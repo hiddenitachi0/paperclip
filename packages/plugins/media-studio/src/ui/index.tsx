@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { PluginCompanySettingsPageProps, PluginDetailTabProps } from "@paperclipai/plugin-sdk/ui";
 import { usePluginAction } from "@paperclipai/plugin-sdk/ui";
 
@@ -13,6 +13,9 @@ const ACTION_LOOKS_SAVE = "looks.save";
 const ACTION_LOOKS_DELETE = "looks.delete";
 const ACTION_LOOK_DEFAULTS_LIST = "looks.defaults.list";
 const ACTION_LOOK_DEFAULTS_SET = "looks.defaults.set";
+const ACTION_LOOK_RULES_LIST = "lookRules.list";
+const ACTION_LOOK_RULES_SAVE = "lookRules.save";
+const ACTION_LOOK_RULES_PREVIEW = "lookRules.preview";
 const ACTION_SOGNI_MODELS = "sogni.models";
 const ACTION_SOGNI_LORAS = "sogni.loras";
 
@@ -810,6 +813,574 @@ export function LookDefaultsSection(props: {
   );
 }
 
+// ─── Automatic looks (look rules) ────────────────────────────────────────────
+//
+// A person's (or a job's) ordered list of rules: "from 08:00 to 12:00 use look
+// X", "when the message says 'work' use look Y". The worker decides what fits
+// (the preview asks it), so the page and the pictures can never disagree.
+// Every change is saved at once; only an owner/admin can change anything.
+
+export const WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
+export type WeekdayKey = (typeof WEEKDAY_KEYS)[number];
+const WEEKDAY_LABEL: Record<WeekdayKey, string> = { mon: "Mon", tue: "Tue", wed: "Wed", thu: "Thu", fri: "Fri", sat: "Sat", sun: "Sun" };
+
+export type RuleWindow = { from: string; to: string; days?: WeekdayKey[] };
+export type LookRuleUi = { id?: string; lookId: string; enabled: boolean; timeWindows?: RuleWindow[]; keywords?: string[] };
+export type RuleSetUi = { timezone: string; rules: LookRuleUi[] };
+export type RuleOwnerJob = { id: string; name: string; title: string | null; defaultLookId: string | null };
+export type RuleOwner = { key: string; kind: "persona" | "agent"; name: string; jobs: RuleOwnerJob[] };
+type LookRulesListResponse = { owners?: RuleOwner[]; ruleSets?: Record<string, RuleSetUi>; defaultTimezone?: string; canManage?: boolean };
+type LookRulesPreview = {
+  timezone: string;
+  localTime: string;
+  rule: { id: string; position: number; lookId: string; lookName: string; why: string } | null;
+  fallbacks: Array<{ agentId: string; agentName: string; lookName: string | null }>;
+};
+
+const FALLBACK_TIMEZONE = "Europe/Oslo";
+const COMMON_TIMEZONES = ["Europe/Oslo", "Europe/Stockholm", "Europe/Copenhagen", "Europe/Helsinki", "Europe/London", "Europe/Berlin", "UTC", "America/New_York", "America/Los_Angeles", "Asia/Tokyo"];
+const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+/** Every time zone the browser knows, with the common ones first and the current one always there. */
+export function timezoneOptions(current: string): string[] {
+  let all: string[] = [];
+  try {
+    const intl = Intl as unknown as { supportedValuesOf?: (key: string) => string[] };
+    all = intl.supportedValuesOf ? intl.supportedValuesOf("timeZone") : [];
+  } catch {
+    all = [];
+  }
+  return [...new Set([current, ...COMMON_TIMEZONES, ...all].filter(Boolean))];
+}
+
+/** "on weekdays", "at weekends", "on Mon, Wed" or "" (every day). */
+export function daysInWords(days: WeekdayKey[] | undefined): string {
+  const set = new Set(days ?? []);
+  if (set.size === 0 || set.size === 7) return "";
+  const exactly = (list: WeekdayKey[]) => set.size === list.length && list.every((d) => set.has(d));
+  if (exactly(["mon", "tue", "wed", "thu", "fri"])) return "on weekdays";
+  if (exactly(["sat", "sun"])) return "at weekends";
+  return `on ${WEEKDAY_KEYS.filter((d) => set.has(d)).map((d) => WEEKDAY_LABEL[d]).join(", ")}`;
+}
+
+/** The rule in one sentence: "Night, from 20:00 to 02:00 at weekends, when the message says "party"". */
+export function ruleInWords(rule: LookRuleUi, looks: Array<{ id: string; name: string }>): string {
+  const name = looks.find((l) => l.id === rule.lookId)?.name ?? "A look that no longer exists";
+  const parts: string[] = [];
+  const windows = rule.timeWindows ?? [];
+  if (windows.length > 0) {
+    parts.push(windows.map((w) => `from ${w.from} to ${w.to}${daysInWords(w.days) ? ` ${daysInWords(w.days)}` : ""}`).join(" or "));
+  }
+  const keywords = rule.keywords ?? [];
+  if (keywords.length > 0) parts.push(`when the message says ${keywords.map((k) => `"${k}"`).join(" or ")}`);
+  return `${name}, ${parts.join(", and ") || "no time or keyword yet"}`;
+}
+
+/** A rule the worker would accept: a look, and a time or a keyword, with every time written as HH:MM. */
+export function ruleIsReady(rule: LookRuleUi): boolean {
+  const windows = rule.timeWindows ?? [];
+  const keywords = (rule.keywords ?? []).filter((k) => k.trim());
+  if (!rule.lookId || (windows.length === 0 && keywords.length === 0)) return false;
+  return windows.every((w) => HHMM.test(w.from) && HHMM.test(w.to) && w.from !== w.to && (w.days === undefined || w.days.length > 0));
+}
+
+/** Move one rule to another place in the list (drag and drop, or the up/down buttons). */
+export function moveRule<T>(list: T[], from: number, to: number): T[] {
+  if (from === to || from < 0 || to < 0 || from >= list.length || to >= list.length) return list;
+  const next = [...list];
+  const [item] = next.splice(from, 1);
+  next.splice(to, 0, item!);
+  return next;
+}
+
+function toggleDay(days: WeekdayKey[] | undefined, day: WeekdayKey): WeekdayKey[] {
+  const current = new Set(days && days.length > 0 ? days : WEEKDAY_KEYS);
+  if (current.has(day)) current.delete(day);
+  else current.add(day);
+  return WEEKDAY_KEYS.filter((d) => current.has(d));
+}
+
+/** One rule's look, times and keywords. Used for a saved rule (each change saved) and for a new one. */
+function LookRuleEditor(props: {
+  rule: LookRuleUi;
+  looks: Array<{ id: string; name: string }>;
+  disabled: boolean;
+  label: string;
+  onChange: (rule: LookRuleUi) => void;
+}) {
+  const { rule, looks, disabled, label, onChange } = props;
+  const [keywordText, setKeywordText] = useState("");
+  const windows = rule.timeWindows ?? [];
+  const keywords = rule.keywords ?? [];
+  const conditionCount = windows.length + keywords.length;
+
+  const setWindow = (index: number, patch: Partial<RuleWindow>) =>
+    onChange({ ...rule, timeWindows: windows.map((w, i) => (i === index ? { ...w, ...patch } : w)) });
+  const addKeyword = () => {
+    const keyword = keywordText.trim().replace(/\s+/g, " ");
+    if (!keyword) return;
+    setKeywordText("");
+    if (keywords.some((k) => k.toLowerCase() === keyword.toLowerCase())) return;
+    onChange({ ...rule, keywords: [...keywords, keyword] });
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <label style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <span>Use the look</span>
+        <select
+          aria-label={`Look for ${label}`}
+          value={rule.lookId}
+          disabled={disabled}
+          onChange={(e) => onChange({ ...rule, lookId: e.target.value })}
+          style={{ ...input, flex: "1 1 180px" }}
+        >
+          {looks.some((l) => l.id === rule.lookId) ? null : <option value={rule.lookId}>Pick a look</option>}
+          {looks.map((l) => (
+            <option key={l.id} value={l.id}>
+              {l.name}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <span style={{ fontSize: 12, opacity: 0.8 }}>At these times (leave out for any time)</span>
+        {windows.map((w, i) => (
+          <div key={i} role="group" aria-label={`Time ${i + 1} for ${label}`} style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+            <span>From</span>
+            <input type="time" aria-label="From" value={w.from} disabled={disabled} onChange={(e) => setWindow(i, { from: e.target.value })} style={input} />
+            <span>up to</span>
+            <input type="time" aria-label="Up to" value={w.to} disabled={disabled} onChange={(e) => setWindow(i, { to: e.target.value })} style={input} />
+            <span style={{ display: "flex", gap: 2 }}>
+              {WEEKDAY_KEYS.map((day) => {
+                const on = !w.days || w.days.length === 0 || w.days.includes(day);
+                return (
+                  <button
+                    key={day}
+                    type="button"
+                    aria-pressed={on}
+                    disabled={disabled}
+                    onClick={() => {
+                      const days = toggleDay(w.days, day);
+                      setWindow(i, { days: days.length === 7 ? undefined : days });
+                    }}
+                    style={{ ...baseBtn, padding: "4px 6px", background: on ? "#1971c2" : "transparent", color: on ? "#fff" : "inherit", borderColor: "#a5d8ff" }}
+                  >
+                    {WEEKDAY_LABEL[day]}
+                  </button>
+                );
+              })}
+            </span>
+            <button
+              type="button"
+              style={ghostBtn}
+              disabled={disabled || conditionCount <= 1}
+              title={conditionCount <= 1 ? "A rule needs a time or a keyword" : undefined}
+              onClick={() => onChange({ ...rule, timeWindows: windows.filter((_, j) => j !== i) })}
+            >
+              Remove time
+            </button>
+            {w.from && w.to && w.to < w.from ? <span style={{ fontSize: 12, opacity: 0.7 }}>(runs past midnight)</span> : null}
+          </div>
+        ))}
+        {!disabled && windows.length < 6 ? (
+          <div>
+            <button type="button" style={secondaryBtn} onClick={() => onChange({ ...rule, timeWindows: [...windows, { from: "09:00", to: "17:00" }] })}>
+              Add a time
+            </button>
+          </div>
+        ) : null}
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <span style={{ fontSize: 12, opacity: 0.8 }}>When the person's message says (any of these words; leave out for any message)</span>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+          {keywords.map((keyword) => (
+            <span key={keyword} style={{ display: "inline-flex", gap: 4, alignItems: "center", padding: "2px 8px", borderRadius: 999, background: "rgba(25,113,194,0.12)" }}>
+              {keyword}
+              {!disabled ? (
+                <button
+                  type="button"
+                  aria-label={`Remove keyword ${keyword}`}
+                  disabled={conditionCount <= 1}
+                  title={conditionCount <= 1 ? "A rule needs a time or a keyword" : undefined}
+                  onClick={() => onChange({ ...rule, keywords: keywords.filter((k) => k !== keyword) })}
+                  style={{ border: "none", background: "none", cursor: "pointer", color: "inherit", padding: 0 }}
+                >
+                  ×
+                </button>
+              ) : null}
+            </span>
+          ))}
+          {!disabled ? (
+            <>
+              <input
+                aria-label={`New keyword for ${label}`}
+                value={keywordText}
+                maxLength={40}
+                placeholder="work"
+                onChange={(e) => setKeywordText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    addKeyword();
+                  }
+                }}
+                style={{ ...input, width: 140 }}
+              />
+              <button type="button" style={secondaryBtn} onClick={addKeyword} disabled={!keywordText.trim()}>
+                Add keyword
+              </button>
+            </>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function AutomaticLooksSection(props: { looks: Array<{ id: string; name: string }>; defaults: Record<string, string> }) {
+  const { looks, defaults } = props;
+  const listRules = usePluginAction(ACTION_LOOK_RULES_LIST);
+  const saveRules = usePluginAction(ACTION_LOOK_RULES_SAVE);
+  const previewRules = usePluginAction(ACTION_LOOK_RULES_PREVIEW);
+
+  const [owners, setOwners] = useState<RuleOwner[] | null>(null);
+  const [sets, setSets] = useState<Record<string, RuleSetUi>>({});
+  const [defaultTimezone, setDefaultTimezone] = useState(FALLBACK_TIMEZONE);
+  const [canManage, setCanManage] = useState(false);
+  const [ownerKey, setOwnerKey] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [adding, setAdding] = useState<LookRuleUi | null>(null);
+  const [message, setMessage] = useState("");
+  const [preview, setPreview] = useState<LookRulesPreview | null>(null);
+  const [savedCount, setSavedCount] = useState(0);
+  const [dragFrom, setDragFrom] = useState<number | null>(null);
+  const [dragOver, setDragOver] = useState<number | null>(null);
+  const saveSeq = useRef(0);
+  const lookIds = looks.map((l) => l.id).join(",");
+
+  // Reloaded when the looks change: deleting a look also deletes its rules.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = ((await listRules({})) ?? {}) as LookRulesListResponse;
+        if (cancelled) return;
+        const list = res.owners ?? [];
+        setOwners(list);
+        setSets(res.ruleSets ?? {});
+        setDefaultTimezone(res.defaultTimezone ?? FALLBACK_TIMEZONE);
+        setCanManage(res.canManage === true);
+        setOwnerKey((key) => (list.some((o) => o.key === key) ? key : (list[0]?.key ?? "")));
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [listRules, lookIds]);
+
+  const owner = owners?.find((o) => o.key === ownerKey) ?? null;
+  const set: RuleSetUi = sets[ownerKey] ?? { timezone: defaultTimezone, rules: [] };
+  const defaultsKey = Object.entries(defaults).map(([a, l]) => `${a}=${l}`).join(",");
+
+  // "Right now this would pick": asked of the worker, a moment after typing stops.
+  useEffect(() => {
+    if (!ownerKey) return;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      (async () => {
+        try {
+          const res = (await previewRules({ ownerKey, message })) as LookRulesPreview | undefined;
+          if (!cancelled) setPreview(res && Array.isArray(res.fallbacks) ? res : null);
+        } catch {
+          if (!cancelled) setPreview(null);
+        }
+      })();
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [previewRules, ownerKey, message, savedCount, defaultsKey, lookIds]);
+
+  /** Save the owner's whole list at once (the order is the priority). Shown at once; put back if saving fails. */
+  const persist = async (next: RuleSetUi) => {
+    const key = ownerKey;
+    const before = sets[key];
+    setSets((all) => ({ ...all, [key]: next }));
+    if (!next.rules.every(ruleIsReady)) return; // Saved once every time is filled in.
+    const seq = ++saveSeq.current;
+    setSaving(true);
+    setError(null);
+    try {
+      const res = (await saveRules({ ownerKey: key, timezone: next.timezone, rules: next.rules })) as { ruleSet?: RuleSetUi };
+      if (seq === saveSeq.current && res.ruleSet) setSets((all) => ({ ...all, [key]: res.ruleSet! }));
+      setSavedCount((n) => n + 1);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      if (seq === saveSeq.current) setSets((all) => (before ? { ...all, [key]: before } : Object.fromEntries(Object.entries(all).filter(([k]) => k !== key))));
+    } finally {
+      if (seq === saveSeq.current) setSaving(false);
+    }
+  };
+
+  const updateRule = (index: number, rule: LookRuleUi) => void persist({ ...set, rules: set.rules.map((r, i) => (i === index ? rule : r)) });
+  const move = (from: number, to: number) => {
+    const rules = moveRule(set.rules, from, to);
+    if (rules !== set.rules) void persist({ ...set, rules });
+  };
+  const removeRule = (index: number) => {
+    if (typeof window !== "undefined" && !window.confirm("Delete this rule?")) return;
+    void persist({ ...set, rules: set.rules.filter((_, i) => i !== index) });
+  };
+  const addRule = async () => {
+    if (!adding || !ruleIsReady(adding)) return;
+    await persist({ ...set, rules: [...set.rules, adding] });
+    setAdding(null);
+  };
+
+  const jobsText = (o: RuleOwner) => (o.kind === "persona" ? ` (${o.jobs.map((j) => j.name).join(", ")})` : "");
+  const people = (owners ?? []).filter((o) => o.kind === "persona");
+  const jobsAlone = (owners ?? []).filter((o) => o.kind === "agent");
+  const lookName = (id: string | null | undefined) => (id ? (looks.find((l) => l.id === id)?.name ?? null) : null);
+
+  return (
+    <section aria-label="Automatic looks" style={{ ...card, gap: 10 }}>
+      <div style={{ fontWeight: 600 }}>Automatic looks</div>
+      <div style={{ opacity: 0.7, fontSize: 12 }}>
+        Pick a look by time of day or by words in the person's message. When no look is named, the rules are checked from
+        the top and the first one that fits right now is used; a rule that does not fit right now is skipped. If none fits,
+        the default look is used. A person's rules are shared by all of that person's jobs. Drag a rule (or use the arrows)
+        to change the order. Changes are saved at once.
+      </div>
+      {error ? <div style={errorBox}>{error}</div> : null}
+      {owners === null ? (
+        error ? null : <div style={{ opacity: 0.7 }}>Loading…</div>
+      ) : owners.length === 0 ? (
+        <div style={{ opacity: 0.7 }}>This company has no agents yet.</div>
+      ) : looks.length === 0 ? (
+        <div style={{ opacity: 0.7 }}>Save a look first; then you can choose when it is used.</div>
+      ) : (
+        <>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+            <label style={{ display: "flex", gap: 8, alignItems: "center", flex: "1 1 260px" }}>
+              <span>For</span>
+              <select aria-label="Person or agent" value={ownerKey} onChange={(e) => { setOwnerKey(e.target.value); setAdding(null); }} style={{ ...input, flex: 1 }}>
+                {people.length > 0 ? (
+                  <optgroup label="People">
+                    {people.map((o) => (
+                      <option key={o.key} value={o.key}>{`${o.name}${jobsText(o)}`}</option>
+                    ))}
+                  </optgroup>
+                ) : null}
+                {jobsAlone.length > 0 ? (
+                  <optgroup label="Agents without a person">
+                    {jobsAlone.map((o) => (
+                      <option key={o.key} value={o.key}>{o.name}</option>
+                    ))}
+                  </optgroup>
+                ) : null}
+              </select>
+            </label>
+            <label style={{ display: "flex", gap: 8, alignItems: "center", flex: "1 1 220px" }}>
+              <span>Time zone</span>
+              <select
+                aria-label="Time zone"
+                value={set.timezone}
+                disabled={!canManage}
+                onChange={(e) => void persist({ ...set, timezone: e.target.value })}
+                style={{ ...input, flex: 1 }}
+              >
+                {timezoneOptions(set.timezone).map((tz) => (
+                  <option key={tz} value={tz}>{tz}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          {owner ? (
+            <div style={{ fontSize: 12, opacity: 0.8 }}>
+              {owner.jobs.length === 1
+                ? `Default look when no rule fits: ${lookName(defaults[owner.jobs[0]!.id]) ?? "none"}.`
+                : `Default look when no rule fits: ${owner.jobs.map((j) => `${j.name}: ${lookName(defaults[j.id]) ?? "none"}`).join("; ")}.`}{" "}
+              (Set it under "Default look per agent" above.)
+            </div>
+          ) : null}
+
+          {set.rules.length === 0 ? (
+            <div style={{ opacity: 0.7 }}>No rules yet{owner ? ` for ${owner.name}` : ""}.</div>
+          ) : (
+            <ol aria-label="Rules in priority order" style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 8 }}>
+              {set.rules.map((rule, index) => {
+                const label = `rule ${index + 1}`;
+                const fitsNow = preview?.rule?.position === index + 1;
+                return (
+                  <li
+                    key={rule.id ?? `new-${index}`}
+                    data-rule-row={index}
+                    aria-label={`Rule ${index + 1}: ${ruleInWords(rule, looks)}`}
+                    onDragOver={(e) => {
+                      if (dragFrom === null) return;
+                      e.preventDefault();
+                      setDragOver(index);
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      if (dragFrom !== null) move(dragFrom, index);
+                      setDragFrom(null);
+                      setDragOver(null);
+                    }}
+                    style={{
+                      ...card,
+                      gap: 8,
+                      opacity: rule.enabled ? 1 : 0.6,
+                      borderColor: dragOver === index && dragFrom !== index ? "#1971c2" : fitsNow ? "#087f5b" : "rgba(128,128,128,0.35)",
+                    }}
+                  >
+                    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                      {canManage ? (
+                        <span
+                          draggable
+                          role="button"
+                          tabIndex={-1}
+                          aria-label={`Drag ${label} to another place`}
+                          title="Drag to change the order"
+                          onDragStart={(e) => {
+                            setDragFrom(index);
+                            try {
+                              e.dataTransfer.effectAllowed = "move";
+                              e.dataTransfer.setData("text/plain", String(index));
+                              const row = (e.currentTarget as HTMLElement).closest("li");
+                              if (row) e.dataTransfer.setDragImage(row, 12, 12);
+                            } catch {
+                              // Some browsers (and tests) have no drag data; the order is kept in state.
+                            }
+                          }}
+                          onDragEnd={() => {
+                            setDragFrom(null);
+                            setDragOver(null);
+                          }}
+                          style={{ cursor: "grab", userSelect: "none", fontSize: 16, padding: "0 4px" }}
+                        >
+                          ⠿
+                        </span>
+                      ) : null}
+                      <span style={{ fontWeight: 600 }}>{index + 1}.</span>
+                      <span style={{ flex: "1 1 200px" }}>{ruleInWords(rule, looks)}</span>
+                      {fitsNow ? <span style={{ fontSize: 12, color: "#087f5b" }}>Fits right now</span> : null}
+                      <label style={{ display: "flex", gap: 4, alignItems: "center", fontSize: 12 }}>
+                        <input
+                          type="checkbox"
+                          aria-label={`${label} on`}
+                          checked={rule.enabled}
+                          disabled={!canManage}
+                          onChange={(e) => updateRule(index, { ...rule, enabled: e.target.checked })}
+                        />
+                        On
+                      </label>
+                      {canManage ? (
+                        <span style={{ display: "flex", gap: 4 }}>
+                          <button type="button" style={ghostBtn} aria-label={`Move ${label} up`} disabled={index === 0} onClick={() => move(index, index - 1)}>
+                            ↑
+                          </button>
+                          <button
+                            type="button"
+                            style={ghostBtn}
+                            aria-label={`Move ${label} down`}
+                            disabled={index === set.rules.length - 1}
+                            onClick={() => move(index, index + 1)}
+                          >
+                            ↓
+                          </button>
+                          <button type="button" style={ghostBtn} onClick={() => removeRule(index)}>
+                            Delete
+                          </button>
+                        </span>
+                      ) : null}
+                    </div>
+                    {canManage ? (
+                      <LookRuleEditor rule={rule} looks={looks} disabled={false} label={label} onChange={(next) => updateRule(index, next)} />
+                    ) : null}
+                    {canManage && !ruleIsReady(rule) ? (
+                      <div style={{ fontSize: 12, color: "#b45309" }}>Not saved yet: fill in both times (like 08:00) and pick at least one day.</div>
+                    ) : null}
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+
+          {canManage && !adding ? (
+            <div>
+              <button
+                type="button"
+                style={primaryBtn}
+                disabled={saving}
+                onClick={() => setAdding({ lookId: looks[0]!.id, enabled: true, timeWindows: [{ from: "08:00", to: "12:00" }], keywords: [] })}
+              >
+                Add a rule
+              </button>
+            </div>
+          ) : null}
+          {adding ? (
+            <div style={{ ...card, gap: 8 }} aria-label="New rule">
+              <div style={{ fontWeight: 600 }}>New rule</div>
+              <LookRuleEditor rule={adding} looks={looks} disabled={false} label="the new rule" onChange={setAdding} />
+              {!ruleIsReady(adding) ? <div style={{ fontSize: 12, opacity: 0.7 }}>A rule needs a time or a keyword (or both).</div> : null}
+              <div style={{ display: "flex", gap: 8 }}>
+                <button type="button" style={primaryBtn} disabled={saving || !ruleIsReady(adding)} onClick={() => void addRule()}>
+                  Add rule
+                </button>
+                <button type="button" style={ghostBtn} onClick={() => setAdding(null)}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : null}
+          {!canManage ? <div style={{ opacity: 0.7, fontSize: 12 }}>Only the company's owner or an admin can change automatic looks.</div> : null}
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, borderTop: "1px solid rgba(128,128,128,0.25)", paddingTop: 8 }}>
+            <label style={field}>
+              <span>Try a message</span>
+              <input
+                aria-label="Test message"
+                value={message}
+                placeholder="Make a picture for work"
+                onChange={(e) => setMessage(e.target.value)}
+                style={input}
+              />
+            </label>
+            <div aria-live="polite" data-testid="look-rules-preview">
+              {preview === null ? (
+                <span style={{ opacity: 0.7 }}>Working out what would be picked…</span>
+              ) : preview.rule ? (
+                <span>
+                  Right now ({preview.localTime}, {preview.timezone}) this would pick: <strong>{preview.rule.lookName}</strong> ({preview.rule.why}).
+                </span>
+              ) : preview.fallbacks.length === 1 ? (
+                <span>
+                  Right now ({preview.localTime}, {preview.timezone}) no rule fits, so this would pick:{" "}
+                  <strong>{preview.fallbacks[0]!.lookName ?? "no look"}</strong> ({preview.fallbacks[0]!.lookName ? "default look" : "there is no default look"}).
+                </span>
+              ) : (
+                <span>
+                  Right now ({preview.localTime}, {preview.timezone}) no rule fits, so each job uses its default look:{" "}
+                  {preview.fallbacks.map((f) => `${f.agentName}: ${f.lookName ?? "no look"}`).join("; ")}.
+                </span>
+              )}
+            </div>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
 export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps) {
   const companyId = context.companyId;
   const listLooks = usePluginAction(ACTION_LOOKS_LIST);
@@ -1079,6 +1650,7 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
           onPick={(agentId, lookId) => void onPickDefault(agentId, lookId)}
         />
       ) : null}
+      {!draft ? <AutomaticLooksSection looks={looks} defaults={defaults} /> : null}
 
       {draft ? (
         <div style={{ ...card, gap: 10 }}>
