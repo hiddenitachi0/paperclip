@@ -71,6 +71,7 @@ import {
   startSecretSurfaceScanner,
 } from "./services/index.js";
 import { schedulerLiveness } from "./services/scheduler-liveness.js";
+import { watcherService } from "./services/watchers.js";
 import { describeTickPhases } from "./services/scheduler-tick-phases.js";
 import {
   SCHEDULER_TICK_CHAIN,
@@ -1018,6 +1019,7 @@ export async function startServer(): Promise<StartedServer> {
     const deployApprovalFeedback = deployApprovalFeedbackService(schedulerDb as any);
     const mergePrAutomation = config.mergePrAutomationEnabled ? mergePrAutomationService(schedulerDb as any) : null;
     const agentErrorAlerts = agentErrorAlertsService(schedulerDb as any);
+    const marketWatchers = watcherService(schedulerDb as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(schedulerDb as any);
     const quietModeAlerts = quietModeAlertsService(schedulerDb as any);
     const personaPublisherSweep = config.personaPublishingSweepEnabled
@@ -1343,6 +1345,30 @@ export async function startServer(): Promise<StartedServer> {
           })
           .catch((err) => {
             logger.error({ err }, "agent-error alert tick failed");
+          }),
+      );
+
+      // Watchers: due market-price checks (no AI; see services/watchers.ts),
+      // and handing fired alerts to their quick agent to write. The writing
+      // itself is detached onto the pool, so a slow picture never holds this
+      // chain's connection.
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.watchers, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: watchers",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:watchers",
+          },
+          () => marketWatchers.tick(new Date()),
+        )
+          .then((result) => {
+            if (result.fired > 0 || result.expired > 0) {
+              logger.info({ ...result }, "watchers tick fired alerts");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "watchers tick failed");
           }),
       );
 
