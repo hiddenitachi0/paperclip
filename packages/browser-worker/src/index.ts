@@ -24,3 +24,18 @@ export type {
   TypeRefusalReason,
   TypeRefusal,
 } from "./payment-detection.js";
+export {
+  checkHostAllowed,
+  createEgressProxyServer,
+  parseAbsoluteHttpTarget,
+  parseConnectTarget,
+  ALLOWED_PROXY_PORTS,
+} from "./egress-proxy.js";
+export type {
+  DnsLookupResult,
+  DnsLookupAll,
+  EgressRefusalReason,
+  EgressLogEntry,
+  EgressProxyOptions,
+  HostCheckResult,
+} from "./egress-proxy.js";
