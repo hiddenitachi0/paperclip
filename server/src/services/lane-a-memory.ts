@@ -91,10 +91,18 @@ function normalize(text: string): string {
     .trim();
 }
 
+// Words that say nothing about which note is meant (English and Norwegian).
+const FILLER_WORDS = new Set([
+  "the", "and", "for", "that", "this", "with", "you", "your", "are", "was", "not", "but", "all", "any", "can",
+  "her", "his", "him", "she", "they", "them", "what", "about", "from", "have", "has", "had", "note", "forget",
+  "remember", "please", "som", "det", "den", "jeg", "meg", "deg", "han", "hun", "oss", "dem", "med", "til",
+  "ikke", "har", "var", "om", "glem", "husk",
+]);
+
 function words(text: string): string[] {
   return normalize(text)
     .split(" ")
-    .filter((word) => word.length >= 3);
+    .filter((word) => word.length >= 3 && !FILLER_WORDS.has(word));
 }
 
 export type MemoryMatch<T> =
@@ -107,6 +115,7 @@ export type MemoryMatch<T> =
  *   1. the note's id, or its 8-character reference as shown in the prompt;
  *   2. the same text (ignoring case, punctuation and spacing);
  *   3. notes that contain the words asked for (or are contained in them);
+ *      filler words alone ("the", "it", "that note") never pick a note;
  *   4. the notes that share the most words with what was asked (at least
  *      half of the asked-for words).
  * The first step with exactly one note wins. More than one at a step is
@@ -127,6 +136,10 @@ export function matchMemory<T extends { id: string; text: string }>(notes: T[], 
   if (exact.length === 1) return { kind: "match", note: exact[0]! };
   if (exact.length > 1) return { kind: "ambiguous", candidates: exact };
 
+  // Too little to go on ("the", "it"): ask which note is meant instead of guessing.
+  const asked = [...new Set(words(raw))];
+  if (asked.length === 0) return { kind: "none" };
+
   const containing = notes.filter((note) => {
     const text = normalize(note.text);
     return text.includes(needle) || (text.length >= 8 && needle.includes(text));
@@ -134,8 +147,6 @@ export function matchMemory<T extends { id: string; text: string }>(notes: T[], 
   if (containing.length === 1) return { kind: "match", note: containing[0]! };
   if (containing.length > 1) return { kind: "ambiguous", candidates: containing };
 
-  const asked = [...new Set(words(raw))];
-  if (asked.length === 0) return { kind: "none" };
   const scored = notes
     .map((note) => {
       const have = new Set(words(note.text));
