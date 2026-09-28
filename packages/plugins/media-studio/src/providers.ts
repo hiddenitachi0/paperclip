@@ -64,10 +64,16 @@ export interface GenerationInput {
   negativePrompt?: string;
   /** The model can make a picture from reference pictures (the catalog says it edits pictures). */
   modelTakesReferences?: boolean;
+  /** How many reference pictures the chosen edit model takes, from Sogni's catalog (the worker checks it first). */
+  maxReferences?: number;
   /** Sogni's Sensitive Content Filter. Only an owner/admin-saved look can set false; anything else is on. */
   safeContentFilter?: boolean;
   /** The picture sizes the chosen model takes (from Sogni's catalog). */
   sizeBounds?: SogniSizeBounds;
+  /** Fal text-to-picture only: how many denoising steps (Fal's num_inference_steps). Quick pictures use few. */
+  steps?: number;
+  /** How long this one picture may take before it is given up (Sogni stops its job). The provider's own limit otherwise. */
+  timeoutMs?: number;
 }
 
 /**
@@ -87,6 +93,16 @@ export function assertFalModelId(model: string): string {
     throw new Error(`"${model}" is not a Fal model name (it looks like fal-ai/flux/schnell).`);
   }
   return trimmed;
+}
+
+/**
+ * Fal's image_size: one of its size names, or {width, height} for an exact
+ * "640x480" size (Fal's schema takes either).
+ */
+export function falImageSize(imageSize?: string): string | { width: number; height: number } {
+  const wanted = imageSize?.trim() || "landscape_4_3";
+  const exact = /^(\d{2,4})\s*x\s*(\d{2,4})$/i.exec(wanted);
+  return exact ? { width: Number(exact[1]), height: Number(exact[2]) } : wanted;
 }
 
 /** The largest seed Fal and ComfyUI accept (unsigned 32-bit). */
@@ -134,9 +150,10 @@ export class FalProvider implements GenerationProvider {
           }
         : {
             prompt: input.prompt,
-            image_size: input.imageSize ?? "landscape_4_3",
+            image_size: falImageSize(input.imageSize),
             num_images: 1,
             enable_safety_checker: true,
+            ...(typeof input.steps === "number" ? { num_inference_steps: input.steps } : {}),
           };
     if (typeof input.seed === "number") body.seed = input.seed;
     const res = await this.fetchImpl(`${this.baseUrl}/${model}`, {

@@ -13,6 +13,15 @@ the roadmap-3 approval gate for the paperclip-fork.
   company's Files, sent to Fal's FLUX Kontext model as data URIs, or uploaded to Sogni's
   storage, so no Paperclip address leaves the box), and `look` (a saved look: style words,
   picture service, model, fixed seed, reference pictures).
+- **Agent tool** `paperclip.media-studio:quick-picture` ("Quick picture", ticked per agent separately from Generate
+  image) — a small mood picture to go with a message, made the fastest and cheapest way: 512 px on the long side
+  (square by default, or landscape/portrait; Sogni's Z-Image Turbo is 512 on the short side, its smallest), the
+  service's fastest model (Fal `fal-ai/flux/schnell` at 2 steps; Sogni `z-turbo`, the fastest and cheapest non-Premium
+  model in Sogni's public catalog), no reference pictures, no LoRAs, no seed. No default or automatic look is applied,
+  so the content filter is on unless a look saved with it off is named as `look` (then only that look's style words
+  and filter setting are used). It counts toward the daily picture limit, gives up after 30 seconds (Sogni's job is
+  cancelled at 28 s), and reports `data.durationMs` (also logged and kept with the picture's record). With `issueId`
+  it is attached to the task instead of saved to Files.
 - **Agent tool** `paperclip.media-studio:list-looks` — read-only list of the company's looks; it marks the
   calling agent's default look.
 - **Default look per agent** — on the looks page an owner/admin can give an agent a default look ("When this agent
@@ -54,6 +63,42 @@ Generation runs behind a `GenerationProvider` interface, selected in the plugin'
 | `fal` | a Fal.ai key (as a Paperclip **secret ref** set in settings) | `POST https://fal.run/{model}` |
 | `sogni` | a Sogni key (as a Paperclip **secret ref** set in settings) | durable workflow at `https://api.sogni.ai` — see below |
 | `comfyui` | a `comfyUrl` (over Tailscale) | self-hosted, swappable GPU endpoint |
+
+## Keeping a character consistent
+
+A look can describe one person (or product) in detail, so every picture of them looks alike over time. All of it is
+under **Company settings → Media Studio looks**, and all of it is optional.
+
+- **What each reference picture is for.** Under each picked picture, pick its role: **Face**, **Body**, **Outfit**,
+  **Style/aesthetic**, **Background** or **Other**. The picture service is then told exactly that, in the way its own
+  guides recommend. For Sogni it gets "Use the person from picture 1 as the final subject and preserve their exact
+  facial likeness ... Identity comes only from picture 1", from the prompt guidance in Sogni's edit_image tool schema.
+  For Fal (FLUX Kontext) it gets "Keep the same person as in image 1, maintaining the same facial features, hairstyle
+  and apparent age", from Black Forest Labs' Kontext and multi-reference guides. Every sentence lives in
+  `src/look-prompt.ts`. Pictures marked Other (and older looks, whose pictures all read as Other) are sent as
+  before, with no extra sentences.
+- **How many pictures.** Fal takes up to 4. With Sogni it depends on the model, read from Sogni's catalog: Qwen Image
+  Edit takes 3, Krea 2 Identity Edit 2, GPT Image 2 / 2.5 up to 16. A model that only makes new pictures hands
+  reference pictures to Sogni's default editor (3). The page shows the limit for the chosen model.
+- **Character sheet.** Short words per field: Hair, Face, Eyes, Body, Skin, Outfit, Accessories, Expression/pose
+  defaults, Setting/background, Art style, Lighting, Camera/framing, Always avoid. For example, Hair "long, blonde"
+  and Face "small, petite nose, narrow eyes, red lips". The prompt is always built the same way: the request, then
+  what each picture is for, then the character, setting, style words and the rest of the sheet. **The request wins**:
+  when it describes something itself ("wearing a red dress", "at the beach"), the sheet's outfit or setting is left out
+  for that picture (and the prompt says to take it from the request, not from an Outfit or Background picture), and
+  the agent is told so. Face, body and skin are never
+  dropped. "Always avoid" goes into the model's own "things to avoid" field when the Sogni model has one, and into
+  the prompt otherwise.
+- **Preview prompt.** Type a sample request and press **Preview prompt** to see the exact text that would be sent
+  (and which model gets it), before saving. Nothing is made or spent.
+- **Lock seed.** A fixed seed with the same sheet gives the most consistent results. Sogni does not use a seed for
+  pictures made from reference pictures.
+- **When a trained LoRA is the stronger option.** Reference pictures and a sheet steer each picture. A LoRA trained
+  on a set of pictures of the person teaches the model the person itself, so it holds up better across new poses,
+  outfits and places. Sogni imports LoRA files you trained elsewhere into your account library ("personal LoRAs";
+  an active Sogni Unlimited plan is needed; see
+  [Sogni's personal LoRA docs](https://docs.sogni.ai/api-reference/personal-loras)). An imported LoRA shows up in the
+  look's LoRA list for the models it works with. Combine it with a sheet for the details the LoRA does not fix.
 
 ## Using Sogni
 
