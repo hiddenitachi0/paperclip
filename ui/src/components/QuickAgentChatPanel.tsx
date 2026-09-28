@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "../lib/utils";
+import { ChatMicButton, ChatSpeakButton } from "./ChatSpeechButtons";
 
 /**
  * Chat panel for a quick agent (Lane A). The conversation id is remembered
@@ -253,6 +254,11 @@ export function QuickAgentChatPanel({
                 >
                   {message.content}
                   <ChatActionImages actions={message.actions} />
+                  {message.role === "assistant" && (
+                    <div>
+                      <ChatSpeakButton companyId={companyId} text={message.content} onError={setNotice} />
+                    </div>
+                  )}
                   {message.actions.length > 0 && (
                     <ul className="mt-2 space-y-1 border-t pt-2 text-xs text-muted-foreground">
                       {message.actions.map((action, index) => (
@@ -289,6 +295,16 @@ export function QuickAgentChatPanel({
             placeholder={`Message ${agentName}… (Enter to send, Shift+Enter for a new line)`}
             className="text-sm"
             disabled={sending || loadingTranscript}
+          />
+          <ChatMicButton
+            companyId={companyId}
+            disabled={sending || loadingTranscript}
+            onError={setNotice}
+            onTranscript={(text) => {
+              // The words land in the box to check before sending.
+              setNotice(null);
+              setInput((current) => (current.trim() ? `${current.trim()} ${text}` : text).slice(0, MESSAGE_MAX_LENGTH));
+            }}
           />
           <Button onClick={() => void send()} disabled={!input.trim() || sending || loadingTranscript}>
             Send
