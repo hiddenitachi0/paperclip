@@ -43,7 +43,14 @@ describe("secret kinds taxonomy", () => {
 
   it("groups kinds by category in display order, leaving no empty group", () => {
     const groups = secretKindsByCategory();
-    expect(groups.map((group) => group.category)).toEqual(["ai_provider", "data_source", "vcs", "messaging", "other"]);
+    expect(groups.map((group) => group.category)).toEqual([
+      "ai_provider",
+      "data_source",
+      "vcs",
+      "messaging",
+      "payments",
+      "other",
+    ]);
     expect(groups.flatMap((group) => group.kinds).length).toBe(SECRET_KINDS.length);
     for (const group of groups) expect(group.label).not.toMatch(/_/);
   });
@@ -92,5 +99,20 @@ describe("secret kinds taxonomy", () => {
     expect(secretKindForEnvKey("BRAVE_API_KEY")).toBe(null);
     // No shape rule: a pasted Brave key is never warned about.
     expect(secretValueLooksWrongForKind("brave_search_api_key", "anything")).toBe(false);
+  });
+
+  // DUR-4019: storage for these two reuses the generic secret — no new route.
+  // `value` holds the sensitive JSON blob (never returned by any GET);
+  // `providerMetadata` holds only the safe-to-display summary.
+  it("knows the two payment/login kinds the browser worker will use", () => {
+    for (const id of ["payment_card_single_use", "site_login"] as const) {
+      const kind = getSecretKind(id);
+      expect(kind?.category).toBe("payments");
+      expect(kind?.provider).toBe("other");
+      expect(kind?.envKey).toBeUndefined();
+      expect(isTestableSecretKind(id)).toBe(false);
+    }
+    expect(getSecretKind("payment_card_single_use")?.label).toBe("Payment card (single-use)");
+    expect(getSecretKind("site_login")?.label).toBe("Website login");
   });
 });

@@ -552,6 +552,72 @@ describe.sequential("every quick-agent field is handled on the employment path",
       adapterConfig: { model: "claude-sonnet-4-5", laneA: { webSearch: true } },
     });
   });
+
+  // DUR-4019: "Browser access" (adapterConfig.laneA.browserAccess) is a
+  // three-level dial (off < browse_and_forms < book_and_buy), guarded the
+  // same board-only way as "Can search the web" above: an agent-authenticated
+  // caller may never raise its own level, on PATCH or at hire.
+  it("the board raises \"Browser access\"; an agent cannot raise its own level for itself or at hire", async () => {
+    mockAgentService.update.mockReset();
+    mockAgentService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) =>
+      makeAgent({ id: ACTOR_AGENT_ID, ...patch }),
+    );
+    const board = await request(await createApp("board"))
+      .patch(`/api/agents/${ACTOR_AGENT_ID}`)
+      .send({ adapterConfig: { laneA: { browserAccess: "book_and_buy" } } });
+    expect(board.status, JSON.stringify(board.body)).toBe(200);
+    expect(mockAgentService.update.mock.calls[0]?.[1]).toMatchObject({
+      adapterConfig: { laneA: { browserAccess: "book_and_buy" } },
+    });
+
+    mockAgentService.update.mockClear();
+    const self = await request(await createApp("agent"))
+      .patch(`/api/agents/${ACTOR_AGENT_ID}`)
+      .send({ adapterConfig: { laneA: { browserAccess: "browse_and_forms" } } });
+    expect(self.status).toBe(403);
+    expect(String(self.body.error)).toContain('cannot raise their own "Browser access" setting');
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+
+    const notALevel = await request(await createApp("board"))
+      .patch(`/api/agents/${ACTOR_AGENT_ID}`)
+      .send({ adapterConfig: { laneA: { browserAccess: "everything" } } });
+    expect(notALevel.status).toBe(400);
+    expect(JSON.stringify(notALevel.body)).toContain("Browser access");
+
+    mockAgentService.create.mockClear();
+    const hire = await postHire(await createApp("agent", createDb(true)), {
+      ...baseHireBody(),
+      adapterConfig: { laneA: { browserAccess: "browse_and_forms" } },
+    });
+    expect(hire.status).toBe(403);
+    expect(mockAgentService.create).not.toHaveBeenCalled();
+  });
+
+  it("an agent may lower or keep its own \"Browser access\" level, and save its other settings unchanged", async () => {
+    mockAgentService.getById.mockResolvedValue(
+      makeAgent({ id: ACTOR_AGENT_ID, adapterConfig: { laneA: { browserAccess: "book_and_buy" } } }),
+    );
+    mockAgentService.update.mockReset();
+    mockAgentService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) =>
+      makeAgent({ id: ACTOR_AGENT_ID, ...patch }),
+    );
+    const lowered = await request(await createApp("agent"))
+      .patch(`/api/agents/${ACTOR_AGENT_ID}`)
+      .send({ adapterConfig: { laneA: { browserAccess: "off" } } });
+    expect(lowered.status, JSON.stringify(lowered.body)).toBe(200);
+    expect(mockAgentService.update.mock.calls[0]?.[1]).toMatchObject({
+      adapterConfig: { laneA: { browserAccess: "off" } },
+    });
+
+    mockAgentService.update.mockClear();
+    const other = await request(await createApp("agent"))
+      .patch(`/api/agents/${ACTOR_AGENT_ID}`)
+      .send({ adapterConfig: { model: "claude-sonnet-4-5" } });
+    expect(other.status, JSON.stringify(other.body)).toBe(200);
+    expect(mockAgentService.update.mock.calls[0]?.[1]).toMatchObject({
+      adapterConfig: { model: "claude-sonnet-4-5", laneA: { browserAccess: "book_and_buy" } },
+    });
+  });
 });
 
 // DUR-4000: the job side of a persona — which person does this job
