@@ -14,6 +14,9 @@ approvals/tasks still live in Paperclip and the web UI.
   carry a secret value). When nobody asked (a card the board filed itself) or
   nobody on the way up has a bot, it goes to the company's notice bot — see
   company_notice_bot for how that one is chosen.
+- Outbound, market watchers: an alert a watcher's quick agent wrote (a price
+  move, maybe with a picture) waits in Paperclip's watcher outbox; it is sent
+  through that agent's bot (or its boss's) and acknowledged, once.
 - Inbound (per bot): Approve/Reject taps resolve the approval. A text message
   goes through the same chat router the web chat uses (DUR-3978): a quick
   question is answered in the same chat when that bot's agent has quick answers
@@ -1266,6 +1269,137 @@ def notify_task_answers(state, bots):
             save_state(state)
 
 
+# ─── Market watchers ──────────────────────────────────────────────────────────
+#
+# A watcher is a cheap scheduled price check in Paperclip (Bitcoin up 5% in
+# 24 hours, and so on). When its rule fires, the watcher's quick agent writes
+# the alert (and maybe makes a picture) and Paperclip puts it in an outbox.
+# This pass sends each alert through the agent's own bot (or the nearest
+# boss's, like a card) and then acknowledges it, so Paperclip never holds a
+# bot token for this and never sends anything itself.
+#
+# Sent once: an alert is remembered in the state file the moment Telegram took
+# it, before the acknowledgement; if the acknowledgement is lost, the next
+# pass only acknowledges it again. An alert nobody could receive (no started
+# chat) stays in the outbox, and Paperclip retires it after a day.
+
+WATCHER_ALERTS_REMEMBERED = 500
+TG_CAPTION_LIMIT = 1024
+
+
+def send_text_checked(token, chat_id, text):
+    """send_plain, but says whether every part got through."""
+    ok = True
+    for part in split_for_telegram(text):
+        if tg(token, "sendMessage", chat_id=chat_id, text=part, disable_web_page_preview=True) is None:
+            ok = False
+    return ok
+
+
+def fetch_picture(bot, file_id):
+    """(bytes, content type) of a picture in the bot's company, or None."""
+    data = cli("chat", "image", file_id, "-C", bot["companyId"])
+    if not (isinstance(data, dict) and data.get("ok") is True and isinstance(data.get("contentBase64"), str)):
+        return None
+    try:
+        payload = base64.b64decode(data["contentBase64"], validate=True)
+    except Exception:
+        return None
+    content_type = str(data.get("contentType") or "").lower()
+    if not payload or not content_type.startswith("image/"):
+        return None
+    return payload, content_type
+
+
+def send_watcher_alert(bot, chat_id, text, picture, file_id):
+    """One alert into one chat: the picture with the text as its caption when
+    it fits, otherwise the text and then the picture. True when the text got
+    through (a picture that fails never blocks the alert itself)."""
+    token = bot["token"]
+    if picture is not None:
+        payload, content_type = picture
+        extension = content_type.split("/", 1)[1].split("+", 1)[0] or "img"
+        filename = f"alert-{file_id[:8]}.{extension}"
+        as_photo = content_type in TG_PHOTO_TYPES and len(payload) <= TG_PHOTO_MAX_BYTES
+        if as_photo and tg_len(text) <= TG_CAPTION_LIMIT:
+            if tg_upload(token, "sendPhoto", "photo", filename, content_type, payload,
+                         chat_id=chat_id, caption=text) is not None:
+                return True
+        if not send_text_checked(token, chat_id, text):
+            return False
+        sent = None
+        if as_photo:
+            sent = tg_upload(token, "sendPhoto", "photo", filename, content_type, payload, chat_id=chat_id)
+        if sent is None:
+            tg_upload(token, "sendDocument", "document", filename, content_type, payload, chat_id=chat_id)
+        return True
+    return send_text_checked(token, chat_id, text)
+
+
+def ack_watcher_alert(company_id, alert_id, outcome="delivered"):
+    return cli("watcher", "outbox:ack", alert_id, "-C", company_id, "--outcome", outcome) is not None
+
+
+def notify_watcher_alerts(state, bots):
+    """Send every alert waiting in each company's watcher outbox, once."""
+    by_company = defaultdict(list)
+    for b in bots:
+        by_company[b["companyId"]].append(b)
+    with LOCK:
+        remembered = list(state.get("sent_watcher_alerts", []))
+    sent_before = set(remembered)
+    for company_id, cbots in by_company.items():
+        data = cli("watcher", "outbox", "-C", company_id)
+        items = data.get("alerts") if isinstance(data, dict) else None
+        if not isinstance(items, list) or not items:
+            continue
+        reports_to, names, roles = fetch_org(company_id)
+        bots_by_agent = {b["agentId"]: b for b in cbots}
+        default_bot = company_notice_bot(cbots, roles)
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            alert_id = it.get("id")
+            if not isinstance(alert_id, str) or not UUID_RE.match(alert_id):
+                continue
+            if it.get("companyId") not in (None, company_id):
+                continue
+            if alert_id in sent_before:
+                # Telegram already has it; only the acknowledgement was lost.
+                ack_watcher_alert(company_id, alert_id)
+                continue
+            agent_id = it.get("agentId")
+            bot, escalated = resolve_bot(agent_id, bots_by_agent, reports_to, default_bot)
+            if bot is None:
+                continue
+            chats = deliverable_chats(state, bot["token"], allowed_users_for(bot))
+            if not chats:
+                continue  # nobody has started this bot yet: try again next pass
+            text = str(it.get("text") or "").strip()
+            if not text:
+                continue
+            if escalated and agent_id:
+                text += f"\n(on behalf of {names.get(agent_id, 'a teammate')})"
+            file_id = it.get("imageFileId")
+            picture = None
+            if isinstance(file_id, str) and UUID_RE.match(file_id):
+                picture = fetch_picture(bot, file_id)
+                if picture is None:
+                    text += "\n(There was a picture too, but it could not be sent here. It is in Paperclip's Files.)"
+            delivered = False
+            for chat in chats:
+                if send_watcher_alert(bot, chat, text, picture, file_id or ""):
+                    delivered = True
+            if not delivered:
+                continue  # Telegram refused; the next pass tries again
+            sent_before.add(alert_id)
+            remembered.append(alert_id)
+            with LOCK:
+                state["sent_watcher_alerts"] = remembered[-WATCHER_ALERTS_REMEMBERED:]
+                save_state(state)
+            ack_watcher_alert(company_id, alert_id)
+
+
 def handle_callback(cq):
     data = cq.get("data", "")
     action, _, rest = data.partition(":")
@@ -1488,6 +1622,10 @@ def main():
             notify_stalled_agents(state, bots)
         except Exception as e:
             print(f"stalled-agent-notify error: {e}", flush=True)
+        try:
+            notify_watcher_alerts(state, bots)
+        except Exception as e:
+            print(f"watcher-alert-notify error: {e}", flush=True)
         time.sleep(12)
 
 

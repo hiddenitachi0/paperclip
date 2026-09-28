@@ -1261,6 +1261,13 @@
       "when": 1787160490000,
       "tag": "0180_agent_memories",
       "breakpoints": true
+    },
+    {
+      "idx": 181,
+      "version": "7",
+      "when": 1787160500000,
+      "tag": "0181_watchers",
+      "breakpoints": true
     }
   ]
 }
