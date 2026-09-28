@@ -544,6 +544,15 @@ describeEmbeddedPostgres("lane A service", () => {
       parameters: { prompt: "a cat" },
       runContext: expect.objectContaining({ agentId: target.id, companyId, projectId: "", runId: expect.any(String) }),
     }, PLUGIN_TOOL_CALL_TIMEOUT_MS);
+    // The person's own words reach the plugin from the host, next to the ids
+    // (never from the model's tool input, which has no such field).
+    expect((call.mock.calls[0]![2] as { runContext: Record<string, unknown> }).runContext).toStrictEqual({
+      agentId: target.id,
+      runId: expect.any(String),
+      companyId,
+      projectId: "",
+      requesterMessage: "make me a picture of a cat",
+    });
     // The host sees the quick agent, the person who asked, and their own words.
     expect(resolvedDuringCall).toEqual({
       agentId: target.id,

@@ -1096,7 +1096,20 @@ export function pluginRoutes(
       return;
     }
 
-    const { tool, parameters, runContext } = body;
+    const { tool, parameters } = body;
+    // Only the four fields a caller may state are taken from the body; every
+    // other field of the run context (for example `requesterMessage`, which
+    // only the host fills in for a quick agent's chat turn) is dropped here so
+    // an agent cannot hand a plugin words the person never wrote.
+    const runContext: ToolRunContext | undefined =
+      body.runContext && typeof body.runContext === "object"
+        ? {
+            agentId: body.runContext.agentId,
+            runId: body.runContext.runId,
+            companyId: body.runContext.companyId,
+            projectId: body.runContext.projectId,
+          }
+        : undefined;
 
     // Validate required fields
     if (!tool || typeof tool !== "string") {

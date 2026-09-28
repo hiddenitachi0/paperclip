@@ -25,6 +25,20 @@ the roadmap-3 approval gate for the paperclip-fork.
   a look clears the defaults that point at it, renaming keeps them. A default look is the same saved look, so the
   content filter rule does not change: it is only off for a look an owner/admin saved with it off. The page lists the
   company's agents through the host (`agents.read`).
+- **Automatic looks** — on the same page, under "Automatic looks", an owner/admin gives a person (shared by all of
+  that person's jobs) or a job without a person an ordered list of rules: a look plus time windows (from/up to,
+  weekdays, may run past midnight; the days are the days a window starts on) and/or keywords (whole words, any case).
+  A rule needs a time or a keyword. When no look is named, the first switched-on rule that fits right now wins (a rule
+  that does not fit now is skipped), else the agent's default look, else none. So the full order is: `look` input >
+  look named in the request > first fitting rule > default look. `data.lookReason` is `look-input`,
+  `named-in-request`, `rule` or `agent-default`, and `data.lookReasonText` says it in words ("rule: 08:00–12:00 on
+  weekdays", "rule: keyword 'work'", "default look"). Keywords are looked for in the person's own message
+  (`ToolRunContext.requesterMessage`, filled by the host only for a quick agent's chat turn; the HTTP execute route
+  drops it from any caller's run context) and in the picture's description. Time zone per person/job, default
+  `Europe/Oslo`. Stored in plugin state (scope `company`, key `lookRules`,
+  `{ "persona:<id>" | "agent:<id>": { timezone, rules[] } }`); deleting a look removes its rules. Drag and drop (or
+  the arrows) sets the priority; every change saves at once; a "Right now this would pick" preview with a test
+  message asks the worker. List saved looks tells the agent its rules in plain words.
 - **Sogni picture tools** — upscale, remove background, restore, change angle, apply a style, select objects, and
   improve a prompt, one agent tool each (see "Sogni tools for existing pictures" below).
 - **Company settings → Media Studio looks** — owners/admins add, edit and delete looks; looks

@@ -42,6 +42,9 @@ import {
   ACTION_LOOKS_LIST,
   ACTION_LOOK_DEFAULTS_LIST,
   ACTION_LOOK_DEFAULTS_SET,
+  ACTION_LOOK_RULES_LIST,
+  ACTION_LOOK_RULES_PREVIEW,
+  ACTION_LOOK_RULES_SAVE,
   ACTION_LOOKS_SAVE,
   ACTION_SOGNI_LORAS,
   ACTION_SOGNI_MODELS,
@@ -53,6 +56,19 @@ import {
   TOOL_GENERATE,
   TOOL_LIST_LOOKS,
 } from "./manifest.js";
+import {
+  DEFAULT_TIMEZONE,
+  checkRuleSet,
+  describeMatch,
+  describeRuleConditions,
+  firstApplicableRule,
+  normalizeRuleSets,
+  ownerKeyFor,
+  parseOwnerKey,
+  withoutLook,
+  type LookRuleOwnerKey,
+  type LookRuleSet,
+} from "./look-rules.js";
 import { SOGNI_TOOLS, prepareSogniCall, sogniToolDescription, sogniToolParameters, type SogniToolDef } from "./sogni-tools.js";
 
 /**
@@ -326,8 +342,86 @@ function liveDefaults(defaults: Record<string, string>, looks: Look[]): Record<s
   return Object.fromEntries(Object.entries(defaults).filter(([, lookId]) => ids.has(lookId)));
 }
 
+// ─── Automatic looks (look rules) ────────────────────────────────────────────
+//
+// An owner/admin can give a person (every job that person holds) or a job
+// without a person an ordered list of rules: "08:00-12:00 use look X",
+// "a message that says 'work' uses look Y". Stored per company next to the
+// looks (plugin state, scope "company", the host-verified company id) as
+// { "persona:<id>" | "agent:<id>": { timezone, rules[] } }. Whose rules apply
+// is decided from the run's own agent as the host resolved it (runCtx), and
+// that agent's person as the host reads it; never from the tool input.
+// Keywords are looked for in the person's own message, which only the host
+// fills in (quick-agent chats), and in the picture's description.
+
+const LOOK_RULES_STATE_KEY = "lookRules";
+
+function lookRulesScope(companyId: string) {
+  return { scopeKind: "company" as const, scopeId: companyId, stateKey: LOOK_RULES_STATE_KEY };
+}
+
+export async function loadLookRules(ctx: PluginContext, companyId: string): Promise<Record<string, LookRuleSet>> {
+  return normalizeRuleSets(await ctx.state.get(lookRulesScope(companyId)));
+}
+
+/** Whose rules this agent follows: its person's when it has one (in this company), else its own. */
+async function ruleOwnerForAgent(ctx: PluginContext, companyId: string, agentId: string): Promise<LookRuleOwnerKey> {
+  try {
+    const agent = (await ctx.agents.get(agentId, companyId)) as { id: string; companyId: string; personaId?: string | null } | null;
+    if (agent && agent.companyId === companyId) return ownerKeyFor(agent);
+  } catch (err) {
+    ctx.logger.warn(`media-studio: could not read the agent for its automatic looks: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return `agent:${agentId}`;
+}
+
+export interface AutomaticLook {
+  look: Look;
+  reason: "rule" | "agent-default";
+  /** "rule: 08:00–12:00 on weekdays", "rule: keyword 'work'" or "default look". */
+  text: string;
+  /** The rule's place in the list (from 1), for a rule. */
+  rulePosition: number | null;
+}
+
+/**
+ * The look for a picture where no look was named: the first automatic look
+ * rule that applies right now, else the agent's default look, else none.
+ */
+export async function automaticLook(
+  ctx: PluginContext,
+  companyId: string,
+  agentId: string,
+  input: { looks: Look[]; texts: Array<string | null | undefined>; now?: Date },
+): Promise<AutomaticLook | null> {
+  const byId = new Map(input.looks.map((look) => [look.id, look]));
+  const owner = await ruleOwnerForAgent(ctx, companyId, agentId);
+  const set = (await loadLookRules(ctx, companyId))[owner];
+  const match = firstApplicableRule(set, { now: input.now ?? new Date(), texts: input.texts, lookExists: (id) => byId.has(id) });
+  if (match) return { look: byId.get(match.rule.lookId)!, reason: "rule", text: describeMatch(match), rulePosition: match.position };
+  const lookId = (await loadLookDefaults(ctx, companyId))[agentId];
+  const fallback = lookId ? byId.get(lookId) : undefined;
+  return fallback ? { look: fallback, reason: "agent-default", text: "default look", rulePosition: null } : null;
+}
+
 /** Why a picture used the look it did; said back to the agent so it can tell the person. */
-export type LookReason = "look-input" | "named-in-request" | "agent-default";
+export type LookReason = "look-input" | "named-in-request" | "rule" | "agent-default";
+
+/** The same, in plain words ("rule: 08:00–12:00 on weekdays", "default look"), for the tool result's data. */
+function lookReasonText(reason: LookReason | null, ruleText: string | null): string | null {
+  switch (reason) {
+    case "look-input":
+      return "named as the look";
+    case "named-in-request":
+      return "named in the request";
+    case "rule":
+      return ruleText ?? "rule";
+    case "agent-default":
+      return "default look";
+    default:
+      return null;
+  }
+}
 
 const WORD_CHAR = "[\\p{L}\\p{N}_]";
 /** What may sit between "look" and a look's name: spaces, a colon, quotes, a hyphen ("look: Maja Night", 'look "B"', "B-look"). */
@@ -389,8 +483,11 @@ export function lookMentionedIn(prompt: string, looks: Look[]): { look: Look } |
 }
 
 /** The sentence the tool result carries about the look (or none). */
-function lookUsedSentence(look: Look | null, reason: LookReason | null): string {
+function lookUsedSentence(look: Look | null, reason: LookReason | null, reasonText: string | null = null): string {
   if (!look) return "";
+  if (reason === "rule") {
+    return ` Used the saved look "${look.name}" (automatic look, ${reasonText ?? "rule"}, because no look was named).`;
+  }
   if (reason === "agent-default") {
     return ` Used the saved look "${look.name}" (your default look, because no look was named).`;
   }
@@ -569,8 +666,10 @@ async function knownLoras(
 export interface PreparedGeneration {
   input: GenerationInput;
   look: Look | null;
-  /** Why this look: named as look, named in the request's text, or the agent's default. Null without a look. */
+  /** Why this look: named as look, named in the request's text, an automatic look rule, or the agent's default. Null without a look. */
   lookReason: LookReason | null;
+  /** The same in plain words: "rule: 08:00–12:00 on weekdays", "rule: keyword 'work'", "default look", "named in the request". */
+  lookReasonText: string | null;
   referenceFileIds: string[];
   /** Plain sentences for the agent: what of the look could not be used, and why. */
   notes: string[];
@@ -685,8 +784,12 @@ export async function prepareGeneration(
   ctx: PluginContext,
   companyId: string,
   params: Record<string, unknown>,
-  /** The calling agent, as the host resolved it for this run (never from the tool input). */
-  options: { agentId?: string | null } = {},
+  /**
+   * The calling agent, as the host resolved it for this run, and the person's
+   * own message for this turn when the host provides it (quick-agent chats).
+   * Neither ever comes from the tool input.
+   */
+  options: { agentId?: string | null; requesterMessage?: string | null; now?: Date } = {},
 ): Promise<PreparedGeneration | { error: string }> {
   const input = toInput(params);
   if (!input.prompt) return { error: "prompt is required" };
@@ -701,9 +804,11 @@ export async function prepareGeneration(
   }
 
   // Which look, in order: the one named as look; else one the request's
-  // text names ("in look Maja Night"); else the agent's default look.
+  // text names ("in look Maja Night"); else the first automatic look rule
+  // that applies right now; else the agent's default look.
   let look: Look | null = null;
   let lookReason: LookReason | null = null;
+  let ruleText: string | null = null;
   const lookName = typeof params.look === "string" ? params.look.trim() : "";
   if (lookName) {
     const looks = await loadLooks(ctx, companyId);
@@ -723,9 +828,17 @@ export async function prepareGeneration(
         look = mentioned.look;
         lookReason = "named-in-request";
       } else if (options.agentId) {
-        const lookId = (await loadLookDefaults(ctx, companyId))[options.agentId];
-        look = (lookId ? looks.find((l) => l.id === lookId) : undefined) ?? null;
-        if (look) lookReason = "agent-default";
+        // Keywords: the person's own message first, the picture's description as well.
+        const auto = await automaticLook(ctx, companyId, options.agentId, {
+          looks,
+          texts: [options.requesterMessage, input.prompt],
+          now: options.now,
+        });
+        if (auto) {
+          look = auto.look;
+          lookReason = auto.reason;
+          if (auto.reason === "rule") ruleText = auto.text;
+        }
       }
     }
   }
@@ -774,7 +887,7 @@ export async function prepareGeneration(
   } catch (err) {
     return { error: err instanceof Error ? err.message : String(err) };
   }
-  return { input, look, lookReason, referenceFileIds, notes };
+  return { input, look, lookReason, lookReasonText: lookReasonText(lookReason, ruleText), referenceFileIds, notes };
 }
 
 function assertCanManageLooks(context: { companyId: string | null; actor: { type: string; canManageCompany?: boolean } }): string {
@@ -937,6 +1050,93 @@ async function validateLookInput(
   };
 }
 
+interface RuleOwner {
+  key: LookRuleOwnerKey;
+  kind: "persona" | "agent";
+  name: string;
+  jobs: Array<{ id: string; name: string; title: string | null }>;
+}
+
+/**
+ * Who can have automatic looks: each person (persona) holding at least one
+ * of the company's jobs, and each job without a person. Terminated jobs and
+ * other companies' jobs are left out.
+ */
+async function ruleOwners(ctx: PluginContext, companyId: string): Promise<RuleOwner[]> {
+  const agents = (await ctx.agents.list({ companyId })) as Array<{
+    id: string;
+    companyId: string;
+    name: string;
+    title?: string | null;
+    status: string;
+    personaId?: string | null;
+    persona?: { displayName?: string | null } | null;
+  }>;
+  const owners = new Map<string, RuleOwner>();
+  for (const agent of agents) {
+    if (agent.companyId !== companyId || agent.status === "terminated") continue;
+    const key = ownerKeyFor(agent);
+    const job = { id: agent.id, name: agent.name, title: agent.title ?? null };
+    const existing = owners.get(key);
+    if (existing) {
+      existing.jobs.push(job);
+      continue;
+    }
+    owners.set(key, {
+      key,
+      kind: agent.personaId ? "persona" : "agent",
+      name: agent.personaId ? agent.persona?.displayName?.trim() || `${agent.name}'s person` : agent.name,
+      jobs: [job],
+    });
+  }
+  const list = [...owners.values()];
+  for (const owner of list) owner.jobs.sort((a, b) => a.name.localeCompare(b.name));
+  // People first, then jobs without a person; each by name.
+  return list.sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === "persona" ? -1 : 1));
+}
+
+async function findRuleOwner(ctx: PluginContext, companyId: string, rawKey: unknown): Promise<RuleOwner> {
+  const parsed = parseOwnerKey(rawKey);
+  if (!parsed) throw new Error("Pick a person or an agent.");
+  const owner = (await ruleOwners(ctx, companyId)).find((o) => o.key === `${parsed.kind}:${parsed.id}`);
+  if (owner) return owner;
+  if (parsed.kind === "agent") {
+    const agent = (await ctx.agents.get(parsed.id, companyId)) as { companyId: string; personaId?: string | null; status: string } | null;
+    if (agent && agent.companyId === companyId && agent.status !== "terminated" && agent.personaId) {
+      throw new Error("This agent is one of a person's jobs, so it follows that person's automatic looks. Pick the person instead.");
+    }
+  }
+  throw new Error("That person or agent is not in this company. Reload the page.");
+}
+
+/**
+ * The automatic looks that apply to this agent, in plain words for the
+ * list-looks tool: only switched-on rules whose look still exists, in order.
+ */
+async function describeAgentRules(
+  ctx: PluginContext,
+  companyId: string,
+  agentId: string,
+  looks: Look[],
+): Promise<{ text: string; lines: string[]; data: { timezone: string; rules: Array<{ position: number; look: string; when: string }> } | null }> {
+  const byId = new Map(looks.map((look) => [look.id, look]));
+  const owner = await ruleOwnerForAgent(ctx, companyId, agentId);
+  const set = (await loadLookRules(ctx, companyId))[owner];
+  const live = (set?.rules ?? []).filter((rule) => rule.enabled && byId.has(rule.lookId));
+  if (!set || live.length === 0) return { text: "", lines: [], data: null };
+  const rows = live.map((rule, i) => ({ position: i + 1, look: byId.get(rule.lookId)!.name, when: describeRuleConditions(rule) }));
+  const lines = rows.map((row) => `${row.position}. "${row.look}": ${row.when}.`);
+  const now = firstApplicableRule({ ...set, rules: live }, { now: new Date(), texts: [], lookExists: (id) => byId.has(id) });
+  const nowSentence = now
+    ? `\nRight now, without any keyword, "${byId.get(now.rule.lookId)!.name}" would be used (${describeMatch(now)}).`
+    : "\nRight now no time rule fits, so only a keyword rule (or your default look) can pick a look.";
+  const text =
+    `\nAutomatic looks: when no look is named, these are checked from the top and the first that fits is used (times are ${set.timezone} time; keywords are looked for in the person's message and in the picture's description):\n` +
+    lines.join("\n") +
+    nowSentence;
+  return { text, lines, data: { timezone: set.timezone, rules: rows } };
+}
+
 const plugin = definePlugin({
   async setup(ctx) {
     // Agent-callable tool: an employee (or a quick agent in chat) makes a picture.
@@ -952,11 +1152,15 @@ const plugin = definePlugin({
         const issueId = typeof rawParams.issueId === "string" ? rawParams.issueId.trim() : "";
 
         // The agent is the run's own, as the host resolved it; the input cannot name another.
-        const prepared = await prepareGeneration(ctx, runCtx.companyId, rawParams, { agentId: runCtx.agentId });
+        // The person's message is the host's (quick-agent chats only); the input cannot supply it.
+        const prepared = await prepareGeneration(ctx, runCtx.companyId, rawParams, {
+          agentId: runCtx.agentId,
+          requesterMessage: typeof runCtx.requesterMessage === "string" ? runCtx.requesterMessage : null,
+        });
         if ("error" in prepared) return { error: prepared.error };
-        const { input, look, lookReason, referenceFileIds, notes } = prepared;
+        const { input, look, lookReason, lookReasonText: reasonText, referenceFileIds, notes } = prepared;
         const notesSentence = notes.length > 0 ? ` ${notes.join(" ")}` : "";
-        const lookSentence = lookUsedSentence(look, lookReason);
+        const lookSentence = lookUsedSentence(look, lookReason, reasonText);
 
         // DUR-177 / DUR-4000: enforce the calling agent's own daily image
         // limit (agents.limits.dailyImageGenerations) in code, at the moment
@@ -999,6 +1203,7 @@ const plugin = definePlugin({
                 seed,
                 look: look?.name ?? null,
                 lookReason,
+                lookReasonText: reasonText,
               },
             };
           }
@@ -1028,6 +1233,7 @@ const plugin = definePlugin({
               issueId: null,
               look: look?.name ?? null,
               lookReason,
+              lookReasonText: reasonText,
               provider: result.provider,
               model: result.model ?? null,
               referenceFileIds,
@@ -1054,13 +1260,15 @@ const plugin = definePlugin({
         // The calling agent's own default, as the host resolved the agent for this run.
         const defaultId = (await loadLookDefaults(ctx, runCtx.companyId))[runCtx.agentId] ?? null;
         const defaultLook = looks.find((look) => look.id === defaultId) ?? null;
+        const rules = await describeAgentRules(ctx, runCtx.companyId, runCtx.agentId, looks);
         const defaultSentence = defaultLook
-          ? `\nYour default look is "${defaultLook.name}": it is used for every picture where no look is named. A look named in the request wins over it.`
+          ? `\nYour default look is "${defaultLook.name}": it is used for every picture where no look is named${rules.lines.length > 0 ? " and no automatic look fits" : ""}. A look named in the request wins over it.`
           : "";
         return {
-          content: `Saved looks:\n${looks.map((look) => describeLook(look, look.id === defaultLook?.id)).join("\n")}${defaultSentence}`,
+          content: `Saved looks:\n${looks.map((look) => describeLook(look, look.id === defaultLook?.id)).join("\n")}${rules.text}${defaultSentence}`,
           data: {
             defaultLook: defaultLook?.name ?? null,
+            automaticLooks: rules.data,
             looks: looks.map((look) => ({
               name: look.name,
               yourDefault: look.id === defaultLook?.id,
@@ -1130,7 +1338,10 @@ const plugin = definePlugin({
       const defaults = await loadLookDefaults(ctx, companyId);
       const kept = liveDefaults(defaults, next);
       if (Object.keys(kept).length !== Object.keys(defaults).length) await ctx.state.set(lookDefaultsScope(companyId), kept);
-      return { looks: next, defaults: kept };
+      // Nor does any automatic look rule.
+      const cleaned = withoutLook(await loadLookRules(ctx, companyId), id);
+      if (cleaned.changed) await ctx.state.set(lookRulesScope(companyId), cleaned.sets);
+      return { looks: next, defaults: kept, lookRules: cleaned.sets };
     });
 
     // Default look per agent (same page). Anyone in the company may see it;
@@ -1170,6 +1381,70 @@ const plugin = definePlugin({
       else delete defaults[agentId];
       await ctx.state.set(lookDefaultsScope(companyId), defaults);
       return { defaults };
+    });
+
+    // Automatic looks (same page). Anyone in the company may see them and try
+    // the preview; only an owner/admin may change them. The people and jobs
+    // are the company's own, read through the host (agents.read).
+    ctx.actions.register(ACTION_LOOK_RULES_LIST, async (_params, context) => {
+      if (!context.companyId) throw new Error("Open this page from inside a company.");
+      const companyId = context.companyId;
+      const [owners, looks, sets, defaults] = await Promise.all([
+        ruleOwners(ctx, companyId),
+        loadLooks(ctx, companyId),
+        loadLookRules(ctx, companyId),
+        loadLookDefaults(ctx, companyId),
+      ]);
+      const live = liveDefaults(defaults, looks);
+      return {
+        owners: owners.map((owner) => ({
+          ...owner,
+          jobs: owner.jobs.map((job) => ({ ...job, defaultLookId: live[job.id] ?? null })),
+        })),
+        ruleSets: Object.fromEntries(owners.filter((owner) => sets[owner.key]).map((owner) => [owner.key, sets[owner.key]])),
+        defaultTimezone: DEFAULT_TIMEZONE,
+        canManage: context.actor.type === "user" && context.actor.canManageCompany === true,
+      };
+    });
+
+    ctx.actions.register(ACTION_LOOK_RULES_SAVE, async (params, context) => {
+      const companyId = assertCanManageLooks(context);
+      const owner = await findRuleOwner(ctx, companyId, params.ownerKey);
+      const looks = await loadLooks(ctx, companyId);
+      const set = checkRuleSet(
+        { timezone: params.timezone, rules: params.rules },
+        new Set(looks.map((look) => look.id)),
+      );
+      const sets = await loadLookRules(ctx, companyId);
+      sets[owner.key] = set;
+      await ctx.state.set(lookRulesScope(companyId), sets);
+      return { ownerKey: owner.key, ruleSet: set };
+    });
+
+    // "Right now this would pick: ..." for the page, with a test message.
+    ctx.actions.register(ACTION_LOOK_RULES_PREVIEW, async (params, context) => {
+      if (!context.companyId) throw new Error("Open this page from inside a company.");
+      const companyId = context.companyId;
+      const owner = await findRuleOwner(ctx, companyId, params.ownerKey);
+      const message = typeof params.message === "string" ? params.message.slice(0, 4000) : "";
+      const [looks, sets, defaults] = await Promise.all([loadLooks(ctx, companyId), loadLookRules(ctx, companyId), loadLookDefaults(ctx, companyId)]);
+      const byId = new Map(looks.map((look) => [look.id, look]));
+      const set = sets[owner.key] ?? { timezone: DEFAULT_TIMEZONE, rules: [] };
+      const now = new Date();
+      const match = firstApplicableRule(set, { now, texts: [message], lookExists: (id) => byId.has(id) });
+      const live = liveDefaults(defaults, looks);
+      return {
+        timezone: set.timezone,
+        localTime: new Intl.DateTimeFormat("en-GB", { timeZone: set.timezone, weekday: "long", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(now),
+        rule: match
+          ? { id: match.rule.id, position: match.position, lookId: match.rule.lookId, lookName: byId.get(match.rule.lookId)!.name, why: describeMatch(match) }
+          : null,
+        fallbacks: owner.jobs.map((job) => ({
+          agentId: job.id,
+          agentName: job.name,
+          lookName: live[job.id] ? (byId.get(live[job.id]!)?.name ?? null) : null,
+        })),
+      };
     });
 
     // Sogni's picture models, for the looks page's model picker. Public
