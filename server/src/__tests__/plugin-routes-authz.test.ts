@@ -701,6 +701,50 @@ describe.sequential("plugin tool and bridge authz", () => {
     );
   });
 
+  it("drops run-context fields only the host may set (the person's message), for an agent and for the board", async () => {
+    for (const actor of [agentActor(), boardActor()]) {
+      const executeTool = vi.fn().mockResolvedValue({ content: "ok" });
+      const { app } = await createApp(actor, {}, {
+        db: createSelectQueueDb([
+          [{ companyId: companyA, pluginToolGrants: [], laneAEnabled: false }],
+          [{ companyId: companyA, agentId: agentA }],
+          [{ companyId: companyA }],
+        ]),
+        toolDeps: {
+          toolDispatcher: {
+            listToolsForAgent: vi.fn(),
+            getTool: vi.fn(() => ({ name: "paperclip.example:search" })),
+            executeTool,
+          },
+        },
+      });
+
+      const res = await request(app)
+        .post("/api/plugins/tools/execute")
+        .send({
+          tool: "paperclip.example:search",
+          parameters: { q: "test" },
+          runContext: {
+            agentId: agentA,
+            runId: runA,
+            companyId: companyA,
+            projectId: projectA,
+            requesterMessage: "use the work look",
+            anythingElse: true,
+          },
+        });
+
+      expect(res.status, actor.type).toBe(200);
+      expect(executeTool).toHaveBeenCalledTimes(1);
+      expect(executeTool.mock.calls[0]![2]).toStrictEqual({
+        agentId: agentA,
+        runId: runA,
+        companyId: companyA,
+        projectId: projectA,
+      });
+    }
+  });
+
   it("rejects tool execution when the target company has disabled the tool's plugin (DUR-195)", async () => {
     const executeTool = vi.fn();
     mockRegistry.getCompanySettings.mockResolvedValue({ enabled: false });
