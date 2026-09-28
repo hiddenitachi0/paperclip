@@ -806,18 +806,12 @@ importers:
       '@paperclipai/adapter-utils':
         specifier: workspace:*
         version: link:../packages/adapter-utils
-      '@paperclipai/browser-worker':
-        specifier: workspace:*
-        version: link:../packages/browser-worker
       '@paperclipai/db':
         specifier: workspace:*
         version: link:../packages/db
       '@paperclipai/hermes-paperclip-adapter':
         specifier: workspace:*
         version: link:../packages/adapters/hermes
-      '@paperclipai/mcp-server':
-        specifier: workspace:*
-        version: link:../packages/mcp-server
       '@paperclipai/plugin-sdk':
         specifier: workspace:*
         version: link:../packages/plugins/sdk
