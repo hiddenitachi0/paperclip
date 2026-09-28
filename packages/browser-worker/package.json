@@ -20,7 +20,7 @@
   "scripts": {
     "build": "tsc",
     "clean": "rm -rf dist",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p fixtures/tsconfig.json",
     "test": "vitest run",
     "worker": "tsx src/entrypoints/worker.ts",
     "egress-proxy": "tsx src/entrypoints/egress-proxy.ts",
