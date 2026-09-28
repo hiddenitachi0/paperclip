@@ -729,6 +729,11 @@ export const SECRET_BINDING_TARGET_TYPES = [
   // Deliberately NOT a dedicated target: one provider key may be shared by
   // several tools (and by an MCP server) if the operator wants that.
   "api_tool",
+  // Watchers: the key of a market-price source (a Finnhub key for a US-stock
+  // watcher; watchers row, config_path 'source_key'). Never resolved by any
+  // agent -- only by the server-side watcher service, which makes every price
+  // request itself. Not dedicated: one Finnhub key serves every stock watcher.
+  "watcher",
 ] as const;
 export type SecretBindingTargetType = (typeof SECRET_BINDING_TARGET_TYPES)[number];
 
