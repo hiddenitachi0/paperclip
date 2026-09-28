@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  BROWSER_ACCESS_LEVELS,
   LANE_A_DEFAULT_MAX_OUTPUT_TOKENS,
   LANE_A_DEFAULT_TRANSFORM_DAILY_CALL_CAP,
   LANE_A_INSTRUCTIONS_MAX_LENGTH,
@@ -18,9 +19,11 @@ import {
   laneATransformWorstCaseDailyCents,
   normalizeLaneAProvider,
   formatAgentDisplayName,
+  readLaneABrowserAccess,
   readLaneAWebSearchSwitch,
   WEB_SEARCH_FREE_CREDIT_TEXT,
   WEB_SEARCH_PRICE_TEXT,
+  type BrowserAccessLevel,
   type CompanySecret,
   type LaneAProvider,
 } from "@paperclipai/shared";
@@ -73,6 +76,14 @@ import { SecretBindingPicker, type SecretBindingValue } from "./SecretBindingPic
  * allowed. Everything is computed from endpoints the page already calls; no
  * new server route.
  */
+
+/** Plain-language labels for the "Browser access" dial (DUR-4020). */
+const BROWSER_ACCESS_LABELS: Record<BrowserAccessLevel, string> = {
+  off: "Off",
+  browse_and_forms: "Can browse and fill forms",
+  book_and_buy: "Can browse, book, and pay",
+};
+
 export function QuickAgentSection({
   agent,
   companyId,
@@ -215,6 +226,11 @@ export function QuickAgentSection({
   });
   const saveWebSearch = (next: boolean) =>
     settingMutation.mutate({ adapterConfig: { laneA: { ...currentLaneA, webSearch: next } } });
+
+  // "Browser access": off unless raised here. Board-only, same as webSearch.
+  const browserAccess = readLaneABrowserAccess(agent.adapterConfig);
+  const saveBrowserAccess = (next: BrowserAccessLevel) =>
+    settingMutation.mutate({ adapterConfig: { laneA: { ...currentLaneA, browserAccess: next } } });
 
   // ─── DUR-3997 slice 4: readiness ────────────────────────────────────────
   // Paperclip's own key is only readable by an instance admin (the route is
@@ -491,6 +507,32 @@ export function QuickAgentSection({
               Searches today (whole company): {webSearchQuery.data.usedToday} of {webSearchQuery.data.dailyCap}.
             </p>
           )}
+        </div>
+
+        {/* Browser access: off by default, per quick agent. DUR-4020. */}
+        <div className="space-y-2 border-t pt-4" data-testid="quick-agent-browser-access">
+          <div className="space-y-1.5">
+            <p className="text-sm font-medium">Browser access</p>
+            <p className="text-xs text-muted-foreground">
+              Lets this quick agent open a real browser to look at web pages and fill in forms for you. "Can
+              browse, book, and pay" also lets it use a payment card or website login you've saved under
+              Connections to finish a booking or a purchase — it never sees a card number or password itself,
+              only Paperclip does. Off by default. Only you can change this.
+            </p>
+          </div>
+          <select
+            className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
+            data-testid="quick-agent-browser-access-select"
+            value={browserAccess}
+            disabled={settingMutation.isPending}
+            onChange={(event) => saveBrowserAccess(event.target.value as BrowserAccessLevel)}
+          >
+            {BROWSER_ACCESS_LEVELS.map((level) => (
+              <option key={level} value={level}>
+                {BROWSER_ACCESS_LABELS[level]}
+              </option>
+            ))}
+          </select>
         </div>
 
         {/* DUR-3977: the settings that decide what a batch of rewrites costs
