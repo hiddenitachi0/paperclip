@@ -52,6 +52,7 @@ import { BudgetPolicyCard } from "../components/BudgetPolicyCard";
 import { SorteringsreglerCard } from "../components/SorteringsreglerCard";
 import { QuickAgentSection } from "../components/QuickAgentSection";
 import { QuickAgentMemorySection } from "../components/QuickAgentMemorySection";
+import { MorningReportSection } from "../components/MorningReportSection";
 import { QuickAgentChatPanel } from "../components/QuickAgentChatPanel";
 import { AgentAddOnToolsSection } from "../components/AgentAddOnToolsSection";
 import { TrustPresetSection } from "../components/TrustPresetSection";
@@ -1622,6 +1623,9 @@ function AgentConfigurePage({
       />
       <QuickAgentSection agent={agent} companyId={companyId} />
       {agent.laneAEnabled && <QuickAgentMemorySection agentId={agent.id} />}
+      {agent.laneAEnabled && (
+        <MorningReportSection agent={agent} companyId={companyId} />
+      )}
       <div>
         <h3 className="text-sm font-medium mb-3">API Keys</h3>
         <KeysTab agentId={agentId} companyId={companyId} />
