@@ -33,6 +33,7 @@ import {
   resolveLaneAModelForProvider,
   laneATemperatureForCall,
   readLaneAWebSearchSwitch,
+  type ChatHandedOverTask,
   type LaneAProvider,
 } from "@paperclipai/shared";
 import { HttpError, conflict, forbidden, notFound, tooManyRequests, unprocessable } from "../errors.js";
@@ -334,6 +335,21 @@ export function buildWebPromptParagraph(input: { search: boolean; readPages: boo
   return lines.join("\n");
 }
 
+/**
+ * Research and planning requests: hand them to a full run of this agent as a
+ * task (start_research_task) instead of squeezing them into a few tool calls.
+ */
+export function buildResearchPromptParagraph(): string {
+  return [
+    `Research and planning (planning a trip or an itinerary, finding the best price on something, comparing options, finding the best X):`,
+    `- Do not try to do these here: you have only ${LANE_A_MAX_TOOL_CALLS} tool calls per message, too few to do it well. Call start_research_task with a full brief; you then do the work in the background and the result page comes back to this chat.`,
+    `- The brief carries the goal and everything the person said that matters: dates, places, budget and currency, who it is for, preferences, the exact product. If one essential detail is missing (for a trip: where, or roughly when), ask one short question first; otherwise make a sensible assumption and write it in the brief as "Assumption: …".`,
+    `- After starting it, tell the person plainly and briefly that you're on it and will send the result here when it's ready (for example "I'm on it — I'll send the plan here when it's ready."), with the task reference. Do not give a half answer from memory.`,
+    `- It is research and a written result only: nothing is booked, bought, signed up for or filled in, by you or by the task. If they ask for that, say you can plan it and they do the booking.`,
+    `- A single quick fact (one price, an opening time, a result) is not a research job: answer it here as usual if you can look it up.`,
+  ].join("\n");
+}
+
 /** DUR-3997: the rules a quick agent reads company files under. */
 export function buildCompanyFilesPromptParagraph(servers: CompanyFileServerSummary[]): string {
   const list = servers
@@ -411,7 +427,8 @@ export function buildSystemPrompt(input: LaneASystemPromptInput): string {
   const capabilities: string[] = [];
   if (input.hasBuiltinTools) {
     capabilities.push(
-      `You can do a few things through tools: hand work to a colleague (route_to_agent), look up the weather (get_weather), ` +
+      `You can do a few things through tools: hand work to a colleague (route_to_agent), take on a bigger research or ` +
+        `planning job yourself as a background task (start_research_task), look up the weather (get_weather), ` +
         `tell the current time and date anywhere (get_time), and read a task summary (lookup_issue).`,
     );
     if (input.webSearch?.search) {
@@ -466,6 +483,9 @@ export function buildSystemPrompt(input: LaneASystemPromptInput): string {
   }
   if (input.webSearch && input.hasBuiltinTools) {
     parts.push(buildWebPromptParagraph(input.webSearch));
+  }
+  if (input.hasBuiltinTools) {
+    parts.push(buildResearchPromptParagraph());
   }
 
   if (input.colleagues && input.colleagues.length > 0) {
@@ -1881,6 +1901,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
               content: string;
               summary: string;
               businessData?: { footer: string | null; lookupId: string | null };
+              task?: ChatHandedOverTask;
             };
             try {
               result = await executeBuiltinTool(block.name, input, ctx);
@@ -1901,7 +1922,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
                 lookupId: result.businessData?.lookupId ?? null,
               });
             }
-            actions.push({ tool: block.name, summary: result.summary, ok: result.ok });
+            actions.push({ tool: block.name, summary: result.summary, ok: result.ok, ...(result.task ? { task: result.task } : {}) });
             await recordToolCall(ctx, block.name, input, { ...result, error: result.ok ? null : result.content });
             toolResults.push({
               toolCallId: block.id,

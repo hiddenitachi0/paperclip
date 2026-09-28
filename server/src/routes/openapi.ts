@@ -3735,6 +3735,10 @@ registry.registerPath({
                 createdAt: z.string(),
               })
               .nullable(),
+            resultDocument: z
+              .object({ key: z.string(), title: z.string().nullable() })
+              .nullable()
+              .describe("The task's result page (issue document 'result'), when it has one"),
           }),
         ),
       }),

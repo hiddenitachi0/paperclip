@@ -23,6 +23,8 @@ export interface LaneAAction {
   summary: string;
   ok: boolean;
   image?: LaneAActionImage;
+  /** Set when the action started a task (a hand-over, or a research task); the chat follows it. */
+  task?: { issueId: string; identifier: string | null; title: string };
 }
 
 export interface LaneASendMessageResult {

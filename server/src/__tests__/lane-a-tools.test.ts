@@ -278,3 +278,84 @@ describe("resolveColleague with personas", () => {
     expect(resolveColleague(bare, "Maja", self).match).toBeNull();
   });
 });
+
+describe("start_research_task", () => {
+  const brief = "Best price on a Moccamaster KBG Select, black, delivered in Norway.";
+
+  it("makes a task for the quick agent itself, with the brief first and the delivery rules after", async () => {
+    const deps = makeDeps({ researchSkillLink: vi.fn(async () => "[research-and-plan](skill://s1?s=research-and-plan)") });
+    const execute = createLaneABuiltinToolExecutor(deps);
+    const result = await execute("start_research_task", { kind: "price_hunt", brief, title: "Best price: Moccamaster" }, ctx());
+
+    expect(result.ok).toBe(true);
+    expect(deps.canAssignTask).toHaveBeenCalledWith(expect.objectContaining({ companyId, assigneeAgentId: quickAgentId }));
+    const created = vi.mocked(deps.createIssueForAgent).mock.calls[0]![0];
+    expect(created).toMatchObject({ companyId, assigneeAgentId: quickAgentId, title: "Best price: Moccamaster", source: "start_research_task" });
+    expect(created.description.startsWith(brief)).toBe(true);
+    expect(created.description).toContain("Follow the [research-and-plan](skill://s1?s=research-and-plan) skill.");
+    expect(created.description).toContain("a table of offers (shop, price including shipping, delivery time, return policy, link, checked at)");
+    expect(created.description).toContain("key `result`");
+    expect(created.description).toContain("#document-result");
+    expect(created.description).toContain("set the task to done");
+    expect(result.task).toEqual({ issueId: "issue-1", identifier: "DUR-12", title: "Best price: Moccamaster" });
+    expect(result.summary).toBe("Started research task DUR-12: Best price: Moccamaster.");
+    expect(result.content).toContain("Do not start the research here");
+  });
+
+  it("still makes the task without the skill (the description says what to deliver) and treats an odd kind as research", async () => {
+    const deps = makeDeps({ researchSkillLink: vi.fn(async () => { throw new Error("db down"); }) });
+    const execute = createLaneABuiltinToolExecutor(deps);
+    const result = await execute("start_research_task", { kind: "book_flights", brief: "Compare the three best robot vacuums under 5000 kr" }, ctx());
+
+    expect(result.ok).toBe(true);
+    const created = vi.mocked(deps.createIssueForAgent).mock.calls[0]![0];
+    expect(created.description).toContain("Follow the research-and-plan skill if you have it.");
+    expect(created.description).toContain("a short summary first");
+    expect(created.title).toBe("Compare the three best robot vacuums under 5000 kr");
+  });
+
+  it("needs a brief", async () => {
+    const deps = makeDeps();
+    const result = await createLaneABuiltinToolExecutor(deps)("start_research_task", { kind: "trip_plan" }, ctx());
+    expect(result.ok).toBe(false);
+    expect(result.task).toBeUndefined();
+    expect(deps.createIssueForAgent).not.toHaveBeenCalled();
+  });
+
+  it("only a person can start one", async () => {
+    const deps = makeDeps();
+    const result = await createLaneABuiltinToolExecutor(deps)(
+      "start_research_task",
+      { kind: "trip_plan", brief: "Weekend in Bergen" },
+      ctx({ requester: { userId: null, agentId: bobId } }),
+    );
+    expect(result.ok).toBe(false);
+    expect(deps.createIssueForAgent).not.toHaveBeenCalled();
+  });
+
+  it("refuses when the person may not give this agent tasks", async () => {
+    const deps = makeDeps({ canAssignTask: vi.fn(async () => ({ allowed: false, explanation: "no" })) });
+    const result = await createLaneABuiltinToolExecutor(deps)("start_research_task", { kind: "trip_plan", brief: "Weekend in Bergen" }, ctx());
+    expect(result.ok).toBe(false);
+    expect(result.content).toContain("no task was created");
+    expect(deps.createIssueForAgent).not.toHaveBeenCalled();
+  });
+
+  it("refuses when the quick agent itself cannot run tasks (paused)", async () => {
+    const deps = makeDeps();
+    const result = await createLaneABuiltinToolExecutor(deps)(
+      "start_research_task",
+      { kind: "trip_plan", brief: "Weekend in Bergen" },
+      ctx({ agent: { id: finnId, name: "Finn" } }),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.content).toContain("no task");
+    expect(deps.createIssueForAgent).not.toHaveBeenCalled();
+  });
+
+  it("route_to_agent also reports the task it made, so the chat can follow it", async () => {
+    const deps = makeDeps();
+    const result = await createLaneABuiltinToolExecutor(deps)("route_to_agent", { agent: "Bob", request: "Fix the login page" }, ctx());
+    expect(result.task).toEqual({ issueId: "issue-1", identifier: "DUR-12", title: "Fix the login page" });
+  });
+});

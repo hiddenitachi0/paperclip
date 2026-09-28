@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "../lib/utils";
 import { ChatMicButton, ChatSpeakButton } from "./ChatSpeechButtons";
+import { ChatTaskFollowUp } from "./ChatTaskFollowUp";
 
 /**
  * Chat panel for a quick agent (Lane A). The conversation id is remembered
@@ -242,8 +243,9 @@ export function QuickAgentChatPanel({
           <div className="space-y-1.5">
             <CardTitle>Talk to {agentName}</CardTitle>
             <CardDescription>
-              Quick agent: answers right here, remembers this conversation, and can hand work to a colleague, look
-              up the weather, or read a task summary. Everything it does is shown under its reply.
+              Quick agent: answers right here, remembers this conversation, and can hand work to a colleague, take
+              on bigger research or planning as a task (the result shows up here), look up the weather, or read a
+              task summary. Everything it does is shown under its reply.
             </CardDescription>
           </div>
           <div className="flex shrink-0 items-center gap-1">
@@ -340,6 +342,11 @@ export function QuickAgentChatPanel({
                       ))}
                     </ul>
                   )}
+                  {message.actions
+                    .filter((action) => action.ok && action.task)
+                    .map((action) => (
+                      <ChatTaskFollowUp key={`${message.id}-task-${action.task!.issueId}`} companyId={companyId} task={action.task!} />
+                    ))}
                 </div>
               </div>
             ))
