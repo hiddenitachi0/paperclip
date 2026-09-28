@@ -21,7 +21,10 @@ import type { Db } from "@paperclipai/db";
 import { agentDailyCounters, agents } from "@paperclipai/db";
 import { parseAgentLimits } from "@paperclipai/shared";
 
-export const AGENT_DAILY_COUNTER_KINDS = ["image_generation"] as const;
+// "web_search" rows are written by server/src/services/web-search.ts (one per
+// quick-agent web search) and capped per COMPANY there, not per agent here:
+// reserve() has no per-agent limit for it and always allows.
+export const AGENT_DAILY_COUNTER_KINDS = ["image_generation", "web_search"] as const;
 export type AgentDailyCounterKind = (typeof AGENT_DAILY_COUNTER_KINDS)[number];
 
 export interface DailyLimitReservation {

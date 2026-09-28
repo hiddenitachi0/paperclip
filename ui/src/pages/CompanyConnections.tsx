@@ -29,6 +29,7 @@ import { AddIntegrationTokenDialog } from "../components/AddIntegrationTokenDial
 import { DataSourcesSection } from "../components/DataSourcesSection";
 import { ServiceTokensSection } from "../components/ServiceTokensSection";
 import { TelegramBotsSection } from "../components/TelegramBotsSection";
+import { WebSearchSection } from "../components/WebSearchSection";
 
 /**
  * DUR-3997 slice 4: Connections, the front door over everything a company is
@@ -356,6 +357,12 @@ export function CompanyConnections() {
             </CardHeader>
           </Card>
         )}
+      </div>
+
+      {/* Web search for quick agents */}
+      <div className="space-y-4" data-testid="connections-web-search-section">
+        <SectionHeading>Web search</SectionHeading>
+        <WebSearchSection companyId={selectedCompanyId} readOnly={!canManage} />
       </div>
 
       {/* Messaging */}
