@@ -14,7 +14,7 @@
 import type {
   AccessibilitySnapshot,
   ElementDescriptor,
-} from "@paperclipai/browser-worker";
+} from "@paperclipai/adapter-utils/browser-tools";
 
 export interface BrowserWorkerSessionHandle {
   workerSessionId: string;
@@ -23,8 +23,8 @@ export interface BrowserWorkerSessionHandle {
 
 /**
  * One call per plain browser tool, mirroring `BrowserDriver` in
- * `packages/browser-worker/src/tools.ts` but scoped to a worker session id
- * over the wire instead of an in-process Playwright page.
+ * `packages/adapter-utils/src/browser-tools.ts` but scoped to a worker
+ * session id over the wire instead of an in-process Playwright page.
  */
 export interface BrowserWorkerClient {
   openSession(input: { agentId: string; companyId: string; purpose: string }): Promise<BrowserWorkerSessionHandle>;

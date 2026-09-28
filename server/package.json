@@ -57,7 +57,6 @@
     "@paperclipai/adapter-opencode-local": "workspace:*",
     "@paperclipai/adapter-pi-local": "workspace:*",
     "@paperclipai/adapter-utils": "workspace:*",
-    "@paperclipai/browser-worker": "workspace:*",
     "@paperclipai/db": "workspace:*",
     "@paperclipai/hermes-paperclip-adapter": "workspace:*",
     "@paperclipai/mcp-server": "workspace:*",

@@ -5,8 +5,11 @@
  * signs off"). Owns session lifecycle, the access-level and full-run gates,
  * and the concurrency/duration/action caps; the actual click/type gating
  * (final-action refusal, payment-field refusal) is the already-tested
- * `BrowserToolHandler` from `@paperclipai/browser-worker`, reused unchanged
- * against a `RemoteBrowserDriver` that forwards each call to the worker over
+ * `BrowserToolHandler` from `@paperclipai/adapter-utils/browser-tools`
+ * (moved there from `@paperclipai/browser-worker`, which is private/
+ * unpublished, so a published `@paperclipai/server` can still resolve it --
+ * see `packages/browser-worker/src/index.ts`), reused unchanged against a
+ * `RemoteBrowserDriver` that forwards each call to the worker over
  * `BrowserWorkerClient`.
  *
  * Scope: browse_and_forms only, per the issue ("browse and forms only, no
@@ -34,7 +37,7 @@ import {
   type BrowserDriver,
   type ElementDescriptor,
   type ToolOutcome,
-} from "@paperclipai/browser-worker";
+} from "@paperclipai/adapter-utils/browser-tools";
 import { forbidden, notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
 import type { BrowserWorkerClient } from "./browser-worker-client.js";
