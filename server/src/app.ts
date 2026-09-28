@@ -60,6 +60,7 @@ import { crossCompanyInstructionRoutes } from "./routes/cross-company-instructio
 import { instanceSecurityRoutes } from "./routes/instance-security.js";
 import { crossCompanyAccessLogRoutes } from "./routes/cross-company-access-log.js";
 import { telegramBotRoutes } from "./routes/telegram-bots.js";
+import { SPEECH_TRANSCRIBE_API_PATH, SPEECH_TRANSCRIBE_JSON_BODY_LIMIT, speechRoutes } from "./routes/speech.js";
 import { dataConnectionRoutes } from "./routes/data-connections.js";
 import { openApiRoutes } from "./routes/openapi.js";
 import {
@@ -214,6 +215,12 @@ export async function createApp(
     limit: PORTABLE_JSON_BODY_LIMIT,
     verify: captureRawBody,
   }));
+  // Voice messages: a recording of up to 20 MB arrives as base64 in JSON,
+  // which is larger than the default limit. Only this one route gets more.
+  app.use(SPEECH_TRANSCRIBE_API_PATH, express.json({
+    limit: SPEECH_TRANSCRIBE_JSON_BODY_LIMIT,
+    verify: captureRawBody,
+  }));
   app.use(express.json({
     limit: DEFAULT_JSON_BODY_LIMIT,
     verify: captureRawBody,
@@ -329,6 +336,7 @@ export async function createApp(
   api.use(instanceClaudeAuthRoutes(db));
   api.use(instanceServerAnthropicKeyRoutes(db));
   api.use(telegramBotRoutes(db));
+  api.use(speechRoutes(db));
   // DUR-3972 S1: business-data sources. Off until enableBusinessData is on.
   api.use(dataConnectionRoutes(db));
   api.use(instanceSecurityRoutes(db, { checkIntervalMinutes: opts.adminAuthCheckIntervalMinutes ?? 0 }));

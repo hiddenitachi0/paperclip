@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { ToggleSwitch } from "@/components/ui/toggle-switch";
+import { TelegramBotVoiceControls, TelegramVoiceSection } from "./TelegramVoiceSettings";
 
 /**
  * DUR-3978 slice 2: where Filip connects a Telegram bot himself.
@@ -226,6 +227,8 @@ export function TelegramBotsSection({ companyId, readOnly = false }: { companyId
           </div>
         )}
 
+        <TelegramVoiceSection companyId={companyId} readOnly={readOnly} />
+
         {botsQuery.isLoading ? (
           <p className="text-sm text-muted-foreground">Loading…</p>
         ) : botsQuery.isError ? (
@@ -310,6 +313,8 @@ export function TelegramBotsSection({ companyId, readOnly = false }: { companyId
                   />
                   <span className="text-xs">Sends this company's approvals and questions</span>
                 </div>
+
+                <TelegramBotVoiceControls companyId={companyId} bot={bot} readOnly={readOnly} />
 
                 {rotatingId === bot.id && !readOnly && (
                   <div className="flex items-end gap-2">

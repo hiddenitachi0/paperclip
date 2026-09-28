@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { boolean, index, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { boolean, check, index, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
 import { companySecrets } from "./company_secrets.js";
@@ -31,6 +31,10 @@ import { companySecrets } from "./company_secrets.js";
  * should — a card the board filed itself, for example. At most one per
  * company (partial unique index). With none marked, the bridge uses the CEO's
  * bot, else the oldest bot.
+ *
+ * `voice_reply_mode` and `voice` (migration 0182) say when the bot reads its
+ * answer aloud ('never', 'when_voice' = when the person sent a voice message,
+ * 'always') and with which text-to-speech voice (null = the default voice).
  */
 export const telegramBots = pgTable(
   "telegram_bots",
@@ -45,6 +49,8 @@ export const telegramBots = pgTable(
     allowedTelegramUserIds: jsonb("allowed_telegram_user_ids").notNull().$type<string[]>().default([]),
     enabled: boolean("enabled").notNull().default(true),
     receivesCompanyNotices: boolean("receives_company_notices").notNull().default(false),
+    voiceReplyMode: text("voice_reply_mode").notNull().default("when_voice"),
+    voice: text("voice"),
     lastCheckAt: timestamp("last_check_at", { withTimezone: true }),
     lastCheckOk: boolean("last_check_ok"),
     lastCheckUsername: text("last_check_username"),
@@ -63,5 +69,9 @@ export const telegramBots = pgTable(
     companyNoticesUq: uniqueIndex("telegram_bots_company_notices_uq")
       .on(table.companyId)
       .where(sql`${table.receivesCompanyNotices}`),
+    voiceReplyModeCheck: check(
+      "telegram_bots_voice_reply_mode_check",
+      sql`${table.voiceReplyMode} IN ('never', 'when_voice', 'always')`,
+    ),
   }),
 );

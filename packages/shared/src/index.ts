@@ -1291,6 +1291,32 @@ export {
   type UpdateTelegramBotAllowedUsersInput,
   type UpdateTelegramBotCompanyNoticesInput,
 } from "./validators/telegram-bot.js";
+export type { SpeechSettings, SpeechSpeakResult, SpeechTranscribeResult } from "./types/speech.js";
+export {
+  SPEECH_DEFAULT_DAILY_SPEAK_CHARACTERS,
+  SPEECH_DEFAULT_DAILY_TRANSCRIBE_SECONDS,
+  SPEECH_DEFAULT_VOICE,
+  SPEECH_MAX_AUDIO_BYTES,
+  SPEECH_MAX_AUDIO_SECONDS,
+  SPEECH_MAX_SPOKEN_CHARACTERS,
+  SPEECH_USAGE_SOURCES,
+  SPEECH_VOICES,
+  SPEECH_VOICE_IDS,
+  TELEGRAM_VOICE_REPLY_MODES,
+  TELEGRAM_VOICE_REPLY_MODE_DEFAULT,
+  TELEGRAM_VOICE_REPLY_MODE_LABELS,
+  speechSpeakSchema,
+  speechTranscribeSchema,
+  updateSpeechSettingsSchema,
+  updateTelegramBotVoiceSchema,
+  type SpeechSpeakInput,
+  type SpeechTranscribeInput,
+  type SpeechUsageSource,
+  type SpeechVoice,
+  type TelegramVoiceReplyMode,
+  type UpdateSpeechSettingsInput,
+  type UpdateTelegramBotVoiceInput,
+} from "./validators/speech.js";
 export type {
   DataConnectionCheckResult,
   DataConnectionObservedSummary,

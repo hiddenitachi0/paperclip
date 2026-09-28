@@ -19,13 +19,23 @@ const mockTelegramBotsApi = vi.hoisted(() => ({
   test: vi.fn(),
   setAllowedUsers: vi.fn(),
   setCompanyNotices: vi.fn(),
+  setVoice: vi.fn(),
   remove: vi.fn(),
 }));
+const mockSpeechApi = vi.hoisted(() => ({
+  getSettings: vi.fn(),
+  updateSettings: vi.fn(),
+  transcribe: vi.fn(),
+  speak: vi.fn(),
+}));
+const mockSecretsApi = vi.hoisted(() => ({ list: vi.fn() }));
 const mockAgentsApi = vi.hoisted(() => ({ list: vi.fn() }));
 const mockPushToast = vi.hoisted(() => vi.fn());
 
 vi.mock("../api/telegramBots", () => ({ telegramBotsApi: mockTelegramBotsApi }));
 vi.mock("../api/agents", () => ({ agentsApi: mockAgentsApi }));
+vi.mock("../api/speech", () => ({ speechApi: mockSpeechApi, playSpeech: vi.fn() }));
+vi.mock("../api/secrets", () => ({ secretsApi: mockSecretsApi }));
 vi.mock("../context/ToastContext", () => ({
   useToast: () => ({ pushToast: mockPushToast }),
   useToastActions: () => ({ pushToast: mockPushToast }),
@@ -51,6 +61,8 @@ const bot: TelegramBotSummary = {
   allowedTelegramUserIds: ["111111"],
   enabled: true,
   receivesCompanyNotices: false,
+  voiceReplyMode: "when_voice",
+  voice: null,
   lastCheckAt: "2026-09-16T10:00:00.000Z",
   lastCheckOk: true,
   lastCheckUsername: "durkan_ceo_bot",
@@ -78,6 +90,16 @@ describe("TelegramBotsSection", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     mockTelegramBotsApi.list.mockResolvedValue([bot]);
+    mockSecretsApi.list.mockResolvedValue([]);
+    mockSpeechApi.getSettings.mockResolvedValue({
+      companyId: COMPANY,
+      keySecretId: null,
+      keySecretName: null,
+      dailyTranscribeSecondsCap: 3600,
+      dailySpeakCharactersCap: 50000,
+      usedToday: { transcribeSeconds: 0, speakCharacters: 0 },
+      models: { transcribe: "gpt-4o-mini-transcribe", speak: "gpt-4o-mini-tts" },
+    });
     mockAgentsApi.list.mockResolvedValue([
       { id: AGENT, name: "Daglig leder" },
       { id: "44444444-4444-4444-8444-444444444444", name: "Fork Lead" },

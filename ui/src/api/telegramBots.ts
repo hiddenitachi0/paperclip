@@ -37,6 +37,16 @@ export const telegramBotsApi = {
       `/companies/${companyId}/telegram-bots/${encodeURIComponent(botId)}/company-notices`,
       { receivesCompanyNotices },
     ),
+  // Voice messages: when the bot reads its answer aloud, and with which voice.
+  setVoice: (
+    companyId: string,
+    botId: string,
+    data: { voiceReplyMode?: "never" | "when_voice" | "always"; voice?: string | null },
+  ) =>
+    api.put<TelegramBotSummary>(
+      `/companies/${companyId}/telegram-bots/${encodeURIComponent(botId)}/voice`,
+      data,
+    ),
   remove: (companyId: string, botId: string) =>
     api.delete<{ ok: true }>(
       `/companies/${companyId}/telegram-bots/${encodeURIComponent(botId)}`,
