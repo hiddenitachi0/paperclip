@@ -4,7 +4,14 @@ import fs from "node:fs/promises";
 import { promisify } from "node:util";
 import { and, desc, eq, inArray, isNotNull, like } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agentWakeupRequests, executionWorkspaces, heartbeatRuns, issueComments, projectWorkspaces } from "@paperclipai/db";
+import {
+  agentWakeupRequests,
+  executionWorkspaces,
+  heartbeatRuns,
+  issueComments,
+  projectWorkspaces,
+  workspaceOperations,
+} from "@paperclipai/db";
 import type { IssueExecutionPolicy } from "@paperclipai/shared";
 
 const execFileAsync = promisify(execFile);
@@ -218,13 +225,34 @@ async function resolveIssueGitWorkspace(
  * the shared repository. That question needs the checkout but no base ref, and a workspace
  * realized without one would otherwise be silently skipped -- reading as "checked, the
  * commit is fine" when nothing was checked at all.
+ *
+ * DUR-4031: execution_workspaces.sourceIssueId is set once, at the moment a workspace is
+ * first realized (see heartbeat.ts's executeRun -> executionWorkspacesSvc.create), and is
+ * never rewritten when a LATER issue's run reuses that same workspace row (the reuse path,
+ * executionWorkspacesSvc.update(reusableExistingExecutionWorkspace.id, {...}), deliberately
+ * does not touch sourceIssueId). For a `shared_workspace`-mode workspace -- created for one
+ * issue (typically a sprint/epic parent or an earlier sibling) and then reused by child/
+ * sibling issues via `inheritExecutionWorkspaceFromIssueId`/parent inheritance -- the primary
+ * lookup by `sourceIssueId = issue.id` above permanently misses for every issue except the
+ * original one, even while that issue's own runs are actively working in the shared
+ * checkout. That's what left DUR-4019 (a shared_workspace child of DUR-4015) stuck: the gate
+ * saw workspaceFullyUnresolvable and fell into the lenient "any completed pass counts"
+ * branch, which itself never matched because there was never a *readable diff* to review in
+ * the first place.
+ *
+ * The fix resolves via workspace_operations as a fallback -- that table's `issueId` column is
+ * written only by the server, from inside a run's own dispatch code (heartbeat.ts's
+ * executeRun -> workspaceOperationsSvc.createRecorder), never via any issue PATCH route, so
+ * it carries the same DUR-83 non-agent-writable guarantee as sourceIssueId while correctly
+ * reflecting which issue's own run most recently operated in a given (possibly shared)
+ * workspace, regardless of who originally created that workspace row.
  */
 export async function resolveIssueWorkspaceCheckout(
   db: Db,
   input: { companyId: string; issueId: string | null | undefined },
 ): Promise<{ workspacePath: string; baseRef: string | null } | null> {
   if (!input.issueId) return null;
-  const workspace = await db
+  const workspaceRow = await db
     .select({
       cwd: executionWorkspaces.cwd,
       providerRef: executionWorkspaces.providerRef,
@@ -236,6 +264,29 @@ export async function resolveIssueWorkspaceCheckout(
     .orderBy(desc(executionWorkspaces.lastUsedAt))
     .limit(1)
     .then((rows) => rows[0] ?? null);
+
+  const workspace =
+    workspaceRow ??
+    (await db
+      .select({
+        cwd: executionWorkspaces.cwd,
+        providerRef: executionWorkspaces.providerRef,
+        providerType: executionWorkspaces.providerType,
+        baseRef: executionWorkspaces.baseRef,
+      })
+      .from(workspaceOperations)
+      .innerJoin(
+        executionWorkspaces,
+        and(
+          eq(executionWorkspaces.id, workspaceOperations.executionWorkspaceId),
+          eq(executionWorkspaces.companyId, input.companyId),
+        ),
+      )
+      .where(and(eq(workspaceOperations.companyId, input.companyId), eq(workspaceOperations.issueId, input.issueId)))
+      .orderBy(desc(workspaceOperations.startedAt))
+      .limit(1)
+      .then((rows) => rows[0] ?? null));
+
   if (!workspace) return null;
   if (workspace.providerType !== "local_fs" && workspace.providerType !== "git_worktree") return null;
 
