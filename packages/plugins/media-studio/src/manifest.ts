@@ -6,6 +6,7 @@ const PLUGIN_VERSION = "0.1.0";
 
 export const TOOL_GENERATE = "generate-image";
 export const TOOL_LIST_LOOKS = "list-looks";
+export const TOOL_QUICK_PICTURE = "quick-picture";
 export const ACTION_GENERATE = "generate";
 export const ACTION_LOOKS_LIST = "looks.list";
 export const ACTION_LOOKS_SAVE = "looks.save";
@@ -43,7 +44,8 @@ export const GENERATE_IMAGE_DESCRIPTION =
   "To make a close variation of an earlier picture (\"same as the last one but with a blue sofa\"), pass the seed that earlier picture reported. " +
   "To keep the same person, product or style as existing pictures, pass their file ids as referenceFileIds (up to 4). " +
   "Pictures are made by the picture service chosen in Media Studio settings; pass provider (\"fal\" or \"sogni\") only when the person asks for a specific one. " +
-  "If the agent has a daily picture limit, this stops working once the limit is reached for the day (it resets at midnight UTC).";
+  "If the agent has a daily picture limit, this stops working once the limit is reached for the day (it resets at midnight UTC). " +
+  "Use this for a real picture the person asked for; for a small mood picture to go along with your own message, use quick-picture instead.";
 
 export const GENERATE_IMAGE_PARAMETERS = {
   type: "object",
@@ -85,6 +87,35 @@ export const GENERATE_IMAGE_PARAMETERS = {
       type: "string",
       enum: ["fal", "sogni"],
       description: "Optional. Which picture service to use for this one picture: fal (Fal.ai) or sogni (Sogni). Leave it out to use the one in Media Studio settings.",
+    },
+  },
+  required: ["prompt"],
+} as const;
+
+/** The quick-picture tool: a small, fast, cheap picture to go along with a message. */
+export const QUICK_PICTURE_DESCRIPTION =
+  "Make a quick, small picture (about 512 pixels, few details, made in a few seconds) to go along with your message: a mood picture that sets the scene, not a finished picture. " +
+  "Use it when a picture would simply make your reply nicer (\"good morning\" with a sunrise, a cosy autumn feeling). " +
+  "When the person asks for a real picture (a product shot, a picture of a person or a specific look, anything they will use), use generate-image instead. " +
+  "It uses the fastest model of the picture service, with no reference pictures and no LoRAs. A saved look is only used when you name it as look (its style words and content filter; not its model, LoRAs or reference pictures). " +
+  "It is saved to the company's Files and shown with your reply; with issueId it is attached to that task instead. It counts toward the daily picture limit, and it gives up after 30 seconds.";
+
+export const QUICK_PICTURE_PARAMETERS = {
+  type: "object",
+  properties: {
+    prompt: { type: "string", description: "What the picture should show, in a sentence or two." },
+    shape: {
+      type: "string",
+      enum: ["square", "landscape", "portrait"],
+      description: "Optional. square (the usual), landscape or portrait.",
+    },
+    look: {
+      type: "string",
+      description: "Optional. The name of a saved look, only when the person names one. Leave it out otherwise: quick pictures do not use default or automatic looks.",
+    },
+    issueId: {
+      type: "string",
+      description: "Optional. The task to attach the picture to; only a task the person named or that is assigned to you. Leave it out to save it to the company's Files.",
     },
   },
   required: ["prompt"],
@@ -132,6 +163,12 @@ const manifest: PaperclipPluginManifestV1 = {
       displayName: "Generate image",
       description: GENERATE_IMAGE_DESCRIPTION,
       parametersSchema: GENERATE_IMAGE_PARAMETERS as unknown as Record<string, unknown>,
+    },
+    {
+      name: TOOL_QUICK_PICTURE,
+      displayName: "Quick picture",
+      description: QUICK_PICTURE_DESCRIPTION,
+      parametersSchema: QUICK_PICTURE_PARAMETERS as unknown as Record<string, unknown>,
     },
     {
       name: TOOL_LIST_LOOKS,

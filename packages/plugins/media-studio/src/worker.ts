@@ -53,9 +53,24 @@ import {
   LIST_LOOKS_DESCRIPTION,
   LOOKS_PAGE_ROUTE,
   MAX_REFERENCE_FILES,
+  QUICK_PICTURE_DESCRIPTION,
+  QUICK_PICTURE_PARAMETERS,
   TOOL_GENERATE,
   TOOL_LIST_LOOKS,
+  TOOL_QUICK_PICTURE,
 } from "./manifest.js";
+import {
+  FAL_QUICK_STEPS,
+  QUICK_PICTURE_PROVIDER_TIMEOUT_MS,
+  QUICK_PICTURE_TIMEOUT_MS,
+  QUICK_PICTURE_TIMEOUT_SENTENCE,
+  isQuickShape,
+  quickModelFor,
+  quickPictureSize,
+  showDuration,
+  withQuickTimeout,
+  type QuickShape,
+} from "./quick-picture.js";
 import {
   DEFAULT_TIMEZONE,
   checkRuleSet,
@@ -1245,6 +1260,18 @@ const plugin = definePlugin({
       },
     );
 
+    // A quick, small mood picture to go along with a message (ticked per agent
+    // separately from Generate image).
+    ctx.tools.register(
+      TOOL_QUICK_PICTURE,
+      {
+        displayName: "Quick picture",
+        description: QUICK_PICTURE_DESCRIPTION,
+        parametersSchema: QUICK_PICTURE_PARAMETERS as unknown as Record<string, unknown>,
+      },
+      (params, runCtx) => runQuickPicture(ctx, (params ?? {}) as Record<string, unknown>, runCtx),
+    );
+
     // Read-only: which looks does this company have? (Maja can answer
     // "which looks do we have?" without being able to change them.)
     ctx.tools.register(
@@ -1671,6 +1698,123 @@ ${text}`,
   }
 }
 
+// ─── Quick pictures ─────────────────────────────────────────────────────────
+
+/**
+ * A quick picture: the fastest model of the picture service, small, no
+ * reference pictures, no LoRAs. A look is only used when it is named as look
+ * (never a default or automatic look), so the content filter stays on unless
+ * a look an owner/admin saved with it off is named. It counts toward the
+ * daily picture limit (reserved before anything is spent) and gives up after
+ * QUICK_PICTURE_TIMEOUT_MS. The time it took is in the result.
+ */
+export async function runQuickPicture(
+  ctx: PluginContext,
+  params: Record<string, unknown>,
+  runCtx: { companyId: string; runId: string; agentId: string },
+): Promise<ToolResult> {
+  const prompt = typeof params.prompt === "string" ? params.prompt.trim() : "";
+  if (!prompt) return { error: "prompt is required" };
+  const rawShape = typeof params.shape === "string" && params.shape.trim() ? params.shape.trim().toLowerCase() : "square";
+  if (!isQuickShape(rawShape)) return { error: `"${String(params.shape)}" is not a shape. Use square, landscape or portrait, or leave it out.` };
+  const shape: QuickShape = rawShape;
+  const issueId = typeof params.issueId === "string" ? params.issueId.trim() : "";
+
+  let look: Look | null = null;
+  const lookName = typeof params.look === "string" ? params.look.trim() : "";
+  if (lookName) {
+    const looks = await loadLooks(ctx, runCtx.companyId);
+    look = findLook(looks, lookName) ?? null;
+    if (!look) return { error: `There is no saved look called "${lookName}". ${lookNamesSentence(looks)}` };
+  }
+
+  const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
+  const settingsProvider = String(cfg.provider ?? "mock").toLowerCase();
+  const catalog = sogniCatalogFor(ctx);
+  const lookService = look
+    ? (look.provider ?? serviceForModel(look.model) ?? (look.model && catalog.knows(look.model) ? "sogni" : null))
+    : null;
+  // Like Generate image: a named look's service is used only when settings pick a paid service (never away from mock/ComfyUI).
+  const service = isPictureService(settingsProvider) && lookService ? lookService : settingsProvider;
+  const size = quickPictureSize(shape, service);
+  const input: GenerationInput = {
+    prompt: look?.style.trim() ? `${prompt}\n\nStyle: ${look.style.trim()}` : prompt,
+    provider: service,
+    model: quickModelFor(service),
+    imageSize: size.imageSize,
+    timeoutMs: QUICK_PICTURE_PROVIDER_TIMEOUT_MS,
+    // Only a look named here, saved off by an owner/admin, turns the filter off.
+    safeContentFilter: look ? !lookFilterOff(look) : true,
+    ...(service === "fal" ? { steps: FAL_QUICK_STEPS } : {}),
+  };
+
+  const reservation = await ctx.personas.reserveDailyGeneration(runCtx.companyId, { runId: runCtx.runId });
+  if (!reservation.allowed) {
+    return { error: `Daily image limit (${reservation.cap ?? 0}) reached for this agent today.` };
+  }
+
+  const started = Date.now();
+  let made: { result: GenerationResult; contentBase64: string; contentType: string };
+  try {
+    made = await withQuickTimeout(
+      (async () => {
+        const result = await runGeneration(ctx, input);
+        return { result, ...(await toAttachmentBytes(ctx, result)) };
+      })(),
+      QUICK_PICTURE_TIMEOUT_MS,
+    );
+  } catch (err) {
+    const durationMs = Date.now() - started;
+    ctx.logger.warn(`media-studio: quick picture via ${service} failed after ${durationMs} ms`);
+    // Past the service's own limit, the plain sentence is the same whichever side gave up first.
+    if (durationMs >= QUICK_PICTURE_PROVIDER_TIMEOUT_MS) return { error: QUICK_PICTURE_TIMEOUT_SENTENCE };
+    return { error: `The quick picture could not be made. ${errorText(err)}` };
+  }
+  const durationMs = Date.now() - started;
+  const { result, contentBase64, contentType } = made;
+  const seed = typeof result.seed === "number" ? result.seed : null;
+  const extension = contentType.split("/")[1]?.replace(/\+.*$/, "") ?? "bin";
+  const filename = `quick-picture${seed !== null ? `-seed-${seed}` : ""}.${extension}`;
+  const record = { seed, prompt: input.prompt, look, provider: result.provider, model: result.model, referenceFileIds: [], quick: true, durationMs };
+  ctx.logger.info(`media-studio: quick picture via ${result.provider} (${result.model ?? "default model"}, ${size.imageSize}) in ${durationMs} ms`);
+  const lookSentence = look ? ` Used the saved look "${look.name}" (its style words only).` : "";
+  const about = `${SERVICE_NAME[result.provider as PictureService] ?? result.provider}, ${size.width}x${size.height}, ${showDuration(durationMs)}`;
+  const data = {
+    quick: true,
+    provider: result.provider,
+    model: result.model ?? null,
+    width: size.width,
+    height: size.height,
+    durationMs,
+    seed,
+    look: look?.name ?? null,
+  };
+
+  try {
+    if (issueId) {
+      const attachment = await ctx.issues.createAttachment(
+        issueId,
+        { contentBase64, contentType, filename },
+        runCtx.companyId,
+        { authorAgentId: runCtx.agentId, runId: runCtx.runId },
+      );
+      await rememberImage(ctx, runCtx.companyId, attachment.id, record);
+      return {
+        content: `Made a quick picture (${about}) and attached it to the task (${attachment.contentPath}). File id: ${attachment.id}.${lookSentence}`,
+        data: { ...data, fileId: attachment.id, attachmentId: attachment.id, contentPath: attachment.contentPath, contentType, issueId },
+      };
+    }
+    const file = await ctx.files.createCompanyFile({ contentBase64, contentType, filename }, runCtx.companyId, { runId: runCtx.runId });
+    await rememberImage(ctx, runCtx.companyId, file.id, record);
+    return {
+      content: `Made a quick picture (${about}) and saved it to the company's Files; it is shown to the person with your reply. File id: ${file.id}.${lookSentence}`,
+      data: { ...data, fileId: file.id, contentPath: file.contentPath, contentType: file.contentType, issueId: null },
+    };
+  } catch (err) {
+    return { error: errorText(err) };
+  }
+}
+
 /** Sogni cannot take a seed for a picture made from reference pictures: say so rather than pretend. */
 function seedNotUsedSentence(result: GenerationResult): string {
   return result.meta?.seedNotUsed === true
@@ -1691,10 +1835,21 @@ async function rememberImage(
   ctx: PluginContext,
   companyId: string,
   fileId: string,
-  record: { seed: number | null; prompt: string; look: Look | null; provider: string; model?: string; referenceFileIds: string[] },
+  record: {
+    seed: number | null;
+    prompt: string;
+    look: Look | null;
+    provider: string;
+    model?: string;
+    referenceFileIds: string[];
+    quick?: boolean;
+    durationMs?: number;
+  },
 ): Promise<void> {
   try {
     await ctx.state.set(imageRecordScope(companyId, fileId), {
+      ...(record.quick ? { quick: true } : {}),
+      ...(typeof record.durationMs === "number" ? { durationMs: record.durationMs } : {}),
       seed: record.seed,
       prompt: record.prompt,
       look: record.look?.name ?? null,

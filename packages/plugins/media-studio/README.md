@@ -13,6 +13,15 @@ the roadmap-3 approval gate for the paperclip-fork.
   company's Files, sent to Fal's FLUX Kontext model as data URIs, or uploaded to Sogni's
   storage, so no Paperclip address leaves the box), and `look` (a saved look: style words,
   picture service, model, fixed seed, reference pictures).
+- **Agent tool** `paperclip.media-studio:quick-picture` ("Quick picture", ticked per agent separately from Generate
+  image) — a small mood picture to go with a message, made the fastest and cheapest way: 512 px on the long side
+  (square by default, or landscape/portrait; Sogni's Z-Image Turbo is 512 on the short side, its smallest), the
+  service's fastest model (Fal `fal-ai/flux/schnell` at 2 steps; Sogni `z-turbo`, the fastest and cheapest non-Premium
+  model in Sogni's public catalog), no reference pictures, no LoRAs, no seed. No default or automatic look is applied,
+  so the content filter is on unless a look saved with it off is named as `look` (then only that look's style words
+  and filter setting are used). It counts toward the daily picture limit, gives up after 30 seconds (Sogni's job is
+  cancelled at 28 s), and reports `data.durationMs` (also logged and kept with the picture's record). With `issueId`
+  it is attached to the task instead of saved to Files.
 - **Agent tool** `paperclip.media-studio:list-looks` — read-only list of the company's looks; it marks the
   calling agent's default look.
 - **Default look per agent** — on the looks page an owner/admin can give an agent a default look ("When this agent

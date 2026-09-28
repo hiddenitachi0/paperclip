@@ -435,7 +435,8 @@ export class SogniProvider implements GenerationProvider {
   }
 
   async generate(input: GenerationInput): Promise<GenerationResult> {
-    const deadline = this.now() + this.timeoutMs;
+    const timeoutMs = input.timeoutMs ?? this.timeoutMs;
+    const deadline = this.now() + timeoutMs;
     const references = input.referenceImages ?? [];
     const size = sogniSize(input.imageSize, input.sizeBounds);
 
@@ -498,6 +499,7 @@ export class SogniProvider implements GenerationProvider {
       mediaReferences,
       input.safeContentFilter !== false,
       deadline,
+      timeoutMs,
     );
     const reportedSeed =
       readSeed(artifact.seed) ??
@@ -547,6 +549,7 @@ export class SogniProvider implements GenerationProvider {
       mediaReferences,
       request.safeContentFilter !== false,
       deadline,
+      this.timeoutMs,
     );
     return { contentType: picture.contentType, contentBase64: picture.bytes.toString("base64"), workflowId, artifactCount };
   }
@@ -592,6 +595,7 @@ export class SogniProvider implements GenerationProvider {
     mediaReferences: Array<{ kind: "image"; url: string }>,
     safeContentFilter: boolean,
     deadline: number,
+    timeoutMs: number,
   ): Promise<{ workflowId: string; firstStep: Json | null; artifact: Json; picture: { bytes: Buffer; contentType: string }; artifactCount: number }> {
     const body: Json = {
       input: { title, steps: [step] },
@@ -616,7 +620,7 @@ export class SogniProvider implements GenerationProvider {
     const workflowId = asRecord(asRecord(started.body?.data)?.workflow)?.workflowId;
     if (typeof workflowId !== "string" || !workflowId) throw new Error("Sogni did not say which job it started, so the picture cannot be collected.");
 
-    const workflow = await this.waitForWorkflow(workflowId, deadline);
+    const workflow = await this.waitForWorkflow(workflowId, deadline, timeoutMs);
     const firstStep = Array.isArray(workflow.steps) ? asRecord(workflow.steps[0]) : null;
     const artifacts = pictureArtifacts(workflow);
     const artifact = artifacts[0];
@@ -625,14 +629,14 @@ export class SogniProvider implements GenerationProvider {
     return { workflowId, firstStep, artifact, picture, artifactCount: artifacts.length };
   }
 
-  private async waitForWorkflow(workflowId: string, deadline: number): Promise<Json> {
+  private async waitForWorkflow(workflowId: string, deadline: number, timeoutMs: number): Promise<Json> {
     const path = `/v1/creative-agent/workflows/${encodeURIComponent(workflowId)}`;
     for (;;) {
       const left = this.remaining(deadline);
       if (left <= 0) {
         await this.cancel(workflowId);
         throw new Error(
-          `Sogni took longer than ${Math.round(this.timeoutMs / 1000)} seconds to make the picture, so it was stopped. Try again in a minute.`,
+          `Sogni took longer than ${Math.round(timeoutMs / 1000)} seconds to make the picture, so it was stopped. Try again in a minute.`,
         );
       }
       await this.sleep(Math.min(this.pollIntervalMs, left));
