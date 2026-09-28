@@ -30,6 +30,12 @@ export interface WatcherSourceInfo {
   note: string;
   /** Currency prices are in. */
   currency: string;
+  /** The shortest check interval that makes sense for this source (its data or its free limits). */
+  minCheckMinutes: number;
+  /** What the key is called on screen, when the source needs one. */
+  keyLabel: string | null;
+  /** How to type a symbol, for the form. */
+  symbolHint: string;
 }
 
 export const WATCHER_SOURCE_INFO: Record<WatcherSource, WatcherSourceInfo> = {
@@ -40,6 +46,9 @@ export const WATCHER_SOURCE_INFO: Record<WatcherSource, WatcherSourceInfo> = {
     needsKey: false,
     note: "Prices from CoinGecko (free, no key), with Binance as the backup. Prices in US dollars.",
     currency: "USD",
+    minCheckMinutes: 5,
+    keyLabel: null,
+    symbolHint: "Pick a coin.",
   },
   us_stock: {
     source: "us_stock",
@@ -47,17 +56,24 @@ export const WATCHER_SOURCE_INFO: Record<WatcherSource, WatcherSourceInfo> = {
     available: true,
     needsKey: true,
     note:
-      "Prices from Finnhub. Needs a free Finnhub key (sign up at finnhub.io), saved as a company secret. Prices in US dollars.",
+      "Prices from Finnhub during US trading hours. Needs a free Finnhub key (sign up at finnhub.io), saved as a company secret. Prices in US dollars.",
     currency: "USD",
+    minCheckMinutes: 5,
+    keyLabel: "Finnhub key",
+    symbolHint: "The ticker, for example AAPL or MSFT.",
   },
   oslo_stock: {
     source: "oslo_stock",
-    label: "Oslo Børs",
-    available: false,
-    needsKey: false,
+    label: "Oslo Børs (closing prices)",
+    available: true,
+    needsKey: true,
     note:
-      "Not available yet. There is no free, reliable price source for Oslo Børs that allows this kind of use. It can be added later if a paid source is chosen.",
+      "Closing prices from EODHD, once a day after Oslo Børs closes. Needs a free EODHD key (sign up at eodhd.com; the free plan is for personal use and allows 20 price requests a day). " +
+      "There is no free source for Oslo prices during the day, so a 24-hour rule here means \"since the day before's close\". Prices in Norwegian kroner.",
     currency: "NOK",
+    minCheckMinutes: 360,
+    keyLabel: "EODHD key",
+    symbolHint: "The Oslo Børs ticker, for example DNB or EQNR.",
   },
 };
 
@@ -93,6 +109,8 @@ export function findWatcherCoin(symbol: string): WatcherCoin | null {
 
 /** A US ticker: letters first, then letters, digits, a dot or a dash (BRK.B). */
 export const WATCHER_US_STOCK_SYMBOL_PATTERN = /^[A-Z][A-Z0-9.-]{0,9}$/;
+/** An Oslo Børs ticker as the exchange writes it (DNB, EQNR, AKER-BP is written AKRBP). */
+export const WATCHER_OSLO_STOCK_SYMBOL_PATTERN = /^[A-Z][A-Z0-9-]{0,9}$/;
 
 /** The name to use in sentences: "Bitcoin" for BTC, the ticker for a stock. */
 export function watcherSymbolName(source: WatcherSource, symbol: string): string {
@@ -255,10 +273,28 @@ export function watcherSymbolProblem(source: WatcherSource, symbol: string): str
       ? null
       : `Pick one of the listed coins: ${WATCHER_CRYPTO_COINS.map((coin) => coin.symbol).join(", ")}.`;
   }
+  if (source === "oslo_stock") {
+    return WATCHER_OSLO_STOCK_SYMBOL_PATTERN.test(symbol)
+      ? null
+      : "Type the Oslo Børs ticker, for example DNB or EQNR.";
+  }
   return WATCHER_US_STOCK_SYMBOL_PATTERN.test(symbol)
     ? null
     : "Type the stock's ticker, for example AAPL or MSFT.";
 }
+
+/** A check interval below what the source supports, in a plain sentence; null when it fits. */
+export function watcherCheckEveryProblem(source: WatcherSource, checkEveryMinutes: number): string | null {
+  const min = WATCHER_SOURCE_INFO[source].minCheckMinutes;
+  if (checkEveryMinutes >= min) return null;
+  const hours = min / 60;
+  return `${WATCHER_SOURCE_INFO[source].label} can be checked at most every ${
+    min % 60 === 0 ? `${hours} hour${hours === 1 ? "" : "s"}` : `${min} minutes`
+  }.`;
+}
+
+/** The rule the form starts with: "moves 5% or more (up or down) within 24 hours". */
+export const WATCHER_DEFAULT_RULE: WatcherRule = { kind: "change", direction: "either", percent: 5, windowHours: 24 };
 
 // ─── What the API answers with ───────────────────────────────────────────────
 

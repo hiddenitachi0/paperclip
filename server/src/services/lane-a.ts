@@ -459,11 +459,21 @@ export function buildTransformSystemPrompt(input: {
   agentName: string;
   instructions?: string | null;
   maxOutputChars?: number;
+  /**
+   * Server-side callers only (watcher alerts): what this one call is for, in
+   * place of the default "rewrite text for a computer system" framing. Never
+   * taken from a request body: the HTTP transform route has no such field.
+   */
+  task?: string | null;
 }): string {
+  const task = input.task?.trim();
   const parts: string[] = [
-    `You are ${input.agentName}. You rewrite one piece of text at a time for a computer system, not for a person. ` +
-      `Reply with the finished text and nothing else: no greeting, no explanation, no quotes around it, no commentary ` +
-      `about what you changed. You have no tools and no memory of any other call.`,
+    task
+      ? `You are ${input.agentName}. ${task} Reply with the finished message and nothing else: no quotes around it, ` +
+        `no commentary about how you wrote it. You have no tools and no memory of any other call.`
+      : `You are ${input.agentName}. You rewrite one piece of text at a time for a computer system, not for a person. ` +
+        `Reply with the finished text and nothing else: no greeting, no explanation, no quotes around it, no commentary ` +
+        `about what you changed. You have no tools and no memory of any other call.`,
   ];
 
   const instructions = input.instructions?.trim();
@@ -706,6 +716,10 @@ interface LaneAToolset {
 }
 
 const EMPTY_TOOLSET: LaneAToolset = { anthropicTools: [], toolIndex: new Map(), pluginTools: new Map(), clients: [] };
+
+/** Media Studio's "Generate image" tool, the one path every picture takes. */
+export const LANE_A_PICTURE_PLUGIN_KEY = "paperclip.media-studio";
+export const LANE_A_PICTURE_TOOL_NAME = "generate-image";
 
 const LANE_A_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -2385,6 +2399,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     input: string;
     variables?: Record<string, string | number | boolean | null>;
     maxOutputChars?: number;
+    /** Server-side callers only; see buildTransformSystemPrompt. */
+    task?: string | null;
   }) {
     if (params.targetAgent.companyId !== params.companyId) {
       // Belt and braces: the route checks this first, but the service must
@@ -2461,6 +2477,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           agentName: params.targetAgent.name,
           instructions: params.targetAgent.laneAInstructions ?? null,
           maxOutputChars: params.maxOutputChars,
+          task: params.task ?? null,
         }),
         message: buildTransformUserMessage({ input: params.input, variables: params.variables }),
         model,
@@ -2678,7 +2695,99 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     return { agents: results };
   }
 
-  return { sendMessage, getConversation, transform, listTransformAgents };
+  /**
+   * Watchers: one picture made by a quick agent outside any chat, through the
+   * same add-on execute path a chat turn takes (so the plugin applies the
+   * agent's daily picture limit and its default look exactly as it would in
+   * a chat), with no model call around it: the prompt is written by the
+   * caller's code. The picture is saved to the company's Files, never to a
+   * task (no requester message names one).
+   *
+   * Never throws for an ordinary refusal: the agent is not a quick agent, is
+   * paused, does not have the picture tool ticked, the add-on is off, the
+   * daily limit is reached, or the picture service failed all come back as
+   * `{ ok: false, reason }` in plain words, because a missing picture must
+   * never stop the alert it belongs to.
+   */
+  async function makePicture(params: {
+    companyId: string;
+    agentId: string;
+    prompt: string;
+    /** Shown in the activity log next to the plugin's own entries (e.g. the alert id). */
+    runLabel: string;
+  }): Promise<{ ok: true; fileId: string; seed: number | null } | { ok: false; reason: string }> {
+    const [agentRow] = await db
+      .select({
+        id: agents.id,
+        name: agents.name,
+        laneAEnabled: agents.laneAEnabled,
+        pluginToolGrants: agents.pluginToolGrants,
+        status: agents.status,
+      })
+      .from(agents)
+      .where(and(eq(agents.id, params.agentId), eq(agents.companyId, params.companyId)));
+    if (!agentRow) return { ok: false, reason: "The agent was not found." };
+    if (!agentRow.laneAEnabled) {
+      return { ok: false, reason: `${agentRow.name} is not a quick agent, so it cannot make pictures.` };
+    }
+    try {
+      await assertAgentMayWork({
+        companyId: params.companyId,
+        targetAgent: { id: agentRow.id, companyId: params.companyId, name: agentRow.name, laneAEnabled: true },
+        kind: "chat",
+      });
+    } catch (err) {
+      return { ok: false, reason: err instanceof Error ? err.message : "The agent may not work right now." };
+    }
+    const execution = pluginToolExecution();
+    if (!execution) return { ok: false, reason: "Pictures are not available right now (the add-ons are not running)." };
+    let tool: Awaited<ReturnType<PluginToolExecutionService["listToolsForCompany"]>>[number] | undefined;
+    try {
+      tool = (await execution.listToolsForCompany(params.companyId)).find(
+        (candidate) => candidate.pluginKey === LANE_A_PICTURE_PLUGIN_KEY && candidate.toolName === LANE_A_PICTURE_TOOL_NAME,
+      );
+    } catch (err) {
+      logger.warn({ err, companyId: params.companyId }, "lane A: could not list add-on tools for a picture");
+    }
+    if (!tool) {
+      return { ok: false, reason: "Media Studio is not switched on for this company, so no picture could be made." };
+    }
+    const pluginToolGrants = (agentRow.pluginToolGrants as string[] | null) ?? [];
+    if (!pluginToolGrants.includes(tool.name)) {
+      return {
+        ok: false,
+        reason: `${agentRow.name} is not allowed to make pictures. Tick "Generate image" on ${agentRow.name}'s Tools tab.`,
+      };
+    }
+    const pluginRun = openLaneAPluginRun({
+      agentId: agentRow.id,
+      companyId: params.companyId,
+      conversationId: params.runLabel,
+      requestedByUserId: null,
+      requestedByAgentId: null,
+      requesterMessage: "",
+    });
+    try {
+      const executed = await execution.execute({
+        tool: tool.name,
+        parameters: { prompt: params.prompt },
+        runContext: { agentId: agentRow.id, runId: pluginRun.run.runId, companyId: params.companyId, projectId: "" },
+        agent: { laneAEnabled: true, pluginToolGrants },
+      });
+      if (!executed.ok) return { ok: false, reason: `The picture was not made: ${executed.error}` };
+      const described = describePluginToolResultForModel(executed.result.result);
+      if (!described.ok) return { ok: false, reason: described.content };
+      const image = await verifiedPluginToolImage(executed.result.result, params.companyId);
+      if (!image) return { ok: false, reason: "The picture service answered, but no picture was saved." };
+      return { ok: true, fileId: image.fileId, seed: image.seed };
+    } catch (err) {
+      return { ok: false, reason: `The picture was not made: ${err instanceof Error ? err.message : String(err)}` };
+    } finally {
+      pluginRun.close();
+    }
+  }
+
+  return { sendMessage, getConversation, transform, listTransformAgents, makePicture };
 }
 
 /**

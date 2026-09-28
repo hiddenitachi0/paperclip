@@ -22,6 +22,7 @@ import { personaAccountRoutes } from "./routes/persona-accounts.js";
 import { mcpToolLibraryRoutes } from "./routes/mcp-tool-library.js";
 import { apiToolRoutes } from "./routes/api-tools.js";
 import { agentMemoryRoutes } from "./routes/agent-memories.js";
+import { watcherRoutes } from "./routes/watchers.js";
 import { mcpOAuthRoutes } from "./routes/mcp-oauth.js";
 import { projectRoutes } from "./routes/projects.js";
 import { issueRoutes } from "./routes/issues.js";
@@ -283,6 +284,7 @@ export async function createApp(
   api.use(mcpToolLibraryRoutes(db));
   api.use(apiToolRoutes(db));
   api.use(agentMemoryRoutes(db));
+  api.use(watcherRoutes(db));
   api.use(mcpOAuthRoutes(db));
   api.use(assetRoutes(db, opts.storageService));
   api.use(projectRoutes(db));

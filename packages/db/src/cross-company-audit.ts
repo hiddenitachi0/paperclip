@@ -70,6 +70,7 @@ export const ROUTINE_SCHEDULER_BYPASS_ROUTES = [
   "heartbeat-scheduler:organizationCheckups",
   "heartbeat-scheduler:adminAuthCheck",
   "heartbeat-scheduler:claudeAuthCheck",
+  "heartbeat-scheduler:watchers",
 ] as const;
 
 export type RoutineSchedulerBypassRoute = (typeof ROUTINE_SCHEDULER_BYPASS_ROUTES)[number];
