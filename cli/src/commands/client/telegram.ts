@@ -37,6 +37,9 @@ type BridgeRosterBot = {
   receivesCompanyNotices?: boolean;
   createdAt?: string;
   agentRole?: string | null;
+  // Voice messages: when the bridge reads an answer aloud, and the voice.
+  voiceReplyMode?: string;
+  voice?: string | null;
 };
 
 export function registerTelegramCommands(program: Command): void {
