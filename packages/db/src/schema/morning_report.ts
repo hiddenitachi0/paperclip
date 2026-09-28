@@ -4,7 +4,7 @@ import { companies } from "./companies.js";
 import { agents } from "./agents.js";
 
 /**
- * Morning report (migration 0183): the daily briefing a quick agent sends to
+ * Morning report (migration 0184): the daily briefing a quick agent sends to
  * its operator's Telegram chat at a configured local time.
  *
  * Settings live on agents.morning_report_settings (a jsonb column, see

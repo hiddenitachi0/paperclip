@@ -252,6 +252,47 @@ describeEmbeddedPostgres("persona-publisher-service attemptPublish", () => {
     expect((approval!.payload as any).reason).toBe("requires_approval_channel");
   });
 
+  it("DUR-4016: recomputes disclosureText from the account's CURRENT setting at claim time, not the gate-time snapshot", async () => {
+    const companyId = await seedCompany();
+    const persona = await seedPersona(companyId);
+    const account = await seedAccount(companyId, persona.id, {
+      autonomyMode: "requires_approval",
+      warmupPostsRequired: 0,
+      aiDisclosureEnabled: false,
+    });
+    await bindPublishToken(companyId, account.id);
+    const post = await seedPost(companyId, persona.id, account.id);
+
+    // Gate-time: disclosure is off, so the post is stamped with a null
+    // snapshot when it goes to pending_approval.
+    const gated = await personaPublisherService(db).attemptPublish(post.id);
+    expect(gated.outcome).toBe("pending_approval");
+    const [gatedPost] = await db.select().from(personaPosts).where(eq(personaPosts.id, post.id));
+    expect(gatedPost!.disclosureText).toBeNull();
+
+    // Operator turns disclosure ON for this account, then approves the post
+    // (simulated directly, same as the "board-approved post" test above).
+    await db.update(personaAccounts).set({ aiDisclosureEnabled: true }).where(eq(personaAccounts.id, account.id));
+    await db.update(personaPosts).set({ status: "approved" }).where(eq(personaPosts.id, post.id));
+
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(init.body as string);
+      expect(body.caption).toContain(PERSONA_POST_AI_DISCLOSURE_TEXT);
+      return new Response(JSON.stringify({ id: "fv_disclosure" }), { status: 201 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const published = await personaPublisherService(db).attemptPublish(post.id);
+    expect(published).toEqual({ outcome: "published", externalPostId: "fv_disclosure" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const [finalPost] = await db.select().from(personaPosts).where(eq(personaPosts.id, post.id));
+    // The account is disclosure-ON now, so the CURRENT setting -- not the
+    // null snapshot stamped when the approval was originally filed -- must
+    // be what ships.
+    expect(finalPost!.disclosureText).toBe(PERSONA_POST_AI_DISCLOSURE_TEXT);
+  });
+
   it("publishes directly for an autonomous account past warm-up, appending the disclosure text", async () => {
     const companyId = await seedCompany();
     const persona = await seedPersona(companyId);

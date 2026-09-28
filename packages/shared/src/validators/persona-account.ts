@@ -47,6 +47,19 @@ export const enqueuePersonaPostSchema = z.object({
 });
 export type EnqueuePersonaPostInput = z.infer<typeof enqueuePersonaPostSchema>;
 
+// DUR-4016: the operator's posting cadence for this account, wired through
+// routines/routine_triggers rather than a bare cron column (item 4 of
+// DUR-134's own DoD). assigneeAgentId is required -- a schedule with nobody
+// to wake can never actually fire (dispatchRoutineRun rejects a routine with
+// no assignee), so there is no "figure it out later" state.
+export const setPersonaAccountScheduleSchema = z.object({
+  assigneeAgentId: z.string().uuid(),
+  cronExpression: z.string().trim().min(1),
+  timezone: z.string().trim().min(1).optional(),
+  enabled: z.boolean().optional(),
+});
+export type SetPersonaAccountScheduleInput = z.infer<typeof setPersonaAccountScheduleSchema>;
+
 export const updatePersonaPublishingCompanySettingsSchema = z.object({
   publishingPaused: z.boolean(),
 });
