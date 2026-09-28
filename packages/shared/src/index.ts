@@ -93,6 +93,12 @@ export {
   type CompanyWebSearchSettings,
 } from "./web-search.js";
 export {
+  BROWSER_ACCESS_LEVELS,
+  readLaneABrowserAccess,
+  browserAccessLevelRank,
+  type BrowserAccessLevel,
+} from "./browser-access.js";
+export {
   RESEARCH_RESULT_DOCUMENT_KEY,
   RESEARCH_SKILL_SLUG,
   RESEARCH_SKILL_KEY,

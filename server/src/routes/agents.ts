@@ -37,6 +37,8 @@ import {
   parseAgentLimits,
   laneAProviderModelIssue,
   readLaneAWebSearchSwitch,
+  readLaneABrowserAccess,
+  browserAccessLevelRank,
 } from "@paperclipai/shared";
 import {
   resolvePaperclipInstanceRootForAdapter,
@@ -1628,6 +1630,20 @@ export function agentRoutes(
     );
   }
 
+  // DUR-4019: "Browser access" (adapterConfig.laneA.browserAccess) is a
+  // three-level dial, not a switch — off < browse_and_forms < book_and_buy —
+  // but the same board-only rule applies: an agent-authenticated caller may
+  // never raise it above what is already stored, on any write path.
+  function assertNoAgentBrowserAccessRaise(req: Request, requestedAdapterConfig: unknown, existingAdapterConfig: unknown) {
+    if (req.actor.type !== "agent") return;
+    const requested = readLaneABrowserAccess(requestedAdapterConfig);
+    const existing = readLaneABrowserAccess(existingAdapterConfig);
+    if (browserAccessLevelRank(requested) <= browserAccessLevelRank(existing)) return;
+    throw forbidden(
+      'Agent-authenticated callers cannot raise their own "Browser access" setting (adapterConfig.laneA.browserAccess). Only board-authenticated callers can.',
+    );
+  }
+
   // DUR-4000: which person does this job (personaId) and the job's own limits
   // box are board-only on every write path, same shape as the quick-agent
   // guard above. An agent that could pick its own persona could speak as
@@ -2673,6 +2689,7 @@ export function agentRoutes(
     const targetSnapshot = asRecord(targetRevision.afterConfig) ?? {};
     assertAgentSelfUpdateRollbackAllowed(req, existing, targetSnapshot);
     assertNoAgentWebSearchSwitchOn(req, targetSnapshot.adapterConfig, existing.adapterConfig);
+    assertNoAgentBrowserAccessRaise(req, targetSnapshot.adapterConfig, existing.adapterConfig);
 
     const actor = getActorInfo(req);
     const updated = await svc.rollbackConfigRevision(id, revisionId, {
@@ -2791,6 +2808,7 @@ export function agentRoutes(
     // model-call lane that a human is supposed to switch on.
     assertNoAgentLaneAFlagMutation(req, req.body as Record<string, unknown>);
     assertNoAgentWebSearchSwitchOn(req, (req.body as Record<string, unknown>).adapterConfig, null);
+    assertNoAgentBrowserAccessRaise(req, (req.body as Record<string, unknown>).adapterConfig, null);
     // DUR-4000: same for the persona link and the limits box.
     assertNoAgentPersonaJobFieldMutation(req, req.body as Record<string, unknown>);
     // DUR-4013: same for the browser-access switch.
@@ -3054,6 +3072,7 @@ export function agentRoutes(
     // depend on that one earlier check staying where it is.
     assertNoAgentLaneAFlagMutation(req, req.body as Record<string, unknown>);
     assertNoAgentWebSearchSwitchOn(req, (req.body as Record<string, unknown>).adapterConfig, null);
+    assertNoAgentBrowserAccessRaise(req, (req.body as Record<string, unknown>).adapterConfig, null);
     // DUR-4000: same for the persona link and the limits box.
     assertNoAgentPersonaJobFieldMutation(req, req.body as Record<string, unknown>);
     // DUR-4013: same for the browser-access switch.
@@ -3637,6 +3656,7 @@ export function agentRoutes(
       });
       patchData.adapterConfig = syncInstructionsBundleConfigFromFilePath(existing, normalizedEffectiveAdapterConfig);
       assertNoAgentWebSearchSwitchOn(req, patchData.adapterConfig, existing.adapterConfig);
+      assertNoAgentBrowserAccessRaise(req, patchData.adapterConfig, existing.adapterConfig);
     }
     if (requestedRuntimeConfig) {
       const baseAdapterConfig = asRecord(patchData.adapterConfig) ?? asRecord(existing.adapterConfig) ?? {};

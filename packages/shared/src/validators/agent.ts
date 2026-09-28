@@ -20,6 +20,7 @@ import {
   laneAModelIssueForProvider,
 } from "../lane-a-models.js";
 import { envBindingSchema, envBindingSecretRefSchema, envConfigSchema } from "./secret.js";
+import { BROWSER_ACCESS_LEVELS } from "../browser-access.js";
 import { trustAuthorizationPolicySchema, trustPresetSchema } from "./trust-policy.js";
 import { agentDesiredSkillSelectionSchema } from "./adapter-skills.js";
 import { validateAdapterModelEffort } from "../model-effort.js";
@@ -156,6 +157,14 @@ export const laneAAdapterConfigSchema = z
      * (server/src/routes/agents.ts), so an agent cannot give itself the web.
      */
     webSearch: z.boolean().optional(),
+    /**
+     * DUR-4019: how far a quick agent may go with the browser worker — off,
+     * can navigate/fill forms, or may also spend a saved payment card / site
+     * login. Off when absent. Board-only, same reason as webSearch above: an
+     * agent-authenticated caller cannot raise its own level
+     * (server/src/routes/agents.ts).
+     */
+    browserAccess: z.enum(BROWSER_ACCESS_LEVELS).optional(),
   })
   .strict();
 
@@ -277,12 +286,17 @@ const adapterConfigSchema = z.record(z.string(), z.unknown()).superRefine((value
     if (!parsed.success) {
       const webSearchValue =
         typeof laneAValue === "object" && laneAValue !== null ? (laneAValue as { webSearch?: unknown }).webSearch : undefined;
+      const browserAccessValue =
+        typeof laneAValue === "object" && laneAValue !== null ? (laneAValue as { browserAccess?: unknown }).browserAccess : undefined;
+      let message = "The quick agent's key must be a saved secret picked from the company's secrets — a key cannot be typed in here.";
+      if (webSearchValue !== undefined && typeof webSearchValue !== "boolean") {
+        message = "The quick agent's \"Can search the web\" switch must be on or off (true or false).";
+      } else if (browserAccessValue !== undefined && !BROWSER_ACCESS_LEVELS.includes(browserAccessValue as never)) {
+        message = `The quick agent's "Browser access" setting must be one of: ${BROWSER_ACCESS_LEVELS.join(", ")}.`;
+      }
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message:
-          webSearchValue !== undefined && typeof webSearchValue !== "boolean"
-            ? "The quick agent's \"Can search the web\" switch must be on or off (true or false)."
-            : "The quick agent's key must be a saved secret picked from the company's secrets — a key cannot be typed in here.",
+        message,
         path: ["laneA"],
       });
     }

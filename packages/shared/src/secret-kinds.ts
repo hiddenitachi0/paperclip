@@ -33,7 +33,7 @@ export type SecretKindProvider =
   | "other";
 
 /** How the Secrets screens group kinds. */
-export type SecretKindCategory = "ai_provider" | "data_source" | "vcs" | "messaging" | "other";
+export type SecretKindCategory = "ai_provider" | "data_source" | "vcs" | "messaging" | "payments" | "other";
 
 export interface SecretKindDescriptor {
   /** Stored in company_secrets.kind. Stable; never rename. */
@@ -76,6 +76,8 @@ export const SECRET_KIND_IDS = [
   "telegram_bot_token",
   "slack_bot_token",
   "brave_search_api_key",
+  "payment_card_single_use",
+  "site_login",
   "other",
 ] as const;
 
@@ -87,6 +89,7 @@ export const SECRET_KIND_CATEGORY_LABELS: Record<SecretKindCategory, string> = {
   data_source: "Data sources",
   vcs: "Code hosting",
   messaging: "Messaging",
+  payments: "Payments and logins",
   other: "Other",
 };
 
@@ -96,6 +99,7 @@ export const SECRET_KIND_CATEGORY_ORDER: readonly SecretKindCategory[] = [
   "data_source",
   "vcs",
   "messaging",
+  "payments",
   "other",
 ];
 
@@ -217,6 +221,22 @@ export const SECRET_KINDS: readonly SecretKindDescriptor[] = [
     // No envKey: the key is only ever read from the company secret picked on
     // Connections -> Web search, and migration 0171's backfill (already applied)
     // lists every kind that has one.
+    testable: false,
+  },
+  {
+    id: "payment_card_single_use",
+    label: "Payment card (single-use)",
+    description: "A card an agent may spend from, one purchase at a time, via the browser worker.",
+    provider: "other",
+    category: "payments",
+    testable: false,
+  },
+  {
+    id: "site_login",
+    label: "Website login",
+    description: "A saved username and password an agent may sign in with, via the browser worker.",
+    provider: "other",
+    category: "payments",
     testable: false,
   },
   {
