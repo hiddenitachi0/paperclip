@@ -93,6 +93,20 @@ TG_PHOTO_MAX_BYTES = 10 * 1024 * 1024
 TG_PHOTO_TYPES = ("image/jpeg", "image/png", "image/webp", "image/gif")
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 
+# Voice messages: a voice message (or an audio file) from an allowed person is
+# downloaded, turned into text by Paperclip (`speech transcribe`), echoed back
+# ("You said: …"), and then handled exactly like a typed message. The answer
+# can also be read aloud (`speech speak`), per bot: never, when the person
+# sent a voice message (the default), or always.
+VOICE_MAX_SECONDS = 5 * 60
+VOICE_MAX_BYTES = 20 * 1024 * 1024  # also Telegram's limit for a bot download
+VOICE_ECHO_MAX = 300
+VOICE_REPLY_MODES = ("never", "when_voice", "always")
+VOICE_NAME_RE = re.compile(r"^[a-z]{2,20}$")
+SPEECH_TIMEOUT_SECONDS = 150
+# The server reads at most 1,500 characters aloud; no need to send it more.
+SPOKEN_TEXT_SEND_MAX = 6000
+
 LOCK = threading.Lock()
 
 # Telegram user ids allowed to use the bots; set in main(). Empty means nobody.
@@ -147,6 +161,11 @@ def fetch_bots_from_api():
             "receivesCompanyNotices": b.get("receivesCompanyNotices") is True,
             "createdAt": b.get("createdAt") if isinstance(b.get("createdAt"), str) else None,
             "agentRole": b.get("agentRole") if isinstance(b.get("agentRole"), str) else None,
+            # Voice messages: this bot's id in Paperclip (for the usage log),
+            # when it reads answers aloud, and with which voice.
+            "botId": b.get("id") if isinstance(b.get("id"), str) and UUID_RE.match(b.get("id")) else None,
+            "voiceReplyMode": b.get("voiceReplyMode") if b.get("voiceReplyMode") in VOICE_REPLY_MODES else "when_voice",
+            "voice": b.get("voice") if isinstance(b.get("voice"), str) and VOICE_NAME_RE.match(b.get("voice")) else None,
             "source": "paperclip",
         })
     return bots
@@ -284,6 +303,20 @@ def cli_env(env, *parts, timeout=90):
         return json.loads(subprocess.check_output(args, stderr=subprocess.DEVNULL, timeout=timeout).decode())
     except Exception as e:
         print(f"cli_env error ({parts[0] if parts else '?'}): {e}", flush=True)
+        return None
+
+
+def cli_stdin(data, *parts, timeout=90):
+    """A CLI call that gets `data` on standard input (`docker exec -i`). Used
+    for a voice recording, which is far too big for the command line or an
+    environment variable, and must never appear in a process list."""
+    args = ["docker", "exec", "-i", CONTAINER, "sh", "-lc", f"{CLI} {' '.join(parts)} {ARGS}"]
+    try:
+        out = subprocess.run(args, input=data, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             timeout=timeout, check=True).stdout
+        return json.loads(out.decode())
+    except Exception as e:
+        print(f"cli_stdin error ({parts[0] if parts else '?'}): {type(e).__name__}", flush=True)
         return None
 
 
@@ -979,8 +1012,12 @@ def _refused(res):
     return isinstance(res, dict) and res.get("ok") is False
 
 
-def ask_agent(state, bot, chat_id, text, force_task=False):
-    """Send a chat message to the bot's agent and reply in the same chat."""
+def ask_agent(state, bot, chat_id, text, force_task=False, came_by_voice=False):
+    """Send a chat message to the bot's agent and reply in the same chat.
+
+    `came_by_voice` is True when `text` is what a voice message said; the
+    message is otherwise handled exactly like a typed one. It only decides
+    whether the answer is also read aloud (see wants_voice_reply)."""
     token, agent_name = bot["token"], bot["name"]
     tg(token, "sendChatAction", chat_id=chat_id, action="typing")
     conversation_id = None if force_task else get_conversation(state, token, chat_id)
@@ -1044,6 +1081,9 @@ def ask_agent(state, bot, chat_id, text, force_task=False):
             send_plain(token, chat_id, "\n\n".join(notes + ([answer] if answer else [])))
         if images:
             send_reply_images(bot, chat_id, images)
+        spoken = str(result.get("response") or "").strip()
+        if spoken and wants_voice_reply(bot, came_by_voice):
+            send_voice_answer(bot, chat_id, spoken)
         return
     task_ref = res.get("taskRef") if isinstance(res, dict) else None
     if lane == "b" and isinstance(task_ref, dict) and isinstance(task_ref.get("issueId"), str) \
@@ -1059,6 +1099,145 @@ def ask_agent(state, bot, chat_id, text, force_task=False):
     send_plain(token, chat_id, (
         f"Something went wrong sending that to {agent_name}. "
         "Check Paperclip before sending it again."))
+
+
+# ─── Voice messages ────────────────────────────────────────────────────────────
+
+def wants_voice_reply(bot, came_by_voice):
+    """Whether this bot reads its answer aloud this time."""
+    mode = bot.get("voiceReplyMode") if bot.get("voiceReplyMode") in VOICE_REPLY_MODES else "when_voice"
+    return mode == "always" or (mode == "when_voice" and came_by_voice)
+
+
+def download_telegram_file(token, file_id):
+    """The bytes of a file someone sent the bot, or (None, reason).
+
+    Reads at most VOICE_MAX_BYTES + 1 bytes, so an oversized file is refused
+    without being held in memory. The download address carries the bot token,
+    so no error message is printed with it."""
+    if not isinstance(file_id, str) or not file_id:
+        return None, "missing"
+    info = tg(token, "getFile", file_id=file_id)
+    path = info.get("file_path") if isinstance(info, dict) else None
+    if not isinstance(path, str) or not path:
+        return None, "missing"
+    size = info.get("file_size")
+    if isinstance(size, int) and size > VOICE_MAX_BYTES:
+        return None, "too_large"
+    url = f"https://api.telegram.org/file/bot{token}/{urllib.parse.quote(path)}"
+    try:
+        with urllib.request.urlopen(url, timeout=60) as r:
+            data = r.read(VOICE_MAX_BYTES + 1)
+    except Exception as e:
+        print(f"telegram-bridge: could not download a voice message ({type(e).__name__})", flush=True)
+        return None, "failed"
+    if len(data) > VOICE_MAX_BYTES:
+        return None, "too_large"
+    return data, path
+
+
+def _safe_audio_filename(path):
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(path or ""))[:80]
+    return name if re.search(r"\.[A-Za-z0-9]{2,5}$", name) else "voice.ogg"
+
+
+def transcribe_voice(bot, data, filename, duration):
+    """Paperclip turns the recording into text, on the bot's own company. The
+    recording goes as base64 on standard input, never on the command line."""
+    parts = ["speech", "transcribe", "-C", bot["companyId"], "--stdin", "--source", "telegram",
+             "--filename", _safe_audio_filename(filename)]
+    if isinstance(duration, (int, float)) and not isinstance(duration, bool) and duration >= 0:
+        parts += ["--duration", str(int(duration))]
+    if bot.get("botId") and UUID_RE.match(bot["botId"]):
+        parts += ["--telegram-bot-id", bot["botId"]]
+    return cli_stdin(base64.b64encode(data), *parts, timeout=SPEECH_TIMEOUT_SECONDS)
+
+
+def handle_voice_message(state, bot, chat_id, m):
+    """A voice message: listen, say what was heard, then handle it exactly like
+    a typed message. Nothing in what was said is treated as a command (`/task`,
+    `/new`, …): the words only ever reach the agent as a message."""
+    token, agent_name = bot["token"], bot["name"]
+    media = m.get("voice") if isinstance(m.get("voice"), dict) else m.get("audio")
+    duration = media.get("duration")
+    size = media.get("file_size")
+    if isinstance(duration, (int, float)) and duration > VOICE_MAX_SECONDS:
+        send_plain(token, chat_id, "That voice message is longer than 5 minutes. Please send a shorter one, or type it.")
+        return
+    if isinstance(size, int) and size > VOICE_MAX_BYTES:
+        send_plain(token, chat_id, "That recording is larger than 20 MB. Please send a shorter one, or type it.")
+        return
+    tg(token, "sendChatAction", chat_id=chat_id, action="typing")
+    if not paperclip_ready():
+        send_plain(token, chat_id, (
+            "Paperclip is restarting. I'll listen to your voice message as soon as it's back, usually within a minute."))
+        if not wait_for_paperclip():
+            send_plain(token, chat_id, (
+                f"Paperclip is still not back, so {agent_name} did not get your voice message. "
+                "Please send it again in a few minutes."))
+            return
+    data, path_or_reason = download_telegram_file(token, media.get("file_id"))
+    if data is None:
+        if path_or_reason == "too_large":
+            send_plain(token, chat_id, "That recording is larger than 20 MB. Please send a shorter one, or type it.")
+        else:
+            send_plain(token, chat_id, "I couldn't get that voice message from Telegram. Please send it again.")
+        return
+    res = transcribe_voice(bot, data, path_or_reason, duration)
+    if res is None:
+        send_plain(token, chat_id, (
+            "I didn't hear back from Paperclip, so I couldn't listen to that voice message. Please send it again."))
+        return
+    if _refused(res):
+        reason = str(res.get("error") or "").strip()[:300]
+        send_plain(token, chat_id, "I couldn't listen to that voice message." + (f" {reason}" if reason else ""))
+        return
+    transcript = str(res.get("text") or "").strip()
+    if not transcript:
+        send_plain(token, chat_id, "I couldn't hear any words in that voice message. Please try again, or type it.")
+        return
+    send_plain(token, chat_id, f"🎙️ You said: {tg_truncate(transcript, VOICE_ECHO_MAX)}")
+    ask_agent(state, bot, chat_id, transcript, came_by_voice=True)
+
+
+def send_voice_answer(bot, chat_id, text):
+    """Read the answer aloud: Paperclip makes the recording (only the text; no
+    links or file ids, and at most about 1,500 characters, ending with "the
+    rest is in the text"), and it goes into the chat as a voice message, or as
+    an audio file when it is not Ogg Opus or a voice message is refused."""
+    token = bot["token"]
+    tg(token, "sendChatAction", chat_id=chat_id, action="record_voice")
+    parts = ["speech", "speak", "-C", bot["companyId"], "--text", '"$TT"', "--source", "telegram"]
+    voice = bot.get("voice")
+    if isinstance(voice, str) and VOICE_NAME_RE.match(voice):
+        parts += ["--voice", voice]
+    if bot.get("botId") and UUID_RE.match(bot["botId"]):
+        parts += ["--telegram-bot-id", bot["botId"]]
+    res = cli_env({"TT": text[:SPOKEN_TEXT_SEND_MAX]}, *parts, timeout=SPEECH_TIMEOUT_SECONDS)
+    if res is None:
+        send_plain(token, chat_id, "(I couldn't read the answer aloud this time.)")
+        return
+    if _refused(res):
+        reason = str(res.get("error") or "").strip()[:300]
+        send_plain(token, chat_id, "(I couldn't read the answer aloud." + (f" {reason})" if reason else ")"))
+        return
+    try:
+        audio = base64.b64decode(str(res.get("audioBase64") or ""), validate=True)
+    except Exception:
+        audio = b""
+    if not audio:
+        send_plain(token, chat_id, "(I couldn't read the answer aloud this time.)")
+        return
+    sent = None
+    if res.get("oggOpus") is True:
+        sent = tg_upload(token, "sendVoice", "voice", "answer.ogg", "audio/ogg", audio, chat_id=chat_id)
+    if sent is None:
+        content_type = str(res.get("contentType") or "audio/mpeg").lower()
+        extension = {"audio/ogg": "ogg", "audio/mpeg": "mp3"}.get(content_type, "audio")
+        sent = tg_upload(token, "sendAudio", "audio", f"answer.{extension}", content_type, audio,
+                         chat_id=chat_id, title="Answer")
+    if sent is None:
+        send_plain(token, chat_id, "(I couldn't send the spoken answer here.)")
 
 
 def format_task_answer(bot, item, entry, answer):
@@ -1195,6 +1374,9 @@ def handle_message(state, bot, m):
         print(f"telegram-bridge: ignored a message to {bot['name']} from a Telegram user or chat that is not allowed", flush=True)
         return
     register_chat(state, bot["token"], chat_id)
+    if isinstance(m.get("voice"), dict) or isinstance(m.get("audio"), dict):
+        handle_voice_message(state, bot, chat_id, m)
+        return
     token, agent_id, agent_name = bot["token"], bot["agentId"], bot["name"]
     company_id = bot["companyId"]
     low = text.lower()
@@ -1205,6 +1387,8 @@ def handle_message(state, bot, m):
             f"• Any message → {agent_name} answers here. A quick question gets a quick answer "
             f"when quick answers are switched on for {agent_name}; anything bigger becomes a task, "
             "and its answer comes back here when it's done\n"
+            f"• A voice message → {agent_name} hears it and answers the same way; the answer can be read "
+            "aloud too (Company settings → Connections → Telegram)\n"
             "• `/task <text>` → always make it a task\n"
             "• `/new` → start a fresh conversation\n"
             "• `/project <name>` → a project\n"
