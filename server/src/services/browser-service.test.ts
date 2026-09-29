@@ -806,6 +806,52 @@ describe("browserService purchase gate (DUR-4046)", () => {
     expect(result.tree).toContain("****************");
   });
 
+  it("DUR-4047: the generic browser_snapshot/read_text/click tools also scrub the card number once fill_payment_details has run on the same session", async () => {
+    const db = fakeDbWithAgent(BOOK_AND_BUY_AGENT);
+    wirePurchaseGateDefaults();
+    const worker = fakeWorkerClientOnCheckoutPage({
+      readText: vi.fn().mockResolvedValue("Total: 300 kr card on file: 4111111111111111"),
+    });
+    const svc = browserService(db as any, { workerClient: worker });
+
+    const { sessionId } = await svc.open(AGENT_ID, { purpose: "buy something" });
+    const { clearanceId } = await svc.requestPurchase(AGENT_ID, sessionId, "A gadget", "e9", CARD_ID);
+
+    vi.mocked(worker.snapshot).mockResolvedValue({ tree: "Total: 300 kr card on file: 4111111111111111", url: CHECKOUT_URL, title: "Checkout" });
+    await svc.fillPaymentDetails(AGENT_ID, sessionId, { clearanceId, cardNumberRef: "e10" });
+
+    // Every plain-tool path an agent could call instead of trusting fill_payment_details's own return value.
+    const snap = await svc.snapshot(AGENT_ID, sessionId);
+    expect(snap.tree).not.toContain("4111111111111111");
+
+    const text = await svc.readText(AGENT_ID, sessionId);
+    expect(text).not.toContain("4111111111111111");
+
+    vi.mocked(worker.describeElement).mockResolvedValueOnce({ ref: "e13", role: "link", label: "Show details", name: null });
+    vi.mocked(worker.performClick).mockResolvedValueOnce({ tree: "Total: 300 kr card on file: 4111111111111111", url: CHECKOUT_URL, title: "Checkout" });
+    const clickResult = await svc.click(AGENT_ID, sessionId, "e13", "look around");
+    expect(clickResult.ok).toBe(true);
+    if (clickResult.ok) expect(clickResult.value.tree).not.toContain("4111111111111111");
+
+    await expect(svc.screenshot(AGENT_ID, sessionId)).rejects.toMatchObject({ status: 422 });
+  });
+
+  it("DUR-4047: browser_snapshot/read_text/screenshot are unaffected before any card has been filled", async () => {
+    const db = fakeDbWithAgent(BOOK_AND_BUY_AGENT);
+    wirePurchaseGateDefaults();
+    const worker = fakeWorkerClientOnCheckoutPage({
+      readText: vi.fn().mockResolvedValue("Total: 300 kr"),
+    });
+    const svc = browserService(db as any, { workerClient: worker });
+
+    const { sessionId } = await svc.open(AGENT_ID, { purpose: "buy something" });
+    await svc.requestPurchase(AGENT_ID, sessionId, "A gadget", "e9", CARD_ID);
+
+    const snap = await svc.snapshot(AGENT_ID, sessionId);
+    expect(snap.tree).toBe("Total: 300 kr");
+    await expect(svc.screenshot(AGENT_ID, sessionId)).resolves.toBeInstanceOf(Uint8Array);
+  });
+
   it("fill_payment_details refuses while an approval-gated purchase is still waiting on Filip's decision", async () => {
     const db = fakeDbWithAgent(BOOK_AND_BUY_AGENT);
     const { approvals } = wirePurchaseGateDefaults();

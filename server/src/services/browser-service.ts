@@ -195,6 +195,17 @@ interface PendingPurchase {
   amountNok: number | null;
   /** Set once confirm_final_step has clicked and armed the network hold -- wait_for_outcome/report_outcome are the only calls valid after this. */
   awaitingOutcome: boolean;
+  /**
+   * Security fix (DUR-4047 review of PR #405): set once `fillPaymentDetails`
+   * has actually typed the real PAN/CVC/expiry/name into the page. Until
+   * this purchase resolves (finalizePurchase nulls `pendingPurchase`), the
+   * card fields may still be sitting unmasked in the DOM -- the *generic*
+   * plain tools (browser_snapshot/browser_read_text/browser_screenshot) are
+   * not gated tools and know nothing about clearances, so they must not be
+   * allowed to hand that back to the agent unscrubbed just because they
+   * happen to be called on the same session mid-purchase.
+   */
+  cardFieldsFilled: boolean;
 }
 
 interface BrowserSession {
@@ -480,64 +491,102 @@ export function browserService(db: Db, deps: BrowserServiceDeps = {}) {
     return session;
   }
 
+  /**
+   * Security fix (DUR-4047 review of PR #405): the gated purchase tools
+   * (`fillPaymentDetails`/`confirmPurchaseFinalStep`/`waitForOutcome`/
+   * `reportOutcome`) each scrub their own returned snapshot with
+   * `maskCardNumbers`, but every *generic* plain tool below
+   * (navigate/snapshot/read_text/click/type/select/check/press_key) also
+   * hands an `AccessibilitySnapshot.tree` straight back to the agent, and
+   * is perfectly usable on the same session in the same window -- once
+   * `fill_payment_details` has typed the real card into the page,
+   * `pending.cardFieldsFilled` is set and stays set until this purchase
+   * resolves, so every plain-tool snapshot on this session is scrubbed too.
+   * Centralizing it here (rather than re-deriving the check in every
+   * caller) means a future plain tool can't reintroduce this gap.
+   */
+  function maskIfCardFilled(session: BrowserSession, snap: AccessibilitySnapshot): AccessibilitySnapshot {
+    if (!session.pendingPurchase?.cardFieldsFilled) return snap;
+    return { ...snap, tree: maskCardNumbers(snap.tree) };
+  }
+
+  function maskOutcomeIfCardFilled(session: BrowserSession, result: ToolOutcome<AccessibilitySnapshot>): ToolOutcome<AccessibilitySnapshot> {
+    if (!result.ok) return result;
+    return { ok: true, value: maskIfCardFilled(session, result.value) };
+  }
+
   async function navigate(agentId: string, sessionId: string, url: string): Promise<AccessibilitySnapshot> {
     const session = requireSession(agentId, sessionId);
     const result = await session.handler.navigate(url);
     touch(session);
-    return result;
+    return maskIfCardFilled(session, result);
   }
 
   async function snapshot(agentId: string, sessionId: string): Promise<AccessibilitySnapshot> {
     const session = requireSession(agentId, sessionId);
     const result = await session.handler.snapshot();
     touch(session);
-    return result;
+    return maskIfCardFilled(session, result);
   }
 
   async function readText(agentId: string, sessionId: string): Promise<string> {
     const session = requireSession(agentId, sessionId);
     const result = await session.handler.readText();
     touch(session);
-    return result;
+    return session.pendingPurchase?.cardFieldsFilled ? maskCardNumbers(result) : result;
   }
 
   async function click(agentId: string, sessionId: string, ref: string, why: string): Promise<ToolOutcome<AccessibilitySnapshot>> {
     const session = requireSession(agentId, sessionId);
     const result = await session.handler.click(ref, why);
     touch(session);
-    return result;
+    return maskOutcomeIfCardFilled(session, result);
   }
 
   async function type(agentId: string, sessionId: string, ref: string, text: string): Promise<ToolOutcome<AccessibilitySnapshot>> {
     const session = requireSession(agentId, sessionId);
     const result = await session.handler.type(ref, text);
     touch(session);
-    return result;
+    return maskOutcomeIfCardFilled(session, result);
   }
 
   async function select(agentId: string, sessionId: string, ref: string, value: string): Promise<AccessibilitySnapshot> {
     const session = requireSession(agentId, sessionId);
     const result = await session.handler.select(ref, value);
     touch(session);
-    return result;
+    return maskIfCardFilled(session, result);
   }
 
   async function check(agentId: string, sessionId: string, ref: string, checked: boolean): Promise<AccessibilitySnapshot> {
     const session = requireSession(agentId, sessionId);
     const result = await session.handler.check(ref, checked);
     touch(session);
-    return result;
+    return maskIfCardFilled(session, result);
   }
 
   async function pressKey(agentId: string, sessionId: string, key: string): Promise<ToolOutcome<AccessibilitySnapshot>> {
     const session = requireSession(agentId, sessionId);
     const result = await session.handler.pressKey(key);
     touch(session);
-    return result;
+    return maskOutcomeIfCardFilled(session, result);
   }
 
+  /**
+   * Security fix (DUR-4047 review): a screenshot is an image -- there is no
+   * text-regex scrub for it, so unlike the tree-based tools above this one
+   * refuses outright while this session has a real card sitting in the
+   * checkout page's fields, rather than risk handing back a picture of the
+   * PAN/CVC. The gated purchase flow takes its own screenshots server-side
+   * (for the approval card / receipt / outcome record); this only blocks
+   * the agent-facing generic tool.
+   */
   async function screenshot(agentId: string, sessionId: string): Promise<Uint8Array> {
     const session = requireSession(agentId, sessionId);
+    if (session.pendingPurchase?.cardFieldsFilled) {
+      throw unprocessable(
+        "Screenshots are unavailable on this session until the current purchase is confirmed or cancelled -- the checkout page has real card details filled in. Call confirm_final_step, or wait_for_outcome/report_outcome if already confirmed.",
+      );
+    }
     const result = await session.handler.screenshot();
     touch(session);
     return result;
@@ -554,7 +603,7 @@ export function browserService(db: Db, deps: BrowserServiceDeps = {}) {
     const session = requireSession(agentId, sessionId);
     const result = await session.handler.back();
     touch(session);
-    return result;
+    return maskIfCardFilled(session, result);
   }
 
   async function close(agentId: string, sessionId: string): Promise<void> {
@@ -1042,6 +1091,7 @@ export function browserService(db: Db, deps: BrowserServiceDeps = {}) {
       detectedTotal: amountEval.detected,
       amountNok: amountEval.amountNok,
       awaitingOutcome: false,
+      cardFieldsFilled: false,
     };
     touch(session);
 
@@ -1118,11 +1168,16 @@ export function browserService(db: Db, deps: BrowserServiceDeps = {}) {
       [input.cvcRef, card.cvc],
       [input.nameOnCardRef, card.nameOnCard],
     ];
+    let filledAny = false;
     for (const [ref, value] of fills) {
       if (ref && value) {
         await session.driver.performType(ref, value);
+        filledAny = true;
       }
     }
+    // Security fix (DUR-4047 review): once the real card is on the page,
+    // the generic plain tools must mask/refuse until this purchase resolves.
+    if (filledAny) pending.cardFieldsFilled = true;
     touch(session);
 
     const snap = await session.driver.snapshot();
