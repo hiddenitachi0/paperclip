@@ -14,10 +14,13 @@ import {
   LANE_A_ANTHROPIC_MAX_TEMPERATURE,
   LANE_A_TEMPERATURE_PRESETS,
   LANE_A_TRANSFORM_MAX_TOTAL_CHARS,
+  LANE_A_TRUST_LEVELS,
+  LANE_A_TRUST_LEVEL_LABELS,
   laneAModelAcceptsTemperature,
   laneAModelsForProvider,
   laneATransformWorstCaseDailyCents,
   normalizeLaneAProvider,
+  normalizeLaneATrustLevel,
   formatAgentDisplayName,
   readLaneABrowserAccess,
   readLaneAWebSearchSwitch,
@@ -26,9 +29,11 @@ import {
   type BrowserAccessLevel,
   type CompanySecret,
   type LaneAProvider,
+  type LaneATrustLevel,
 } from "@paperclipai/shared";
 import { AlertCircle, CheckCircle2, Circle, Loader2 } from "lucide-react";
 import { Link } from "@/lib/router";
+import { accessApi } from "../api/access";
 import { agentsApi } from "../api/agents";
 import { budgetsApi } from "../api/budgets";
 import { dataConnectionsApi } from "../api/dataConnections";
@@ -104,6 +109,10 @@ export function QuickAgentSection({
     laneAProvider?: string | null;
     laneABaseUrl?: string | null;
     laneATemperature?: number | null;
+    /** DUR-4070: the trust-level ceiling (limited/standard/full). Null/absent reads as "full". */
+    laneATrustLevel?: string | null;
+    /** DUR-4070: company-member userIds this quick agent may chat with, besides the company's owner. */
+    laneAAssignedUserIds?: string[] | null;
   };
   companyId?: string;
 }) {
@@ -231,6 +240,22 @@ export function QuickAgentSection({
   const browserAccess = readLaneABrowserAccess(agent.adapterConfig);
   const saveBrowserAccess = (next: BrowserAccessLevel) =>
     settingMutation.mutate({ adapterConfig: { laneA: { ...currentLaneA, browserAccess: next } } });
+
+  // ─── DUR-4070: trust level + who may chat with this quick agent ────────
+  const trustLevel = normalizeLaneATrustLevel(agent.laneATrustLevel);
+  const saveTrustLevel = (next: LaneATrustLevel) => settingMutation.mutate({ laneATrustLevel: next });
+  const assignedUserIds = agent.laneAAssignedUserIds ?? [];
+  const membersQuery = useQuery({
+    queryKey: queryKeys.access.companyMembers(effectiveCompanyId),
+    queryFn: () => accessApi.listMembers(effectiveCompanyId),
+    enabled: Boolean(effectiveCompanyId),
+  });
+  const toggleAssignedUser = (userId: string, next: boolean) =>
+    settingMutation.mutate({
+      laneAAssignedUserIds: next
+        ? [...assignedUserIds, userId]
+        : assignedUserIds.filter((id) => id !== userId),
+    });
 
   // ─── DUR-3997 slice 4: readiness ────────────────────────────────────────
   // Paperclip's own key is only readable by an instance admin (the route is
@@ -534,6 +559,72 @@ export function QuickAgentSection({
               </option>
             ))}
           </select>
+        </div>
+
+        {/* DUR-4070: the trust-level ceiling. */}
+        <div className="space-y-2 border-t pt-4" data-testid="quick-agent-trust-level">
+          <div className="space-y-1.5">
+            <p className="text-sm font-medium">Trust level</p>
+            <p className="text-xs text-muted-foreground">
+              One dial for add-on tools, business data, company files, web search, browser access, and its
+              memory notebook. Limited switches all of those off, no matter what is ticked elsewhere on this
+              agent. Only you can change this.
+            </p>
+          </div>
+          <select
+            className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
+            data-testid="quick-agent-trust-level-select"
+            value={trustLevel}
+            disabled={settingMutation.isPending}
+            onChange={(event) => saveTrustLevel(event.target.value as LaneATrustLevel)}
+          >
+            {LANE_A_TRUST_LEVELS.map((level) => (
+              <option key={level} value={level}>
+                {LANE_A_TRUST_LEVEL_LABELS[level]}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* DUR-4070: who may chat with this quick agent at all. */}
+        <div className="space-y-2 border-t pt-4" data-testid="quick-agent-assigned-people">
+          <div className="space-y-1.5">
+            <p className="text-sm font-medium">Who can chat with {displayName}</p>
+            <p className="text-xs text-muted-foreground">
+              The company's owner can always chat with {displayName}. Tick anyone else who should be able to.
+              Everyone not ticked gets a plain "not assigned" reply instead of an answer — in the chat box and
+              on Telegram alike. Only you can change this.
+            </p>
+          </div>
+          {membersQuery.isPending ? (
+            <p className="text-xs text-muted-foreground">Loading the member list…</p>
+          ) : membersQuery.isError ? (
+            <p className="text-xs text-destructive">Could not load the member list.</p>
+          ) : (
+            <ul className="space-y-1.5" data-testid="quick-agent-assigned-people-list">
+              {(membersQuery.data?.members ?? [])
+                .filter((member) => member.status === "active")
+                .map((member) => {
+                  const isOwner = member.membershipRole === "owner";
+                  const checked = isOwner || assignedUserIds.includes(member.principalId);
+                  const label = member.user?.name || member.user?.email || member.principalId;
+                  return (
+                    <li key={member.id} className="flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={isOwner || settingMutation.isPending}
+                        onChange={(event) => toggleAssignedUser(member.principalId, event.target.checked)}
+                      />
+                      <span>
+                        {label}
+                        {isOwner && <span className="text-xs text-muted-foreground"> (owner, always allowed)</span>}
+                      </span>
+                    </li>
+                  );
+                })}
+            </ul>
+          )}
         </div>
 
         {/* DUR-3977: the settings that decide what a batch of rewrites costs

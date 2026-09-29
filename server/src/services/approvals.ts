@@ -436,6 +436,16 @@ export function approvalService(db: Db) {
             laneABaseUrl: typeof payload.laneABaseUrl === "string" ? payload.laneABaseUrl : null,
             laneATemperature:
               typeof payload.laneATemperature === "number" ? payload.laneATemperature : null,
+            // DUR-4070: the trust-level ceiling and assigned-people list the
+            // card carries, read back for the same reason. An unrecognized
+            // trust level reads as the column default ("full") via
+            // normalizeLaneATrustLevel inside the service; a malformed list
+            // reads as "the owner only".
+            laneATrustLevel:
+              typeof payload.laneATrustLevel === "string" ? payload.laneATrustLevel : undefined,
+            laneAAssignedUserIds: Array.isArray(payload.laneAAssignedUserIds)
+              ? payload.laneAAssignedUserIds.filter((id): id is string => typeof id === "string")
+              : [],
             // DUR-4017: the daily briefing settings the card carries, read
             // back for the same reason. Anything not an object reads as
             // "never configured" (null), matching a hire made before this

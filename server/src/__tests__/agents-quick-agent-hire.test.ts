@@ -381,6 +381,9 @@ describe.sequential("every quick-agent field is handled on the employment path",
     laneABaseUrl: "http://localhost:11434/v1",
     // "Creativity" (sampling temperature).
     laneATemperature: 0.9,
+    // DUR-4070: the trust-level ceiling and the assigned-people list.
+    laneATrustLevel: "limited",
+    laneAAssignedUserIds: ["11111111-1111-4111-8111-111111111199"],
     // DUR-4017: the daily briefing settings.
     morningReportSettings: {
       enabled: true,
