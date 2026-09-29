@@ -172,6 +172,8 @@ export function chatRouterRoutes(db: Db, options: { laneA?: LaneAServiceOptions 
           laneABaseUrl: targetAgent.laneABaseUrl ?? null,
           // "Creativity" (sampling temperature); null = the model host's default.
           laneATemperature: targetAgent.laneATemperature ?? null,
+          // OpenRouter "model hosts"; null = OpenRouter picks.
+          laneAProviderRouting: targetAgent.laneAProviderRouting ?? null,
         },
         requester,
         actor: req.actor,

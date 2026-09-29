@@ -287,6 +287,7 @@ export {
   QUICK_AGENT_FIELDS,
   laneAProviderModelIssue,
   laneAAdapterConfigSchema,
+  laneAProviderRoutingSchema,
   type QuickAgentField,
 } from "./agent.js";
 
