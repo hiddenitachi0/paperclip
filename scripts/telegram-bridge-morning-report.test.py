@@ -11,24 +11,26 @@ acknowledges it. These tests pin that:
   - nothing is acknowledged when nobody could receive it or Telegram refused;
   - an agent without a bot of its own reports through its boss's bot;
   - a report of another company in the answer is ignored;
-  - a long report is split into several messages.
+  - a long report (no facts — written before DUR-4059) is split into several messages.
 
-DUR-4059 (links, prices, pictures, full briefing page) adds structured `facts`
-and a Lane A `conversationId` to a report; these tests additionally pin that:
+DUR-4059 direction change: a report with structured facts becomes exactly ONE
+Telegram message — the weather picture (if Media Studio made one) with a
+short plain-text caption (facts['teaser']) and the briefing-page link, only
+once that page is live. These tests additionally pin that:
 
-  - a report with facts gets a full-briefing-page link up front, one HTML
-    section per non-empty headlines/hobby/sport/prices list (each item a
-    clickable link to its source), and any pictures as their own photo
-    messages with a caption — still sent once and acknowledged once;
-  - an empty facts list (e.g. no hobby news that day) sends no section for it;
-  - a picture that cannot be fetched is skipped without losing the report or
-    its acknowledgement;
+  - a report with facts sends its teaser as ONE photo caption (not the long
+    written text, not separate HTML section messages) when a weather picture
+    exists;
+  - the briefing-page link is appended only when facts['briefingPageLive'] is
+    true, and left off otherwise (DUR-4075 not live yet);
+  - no weather picture (Media Studio failed, or none was requested) sends the
+    same teaser as a single plain text message instead, never losing the report;
+  - the mood picture, if present, is never sent to Telegram (it is page-only);
   - the chat is pointed at the report's conversationId so a later reply
     continues the same history;
   - a report with no facts (written before DUR-4059) behaves exactly as
-    before — a single plain-text message, no HTML, no photos.
+    before — the full written text, split if long, no photos.
 """
-import base64
 import importlib.util
 import os
 import unittest
@@ -56,28 +58,32 @@ BOSS_BOT = {"token": "boss-token", "agentId": BOSS, "name": "Boss", "companyId":
             "uiBase": "https://paperclip.example", "allowedUserIds": {OPERATOR}}
 
 TEXT = "Good morning!\n\nWeather: Drobak 12C, light rain. Oslo 11C.\n\nHeadlines: ..."
+TEASER = "Drøbak: 12C, light rain; Oslo: 11C\nTop story: Big <news> today & more\nBTC: 65000 USD (+1.23%)"
 CONV = "e0000000-0000-4000-8000-000000000001"
 WEATHER_FILE = "f0000000-0000-4000-8000-000000000001"
 MOOD_FILE = "f0000000-0000-4000-8000-000000000002"
 JPEG = b"\xff\xd8\xff\xe0fake-jpeg-bytes"
 
 FACTS = {
-    "place": "Drøbak",
-    "weatherText": "12C, light rain",
+    "places": ["Drøbak", "Oslo"],
+    "weather": [{"place": "Drøbak", "text": "Now in Drøbak: light rain, 12°C"},
+                {"place": "Oslo", "text": "Now in Oslo: cloudy, 11°C"}],
     "headlines": [
         {"title": "Big <news> today & more", "url": "https://example.com/a", "source": "nrk"},
-        {"title": "No-URL headline", "url": "", "source": "nrk"},
     ],
     "hobby": [],
     "sport": [{"title": "Zucc scores again", "url": "https://example.com/sport", "source": "mats_zuccarello_nhl"}],
     "prices": [
-        {"symbol": "BTC", "price": 65000, "currency": "USD", "changePercent": 1.2345},
-        {"symbol": "DNB.OL", "price": 210, "currency": "NOK", "changePercent": None},
+        {"symbol": "BTC", "price": 65000, "currency": "USD", "changePercent": 1.2345, "history": []},
     ],
     "images": [
         {"fileId": WEATHER_FILE, "caption": "Maja, dressed for today's weather.", "kind": "weather"},
         {"fileId": MOOD_FILE, "caption": "Today's mood, in one picture.", "kind": "mood"},
     ],
+    "opening": "Good morning! A busy news day.",
+    "teaser": TEASER,
+    "stats": {"sourcesChecked": 1, "itemsFound": 1},
+    "briefingPageLive": True,
     "notes": [],
 }
 
@@ -93,6 +99,7 @@ def report(report_id=REPORT1, agent=MAJA, text=TEXT, company=COMPANY, facts=None
 
 
 def picture(data=JPEG, content_type="image/jpeg"):
+    import base64
     return {"ok": True, "contentType": content_type, "byteSize": len(data),
             "contentBase64": base64.b64encode(data).decode()}
 
@@ -185,13 +192,13 @@ class MorningReportTests(unittest.TestCase):
         self.run_pass()
         self.assertEqual(self.acks, [(REPORT2, COMPANY, "delivered")])
 
-    def test_a_long_report_is_split(self):
+    def test_a_long_report_with_no_facts_is_split(self):
         self.outbox[COMPANY] = [report(text="News line. " * 900)]
         self.run_pass()
         self.assertGreater(len(self.sent_texts()), 1)
         self.assertEqual(self.acks, [(REPORT1, COMPANY, "delivered")])
 
-    # ─── DUR-4059: facts sections, photos, conversation continuity ─────────
+    # ─── DUR-4059 direction change: ONE message — picture + teaser + link ──
 
     def test_a_report_with_no_facts_behaves_exactly_as_before(self):
         self.run_pass()
@@ -199,56 +206,59 @@ class MorningReportTests(unittest.TestCase):
         self.assertEqual(self.sent_html(), [])
         self.tg_upload.assert_not_called()
 
-    def test_facts_get_a_briefing_link_html_sections_and_photos_in_one_multi_message_delivery(self):
+    def test_facts_with_a_weather_picture_send_it_as_one_photo_with_the_teaser_and_link_as_its_caption(self):
         self.outbox[COMPANY] = [report(facts=FACTS, conversation_id=CONV)]
         self.run_pass()
 
-        texts = self.sent_texts()
-        self.assertEqual(len(texts), 1)
-        token, chat_id, text = texts[0]
+        # Exactly one photo per allowed chat, no separate text or HTML messages.
+        self.assertEqual(self.sent_texts(), [])
+        self.assertEqual(self.sent_html(), [])
+        photos = self.sent_photos()
+        self.assertEqual(len(photos), 1)
+        token, chat_id, caption = photos[0]
         self.assertEqual(token, "maja-token")
         self.assertEqual(chat_id, OPERATOR)
-        self.assertTrue(text.startswith(f"Full briefing: https://paperclip.example/agents/{MAJA}/morning-reports/{REPORT1}\n\n"))
-        self.assertTrue(text.endswith(TEXT))
+        self.assertTrue(caption.startswith(TEASER))
+        self.assertIn(f"Full briefing: https://paperclip.example/agents/{MAJA}/morning-reports/{REPORT1}", caption)
+        # The teaser is plain text: an HTML-looking fragment from a headline
+        # title is never turned into a link or any other markup.
+        self.assertIn("<news>", caption)
+        self.assertNotIn("<a href", caption)
 
-        html_msgs = self.sent_html()
-        self.assertEqual([m[0] for m in html_msgs], ["maja-token"] * len(html_msgs))
-        self.assertEqual([m[1] for m in html_msgs], [OPERATOR] * len(html_msgs))
-        bodies = [m[2] for m in html_msgs]
-        # Headlines: a clickable link for the item with a URL, plain numbered text for the one without.
-        self.assertIn('1. <a href="https://example.com/a">Big &lt;news&gt; today &amp; more</a>', bodies[0])
-        self.assertIn("2. No-URL headline", bodies[0])
-        self.assertTrue(bodies[0].startswith("<b>Headlines</b>"))
-        # Hobby news was an empty list this time: no section for it at all.
-        self.assertFalse(any(b.startswith("<b>Hobby news</b>") for b in bodies))
-        self.assertTrue(any(b.startswith("<b>Sport</b>") and 'href="https://example.com/sport"' in b for b in bodies))
-        self.assertTrue(any(b.startswith("<b>Prices</b>") and "BTC: 65000 USD" in b and "DNB.OL: 210 NOK" in b for b in bodies))
-
-        photos = self.sent_photos()
-        self.assertEqual(
-            sorted(photos),
-            sorted([
-                ("maja-token", OPERATOR, "Maja, dressed for today's weather."),
-                ("maja-token", OPERATOR, "Today's mood, in one picture."),
-            ]),
-        )
+        # Only the weather picture is ever sent — the mood picture stays page-only.
+        upload_args = self.tg_upload.call_args_list[0]
+        self.assertIn(f"report-{WEATHER_FILE[:8]}", upload_args.args[3])
 
         self.assertEqual(self.acks, [(REPORT1, COMPANY, "delivered")])
         self.assertEqual(bridge.get_conversation(self.state, "maja-token", OPERATOR), CONV)
 
-    def test_a_picture_that_cannot_be_fetched_is_skipped_without_losing_the_report(self):
+    def test_the_briefing_link_is_left_off_until_the_page_is_live(self):
+        facts = {**FACTS, "briefingPageLive": False}
+        self.outbox[COMPANY] = [report(facts=facts)]
+        self.run_pass()
+
+        caption = self.sent_photos()[0][2]
+        self.assertEqual(caption, TEASER)
+        self.assertNotIn("Full briefing", caption)
+
+    def test_no_weather_picture_sends_the_teaser_as_plain_text_instead(self):
+        facts = {**FACTS, "images": [im for im in FACTS["images"] if im["kind"] != "weather"]}
+        self.outbox[COMPANY] = [report(facts=facts)]
+        self.run_pass()
+
+        self.tg_upload.assert_not_called()
+        texts = self.sent_texts()
+        self.assertEqual(len(texts), 1)
+        self.assertEqual(texts[0][0], "maja-token")
+        self.assertIn(TEASER, texts[0][2])
+        self.assertEqual(self.acks, [(REPORT1, COMPANY, "delivered")])
+
+    def test_a_picture_that_cannot_be_fetched_falls_back_to_plain_text(self):
         self.pictures = {}  # neither fileId resolves
         self.outbox[COMPANY] = [report(facts=FACTS)]
         self.run_pass()
+        self.tg_upload.assert_not_called()
         self.assertEqual(len(self.sent_texts()), 1)
-        self.tg_upload.assert_not_called()
-        self.assertEqual(self.acks, [(REPORT1, COMPANY, "delivered")])
-
-    def test_facts_with_no_images_send_no_photos(self):
-        facts = {**FACTS, "images": []}
-        self.outbox[COMPANY] = [report(facts=facts)]
-        self.run_pass()
-        self.tg_upload.assert_not_called()
         self.assertEqual(self.acks, [(REPORT1, COMPANY, "delivered")])
 
     def test_facts_are_sent_once_a_lost_acknowledgement_is_not_resent(self):
@@ -256,7 +266,7 @@ class MorningReportTests(unittest.TestCase):
         self.state["sent_morning_reports"] = [REPORT1]
         self.run_pass()
         self.assertEqual(self.sent_texts(), [])
-        self.assertEqual(self.sent_html(), [])
+        self.assertEqual(self.sent_photos(), [])
         self.tg_upload.assert_not_called()
         self.assertEqual(self.acks, [(REPORT1, COMPANY, "delivered")])
 
