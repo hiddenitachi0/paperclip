@@ -162,6 +162,9 @@ DECLARE
     'company_api_tools',
     'company_mcp_tools',
     'company_memberships',
+    -- DUR-4037. Created (and granted on) in 0187_payment_notices_and_settings.sql;
+    -- listed here so the login-role lists match the schema, as for the tables above.
+    'company_payment_settings',
     'company_secret_bindings',
     'company_secret_provider_configs',
     'company_secret_versions',
@@ -251,6 +254,9 @@ DECLARE
     -- DUR-4040. Created (and granted on) in 0186_payment_cards.sql; listed
     -- here so the login-role lists match the schema, as for the tables above.
     'payment_cards',
+    -- DUR-4037. Created (and granted on) in 0187_payment_notices_and_settings.sql;
+    -- listed here so the login-role lists match the schema, as for the tables above.
+    'payment_notices',
     'persona_account_publish_counters',
     'persona_accounts',
     'persona_generation_counters',
@@ -352,6 +358,9 @@ DECLARE
     'company_api_tools',
     'company_mcp_tools',
     'company_memberships',
+    -- DUR-4037. Created (and granted on) in 0187_payment_notices_and_settings.sql;
+    -- listed here so the login-role lists match the schema, as for the tables above.
+    'company_payment_settings',
     'company_secret_bindings',
     'company_secret_provider_configs',
     'company_secrets',
@@ -422,6 +431,9 @@ DECLARE
     -- DUR-4040. Created (and granted on) in 0186_payment_cards.sql; listed
     -- here so the login-role lists match the schema, as for the tables above.
     'payment_cards',
+    -- DUR-4037. Created (and granted on) in 0187_payment_notices_and_settings.sql;
+    -- listed here so the login-role lists match the schema, as for the tables above.
+    'payment_notices',
     'persona_account_publish_counters',
     'persona_accounts',
     'persona_generation_counters',

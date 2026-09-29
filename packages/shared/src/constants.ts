@@ -747,6 +747,14 @@ export const SECRET_BINDING_TARGET_TYPES = [
   // resolved by any agent -- only by the server-side web_search tool, which
   // makes the call itself. Not dedicated, like api_tool.
   "web_search",
+  // DUR-4037: a `site_login` secret (domain/username/password), bound to the
+  // one agent Filip lets sign in with it (target_id = the agent id). Never
+  // resolved by that agent directly -- only by the server-side browser
+  // service, which fills the login fields itself on the matching registrable
+  // domain inside a live browser session. Dedicated (see
+  // DEDICATED_SECRET_BINDING_TARGET_TYPES below): a login saved for one agent
+  // cannot also be attached to another agent or connection.
+  "site_login",
 ] as const;
 export type SecretBindingTargetType = (typeof SECRET_BINDING_TARGET_TYPES)[number];
 
@@ -758,6 +766,7 @@ export const DEDICATED_SECRET_BINDING_TARGET_TYPES = [
   "data_connection",
   "telegram_bot",
   "persona_account",
+  "site_login",
 ] as const satisfies readonly SecretBindingTargetType[];
 
 // DUR-134: platforms a persona_accounts row can target. Fanvue only for now

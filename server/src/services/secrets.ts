@@ -85,6 +85,7 @@ const DEDICATED_TARGET_LABELS: Record<(typeof DEDICATED_SECRET_BINDING_TARGET_TY
   data_connection: "a data connection (Data sources)",
   telegram_bot: "a Telegram bot",
   persona_account: "a persona account",
+  site_login: "a site login",
 };
 
 /**

@@ -1,14 +1,16 @@
 /**
- * DUR-4013 step 3: the thin stdio MCP wrapper's tool definitions. Per the
- * design, this package "holds no secret, makes no decision" -- every tool
- * here is a direct pass-through to one `/api/browser/...` REST call; the
- * gate (final-action refusal, payment-field refusal, access level, session
- * caps) lives entirely on the server (`server/src/services/browser-service.ts`).
+ * DUR-4013 step 3 / DUR-4037 step 4: the thin stdio MCP wrapper's tool
+ * definitions. Per the design, this package "holds no secret, makes no
+ * decision" -- every tool here is a direct pass-through to one
+ * `/api/browser/...` REST call; every gate (final-action refusal,
+ * payment-field refusal, access level, session caps, the booking approval
+ * itself) lives entirely on the server (`server/src/services/browser-service.ts`).
  *
- * Plain tools only, per the issue ("browse and forms only, no final
- * steps") -- request_booking/request_purchase/fill_payment_details/
- * confirm_final_step and the rest of the gated surface are a later phase
- * and have no tool here.
+ * Step 4 adds `request_booking`/`confirm_final_step` (book_and_buy agents
+ * only; the server re-checks that, this file does not). `request_purchase`,
+ * `fill_payment_details`, `check_clearance`, `wait_for_outcome`,
+ * `report_outcome` (the purchase/card side of the design) are a later phase
+ * and have no tool here yet.
  */
 import { z } from "zod";
 import { PaperclipApiClient } from "./client.js";
@@ -69,7 +71,7 @@ export function createBrowserToolDefinitions(client: PaperclipApiClient): ToolDe
     ),
     makeTool(
       "browser_click",
-      "Click an element by its ref from the last snapshot. Refused for elements that look like a final booking/purchase action (e.g. \"Confirm\", \"Pay\", \"Book now\") -- that path is not available in this build.",
+      "Click an element by its ref from the last snapshot. Refused for elements that look like a final booking/purchase action (e.g. \"Confirm\", \"Pay\", \"Book now\") -- if you are trying to complete a booking, use request_booking and confirm_final_step instead.",
       sessionIdSchema.extend({ ref: z.string().min(1).max(200), why: z.string().min(1).max(500) }),
       ({ sessionId, ...body }) => client.requestJson("POST", `/browser/sessions/${sessionId}/click`, { body }),
     ),
@@ -120,6 +122,21 @@ export function createBrowserToolDefinitions(client: PaperclipApiClient): ToolDe
       "Close the browser session.",
       sessionIdSchema,
       ({ sessionId }) => client.requestJson("POST", `/browser/sessions/${sessionId}/close`),
+    ),
+    makeTool(
+      "request_booking",
+      "Ask Filip to approve a booking on the current page (book_and_buy agents only). EVERY booking needs this, even a free one with no deposit -- there is no automatic approval. The server takes its own screenshot of the current page and stamps the site's domain, page, target button, and visible price itself; your summary is shown to Filip in quotes, not as fact. `ref` must be the final confirm/book button you intend to click once approved -- confirm_final_step will refuse any other element, a different page, or a higher price than what is bound here. Returns an approvalId and \"pending_approval\" -- the session is parked until Filip decides; do not click anything that looks like a final booking action yourself, call confirm_final_step once you believe it is approved.",
+      sessionIdSchema.extend({
+        summary: z.string().min(1).max(1000).describe("One sentence: what is being booked, dates, price if any"),
+        ref: z.string().min(1).max(200).describe("Ref of the final confirm/book button from the last snapshot -- the exact button confirm_final_step will later click"),
+      }),
+      ({ sessionId, ...body }) => client.requestJson("POST", `/browser/sessions/${sessionId}/request-booking`, { body }),
+    ),
+    makeTool(
+      "confirm_final_step",
+      "Click the final confirm/book button for a booking Filip has approved (book_and_buy agents only). Refused with a plain reason if there is no pending booking on this session, Filip has not decided yet, Filip said no, the approval window (30 minutes) expired, the page or button is not the exact one request_booking was filed with, or the visible price went up since then. Single-use: consumed on the first confirm attempt whether it succeeds or fails -- call request_booking again for another booking.",
+      sessionIdSchema.extend({ ref: z.string().min(1).max(200).describe("Ref of the final confirm/book button from the last snapshot -- must be the same button passed to request_booking") }),
+      ({ sessionId, ...body }) => client.requestJson("POST", `/browser/sessions/${sessionId}/confirm-final-step`, { body }),
     ),
     makeTool(
       "browser_hand_over",

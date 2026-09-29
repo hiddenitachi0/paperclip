@@ -1870,6 +1870,7 @@ export {
   instructionsChangeRequestPayloadSchema,
   personaPublishRequestPayloadSchema,
   featureLaunchRequestPayloadSchema,
+  bookingRequestPayloadSchema,
   type CreateApproval,
   type UpsertBudgetPolicy,
   type ResolveBudgetIncident,
@@ -1887,6 +1888,7 @@ export {
   type InstructionsChangeRequestPayload,
   type PersonaPublishRequestPayload,
   type FeatureLaunchRequestPayload,
+  type BookingRequestPayload,
   envBindingPlainSchema,
   envBindingSecretRefSchema,
   envBindingSchema,
@@ -2273,6 +2275,18 @@ export {
   type WatcherSourceInfo,
   type WatcherSummary,
 } from "./watchers.js";
+
+export {
+  PAYMENT_NOTICE_KINDS,
+  PAYMENT_NOTICE_STATUSES,
+  ackPaymentNoticeOutboxSchema,
+  type PaymentNoticeKind,
+  type PaymentNoticeStatus,
+  type PaymentNoticeOutboxItem,
+  type AckPaymentNoticeOutboxInput,
+} from "./payment-notices.js";
+
+export { siteLoginSecretValueSchema, type SiteLoginSecretValue } from "./site-login.js";
 
 export {
   MORNING_REPORT_SOURCES,
