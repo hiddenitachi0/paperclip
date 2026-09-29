@@ -14,6 +14,9 @@ approvals/tasks still live in Paperclip and the web UI.
   carry a secret value). When nobody asked (a card the board filed itself) or
   nobody on the way up has a bot, it goes to the company's notice bot — see
   company_notice_bot for how that one is chosen.
+- Outbound, morning reports: a quick agent's daily report waits in
+  Paperclip's morning-report outbox and is sent through the agent's own bot
+  once, then acknowledged (like a watcher alert, text only).
 - Outbound, market watchers: an alert a watcher's quick agent wrote (a price
   move, maybe with a picture) waits in Paperclip's watcher outbox; it is sent
   through that agent's bot (or its boss's) and acknowledged, once.
@@ -1626,6 +1629,76 @@ def notify_watcher_alerts(state, bots):
             ack_watcher_alert(company_id, alert_id)
 
 
+
+# ─── Morning reports ──────────────────────────────────────────────────────────
+#
+# A quick agent with a morning report writes it at its set time, and Paperclip
+# puts it in the morning-report outbox. This pass sends each report through
+# the agent's own bot (or the nearest boss's), the same way as a watcher
+# alert: remembered the moment Telegram took it, then acknowledged, so a lost
+# acknowledgement never sends it twice. A report nobody could receive stays in
+# the outbox, and Paperclip retires it after a day.
+
+MORNING_REPORTS_REMEMBERED = 200
+
+
+def ack_morning_report(company_id, report_id, outcome="delivered"):
+    return cli("morning-report", "outbox:ack", report_id, "-C", company_id, "--outcome", outcome) is not None
+
+
+def notify_morning_reports(state, bots):
+    """Send every report waiting in each company's morning-report outbox, once."""
+    by_company = defaultdict(list)
+    for b in bots:
+        by_company[b["companyId"]].append(b)
+    with LOCK:
+        remembered = list(state.get("sent_morning_reports", []))
+    sent_before = set(remembered)
+    for company_id, cbots in by_company.items():
+        data = cli("morning-report", "outbox", "-C", company_id)
+        items = data.get("reports") if isinstance(data, dict) else None
+        if not isinstance(items, list) or not items:
+            continue
+        reports_to, names, roles = fetch_org(company_id)
+        bots_by_agent = {b["agentId"]: b for b in cbots}
+        default_bot = company_notice_bot(cbots, roles)
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            report_id = it.get("id")
+            if not isinstance(report_id, str) or not UUID_RE.match(report_id):
+                continue
+            if it.get("companyId") not in (None, company_id):
+                continue
+            if report_id in sent_before:
+                # Telegram already has it; only the acknowledgement was lost.
+                ack_morning_report(company_id, report_id)
+                continue
+            agent_id = it.get("agentId")
+            bot, escalated = resolve_bot(agent_id, bots_by_agent, reports_to, default_bot)
+            if bot is None:
+                continue
+            chats = deliverable_chats(state, bot["token"], allowed_users_for(bot))
+            if not chats:
+                continue  # nobody has started this bot yet: try again next pass
+            text = str(it.get("text") or "").strip()
+            if not text:
+                continue
+            if escalated and agent_id:
+                text += f"\n(on behalf of {names.get(agent_id, 'a teammate')})"
+            delivered = False
+            for chat in chats:
+                if send_text_checked(bot["token"], chat, text):
+                    delivered = True
+            if not delivered:
+                continue  # Telegram refused; the next pass tries again
+            sent_before.add(report_id)
+            remembered.append(report_id)
+            with LOCK:
+                state["sent_morning_reports"] = remembered[-MORNING_REPORTS_REMEMBERED:]
+                save_state(state)
+            ack_morning_report(company_id, report_id)
+
 def handle_callback(cq):
     data = cq.get("data", "")
     action, _, rest = data.partition(":")
@@ -1855,6 +1928,10 @@ def main():
             notify_watcher_alerts(state, bots)
         except Exception as e:
             print(f"watcher-alert-notify error: {e}", flush=True)
+        try:
+            notify_morning_reports(state, bots)
+        except Exception as e:
+            print(f"morning-report-notify error: {e}", flush=True)
         time.sleep(12)
 
 
