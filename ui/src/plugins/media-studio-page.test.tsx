@@ -63,7 +63,7 @@ describe("Media Studio main-menu link and page (DUR-4060)", () => {
 
   it("SidebarLink points at the top-level Media Studio route", async () => {
     root = createRoot(container);
-    root.render(<SidebarLink context={{ companyId: COMPANY }} />);
+    root.render(<SidebarLink context={{ companyId: COMPANY } as never} />);
     await flush();
     const link = container.querySelector("a")!;
     expect(link.getAttribute("href")).toBe("/media-studio");
