@@ -99,6 +99,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "browser.ts",
   // Morning report routes (DUR-4017) are a new backend feature not yet in the public OpenAPI document.
   "morning-report.ts",
+  // Payment card routes (DUR-4040) are board-only, switched off by default, and not yet in the public OpenAPI document.
+  "payment-cards.ts",
 ]);
 
 function createApp() {

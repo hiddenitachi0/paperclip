@@ -248,6 +248,9 @@ DECLARE
     -- listed here so the login-role lists match the schema, as for the
     -- tables above.
     'morning_report_outbox',
+    -- DUR-4040. Created (and granted on) in 0186_payment_cards.sql; listed
+    -- here so the login-role lists match the schema, as for the tables above.
+    'payment_cards',
     'persona_account_publish_counters',
     'persona_accounts',
     'persona_generation_counters',
@@ -416,6 +419,9 @@ DECLARE
     -- listed here so the login-role lists match the schema, as for the
     -- tables above.
     'morning_report_outbox',
+    -- DUR-4040. Created (and granted on) in 0186_payment_cards.sql; listed
+    -- here so the login-role lists match the schema, as for the tables above.
+    'payment_cards',
     'persona_account_publish_counters',
     'persona_accounts',
     'persona_generation_counters',

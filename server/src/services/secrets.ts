@@ -37,6 +37,7 @@ import {
   deriveProjectUrlKey,
   envBindingSchema,
   GITHUB_TOKEN_SECRET_NAMES,
+  isSecretKindBindable,
   isUuidLike,
   normalizeAgentUrlKey,
   secretProviderConfigPayloadSchema,
@@ -304,6 +305,14 @@ type SecretConsumerContext = {
 type SecretResolutionOptions = {
   bindingContext?: SecretConsumerContext;
   accessContext?: SecretConsumerContext;
+  /**
+   * Set only by resolveSecretValueForBrowserFill, the one intended reader of
+   * payment_card_single_use/site_login secret values. Every other resolution
+   * path (env, MCP, export, plugin, test, ephemeral) leaves this unset and is
+   * refused by kind, defence-in-depth against a binding row that should never
+   * have been created for one of these kinds in the first place.
+   */
+  allowProtectedSecretKind?: boolean;
 };
 
 export type RuntimeSecretManifestEntry = {
@@ -564,6 +573,15 @@ export function secretService(db: Db, rawDb: Db = db) {
     });
   }
 
+  // DUR-4044: every caller of this function is validating a secret ahead of
+  // creating/replacing a company_secret_bindings row or persisting it into an
+  // adapter/env/MCP config field (createBinding, syncSecretRefsForTarget,
+  // syncEnvBindingsForTarget, normalizeEnvConfig, normalizeSchemaSecretField
+  // ForPersistence). A payment_card_single_use or site_login secret must
+  // never be reachable through any of those paths -- only
+  // paymentCardService.resolveForFill (via resolveSecretValueForBrowserFill)
+  // may ever see the value -- so the refusal belongs here, by kind, once, not
+  // repeated (and possibly forgotten) at each call site.
   async function assertSecretInCompany(
     companyId: string,
     secretId: string,
@@ -573,6 +591,11 @@ export function secretService(db: Db, rawDb: Db = db) {
     if (!secret) throw notFound("Secret not found");
     if (secret.status === "deleted") throw notFound("Secret not found");
     if (secret.companyId !== companyId) throw unprocessable("Secret must belong to same company");
+    if (!isSecretKindBindable(secret.kind)) {
+      throw forbidden(
+        `Secrets of kind "${secret.kind}" can only be read through their dedicated resolver and can never be bound to an agent, environment, or config`,
+      );
+    }
     return secret;
   }
 
@@ -716,6 +739,16 @@ export function secretService(db: Db, rawDb: Db = db) {
     const secret = await getById(secretId);
     if (!secret) throw notFound("Secret not found");
     if (secret.companyId !== companyId) throw unprocessable("Secret must belong to same company");
+    // DUR-4044: defence in depth. Binding creation already refuses these
+    // kinds (assertSecretInCompany), but a stale/pre-existing binding row (or
+    // any future resolution path that forgets to check) must not be able to
+    // hand out a payment_card_single_use/site_login value either -- only
+    // resolveSecretValueForBrowserFill sets allowProtectedSecretKind.
+    if (!options?.allowProtectedSecretKind && !isSecretKindBindable(secret.kind)) {
+      throw forbidden(
+        `Secrets of kind "${secret.kind}" can only be resolved through their dedicated reader`,
+      );
+    }
     const resolvedVersion = version === "latest" ? secret.latestVersion : version;
     const providerId = secret.provider as SecretProvider;
     const configPath = accessContext?.configPath ?? null;
@@ -895,6 +928,41 @@ export function secretService(db: Db, rawDb: Db = db) {
     }
     return (await resolveSecretValueInternal(companyId, secretId, version, {
       accessContext: context,
+    })).value;
+  }
+
+  /**
+   * DUR-4040 (Maja browser step 5): resolve a `payment_card_single_use` (or
+   * `site_login`) secret's VALUE for `paymentCardService.resolveForFill`, the
+   * only caller. Like the plugin path this asserts no `company_secret_bindings`
+   * row -- a payment card points at its secret directly via
+   * `payment_cards.secret_id`, there is no binding UI for it -- but still
+   * records an access event via resolveSecretValueInternal, so every fill
+   * shows up in the secret's own audit trail (its "who accessed this and
+   * when" list) as well as the card's own. Requires an agent actor context;
+   * paymentCardService is responsible for everything else the design asks
+   * for before calling this (a live clearance, the card reserved for that
+   * clearance, the kill switch off) -- this function only ever resolves the
+   * bytes, it does not re-derive any of those checks.
+   */
+  async function resolveSecretValueForBrowserFill(
+    companyId: string,
+    secretId: string,
+    context: { actorId: string; issueId?: string | null; heartbeatRunId?: string | null },
+  ): Promise<string> {
+    if (!context.actorId?.trim()) {
+      throw forbidden("Payment card fill requires an agent actor context");
+    }
+    return (await resolveSecretValueInternal(companyId, secretId, "latest", {
+      accessContext: {
+        consumerType: "system",
+        consumerId: `payment_card_fill:${secretId}`,
+        actorType: "agent",
+        actorId: context.actorId,
+        issueId: context.issueId ?? null,
+        heartbeatRunId: context.heartbeatRunId ?? null,
+      },
+      allowProtectedSecretKind: true,
     })).value;
   }
 
@@ -2143,6 +2211,7 @@ export function secretService(db: Db, rawDb: Db = db) {
     resolveSecretValueForEphemeralAccess,
     resolveSecretValueForExport,
     resolveSecretValueForPlugin,
+    resolveSecretValueForBrowserFill,
     resolveSecretValueForTest,
     resolveGitHubToken,
 
