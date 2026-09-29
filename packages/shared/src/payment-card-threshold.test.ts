@@ -3,6 +3,7 @@ import {
   DEFAULT_FX_RATES_TO_NOK,
   NOK_APPROVAL_THRESHOLD,
   PURCHASE_CAPS,
+  containsSubscriptionOrTrialWording,
   evaluatePurchaseAmount,
   evaluatePurchaseCaps,
   findMoneyCandidates,
@@ -193,6 +194,7 @@ describe("evaluatePurchaseCaps", () => {
     autoPurchasesToday: 0,
     merchantPurchasesToday: 0,
     merchantPurchasesThisWeek: 0,
+    merchantSpendLast24hNok: 0,
   };
 
   it("allows a purchase well within every cap", () => {
@@ -245,5 +247,48 @@ describe("evaluatePurchaseCaps", () => {
     expect(result.breachedCaps).toEqual(
       expect.arrayContaining(["daily_amount", "weekly_amount"]),
     );
+  });
+
+  it("requires approval when this purchase would make the merchant's trailing-24h sum reach the threshold (no splitting)", () => {
+    // Two prior 200 NOK purchases at the same merchant today, a third of 150
+    // brings the 24h sum to 550 -- over the 500 NOK line -- even though no
+    // single purchase crossed it and the count/amount caps above are untouched.
+    const result = evaluatePurchaseCaps({
+      ...baseline,
+      amountNok: 150,
+      merchantSpendLast24hNok: 400,
+    });
+    expect(result.requiresApproval).toBe(true);
+    expect(result.breachedCaps).toContain("merchant_24h_splitting");
+  });
+
+  it("does not breach the splitting cap for a merchant sum comfortably under the threshold", () => {
+    const result = evaluatePurchaseCaps({ ...baseline, amountNok: 100, merchantSpendLast24hNok: 100 });
+    expect(result.breachedCaps).not.toContain("merchant_24h_splitting");
+  });
+
+  it("never applies the splitting cap when no merchant is given", () => {
+    const result = evaluatePurchaseCaps({
+      ...baseline,
+      merchant: null,
+      amountNok: 600,
+      merchantSpendLast24hNok: 600,
+    });
+    expect(result.breachedCaps).not.toContain("merchant_24h_splitting");
+  });
+});
+
+describe("containsSubscriptionOrTrialWording", () => {
+  it("flags English subscription/trial wording", () => {
+    expect(containsSubscriptionOrTrialWording("Start your free trial today, then $9.99/month")).toBe(true);
+    expect(containsSubscriptionOrTrialWording("This subscription renews automatically")).toBe(true);
+  });
+
+  it("flags Norwegian wording", () => {
+    expect(containsSubscriptionOrTrialWording("Prøveperiode i 14 dager, deretter løpende avtale")).toBe(true);
+  });
+
+  it("does not flag an ordinary one-off checkout page", () => {
+    expect(containsSubscriptionOrTrialWording("Total: 349 kr. Thank you for your order.")).toBe(false);
   });
 });

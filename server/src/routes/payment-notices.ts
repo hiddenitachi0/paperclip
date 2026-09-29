@@ -87,5 +87,13 @@ export function paymentNoticesRoutes(rawDb: Db) {
     res.json(await settings.setBookingEnabled(req.params.companyId as string, enabled));
   });
 
+  // DUR-4046 (step 6): the purchase-side kill switch, same owner/admin bar
+  // and shape as booking-enabled above, deliberately a separate flag.
+  router.put("/companies/:companyId/payment-settings/purchases-enabled", ownerOrAdminScope(), async (req, res) => {
+    const enabled = req.body?.enabled;
+    if (typeof enabled !== "boolean") throw badRequest("Body must be { enabled: boolean }");
+    res.json(await settings.setPurchasesEnabled(req.params.companyId as string, enabled));
+  });
+
   return router;
 }

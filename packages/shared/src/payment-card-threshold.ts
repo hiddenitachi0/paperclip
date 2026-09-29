@@ -283,6 +283,15 @@ export interface PurchaseCapsInput {
   autoPurchasesToday: number;
   merchantPurchasesToday: number;
   merchantPurchasesThisWeek: number;
+  /**
+   * Already-completed auto-purchase spend at this SAME merchant in the
+   * trailing 24 hours, NOT including this one -- Filip's anti-splitting
+   * rule ("a merchant's 24h sum reaching 500 NOK needs approval, no
+   * splitting"). Required (not defaulted) so a caller cannot forget to wire
+   * this counter and silently under-detect splitting, which is the one
+   * failure direction this rule must never allow.
+   */
+  merchantSpendLast24hNok: number;
 }
 
 export type PurchaseCapKind =
@@ -290,7 +299,8 @@ export type PurchaseCapKind =
   | "weekly_amount"
   | "daily_auto_purchase_count"
   | "merchant_daily"
-  | "merchant_weekly";
+  | "merchant_weekly"
+  | "merchant_24h_splitting";
 
 export interface EvaluatePurchaseCapsResult {
   requiresApproval: boolean;
@@ -299,10 +309,12 @@ export interface EvaluatePurchaseCapsResult {
 
 /**
  * The spend/count caps, counted in NOK: 1,000/day, 2,500/week, 3 auto
- * purchases/day, 1 per merchant/day, 2 per merchant/week. Pure given
- * already-known counters -- collecting those counters from finance events is
- * step 6 (purchasing); this is just the rule of whether adding one more
- * purchase of `amountNok` would breach any of them.
+ * purchases/day, 1 per merchant/day, 2 per merchant/week, plus the
+ * anti-splitting rule (a merchant's trailing-24h sum reaching the 500 NOK
+ * approval line needs approval even if each individual purchase was under
+ * it). Pure given already-known counters -- collecting those counters from
+ * finance events is step 6 (purchasing); this is just the rule of whether
+ * adding one more purchase of `amountNok` would breach any of them.
  */
 export function evaluatePurchaseCaps(input: PurchaseCapsInput): EvaluatePurchaseCapsResult {
   const breached: PurchaseCapKind[] = [];
@@ -312,6 +324,47 @@ export function evaluatePurchaseCaps(input: PurchaseCapsInput): EvaluatePurchase
   if (input.merchant) {
     if (input.merchantPurchasesToday + 1 > PURCHASE_CAPS.perMerchantPerDay) breached.push("merchant_daily");
     if (input.merchantPurchasesThisWeek + 1 > PURCHASE_CAPS.perMerchantPerWeek) breached.push("merchant_weekly");
+    // "Reaching" the threshold, i.e. >=, matches evaluatePurchaseAmount's own
+    // at_or_above_threshold semantics -- the same line an unsplit purchase of
+    // this size would already have needed approval for.
+    if (input.merchantSpendLast24hNok + input.amountNok >= NOK_APPROVAL_THRESHOLD) {
+      breached.push("merchant_24h_splitting");
+    }
   }
   return { requiresApproval: breached.length > 0, breachedCaps: breached };
+}
+
+/**
+ * Design section 5 / Filip's ruling: subscription/trial wording on a
+ * checkout page always needs approval, regardless of the parsed amount --
+ * a "free trial" today can auto-renew into a real charge later with no
+ * further chance to catch it, so the auto-clear path must never see this
+ * page as "just a small purchase". Checked against the same free text the
+ * total parser reads (the accessibility snapshot tree), case-insensitive,
+ * English/Norwegian/Danish/Swedish/German since the same fixture languages
+ * apply here as `final-action-matcher.ts`'s wording lists.
+ */
+const SUBSCRIPTION_WORDING_RE =
+  /\b(subscription|subscribe|recurring|auto-renew|auto renew|renews automatically|free trial|trial period|membership|abonnement|abonner|løpende avtale|prøveperiode|prøveabonnement|mitgliedschaft|testphase)\b/i;
+
+export function containsSubscriptionOrTrialWording(text: string): boolean {
+  return SUBSCRIPTION_WORDING_RE.test(text);
+}
+
+/**
+ * The purchase analogue of `isAmountStillAcceptable` in browser-amount.ts
+ * (the booking gate's coarse re-check), but built on the currency-aware
+ * `ParsedTotal` from `pickTotal`/`evaluatePurchaseAmount` instead of a bare
+ * currency token -- `confirm_final_step` for a purchase re-parses the total
+ * with the SAME parser `request_purchase` used, not the booking gate's
+ * looser one. Both null (unparseable both times, e.g. a page evaluated as
+ * "needs approval" is being re-checked after the same unparseable text) is
+ * fine; a mismatch in currency, or one present/other absent, or an increase,
+ * is not verifiably safe and returns false.
+ */
+export function isPurchaseTotalStillAcceptable(atRequest: ParsedTotal | null, atConfirm: ParsedTotal | null): boolean {
+  if (!atRequest && !atConfirm) return true;
+  if (!atRequest || !atConfirm) return false;
+  if (normalizeCurrencyCode(atRequest.currency) !== normalizeCurrencyCode(atConfirm.currency)) return false;
+  return atConfirm.amount <= atRequest.amount;
 }

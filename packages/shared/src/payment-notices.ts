@@ -1,10 +1,11 @@
 import { z } from "zod";
 
 /**
- * Payment notices (DUR-4037, Maja browser step 4): the outbox for the
- * booking/purchase flow's plain-language notifications that are not
- * themselves an approval card -- a receipt after a booking went through, or a
- * hand-over ("Filip, I hit a login step I can't do -- 2FA/BankID/SMS").
+ * Payment notices (DUR-4037, Maja browser step 4; `purchase_receipt` added
+ * DUR-4046 step 6): the outbox for the booking/purchase flow's
+ * plain-language notifications that are not themselves an approval card -- a
+ * receipt after a booking or purchase went through, or a hand-over ("Filip,
+ * I hit a login step I can't do -- 2FA/BankID/SMS").
  * Modelled directly on `watcher_alerts` (`packages/shared/src/watchers.ts`),
  * with one difference: nothing here is written by a quick agent after the
  * fact, so there is no `composing` state -- every notice is written `ready`
@@ -12,7 +13,7 @@ import { z } from "zod";
  * as fact (same rule as a booking approval's `agentSummary`).
  */
 
-export const PAYMENT_NOTICE_KINDS = ["booking_receipt", "hand_over"] as const;
+export const PAYMENT_NOTICE_KINDS = ["booking_receipt", "purchase_receipt", "hand_over"] as const;
 export type PaymentNoticeKind = (typeof PAYMENT_NOTICE_KINDS)[number];
 
 export const PAYMENT_NOTICE_STATUSES = ["ready", "delivered", "failed", "expired"] as const;

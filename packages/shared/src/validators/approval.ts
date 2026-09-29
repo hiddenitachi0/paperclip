@@ -378,3 +378,50 @@ export const bookingRequestPayloadSchema = z
   .strict();
 
 export type BookingRequestPayload = z.infer<typeof bookingRequestPayloadSchema>;
+
+/**
+ * `request_board_approval` payload convention for a purchase clearance
+ * (DUR-4046, Maja browser step 6). Filed whenever the purchase gate cannot
+ * auto-clear a purchase: at/above the 500 NOK threshold, a daily/weekly/
+ * per-merchant/anti-splitting cap would be breached, the total could not be
+ * parsed or its currency is ambiguous, several totals were found, or the
+ * page reads as a subscription/trial. `confirm_final_step` only proceeds
+ * once this specific approval is `approved`, same shape as
+ * `bookingRequestPayloadSchema` above.
+ *
+ * Every field here is stamped server-side by `browser-service.ts`'s
+ * `requestPurchase` at filing time -- never trusted from the requesting
+ * agent's own words beyond the quoted `agentSummary` -- so a filer cannot
+ * claim its own "this is a harmless small purchase". `cardLast4`/`cardLabel`
+ * identify which card would be spent without exposing the PAN/CVC (never
+ * present in this payload, only in the encrypted secret the card's
+ * `secretId` points at).
+ */
+export const purchaseRequestPayloadSchema = z
+  .object({
+    kind: z.literal("purchase"),
+    sessionId: z.string().uuid(),
+    agentId: z.string().uuid(),
+    clearanceId: z.string().uuid(),
+    cardId: z.string().uuid(),
+    cardLast4: z.string().trim().min(1).max(4),
+    cardLabel: z.string().trim().min(1).max(200),
+    /** The page's registrable domain at the moment of filing (tldts), never the raw URL an agent could pad with a lie. */
+    merchantDomain: z.string().trim().min(1).max(253),
+    /** The agent's own one-line account of what it is buying, always shown quoted, never as fact. */
+    agentSummary: multilineTextSchema.pipe(z.string().trim().min(1).max(1000)),
+    /** The server's own parsed total, or null when it could not be parsed (itself a reason this needed approval). */
+    detectedAmount: z.number().nonnegative().nullable(),
+    detectedCurrency: z.string().trim().max(10).nullable(),
+    amountNok: z.number().nonnegative().nullable(),
+    /** Why this could not auto-clear -- shown to Filip so he knows what to check. */
+    reasons: z.array(z.string().trim().min(1)).min(1),
+    /** A same-company attachment id (GET /api/attachments/:id/content) for the pre-confirm screenshot, or null when one could not be taken. */
+    screenshotFileId: z.string().uuid().nullable(),
+    title: z.string().min(1),
+    summary: multilineTextSchema.optional(),
+    expiresAt: z.string().datetime(),
+  })
+  .strict();
+
+export type PurchaseRequestPayload = z.infer<typeof purchaseRequestPayloadSchema>;

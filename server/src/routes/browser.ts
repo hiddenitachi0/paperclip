@@ -27,6 +27,10 @@ import {
   browserHandOverSchema,
   browserRequestBookingSchema,
   browserConfirmFinalStepSchema,
+  browserRequestPurchaseSchema,
+  browserFillPaymentDetailsSchema,
+  browserWaitForOutcomeSchema,
+  browserReportOutcomeSchema,
 } from "@paperclipai/shared/validators/browser";
 import { forbidden, notFound } from "../errors.js";
 import { validate } from "../middleware/validate.js";
@@ -157,6 +161,50 @@ export function browserRoutes(rawDb: Db, deps: BrowserServiceDeps = {}) {
     async (req, res) => {
       const { agentId } = requireAgentActor(req);
       res.json({ snapshot: await svc.confirmFinalStep(agentId, sessionIdOf(req), req.body.ref) });
+    },
+  );
+
+  // ── DUR-4046 (step 6): the purchase gate. book_and_buy agents only, same
+  // access/kill-switch checks as booking, re-checked by the service itself --
+  // this layer only wires HTTP <-> service, same as everything above.
+
+  router.post(
+    "/browser/sessions/:sessionId/request-purchase",
+    agentScope(),
+    validate(browserRequestPurchaseSchema),
+    async (req, res) => {
+      const { agentId } = requireAgentActor(req);
+      res.status(202).json(await svc.requestPurchase(agentId, sessionIdOf(req), req.body.summary, req.body.ref, req.body.cardId));
+    },
+  );
+
+  router.post(
+    "/browser/sessions/:sessionId/fill-payment-details",
+    agentScope(),
+    validate(browserFillPaymentDetailsSchema),
+    async (req, res) => {
+      const { agentId } = requireAgentActor(req);
+      res.json({ snapshot: await svc.fillPaymentDetails(agentId, sessionIdOf(req), req.body) });
+    },
+  );
+
+  router.post(
+    "/browser/sessions/:sessionId/wait-for-outcome",
+    agentScope(),
+    validate(browserWaitForOutcomeSchema),
+    async (req, res) => {
+      const { agentId } = requireAgentActor(req);
+      res.json(await svc.waitForOutcome(agentId, sessionIdOf(req), req.body.ms));
+    },
+  );
+
+  router.post(
+    "/browser/sessions/:sessionId/report-outcome",
+    agentScope(),
+    validate(browserReportOutcomeSchema),
+    async (req, res) => {
+      const { agentId } = requireAgentActor(req);
+      res.json(await svc.reportOutcome(agentId, sessionIdOf(req), req.body.agentNote));
     },
   );
 

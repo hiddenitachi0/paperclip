@@ -1310,6 +1310,13 @@
       "when": 1787160560000,
       "tag": "0187_payment_notices_and_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 188,
+      "version": "7",
+      "when": 1787160570000,
+      "tag": "0188_purchase_settings",
+      "breakpoints": true
     }
   ]
 }
