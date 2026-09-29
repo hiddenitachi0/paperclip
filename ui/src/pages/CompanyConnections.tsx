@@ -9,7 +9,7 @@ import {
   type SecretKindDescriptor,
   type SecretKindProvider,
 } from "@paperclipai/shared";
-import { AlertCircle, CheckCircle2, KeyRound, Loader2, Plug, Plus, Wrench } from "lucide-react";
+import { AlertCircle, CheckCircle2, CreditCard, KeyRound, Loader2, Plug, Plus, Wrench } from "lucide-react";
 import { Link } from "@/lib/router";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
@@ -26,6 +26,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { AddIntegrationTokenDialog } from "../components/AddIntegrationTokenDialog";
+import { AddPaymentCardDialog } from "../components/AddPaymentCardDialog";
+import { AddSiteLoginDialog } from "../components/AddSiteLoginDialog";
 import { DataSourcesSection } from "../components/DataSourcesSection";
 import { ServiceTokensSection } from "../components/ServiceTokensSection";
 import { TelegramBotsSection } from "../components/TelegramBotsSection";
@@ -240,6 +242,8 @@ export function CompanyConnections() {
   const canManage = role.canManageConnections;
   const [addKind, setAddKind] = useState<SecretKind | null>(null);
   const [testingId, setTestingId] = useState<string | null>(null);
+  const [addCardOpen, setAddCardOpen] = useState(false);
+  const [addLoginOpen, setAddLoginOpen] = useState(false);
 
   useEffect(() => {
     setBreadcrumbs([
@@ -263,6 +267,11 @@ export function CompanyConnections() {
 
   const secrets = useMemo(() => secretsQuery.data ?? [], [secretsQuery.data]);
   const untaggedCount = useMemo(() => secrets.filter((secret) => secret.kind === null).length, [secrets]);
+  const paymentCards = useMemo(
+    () => secrets.filter((secret) => secret.kind === "payment_card_single_use"),
+    [secrets],
+  );
+  const siteLogins = useMemo(() => secrets.filter((secret) => secret.kind === "site_login"), [secrets]);
 
   const testMutation = useMutation({
     mutationFn: (secret: CompanySecret) => secretsApi.test(selectedCompanyId!, secret.id),
@@ -372,6 +381,89 @@ export function CompanyConnections() {
         <ServiceTokensSection companyId={selectedCompanyId} readOnly={!canManage} />
       </div>
 
+      {/* Payments and logins, for agents with browser access */}
+      <div className="space-y-4" data-testid="connections-payments">
+        <SectionHeading>Payments and logins</SectionHeading>
+        <p className="text-xs text-muted-foreground">
+          For agents that can use a web browser to book, buy or sign in on your behalf. Once saved, none of these
+          details are ever shown again — only the label you give each one.
+        </p>
+        <Card data-testid="payment-cards-card">
+          <CardHeader>
+            <div className="flex items-start justify-between gap-3">
+              <div className="space-y-1">
+                <CardTitle className="flex items-center gap-1.5 text-sm">
+                  <CreditCard className="h-3.5 w-3.5" /> Payment cards
+                </CardTitle>
+                <CardDescription>
+                  A card an agent may spend from, one purchase or booking at a time.
+                </CardDescription>
+              </div>
+              {canManage && (
+                <Button size="sm" variant="outline" onClick={() => setAddCardOpen(true)}>
+                  <Plus className="mr-1 h-3.5 w-3.5" /> Add card
+                </Button>
+              )}
+            </div>
+          </CardHeader>
+          <CardContent>
+            {paymentCards.length === 0 ? (
+              <p className="text-xs text-muted-foreground">No cards saved for this company yet.</p>
+            ) : (
+              <ul className="divide-y rounded-md border">
+                {paymentCards.map((secret) => (
+                  <li key={secret.id} className="flex items-center justify-between gap-3 px-3 py-2">
+                    <p className="flex items-center gap-2 truncate text-sm font-medium">
+                      <span className="truncate">{secret.name}</span>
+                      {secret.status !== "active" && (
+                        <Badge variant="outline" className="text-[10px]">
+                          {secret.status}
+                        </Badge>
+                      )}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </CardContent>
+        </Card>
+        <Card data-testid="site-logins-card">
+          <CardHeader>
+            <div className="flex items-start justify-between gap-3">
+              <div className="space-y-1">
+                <CardTitle className="text-sm">Website logins</CardTitle>
+                <CardDescription>A saved username and password an agent may sign in with.</CardDescription>
+              </div>
+              {canManage && (
+                <Button size="sm" variant="outline" onClick={() => setAddLoginOpen(true)}>
+                  <Plus className="mr-1 h-3.5 w-3.5" /> Add website login
+                </Button>
+              )}
+            </div>
+          </CardHeader>
+          <CardContent>
+            {siteLogins.length === 0 ? (
+              <p className="text-xs text-muted-foreground">No website logins saved for this company yet.</p>
+            ) : (
+              <ul className="divide-y rounded-md border">
+                {siteLogins.map((secret) => (
+                  <li key={secret.id} className="flex items-center justify-between gap-3 px-3 py-2">
+                    <p className="flex items-center gap-2 truncate text-sm font-medium">
+                      <span className="truncate">{secret.name}</span>
+                      {secret.status !== "active" && (
+                        <Badge variant="outline" className="text-[10px]">
+                          {secret.status}
+                        </Badge>
+                      )}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
       {/* All secrets + Tools */}
       <div className="space-y-4" data-testid="connections-all-secrets">
         <SectionHeading>All secrets</SectionHeading>
@@ -412,14 +504,18 @@ export function CompanyConnections() {
       </div>
 
       {canManage && (
-        <AddIntegrationTokenDialog
-          open={addKind !== null}
-          onOpenChange={(open) => {
-            if (!open) setAddKind(null);
-          }}
-          companyId={selectedCompanyId}
-          initialKind={addKind}
-        />
+        <>
+          <AddIntegrationTokenDialog
+            open={addKind !== null}
+            onOpenChange={(open) => {
+              if (!open) setAddKind(null);
+            }}
+            companyId={selectedCompanyId}
+            initialKind={addKind}
+          />
+          <AddPaymentCardDialog open={addCardOpen} onOpenChange={setAddCardOpen} companyId={selectedCompanyId} />
+          <AddSiteLoginDialog open={addLoginOpen} onOpenChange={setAddLoginOpen} companyId={selectedCompanyId} />
+        </>
       )}
     </div>
   );

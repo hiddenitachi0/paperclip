@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  BROWSER_ACCESS_LEVELS,
   LANE_A_DEFAULT_MAX_OUTPUT_TOKENS,
   LANE_A_DEFAULT_TRANSFORM_DAILY_CALL_CAP,
   LANE_A_INSTRUCTIONS_MAX_LENGTH,
@@ -18,7 +19,9 @@ import {
   laneATransformWorstCaseDailyCents,
   normalizeLaneAProvider,
   formatAgentDisplayName,
+  readLaneABrowserAccess,
   readLaneAWebSearchSwitch,
+  type BrowserAccessLevel,
   WEB_SEARCH_FREE_CREDIT_TEXT,
   WEB_SEARCH_PRICE_TEXT,
   type CompanySecret,
@@ -215,6 +218,11 @@ export function QuickAgentSection({
   });
   const saveWebSearch = (next: boolean) =>
     settingMutation.mutate({ adapterConfig: { laneA: { ...currentLaneA, webSearch: next } } });
+
+  // "Browser access": off unless raised here. Board-only, same as web search.
+  const browserAccess = readLaneABrowserAccess(agent.adapterConfig);
+  const saveBrowserAccess = (next: BrowserAccessLevel) =>
+    settingMutation.mutate({ adapterConfig: { laneA: { ...currentLaneA, browserAccess: next } } });
 
   // ─── DUR-3997 slice 4: readiness ────────────────────────────────────────
   // Paperclip's own key is only readable by an instance admin (the route is
@@ -493,6 +501,43 @@ export function QuickAgentSection({
           )}
         </div>
 
+        {/* Browser access: off by default. A three-level dial rather than a
+            switch, since a browser can do a lot more than a search box. */}
+        <div className="space-y-2 border-t pt-4" data-testid="quick-agent-browser-access">
+          <div className="space-y-1.5">
+            <p className="text-sm font-medium">Browser access</p>
+            <p className="text-xs text-muted-foreground">
+              Lets this agent use a web browser on the server to look at real pages and fill in forms for you — for
+              example checking a booking site or placing an order. It never sees a card number or a website password
+              directly; Paperclip fills those in for it, only on the right page, and only when you have approved it.
+              Off by default. Only you can change this.
+            </p>
+          </div>
+          <select
+            className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
+            value={browserAccess}
+            disabled={settingMutation.isPending}
+            aria-label="Browser access"
+            onChange={(event) => saveBrowserAccess(event.target.value as BrowserAccessLevel)}
+          >
+            {BROWSER_ACCESS_LEVELS.map((level) => (
+              <option key={level} value={level}>
+                {browserAccessLabel(level)}
+              </option>
+            ))}
+          </select>
+          {browserAccess === "book_and_buy" && (
+            <p className="text-xs text-muted-foreground">
+              To actually complete a purchase or a booking, this agent also needs a saved payment card or website
+              login — add those under{" "}
+              <Link to="/company/settings/connections" className="underline">
+                Connections → Payments and logins
+              </Link>
+              .
+            </p>
+          )}
+        </div>
+
         {/* DUR-3977: the settings that decide what a batch of rewrites costs
             and how far it can run before it stops on its own. */}
         <div className="space-y-3 border-t pt-4">
@@ -625,6 +670,18 @@ function ReadinessChecklist({ lines }: { lines: ReadinessLine[] }) {
       </ul>
     </div>
   );
+}
+
+/** Plain-language label for each browser access level, for the settings dropdown. */
+function browserAccessLabel(level: BrowserAccessLevel): string {
+  switch (level) {
+    case "off":
+      return "Off";
+    case "browse_and_forms":
+      return "Can browse and fill in forms";
+    case "book_and_buy":
+      return "Can browse, buy and book";
+  }
 }
 
 /** The secret_ref bound at adapterConfig.laneA.apiKey, if any. */
