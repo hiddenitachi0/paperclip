@@ -256,14 +256,19 @@ export function MorningReportSection({
         <CardContent className="space-y-6">
           {/* Send a test report now (DUR-4075): try changes without waiting for the scheduled time */}
           <div className="space-y-2">
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => testMutation.mutate()}
-              disabled={testMutation.isPending}
-            >
-              {testMutation.isPending ? "Sending test report…" : "Send a test report now"}
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => testMutation.mutate()}
+                disabled={testMutation.isPending}
+              >
+                {testMutation.isPending ? "Sending test report…" : "Send a test report now"}
+              </Button>
+              <Button size="sm" variant="ghost" asChild>
+                <Link to={`/agents/${agent.id}/morning-reports`}>Past reports</Link>
+              </Button>
+            </div>
             {testResult && (
               <div className="rounded-md border border-border bg-muted/40 p-3 text-sm space-y-1.5">
                 <p className="text-muted-foreground">Test report sent. Here is what it says:</p>

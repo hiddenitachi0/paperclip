@@ -235,6 +235,7 @@ export const queryKeys = {
   },
   morningReports: {
     detail: (reportId: string) => ["morning-reports", "detail", reportId] as const,
+    listRecent: (agentId: string) => ["morning-reports", "list-recent", agentId] as const,
   },
   stalledTasks: {
     forCompany: (companyId: string) => ["stalled-tasks", companyId] as const,

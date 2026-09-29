@@ -18,4 +18,18 @@ export const morningReportsApi = {
   /** "Send a test report now" — composes and returns a report immediately, without consuming the day's scheduled slot. */
   sendTestNow: (companyId: string, agentId: string) =>
     api.post<MorningReportOutboxItem>(`/companies/${companyId}/agents/${agentId}/morning-report/test`, {}),
+  /**
+   * Past reports for one agent. Backed by the company-wide list route, which
+   * today only returns reports still `status: "ready"` from the last 24h
+   * (built for the Telegram bridge's polling, not a history view) — filtered
+   * to this agent client-side. A real per-agent history route is tracked on
+   * DUR-4080; until it lands this list only shows very recent, not-yet-
+   * delivered reports, which the page says plainly.
+   */
+  listRecent: async (companyId: string, agentId: string) => {
+    const { reports } = await api.get<{ reports: MorningReportOutboxItem[] }>(
+      `/companies/${companyId}/morning-report-outbox`,
+    );
+    return reports.filter((r) => r.agentId === agentId);
+  },
 };
