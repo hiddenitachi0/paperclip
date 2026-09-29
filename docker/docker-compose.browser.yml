@@ -1,4 +1,4 @@
-# DUR-4015 (Maja browser, step 2): infra-only overlay adding the sandboxed
+# DUR-4015/DUR-4065 (Maja browser): infra overlay adding the sandboxed
 # browser worker and its forward proxy. Layer on top of the base compose the
 # same way docker-compose.prod.yml is layered:
 #
@@ -13,7 +13,8 @@
 # host firewall rules, capacity check).
 #
 # Design: see DUR-4015 description ("Maja acts on websites and pays with
-# single-use cards"). Two containers, one image:
+# single-use cards"). Two containers, one image (packages/browser-worker/Dockerfile,
+# built here the same way the server image is built from the repo root):
 #
 #  - `browser`: the Playwright/Chromium worker. Runs as the image's built-in
 #    non-root `pwuser`, filesystem read-only (tmpfs for /tmp and its home so
@@ -30,18 +31,43 @@
 #    multicast all refused), ports 80/443 only, no route back into this
 #    compose project's own network.
 #
-# Both containers are placeholders for Backend Engineer's step-1 image
-# (worker package + Dockerfile, still in progress as of this PR -- see
-# DUR-4013). `image:` below names where that image is expected to land;
-# update it to the real tag/digest once step 1 merges. Nothing in this file
-# is referenced by the base compose or any deploy path, so it is inert
-# until a host operator explicitly adds it to deployPolicy.composeFiles.
+# DUR-4065: the worker's control server (packages/browser-worker/src/entrypoints/worker.ts)
+# is a deployability-only stub as of this PR -- it binds the socket below,
+# authenticates the server, and answers every session route with a clean 501.
+# Wiring a real Playwright-backed driver in there is tracked separately (see
+# that file's own comment); this overlay, the image build and the isolation
+# probe are all real and usable today regardless of that follow-up landing.
+#
+# `server` also gets the `browser-control` volume and the token here: the
+# server and worker talk over the Unix socket on that shared volume (never a
+# network path -- the worker has none back to the server, database or
+# tailnet), so both sides need the socket path and the same bearer token. See
+# server/src/services/browser-worker-client.ts.
+#
+# Secrets: production does not use docker-compose.secrets.yml today. Put
+# PAPERCLIP_SERVER_BROWSER_TOKEN in the host's /root/paperclip/.env (see "Host
+# steps for Filip" in the PR description for how to generate it) -- the
+# PAPERCLIP_SERVER_ prefix already keeps it out of every agent's own
+# environment (packages/adapter-utils/src/server-env-secrets.ts). Moving it
+# into a root-only secrets file is later hardening, not required for this PR.
+x-browser-worker-image: &browser-worker-image
+  build:
+    context: ..
+    dockerfile: packages/browser-worker/Dockerfile
+  image: "${PAPERCLIP_BROWSER_IMAGE:-paperclip-browser-worker:local}"
+
 services:
+  server:
+    environment:
+      PAPERCLIP_SERVER_BROWSER_TOKEN: "${PAPERCLIP_SERVER_BROWSER_TOKEN:?set in .env, see Host steps for Filip}"
+      PAPERCLIP_SERVER_BROWSER_WORKER_SOCKET: /run/browser-control/control.sock
+    volumes:
+      - browser-control:/run/browser-control
+
   browser:
-    image: "${PAPERCLIP_BROWSER_IMAGE:?set once DUR-4013's worker image is published}"
+    <<: *browser-worker-image
     # No `command:` override: the image's default entrypoint is the browser
-    # worker (control server + Chromium launcher), per Backend Engineer's
-    # step-1 image.
+    # worker's control server.
     init: true
     read_only: true
     user: pwuser
@@ -64,7 +90,7 @@ services:
       # Filip"). The `PAPERCLIP_SERVER_` prefix keeps this out of every
       # agent's own environment already (packages/adapter-utils/src/
       # server-env-secrets.ts), same as the server's own secrets.
-      PAPERCLIP_SERVER_BROWSER_TOKEN: "${PAPERCLIP_SERVER_BROWSER_TOKEN:?set in the root-only secrets file, see Host steps for Filip}"
+      PAPERCLIP_SERVER_BROWSER_TOKEN: "${PAPERCLIP_SERVER_BROWSER_TOKEN:?set in .env, see Host steps for Filip}"
       BROWSER_CONTROL_SOCKET: /run/browser-control/control.sock
     volumes:
       - browser-control:/run/browser-control
@@ -75,7 +101,7 @@ services:
     restart: unless-stopped
 
   browser-egress:
-    image: "${PAPERCLIP_BROWSER_IMAGE:?set once DUR-4013's worker image is published}"
+    <<: *browser-worker-image
     entrypoint: ["egress-proxy"]
     init: true
     read_only: true
