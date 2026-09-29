@@ -69,6 +69,9 @@ export function paymentNoticesService(db: Db) {
   const writeReceipt = (input: { companyId: string; agentId: string; text: string; imageFileId?: string | null }) =>
     write({ ...input, kind: "booking_receipt" });
 
+  const writePurchaseReceipt = (input: { companyId: string; agentId: string; text: string; imageFileId?: string | null }) =>
+    write({ ...input, kind: "purchase_receipt" });
+
   const writeHandOver = (input: { companyId: string; agentId: string; text: string; imageFileId?: string | null }) =>
     write({ ...input, kind: "hand_over" });
 
@@ -123,5 +126,5 @@ export function paymentNoticesService(db: Db) {
     return toSummary(updated ?? row);
   }
 
-  return { writeReceipt, writeHandOver, outbox, ack };
+  return { writeReceipt, writePurchaseReceipt, writeHandOver, outbox, ack };
 }

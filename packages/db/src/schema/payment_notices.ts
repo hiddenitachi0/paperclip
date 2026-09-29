@@ -38,7 +38,10 @@ export const paymentNotices = pgTable(
   (table) => ({
     companyStatusIdx: index("payment_notices_company_status_idx").on(table.companyId, table.status, table.createdAt),
     agentCreatedIdx: index("payment_notices_agent_created_idx").on(table.agentId, table.createdAt),
-    kindCheck: check("payment_notices_kind_check", sql`${table.kind} IN ('booking_receipt', 'hand_over')`),
+    kindCheck: check(
+      "payment_notices_kind_check",
+      sql`${table.kind} IN ('booking_receipt', 'purchase_receipt', 'hand_over')`,
+    ),
     statusCheck: check(
       "payment_notices_status_check",
       sql`${table.status} IN ('ready', 'delivered', 'failed', 'expired')`,

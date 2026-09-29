@@ -50,7 +50,7 @@ import {
   type ElementDescriptor,
   type ToolOutcome,
 } from "@paperclipai/adapter-utils/browser-tools";
-import { bookingRequestPayloadSchema } from "@paperclipai/shared";
+import { bookingRequestPayloadSchema, readLaneABrowserAccess } from "@paperclipai/shared";
 import { forbidden, notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
 import { approvalService } from "./approvals.js";
@@ -73,7 +73,16 @@ const BOOKING_APPROVAL_EXPIRY_MS = 30 * 60 * 1000;
 export interface BrowserAccessAgent {
   id: string;
   companyId: string;
-  browserAccess: string;
+  /**
+   * DUR-4046 fix: the browse/book gate reads `adapterConfig.laneA.browserAccess`
+   * (via `readLaneABrowserAccess`), not a bare string field. This used to be a
+   * plain `agents.browser_access` DB column that the Connections form
+   * (DUR-4020) and `paymentCardService.resolveForFill` never wrote or read --
+   * an operator turning the switch on in the UI silently never reached this
+   * gate. Kept as `unknown` so callers pass the raw `adapterConfig` column
+   * through unchanged.
+   */
+  adapterConfig: unknown;
   status: string;
 }
 
@@ -207,7 +216,7 @@ export function browserService(db: Db, deps: BrowserServiceDeps = {}) {
 
   async function loadAgent(agentId: string): Promise<BrowserAccessAgent> {
     const [agent] = await db
-      .select({ id: agents.id, companyId: agents.companyId, browserAccess: agents.browserAccess, status: agents.status })
+      .select({ id: agents.id, companyId: agents.companyId, adapterConfig: agents.adapterConfig, status: agents.status })
       .from(agents)
       .where(eq(agents.id, agentId));
     if (!agent) throw notFound("Agent not found");
@@ -215,15 +224,16 @@ export function browserService(db: Db, deps: BrowserServiceDeps = {}) {
   }
 
   /**
-   * The access gate: board-only switch (never mutable by the agent itself,
-   * see `assertNoAgentBrowserAccessFieldMutation` in routes/agents.ts) must
-   * be something other than "off", and the agent must be active. Level
-   * ("browse_and_forms" vs "book_and_buy") is not distinguished here --
-   * both get the plain tools this function guards. `book_and_buy` additionally
-   * needs `assertBookAndBuyAllowed` below before it may touch a gated tool.
+   * The access gate: board-only switch (never mutable by the agent itself
+   * beyond raising its own level, see `assertNoAgentBrowserAccessRaise` in
+   * routes/agents.ts) must be something other than "off", and the agent must
+   * be active. Level ("browse_and_forms" vs "book_and_buy") is not
+   * distinguished here -- both get the plain tools this function guards.
+   * `book_and_buy` additionally needs `assertBookAndBuyAllowed` below before
+   * it may touch a gated tool.
    */
   function assertBrowserAccessAllowed(agent: BrowserAccessAgent) {
-    if (agent.browserAccess === "off" || !agent.browserAccess) {
+    if (readLaneABrowserAccess(agent.adapterConfig) === "off") {
       throw forbidden("This agent's browser access is off. A board user can turn it on in the agent's settings.");
     }
     if (agent.status === "terminated" || agent.status === "pending_approval") {
@@ -241,7 +251,7 @@ export function browserService(db: Db, deps: BrowserServiceDeps = {}) {
    */
   async function assertBookAndBuyAllowed(agent: BrowserAccessAgent) {
     assertBrowserAccessAllowed(agent);
-    if (agent.browserAccess !== "book_and_buy") {
+    if (readLaneABrowserAccess(agent.adapterConfig) !== "book_and_buy") {
       throw forbidden("This agent can browse but cannot book. A board user can turn booking on in the agent's settings.");
     }
     if (process.env.PAPERCLIP_BROWSER_DISABLED === "1") {

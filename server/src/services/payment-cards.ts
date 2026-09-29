@@ -158,6 +158,122 @@ export function paymentCardService(db: Db, rawDb: Db = db, deps: PaymentCardServ
   }
 
   /**
+   * DUR-4046 (step 6): atomically claims an available card for a purchase
+   * clearance. The `status = 'available'` guard in the WHERE clause is
+   * itself the race guard -- two concurrent `request_purchase` calls for the
+   * same card race on this single-row UPDATE, and at most one can match --
+   * no advisory lock is needed for THIS check (unlike the cross-row
+   * daily/weekly/merchant cap counters, which browser-service.ts computes
+   * under `pg_advisory_xact_lock` before ever calling this). Requires the
+   * card to already list `agentId` in `allowedAgentIds`; a card with no
+   * agents listed (the schema's safe default) can never be reserved by
+   * anyone.
+   */
+  async function reserveAvailableCard(
+    companyId: string,
+    cardId: string,
+    input: { clearanceId: string; agentId: string },
+  ): Promise<PaymentCardSummary> {
+    const existing = await getRow(companyId, cardId);
+    if (!existing) throw notFound("Payment card not found");
+    if (!existing.allowedAgentIds.includes(input.agentId)) {
+      throw forbidden("This agent is not allowed to use this payment card");
+    }
+    const [row] = await db
+      .update(paymentCards)
+      .set({
+        status: "reserved",
+        reservedForClearanceId: input.clearanceId,
+        reservedAt: now(),
+        updatedAt: now(),
+      })
+      .where(
+        and(
+          eq(paymentCards.companyId, companyId),
+          eq(paymentCards.id, cardId),
+          eq(paymentCards.status, "available"),
+        ),
+      )
+      .returning();
+    if (!row) throw conflict(`Card is ${existing.status}, not available`);
+    return toSummary(row);
+  }
+
+  /**
+   * DUR-4046 (step 6): the reservation's terminal step once a purchase's
+   * outcome is known -- `used` when the server itself verified the charge
+   * (see `classifyPurchaseOutcome`), `used_unverified` when a confirm/arm
+   * happened but the outcome could not be independently confirmed (the
+   * design's "fake confirmation pages" mitigation: an unverified charge must
+   * never look identical to a verified one). Guarded on the exact
+   * `clearanceId` the card was reserved for, so a stale/duplicate call
+   * cannot consume a card a fresh `request_purchase` has since re-reserved.
+   */
+  async function consumeReservation(
+    companyId: string,
+    cardId: string,
+    input: { clearanceId: string; outcome: "used" | "used_unverified"; spentAmountCents: number; purchaseId: string },
+  ): Promise<PaymentCardSummary> {
+    const existing = await getRow(companyId, cardId);
+    if (!existing) throw notFound("Payment card not found");
+    const [row] = await db
+      .update(paymentCards)
+      .set({
+        status: input.outcome,
+        usedAt: now(),
+        usedByPurchaseId: input.purchaseId,
+        remainingAmountCents: Math.max(0, existing.remainingAmountCents - Math.max(0, input.spentAmountCents)),
+        updatedAt: now(),
+      })
+      .where(
+        and(
+          eq(paymentCards.companyId, companyId),
+          eq(paymentCards.id, cardId),
+          eq(paymentCards.status, "reserved"),
+          eq(paymentCards.reservedForClearanceId, input.clearanceId),
+        ),
+      )
+      .returning();
+    if (!row) throw conflict(`Card is not reserved for clearance ${input.clearanceId}`);
+    return toSummary(row);
+  }
+
+  /**
+   * DUR-4046 (step 6): "Failure before a charge -> available again" (design
+   * section 4). Only ever called on a path the caller knows never armed the
+   * network hold (or explicitly detected a declined/failed outcome before
+   * any charge could have landed) -- confirmFinalStep's own gate refusals
+   * (page changed, price changed, wrong element, no live clearance) never
+   * reach the click, so those callers release directly; a card that already
+   * moved past `reserved` (used/used_unverified/disabled/expired) is left
+   * untouched, matching `markAsUsedUp`'s own idempotent pattern.
+   */
+  async function releaseReservation(
+    companyId: string,
+    cardId: string,
+    input: { clearanceId: string },
+  ): Promise<PaymentCardSummary> {
+    const existing = await getRow(companyId, cardId);
+    if (!existing) throw notFound("Payment card not found");
+    if (existing.status !== "reserved" || existing.reservedForClearanceId !== input.clearanceId) {
+      return toSummary(existing);
+    }
+    const [row] = await db
+      .update(paymentCards)
+      .set({ status: "available", reservedForClearanceId: null, reservedAt: null, updatedAt: now() })
+      .where(
+        and(
+          eq(paymentCards.companyId, companyId),
+          eq(paymentCards.id, cardId),
+          eq(paymentCards.status, "reserved"),
+          eq(paymentCards.reservedForClearanceId, input.clearanceId),
+        ),
+      )
+      .returning();
+    return toSummary(row ?? existing);
+  }
+
+  /**
    * The ONLY reader of a payment card's secret material. Re-checks every off
    * -switch plus the reservation itself; does not create or extend a
    * reservation (that is step 6's job). Throws (never silently returns null)
@@ -211,6 +327,9 @@ export function paymentCardService(db: Db, rawDb: Db = db, deps: PaymentCardServ
     markAsUsedUp,
     runDailyExpiryTick,
     resolveForFill,
+    reserveAvailableCard,
+    consumeReservation,
+    releaseReservation,
   };
 }
 

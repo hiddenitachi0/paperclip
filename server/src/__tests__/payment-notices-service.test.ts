@@ -95,13 +95,25 @@ d("paymentNoticesService + companyPaymentSettingsService", () => {
     const { companyId } = await seedCompanyAndAgent();
     const settings = companyPaymentSettingsService(db);
 
-    expect(await settings.get(companyId)).toEqual({ companyId, bookingEnabled: false });
+    expect(await settings.get(companyId)).toEqual({ companyId, bookingEnabled: false, purchasesEnabled: false });
 
     const enabled = await settings.setBookingEnabled(companyId, true);
-    expect(enabled).toEqual({ companyId, bookingEnabled: true });
-    expect(await settings.get(companyId)).toEqual({ companyId, bookingEnabled: true });
+    expect(enabled).toEqual({ companyId, bookingEnabled: true, purchasesEnabled: false });
+    expect(await settings.get(companyId)).toEqual({ companyId, bookingEnabled: true, purchasesEnabled: false });
 
     const disabled = await settings.setBookingEnabled(companyId, false);
-    expect(disabled).toEqual({ companyId, bookingEnabled: false });
+    expect(disabled).toEqual({ companyId, bookingEnabled: false, purchasesEnabled: false });
+  });
+
+  it("reads purchases_enabled independently of booking_enabled (DUR-4046: two separate switches, not one)", async () => {
+    const { companyId } = await seedCompanyAndAgent();
+    const settings = companyPaymentSettingsService(db);
+
+    await settings.setBookingEnabled(companyId, true);
+    const withPurchases = await settings.setPurchasesEnabled(companyId, true);
+    expect(withPurchases).toEqual({ companyId, bookingEnabled: true, purchasesEnabled: true });
+
+    const bookingOff = await settings.setBookingEnabled(companyId, false);
+    expect(bookingOff).toEqual({ companyId, bookingEnabled: false, purchasesEnabled: true });
   });
 });

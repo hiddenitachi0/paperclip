@@ -91,9 +91,9 @@ function wireBookingGateDefaults(input: { bookingEnabled?: boolean } = {}) {
   return { approvals, settings, notices, issues };
 }
 
-const BOOK_AND_BUY_AGENT = { id: AGENT_ID, companyId: COMPANY_ID, browserAccess: "book_and_buy", status: "idle" };
+const BOOK_AND_BUY_AGENT = { id: AGENT_ID, companyId: COMPANY_ID, adapterConfig: { laneA: { browserAccess: "book_and_buy" } }, status: "idle" };
 
-function fakeDbWithAgent(agent: { id: string; companyId: string; browserAccess: string; status: string } | null) {
+function fakeDbWithAgent(agent: { id: string; companyId: string; adapterConfig: unknown; status: string } | null) {
   return {
     select: vi.fn(() => ({
       from: vi.fn(() => ({
@@ -136,7 +136,7 @@ describe("browserService", () => {
   });
 
   it("refuses to open a session when the agent's browser access is off (the default)", async () => {
-    const db = fakeDbWithAgent({ id: AGENT_ID, companyId: COMPANY_ID, browserAccess: "off", status: "idle" });
+    const db = fakeDbWithAgent({ id: AGENT_ID, companyId: COMPANY_ID, adapterConfig: { laneA: { browserAccess: "off" } }, status: "idle" });
     const svc = browserService(db as any, { workerClient: fakeWorkerClient() });
 
     await expect(svc.open(AGENT_ID, { purpose: "book a table" })).rejects.toMatchObject({ status: 403 });
@@ -150,7 +150,7 @@ describe("browserService", () => {
   });
 
   it("opens a session, returns the initial snapshot, and logs it", async () => {
-    const db = fakeDbWithAgent({ id: AGENT_ID, companyId: COMPANY_ID, browserAccess: "browse_and_forms", status: "idle" });
+    const db = fakeDbWithAgent({ id: AGENT_ID, companyId: COMPANY_ID, adapterConfig: { laneA: { browserAccess: "browse_and_forms" } }, status: "idle" });
     const worker = fakeWorkerClient();
     const svc = browserService(db as any, { workerClient: worker });
 
@@ -166,7 +166,7 @@ describe("browserService", () => {
   });
 
   it("refuses a second concurrent session for the same agent", async () => {
-    const db = fakeDbWithAgent({ id: AGENT_ID, companyId: COMPANY_ID, browserAccess: "browse_and_forms", status: "idle" });
+    const db = fakeDbWithAgent({ id: AGENT_ID, companyId: COMPANY_ID, adapterConfig: { laneA: { browserAccess: "browse_and_forms" } }, status: "idle" });
     const svc = browserService(db as any, { workerClient: fakeWorkerClient() });
 
     await svc.open(AGENT_ID, { purpose: "first" });
@@ -174,7 +174,7 @@ describe("browserService", () => {
   });
 
   it("refuses to act on a session opened by a different agent", async () => {
-    const db = fakeDbWithAgent({ id: AGENT_ID, companyId: COMPANY_ID, browserAccess: "browse_and_forms", status: "idle" });
+    const db = fakeDbWithAgent({ id: AGENT_ID, companyId: COMPANY_ID, adapterConfig: { laneA: { browserAccess: "browse_and_forms" } }, status: "idle" });
     const worker = fakeWorkerClient({
       navigate: vi.fn().mockResolvedValue({ tree: "", url: "https://example.com/2", title: "" }),
     });
@@ -187,14 +187,14 @@ describe("browserService", () => {
   });
 
   it("404s for a session id that was never opened", async () => {
-    const db = fakeDbWithAgent({ id: AGENT_ID, companyId: COMPANY_ID, browserAccess: "browse_and_forms", status: "idle" });
+    const db = fakeDbWithAgent({ id: AGENT_ID, companyId: COMPANY_ID, adapterConfig: { laneA: { browserAccess: "browse_and_forms" } }, status: "idle" });
     const svc = browserService(db as any, { workerClient: fakeWorkerClient() });
 
     await expect(svc.navigate(AGENT_ID, "nonexistent-session", "https://example.com")).rejects.toMatchObject({ status: 404 });
   });
 
   it("closes a session, frees the per-agent slot, and logs it", async () => {
-    const db = fakeDbWithAgent({ id: AGENT_ID, companyId: COMPANY_ID, browserAccess: "browse_and_forms", status: "idle" });
+    const db = fakeDbWithAgent({ id: AGENT_ID, companyId: COMPANY_ID, adapterConfig: { laneA: { browserAccess: "browse_and_forms" } }, status: "idle" });
     const worker = fakeWorkerClient();
     const svc = browserService(db as any, { workerClient: worker });
 
@@ -209,7 +209,7 @@ describe("browserService", () => {
   });
 
   it("hand-over marks the session unusable for further actions and logs a plain-English record", async () => {
-    const db = fakeDbWithAgent({ id: AGENT_ID, companyId: COMPANY_ID, browserAccess: "browse_and_forms", status: "idle" });
+    const db = fakeDbWithAgent({ id: AGENT_ID, companyId: COMPANY_ID, adapterConfig: { laneA: { browserAccess: "browse_and_forms" } }, status: "idle" });
     const svc = browserService(db as any, { workerClient: fakeWorkerClient() });
 
     const { sessionId } = await svc.open(AGENT_ID, { purpose: "first" });
@@ -252,7 +252,7 @@ describe("browserService booking gate (DUR-4037)", () => {
   }
 
   it("refuses request_booking for a browse_and_forms agent even with bookings enabled company-wide", async () => {
-    const db = fakeDbWithAgent({ id: AGENT_ID, companyId: COMPANY_ID, browserAccess: "browse_and_forms", status: "idle" });
+    const db = fakeDbWithAgent({ id: AGENT_ID, companyId: COMPANY_ID, adapterConfig: { laneA: { browserAccess: "browse_and_forms" } }, status: "idle" });
     wireBookingGateDefaults({ bookingEnabled: true });
     const svc = browserService(db as any, { workerClient: fakeWorkerClientOnBookingPage() });
 
@@ -533,7 +533,7 @@ describe("browserService booking gate (DUR-4037)", () => {
   });
 
   it("hand_over writes a plain-language payment notice for the Telegram bridge", async () => {
-    const db = fakeDbWithAgent({ id: AGENT_ID, companyId: COMPANY_ID, browserAccess: "browse_and_forms", status: "idle" });
+    const db = fakeDbWithAgent({ id: AGENT_ID, companyId: COMPANY_ID, adapterConfig: { laneA: { browserAccess: "browse_and_forms" } }, status: "idle" });
     const { notices } = wireBookingGateDefaults();
     const svc = browserService(db as any, { workerClient: fakeWorkerClientOnBookingPage() });
 

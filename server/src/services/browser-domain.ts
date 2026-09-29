@@ -45,3 +45,23 @@ export function pageUrlKey(url: string): string | null {
     return null;
   }
 }
+
+/**
+ * DUR-4046 (step 6, closing a residual from the DUR-4045 review): a
+ * purchase clearance binds tighter than a booking clearance -- the ticket
+ * explicitly overrides `pageUrlKey`'s own "not the query string" rule for
+ * purchases, because a cart/product identity commonly lives in the query
+ * string (`?product=`, `?cart=`, `?sku=`) and two different items at the
+ * same path with a different query are two different purchases. Returns
+ * "origin + pathname + search" -- still not the fragment, which is
+ * client-side-only and never reaches the server -- or null when the URL
+ * cannot be parsed. Callers must treat null as "cannot verify."
+ */
+export function fullPageUrlKey(url: string): string | null {
+  try {
+    const u = new URL(url);
+    return `${u.origin}${u.pathname}${u.search}`;
+  } catch {
+    return null;
+  }
+}

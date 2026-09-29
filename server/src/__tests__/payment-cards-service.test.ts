@@ -302,4 +302,186 @@ d("paymentCardService", () => {
       }
     });
   });
+
+  describe("reserveAvailableCard (DUR-4046)", () => {
+    it("reserves an available card allowed to this agent", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent(companyId);
+      const secretId = await seedCardSecret(companyId);
+      const card = await seedCard(companyId, secretId, { allowedAgentIds: [agentId] });
+      const clearanceId = `clearance-${randomUUID()}`;
+
+      const reserved = await service().reserveAvailableCard(companyId, card.id, { clearanceId, agentId });
+      expect(reserved.status).toBe("reserved");
+      expect(reserved.reservedForClearanceId).toBe(clearanceId);
+    });
+
+    it("refuses an agent not in the card's allowed list", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent(companyId);
+      const secretId = await seedCardSecret(companyId);
+      const card = await seedCard(companyId, secretId, { allowedAgentIds: [] });
+
+      await expect(
+        service().reserveAvailableCard(companyId, card.id, { clearanceId: "c1", agentId }),
+      ).rejects.toMatchObject({ status: 403 });
+    });
+
+    it("refuses a card that is not available", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent(companyId);
+      const secretId = await seedCardSecret(companyId);
+      const card = await seedCard(companyId, secretId, { allowedAgentIds: [agentId], status: "used" });
+
+      await expect(
+        service().reserveAvailableCard(companyId, card.id, { clearanceId: "c1", agentId }),
+      ).rejects.toMatchObject({ status: 409 });
+    });
+
+    it("lets only one of two racing reservations win (the status='available' guard is the race guard)", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent(companyId);
+      const secretId = await seedCardSecret(companyId);
+      const card = await seedCard(companyId, secretId, { allowedAgentIds: [agentId] });
+
+      const results = await Promise.allSettled([
+        service().reserveAvailableCard(companyId, card.id, { clearanceId: "c1", agentId }),
+        service().reserveAvailableCard(companyId, card.id, { clearanceId: "c2", agentId }),
+      ]);
+      const fulfilled = results.filter((r) => r.status === "fulfilled");
+      const rejected = results.filter((r) => r.status === "rejected");
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+    });
+  });
+
+  describe("consumeReservation (DUR-4046)", () => {
+    it("marks a reserved card used and reduces its remaining balance", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent(companyId);
+      const secretId = await seedCardSecret(companyId);
+      const clearanceId = `clearance-${randomUUID()}`;
+      const card = await seedCard(companyId, secretId, {
+        allowedAgentIds: [agentId],
+        status: "reserved",
+        reservedForClearanceId: clearanceId,
+        remainingAmountCents: 100_000,
+      });
+
+      const consumed = await service().consumeReservation(companyId, card.id, {
+        clearanceId,
+        outcome: "used",
+        spentAmountCents: 62_000,
+        purchaseId: "purchase-1",
+      });
+      expect(consumed.status).toBe("used");
+      expect(consumed.remainingAmountCents).toBe(38_000);
+      expect(consumed.usedByPurchaseId).toBe("purchase-1");
+    });
+
+    it("can mark a card used_unverified when the outcome could not be confirmed", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent(companyId);
+      const secretId = await seedCardSecret(companyId);
+      const clearanceId = `clearance-${randomUUID()}`;
+      const card = await seedCard(companyId, secretId, {
+        allowedAgentIds: [agentId],
+        status: "reserved",
+        reservedForClearanceId: clearanceId,
+      });
+
+      const consumed = await service().consumeReservation(companyId, card.id, {
+        clearanceId,
+        outcome: "used_unverified",
+        spentAmountCents: 1000,
+        purchaseId: "purchase-1",
+      });
+      expect(consumed.status).toBe("used_unverified");
+    });
+
+    it("refuses to consume a card reserved for a different clearance", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent(companyId);
+      const secretId = await seedCardSecret(companyId);
+      const card = await seedCard(companyId, secretId, {
+        allowedAgentIds: [agentId],
+        status: "reserved",
+        reservedForClearanceId: "some-other-clearance",
+      });
+
+      await expect(
+        service().consumeReservation(companyId, card.id, {
+          clearanceId: "clearance-1",
+          outcome: "used",
+          spentAmountCents: 100,
+          purchaseId: "purchase-1",
+        }),
+      ).rejects.toMatchObject({ status: 409 });
+    });
+
+    it("never reduces remaining balance below zero", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent(companyId);
+      const secretId = await seedCardSecret(companyId);
+      const clearanceId = `clearance-${randomUUID()}`;
+      const card = await seedCard(companyId, secretId, {
+        allowedAgentIds: [agentId],
+        status: "reserved",
+        reservedForClearanceId: clearanceId,
+        remainingAmountCents: 1000,
+      });
+
+      const consumed = await service().consumeReservation(companyId, card.id, {
+        clearanceId,
+        outcome: "used",
+        spentAmountCents: 5000,
+        purchaseId: "purchase-1",
+      });
+      expect(consumed.remainingAmountCents).toBe(0);
+    });
+  });
+
+  describe("releaseReservation (DUR-4046)", () => {
+    it("returns a reserved card to available when the clearance matches", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent(companyId);
+      const secretId = await seedCardSecret(companyId);
+      const clearanceId = `clearance-${randomUUID()}`;
+      const card = await seedCard(companyId, secretId, {
+        allowedAgentIds: [agentId],
+        status: "reserved",
+        reservedForClearanceId: clearanceId,
+        reservedAt: new Date(),
+      });
+
+      const released = await service().releaseReservation(companyId, card.id, { clearanceId });
+      expect(released.status).toBe("available");
+      expect(released.reservedForClearanceId).toBeNull();
+    });
+
+    it("is idempotent: releasing an already-available card is a no-op, not an error", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent(companyId);
+      const secretId = await seedCardSecret(companyId);
+      const card = await seedCard(companyId, secretId, { allowedAgentIds: [agentId], status: "available" });
+
+      const released = await service().releaseReservation(companyId, card.id, { clearanceId: "whatever" });
+      expect(released.status).toBe("available");
+    });
+
+    it("does not release a card reserved for a different clearance", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent(companyId);
+      const secretId = await seedCardSecret(companyId);
+      const card = await seedCard(companyId, secretId, {
+        allowedAgentIds: [agentId],
+        status: "reserved",
+        reservedForClearanceId: "some-other-clearance",
+      });
+
+      const result = await service().releaseReservation(companyId, card.id, { clearanceId: "clearance-1" });
+      expect(result.status).toBe("reserved");
+      expect(result.reservedForClearanceId).toBe("some-other-clearance");
+    });
+  });
 });
