@@ -28,6 +28,13 @@ export const updateCompanySchema = createCompanySchema
     status: z.enum(COMPANY_STATUSES).optional(),
     spentMonthlyCents: z.number().int().nonnegative().optional(),
     requireBoardApprovalForNewAgents: z.boolean().optional(),
+    // DUR-4040: one of the three off-switches the payment-card feature ships
+    // behind (alongside an agent's browserAccess level and the
+    // PAPERCLIP_BROWSER_DISABLED instance env var). Reaches
+    // updateCompanySchema only, not updateCompanyBrandingSchema, so this
+    // stays board-only the same way the route already restricts agent
+    // actors to branding fields (server/src/routes/companies.ts).
+    paymentsEnabled: z.boolean().optional(),
     feedbackDataSharingEnabled: z.boolean().optional(),
     feedbackDataSharingConsentAt: z.coerce.date().nullable().optional(),
     feedbackDataSharingConsentByUserId: z.string().min(1).nullable().optional(),

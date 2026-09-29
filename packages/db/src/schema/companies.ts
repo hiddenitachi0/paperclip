@@ -25,6 +25,12 @@ export const companies = pgTable(
     feedbackDataSharingConsentAt: timestamp("feedback_data_sharing_consent_at", { withTimezone: true }),
     feedbackDataSharingConsentByUserId: text("feedback_data_sharing_consent_by_user_id"),
     feedbackDataSharingTermsVersion: text("feedback_data_sharing_terms_version"),
+    // DUR-4040 (Maja browser step 5): one of the three off-switches the
+    // payment-card feature ships behind (alongside an agent's own
+    // browserAccess level and the PAPERCLIP_BROWSER_DISABLED instance env
+    // var). Board-settable, defaults false, so every existing company keeps
+    // zero visible behavior change until an operator turns it on.
+    paymentsEnabled: boolean("payments_enabled").notNull().default(false),
     brandColor: text("brand_color"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
