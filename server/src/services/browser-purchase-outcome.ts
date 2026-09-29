@@ -94,15 +94,17 @@ function escapeRegExp(value: string): string {
 
 /**
  * Blanks every exact, whole-token occurrence of `literal` in `text` with
- * asterisks. Word-boundary anchored so a short literal (a 3-digit CVC)
- * matches only as a standalone token, not as a substring run inside a
- * longer unrelated number or word -- `\b` sits between a `\w` and non-`\w`
- * character, and digits/letters are both `\w`, so `\b123\b` will not match
- * the "123" inside "41234" but will match a lone "123".
+ * asterisks. Boundary-anchored so a short literal (a 3-digit CVC) matches
+ * only as a standalone token, not as a substring run inside a longer
+ * unrelated number or word. Anchored with Unicode-aware lookarounds against
+ * `\p{L}\p{N}` (not plain `\b`, which is defined against ASCII-only `\w` and
+ * silently fails to match at all -- not partially -- when the literal
+ * starts or ends with a non-ASCII letter such as Æ/Ø/Å, common in Nordic
+ * cardholder names; DUR-4054).
  */
 function maskLiteral(text: string, literal: string): string {
   if (literal.length < 2) return text;
-  const re = new RegExp(`\\b${escapeRegExp(literal)}\\b`, "gi");
+  const re = new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(literal)}(?![\\p{L}\\p{N}])`, "giu");
   return text.replace(re, (match) => "*".repeat(match.length));
 }
 

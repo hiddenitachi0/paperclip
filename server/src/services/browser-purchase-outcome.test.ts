@@ -86,4 +86,15 @@ describe("maskCardNumbers", () => {
     const text = "Total: 300 kr";
     expect(maskCardNumbers(text, ["", "3"])).toBe(text);
   });
+
+  it("DUR-4054: masks a cardholder name starting/ending with a non-ASCII Nordic letter", () => {
+    const text = "Cardholder: Åse Løvenskiöld.";
+    const result = maskCardNumbers(text, ["Åse Løvenskiöld"]);
+    expect(result).not.toContain("Åse Løvenskiöld");
+  });
+
+  it("DUR-4054: non-ASCII literal still matches whole tokens only, not substrings of a longer word", () => {
+    const text = "Åse Løvenskiöldsgate 12";
+    expect(maskCardNumbers(text, ["Åse Løvenskiöld"])).toBe(text);
+  });
 });
