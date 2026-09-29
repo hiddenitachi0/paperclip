@@ -247,9 +247,13 @@ async function deliverResult(ctx: PluginContext, jobRunId: string, record: Plugi
   await updateJob(ctx, record, "done", done);
   if (!data.issueId) return;
   try {
+    // DUR-4062: scripts/telegram-bridge.py's MEDIA_JOB_ANSWER_RE parses this
+    // exact "Your <kind> is ready: <name> (file id <uuid>)" shape to fetch
+    // and upload the file itself as a Telegram video/audio message, instead
+    // of just announcing it landed in Files — keep the two in sync.
     await ctx.issues.createComment(
       data.issueId,
-      `Your ${data.kind} is ready: ${filename} — saved to the company's Files (id ${file.id}; it could not be attached to this task automatically, a task attachment needs a live run).`,
+      `Your ${data.kind} is ready: ${filename} (file id ${file.id}). Saved to the company's Files — it could not be attached to this task automatically (a task attachment needs a live run).`,
       data.companyId,
       { authorAgentId: data.agentId },
     );
