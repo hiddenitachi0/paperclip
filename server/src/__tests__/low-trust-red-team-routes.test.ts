@@ -539,15 +539,20 @@ describeEmbeddedPostgres("low-trust red-team HTTP route regression suite", () =>
       () => db.delete(agents),
     );
     await db.delete(projects);
-    await db.delete(companySkills);
     // The wakeup()-driven finalization path (heartbeat.ts refreshContinuationSummaryForRun,
     // called after a run's terminal status is persisted) keeps writing issueDocuments rows
-    // in a chain the test's `waitFor(status === succeeded|...)` doesn't await. That trailing
-    // write can land after the plain issueDocuments delete above and race the companies
-    // delete, tripping issue_documents_company_id_companies_id_fk. Retry the pair so a
-    // late-arriving row gets swept up. Same precedent as DUR-927.
+    // in a chain the test's `waitFor(status === succeeded|...)` doesn't await, and the same
+    // class of continuation can re-populate company_skills (teams-catalog.ts
+    // installFromCatalog / research-skill-link.ts) after the plain delete below. Either
+    // trailing write can land after its child delete and race the companies delete, tripping
+    // issue_documents_company_id_companies_id_fk or company_skills_company_id_companies_id_fk.
+    // Retry the pair so a late-arriving row in either child gets swept up. Same precedent as
+    // DUR-927.
     await deleteAfterLateWritesDrain(
-      () => db.delete(issueDocuments),
+      async () => {
+        await db.delete(issueDocuments);
+        await db.delete(companySkills);
+      },
       () => db.delete(companies),
       { attempts: 5, delayMs: 50 },
     );
