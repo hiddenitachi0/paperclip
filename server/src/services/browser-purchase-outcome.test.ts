@@ -97,4 +97,14 @@ describe("maskCardNumbers", () => {
     const text = "Åse Løvenskiöldsgate 12";
     expect(maskCardNumbers(text, ["Åse Løvenskiöld"])).toBe(text);
   });
+
+  it("DUR-4056: masks a CVC/PAN-fragment literal immediately followed by a non-ASCII letter with no separator", () => {
+    const text = "Sum: 123Østfold";
+    expect(maskCardNumbers(text, ["123"])).not.toContain("123");
+  });
+
+  it("DUR-4056: masks an ASCII literal immediately preceded by a non-ASCII letter with no separator", () => {
+    const text = "Beløp: Ø123 kroner";
+    expect(maskCardNumbers(text, ["123"])).not.toContain("123");
+  });
 });

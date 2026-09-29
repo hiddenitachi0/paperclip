@@ -92,19 +92,36 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+const ASCII_ONLY_RE = /^[\x00-\x7F]*$/;
+
 /**
  * Blanks every exact, whole-token occurrence of `literal` in `text` with
  * asterisks. Boundary-anchored so a short literal (a 3-digit CVC) matches
  * only as a standalone token, not as a substring run inside a longer
- * unrelated number or word. Anchored with Unicode-aware lookarounds against
- * `\p{L}\p{N}` (not plain `\b`, which is defined against ASCII-only `\w` and
- * silently fails to match at all -- not partially -- when the literal
- * starts or ends with a non-ASCII letter such as Æ/Ø/Å, common in Nordic
- * cardholder names; DUR-4054).
+ * unrelated number or word.
+ *
+ * Two boundary strategies, chosen by whether `literal` itself is ASCII-only:
+ * - ASCII literals (CVC/PAN fragments/expiry, and ASCII-only names) use
+ *   plain `\b`. This is intentional, not the DUR-4054 bug: ASCII `\b` (built
+ *   on `\w` = `[A-Za-z0-9_]`) treats any non-ASCII neighbor character as a
+ *   non-word boundary, so it correctly masks e.g. "123" immediately
+ *   followed by "Østfold" with no separating whitespace -- a real
+ *   accessibility-tree artifact on Nordic pages. Swapping this to the
+ *   Unicode-aware form below for ASCII literals was tried and regressed
+ *   exactly that case (DUR-4056): `\p{L}\p{N}` lookaround treats the
+ *   neighboring non-ASCII letter as "word-like" too, so the boundary
+ *   disappears and the literal goes unmasked.
+ * - Non-ASCII literals (Nordic cardholder names containing Æ/Ø/Å/ö/é/etc.)
+ *   use Unicode-aware lookarounds against `\p{L}\p{N}` with the `u` flag,
+ *   because plain `\b` never matches at an edge that IS one of those
+ *   letters -- the literal fails to match at all, not partially (DUR-4054).
  */
 function maskLiteral(text: string, literal: string): string {
   if (literal.length < 2) return text;
-  const re = new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(literal)}(?![\\p{L}\\p{N}])`, "giu");
+  const escaped = escapeRegExp(literal);
+  const re = ASCII_ONLY_RE.test(literal)
+    ? new RegExp(`\\b${escaped}\\b`, "gi")
+    : new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, "giu");
   return text.replace(re, (match) => "*".repeat(match.length));
 }
 
