@@ -45,6 +45,10 @@ export function morningReportRoutes(rawDb: Db, deps: MorningReportServiceDeps = 
     res.json({ reports: await svc.outbox(req.params.companyId as string) });
   });
 
+  router.get("/companies/:companyId/morning-report-outbox/:reportId", memberScope(), async (req, res) => {
+    res.json(await svc.getOutboxItem(req.params.companyId as string, idParam(req, "reportId", "report")));
+  });
+
   router.post(
     "/companies/:companyId/morning-report-outbox/:reportId/ack",
     memberScope(),

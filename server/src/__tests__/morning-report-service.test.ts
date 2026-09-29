@@ -334,4 +334,39 @@ d("morning report tick", () => {
       expect(await svc.outbox(companyId)).toHaveLength(0);
     });
   });
+
+  describe("getOutboxItem", () => {
+    it("finds a report by id regardless of status (delivered reports drop out of outbox() but stay findable by id)", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent(companyId, baseSettings);
+      feeds[BBC_URL] = rssXml([{ title: "A headline", link: "https://bbc.example/x" }]);
+      feeds[DAGBLADET_URL] = rssXml([]);
+
+      const svc = service();
+      await svc.tick(OSLO_WINTER_0700);
+      await settle();
+      const [listed] = await svc.outbox(companyId);
+      await svc.ack(companyId, listed!.id, { outcome: "delivered" });
+
+      const found = await svc.getOutboxItem(companyId, listed!.id);
+      expect(found).toMatchObject({ id: listed!.id, companyId, agentId, text: "Good morning! Here is your briefing." });
+    });
+
+    it("404s for an id that does not exist or belongs to another company", async () => {
+      const companyId = await seedCompany();
+      const otherCompanyId = await seedCompany();
+      const agentId = await seedAgent(companyId, baseSettings);
+      feeds[BBC_URL] = rssXml([{ title: "A headline", link: "https://bbc.example/x" }]);
+      feeds[DAGBLADET_URL] = rssXml([]);
+
+      const svc = service();
+      await svc.tick(OSLO_WINTER_0700);
+      await settle();
+      const [listed] = await svc.outbox(companyId);
+      void agentId;
+
+      await expect(svc.getOutboxItem(companyId, randomUUID())).rejects.toThrow("That report was not found.");
+      await expect(svc.getOutboxItem(otherCompanyId, listed!.id)).rejects.toThrow("That report was not found.");
+    });
+  });
 });

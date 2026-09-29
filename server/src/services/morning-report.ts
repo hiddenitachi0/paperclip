@@ -601,6 +601,16 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
 
   // ─── Outbox (the Telegram bridge) ───────────────────────────────────────
 
+  function toOutboxItem(row: typeof morningReportOutbox.$inferSelect): MorningReportOutboxItem {
+    return {
+      id: row.id,
+      companyId: row.companyId,
+      agentId: row.agentId,
+      text: row.text,
+      createdAt: row.createdAt.toISOString(),
+    };
+  }
+
   async function outbox(companyId: string): Promise<MorningReportOutboxItem[]> {
     const cutoff = new Date(nowOf().getTime() - MORNING_REPORT_OUTBOX_MAX_AGE_MS);
     const rows = await db
@@ -609,13 +619,17 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
       .where(and(eq(morningReportOutbox.companyId, companyId), eq(morningReportOutbox.status, "ready"), gte(morningReportOutbox.readyAt, cutoff)))
       .orderBy(morningReportOutbox.createdAt)
       .limit(OUTBOX_BATCH);
-    return rows.map((row) => ({
-      id: row.id,
-      companyId: row.companyId,
-      agentId: row.agentId,
-      text: row.text,
-      createdAt: row.createdAt.toISOString(),
-    }));
+    return rows.map(toOutboxItem);
+  }
+
+  /** One report by id, any status/age — the full-briefing page's direct lookup for a link that may be opened days later. */
+  async function getOutboxItem(companyId: string, id: string): Promise<MorningReportOutboxItem> {
+    const [row] = await db
+      .select()
+      .from(morningReportOutbox)
+      .where(and(eq(morningReportOutbox.id, id), eq(morningReportOutbox.companyId, companyId)));
+    if (!row) throw notFound("That report was not found.");
+    return toOutboxItem(row);
   }
 
   function toStatus(status: string): MorningReportOutboxStatus {
@@ -647,5 +661,5 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
     return { id: (updated ?? row).id, status: toStatus((updated ?? row).status) };
   }
 
-  return { tick, composeReport, outbox, ack };
+  return { tick, composeReport, outbox, getOutboxItem, ack };
 }
