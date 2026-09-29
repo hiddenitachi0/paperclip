@@ -571,6 +571,30 @@ export function buildHostServices(
     return laneARun && laneARun.companyId === companyId ? laneARun.agentId : null;
   };
 
+  /**
+   * Whether `runId` currently holds a checkout-based claim on `issue`:
+   * either it IS the issue's live checkoutRunId, or it is a Lane-A
+   * quick-agent run assigned to the issue or naming it in the requester's
+   * message. Shared by createAttachment and createComment so the two
+   * enforcement paths cannot drift apart (DUR-4096).
+   */
+  const resolveIssueRunAccess = async (
+    issue: { id: string; identifier: string | null; assigneeAgentId?: string | null },
+    companyId: string,
+    runId: string,
+  ): Promise<"checkout" | "lane-a-allowed" | "lane-a-denied" | "none"> => {
+    const checkoutRow = await db
+      .select({ id: issuesTable.id, checkoutRunId: issuesTable.checkoutRunId })
+      .from(issuesTable)
+      .where(and(eq(issuesTable.id, issue.id), eq(issuesTable.companyId, companyId)))
+      .then((rows) => rows[0] ?? null);
+    if (checkoutRow && checkoutRow.checkoutRunId === runId) return "checkout";
+    const laneARun = findLaneAPluginRun(runId);
+    if (!laneARun || laneARun.companyId !== companyId) return "none";
+    const assignedToQuickAgent = issue.assigneeAgentId === laneARun.agentId;
+    return assignedToQuickAgent || laneAPluginRunNamesIssue(laneARun, issue) ? "lane-a-allowed" : "lane-a-denied";
+  };
+
   const logPluginActivity = async (input: {
     companyId: string;
     action: string;
@@ -1915,6 +1939,44 @@ export function buildHostServices(
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
         const issue = requireInCompany("Issue", await issues.getById(params.issueId), companyId);
+
+        // DUR-4096: an attributed comment (authorAgentId set) is an
+        // impersonation-adjacent primitive -- it reads, in the issue
+        // thread, as if that agent said something -- so it gets the same
+        // host-enforced checkout/Lane-A boundary createAttachment already
+        // has (resolveIssueRunAccess), plus one narrower exception: a run
+        // that resolves to the issue's *current* assignee may still
+        // comment even without checkout, for background-job delivery whose
+        // triggering tool-call run (and its checkout) already ended
+        // (media-studio's job poller and similar -- see DUR-4096). An
+        // unattributed comment (no authorAgentId) can't be used to
+        // impersonate anyone, so it keeps the pre-DUR-4096 company-scope-
+        // only check, unchanged for callers like plugin-llm-wiki that post
+        // plugin-authored status comments with no agent attribution on
+        // issue ids their own code resolved, never from model/tool-call
+        // input.
+        if (params.authorAgentId) {
+          if (!params.runId) {
+            throw new Error("runId is required when authorAgentId is set");
+          }
+          const callingAgentId = await callingAgentIdForRun(companyId, params.runId);
+          if (!callingAgentId || callingAgentId !== params.authorAgentId) {
+            throw new Error("authorAgentId must match the invoking run's own agent");
+          }
+          const access = await resolveIssueRunAccess(issue, companyId, params.runId);
+          const assignedToCallingAgent = issue.assigneeAgentId === callingAgentId;
+          if ((access === "none" || access === "lane-a-denied") && !assignedToCallingAgent) {
+            if (access === "lane-a-denied") {
+              const ref = issue.identifier ?? issue.id;
+              throw new Error(
+                `The task ${ref} was not named in the message, so the quick agent cannot comment on it. ` +
+                  `Name the task in your message (for example ${issue.identifier ?? "DUR-12"}), or assign the task to the quick agent.`,
+              );
+            }
+            throw new Error("Issue is not currently checked out by the invoking run, and is not assigned to the calling agent");
+          }
+        }
+
         const comment = (await issues.addComment(
           params.issueId,
           params.body,
@@ -1966,16 +2028,13 @@ export function buildHostServices(
         // attach content to an issue it isn't currently running against, even
         // though it declares issue.attachments.create. Without this check the
         // only remaining boundary would be company scope, which every issue
-        // in the company passes.
+        // in the company passes. (resolveIssueRunAccess is shared with
+        // createComment's own checkout/Lane-A enforcement -- DUR-4096.)
         if (!params.runId) {
           throw new Error("runId is required");
         }
-        const checkoutRow = await db
-          .select({ id: issuesTable.id, checkoutRunId: issuesTable.checkoutRunId })
-          .from(issuesTable)
-          .where(and(eq(issuesTable.id, issue.id), eq(issuesTable.companyId, companyId)))
-          .then((rows) => rows[0] ?? null);
-        if (!checkoutRow || checkoutRow.checkoutRunId !== params.runId) {
+        const access = await resolveIssueRunAccess(issue, companyId, params.runId);
+        if (access === "lane-a-denied") {
           // A quick agent (Lane A) has no checkout: it answers in chat. Its
           // run is resolved by the host (lane-a-plugin-runs.ts, one id per
           // tool call), never from a plugin-claimed id, and it may attach
@@ -1984,18 +2043,14 @@ export function buildHostServices(
           // tool input comes from the model, and a file or a sales lookup
           // the agent read this turn lands in the same context — so a task
           // reference planted there is not enough.
-          const laneARun = findLaneAPluginRun(params.runId);
-          if (!laneARun || laneARun.companyId !== companyId) {
-            throw new Error("Issue is not currently checked out by the invoking run");
-          }
-          const assignedToQuickAgent = issue.assigneeAgentId === laneARun.agentId;
-          if (!assignedToQuickAgent && !laneAPluginRunNamesIssue(laneARun, issue)) {
-            const ref = issue.identifier ?? issue.id;
-            throw new Error(
-              `The task ${ref} was not named in the message, so the quick agent cannot attach to it. ` +
-                `Name the task in your message (for example ${issue.identifier ?? "DUR-12"}), or assign the task to the quick agent.`,
-            );
-          }
+          const ref = issue.identifier ?? issue.id;
+          throw new Error(
+            `The task ${ref} was not named in the message, so the quick agent cannot attach to it. ` +
+              `Name the task in your message (for example ${issue.identifier ?? "DUR-12"}), or assign the task to the quick agent.`,
+          );
+        }
+        if (access === "none") {
+          throw new Error("Issue is not currently checked out by the invoking run");
         }
 
         const contentType = normalizeContentType(params.contentType);
