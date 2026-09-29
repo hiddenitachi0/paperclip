@@ -99,6 +99,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "browser.ts",
   // Morning report routes (DUR-4017) are a new backend feature not yet in the public OpenAPI document.
   "morning-report.ts",
+  // Payment notice routes (DUR-4037, the booking gate's Telegram outbox) are board-only, switched off by default, and not yet in the public OpenAPI document.
+  "payment-notices.ts",
 ]);
 
 function createApp() {
