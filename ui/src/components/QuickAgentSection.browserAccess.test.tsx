@@ -142,6 +142,8 @@ describe("Browser access", () => {
     expect(options).toEqual(["Off", "Can browse and fill forms", "Can browse, book, and pay"]);
     const section = container.querySelector('[data-testid="quick-agent-browser-access"]');
     expect(section?.textContent).not.toMatch(/laneA|adapterConfig|claude_local/i);
+    expect(section?.textContent).toContain("This only applies when the agent does a full run");
+    expect(section?.textContent).not.toContain("Lets this quick agent");
     await act(async () => {
       root.unmount();
     });
