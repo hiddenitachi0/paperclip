@@ -181,4 +181,69 @@ describe("chat commands", () => {
 
     expect(JSON.parse(printed.join("\n"))).toMatchObject({ ok: false, status: 415 });
   });
+
+  it("fetches a Media Studio video's bytes as base64 for the bridge (DUR-4062)", async () => {
+    const bytes = Buffer.from([0, 0, 0, 24, 102, 116, 121, 112]);
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(bytes, { status: 200, headers: { "Content-Type": "video/mp4" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await run(["chat", "media", ISSUE_A, "-C", COMPANY_ID, "--json"]);
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`http://localhost:3100/api/attachments/${ISSUE_A}/content`);
+    expect(JSON.parse(printed.join("\n"))).toEqual({
+      ok: true,
+      fileId: ISSUE_A,
+      contentType: "video/mp4",
+      byteSize: bytes.length,
+      contentBase64: bytes.toString("base64"),
+    });
+  });
+
+  it("fetches a Media Studio audio file the same way", async () => {
+    const bytes = Buffer.from([0x49, 0x44, 0x33]);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response(bytes, { status: 200, headers: { "Content-Type": "audio/mpeg" } })),
+    );
+
+    await run(["chat", "media", ISSUE_A, "-C", COMPANY_ID, "--json"]);
+
+    expect(JSON.parse(printed.join("\n"))).toMatchObject({ ok: true, contentType: "audio/mpeg" });
+  });
+
+  it("still lets 'chat media' fetch a picture (it is not image-only like 'chat image')", async () => {
+    const bytes = Buffer.from([0xff, 0xd8, 0xff]);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response(bytes, { status: 200, headers: { "Content-Type": "image/jpeg" } })),
+    );
+
+    await run(["chat", "media", ISSUE_A, "-C", COMPANY_ID, "--json"]);
+
+    expect(JSON.parse(printed.join("\n"))).toMatchObject({ ok: true, contentType: "image/jpeg" });
+  });
+
+  it("refuses a 'chat media' file that is neither a picture, a video nor audio", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response("<html></html>", { status: 200, headers: { "Content-Type": "text/html" } })),
+    );
+
+    await run(["chat", "media", ISSUE_A, "-C", COMPANY_ID, "--json"]);
+
+    expect(JSON.parse(printed.join("\n"))).toMatchObject({ ok: false, status: 415 });
+  });
+
+  it("refuses a 'chat media' file over the 50MB Telegram upload limit", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(new Uint8Array(51 * 1024 * 1024), { status: 200, headers: { "Content-Type": "video/mp4" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await run(["chat", "media", ISSUE_A, "-C", COMPANY_ID, "--json"]);
+
+    expect(JSON.parse(printed.join("\n"))).toMatchObject({ ok: false, status: 413 });
+  });
 });
