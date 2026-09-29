@@ -301,6 +301,21 @@ export function isTestableSecretKind(id: string | null | undefined): boolean {
   return getSecretKind(id)?.testable ?? false;
 }
 
+/**
+ * Kinds whose raw value must never be bound into an agent's environment,
+ * adapter config field, or MCP/tool config, and must never be resolved by
+ * any generic runtime-resolution path -- only a dedicated, audited reader
+ * (paymentCardService.resolveForFill for payment_card_single_use, and the
+ * equivalent for site_login) may ever see the value. Checked by kind, not by
+ * binding row, so a differently-named row can never slip past the rule.
+ */
+export const SECRET_KINDS_NEVER_BINDABLE: readonly SecretKind[] = ["payment_card_single_use", "site_login"];
+
+export function isSecretKindBindable(id: string | null | undefined): boolean {
+  if (!id) return true;
+  return !SECRET_KINDS_NEVER_BINDABLE.includes(id as SecretKind);
+}
+
 /** Kinds grouped for a dropdown, in display order, empty categories left out. */
 export function secretKindsByCategory(): ReadonlyArray<{
   category: SecretKindCategory;

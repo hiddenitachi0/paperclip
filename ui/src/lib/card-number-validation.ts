@@ -43,3 +43,13 @@ export function cardNumberErrorMessage(rawInput: string): string | null {
   }
   return null;
 }
+
+/** A guess at the card brand from its leading digits, for display only (never sent anywhere). */
+export function guessCardBrand(rawInput: string): string | null {
+  const digitsOnly = normalizeCardNumber(rawInput);
+  if (/^4/.test(digitsOnly)) return "Visa";
+  if (/^(5[1-5]|2(2[2-9]|[3-6]\d|7[01]|720))/.test(digitsOnly)) return "Mastercard";
+  if (/^3[47]/.test(digitsOnly)) return "American Express";
+  if (/^6(011|5)/.test(digitsOnly)) return "Discover";
+  return null;
+}

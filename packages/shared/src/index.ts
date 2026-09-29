@@ -99,6 +99,29 @@ export {
   type BrowserAccessLevel,
 } from "./browser-access.js";
 export {
+  PAYMENT_CARD_STATUSES,
+  ACTIVE_PAYMENT_CARD_STATUSES,
+  type PaymentCardStatus,
+  type PaymentCardSummary,
+} from "./payment-card.js";
+export {
+  NOK_APPROVAL_THRESHOLD,
+  DEFAULT_FX_RATES_TO_NOK,
+  PURCHASE_CAPS,
+  findMoneyCandidates,
+  pickTotal,
+  evaluatePurchaseAmount,
+  evaluatePurchaseCaps,
+  type MoneyCandidate,
+  type ParsedTotal,
+  type PurchaseAmountReason,
+  type EvaluatePurchaseAmountInput,
+  type EvaluatePurchaseAmountResult,
+  type PurchaseCapsInput,
+  type PurchaseCapKind,
+  type EvaluatePurchaseCapsResult,
+} from "./payment-card-threshold.js";
+export {
   RESEARCH_RESULT_DOCUMENT_KEY,
   RESEARCH_SKILL_SLUG,
   RESEARCH_SKILL_KEY,
@@ -546,8 +569,10 @@ export {
   SECRET_KIND_IDS,
   SECRET_KIND_CATEGORY_LABELS,
   SECRET_KIND_CATEGORY_ORDER,
+  SECRET_KINDS_NEVER_BINDABLE,
   getSecretKind,
   isSecretKind,
+  isSecretKindBindable,
   isTestableSecretKind,
   secretKindEnvKeyPairs,
   secretKindForEnvKey,

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   cardNumberErrorMessage,
+  guessCardBrand,
   isLuhnValid,
   isValidCardNumber,
   normalizeCardNumber,
@@ -54,5 +55,20 @@ describe("cardNumberErrorMessage", () => {
 
   it("returns a plain-language message for letters", () => {
     expect(cardNumberErrorMessage("abcd")).toBe("Card number can only contain numbers.");
+  });
+});
+
+describe("guessCardBrand", () => {
+  it("recognizes Visa, Mastercard, Amex, Discover by leading digits", () => {
+    expect(guessCardBrand("4242 4242 4242 4242")).toBe("Visa");
+    expect(guessCardBrand("5555555555554444")).toBe("Mastercard");
+    expect(guessCardBrand("2223003122003222")).toBe("Mastercard");
+    expect(guessCardBrand("378282246310005")).toBe("American Express");
+    expect(guessCardBrand("6011111111111117")).toBe("Discover");
+  });
+
+  it("returns null when it cannot tell", () => {
+    expect(guessCardBrand("9999999999999999")).toBeNull();
+    expect(guessCardBrand("")).toBeNull();
   });
 });

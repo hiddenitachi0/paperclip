@@ -2280,4 +2280,232 @@ describeEmbeddedPostgres("secretService", () => {
       }),
     ).rejects.toThrow(/active member|secrets:read|forbidden/i);
   });
+
+  // DUR-4044 (security review of DUR-4040): a payment_card_single_use or
+  // site_login secret must never become reachable through a binding row --
+  // an agent env, an MCP/tool config, or any other bound consumer would hand
+  // the raw card/password to the agent process and skip every
+  // paymentCardService.resolveForFill check. Refused by KIND at every
+  // binding/env/config path, plus defence-in-depth at runtime resolution
+  // itself, so a pre-existing (or future, forgotten-check) binding row can
+  // never resolve one of these kinds either. resolveSecretValueForBrowserFill
+  // is the one exception.
+  describe("protected secret kinds (payment_card_single_use, site_login)", () => {
+    it.each(["payment_card_single_use", "site_login"] as const)(
+      "refuses createBinding for a %s secret",
+      async (kind) => {
+        const companyId = await seedCompany();
+        const svc = secretService(db);
+        const secret = await svc.create(companyId, {
+          name: `protected-createBinding-${kind}-${randomUUID()}`,
+          provider: "local_encrypted",
+          value: "raw-card-or-password",
+          kind,
+        });
+
+        await expect(
+          svc.createBinding({
+            companyId,
+            secretId: secret.id,
+            targetType: "agent",
+            targetId: "agent-1",
+            configPath: "env.CARD",
+          }),
+        ).rejects.toMatchObject({ status: 403 });
+
+        const bindings = await db
+          .select()
+          .from(companySecretBindings)
+          .where(eq(companySecretBindings.secretId, secret.id));
+        expect(bindings).toHaveLength(0);
+      },
+    );
+
+    it.each(["payment_card_single_use", "site_login"] as const)(
+      "refuses syncSecretRefsForTarget for a %s secret",
+      async (kind) => {
+        const companyId = await seedCompany();
+        const svc = secretService(db);
+        const secret = await svc.create(companyId, {
+          name: `protected-sync-${kind}-${randomUUID()}`,
+          provider: "local_encrypted",
+          value: "raw-card-or-password",
+          kind,
+        });
+
+        await expect(
+          svc.syncSecretRefsForTarget(companyId, { targetType: "agent", targetId: "agent-1" }, [
+            { secretId: secret.id, configPath: "env.CARD" },
+          ]),
+        ).rejects.toMatchObject({ status: 403 });
+      },
+    );
+
+    it.each(["payment_card_single_use", "site_login"] as const)(
+      "refuses env binding persistence (adapterConfig.env) for a %s secret",
+      async (kind) => {
+        const companyId = await seedCompany();
+        const svc = secretService(db);
+        const secret = await svc.create(companyId, {
+          name: `protected-env-persist-${kind}-${randomUUID()}`,
+          provider: "local_encrypted",
+          value: "raw-card-or-password",
+          kind,
+        });
+
+        await expect(
+          svc.normalizeEnvBindingsForPersistence(companyId, {
+            CARD: { type: "secret_ref", secretId: secret.id, version: "latest" },
+          }),
+        ).rejects.toMatchObject({ status: 403 });
+      },
+    );
+
+    it.each(["payment_card_single_use", "site_login"] as const)(
+      "refuses MCP server env/header binding creation for a %s secret",
+      async (kind) => {
+        const companyId = await seedCompany();
+        const svc = secretService(db);
+        const secret = await svc.create(companyId, {
+          name: `protected-mcp-persist-${kind}-${randomUUID()}`,
+          provider: "local_encrypted",
+          value: "raw-card-or-password",
+          kind,
+        });
+
+        // MCP server env/header secret_refs get their company_secret_bindings
+        // row through syncSecretRefsForTarget (see agent-secret-bindings.ts's
+        // collectMcpServerSecretRefs), keyed by an "mcpServers[name].field.KEY"
+        // configPath -- normalizeAdapterConfigForPersistence itself does not
+        // touch mcpServers, so this is the real validation choke point.
+        await expect(
+          svc.syncSecretRefsForTarget(companyId, { targetType: "agent", targetId: "agent-1" }, [
+            { secretId: secret.id, configPath: "mcpServers[fs].env.TOKEN" },
+          ]),
+        ).rejects.toMatchObject({ status: 403 });
+      },
+    );
+
+    it.each(["payment_card_single_use", "site_login"] as const)(
+      "refuses runtime env resolution for a %s secret even if a binding row already exists (defence in depth)",
+      async (kind) => {
+        const companyId = await seedCompany();
+        const svc = secretService(db);
+        const secret = await svc.create(companyId, {
+          name: `protected-resolve-env-${kind}-${randomUUID()}`,
+          provider: "local_encrypted",
+          value: "raw-card-or-password",
+          kind,
+        });
+        // Simulate a binding row that predates this fix (or bypassed it),
+        // written directly rather than through createBinding/syncSecretRefsForTarget.
+        await db.insert(companySecretBindings).values({
+          companyId,
+          secretId: secret.id,
+          targetType: "agent",
+          targetId: "agent-1",
+          configPath: "env.CARD",
+          versionSelector: "latest",
+          required: true,
+        });
+
+        await expect(
+          svc.resolveEnvBindings(
+            companyId,
+            { CARD: { type: "secret_ref", secretId: secret.id, version: "latest" } },
+            { consumerType: "agent", consumerId: "agent-1", actorType: "agent", actorId: "agent-1" },
+          ),
+        ).rejects.toMatchObject({ status: 403 });
+      },
+    );
+
+    it.each(["payment_card_single_use", "site_login"] as const)(
+      "refuses runtime MCP config resolution for a %s secret even if a binding row already exists (defence in depth)",
+      async (kind) => {
+        const companyId = await seedCompany();
+        const svc = secretService(db);
+        const secret = await svc.create(companyId, {
+          name: `protected-resolve-mcp-${kind}-${randomUUID()}`,
+          provider: "local_encrypted",
+          value: "raw-card-or-password",
+          kind,
+        });
+        await db.insert(companySecretBindings).values({
+          companyId,
+          secretId: secret.id,
+          targetType: "agent",
+          targetId: "agent-1",
+          configPath: "mcpServers[fs].env.TOKEN",
+          versionSelector: "latest",
+          required: true,
+        });
+
+        await expect(
+          svc.resolveAdapterConfigForRuntime(
+            companyId,
+            {
+              mcpServers: [
+                {
+                  name: "fs",
+                  command: "npx",
+                  env: { TOKEN: { type: "secret_ref", secretId: secret.id, version: "latest" } },
+                },
+              ],
+            },
+            { consumerType: "agent", consumerId: "agent-1", actorType: "agent", actorId: "agent-1" },
+          ),
+        ).rejects.toMatchObject({ status: 403 });
+      },
+    );
+
+    it.each(["payment_card_single_use", "site_login"] as const)(
+      "refuses export, plugin and test resolution paths for a %s secret",
+      async (kind) => {
+        const companyId = await seedCompany();
+        const svc = secretService(db);
+        const secret = await svc.create(companyId, {
+          name: `protected-other-readers-${kind}-${randomUUID()}`,
+          provider: "local_encrypted",
+          value: "raw-card-or-password",
+          kind,
+        });
+
+        await expect(
+          svc.resolveSecretValueForExport(companyId, secret.id, "latest"),
+        ).rejects.toMatchObject({ status: 403 });
+
+        await expect(
+          svc.resolveSecretValueForPlugin(companyId, secret.id, "latest", {
+            consumerType: "system",
+            consumerId: "plugin-x",
+            actorType: "plugin",
+            pluginId: "plugin-x",
+          }),
+        ).rejects.toMatchObject({ status: 403 });
+
+        await expect(
+          svc.resolveSecretValueForTest(companyId, secret.id, { userId: "user-1" }),
+        ).rejects.toMatchObject({ status: 403 });
+      },
+    );
+
+    it.each(["payment_card_single_use", "site_login"] as const)(
+      "still lets resolveSecretValueForBrowserFill read a %s secret -- the one intended reader",
+      async (kind) => {
+        const companyId = await seedCompany();
+        const svc = secretService(db);
+        const secret = await svc.create(companyId, {
+          name: `protected-browser-fill-${kind}-${randomUUID()}`,
+          provider: "local_encrypted",
+          value: "raw-card-or-password",
+          kind,
+        });
+
+        const value = await svc.resolveSecretValueForBrowserFill(companyId, secret.id, {
+          actorId: "agent-1",
+        });
+        expect(value).toBe("raw-card-or-password");
+      },
+    );
+  });
 });

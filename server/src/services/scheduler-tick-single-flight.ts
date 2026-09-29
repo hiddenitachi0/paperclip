@@ -149,6 +149,7 @@ export const SCHEDULER_TICK_CHAINS = [
   "claudeAuthCheck",
   "watchers",
   "morningReport",
+  "paymentCardExpiry",
 ] as const;
 
 export type SchedulerTickChain = (typeof SCHEDULER_TICK_CHAINS)[number];
@@ -200,6 +201,7 @@ export const SCHEDULER_TICK_CHAIN_LABELS: Record<SchedulerTickChain, string> = {
   claudeAuthCheck: "checking the Claude sign-in",
   watchers: "checking market watchers",
   morningReport: "sending morning reports",
+  paymentCardExpiry: "expiring old payment cards",
 };
 
 /** At most one skip line per chain per minute, however often it skips. */

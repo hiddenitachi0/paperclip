@@ -73,6 +73,7 @@ import {
 import { schedulerLiveness } from "./services/scheduler-liveness.js";
 import { watcherService } from "./services/watchers.js";
 import { morningReportService } from "./services/morning-report.js";
+import { paymentCardService } from "./services/payment-cards.js";
 import { describeTickPhases } from "./services/scheduler-tick-phases.js";
 import {
   SCHEDULER_TICK_CHAIN,
@@ -1022,6 +1023,7 @@ export async function startServer(): Promise<StartedServer> {
     const agentErrorAlerts = agentErrorAlertsService(schedulerDb as any);
     const marketWatchers = watcherService(schedulerDb as any);
     const morningReports = morningReportService(schedulerDb as any);
+    const paymentCards = paymentCardService(schedulerDb as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(schedulerDb as any);
     const quietModeAlerts = quietModeAlertsService(schedulerDb as any);
     const personaPublisherSweep = config.personaPublishingSweepEnabled
@@ -1395,6 +1397,30 @@ export async function startServer(): Promise<StartedServer> {
           })
           .catch((err) => {
             logger.error({ err }, "morning-report tick failed");
+          }),
+      );
+
+      // Payment cards: sweep available/reserved cards whose expiresOn has
+      // passed to expired (see services/payment-cards.ts). Ships behind the
+      // same off-switches as the rest of the feature; an instance with zero
+      // cards just no-ops every tick.
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.paymentCardExpiry, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: paymentCardExpiry",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:paymentCardExpiry",
+          },
+          () => paymentCards.runDailyExpiryTick(new Date()),
+        )
+          .then((result) => {
+            if (result.expired > 0) {
+              logger.info({ ...result }, "payment-card tick expired cards");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "payment-card tick failed");
           }),
       );
 

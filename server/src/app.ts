@@ -25,6 +25,7 @@ import { webSearchRoutes } from "./routes/web-search.js";
 import { agentMemoryRoutes } from "./routes/agent-memories.js";
 import { browserRoutes } from "./routes/browser.js";
 import { paymentNoticesRoutes } from "./routes/payment-notices.js";
+import { paymentCardRoutes } from "./routes/payment-cards.js";
 import { watcherRoutes } from "./routes/watchers.js";
 import { morningReportRoutes } from "./routes/morning-report.js";
 import { mcpOAuthRoutes } from "./routes/mcp-oauth.js";
@@ -298,6 +299,7 @@ export async function createApp(
   api.use(agentMemoryRoutes(db));
   api.use(browserRoutes(db));
   api.use(paymentNoticesRoutes(db));
+  api.use(paymentCardRoutes(db));
   api.use(watcherRoutes(db));
   api.use(morningReportRoutes(db));
   api.use(mcpOAuthRoutes(db));
