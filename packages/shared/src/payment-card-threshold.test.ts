@@ -92,6 +92,19 @@ describe("pickTotal", () => {
     const total = pickTotal("Shipping 49 kr\nTotal: 349 kr");
     expect(total).toMatchObject({ amount: 349, currency: "NOK" });
   });
+
+  it("fails closed when a small labelled total sits next to a larger unlabelled amount (decoy)", () => {
+    expect(pickTotal("Item price: 900 kr\nService fee total: 5 kr")).toBeNull();
+  });
+
+  it("fails closed when a labelled discount total is much smaller than the real unlabelled price", () => {
+    expect(pickTotal("Full price: 5000 kr\nDiscount total: 1 kr")).toBeNull();
+  });
+
+  it("still trusts a labelled total that is also the largest amount on the page", () => {
+    const total = pickTotal("Item price: 200 kr\nTotal: 349 kr");
+    expect(total).toMatchObject({ amount: 349, currency: "NOK" });
+  });
 });
 
 describe("evaluatePurchaseAmount", () => {
@@ -145,6 +158,13 @@ describe("evaluatePurchaseAmount", () => {
   it("requires approval when multiple unlabelled totals are ambiguous", () => {
     const result = evaluatePurchaseAmount({ text: "100 kr or 900 kr" });
     expect(result).toMatchObject({ requiresApproval: true, reason: "unparseable" });
+  });
+
+  it("requires approval instead of trusting a decoy total smaller than the real charge", () => {
+    // A malicious or buggy checkout page could label a tiny fee "total" while
+    // the real (larger) charge sits unlabelled elsewhere -- must not auto-approve.
+    const result = evaluatePurchaseAmount({ text: "Item price: 9000 kr\nHandling total: 5 kr" });
+    expect(result).toMatchObject({ requiresApproval: true, reason: "unparseable", amountNok: null, detected: null });
   });
 
   it("honors a caller-supplied FX table and threshold", () => {

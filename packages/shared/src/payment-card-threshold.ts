@@ -194,24 +194,32 @@ export interface ParsedTotal {
  * "total" -- taking the largest is the safe direction, since under-reading
  * the real total is the failure mode that must never happen). Falls back to
  * the single unlabelled candidate when there is exactly one amount anywhere
- * in the text and nothing is labelled. Returns null when nothing was found,
- * or when there are multiple unlabelled candidates and nothing to prefer
- * between them -- an ambiguous read, which the caller treats as "needs
- * approval", not a guess.
+ * in the text and nothing is labelled. Fails closed (returns null, "needs
+ * approval") when there are multiple unlabelled candidates with nothing to
+ * prefer between them, or when the largest labelled candidate is smaller
+ * than some other candidate on the page -- a smaller "total"-labelled line
+ * next to a larger unlabelled amount is a decoy/mislabel, not a total to
+ * trust, and under-reading the charge must never happen silently.
  */
 export function pickTotal(text: string): ParsedTotal | null {
   const candidates = findMoneyCandidates(text);
   if (candidates.length === 0) return null;
 
   const labelled = candidates.filter((candidate) => candidate.labelled);
-  const pool = labelled.length > 0 ? labelled : candidates;
-  if (pool.length === 1 || labelled.length > 0) {
-    const winner = pool.reduce((best, current) => (current.amount > best.amount ? current : best));
-    return { amount: winner.amount, currency: winner.currency, raw: winner.raw };
+  if (labelled.length === 0) {
+    if (candidates.length !== 1) return null;
+    const [only] = candidates;
+    return { amount: only.amount, currency: only.currency, raw: only.raw };
   }
 
-  // Multiple unlabelled candidates, nothing to prefer between them.
-  return null;
+  const largestOverall = candidates.reduce((best, current) => (current.amount > best.amount ? current : best));
+  const largestLabelled = labelled.reduce((best, current) => (current.amount > best.amount ? current : best));
+
+  // The labelled total disagrees with a larger amount elsewhere on the page --
+  // ambiguous, do not trust the smaller labelled number.
+  if (largestLabelled.amount < largestOverall.amount) return null;
+
+  return { amount: largestLabelled.amount, currency: largestLabelled.currency, raw: largestLabelled.raw };
 }
 
 export type PurchaseAmountReason =

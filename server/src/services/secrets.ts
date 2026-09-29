@@ -37,6 +37,7 @@ import {
   deriveProjectUrlKey,
   envBindingSchema,
   GITHUB_TOKEN_SECRET_NAMES,
+  isSecretKindBindable,
   isUuidLike,
   normalizeAgentUrlKey,
   secretProviderConfigPayloadSchema,
@@ -304,6 +305,14 @@ type SecretConsumerContext = {
 type SecretResolutionOptions = {
   bindingContext?: SecretConsumerContext;
   accessContext?: SecretConsumerContext;
+  /**
+   * Set only by resolveSecretValueForBrowserFill, the one intended reader of
+   * payment_card_single_use/site_login secret values. Every other resolution
+   * path (env, MCP, export, plugin, test, ephemeral) leaves this unset and is
+   * refused by kind, defence-in-depth against a binding row that should never
+   * have been created for one of these kinds in the first place.
+   */
+  allowProtectedSecretKind?: boolean;
 };
 
 export type RuntimeSecretManifestEntry = {
@@ -564,6 +573,15 @@ export function secretService(db: Db, rawDb: Db = db) {
     });
   }
 
+  // DUR-4044: every caller of this function is validating a secret ahead of
+  // creating/replacing a company_secret_bindings row or persisting it into an
+  // adapter/env/MCP config field (createBinding, syncSecretRefsForTarget,
+  // syncEnvBindingsForTarget, normalizeEnvConfig, normalizeSchemaSecretField
+  // ForPersistence). A payment_card_single_use or site_login secret must
+  // never be reachable through any of those paths -- only
+  // paymentCardService.resolveForFill (via resolveSecretValueForBrowserFill)
+  // may ever see the value -- so the refusal belongs here, by kind, once, not
+  // repeated (and possibly forgotten) at each call site.
   async function assertSecretInCompany(
     companyId: string,
     secretId: string,
@@ -573,6 +591,11 @@ export function secretService(db: Db, rawDb: Db = db) {
     if (!secret) throw notFound("Secret not found");
     if (secret.status === "deleted") throw notFound("Secret not found");
     if (secret.companyId !== companyId) throw unprocessable("Secret must belong to same company");
+    if (!isSecretKindBindable(secret.kind)) {
+      throw forbidden(
+        `Secrets of kind "${secret.kind}" can only be read through their dedicated resolver and can never be bound to an agent, environment, or config`,
+      );
+    }
     return secret;
   }
 
@@ -716,6 +739,16 @@ export function secretService(db: Db, rawDb: Db = db) {
     const secret = await getById(secretId);
     if (!secret) throw notFound("Secret not found");
     if (secret.companyId !== companyId) throw unprocessable("Secret must belong to same company");
+    // DUR-4044: defence in depth. Binding creation already refuses these
+    // kinds (assertSecretInCompany), but a stale/pre-existing binding row (or
+    // any future resolution path that forgets to check) must not be able to
+    // hand out a payment_card_single_use/site_login value either -- only
+    // resolveSecretValueForBrowserFill sets allowProtectedSecretKind.
+    if (!options?.allowProtectedSecretKind && !isSecretKindBindable(secret.kind)) {
+      throw forbidden(
+        `Secrets of kind "${secret.kind}" can only be resolved through their dedicated reader`,
+      );
+    }
     const resolvedVersion = version === "latest" ? secret.latestVersion : version;
     const providerId = secret.provider as SecretProvider;
     const configPath = accessContext?.configPath ?? null;
@@ -929,6 +962,7 @@ export function secretService(db: Db, rawDb: Db = db) {
         issueId: context.issueId ?? null,
         heartbeatRunId: context.heartbeatRunId ?? null,
       },
+      allowProtectedSecretKind: true,
     })).value;
   }
 
