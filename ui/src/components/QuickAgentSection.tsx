@@ -509,15 +509,16 @@ export function QuickAgentSection({
           )}
         </div>
 
-        {/* Browser access: off by default, per quick agent. DUR-4020. */}
+        {/* Browser access: off by default, applies to full runs only. DUR-4020. */}
         <div className="space-y-2 border-t pt-4" data-testid="quick-agent-browser-access">
           <div className="space-y-1.5">
             <p className="text-sm font-medium">Browser access</p>
             <p className="text-xs text-muted-foreground">
-              Lets this quick agent open a real browser to look at web pages and fill in forms for you. "Can
-              browse, book, and pay" also lets it use a payment card or website login you've saved under
-              Connections to finish a booking or a purchase — it never sees a card number or password itself,
-              only Paperclip does. Off by default. Only you can change this.
+              Lets this agent open a real browser to look at web pages and fill in forms for you. "Can browse,
+              book, and pay" also lets it use a payment card or website login you've saved under Connections to
+              finish a booking or a purchase — it never sees a card number or password itself, only Paperclip
+              does. This only applies when the agent does a full run — a quick agent never gets browser access,
+              even with this switched on. Off by default. Only you can change this.
             </p>
           </div>
           <select
