@@ -6,11 +6,14 @@
  * payment-field refusal, access level, session caps, the booking approval
  * itself) lives entirely on the server (`server/src/services/browser-service.ts`).
  *
- * Step 4 adds `request_booking`/`confirm_final_step` (book_and_buy agents
- * only; the server re-checks that, this file does not). `request_purchase`,
- * `fill_payment_details`, `check_clearance`, `wait_for_outcome`,
- * `report_outcome` (the purchase/card side of the design) are a later phase
- * and have no tool here yet.
+ * Step 4 added `request_booking`/`confirm_final_step` (book_and_buy agents
+ * only; the server re-checks that, this file does not). Step 6 (DUR-4046)
+ * adds the purchase/card side: `request_purchase`, `fill_payment_details`,
+ * `wait_for_outcome`, `report_outcome` -- `confirm_final_step` above is
+ * shared between booking and purchase, dispatched server-side on whichever
+ * one is pending on the session. `check_clearance` from the design is not
+ * built; nothing in this phase needs an agent to poll clearance state
+ * separately from the request/confirm/outcome calls above.
  */
 import { z } from "zod";
 import { PaperclipApiClient } from "./client.js";
@@ -137,6 +140,42 @@ export function createBrowserToolDefinitions(client: PaperclipApiClient): ToolDe
       "Click the final confirm/book button for a booking Filip has approved (book_and_buy agents only). Refused with a plain reason if there is no pending booking on this session, Filip has not decided yet, Filip said no, the approval window (30 minutes) expired, the page or button is not the exact one request_booking was filed with, or the visible price went up since then. Single-use: consumed on the first confirm attempt whether it succeeds or fails -- call request_booking again for another booking.",
       sessionIdSchema.extend({ ref: z.string().min(1).max(200).describe("Ref of the final confirm/book button from the last snapshot -- must be the same button passed to request_booking") }),
       ({ sessionId, ...body }) => client.requestJson("POST", `/browser/sessions/${sessionId}/confirm-final-step`, { body }),
+    ),
+    makeTool(
+      "request_purchase",
+      "Ask to buy the item shown on the current checkout page with a specific card (book_and_buy agents only, purchases must be switched on for the company). The server reads the total off the page itself -- your summary is shown to Filip in quotes if he needs to decide, never trusted as the amount. Strictly below 500 NOK equivalent with no caps breached auto-clears immediately (status \"auto_cleared\", no approval needed); at or above, or if a daily/weekly/per-merchant/anti-splitting cap would be breached, or the amount/currency could not be read with confidence, or the page mentions a subscription/trial, this files a board approval instead (status \"pending_approval\") and the session parks until Filip decides. `ref` must be the final pay/place-order button -- confirm_final_step will refuse any other element, a different page (including a different product via the query string), or a higher price than what is bound here. Returns a clearanceId; nothing is charged yet.",
+      sessionIdSchema.extend({
+        summary: z.string().min(1).max(1000).describe("One sentence: what is being bought"),
+        ref: z.string().min(1).max(200).describe("Ref of the final pay/place-order button from the last snapshot -- the exact button confirm_final_step will later click"),
+        cardId: z.string().uuid().describe("Which payment card to use, from the cards available to this agent"),
+      }),
+      ({ sessionId, ...body }) => client.requestJson("POST", `/browser/sessions/${sessionId}/request-purchase`, { body }),
+    ),
+    makeTool(
+      "fill_payment_details",
+      "Fill card details into the given element refs for a live purchase clearance (book_and_buy agents only). You never see the card number, CVC, or expiry -- pass the ref of whichever fields exist on the page (card number, expiry, or separate month/year, CVC, name on card) and the server types the real values in directly, filling only the fields you named. Refused if the clearance is not yet approved, has expired, or was rejected. The returned page content has any card number scrubbed.",
+      sessionIdSchema.extend({
+        clearanceId: z.string().uuid().describe("clearanceId returned by request_purchase"),
+        cardNumberRef: z.string().min(1).max(200).optional(),
+        expiryRef: z.string().min(1).max(200).optional().describe("Ref of a combined MM/YY expiry field, if the form has one"),
+        expiryMonthRef: z.string().min(1).max(200).optional(),
+        expiryYearRef: z.string().min(1).max(200).optional(),
+        cvcRef: z.string().min(1).max(200).optional(),
+        nameOnCardRef: z.string().min(1).max(200).optional(),
+      }),
+      ({ sessionId, ...body }) => client.requestJson("POST", `/browser/sessions/${sessionId}/fill-payment-details`, { body }),
+    ),
+    makeTool(
+      "wait_for_outcome",
+      "After confirm_final_step on a purchase, check whether the page shows the purchase succeeded, failed, or is still unclear. Safe to call repeatedly while waiting (e.g. during 3-D Secure) -- does nothing until the outcome is no longer unverified. Once confirmed or failed, this is final: the card is marked used and a receipt sent (confirmed), or the reservation is released with no charge (failed).",
+      sessionIdSchema.extend({ ms: z.number().int().min(0).max(30_000).optional().describe("Optional wait before checking, in milliseconds") }),
+      ({ sessionId, ...body }) => client.requestJson("POST", `/browser/sessions/${sessionId}/wait-for-outcome`, { body }),
+    ),
+    makeTool(
+      "report_outcome",
+      "Force a final decision on a purchase whose outcome wait_for_outcome still can't read with confidence (e.g. the page never redirected). Your note is quoted to Filip, never trusted as the actual result -- the server always re-derives the outcome itself from the page. If it still can't confirm success, this finalizes as \"used_unverified\" (card marked used, receipt flagged as unconfirmed) rather than leaving the purchase, session, and card reservation hanging indefinitely.",
+      sessionIdSchema.extend({ agentNote: z.string().max(1000).optional().describe("What you observed, in your own words -- shown to Filip in quotes") }),
+      ({ sessionId, ...body }) => client.requestJson("POST", `/browser/sessions/${sessionId}/report-outcome`, { body }),
     ),
     makeTool(
       "browser_hand_over",

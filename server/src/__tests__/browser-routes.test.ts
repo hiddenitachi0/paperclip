@@ -29,6 +29,10 @@ const mockBrowserService = vi.hoisted(() => ({
   handOver: vi.fn(),
   requestBooking: vi.fn(),
   confirmFinalStep: vi.fn(),
+  requestPurchase: vi.fn(),
+  fillPaymentDetails: vi.fn(),
+  waitForOutcome: vi.fn(),
+  reportOutcome: vi.fn(),
 }));
 
 vi.mock("../services/browser-service.js", () => ({
@@ -162,5 +166,84 @@ describe("browserRoutes", () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ snapshot: { tree: "", url: "https://x/confirmed", title: "Confirmed" } });
     expect(mockBrowserService.confirmFinalStep).toHaveBeenCalledWith(AGENT_ID, "sess-1", "e9");
+  });
+
+  it("routes request-purchase with summary/ref/cardId to the service (DUR-4046)", async () => {
+    mockBrowserService.requestPurchase.mockResolvedValue({ clearanceId: "clr-1", cardId: "card-1", status: "auto_cleared", approvalId: null });
+    const app = await createApp("agent");
+
+    const res = await request(app)
+      .post("/api/browser/sessions/sess-1/request-purchase")
+      .send({ summary: "A gadget", ref: "e9", cardId: "22222222-2222-4222-8222-222222222222" });
+
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({ clearanceId: "clr-1", cardId: "card-1", status: "auto_cleared", approvalId: null });
+    expect(mockBrowserService.requestPurchase).toHaveBeenCalledWith(AGENT_ID, "sess-1", "A gadget", "e9", "22222222-2222-4222-8222-222222222222");
+  });
+
+  it("rejects request-purchase without a valid cardId before it reaches the service", async () => {
+    const app = await createApp("agent");
+    const res = await request(app).post("/api/browser/sessions/sess-1/request-purchase").send({ summary: "A gadget", ref: "e9", cardId: "not-a-uuid" });
+    expect(res.status).toBe(400);
+    expect(mockBrowserService.requestPurchase).not.toHaveBeenCalled();
+  });
+
+  it("refuses a board user on request-purchase (agent-only, same as every other browser route)", async () => {
+    const app = await createApp("board");
+    const res = await request(app).post("/api/browser/sessions/sess-1/request-purchase").send({ summary: "A gadget", ref: "e9", cardId: "22222222-2222-4222-8222-222222222222" });
+    expect(res.status).toBe(403);
+    expect(mockBrowserService.requestPurchase).not.toHaveBeenCalled();
+  });
+
+  it("routes fill-payment-details with the clearance and field refs to the service (DUR-4046)", async () => {
+    mockBrowserService.fillPaymentDetails.mockResolvedValue({ tree: "****", url: "https://x", title: "Checkout" });
+    const app = await createApp("agent");
+
+    const res = await request(app)
+      .post("/api/browser/sessions/sess-1/fill-payment-details")
+      .send({ clearanceId: "22222222-2222-4222-8222-222222222222", cardNumberRef: "e10", cvcRef: "e11" });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ snapshot: { tree: "****", url: "https://x", title: "Checkout" } });
+    expect(mockBrowserService.fillPaymentDetails).toHaveBeenCalledWith(AGENT_ID, "sess-1", {
+      clearanceId: "22222222-2222-4222-8222-222222222222",
+      cardNumberRef: "e10",
+      cvcRef: "e11",
+    });
+  });
+
+  it("rejects fill-payment-details without a valid clearanceId before it reaches the service", async () => {
+    const app = await createApp("agent");
+    const res = await request(app).post("/api/browser/sessions/sess-1/fill-payment-details").send({ clearanceId: "not-a-uuid" });
+    expect(res.status).toBe(400);
+    expect(mockBrowserService.fillPaymentDetails).not.toHaveBeenCalled();
+  });
+
+  it("routes wait-for-outcome (with no body) to the service (DUR-4046)", async () => {
+    mockBrowserService.waitForOutcome.mockResolvedValue({ outcome: "confirmed", snapshot: { tree: "", url: "https://x", title: "" } });
+    const app = await createApp("agent");
+
+    const res = await request(app).post("/api/browser/sessions/sess-1/wait-for-outcome").send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ outcome: "confirmed", snapshot: { tree: "", url: "https://x", title: "" } });
+    expect(mockBrowserService.waitForOutcome).toHaveBeenCalledWith(AGENT_ID, "sess-1", undefined);
+  });
+
+  it("routes report-outcome with an agentNote to the service (DUR-4046)", async () => {
+    mockBrowserService.reportOutcome.mockResolvedValue({ outcome: "used_unverified", snapshot: { tree: "", url: "https://x", title: "" } });
+    const app = await createApp("agent");
+
+    const res = await request(app).post("/api/browser/sessions/sess-1/report-outcome").send({ agentNote: "page never redirected" });
+
+    expect(res.status).toBe(200);
+    expect(mockBrowserService.reportOutcome).toHaveBeenCalledWith(AGENT_ID, "sess-1", "page never redirected");
+  });
+
+  it("refuses a Lane A quick-agent call on report-outcome (never an 'agent' actor)", async () => {
+    const app = await createApp("service");
+    const res = await request(app).post("/api/browser/sessions/sess-1/report-outcome").send();
+    expect(res.status).toBe(403);
+    expect(mockBrowserService.reportOutcome).not.toHaveBeenCalled();
   });
 });
