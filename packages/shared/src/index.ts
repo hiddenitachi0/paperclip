@@ -112,6 +112,8 @@ export {
   pickTotal,
   evaluatePurchaseAmount,
   evaluatePurchaseCaps,
+  containsSubscriptionOrTrialWording,
+  isPurchaseTotalStillAcceptable,
   type MoneyCandidate,
   type ParsedTotal,
   type PurchaseAmountReason,
