@@ -831,6 +831,26 @@ export function pluginRoutes(
       return { ...noGrants, error: '"runContext.agentId" does not match the authenticated agent' };
     }
 
+    // DUR-4096 (round 3): `runContext.runId` is caller-supplied in the POST
+    // body -- nothing upstream of this function verifies it names the run
+    // actually issuing the request. `actor.runId` is the one anchor the
+    // caller cannot pick: for an agent JWT it is baked into the signed token
+    // at mint time (auth.ts ignores any differing header), and for a
+    // long-lived agent API key it is independently confirmed by
+    // `resolveAgentKeyRunId` to be one of this agent's own *currently
+    // active* runs. Without this, a live run could name a different, real
+    // (possibly already-ended) run of its own agent as `runContext.runId`,
+    // which `deriveInvocationScope`/`assertRunIdMatchesLiveInvocation`
+    // downstream would then trust as "the live run" -- defeating the
+    // checkout/Lane-A enforcement `createComment`/`createAttachment` rely on
+    // that value for. When `actor.runId` is absent (e.g. an agent API key
+    // call with no run bound to it at all) there is no live run to anchor
+    // against, so this check is skipped rather than invented; those calls
+    // already carried no run-liveness guarantee before this fix.
+    if (actor.type === "agent" && actor.runId && actor.runId !== runContext.runId) {
+      return { ...noGrants, error: '"runContext.runId" does not match the authenticated run' };
+    }
+
     const [agent] = await db
       .select({
         companyId: agents.companyId,
