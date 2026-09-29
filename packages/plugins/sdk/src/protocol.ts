@@ -1433,7 +1433,26 @@ export interface WorkerToHostMethods {
     result: IssueComment[],
   ];
   "issues.createComment": [
-    params: { issueId: string; body: string; companyId: string; authorAgentId?: string },
+    params: {
+      issueId: string;
+      body: string;
+      companyId: string;
+      authorAgentId?: string;
+      /**
+       * The invoking tool call's (or background job's) run id. Required and
+       * host-enforced whenever `authorAgentId` is set (DUR-4096): an
+       * attributed comment is an impersonation-adjacent primitive -- it
+       * reads, in the issue thread, as if that agent said something -- so
+       * the host verifies the run's access to `issueId` (checkout, or a
+       * narrower Lane-A carve-out, or the run resolving to the issue's
+       * current assignee) the same way `createAttachment` verifies runId
+       * before letting a plugin attach. Omit both `runId` and
+       * `authorAgentId` for an unattributed system/plugin comment on an
+       * issue id the plugin's own code resolved (never from model/tool-call
+       * input) -- that path is unchanged from before DUR-4096.
+       */
+      runId?: string | null;
+    },
     result: IssueComment,
   ];
   "issues.createAttachment": [
