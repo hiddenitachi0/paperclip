@@ -46,7 +46,7 @@ function fakeClaude(answer: string) {
   return { client: { messages: { create } } as unknown as LaneAModelClient, calls, create };
 }
 
-const minutesAgo = (n: number) => new Date(Date.now() - n * 60_000);
+const minutesAgo = (n: number, base: Date = new Date()) => new Date(base.getTime() - n * 60_000);
 
 d("continue an earlier quick-agent conversation", () => {
   let stopDb: (() => Promise<void>) | null = null;
@@ -105,6 +105,7 @@ d("continue an earlier quick-agent conversation", () => {
     agentId: string,
     requester: { userId?: string; agentId?: string },
     turns: Array<["user" | "assistant", string, number]>,
+    now?: Date,
   ) {
     const last = Math.min(...turns.map((turn) => turn[2]));
     const [conversation] = await db
@@ -115,8 +116,8 @@ d("continue an earlier quick-agent conversation", () => {
         requestedByUserId: requester.userId ?? null,
         requestedByAgentId: requester.agentId ?? null,
         turnCount: Math.ceil(turns.length / 2),
-        lastMessageAt: minutesAgo(last),
-        createdAt: minutesAgo(Math.max(...turns.map((turn) => turn[2]))),
+        lastMessageAt: minutesAgo(last, now),
+        createdAt: minutesAgo(Math.max(...turns.map((turn) => turn[2])), now),
       })
       .returning();
     await db.insert(laneAMessages).values(
@@ -126,7 +127,7 @@ d("continue an earlier quick-agent conversation", () => {
         agentId,
         role,
         content,
-        createdAt: minutesAgo(ago),
+        createdAt: minutesAgo(ago, now),
       })),
     );
     return conversation!.id;
@@ -235,14 +236,25 @@ d("continue an earlier quick-agent conversation", () => {
   });
 
   it("a topic makes one call to the agent's own model, which picks the messages and writes the recap", async () => {
+    // Anchored well away from midnight in Norway time: the "today" window is
+    // calendar-day-bound there, and messages "90 minutes ago" from a real
+    // Date.now() land in the wrong Oslo day whenever the suite runs shortly
+    // after local midnight.
+    const now = new Date("2025-06-10T10:00:00.000Z");
     const companyId = await seedCompany();
     const maja = await seedAgent(companyId);
-    await seedConversation(companyId, maja.id, { userId: "filip" }, [
-      ["user", "Let's prepare the meeting with Jacsped.", 90],
-      ["assistant", "Agenda: delivery times, prices.", 89],
-      ["user", "What's the weather in Oslo?", 60],
-      ["assistant", "Sunny, 14 degrees.", 59],
-    ]);
+    await seedConversation(
+      companyId,
+      maja.id,
+      { userId: "filip" },
+      [
+        ["user", "Let's prepare the meeting with Jacsped.", 90],
+        ["assistant", "Agenda: delivery times, prices.", 89],
+        ["user", "What's the weather in Oslo?", 60],
+        ["assistant", "Sunny, 14 degrees.", 59],
+      ],
+      now,
+    );
     const claude = fakeClaude('{"ids": [1, 2], "recap": "Preparing the Jacsped meeting: agenda is delivery times and prices."}');
 
     const result = await laneAService(db, { createModelClient: () => claude.client }).continueConversation({
@@ -251,6 +263,7 @@ d("continue an earlier quick-agent conversation", () => {
       requester: filip,
       actor: board(companyId),
       spec: "our meeting today",
+      now,
     });
 
     expect(claude.create).toHaveBeenCalledTimes(1);
