@@ -4,13 +4,94 @@ import type { BrowserWorkerClient } from "./browser-worker-client.js";
 vi.mock("./activity-log.js", () => ({
   logActivity: vi.fn().mockResolvedValue(undefined),
 }));
+// Sane no-op defaults so every pre-existing test above (which never touches
+// the booking gate) keeps constructing `browserService()` without wiring
+// these up itself; `wireBookingGateDefaults` below overrides per test.
+vi.mock("./approvals.js", () => ({
+  approvalService: vi.fn(() => ({
+    create: vi.fn().mockResolvedValue({ id: "approval-1" }),
+    getById: vi.fn().mockResolvedValue(null),
+  })),
+}));
+vi.mock("./company-payment-settings.js", () => ({
+  companyPaymentSettingsService: vi.fn(() => ({
+    get: vi.fn().mockResolvedValue({ companyId: "unset", bookingEnabled: false }),
+  })),
+}));
+vi.mock("./payment-notices.js", () => ({
+  paymentNoticesService: vi.fn(() => ({
+    writeReceipt: vi.fn().mockResolvedValue({}),
+    writeHandOver: vi.fn().mockResolvedValue({}),
+  })),
+}));
+vi.mock("./issues.js", () => ({
+  issueService: vi.fn(() => ({ createCompanyFile: vi.fn().mockResolvedValue({ id: "unset" }) })),
+}));
+vi.mock("../storage/index.js", () => ({
+  getStorageService: vi.fn(() => ({ putFile: vi.fn().mockResolvedValue({}) })),
+}));
 
 const { browserService, _resetBrowserSessionsForTests } = await import("./browser-service.js");
 const { logActivity } = await import("./activity-log.js");
+const { approvalService } = await import("./approvals.js");
+const { companyPaymentSettingsService } = await import("./company-payment-settings.js");
+const { paymentNoticesService } = await import("./payment-notices.js");
+const { issueService } = await import("./issues.js");
+const { getStorageService } = await import("../storage/index.js");
 
 const AGENT_ID = "11111111-1111-4111-8111-111111111111";
 const OTHER_AGENT_ID = "22222222-2222-4222-8222-222222222222";
 const COMPANY_ID = "c0000001-0000-4000-8000-000000000001";
+
+/** DUR-4037: booking-gate test doubles, wired to sane no-op defaults so tests that don't care about them (everything above this point) keep passing untouched. */
+function fakeApprovals() {
+  const approvals = {
+    create: vi.fn().mockResolvedValue({ id: "approval-1" }),
+    getById: vi.fn().mockResolvedValue({ id: "approval-1", status: "pending" }),
+  };
+  vi.mocked(approvalService).mockReturnValue(approvals as any);
+  return approvals;
+}
+
+function fakePaymentSettings(bookingEnabled: boolean) {
+  const settings = { get: vi.fn().mockResolvedValue({ companyId: COMPANY_ID, bookingEnabled }) };
+  vi.mocked(companyPaymentSettingsService).mockReturnValue(settings as any);
+  return settings;
+}
+
+function fakePaymentNotices() {
+  const notices = { writeReceipt: vi.fn().mockResolvedValue({}), writeHandOver: vi.fn().mockResolvedValue({}) };
+  vi.mocked(paymentNoticesService).mockReturnValue(notices as any);
+  return notices;
+}
+
+const FILE_ID = "f1000000-f100-4100-8100-f10000000001";
+
+function fakeIssues() {
+  const issues = { createCompanyFile: vi.fn().mockResolvedValue({ id: FILE_ID }) };
+  vi.mocked(issueService).mockReturnValue(issues as any);
+  return issues;
+}
+
+function wireBookingGateDefaults(input: { bookingEnabled?: boolean } = {}) {
+  const approvals = fakeApprovals();
+  const settings = fakePaymentSettings(input.bookingEnabled ?? true);
+  const notices = fakePaymentNotices();
+  const issues = fakeIssues();
+  vi.mocked(getStorageService).mockReturnValue({
+    putFile: vi.fn().mockResolvedValue({
+      provider: "fs",
+      objectKey: "key-1",
+      contentType: "image/png",
+      byteSize: 3,
+      sha256: "sha",
+      originalFilename: "shot.png",
+    }),
+  } as any);
+  return { approvals, settings, notices, issues };
+}
+
+const BOOK_AND_BUY_AGENT = { id: AGENT_ID, companyId: COMPANY_ID, browserAccess: "book_and_buy", status: "idle" };
 
 function fakeDbWithAgent(agent: { id: string; companyId: string; browserAccess: string; status: string } | null) {
   return {
@@ -142,5 +223,325 @@ describe("browserService", () => {
       }),
     );
     await expect(svc.snapshot(AGENT_ID, sessionId)).rejects.toMatchObject({ status: 422 });
+  });
+});
+
+describe("browserService booking gate (DUR-4037)", () => {
+  beforeEach(() => {
+    _resetBrowserSessionsForTests();
+    vi.mocked(logActivity).mockClear();
+  });
+
+  const BOOKING_PAGE_URL = "https://booking.example.com/step-3";
+  const OTHER_SITE_URL = "https://other-site.example/step-3";
+
+  function fakeWorkerClientOnBookingPage(overrides: Partial<BrowserWorkerClient> = {}): BrowserWorkerClient {
+    return fakeWorkerClient({
+      snapshot: vi.fn().mockResolvedValue({ tree: "", url: BOOKING_PAGE_URL, title: "Review booking" }),
+      screenshot: vi.fn().mockResolvedValue(new Uint8Array([1, 2, 3])),
+      describeElement: vi.fn().mockResolvedValue({
+        ref: "e9",
+        role: "button",
+        label: "Bekreft bestilling",
+        name: null,
+        isFormSubmit: true,
+      }),
+      performClick: vi.fn().mockResolvedValue({ tree: "", url: BOOKING_PAGE_URL + "/confirmed", title: "Confirmed" }),
+      ...overrides,
+    });
+  }
+
+  it("refuses request_booking for a browse_and_forms agent even with bookings enabled company-wide", async () => {
+    const db = fakeDbWithAgent({ id: AGENT_ID, companyId: COMPANY_ID, browserAccess: "browse_and_forms", status: "idle" });
+    wireBookingGateDefaults({ bookingEnabled: true });
+    const svc = browserService(db as any, { workerClient: fakeWorkerClientOnBookingPage() });
+
+    const { sessionId } = await svc.open(AGENT_ID, { purpose: "book a table" });
+    await expect(svc.requestBooking(AGENT_ID, sessionId, "A table for two", "e9")).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("refuses request_booking for a book_and_buy agent when the company kill switch is off", async () => {
+    const db = fakeDbWithAgent(BOOK_AND_BUY_AGENT);
+    wireBookingGateDefaults({ bookingEnabled: false });
+    const svc = browserService(db as any, { workerClient: fakeWorkerClientOnBookingPage() });
+
+    const { sessionId } = await svc.open(AGENT_ID, { purpose: "book a table" });
+    await expect(svc.requestBooking(AGENT_ID, sessionId, "A table for two", "e9")).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("request_booking files a board approval stamped with the server's own domain and screenshot, and parks the session", async () => {
+    const db = fakeDbWithAgent(BOOK_AND_BUY_AGENT);
+    const { approvals, issues } = wireBookingGateDefaults({ bookingEnabled: true });
+    const svc = browserService(db as any, { workerClient: fakeWorkerClientOnBookingPage() });
+
+    const { sessionId } = await svc.open(AGENT_ID, { purpose: "book a table" });
+    const result = await svc.requestBooking(AGENT_ID, sessionId, 'A "free" table, no deposit', "e9");
+
+    expect(result).toEqual({ approvalId: "approval-1", status: "pending_approval" });
+    expect(issues.createCompanyFile).toHaveBeenCalledWith(expect.objectContaining({ companyId: COMPANY_ID, createdByAgentId: AGENT_ID }));
+    expect(approvals.create).toHaveBeenCalledWith(
+      COMPANY_ID,
+      expect.objectContaining({
+        type: "request_board_approval",
+        requestedByAgentId: AGENT_ID,
+        status: "pending",
+        payload: expect.objectContaining({
+          kind: "booking",
+          merchantDomain: "example.com",
+          agentSummary: 'A "free" table, no deposit',
+          screenshotFileId: FILE_ID,
+        }),
+      }),
+    );
+  });
+
+  it("refuses a second request_booking while one is already pending on the session", async () => {
+    const db = fakeDbWithAgent(BOOK_AND_BUY_AGENT);
+    wireBookingGateDefaults({ bookingEnabled: true });
+    const svc = browserService(db as any, { workerClient: fakeWorkerClientOnBookingPage() });
+
+    const { sessionId } = await svc.open(AGENT_ID, { purpose: "book a table" });
+    await svc.requestBooking(AGENT_ID, sessionId, "First booking", "e9");
+    await expect(svc.requestBooking(AGENT_ID, sessionId, "Second booking", "e9")).rejects.toMatchObject({ status: 422 });
+  });
+
+  it("confirm_final_step refuses when there is no pending booking on the session", async () => {
+    const db = fakeDbWithAgent(BOOK_AND_BUY_AGENT);
+    const worker = fakeWorkerClientOnBookingPage();
+    wireBookingGateDefaults({ bookingEnabled: true });
+    const svc = browserService(db as any, { workerClient: worker });
+
+    const { sessionId } = await svc.open(AGENT_ID, { purpose: "book a table" });
+    await expect(svc.confirmFinalStep(AGENT_ID, sessionId, "e9")).rejects.toMatchObject({ status: 422 });
+    expect(worker.performClick).not.toHaveBeenCalled();
+  });
+
+  it("confirm_final_step refuses while Filip has not decided yet, without clicking anything", async () => {
+    const db = fakeDbWithAgent(BOOK_AND_BUY_AGENT);
+    const worker = fakeWorkerClientOnBookingPage();
+    const { approvals } = wireBookingGateDefaults({ bookingEnabled: true });
+    approvals.getById.mockResolvedValue({ id: "approval-1", status: "pending" });
+    const svc = browserService(db as any, { workerClient: worker });
+
+    const { sessionId } = await svc.open(AGENT_ID, { purpose: "book a table" });
+    await svc.requestBooking(AGENT_ID, sessionId, "A table for two", "e9");
+
+    await expect(svc.confirmFinalStep(AGENT_ID, sessionId, "e9")).rejects.toMatchObject({ status: 422 });
+    expect(worker.performClick).not.toHaveBeenCalled();
+  });
+
+  it("confirm_final_step refuses and clears the slot once Filip has said no", async () => {
+    const db = fakeDbWithAgent(BOOK_AND_BUY_AGENT);
+    const worker = fakeWorkerClientOnBookingPage();
+    const { approvals } = wireBookingGateDefaults({ bookingEnabled: true });
+    approvals.getById.mockResolvedValue({ id: "approval-1", status: "rejected" });
+    const svc = browserService(db as any, { workerClient: worker });
+
+    const { sessionId } = await svc.open(AGENT_ID, { purpose: "book a table" });
+    await svc.requestBooking(AGENT_ID, sessionId, "A table for two", "e9");
+
+    await expect(svc.confirmFinalStep(AGENT_ID, sessionId, "e9")).rejects.toMatchObject({ status: 422 });
+    expect(worker.performClick).not.toHaveBeenCalled();
+    // Slot cleared: a second confirm attempt gets the "no pending booking" refusal, not another "rejected" one.
+    await expect(svc.confirmFinalStep(AGENT_ID, sessionId, "e9")).rejects.toMatchObject({ status: 422 });
+  });
+
+  it("confirm_final_step refuses when the page moved to a different site since request_booking", async () => {
+    const db = fakeDbWithAgent(BOOK_AND_BUY_AGENT);
+    const worker = fakeWorkerClientOnBookingPage();
+    const { approvals } = wireBookingGateDefaults({ bookingEnabled: true });
+    approvals.getById.mockResolvedValue({ id: "approval-1", status: "approved" });
+    const svc = browserService(db as any, { workerClient: worker });
+
+    const { sessionId } = await svc.open(AGENT_ID, { purpose: "book a table" });
+    await svc.requestBooking(AGENT_ID, sessionId, "A table for two", "e9");
+
+    vi.mocked(worker.snapshot).mockResolvedValue({ tree: "", url: OTHER_SITE_URL, title: "Different site" });
+    await expect(svc.confirmFinalStep(AGENT_ID, sessionId, "e9")).rejects.toMatchObject({ status: 422 });
+    expect(worker.performClick).not.toHaveBeenCalled();
+  });
+
+  // DUR-4045 security review: the clearance used to be bound only to the
+  // registrable domain, so one approved booking allowed any final click
+  // anywhere on that domain for up to 30 minutes. These tests pin the fix.
+
+  it("confirm_final_step refuses when the page navigated to a different page on the SAME domain since request_booking", async () => {
+    const db = fakeDbWithAgent(BOOK_AND_BUY_AGENT);
+    const worker = fakeWorkerClientOnBookingPage();
+    const { approvals } = wireBookingGateDefaults({ bookingEnabled: true });
+    approvals.getById.mockResolvedValue({ id: "approval-1", status: "approved" });
+    const svc = browserService(db as any, { workerClient: worker });
+
+    const { sessionId } = await svc.open(AGENT_ID, { purpose: "book a table" });
+    await svc.requestBooking(AGENT_ID, sessionId, "A table for two", "e9");
+
+    // Same domain, different page -- must not inherit the clearance.
+    vi.mocked(worker.snapshot).mockResolvedValue({ tree: "", url: "https://booking.example.com/another-room", title: "Another room" });
+    await expect(svc.confirmFinalStep(AGENT_ID, sessionId, "e9")).rejects.toMatchObject({ status: 422 });
+    expect(worker.performClick).not.toHaveBeenCalled();
+  });
+
+  it("confirm_final_step refuses a different element on the same page since request_booking", async () => {
+    const db = fakeDbWithAgent(BOOK_AND_BUY_AGENT);
+    const worker = fakeWorkerClientOnBookingPage();
+    const { approvals } = wireBookingGateDefaults({ bookingEnabled: true });
+    approvals.getById.mockResolvedValue({ id: "approval-1", status: "approved" });
+    const svc = browserService(db as any, { workerClient: worker });
+
+    const { sessionId } = await svc.open(AGENT_ID, { purpose: "book a table" });
+    await svc.requestBooking(AGENT_ID, sessionId, "A table for two", "e9");
+
+    // Same page, but confirm_final_step is pointed at a different element
+    // (e.g. a "Subscribe to newsletter" button the page also final-refuses).
+    vi.mocked(worker.describeElement).mockResolvedValue({
+      ref: "e12",
+      role: "button",
+      label: "Meld pa nyhetsbrev",
+      name: null,
+      isFormSubmit: false,
+    });
+    await expect(svc.confirmFinalStep(AGENT_ID, sessionId, "e12")).rejects.toMatchObject({ status: 422 });
+    expect(worker.performClick).not.toHaveBeenCalled();
+  });
+
+  it("confirm_final_step refuses when the visible price increased since request_booking", async () => {
+    const db = fakeDbWithAgent(BOOK_AND_BUY_AGENT);
+    const worker = fakeWorkerClientOnBookingPage({
+      snapshot: vi.fn().mockResolvedValue({ tree: "Total: 450 kr", url: BOOKING_PAGE_URL, title: "Review booking" }),
+    });
+    const { approvals } = wireBookingGateDefaults({ bookingEnabled: true });
+    approvals.getById.mockResolvedValue({ id: "approval-1", status: "approved" });
+    const svc = browserService(db as any, { workerClient: worker });
+
+    const { sessionId } = await svc.open(AGENT_ID, { purpose: "book a table" });
+    await svc.requestBooking(AGENT_ID, sessionId, "A table for two", "e9");
+
+    vi.mocked(worker.snapshot).mockResolvedValue({ tree: "Total: 900 kr", url: BOOKING_PAGE_URL, title: "Review booking" });
+    await expect(svc.confirmFinalStep(AGENT_ID, sessionId, "e9")).rejects.toMatchObject({ status: 422 });
+    expect(worker.performClick).not.toHaveBeenCalled();
+  });
+
+  it("confirm_final_step refuses when a price appears where the page was free at request_booking time", async () => {
+    const db = fakeDbWithAgent(BOOK_AND_BUY_AGENT);
+    const worker = fakeWorkerClientOnBookingPage();
+    const { approvals } = wireBookingGateDefaults({ bookingEnabled: true });
+    approvals.getById.mockResolvedValue({ id: "approval-1", status: "approved" });
+    const svc = browserService(db as any, { workerClient: worker });
+
+    const { sessionId } = await svc.open(AGENT_ID, { purpose: "book a table" });
+    await svc.requestBooking(AGENT_ID, sessionId, "A table for two", "e9");
+
+    vi.mocked(worker.snapshot).mockResolvedValue({ tree: "Deposit: 300 kr", url: BOOKING_PAGE_URL, title: "Review booking" });
+    await expect(svc.confirmFinalStep(AGENT_ID, sessionId, "e9")).rejects.toMatchObject({ status: 422 });
+    expect(worker.performClick).not.toHaveBeenCalled();
+  });
+
+  it("confirm_final_step allows a lower or equal price since request_booking", async () => {
+    const db = fakeDbWithAgent(BOOK_AND_BUY_AGENT);
+    const worker = fakeWorkerClientOnBookingPage({
+      snapshot: vi.fn().mockResolvedValue({ tree: "Total: 900 kr", url: BOOKING_PAGE_URL, title: "Review booking" }),
+    });
+    const { approvals } = wireBookingGateDefaults({ bookingEnabled: true });
+    approvals.getById.mockResolvedValue({ id: "approval-1", status: "approved" });
+    const svc = browserService(db as any, { workerClient: worker });
+
+    const { sessionId } = await svc.open(AGENT_ID, { purpose: "book a table" });
+    await svc.requestBooking(AGENT_ID, sessionId, "A table for two", "e9");
+
+    vi.mocked(worker.snapshot).mockResolvedValue({ tree: "Total: 450 kr", url: BOOKING_PAGE_URL, title: "Review booking" });
+    await expect(svc.confirmFinalStep(AGENT_ID, sessionId, "e9")).resolves.toMatchObject({});
+    expect(worker.performClick).toHaveBeenCalledWith("worker-session-1", "e9");
+  });
+
+  it("confirm_final_step still refuses a submit button in a form with a payment field, even for the approved element", async () => {
+    const db = fakeDbWithAgent(BOOK_AND_BUY_AGENT);
+    const worker = fakeWorkerClientOnBookingPage({
+      describeElement: vi.fn().mockResolvedValue({
+        ref: "e9",
+        role: "button",
+        label: "Bekreft bestilling",
+        name: null,
+        isFormSubmit: true,
+        formHasPaymentField: true,
+      }),
+    });
+    const { approvals } = wireBookingGateDefaults({ bookingEnabled: true });
+    approvals.getById.mockResolvedValue({ id: "approval-1", status: "approved" });
+    const svc = browserService(db as any, { workerClient: worker });
+
+    const { sessionId } = await svc.open(AGENT_ID, { purpose: "book a table" });
+    await svc.requestBooking(AGENT_ID, sessionId, "A table for two", "e9");
+
+    await expect(svc.confirmFinalStep(AGENT_ID, sessionId, "e9")).rejects.toMatchObject({ status: 422 });
+    expect(worker.performClick).not.toHaveBeenCalled();
+  });
+
+  it(
+    "confirm_final_step clicks the final-action button directly once Filip approved, bypassing the refusal a plain " +
+      "browser_click would give the exact same button (the fixture booking wizard's Norwegian final-action wording), " +
+      "and writes a receipt",
+    async () => {
+      const db = fakeDbWithAgent(BOOK_AND_BUY_AGENT);
+      const worker = fakeWorkerClientOnBookingPage();
+      const { approvals, notices, issues } = wireBookingGateDefaults({ bookingEnabled: true });
+      approvals.getById.mockResolvedValue({ id: "approval-1", status: "approved" });
+      const svc = browserService(db as any, { workerClient: worker });
+
+      const { sessionId } = await svc.open(AGENT_ID, { purpose: "book a table" });
+      await svc.requestBooking(AGENT_ID, sessionId, "A table for two", "e9");
+
+      // Proves the bypass is real: the exact same ref/element ("Bekreft bestilling",
+      // a final-action submit button) is refused through the plain click tool...
+      const plainClick = await svc.click(AGENT_ID, sessionId, "e9", "finishing the booking");
+      expect(plainClick).toMatchObject({ ok: false });
+      expect(worker.performClick).not.toHaveBeenCalled();
+
+      // ...but proceeds through confirm_final_step once Filip has approved it.
+      const snapshot = await svc.confirmFinalStep(AGENT_ID, sessionId, "e9");
+
+      expect(worker.performClick).toHaveBeenCalledWith("worker-session-1", "e9");
+      expect(snapshot.url).toBe(BOOKING_PAGE_URL + "/confirmed");
+      expect(issues.createCompanyFile).toHaveBeenCalledTimes(2); // request screenshot + receipt screenshot
+      expect(notices.writeReceipt).toHaveBeenCalledWith(
+        expect.objectContaining({ companyId: COMPANY_ID, agentId: AGENT_ID, imageFileId: FILE_ID }),
+      );
+      expect(logActivity).toHaveBeenCalledWith(db, expect.objectContaining({ action: "browser_booking_confirmed" }));
+
+      // Single-use: a second confirm on the same session has nothing left to consume.
+      await expect(svc.confirmFinalStep(AGENT_ID, sessionId, "e9")).rejects.toMatchObject({ status: 422 });
+    },
+  );
+
+  it("confirm_final_step consumes the clearance even when the click itself fails, refusing a retry", async () => {
+    const db = fakeDbWithAgent(BOOK_AND_BUY_AGENT);
+    const worker = fakeWorkerClientOnBookingPage({
+      performClick: vi.fn().mockRejectedValue(new Error("worker crashed mid-click")),
+    });
+    const { approvals } = wireBookingGateDefaults({ bookingEnabled: true });
+    approvals.getById.mockResolvedValue({ id: "approval-1", status: "approved" });
+    const svc = browserService(db as any, { workerClient: worker });
+
+    const { sessionId } = await svc.open(AGENT_ID, { purpose: "book a table" });
+    await svc.requestBooking(AGENT_ID, sessionId, "A table for two", "e9");
+
+    await expect(svc.confirmFinalStep(AGENT_ID, sessionId, "e9")).rejects.toThrow("worker crashed mid-click");
+    expect(worker.performClick).toHaveBeenCalledTimes(1);
+
+    // Single-use held even though the click failed: no dangling clearance to retry.
+    await expect(svc.confirmFinalStep(AGENT_ID, sessionId, "e9")).rejects.toMatchObject({ status: 422 });
+    expect(worker.performClick).toHaveBeenCalledTimes(1);
+  });
+
+  it("hand_over writes a plain-language payment notice for the Telegram bridge", async () => {
+    const db = fakeDbWithAgent({ id: AGENT_ID, companyId: COMPANY_ID, browserAccess: "browse_and_forms", status: "idle" });
+    const { notices } = wireBookingGateDefaults();
+    const svc = browserService(db as any, { workerClient: fakeWorkerClientOnBookingPage() });
+
+    const { sessionId } = await svc.open(AGENT_ID, { purpose: "book a table" });
+    await svc.handOver(AGENT_ID, sessionId, "hit a captcha", "please solve it and continue manually");
+
+    expect(notices.writeHandOver).toHaveBeenCalledWith(
+      expect.objectContaining({ companyId: COMPANY_ID, agentId: AGENT_ID, text: expect.stringContaining("captcha") }),
+    );
   });
 });

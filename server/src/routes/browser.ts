@@ -25,6 +25,8 @@ import {
   browserPressKeySchema,
   browserWaitSchema,
   browserHandOverSchema,
+  browserRequestBookingSchema,
+  browserConfirmFinalStepSchema,
 } from "@paperclipai/shared/validators/browser";
 import { forbidden, notFound } from "../errors.js";
 import { validate } from "../middleware/validate.js";
@@ -133,6 +135,30 @@ export function browserRoutes(rawDb: Db, deps: BrowserServiceDeps = {}) {
     await svc.handOver(agentId, sessionIdOf(req), req.body.reason, req.body.whatFilipShouldDo);
     res.json({ ok: true });
   });
+
+  // ── DUR-4037 (step 4): the booking gate. book_and_buy agents only -- the
+  // service itself re-checks the agent's access level and the company kill
+  // switch, this layer only wires HTTP <-> service, same as everything above.
+
+  router.post(
+    "/browser/sessions/:sessionId/request-booking",
+    agentScope(),
+    validate(browserRequestBookingSchema),
+    async (req, res) => {
+      const { agentId } = requireAgentActor(req);
+      res.status(202).json(await svc.requestBooking(agentId, sessionIdOf(req), req.body.summary, req.body.ref));
+    },
+  );
+
+  router.post(
+    "/browser/sessions/:sessionId/confirm-final-step",
+    agentScope(),
+    validate(browserConfirmFinalStepSchema),
+    async (req, res) => {
+      const { agentId } = requireAgentActor(req);
+      res.json({ snapshot: await svc.confirmFinalStep(agentId, sessionIdOf(req), req.body.ref) });
+    },
+  );
 
   return router;
 }

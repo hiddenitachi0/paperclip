@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   REDACTED_EVENT_VALUE,
+  redactCardNumbers,
   redactEventPayload,
   redactHeartbeatRunPatchSecrets,
   redactKnownLeakedSecretPatterns,
@@ -9,6 +10,11 @@ import {
   redactSensitiveText,
   sanitizeRecord,
 } from "../redaction.js";
+
+// DUR-4040: Stripe's canonical test Visa number -- obviously fake, Luhn-valid,
+// and exactly the shape a real PAN would have. Used across this suite so a
+// regression that stops redacting it is a single easy-to-spot failure.
+const CANARY_CARD_NUMBER = "4242424242424242";
 
 describe("redaction", () => {
   it("redacts sensitive keys and nested secret values", () => {
@@ -269,6 +275,64 @@ describe("redactKnownLeakedSecretPatterns", () => {
     expect(result).not.toContain("ghs_1234567890abcdefghijklmnopqrstuvwxyz");
     expect(result).not.toContain("ghr_1234567890abcdefghijklmnopqrstuvwxyz");
     expect(result).not.toContain("xoxp-test-fixture-not-a-real-token-000000");
+  });
+});
+
+describe("redactCardNumbers", () => {
+  it("redacts the canary card number wherever it appears in free text, spaced or not", () => {
+    expect(redactCardNumbers(`Card on file: ${CANARY_CARD_NUMBER}`)).toBe(
+      "Card on file: [REDACTED:card_number]",
+    );
+    expect(redactCardNumbers("Card on file: 4242 4242 4242 4242")).toBe(
+      "Card on file: [REDACTED:card_number]",
+    );
+    expect(redactCardNumbers("Card on file: 4242-4242-4242-4242")).toBe(
+      "Card on file: [REDACTED:card_number]",
+    );
+  });
+
+  it("does not redact an ordinary long number that fails the Luhn check", () => {
+    const input = "Order ID: 1234567890123456";
+    expect(redactCardNumbers(input)).toBe(input);
+  });
+
+  it("is folded into redactKnownLeakedSecretPatterns, the run-output redaction path", () => {
+    const result = redactKnownLeakedSecretPatterns(
+      `browser_type filled the field with ${CANARY_CARD_NUMBER}`,
+    );
+    expect(result).not.toContain(CANARY_CARD_NUMBER);
+    expect(result).toContain("[REDACTED:card_number]");
+  });
+
+  it("is folded into the deep-walk activity-log/workspace-metadata redaction path", () => {
+    const result = redactKnownLeakedSecretPatternsDeep({
+      note: `typed ${CANARY_CARD_NUMBER} into the form`,
+      nested: [{ detail: CANARY_CARD_NUMBER }],
+    }) as { note: string; nested: Array<{ detail: string }> };
+    expect(result.note).not.toContain(CANARY_CARD_NUMBER);
+    expect(result.nested[0].detail).not.toContain(CANARY_CARD_NUMBER);
+  });
+});
+
+describe("canary card number never survives serialization (DUR-4040)", () => {
+  it("is redacted from an activity-log-shaped details object via sanitizeRecord", () => {
+    const result = sanitizeRecord({
+      cardNumber: CANARY_CARD_NUMBER,
+      cvc: "123",
+      cardCvc: "123",
+      label: "Test card",
+    });
+    expect(result.cardNumber).toBe(REDACTED_EVENT_VALUE);
+    expect(result.cvc).toBe(REDACTED_EVENT_VALUE);
+    expect(result.cardCvc).toBe(REDACTED_EVENT_VALUE);
+    expect(result.label).toBe("Test card");
+    expect(JSON.stringify(result)).not.toContain(CANARY_CARD_NUMBER);
+  });
+
+  it("is redacted from an unstructured log/transcript line even with no field name at all", () => {
+    const line = `POST /checkout body: {"total":"499 kr","card":"${CANARY_CARD_NUMBER}"}`;
+    const result = redactKnownLeakedSecretPatterns(line);
+    expect(result).not.toContain(CANARY_CARD_NUMBER);
   });
 });
 

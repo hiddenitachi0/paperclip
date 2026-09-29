@@ -43,6 +43,22 @@ describe("redactSensitive", () => {
     expect((redactSensitive({ env: { A: { type: "plain", value: "hunter2" } } }) as any).env.A.value).toBe("[REDACTED]");
   });
 
+  // DUR-4040: the canary card. This exact test number must never reach
+  // server.log through the "Add card" form's cardNumber/cvc fields, whatever
+  // status code that request ends up returning.
+  it("redacts the canary payment card number and CVC under the Add-card form's field names", () => {
+    const out = redactSensitive({
+      label: "Test card",
+      cardNumber: "4242424242424242",
+      cvc: "123",
+    }) as Record<string, unknown>;
+
+    expect(out.label).toBe("Test card");
+    expect(out.cardNumber).toBe("[REDACTED]");
+    expect(out.cvc).toBe("[REDACTED]");
+    expect(JSON.stringify(out)).not.toContain("4242424242424242");
+  });
+
   it("does not redact a bare `token` field — pagination cursors and CSRF tokens are not credentials", () => {
     const out = redactSensitive({ token: "next-page-cursor", limit: 20 }) as Record<string, unknown>;
 

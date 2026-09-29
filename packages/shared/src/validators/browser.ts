@@ -46,3 +46,24 @@ export const browserHandOverSchema = z.object({
   reason: z.string().trim().min(1).max(1000),
   whatFilipShouldDo: z.string().trim().min(1).max(1000),
 });
+
+// DUR-4037 (Maja browser step 4): the gated booking surface, `book_and_buy`
+// agents only. Every booking, including a free one with no deposit, needs
+// Filip's approval -- there is no auto-clear input to accept here.
+
+export const browserRequestBookingSchema = z.object({
+  /** The agent's own one-line account of what it is booking; always shown to Filip quoted, never as fact. */
+  summary: z.string().trim().min(1).max(1000),
+  /** Ref of the final confirm/book button from the last snapshot -- the server binds the clearance to this exact element (role + accessible name) plus the current page and price, per the DUR-4045 security review of the booking gate. */
+  ref: z.string().trim().min(1).max(200),
+});
+
+export const browserConfirmFinalStepSchema = z.object({
+  ref: z.string().trim().min(1).max(200),
+});
+
+export const browserFillSiteLoginSchema = z.object({
+  secretId: z.string().uuid(),
+  usernameRef: z.string().trim().min(1).max(200),
+  passwordRef: z.string().trim().min(1).max(200),
+});
