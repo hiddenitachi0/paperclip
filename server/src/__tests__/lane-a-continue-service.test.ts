@@ -132,11 +132,15 @@ d("continue an earlier quick-agent conversation", () => {
     return conversation!.id;
   }
 
+  // DUR-4070: "filip" is this fixture's company owner throughout the file, so
+  // he passes the "assigned people + owner" gate without being added to any
+  // agent's laneAAssignedUserIds -- exactly the "default: owner only" rule.
   const board = (companyId: string, userId = "filip") => ({
     type: "board" as const,
     userId,
     companyIds: [companyId],
     source: "session" as const,
+    memberships: [{ companyId, membershipRole: "owner", status: "active" }],
   });
   const filip = { userId: "filip", agentId: null };
 

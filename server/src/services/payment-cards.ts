@@ -1,7 +1,7 @@
 import { and, asc, eq, inArray, lt } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, companies, paymentCards } from "@paperclipai/db";
-import { readLaneABrowserAccess, type PaymentCardStatus, type PaymentCardSummary } from "@paperclipai/shared";
+import { effectiveLaneABrowserAccess, type PaymentCardStatus, type PaymentCardSummary } from "@paperclipai/shared";
 import { conflict, forbidden, notFound } from "../errors.js";
 import { secretService } from "./secrets.js";
 
@@ -297,7 +297,7 @@ export function paymentCardService(db: Db, rawDb: Db = db, deps: PaymentCardServ
       .from(agents)
       .where(and(eq(agents.companyId, companyId), eq(agents.id, context.agentId)));
     if (!agent) throw notFound("Agent not found");
-    if (readLaneABrowserAccess(agent.adapterConfig) !== "book_and_buy") {
+    if (effectiveLaneABrowserAccess(agent) !== "book_and_buy") {
       throw forbidden("This agent's browser access does not allow using a payment card");
     }
 
