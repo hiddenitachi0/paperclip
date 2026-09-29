@@ -1317,6 +1317,13 @@
       "when": 1787160570000,
       "tag": "0188_purchase_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 189,
+      "version": "7",
+      "when": 1787160580000,
+      "tag": "0189_project_display_fields",
+      "breakpoints": true
     }
   ]
 }

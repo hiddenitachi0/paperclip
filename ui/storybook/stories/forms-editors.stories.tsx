@@ -305,6 +305,8 @@ const storybookProject: Project = {
   targetDate: null,
   color: "#0f766e",
   icon: null,
+  productionUrl: null,
+  hostingTarget: null,
   env: null,
   pauseReason: null,
   pausedAt: null,
