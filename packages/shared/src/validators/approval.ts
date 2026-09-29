@@ -344,3 +344,37 @@ export const featureLaunchRequestPayloadSchema = z
   .strict();
 
 export type FeatureLaunchRequestPayload = z.infer<typeof featureLaunchRequestPayloadSchema>;
+
+/**
+ * `request_board_approval` payload convention for a booking clearance (DUR-4037,
+ * Maja browser step 4). Filip's ruling overrides the original design: EVERY
+ * booking needs this card, including a free one with no deposit -- there is no
+ * auto-clear path at all, so filing one of these is the only way
+ * `confirm_final_step` can ever be allowed to proceed past the browser
+ * worker's final-action refusal (see `evaluateFinalActionRisk` in
+ * `@paperclipai/adapter-utils/final-action-matcher`).
+ *
+ * Every field here is stamped server-side by `browser-service.ts`'s
+ * `requestBooking` at filing time, never trusted from the requesting agent's
+ * own words beyond the quoted `agentSummary` -- same trust boundary as
+ * `deployRequestPayloadSchema`'s `changesSinceLive` above: a filer must not be
+ * able to claim its own "this is a harmless free booking".
+ */
+export const bookingRequestPayloadSchema = z
+  .object({
+    kind: z.literal("booking"),
+    sessionId: z.string().uuid(),
+    agentId: z.string().uuid(),
+    /** The page's registrable domain at the moment of filing (tldts), never the raw URL an agent could pad with a lie. */
+    merchantDomain: z.string().trim().min(1).max(253),
+    /** The agent's own one-line account of what it is booking, always shown quoted, never as fact. */
+    agentSummary: multilineTextSchema.pipe(z.string().trim().min(1).max(1000)),
+    /** A same-company attachment id (GET /api/attachments/:id/content) for the pre-confirm screenshot, or null when one could not be taken. */
+    screenshotFileId: z.string().uuid().nullable(),
+    title: z.string().min(1),
+    summary: multilineTextSchema.optional(),
+    expiresAt: z.string().datetime(),
+  })
+  .strict();
+
+export type BookingRequestPayload = z.infer<typeof bookingRequestPayloadSchema>;

@@ -324,6 +324,9 @@ export {
   browserPressKeySchema,
   browserWaitSchema,
   browserHandOverSchema,
+  browserRequestBookingSchema,
+  browserConfirmFinalStepSchema,
+  browserFillSiteLoginSchema,
 } from "./browser.js";
 
 export {
@@ -610,6 +613,7 @@ export {
   instructionsChangeRequestPayloadSchema,
   personaPublishRequestPayloadSchema,
   featureLaunchRequestPayloadSchema,
+  bookingRequestPayloadSchema,
   type CreateApproval,
   type ResolveApproval,
   type RequestApprovalRevision,
@@ -625,6 +629,7 @@ export {
   type InstructionsChangeRequestPayload,
   type PersonaPublishRequestPayload,
   type FeatureLaunchRequestPayload,
+  type BookingRequestPayload,
 } from "./approval.js";
 
 export {

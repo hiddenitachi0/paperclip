@@ -878,6 +878,9 @@ importers:
       ssh2:
         specifier: ^1.17.0
         version: 1.17.0
+      tldts:
+        specifier: ^7.0.26
+        version: 7.0.26
       ws:
         specifier: ^8.19.0
         version: 8.19.0
