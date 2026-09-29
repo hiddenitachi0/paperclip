@@ -227,6 +227,52 @@ describeEmbeddedPostgres("plugin-host-services issues.createComment", () => {
     expect(rows).toHaveLength(0);
   });
 
+  it("rejects a live invocation that names a different, real, ended run of its own agent to reach the delivery exception (runId-spoofing security-review follow-up)", async () => {
+    // A second security review of this same fix found that "the named run
+    // has ended" was not enough either: nothing stopped a currently-live
+    // tool invocation from citing a *different*, genuinely-ended run of its
+    // own agent (e.g. one it has seen via createdByRunId on its own past
+    // comments) to satisfy the delivery exception, even though the call
+    // actually executing right now is `runId` (live, checked out on
+    // `issueId`), not `staleRunId` at all.
+    //
+    // The host knows which run is really driving this call because it came
+    // through a live `executeTool` invocation -- that's what `context`
+    // models here. Once that's wired in, a plugin-supplied `params.runId`
+    // that disagrees with it must be rejected outright, regardless of
+    // whether the *named* run happens to be real, ended, and assigned.
+    const { companyId, agentId, secondAssignedIssueId, runId, staleRunId } = await seed();
+    await expect(
+      services().issues.createComment(
+        {
+          issueId: secondAssignedIssueId,
+          companyId,
+          body: "operator approved, proceeding (spoofed via a stale but real ended runId)",
+          authorAgentId: agentId,
+          runId: staleRunId,
+        },
+        { invocationScope: { companyId, runId } },
+      ),
+    ).rejects.toThrow("runId must match the invoking run");
+    const rows = await db.select().from(issueComments).where(eq(issueComments.issueId, secondAssignedIssueId));
+    expect(rows).toHaveLength(0);
+  });
+
+  it("allows an attributed comment during a live invocation when params.runId matches the invocation's own runId", async () => {
+    const { companyId, agentId, issueId, runId } = await seed();
+    const comment = await services().issues.createComment(
+      {
+        issueId,
+        companyId,
+        body: "Your video is ready",
+        authorAgentId: agentId,
+        runId,
+      },
+      { invocationScope: { companyId, runId } },
+    );
+    expect(comment.body).toBe("Your video is ready");
+  });
+
   it("allows a run that has since ended to reach a different issue when it is that issue's current assignee (background-job delivery exception is issue-agnostic once the run is over)", async () => {
     const { companyId, agentId, secondAssignedIssueId, staleRunId } = await seed();
     // staleRunId is "completed" and never held checkout anywhere -- it's the

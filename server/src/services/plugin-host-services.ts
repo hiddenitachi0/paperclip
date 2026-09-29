@@ -25,6 +25,7 @@ import type {
   PluginIssueAssigneeSummary,
   PluginIssueOrchestrationSummary,
   PluginExecutionWorkspaceMetadata,
+  WorkerHostCallContext,
 } from "@paperclipai/plugin-sdk";
 import type { CreateIssueThreadInteraction, InviteJoinType, IssueDocumentSummary, PermissionKey, PrincipalType } from "@paperclipai/shared";
 import { pluginOperationIssueOriginKind } from "@paperclipai/shared";
@@ -617,6 +618,40 @@ export function buildHostServices(
       .where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, companyId)))
       .then((rows) => rows[0] ?? null);
     return run !== null && !ACTIVE_HEARTBEAT_RUN_STATUSES.has(run.status);
+  };
+
+  /**
+   * When this call happens inside a live, host-verified tool invocation
+   * (`executeTool`), `context.invocationScope.runId` is the run actually
+   * driving this call right now -- set by the host itself from
+   * `runContext.runId` after the route layer already checked it against
+   * `heartbeat_runs` (`validateToolRunContextScope`, server/src/routes/
+   * plugins.ts), never from anything the plugin process supplies on this
+   * RPC call. `params.runId` here is a plain plugin-supplied field with no
+   * such binding.
+   *
+   * If the host knows the real live run, a plugin-supplied `params.runId`
+   * naming a *different* run must be rejected outright: without this, a
+   * live invocation could "borrow" any other real, completed run belonging
+   * to the same agent (trivially discoverable -- every comment/attachment
+   * an agent has ever authored exposes its own `createdByRunId`) to satisfy
+   * an ended-run check the live call itself could never pass on its own
+   * merits (DUR-4096 security-review follow-up).
+   *
+   * Absent (background job / webhook / scheduler dispatch has no live tool
+   * invocation) -- there is nothing to bind against, so `params.runId` is
+   * left to the caller's own DB-backed validation (resolveIssueRunAccess /
+   * isHeartbeatRunEnded), which is what the legitimate background-job
+   * delivery case (media-studio's job poller) relies on.
+   */
+  const assertRunIdMatchesLiveInvocation = (
+    context: WorkerHostCallContext | undefined,
+    runId: string,
+  ): void => {
+    const liveRunId = context?.invocationScope?.runId;
+    if (liveRunId && liveRunId !== runId) {
+      throw new Error("runId must match the invoking run");
+    }
   };
 
   const logPluginActivity = async (input: {
@@ -1959,7 +1994,7 @@ export function buildHostServices(
         if (!inCompany(await issues.getById(params.issueId), companyId)) return [];
         return (await issues.listComments(params.issueId)) as IssueComment[];
       },
-      async createComment(params) {
+      async createComment(params, context) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
         const issue = requireInCompany("Issue", await issues.getById(params.issueId), companyId);
@@ -1978,8 +2013,17 @@ export function buildHostServices(
         // it, any of an agent's currently-live runs could reach a
         // completely unrelated issue merely because that agent happens to
         // be assigned there too -- a second security review of this same
-        // PR found that exact gap before merge. An unattributed comment (no
-        // authorAgentId) can't be used to impersonate anyone, so it keeps
+        // PR found that exact gap before merge. A *third* review then found
+        // that "ended" alone wasn't enough either: a live invocation could
+        // still name a different, real, already-ended run of its own agent
+        // (e.g. one it has seen via createdByRunId on its own past
+        // comments) to reach the assignment-based exception on an issue the
+        // live call itself has no relationship to. assertRunIdMatchesLiveInvocation
+        // closes that: whenever this call happens inside a live tool
+        // invocation, params.runId is host-verified to be that exact
+        // invocation's own run, not merely "some real run of this agent".
+        // An unattributed comment (no authorAgentId) can't be used to
+        // impersonate anyone, so it keeps
         // the pre-DUR-4096 company-scope-only check, unchanged for callers
         // like plugin-llm-wiki that post plugin-authored status comments
         // with no agent attribution on issue ids their own code resolved,
@@ -1988,6 +2032,7 @@ export function buildHostServices(
           if (!params.runId) {
             throw new Error("runId is required when authorAgentId is set");
           }
+          assertRunIdMatchesLiveInvocation(context, params.runId);
           const callingAgentId = await callingAgentIdForRun(companyId, params.runId);
           if (!callingAgentId || callingAgentId !== params.authorAgentId) {
             throw new Error("authorAgentId must match the invoking run's own agent");
@@ -2052,7 +2097,7 @@ export function buildHostServices(
         });
         return interaction as any;
       },
-      async createAttachment(params) {
+      async createAttachment(params, context) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
         const issue = requireInCompany("Issue", await issues.getById(params.issueId), companyId);
@@ -2066,6 +2111,10 @@ export function buildHostServices(
         if (!params.runId) {
           throw new Error("runId is required");
         }
+        // Same host-verified live-invocation binding as createComment
+        // (DUR-4096 security-review follow-up) -- kept here too so the two
+        // enforcement paths cannot drift apart on this point either.
+        assertRunIdMatchesLiveInvocation(context, params.runId);
         const access = await resolveIssueRunAccess(issue, companyId, params.runId);
         if (access === "lane-a-denied") {
           // A quick agent (Lane A) has no checkout: it answers in chat. Its

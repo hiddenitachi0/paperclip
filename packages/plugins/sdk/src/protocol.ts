@@ -266,11 +266,22 @@ export type PluginRpcErrorCode =
 // ---------------------------------------------------------------------------
 
 /**
- * Company scope attached by the host to one top-level plugin invocation.
- * Absence of this metadata means the invocation is instance/global scoped.
+ * Company (and, when available, run) scope attached by the host to one
+ * top-level plugin invocation. Absence of this metadata means the
+ * invocation is instance/global scoped.
+ *
+ * `runId` is populated only for invocations dispatched from a live,
+ * server-verified tool call (`executeTool`, whose `runContext.runId` the
+ * route layer already validated against `heartbeat_runs` before dispatch --
+ * see `validateToolRunContextScope` in `server/src/routes/plugins.ts`). It
+ * is never derived from anything the plugin process itself supplies. A
+ * background job/webhook/scheduler dispatch has no live tool invocation, so
+ * this is absent there -- callers must not treat "no runId here" as "no
+ * run", only as "no host-verified live run for this call".
  */
 export interface PluginInvocationScope {
   companyId: string;
+  runId?: string | null;
 }
 
 /**
