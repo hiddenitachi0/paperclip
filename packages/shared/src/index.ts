@@ -2317,8 +2317,11 @@ export {
   type MorningReportOutboxStatus,
   type MorningReportOutboxItem,
   type MorningReportFactItem,
+  type MorningReportPricePoint,
   type MorningReportPriceFact,
   type MorningReportImageFact,
+  type MorningReportWeatherFact,
+  type MorningReportStats,
   type MorningReportFacts,
   type AckMorningReportOutboxInput,
 } from "./morning-report.js";

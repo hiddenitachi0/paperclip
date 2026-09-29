@@ -22,11 +22,13 @@ import {
   type MorningReportOutboxItem,
   type MorningReportOutboxStatus,
   type MorningReportPriceFact,
+  type MorningReportPricePoint,
   type MorningReportPriceSymbol,
   type MorningReportSettings,
   type MorningReportSource,
   type MorningReportSportFollow,
   type MorningReportTopic,
+  type MorningReportWeatherFact,
   type WatcherSource,
 } from "@paperclipai/shared";
 import { notFound } from "../errors.js";
@@ -77,18 +79,37 @@ export const MORNING_REPORT_LEASE_MS = 10 * 60_000;
 export const MORNING_REPORT_OUTBOX_MAX_AGE_MS = 24 * 3_600_000;
 const HTTP_TIMEOUT_MS = 8_000;
 const OUTBOX_BATCH = 20;
-/** ~1024 output tokens, expressed as the chars-equivalent lane-a.ts's transform() takes (see resolveTransformMaxTokens). */
-const MAX_OUTPUT_CHARS_FOR_1024_TOKENS = 1024 * 4;
 const HOBBY_MAX_AGE_HOURS = 24 * 7;
 const SEARCH_RESULTS_PER_SOURCE = 5;
+/** How many of a price's most recent watcher readings become its sparkline history (DUR-4059). */
+const PRICE_HISTORY_POINTS = 7;
 
-/** Instructions for the one model call a report costs. The facts travel as data, never in here. */
-export const MORNING_REPORT_TASK =
-  "You write one daily morning briefing message to the person you work for, in English, using only the facts given below. " +
-  "Organize it with short, clearly labelled sections (for example Weather, Headlines, Hobby news, Sport, Prices) in whatever " +
-  "order reads best. Use the facts exactly as given: do not invent, round differently, or add any number, headline or fact " +
-  "not present below. Keep it skimmable — plain prose or short bullet points, at most a few sentences per section. If a " +
-  "section has no facts, leave it out entirely rather than saying there is nothing to report.";
+/**
+ * Realistic cap for the one model call a report still costs (DUR-4059
+ * review): a numbered JSON list of short per-headline summaries plus a short
+ * opening genuinely needs more room than the old whole-report call did, so
+ * this is deliberately larger than a short answer would need — a smaller cap
+ * was exactly what caused the old call to cut off mid-list. Expressed as the
+ * chars-equivalent lane-a.ts's transform() takes (see resolveTransformMaxTokens).
+ */
+const MORNING_REPORT_SUMMARY_MAX_OUTPUT_TOKENS = 3_000;
+const MAX_OUTPUT_CHARS_FOR_SUMMARIES = MORNING_REPORT_SUMMARY_MAX_OUTPUT_TOKENS * 4;
+
+/**
+ * Instructions for the one model call a report still costs (DUR-4059
+ * direction change): the model writes ONLY a short opening and one-sentence
+ * summaries for the given headlines, as strict JSON, never the report itself.
+ * Every list in the report (weather, headlines, hobby, sport, prices) is
+ * rendered by code from the facts, so nothing Filip needs depends on this
+ * call succeeding, finishing, or being trusted with formatting/links.
+ */
+export const MORNING_REPORT_SUMMARY_TASK =
+  "You write two short things for a daily morning briefing, using only the facts given below: do not invent, round " +
+  'differently, or add any number, headline or fact not present below. Answer with ONLY one JSON object, no markdown, ' +
+  'no code fences, no commentary, matching exactly this shape: {"opening": "a friendly 3-5 sentence opening for the day, ' +
+  'plain text only, mentioning the weather and the most notable news in your own words", "headlines": [{"n": 1, ' +
+  '"summary": "one plain-text sentence summarizing headline 1, using only its title"}, ...one entry per numbered headline ' +
+  "given below] }. Plain text only in every string: never HTML, never markdown links, never a URL.";
 
 export interface MorningReportServiceDeps extends WebSearchServiceDeps {
   now?: () => Date;
@@ -101,6 +122,14 @@ export interface MorningReportServiceDeps extends WebSearchServiceDeps {
   secrets?: { resolveStockDataKey: ReturnType<typeof secretService>["resolveStockDataKey"] };
   /** Test seam: how a claimed report is handed off. Production detaches it onto the pool. */
   dispatch?: (work: () => Promise<void>) => void;
+  /**
+   * Whether the full briefing page (DUR-4075) is live yet. Defaults to the
+   * PAPERCLIP_MORNING_REPORT_BRIEFING_PAGE_ENABLED env var so the link is
+   * switched off everywhere until that page ships, without a code change
+   * here. A report written while this is false never carries the link, even
+   * after it flips true — see MorningReportFacts.briefingPageLive.
+   */
+  briefingPageLive?: boolean;
 }
 
 // ─── Local time, DST-safe ──────────────────────────────────────────────────
@@ -280,11 +309,11 @@ async function fetchRss(fetchImpl: typeof fetch, url: string, limit: number): Pr
   return parseRssItems(await response.text(), limit);
 }
 
-/** One place's weather: the formatted block (for the model/facts) and a short "place: conditions" line (for the picture prompt). */
+/** One place's weather: the formatted block (for the facts) and a short "place: conditions" line (for the picture prompt). */
 async function fetchOnePlaceWeather(
   fetchImpl: typeof fetch,
   place: string,
-): Promise<{ block: string; condition: string } | { note: string }> {
+): Promise<{ place: string; block: string; condition: string } | { note: string }> {
   try {
     const geo = (await fetchJson(
       fetchImpl,
@@ -303,30 +332,30 @@ async function fetchOnePlaceWeather(
     // "<place>: <conditions>" so two places read as a short list in the picture prompt.
     const firstLine = block.split("\n")[0] ?? block;
     const condition = firstLine.replace(/^Now in [^:]+:\s*/, `${place}: `);
-    return { block, condition };
+    return { place, block, condition };
   } catch (err) {
     return { note: `Weather (${place}): the forecast service did not answer (${err instanceof Error ? err.message : "unknown reason"}).` };
   }
 }
 
-/** Every configured place's weather (DUR-4059: Drøbak and Oslo by default, or just the one override place), combined into one block for the model/facts plus a short summary for the weather picture prompt. A place that fails degrades to a note, never losing the others. */
+/** Every configured place's weather (DUR-4059: Drøbak and Oslo by default, or just the one override place), one fact per place plus a short summary for the weather picture prompt. A place that fails degrades to a note, never losing the others. */
 async function fetchWeatherSection(
   fetchImpl: typeof fetch,
   places: string[],
-): Promise<{ text: string | null; conditionsSummary: string | null; notes: string[] }> {
+): Promise<{ items: MorningReportWeatherFact[]; conditionsSummary: string | null; notes: string[] }> {
   const results = await Promise.all(places.map((place) => fetchOnePlaceWeather(fetchImpl, place)));
-  const blocks: string[] = [];
+  const items: MorningReportWeatherFact[] = [];
   const conditions: string[] = [];
   const notes: string[] = [];
   for (const result of results) {
     if ("note" in result) notes.push(result.note);
     else {
-      blocks.push(result.block);
+      items.push({ place: result.place, text: result.block });
       conditions.push(result.condition);
     }
   }
   return {
-    text: blocks.length > 0 ? blocks.join("\n\n") : null,
+    items,
     conditionsSummary: conditions.length > 0 ? conditions.join("; ") : null,
     notes,
   };
@@ -334,6 +363,13 @@ async function fetchWeatherSection(
 
 type BraveSearch = (query: string) => Promise<{ title: string; url: string }[]>;
 
+/**
+ * DUR-4059 review: log per source how many items were fetched, survived the
+ * topic filter, and were finally kept (after cross-source dedupe and the
+ * maxHeadlines cap), so a thin headline day shows why in the server log —
+ * `stats.sourcesChecked`/`itemsFound` in the facts (see composeReport) is the
+ * plain-language, operator-facing version of the same count.
+ */
 async function collectHeadlines(params: {
   sources: MorningReportSource[];
   topics: MorningReportTopic[];
@@ -343,22 +379,42 @@ async function collectHeadlines(params: {
 }): Promise<{ items: { title: string; url: string; source: MorningReportSource }[]; notes: string[] }> {
   const notes: string[] = [];
   const collected: { title: string; url: string; source: MorningReportSource; pubDate: string | null }[] = [];
+  const fetchedPerSource = new Map<MorningReportSource, number>();
   for (const source of params.sources) {
     const feed = MORNING_REPORT_RSS_FEEDS[source];
     try {
       if (feed) {
-        for (const item of await fetchRss(params.fetchImpl, feed, 20)) collected.push({ ...item, source });
+        const got = await fetchRss(params.fetchImpl, feed, 20);
+        fetchedPerSource.set(source, got.length);
+        for (const item of got) collected.push({ ...item, source });
       } else {
-        for (const result of await params.braveSearch(`${source} news`)) {
-          collected.push({ title: result.title, url: result.url, source, pubDate: null });
-        }
+        const got = await params.braveSearch(`${source} news`);
+        fetchedPerSource.set(source, got.length);
+        for (const result of got) collected.push({ title: result.title, url: result.url, source, pubDate: null });
       }
     } catch (err) {
+      fetchedPerSource.set(source, 0);
       notes.push(`${source}: could not fetch headlines (${err instanceof Error ? err.message : "unknown reason"}).`);
     }
   }
   const onTopic = collected.filter((item) => matchesMorningReportTopics(item.title, params.topics));
+  const onTopicPerSource = new Map<MorningReportSource, number>();
+  for (const item of onTopic) onTopicPerSource.set(item.source, (onTopicPerSource.get(item.source) ?? 0) + 1);
   const items = dedupeHeadlines(onTopic).slice(0, params.maxHeadlines).map(({ title, url, source }) => ({ title, url, source }));
+  const keptPerSource = new Map<MorningReportSource, number>();
+  for (const item of items) keptPerSource.set(item.source, (keptPerSource.get(item.source) ?? 0) + 1);
+  for (const source of params.sources) {
+    logger.info(
+      {
+        event: "morning_report.headline_source",
+        source,
+        fetched: fetchedPerSource.get(source) ?? 0,
+        onTopic: onTopicPerSource.get(source) ?? 0,
+        kept: keptPerSource.get(source) ?? 0,
+      },
+      `morning-report: ${source} fetched ${fetchedPerSource.get(source) ?? 0}, ${onTopicPerSource.get(source) ?? 0} on-topic, ${keptPerSource.get(source) ?? 0} kept after dedupe/cap`,
+    );
+  }
   return { items, notes };
 }
 
@@ -465,11 +521,18 @@ async function collectPrices(
       // The reading closest to (but not under) 18 hours old stands in for
       // "yesterday's close" without needing a calendar-aware close price.
       const base = rows.find((row) => latest.observedAt.getTime() - row.observedAt.getTime() >= 18 * 3_600_000) ?? null;
+      // DUR-4059: a short sparkline history from the same watcher readings
+      // already fetched above — oldest first, at most PRICE_HISTORY_POINTS.
+      const history: MorningReportPricePoint[] = rows
+        .slice(0, PRICE_HISTORY_POINTS)
+        .reverse()
+        .map((row) => ({ price: row.price, observedAt: row.observedAt.toISOString() }));
       facts.push({
         symbol,
         price: latest.price,
         currency,
         changePercent: base ? ((latest.price - base.price) / base.price) * 100 : null,
+        history,
       });
       continue;
     }
@@ -490,11 +553,16 @@ async function collectPrices(
       }
       const quote = quotes.get(mapping.sourceSymbol);
       if (quote && !isWatcherQuoteError(quote)) {
+        // No watcher history exists yet for this symbol (the common case —
+        // prices must work without Filip ever creating a watcher), so there
+        // is no cheap sparkline source here; see "Questions for Filip" in
+        // the PR for the real 7-day-fetch fast-follow.
         facts.push({
           symbol,
           price: quote.price,
           currency,
           changePercent: quote.reference ? ((quote.price - quote.reference.price) / quote.reference.price) * 100 : null,
+          history: [],
         });
       } else {
         notes.push(`${symbol}: ${isWatcherQuoteError(quote) ? quote.message : "no price available right now."}`);
@@ -513,20 +581,156 @@ function formatPriceLine(fact: MorningReportPriceFact): string {
   return `${fact.symbol}: ${price} (${sign}${fact.changePercent.toFixed(2)}% vs ~24h ago)`;
 }
 
-function formatFactsAsPlainText(sections: {
-  weather: string | null;
+/**
+ * DUR-4059 review: every list here is rendered from the facts by code, never
+ * by a model, and every section that was configured says something even when
+ * it found nothing — a section never just silently disappears, so a thin day
+ * is visible instead of looking like a working, uneventful one. `settings` is
+ * only used to tell "not configured" (omit the section) apart from
+ * "configured but nothing found" (say so in one line).
+ */
+function renderFullReportText(
+  facts: Pick<MorningReportFacts, "opening" | "weather" | "headlines" | "hobby" | "sport" | "prices" | "stats">,
+  settings: Pick<MorningReportSettings, "sources" | "hobbyTopics" | "sportFollows" | "priceSymbols">,
+): string {
+  const parts: string[] = [facts.opening];
+  parts.push(facts.weather.length > 0 ? `Weather:\n${facts.weather.map((w) => w.text).join("\n\n")}` : "Weather: unavailable today.");
+  if (settings.sources.length > 0) {
+    parts.push(
+      facts.headlines.length > 0
+        ? `Headlines:\n${facts.headlines
+            .map((h, i) => `${i + 1}. ${h.title}${h.summary ? ` — ${h.summary}` : ""} (${h.url})`)
+            .join("\n")}`
+        : "Headlines: no new headlines found today.",
+    );
+  }
+  if (settings.hobbyTopics.length > 0) {
+    parts.push(
+      facts.hobby.length > 0
+        ? `Hobby news:\n${facts.hobby.map((h) => `- ${h.title} (${h.url})`).join("\n")}`
+        : "Hobby news: nothing new today.",
+    );
+  }
+  if (settings.sportFollows.length > 0) {
+    parts.push(
+      facts.sport.length > 0 ? `Sport:\n${facts.sport.map((h) => `- ${h.title} (${h.url})`).join("\n")}` : "Sport: nothing new today.",
+    );
+  }
+  if (settings.priceSymbols.length > 0) {
+    parts.push(
+      facts.prices.length > 0 ? `Prices:\n${facts.prices.map(formatPriceLine).join("\n")}` : "Prices: unavailable today.",
+    );
+  }
+  if (settings.sources.length > 0) {
+    parts.push(`Sources checked: ${facts.stats.sourcesChecked}, headlines found: ${facts.stats.itemsFound}.`);
+  }
+  return parts.join("\n\n");
+}
+
+/** A short, always-safe opening used when the model call fails, is truncated, or is not available. Never a model call. */
+function deterministicOpening(places: string[]): string {
+  return `Good morning! Here is your briefing for ${places.join(" and ")}.`;
+}
+
+/**
+ * DUR-4059 direction change: the short, plain-text Telegram teaser — today's
+ * weather in both places, the single most important headline, one price
+ * move. Built entirely in code, never by a model, and never containing HTML
+ * or markdown: the Telegram bridge sends it with no parse_mode, so any stray
+ * angle bracket in a headline title is shown literally rather than parsed.
+ * The bridge appends the briefing-page link itself, only when
+ * facts.briefingPageLive is true — this function never mentions the link.
+ */
+function buildTeaser(input: {
+  weather: MorningReportWeatherFact[];
   headlines: MorningReportFactItem[];
-  hobby: MorningReportFactItem[];
-  sport: MorningReportFactItem[];
   prices: MorningReportPriceFact[];
 }): string {
-  const parts: string[] = [];
-  if (sections.weather) parts.push(`Weather:\n${sections.weather}`);
-  if (sections.headlines.length > 0) parts.push(`Headlines:\n${sections.headlines.map((h) => `- ${h.title}`).join("\n")}`);
-  if (sections.hobby.length > 0) parts.push(`Hobby news:\n${sections.hobby.map((h) => `- ${h.title}`).join("\n")}`);
-  if (sections.sport.length > 0) parts.push(`Sport:\n${sections.sport.map((h) => `- ${h.title}`).join("\n")}`);
-  if (sections.prices.length > 0) parts.push(`Prices:\n${sections.prices.map(formatPriceLine).join("\n")}`);
-  return parts.length > 0 ? parts.join("\n\n") : "Nothing to report today.";
+  const lines: string[] = [];
+  lines.push(
+    input.weather.length > 0
+      ? input.weather.map((w) => (w.text.split("\n")[0] ?? w.text).trim()).join("; ")
+      : "Weather: unavailable today.",
+  );
+  lines.push(input.headlines.length > 0 ? `Top story: ${input.headlines[0]!.title}` : "Headlines: nothing new today.");
+  const notable = input.prices.find((p) => p.changePercent !== null) ?? input.prices[0];
+  if (notable) lines.push(formatPriceLine(notable));
+  return lines.join("\n");
+}
+
+/**
+ * Neutralizes any HTML the model might produce (DUR-4059 direction change:
+ * "no HTML or markdown links from the model are ever rendered as markup") —
+ * defense in depth on top of the Telegram bridge never using parse_mode for
+ * model-written text: even if a future caller renders this as HTML by
+ * mistake, there is no angle bracket left to form a tag.
+ */
+function sanitizeModelText(text: string, maxLength: number): string {
+  return text.replace(/[<>]/g, "").trim().slice(0, maxLength);
+}
+
+interface ParsedSummaryResponse {
+  opening?: unknown;
+  headlines?: unknown;
+}
+
+/** Best-effort JSON extraction from a model answer that is supposed to be strict JSON but might carry code fences or stray prose. Returns null on anything that does not parse. */
+function parseSummaryJson(text: string): ParsedSummaryResponse | null {
+  const trimmed = text.trim();
+  const candidates = [trimmed];
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced) candidates.push(fenced[1]!.trim());
+  const braces = trimmed.match(/\{[\s\S]*\}/);
+  if (braces) candidates.push(braces[0]);
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as ParsedSummaryResponse;
+    } catch {
+      // Try the next candidate.
+    }
+  }
+  return null;
+}
+
+/** Applies the model's per-headline summaries by position (n is 1-based, matching the numbering the model was given). Any entry that is malformed, out of range, or missing is simply skipped — a headline with no summary is still a complete, safe headline (title + link). */
+function applyHeadlineSummaries(
+  items: MorningReportFactItem[],
+  headlinesField: unknown,
+): MorningReportFactItem[] {
+  if (!Array.isArray(headlinesField)) return items;
+  const summaries = new Map<number, string>();
+  for (const entry of headlinesField) {
+    if (!entry || typeof entry !== "object") continue;
+    const n = (entry as Record<string, unknown>).n;
+    const summary = (entry as Record<string, unknown>).summary;
+    if (typeof n !== "number" || !Number.isInteger(n)) continue;
+    if (typeof summary !== "string" || !summary.trim()) continue;
+    summaries.set(n, sanitizeModelText(summary, 400));
+  }
+  return items.map((item, i) => {
+    const summary = summaries.get(i + 1);
+    return summary ? { ...item, summary } : item;
+  });
+}
+
+/** The compact, plain-text digest the one summaries model call reads — titles and short facts only, never a URL (so the model has nothing to turn into a link). */
+function buildSummaryDigest(input: {
+  places: string[];
+  weather: MorningReportWeatherFact[];
+  headlines: MorningReportFactItem[];
+  prices: MorningReportPriceFact[];
+}): string {
+  const lines: string[] = [`Places: ${input.places.join(", ")}.`];
+  for (const w of input.weather) lines.push(`Weather ${w.place}: ${(w.text.split("\n")[0] ?? w.text).trim()}`);
+  if (input.prices.length > 0) lines.push(`Prices: ${input.prices.map(formatPriceLine).join("; ")}`);
+  if (input.headlines.length > 0) {
+    lines.push("Headlines, numbered (write one summary per number, using only the title given):");
+    input.headlines.forEach((h, i) => lines.push(`${i + 1}. ${h.title} [${h.source}]`));
+  } else {
+    lines.push("Headlines: none today.");
+  }
+  return lines.join("\n");
 }
 
 /** Code-written (no model call): Maja dressed for today's weather, in her own default look. */
@@ -562,6 +766,7 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
   const secrets = deps.secrets ?? secretService(db);
   const nowOf = () => deps.now?.() ?? new Date();
   const fetchImpl = deps.fetchImpl ?? fetch;
+  const briefingPageLive = deps.briefingPageLive ?? process.env.PAPERCLIP_MORNING_REPORT_BRIEFING_PAGE_ENABLED === "true";
   const dispatch =
     deps.dispatch ??
     ((work: () => Promise<void>) => {
@@ -736,17 +941,18 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
     const notes: string[] = [...weather.notes];
     notes.push(...headlines.notes, ...hobby.notes, ...sport.notes, ...prices.notes);
 
-    const factsText = formatFactsAsPlainText({
-      weather: weather.text,
-      headlines: headlines.items,
-      hobby: hobby.items,
-      sport: sport.items,
-      prices: prices.facts,
-    });
+    const stats = { sourcesChecked: settings.sources.length, itemsFound: headlines.items.length };
 
-    let text = factsText;
+    // DUR-4059 direction change: the model writes ONLY a short opening and
+    // per-headline summaries, as JSON, never the report itself — every list
+    // above already exists in full regardless of what happens next. A
+    // truncated or unparsable answer is discarded whole (never "half a
+    // list"): the deterministic opening and plain title+link headlines are
+    // always a complete, safe report on their own.
+    let opening = deterministicOpening(places);
+    let headlineItems: MorningReportFactItem[] = headlines.items;
     if (!agentRow.laneAEnabled) {
-      notes.push("This agent is not a quick agent any more, so the facts were sent as they are.");
+      notes.push("This agent is not a quick agent any more, so headline summaries were not written.");
     } else {
       try {
         const written = await laneA.transform({
@@ -763,39 +969,52 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
             laneAMaxOutputTokens: agentRow.laneAMaxOutputTokens ?? null,
             laneATransformDailyCallCap: agentRow.laneATransformDailyCallCap ?? null,
           },
-          input: factsText,
-          task: MORNING_REPORT_TASK,
-          // One call a day; capped at min(the agent's own laneAMaxOutputTokens,
-          // 1024) — transform()'s maxOutputChars already takes the min of the
-          // agent's resolved token cap and this chars-equivalent budget (see
-          // resolveTransformMaxTokens in lane-a.ts).
-          maxOutputChars: MAX_OUTPUT_CHARS_FOR_1024_TOKENS,
+          input: buildSummaryDigest({ places, weather: weather.items, headlines: headlines.items, prices: prices.facts }),
+          task: MORNING_REPORT_SUMMARY_TASK,
+          maxOutputChars: MAX_OUTPUT_CHARS_FOR_SUMMARIES,
         });
-        const words = written.text.trim();
-        if (words) text = words;
-        else notes.push(`${agentRow.name} gave no text, so the facts were sent as they are.`);
+        if (written.truncated) {
+          notes.push(
+            `${agentRow.name}'s summary was cut off before it finished, so the opening and headlines were sent without it instead of a half-written one.`,
+          );
+        } else {
+          const parsed = parseSummaryJson(written.text);
+          if (!parsed) {
+            notes.push(`${agentRow.name} did not answer with the expected JSON, so the opening and headlines were sent without it.`);
+          } else {
+            if (typeof parsed.opening === "string" && parsed.opening.trim()) {
+              opening = sanitizeModelText(parsed.opening, 1200);
+            }
+            headlineItems = applyHeadlineSummaries(headlines.items, parsed.headlines);
+          }
+        }
       } catch (err) {
         const reason = err instanceof Error ? err.message : "unknown reason";
-        notes.push(`${agentRow.name} could not write this one (${reason.slice(0, 200)}), so the facts were sent as they are.`);
+        notes.push(`${agentRow.name} could not write summaries this time (${reason.slice(0, 200)}), so the opening and headlines were sent without it.`);
       }
     }
-    if (opts.isTest) text = `🧪 Test report\n${text}`;
+    if (opts.isTest) opening = `🧪 Test report\n${opening}`;
 
-    // Pictures via Media Studio, after the one written-text model call, never
+    // Pictures via Media Studio, after the one summaries model call, never
     // blocking it: a failed picture must never lose the report (DUR-4059).
-    const pictures = await collectImages(agentRow, places, weather.conditionsSummary, headlines.items, localDate);
+    const pictures = await collectImages(agentRow, places, weather.conditionsSummary, headlineItems, localDate);
     notes.push(...pictures.notes);
 
     const facts: MorningReportFacts = {
       places,
-      weatherText: weather.text,
-      headlines: headlines.items,
+      weather: weather.items,
+      headlines: headlineItems,
       hobby: hobby.items,
       sport: sport.items,
       prices: prices.facts,
       images: pictures.images,
+      opening,
+      teaser: buildTeaser({ weather: weather.items, headlines: headlineItems, prices: prices.facts }),
+      stats,
+      briefingPageLive,
       notes,
     };
+    const text = renderFullReportText(facts, settings);
     const conversationId = await appendReportToConversation(agentRow, text, facts, now);
 
     const [inserted] = await db
@@ -896,6 +1115,22 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
     return rows.map(toOutboxItem);
   }
 
+  /**
+   * One report's facts, for the full briefing page (DUR-4075's child task).
+   * Unlike outbox() this is not limited to 'ready'/unexpired rows — the page
+   * is read after Telegram has already delivered the report, by which point
+   * status has moved on to 'delivered'. Company-scoped like every other route
+   * here; the route itself is board-only (see routes/morning-report.ts).
+   */
+  async function getOne(companyId: string, id: string): Promise<MorningReportOutboxItem> {
+    const [row] = await db
+      .select()
+      .from(morningReportOutbox)
+      .where(and(eq(morningReportOutbox.id, id), eq(morningReportOutbox.companyId, companyId)));
+    if (!row) throw notFound("That report was not found.");
+    return toOutboxItem(row);
+  }
+
   function toStatus(status: string): MorningReportOutboxStatus {
     return status as MorningReportOutboxStatus;
   }
@@ -925,5 +1160,5 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
     return { id: (updated ?? row).id, status: toStatus((updated ?? row).status) };
   }
 
-  return { tick, composeReport, sendTestReportNow, outbox, ack };
+  return { tick, composeReport, sendTestReportNow, outbox, getOne, ack };
 }

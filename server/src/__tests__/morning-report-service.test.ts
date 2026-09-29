@@ -205,7 +205,13 @@ d("morning report tick", () => {
     makePicture.mockRejectedValue(new Error("no picture expected in this test"));
     webSearch.search.mockReset();
     webSearch.search.mockRejectedValue(new Error("web search was not expected in this test"));
-    transform.mockResolvedValue({ text: "Good morning! Here is your briefing.", model: "fake", provider: "anthropic" });
+    transform.mockResolvedValue({
+      text: JSON.stringify({ opening: "Good morning! Here is your briefing.", headlines: [] }),
+      model: "fake",
+      provider: "anthropic",
+      truncated: false,
+      stopReason: "stop",
+    });
   });
 
   afterAll(async () => {
@@ -280,7 +286,10 @@ d("morning report tick", () => {
 
     const rows = await outboxRowsFor(agentId);
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ companyId, agentId, status: "ready", text: "Good morning! Here is your briefing." });
+    expect(rows[0]).toMatchObject({ companyId, agentId, status: "ready" });
+    expect(rows[0]!.text).toContain("Good morning! Here is your briefing.");
+    expect(rows[0]!.text).toContain("World leaders meet for summit");
+    expect(rows[0]!.text).toContain("Lokal nyhet fra Dagbladet");
 
     const [agentRow] = await db.select().from(agents).where(eq(agents.id, agentId));
     expect(agentRow).toMatchObject({ morningReportLastSentDate: "2026-01-15", morningReportLeaseUntil: null });
@@ -321,7 +330,7 @@ d("morning report tick", () => {
     expect(await outboxRowsFor(agentId)).toHaveLength(1);
   });
 
-  it("falls back to the plain facts, with a note, when the agent cannot write the report", async () => {
+  it("falls back to the deterministic opening and plain title+link headlines, with a note, when the agent cannot write summaries", async () => {
     const companyId = await seedCompany();
     const agentId = await seedAgent(companyId, baseSettings);
     feeds[BBC_URL] = rssXml([{ title: "A headline", link: "https://bbc.example/x" }]);
@@ -334,7 +343,79 @@ d("morning report tick", () => {
     const [row] = await outboxRowsFor(agentId);
     expect(row!.status).toBe("ready");
     expect(row!.text).toContain("A headline");
-    expect(row!.note ?? "").toContain("could not write this one");
+    expect(row!.facts!.headlines[0]!.summary).toBeUndefined();
+    expect(row!.note ?? "").toContain("could not write summaries this time");
+  });
+
+  it("discards the whole summaries answer (never a half-written one) when the model call is truncated", async () => {
+    const companyId = await seedCompany();
+    const agentId = await seedAgent(companyId, baseSettings);
+    feeds[BBC_URL] = rssXml([{ title: "A headline that must survive truncation", link: "https://bbc.example/x" }]);
+    feeds[DAGBLADET_URL] = rssXml([]);
+    transform.mockResolvedValue({
+      text: JSON.stringify({ opening: "Cut off mid", headlines: [{ n: 1, summary: "cut off" }] }),
+      model: "fake",
+      provider: "anthropic",
+      truncated: true,
+      stopReason: "max_tokens",
+    });
+
+    await service().tick(OSLO_WINTER_0700);
+    await settle();
+
+    const [row] = await outboxRowsFor(agentId);
+    expect(row!.status).toBe("ready");
+    // The deterministic fallback opening, not the (truncated) model one.
+    expect(row!.text).toContain("Good morning! Here is your briefing for");
+    expect(row!.text).not.toContain("Cut off mid");
+    expect(row!.facts!.headlines[0]!.summary).toBeUndefined();
+    expect(row!.facts!.headlines[0]!.title).toBe("A headline that must survive truncation");
+    expect(row!.note ?? "").toContain("cut off before it finished");
+  });
+
+  it("degrades to the deterministic fallback when the model answers with something that is not the expected JSON", async () => {
+    const companyId = await seedCompany();
+    const agentId = await seedAgent(companyId, baseSettings);
+    feeds[BBC_URL] = rssXml([{ title: "A headline", link: "https://bbc.example/x" }]);
+    feeds[DAGBLADET_URL] = rssXml([]);
+    transform.mockResolvedValue({ text: "Sure, here is your briefing: not JSON at all.", model: "fake", provider: "anthropic", truncated: false });
+
+    await service().tick(OSLO_WINTER_0700);
+    await settle();
+
+    const [row] = await outboxRowsFor(agentId);
+    expect(row!.text).toContain("Good morning! Here is your briefing for");
+    expect(row!.facts!.headlines[0]!.summary).toBeUndefined();
+    expect(row!.note ?? "").toContain("did not answer with the expected JSON");
+  });
+
+  it("applies the model's per-headline summaries by position, leaving an unmatched headline as title+link only", async () => {
+    const companyId = await seedCompany();
+    const agentId = await seedAgent(companyId, baseSettings);
+    feeds[BBC_URL] = rssXml([
+      { title: "First headline", link: "https://bbc.example/1" },
+      { title: "Second headline", link: "https://bbc.example/2" },
+    ]);
+    feeds[DAGBLADET_URL] = rssXml([]);
+    transform.mockResolvedValue({
+      text: JSON.stringify({
+        opening: "Here is the news, in brief.",
+        headlines: [{ n: 1, summary: "The first one, summarized." }],
+      }),
+      model: "fake",
+      provider: "anthropic",
+      truncated: false,
+    });
+
+    await service().tick(OSLO_WINTER_0700);
+    await settle();
+
+    const [row] = await outboxRowsFor(agentId);
+    expect(row!.text).toContain("Here is the news, in brief.");
+    expect(row!.facts!.headlines[0]).toMatchObject({ title: "First headline", summary: "The first one, summarized." });
+    expect(row!.facts!.headlines[1]).toMatchObject({ title: "Second headline" });
+    expect(row!.facts!.headlines[1]!.summary).toBeUndefined();
+    expect(row!.text).toContain("First headline — The first one, summarized.");
   });
 
   describe("outbox + ack", () => {
@@ -350,7 +431,8 @@ d("morning report tick", () => {
 
       const listed = await svc.outbox(companyId);
       expect(listed).toHaveLength(1);
-      expect(listed[0]).toMatchObject({ companyId, agentId, text: "Good morning! Here is your briefing." });
+      expect(listed[0]).toMatchObject({ companyId, agentId });
+      expect(listed[0]!.text).toContain("Good morning! Here is your briefing.");
 
       const ack1 = await svc.ack(companyId, listed[0]!.id, { outcome: "delivered" });
       expect(ack1).toEqual({ id: listed[0]!.id, status: "delivered" });
@@ -376,7 +458,7 @@ d("morning report tick", () => {
       await settle();
 
       const [row] = await outboxRowsFor(agentId);
-      expect(row!.facts).toMatchObject({ prices: [{ symbol: "BTC", price: 65000, currency: "USD" }] });
+      expect(row!.facts).toMatchObject({ prices: [{ symbol: "BTC", price: 65000, currency: "USD", history: [] }] });
       expect(row!.facts!.prices[0]!.changePercent).toBeCloseTo(5, 5);
       // The facts handed to the one model call, not what the (mocked) model wrote back.
       expect(transform.mock.calls[0]![0].input).toContain("BTC: 65000 USD (+5.00% vs ~24h ago)");
@@ -396,7 +478,7 @@ d("morning report tick", () => {
 
       expect(fetchCalls.some((url) => url.includes("eodhd.com"))).toBe(true);
       const [row] = await outboxRowsFor(agentId);
-      expect(row!.facts).toMatchObject({ prices: [{ symbol: "DNB.OL", price: 260, currency: "NOK" }] });
+      expect(row!.facts).toMatchObject({ prices: [{ symbol: "DNB.OL", price: 260, currency: "NOK", history: [] }] });
       expect(row!.facts!.prices[0]!.changePercent).toBeCloseTo(4, 5);
     });
 
@@ -431,8 +513,10 @@ d("morning report tick", () => {
       expect(geocodeQueries).toEqual(["Drøbak", "Oslo"]);
       const [row] = await outboxRowsFor(agentId);
       expect(row!.facts!.places).toEqual(["Drøbak", "Oslo"]);
-      expect(row!.facts!.weatherText).toContain("Now in Drøbak");
-      expect(row!.facts!.weatherText).toContain("Now in Oslo");
+      expect(row!.facts!.weather).toEqual([
+        { place: "Drøbak", text: expect.stringContaining("Now in Drøbak") },
+        { place: "Oslo", text: expect.stringContaining("Now in Oslo") },
+      ]);
     });
 
     it("fetches only the override place when one is set, not the defaults", async () => {
@@ -466,8 +550,8 @@ d("morning report tick", () => {
       await settle();
 
       const [row] = await outboxRowsFor(agentId);
-      expect(row!.facts!.weatherText).not.toContain("Drøbak");
-      expect(row!.facts!.weatherText).toContain("Now in Oslo");
+      expect(row!.facts!.weather.some((w) => w.place === "Drøbak")).toBe(false);
+      expect(row!.facts!.weather).toEqual([{ place: "Oslo", text: expect.stringContaining("Now in Oslo") }]);
       expect(row!.note ?? "").toContain('could not find a place called "Drøbak"');
     });
   });
@@ -492,6 +576,145 @@ d("morning report tick", () => {
         { fileId: "11111111-1111-1111-1111-111111111111", caption: expect.stringContaining("dressed for today's weather"), kind: "weather" },
       ]);
       expect(row!.note ?? "").toContain("No mood picture this time");
+    });
+  });
+
+  // DUR-4059 review (PR #410 was rejected for cutting off mid-report): a
+  // realistic-size report — 10 headlines, 5 hobby items, 1 sport item, 4
+  // prices, 2 places — must come out with nothing cut off and every
+  // configured section present, because every list is rendered by code from
+  // the facts and only the model's own short opening/summaries are capped.
+  describe("realistic fixture: nothing cut off, every section present", () => {
+    it("builds a full report from 10 headlines, hobby news, sport, 4 prices and 2 places with every section present", async () => {
+      const companyId = await seedCompany();
+      await secretService(db).create(companyId, { name: "EODHD", provider: "local_encrypted", value: "fake-eodhd-key" });
+      const agentId = await seedAgent(companyId, {
+        ...baseSettings,
+        sources: ["bbc", "dagbladet"],
+        hobbyTopics: ["zelda"],
+        sportFollows: ["mats_zuccarello_nhl"],
+        priceSymbols: ["BTC", "SOL", "ETH", "DNB.OL"],
+        maxHeadlines: 10,
+      });
+      feeds[BBC_URL] = rssXml(
+        Array.from({ length: 6 }, (_, i) => ({ title: `BBC headline ${i + 1}`, link: `https://bbc.example/${i + 1}` })),
+      );
+      feeds[DAGBLADET_URL] = rssXml(
+        Array.from({ length: 6 }, (_, i) => ({ title: `Dagbladet headline ${i + 1}`, link: `https://dagbladet.example/${i + 1}` })),
+      );
+      feeds[MORNING_REPORT_RSS_FEEDS.zelda_dungeon!] = rssXml(
+        Array.from({ length: 5 }, (_, i) => ({ title: `Zelda release ${i + 1} out now`, link: `https://zeldadungeon.example/${i + 1}` })),
+      );
+      webSearch.search.mockImplementation(async (_companyId: string, params: { query: string }) => {
+        if (params.query === "Mats Zuccarello NHL result news") {
+          return { results: [{ title: "Zuccarello scores in overtime win", url: "https://nhl.example/zucc" }] };
+        }
+        throw new Error(`unexpected search in fixture test: ${params.query}`);
+      });
+      coingeckoPrices.bitcoin = { usd: 65000, usd_24h_change: 5 };
+      coingeckoPrices.solana = { usd: 150, usd_24h_change: -2 };
+      coingeckoPrices.ethereum = { usd: 3200, usd_24h_change: 1.5 };
+      eodhdCloses = [
+        { date: "2026-01-13", close: 250 },
+        { date: "2026-01-14", close: 260 },
+      ];
+      transform.mockResolvedValue({
+        text: JSON.stringify({
+          opening: "Good morning! It's a busy news day with market moves across the board.",
+          headlines: Array.from({ length: 10 }, (_, i) => ({ n: i + 1, summary: `Summary for headline ${i + 1}.` })),
+        }),
+        model: "fake",
+        provider: "anthropic",
+        truncated: false,
+      });
+
+      await service().tick(OSLO_WINTER_0700);
+      await settle();
+
+      const [row] = await outboxRowsFor(agentId);
+      const facts = row!.facts!;
+      expect(facts.places).toEqual(["Drøbak", "Oslo"]);
+      expect(facts.weather).toHaveLength(2);
+      expect(facts.headlines).toHaveLength(10);
+      expect(facts.headlines.every((h) => typeof h.summary === "string" && h.summary!.length > 0)).toBe(true);
+      expect(facts.hobby).toHaveLength(5);
+      expect(facts.sport).toHaveLength(1);
+      expect(facts.prices).toHaveLength(4);
+      expect(facts.stats).toEqual({ sourcesChecked: 2, itemsFound: 10 });
+      expect(facts.briefingPageLive).toBe(false);
+
+      // Nothing is cut off: all 10 numbered headlines and every configured
+      // section actually appear in the full text, plus the footer.
+      for (let i = 1; i <= 10; i++) expect(row!.text).toContain(`${i}. `);
+      expect(row!.text).toContain("Weather:");
+      expect(row!.text).toContain("Headlines:");
+      expect(row!.text).toContain("Hobby news:");
+      expect(row!.text).toContain("Sport:");
+      expect(row!.text).toContain("Prices:");
+      expect(row!.text).toContain("Sources checked: 2, headlines found: 10.");
+
+      // The Telegram teaser stays short — never the full report.
+      expect(facts.teaser.split("\n").length).toBeLessThanOrEqual(3);
+    });
+
+    it("says so in one line, per section, on a day nothing came in — instead of the section silently disappearing", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent(companyId, {
+        ...baseSettings,
+        sources: ["bbc"],
+        hobbyTopics: ["zelda"],
+        sportFollows: ["mats_zuccarello_nhl"],
+        priceSymbols: ["BTC"],
+      });
+      feeds[BBC_URL] = rssXml([]);
+      feeds[MORNING_REPORT_RSS_FEEDS.zelda_dungeon!] = rssXml([]);
+      webSearch.search.mockResolvedValue({ results: [] });
+
+      await service().tick(OSLO_WINTER_0700);
+      await settle();
+
+      const [row] = await outboxRowsFor(agentId);
+      expect(row!.text).toContain("Headlines: no new headlines found today.");
+      expect(row!.text).toContain("Hobby news: nothing new today.");
+      expect(row!.text).toContain("Sport: nothing new today.");
+      expect(row!.text).toContain("Prices: unavailable today.");
+      expect(row!.text).toContain("Sources checked: 1, headlines found: 0.");
+    });
+  });
+
+  describe("briefingPageLive", () => {
+    it("is false by default (the page does not exist yet), and only true when the deps flag says so", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent(companyId, { ...baseSettings, sources: ["bbc"] });
+      feeds[BBC_URL] = rssXml([]);
+
+      await service().tick(OSLO_WINTER_0700);
+      await settle();
+      expect((await outboxRowsFor(agentId))[0]!.facts!.briefingPageLive).toBe(false);
+
+      const agentId2 = await seedAgent(companyId, { ...baseSettings, sources: ["bbc"] });
+      await service({ briefingPageLive: true }).tick(OSLO_WINTER_0700);
+      await settle();
+      expect((await outboxRowsFor(agentId2))[0]!.facts!.briefingPageLive).toBe(true);
+    });
+  });
+
+  describe("getOne", () => {
+    it("returns one report's facts, company-scoped", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent(companyId, { ...baseSettings, sources: ["bbc"] });
+      feeds[BBC_URL] = rssXml([{ title: "A headline", link: "https://bbc.example/x" }]);
+
+      const svc = service();
+      await svc.tick(OSLO_WINTER_0700);
+      await settle();
+      const [listed] = await svc.outbox(companyId);
+
+      const fetched = await svc.getOne(companyId, listed!.id);
+      expect(fetched).toMatchObject({ id: listed!.id, companyId, agentId });
+
+      const otherCompanyId = await seedCompany();
+      await expect(svc.getOne(otherCompanyId, listed!.id)).rejects.toMatchObject({ status: 404 });
     });
   });
 

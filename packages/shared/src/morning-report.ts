@@ -142,6 +142,20 @@ export interface MorningReportFactItem {
   title: string;
   url: string;
   source: string;
+  /**
+   * One-sentence, model-written summary of this item (DUR-4059 direction
+   * change) — only ever populated for headlines, and only when the one
+   * summaries model call succeeded, was not truncated, and its JSON parsed.
+   * Missing/null means "title and link only", which is always safe to send:
+   * nothing Filip needs ever depends on this field being present.
+   */
+  summary?: string | null;
+}
+
+/** One historical reading for a price's sparkline — oldest first. */
+export interface MorningReportPricePoint {
+  price: number;
+  observedAt: string;
 }
 
 /** One price line: the symbol as the operator picked it (e.g. "DNB.OL"), not the upstream source's own spelling. */
@@ -151,6 +165,8 @@ export interface MorningReportPriceFact {
   currency: string;
   /** Null when no ~24h-ago reading was available to compare against. */
   changePercent: number | null;
+  /** Short history for a sparkline, oldest first. Empty when none was available (see notes for why). */
+  history: MorningReportPricePoint[];
 }
 
 /** One picture the report carries: Maja dressed for today's weather, or a mood illustration for the news. */
@@ -161,22 +177,49 @@ export interface MorningReportImageFact {
   kind: "weather" | "mood";
 }
 
+/** One place's weather, now plus up to 3 days — see formatWeatherReport (server/src/services/lane-a-tools.ts). */
+export interface MorningReportWeatherFact {
+  place: string;
+  text: string;
+}
+
+/** "sources checked: N, items found: M" — so a thin headline day is visible rather than silently short. */
+export interface MorningReportStats {
+  sourcesChecked: number;
+  itemsFound: number;
+}
+
 /**
- * Everything the one model call read facts from, kept structured (not just
- * flattened into the written prose) so the Telegram bridge can render clickable
- * links/photos section by section, and so the full briefing page can show every
- * item with its source, independent of what the model chose to mention.
+ * Everything a report is built from, kept structured (not just flattened into
+ * prose) so the Telegram bridge can render a short teaser plus a link, and so
+ * the full briefing page can show every item with its source, independent of
+ * what any model call chose to mention. Every list here is built entirely in
+ * code from fetched data — never from a model — so nothing Filip needs can be
+ * lost to a model call failing, running out of tokens, or being truncated.
  */
 export interface MorningReportFacts {
   /** One place (a place override), or the default two (Drøbak, Oslo) — see MORNING_REPORT_DEFAULT_PLACES. */
   places: string[];
-  weatherText: string | null;
+  weather: MorningReportWeatherFact[];
   headlines: MorningReportFactItem[];
   hobby: MorningReportFactItem[];
   sport: MorningReportFactItem[];
   prices: MorningReportPriceFact[];
   images: MorningReportImageFact[];
-  /** Plain-language notes about anything that degraded (a source down, no key configured, …). */
+  /** 3-5 sentence, model-written opening. Falls back to a short deterministic sentence when the model call fails or is truncated. */
+  opening: string;
+  /**
+   * The short (at most a few lines), plain-text teaser sent to Telegram —
+   * today's weather in both places, the single most important headline, and
+   * one price move. Built entirely in code, never by a model. The Telegram
+   * bridge appends the briefing-page link itself, only when briefingPageLive
+   * is true.
+   */
+  teaser: string;
+  stats: MorningReportStats;
+  /** Whether the full briefing page (DUR-4075) is live yet — the Telegram bridge must not link to it until this is true. */
+  briefingPageLive: boolean;
+  /** Plain-language notes about anything that degraded (a source down, no key configured, a model call failing or truncating, …). */
   notes: string[];
 }
 
