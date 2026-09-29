@@ -2932,6 +2932,8 @@ export function agentRoutes(
           laneABaseUrl: agent.laneABaseUrl ?? null,
           // "Creativity" chosen at hire time, same reason.
           laneATemperature: agent.laneATemperature ?? null,
+          // OpenRouter "model hosts" chosen at hire time, same reason.
+          laneAProviderRouting: agent.laneAProviderRouting ?? null,
           // DUR-4017: the daily briefing settings chosen at hire time, same
           // reason — the card is what the board reads, and the legacy branch
           // in approvals.ts rebuilds the agent from it.

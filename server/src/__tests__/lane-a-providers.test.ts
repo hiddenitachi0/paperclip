@@ -350,6 +350,83 @@ describe("OpenAI-compatible provider client", () => {
     expect(body.temperature).toBe(0.9);
     expect(body.provider).toEqual({ require_parameters: true });
   });
+
+  // 29 Sep: Mistral Small 3.2 24B was wanted on DeepInfra, but OpenRouter
+  // picked Venice, which does not do tools. The operator's "model hosts"
+  // setting is merged into OpenRouter's `provider` object in its own names.
+  it("on OpenRouter, merges the model-hosts setting into `provider` next to require_parameters", () => {
+    const body = buildOpenAiCompatibleBody("openrouter", {
+      model: "mistralai/mistral-small-3.2-24b-instruct",
+      system: "s",
+      messages: [{ role: "user", content: "u" }],
+      tools: [WEATHER_TOOL],
+      maxTokens: 10,
+      providerRouting: { only: ["deepinfra"], order: ["deepinfra", "mistral"], ignore: ["venice"], allowFallbacks: false },
+    });
+    expect(body.provider).toEqual({
+      require_parameters: true,
+      only: ["deepinfra"],
+      order: ["deepinfra", "mistral"],
+      ignore: ["venice"],
+      allow_fallbacks: false,
+    });
+  });
+
+  it("on OpenRouter without tools, still sends the host choice but not require_parameters", () => {
+    const body = buildOpenAiCompatibleBody("openrouter", {
+      model: "mistralai/mistral-small-3.2-24b-instruct",
+      system: "s",
+      messages: [{ role: "user", content: "u" }],
+      maxTokens: 10,
+      providerRouting: { ignore: ["venice"] },
+    });
+    expect(body.provider).toEqual({ ignore: ["venice"] });
+  });
+
+  it("no host choice (null, empty, or malformed) sends exactly what was sent before", () => {
+    const base = {
+      model: "mistralai/mistral-small-3.2-24b-instruct",
+      system: "s",
+      messages: [{ role: "user" as const, content: "u" }],
+      maxTokens: 10,
+    };
+    for (const providerRouting of [undefined, null, {}, { only: [] }, { only: ["Not a host!"] }, "deepinfra"] as never[]) {
+      expect(buildOpenAiCompatibleBody("openrouter", { ...base, providerRouting }).provider).toBeUndefined();
+      expect(
+        buildOpenAiCompatibleBody("openrouter", { ...base, tools: [WEATHER_TOOL], providerRouting }).provider,
+      ).toEqual({ require_parameters: true });
+    }
+  });
+
+  it("ignores the host choice for every provider but OpenRouter", () => {
+    for (const provider of ["openai", "google", "local"] as const) {
+      const body = buildOpenAiCompatibleBody(provider, {
+        model: "m",
+        system: "s",
+        messages: [{ role: "user", content: "u" }],
+        tools: [WEATHER_TOOL],
+        maxTokens: 10,
+        providerRouting: { only: ["deepinfra"], allowFallbacks: false },
+      });
+      expect(Object.hasOwn(body, "provider"), provider).toBe(false);
+    }
+  });
+
+  it("puts the host choice on the wire for OpenRouter", async () => {
+    const fetcher = fakeFetch(() =>
+      jsonResponse({ choices: [{ message: { role: "assistant", content: "Hei!" }, finish_reason: "stop" }] }),
+    );
+    const client = createLaneAProviderClient({ provider: "openrouter", apiKey: KEY, fetch: fetcher.impl });
+    await client.complete({
+      model: "mistralai/mistral-small-3.2-24b-instruct",
+      system: "s",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [WEATHER_TOOL],
+      maxTokens: 64,
+      providerRouting: { only: ["deepinfra"] },
+    });
+    expect(fetcher.calls[0]!.body.provider).toEqual({ require_parameters: true, only: ["deepinfra"] });
+  });
 });
 
 describe("Anthropic provider client", () => {
