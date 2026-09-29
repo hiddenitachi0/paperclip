@@ -339,6 +339,90 @@ export function laneATemperatureForCall(provider: unknown, model: unknown, tempe
 }
 
 /**
+ * Quick-agent "model hosts" (OpenRouter only). OpenRouter can serve the same
+ * model from several hosts ("providers" in its API, e.g. deepinfra, venice),
+ * and not every host supports tools. The operator can pin the hosts a quick
+ * agent's calls may use, the order to try them in, and hosts never to use.
+ * Stored on agents.lane_a_provider_routing; null = OpenRouter picks, as before.
+ */
+export interface LaneAProviderRouting {
+  /** Use only these hosts. */
+  only?: string[];
+  /** Try these hosts first, in this order. */
+  order?: string[];
+  /** Never use these hosts. */
+  ignore?: string[];
+  /** Whether OpenRouter may fall back to other hosts when the listed ones fail. */
+  allowFallbacks?: boolean;
+}
+
+/** An OpenRouter host slug, lower case: "deepinfra", "mistral", "together", "novita". */
+export const LANE_A_PROVIDER_SLUG_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+/** At most this many hosts in any one list. */
+export const LANE_A_PROVIDER_ROUTING_MAX_ENTRIES = 10;
+
+const LANE_A_PROVIDER_ROUTING_LISTS = ["only", "order", "ignore"] as const;
+
+function cleanSlugList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out: string[] = [];
+  for (const raw of value) {
+    if (typeof raw !== "string") continue;
+    const slug = raw.trim().toLowerCase();
+    if (!LANE_A_PROVIDER_SLUG_RE.test(slug) || out.includes(slug)) continue;
+    out.push(slug);
+    if (out.length >= LANE_A_PROVIDER_ROUTING_MAX_ENTRIES) break;
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+/**
+ * The stored routing, cleaned, or null when there is nothing to send.
+ * Defensive on purpose: the column is jsonb, and a bad stored value must
+ * never break a chat, so anything malformed is dropped rather than forwarded.
+ */
+export function normalizeLaneAProviderRouting(value: unknown): LaneAProviderRouting | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const out: LaneAProviderRouting = {};
+  for (const key of LANE_A_PROVIDER_ROUTING_LISTS) {
+    const list = cleanSlugList(record[key]);
+    if (list) out[key] = list;
+  }
+  if (typeof record.allowFallbacks === "boolean") out.allowFallbacks = record.allowFallbacks;
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/**
+ * The routing one call is actually made with: OpenRouter only (every other
+ * provider has one host, so there is nothing to choose), null otherwise.
+ */
+export function laneAProviderRoutingForCall(provider: unknown, routing: unknown): LaneAProviderRouting | null {
+  if (normalizeLaneAProvider(provider) !== "openrouter") return null;
+  return normalizeLaneAProviderRouting(routing);
+}
+
+/**
+ * Split what an operator typed into a host field ("deepinfra, Mistral") into
+ * slugs. `invalid` lists the entries that are not a host name, so the form
+ * can say which one it did not understand instead of silently dropping it.
+ */
+export function parseLaneAProviderSlugList(text: string): { slugs: string[]; invalid: string[] } {
+  const slugs: string[] = [];
+  const invalid: string[] = [];
+  for (const part of text.split(/[,\s]+/)) {
+    const slug = part.trim().toLowerCase();
+    if (slug.length === 0) continue;
+    if (!LANE_A_PROVIDER_SLUG_RE.test(slug)) {
+      invalid.push(part.trim());
+      continue;
+    }
+    if (!slugs.includes(slug)) slugs.push(slug);
+  }
+  return { slugs, invalid };
+}
+
+/**
  * What a day of transform calls could cost this quick agent if every call ran
  * at the limit, in whole US cents.
  *
