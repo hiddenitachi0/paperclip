@@ -20,7 +20,12 @@
  *    new gated-tool responses (`fill_payment_details`, `confirm_final_step`,
  *    `wait_for_outcome`) as it did to the plain tools -- any snapshot/text
  *    handed back to the agent after a card fill is scrubbed of Luhn-valid
- *    digit runs first.
+ *    digit runs first. DUR-4049 (residual from the DUR-4047 re-review):
+ *    the PAN regex never matches a CVC (3-4 digits) or plain-text expiry/
+ *    cardholder name, so an optional `extraLiterals` list of the exact
+ *    values just typed into the page is blanked first, on a word boundary
+ *    so a short numeric literal (a CVC) doesn't eat digits out of an
+ *    unrelated larger number.
  */
 import { isLuhnValid } from "@paperclipai/adapter-utils/payment-detection";
 import { registrableDomain } from "./browser-domain.js";
@@ -83,9 +88,38 @@ export function classifyPurchaseOutcome(input: { url: string; tree: string; clea
   return "unverified";
 }
 
-/** Replaces every Luhn-valid 13-19 digit run in `text` (spaces/dashes and all) with asterisks, same length hidden. */
-export function maskCardNumbers(text: string): string {
-  return text.replace(CARD_NUMBER_TOKEN_RE, (match) => {
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Blanks every exact, whole-token occurrence of `literal` in `text` with
+ * asterisks. Word-boundary anchored so a short literal (a 3-digit CVC)
+ * matches only as a standalone token, not as a substring run inside a
+ * longer unrelated number or word -- `\b` sits between a `\w` and non-`\w`
+ * character, and digits/letters are both `\w`, so `\b123\b` will not match
+ * the "123" inside "41234" but will match a lone "123".
+ */
+function maskLiteral(text: string, literal: string): string {
+  if (literal.length < 2) return text;
+  const re = new RegExp(`\\b${escapeRegExp(literal)}\\b`, "gi");
+  return text.replace(re, (match) => "*".repeat(match.length));
+}
+
+/**
+ * Replaces every Luhn-valid 13-19 digit run in `text` (spaces/dashes and
+ * all) with asterisks, same length hidden. `extraLiterals` (DUR-4049) are
+ * the exact CVC/expiry/cardholder-name values just typed into the page --
+ * those never look like a card-number-shaped run, so the PAN regex alone
+ * never catches them; they're blanked first, then the PAN regex runs on
+ * what's left.
+ */
+export function maskCardNumbers(text: string, extraLiterals: readonly string[] = []): string {
+  let masked = text;
+  for (const literal of extraLiterals) {
+    if (literal) masked = maskLiteral(masked, literal);
+  }
+  return masked.replace(CARD_NUMBER_TOKEN_RE, (match) => {
     const digitsOnly = match.replace(/[\s-]/g, "");
     if (digitsOnly.length < 13 || digitsOnly.length > 19 || !isLuhnValid(digitsOnly)) return match;
     return "*".repeat(match.length);

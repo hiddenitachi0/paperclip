@@ -806,6 +806,61 @@ describe("browserService purchase gate (DUR-4046)", () => {
     expect(result.tree).toContain("****************");
   });
 
+  it("DUR-4049: fill_payment_details also masks the CVC/expiry/cardholder name echoed back in a snapshot, not just the PAN", async () => {
+    const db = fakeDbWithAgent(BOOK_AND_BUY_AGENT);
+    wirePurchaseGateDefaults();
+    const worker = fakeWorkerClientOnCheckoutPage();
+    const svc = browserService(db as any, { workerClient: worker });
+
+    const { sessionId } = await svc.open(AGENT_ID, { purpose: "buy something" });
+    const { clearanceId } = await svc.requestPurchase(AGENT_ID, sessionId, "A gadget", "e9", CARD_ID);
+
+    // A "review your details" style step echoing the CVC/expiry/name back --
+    // none of these are Luhn-shaped 13-19-digit runs, so the PAN regex alone
+    // (the only scrub before this fix) would leave all three unmasked.
+    vi.mocked(worker.snapshot).mockResolvedValue({
+      tree: "Total: 300 kr. Security code: 123. Expires 01/2030. Cardholder: M Test.",
+      url: CHECKOUT_URL,
+      title: "Checkout",
+    });
+    const result = await svc.fillPaymentDetails(AGENT_ID, sessionId, {
+      clearanceId,
+      cardNumberRef: "e10",
+      cvcRef: "e11",
+      nameOnCardRef: "e12",
+      expiryMonthRef: "e14",
+      expiryYearRef: "e15",
+    });
+
+    expect(result.tree).not.toContain("123");
+    expect(result.tree).not.toContain("2030");
+    expect(result.tree).not.toContain("M Test");
+
+    // Same as the PAN case in DUR-4047: any later plain-tool snapshot on
+    // this session must stay scrubbed too, not just fill_payment_details's
+    // own return value.
+    const snap = await svc.snapshot(AGENT_ID, sessionId);
+    expect(snap.tree).not.toContain("123");
+    expect(snap.tree).not.toContain("M Test");
+  });
+
+  it("DUR-4049: a CVC-shaped number embedded inside an unrelated larger number is left alone (word-boundary anchored)", async () => {
+    const db = fakeDbWithAgent(BOOK_AND_BUY_AGENT);
+    wirePurchaseGateDefaults();
+    const worker = fakeWorkerClientOnCheckoutPage();
+    const svc = browserService(db as any, { workerClient: worker });
+
+    const { sessionId } = await svc.open(AGENT_ID, { purpose: "buy something" });
+    const { clearanceId } = await svc.requestPurchase(AGENT_ID, sessionId, "A gadget", "e9", CARD_ID);
+
+    // "123" is the CVC, but "41234" here is an unrelated order number that
+    // merely contains "123" as a substring -- it must survive untouched.
+    vi.mocked(worker.snapshot).mockResolvedValue({ tree: "Order #41234 total 300 kr", url: CHECKOUT_URL, title: "Checkout" });
+    const result = await svc.fillPaymentDetails(AGENT_ID, sessionId, { clearanceId, cvcRef: "e11" });
+
+    expect(result.tree).toContain("Order #41234");
+  });
+
   it("DUR-4047: the generic browser_snapshot/read_text/click tools also scrub the card number once fill_payment_details has run on the same session", async () => {
     const db = fakeDbWithAgent(BOOK_AND_BUY_AGENT);
     wirePurchaseGateDefaults();

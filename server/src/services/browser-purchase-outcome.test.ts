@@ -63,4 +63,27 @@ describe("maskCardNumbers", () => {
     const text = "Order number 1234567890123456";
     expect(maskCardNumbers(text)).toBe(text);
   });
+
+  it("DUR-4049: masks extraLiterals (CVC/expiry/name) that the PAN regex alone would miss", () => {
+    const text = "Security code: 123. Expires 01/2030. Cardholder: M Test.";
+    const result = maskCardNumbers(text, ["123", "2030", "M Test"]);
+    expect(result).not.toContain("123");
+    expect(result).not.toContain("2030");
+    expect(result).not.toContain("M Test");
+  });
+
+  it("DUR-4049: extraLiterals match whole tokens only, not substrings of an unrelated larger number", () => {
+    const text = "Order #41234 total 300 kr";
+    expect(maskCardNumbers(text, ["123"])).toBe(text);
+  });
+
+  it("DUR-4049: extraLiterals matching is case-insensitive for a cardholder name", () => {
+    const result = maskCardNumbers("cardholder: m test", ["M Test"]);
+    expect(result).not.toContain("m test");
+  });
+
+  it("DUR-4049: ignores empty/whitespace/1-char extraLiterals rather than mangling unrelated text", () => {
+    const text = "Total: 300 kr";
+    expect(maskCardNumbers(text, ["", "3"])).toBe(text);
+  });
 });

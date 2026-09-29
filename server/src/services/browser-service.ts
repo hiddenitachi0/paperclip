@@ -206,6 +206,16 @@ interface PendingPurchase {
    * happen to be called on the same session mid-purchase.
    */
   cardFieldsFilled: boolean;
+  /**
+   * DUR-4049 (residual from the DUR-4047 re-review): the exact CVC/expiry/
+   * cardholder-name/PAN strings `fillPaymentDetails` actually typed into
+   * the page, for `maskCardNumbers`'s `extraLiterals` to blank verbatim --
+   * the PAN regex alone never matches a 3-4 digit CVC or plain-text
+   * expiry/name. Populated once, at fill time, alongside
+   * `cardFieldsFilled`; cleared with the rest of `pendingPurchase` when the
+   * purchase resolves.
+   */
+  sensitiveLiterals: string[];
 }
 
 interface BrowserSession {
@@ -506,8 +516,9 @@ export function browserService(db: Db, deps: BrowserServiceDeps = {}) {
    * caller) means a future plain tool can't reintroduce this gap.
    */
   function maskIfCardFilled(session: BrowserSession, snap: AccessibilitySnapshot): AccessibilitySnapshot {
-    if (!session.pendingPurchase?.cardFieldsFilled) return snap;
-    return { ...snap, tree: maskCardNumbers(snap.tree) };
+    const pending = session.pendingPurchase;
+    if (!pending?.cardFieldsFilled) return snap;
+    return { ...snap, tree: maskCardNumbers(snap.tree, pending.sensitiveLiterals) };
   }
 
   function maskOutcomeIfCardFilled(session: BrowserSession, result: ToolOutcome<AccessibilitySnapshot>): ToolOutcome<AccessibilitySnapshot> {
@@ -533,7 +544,8 @@ export function browserService(db: Db, deps: BrowserServiceDeps = {}) {
     const session = requireSession(agentId, sessionId);
     const result = await session.handler.readText();
     touch(session);
-    return session.pendingPurchase?.cardFieldsFilled ? maskCardNumbers(result) : result;
+    const pending = session.pendingPurchase;
+    return pending?.cardFieldsFilled ? maskCardNumbers(result, pending.sensitiveLiterals) : result;
   }
 
   async function click(agentId: string, sessionId: string, ref: string, why: string): Promise<ToolOutcome<AccessibilitySnapshot>> {
@@ -1092,6 +1104,7 @@ export function browserService(db: Db, deps: BrowserServiceDeps = {}) {
       amountNok: amountEval.amountNok,
       awaitingOutcome: false,
       cardFieldsFilled: false,
+      sensitiveLiterals: [],
     };
     touch(session);
 
@@ -1169,15 +1182,22 @@ export function browserService(db: Db, deps: BrowserServiceDeps = {}) {
       [input.nameOnCardRef, card.nameOnCard],
     ];
     let filledAny = false;
+    const filledLiterals: string[] = [];
     for (const [ref, value] of fills) {
       if (ref && value) {
         await session.driver.performType(ref, value);
         filledAny = true;
+        filledLiterals.push(value);
       }
     }
     // Security fix (DUR-4047 review): once the real card is on the page,
     // the generic plain tools must mask/refuse until this purchase resolves.
-    if (filledAny) pending.cardFieldsFilled = true;
+    // DUR-4049: also record the exact values typed, so maskCardNumbers can
+    // blank the CVC/expiry/name verbatim, not just the PAN.
+    if (filledAny) {
+      pending.cardFieldsFilled = true;
+      pending.sensitiveLiterals = [...pending.sensitiveLiterals, ...filledLiterals];
+    }
     touch(session);
 
     const snap = await session.driver.snapshot();
@@ -1193,7 +1213,7 @@ export function browserService(db: Db, deps: BrowserServiceDeps = {}) {
       details: { sessionId, clearanceId: pending.clearanceId, filledFields: fills.filter(([ref, v]) => ref && v).map(([ref]) => ref) },
     });
 
-    return { ...snap, tree: maskCardNumbers(snap.tree) };
+    return { ...snap, tree: maskCardNumbers(snap.tree, pending.sensitiveLiterals) };
   }
 
   /** Shared by fill_payment_details and confirm_final_step's purchase branch: refuses unless the clearance is live -- auto-cleared, or Filip has approved it (and not yet expired/rejected). Clears the slot and releases the card on a rejection. */
@@ -1279,7 +1299,7 @@ export function browserService(db: Db, deps: BrowserServiceDeps = {}) {
       details: { sessionId: session.id, merchantDomain: pending.merchantDomain, clearanceId: pending.clearanceId },
     });
 
-    return { ...result, tree: maskCardNumbers(result.tree) };
+    return { ...result, tree: maskCardNumbers(result.tree, pending.sensitiveLiterals) };
   }
 
   /**
@@ -1309,10 +1329,10 @@ export function browserService(db: Db, deps: BrowserServiceDeps = {}) {
     touch(session);
 
     if (outcome === "unverified") {
-      return { outcome, snapshot: { ...snap, tree: maskCardNumbers(snap.tree) } };
+      return { outcome, snapshot: { ...snap, tree: maskCardNumbers(snap.tree, pending.sensitiveLiterals) } };
     }
     await finalizePurchase(agent, session, pending, outcome);
-    return { outcome, snapshot: { ...snap, tree: maskCardNumbers(snap.tree) } };
+    return { outcome, snapshot: { ...snap, tree: maskCardNumbers(snap.tree, pending.sensitiveLiterals) } };
   }
 
   /** Forces a terminal decision: unlike wait_for_outcome, a still-"unverified" classification here finalizes as used_unverified rather than leaving the clearance (and the reserved card) dangling forever. `agentNote` is shown in the receipt/notice text, always quoted, never used to decide the outcome itself. */
@@ -1331,7 +1351,7 @@ export function browserService(db: Db, deps: BrowserServiceDeps = {}) {
     touch(session);
 
     await finalizePurchase(agent, session, pending, outcome, agentNote);
-    return { outcome, snapshot: { ...snap, tree: maskCardNumbers(snap.tree) } };
+    return { outcome, snapshot: { ...snap, tree: maskCardNumbers(snap.tree, pending.sensitiveLiterals) } };
   }
 
   /**
