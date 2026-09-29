@@ -182,6 +182,7 @@ import {
   type ClaudeCredentialSource,
 } from "./claude-credential-source.js";
 import { resolveAgentMcpToolLibraryServers } from "./mcp-tool-library.js";
+import { resolveBrowserMcpServerEntry } from "./browser-mcp-entry.js";
 import { buildApiToolsAnnouncement } from "./api-tools-agent-prompt.js";
 import {
   evaluateExecutionAllowlist,
@@ -12189,8 +12190,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         (agent.mcpToolIds as string[] | null) ?? [],
         existingNames,
       );
-      if (grantedToolServers.length > 0) {
-        mergedConfig.mcpServers = [...existingMcpServers, ...grantedToolServers];
+      // DUR-4013 step 3: the board-only browser switch, same fold-in shape.
+      // Checked against `existingNames` too, so an agent's own explicit
+      // "paperclip-browser" entry always wins over the built-in one.
+      const browserEntry =
+        !existingNames.has("paperclip-browser") ? resolveBrowserMcpServerEntry(agent) : null;
+      const additions = [...grantedToolServers, ...(browserEntry ? [browserEntry] : [])];
+      if (additions.length > 0) {
+        mergedConfig.mcpServers = [...existingMcpServers, ...additions];
       }
     }
     // DUR-4004: an "API with a key" tool has no MCP surface, so the agent is
