@@ -1,24 +1,40 @@
 import { and, desc, eq, gte, isNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, morningReportOutbox, runInPooledScope, watcherPricePoints, watchers } from "@paperclipai/db";
 import {
-  MORNING_REPORT_DEFAULT_PLACE,
+  agents,
+  companyMemberships,
+  laneAConversations,
+  laneAMessages,
+  morningReportOutbox,
+  runInPooledScope,
+  watcherPricePoints,
+  watchers,
+} from "@paperclipai/db";
+import {
+  MORNING_REPORT_DEFAULT_PLACES,
   MORNING_REPORT_RSS_FEEDS,
   parseMorningReportSettings,
+  WATCHER_SOURCE_INFO,
+  type MorningReportFacts,
+  type MorningReportFactItem,
   type MorningReportHobbyTopic,
+  type MorningReportImageFact,
   type MorningReportOutboxItem,
   type MorningReportOutboxStatus,
+  type MorningReportPriceFact,
   type MorningReportPriceSymbol,
   type MorningReportSettings,
   type MorningReportSource,
   type MorningReportSportFollow,
   type MorningReportTopic,
+  type WatcherSource,
 } from "@paperclipai/shared";
 import { notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
 import { formatWeatherReport } from "./lane-a-tools.js";
 import { laneAService } from "./lane-a.js";
+import { secretService } from "./secrets.js";
 import { webSearchService, type WebSearchServiceDeps } from "./web-search.js";
 import { WATCHER_PRICE_SOURCES, isWatcherQuoteError } from "./watcher-sources.js";
 
@@ -77,8 +93,12 @@ export const MORNING_REPORT_TASK =
 export interface MorningReportServiceDeps extends WebSearchServiceDeps {
   now?: () => Date;
   fetchImpl?: typeof fetch;
-  laneA?: { transform: ReturnType<typeof laneAService>["transform"] };
+  laneA?: {
+    transform: ReturnType<typeof laneAService>["transform"];
+    makePicture: ReturnType<typeof laneAService>["makePicture"];
+  };
   webSearch?: { search: ReturnType<typeof webSearchService>["search"] };
+  secrets?: { resolveStockDataKey: ReturnType<typeof secretService>["resolveStockDataKey"] };
   /** Test seam: how a claimed report is handed off. Production detaches it onto the pool. */
   dispatch?: (work: () => Promise<void>) => void;
 }
@@ -115,10 +135,11 @@ export function dueMorningReport(
   return { due: true, localDate: date };
 }
 
-function resolvePlace(settings: MorningReportSettings, localDate: string): string {
-  if (!settings.placeOverride) return MORNING_REPORT_DEFAULT_PLACE;
-  if (settings.placeOverrideUntil && settings.placeOverrideUntil < localDate) return MORNING_REPORT_DEFAULT_PLACE;
-  return settings.placeOverride;
+/** The place override alone when set (and not expired), otherwise both default places (DUR-4059). */
+function resolvePlaces(settings: MorningReportSettings, localDate: string): string[] {
+  if (!settings.placeOverride) return [...MORNING_REPORT_DEFAULT_PLACES];
+  if (settings.placeOverrideUntil && settings.placeOverrideUntil < localDate) return [...MORNING_REPORT_DEFAULT_PLACES];
+  return [settings.placeOverride];
 }
 
 // ─── RSS (minimal, dependency-free) ────────────────────────────────────────
@@ -259,24 +280,56 @@ async function fetchRss(fetchImpl: typeof fetch, url: string, limit: number): Pr
   return parseRssItems(await response.text(), limit);
 }
 
-async function fetchWeatherSection(fetchImpl: typeof fetch, place: string): Promise<{ text: string | null; note: string | null }> {
+/** One place's weather: the formatted block (for the model/facts) and a short "place: conditions" line (for the picture prompt). */
+async function fetchOnePlaceWeather(
+  fetchImpl: typeof fetch,
+  place: string,
+): Promise<{ block: string; condition: string } | { note: string }> {
   try {
     const geo = (await fetchJson(
       fetchImpl,
       `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(place)}&count=1&language=en&format=json`,
     )) as { results?: Array<{ name: string; latitude: number; longitude: number; country?: string; admin1?: string }> };
     const found = geo.results?.[0];
-    if (!found) return { text: null, note: `Weather: could not find a place called "${place}".` };
+    if (!found) return { note: `Weather: could not find a place called "${place}".` };
     const forecast = await fetchJson(
       fetchImpl,
       `https://api.open-meteo.com/v1/forecast?latitude=${found.latitude}&longitude=${found.longitude}` +
         `&current=temperature_2m,wind_speed_10m,precipitation,weather_code` +
         `&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,weather_code&forecast_days=3&timezone=auto`,
     );
-    return { text: formatWeatherReport(found, forecast), note: null };
+    const block = formatWeatherReport(found, forecast);
+    // formatWeatherReport's first line always reads "Now in <where>: <conditions>" — reworded to
+    // "<place>: <conditions>" so two places read as a short list in the picture prompt.
+    const firstLine = block.split("\n")[0] ?? block;
+    const condition = firstLine.replace(/^Now in [^:]+:\s*/, `${place}: `);
+    return { block, condition };
   } catch (err) {
-    return { text: null, note: `Weather: the forecast service did not answer (${err instanceof Error ? err.message : "unknown reason"}).` };
+    return { note: `Weather (${place}): the forecast service did not answer (${err instanceof Error ? err.message : "unknown reason"}).` };
   }
+}
+
+/** Every configured place's weather (DUR-4059: Drøbak and Oslo by default, or just the one override place), combined into one block for the model/facts plus a short summary for the weather picture prompt. A place that fails degrades to a note, never losing the others. */
+async function fetchWeatherSection(
+  fetchImpl: typeof fetch,
+  places: string[],
+): Promise<{ text: string | null; conditionsSummary: string | null; notes: string[] }> {
+  const results = await Promise.all(places.map((place) => fetchOnePlaceWeather(fetchImpl, place)));
+  const blocks: string[] = [];
+  const conditions: string[] = [];
+  const notes: string[] = [];
+  for (const result of results) {
+    if ("note" in result) notes.push(result.note);
+    else {
+      blocks.push(result.block);
+      conditions.push(result.condition);
+    }
+  }
+  return {
+    text: blocks.length > 0 ? blocks.join("\n\n") : null,
+    conditionsSummary: conditions.length > 0 ? conditions.join("; ") : null,
+    notes,
+  };
 }
 
 type BraveSearch = (query: string) => Promise<{ title: string; url: string }[]>;
@@ -364,17 +417,42 @@ async function collectSportNews(params: {
   return { items: dedupeHeadlines(collected).slice(0, 5), notes };
 }
 
+/**
+ * Which live-quote source (and the symbol spelling that source expects) each
+ * closed-list price symbol maps to. DNB.OL is Oslo Børs's own spelling; the
+ * EODHD source appends ".OL" itself (see osloStockSource in
+ * watcher-sources.ts), so it wants the bare "DNB".
+ */
+const PRICE_SYMBOL_SOURCE: Record<MorningReportPriceSymbol, { source: WatcherSource; sourceSymbol: string }> = {
+  BTC: { source: "crypto", sourceSymbol: "BTC" },
+  SOL: { source: "crypto", sourceSymbol: "SOL" },
+  ETH: { source: "crypto", sourceSymbol: "ETH" },
+  "DNB.OL": { source: "oslo_stock", sourceSymbol: "DNB" },
+};
+
+/**
+ * Prices, direct (DUR-4059): a symbol with watcher history uses it, exactly
+ * as before. Otherwise — the common case, since prices must work without
+ * Filip ever creating a watcher — this fetches the live quote itself, from
+ * the right source for that symbol (crypto needs no key; an Oslo Børs symbol
+ * needs the company's EODHD key, read by name, never stored on this call).
+ * Earlier code always tried the crypto source here regardless of symbol,
+ * which is why DNB.OL never got a fallback price even with a key configured.
+ */
 async function collectPrices(
   db: Db,
   companyId: string,
   symbols: MorningReportPriceSymbol[],
   fetchImpl: typeof fetch,
   now: Date,
-): Promise<{ lines: string[]; notes: string[] }> {
-  if (symbols.length === 0) return { lines: [], notes: [] };
-  const lines: string[] = [];
+  resolveStockDataKey: (companyId: string) => Promise<string | null>,
+): Promise<{ facts: MorningReportPriceFact[]; notes: string[] }> {
+  if (symbols.length === 0) return { facts: [], notes: [] };
+  const facts: MorningReportPriceFact[] = [];
   const notes: string[] = [];
   for (const symbol of symbols) {
+    const mapping = PRICE_SYMBOL_SOURCE[symbol];
+    const currency = WATCHER_SOURCE_INFO[mapping.source].currency;
     const rows = await db
       .select({ price: watcherPricePoints.price, observedAt: watcherPricePoints.observedAt })
       .from(watcherPricePoints)
@@ -387,43 +465,93 @@ async function collectPrices(
       // The reading closest to (but not under) 18 hours old stands in for
       // "yesterday's close" without needing a calendar-aware close price.
       const base = rows.find((row) => latest.observedAt.getTime() - row.observedAt.getTime() >= 18 * 3_600_000) ?? null;
-      if (base) {
-        const change = ((latest.price - base.price) / base.price) * 100;
-        lines.push(`${symbol}: ${latest.price} (${change >= 0 ? "+" : ""}${change.toFixed(2)}% vs ~24h ago)`);
-      } else {
-        lines.push(`${symbol}: ${latest.price} (no ~24h-old price yet to compare)`);
-      }
+      facts.push({
+        symbol,
+        price: latest.price,
+        currency,
+        changePercent: base ? ((latest.price - base.price) / base.price) * 100 : null,
+      });
       continue;
     }
     try {
-      const quotes = await WATCHER_PRICE_SOURCES.crypto.fetchQuotes({ symbols: [symbol], now }, { fetchImpl });
-      const quote = quotes.get(symbol);
-      if (quote && !isWatcherQuoteError(quote)) {
-        lines.push(`${symbol}: ${quote.price} (no price history yet to compare)`);
+      let quotes;
+      if (mapping.source === "oslo_stock") {
+        const key = await resolveStockDataKey(companyId);
+        if (!key) {
+          notes.push(
+            `${symbol}: no stock data key is configured for this company, so this price could not be fetched. ` +
+              `Save a free EODHD key (eodhd.com) as a company secret named "EODHD" to show it.`,
+          );
+          continue;
+        }
+        quotes = await WATCHER_PRICE_SOURCES.oslo_stock.fetchQuotes({ symbols: [mapping.sourceSymbol], key, now }, { fetchImpl });
       } else {
-        notes.push(`${symbol}: no price available (no watcher history, and it is not a known live-quote symbol).`);
+        quotes = await WATCHER_PRICE_SOURCES.crypto.fetchQuotes({ symbols: [mapping.sourceSymbol], now }, { fetchImpl });
+      }
+      const quote = quotes.get(mapping.sourceSymbol);
+      if (quote && !isWatcherQuoteError(quote)) {
+        facts.push({
+          symbol,
+          price: quote.price,
+          currency,
+          changePercent: quote.reference ? ((quote.price - quote.reference.price) / quote.reference.price) * 100 : null,
+        });
+      } else {
+        notes.push(`${symbol}: ${isWatcherQuoteError(quote) ? quote.message : "no price available right now."}`);
       }
     } catch {
       notes.push(`${symbol}: no price available right now.`);
     }
   }
-  return { lines, notes };
+  return { facts, notes };
+}
+
+function formatPriceLine(fact: MorningReportPriceFact): string {
+  const price = `${fact.price} ${fact.currency}`;
+  if (fact.changePercent === null) return `${fact.symbol}: ${price} (no ~24h-old price yet to compare)`;
+  const sign = fact.changePercent >= 0 ? "+" : "";
+  return `${fact.symbol}: ${price} (${sign}${fact.changePercent.toFixed(2)}% vs ~24h ago)`;
 }
 
 function formatFactsAsPlainText(sections: {
   weather: string | null;
-  headlines: { title: string }[];
-  hobby: { title: string }[];
-  sport: { title: string }[];
-  prices: string[];
+  headlines: MorningReportFactItem[];
+  hobby: MorningReportFactItem[];
+  sport: MorningReportFactItem[];
+  prices: MorningReportPriceFact[];
 }): string {
   const parts: string[] = [];
   if (sections.weather) parts.push(`Weather:\n${sections.weather}`);
   if (sections.headlines.length > 0) parts.push(`Headlines:\n${sections.headlines.map((h) => `- ${h.title}`).join("\n")}`);
   if (sections.hobby.length > 0) parts.push(`Hobby news:\n${sections.hobby.map((h) => `- ${h.title}`).join("\n")}`);
   if (sections.sport.length > 0) parts.push(`Sport:\n${sections.sport.map((h) => `- ${h.title}`).join("\n")}`);
-  if (sections.prices.length > 0) parts.push(`Prices:\n${sections.prices.join("\n")}`);
+  if (sections.prices.length > 0) parts.push(`Prices:\n${sections.prices.map(formatPriceLine).join("\n")}`);
   return parts.length > 0 ? parts.join("\n\n") : "Nothing to report today.";
+}
+
+/** Code-written (no model call): Maja dressed for today's weather, in her own default look. */
+function weatherPicturePrompt(agentName: string, places: string[], conditionsSummary: string): string {
+  return (
+    `A warm, friendly full-body illustration of ${agentName} dressed appropriately for today's weather in ${places.join(" and ")}: ` +
+    `${conditionsSummary}. Illustration style, no text, no numbers, no logos.`
+  );
+}
+
+/** Code-written (no model call): one picture capturing today's overall news mood, not one per headline. */
+function moodPicturePrompt(headlines: MorningReportFactItem[]): string | null {
+  if (headlines.length === 0) return null;
+  const topics = headlines.slice(0, 3).map((h) => h.title).join("; ");
+  return (
+    "An editorial illustration capturing the overall mood of today's news, inspired by (but not depicting any " +
+    `real person, brand or logo from) these headlines: ${topics}. No text, no numbers.`
+  );
+}
+
+/** The numbered list Filip sees in Telegram's headlines section, so a later "tell me more about number 3" resolves to the right item. */
+function conversationMessageForReport(text: string, facts: MorningReportFacts): string {
+  if (facts.headlines.length === 0) return text;
+  const numbered = facts.headlines.map((h, i) => `${i + 1}. ${h.title} (${h.url})`).join("\n");
+  return `${text}\n\nHeadlines, numbered as sent:\n${numbered}`;
 }
 
 // ─── The service ────────────────────────────────────────────────────────────
@@ -431,6 +559,7 @@ function formatFactsAsPlainText(sections: {
 export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}) {
   const laneA = deps.laneA ?? laneAService(db);
   const webSearch = deps.webSearch ?? webSearchService(db, deps);
+  const secrets = deps.secrets ?? secretService(db);
   const nowOf = () => deps.now?.() ?? new Date();
   const fetchImpl = deps.fetchImpl ?? fetch;
   const dispatch =
@@ -450,6 +579,99 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
       );
       return results.map((r) => ({ title: r.title, url: r.url }));
     };
+  }
+
+  /**
+   * Appends the report as an assistant turn in a fresh Lane A conversation
+   * owned by the company's board owner, so a later Telegram reply ("tell me
+   * more about number 3") continues the same chat history the normal quick-
+   * agent chat path reads (server/src/services/lane-a.ts's
+   * loadReplayHistory). The Telegram bridge must still point that chat at
+   * this conversationId (it keeps its own token+chat_id mapping) — see the
+   * outbox `conversationId` field and scripts/telegram-bridge.py.
+   *
+   * Never throws: no board owner, the agent not being a quick agent, or any
+   * write failure all just mean no conversation link, never a failed report.
+   */
+  async function appendReportToConversation(agentRow: AgentRow, text: string, facts: MorningReportFacts, now: Date): Promise<string | null> {
+    if (!agentRow.laneAEnabled) return null;
+    try {
+      const [owner] = await db
+        .select({ userId: companyMemberships.principalId })
+        .from(companyMemberships)
+        .where(
+          and(
+            eq(companyMemberships.companyId, agentRow.companyId),
+            eq(companyMemberships.principalType, "user"),
+            eq(companyMemberships.membershipRole, "owner"),
+            eq(companyMemberships.status, "active"),
+          ),
+        )
+        .limit(1);
+      if (!owner) return null;
+      const [conversation] = await db
+        .insert(laneAConversations)
+        .values({
+          companyId: agentRow.companyId,
+          agentId: agentRow.id,
+          requestedByUserId: owner.userId,
+          requestedByAgentId: null,
+          turnCount: 1,
+          createdAt: now,
+          lastMessageAt: now,
+        })
+        .returning();
+      if (!conversation) return null;
+      await db.insert(laneAMessages).values({
+        companyId: agentRow.companyId,
+        conversationId: conversation.id,
+        agentId: agentRow.id,
+        role: "assistant",
+        content: conversationMessageForReport(text, facts),
+        createdAt: now,
+      });
+      return conversation.id;
+    } catch (err) {
+      logger.warn({ err, agentId: agentRow.id }, "morning-report: could not link the report into a Lane A conversation");
+      return null;
+    }
+  }
+
+  /** Maja's weather picture and one mood picture, via Media Studio (laneA.makePicture) — the same "quick picture tool" chat pictures use. Never throws: a failed picture just means fewer images, never a failed report. */
+  async function collectImages(agentRow: AgentRow, places: string[], conditionsSummary: string | null, headlines: MorningReportFactItem[], localDate: string): Promise<{ images: MorningReportImageFact[]; notes: string[] }> {
+    const images: MorningReportImageFact[] = [];
+    const notes: string[] = [];
+    if (!agentRow.laneAEnabled) return { images, notes };
+    if (conditionsSummary) {
+      try {
+        const picture = await laneA.makePicture({
+          companyId: agentRow.companyId,
+          agentId: agentRow.id,
+          prompt: weatherPicturePrompt(agentRow.name, places, conditionsSummary),
+          runLabel: `morning-report-weather:${agentRow.id}:${localDate}`,
+        });
+        if (picture.ok) images.push({ fileId: picture.fileId, caption: `${agentRow.name}, dressed for today's weather in ${places.join(" and ")}.`, kind: "weather" });
+        else notes.push(`No weather picture this time: ${picture.reason}`);
+      } catch (err) {
+        notes.push(`No weather picture this time: ${err instanceof Error ? err.message.slice(0, 200) : "the picture failed"}.`);
+      }
+    }
+    const moodPrompt = moodPicturePrompt(headlines);
+    if (moodPrompt) {
+      try {
+        const picture = await laneA.makePicture({
+          companyId: agentRow.companyId,
+          agentId: agentRow.id,
+          prompt: moodPrompt,
+          runLabel: `morning-report-mood:${agentRow.id}:${localDate}`,
+        });
+        if (picture.ok) images.push({ fileId: picture.fileId, caption: "Today's mood, in one picture.", kind: "mood" });
+        else notes.push(`No mood picture this time: ${picture.reason}`);
+      } catch (err) {
+        notes.push(`No mood picture this time: ${err instanceof Error ? err.message.slice(0, 200) : "the picture failed"}.`);
+      }
+    }
+    return { images, notes };
   }
 
   // ─── The tick ──────────────────────────────────────────────────────────
@@ -495,18 +717,23 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
     return rows.length;
   }
 
-  async function composeReport(agentRow: AgentRow, settings: MorningReportSettings, localDate: string, now: Date): Promise<void> {
+  async function composeReport(
+    agentRow: AgentRow,
+    settings: MorningReportSettings,
+    localDate: string,
+    now: Date,
+    opts: { isTest?: boolean } = {},
+  ): Promise<string> {
     const braveSearch = braveSearchFor(agentRow.companyId, agentRow.id);
-    const place = resolvePlace(settings, localDate);
+    const places = resolvePlaces(settings, localDate);
     const [weather, headlines, hobby, sport, prices] = await Promise.all([
-      fetchWeatherSection(fetchImpl, place),
+      fetchWeatherSection(fetchImpl, places),
       collectHeadlines({ sources: settings.sources, topics: settings.topics, maxHeadlines: settings.maxHeadlines, fetchImpl, braveSearch }),
       collectHobbyNews({ hobbyTopics: settings.hobbyTopics, fetchImpl, braveSearch, now }),
       collectSportNews({ sportFollows: settings.sportFollows, braveSearch }),
-      collectPrices(db, agentRow.companyId, settings.priceSymbols, fetchImpl, now),
+      collectPrices(db, agentRow.companyId, settings.priceSymbols, fetchImpl, now, (companyId) => secrets.resolveStockDataKey(companyId)),
     ]);
-    const notes: string[] = [];
-    if (weather.note) notes.push(weather.note);
+    const notes: string[] = [...weather.notes];
     notes.push(...headlines.notes, ...hobby.notes, ...sport.notes, ...prices.notes);
 
     const factsText = formatFactsAsPlainText({
@@ -514,7 +741,7 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
       headlines: headlines.items,
       hobby: hobby.items,
       sport: sport.items,
-      prices: prices.lines,
+      prices: prices.facts,
     });
 
     let text = factsText;
@@ -552,20 +779,45 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
         notes.push(`${agentRow.name} could not write this one (${reason.slice(0, 200)}), so the facts were sent as they are.`);
       }
     }
+    if (opts.isTest) text = `🧪 Test report\n${text}`;
 
-    await db.insert(morningReportOutbox).values({
-      companyId: agentRow.companyId,
-      agentId: agentRow.id,
-      status: "ready",
-      text,
-      note: notes.length > 0 ? notes.join(" ").slice(0, 1000) : null,
-      createdAt: now,
-      readyAt: now,
-    });
-    await db
-      .update(agents)
-      .set({ morningReportLastSentDate: localDate, morningReportLeaseUntil: null })
-      .where(eq(agents.id, agentRow.id));
+    // Pictures via Media Studio, after the one written-text model call, never
+    // blocking it: a failed picture must never lose the report (DUR-4059).
+    const pictures = await collectImages(agentRow, places, weather.conditionsSummary, headlines.items, localDate);
+    notes.push(...pictures.notes);
+
+    const facts: MorningReportFacts = {
+      places,
+      weatherText: weather.text,
+      headlines: headlines.items,
+      hobby: hobby.items,
+      sport: sport.items,
+      prices: prices.facts,
+      images: pictures.images,
+      notes,
+    };
+    const conversationId = await appendReportToConversation(agentRow, text, facts, now);
+
+    const [inserted] = await db
+      .insert(morningReportOutbox)
+      .values({
+        companyId: agentRow.companyId,
+        agentId: agentRow.id,
+        status: "ready",
+        text,
+        facts,
+        conversationId,
+        note: notes.length > 0 ? notes.join(" ").slice(0, 1000) : null,
+        createdAt: now,
+        readyAt: now,
+      })
+      .returning({ id: morningReportOutbox.id });
+    if (!opts.isTest) {
+      await db
+        .update(agents)
+        .set({ morningReportLastSentDate: localDate, morningReportLeaseUntil: null })
+        .where(eq(agents.id, agentRow.id));
+    }
     await logActivity(db, {
       companyId: agentRow.companyId,
       actorType: "system",
@@ -574,8 +826,9 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
       entityType: "agent",
       entityId: agentRow.id,
       agentId: agentRow.id,
-      details: { localDate },
+      details: { localDate, isTest: Boolean(opts.isTest) },
     }).catch(() => undefined);
+    return inserted!.id;
   }
 
   function dispatchCompose(row: AgentRow, settings: MorningReportSettings, localDate: string, now: Date) {
@@ -590,6 +843,25 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
     });
   }
 
+  /**
+   * "Send a test report now" (DUR-4059): composes and queues a report right
+   * away, ignoring the due-time/lease/once-a-day gate, so Filip can try
+   * changes without waiting for 07:00. Runs in the caller's own request (not
+   * detached), because the whole point is to see the result immediately.
+   * Never marks the day as sent — the real scheduled report still fires.
+   */
+  async function sendTestReportNow(companyId: string, agentId: string): Promise<MorningReportOutboxItem> {
+    const [row] = await db.select().from(agents).where(and(eq(agents.id, agentId), eq(agents.companyId, companyId)));
+    if (!row) throw notFound("That agent was not found.");
+    const settings = parseMorningReportSettings(row.morningReportSettings);
+    const now = nowOf();
+    const { date: localDate } = localDateTimeParts(now, settings.timezone);
+    const outboxId = await composeReport(row, settings, localDate, now, { isTest: true });
+    const [outboxRow] = await db.select().from(morningReportOutbox).where(eq(morningReportOutbox.id, outboxId));
+    if (!outboxRow) throw new Error("The test report was written but could not be read back.");
+    return toOutboxItem(outboxRow);
+  }
+
   async function tick(now: Date = nowOf()) {
     const expired = await expireStaleOutbox(now);
     const due = await claimDueAgents(now);
@@ -601,6 +873,18 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
 
   // ─── Outbox (the Telegram bridge) ───────────────────────────────────────
 
+  function toOutboxItem(row: typeof morningReportOutbox.$inferSelect): MorningReportOutboxItem {
+    return {
+      id: row.id,
+      companyId: row.companyId,
+      agentId: row.agentId,
+      text: row.text,
+      facts: row.facts ?? null,
+      conversationId: row.conversationId ?? null,
+      createdAt: row.createdAt.toISOString(),
+    };
+  }
+
   async function outbox(companyId: string): Promise<MorningReportOutboxItem[]> {
     const cutoff = new Date(nowOf().getTime() - MORNING_REPORT_OUTBOX_MAX_AGE_MS);
     const rows = await db
@@ -609,13 +893,7 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
       .where(and(eq(morningReportOutbox.companyId, companyId), eq(morningReportOutbox.status, "ready"), gte(morningReportOutbox.readyAt, cutoff)))
       .orderBy(morningReportOutbox.createdAt)
       .limit(OUTBOX_BATCH);
-    return rows.map((row) => ({
-      id: row.id,
-      companyId: row.companyId,
-      agentId: row.agentId,
-      text: row.text,
-      createdAt: row.createdAt.toISOString(),
-    }));
+    return rows.map(toOutboxItem);
   }
 
   function toStatus(status: string): MorningReportOutboxStatus {
@@ -647,5 +925,5 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
     return { id: (updated ?? row).id, status: toStatus((updated ?? row).status) };
   }
 
-  return { tick, composeReport, outbox, ack };
+  return { tick, composeReport, sendTestReportNow, outbox, ack };
 }

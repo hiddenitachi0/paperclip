@@ -57,8 +57,12 @@ export type MorningReportPriceSymbol = (typeof MORNING_REPORT_PRICE_SYMBOLS)[num
 export const MORNING_REPORT_MIN_HEADLINES = 1;
 export const MORNING_REPORT_MAX_HEADLINES = 10;
 
-/** Every existing agent, and the default place used when no override is set. */
-export const MORNING_REPORT_DEFAULT_PLACE = "Oslo";
+/**
+ * DUR-4059: the default places whose weather is shown when no place override
+ * is set — Filip's home (Drøbak) and where he works (Oslo). A place override
+ * replaces this whole list with the one override place, same as before.
+ */
+export const MORNING_REPORT_DEFAULT_PLACES = ["Drøbak", "Oslo"] as const;
 
 function isValidTimeZone(tz: string): boolean {
   try {
@@ -133,6 +137,49 @@ export function parseMorningReportSettings(value: unknown): MorningReportSetting
 export const MORNING_REPORT_OUTBOX_STATUSES = ["ready", "delivered", "failed", "expired"] as const;
 export type MorningReportOutboxStatus = (typeof MORNING_REPORT_OUTBOX_STATUSES)[number];
 
+/** One clickable headline, hobby-news or sport item, with its source kept for the reader. */
+export interface MorningReportFactItem {
+  title: string;
+  url: string;
+  source: string;
+}
+
+/** One price line: the symbol as the operator picked it (e.g. "DNB.OL"), not the upstream source's own spelling. */
+export interface MorningReportPriceFact {
+  symbol: string;
+  price: number;
+  currency: string;
+  /** Null when no ~24h-ago reading was available to compare against. */
+  changePercent: number | null;
+}
+
+/** One picture the report carries: Maja dressed for today's weather, or a mood illustration for the news. */
+export interface MorningReportImageFact {
+  /** issue_attachments id — same fileId shape as a Lane A chat picture (LaneAToolImage). */
+  fileId: string;
+  caption: string;
+  kind: "weather" | "mood";
+}
+
+/**
+ * Everything the one model call read facts from, kept structured (not just
+ * flattened into the written prose) so the Telegram bridge can render clickable
+ * links/photos section by section, and so the full briefing page can show every
+ * item with its source, independent of what the model chose to mention.
+ */
+export interface MorningReportFacts {
+  /** One place (a place override), or the default two (Drøbak, Oslo) — see MORNING_REPORT_DEFAULT_PLACES. */
+  places: string[];
+  weatherText: string | null;
+  headlines: MorningReportFactItem[];
+  hobby: MorningReportFactItem[];
+  sport: MorningReportFactItem[];
+  prices: MorningReportPriceFact[];
+  images: MorningReportImageFact[];
+  /** Plain-language notes about anything that degraded (a source down, no key configured, …). */
+  notes: string[];
+}
+
 /** One report waiting in the outbox for the Telegram bridge. */
 export interface MorningReportOutboxItem {
   id: string;
@@ -140,6 +187,15 @@ export interface MorningReportOutboxItem {
   /** The quick agent whose bot should send it. */
   agentId: string;
   text: string;
+  /** Structured facts for the Telegram bridge's per-section messages and the full briefing page. Null for a report written before DUR-4059. */
+  facts: MorningReportFacts | null;
+  /**
+   * The Lane A conversation the report was appended to as an assistant turn
+   * (when the agent is a quick agent and the company has a board owner), so
+   * "tell me more about number 3" in Telegram continues the same chat
+   * history the report is part of. Null when it could not be created.
+   */
+  conversationId: string | null;
   createdAt: string;
 }
 

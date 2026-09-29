@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
-import { agents, companies, createDb, morningReportOutbox } from "@paperclipai/db";
+import { agents, companies, companyMemberships, createDb, laneAMessages, morningReportOutbox } from "@paperclipai/db";
 import { DEFAULT_MORNING_REPORT_SETTINGS, MORNING_REPORT_RSS_FEEDS, type MorningReportSettings } from "@paperclipai/shared";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { agentService } from "../services/agents.ts";
+import { secretService } from "../services/secrets.ts";
+import { resetWatcherSourceState } from "../services/watcher-sources.ts";
 import {
   dedupeHeadlines,
   dueMorningReport,
@@ -121,9 +123,13 @@ d("morning report tick", () => {
 
   let feeds: Record<string, string> = {};
   let failingFeeds: Set<string> = new Set();
+  let unknownPlaces: Set<string> = new Set();
   let fetchCalls: string[] = [];
   let pending: Promise<void>[] = [];
+  let coingeckoPrices: Record<string, { usd: number; usd_24h_change?: number }> = {};
+  let eodhdCloses: Array<{ date: string; close: number }> = [];
   const transform = vi.fn();
+  const makePicture = vi.fn();
   const webSearch = { search: vi.fn().mockRejectedValue(new Error("web search was not expected in this test")) };
 
   vi.setConfig({ testTimeout: 60_000 });
@@ -132,13 +138,27 @@ d("morning report tick", () => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
     fetchCalls.push(url.href);
     if (url.hostname === "geocoding-api.open-meteo.com") {
-      return json({ results: [{ name: "Oslo", latitude: 59.91, longitude: 10.75, country: "Norway" }] });
+      // Echoes the queried place name back, so DUR-4059's dual-place weather
+      // (Drøbak, Oslo) can be told apart in a report's facts.
+      const queried = url.searchParams.get("name") || "Oslo";
+      if (unknownPlaces.has(queried)) return json({ results: [] });
+      return json({ results: [{ name: queried, latitude: 59.91, longitude: 10.75, country: "Norway" }] });
     }
     if (url.hostname === "api.open-meteo.com") {
       return json({
         current: { temperature_2m: 2, wind_speed_10m: 8, precipitation: 0, weather_code: 1 },
         daily: { time: ["2026-01-15"], temperature_2m_max: [3], temperature_2m_min: [-1], precipitation_sum: [0], weather_code: [1] },
       });
+    }
+    if (url.hostname === "api.coingecko.com") {
+      const body: Record<string, { usd: number; usd_24h_change?: number; last_updated_at: number }> = {};
+      for (const [id, quote] of Object.entries(coingeckoPrices)) {
+        body[id] = { ...quote, last_updated_at: Math.floor(OSLO_WINTER_0700.getTime() / 1000) };
+      }
+      return json(body);
+    }
+    if (url.hostname === "eodhd.com") {
+      return json(eodhdCloses);
     }
     if (failingFeeds.has(url.href)) return new Response("", { status: 503 });
     const feed = feeds[url.href];
@@ -150,7 +170,7 @@ d("morning report tick", () => {
     return morningReportService(db, {
       fetchImpl,
       now: () => OSLO_WINTER_0700,
-      laneA: { transform } as unknown as MorningReportServiceDeps["laneA"],
+      laneA: { transform, makePicture } as unknown as MorningReportServiceDeps["laneA"],
       webSearch,
       dispatch: (work) => {
         pending.push(work());
@@ -174,9 +194,15 @@ d("morning report tick", () => {
   beforeEach(() => {
     feeds = {};
     failingFeeds = new Set();
+    unknownPlaces = new Set();
     fetchCalls = [];
     pending = [];
+    coingeckoPrices = {};
+    eodhdCloses = [];
+    resetWatcherSourceState();
     transform.mockReset();
+    makePicture.mockReset();
+    makePicture.mockRejectedValue(new Error("no picture expected in this test"));
     webSearch.search.mockReset();
     webSearch.search.mockRejectedValue(new Error("web search was not expected in this test"));
     transform.mockResolvedValue({ text: "Good morning! Here is your briefing.", model: "fake", provider: "anthropic" });
@@ -332,6 +358,212 @@ d("morning report tick", () => {
       const ack2 = await svc.ack(companyId, listed[0]!.id, { outcome: "failed" });
       expect(ack2).toEqual({ id: listed[0]!.id, status: "delivered" });
       expect(await svc.outbox(companyId)).toHaveLength(0);
+    });
+  });
+
+  // DUR-4059: prices must work without Filip ever creating a watcher, and
+  // must use the right live-quote source for the symbol — earlier code
+  // always tried the crypto source, so DNB.OL never got a fallback price.
+  describe("prices without a watcher", () => {
+    const settingsWithPrices: MorningReportSettings = { ...baseSettings, sources: [], priceSymbols: ["BTC", "DNB.OL"] };
+
+    it("fetches crypto directly from CoinGecko, using its 24h change as the comparison", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent(companyId, { ...settingsWithPrices, priceSymbols: ["BTC"] });
+      coingeckoPrices.bitcoin = { usd: 65000, usd_24h_change: 5 };
+
+      await service().tick(OSLO_WINTER_0700);
+      await settle();
+
+      const [row] = await outboxRowsFor(agentId);
+      expect(row!.facts).toMatchObject({ prices: [{ symbol: "BTC", price: 65000, currency: "USD" }] });
+      expect(row!.facts!.prices[0]!.changePercent).toBeCloseTo(5, 5);
+      // The facts handed to the one model call, not what the (mocked) model wrote back.
+      expect(transform.mock.calls[0]![0].input).toContain("BTC: 65000 USD (+5.00% vs ~24h ago)");
+    });
+
+    it("fetches DNB.OL from EODHD (not the crypto source) when a company EODHD key is saved", async () => {
+      const companyId = await seedCompany();
+      await secretService(db).create(companyId, { name: "EODHD", provider: "local_encrypted", value: "fake-eodhd-key" });
+      const agentId = await seedAgent(companyId, { ...settingsWithPrices, priceSymbols: ["DNB.OL"] });
+      eodhdCloses = [
+        { date: "2026-01-13", close: 250 },
+        { date: "2026-01-14", close: 260 },
+      ];
+
+      await service().tick(OSLO_WINTER_0700);
+      await settle();
+
+      expect(fetchCalls.some((url) => url.includes("eodhd.com"))).toBe(true);
+      const [row] = await outboxRowsFor(agentId);
+      expect(row!.facts).toMatchObject({ prices: [{ symbol: "DNB.OL", price: 260, currency: "NOK" }] });
+      expect(row!.facts!.prices[0]!.changePercent).toBeCloseTo(4, 5);
+    });
+
+    it("says plainly that no stock data key is configured, instead of silently querying CoinGecko for DNB.OL", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent(companyId, { ...settingsWithPrices, priceSymbols: ["DNB.OL"] });
+
+      await service().tick(OSLO_WINTER_0700);
+      await settle();
+
+      expect(fetchCalls.some((url) => url.includes("eodhd.com") || url.includes("coingecko.com"))).toBe(false);
+      const [row] = await outboxRowsFor(agentId);
+      expect(row!.facts!.prices).toEqual([]);
+      expect(row!.note ?? "").toContain("no stock data key is configured");
+    });
+  });
+
+  // DUR-4059: weather covers both of Filip's default places (Drøbak, Oslo)
+  // unless a place override is set, in which case only that one place is used.
+  describe("places (weather)", () => {
+    it("fetches weather for both default places and lists them in the facts", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent(companyId, { ...baseSettings, sources: ["bbc"] });
+      feeds[BBC_URL] = rssXml([]);
+
+      await service().tick(OSLO_WINTER_0700);
+      await settle();
+
+      const geocodeQueries = fetchCalls
+        .filter((url) => url.includes("geocoding-api.open-meteo.com"))
+        .map((url) => new URL(url).searchParams.get("name"));
+      expect(geocodeQueries).toEqual(["Drøbak", "Oslo"]);
+      const [row] = await outboxRowsFor(agentId);
+      expect(row!.facts!.places).toEqual(["Drøbak", "Oslo"]);
+      expect(row!.facts!.weatherText).toContain("Now in Drøbak");
+      expect(row!.facts!.weatherText).toContain("Now in Oslo");
+    });
+
+    it("fetches only the override place when one is set, not the defaults", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent(companyId, {
+        ...baseSettings,
+        sources: ["bbc"],
+        placeOverride: "Bergen",
+        placeOverrideUntil: null,
+      });
+      feeds[BBC_URL] = rssXml([]);
+
+      await service().tick(OSLO_WINTER_0700);
+      await settle();
+
+      const geocodeQueries = fetchCalls
+        .filter((url) => url.includes("geocoding-api.open-meteo.com"))
+        .map((url) => new URL(url).searchParams.get("name"));
+      expect(geocodeQueries).toEqual(["Bergen"]);
+      const [row] = await outboxRowsFor(agentId);
+      expect(row!.facts!.places).toEqual(["Bergen"]);
+    });
+
+    it("degrades one failing place to a note while still reporting the other's weather", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent(companyId, { ...baseSettings, sources: ["bbc"] });
+      feeds[BBC_URL] = rssXml([]);
+      unknownPlaces.add("Drøbak");
+
+      await service().tick(OSLO_WINTER_0700);
+      await settle();
+
+      const [row] = await outboxRowsFor(agentId);
+      expect(row!.facts!.weatherText).not.toContain("Drøbak");
+      expect(row!.facts!.weatherText).toContain("Now in Oslo");
+      expect(row!.note ?? "").toContain('could not find a place called "Drøbak"');
+    });
+  });
+
+  // DUR-4059: pictures via Media Studio (laneA.makePicture) — a weather
+  // portrait of the agent and one mood picture, never blocking the report.
+  describe("pictures", () => {
+    it("stores a weather picture and a mood picture Media Studio made, and degrades gracefully when it fails", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent(companyId, { ...baseSettings, sources: ["bbc"] });
+      feeds[BBC_URL] = rssXml([{ title: "A headline to set the mood", link: "https://bbc.example/mood" }]);
+      makePicture
+        .mockResolvedValueOnce({ ok: true, fileId: "11111111-1111-1111-1111-111111111111", seed: 1 })
+        .mockResolvedValueOnce({ ok: false, reason: "Media Studio is not switched on for this company." });
+
+      await service().tick(OSLO_WINTER_0700);
+      await settle();
+
+      expect(makePicture).toHaveBeenCalledTimes(2);
+      const [row] = await outboxRowsFor(agentId);
+      expect(row!.facts!.images).toEqual([
+        { fileId: "11111111-1111-1111-1111-111111111111", caption: expect.stringContaining("dressed for today's weather"), kind: "weather" },
+      ]);
+      expect(row!.note ?? "").toContain("No mood picture this time");
+    });
+  });
+
+  // DUR-4059: the report becomes part of the quick agent's own Lane A chat
+  // history, so a later "tell me more about number 3" in Telegram resolves
+  // against the same headlines Filip was sent.
+  describe("conversation continuity", () => {
+    it("appends the report as an assistant turn owned by the company's board owner, and carries the conversationId in the outbox", async () => {
+      const companyId = await seedCompany();
+      const ownerUserId = `user-${randomUUID()}`;
+      await db.insert(companyMemberships).values({
+        companyId,
+        principalType: "user",
+        principalId: ownerUserId,
+        membershipRole: "owner",
+        status: "active",
+      });
+      const agentId = await seedAgent(companyId, baseSettings);
+      feeds[BBC_URL] = rssXml([{ title: "A story worth a follow-up", link: "https://bbc.example/x" }]);
+      feeds[DAGBLADET_URL] = rssXml([]);
+
+      await service().tick(OSLO_WINTER_0700);
+      await settle();
+
+      const [row] = await outboxRowsFor(agentId);
+      expect(row!.conversationId).toBeTruthy();
+      const messages = await db.select().from(laneAMessages).where(eq(laneAMessages.conversationId, row!.conversationId!));
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({ role: "assistant", agentId });
+      expect(messages[0]!.content).toContain("A story worth a follow-up");
+    });
+
+    it("leaves conversationId null (never fails the report) when the company has no board owner", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent(companyId, baseSettings);
+      feeds[BBC_URL] = rssXml([]);
+      feeds[DAGBLADET_URL] = rssXml([]);
+
+      await service().tick(OSLO_WINTER_0700);
+      await settle();
+
+      const [row] = await outboxRowsFor(agentId);
+      expect(row!.status).toBe("ready");
+      expect(row!.conversationId).toBeNull();
+    });
+  });
+
+  // DUR-4059: the settings card's "Send a test report now" button.
+  describe("sendTestReportNow", () => {
+    it("composes and returns a report immediately, prefixed as a test, without consuming the day's scheduled slot", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent(companyId, baseSettings);
+      feeds[BBC_URL] = rssXml([{ title: "A headline", link: "https://bbc.example/x" }]);
+      feeds[DAGBLADET_URL] = rssXml([]);
+
+      const svc = service();
+      const result = await svc.sendTestReportNow(companyId, agentId);
+      expect(result.text).toContain("🧪 Test report");
+
+      const [agentRow] = await db.select().from(agents).where(eq(agents.id, agentId));
+      expect(agentRow).toMatchObject({ morningReportLastSentDate: null, morningReportLeaseUntil: null });
+
+      // The real scheduled report still fires today — the test did not use up the slot.
+      const tickResult = await svc.tick(OSLO_WINTER_0700);
+      expect(tickResult.fired).toBe(1);
+      await settle();
+      expect(await outboxRowsFor(agentId)).toHaveLength(2);
+    });
+
+    it("rejects an unknown agent", async () => {
+      const companyId = await seedCompany();
+      await expect(service().sendTestReportNow(companyId, randomUUID())).rejects.toMatchObject({ status: 404 });
     });
   });
 });

@@ -14,9 +14,17 @@ approvals/tasks still live in Paperclip and the web UI.
   carry a secret value). When nobody asked (a card the board filed itself) or
   nobody on the way up has a bot, it goes to the company's notice bot — see
   company_notice_bot for how that one is chosen.
-- Outbound, morning reports: a quick agent's daily report waits in
-  Paperclip's morning-report outbox and is sent through the agent's own bot
-  once, then acknowledged (like a watcher alert, text only).
+- Outbound, morning reports: a quick agent's daily report waits in Paperclip's
+  morning-report outbox and is sent through the agent's own bot once, then
+  acknowledged (like a watcher alert). DUR-4059: the written briefing (with a
+  link to the full page and any degraded-source notes) goes first, then
+  clickable HTML-link sections (headlines/hobby/sport, each numbered), a
+  prices section, and any pictures Media Studio made (a weather portrait, a
+  mood picture) as their own photo messages — every part but the briefing
+  text itself is best-effort, so one failed picture never loses the report.
+  When the report carries a Lane A conversationId, the chat is pointed at it
+  afterwards so a reply like "tell me more about number 3" continues the same
+  history the report is part of.
 - Outbound, market watchers: an alert a watcher's quick agent wrote (a price
   move, maybe with a picture) waits in Paperclip's watcher outbox; it is sent
   through that agent's bot (or its boss's) and acknowledged, once.
@@ -50,6 +58,7 @@ both describe the same agent.
 `companyId` scopes the bot to a company (defaults to PAPERCLIP_COMPANY_ID).
 `uiBase` is the deep-link base for that company (defaults to PAPERCLIP_UI_HOST).
 """
+import html
 import json
 import os
 import re
@@ -1640,14 +1649,109 @@ def notify_watcher_alerts(state, bots):
 # the outbox, and Paperclip retires it after a day.
 
 MORNING_REPORTS_REMEMBERED = 200
+# DUR-4059: which MorningReportFacts list-field becomes which HTML section
+# message, in send order, right after the written briefing text.
+MORNING_REPORT_SECTION_TITLES = {"headlines": "Headlines", "hobby": "Hobby news", "sport": "Sport"}
 
 
 def ack_morning_report(company_id, report_id, outcome="delivered"):
     return cli("morning-report", "outbox:ack", report_id, "-C", company_id, "--outcome", outcome) is not None
 
 
+def morning_report_page_url(bot, agent_id, report_id):
+    """The full briefing page's URL for one report (frontend route, DUR-4059's child task)."""
+    return f"{bot['uiBase']}/agents/{agent_id}/morning-reports/{report_id}"
+
+
+def morning_report_link_section(title, items):
+    """One HTML message listing clickable items (falls back to plain text when an item has no URL),
+    or None when there is nothing to show — a report's facts leave a section out entirely rather
+    than sending an empty one."""
+    items = [it for it in (items or []) if isinstance(it, dict) and str(it.get("title") or "").strip()]
+    if not items:
+        return None
+    lines = [f"<b>{html.escape(title)}</b>"]
+    for i, item in enumerate(items, start=1):
+        label = html.escape(str(item.get("title")).strip())
+        url = str(item.get("url") or "").strip()
+        lines.append(f'{i}. <a href="{html.escape(url, quote=True)}">{label}</a>' if url else f"{i}. {label}")
+    return "\n".join(lines)
+
+
+def morning_report_prices_section(prices):
+    """One HTML message with a line per price fact, or None when there are none."""
+    prices = [p for p in (prices or []) if isinstance(p, dict) and p.get("symbol")]
+    if not prices:
+        return None
+    lines = ["<b>Prices</b>"]
+    for p in prices:
+        line = f"{html.escape(str(p.get('symbol')))}: {p.get('price')} {html.escape(str(p.get('currency') or ''))}".strip()
+        change = p.get("changePercent")
+        if isinstance(change, (int, float)):
+            line += f" ({'+' if change >= 0 else ''}{change:.2f}%)"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def morning_report_sections(facts):
+    """The extra HTML section messages a report's structured facts carry (headlines/hobby/sport/
+    prices), in send order. Each keeps every item's source URL, independent of what the one model
+    call chose to mention in the written text."""
+    if not isinstance(facts, dict):
+        return []
+    sections = [s for key, title in MORNING_REPORT_SECTION_TITLES.items()
+                if (s := morning_report_link_section(title, facts.get(key)))]
+    prices_section = morning_report_prices_section(facts.get("prices"))
+    if prices_section:
+        sections.append(prices_section)
+    return sections
+
+
+def send_html_checked(token, chat_id, text):
+    """send_text_checked, but with clickable HTML links rendered (see morning_report_link_section)."""
+    ok = True
+    for part in split_for_telegram(text):
+        if tg(token, "sendMessage", chat_id=chat_id, text=part, parse_mode="HTML", disable_web_page_preview=True) is None:
+            ok = False
+    return ok
+
+
+def send_report_image(bot, chat_id, image, picture_cache):
+    """One report picture (Maja dressed for today's weather, or the mood picture) into one chat, as
+    a photo with its caption. `picture_cache` is a plain dict the caller keeps for one report's whole
+    delivery, so the same fileId is fetched once even with several chats or images. Best-effort: a
+    picture that cannot be fetched or sent never affects the report's own delivery/ack (DUR-4059,
+    same rule as send_watcher_alert)."""
+    if not isinstance(image, dict):
+        return False
+    file_id = image.get("fileId")
+    if not isinstance(file_id, str) or not UUID_RE.match(file_id):
+        return False
+    if file_id not in picture_cache:
+        picture_cache[file_id] = fetch_picture(bot, file_id)
+    picture = picture_cache[file_id]
+    if picture is None:
+        return False
+    payload, content_type = picture
+    if content_type not in TG_PHOTO_TYPES or len(payload) > TG_PHOTO_MAX_BYTES:
+        return False
+    extension = content_type.split("/", 1)[1].split("+", 1)[0] or "img"
+    filename = f"report-{file_id[:8]}.{extension}"
+    caption = str(image.get("caption") or "")[:TG_CAPTION_LIMIT]
+    return tg_upload(bot["token"], "sendPhoto", "photo", filename, content_type, payload,
+                      chat_id=chat_id, caption=caption) is not None
+
+
 def notify_morning_reports(state, bots):
-    """Send every report waiting in each company's morning-report outbox, once."""
+    """Send every report waiting in each company's morning-report outbox, once. A report written
+    before DUR-4059 (or whose facts carried nothing extra) is just the written text, exactly as
+    before. One with structured facts additionally gets: a link to the full briefing page at the
+    top of the written text, one HTML section message per non-empty headlines/hobby/sport/prices
+    list (each item a clickable link to its source), and any pictures Media Studio made as their own
+    photo messages — every part past the written text is best-effort, so one failed section or
+    picture never loses the report or blocks its acknowledgement. When the report carries a Lane A
+    conversationId, later replies in that chat are pointed at it, so "tell me more about number 3"
+    continues the same history the report is part of."""
     by_company = defaultdict(list)
     for b in bots:
         by_company[b["companyId"]].append(b)
@@ -1686,10 +1790,26 @@ def notify_morning_reports(state, bots):
                 continue
             if escalated and agent_id:
                 text += f"\n(on behalf of {names.get(agent_id, 'a teammate')})"
+            facts = it.get("facts") if isinstance(it.get("facts"), dict) else None
+            if facts and agent_id:
+                text = f"Full briefing: {morning_report_page_url(bot, agent_id, report_id)}\n\n{text}"
+            sections = morning_report_sections(facts)
+            images = facts.get("images") if facts else None
+            images = [im for im in images if isinstance(im, dict)] if isinstance(images, list) else []
+            conversation_id = it.get("conversationId")
+            conversation_id = conversation_id if isinstance(conversation_id, str) and UUID_RE.match(conversation_id) else None
+            picture_cache = {}
             delivered = False
             for chat in chats:
-                if send_text_checked(bot["token"], chat, text):
-                    delivered = True
+                if not send_text_checked(bot["token"], chat, text):
+                    continue
+                delivered = True
+                for section in sections:
+                    send_html_checked(bot["token"], chat, section)
+                for image in images:
+                    send_report_image(bot, chat, image, picture_cache)
+                if conversation_id:
+                    set_conversation(state, bot["token"], chat, conversation_id)
             if not delivered:
                 continue  # Telegram refused; the next pass tries again
             sent_before.add(report_id)

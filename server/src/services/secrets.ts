@@ -35,6 +35,7 @@ import {
   createSecretProviderConfigSchema,
   DEDICATED_SECRET_BINDING_TARGET_TYPES,
   deriveProjectUrlKey,
+  EODHD_SECRET_NAMES,
   envBindingSchema,
   GITHUB_TOKEN_SECRET_NAMES,
   isSecretKindBindable,
@@ -1002,6 +1003,25 @@ export function secretService(db: Db, rawDb: Db = db) {
       if (!secret) continue;
       const value = await resolveSecretValueInternal(companyId, secret.id, "latest", {
         accessContext: context ?? { consumerType: "system", consumerId: "deploy-runner" },
+      }).catch(() => null);
+      const trimmed = value?.value?.trim();
+      if (trimmed) return trimmed;
+    }
+    return null;
+  }
+
+  /**
+   * Resolve the company's EODHD key by the same by-name convention as
+   * resolveGitHubToken — the first bound+resolvable secret named
+   * EODHD/EODHD_API_KEY/"EODHD key" wins. Lets the morning report price
+   * section fetch DNB.OL directly, with no watcher required (DUR-4059).
+   */
+  async function resolveStockDataKey(companyId: string, context?: SecretConsumerContext): Promise<string | null> {
+    for (const secretName of EODHD_SECRET_NAMES) {
+      const secret = await getByName(companyId, secretName).catch(() => null);
+      if (!secret) continue;
+      const value = await resolveSecretValueInternal(companyId, secret.id, "latest", {
+        accessContext: context ?? { consumerType: "system", consumerId: "morning-report" },
       }).catch(() => null);
       const trimmed = value?.value?.trim();
       if (trimmed) return trimmed;
@@ -2215,6 +2235,7 @@ export function secretService(db: Db, rawDb: Db = db) {
     resolveSecretValueForBrowserFill,
     resolveSecretValueForTest,
     resolveGitHubToken,
+    resolveStockDataKey,
 
     create: async (
       companyId: string,

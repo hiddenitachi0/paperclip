@@ -561,6 +561,7 @@ export {
 export {
   KNOWN_INTEGRATION_ENV_KEYS,
   GITHUB_TOKEN_SECRET_NAMES,
+  EODHD_SECRET_NAMES,
   PUSH_CAPABILITY_ENV_KEYS,
   getIntegrationKey,
   type IntegrationKeyDescriptor,
@@ -2301,7 +2302,7 @@ export {
   MORNING_REPORT_PRICE_SYMBOLS,
   MORNING_REPORT_MIN_HEADLINES,
   MORNING_REPORT_MAX_HEADLINES,
-  MORNING_REPORT_DEFAULT_PLACE,
+  MORNING_REPORT_DEFAULT_PLACES,
   MORNING_REPORT_OUTBOX_STATUSES,
   morningReportSettingsSchema,
   DEFAULT_MORNING_REPORT_SETTINGS,
@@ -2315,5 +2316,9 @@ export {
   type MorningReportSettings,
   type MorningReportOutboxStatus,
   type MorningReportOutboxItem,
+  type MorningReportFactItem,
+  type MorningReportPriceFact,
+  type MorningReportImageFact,
+  type MorningReportFacts,
   type AckMorningReportOutboxInput,
 } from "./morning-report.js";

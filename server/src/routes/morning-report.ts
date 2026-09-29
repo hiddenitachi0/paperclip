@@ -54,5 +54,12 @@ export function morningReportRoutes(rawDb: Db, deps: MorningReportServiceDeps = 
     },
   );
 
+  // "Send a test report now" (DUR-4059): the Morning report settings card's
+  // test button. Board-only, same as the rest of this router — an agent
+  // cannot trigger its own report on demand.
+  router.post("/companies/:companyId/agents/:agentId/morning-report/test", memberScope(), async (req, res) => {
+    res.json(await svc.sendTestReportNow(req.params.companyId as string, idParam(req, "agentId", "agent")));
+  });
+
   return router;
 }
