@@ -6,8 +6,13 @@ import {
   LANE_A_MAX_TEMPERATURE,
   LANE_A_MIN_TEMPERATURE,
   LANE_A_PROVIDER_CATALOGUE,
+  LANE_A_PROVIDER_ROUTING_MAX_ENTRIES,
+  LANE_A_PROVIDER_SLUG_RE,
   LANE_A_TEMPERATURE_PRESETS,
   isLaneAModelForProvider,
+  laneAProviderRoutingForCall,
+  normalizeLaneAProviderRouting,
+  parseLaneAProviderSlugList,
   laneAModelAcceptsTemperature,
   laneATemperatureForCall,
   laneAModelCostCents,
@@ -230,5 +235,78 @@ describe("quick-agent creativity (sampling temperature)", () => {
     expect(laneATemperatureForCall("local", "llama3.1", 3)).toBeNull();
     expect(laneATemperatureForCall("local", "llama3.1", -1)).toBeNull();
     expect(laneATemperatureForCall("local", "llama3.1", Number.NaN)).toBeNull();
+  });
+});
+
+describe("quick-agent model hosts (OpenRouter provider routing)", () => {
+  const base = { name: "Front desk", adapterType: "claude_local" as const };
+
+  it("is a board-only quick-agent field", () => {
+    expect(QUICK_AGENT_FIELDS).toContain("laneAProviderRouting");
+  });
+
+  it("accepts host lists, the fallback switch and null on create and on PATCH, lower-casing the hosts", () => {
+    const routing = { only: [" DeepInfra "], order: ["deepinfra", "mistral"], ignore: ["venice"], allowFallbacks: false };
+    expect(createAgentSchema.parse({ ...base, laneAProviderRouting: routing }).laneAProviderRouting).toEqual({
+      only: ["deepinfra"],
+      order: ["deepinfra", "mistral"],
+      ignore: ["venice"],
+      allowFallbacks: false,
+    });
+    expect(updateAgentSchema.parse({ laneAProviderRouting: { only: ["deepinfra"] } }).laneAProviderRouting).toEqual({
+      only: ["deepinfra"],
+    });
+    expect(updateAgentSchema.safeParse({ laneAProviderRouting: null }).success).toBe(true);
+    expect(updateAgentSchema.parse({})).not.toHaveProperty("laneAProviderRouting");
+  });
+
+  it("refuses hosts that are not a slug, too many hosts, and unknown keys", () => {
+    for (const value of [
+      { only: ["deep infra"] },
+      { only: ["-deepinfra"] },
+      { only: [""] },
+      { only: ["a".repeat(65)] },
+      { ignore: Array.from({ length: LANE_A_PROVIDER_ROUTING_MAX_ENTRIES + 1 }, (_, i) => `host${i}`) },
+      { only: "deepinfra" },
+      { allowFallbacks: "no" },
+      { sort: "price" },
+      ["deepinfra"],
+    ]) {
+      expect(updateAgentSchema.safeParse({ laneAProviderRouting: value }).success, JSON.stringify(value)).toBe(false);
+    }
+  });
+
+  it("cleans a stored value defensively: bad entries dropped, duplicates removed, nothing left = null", () => {
+    expect(normalizeLaneAProviderRouting(null)).toBeNull();
+    expect(normalizeLaneAProviderRouting({})).toBeNull();
+    expect(normalizeLaneAProviderRouting({ only: [] })).toBeNull();
+    expect(normalizeLaneAProviderRouting("deepinfra")).toBeNull();
+    expect(
+      normalizeLaneAProviderRouting({
+        only: ["DeepInfra", "deepinfra", "not a host", 7],
+        ignore: ["venice"],
+        allowFallbacks: true,
+      }),
+    ).toEqual({ only: ["deepinfra"], ignore: ["venice"], allowFallbacks: true });
+    expect(LANE_A_PROVIDER_SLUG_RE.test("deepinfra")).toBe(true);
+    expect(LANE_A_PROVIDER_SLUG_RE.test("DeepInfra")).toBe(false);
+  });
+
+  it("applies only to OpenRouter", () => {
+    const routing = { only: ["deepinfra"] };
+    expect(laneAProviderRoutingForCall("openrouter", routing)).toEqual(routing);
+    for (const provider of [null, "anthropic", "openai", "google", "local"]) {
+      expect(laneAProviderRoutingForCall(provider, routing), String(provider)).toBeNull();
+    }
+  });
+
+  it("splits what an operator typed into hosts, and names what it did not understand", () => {
+    expect(parseLaneAProviderSlugList("DeepInfra, mistral,,  venice")).toEqual({
+      slugs: ["deepinfra", "mistral", "venice"],
+      invalid: [],
+    });
+    expect(parseLaneAProviderSlugList("")).toEqual({ slugs: [], invalid: [] });
+    expect(parseLaneAProviderSlugList("deepinfra, deepinfra")).toEqual({ slugs: ["deepinfra"], invalid: [] });
+    expect(parseLaneAProviderSlugList("deepinfra, Infra!")).toEqual({ slugs: ["deepinfra"], invalid: ["Infra!"] });
   });
 });
