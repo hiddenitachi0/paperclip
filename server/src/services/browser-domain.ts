@@ -26,3 +26,22 @@ export function registrableDomain(url: string): string | null {
     return null;
   }
 }
+
+/**
+ * Security fix (DUR-4045 review of DUR-4037): the registrable domain alone
+ * is too coarse to bind a booking clearance to -- it let one approved
+ * booking's clearance cover any final click anywhere on the same domain for
+ * up to 30 minutes (a different page, a different form, a different
+ * merchant flow behind the same host). Returns "origin + pathname" -- not
+ * the query string, which a merchant may vary per request without it being
+ * a materially different page, and not the fragment -- or null when the URL
+ * cannot be parsed. Callers must treat null as "cannot verify."
+ */
+export function pageUrlKey(url: string): string | null {
+  try {
+    const u = new URL(url);
+    return `${u.origin}${u.pathname}`;
+  } catch {
+    return null;
+  }
+}

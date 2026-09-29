@@ -119,22 +119,29 @@ describe("browserRoutes", () => {
     expect(mockBrowserService.handOver).toHaveBeenCalledWith(AGENT_ID, "sess-1", "captcha", "solve it and continue");
   });
 
-  it("routes request-booking with summary to the service (DUR-4037)", async () => {
+  it("routes request-booking with summary and ref to the service (DUR-4037)", async () => {
     mockBrowserService.requestBooking.mockResolvedValue({ approvalId: "approval-1", status: "pending_approval" });
     const app = await createApp("agent");
 
     const res = await request(app)
       .post("/api/browser/sessions/sess-1/request-booking")
-      .send({ summary: "A table for two, free, no deposit" });
+      .send({ summary: "A table for two, free, no deposit", ref: "e9" });
 
     expect(res.status).toBe(202);
     expect(res.body).toEqual({ approvalId: "approval-1", status: "pending_approval" });
-    expect(mockBrowserService.requestBooking).toHaveBeenCalledWith(AGENT_ID, "sess-1", "A table for two, free, no deposit");
+    expect(mockBrowserService.requestBooking).toHaveBeenCalledWith(AGENT_ID, "sess-1", "A table for two, free, no deposit", "e9");
   });
 
   it("rejects request-booking with an empty summary before it reaches the service", async () => {
     const app = await createApp("agent");
-    const res = await request(app).post("/api/browser/sessions/sess-1/request-booking").send({ summary: "" });
+    const res = await request(app).post("/api/browser/sessions/sess-1/request-booking").send({ summary: "", ref: "e9" });
+    expect(res.status).toBe(400);
+    expect(mockBrowserService.requestBooking).not.toHaveBeenCalled();
+  });
+
+  it("rejects request-booking without a ref before it reaches the service (DUR-4045 clearance binding)", async () => {
+    const app = await createApp("agent");
+    const res = await request(app).post("/api/browser/sessions/sess-1/request-booking").send({ summary: "A table for two" });
     expect(res.status).toBe(400);
     expect(mockBrowserService.requestBooking).not.toHaveBeenCalled();
   });

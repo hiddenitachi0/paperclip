@@ -54,7 +54,8 @@ import { bookingRequestPayloadSchema } from "@paperclipai/shared";
 import { forbidden, notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
 import { approvalService } from "./approvals.js";
-import { registrableDomain } from "./browser-domain.js";
+import { isAmountStillAcceptable, parseLargestPageAmount, type ParsedPageAmount } from "./browser-amount.js";
+import { pageUrlKey, registrableDomain } from "./browser-domain.js";
 import type { BrowserWorkerClient } from "./browser-worker-client.js";
 import { createBrowserWorkerClientFromEnv } from "./browser-worker-client.js";
 import { companyPaymentSettingsService } from "./company-payment-settings.js";
@@ -130,6 +131,23 @@ interface PendingBooking {
   merchantDomain: string;
   /** ms epoch; design section 1's 30-minute approval expiry. */
   expiresAt: number;
+  /**
+   * Security fix (DUR-4045 review): origin+pathname of the page Filip's
+   * approval card was filed from. `merchantDomain` alone let one approved
+   * booking's clearance cover any final click anywhere on the same domain
+   * for up to 30 minutes; `confirmFinalStep` now requires the same page too.
+   */
+  pageUrl: string;
+  /** Role + accessible name of the exact element Filip approved -- confirmFinalStep must resolve to this same element, not merely any element on the bound page. */
+  elementRole: string;
+  elementName: string | null;
+  /** Largest amount visible on the page at request time, if any; confirmFinalStep refuses a higher (or newly-appeared) amount. */
+  amount: ParsedPageAmount | null;
+}
+
+/** `el.label` (accessible label) wins over `el.name` (HTML `name` attribute) as the human-readable identity of an element, matching `elementText()` in `@paperclipai/adapter-utils/browser-tools`. */
+function accessibleName(el: { label?: string | null; name?: string | null }): string | null {
+  return el.label ?? el.name ?? null;
 }
 
 interface BrowserSession {
@@ -432,12 +450,18 @@ export function browserService(db: Db, deps: BrowserServiceDeps = {}) {
    * server-side with the page's registrable domain (never the raw URL, which
    * an agent's own words could pad with a lie) and a screenshot, and parks
    * the session's one live booking slot on it; `confirmFinalStep` is the
-   * only thing that can consume it, and only once it is `approved`.
+   * only thing that can consume it, and only once it is `approved`. Security
+   * fix (DUR-4045 review): also stamps the exact page (origin+path), the
+   * target element's role/accessible name, and the largest amount visible on
+   * the page -- `confirmFinalStep` requires an exact match on all three
+   * before it will use this clearance, so approving this booking does not
+   * clear a different page, a different button, or a higher price.
    */
   async function requestBooking(
     agentId: string,
     sessionId: string,
     summary: string,
+    ref: string,
   ): Promise<{ approvalId: string; status: "pending_approval" }> {
     const agent = await loadAgent(agentId);
     await assertBookAndBuyAllowed(agent);
@@ -454,6 +478,13 @@ export function browserService(db: Db, deps: BrowserServiceDeps = {}) {
     if (!merchantDomain) {
       throw unprocessable("Could not tell what site this is from the current page. Take a fresh browser_snapshot on the booking page first.");
     }
+    const pageUrl = pageUrlKey(snap.url);
+    if (!pageUrl) {
+      throw unprocessable("Could not tell what page this is from the current page. Take a fresh browser_snapshot on the booking page first.");
+    }
+    const el = await session.driver.describeElement(ref);
+    if (!el) throw new Error(`Unknown element ref "${ref}"; take a fresh browser_snapshot`);
+    const amount = parseLargestPageAmount(snap.tree);
 
     const screenshotBytes = await session.handler.screenshot();
     const stored = await getStorageService().putFile({
@@ -494,7 +525,15 @@ export function browserService(db: Db, deps: BrowserServiceDeps = {}) {
       status: "pending",
     });
 
-    session.pendingBooking = { approvalId: approval!.id, merchantDomain, expiresAt: expiresAt.getTime() };
+    session.pendingBooking = {
+      approvalId: approval!.id,
+      merchantDomain,
+      expiresAt: expiresAt.getTime(),
+      pageUrl,
+      elementRole: el.role,
+      elementName: accessibleName(el),
+      amount,
+    };
     touch(session);
 
     await logActivity(db, {
@@ -505,7 +544,7 @@ export function browserService(db: Db, deps: BrowserServiceDeps = {}) {
       entityType: "approval",
       entityId: approval!.id,
       agentId,
-      details: { sessionId, merchantDomain, summary },
+      details: { sessionId, merchantDomain, summary, ref },
     });
 
     return { approvalId: approval!.id, status: "pending_approval" };
@@ -514,15 +553,28 @@ export function browserService(db: Db, deps: BrowserServiceDeps = {}) {
   /**
    * The booking gate's confirming half (DUR-4037). Only proceeds when the
    * session's parked `pendingBooking` approval is `approved`, has not
-   * expired, and the page is still on the same registrable domain it was
-   * filed against (a merchant redirecting/iframing to a different site
-   * between filing and confirming must not silently inherit the clearance).
-   * On success this calls `session.driver.performClick` directly, bypassing
-   * `BrowserToolHandler`'s generic final-action refusal -- Filip's approval,
-   * not another heuristic, is the sign-off for this exact click -- then
-   * writes a receipt to the payment-notices outbox so Filip hears about it
-   * on Telegram even without opening the board. Single-use: the parked slot
-   * is cleared as soon as this call resolves either way.
+   * expired, the page is still the exact page it was filed against (not
+   * just the same domain -- a merchant redirecting/iframing to a different
+   * page, or a different domain, between filing and confirming must not
+   * silently inherit the clearance), `ref` resolves to the same
+   * role+accessible-name element Filip's card showed, and the largest
+   * amount visible on the page has not gone up (or newly appeared where
+   * there was none). Any mismatch clears the slot and refuses, per the
+   * DUR-4045 review: clearance is single-use and does not survive a failed
+   * match, so the agent must call `request_booking` again from the actual
+   * page/button/price Filip is being asked to see.
+   *
+   * On a match this calls `session.driver.performClick` directly, bypassing
+   * only the final-action/invoice *wording* refusal `BrowserToolHandler`
+   * would otherwise give this exact button -- Filip's approval, not another
+   * heuristic, is the sign-off for that one click. The payment-field-in-form
+   * refusal stays in force even for the approved element: bookings in this
+   * phase never get a payment-field clearance, so a form that suddenly
+   * contains one is refused regardless of what Filip approved. The slot is
+   * cleared the instant every check has passed and the click is committed --
+   * before the click's own result is known -- so a clearance is consumed on
+   * the first confirm attempt, success or failure, never left dangling for
+   * a retry.
    */
   async function confirmFinalStep(agentId: string, sessionId: string, ref: string): Promise<AccessibilitySnapshot> {
     const agent = await loadAgent(agentId);
@@ -548,20 +600,50 @@ export function browserService(db: Db, deps: BrowserServiceDeps = {}) {
     }
 
     const snap = await session.handler.snapshot();
-    const currentDomain = registrableDomain(snap.url);
-    if (currentDomain !== pending.merchantDomain) {
+    const currentPageUrl = pageUrlKey(snap.url);
+    if (currentPageUrl !== pending.pageUrl) {
       session.pendingBooking = null;
       throw unprocessable(
-        "The page changed to a different site since Filip approved this booking. Call request_booking again from the booking page.",
+        "The page changed since Filip approved this booking. Call request_booking again from the booking page.",
       );
     }
 
     const el = await session.driver.describeElement(ref);
     if (!el) throw new Error(`Unknown element ref "${ref}"; take a fresh browser_snapshot`);
+    if (el.role !== pending.elementRole || accessibleName(el) !== pending.elementName) {
+      session.pendingBooking = null;
+      throw unprocessable(
+        "This isn't the button Filip approved. Call request_booking again for the exact button you want to click.",
+      );
+    }
 
+    const currentAmount = parseLargestPageAmount(snap.tree);
+    if (!isAmountStillAcceptable(pending.amount, currentAmount)) {
+      session.pendingBooking = null;
+      throw unprocessable(
+        "The price on this page changed since Filip approved this booking. Call request_booking again so he can see the new price.",
+      );
+    }
+
+    // Checked directly rather than via evaluateFinalActionRisk(): that
+    // helper checks final-action *wording* first and returns as soon as it
+    // matches, so a wording match (expected here -- it is why request_booking
+    // was needed) would mask a payment-field-in-form signal instead of both
+    // being independently enforced. Bookings never get a payment-field
+    // clearance in this phase, so this refusal stays in force even for the
+    // one approved element.
+    if (el.isFormSubmit && el.formHasPaymentField) {
+      session.pendingBooking = null;
+      throw unprocessable("This submits a form with a payment field. That needs request_purchase and a live clearance first.");
+    }
+    // The final-action/invoice wording refusal a plain browser_click would
+    // give this exact button is expected -- it is exactly what
+    // request_booking exists for -- and does not block the one element
+    // Filip's approval already bound this clearance to.
+
+    session.pendingBooking = null;
     const result = await session.driver.performClick(ref);
     touch(session);
-    session.pendingBooking = null;
 
     const receiptScreenshot = await session.handler.screenshot();
     const stored = await getStorageService().putFile({

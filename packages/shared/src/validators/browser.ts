@@ -54,6 +54,8 @@ export const browserHandOverSchema = z.object({
 export const browserRequestBookingSchema = z.object({
   /** The agent's own one-line account of what it is booking; always shown to Filip quoted, never as fact. */
   summary: z.string().trim().min(1).max(1000),
+  /** Ref of the final confirm/book button from the last snapshot -- the server binds the clearance to this exact element (role + accessible name) plus the current page and price, per the DUR-4045 security review of the booking gate. */
+  ref: z.string().trim().min(1).max(200),
 });
 
 export const browserConfirmFinalStepSchema = z.object({

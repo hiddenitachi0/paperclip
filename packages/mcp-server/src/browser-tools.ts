@@ -125,14 +125,17 @@ export function createBrowserToolDefinitions(client: PaperclipApiClient): ToolDe
     ),
     makeTool(
       "request_booking",
-      "Ask Filip to approve a booking on the current page (book_and_buy agents only). EVERY booking needs this, even a free one with no deposit -- there is no automatic approval. The server takes its own screenshot of the current page and stamps the site's domain itself; your summary is shown to Filip in quotes, not as fact. Returns an approvalId and \"pending_approval\" -- the session is parked until Filip decides; do not click anything that looks like a final booking action yourself, call confirm_final_step once you believe it is approved.",
-      sessionIdSchema.extend({ summary: z.string().min(1).max(1000).describe("One sentence: what is being booked, dates, price if any") }),
+      "Ask Filip to approve a booking on the current page (book_and_buy agents only). EVERY booking needs this, even a free one with no deposit -- there is no automatic approval. The server takes its own screenshot of the current page and stamps the site's domain, page, target button, and visible price itself; your summary is shown to Filip in quotes, not as fact. `ref` must be the final confirm/book button you intend to click once approved -- confirm_final_step will refuse any other element, a different page, or a higher price than what is bound here. Returns an approvalId and \"pending_approval\" -- the session is parked until Filip decides; do not click anything that looks like a final booking action yourself, call confirm_final_step once you believe it is approved.",
+      sessionIdSchema.extend({
+        summary: z.string().min(1).max(1000).describe("One sentence: what is being booked, dates, price if any"),
+        ref: z.string().min(1).max(200).describe("Ref of the final confirm/book button from the last snapshot -- the exact button confirm_final_step will later click"),
+      }),
       ({ sessionId, ...body }) => client.requestJson("POST", `/browser/sessions/${sessionId}/request-booking`, { body }),
     ),
     makeTool(
       "confirm_final_step",
-      "Click the final confirm/book button for a booking Filip has approved (book_and_buy agents only). Refused with a plain reason if there is no pending booking on this session, Filip has not decided yet, Filip said no, the approval window (30 minutes) expired, or the page moved to a different site since request_booking was called. Single-use: call request_booking again for another booking.",
-      sessionIdSchema.extend({ ref: z.string().min(1).max(200).describe("Ref of the final confirm/book button from the last snapshot") }),
+      "Click the final confirm/book button for a booking Filip has approved (book_and_buy agents only). Refused with a plain reason if there is no pending booking on this session, Filip has not decided yet, Filip said no, the approval window (30 minutes) expired, the page or button is not the exact one request_booking was filed with, or the visible price went up since then. Single-use: consumed on the first confirm attempt whether it succeeds or fails -- call request_booking again for another booking.",
+      sessionIdSchema.extend({ ref: z.string().min(1).max(200).describe("Ref of the final confirm/book button from the last snapshot -- must be the same button passed to request_booking") }),
       ({ sessionId, ...body }) => client.requestJson("POST", `/browser/sessions/${sessionId}/confirm-final-step`, { body }),
     ),
     makeTool(

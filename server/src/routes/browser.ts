@@ -146,7 +146,7 @@ export function browserRoutes(rawDb: Db, deps: BrowserServiceDeps = {}) {
     validate(browserRequestBookingSchema),
     async (req, res) => {
       const { agentId } = requireAgentActor(req);
-      res.status(202).json(await svc.requestBooking(agentId, sessionIdOf(req), req.body.summary));
+      res.status(202).json(await svc.requestBooking(agentId, sessionIdOf(req), req.body.summary, req.body.ref));
     },
   );
 
