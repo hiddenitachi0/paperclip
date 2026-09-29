@@ -310,6 +310,14 @@ describe("SidebarAgents", () => {
     await flushReact();
   }
 
+  it("renders a Personas link in the Agents section (DUR-4060)", async () => {
+    await renderSidebarAgents();
+
+    const personasLink = container.querySelector('a[href="/personas"]');
+    expect(personasLink).not.toBeNull();
+    expect(personasLink?.textContent).toContain("Personas");
+  });
+
   it("renders icon-only agent rows with tooltips and no row actions in the rail", async () => {
     mockAgentsApi.list.mockResolvedValue([makeAgent({ id: "agent-a", name: "Alpha", urlKey: "alpha" })]);
 
