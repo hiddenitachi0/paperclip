@@ -18,12 +18,13 @@ import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } fro
 vi.setConfig({ testTimeout: 15_000 });
 
 const logActivityMock = vi.fn();
+const hasPermissionMock = vi.fn();
 
 vi.mock("../services/index.js", () => ({
   accessService: () => ({
     isInstanceAdmin: vi.fn(),
     canUser: vi.fn(),
-    hasPermission: vi.fn(),
+    hasPermission: (...args: unknown[]) => hasPermissionMock(...args),
   }),
   agentService: () => ({
     getById: vi.fn(),
@@ -61,6 +62,7 @@ describeEmbeddedPostgres("POST /companies/:companyId/invites", () => {
     await realDb.delete(invites);
     await realDb.delete(companies);
     logActivityMock.mockReset();
+    hasPermissionMock.mockReset();
     vi.clearAllMocks();
   });
 
@@ -68,13 +70,13 @@ describeEmbeddedPostgres("POST /companies/:companyId/invites", () => {
     await tempDb?.cleanup();
   });
 
-  async function createApp(companyId: string) {
+  async function createApp(companyId: string, actor?: Record<string, unknown>) {
     const { accessRoutes } = await import("../routes/access.js");
     const { errorHandler } = await import("../middleware/index.js");
     const app = express();
     app.use(express.json());
     app.use((req, _res, next) => {
-      req.actor = {
+      req.actor = (actor as typeof req.actor) ?? {
         type: "board",
         source: "local_implicit",
         userId: null,
@@ -118,5 +120,52 @@ describeEmbeddedPostgres("POST /companies/:companyId/invites", () => {
     expect(res.body.companyName).toBe("Acme Robotics");
     expect(res.body.invitePath).toMatch(/^\/invite\/pcp_invite_/);
     expect(res.body.inviteUrl).toMatch(/^https:\/\/paperclip\.example\/invite\/pcp_invite_/);
+  });
+
+  // DUR-4100: agents hold no human company role, so even a fully permissioned
+  // agent actor (e.g. one granted `users:invite` directly) must never be able
+  // to mint an owner-level invite -- only a genuine board Owner can.
+  it("an agent actor with users:invite permission is blocked from an owner-level invite", async () => {
+    const companyId = randomUUID();
+    await realDb.insert(companies).values({
+      id: companyId,
+      name: "Acme Robotics",
+      issuePrefix: `A${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+    });
+    hasPermissionMock.mockResolvedValue(true);
+
+    const app = await createApp(companyId, {
+      type: "agent",
+      agentId: randomUUID(),
+      companyId,
+    });
+
+    const res = await request(app)
+      .post(`/api/companies/${companyId}/invites`)
+      .send({ allowedJoinTypes: "human", humanRole: "owner" });
+
+    expect(res.status).toBe(403);
+  });
+
+  it("an agent actor with users:invite permission can create an admin-level invite", async () => {
+    const companyId = randomUUID();
+    await realDb.insert(companies).values({
+      id: companyId,
+      name: "Acme Robotics",
+      issuePrefix: `A${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+    });
+    hasPermissionMock.mockResolvedValue(true);
+
+    const app = await createApp(companyId, {
+      type: "agent",
+      agentId: randomUUID(),
+      companyId,
+    });
+
+    const res = await request(app)
+      .post(`/api/companies/${companyId}/invites`)
+      .send({ allowedJoinTypes: "human", humanRole: "admin" });
+
+    expect(res.status).toBe(201);
   });
 });
