@@ -27,7 +27,12 @@ const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : 
 
 type Db = ReturnType<typeof createDb>;
 
-async function createApp(db: Db, companyId: string, userId: string) {
+async function createApp(
+  db: Db,
+  companyId: string,
+  userId: string,
+  actorOverrides: Partial<Express.Request["actor"]> = {},
+) {
   process.env.PAPERCLIP_LOG_DIR = "/tmp/paperclip-test-home/logs";
   process.env.PAPERCLIP_IN_WORKTREE = "false";
   const { accessRoutes } = await import("../routes/access.js");
@@ -41,6 +46,7 @@ async function createApp(db: Db, companyId: string, userId: string) {
       companyIds: [companyId],
       memberships: [{ companyId, membershipRole: "owner", status: "active" }],
       isInstanceAdmin: true,
+      ...actorOverrides,
     };
     next();
   });
@@ -98,6 +104,62 @@ describeEmbeddedPostgres("access routes permissions upgrade compatibility", () =
   afterAll(async () => {
     await tempDb?.cleanup();
   });
+
+  it("DUR-4076: lets an Admin (users:invite but no users:manage_permissions) GET the member list", async () => {
+    const { company, owner } = await createCompanyWithOwner(db);
+    const admin = await db
+      .insert(companyMemberships)
+      .values({
+        companyId: company.id,
+        principalType: "user",
+        principalId: `admin-${randomUUID()}`,
+        status: "active",
+        membershipRole: "admin",
+      })
+      .returning()
+      .then((rows) => rows[0]!);
+    // Admin role grants users:invite but not users:manage_permissions -- see
+    // grantsForHumanRole in company-member-roles.ts. Grants are materialized
+    // DB rows (not derived from membershipRole at decide-time), so seed the
+    // row an invite-accept flow would have created.
+    await db.insert(principalPermissionGrants).values({
+      companyId: company.id,
+      principalType: "user",
+      principalId: admin.principalId,
+      permissionKey: "users:invite",
+      scope: null,
+      grantedByUserId: owner.principalId,
+    });
+
+    const res = await request(
+      await createApp(db, company.id, admin.principalId, { source: "session", isInstanceAdmin: false }),
+    ).get(`/api/companies/${company.id}/members`);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const memberIds = res.body.members.map((m: { id: string }) => m.id).sort();
+    expect(memberIds).toEqual([admin.id, owner.id].sort());
+  }, 30_000);
+
+  it("DUR-4076: rejects a member without users:invite (viewer) from GET-ing the member list", async () => {
+    const { company } = await createCompanyWithOwner(db);
+    const viewer = await db
+      .insert(companyMemberships)
+      .values({
+        companyId: company.id,
+        principalType: "user",
+        principalId: `viewer-${randomUUID()}`,
+        status: "active",
+        membershipRole: "viewer",
+      })
+      .returning()
+      .then((rows) => rows[0]!);
+
+    const res = await request(
+      await createApp(db, company.id, viewer.principalId, { source: "session", isInstanceAdmin: false }),
+    ).get(`/api/companies/${company.id}/members`);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+  }, 30_000);
 
   it("rejects owner self-lockout through the member route after the permissions upgrade", async () => {
     const { company, owner } = await createCompanyWithOwner(db);

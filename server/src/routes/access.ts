@@ -4777,7 +4777,7 @@ export function accessRoutes(
 
   router.get(
     "/companies/:companyId/members",
-    companyScopeFromParam(rawDb, (req, companyId) => assertCompanyPermission(req, companyId, "users:manage_permissions")),
+    companyScopeFromParam(rawDb, (req, companyId) => assertCompanyPermission(req, companyId, "users:invite")),
     async (req, res) => {
     const companyId = req.params.companyId as string;
     const [members, currentAccess] = await Promise.all([
