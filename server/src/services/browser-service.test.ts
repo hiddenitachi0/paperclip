@@ -73,8 +73,8 @@ function fakeIssues() {
   return issues;
 }
 
-function wireBookingGateDefaults(input: { bookingEnabled?: boolean; approvalOverrides?: { create?: unknown; getById?: unknown } } = {}) {
-  const approvals = fakeApprovals(input.approvalOverrides);
+function wireBookingGateDefaults(input: { bookingEnabled?: boolean } = {}) {
+  const approvals = fakeApprovals();
   const settings = fakePaymentSettings(input.bookingEnabled ?? true);
   const notices = fakePaymentNotices();
   const issues = fakeIssues();
