@@ -595,6 +595,30 @@ export function buildHostServices(
     return assignedToQuickAgent || laneAPluginRunNamesIssue(laneARun, issue) ? "lane-a-allowed" : "lane-a-denied";
   };
 
+  /** Heartbeat run statuses that mean "still in flight" -- see isHeartbeatRunEnded. */
+  const ACTIVE_HEARTBEAT_RUN_STATUSES = new Set(["queued", "running", "scheduled_retry"]);
+
+  /**
+   * True only when `runId` is a heartbeat run in this company that has
+   * actually finished (any status other than queued/running/scheduled_retry).
+   * A Lane-A run, or an id that doesn't resolve to a heartbeat run at all,
+   * is never "ended" here -- it's simply not the case this check is for.
+   *
+   * Used to gate createComment's assignment-based delivery exception: that
+   * exception exists for background-job delivery whose *triggering* run has
+   * already ended, not as a general license for any currently-live run to
+   * reach a different issue just because its agent happens to be assigned
+   * there (DUR-4096 security-review follow-up -- see createComment).
+   */
+  const isHeartbeatRunEnded = async (companyId: string, runId: string): Promise<boolean> => {
+    const run = await db
+      .select({ status: heartbeatRuns.status })
+      .from(heartbeatRuns)
+      .where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, companyId)))
+      .then((rows) => rows[0] ?? null);
+    return run !== null && !ACTIVE_HEARTBEAT_RUN_STATUSES.has(run.status);
+  };
+
   const logPluginActivity = async (input: {
     companyId: string;
     action: string;
@@ -1945,16 +1969,21 @@ export function buildHostServices(
         // thread, as if that agent said something -- so it gets the same
         // host-enforced checkout/Lane-A boundary createAttachment already
         // has (resolveIssueRunAccess), plus one narrower exception: a run
-        // that resolves to the issue's *current* assignee may still
-        // comment even without checkout, for background-job delivery whose
-        // triggering tool-call run (and its checkout) already ended
-        // (media-studio's job poller and similar -- see DUR-4096). An
-        // unattributed comment (no authorAgentId) can't be used to
-        // impersonate anyone, so it keeps the pre-DUR-4096 company-scope-
-        // only check, unchanged for callers like plugin-llm-wiki that post
-        // plugin-authored status comments with no agent attribution on
-        // issue ids their own code resolved, never from model/tool-call
-        // input.
+        // that has already ENDED and resolves to the issue's *current*
+        // assignee may still comment despite never holding checkout, for
+        // background-job delivery whose triggering tool-call run (and its
+        // checkout) already ended (media-studio's job poller and similar --
+        // see DUR-4096). That "already ended" condition is load-bearing and
+        // host-enforced (isHeartbeatRunEnded), not just documented: without
+        // it, any of an agent's currently-live runs could reach a
+        // completely unrelated issue merely because that agent happens to
+        // be assigned there too -- a second security review of this same
+        // PR found that exact gap before merge. An unattributed comment (no
+        // authorAgentId) can't be used to impersonate anyone, so it keeps
+        // the pre-DUR-4096 company-scope-only check, unchanged for callers
+        // like plugin-llm-wiki that post plugin-authored status comments
+        // with no agent attribution on issue ids their own code resolved,
+        // never from model/tool-call input.
         if (params.authorAgentId) {
           if (!params.runId) {
             throw new Error("runId is required when authorAgentId is set");
@@ -1965,7 +1994,11 @@ export function buildHostServices(
           }
           const access = await resolveIssueRunAccess(issue, companyId, params.runId);
           const assignedToCallingAgent = issue.assigneeAgentId === callingAgentId;
-          if ((access === "none" || access === "lane-a-denied") && !assignedToCallingAgent) {
+          const deliveryAfterRunEnded =
+            assignedToCallingAgent &&
+            access === "none" &&
+            (await isHeartbeatRunEnded(companyId, params.runId));
+          if ((access === "none" || access === "lane-a-denied") && !deliveryAfterRunEnded) {
             if (access === "lane-a-denied") {
               const ref = issue.identifier ?? issue.id;
               throw new Error(

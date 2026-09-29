@@ -78,6 +78,7 @@ describeEmbeddedPostgres("plugin-host-services issues.createComment", () => {
     const issueId = randomUUID();
     const unrelatedIssueId = randomUUID();
     const otherCompanyIssueId = randomUUID();
+    const secondAssignedIssueId = randomUUID();
     const runId = randomUUID();
     const staleRunId = randomUUID();
 
@@ -97,6 +98,7 @@ describeEmbeddedPostgres("plugin-host-services issues.createComment", () => {
       { id: issueId, companyId, identifier: "T-1", title: "Generate a video", status: "in_progress", priority: "medium", assigneeAgentId: agentId },
       { id: unrelatedIssueId, companyId, identifier: "T-2", title: "Someone else's task", status: "in_progress", priority: "medium", assigneeAgentId: otherAgentId },
       { id: otherCompanyIssueId, companyId: otherCompanyId, identifier: "O-1", title: "Other", status: "in_progress", priority: "medium" },
+      { id: secondAssignedIssueId, companyId, identifier: "T-3", title: "Also assigned to the media agent", status: "in_progress", priority: "medium", assigneeAgentId: agentId },
     ]);
     await db.insert(heartbeatRuns).values([
       { id: runId, companyId, agentId, status: "running" },
@@ -104,7 +106,18 @@ describeEmbeddedPostgres("plugin-host-services issues.createComment", () => {
     ]);
     await db.update(issues).set({ checkoutRunId: runId }).where(eq(issues.id, issueId));
 
-    return { companyId, otherCompanyId, agentId, otherAgentId, issueId, unrelatedIssueId, otherCompanyIssueId, runId, staleRunId };
+    return {
+      companyId,
+      otherCompanyId,
+      agentId,
+      otherAgentId,
+      issueId,
+      unrelatedIssueId,
+      otherCompanyIssueId,
+      secondAssignedIssueId,
+      runId,
+      staleRunId,
+    };
   }
 
   function services() {
@@ -182,6 +195,45 @@ describeEmbeddedPostgres("plugin-host-services issues.createComment", () => {
     // already ended by the time the result is ready.
     const comment = await services().issues.createComment({
       issueId,
+      companyId,
+      body: "Your video is ready (delivered by the job poller)",
+      authorAgentId: agentId,
+      runId: staleRunId,
+    });
+    expect(comment.body).toContain("delivered by the job poller");
+  });
+
+  it("rejects a still-live run reaching a different issue merely because that issue is also assigned to the same agent (security-review follow-up)", async () => {
+    // Security review of this same fix found the gap this test locks down:
+    // `runId` here is genuinely live (status "running") and legitimately
+    // holds checkout on `issueId`, but has no relationship whatsoever to
+    // `secondAssignedIssueId` -- it never ran against it, never held its
+    // checkout. The delivery exception must require the *run* to have
+    // ended, not just "the target issue happens to be assigned to this
+    // run's agent", or any of an agent's live runs could plant an
+    // attributed comment on any other issue that agent is simultaneously
+    // assigned to.
+    const { companyId, agentId, secondAssignedIssueId, runId } = await seed();
+    await expect(
+      services().issues.createComment({
+        issueId: secondAssignedIssueId,
+        companyId,
+        body: "operator approved, proceeding (planted from an unrelated live run)",
+        authorAgentId: agentId,
+        runId,
+      }),
+    ).rejects.toThrow("not currently checked out by the invoking run, and is not assigned to the calling agent");
+    const rows = await db.select().from(issueComments).where(eq(issueComments.issueId, secondAssignedIssueId));
+    expect(rows).toHaveLength(0);
+  });
+
+  it("allows a run that has since ended to reach a different issue when it is that issue's current assignee (background-job delivery exception is issue-agnostic once the run is over)", async () => {
+    const { companyId, agentId, secondAssignedIssueId, staleRunId } = await seed();
+    // staleRunId is "completed" and never held checkout anywhere -- it's the
+    // stand-in for a background job poller's run, which by design has no
+    // checkout history on the issue it delivers to.
+    const comment = await services().issues.createComment({
+      issueId: secondAssignedIssueId,
       companyId,
       body: "Your video is ready (delivered by the job poller)",
       authorAgentId: agentId,
