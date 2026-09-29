@@ -6,8 +6,7 @@ import { useLocation, useNavigate } from "@/lib/router";
 const items = [
   { value: "general", label: "General", href: "/company/settings" },
   { value: "cloud-upstream", label: "Cloud upstream", href: "/company/settings/cloud-upstream" },
-  { value: "members", label: "Members", href: "/company/settings/members" },
-  { value: "invites", label: "Invites", href: "/company/settings/invites" },
+  { value: "people", label: "People", href: "/company/settings/people" },
   { value: "connections", label: "Connections", href: "/company/settings/connections" },
   { value: "secrets", label: "Secrets", href: "/company/settings/secrets" },
   { value: "instance-profile", label: "Instance profile", href: `${INSTANCE_SETTINGS_PATH_PREFIX}/profile` },
@@ -68,12 +67,13 @@ export function getCompanySettingsTab(pathname: string): CompanySettingsTab {
     return "cloud-upstream";
   }
 
-  if (pathname.includes("/company/settings/members") || pathname.includes("/company/settings/access")) {
-    return "members";
-  }
-
-  if (pathname.includes("/company/settings/invites")) {
-    return "invites";
+  if (
+    pathname.includes("/company/settings/people") ||
+    pathname.includes("/company/settings/members") ||
+    pathname.includes("/company/settings/invites") ||
+    pathname.includes("/company/settings/access")
+  ) {
+    return "people";
   }
 
   if (pathname.includes("/company/settings/connections")) {

@@ -423,8 +423,8 @@ function InviteResultPreview({
           <>
             <div className="border border-zinc-800 p-3">
               <p className="mb-1 text-xs text-zinc-500">Approval page</p>
-              <a className="text-sm text-zinc-200 underline underline-offset-2" href="/company/settings/members">
-                Company Settings → Members
+              <a className="text-sm text-zinc-200 underline underline-offset-2" href="/company/settings/people">
+                Company Settings → People
               </a>
             </div>
             <p className="text-xs text-zinc-500">
