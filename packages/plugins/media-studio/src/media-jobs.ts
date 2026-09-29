@@ -300,7 +300,13 @@ async function advanceOne(ctx: PluginContext, jobRunId: string, record: PluginEn
     await failJob(ctx, record, data, outcome.error);
     return;
   }
-  await deliverResult(ctx, jobRunId, record, data, outcome.result);
+  try {
+    await deliverResult(ctx, jobRunId, record, data, outcome.result);
+  } catch (err) {
+    // The provider said "done" but the result could not be turned into a file
+    // (e.g. a wrong/unsafe content type) — a clean failure, not a silent stall.
+    await failJob(ctx, record, data, err instanceof Error ? err.message : String(err));
+  }
 }
 
 /**
