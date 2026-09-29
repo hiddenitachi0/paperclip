@@ -723,6 +723,29 @@ describe("browserService purchase gate (DUR-4046)", () => {
     );
   });
 
+  it("gates on the page-detected total, not the agent's own item summary (DUR-4044/DUR-4045 decoy-total misuse case applied to purchases)", async () => {
+    const db = fakeDbWithAgent(BOOK_AND_BUY_AGENT);
+    const { approvals } = wirePurchaseGateDefaults();
+    // Agent describes it as a cheap trinket, but the page itself shows an
+    // above-threshold total -- only the page-parsed amount may decide the
+    // gate; the agent's own words are never trusted for that decision.
+    const worker = fakeWorkerClientOnCheckoutPage({
+      snapshot: vi.fn().mockResolvedValue({ tree: "Total: 900 kr", url: CHECKOUT_URL, title: "Checkout" }),
+    });
+    const svc = browserService(db as any, { workerClient: worker });
+
+    const { sessionId } = await svc.open(AGENT_ID, { purpose: "buy something" });
+    const result = await svc.requestPurchase(AGENT_ID, sessionId, "A $2 pencil, nothing more", "e9", CARD_ID);
+
+    expect(result.status).toBe("pending_approval");
+    expect(approvals.create).toHaveBeenCalledWith(
+      COMPANY_ID,
+      expect.objectContaining({
+        payload: expect.objectContaining({ amountNok: 900, reasons: expect.arrayContaining([expect.stringContaining("900")]) }),
+      }),
+    );
+  });
+
   it("files a board approval when a rolling-window cap is breached, even though the amount itself is under threshold", async () => {
     const db = fakeDbWithAgent(BOOK_AND_BUY_AGENT);
     const { approvals } = wirePurchaseGateDefaults({ counters: { autoPurchasesToday: 3 } }); // PURCHASE_CAPS.autoPurchasesPerDay is 3
@@ -816,6 +839,24 @@ describe("browserService purchase gate (DUR-4046)", () => {
 
     // Slot cleared: a second confirm has nothing left to consume.
     await expect(svc.confirmFinalStep(AGENT_ID, sessionId, "e9")).rejects.toMatchObject({ status: 422 });
+  });
+
+  it("confirm_final_step (purchase) refuses a same-domain, same-path different product since request_purchase (query-string swap; the DUR-4045 booking-gate residual this ticket closes)", async () => {
+    const db = fakeDbWithAgent(BOOK_AND_BUY_AGENT);
+    const { cards } = wirePurchaseGateDefaults();
+    const worker = fakeWorkerClientOnCheckoutPage();
+    const svc = browserService(db as any, { workerClient: worker });
+
+    const { sessionId } = await svc.open(AGENT_ID, { purpose: "buy something" });
+    await svc.requestPurchase(AGENT_ID, sessionId, "A gadget", "e9", CARD_ID);
+
+    // Same origin and pathname as CHECKOUT_URL, but the cart/product identity
+    // in the query string changed -- pageUrlKey (origin+pathname only, what
+    // the booking gate uses) would miss this; fullPageUrlKey must not.
+    vi.mocked(worker.snapshot).mockResolvedValue({ tree: "Total: 300 kr", url: "https://shop.example.com/checkout?cart=xyz999", title: "Checkout" });
+    await expect(svc.confirmFinalStep(AGENT_ID, sessionId, "e9")).rejects.toMatchObject({ status: 422 });
+    expect(worker.performClick).not.toHaveBeenCalled();
+    expect(cards.releaseReservation).toHaveBeenCalledWith(COMPANY_ID, CARD_ID, { clearanceId: expect.any(String) });
   });
 
   it("confirm_final_step (purchase) allows a payment-field form submit (unlike booking) and marks the purchase awaiting outcome without writing a receipt yet", async () => {
