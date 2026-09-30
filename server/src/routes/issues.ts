@@ -9595,8 +9595,8 @@ export function issueRoutes(
       actorId: actor.actorId,
       agentId: actor.agentId,
       runId: actor.runId,
-      action: "issue.attachment_added",
-      entityType: "issue",
+      action: "company_file.created",
+      entityType: "company_file",
       entityId: created.id,
       details: {
         attachmentId: created.id,
