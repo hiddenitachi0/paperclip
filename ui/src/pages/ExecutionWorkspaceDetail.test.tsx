@@ -163,6 +163,7 @@ function project(overrides: Partial<Project> = {}): Project {
     pausedAt: null,
     executionWorkspacePolicy: null,
     deployPolicy: null,
+    deployTransport: "git_push",
     codebase: {
       workspaceId: null,
       repoUrl: null,
