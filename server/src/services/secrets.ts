@@ -970,6 +970,40 @@ export function secretService(db: Db, rawDb: Db = db) {
   }
 
   /**
+   * DUR-4127: resolve a Fal/Sogni API key for the video-storyline render
+   * scheduler tick (video-storyline-render.ts), the only caller. This is a
+   * server-side scheduler tick, not a plugin ctx call, so it is NOT subject
+   * to (and must never be routed through) createPluginSecretsHandler's
+   * executeTool-invocation-scope gate -- that gate exists specifically
+   * because a background job/webhook/scheduler tick has no invocation scope
+   * a plugin worker could forge (see plugin-secrets-handler.ts's own doc
+   * comment). This function is the trusted-server equivalent, same tier as
+   * resolveGitHubToken below: no per-consumer binding is asserted (the
+   * media-studio plugin's instance-wide config has no binding UI for
+   * falKeySecretRef/sogniKeySecretRef either), but the company-match check
+   * inside resolveSecretValueInternal still makes cross-company leakage
+   * impossible, and every resolution still lands in the secret's own audit
+   * trail via the access event below.
+   */
+  async function resolveSecretValueForVideoRender(
+    companyId: string,
+    secretId: string,
+    context: { actorId: string },
+  ): Promise<string> {
+    if (!context.actorId?.trim()) {
+      throw forbidden("Video storyline rendering requires an actor context for the audit trail");
+    }
+    return (await resolveSecretValueInternal(companyId, secretId, "latest", {
+      accessContext: {
+        consumerType: "system",
+        consumerId: `video_storyline_render:${secretId}`,
+        actorType: "system",
+        actorId: context.actorId,
+      },
+    })).value;
+  }
+
+  /**
    * Resolve the company's GitHub token by the same secret-name convention as
    * managed workspace clones (see heartbeat.ts's resolveManagedCloneGitHubToken)
    * — first bound+resolvable secret named GITHUB_TOKEN/GH_TOKEN/PAPERCLIP_GITHUB_TOKEN
@@ -2234,6 +2268,7 @@ export function secretService(db: Db, rawDb: Db = db) {
     resolveSecretValueForExport,
     resolveSecretValueForPlugin,
     resolveSecretValueForBrowserFill,
+    resolveSecretValueForVideoRender,
     resolveSecretValueForTest,
     resolveGitHubToken,
     resolveStockDataKey,
