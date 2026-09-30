@@ -222,12 +222,12 @@ async function updateJob(ctx: PluginContext, record: PluginEntityRecord, status:
   });
 }
 
-async function failJob(ctx: PluginContext, record: PluginEntityRecord, data: MediaJobData, message: string): Promise<void> {
+async function failJob(ctx: PluginContext, jobRunId: string, record: PluginEntityRecord, data: MediaJobData, message: string): Promise<void> {
   const failed: MediaJobData = { ...data, error: message, updatedAt: new Date().toISOString() };
   await updateJob(ctx, record, "failed", failed);
   if (!data.issueId) return;
   try {
-    await ctx.issues.createComment(data.issueId, `Could not make the ${data.kind}: ${message}`, data.companyId, { authorAgentId: data.agentId });
+    await ctx.issues.createComment(data.issueId, `Could not make the ${data.kind}: ${message}`, data.companyId, { authorAgentId: data.agentId, runId: jobRunId });
   } catch (err) {
     ctx.logger.warn(`media-studio: could not post the ${data.kind} failure to issue ${data.issueId}: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -255,7 +255,7 @@ async function deliverResult(ctx: PluginContext, jobRunId: string, record: Plugi
       data.issueId,
       `Your ${data.kind} is ready: ${filename} (file id ${file.id}). Saved to the company's Files — it could not be attached to this task automatically (a task attachment needs a live run).`,
       data.companyId,
-      { authorAgentId: data.agentId },
+      { authorAgentId: data.agentId, runId: jobRunId },
     );
   } catch (err) {
     ctx.logger.warn(`media-studio: could not post the finished ${data.kind} to issue ${data.issueId}: ${err instanceof Error ? err.message : String(err)}`);
@@ -277,14 +277,14 @@ async function advanceOne(ctx: PluginContext, jobRunId: string, record: PluginEn
     const secrets = await resolveMediaSecrets(ctx, cfg, data.provider);
     provider = buildMediaProvider(ctx, data.kind, data.provider, cfg, secrets);
   } catch (err) {
-    await failJob(ctx, record, data, err instanceof Error ? err.message : String(err));
+    await failJob(ctx, jobRunId, record, data, err instanceof Error ? err.message : String(err));
     return;
   }
 
   const handle: MediaJobHandle = { externalId: data.externalId, model: data.model, provider: data.provider };
   if (Date.now() - new Date(data.createdAt).getTime() > MEDIA_JOB_MAX_AGE_MS) {
     await provider.cancel(handle);
-    await failJob(ctx, record, data, `Gave up after ${Math.round(MEDIA_JOB_MAX_AGE_MS / 60_000)} minutes without a result. Try again.`);
+    await failJob(ctx, jobRunId, record, data, `Gave up after ${Math.round(MEDIA_JOB_MAX_AGE_MS / 60_000)} minutes without a result. Try again.`);
     return;
   }
 
@@ -292,7 +292,7 @@ async function advanceOne(ctx: PluginContext, jobRunId: string, record: PluginEn
   try {
     outcome = await provider.poll(handle);
   } catch (err) {
-    await failJob(ctx, record, data, err instanceof Error ? err.message : String(err));
+    await failJob(ctx, jobRunId, record, data, err instanceof Error ? err.message : String(err));
     return;
   }
 
@@ -301,7 +301,7 @@ async function advanceOne(ctx: PluginContext, jobRunId: string, record: PluginEn
     return;
   }
   if (outcome.status === "failed") {
-    await failJob(ctx, record, data, outcome.error);
+    await failJob(ctx, jobRunId, record, data, outcome.error);
     return;
   }
   try {
@@ -309,7 +309,7 @@ async function advanceOne(ctx: PluginContext, jobRunId: string, record: PluginEn
   } catch (err) {
     // The provider said "done" but the result could not be turned into a file
     // (e.g. a wrong/unsafe content type) — a clean failure, not a silent stall.
-    await failJob(ctx, record, data, err instanceof Error ? err.message : String(err));
+    await failJob(ctx, jobRunId, record, data, err instanceof Error ? err.message : String(err));
   }
 }
 
