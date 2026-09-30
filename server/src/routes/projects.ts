@@ -30,6 +30,7 @@ import {
 import {
   assertNoAgentHostWorkspaceCommandMutation,
   collectDeployPolicyCommandPaths,
+  collectProjectDeployTransportCommandPaths,
   collectProjectExecutionWorkspaceCommandPaths,
   collectProjectWorkspaceCommandPaths,
 } from "./workspace-command-authz.js";
@@ -297,6 +298,7 @@ export function projectRoutes(rawDb: Db) {
         ...collectProjectExecutionWorkspaceCommandPaths(projectData.executionWorkspacePolicy),
         ...collectProjectWorkspaceCommandPaths(workspace, "workspace"),
         ...collectDeployPolicyCommandPaths(projectData.deployPolicy),
+        ...collectProjectDeployTransportCommandPaths(projectData),
       ],
     );
     if (projectData.env !== undefined) {
@@ -367,6 +369,7 @@ export function projectRoutes(rawDb: Db) {
       [
         ...collectProjectExecutionWorkspaceCommandPaths(body.executionWorkspacePolicy),
         ...collectDeployPolicyCommandPaths(body.deployPolicy),
+        ...collectProjectDeployTransportCommandPaths(body),
       ],
     );
     await assertProjectEnvironmentSelection(
