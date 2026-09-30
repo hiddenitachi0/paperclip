@@ -126,6 +126,10 @@ export interface Project {
   targetDate: string | null;
   color: string | null;
   icon: string | null;
+  /** The live URL, purely descriptive — not used for any deploy logic. */
+  productionUrl: string | null;
+  /** Free-text label of where the project is hosted, e.g. "VPS via deploy-runner", "Vercel". */
+  hostingTarget: string | null;
   env: AgentEnvConfig | null;
   pauseReason: PauseReason | null;
   pausedAt: Date | null;

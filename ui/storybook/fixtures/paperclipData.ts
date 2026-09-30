@@ -595,6 +595,8 @@ function createProject(overrides: Partial<Project> = {}): Project {
     targetDate: "2026-04-30",
     color: "#0f766e",
     icon: null,
+    productionUrl: null,
+    hostingTarget: null,
     env: null,
     pauseReason: null,
     pausedAt: null,
