@@ -22,11 +22,18 @@ export interface CoverageSummary {
   itemsFound: number;
 }
 
-/** "sources checked / items found" footer line — computed from what the report actually carries, not from settings (which aren't on the outbox row). */
+/**
+ * DUR-4138: "sources checked / items found" footer line — reads facts.stats
+ * (the same counts collectHeadlines logs and the live briefing page already
+ * renders), not a recount of distinct sources across the *kept* fact lists.
+ * That recount is what produced the "2 sources checked" bug Filip reported
+ * when the report itself said 11: `stats.sourcesChecked` counts every source
+ * the agent was configured to check, including ones that ended up with zero
+ * kept items after topic filtering/dedupe/balancing, which a recount over
+ * kept items alone can never see.
+ */
 export function summarizeCoverage(facts: MorningReportFacts): CoverageSummary {
-  const items: MorningReportFactItem[] = [...facts.headlines, ...facts.hobby, ...facts.sport];
-  const sources = new Set(items.map((item) => item.source));
-  return { sourcesChecked: sources.size, itemsFound: items.length + facts.prices.length };
+  return facts.stats;
 }
 
 function escapeHtml(value: string): string {
@@ -71,16 +78,17 @@ export function buildStandaloneReportHtml(
   images: DownloadImage[],
 ): string {
   const facts = report.facts ?? null;
-  const imageHtml = images
-    .map(
-      (img) =>
-        `<figure><img src="${img.dataUrl}" alt="${escapeHtml(img.caption)}" /><figcaption>${escapeHtml(img.caption)}</figcaption></figure>`,
-    )
-    .join("\n");
+  const imageFigure = (img: DownloadImage) =>
+    `<figure><img src="${img.dataUrl}" alt="${escapeHtml(img.caption)}" /><figcaption>${escapeHtml(img.caption)}</figcaption></figure>`;
+  const moodImage = facts ? facts.images.find((i) => i.kind === "mood") : undefined;
+  const weatherImage = facts ? facts.images.find((i) => i.kind === "weather") : undefined;
+  const findImage = (fileId: string) => images.find((img) => img.fileId === fileId);
+  const moodHtml = moodImage ? imageFigure(findImage(moodImage.fileId) ?? { ...moodImage, dataUrl: "" }) : "";
+  const weatherImageHtml = weatherImage ? imageFigure(findImage(weatherImage.fileId) ?? { ...weatherImage, dataUrl: "" }) : "";
 
   const weatherHtml =
-    facts && facts.weather.length > 0
-      ? `<section><h2>Weather${facts.places.length ? ` — ${escapeHtml(facts.places.join(", "))}` : ""}</h2>${facts.weather
+    facts && (facts.weather.length > 0 || weatherImage)
+      ? `<section><h2>Weather${facts.places.length ? ` — ${escapeHtml(facts.places.join(", "))}` : ""}</h2>${weatherImageHtml}${facts.weather
           .map((w) => `<h3>${escapeHtml(w.place)}</h3><p class="pre">${escapeHtml(w.text)}</p>`)
           .join("")}</section>`
       : "";
@@ -143,13 +151,13 @@ export function buildStandaloneReportHtml(
 <body>
 <h1>${escapeHtml(agentName)}'s morning report</h1>
 <p class="date">${escapeHtml(new Date(report.createdAt).toLocaleString())}</p>
+${moodHtml}
 <div class="pre">${escapeHtml(report.text)}</div>
-${imageHtml}
-${weatherHtml}
 ${factItemsHtml("Headlines", facts?.headlines ?? [])}
-${factItemsHtml("Hobby news", facts?.hobby ?? [])}
-${factItemsHtml("Sport", facts?.sport ?? [])}
+${weatherHtml}
 ${pricesHtml}
+${factItemsHtml("Hobby", facts?.hobby ?? [])}
+${factItemsHtml("Sport", facts?.sport ?? [])}
 ${notesHtml}
 ${footerHtml}
 </body>

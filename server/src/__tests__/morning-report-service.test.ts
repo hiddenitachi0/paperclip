@@ -623,10 +623,13 @@ d("morning report tick", () => {
       expect(row!.note ?? "").toContain("No mood picture this time");
     });
 
-    // DUR-4133: the mood picture must never carry Maja's (or any) look, and
-    // both pictures must stay safe for work regardless of the company's own
-    // Sogni content-filter setting.
-    it("asks for no look and safe-for-work on the mood picture, and safe-for-work (keeping the look) on the weather picture", async () => {
+    // DUR-4138 (was DUR-4133's "no look"): the mood picture now shows the
+    // persona itself by default (no per-picture setting saved), so it takes
+    // no explicit look/model params — the normal look-resolution chain
+    // (named/mentioned/automatic/the agent's own default look) applies, same
+    // as the weather picture. Both pictures must stay safe for work
+    // regardless of the company's own Sogni content-filter setting.
+    it("asks for the default look and safe-for-work on both the mood and weather pictures", async () => {
       const companyId = await seedCompany();
       const agentId = await seedAgent(companyId, { ...baseSettings, sources: ["bbc"] });
       feeds[BBC_URL] = rssXml([{ title: "A headline to set the mood", link: "https://bbc.example/mood" }]);
@@ -641,7 +644,9 @@ d("morning report tick", () => {
       expect(weatherCall).toMatchObject({ safeForWork: true });
       expect(weatherCall.look).toBeUndefined();
       expect(weatherCall.prompt).toContain("Fully clothed, dressed for the weather, safe for work.");
-      expect(moodCall).toMatchObject({ look: "none", safeForWork: true });
+      expect(moodCall).toMatchObject({ safeForWork: true });
+      expect(moodCall.look).toBeUndefined();
+      expect(moodCall.model).toBeUndefined();
     });
 
     // DUR-4133 requirement 3 & 5: the mood picture's prompt is built from
@@ -671,7 +676,10 @@ d("morning report tick", () => {
       expect(moodCall.prompt).toContain("Oslo:");
       expect(moodCall.prompt).not.toContain(distinctiveHeadline);
       expect(moodCall.prompt).not.toContain("Zorbax");
-      expect(moodCall.prompt).toMatch(/no people/i);
+      expect(moodCall.prompt).toContain("Maja");
+      expect(moodCall.prompt).toContain("smiling");
+      expect(moodCall.prompt).not.toMatch(/no people/i);
+      expect(moodCall.prompt).toMatch(/no text, no letters, no words, no numbers, no logos/i);
     });
 
     // DUR-4133 requirement 3: "If the model call fails, derive the mood from prices + weather only."
@@ -692,7 +700,9 @@ d("morning report tick", () => {
       expect(moodCall.prompt).toContain("falling");
       expect(moodCall.prompt).not.toContain(distinctiveHeadline);
       expect(moodCall.prompt).not.toContain("Quorlath");
-      expect(moodCall).toMatchObject({ look: "none", safeForWork: true });
+      expect(moodCall.prompt).toContain("downcast");
+      expect(moodCall).toMatchObject({ safeForWork: true });
+      expect(moodCall.look).toBeUndefined();
     });
   });
 
@@ -707,7 +717,14 @@ d("morning report tick", () => {
       await secretService(db).create(companyId, { name: "EODHD", provider: "local_encrypted", value: "fake-eodhd-key" });
       const agentId = await seedAgent(companyId, {
         ...baseSettings,
-        sources: ["bbc", "dagbladet"],
+        // DUR-4138: balanceHeadlinesAcrossSources caps any one source at
+        // MORNING_REPORT_MAX_HEADLINES_PER_SOURCE (4) while other sources
+        // still have items — with only 2 sources that cap mathematically
+        // tops out at 8 (4+4), never 10, regardless of how many items each
+        // feed has. A 3rd source is required so the day's 10-headline list
+        // is actually reachable while still respecting "no more than 4 from
+        // one source": 4 (bbc) + 4 (dagbladet) + 2 (gizmodo) = 10.
+        sources: ["bbc", "dagbladet", "gizmodo"],
         hobbyTopics: ["zelda"],
         sportFollows: ["mats_zuccarello_nhl"],
         priceSymbols: ["BTC", "SOL", "ETH", "DNB.OL"],
@@ -718,6 +735,9 @@ d("morning report tick", () => {
       );
       feeds[DAGBLADET_URL] = rssXml(
         Array.from({ length: 6 }, (_, i) => ({ title: `Dagbladet headline ${i + 1}`, link: `https://dagbladet.example/${i + 1}` })),
+      );
+      feeds[GIZMODO_URL] = rssXml(
+        Array.from({ length: 6 }, (_, i) => ({ title: `Gizmodo headline ${i + 1}`, link: `https://gizmodo.example/${i + 1}` })),
       );
       feeds[MORNING_REPORT_RSS_FEEDS.zelda_dungeon!] = rssXml(
         Array.from({ length: 5 }, (_, i) => ({ title: `Zelda release ${i + 1} out now`, link: `https://zeldadungeon.example/${i + 1}` })),
@@ -757,7 +777,7 @@ d("morning report tick", () => {
       expect(facts.hobby).toHaveLength(5);
       expect(facts.sport).toHaveLength(1);
       expect(facts.prices).toHaveLength(4);
-      expect(facts.stats).toEqual({ sourcesChecked: 2, itemsFound: 10 });
+      expect(facts.stats).toEqual({ sourcesChecked: 3, itemsFound: 10 });
       expect(facts.briefingPageLive).toBe(true);
 
       // Nothing is cut off: all 10 numbered headlines and every configured
@@ -768,7 +788,7 @@ d("morning report tick", () => {
       expect(row!.text).toContain("Hobby news:");
       expect(row!.text).toContain("Sport:");
       expect(row!.text).toContain("Prices:");
-      expect(row!.text).toContain("Sources checked: 2, headlines found: 10.");
+      expect(row!.text).toContain("Sources checked: 3, headlines found: 10.");
 
       // The Telegram teaser stays short — never the full report.
       expect(facts.teaser.split("\n").length).toBeLessThanOrEqual(3);

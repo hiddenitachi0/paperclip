@@ -354,8 +354,11 @@ export async function loadLooks(ctx: PluginContext, companyId: string): Promise<
   return Array.isArray(raw) ? raw.filter(isLook).map(normalizeLook) : [];
 }
 
-function findLook(looks: Look[], name: string): Look | undefined {
-  const wanted = name.trim().toLowerCase();
+/** Matches a saved look by id first (DUR-4138: morning-report settings store a stable lookId), then by name (the normal chat "look: X" path). */
+function findLook(looks: Look[], nameOrId: string): Look | undefined {
+  const byId = looks.find((look) => look.id === nameOrId);
+  if (byId) return byId;
+  const wanted = nameOrId.trim().toLowerCase();
   return looks.find((look) => look.name.trim().toLowerCase() === wanted);
 }
 
@@ -865,10 +868,12 @@ async function prepareSogni(
 }
 
 /**
- * DUR-4133: the fixed "things to avoid" text forced onto a picture made with
- * `safeForWork: true`, regardless of any look's own content-filter setting
- * or "always avoid" text — used for pictures nobody reviews before they go
- * out (the morning report's illustrations).
+ * DUR-4133/DUR-4138: the fixed "things to avoid" text merged onto a picture
+ * made with `safeForWork: true` — used for pictures nobody reviews before
+ * they go out (the morning report's illustrations). DUR-4138: this text
+ * (plus "fully clothed" in the prompt) is the *only* safety net `safeForWork`
+ * adds now — it no longer touches the provider's own content-filter switch,
+ * see the `safeForWork` block below.
  */
 export const SAFE_FOR_WORK_AVOID = "nudity, nsfw, text, letters, words, watermark, logo";
 
@@ -899,11 +904,14 @@ export async function prepareGeneration(
   if (rawProvider && !isPictureService(rawProvider)) {
     return { error: `"${String(params.provider)}" is not a picture service. Use fal (Fal.ai) or sogni (Sogni), or leave it out.` };
   }
-  // DUR-4133: forces the content filter on and a fixed safety negative
-  // prompt, regardless of any look's own setting. Not in any tool's public
-  // parameters schema, so an ordinary chat agent cannot set it — only
-  // first-party server code building `parameters` directly (the morning
-  // report's pictures) does.
+  // DUR-4138 (was DUR-4133): adds "fully clothed" and a fixed safety negative
+  // prompt to the request, regardless of any look's own text. It does NOT
+  // touch the provider's own content filter switch any more — that stays the
+  // chosen look's own setting (or the company/provider default below), so an
+  // operator's own filter-off preference (e.g. Filip's Sogni account) is
+  // never silently overridden. Not in any tool's public parameters schema, so
+  // an ordinary chat agent cannot set it — only first-party server code
+  // building `parameters` directly (the morning report's pictures) does.
   const safeForWork = params.safeForWork === true;
 
   // Which look, in order: the one named as look; else one the request's
@@ -1018,9 +1026,13 @@ export async function prepareGeneration(
     notes.push(`The look's ${labels.join(", ")} ${labels.length === 1 ? "was" : "were"} left out, because the request describes ${labels.length === 1 ? "it" : "them"}.`);
   }
   if (safeForWork) {
-    // Wins over any look's content filter setting (forcing the filter ON is
-    // never a privilege escalation, unlike a look forcing it off).
-    input.safeContentFilter = true;
+    // DUR-4138: does NOT touch input.safeContentFilter any more — that stays
+    // whatever the look/provider/company resolution above already set it to
+    // (a look's own filter-off setting is respected, exactly like any other
+    // picture). Safety here is prompt-only: "fully clothed" plus the fixed
+    // negative prompt, always, for a picture nobody reviews before it goes
+    // out (the morning report's illustrations).
+    input.prompt = `${input.prompt}\n\nFully clothed.`;
     if (negativeAllowed) {
       const merged = input.negativePrompt ? `${input.negativePrompt}, ${SAFE_FOR_WORK_AVOID}` : SAFE_FOR_WORK_AVOID;
       if (merged.length <= SOGNI_NEGATIVE_PROMPT_MAX) input.negativePrompt = merged;

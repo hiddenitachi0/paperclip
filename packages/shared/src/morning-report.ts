@@ -28,10 +28,21 @@ export const MORNING_REPORT_SOURCES = [
 ] as const;
 export type MorningReportSource = (typeof MORNING_REPORT_SOURCES)[number];
 
-/** RSS feed for every source that has one. A source with no entry here (financial_times) is search-only. */
+/**
+ * RSS feed for every source that has one. A source with no entry here
+ * (financial_times) is search-only.
+ *
+ * DUR-4138: nettavisen's and dagbladet's old URLs both 404 now — verified
+ * live (30 Sep 2026) that these two answer 200 with real RSS/XML:
+ * nettavisen's own rss.nettavisen.no mirror, and dagbladet's `?lab_viewport=
+ * rss` query param on its homepage (Labrador CMS's RSS switch). pcmag and
+ * zelda_dungeon are both behind a Cloudflare bot challenge that a normal
+ * browser User-Agent does not clear (verified live, same date) — fetchRss
+ * falls back to web search for those two, see collectHeadlines.
+ */
 export const MORNING_REPORT_RSS_FEEDS: Partial<Record<MorningReportSource, string>> = {
-  nettavisen: "https://www.nettavisen.no/rss.xml",
-  dagbladet: "https://www.dagbladet.no/rss",
+  nettavisen: "https://www.nettavisen.no/service/rich-rss",
+  dagbladet: "https://www.dagbladet.no/?lab_viewport=rss",
   bbc: "https://feeds.bbci.co.uk/news/world/rss.xml",
   aljazeera: "https://www.aljazeera.com/xml/rss/all.xml",
   pcmag: "https://www.pcmag.com/rss",
@@ -63,6 +74,35 @@ export const MORNING_REPORT_MAX_HEADLINES = 10;
  * replaces this whole list with the one override place, same as before.
  */
 export const MORNING_REPORT_DEFAULT_PLACES = ["Drøbak", "Oslo"] as const;
+
+/**
+ * DUR-4138: which picture to use for one report picture (weather or mood) —
+ * a saved Media Studio look, a picture model picked directly (bypassing look
+ * resolution for the model, e.g. Sogni "Dark Beat"), or the agent's own
+ * default look (the same default every other picture the agent makes falls
+ * back to — see laneA.makePicture's `look` param with nothing set).
+ *
+ * Kept in sync by hand with packages/plugins/media-studio/src/providers.ts's
+ * PICTURE_SERVICES: packages/shared must not import from packages/plugins.
+ */
+export const MORNING_REPORT_PICTURE_PROVIDERS = ["fal", "sogni"] as const;
+export type MorningReportPictureProvider = (typeof MORNING_REPORT_PICTURE_PROVIDERS)[number];
+
+export const morningReportPictureSourceSchema = z
+  .discriminatedUnion("kind", [
+    z.object({ kind: z.literal("default") }).strict(),
+    z.object({ kind: z.literal("look"), lookId: z.string().trim().min(1).max(120) }).strict(),
+    z
+      .object({
+        kind: z.literal("model"),
+        provider: z.enum(MORNING_REPORT_PICTURE_PROVIDERS),
+        model: z.string().trim().min(1).max(200),
+      })
+      .strict(),
+  ]);
+export type MorningReportPictureSource = z.infer<typeof morningReportPictureSourceSchema>;
+
+export const DEFAULT_MORNING_REPORT_PICTURE_SOURCE: MorningReportPictureSource = { kind: "default" };
 
 function isValidTimeZone(tz: string): boolean {
   try {
@@ -106,6 +146,17 @@ export const morningReportSettingsSchema = z
     sportFollows: z.array(z.enum(MORNING_REPORT_SPORT_FOLLOWS)).max(MORNING_REPORT_SPORT_FOLLOWS.length),
     priceSymbols: z.array(z.enum(MORNING_REPORT_PRICE_SYMBOLS)).max(MORNING_REPORT_PRICE_SYMBOLS.length),
     maxHeadlines: z.number().int().min(MORNING_REPORT_MIN_HEADLINES).max(MORNING_REPORT_MAX_HEADLINES),
+    /**
+     * DUR-4138: per-picture look/model choice, added after every other field
+     * here went live — `.optional()` (unlike the rest of this object) so an
+     * agent's already-saved settings (written before the UI for this existed)
+     * still parse instead of falling back to DEFAULT_MORNING_REPORT_SETTINGS
+     * whole. Absent reads as `{ kind: "default" }` (the agent's own default
+     * look) everywhere this is read — see resolvePictureSource in
+     * morning-report.ts.
+     */
+    weatherPicture: morningReportPictureSourceSchema.optional(),
+    moodPicture: morningReportPictureSourceSchema.optional(),
   })
   .strict();
 export type MorningReportSettings = z.infer<typeof morningReportSettingsSchema>;
@@ -123,6 +174,8 @@ export const DEFAULT_MORNING_REPORT_SETTINGS: MorningReportSettings = {
   sportFollows: [],
   priceSymbols: [],
   maxHeadlines: 10,
+  weatherPicture: DEFAULT_MORNING_REPORT_PICTURE_SOURCE,
+  moodPicture: DEFAULT_MORNING_REPORT_PICTURE_SOURCE,
 };
 
 /** Read agents.morning_report_settings (an open jsonb column) into the typed shape; anything malformed or absent reads as "disabled". */
@@ -130,6 +183,11 @@ export function parseMorningReportSettings(value: unknown): MorningReportSetting
   if (value === null || value === undefined) return DEFAULT_MORNING_REPORT_SETTINGS;
   const parsed = morningReportSettingsSchema.safeParse(value);
   return parsed.success ? parsed.data : DEFAULT_MORNING_REPORT_SETTINGS;
+}
+
+/** DUR-4138: resolves an optional (not-yet-saved) picture-source field to its default — the agent's own default look. */
+export function resolveMorningReportPictureSource(source: MorningReportPictureSource | undefined): MorningReportPictureSource {
+  return source ?? DEFAULT_MORNING_REPORT_PICTURE_SOURCE;
 }
 
 // ─── What the API answers with ───────────────────────────────────────────────

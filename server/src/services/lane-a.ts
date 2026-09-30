@@ -2800,6 +2800,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     maxOutputChars?: number;
     /** Server-side callers only; see buildTransformSystemPrompt. */
     task?: string | null;
+    /** DUR-4138: asks an OpenAI-compatible host for strict JSON output. See LaneACompletionRequest.responseFormat — ignored by the Anthropic client. */
+    responseFormat?: "json_object";
   }) {
     if (params.targetAgent.companyId !== params.companyId) {
       // Belt and braces: the route checks this first, but the service must
@@ -2890,6 +2892,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         }),
         temperature: settings.temperature,
         providerRouting: settings.providerRouting,
+        responseFormat: params.responseFormat,
       });
     } finally {
       release();
@@ -2941,6 +2944,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     temperature?: number | null;
     /** OpenRouter "model hosts", already resolved for this provider. Null = OpenRouter picks. */
     providerRouting?: LaneAProviderRouting | null;
+    /** DUR-4138: see LaneACompletionRequest.responseFormat. */
+    responseFormat?: "json_object";
   }) {
     try {
       const send = (withTemperature: boolean) =>
@@ -2951,6 +2956,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           messages: [{ role: "user", content: params.message }],
           ...(withTemperature ? { temperature: params.temperature } : {}),
           ...(params.providerRouting ? { providerRouting: params.providerRouting } : {}),
+          ...(params.responseFormat ? { responseFormat: params.responseFormat } : {}),
         });
       const withTemperature = typeof params.temperature === "number";
       let response: Awaited<ReturnType<typeof send>>;
@@ -3409,9 +3415,13 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     prompt: string;
     /** Shown in the activity log next to the plugin's own entries (e.g. the alert id). */
     runLabel: string;
-    /** "none" skips every source of a look (named, mentioned, automatic, default) — DUR-4133: for a picture that must never carry any person's look. */
+    /** A saved look's id or name, or "none" to skip every source of a look (named, mentioned, automatic, default) — DUR-4133: for a picture that must never carry any person's look. */
     look?: string;
-    /** Forces Sogni's content filter on and a fixed safety negative prompt, regardless of any look's own setting — DUR-4133: for a picture nobody reviews before it goes out (e.g. the morning report). */
+    /** A picture model to use directly, bypassing look resolution for the model (DUR-4138: morning-report per-picture model choice). Ignored when `look` resolves to a look with its own model and no override is intended. */
+    model?: string;
+    /** The picture service `model` belongs to ("sogni" | "fal"). Only meaningful together with `model`. */
+    provider?: string;
+    /** Adds "fully clothed" and a fixed safety negative prompt to the request — DUR-4138: prompt-only safety for a picture nobody reviews before it goes out (e.g. the morning report). Does NOT touch the provider's own content filter, which still follows the chosen look's own setting (or the company/provider default). */
     safeForWork?: boolean;
   }): Promise<{ ok: true; fileId: string; seed: number | null } | { ok: false; reason: string }> {
     const [agentRow] = await db
@@ -3475,6 +3485,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         parameters: {
           prompt: params.prompt,
           ...(params.look ? { look: params.look } : {}),
+          ...(params.model ? { model: params.model } : {}),
+          ...(params.provider ? { provider: params.provider } : {}),
           ...(params.safeForWork ? { safeForWork: true } : {}),
         },
         runContext: { agentId: agentRow.id, runId: pluginRun.run.runId, companyId: params.companyId, projectId: "" },

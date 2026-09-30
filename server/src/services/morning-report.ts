@@ -14,6 +14,7 @@ import {
   MORNING_REPORT_DEFAULT_PLACES,
   MORNING_REPORT_RSS_FEEDS,
   parseMorningReportSettings,
+  resolveMorningReportPictureSource,
   WATCHER_SOURCE_INFO,
   type MorningReportFacts,
   type MorningReportFactItem,
@@ -21,6 +22,7 @@ import {
   type MorningReportImageFact,
   type MorningReportOutboxItem,
   type MorningReportOutboxStatus,
+  type MorningReportPictureSource,
   type MorningReportPriceFact,
   type MorningReportPricePoint,
   type MorningReportPriceSymbol,
@@ -97,25 +99,33 @@ const MAX_OUTPUT_CHARS_FOR_SUMMARIES = MORNING_REPORT_SUMMARY_MAX_OUTPUT_TOKENS 
 
 /**
  * Instructions for the one model call a report still costs (DUR-4059
- * direction change; DUR-4133 added "mood"): the model writes ONLY a short
- * opening, a short mood description, and one-sentence summaries for the
- * given headlines, as strict JSON, never the report itself. Every list in
- * the report (weather, headlines, hobby, sport, prices) is rendered by code
- * from the facts, so nothing Filip needs depends on this call succeeding,
- * finishing, or being trusted with formatting/links. "mood" is a plain
- * description (never a quoted headline title): it becomes the mood picture's
- * prompt, so a quoted headline here is exactly the garbled-text bug DUR-4133
- * fixed.
+ * direction change; DUR-4133 added "mood"; DUR-4138 added "themeKeywords"):
+ * the model writes ONLY a short opening, a short mood description, 2-4 theme
+ * keywords, and one-sentence summaries for the given headlines, as strict
+ * JSON, never the report itself. Every list in the report (weather,
+ * headlines, hobby, sport, prices) is rendered by code from the facts, so
+ * nothing Filip needs depends on this call succeeding, finishing, or being
+ * trusted with formatting/links. "mood" and "themeKeywords" are plain,
+ * model-written descriptions (never a quoted headline title): they become
+ * the mood picture's prompt, so a quoted headline here is exactly the
+ * garbled-text bug DUR-4133 fixed.
  */
 export const MORNING_REPORT_SUMMARY_TASK =
-  "You write three short things for a daily morning briefing, using only the facts given below: do not invent, round " +
+  "You write four short things for a daily morning briefing, using only the facts given below: do not invent, round " +
   'differently, or add any number, headline or fact not present below. Answer with ONLY one JSON object, no markdown, ' +
   'no code fences, no commentary, matching exactly this shape: {"opening": "a friendly 3-5 sentence opening for the day, ' +
   'plain text only, mentioning the weather and the most notable news in your own words", "mood": "the overall mood of ' +
   "today's news in at most 8 plain words (for example 'tense but hopeful'), your own description, never a quoted " +
-  'headline or title", "headlines": [{"n": 1, ' +
+  'headline or title", "themeKeywords": ["2 to 4 short plain words or short phrases capturing today\'s news themes, ' +
+  'your own words, never a quoted headline or title (for example [\\"war\\", \\"elections\\"])"], "headlines": [{"n": 1, ' +
   '"summary": "one plain-text sentence summarizing headline 1, using only its title"}, ...one entry per numbered headline ' +
   "given below] }. Plain text only in every string: never HTML, never markdown links, never a URL.";
+
+/** DUR-4138: a stricter retry when the first answer did not parse as JSON — the same task, said more forcefully. The model has no memory of the first answer (each transform() call is stateless), so this cannot literally say "try again"; it just states the constraint harder. */
+export const MORNING_REPORT_SUMMARY_TASK_STRICT =
+  `${MORNING_REPORT_SUMMARY_TASK} Your answer must be ONLY the JSON object itself: the very first character must be "{" ` +
+  'and the very last character must be "}". Nothing else: no prose before or after it, no markdown, no code fences, no ' +
+  "explanation of what you are doing.";
 
 export interface MorningReportServiceDeps extends WebSearchServiceDeps {
   now?: () => Date;
@@ -306,10 +316,23 @@ async function fetchJson(fetchImpl: typeof fetch, url: string): Promise<unknown>
   return response.json();
 }
 
+/**
+ * DUR-4138: a plain, normal-browser User-Agent and Accept header — some feeds
+ * (pcmag, zelda_dungeon) refuse a bare `fetch` User-Agent with a 403 (a
+ * Cloudflare bot challenge, verified live: even this header does not clear
+ * it, so collectHeadlines falls back to web search for those two instead of
+ * retrying here).
+ */
+const RSS_FETCH_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
 async function fetchRss(fetchImpl: typeof fetch, url: string, limit: number): Promise<RssItem[]> {
   const response = await fetchImpl(url, {
     signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
-    headers: { accept: "application/rss+xml, application/atom+xml, application/xml, text/xml" },
+    headers: {
+      accept: "application/rss+xml, application/atom+xml, application/xml, text/xml, */*;q=0.1",
+      "user-agent": RSS_FETCH_USER_AGENT,
+    },
   });
   if (!response.ok) throw new Error(`answered ${response.status}`);
   return parseRssItems(await response.text(), limit);
@@ -369,12 +392,54 @@ async function fetchWeatherSection(
 
 type BraveSearch = (query: string) => Promise<{ title: string; url: string }[]>;
 
+/** DUR-4138: "no more than 3-4 headlines from one source when others have items" — the cap on any single source while at least one other source still has unused items. */
+export const MORNING_REPORT_MAX_HEADLINES_PER_SOURCE = 4;
+
+/**
+ * DUR-4138: round-robins deduped, on-topic items across their sources so one
+ * heavy source (e.g. a source with a large, reliable feed) cannot swamp the
+ * final list while other configured sources still have unused items of their
+ * own — each source is capped at MORNING_REPORT_MAX_HEADLINES_PER_SOURCE
+ * until every other source runs dry, at which point the cap lifts for
+ * whichever source is left (filling the day's list is still the priority; a
+ * thin day from one source is better than a short one).
+ */
+export function balanceHeadlinesAcrossSources<T extends { source: MorningReportSource }>(items: T[], maxHeadlines: number): T[] {
+  const bySource = new Map<MorningReportSource, T[]>();
+  for (const item of items) {
+    const list = bySource.get(item.source);
+    if (list) list.push(item);
+    else bySource.set(item.source, [item]);
+  }
+  const sources = [...bySource.keys()];
+  const nextIndex = new Map<MorningReportSource, number>(sources.map((s) => [s, 0]));
+  const taken = new Map<MorningReportSource, number>(sources.map((s) => [s, 0]));
+  const result: T[] = [];
+  while (result.length < maxHeadlines) {
+    let addedThisRound = false;
+    for (const source of sources) {
+      if (result.length >= maxHeadlines) break;
+      const list = bySource.get(source)!;
+      const i = nextIndex.get(source)!;
+      if (i >= list.length) continue;
+      const othersHaveItems = sources.some((s) => s !== source && nextIndex.get(s)! < bySource.get(s)!.length);
+      if (taken.get(source)! >= MORNING_REPORT_MAX_HEADLINES_PER_SOURCE && othersHaveItems) continue;
+      result.push(list[i]!);
+      nextIndex.set(source, i + 1);
+      taken.set(source, taken.get(source)! + 1);
+      addedThisRound = true;
+    }
+    if (!addedThisRound) break;
+  }
+  return result;
+}
+
 /**
  * DUR-4059 review: log per source how many items were fetched, survived the
- * topic filter, and were finally kept (after cross-source dedupe and the
- * maxHeadlines cap), so a thin headline day shows why in the server log —
- * `stats.sourcesChecked`/`itemsFound` in the facts (see composeReport) is the
- * plain-language, operator-facing version of the same count.
+ * topic filter, and were finally kept (after cross-source dedupe, balancing
+ * and the maxHeadlines cap), so a thin headline day shows why in the server
+ * log — `stats.sourcesChecked`/`itemsFound` in the facts (see composeReport)
+ * is the plain-language, operator-facing version of the same count.
  */
 async function collectHeadlines(params: {
   sources: MorningReportSource[];
@@ -388,25 +453,43 @@ async function collectHeadlines(params: {
   const fetchedPerSource = new Map<MorningReportSource, number>();
   for (const source of params.sources) {
     const feed = MORNING_REPORT_RSS_FEEDS[source];
-    try {
-      if (feed) {
-        const got = await fetchRss(params.fetchImpl, feed, 20);
-        fetchedPerSource.set(source, got.length);
-        for (const item of got) collected.push({ ...item, source });
-      } else {
+    if (!feed) {
+      try {
         const got = await params.braveSearch(`${source} news`);
         fetchedPerSource.set(source, got.length);
         for (const result of got) collected.push({ title: result.title, url: result.url, source, pubDate: null });
+      } catch (err) {
+        fetchedPerSource.set(source, 0);
+        notes.push(`${source}: could not fetch headlines (${err instanceof Error ? err.message : "unknown reason"}).`);
       }
+      continue;
+    }
+    try {
+      const got = await fetchRss(params.fetchImpl, feed, 20);
+      fetchedPerSource.set(source, got.length);
+      for (const item of got) collected.push({ ...item, source });
     } catch (err) {
-      fetchedPerSource.set(source, 0);
-      notes.push(`${source}: could not fetch headlines (${err instanceof Error ? err.message : "unknown reason"}).`);
+      // DUR-4138: the feed refused the request (e.g. a Cloudflare bot
+      // challenge, like pcmag/zelda_dungeon even with a browser User-Agent) —
+      // fall back to web search for this source rather than losing it.
+      try {
+        const got = await params.braveSearch(`${source} news`);
+        fetchedPerSource.set(source, got.length);
+        for (const result of got) collected.push({ title: result.title, url: result.url, source, pubDate: null });
+      } catch (fallbackErr) {
+        fetchedPerSource.set(source, 0);
+        notes.push(`${source}: could not fetch headlines (${fallbackErr instanceof Error ? fallbackErr.message : "unknown reason"}).`);
+      }
     }
   }
   const onTopic = collected.filter((item) => matchesMorningReportTopics(item.title, params.topics));
   const onTopicPerSource = new Map<MorningReportSource, number>();
   for (const item of onTopic) onTopicPerSource.set(item.source, (onTopicPerSource.get(item.source) ?? 0) + 1);
-  const items = dedupeHeadlines(onTopic).slice(0, params.maxHeadlines).map(({ title, url, source }) => ({ title, url, source }));
+  const items = balanceHeadlinesAcrossSources(dedupeHeadlines(onTopic), params.maxHeadlines).map(({ title, url, source }) => ({
+    title,
+    url,
+    source,
+  }));
   const keptPerSource = new Map<MorningReportSource, number>();
   for (const item of items) keptPerSource.set(item.source, (keptPerSource.get(item.source) ?? 0) + 1);
   for (const source of params.sources) {
@@ -438,8 +521,15 @@ async function collectHobbyNews(params: {
       for (const item of await fetchRss(params.fetchImpl, MORNING_REPORT_RSS_FEEDS.zelda_dungeon!, 30)) {
         collected.push({ ...item, source: "zelda_dungeon" });
       }
-    } catch (err) {
-      notes.push(`Hobby (zelda): could not fetch (${err instanceof Error ? err.message : "unknown reason"}).`);
+    } catch {
+      // DUR-4138: same Cloudflare-challenge fallback as collectHeadlines.
+      try {
+        for (const result of await params.braveSearch("zelda news")) {
+          collected.push({ title: result.title, url: result.url, source: "zelda_dungeon", pubDate: null });
+        }
+      } catch (fallbackErr) {
+        notes.push(`Hobby (zelda): could not fetch (${fallbackErr instanceof Error ? fallbackErr.message : "unknown reason"}).`);
+      }
     }
   }
   for (const topic of params.hobbyTopics.filter((t) => t !== "zelda")) {
@@ -678,17 +768,66 @@ function sanitizeModelText(text: string, maxLength: number): string {
 interface ParsedSummaryResponse {
   opening?: unknown;
   mood?: unknown;
+  themeKeywords?: unknown;
   headlines?: unknown;
 }
 
-/** Best-effort JSON extraction from a model answer that is supposed to be strict JSON but might carry code fences or stray prose. Returns null on anything that does not parse. */
+/**
+ * DUR-4138: the first *balanced* `{...}` object in `text`, scanning brace
+ * depth and skipping over string contents (so a brace-like character inside
+ * a quoted string, or trailing prose after the object, cannot break the
+ * match). Replaces a plain `/\{[\s\S]*\}/` regex, which is greedy to the
+ * LAST `}` in the whole answer — wrong whenever the model adds any prose
+ * with its own braces after the real object. Returns null when there is no
+ * `{` at all, or the braces never balance (e.g. truncated output).
+ */
+function extractFirstJsonObject(text: string): string | null {
+  const start = text.indexOf("{");
+  if (start === -1) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === "{") {
+      depth++;
+    } else if (ch === "}") {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+/**
+ * Best-effort JSON extraction from a model answer that is supposed to be
+ * strict JSON but might carry code fences or stray prose (DUR-4138: Mistral
+ * Small over OpenRouter regularly wraps its answer in ```json fences plus a
+ * sentence of preamble/postamble even when asked not to). Tries, in order: a
+ * fenced code block's own balanced object, the whole answer's first balanced
+ * object, then the raw trimmed text (covers a host honoring JSON mode and
+ * answering with nothing else). Returns null on anything that does not parse
+ * as a JSON object.
+ */
 function parseSummaryJson(text: string): ParsedSummaryResponse | null {
   const trimmed = text.trim();
-  const candidates = [trimmed];
+  const candidates: string[] = [];
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fenced) candidates.push(fenced[1]!.trim());
-  const braces = trimmed.match(/\{[\s\S]*\}/);
-  if (braces) candidates.push(braces[0]);
+  if (fenced) {
+    const extracted = extractFirstJsonObject(fenced[1]!.trim());
+    if (extracted) candidates.push(extracted);
+  }
+  const extractedWhole = extractFirstJsonObject(trimmed);
+  if (extractedWhole) candidates.push(extractedWhole);
+  candidates.push(trimmed);
   for (const candidate of candidates) {
     try {
       const parsed = JSON.parse(candidate);
@@ -698,6 +837,19 @@ function parseSummaryJson(text: string): ParsedSummaryResponse | null {
     }
   }
   return null;
+}
+
+/** At most 4 short, plain, non-empty keywords (DUR-4138): the model's theme-keywords answer feeds the mood picture's background, never a quoted headline at length. */
+export function sanitizeThemeKeywords(field: unknown): string[] {
+  if (!Array.isArray(field)) return [];
+  const words: string[] = [];
+  for (const entry of field) {
+    if (typeof entry !== "string") continue;
+    const cleaned = sanitizeModelText(entry, 40);
+    if (cleaned) words.push(cleaned);
+    if (words.length >= 4) break;
+  }
+  return words;
 }
 
 /** Applies the model's per-headline summaries by position (n is 1-based, matching the numbering the model was given). Any entry that is malformed, out of range, or missing is simply skipped — a headline with no summary is still a complete, safe headline (title + link). */
@@ -770,19 +922,103 @@ export function deterministicMood(direction: ReturnType<typeof priceDirection>, 
   return conditionsSummary ? `${priceWord}, weather-led` : priceWord;
 }
 
+const MOOD_SAD_WORDS = [
+  "sad",
+  "grim",
+  "somber",
+  "sombre",
+  "bleak",
+  "gloomy",
+  "tense",
+  "dark",
+  "worried",
+  "anxious",
+  "subdued",
+  "troubling",
+  "troubled",
+  "difficult",
+  "harsh",
+  "war",
+  "conflict",
+  "crisis",
+  "falling",
+  "down",
+  "negative",
+  "concern",
+  "concerning",
+  "grief",
+  "mourning",
+];
+const MOOD_HAPPY_WORDS = [
+  "happy",
+  "hopeful",
+  "bright",
+  "cheerful",
+  "calm",
+  "positive",
+  "upbeat",
+  "optimistic",
+  "good",
+  "great",
+  "sunny",
+  "joyful",
+  "excited",
+  "celebratory",
+  "rising",
+  "up",
+  "steady",
+  "peaceful",
+];
+
 /**
- * Code-written (no model call): one abstract or scenic illustration for
- * today's overall mood — never a person, never quoted headline text (DUR-4133:
- * quoting headline titles verbatim is what made the model paint garbled
- * text before).
+ * DUR-4138: "happy" or "sad" for the mood picture's persona expression — a
+ * plain keyword count over the model's own mood phrase (never the headlines
+ * themselves), falling back to price direction on a tie or an empty/unclear
+ * phrase, matching deterministicMood's existing price-led convention.
  */
-function moodPicturePrompt(mood: string, direction: ReturnType<typeof priceDirection>, conditionsSummary: string | null): string {
-  const priceClause = direction ? `Prices are ${direction} today. ` : "";
+export function moodSentiment(mood: string, direction: ReturnType<typeof priceDirection>): "happy" | "sad" {
+  const lower = mood.toLowerCase();
+  const sadScore = MOOD_SAD_WORDS.filter((w) => lower.includes(w)).length;
+  const happyScore = MOOD_HAPPY_WORDS.filter((w) => lower.includes(w)).length;
+  if (sadScore > happyScore) return "sad";
+  if (happyScore > sadScore) return "happy";
+  return direction === "falling" ? "sad" : "happy";
+}
+
+/**
+ * DUR-4138 (was DUR-4133's abstract/scenic illustration): a visual recap of
+ * the day showing the persona itself (via the chosen look — collectImages
+ * resolves which one), happy or sad depending on the overall sentiment of
+ * today's headlines, with background elements for the day's themes and
+ * today's price direction — never quoted headline text, and no text/letters/
+ * logos at all (a model painting quoted text as garbled letters is exactly
+ * the DUR-4133 bug; theme keywords and mood are always the model's own short
+ * words, never a headline title).
+ */
+function moodPicturePrompt(
+  agentName: string,
+  mood: string,
+  sentiment: "happy" | "sad",
+  themeKeywords: string[],
+  direction: ReturnType<typeof priceDirection>,
+  conditionsSummary: string | null,
+): string {
+  const expression = sentiment === "happy" ? "a smiling, upbeat expression" : "a subdued, downcast expression";
+  const themeClause =
+    themeKeywords.length > 0 ? `Background elements reflecting today's news themes: ${themeKeywords.join(", ")}. ` : "";
+  const priceClause =
+    direction === "rising"
+      ? "A small rising green chart or a few coins in the background: prices are up today. "
+      : direction === "falling"
+        ? "A small falling red chart in the background: prices are down today. "
+        : direction === "flat"
+          ? "Prices are flat today. "
+          : "";
   const weatherClause = conditionsSummary ? `Today's weather: ${conditionsSummary}. ` : "";
   return (
-    `An abstract or scenic illustration (a landscape, sky or light study; no people) capturing today's overall mood: ${mood}. ` +
-    `${priceClause}${weatherClause}` +
-    "No people, no text, no letters, no words, no logos, no watermark."
+    `A full-body illustration of ${agentName}, ${expression}, a visual recap of today's overall mood: ${mood}. ` +
+    `${themeClause}${priceClause}${weatherClause}` +
+    "Illustration style, no text, no letters, no words, no numbers, no logos, no watermark."
   );
 }
 
@@ -881,11 +1117,20 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
   }
 
   /** Maja's weather picture and one mood picture, via Media Studio (laneA.makePicture) — the same "quick picture tool" chat pictures use. Never throws: a failed picture just means fewer images, never a failed report. */
+  /** DUR-4138: turns one picture's setting into laneA.makePicture's look/model params. "default" passes neither, so the normal resolution chain (named/mentioned/automatic/the agent's own default look) applies — the same thing both report pictures already did before per-picture choice existed. */
+  function pictureSourceParams(source: MorningReportPictureSource): { look?: string; model?: string; provider?: string } {
+    if (source.kind === "look") return { look: source.lookId };
+    if (source.kind === "model") return { model: source.model, provider: source.provider };
+    return {};
+  }
+
   async function collectImages(
     agentRow: AgentRow,
+    settings: MorningReportSettings,
     places: string[],
     conditionsSummary: string | null,
     mood: string,
+    themeKeywords: string[],
     direction: ReturnType<typeof priceDirection>,
     localDate: string,
   ): Promise<{ images: MorningReportImageFact[]; notes: string[] }> {
@@ -899,8 +1144,11 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
           agentId: agentRow.id,
           prompt: weatherPicturePrompt(agentRow.name, places, conditionsSummary),
           runLabel: `morning-report-weather:${agentRow.id}:${localDate}`,
-          // Keeps agentRow's own look (DUR-4133: that is intended for the weather picture), but never unsafe regardless of the look's own content-filter setting.
+          // DUR-4138: "fully clothed" and a fixed negative prompt only — never
+          // forces the provider's content filter, which follows the chosen
+          // look's own setting (or the company/provider default).
           safeForWork: true,
+          ...pictureSourceParams(resolveMorningReportPictureSource(settings.weatherPicture)),
         });
         if (picture.ok) images.push({ fileId: picture.fileId, caption: `${agentRow.name}, dressed for today's weather in ${places.join(" and ")}.`, kind: "weather" });
         else notes.push(`No weather picture this time: ${picture.reason}`);
@@ -909,14 +1157,18 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
       }
     }
     try {
+      const sentiment = moodSentiment(mood, direction);
       const picture = await laneA.makePicture({
         companyId: agentRow.companyId,
         agentId: agentRow.id,
-        prompt: moodPicturePrompt(mood, direction, conditionsSummary),
+        prompt: moodPicturePrompt(agentRow.name, mood, sentiment, themeKeywords, direction, conditionsSummary),
         runLabel: `morning-report-mood:${agentRow.id}:${localDate}`,
-        // DUR-4133: never any person's look (not Maja's, not any other saved look), and never unsafe.
-        look: "none",
+        // DUR-4138 (was DUR-4133's look:"none"): the mood picture now shows
+        // the persona, via the chosen look (default: the agent's own default
+        // look) — same prompt-only safety as the weather picture, never a
+        // forced content filter.
         safeForWork: true,
+        ...pictureSourceParams(resolveMorningReportPictureSource(settings.moodPicture)),
       });
       if (picture.ok) images.push({ fileId: picture.fileId, caption: "Today's mood, in one picture.", kind: "mood" });
       else notes.push(`No mood picture this time: ${picture.reason}`);
@@ -999,34 +1251,56 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
     let opening = deterministicOpening(places);
     let headlineItems: MorningReportFactItem[] = headlines.items;
     let modelMood: string | null = null;
+    let modelThemeKeywords: string[] = [];
     if (!agentRow.laneAEnabled) {
       notes.push("This agent is not a quick agent any more, so headline summaries were not written.");
     } else {
+      const targetAgent = {
+        id: agentRow.id,
+        companyId: agentRow.companyId,
+        name: agentRow.name,
+        role: agentRow.role,
+        laneAEnabled: agentRow.laneAEnabled,
+        laneAInstructions: agentRow.laneAInstructions ?? null,
+        status: agentRow.status ?? null,
+        laneAModel: agentRow.laneAModel ?? null,
+        laneAMaxOutputTokens: agentRow.laneAMaxOutputTokens ?? null,
+        laneATransformDailyCallCap: agentRow.laneATransformDailyCallCap ?? null,
+      };
+      const input = buildSummaryDigest({ places, weather: weather.items, headlines: headlines.items, prices: prices.facts });
       try {
+        // DUR-4138: ask for JSON mode up front — a host/model that ignores it
+        // answers exactly as before, so parseSummaryJson still runs either way.
         const written = await laneA.transform({
           companyId: agentRow.companyId,
-          targetAgent: {
-            id: agentRow.id,
-            companyId: agentRow.companyId,
-            name: agentRow.name,
-            role: agentRow.role,
-            laneAEnabled: agentRow.laneAEnabled,
-            laneAInstructions: agentRow.laneAInstructions ?? null,
-            status: agentRow.status ?? null,
-            laneAModel: agentRow.laneAModel ?? null,
-            laneAMaxOutputTokens: agentRow.laneAMaxOutputTokens ?? null,
-            laneATransformDailyCallCap: agentRow.laneATransformDailyCallCap ?? null,
-          },
-          input: buildSummaryDigest({ places, weather: weather.items, headlines: headlines.items, prices: prices.facts }),
+          targetAgent,
+          input,
           task: MORNING_REPORT_SUMMARY_TASK,
           maxOutputChars: MAX_OUTPUT_CHARS_FOR_SUMMARIES,
+          responseFormat: "json_object",
         });
         if (written.truncated) {
           notes.push(
             `${agentRow.name}'s summary was cut off before it finished, so the opening and headlines were sent without it instead of a half-written one.`,
           );
         } else {
-          const parsed = parseSummaryJson(written.text);
+          let parsed = parseSummaryJson(written.text);
+          if (!parsed) {
+            // DUR-4138: retry once with a stricter instruction before falling back to the plain facts.
+            try {
+              const retry = await laneA.transform({
+                companyId: agentRow.companyId,
+                targetAgent,
+                input,
+                task: MORNING_REPORT_SUMMARY_TASK_STRICT,
+                maxOutputChars: MAX_OUTPUT_CHARS_FOR_SUMMARIES,
+                responseFormat: "json_object",
+              });
+              if (!retry.truncated) parsed = parseSummaryJson(retry.text);
+            } catch {
+              // Keep parsed === null; the fallback note below still fires.
+            }
+          }
           if (!parsed) {
             notes.push(`${agentRow.name} did not answer with the expected JSON, so the opening and headlines were sent without it.`);
           } else {
@@ -1036,6 +1310,7 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
             if (typeof parsed.mood === "string" && parsed.mood.trim()) {
               modelMood = sanitizeMoodWords(parsed.mood);
             }
+            modelThemeKeywords = sanitizeThemeKeywords(parsed.themeKeywords);
             headlineItems = applyHeadlineSummaries(headlines.items, parsed.headlines);
           }
         }
@@ -1048,12 +1323,12 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
 
     // Pictures via Media Studio, after the one summaries model call, never
     // blocking it: a failed picture must never lose the report (DUR-4059).
-    // The mood picture's prompt (DUR-4133) is built from the model's own
-    // mood words when it answered, else purely from prices and weather —
-    // never from headline titles.
+    // The mood picture's prompt (DUR-4138, was DUR-4133) is built from the
+    // model's own mood words and theme keywords when it answered, else
+    // purely from prices and weather — never from headline titles.
     const direction = priceDirection(prices.facts);
     const mood = modelMood ?? deterministicMood(direction, weather.conditionsSummary);
-    const pictures = await collectImages(agentRow, places, weather.conditionsSummary, mood, direction, localDate);
+    const pictures = await collectImages(agentRow, settings, places, weather.conditionsSummary, mood, modelThemeKeywords, direction, localDate);
     notes.push(...pictures.notes);
 
     const facts: MorningReportFacts = {
