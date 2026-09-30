@@ -157,9 +157,7 @@ describe("CompanySettingsSidebar", () => {
     expect(container.textContent).toContain("General");
     expect(container.textContent).toContain("Environments");
     expect(container.textContent).not.toContain("Cloud upstream");
-    expect(container.textContent).toContain("Members");
-    expect(container.textContent).not.toContain("Cloud upstream");
-    expect(container.textContent).toContain("Invites");
+    expect(container.textContent).toContain("People");
     expect(container.textContent).toContain("Connections");
     expect(container.textContent).toContain("Secrets");
     expect(sidebarNavItemMock).toHaveBeenCalledWith(
@@ -178,16 +176,9 @@ describe("CompanySettingsSidebar", () => {
     );
     expect(sidebarNavItemMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        to: "/company/settings/members",
-        label: "Members",
+        to: "/company/settings/people",
+        label: "People",
         badge: 2,
-        end: true,
-      }),
-    );
-    expect(sidebarNavItemMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        to: "/company/settings/invites",
-        label: "Invites",
         end: true,
       }),
     );
