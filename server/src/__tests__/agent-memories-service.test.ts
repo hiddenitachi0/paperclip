@@ -6,6 +6,7 @@ import {
   agentMemories,
   agents,
   companies,
+  companyMemberships,
   costEvents,
   createDb,
   laneAConversations,
@@ -63,6 +64,7 @@ d("quick-agent memory notebook", () => {
     await db.update(agents).set({ personaId: null });
     await db.delete(personas);
     await db.delete(agents);
+    await db.delete(companyMemberships);
     await db.delete(companies);
   });
 
@@ -357,6 +359,45 @@ d("quick-agent memory notebook", () => {
       });
       expect(result.actions).toEqual([{ tool: "forget", summary: 'Forgot a note: "I take my coffee black."', ok: true }]);
       expect((await db.select().from(agentMemories)).map((row) => row.text)).toEqual(["My dog is called Rex."]);
+    });
+  });
+
+  describe("privacy (DUR-4094)", () => {
+    it("hides an Employee (light) author's notes from the admin page by default, and shows them with emergencyAccess", async () => {
+      const companyId = await seedCompany();
+      const desk = await seedAgent(companyId, "Front desk");
+      await db.insert(companyMemberships).values({
+        companyId,
+        principalType: "user",
+        principalId: "filip",
+        status: "active",
+        membershipRole: "employee",
+      });
+      const svc = agentMemoryService(db);
+      await svc.add(companyId, desk.id, { text: "Her note, written by her PA.", source: "user" }, PAGE);
+
+      const ordinary = await svc.list(companyId, desk.id);
+      expect(ordinary.notes).toEqual([]);
+
+      const breakGlass = await svc.list(companyId, desk.id, { emergencyAccess: true });
+      expect(breakGlass.notes.map((n) => n.text)).toEqual(["Her note, written by her PA."]);
+    });
+
+    it("does not hide notes from a non-employee author (e.g. an operator)", async () => {
+      const companyId = await seedCompany();
+      const desk = await seedAgent(companyId, "Front desk");
+      await db.insert(companyMemberships).values({
+        companyId,
+        principalType: "user",
+        principalId: "filip",
+        status: "active",
+        membershipRole: "operator",
+      });
+      const svc = agentMemoryService(db);
+      await svc.add(companyId, desk.id, { text: "Not private.", source: "user" }, PAGE);
+
+      const ordinary = await svc.list(companyId, desk.id);
+      expect(ordinary.notes.map((n) => n.text)).toEqual(["Not private."]);
     });
   });
 });
