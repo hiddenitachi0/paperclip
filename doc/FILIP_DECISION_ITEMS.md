@@ -212,13 +212,13 @@ This document lists decisions Filip needs to make to complete the security basel
 
 **Question**: Should 2FA be mandatory for all board users or optional?
 
-**Current Implementation**: Available but optional  
-**Question**: Make mandatory for all users? Allow exceptions?  
+**Current Implementation**: Backend/service layer only (TOTP secret generation, verification, recovery codes in `server/src/services/totp-2fa.ts`) — there is no API route or UI wired up yet, so it is not reachable or usable by any board user today, whether mandatory or optional.
+**Question**: Once routes/UI are built, make mandatory for all users? Allow exceptions?  
 **Rollout**: Immediate or phased?  
 **Hardening**: Backup codes, recovery procedures?  
 
 **Decision Made By**: Filip  
-**Status**: Pending — Currently implemented as optional  
+**Status**: Pending — not yet implemented end-to-end (service exists, no route/UI)  
 
 ---
 

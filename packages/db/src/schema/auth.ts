@@ -56,6 +56,9 @@ export const userTotpSecrets = pgTable(
     userId: text("user_id")
       .notNull()
       .references(() => authUsers.id, { onDelete: "cascade" }),
+    // DUR-4180: sealed (AES-256-GCM, local_encrypted scheme), never the raw
+    // base32 TOTP secret. See totp-2fa.ts's sealTotpSecret/unsealTotpSecret,
+    // the same pattern instance_claude_auth.token_sealed uses.
     secret: text("secret").notNull(),
     verified: boolean("verified").notNull().default(false),
     enabledAt: timestamp("enabled_at", { withTimezone: true }),

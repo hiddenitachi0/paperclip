@@ -47,7 +47,7 @@ A: Yes. We conduct:
 
 A: Access control is managed through:
 - Role-based access control (RBAC) - users have specific roles with defined permissions
-- Multi-factor authentication (MFA/2FA) for board user accounts
+- Multi-factor authentication (MFA/2FA): backend/service support exists (TOTP secret generation, verification, recovery codes) but is not yet wired up to any route or UI, so it is not currently enforced or available to board user accounts
 - API key authentication for agent integrations
 - Company-scoped access - users can only access their company's data
 - Regular access reviews - access privileges reviewed quarterly
@@ -61,7 +61,7 @@ A: Yes, we enforce:
 - Complexity requirements (upper, lower, numbers, special characters)
 - Password history - users cannot reuse recent passwords
 - Password expiration - periodic password change requirements
-- Two-factor authentication available and recommended
+- Two-factor authentication: implemented at the backend/service level, not yet available to users (no route or UI wired up yet)
 
 **Q: How are credentials for shared systems managed?**
 
@@ -77,7 +77,7 @@ A: Shared system credentials:
 
 A: Authentication methods include:
 - Username and password
-- Two-factor authentication (2FA) using time-based one-time passwords (TOTP)
+- Two-factor authentication (2FA) using time-based one-time passwords (TOTP): built at the backend/service level (secret generation, verification, recovery codes) but not yet wired up to an API route or UI, so it is not currently usable by board users
 - API key authentication for agents
 - Session-based authentication for board users
 - Automatic logout on session expiration or device logout

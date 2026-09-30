@@ -1,5 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
+import * as speakeasy from "speakeasy";
 import { authUsers, createDb, userRecoveryCodes, userTotpSecrets } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
 import { totpService } from "./totp-2fa.js";
@@ -109,6 +111,65 @@ d("totpService (embedded Postgres)", () => {
 
     it("rejects an unknown recovery code without throwing", async () => {
       const result = await service.validateAndConsumeTotpToken(userId, "ZZZZ-ZZZZ", true);
+      expect(result.valid).toBe(false);
+    });
+  });
+
+  describe("completeTotpSetup (DUR-4180: secret encrypted at rest)", () => {
+    it("stores the TOTP secret sealed (never plaintext) and still verifies a valid code after the round trip", async () => {
+      const setupUserId = randomUUID();
+      const now = new Date();
+      await db.insert(authUsers).values({
+        id: setupUserId,
+        name: "Setup Test User",
+        email: `setup-${setupUserId}@example.com`,
+        emailVerified: true,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      const setup = await service.initiateTotpSetup(setupUserId, `setup-${setupUserId}@example.com`);
+      const currentToken = speakeasy.totp({ secret: setup.secret, encoding: "base32" });
+
+      await service.completeTotpSetup(setupUserId, setup.secret, currentToken, setup.recoveryCodes);
+
+      const row = await db
+        .select({ secret: userTotpSecrets.secret })
+        .from(userTotpSecrets)
+        .where(eq(userTotpSecrets.userId, setupUserId))
+        .then((rows) => rows[0]);
+
+      expect(row).toBeTruthy();
+      // The stored value must not be (or contain) the raw base32 secret, and
+      // must be wrapped in the sealed scheme rather than stored plaintext.
+      expect(row!.secret).not.toBe(setup.secret);
+      expect(row!.secret).not.toContain(setup.secret);
+      expect(row!.secret.startsWith("totp_secret:local_encrypted_v1:")).toBe(true);
+
+      // A fresh valid token still verifies correctly after the encrypt/decrypt
+      // round trip through storage.
+      const nextToken = speakeasy.totp({ secret: setup.secret, encoding: "base32" });
+      const result = await service.validateAndConsumeTotpToken(setupUserId, nextToken, false);
+      expect(result.valid).toBe(true);
+    });
+
+    it("rejects an invalid code after the encrypted round trip", async () => {
+      const setupUserId = randomUUID();
+      const now = new Date();
+      await db.insert(authUsers).values({
+        id: setupUserId,
+        name: "Setup Test User 2",
+        email: `setup2-${setupUserId}@example.com`,
+        emailVerified: true,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      const setup = await service.initiateTotpSetup(setupUserId, `setup2-${setupUserId}@example.com`);
+      const currentToken = speakeasy.totp({ secret: setup.secret, encoding: "base32" });
+      await service.completeTotpSetup(setupUserId, setup.secret, currentToken, setup.recoveryCodes);
+
+      const result = await service.validateAndConsumeTotpToken(setupUserId, "000000", false);
       expect(result.valid).toBe(false);
     });
   });

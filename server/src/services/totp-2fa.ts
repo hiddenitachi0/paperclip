@@ -3,6 +3,34 @@ import { and, eq, gte, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { userTotpSecrets, userRecoveryCodes, totpSessionTokens, authUsers } from "@paperclipai/db";
 import * as speakeasy from "speakeasy";
+import { localEncryptedProvider } from "../secrets/local-encrypted-provider.js";
+
+// DUR-4180: the raw base32 TOTP secret must never be written to the
+// database in plaintext (it is the only thing standing between an attacker
+// with DB read access and a full TOTP bypass). We seal it with the same
+// local_encrypted AES-256-GCM scheme already used elsewhere in this codebase
+// for exactly this kind of "single sensitive field, not part of the
+// company secrets vault" case (see instance-claude-auth.ts's
+// sealToken/unsealToken for the identical pattern). The sealed prefix marks
+// the on-disk format so a future migration to a different scheme can be
+// detected instead of silently misparsed.
+const SEALED_TOTP_SECRET_PREFIX = "totp_secret:local_encrypted_v1:";
+
+async function sealTotpSecret(secret: string): Promise<string> {
+  const prepared = await localEncryptedProvider.createSecret({ value: secret });
+  return `${SEALED_TOTP_SECRET_PREFIX}${JSON.stringify(prepared.material)}`;
+}
+
+async function unsealTotpSecret(sealed: string): Promise<string> {
+  if (!sealed.startsWith(SEALED_TOTP_SECRET_PREFIX)) {
+    // Defence in depth for any pre-existing plaintext row from before this
+    // fix: treat anything without the sealed prefix as already-plaintext
+    // rather than throwing, so existing (test/dev) rows do not hard-break.
+    return sealed;
+  }
+  const material = JSON.parse(sealed.slice(SEALED_TOTP_SECRET_PREFIX.length)) as Record<string, unknown>;
+  return localEncryptedProvider.resolveVersion({ material, externalRef: null });
+}
 
 export interface TotpSetupResponse {
   secret: string;
@@ -73,12 +101,14 @@ export function totpService(db: Db) {
 
     const now = new Date();
     const setupId = `totp_${randomBytes(16).toString("hex")}`;
+    const sealedSecret = await sealTotpSecret(secret);
 
-    // Store the TOTP secret (verified)
+    // Store the TOTP secret (verified), encrypted at rest -- never the raw
+    // base32 value (DUR-4180).
     await db.insert(userTotpSecrets).values({
       id: setupId,
       userId,
-      secret,
+      secret: sealedSecret,
       verified: true,
       enabledAt: now,
       createdAt: now,
@@ -176,7 +206,8 @@ export function totpService(db: Db) {
       return { valid: false, totalCodes: 0, remainingCodes: 0 };
     }
 
-    const isValid = await verifyTotpToken(secret.secret, token);
+    const plaintextSecret = await unsealTotpSecret(secret.secret);
+    const isValid = await verifyTotpToken(plaintextSecret, token);
 
     if (!isValid) {
       return { valid: false, totalCodes: 0, remainingCodes: 0 };

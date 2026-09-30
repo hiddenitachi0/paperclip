@@ -40,7 +40,7 @@ Paperclip enforces company-scoped isolation:
 
 **Board Users** (your team members):
 - Username/password authentication
-- Two-factor authentication (2FA) available for enhanced security
+- Two-factor authentication (2FA): implemented at the backend/service level (TOTP secret generation, verification, recovery codes) but not yet wired up to any API route or UI, so it is not enforced or usable by board users today
 - Session tokens stored securely
 - Automatic session expiration
 
@@ -169,7 +169,7 @@ While Paperclip provides strong security controls, your security also depends on
 
 ### Current Release
 
-- Two-factor authentication (2FA) for board users
+- Two-factor authentication (2FA) backend service (TOTP + recovery codes) built but not yet connected to a route or UI — not yet usable by board users
 - Comprehensive audit logging
 - Company-scoped data isolation
 - API key management with hashing
