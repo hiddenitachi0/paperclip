@@ -25,6 +25,7 @@ import type {
   PluginIssueAssigneeSummary,
   PluginIssueOrchestrationSummary,
   PluginExecutionWorkspaceMetadata,
+  WorkerHostCallContext,
 } from "@paperclipai/plugin-sdk";
 import type { CreateIssueThreadInteraction, InviteJoinType, IssueDocumentSummary, PermissionKey, PrincipalType } from "@paperclipai/shared";
 import { pluginOperationIssueOriginKind } from "@paperclipai/shared";
@@ -569,6 +570,88 @@ export function buildHostServices(
     if (run) return run.companyId === companyId ? run.agentId : null;
     const laneARun = findLaneAPluginRun(runId);
     return laneARun && laneARun.companyId === companyId ? laneARun.agentId : null;
+  };
+
+  /**
+   * Whether `runId` currently holds a checkout-based claim on `issue`:
+   * either it IS the issue's live checkoutRunId, or it is a Lane-A
+   * quick-agent run assigned to the issue or naming it in the requester's
+   * message. Shared by createAttachment and createComment so the two
+   * enforcement paths cannot drift apart (DUR-4096).
+   */
+  const resolveIssueRunAccess = async (
+    issue: { id: string; identifier: string | null; assigneeAgentId?: string | null },
+    companyId: string,
+    runId: string,
+  ): Promise<"checkout" | "lane-a-allowed" | "lane-a-denied" | "none"> => {
+    const checkoutRow = await db
+      .select({ id: issuesTable.id, checkoutRunId: issuesTable.checkoutRunId })
+      .from(issuesTable)
+      .where(and(eq(issuesTable.id, issue.id), eq(issuesTable.companyId, companyId)))
+      .then((rows) => rows[0] ?? null);
+    if (checkoutRow && checkoutRow.checkoutRunId === runId) return "checkout";
+    const laneARun = findLaneAPluginRun(runId);
+    if (!laneARun || laneARun.companyId !== companyId) return "none";
+    const assignedToQuickAgent = issue.assigneeAgentId === laneARun.agentId;
+    return assignedToQuickAgent || laneAPluginRunNamesIssue(laneARun, issue) ? "lane-a-allowed" : "lane-a-denied";
+  };
+
+  /** Heartbeat run statuses that mean "still in flight" -- see isHeartbeatRunEnded. */
+  const ACTIVE_HEARTBEAT_RUN_STATUSES = new Set(["queued", "running", "scheduled_retry"]);
+
+  /**
+   * True only when `runId` is a heartbeat run in this company that has
+   * actually finished (any status other than queued/running/scheduled_retry).
+   * A Lane-A run, or an id that doesn't resolve to a heartbeat run at all,
+   * is never "ended" here -- it's simply not the case this check is for.
+   *
+   * Used to gate createComment's assignment-based delivery exception: that
+   * exception exists for background-job delivery whose *triggering* run has
+   * already ended, not as a general license for any currently-live run to
+   * reach a different issue just because its agent happens to be assigned
+   * there (DUR-4096 security-review follow-up -- see createComment).
+   */
+  const isHeartbeatRunEnded = async (companyId: string, runId: string): Promise<boolean> => {
+    const run = await db
+      .select({ status: heartbeatRuns.status })
+      .from(heartbeatRuns)
+      .where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, companyId)))
+      .then((rows) => rows[0] ?? null);
+    return run !== null && !ACTIVE_HEARTBEAT_RUN_STATUSES.has(run.status);
+  };
+
+  /**
+   * When this call happens inside a live, host-verified tool invocation
+   * (`executeTool`), `context.invocationScope.runId` is the run actually
+   * driving this call right now -- set by the host itself from
+   * `runContext.runId` after the route layer already checked it against
+   * `heartbeat_runs` (`validateToolRunContextScope`, server/src/routes/
+   * plugins.ts), never from anything the plugin process supplies on this
+   * RPC call. `params.runId` here is a plain plugin-supplied field with no
+   * such binding.
+   *
+   * If the host knows the real live run, a plugin-supplied `params.runId`
+   * naming a *different* run must be rejected outright: without this, a
+   * live invocation could "borrow" any other real, completed run belonging
+   * to the same agent (trivially discoverable -- every comment/attachment
+   * an agent has ever authored exposes its own `createdByRunId`) to satisfy
+   * an ended-run check the live call itself could never pass on its own
+   * merits (DUR-4096 security-review follow-up).
+   *
+   * Absent (background job / webhook / scheduler dispatch has no live tool
+   * invocation) -- there is nothing to bind against, so `params.runId` is
+   * left to the caller's own DB-backed validation (resolveIssueRunAccess /
+   * isHeartbeatRunEnded), which is what the legitimate background-job
+   * delivery case (media-studio's job poller) relies on.
+   */
+  const assertRunIdMatchesLiveInvocation = (
+    context: WorkerHostCallContext | undefined,
+    runId: string,
+  ): void => {
+    const liveRunId = context?.invocationScope?.runId;
+    if (liveRunId && liveRunId !== runId) {
+      throw new Error("runId must match the invoking run");
+    }
   };
 
   const logPluginActivity = async (input: {
@@ -1911,10 +1994,67 @@ export function buildHostServices(
         if (!inCompany(await issues.getById(params.issueId), companyId)) return [];
         return (await issues.listComments(params.issueId)) as IssueComment[];
       },
-      async createComment(params) {
+      async createComment(params, context) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
         const issue = requireInCompany("Issue", await issues.getById(params.issueId), companyId);
+
+        // DUR-4096: an attributed comment (authorAgentId set) is an
+        // impersonation-adjacent primitive -- it reads, in the issue
+        // thread, as if that agent said something -- so it gets the same
+        // host-enforced checkout/Lane-A boundary createAttachment already
+        // has (resolveIssueRunAccess), plus one narrower exception: a run
+        // that has already ENDED and resolves to the issue's *current*
+        // assignee may still comment despite never holding checkout, for
+        // background-job delivery whose triggering tool-call run (and its
+        // checkout) already ended (media-studio's job poller and similar --
+        // see DUR-4096). That "already ended" condition is load-bearing and
+        // host-enforced (isHeartbeatRunEnded), not just documented: without
+        // it, any of an agent's currently-live runs could reach a
+        // completely unrelated issue merely because that agent happens to
+        // be assigned there too -- a second security review of this same
+        // PR found that exact gap before merge. A *third* review then found
+        // that "ended" alone wasn't enough either: a live invocation could
+        // still name a different, real, already-ended run of its own agent
+        // (e.g. one it has seen via createdByRunId on its own past
+        // comments) to reach the assignment-based exception on an issue the
+        // live call itself has no relationship to. assertRunIdMatchesLiveInvocation
+        // closes that: whenever this call happens inside a live tool
+        // invocation, params.runId is host-verified to be that exact
+        // invocation's own run, not merely "some real run of this agent".
+        // An unattributed comment (no authorAgentId) can't be used to
+        // impersonate anyone, so it keeps
+        // the pre-DUR-4096 company-scope-only check, unchanged for callers
+        // like plugin-llm-wiki that post plugin-authored status comments
+        // with no agent attribution on issue ids their own code resolved,
+        // never from model/tool-call input.
+        if (params.authorAgentId) {
+          if (!params.runId) {
+            throw new Error("runId is required when authorAgentId is set");
+          }
+          assertRunIdMatchesLiveInvocation(context, params.runId);
+          const callingAgentId = await callingAgentIdForRun(companyId, params.runId);
+          if (!callingAgentId || callingAgentId !== params.authorAgentId) {
+            throw new Error("authorAgentId must match the invoking run's own agent");
+          }
+          const access = await resolveIssueRunAccess(issue, companyId, params.runId);
+          const assignedToCallingAgent = issue.assigneeAgentId === callingAgentId;
+          const deliveryAfterRunEnded =
+            assignedToCallingAgent &&
+            access === "none" &&
+            (await isHeartbeatRunEnded(companyId, params.runId));
+          if ((access === "none" || access === "lane-a-denied") && !deliveryAfterRunEnded) {
+            if (access === "lane-a-denied") {
+              const ref = issue.identifier ?? issue.id;
+              throw new Error(
+                `The task ${ref} was not named in the message, so the quick agent cannot comment on it. ` +
+                  `Name the task in your message (for example ${issue.identifier ?? "DUR-12"}), or assign the task to the quick agent.`,
+              );
+            }
+            throw new Error("Issue is not currently checked out by the invoking run, and is not assigned to the calling agent");
+          }
+        }
+
         const comment = (await issues.addComment(
           params.issueId,
           params.body,
@@ -1957,7 +2097,7 @@ export function buildHostServices(
         });
         return interaction as any;
       },
-      async createAttachment(params) {
+      async createAttachment(params, context) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
         const issue = requireInCompany("Issue", await issues.getById(params.issueId), companyId);
@@ -1966,16 +2106,17 @@ export function buildHostServices(
         // attach content to an issue it isn't currently running against, even
         // though it declares issue.attachments.create. Without this check the
         // only remaining boundary would be company scope, which every issue
-        // in the company passes.
+        // in the company passes. (resolveIssueRunAccess is shared with
+        // createComment's own checkout/Lane-A enforcement -- DUR-4096.)
         if (!params.runId) {
           throw new Error("runId is required");
         }
-        const checkoutRow = await db
-          .select({ id: issuesTable.id, checkoutRunId: issuesTable.checkoutRunId })
-          .from(issuesTable)
-          .where(and(eq(issuesTable.id, issue.id), eq(issuesTable.companyId, companyId)))
-          .then((rows) => rows[0] ?? null);
-        if (!checkoutRow || checkoutRow.checkoutRunId !== params.runId) {
+        // Same host-verified live-invocation binding as createComment
+        // (DUR-4096 security-review follow-up) -- kept here too so the two
+        // enforcement paths cannot drift apart on this point either.
+        assertRunIdMatchesLiveInvocation(context, params.runId);
+        const access = await resolveIssueRunAccess(issue, companyId, params.runId);
+        if (access === "lane-a-denied") {
           // A quick agent (Lane A) has no checkout: it answers in chat. Its
           // run is resolved by the host (lane-a-plugin-runs.ts, one id per
           // tool call), never from a plugin-claimed id, and it may attach
@@ -1984,18 +2125,14 @@ export function buildHostServices(
           // tool input comes from the model, and a file or a sales lookup
           // the agent read this turn lands in the same context — so a task
           // reference planted there is not enough.
-          const laneARun = findLaneAPluginRun(params.runId);
-          if (!laneARun || laneARun.companyId !== companyId) {
-            throw new Error("Issue is not currently checked out by the invoking run");
-          }
-          const assignedToQuickAgent = issue.assigneeAgentId === laneARun.agentId;
-          if (!assignedToQuickAgent && !laneAPluginRunNamesIssue(laneARun, issue)) {
-            const ref = issue.identifier ?? issue.id;
-            throw new Error(
-              `The task ${ref} was not named in the message, so the quick agent cannot attach to it. ` +
-                `Name the task in your message (for example ${issue.identifier ?? "DUR-12"}), or assign the task to the quick agent.`,
-            );
-          }
+          const ref = issue.identifier ?? issue.id;
+          throw new Error(
+            `The task ${ref} was not named in the message, so the quick agent cannot attach to it. ` +
+              `Name the task in your message (for example ${issue.identifier ?? "DUR-12"}), or assign the task to the quick agent.`,
+          );
+        }
+        if (access === "none") {
+          throw new Error("Issue is not currently checked out by the invoking run");
         }
 
         const contentType = normalizeContentType(params.contentType);

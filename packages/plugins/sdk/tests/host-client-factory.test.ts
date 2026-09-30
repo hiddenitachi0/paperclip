@@ -235,10 +235,11 @@ describe("createHostClientHandlers invocation company scope", () => {
     });
 
     const params = { issueId: "issue-a", companyId: "company-a", contentBase64: "AA==", contentType: "image/png", runId: "run-a" };
+    const context = { invocationScope: { companyId: "company-a" } };
     await expect(
-      handlers["issues.createAttachment"](params, { invocationScope: { companyId: "company-a" } }),
+      handlers["issues.createAttachment"](params, context),
     ).resolves.toEqual({ id: "attachment-a" });
-    expect(createAttachment).toHaveBeenCalledWith(params);
+    expect(createAttachment).toHaveBeenCalledWith(params, context);
   });
   it("keeps company files to the current invocation company", async () => {
     const createCompanyFile = vi.fn(async () => ({ id: "file-a" }));

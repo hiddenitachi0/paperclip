@@ -192,6 +192,46 @@ describeEmbeddedPostgres("plugin-host-services issues.createAttachment", () => {
     ).rejects.toThrow("not currently checked out by the invoking run");
   });
 
+  it("rejects a live invocation that names a different run's id, even one that owns some issue's checkout (runId-spoofing security-review follow-up, DUR-4096)", async () => {
+    // Mirrors the createComment security-review follow-up: whenever the
+    // host knows which run is actually driving this call (a live
+    // executeTool invocation, modeled here by `context`), a plugin-supplied
+    // params.runId naming a different run must be rejected outright, even
+    // if that named run happens to hold real checkout somewhere. Otherwise
+    // a live invocation could reach any issue whose checkout the calling
+    // agent's *other* runs happen to hold, well outside its own live
+    // execution's actual relationship to that issue.
+    const { companyId, runId, staleRunId } = await seed();
+    const otherIssueId = randomUUID();
+    await db.insert(issues).values({
+      id: otherIssueId,
+      companyId,
+      identifier: "T-2",
+      title: "Also has a checkout, held by a different run",
+      status: "in_progress",
+      priority: "medium",
+      checkoutRunId: staleRunId,
+    });
+    const services = buildHostServices(db, randomUUID(), "media-studio-test", createEventBusStub(), undefined, {
+      storage: createStorageServiceStub(),
+    });
+
+    await expect(
+      services.issues.createAttachment(
+        {
+          issueId: otherIssueId,
+          companyId,
+          contentBase64: Buffer.from("x").toString("base64"),
+          contentType: "image/png",
+          runId: staleRunId,
+        },
+        { invocationScope: { companyId, runId } },
+      ),
+    ).rejects.toThrow("runId must match the invoking run");
+    const rows = await db.select().from(issueAttachments).where(eq(issueAttachments.issueId, otherIssueId));
+    expect(rows).toHaveLength(0);
+  });
+
   it("rejects a disallowed content type", async () => {
     const { companyId, issueId, runId } = await seed();
     const services = buildHostServices(db, randomUUID(), "media-studio-test", createEventBusStub(), undefined, {
