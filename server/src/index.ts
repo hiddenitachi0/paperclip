@@ -75,6 +75,8 @@ import { watcherService } from "./services/watchers.js";
 import { morningReportService } from "./services/morning-report.js";
 import { paymentCardService } from "./services/payment-cards.js";
 import { mailSecretaryService } from "./services/mail-secretary.js";
+import { videoStorylineRenderService } from "./services/video-storyline-render.js";
+import { videoStorylineStitchService } from "./services/video-storyline-stitch.js";
 import { describeTickPhases } from "./services/scheduler-tick-phases.js";
 import {
   SCHEDULER_TICK_CHAIN,
@@ -1026,6 +1028,8 @@ export async function startServer(): Promise<StartedServer> {
     const morningReports = morningReportService(schedulerDb as any);
     const paymentCards = paymentCardService(schedulerDb as any);
     const mailSecretary = mailSecretaryService(schedulerDb as any);
+    const videoStorylineRender = videoStorylineRenderService(schedulerDb as any);
+    const videoStorylineStitch = videoStorylineStitchService(schedulerDb as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(schedulerDb as any);
     const quietModeAlerts = quietModeAlertsService(schedulerDb as any);
     const personaPublisherSweep = config.personaPublishingSweepEnabled
@@ -1449,6 +1453,51 @@ export async function startServer(): Promise<StartedServer> {
           })
           .catch((err) => {
             logger.error({ err }, "mail-secretary tick failed");
+          }),
+      );
+
+      // Video storylines (DUR-4127): advance in-flight shot renders, then
+      // stitch storylines whose shots have all finished. Ships behind the
+      // per-company videoStorylinesEnabled flag (default off) -- see
+      // video-storyline-settings.ts -- but the ticks themselves always run;
+      // an instance with the flag off everywhere just finds nothing to do.
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.videoStorylineRender, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: videoStorylineRender",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:videoStorylineRender",
+          },
+          () => videoStorylineRender.tick(),
+        )
+          .then((result) => {
+            if (result.advanced > 0 || result.failed > 0) {
+              logger.info({ ...result }, "video-storyline-render tick");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "video-storyline-render tick failed");
+          }),
+      );
+
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.videoStorylineStitch, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: videoStorylineStitch",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:videoStorylineStitch",
+          },
+          () => videoStorylineStitch.tick(),
+        )
+          .then((result) => {
+            if (result.stitched > 0 || result.blocked > 0 || result.failed > 0) {
+              logger.info({ ...result }, "video-storyline-stitch tick");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "video-storyline-stitch tick failed");
           }),
       );
 

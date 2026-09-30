@@ -107,6 +107,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "payment-cards.ts",
   // Private-workspace emergency-access routes (DUR-4094) are owner/admin-only and not yet in the public OpenAPI document.
   "private-access.ts",
+  // Video storyline routes (DUR-4127) are a new backend feature, off by default, and not yet in the public OpenAPI document.
+  "video-storylines.ts",
 ]);
 
 function createApp() {
