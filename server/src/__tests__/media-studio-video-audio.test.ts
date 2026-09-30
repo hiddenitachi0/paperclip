@@ -65,6 +65,7 @@ async function setup(config: Record<string, unknown>, withIssue = false): Promis
               status: "in_progress",
               priority: "medium",
               assigneeAgentId: AGENT,
+              checkoutRunId: RUN,
             } as never,
           ],
         }
@@ -170,6 +171,24 @@ describe("generate-video", () => {
     expect(calls).toHaveLength(0);
   });
 
+  // DUR-4091 finding 1: issueId comes straight from the model's tool-call
+  // parameters, and the background job later comments on/wakes it with only
+  // a company check. Before starting the job, the calling agent must
+  // currently own the checkout on that issueId — same rule generate-image
+  // gets for free from createAttachment.
+  it("refuses issueId for an issue the calling agent has not checked out, before calling anything", async () => {
+    const harness = await setup(FAL, true);
+    const { calls } = fakeFalQueue(harness);
+    const reserve = vi.spyOn(harness.ctx.personas, "reserveDailyGeneration");
+    const otherRunCtx = { ...runCtx, agentId: OTHER_AGENT };
+
+    const result = await harness.executeTool<any>(TOOL_GENERATE_VIDEO, { prompt: "x", issueId: ISSUE }, otherRunCtx);
+
+    expect(result.error).toMatch(/currently checked out/);
+    expect(reserve).not.toHaveBeenCalled();
+    expect(falSubmits(calls)).toHaveLength(0);
+  });
+
   it("counts toward the daily picture limit, reserved before the provider is called", async () => {
     const harness = await setup(FAL);
     const { calls } = fakeFalQueue(harness);
@@ -216,6 +235,20 @@ describe("generate-audio", () => {
     const harness = await setup(FAL);
     const result = await harness.executeTool<any>(TOOL_GENERATE_AUDIO, { prompt: "x", mode: "yodel" }, runCtx);
     expect(result.error).toMatch(/not "music" or "speech"/);
+  });
+
+  // DUR-4091 finding 1, same rule as generate-video.
+  it("refuses issueId for an issue the calling agent has not checked out, before calling anything", async () => {
+    const harness = await setup(FAL, true);
+    const { calls } = fakeFalQueue(harness, { resultKey: "audio" });
+    const reserve = vi.spyOn(harness.ctx.personas, "reserveDailyGeneration");
+    const otherRunCtx = { ...runCtx, agentId: OTHER_AGENT };
+
+    const result = await harness.executeTool<any>(TOOL_GENERATE_AUDIO, { prompt: "x", issueId: ISSUE }, otherRunCtx);
+
+    expect(result.error).toMatch(/currently checked out/);
+    expect(reserve).not.toHaveBeenCalled();
+    expect(falSubmits(calls)).toHaveLength(0);
   });
 });
 

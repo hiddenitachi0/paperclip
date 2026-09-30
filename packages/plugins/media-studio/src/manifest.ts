@@ -233,6 +233,10 @@ const manifest: PaperclipPluginManifestV1 = {
     "jobs.schedule",
     "issue.comments.create",
     "issues.wakeup",
+    // DUR-4091 finding 1: generate-video/generate-audio must confirm the calling
+    // agent currently owns the checkout on any issueId it supplies before a
+    // background job is started against it.
+    "issues.checkout",
   ],
   entrypoints: {
     worker: "./dist/worker.js",

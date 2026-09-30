@@ -1685,6 +1685,34 @@ function readSeedParam(value: unknown): number | undefined | "invalid" {
   return seed === "invalid" ? "invalid" : (seed ?? undefined);
 }
 
+/**
+ * DUR-4091 finding 1: generate-video/generate-audio take `issueId` straight
+ * from the model's own tool-call parameters. The tool call itself still runs
+ * on the calling agent's live, checked-out run, so — unlike the background
+ * job that later delivers the result — this is the one point where the host
+ * can still verify the agent actually owns that issue right now, the same
+ * rule `createAttachment` already enforces for generate-image. Returns an
+ * error string when the calling agent may not use this issueId, or null when
+ * it is clear to proceed.
+ */
+async function assertOwnedIssueId(
+  ctx: PluginContext,
+  runCtx: { agentId: string; runId: string; companyId: string },
+  issueId: string,
+): Promise<string | null> {
+  try {
+    await ctx.issues.assertCheckoutOwner({
+      issueId,
+      companyId: runCtx.companyId,
+      actorAgentId: runCtx.agentId,
+      actorRunId: runCtx.runId,
+    });
+    return null;
+  } catch {
+    return "You can only post this to a task you're currently checked out on and working.";
+  }
+}
+
 function registerMediaJobTools(ctx: PluginContext): void {
   ctx.tools.register(
     TOOL_GENERATE_VIDEO,
@@ -1694,6 +1722,10 @@ function registerMediaJobTools(ctx: PluginContext): void {
       const prompt = typeof rawParams.prompt === "string" ? rawParams.prompt.trim() : "";
       if (!prompt) return { error: "prompt is required" };
       const issueId = typeof rawParams.issueId === "string" && rawParams.issueId.trim() ? rawParams.issueId.trim() : null;
+      if (issueId) {
+        const ownershipError = await assertOwnedIssueId(ctx, runCtx, issueId);
+        if (ownershipError) return { error: ownershipError };
+      }
 
       const rawProvider = typeof rawParams.provider === "string" ? rawParams.provider.trim().toLowerCase() : "";
       if (rawProvider && rawProvider !== "fal" && rawProvider !== "sogni") {
@@ -1753,6 +1785,10 @@ function registerMediaJobTools(ctx: PluginContext): void {
       const prompt = typeof rawParams.prompt === "string" ? rawParams.prompt.trim() : "";
       if (!prompt) return { error: "prompt is required" };
       const issueId = typeof rawParams.issueId === "string" && rawParams.issueId.trim() ? rawParams.issueId.trim() : null;
+      if (issueId) {
+        const ownershipError = await assertOwnedIssueId(ctx, runCtx, issueId);
+        if (ownershipError) return { error: ownershipError };
+      }
 
       const rawMode = typeof rawParams.mode === "string" && rawParams.mode.trim() ? rawParams.mode.trim().toLowerCase() : "music";
       if (rawMode !== "music" && rawMode !== "speech") {
