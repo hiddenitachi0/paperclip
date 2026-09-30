@@ -14,6 +14,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compatibility.js";
 
 vi.hoisted(() => {
   process.env.PAPERCLIP_HOME = "/tmp/paperclip-test-home";
@@ -82,6 +83,18 @@ async function createCompanyWithOwner(db: Db) {
     })
     .returning()
     .then((rows) => rows[0]!);
+  // Every real owner-creation path (board-claim.ts's instance claim flow,
+  // middleware/auth.ts's cloud_tenant provisioning) seeds the role's default
+  // grants via ensureHumanRoleDefaultGrants immediately after inserting the
+  // membership row -- permission decisions are made against materialized
+  // principalPermissionGrants rows, never derived from membershipRole at
+  // decide-time. Mirror that here so this fixture reflects a real Owner.
+  await ensureHumanRoleDefaultGrants(db, {
+    companyId: company.id,
+    principalId: owner.principalId,
+    membershipRole: "owner",
+    grantedByUserId: null,
+  });
   return { company, owner };
 }
 
@@ -144,6 +157,24 @@ describeEmbeddedPostgres("access routes permissions upgrade compatibility", () =
     }
   }, 30_000);
 
+  it("DUR-4117: lets a real production-style Owner (default role grants, non-local-implicit session) GET the member list", async () => {
+    const { company, owner } = await createCompanyWithOwner(db);
+
+    // Force a real permission-grant decision instead of the local_implicit
+    // board bypass, the same as a signed-in Owner hitting this route over a
+    // normal session -- proves the Owner's default grants (materialized by
+    // createCompanyWithOwner via ensureHumanRoleDefaultGrants, matching
+    // board-claim.ts and middleware/auth.ts's cloud_tenant provisioning)
+    // are sufficient on their own, with no bypass involved.
+    const res = await request(
+      await createApp(db, company.id, owner.principalId, { source: "session", isInstanceAdmin: false }),
+    ).get(`/api/companies/${company.id}/members`);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const memberIds = res.body.members.map((m: { id: string }) => m.id);
+    expect(memberIds).toEqual([owner.id]);
+  }, 30_000);
+
   it("DUR-4076: rejects a member without users:invite (viewer) from GET-ing the member list", async () => {
     const { company } = await createCompanyWithOwner(db);
     const viewer = await db
@@ -160,6 +191,28 @@ describeEmbeddedPostgres("access routes permissions upgrade compatibility", () =
 
     const res = await request(
       await createApp(db, company.id, viewer.principalId, { source: "session", isInstanceAdmin: false }),
+    ).get(`/api/companies/${company.id}/members`);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+  }, 30_000);
+
+  it("DUR-4117: rejects a member without users:invite (operator) from GET-ing the member list", async () => {
+    const { company } = await createCompanyWithOwner(db);
+    const operator = await db
+      .insert(companyMemberships)
+      .values({
+        companyId: company.id,
+        principalType: "user",
+        principalId: `operator-${randomUUID()}`,
+        status: "active",
+        membershipRole: "operator",
+      })
+      .returning()
+      .then((rows) => rows[0]!);
+    // grantsForHumanRole("operator") is only tasks:assign -- no users:invite.
+
+    const res = await request(
+      await createApp(db, company.id, operator.principalId, { source: "session", isInstanceAdmin: false }),
     ).get(`/api/companies/${company.id}/members`);
 
     expect(res.status, JSON.stringify(res.body)).toBe(403);
