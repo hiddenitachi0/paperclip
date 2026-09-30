@@ -1,4 +1,5 @@
-import { pgTable, text, timestamp, boolean } from "drizzle-orm/pg-core";
+import { pgTable, text, timestamp, boolean, index, unique } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 export const authUsers = pgTable("user", {
   id: text("id").primaryKey(),
@@ -6,6 +7,8 @@ export const authUsers = pgTable("user", {
   email: text("email").notNull(),
   emailVerified: boolean("email_verified").notNull().default(false),
   image: text("image"),
+  totpRequired: boolean("totp_required").notNull().default(false),
+  totpVerifiedAt: timestamp("totp_verified_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
 });
@@ -45,3 +48,61 @@ export const authVerifications = pgTable("verification", {
   createdAt: timestamp("created_at", { withTimezone: true }),
   updatedAt: timestamp("updated_at", { withTimezone: true }),
 });
+
+export const userTotpSecrets = pgTable(
+  "user_totp_secrets",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => authUsers.id, { onDelete: "cascade" }),
+    secret: text("secret").notNull(),
+    verified: boolean("verified").notNull().default(false),
+    enabledAt: timestamp("enabled_at", { withTimezone: true }),
+    disabledAt: timestamp("disabled_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    userIdIdx: index("idx_user_totp_secrets_user_id").on(table.userId),
+    verifiedIdx: index("idx_user_totp_secrets_verified").on(table.verified, table.userId),
+    uniqueActivePerUser: unique("only_one_active_totp_per_user").on(table.userId).where(sql`${table.disabledAt} IS NULL`),
+  }),
+);
+
+export const userRecoveryCodes = pgTable(
+  "user_recovery_codes",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => authUsers.id, { onDelete: "cascade" }),
+    codeHash: text("code_hash").notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    userIdIdx: index("idx_user_recovery_codes_user_id").on(table.userId),
+    codeHashIdx: index("idx_user_recovery_codes_hash").on(table.codeHash),
+  }),
+);
+
+export const totpSessionTokens = pgTable(
+  "totp_session_tokens",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => authUsers.id, { onDelete: "cascade" }),
+    sessionId: text("session_id").notNull(),
+    verifiedAt: timestamp("verified_at", { withTimezone: true }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    userIdIdx: index("idx_totp_session_tokens_user_id").on(table.userId),
+    sessionIdIdx: index("idx_totp_session_tokens_session_id").on(table.sessionId),
+    expiresAtIdx: index("idx_totp_session_tokens_expires_at").on(table.expiresAt),
+  }),
+);
