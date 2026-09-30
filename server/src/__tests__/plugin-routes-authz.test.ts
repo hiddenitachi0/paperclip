@@ -1396,6 +1396,119 @@ describe.sequential("plugin tool and bridge authz", () => {
     expect(res.status).toBe(403);
     expect(executeTool).not.toHaveBeenCalled();
   });
+
+  it("rejects a live agent JWT naming a different, real run of its own as runContext.runId (DUR-4096 round 3)", async () => {
+    // Round-3 finding: `runContext.runId` is caller-supplied in the POST body
+    // and, pre-fix, was never checked against the run the caller is actually
+    // authenticated as (`req.actor.runId`, baked into the signed JWT at mint
+    // time). A live run could therefore name a different, real (possibly
+    // already-ended) run of its own agent and have it trusted downstream as
+    // "the live run" -- exactly the spoof this test reproduces at the route
+    // layer instead of by constructing invocationScope directly.
+    const staleOwnRun = "99999999-9999-4999-8999-999999999999";
+    const executeTool = vi.fn();
+    const { app } = await createApp(
+      agentActor({ runId: runA }),
+      {},
+      {
+        db: createSelectQueueDb([]),
+        toolDeps: {
+          toolDispatcher: {
+            listToolsForAgent: vi.fn(),
+            getTool: vi.fn(() => ({ name: "paperclip.example:search", pluginDbId: pluginId })),
+            executeTool,
+          },
+        },
+      },
+    );
+
+    const res = await request(app)
+      .post("/api/plugins/tools/execute")
+      .send({
+        tool: "paperclip.example:search",
+        parameters: {},
+        runContext: { agentId: agentA, runId: staleOwnRun, companyId: companyA, projectId: projectA },
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/runContext\.runId.*does not match the authenticated run/);
+    expect(executeTool).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unbound agent API key naming a real but ended run of its own as runContext.runId (DUR-4096 round 4)", async () => {
+    // Round-4 finding: the round-3 anchor only fires when `actor.runId` is
+    // populated. A long-lived agent API key call with no run bound to it
+    // (no `x-paperclip-run-id` header, or one naming an ended run --
+    // `resolveAgentKeyRunId` returns undefined either way) has `actor.runId`
+    // undefined, skipping that anchor and letting `runContext.runId` be
+    // trusted again purely for naming a real run of the right agent/company
+    // -- including one long since completed.
+    const endedOwnRun = "99999999-9999-4999-8999-999999999999";
+    const executeTool = vi.fn();
+    const { app } = await createApp(
+      agentActor({ runId: undefined, source: "agent_key" }),
+      {},
+      {
+        db: createSelectQueueDb([
+          [{ companyId: companyA }],
+          [{ companyId: companyA, agentId: agentA, status: "completed" }],
+        ]),
+        toolDeps: {
+          toolDispatcher: {
+            listToolsForAgent: vi.fn(),
+            getTool: vi.fn(() => ({ name: "paperclip.example:search", pluginDbId: pluginId })),
+            executeTool,
+          },
+        },
+      },
+    );
+
+    const res = await request(app)
+      .post("/api/plugins/tools/execute")
+      .send({
+        tool: "paperclip.example:search",
+        parameters: {},
+        runContext: { agentId: agentA, runId: endedOwnRun, companyId: companyA, projectId: projectA },
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/runContext\.runId.*does not name a currently active run/);
+    expect(executeTool).not.toHaveBeenCalled();
+  });
+
+  it("allows an unbound agent API key naming its own currently active run as runContext.runId (DUR-4096 round 4)", async () => {
+    const activeOwnRun = "88888888-8888-4888-8888-888888888899";
+    const executeTool = vi.fn().mockResolvedValue({ content: "ok" });
+    const { app } = await createApp(
+      agentActor({ runId: undefined, source: "agent_key" }),
+      {},
+      {
+        db: createSelectQueueDb([
+          [{ companyId: companyA }],
+          [{ companyId: companyA, agentId: agentA, status: "running" }],
+          [{ companyId: companyA }],
+        ]),
+        toolDeps: {
+          toolDispatcher: {
+            listToolsForAgent: vi.fn(),
+            getTool: vi.fn(() => ({ name: "paperclip.example:search", pluginDbId: pluginId })),
+            executeTool,
+          },
+        },
+      },
+    );
+
+    const res = await request(app)
+      .post("/api/plugins/tools/execute")
+      .send({
+        tool: "paperclip.example:search",
+        parameters: {},
+        runContext: { agentId: agentA, runId: activeOwnRun, companyId: companyA, projectId: projectA },
+      });
+
+    expect(res.status).toBe(200);
+    expect(executeTool).toHaveBeenCalled();
+  });
 });
 
 describe("DUR-189 plugin tool grants", () => {

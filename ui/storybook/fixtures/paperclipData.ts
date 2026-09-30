@@ -595,6 +595,8 @@ function createProject(overrides: Partial<Project> = {}): Project {
     targetDate: "2026-04-30",
     color: "#0f766e",
     icon: null,
+    productionUrl: null,
+    hostingTarget: null,
     env: null,
     pauseReason: null,
     pausedAt: null,
@@ -618,6 +620,7 @@ function createProject(overrides: Partial<Project> = {}): Project {
       cleanupPolicy: null,
     },
     deployPolicy: null,
+    deployTransport: "git_push",
     codebase: {
       workspaceId: "workspace-board-ui",
       repoUrl: "https://github.com/paperclipai/paperclip",

@@ -540,16 +540,23 @@ export function createPluginWorkerHandle(
   ): PluginInvocationScope | null {
     if (!isRecord(params)) return null;
 
+    // executeTool's runContext.runId is the one host-verified "which run is
+    // calling right now" signal (validateToolRunContextScope in
+    // routes/plugins.ts already confirmed it belongs to runContext.agentId
+    // before this dispatch happens) -- checked first so a stray top-level
+    // params.companyId on an executeTool call can never shadow it.
+    if (method === "executeTool" && isRecord(params.runContext)) {
+      const companyId = readNonEmptyString(params.runContext.companyId);
+      if (!companyId) return null;
+      const runId = readNonEmptyString(params.runContext.runId);
+      return runId ? { companyId, runId } : { companyId };
+    }
+
     const directCompanyId = readNonEmptyString(params.companyId);
     if (directCompanyId) return { companyId: directCompanyId };
 
     if (method === "performAction" && isRecord(params.actorContext)) {
       const companyId = readNonEmptyString(params.actorContext.companyId);
-      return companyId ? { companyId } : null;
-    }
-
-    if (method === "executeTool" && isRecord(params.runContext)) {
-      const companyId = readNonEmptyString(params.runContext.companyId);
       return companyId ? { companyId } : null;
     }
 
