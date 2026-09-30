@@ -39,6 +39,9 @@ import {
   type SogniModelInfo,
 } from "./sogni-catalog.js";
 import {
+  ACTION_EDIT_CAPABILITIES,
+  ACTION_EDIT_FAL,
+  ACTION_EDIT_SOGNI,
   ACTION_GENERATE,
   ACTION_LOOKS_DELETE,
   ACTION_LOOKS_LIST,
@@ -1639,6 +1642,108 @@ const plugin = definePlugin({
         }
       }
       return { modelId, loras, maxLoras: publicCatalog?.maxPerRequest ?? SOGNI_MAX_LORAS, personal, live: publicCatalog !== null, note };
+    });
+
+    // Media Studio's Edit tab (DUR-4063): a person editing a picture directly
+    // in the browser, not an agent. Which AI edit buttons to show — the tab
+    // hides a button whose service has no key instead of offering one that
+    // would just fail.
+    ctx.actions.register(ACTION_EDIT_CAPABILITIES, async (_params, context) => {
+      if (!context.companyId) throw new Error("Open this page from inside a company.");
+      const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
+      const sogniRef = typeof cfg.sogniKeySecretRef === "string" ? cfg.sogniKeySecretRef.trim() : "";
+      const falRef = typeof cfg.falKeySecretRef === "string" ? cfg.falKeySecretRef.trim() : "";
+      return { sogni: sogniRef.length > 0, fal: falRef.length > 0 };
+    });
+
+    // Run one Sogni picture tool (restore/upscale/remove background) on a
+    // picture the person is editing. This is deliberately its own path, not
+    // runSogniTool: it takes the picture's bytes straight from the browser
+    // (the picture is already open in the editor) instead of re-reading
+    // ctx.files, and it does not reserve the agent daily-picture cap --
+    // that cap is per-agent, and this is a human editing their own picture,
+    // not an agent run.
+    ctx.actions.register(ACTION_EDIT_SOGNI, async (params, context) => {
+      if (context.actor.type !== "user") throw new Error("This is only for a person editing a picture in Media Studio.");
+      if (!context.companyId) throw new Error("Open this page from inside a company.");
+      const raw = (params ?? {}) as Record<string, unknown>;
+      const toolName = typeof raw.tool === "string" ? raw.tool : "";
+      const def = SOGNI_TOOLS.find((d) => d.name === toolName && d.kind === "picture");
+      if (!def) throw new Error("Unknown edit action.");
+      const imageDataUrl = typeof raw.imageDataUrl === "string" ? raw.imageDataUrl : "";
+      if (!/^data:image\//i.test(imageDataUrl)) throw new Error("Open a picture in the editor first.");
+
+      const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
+      const defaultModel = textOrNull(cfg.sogniModel) ?? SOGNI_DEFAULT_MODEL;
+      const callParams: Record<string, unknown> = { ...raw, fileId: "editor" };
+      delete callParams.tool;
+      delete callParams.imageDataUrl;
+      const prepared = prepareSogniCall(def, callParams, { defaultModel });
+      if ("error" in prepared) throw new Error(prepared.error);
+
+      const ref = typeof cfg.sogniKeySecretRef === "string" ? cfg.sogniKeySecretRef.trim() : "";
+      if (!ref) {
+        throw new Error("Ask an admin to add a Sogni API key in Media Studio settings to use AI edits.");
+      }
+      let apiKey: string;
+      try {
+        apiKey = await ctx.secrets.resolve(ref);
+      } catch (err) {
+        throw new Error(`The Sogni API key picked in Media Studio's settings could not be read: ${errorText(err)}`);
+      }
+      const sogni = new SogniProvider({
+        apiKey,
+        apiFetch: (url, init) => ctx.http.fetch(url, init),
+        transferFetch: guardedTransferFetch,
+        defaultModel,
+        tokenType: sogniTokenType(cfg),
+      });
+      try {
+        const made = await sogni.runPictureTool({
+          toolName: def.sogniTool,
+          arguments: prepared.arguments,
+          pictures: [imageDataUrl],
+          safeContentFilter: true,
+        });
+        const contentType = assertImageContentType(made.contentType);
+        return { imageDataUrl: `data:${contentType};base64,${made.contentBase64}`, contentType, provider: "sogni" };
+      } catch (err) {
+        throw new Error(errorText(err));
+      }
+    });
+
+    // "Make a variation" / "Edit with a prompt": Fal's Kontext model takes
+    // the picture as a reference and a written instruction. Same non-agent
+    // path as edit.sogni: no daily cap, bytes come straight from the browser.
+    ctx.actions.register(ACTION_EDIT_FAL, async (params, context) => {
+      if (context.actor.type !== "user") throw new Error("This is only for a person editing a picture in Media Studio.");
+      if (!context.companyId) throw new Error("Open this page from inside a company.");
+      const raw = (params ?? {}) as Record<string, unknown>;
+      const imageDataUrl = typeof raw.imageDataUrl === "string" ? raw.imageDataUrl : "";
+      if (!/^data:image\//i.test(imageDataUrl)) throw new Error("Open a picture in the editor first.");
+      const prompt = typeof raw.prompt === "string" ? raw.prompt.trim() : "";
+      if (!prompt) throw new Error("Describe what to change first.");
+
+      const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
+      const ref = typeof cfg.falKeySecretRef === "string" ? cfg.falKeySecretRef.trim() : "";
+      if (!ref) {
+        throw new Error("Ask an admin to add a Fal.ai API key in Media Studio settings to use AI edits.");
+      }
+      let falKey: string;
+      try {
+        falKey = await ctx.secrets.resolve(ref);
+      } catch (err) {
+        throw new Error(`The Fal.ai API key picked in Media Studio's settings could not be read: ${errorText(err)}`);
+      }
+      const providerConfig: ProviderConfig = { provider: "fal", falKey, falModel: FAL_REFERENCE_MODEL };
+      const impl = selectProvider(providerConfig, (url, init) => ctx.http.fetch(url, init));
+      try {
+        const result = await impl.generate({ prompt, referenceImages: [imageDataUrl] });
+        const { contentBase64, contentType } = await toAttachmentBytes(ctx, result);
+        return { imageDataUrl: `data:${contentType};base64,${contentBase64}`, contentType, provider: "fal" };
+      } catch (err) {
+        throw new Error(errorText(err));
+      }
     });
 
     // Sogni's picture tools and its prompt tool, one agent tool each (ticked

@@ -9529,6 +9529,86 @@ export function issueRoutes(
     res.status(201).json(withContentPath(attachment));
   });
 
+  // A company file with no task, uploaded directly by a board user (not an
+  // agent run). DUR-4063: Media Studio's picture editor saves an edited
+  // picture as a brand-new file here (never overwriting the one it started
+  // from) when the picture being edited did not come from a task's Files tab
+  // -- see POST /companies/:companyId/issues/:issueId/attachments above for
+  // the task-scoped case. Board access is full-control operator context
+  // (AGENTS.md §8), same company-access check as every other company route.
+  router.post("/companies/:companyId/files", companyScopeFromParam(rawDb, assertCompanyAccess), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+
+    const company = await companiesSvc.getById(companyId);
+    const attachmentMaxBytes = normalizeIssueAttachmentMaxBytes(company?.attachmentMaxBytes);
+
+    try {
+      await runSingleFileUpload(req, res, attachmentMaxBytes);
+    } catch (err) {
+      if (err instanceof multer.MulterError) {
+        if (err.code === "LIMIT_FILE_SIZE") {
+          res.status(422).json({ error: `File exceeds ${attachmentMaxBytes} bytes` });
+          return;
+        }
+        res.status(400).json({ error: err.message });
+        return;
+      }
+      throw err;
+    }
+
+    const file = (req as Request & { file?: { mimetype: string; buffer: Buffer; originalname: string } }).file;
+    if (!file) {
+      res.status(400).json({ error: "Missing file field 'file'" });
+      return;
+    }
+    const contentType = normalizeContentType(file.mimetype);
+    if (file.buffer.length <= 0) {
+      res.status(422).json({ error: "File is empty" });
+      return;
+    }
+
+    const actor = getActorInfo(req);
+    const stored = await storage.putFile({
+      companyId,
+      namespace: "company-files",
+      originalFilename: file.originalname || null,
+      contentType,
+      body: file.buffer,
+    });
+
+    const created = await svc.createCompanyFile({
+      companyId,
+      provider: stored.provider,
+      objectKey: stored.objectKey,
+      contentType: stored.contentType,
+      byteSize: stored.byteSize,
+      sha256: stored.sha256,
+      originalFilename: stored.originalFilename,
+      createdByAgentId: actor.agentId,
+      createdByUserId: actor.actorType === "user" ? actor.actorId : null,
+    });
+
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "company_file.created",
+      entityType: "company_file",
+      entityId: created.id,
+      details: {
+        attachmentId: created.id,
+        originalFilename: created.originalFilename,
+        contentType: created.contentType,
+        byteSize: created.byteSize,
+      },
+    });
+
+    res.status(201).json(withContentPath(created));
+  });
+
   router.get("/attachments/:attachmentId/content", scopeFromAttachmentParam(), async (req, res, next) => {
     const attachmentId = req.params.attachmentId as string;
     const attachment = await svc.getAttachmentById(attachmentId);
