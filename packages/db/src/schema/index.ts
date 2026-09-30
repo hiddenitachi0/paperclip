@@ -138,3 +138,4 @@ export { paymentNotices } from "./payment_notices.js";
 export { companyPaymentSettings } from "./company_payment_settings.js";
 export { paymentCards } from "./payment_cards.js";
 export { videoStorylines, videoScenes, videoShots, videoShotRenderJobs } from "./video_storylines.js";
+export { tradingStrategies, tradingOrders, tradingFifoLots, tradingLedgerEntries, tradingDailyStats } from "./trading.js";
