@@ -72,3 +72,23 @@ CREATE INDEX IF NOT EXISTS idx_user_recovery_codes_hash ON "user_recovery_codes"
 CREATE INDEX IF NOT EXISTS idx_totp_session_tokens_user_id ON "totp_session_tokens"("user_id");
 CREATE INDEX IF NOT EXISTS idx_totp_session_tokens_session_id ON "totp_session_tokens"("session_id");
 CREATE INDEX IF NOT EXISTS idx_totp_session_tokens_expires_at ON "totp_session_tokens"("expires_at");
+
+-- Instance-wide (no company_id), so no row-level-security policy -- same
+-- shape as instance_server_anthropic_key in 0170. The limited app logins
+-- from 0164_rls_login_roles.sql get the same table privileges 0164 gives
+-- every Paperclip table (the names are also in 0164's explicit table list,
+-- which its test keeps equal to the schema); guarded so this is safe where
+-- those roles do not exist.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'paperclip_app_scoped') THEN
+    EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE user_totp_secrets TO paperclip_app_scoped';
+    EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE user_recovery_codes TO paperclip_app_scoped';
+    EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE totp_session_tokens TO paperclip_app_scoped';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'paperclip_app_bypass_login') THEN
+    EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE user_totp_secrets TO paperclip_app_bypass_login';
+    EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE user_recovery_codes TO paperclip_app_bypass_login';
+    EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE totp_session_tokens TO paperclip_app_bypass_login';
+  END IF;
+END $$;
