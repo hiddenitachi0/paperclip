@@ -1,0 +1,18 @@
+-- Quick-agent "model hosts": which OpenRouter hosts a quick agent's model
+-- calls may (or may never) be sent to.
+--
+-- OpenRouter can serve one model from several hosts, and not every host
+-- supports tools. Without a way to pin hosts, OpenRouter could pick one that
+-- does not (Mistral Small 3.2 24B on Venice rather than DeepInfra) and the
+-- quick agent lost its tools.
+--
+-- After this migration:
+--   * lane_a_provider_routing (jsonb, nullable) holds
+--     { only?, order?, ignore?, allowFallbacks? } -- host slugs such as
+--     "deepinfra" -- validated by the API. It is only used when the quick
+--     agent's provider is OpenRouter. Null = no preference, i.e. exactly what
+--     happened before.
+--
+-- Additive only: one nullable column, no default, no row written. Every
+-- existing quick agent stays null. Guarded so a re-run is a no-op.
+ALTER TABLE "agents" ADD COLUMN IF NOT EXISTS "lane_a_provider_routing" jsonb;

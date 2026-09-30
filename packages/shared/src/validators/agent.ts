@@ -17,6 +17,8 @@ import {
   LANE_A_MIN_TEMPERATURE,
   LANE_A_MIN_TRANSFORM_DAILY_CALL_CAP,
   LANE_A_PROVIDERS,
+  LANE_A_PROVIDER_ROUTING_MAX_ENTRIES,
+  LANE_A_PROVIDER_SLUG_RE,
   laneAModelIssueForProvider,
 } from "../lane-a-models.js";
 import { envBindingSchema, envBindingSecretRefSchema, envConfigSchema } from "./secret.js";
@@ -25,6 +27,36 @@ import { trustAuthorizationPolicySchema, trustPresetSchema } from "./trust-polic
 import { agentDesiredSkillSelectionSchema } from "./adapter-skills.js";
 import { validateAdapterModelEffort } from "../model-effort.js";
 import { morningReportSettingsSchema } from "../morning-report.js";
+
+const laneAProviderSlugSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .regex(
+    LANE_A_PROVIDER_SLUG_RE,
+    "A model host must be a short OpenRouter host name in lower case letters, digits, dots, dashes or underscores, for example deepinfra.",
+  );
+
+const laneAProviderSlugListSchema = z
+  .array(laneAProviderSlugSchema)
+  .max(LANE_A_PROVIDER_ROUTING_MAX_ENTRIES, `List at most ${LANE_A_PROVIDER_ROUTING_MAX_ENTRIES} model hosts.`)
+  .optional();
+
+/**
+ * Quick-agent "model hosts" (agents.lane_a_provider_routing): which OpenRouter
+ * hosts a quick agent's calls may only use (`only`), try first (`order`) or
+ * never use (`ignore`), and whether OpenRouter may fall back to others.
+ * Used only when the quick agent's provider is OpenRouter. Null = no
+ * preference (OpenRouter picks), exactly as before the setting existed.
+ */
+export const laneAProviderRoutingSchema = z
+  .object({
+    only: laneAProviderSlugListSchema,
+    order: laneAProviderSlugListSchema,
+    ignore: laneAProviderSlugListSchema,
+    allowFallbacks: z.boolean().optional(),
+  })
+  .strict();
 
 /** Upper bound for agents.laneAInstructions (roughly 2k tokens); it is prepended to every quick-agent call. */
 export const LANE_A_INSTRUCTIONS_MAX_LENGTH = 8000;
@@ -59,6 +91,10 @@ export const QUICK_AGENT_FIELDS = [
   // temperature). Null = the model host's own default. Board-only like the
   // rest: it changes how the agent talks to people.
   "laneATemperature",
+  // Which OpenRouter hosts the quick agent's model may (or may never) run on.
+  // Null = OpenRouter picks. Board-only like the rest: it decides where the
+  // company's prompts are sent.
+  "laneAProviderRouting",
   // DUR-4017: the daily briefing settings (on/off, delivery time, sources to
   // pull). Board-only like the rest of this list — an agent cannot switch its
   // own daily report on or change what it is told to fetch and say.
@@ -534,6 +570,9 @@ const createAgentObjectSchema = z.object({
     .max(LANE_A_MAX_TEMPERATURE, `Creativity must be between ${LANE_A_MIN_TEMPERATURE} and ${LANE_A_MAX_TEMPERATURE}.`)
     .nullable()
     .optional(),
+  // Which OpenRouter hosts the model may (or may never) run on. Null = no
+  // preference. Ignored at call time for every provider but OpenRouter.
+  laneAProviderRouting: laneAProviderRoutingSchema.nullable().optional(),
   // DUR-4000 (PERSONA_JOB_FIELDS): which person does this job, and the
   // job's own limits. Board-only on create, hire and PATCH — enforced in
   // server/src/routes/agents.ts (assertNoAgentPersonaJobFieldMutation), not
