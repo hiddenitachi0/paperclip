@@ -794,7 +794,7 @@ function MarkdownBodyImpl({
             : parsed.kind === "skill"
               ? `/skills/${parsed.skillId}`
               : parsed.kind === "routine"
-                ? `/routines/${parsed.routineId}`
+                ? `/jobs/${parsed.routineId}`
                 : parsed.kind === "user"
                   ? "/company/settings/access"
                   : `/agents/${parsed.agentId}`;

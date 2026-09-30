@@ -112,7 +112,7 @@ export function ManagedRoutinesList({
     <div className="rounded-lg border border-border">
       {routines.map((routine) => {
         const row = managedRoutineToRow(routine);
-        const href = routine.href ?? (routine.routineId ? `/routines/${routine.routineId}` : "/routines");
+        const href = routine.href ?? (routine.routineId ? `/jobs/${routine.routineId}` : "/jobs");
         const missingRefs = routine.missingRefs ?? [];
         const canUseRoutine = Boolean(routine.routineId && routine.resourceKey && missingRefs.length === 0);
         const managedBy = routine.managedByPluginDisplayName ?? pluginDisplayName;
