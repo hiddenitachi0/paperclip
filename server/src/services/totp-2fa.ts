@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, gte, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { userTotpSecrets, userRecoveryCodes, totpSessionTokens, authUsers } from "@paperclipai/db";
 import * as speakeasy from "speakeasy";
@@ -35,9 +35,12 @@ export function totpService(db: Db) {
       name: `Paperclip (${userEmail})`,
       issuer: "Paperclip",
       length: 32,
+      otpauth_url: true,
     });
 
-    const qrCode = secret.qr_code || "";
+    // speakeasy only returns the otpauth:// URL; rendering it as a scannable
+    // QR image is a separate, not-yet-implemented concern (see DUR-4176).
+    const qrCode = secret.otpauth_url || "";
 
     if (!secret.base32) {
       throw new Error("Failed to generate TOTP secret");
@@ -128,13 +131,18 @@ export function totpService(db: Db) {
   ): Promise<TotpVerifyResponse> {
     if (isRecoveryCode) {
       const codeHash = hashCode(token);
-      const recoveryCode = await db
-        .select({ id: userRecoveryCodes.id, usedAt: userRecoveryCodes.usedAt })
+      const codeHashBuf = Buffer.from(codeHash, "hex");
+      const candidates = await db
+        .select({ id: userRecoveryCodes.id, codeHash: userRecoveryCodes.codeHash, usedAt: userRecoveryCodes.usedAt })
         .from(userRecoveryCodes)
-        .where(and(eq(userRecoveryCodes.userId, userId), eq(userRecoveryCodes.codeHash, codeHash)))
-        .then((rows) => rows[0] ?? null);
+        .where(and(eq(userRecoveryCodes.userId, userId), isNull(userRecoveryCodes.usedAt)));
 
-      if (!recoveryCode || recoveryCode.usedAt) {
+      const recoveryCode = candidates.find((candidate) => {
+        const candidateHashBuf = Buffer.from(candidate.codeHash, "hex");
+        return candidateHashBuf.length === codeHashBuf.length && timingSafeEqual(candidateHashBuf, codeHashBuf);
+      });
+
+      if (!recoveryCode) {
         return { valid: false, totalCodes: 0, remainingCodes: 0 };
       }
 
@@ -234,18 +242,12 @@ export function totpService(db: Db) {
         and(
           eq(totpSessionTokens.userId, userId),
           eq(totpSessionTokens.sessionId, sessionId),
-          // NOT expired
-          // Drizzle doesn't support > comparison directly in where, so we use sql
+          gte(totpSessionTokens.expiresAt, now),
         ),
       )
       .then((rows) => rows[0] ?? null);
 
-    if (!token) {
-      return false;
-    }
-
-    // Check if expired (this is a simplified check; in production use SQL comparison)
-    return true;
+    return !!token;
   }
 
   async function isTotpEnabled(userId: string): Promise<boolean> {

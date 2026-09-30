@@ -19,10 +19,10 @@ CREATE TABLE IF NOT EXISTS "user_totp_secrets" (
   "disabled_at" timestamp with time zone,
 
   "created_at" timestamp with time zone NOT NULL,
-  "updated_at" timestamp with time zone NOT NULL,
-
-  CONSTRAINT only_one_active_totp_per_user UNIQUE ("user_id") WHERE ("disabled_at" IS NULL)
+  "updated_at" timestamp with time zone NOT NULL
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS only_one_active_totp_per_user ON "user_totp_secrets"("user_id") WHERE ("disabled_at" IS NULL);
 
 -- Recovery codes table
 -- Stores hashed recovery codes for account recovery if user loses TOTP device

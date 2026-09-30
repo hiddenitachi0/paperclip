@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp, boolean, index, unique } from "drizzle-orm/pg-core";
+import { pgTable, text, timestamp, boolean, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
 export const authUsers = pgTable("user", {
@@ -66,7 +66,9 @@ export const userTotpSecrets = pgTable(
   (table) => ({
     userIdIdx: index("idx_user_totp_secrets_user_id").on(table.userId),
     verifiedIdx: index("idx_user_totp_secrets_verified").on(table.verified, table.userId),
-    uniqueActivePerUser: unique("only_one_active_totp_per_user").on(table.userId).where(sql`${table.disabledAt} IS NULL`),
+    uniqueActivePerUser: uniqueIndex("only_one_active_totp_per_user")
+      .on(table.userId)
+      .where(sql`${table.disabledAt} IS NULL`),
   }),
 );
 
