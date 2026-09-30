@@ -102,8 +102,17 @@ export {
   BROWSER_ACCESS_LEVELS,
   readLaneABrowserAccess,
   browserAccessLevelRank,
+  effectiveLaneABrowserAccess,
   type BrowserAccessLevel,
 } from "./browser-access.js";
+export {
+  LANE_A_TRUST_LEVELS,
+  DEFAULT_LANE_A_TRUST_LEVEL,
+  LANE_A_TRUST_LEVEL_LABELS,
+  normalizeLaneATrustLevel,
+  isLaneATrustLimited,
+  type LaneATrustLevel,
+} from "./lane-a-trust.js";
 export {
   PAYMENT_CARD_STATUSES,
   ACTIVE_PAYMENT_CARD_STATUSES,
@@ -1567,6 +1576,7 @@ export {
   type LowTrustBoundaryInput,
   type TrustAuthorizationPolicyInput,
   LANE_A_INSTRUCTIONS_MAX_LENGTH,
+  LANE_A_ASSIGNED_USER_IDS_MAX_LENGTH,
   QUICK_AGENT_FIELDS,
   laneAProviderModelIssue,
   laneAAdapterConfigSchema,

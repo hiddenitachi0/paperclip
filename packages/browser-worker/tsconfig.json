@@ -3,7 +3,11 @@
   "compilerOptions": {
     "outDir": "dist",
     "rootDir": "src",
-    "types": ["node"]
+    "types": ["node"],
+    // "DOM" is needed only to typecheck the `page.evaluate(...)` callbacks
+    // in dom-snapshot.ts, which run inside the browser page, not this Node
+    // process -- this package never itself touches `window`/`document`.
+    "lib": ["ES2023", "DOM"]
   },
   "include": ["src"]
 }

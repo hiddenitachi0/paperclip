@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { BROWSER_ACCESS_LEVELS, browserAccessLevelRank, readLaneABrowserAccess } from "./browser-access.js";
+import {
+  BROWSER_ACCESS_LEVELS,
+  browserAccessLevelRank,
+  effectiveLaneABrowserAccess,
+  readLaneABrowserAccess,
+} from "./browser-access.js";
 import { laneAAdapterConfigSchema } from "./validators/agent.js";
 
 describe("readLaneABrowserAccess", () => {
@@ -25,6 +30,39 @@ describe("browserAccessLevelRank", () => {
   it("orders off < browse_and_forms < book_and_buy", () => {
     expect(browserAccessLevelRank("off")).toBeLessThan(browserAccessLevelRank("browse_and_forms"));
     expect(browserAccessLevelRank("browse_and_forms")).toBeLessThan(browserAccessLevelRank("book_and_buy"));
+  });
+});
+
+// DUR-4070: the trust-level ceiling. "limited" must force "off" no matter
+// what adapterConfig.laneA.browserAccess itself stores -- this is the exact
+// shape of bug (an operator's book_and_buy switch surviving a downgrade to
+// Limited) the ceiling exists to close.
+describe("effectiveLaneABrowserAccess", () => {
+  it("forces 'off' for a limited-trust agent regardless of its own browserAccess switch", () => {
+    for (const level of BROWSER_ACCESS_LEVELS) {
+      expect(
+        effectiveLaneABrowserAccess({ adapterConfig: { laneA: { browserAccess: level } }, laneATrustLevel: "limited" }),
+      ).toBe("off");
+    }
+  });
+
+  it("passes through the real switch for standard and full trust", () => {
+    for (const trust of ["standard", "full"] as const) {
+      for (const level of BROWSER_ACCESS_LEVELS) {
+        expect(
+          effectiveLaneABrowserAccess({ adapterConfig: { laneA: { browserAccess: level } }, laneATrustLevel: trust }),
+        ).toBe(level);
+      }
+    }
+  });
+
+  it("treats a missing/null trust level as full (today's behavior, unchanged)", () => {
+    expect(
+      effectiveLaneABrowserAccess({ adapterConfig: { laneA: { browserAccess: "book_and_buy" } } }),
+    ).toBe("book_and_buy");
+    expect(
+      effectiveLaneABrowserAccess({ adapterConfig: { laneA: { browserAccess: "book_and_buy" } }, laneATrustLevel: null }),
+    ).toBe("book_and_buy");
   });
 });
 

@@ -83,6 +83,54 @@ describe("grantPolicyForAgent", () => {
   });
 });
 
+// DUR-4070: the exact failure mode the ticket calls out by name — a
+// "limited"-trust full agent (laneAEnabled: false) would otherwise hit
+// empty_means_all and get every plugin tool unrestricted. The trust check in
+// `execute` below must refuse before grantPolicyForAgent is ever consulted.
+describe("pluginToolExecutionService.execute — DUR-4070 trust-level gate", () => {
+  beforeEach(() => {
+    mockRegistry.getById.mockReset();
+    mockRegistry.getCompanySettings.mockReset();
+    mockRegistry.getCompanySettings.mockResolvedValue(null);
+  });
+
+  it("refuses a limited-trust FULL agent (laneAEnabled: false) even though empty grants would otherwise mean 'all'", async () => {
+    const dispatcher = dispatcherStub();
+    const outcome = await pluginToolExecutionService({} as never, dispatcher).execute({
+      tool: TOOL,
+      parameters: {},
+      runContext,
+      agent: { laneAEnabled: false, pluginToolGrants: [], laneATrustLevel: "limited" },
+    });
+    expect(outcome).toMatchObject({ ok: false, status: 403, error: expect.stringContaining("Limited") });
+    expect(dispatcher.executeTool).not.toHaveBeenCalled();
+  });
+
+  it("refuses a limited-trust QUICK agent even with the tool explicitly ticked", async () => {
+    const dispatcher = dispatcherStub();
+    const outcome = await pluginToolExecutionService({} as never, dispatcher).execute({
+      tool: TOOL,
+      parameters: {},
+      runContext,
+      agent: { laneAEnabled: true, pluginToolGrants: [TOOL], laneATrustLevel: "limited" },
+    });
+    expect(outcome).toMatchObject({ ok: false, status: 403, error: expect.stringContaining("Limited") });
+    expect(dispatcher.executeTool).not.toHaveBeenCalled();
+  });
+
+  it("standard and full trust are unaffected: they fall through to the same grant policy as before this column existed", async () => {
+    for (const trust of ["standard", "full", null, undefined] as const) {
+      const outcome = await pluginToolExecutionService({} as never, dispatcherStub()).execute({
+        tool: TOOL,
+        parameters: {},
+        runContext,
+        agent: { laneAEnabled: false, pluginToolGrants: [], laneATrustLevel: trust },
+      });
+      expect(outcome).toMatchObject({ ok: true });
+    }
+  });
+});
+
 describe("pluginToolExecutionService.execute", () => {
   beforeEach(() => {
     mockRegistry.getById.mockReset();
