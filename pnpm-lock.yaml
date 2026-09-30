@@ -815,9 +815,6 @@ importers:
       '@paperclipai/mcp-server':
         specifier: workspace:*
         version: link:../packages/mcp-server
-      '@paperclipai/plugin-media-studio':
-        specifier: workspace:*
-        version: link:../packages/plugins/media-studio
       '@paperclipai/plugin-sdk':
         specifier: workspace:*
         version: link:../packages/plugins/sdk
