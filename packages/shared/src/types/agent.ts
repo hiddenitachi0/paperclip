@@ -1,3 +1,4 @@
+import type { LaneAProviderRouting } from "../lane-a-models.js";
 import type {
   AgentAdapterType,
   ModelProfileKey,
@@ -156,6 +157,8 @@ export interface Agent {
   laneABaseUrl?: string | null;
   /** Quick-agent "creativity" (sampling temperature, 0-1.5). Null = the model host's default. Board-only. */
   laneATemperature?: number | null;
+  /** Quick-agent "model hosts" (OpenRouter only): hosts to use only / try first / never use. Null = OpenRouter picks. Board-only. */
+  laneAProviderRouting?: LaneAProviderRouting | null;
   createdAt: Date;
   updatedAt: Date;
 }
