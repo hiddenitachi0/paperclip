@@ -29,9 +29,13 @@ export const ACTION_SOGNI_MODELS = "sogni.models";
 export const ACTION_SOGNI_LORAS = "sogni.loras";
 export const ISSUE_TAB_SLOT = "media-studio-issue-tab";
 export const ISSUE_TAB_EXPORT = "MediaStudioIssueTab";
-export const LOOKS_PAGE_SLOT = "media-studio-looks";
 export const LOOKS_PAGE_EXPORT = "MediaStudioLooksPage";
+/** Old route (Company settings -> Media Studio looks); kept only as a redirect target. */
 export const LOOKS_PAGE_ROUTE = "media-studio-looks";
+export const SIDEBAR_LINK_EXPORT = "SidebarLink";
+export const MAIN_PAGE_SLOT = "media-studio-page";
+export const MAIN_PAGE_EXPORT = "MediaStudioPage";
+export const MAIN_PAGE_ROUTE = "media-studio";
 /** At most this many reference pictures per image (Fal's Kontext models take a handful; Sogni's edit models 2-16). */
 export const MAX_REFERENCE_FILES = 4;
 
@@ -152,7 +156,8 @@ const manifest: PaperclipPluginManifestV1 = {
     "agents.read",
     "plugin.state.read",
     "plugin.state.write",
-    "instance.settings.register",
+    "ui.sidebar.register",
+    "ui.page.register",
     "personas.generation_cap.enforce",
   ],
   entrypoints: {
@@ -193,11 +198,18 @@ const manifest: PaperclipPluginManifestV1 = {
         entityTypes: ["issue"],
       },
       {
-        type: "companySettingsPage",
-        id: LOOKS_PAGE_SLOT,
-        displayName: "Media Studio looks",
-        exportName: LOOKS_PAGE_EXPORT,
-        routePath: LOOKS_PAGE_ROUTE,
+        type: "sidebar",
+        id: "media-studio-sidebar",
+        displayName: "Media Studio",
+        exportName: SIDEBAR_LINK_EXPORT,
+        order: 30,
+      },
+      {
+        type: "page",
+        id: MAIN_PAGE_SLOT,
+        displayName: "Media Studio",
+        exportName: MAIN_PAGE_EXPORT,
+        routePath: MAIN_PAGE_ROUTE,
       },
     ],
   },

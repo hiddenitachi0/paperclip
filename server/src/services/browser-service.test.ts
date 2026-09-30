@@ -232,6 +232,17 @@ describe("browserService", () => {
     await expect(svc.open(AGENT_ID, { purpose: "book a table" })).rejects.toMatchObject({ status: 403 });
   });
 
+  // DUR-4070: the trust-level ceiling must close the browser-access door even
+  // when the agent's own switch says book_and_buy -- this is the exact
+  // consumer (`effectiveLaneABrowserAccess` in `assertBrowserAccessAllowed`)
+  // that used to be left calling the un-ceilinged `readLaneABrowserAccess`.
+  it("refuses to open a session for a limited-trust agent even at book_and_buy", async () => {
+    const db = fakeDbWithAgent({ ...BOOK_AND_BUY_AGENT, ...({ laneATrustLevel: "limited" } as object) });
+    const svc = browserService(db as any, { workerClient: fakeWorkerClient() });
+
+    await expect(svc.open(AGENT_ID, { purpose: "book a table" })).rejects.toMatchObject({ status: 403 });
+  });
+
   it("refuses to open a session for an agent that does not exist", async () => {
     const db = fakeDbWithAgent(null);
     const svc = browserService(db as any, { workerClient: fakeWorkerClient() });

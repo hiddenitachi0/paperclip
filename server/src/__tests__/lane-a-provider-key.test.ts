@@ -142,6 +142,7 @@ describeEmbeddedPostgres("lane A provider key resolution (DUR-3997)", () => {
       model?: string | null;
       baseUrl?: string | null;
       keySecretId?: string | null;
+      providerRouting?: { only?: string[]; order?: string[]; ignore?: string[]; allowFallbacks?: boolean } | null;
     } = {},
   ) {
     const created = await agentService(db).create(companyId, {
@@ -163,6 +164,7 @@ describeEmbeddedPostgres("lane A provider key resolution (DUR-3997)", () => {
         laneAProvider: input.provider ?? null,
         laneAModel: input.model ?? null,
         laneABaseUrl: input.baseUrl ?? null,
+        laneAProviderRouting: input.providerRouting ?? null,
       })
       .where(eq(agents.id, created.id));
     return {
@@ -412,6 +414,56 @@ describeEmbeddedPostgres("lane A provider key resolution (DUR-3997)", () => {
     // Remembered: the next message goes straight to the no-tools request.
     expect(bodies).toHaveLength(3);
     expect(bodies[2]!.tools).toBeUndefined();
+    lane.resetLaneAModelsRefusingTools();
+  });
+
+  it("sends the chosen OpenRouter hosts, read off the agent row, and says plainly when they don't support tools", async () => {
+    // 29 Sep: Mistral Small 3.2 24B pinned to one host. When that host
+    // cannot do tools, OpenRouter (require_parameters) finds no endpoint;
+    // the quick agent keeps chatting and is told the chosen hosts are why.
+    const companyId = await seedCompany();
+    const secret = await seedSecret(companyId, `sk-or-v1-${randomUUID()}`);
+    const target = await seedQuickAgent(companyId, {
+      provider: "openrouter",
+      model: "mistralai/mistral-small-3.2-24b-instruct",
+      keySecretId: secret.id,
+      providerRouting: { only: ["venice"] },
+    });
+    const bodies: Array<Record<string, unknown>> = [];
+    const providerFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      bodies.push(body);
+      if (Array.isArray(body.tools) && body.tools.length > 0) {
+        return new Response(
+          JSON.stringify({ error: { message: "No endpoints found that can handle the requested parameters.", code: 404 } }),
+          { status: 404, headers: { "content-type": "application/json" } },
+        );
+      }
+      return completionResponse("Hei! Jeg kan bare prate nå.");
+    }) as unknown as typeof fetch;
+    const lane = await import("../services/lane-a.ts");
+    lane.resetLaneAModelsRefusingTools();
+
+    // The caller passes no routing (as an older caller would): it is read off the row.
+    const reply = await lane.laneAService(db, { providerFetch }).sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "filip", agentId: null },
+      message: "lag et bilde",
+    });
+
+    expect(reply.response).toBe("Hei! Jeg kan bare prate nå.");
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]!.provider).toEqual({ require_parameters: true, only: ["venice"] });
+    expect(bodies[1]!.tools).toBeUndefined();
+    expect(bodies[1]!.provider).toEqual({ only: ["venice"] });
+    const system = JSON.stringify(bodies[1]!.messages);
+    expect(system).toContain("The model host chosen for you (venice) does not support tools");
+    expect(system).not.toContain("Your current model cannot use tools");
+
+    // Remembered for this host choice only: another host list tries tools again.
+    expect(lane.laneAModelRefusesTools(lane.laneAToolsRefusalKey("mistralai/mistral-small-3.2-24b-instruct", { only: ["venice"] }))).toBe(true);
+    expect(lane.laneAModelRefusesTools("mistralai/mistral-small-3.2-24b-instruct")).toBe(false);
     lane.resetLaneAModelsRefusingTools();
   });
 

@@ -172,6 +172,15 @@ export function chatRouterRoutes(db: Db, options: { laneA?: LaneAServiceOptions 
           laneABaseUrl: targetAgent.laneABaseUrl ?? null,
           // "Creativity" (sampling temperature); null = the model host's default.
           laneATemperature: targetAgent.laneATemperature ?? null,
+          // DUR-4070: who besides the company owner may chat with this agent.
+          // Both the web chat box and the Telegram bridge's `chat send` go
+          // through this router (see its module docstring), so omitting this
+          // would silently read every assigned person here as "owner only" —
+          // refusing someone the operator explicitly assigned, on the exact
+          // two paths the ticket asks to cover.
+          laneAAssignedUserIds: (targetAgent.laneAAssignedUserIds as string[] | null) ?? [],
+          // OpenRouter "model hosts"; null = OpenRouter picks.
+          laneAProviderRouting: targetAgent.laneAProviderRouting ?? null,
         },
         requester,
         actor: req.actor,
