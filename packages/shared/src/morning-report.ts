@@ -57,8 +57,12 @@ export type MorningReportPriceSymbol = (typeof MORNING_REPORT_PRICE_SYMBOLS)[num
 export const MORNING_REPORT_MIN_HEADLINES = 1;
 export const MORNING_REPORT_MAX_HEADLINES = 10;
 
-/** Every existing agent, and the default place used when no override is set. */
-export const MORNING_REPORT_DEFAULT_PLACE = "Oslo";
+/**
+ * DUR-4059: the default places whose weather is shown when no place override
+ * is set — Filip's home (Drøbak) and where he works (Oslo). A place override
+ * replaces this whole list with the one override place, same as before.
+ */
+export const MORNING_REPORT_DEFAULT_PLACES = ["Drøbak", "Oslo"] as const;
 
 function isValidTimeZone(tz: string): boolean {
   try {
@@ -133,6 +137,92 @@ export function parseMorningReportSettings(value: unknown): MorningReportSetting
 export const MORNING_REPORT_OUTBOX_STATUSES = ["ready", "delivered", "failed", "expired"] as const;
 export type MorningReportOutboxStatus = (typeof MORNING_REPORT_OUTBOX_STATUSES)[number];
 
+/** One clickable headline, hobby-news or sport item, with its source kept for the reader. */
+export interface MorningReportFactItem {
+  title: string;
+  url: string;
+  source: string;
+  /**
+   * One-sentence, model-written summary of this item (DUR-4059 direction
+   * change) — only ever populated for headlines, and only when the one
+   * summaries model call succeeded, was not truncated, and its JSON parsed.
+   * Missing/null means "title and link only", which is always safe to send:
+   * nothing Filip needs ever depends on this field being present.
+   */
+  summary?: string | null;
+}
+
+/** One historical reading for a price's sparkline — oldest first. */
+export interface MorningReportPricePoint {
+  price: number;
+  observedAt: string;
+}
+
+/** One price line: the symbol as the operator picked it (e.g. "DNB.OL"), not the upstream source's own spelling. */
+export interface MorningReportPriceFact {
+  symbol: string;
+  price: number;
+  currency: string;
+  /** Null when no ~24h-ago reading was available to compare against. */
+  changePercent: number | null;
+  /** Short history for a sparkline, oldest first. Empty when none was available (see notes for why). */
+  history: MorningReportPricePoint[];
+}
+
+/** One picture the report carries: Maja dressed for today's weather, or a mood illustration for the news. */
+export interface MorningReportImageFact {
+  /** issue_attachments id — same fileId shape as a Lane A chat picture (LaneAToolImage). */
+  fileId: string;
+  caption: string;
+  kind: "weather" | "mood";
+}
+
+/** One place's weather, now plus up to 3 days — see formatWeatherReport (server/src/services/lane-a-tools.ts). */
+export interface MorningReportWeatherFact {
+  place: string;
+  text: string;
+}
+
+/** "sources checked: N, items found: M" — so a thin headline day is visible rather than silently short. */
+export interface MorningReportStats {
+  sourcesChecked: number;
+  itemsFound: number;
+}
+
+/**
+ * Everything a report is built from, kept structured (not just flattened into
+ * prose) so the Telegram bridge can render a short teaser plus a link, and so
+ * the full briefing page can show every item with its source, independent of
+ * what any model call chose to mention. Every list here is built entirely in
+ * code from fetched data — never from a model — so nothing Filip needs can be
+ * lost to a model call failing, running out of tokens, or being truncated.
+ */
+export interface MorningReportFacts {
+  /** One place (a place override), or the default two (Drøbak, Oslo) — see MORNING_REPORT_DEFAULT_PLACES. */
+  places: string[];
+  weather: MorningReportWeatherFact[];
+  headlines: MorningReportFactItem[];
+  hobby: MorningReportFactItem[];
+  sport: MorningReportFactItem[];
+  prices: MorningReportPriceFact[];
+  images: MorningReportImageFact[];
+  /** 3-5 sentence, model-written opening. Falls back to a short deterministic sentence when the model call fails or is truncated. */
+  opening: string;
+  /**
+   * The short (at most a few lines), plain-text teaser sent to Telegram —
+   * today's weather in both places, the single most important headline, and
+   * one price move. Built entirely in code, never by a model. The Telegram
+   * bridge appends the briefing-page link itself, only when briefingPageLive
+   * is true.
+   */
+  teaser: string;
+  stats: MorningReportStats;
+  /** Whether the full briefing page (DUR-4075) is live yet — the Telegram bridge must not link to it until this is true. */
+  briefingPageLive: boolean;
+  /** Plain-language notes about anything that degraded (a source down, no key configured, a model call failing or truncating, …). */
+  notes: string[];
+}
+
 /** One report waiting in the outbox for the Telegram bridge. */
 export interface MorningReportOutboxItem {
   id: string;
@@ -140,6 +230,15 @@ export interface MorningReportOutboxItem {
   /** The quick agent whose bot should send it. */
   agentId: string;
   text: string;
+  /** Structured facts for the Telegram bridge's per-section messages and the full briefing page. Null for a report written before DUR-4059. */
+  facts: MorningReportFacts | null;
+  /**
+   * The Lane A conversation the report was appended to as an assistant turn
+   * (when the agent is a quick agent and the company has a board owner), so
+   * "tell me more about number 3" in Telegram continues the same chat
+   * history the report is part of. Null when it could not be created.
+   */
+  conversationId: string | null;
   createdAt: string;
 }
 

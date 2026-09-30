@@ -1322,6 +1322,19 @@ async function assertCanManageCompanyMember(
   if (reason) throw forbidden(reason);
 }
 
+async function filterMemberDataByRole(
+  members: CompanyMemberRecord[],
+  actorRole: HumanCompanyMembershipRole | null,
+): Promise<Array<Omit<CompanyMemberRecord, "grants"> | CompanyMemberRecord>> {
+  return members.map((member) => {
+    if (actorRole === "owner") {
+      return member;
+    }
+    const { grants: _, ...filtered } = member;
+    return filtered;
+  });
+}
+
 // DUR-4100: invite creation previously only checked the `users:invite`
 // permission, which any admin holds -- with no check on the *level* being
 // granted. That let an Admin mint an invite carrying humanRole "owner",
@@ -1368,8 +1381,9 @@ async function addCompanyMemberRemovalAccess(
         .then((rows) => rows.map((row) => row.userId)),
     )
     : new Set<string>();
+  const filtered = await filterMemberDataByRole(members, actorRole);
   return Promise.all(
-    members.map(async (member) => {
+    filtered.map(async (member) => {
       const reason = await getProtectedMemberReason(req, access, companyId, member, {
         actorRole,
         instanceAdminUserIds,
@@ -4818,7 +4832,7 @@ export function accessRoutes(
 
   router.get(
     "/companies/:companyId/members",
-    companyScopeFromParam(rawDb, (req, companyId) => assertCompanyPermission(req, companyId, "users:manage_permissions")),
+    companyScopeFromParam(rawDb, (req, companyId) => assertCompanyPermission(req, companyId, "users:invite")),
     async (req, res) => {
     const companyId = req.params.companyId as string;
     const [members, currentAccess] = await Promise.all([

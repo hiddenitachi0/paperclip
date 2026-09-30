@@ -233,6 +233,10 @@ export const queryKeys = {
   interactions: {
     pendingForCompany: (companyId: string) => ["interactions", "pending", companyId] as const,
   },
+  morningReports: {
+    detail: (reportId: string) => ["morning-reports", "detail", reportId] as const,
+    listRecent: (agentId: string) => ["morning-reports", "list-recent", agentId] as const,
+  },
   stalledTasks: {
     forCompany: (companyId: string) => ["stalled-tasks", companyId] as const,
   },
