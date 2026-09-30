@@ -344,6 +344,73 @@ describe("project deployment settings routes", () => {
         }),
       );
     });
+
+    /**
+     * DUR-4139: `mode` and `askFirstActions` decide whether a deploy needs a
+     * board decision at all (deploy-policy-enforcement.ts) -- an agent that
+     * could set either on its own project could switch itself to
+     * `auto_after_review` and clear the ask-first list in the same write
+     * that requests the deploy. Same board-only bar as sftpHost etc.
+     */
+    it("refuses an agent key that tries to switch its own project to auto_after_review", async () => {
+      const app = await createApp(agentActor);
+      const res = await request(app)
+        .patch("/api/projects/project-1")
+        .send({
+          deployPolicy: policy({
+            workspaceId: WORKSPACE_ID,
+            deployTargetPath: "/root/dashboard",
+            healthCheckUrl: "https://dashboard.example.com/health",
+            mode: "auto_after_review",
+          }),
+        });
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toMatch(/deployPolicy\.mode/);
+      expect(mockProjectService.update).not.toHaveBeenCalled();
+    });
+
+    it("refuses an agent key that tries to clear the ask-first list on its own project", async () => {
+      const app = await createApp(agentActor);
+      const res = await request(app)
+        .patch("/api/projects/project-1")
+        .send({
+          deployPolicy: policy({
+            workspaceId: WORKSPACE_ID,
+            deployTargetPath: "/root/dashboard",
+            healthCheckUrl: "https://dashboard.example.com/health",
+            askFirstActions: [],
+          }),
+        });
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toMatch(/deployPolicy\.askFirstActions/);
+      expect(mockProjectService.update).not.toHaveBeenCalled();
+    });
+
+    it("lets a person on the board set the mode and the ask-first list", async () => {
+      const app = await createApp(boardActor);
+      const res = await request(app)
+        .patch("/api/projects/project-1")
+        .send({
+          deployPolicy: policy({
+            enabled: false,
+            mode: "auto_after_review",
+            askFirstActions: ["live_data_write", "costs_money"],
+          }),
+        });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockProjectService.update).toHaveBeenCalledWith(
+        "project-1",
+        expect.objectContaining({
+          deployPolicy: expect.objectContaining({
+            mode: "auto_after_review",
+            askFirstActions: ["live_data_write", "costs_money"],
+          }),
+        }),
+      );
+    });
   });
 
   describe("POST /projects/:id/github-token-check", () => {
