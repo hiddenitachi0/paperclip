@@ -78,6 +78,7 @@ export const SECRET_KIND_IDS = [
   "brave_search_api_key",
   "payment_card_single_use",
   "site_login",
+  "mail_imap_password",
   "other",
 ] as const;
 
@@ -237,6 +238,14 @@ export const SECRET_KINDS: readonly SecretKindDescriptor[] = [
     description: "A saved username and password an agent may sign in with, via the browser worker.",
     provider: "other",
     category: "payments",
+    testable: false,
+  },
+  {
+    id: "mail_imap_password",
+    label: "Email inbox password (IMAP)",
+    description: "An account or app password for reading an email inbox read-only, used by the mail secretary duty.",
+    provider: "other",
+    category: "data_source",
     testable: false,
   },
   {
