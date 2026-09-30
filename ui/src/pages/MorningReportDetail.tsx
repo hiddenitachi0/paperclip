@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useParams } from "@/lib/router";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronDown, ChevronRight, Download } from "lucide-react";
+import { Download } from "lucide-react";
 import { morningReportsApi } from "../api/morning-reports";
 import { agentsApi } from "../api/agents";
 import { useCompany } from "../context/CompanyContext";
@@ -9,13 +9,11 @@ import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useToastActions } from "../context/ToastContext";
 import { queryKeys } from "../lib/queryKeys";
 import { PageSkeleton } from "../components/PageSkeleton";
-import { MarkdownBody } from "../components/MarkdownBody";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { formatDate } from "../lib/utils";
-import { isSafeExternalUrl, summarizeCoverage, buildStandaloneReportHtml, type DownloadImage } from "../lib/morning-report-render";
-import type { MorningReportFactItem, MorningReportImageFact } from "@paperclipai/shared";
+import { buildStandaloneReportHtml, type DownloadImage } from "../lib/morning-report-render";
+import { MorningReport } from "../components/MorningReport";
 
 /**
  * Full morning report briefing page (DUR-4075): what the "Full briefing"
@@ -85,7 +83,6 @@ export function MorningReportDetail() {
 
   const facts = report.facts;
   const agentName = agent?.name ?? "This agent";
-  const coverage = facts ? summarizeCoverage(facts) : null;
 
   async function handleDownload() {
     if (!report) return;
@@ -138,204 +135,23 @@ export function MorningReportDetail() {
         </Button>
       </div>
 
-      <Card>
-        <CardContent className="pt-6">
-          {/* Plain text only: the opening is partly model-written, so it is
-              never rendered as markdown or HTML (no links or markup from the model). */}
-          <p className="whitespace-pre-line text-sm leading-relaxed">{facts?.opening || report.text}</p>
-        </CardContent>
-      </Card>
-
-      {!facts && (
-        <p className="text-sm text-muted-foreground">
-          This report was sent before the full briefing page existed, so only the written text above is available.
-        </p>
-      )}
-
-      {facts && (
-        <>
-          {facts.images.length > 0 && (
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              {facts.images.map((image) => (
-                <MorningReportImage key={image.fileId} image={image} />
-              ))}
-            </div>
-          )}
-
-          {facts.weather.length > 0 && (
-            <ReportSection title="Weather" subtitle={facts.places.length > 0 ? facts.places.join(", ") : undefined} defaultOpen>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                {facts.weather.map((w) => (
-                  <div key={w.place} className="rounded-md border p-3">
-                    <p className="text-sm font-medium">{w.place}</p>
-                    <p className="whitespace-pre-line text-sm text-muted-foreground">{w.text}</p>
-                  </div>
-                ))}
-              </div>
-            </ReportSection>
-          )}
-
-          <FactSection title="Headlines" items={facts.headlines} />
-          <FactSection title="Hobby news" items={facts.hobby} />
-          <FactSection title="Sport" items={facts.sport} />
-
-          {facts.prices.length > 0 && (
-            <ReportSection title="Prices" defaultOpen>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                {facts.prices.map((price) => (
-                  <div key={price.symbol} className="rounded-lg border border-border p-3">
-                    <div className="flex items-center justify-between">
-                      <span className="font-medium">{price.symbol}</span>
-                      {price.changePercent !== null && (
-                        <span
-                          className={
-                            price.changePercent >= 0
-                              ? "text-xs font-medium text-green-600 dark:text-green-400"
-                              : "text-xs font-medium text-red-600 dark:text-red-400"
-                          }
-                        >
-                          {price.changePercent >= 0 ? "+" : ""}
-                          {price.changePercent.toFixed(2)}%
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-sm text-muted-foreground">
-                      {price.price} {price.currency}
-                    </p>
-                    <PriceSparkline points={price.history} rising={(price.changePercent ?? 0) >= 0} />
-                  </div>
-                ))}
-              </div>
-            </ReportSection>
-          )}
-
-          {facts.notes.length > 0 && (
-            <ReportSection title="Notes" defaultOpen>
-              <ul className="list-disc pl-5 space-y-1 text-sm text-muted-foreground">
-                {facts.notes.map((note, i) => (
-                  <li key={i}>{note}</li>
-                ))}
-              </ul>
-            </ReportSection>
-          )}
-
-          {coverage && (
-            <p className="text-xs text-muted-foreground border-t border-border pt-3">
-              {coverage.sourcesChecked} source{coverage.sourcesChecked === 1 ? "" : "s"} checked, {coverage.itemsFound}{" "}
-              item{coverage.itemsFound === 1 ? "" : "s"} found.
+      {facts ? (
+        <MorningReport
+          facts={facts}
+          imageUrl={(fileId) => `/api/attachments/${encodeURIComponent(fileId)}/content`}
+          date={new Date(report.createdAt)}
+        />
+      ) : (
+        <Card>
+          <CardContent className="pt-6 space-y-3">
+            {/* Plain text only: the report text is partly model-written, so it is never rendered as markdown or HTML. */}
+            <p className="whitespace-pre-line text-sm leading-relaxed">{report.text}</p>
+            <p className="text-sm text-muted-foreground">
+              This report was sent before the full briefing page existed, so only the written text above is available.
             </p>
-          )}
-        </>
+          </CardContent>
+        </Card>
       )}
     </div>
-  );
-}
-
-/** A collapsible card section — every fact section can be closed to keep the phone-width page scannable. */
-function ReportSection({
-  title,
-  subtitle,
-  defaultOpen = false,
-  children,
-}: {
-  title: string;
-  subtitle?: string;
-  defaultOpen?: boolean;
-  children: React.ReactNode;
-}) {
-  const [open, setOpen] = useState(defaultOpen);
-  return (
-    <Card className="overflow-hidden">
-      <Collapsible open={open} onOpenChange={setOpen}>
-        <CollapsibleTrigger className="flex w-full items-center justify-between px-6 py-4 text-left">
-          <div>
-            <CardTitle className="text-base">{title}</CardTitle>
-            {subtitle && <p className="text-xs text-muted-foreground mt-0.5">{subtitle}</p>}
-          </div>
-          {open ? (
-            <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" />
-          ) : (
-            <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
-          )}
-        </CollapsibleTrigger>
-        <CollapsibleContent>
-          <CardContent className="pt-0">{children}</CardContent>
-        </CollapsibleContent>
-      </Collapsible>
-    </Card>
-  );
-}
-
-function FactSection({ title, items }: { title: string; items: MorningReportFactItem[] }) {
-  if (items.length === 0) return null;
-  return (
-    <ReportSection title={title} defaultOpen>
-      <ol className="space-y-3 text-sm">
-        {items.map((item, i) => (
-          <li key={`${item.url}-${i}`} className="flex gap-2.5">
-            <span className="text-muted-foreground font-medium shrink-0">{i + 1}.</span>
-            <div className="space-y-0.5">
-              <p className="font-medium">{item.title}</p>
-              {item.summary ? <p className="text-sm text-muted-foreground">{item.summary}</p> : null}
-              <p className="text-xs text-muted-foreground">{item.source}</p>
-              {isSafeExternalUrl(item.url) ? (
-                <a
-                  href={item.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-xs text-primary hover:underline inline-block"
-                >
-                  Read the full story
-                </a>
-              ) : (
-                <span className="text-xs text-muted-foreground">Link unavailable</span>
-              )}
-            </div>
-          </li>
-        ))}
-      </ol>
-    </ReportSection>
-  );
-}
-
-function MorningReportImage({ image }: { image: MorningReportImageFact }) {
-  return (
-    <figure className="space-y-1.5">
-      <img
-        src={`/api/attachments/${image.fileId}/content`}
-        alt={image.caption}
-        className="w-full rounded-lg border border-border"
-      />
-      <figcaption className="text-xs text-muted-foreground">{image.caption}</figcaption>
-    </figure>
-  );
-}
-
-/** A small 7-day line for one price, oldest first. Nothing when there are fewer than two points. */
-function PriceSparkline({ points, rising }: { points: Array<{ price: number; observedAt: string }>; rising: boolean }) {
-  if (points.length < 2) return null;
-  const width = 120;
-  const height = 28;
-  const prices = points.map((p) => p.price);
-  const min = Math.min(...prices);
-  const max = Math.max(...prices);
-  const span = max - min || 1;
-  const path = prices
-    .map((price, i) => {
-      const x = (i / (prices.length - 1)) * width;
-      const y = height - ((price - min) / span) * (height - 4) - 2;
-      return `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(" ");
-  return (
-    <svg
-      role="img"
-      aria-label={`Price over the last ${points.length} readings`}
-      viewBox={`0 0 ${width} ${height}`}
-      className={rising ? "mt-2 h-7 w-full text-green-600 dark:text-green-400" : "mt-2 h-7 w-full text-red-600 dark:text-red-400"}
-      preserveAspectRatio="none"
-    >
-      <path d={path} fill="none" stroke="currentColor" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
-    </svg>
   );
 }
