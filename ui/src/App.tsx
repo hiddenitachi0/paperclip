@@ -121,6 +121,11 @@ function boardRoutes() {
       <Route path="company/settings/instance/plugins" element={<PluginManager />} />
       <Route path="company/settings/instance/plugins/:pluginId" element={<PluginSettings />} />
       <Route path="company/settings/instance/adapters" element={<AdapterManager />} />
+      {/* Media Studio's "Looks" page moved from Company settings into a Looks
+          tab on its own main-menu page (DUR-4060); keep the old settings URL
+          working. */}
+      <Route path="company/settings/media-studio-looks" element={<Navigate to="/media-studio?tab=looks" replace />} />
+      <Route path="company/settings/media-studio-looks/*" element={<Navigate to="/media-studio?tab=looks" replace />} />
       <Route path="company/settings/:settingsRoutePath/*" element={<CompanySettingsPluginPage />} />
       <Route path="skills/*" element={<CompanySkills />} />
       <Route path="tools" element={<CompanyMcpTools />} />
