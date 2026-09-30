@@ -5,7 +5,7 @@ import { createTradingStrategySchema, setTradingStrategyStatusSchema, updateTrad
 import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
 import { assertBoardOrgAccess, assertCompanyAccess, assertCompanyOwnerAdminOrInstanceAdmin } from "./authz.js";
-import { tradingService } from "../services/trading.js";
+import { tradingService, type TradingServiceDeps } from "../services/trading.js";
 
 /**
  * DUR-4153/DUR-4171: the trading agent is board-only, both reading and
@@ -19,10 +19,11 @@ import { tradingService } from "../services/trading.js";
  * company member.
  */
 
-export function tradingRoutes(rawDb: Db) {
+/** `deps` lets tests inject a fake TradingMarketDataSource (createStrategy's quote fetch) without a real network call; app.ts always calls this with none, i.e. the real Kraken client. */
+export function tradingRoutes(rawDb: Db, deps: TradingServiceDeps = {}) {
   const router = Router();
   const db = createRequestScopedDb(rawDb);
-  const trading = tradingService(db);
+  const trading = tradingService(db, deps);
 
   function readScope() {
     return companyScopeFromParam(rawDb, (req, companyId) => {
