@@ -126,6 +126,30 @@ function ProjectPropertiesMatrix() {
     }),
     [],
   );
+  const sftpProject: Project = useMemo(
+    () => ({
+      ...boardProject,
+      id: "project-sftp-deploy",
+      name: "Marketing Site",
+      deployTransport: "sftp",
+      deployPolicy: {
+        enabled: true,
+        requestingAgentId: "agent-codex",
+        workspaceId: "workspace-board-ui",
+        deployTargetPath: "/root/marketing-site",
+        deployKind: "compose_recreate",
+        healthCheckUrl: "https://marketing.example.com/",
+        rollback: "git_previous",
+        mode: "preview_only",
+        askFirstActions: ["publish_new_public_content"],
+        sftpHost: "ftp.marketing-host.example.com",
+        sftpUsername: "deploy",
+        sftpRemotePath: "/httpdocs",
+        sftpAllowlist: ["dist/index.html", "dist/assets/app.js"],
+      },
+    }),
+    [],
+  );
 
   return (
     <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_420px]">
@@ -155,6 +179,13 @@ function ProjectPropertiesMatrix() {
             onArchive={() => undefined}
             archivePending={false}
           />
+        </div>
+        <div className="rounded-lg border border-border bg-background p-4">
+          <div className="mb-3">
+            <div className="text-sm font-medium">{sftpProject.name}</div>
+            <div className="text-xs text-muted-foreground">Deploy transport: SFTP, preview-only mode</div>
+          </div>
+          <ProjectProperties project={sftpProject} onFieldUpdate={() => undefined} onArchive={() => undefined} />
         </div>
         <div className="grid gap-3 sm:grid-cols-3 xl:grid-cols-1">
           {[
