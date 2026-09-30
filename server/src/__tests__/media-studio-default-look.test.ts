@@ -156,6 +156,23 @@ describe("media-studio default look per agent: making pictures", () => {
     const result = await harness.executeTool<any>(TOOL_GENERATE, { prompt: "a sofa" }, majaRun);
     expect(result.data.look).toBeNull();
   });
+
+  // DUR-4133: the morning report's mood picture must never carry Maja's (or
+  // any) look, even though she has a default. `look: "none"` skips every
+  // source — named, mentioned in the request text, automatic rule, default —
+  // not just the absence of an explicit look (which still falls through to
+  // the default, the bug this ticket fixed).
+  it('"none" skips the agent\'s default look, an automatic look, and a look named in the request text', async () => {
+    const harness = await setup(undefined, { [MAJA]: NIGHT.id });
+    const calls = fakeFal(harness);
+
+    const result = await harness.executeTool<any>(TOOL_GENERATE, { prompt: "a sofa in look Maja Night", look: "none" }, majaRun);
+
+    expect(result.error).toBeUndefined();
+    expect(result.data).toMatchObject({ look: null, lookReason: null });
+    expect(calls[0]!.body.prompt).toBe("a sofa in look Maja Night");
+    expect(calls[0]!.body.seed).toBeUndefined();
+  });
 });
 
 describe("media-studio: a look named in the request's text", () => {
