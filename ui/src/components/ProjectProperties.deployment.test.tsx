@@ -85,6 +85,7 @@ function buildProject(overrides: Partial<Project> = {}): Project {
     pausedAt: null,
     executionWorkspacePolicy: null,
     deployPolicy: null,
+    deployTransport: "git_push",
     codebase: {
       workspaceId: "ws-1",
       repoUrl: "https://github.com/acme/dashboard",
@@ -212,8 +213,139 @@ describe("ProjectProperties deployment section", () => {
         healthCheckUrl: "https://dashboard.example.com/health",
         rollback: "none",
         deployBranch: "main",
+        mode: "approval_every_time",
       },
     });
+  });
+
+  it("shows git-recipe fields by default and switches to SFTP fields when the transport changes", async () => {
+    const onFieldUpdate = vi.fn(async () => {});
+    const el = await render(
+      <ProjectProperties
+        project={buildProject({
+          deployPolicy: {
+            enabled: true,
+            requestingAgentId: null,
+            workspaceId: "22222222-2222-4222-8222-222222222222",
+            deployTargetPath: "/root/dashboard",
+            deployKind: "compose_recreate",
+            healthCheckUrl: "https://dashboard.example.com/health",
+            rollback: "git_previous",
+          },
+        })}
+        onFieldUpdate={onFieldUpdate}
+      />,
+    );
+    await flush();
+
+    expect(el.textContent).toContain("How to deploy");
+    expect(el.textContent).not.toContain("SFTP host");
+
+    const transportSelect = Array.from(el.querySelectorAll("select")).find((select) =>
+      Array.from(select.options).some((option) => option.value === "sftp"),
+    ) as HTMLSelectElement;
+    expect(transportSelect).toBeDefined();
+
+    await act(async () => {
+      transportSelect.value = "sftp";
+      transportSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await flush();
+
+    expect(onFieldUpdate).toHaveBeenCalledWith("deploy_transport", { deployTransport: "sftp" });
+  });
+
+  it("shows SFTP fields (never a password field) and hides the git recipe fields when deployTransport is sftp", async () => {
+    const onFieldUpdate = vi.fn(async () => {});
+    const el = await render(
+      <ProjectProperties
+        project={buildProject({
+          deployTransport: "sftp",
+          deployPolicy: {
+            enabled: true,
+            requestingAgentId: null,
+            workspaceId: "22222222-2222-4222-8222-222222222222",
+            deployTargetPath: "/root/dashboard",
+            deployKind: "compose_recreate",
+            healthCheckUrl: "https://dashboard.example.com/health",
+            rollback: "git_previous",
+            sftpHost: "ftp.example.com",
+            sftpUsername: "deploy",
+            sftpRemotePath: "/httpdocs",
+            sftpAllowlist: ["dist/index.html"],
+          },
+        })}
+        onFieldUpdate={onFieldUpdate}
+      />,
+    );
+    await flush();
+
+    expect(el.textContent).toContain("SFTP host");
+    expect(el.textContent).toContain("never entered here");
+    expect(el.textContent).not.toContain("How to deploy");
+    expect(el.textContent).not.toContain("Services to restart");
+    expect(el.querySelectorAll('input[type="password"]').length).toBe(0);
+
+    const allowlistInput = Array.from(el.querySelectorAll("input")).find(
+      (input) => input.value === "dist/index.html",
+    ) as HTMLInputElement;
+    expect(allowlistInput).toBeDefined();
+  });
+
+  it("saves the deploy mode and lets ask-first categories be toggled independently of it", async () => {
+    const onFieldUpdate = vi.fn(async () => {});
+    const el = await render(
+      <ProjectProperties
+        project={buildProject({
+          deployPolicy: {
+            enabled: true,
+            requestingAgentId: null,
+            workspaceId: "22222222-2222-4222-8222-222222222222",
+            deployTargetPath: "/root/dashboard",
+            deployKind: "compose_recreate",
+            healthCheckUrl: "https://dashboard.example.com/health",
+            rollback: "git_previous",
+            mode: "approval_every_time",
+          },
+        })}
+        onFieldUpdate={onFieldUpdate}
+      />,
+    );
+    await flush();
+
+    const modeSelect = Array.from(el.querySelectorAll("select")).find((select) =>
+      Array.from(select.options).some((option) => option.value === "auto_after_review"),
+    ) as HTMLSelectElement;
+    expect(modeSelect).toBeDefined();
+
+    await act(async () => {
+      modeSelect.value = "auto_after_review";
+      modeSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await flush();
+
+    expect(onFieldUpdate).toHaveBeenCalledWith(
+      "deploy_mode",
+      expect.objectContaining({ deployPolicy: expect.objectContaining({ mode: "auto_after_review" }) }),
+    );
+
+    const costsMoneyCheckbox = Array.from(el.querySelectorAll("label"))
+      .find((label) => label.textContent?.includes("Anything that costs money"))
+      ?.querySelector("input[type=checkbox]") as HTMLInputElement;
+    expect(costsMoneyCheckbox).toBeDefined();
+    expect(costsMoneyCheckbox.checked).toBe(false);
+
+    await act(async () => {
+      costsMoneyCheckbox.click();
+    });
+    await flush();
+
+    expect(onFieldUpdate).toHaveBeenCalledWith(
+      "deploy_ask_first_actions",
+      expect.objectContaining({
+        deployPolicy: expect.objectContaining({ askFirstActions: ["costs_money"] }),
+      }),
+    );
   });
 
   it("names the GitHub scopes the project needs and renders the token report without the token", async () => {
