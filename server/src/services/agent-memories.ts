@@ -1,6 +1,6 @@
 import { and, count, desc, eq, inArray, isNull, type SQL } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agentMemories, agents, authUsers, personas } from "@paperclipai/db";
+import { agentMemories, agents, authUsers, companyMemberships, personas } from "@paperclipai/db";
 import {
   AGENT_MEMORY_MAX_LENGTH,
   AGENT_MEMORY_MAX_NOTES,
@@ -168,21 +168,61 @@ export function agentMemoryService(db: Db) {
     return row;
   }
 
+  /**
+   * DUR-4094: which of these notes' authors are an active "Employee (light)"
+   * member of the company right now. This route is board-only and a light
+   * employee can never reach it (no agents:create grant, and blocked by
+   * default besides), so every caller here is, by construction, someone
+   * other than the note's author -- exactly the case Filip's privacy rule
+   * covers: her PA's memory notes are hers, not the admin page's.
+   */
+  async function privacyProtectedAuthorIds(companyId: string, authorIds: string[]): Promise<Set<string>> {
+    const ids = [...new Set(authorIds)];
+    if (ids.length === 0) return new Set();
+    const rows = await db
+      .select({ principalId: companyMemberships.principalId })
+      .from(companyMemberships)
+      .where(
+        and(
+          eq(companyMemberships.companyId, companyId),
+          eq(companyMemberships.principalType, "user"),
+          eq(companyMemberships.status, "active"),
+          eq(companyMemberships.membershipRole, "employee"),
+          inArray(companyMemberships.principalId, ids),
+        ),
+      );
+    return new Set(rows.map((row) => row.principalId));
+  }
+
   return {
     resolveOwner,
 
-    /** The notebook for the agent's page: owner, limits and every note, newest first. */
-    async list(companyId: string, agentId: string): Promise<AgentMemoryList> {
+    /**
+     * The notebook for the agent's page: owner, limits and every note, newest
+     * first. A note written by an active Employee (light) member is left out
+     * -- it is hers, same as her PA chat transcript -- unless
+     * `emergencyAccess` is set, which the caller may only do after writing a
+     * private_access_events row (see server/src/services/private-access.ts
+     * and routes/private-access.ts).
+     */
+    async list(companyId: string, agentId: string, options?: { emergencyAccess?: boolean }): Promise<AgentMemoryList> {
       const owner = await resolveOwner(companyId, agentId);
       const rows = await listRows(owner);
-      const names = await namesFor(rows.map((row) => row.createdByUserId).filter((id): id is string => !!id));
+      const protectedAuthorIds = options?.emergencyAccess
+        ? new Set<string>()
+        : await privacyProtectedAuthorIds(
+            companyId,
+            rows.map((row) => row.createdByUserId).filter((id): id is string => !!id),
+          );
+      const visibleRows = rows.filter((row) => !row.createdByUserId || !protectedAuthorIds.has(row.createdByUserId));
+      const names = await namesFor(visibleRows.map((row) => row.createdByUserId).filter((id): id is string => !!id));
       return {
         owner: owner.personaId
           ? { kind: "persona", personaId: owner.personaId, name: owner.personaName }
           : { kind: "agent", agentId: owner.agentId, name: owner.agentName },
         maxNotes: AGENT_MEMORY_MAX_NOTES,
         maxLength: AGENT_MEMORY_MAX_LENGTH,
-        notes: rows.map((row) => toNote(row, names)),
+        notes: visibleRows.map((row) => toNote(row, names)),
       };
     },
 

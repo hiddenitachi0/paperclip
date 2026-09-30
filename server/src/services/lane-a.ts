@@ -1671,6 +1671,25 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     }
   }
 
+  /**
+   * DUR-4094: is the person on the other end of this chat an active
+   * Employee (light) member? Her PA chat is one of the "private chats and
+   * files" Filip's rule covers, and this activity-log entry (visible on the
+   * company Activity page to every member who can read it) was one of the
+   * four places that leaked it despite the conversation itself being
+   * owner-only. Compared against `ctx.actor` (not a fresh lookup) only when
+   * the actor IS the requester, which holds for every path except the
+   * Telegram bridge's one shared user (DUR-4094 "Questions for Filip" /
+   * follow-up: per-employee Telegram identity) -- that gap is unchanged by
+   * this fix, not worsened.
+   */
+  function isPrivacyProtectedRequester(ctx: LaneAToolContext): boolean {
+    const userId = ctx.requester.userId;
+    if (!userId || ctx.actor.type !== "board" || ctx.actor.userId !== userId) return false;
+    const membership = ctx.actor.memberships?.find((item) => item.companyId === ctx.companyId);
+    return membership?.status === "active" && membership.membershipRole === "employee";
+  }
+
   async function recordToolCall(
     ctx: LaneAToolContext,
     toolName: string,
@@ -1678,6 +1697,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     result: { ok: boolean; summary: string; error?: string | null },
   ) {
     try {
+      const isPrivate = isPrivacyProtectedRequester(ctx);
       await logActivity(db, {
         companyId: ctx.companyId,
         actorType: ctx.requester.userId ? "user" : "agent",
@@ -1686,16 +1706,23 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         action: "lane_a.tool_called",
         entityType: "agent",
         entityId: ctx.agent.id,
-        details: {
-          tool: toolName,
-          input: summarizeToolInput(input),
-          ok: result.ok,
-          summary: result.summary,
-          // What the tool or service actually said when it failed, so "who
-          // blocked this?" can be answered from the log.
-          ...(!result.ok && result.error ? { error: result.error.slice(0, LANE_A_TOOL_ERROR_LOG_CHARS) } : {}),
-          conversationId: ctx.conversationId,
-        },
+        details: isPrivate
+          ? {
+              tool: toolName,
+              ok: result.ok,
+              conversationId: ctx.conversationId,
+              private: true,
+            }
+          : {
+              tool: toolName,
+              input: summarizeToolInput(input),
+              ok: result.ok,
+              summary: result.summary,
+              // What the tool or service actually said when it failed, so "who
+              // blocked this?" can be answered from the log.
+              ...(!result.ok && result.error ? { error: result.error.slice(0, LANE_A_TOOL_ERROR_LOG_CHARS) } : {}),
+              conversationId: ctx.conversationId,
+            },
       });
     } catch {
       // The activity log must never break a chat turn; the action is still
@@ -2558,6 +2585,33 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     };
   }
 
+  /**
+   * DUR-4094: who owns this conversation, so the emergency-access route
+   * (routes/private-access.ts) can name the correct person in the audit row
+   * it writes BEFORE it reads the transcript. Does not check ownership or
+   * gate on it -- that stays getConversation's job -- and returns nothing
+   * from the transcript itself.
+   */
+  async function getConversationOwner(params: {
+    companyId: string;
+    targetAgentId: string;
+    conversationId: string;
+  }): Promise<{ requestedByUserId: string | null; requestedByAgentId: string | null } | null> {
+    const [conversation] = await db
+      .select({
+        companyId: laneAConversations.companyId,
+        agentId: laneAConversations.agentId,
+        requestedByUserId: laneAConversations.requestedByUserId,
+        requestedByAgentId: laneAConversations.requestedByAgentId,
+      })
+      .from(laneAConversations)
+      .where(eq(laneAConversations.id, params.conversationId));
+    if (!conversation || conversation.companyId !== params.companyId || conversation.agentId !== params.targetAgentId) {
+      return null;
+    }
+    return { requestedByUserId: conversation.requestedByUserId, requestedByAgentId: conversation.requestedByAgentId };
+  }
+
   /** The stored transcript of one conversation, for the chat panel to resume after a reload. */
   async function getConversation(params: {
     companyId: string;
@@ -2567,8 +2621,18 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     /** DUR-4070: which people may read this agent's chat history. Optional so existing test callers keep working; omitted = not checked (matches this endpoint's pre-DUR-4070 behavior). */
     targetAgent?: { name: string; laneAAssignedUserIds?: string[] | null };
     actor?: AuthorizationActor;
+    /**
+     * DUR-4094: set only by the emergency-access route
+     * (routes/private-access.ts), and only after it has already written the
+     * private_access_events row for this read. Skips the "this conversation
+     * belongs to someone else" and assignment checks below -- the two things
+     * that make a PA chat private in the first place -- which is exactly
+     * what a logged, reasoned break-glass read is for. Never set from a
+     * request body; the caller decides this, not the client.
+     */
+    emergencyAccess?: boolean;
   }) {
-    if (params.targetAgent) {
+    if (params.targetAgent && !params.emergencyAccess) {
       assertPersonAssignedToQuickAgent({
         companyId: params.companyId,
         targetAgent: params.targetAgent,
@@ -2583,7 +2647,9 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     if (!conversation || conversation.companyId !== params.companyId || conversation.agentId !== params.targetAgentId) {
       throw notFound("Lane A conversation not found");
     }
-    assertConversationOwnedBy(conversation, params.requester);
+    if (!params.emergencyAccess) {
+      assertConversationOwnedBy(conversation, params.requester);
+    }
 
     const rows = await db
       .select()
@@ -3419,7 +3485,16 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     }
   }
 
-  return { sendMessage, getConversation, transform, listTransformAgents, continueConversation, listLooks, makePicture };
+  return {
+    sendMessage,
+    getConversation,
+    getConversationOwner,
+    transform,
+    listTransformAgents,
+    continueConversation,
+    listLooks,
+    makePicture,
+  };
 }
 
 /** The bare name of Media Studio's "List saved looks" tool (its grant is `<plugin>:list-looks`). */
