@@ -6,6 +6,7 @@ import {
 } from "../constants.js";
 import { multilineTextSchema } from "./text.js";
 import { mcpServerConfigSchema } from "./agent.js";
+import { deployAskFirstActionSchema } from "./project.js";
 
 export const createApprovalSchema = z.object({
   type: z.enum(APPROVAL_TYPES),
@@ -156,6 +157,12 @@ export const deployRequestPayloadSchema = z
     // "nothing".
     resolvedCommit: z.string().trim().min(1).max(200).optional(),
     resolvedCommitSource: z.enum(["pinned", "branch_tip"]).optional(),
+    // DUR-4139: the project's deployPolicy.askFirstActions, stamped
+    // server-side at filing time (server/src/services/deploy-policy-enforcement.ts)
+    // so the card can say why it needs a decision. Never trusted from the
+    // filer, same rule as sourceBranch/deployBranch/changesSinceLive above --
+    // a card must not be able to claim its own "nothing here needs asking".
+    askFirstActions: z.array(deployAskFirstActionSchema).optional(),
   })
   .strict();
 
