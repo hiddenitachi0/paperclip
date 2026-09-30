@@ -76,6 +76,8 @@ export const SECRET_KIND_IDS = [
   "telegram_bot_token",
   "slack_bot_token",
   "brave_search_api_key",
+  "sftp_password",
+  "sftp_private_key",
   "payment_card_single_use",
   "site_login",
   "mail_imap_password",
@@ -222,6 +224,22 @@ export const SECRET_KINDS: readonly SecretKindDescriptor[] = [
     // No envKey: the key is only ever read from the company secret picked on
     // Connections -> Web search, and migration 0171's backfill (already applied)
     // lists every kind that has one.
+    testable: false,
+  },
+  {
+    id: "sftp_password",
+    label: "SFTP password",
+    description: "Password for an SFTP deploy target (DUR-4068), bound to the one agent allowed to deploy over SFTP.",
+    provider: "other",
+    category: "other",
+    testable: false,
+  },
+  {
+    id: "sftp_private_key",
+    label: "SFTP private key",
+    description: "SSH private key for an SFTP deploy target (DUR-4068), preferred over a password where the host supports it.",
+    provider: "other",
+    category: "other",
     testable: false,
   },
   {

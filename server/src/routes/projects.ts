@@ -30,6 +30,7 @@ import {
 import {
   assertNoAgentHostWorkspaceCommandMutation,
   collectDeployPolicyCommandPaths,
+  collectProjectDeployTransportCommandPaths,
   collectProjectExecutionWorkspaceCommandPaths,
   collectProjectWorkspaceCommandPaths,
 } from "./workspace-command-authz.js";
@@ -117,10 +118,20 @@ export function projectRoutes(rawDb: Db) {
     return { workspaces: workspaceRows, agents: agentRows };
   }
 
-  async function assertDeployPolicyMakesSense(deployPolicy: unknown, companyId: string, projectId: string | null) {
+  async function assertDeployPolicyMakesSense(
+    deployPolicy: unknown,
+    companyId: string,
+    projectId: string | null,
+    // paperclip:allow-git-push: enum default value (ProjectDeployTransport), not a git command invocation
+    deployTransport: "git_push" | "sftp" = "git_push",
+  ) {
     if (!deployPolicy || typeof deployPolicy !== "object" || Array.isArray(deployPolicy)) return;
     const context = await loadDeployPolicyValidationContext(companyId, projectId);
-    const problems = describeDeployPolicyProblems(deployPolicy as Parameters<typeof describeDeployPolicyProblems>[0], context);
+    const problems = describeDeployPolicyProblems(
+      deployPolicy as Parameters<typeof describeDeployPolicyProblems>[0],
+      context,
+      deployTransport,
+    );
     if (problems.length > 0) {
       throw unprocessable(formatDeployPolicyProblems(problems), { code: "deploy_policy_invalid", problems });
     }
@@ -288,6 +299,7 @@ export function projectRoutes(rawDb: Db) {
         ...collectProjectExecutionWorkspaceCommandPaths(projectData.executionWorkspacePolicy),
         ...collectProjectWorkspaceCommandPaths(workspace, "workspace"),
         ...collectDeployPolicyCommandPaths(projectData.deployPolicy),
+        ...collectProjectDeployTransportCommandPaths(projectData),
       ],
     );
     if (projectData.env !== undefined) {
@@ -297,7 +309,13 @@ export function projectRoutes(rawDb: Db) {
         { strictMode: strictSecretsMode, fieldPath: "env" },
       );
     }
-    await assertDeployPolicyMakesSense(projectData.deployPolicy, companyId, null);
+    await assertDeployPolicyMakesSense(
+      projectData.deployPolicy,
+      companyId,
+      null,
+      // paperclip:allow-git-push: enum default value (ProjectDeployTransport), not a git command invocation
+      (projectData.deployTransport as "git_push" | "sftp" | undefined) ?? "git_push",
+    );
     const project = await svc.create(companyId, projectData);
     if (project.env) {
       await secretsSvc.syncEnvBindingsForTarget?.(
@@ -353,6 +371,7 @@ export function projectRoutes(rawDb: Db) {
       [
         ...collectProjectExecutionWorkspaceCommandPaths(body.executionWorkspacePolicy),
         ...collectDeployPolicyCommandPaths(body.deployPolicy),
+        ...collectProjectDeployTransportCommandPaths(body),
       ],
     );
     await assertProjectEnvironmentSelection(
@@ -368,7 +387,12 @@ export function projectRoutes(rawDb: Db) {
         fieldPath: "env",
       });
     }
-    await assertDeployPolicyMakesSense(body.deployPolicy, existing.companyId, existing.id);
+    await assertDeployPolicyMakesSense(
+      body.deployPolicy,
+      existing.companyId,
+      existing.id,
+      body.deployTransport ?? existing.deployTransport,
+    );
     const project = await svc.update(id, body);
     if (!project) {
       res.status(404).json({ error: "Project not found" });

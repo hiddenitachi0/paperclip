@@ -3825,3 +3825,184 @@ test("DUR-3974: a deploy that dies between the stop and the recipe still has its
     if (dir) rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// DUR-4068: upload_via_sftp is run_recipe's counterpart for projects whose
+// deployTransport is "sftp" — instead of swapping deployTargetPath in place,
+// it uploads an explicit allowlist of files out of it to a remote host. This
+// is tested directly (not via a real SFTP server): a fake `curl` on PATH
+// records every invocation and simulates success/failure per target file, and
+// `cli_json` is stubbed to return a canned credential the way the real
+// instance-admin-only route would.
+test("upload_via_sftp resolves the agent-bound credential, uploads only files that exist locally via a chmod-600 netrc, and never lets the credential value reach the log", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-test-"));
+  try {
+    const targetDir = path.join(dir, "target");
+    mkdirSync(path.join(targetDir, "assets"), { recursive: true });
+    writeFileSync(path.join(targetDir, "index.html"), "<html></html>");
+    writeFileSync(path.join(targetDir, "assets", "app.js"), "console.log(1)");
+    // Deliberately no assets/missing.js on disk — the allowlist below names it anyway.
+
+    const binDir = path.join(dir, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const curlCallsLog = path.join(dir, "curl-calls.log");
+    const netrcSnapshotLog = path.join(dir, "netrc-snapshot.log");
+    const fakeCurl = [
+      "#!/usr/bin/env bash",
+      "set -uo pipefail",
+      `printf '%s\\n' "$*" >> "${curlCallsLog}"`,
+      'netrc=""',
+      'args=("$@")',
+      'n=${#args[@]}',
+      'i=0',
+      'while [ "$i" -lt "$n" ]; do',
+      '  if [ "${args[$i]}" = "--netrc-file" ]; then netrc="${args[$((i+1))]}"; fi',
+      '  i=$((i+1))',
+      'done',
+      'if [ -n "$netrc" ]; then',
+      `  { printf 'PERM=%s\\n' "$(stat -c %a "$netrc" 2>/dev/null)"; cat "$netrc"; } >> "${netrcSnapshotLog}" 2>/dev/null`,
+      "fi",
+      'last="${args[$((n-1))]}"',
+      'case "$last" in',
+      "  *missing*) exit 7 ;;",
+      "  *) exit 0 ;;",
+      "esac",
+    ].join("\n");
+    writeFileSync(path.join(binDir, "curl"), fakeCurl, { mode: 0o755 });
+
+    const logFile = path.join(dir, "runner.log");
+    const allowlist = "index.html\\nassets/app.js\\nassets/missing.js";
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      cli_json() { printf '{"kind":"sftp_password","value":"s3cr3t-value"}'; }
+      upload_via_sftp "aid-1" "${targetDir}" "$(printf '${allowlist}')" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1"
+      echo "STATUS=$?"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, PAPERCLIP_DEPLOY_RUNNER_LOG: logFile },
+    });
+    assert.match(
+      result.stdout,
+      /STATUS=1/,
+      `expected a non-zero status because one allowlisted file does not exist locally\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+
+    const calls = readFileSync(curlCallsLog, "utf8").trim().split("\n").filter(Boolean);
+    assert.equal(calls.length, 2, `curl must only be invoked for files that actually exist locally, got: ${JSON.stringify(calls)}`);
+    assert.ok(calls.some((c) => c.includes("sftp://sftp.example.invalid:22/var/www/site/index.html")), "index.html must be uploaded");
+    assert.ok(calls.some((c) => c.includes("sftp://sftp.example.invalid:22/var/www/site/assets/app.js")), "assets/app.js must be uploaded");
+    assert.ok(!calls.some((c) => c.includes("missing.js")), "the missing local file must never be handed to curl at all");
+
+    const log = readFileSync(logFile, "utf8");
+    assert.doesNotMatch(log, /s3cr3t-value/, "the resolved credential value must never be written to the deploy-runner log");
+    assert.match(log, /missing/, "the missing allowlist entry must be logged as a failure, not silently dropped");
+
+    const netrcSnapshot = readFileSync(netrcSnapshotLog, "utf8");
+    assert.match(netrcSnapshot, /PERM=600/, "the temporary .netrc file must be chmod 600");
+    assert.match(
+      netrcSnapshot,
+      /machine sftp\.example\.invalid login deployer password s3cr3t-value/,
+      "the netrc must carry the resolved host/username/password",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("upload_via_sftp fails closed (no upload attempted) when no credential is bound to the requesting agent yet", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-nocred-test-"));
+  try {
+    const targetDir = path.join(dir, "target");
+    mkdirSync(targetDir, { recursive: true });
+    writeFileSync(path.join(targetDir, "index.html"), "<html></html>");
+
+    const binDir = path.join(dir, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const curlCallsLog = path.join(dir, "curl-calls.log");
+    writeFileSync(
+      path.join(binDir, "curl"),
+      ["#!/usr/bin/env bash", `printf '%s\\n' "$*" >> "${curlCallsLog}"`, "exit 0"].join("\n"),
+      { mode: 0o755 },
+    );
+
+    const logFile = path.join(dir, "runner.log");
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      cli_json() { printf '{"kind":null,"value":null}'; }
+      upload_via_sftp "aid-1" "${targetDir}" "index.html" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1"
+      echo "STATUS=$?"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, PAPERCLIP_DEPLOY_RUNNER_LOG: logFile },
+    });
+    assert.match(result.stdout, /STATUS=1/, `expected failure when no credential is bound\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.ok(!existsSync(curlCallsLog), "curl must never be invoked when no credential is bound yet");
+    assert.match(readFileSync(logFile, "utf8"), /no SFTP deploy credential is bound/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-4068: a project with deployTransport \"sftp\" dispatches to upload_via_sftp instead of run_recipe", () => {
+  const scenario = makeScenario();
+  let dir;
+  try {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-dispatch-test-"));
+    dir = tmp;
+    const targetPath = path.join(tmp, "target");
+    mkdirSync(targetPath, { recursive: true });
+    spawnSync("git", ["init", "--quiet", "-b", "custom"], { cwd: targetPath });
+
+    const project = {
+      id: "proj-1",
+      deployTransport: "sftp",
+      deployPolicy: {
+        enabled: true,
+        workspaceId: "ws-1",
+        deployTargetPath: targetPath,
+        healthCheckUrl: "http://example.invalid/health",
+        requestingAgentId: "agent-1",
+        sftpHost: "sftp.example.invalid",
+        sftpPort: 22,
+        sftpUsername: "deployer",
+        sftpRemotePath: "/var/www/site",
+        sftpAllowlist: ["index.html"],
+      },
+      workspaces: [{ id: "ws-1", repoUrl: "https://example.invalid/repo.git", repoRef: "custom" }],
+    };
+    scenario.writeJson("project-proj-1.json", project);
+    scenario.writeJson("approval-aid-1.json", {
+      id: "aid-1",
+      payload: { projectId: "proj-1", workspaceId: "ws-1", commit: "irrelevant", kind: "deploy" },
+    });
+
+    const callsLog = path.join(scenario.dir, "dispatch-calls.log");
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      health_check() { return 0; }
+      run_recipe() { echo "run_recipe must never run for an sftp-transport project" >> "${callsLog}"; return 1; }
+      upload_via_sftp() { echo "upload_via_sftp $*" >> "${callsLog}"; return 0; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: { ...process.env, PATH: `${scenario.binDir}:${process.env.PATH}`, SCENARIO_DIR: scenario.dir, PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log },
+    });
+    assertSuccess(result, "process_approval");
+
+    const calls = existsSync(callsLog) ? readFileSync(callsLog, "utf8").trim().split("\n").filter(Boolean) : [];
+    assert.ok(
+      calls.every((line) => !line.startsWith("run_recipe")),
+      `run_recipe must never be called for an sftp-transport project, got: ${JSON.stringify(calls)}`,
+    );
+    const uploadCalls = calls.filter((line) => line.startsWith("upload_via_sftp"));
+    assert.equal(uploadCalls.length, 1, `expected exactly one upload_via_sftp call for the deploy, got: ${JSON.stringify(calls)}`);
+    assert.ok(uploadCalls[0].includes("agent-1") && uploadCalls[0].includes("co-1"), "the requesting agent id and company id must be threaded through to upload_via_sftp");
+    assert.equal(scenario.commentsFor("aid-1").length, 1, "a successful sftp-transport deploy must still post exactly one success comment");
+  } finally {
+    scenario.cleanup();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});

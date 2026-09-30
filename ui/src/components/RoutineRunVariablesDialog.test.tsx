@@ -94,6 +94,7 @@ function createProject(): Project {
       allowIssueOverride: true,
     },
     deployPolicy: null,
+    deployTransport: "git_push",
     codebase: {
       workspaceId: null,
       repoUrl: null,

@@ -45,6 +45,13 @@ const FULLY_POPULATED_POLICY = {
   mirrorBranch: "master",
   previewCommand: "pnpm dev",
   previewHealthPath: "/",
+  mode: "auto_after_review",
+  askFirstActions: ["live_data_write"],
+  sftpHost: "sftp.example.com",
+  sftpPort: 22,
+  sftpUsername: "deployer",
+  sftpRemotePath: "/var/www/site",
+  sftpAllowlist: ["dist/index.html"],
 } as const;
 
 /**
@@ -53,11 +60,17 @@ const FULLY_POPULATED_POLICY = {
  * because adding it was inconvenient.
  */
 const NOT_USED_BY_THE_RUNNER: Record<string, string> = {
-  requestingAgentId: "who may ask for a deploy is decided by the server when the card is filed, before the runner ever sees it",
   deployBranch: "the runner deploys the workspace's own repoRef; deployBranch gates the merge approval, server-side",
   mirrorBranch: "purely a server-side guard on which branch a merge_pr card may target",
   previewCommand: "previews are started by the server for an undecided card, never by the deploy runner",
   previewHealthPath: "same as previewCommand — it belongs to the preview, not to a deploy",
+  // DUR-4068: both of these decide whether an approval needs a board approval
+  // card at all -- entirely server-side, before an approved card ever reaches
+  // the runner. requestingAgentId, by contrast, IS read by the runner now (to
+  // resolve the SFTP credential bound to that agent), so it is deliberately
+  // not listed here any more.
+  mode: "governs whether a deploy needs a request_board_approval card; decided server-side before the card is even filed",
+  askFirstActions: "same as mode — routes specific action categories to a board approval card, server-side only",
 };
 
 describe("deploy policy fields reach every layer that has to know about them", () => {

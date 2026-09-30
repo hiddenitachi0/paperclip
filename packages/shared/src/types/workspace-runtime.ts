@@ -163,6 +163,41 @@ export interface ProjectExecutionWorkspacePolicy {
 export type ProjectDeployKind = "compose_recreate" | "compose_build_swap" | "custom";
 export type ProjectDeployRollbackStrategy = "git_previous" | "none";
 
+/**
+ * Which upload mechanism the deploy runner uses for a project's production
+ * target (DUR-4068). `git_push` is today's behavior (git fetch + reset inside
+ * deployTargetPath), unchanged and the default. `sftp` uploads
+ * `deployPolicy.sftpAllowlist` to `deployPolicy.sftpHost` instead.
+ */
+export type ProjectDeployTransport = "git_push" | "sftp";
+
+/**
+ * Governs whether a production deploy for *this project's own site* needs a
+ * board approval card (DUR-4068). Distinct from, and never changes, the
+ * separate always-a-card rule for deploying Paperclip itself.
+ *   - auto_after_review: deploy once review/security checks pass, no card.
+ *   - approval_every_time: every production deploy is a request_board_approval
+ *     card, like Paperclip's own deploy gate.
+ *   - preview_only: never auto-deploys; every change becomes a preview link
+ *     for a human to push by hand.
+ * Unset means today's behavior: always a card (same as approval_every_time).
+ */
+export type ProjectDeployPolicyMode = "auto_after_review" | "approval_every_time" | "preview_only";
+
+/**
+ * Action categories that always route to a request_board_approval card
+ * regardless of `deployPolicy.mode` (DUR-4068) — a direct implementation of
+ * "ask the owner first" for specific action kinds, wired to Paperclip's
+ * approval flow rather than left as a convention in a role's instructions.
+ */
+export type ProjectDeployAskFirstAction =
+  | "delete_or_overwrite_foreign_file"
+  | "live_data_write"
+  | "access_policy_change"
+  | "structural_change"
+  | "costs_money"
+  | "publish_new_public_content";
+
 export interface ProjectDeployPolicy {
   enabled: boolean;
   requestingAgentId: string | null;
@@ -194,6 +229,22 @@ export interface ProjectDeployPolicy {
   previewCommand?: string;
   /** Path on the preview that answers OK once it has finished starting. */
   previewHealthPath?: string;
+  /** See ProjectDeployPolicyMode. Unset = today's behavior (always a card). */
+  mode?: ProjectDeployPolicyMode;
+  /** Action categories that always force a board approval card (DUR-4068). */
+  askFirstActions?: ProjectDeployAskFirstAction[];
+  /** SFTP host, used only when the project's deployTransport is "sftp". */
+  sftpHost?: string;
+  /** SFTP port. Defaults to 22 when unset. */
+  sftpPort?: number;
+  sftpUsername?: string;
+  /** Remote directory the allowlisted files are uploaded into. */
+  sftpRemotePath?: string;
+  /**
+   * Explicit list of local (repo-relative) files the deploy runner may
+   * upload over SFTP — never a wildcard/whole-tree upload (DUR-4068).
+   */
+  sftpAllowlist?: string[];
 }
 
 export interface IssueExecutionWorkspaceSettings {

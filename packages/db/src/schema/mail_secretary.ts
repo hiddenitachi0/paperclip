@@ -5,7 +5,7 @@ import { agents } from "./agents.js";
 import { companySecrets } from "./company_secrets.js";
 
 /**
- * Mail secretary (migration 0192): a limited-trust duty run, the same shape
+ * Mail secretary (migration 0193): a limited-trust duty run, the same shape
  * as watchers (see watchers.ts) -- code fetches an inbox over IMAP
  * (read-only), code checks per-inbox ignore filters, one cheap model call
  * with NO tools classifies what is left, and code routes: ignore, keep for

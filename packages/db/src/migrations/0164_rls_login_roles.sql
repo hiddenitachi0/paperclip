@@ -247,7 +247,7 @@ DECLARE
     'lane_a_conversations',
     'lane_a_messages',
     -- Mail secretary (DUR-4093). Created (and granted on) in
-    -- 0192_mail_secretary.sql; listed here so the login-role lists match the
+    -- 0193_mail_secretary.sql; listed here so the login-role lists match the
     -- schema, as for the tables above.
     'mail_inbox_filters',
     'mail_inboxes',
@@ -430,7 +430,7 @@ DECLARE
     'lane_a_conversations',
     'lane_a_messages',
     -- Mail secretary (DUR-4093). Created (and granted on) in
-    -- 0192_mail_secretary.sql; listed here so the login-role lists match the
+    -- 0193_mail_secretary.sql; listed here so the login-role lists match the
     -- schema, as for the tables above.
     'mail_inbox_filters',
     'mail_inboxes',

@@ -24,6 +24,11 @@ export const projects = pgTable(
     pausedAt: timestamp("paused_at", { withTimezone: true }),
     executionWorkspacePolicy: jsonb("execution_workspace_policy").$type<Record<string, unknown>>(),
     deployPolicy: jsonb("deploy_policy").$type<Record<string, unknown>>(),
+    // DUR-4068: which upload mechanism the deploy runner uses for this
+    // project's production target -- "git_push" (default, unchanged) or
+    // "sftp". Kept as a plain column (not folded into deploy_policy) since it
+    // decides which OTHER deploy_policy fields apply.
+    deployTransport: text("deploy_transport").notNull().default("git_push"),
     archivedAt: timestamp("archived_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
