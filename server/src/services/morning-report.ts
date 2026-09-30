@@ -766,7 +766,10 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
   const secrets = deps.secrets ?? secretService(db);
   const nowOf = () => deps.now?.() ?? new Date();
   const fetchImpl = deps.fetchImpl ?? fetch;
-  const briefingPageLive = deps.briefingPageLive ?? process.env.PAPERCLIP_MORNING_REPORT_BRIEFING_PAGE_ENABLED === "true";
+  // The briefing page (DUR-4075) ships together with this service, so the
+  // link is on by default; set PAPERCLIP_MORNING_REPORT_BRIEFING_PAGE_ENABLED=false
+  // to keep Telegram teasers link-free.
+  const briefingPageLive = deps.briefingPageLive ?? process.env.PAPERCLIP_MORNING_REPORT_BRIEFING_PAGE_ENABLED !== "false";
   const dispatch =
     deps.dispatch ??
     ((work: () => Promise<void>) => {

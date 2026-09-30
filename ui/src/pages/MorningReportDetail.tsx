@@ -140,7 +140,9 @@ export function MorningReportDetail() {
 
       <Card>
         <CardContent className="pt-6">
-          <MarkdownBody>{report.text}</MarkdownBody>
+          {/* Plain text only: the opening is partly model-written, so it is
+              never rendered as markdown or HTML (no links or markup from the model). */}
+          <p className="whitespace-pre-line text-sm leading-relaxed">{facts?.opening || report.text}</p>
         </CardContent>
       </Card>
 
@@ -160,9 +162,16 @@ export function MorningReportDetail() {
             </div>
           )}
 
-          {facts.weatherText && (
+          {facts.weather.length > 0 && (
             <ReportSection title="Weather" subtitle={facts.places.length > 0 ? facts.places.join(", ") : undefined} defaultOpen>
-              <p className="whitespace-pre-line text-sm">{facts.weatherText}</p>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                {facts.weather.map((w) => (
+                  <div key={w.place} className="rounded-md border p-3">
+                    <p className="text-sm font-medium">{w.place}</p>
+                    <p className="whitespace-pre-line text-sm text-muted-foreground">{w.text}</p>
+                  </div>
+                ))}
+              </div>
             </ReportSection>
           )}
 
@@ -193,6 +202,7 @@ export function MorningReportDetail() {
                     <p className="text-sm text-muted-foreground">
                       {price.price} {price.currency}
                     </p>
+                    <PriceSparkline points={price.history} rising={(price.changePercent ?? 0) >= 0} />
                   </div>
                 ))}
               </div>
@@ -266,6 +276,7 @@ function FactSection({ title, items }: { title: string; items: MorningReportFact
             <span className="text-muted-foreground font-medium shrink-0">{i + 1}.</span>
             <div className="space-y-0.5">
               <p className="font-medium">{item.title}</p>
+              {item.summary ? <p className="text-sm text-muted-foreground">{item.summary}</p> : null}
               <p className="text-xs text-muted-foreground">{item.source}</p>
               {isSafeExternalUrl(item.url) ? (
                 <a
@@ -297,5 +308,34 @@ function MorningReportImage({ image }: { image: MorningReportImageFact }) {
       />
       <figcaption className="text-xs text-muted-foreground">{image.caption}</figcaption>
     </figure>
+  );
+}
+
+/** A small 7-day line for one price, oldest first. Nothing when there are fewer than two points. */
+function PriceSparkline({ points, rising }: { points: Array<{ price: number; observedAt: string }>; rising: boolean }) {
+  if (points.length < 2) return null;
+  const width = 120;
+  const height = 28;
+  const prices = points.map((p) => p.price);
+  const min = Math.min(...prices);
+  const max = Math.max(...prices);
+  const span = max - min || 1;
+  const path = prices
+    .map((price, i) => {
+      const x = (i / (prices.length - 1)) * width;
+      const y = height - ((price - min) / span) * (height - 4) - 2;
+      return `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+  return (
+    <svg
+      role="img"
+      aria-label={`Price over the last ${points.length} readings`}
+      viewBox={`0 0 ${width} ${height}`}
+      className={rising ? "mt-2 h-7 w-full text-green-600 dark:text-green-400" : "mt-2 h-7 w-full text-red-600 dark:text-red-400"}
+      preserveAspectRatio="none"
+    >
+      <path d={path} fill="none" stroke="currentColor" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+    </svg>
   );
 }

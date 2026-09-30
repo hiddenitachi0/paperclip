@@ -46,7 +46,8 @@ function factItemsHtml(title: string, items: MorningReportFactItem[]): string {
         ? `<a href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer">`
         : "<span>";
       const linkClose = isSafeExternalUrl(item.url) ? "</a>" : "</span>";
-      return `<li><span class="num">${i + 1}.</span> ${linkOpen}${escapeHtml(item.title)}${linkClose} <span class="source">— ${escapeHtml(item.source)}</span></li>`;
+      const summary = item.summary ? `<br /><span class="summary">${escapeHtml(item.summary)}</span>` : "";
+      return `<li><span class="num">${i + 1}.</span> ${linkOpen}${escapeHtml(item.title)}${linkClose} <span class="source">— ${escapeHtml(item.source)}</span>${summary}</li>`;
     })
     .join("\n");
   return `<section><h2>${escapeHtml(title)}</h2><ol class="items">${rows}</ol></section>`;
@@ -77,9 +78,12 @@ export function buildStandaloneReportHtml(
     )
     .join("\n");
 
-  const weatherHtml = facts?.weatherText
-    ? `<section><h2>Weather${facts.places.length ? ` — ${escapeHtml(facts.places.join(", "))}` : ""}</h2><p class="pre">${escapeHtml(facts.weatherText)}</p></section>`
-    : "";
+  const weatherHtml =
+    facts && facts.weather.length > 0
+      ? `<section><h2>Weather${facts.places.length ? ` — ${escapeHtml(facts.places.join(", "))}` : ""}</h2>${facts.weather
+          .map((w) => `<h3>${escapeHtml(w.place)}</h3><p class="pre">${escapeHtml(w.text)}</p>`)
+          .join("")}</section>`
+      : "";
 
   const pricesHtml =
     facts && facts.prices.length > 0

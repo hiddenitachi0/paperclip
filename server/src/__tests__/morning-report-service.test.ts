@@ -641,7 +641,7 @@ d("morning report tick", () => {
       expect(facts.sport).toHaveLength(1);
       expect(facts.prices).toHaveLength(4);
       expect(facts.stats).toEqual({ sourcesChecked: 2, itemsFound: 10 });
-      expect(facts.briefingPageLive).toBe(false);
+      expect(facts.briefingPageLive).toBe(true);
 
       // Nothing is cut off: all 10 numbered headlines and every configured
       // section actually appear in the full text, plus the footer.
@@ -683,19 +683,32 @@ d("morning report tick", () => {
   });
 
   describe("briefingPageLive", () => {
-    it("is false by default (the page does not exist yet), and only true when the deps flag says so", async () => {
+    it("is true by default (the page ships with this service), and false when switched off", async () => {
       const companyId = await seedCompany();
       const agentId = await seedAgent(companyId, { ...baseSettings, sources: ["bbc"] });
       feeds[BBC_URL] = rssXml([]);
 
-      await service().tick(OSLO_WINTER_0700);
-      await settle();
-      expect((await outboxRowsFor(agentId))[0]!.facts!.briefingPageLive).toBe(false);
+      const previous = process.env.PAPERCLIP_MORNING_REPORT_BRIEFING_PAGE_ENABLED;
+      delete process.env.PAPERCLIP_MORNING_REPORT_BRIEFING_PAGE_ENABLED;
+      try {
+        await service().tick(OSLO_WINTER_0700);
+        await settle();
+        expect((await outboxRowsFor(agentId))[0]!.facts!.briefingPageLive).toBe(true);
 
-      const agentId2 = await seedAgent(companyId, { ...baseSettings, sources: ["bbc"] });
-      await service({ briefingPageLive: true }).tick(OSLO_WINTER_0700);
-      await settle();
-      expect((await outboxRowsFor(agentId2))[0]!.facts!.briefingPageLive).toBe(true);
+        const agentId2 = await seedAgent(companyId, { ...baseSettings, sources: ["bbc"] });
+        await service({ briefingPageLive: false }).tick(OSLO_WINTER_0700);
+        await settle();
+        expect((await outboxRowsFor(agentId2))[0]!.facts!.briefingPageLive).toBe(false);
+
+        const agentId3 = await seedAgent(companyId, { ...baseSettings, sources: ["bbc"] });
+        process.env.PAPERCLIP_MORNING_REPORT_BRIEFING_PAGE_ENABLED = "false";
+        await service().tick(OSLO_WINTER_0700);
+        await settle();
+        expect((await outboxRowsFor(agentId3))[0]!.facts!.briefingPageLive).toBe(false);
+      } finally {
+        if (previous === undefined) delete process.env.PAPERCLIP_MORNING_REPORT_BRIEFING_PAGE_ENABLED;
+        else process.env.PAPERCLIP_MORNING_REPORT_BRIEFING_PAGE_ENABLED = previous;
+      }
     });
   });
 

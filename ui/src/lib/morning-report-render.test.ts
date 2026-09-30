@@ -4,7 +4,10 @@ import { buildStandaloneReportHtml, isSafeExternalUrl, summarizeCoverage } from 
 
 const facts: MorningReportFacts = {
   places: ["Drøbak", "Oslo"],
-  weatherText: "Cloudy, 8°C in Drøbak. Clear, 6°C in Oslo.",
+  weather: [
+    { place: "Drøbak", text: "Cloudy, 8°C" },
+    { place: "Oslo", text: "Clear, 6°C" },
+  ],
   headlines: [
     { title: "Big news story", url: "https://bbc.co.uk/story", source: "bbc" },
     { title: "Second story", url: "https://nettavisen.no/story-2", source: "nettavisen" },
@@ -12,10 +15,14 @@ const facts: MorningReportFacts = {
   hobby: [{ title: "Zelda update", url: "https://zeldadungeon.net/x", source: "zelda_dungeon" }],
   sport: [{ title: "Zuccarello scores", url: "https://example.com/nhl", source: "bbc" }],
   prices: [
-    { symbol: "BTC", price: 65000, currency: "USD", changePercent: 1.2 },
-    { symbol: "DNB.OL", price: 210.5, currency: "NOK", changePercent: -0.4 },
+    { symbol: "BTC", price: 65000, currency: "USD", changePercent: 1.2, history: [] },
+    { symbol: "DNB.OL", price: 210.5, currency: "NOK", changePercent: -0.4, history: [] },
   ],
   images: [{ fileId: "file-1", caption: "Maja dressed for the weather", kind: "weather" }],
+  opening: "Good morning! A calm day in the markets.",
+  teaser: "Drøbak 8°C, Oslo 6°C. Big news story. BTC +1.2%.",
+  stats: { sourcesChecked: 3, itemsFound: 6 },
+  briefingPageLive: true,
   notes: ["No stock data key configured for ETH."],
 };
 
@@ -54,12 +61,16 @@ describe("summarizeCoverage", () => {
   it("returns zero for an empty facts object", () => {
     const empty: MorningReportFacts = {
       places: [],
-      weatherText: null,
+      weather: [],
       headlines: [],
       hobby: [],
       sport: [],
       prices: [],
       images: [],
+      opening: "",
+      teaser: "",
+      stats: { sourcesChecked: 0, itemsFound: 0 },
+      briefingPageLive: false,
       notes: [],
     };
     expect(summarizeCoverage(empty)).toEqual({ sourcesChecked: 0, itemsFound: 0 });
@@ -81,7 +92,8 @@ describe("buildStandaloneReportHtml", () => {
     expect(html).toContain("BTC");
     expect(html).toContain("210.5");
     expect(html).toContain("No stock data key configured for ETH.");
-    expect(html).toContain("Cloudy, 8°C in Drøbak");
+    expect(html).toContain("Drøbak");
+    expect(html).toContain("Cloudy, 8°C");
     expect(html).toContain("data:image/png;base64,AAAA");
     expect(html).toContain("3 sources checked, 6 items found.");
   });
