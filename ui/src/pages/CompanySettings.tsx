@@ -12,7 +12,7 @@ import { instanceSettingsApi } from "../api/instanceSettings";
 import { queryKeys } from "../lib/queryKeys";
 import { Button } from "@/components/ui/button";
 import { Link } from "@/lib/router";
-import { Settings, CloudUpload, Download, Plug, Upload } from "lucide-react";
+import { Settings, CloudUpload, Download, Plug, Upload, Image } from "lucide-react";
 import { CompanyPatternIcon } from "../components/CompanyPatternIcon";
 import { isDefaultSkin, setDefaultSkin } from "../lib/company-branding";
 import {
@@ -429,6 +429,27 @@ export function CompanySettings() {
               <Link to="/company/settings/connections">
                 <Plug className="mr-1.5 h-3.5 w-3.5" />
                 Open Connections
+              </Link>
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      {/* DUR-4060: Media Studio's picture styles ("looks") moved from here into
+          a Looks tab on Media Studio's own page, reached from the main menu. */}
+      <div className="space-y-4">
+        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+          Pictures
+        </div>
+        <div className="rounded-md border border-border px-4 py-4">
+          <p className="text-sm text-muted-foreground">
+            Saved picture styles ("looks") for Media Studio now live on the Media Studio page.
+          </p>
+          <div className="mt-3">
+            <Button size="sm" variant="outline" asChild>
+              <Link to="/media-studio?tab=looks">
+                <Image className="mr-1.5 h-3.5 w-3.5" />
+                Open Media Studio looks
               </Link>
             </Button>
           </div>

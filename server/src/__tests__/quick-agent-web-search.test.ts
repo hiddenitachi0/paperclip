@@ -298,7 +298,14 @@ d("quick-agent web search", () => {
       return { client: { messages: { create } } as unknown as LaneAModelClient, calls };
     }
 
-    const board = (companyId: string) => ({ type: "board" as const, userId: "filip", companyIds: [companyId], source: "session" as const });
+    // "filip" stands in for this company's owner (DUR-4070: only assigned people, or the owner, may chat with a quick agent).
+    const board = (companyId: string) => ({
+      type: "board" as const,
+      userId: "filip",
+      companyIds: [companyId],
+      source: "session" as const,
+      memberships: [{ companyId, membershipRole: "owner", status: "active" as const }],
+    });
     const toolNames = (call: Call) => (call.tools ?? []).map((tool) => tool.name);
 
     it("offers neither web tool while the switch is off, even with a key; get_time is always there", async () => {

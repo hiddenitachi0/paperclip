@@ -1,6 +1,7 @@
 import type { Db } from "@paperclipai/db";
 import type { ToolRunContext } from "@paperclipai/plugin-sdk";
 import type { PluginStatus } from "@paperclipai/shared";
+import { isLaneATrustLimited } from "@paperclipai/shared";
 import type { AgentToolDescriptor, PluginToolDispatcher } from "./plugin-tool-dispatcher.js";
 import type { ToolExecutionResult } from "./plugin-tool-registry.js";
 import { pluginRegistryService } from "./plugin-registry.js";
@@ -38,6 +39,15 @@ export type PluginToolGrantPolicy = "empty_means_all" | "ticked_only";
 export interface PluginToolGrantAgent {
   laneAEnabled?: boolean | null;
   pluginToolGrants?: string[] | null;
+  /**
+   * DUR-4070: checked before the grant policy below, on every caller
+   * (full-agent route and quick-agent chat alike). "limited" refuses every
+   * plugin tool call outright, regardless of pluginToolGrants -- this is
+   * also what keeps a "limited" full agent (laneAEnabled false, so it would
+   * otherwise hit the empty_means_all policy) from getting an unrestricted
+   * tool set.
+   */
+  laneATrustLevel?: string | null;
 }
 
 export function grantPolicyForAgent(agent: PluginToolGrantAgent): PluginToolGrantPolicy {
@@ -157,6 +167,14 @@ export function pluginToolExecutionService(db: Db, toolDispatcher: PluginToolDis
     const pluginEnabled = await isPluginEnabledForCompany(registeredTool.pluginDbId, input.runContext.companyId);
     if (!pluginEnabled) {
       return { ok: false, status: 403, error: `Plugin "${registeredTool.pluginId}" is disabled for this company` };
+    }
+
+    // DUR-4070: a "limited"-trust agent never reaches the grant policy below
+    // -- not even the empty_means_all policy a full agent would otherwise
+    // get -- so there is no code path left where "limited" plus an empty
+    // pluginToolGrants ever resolves to "allowed".
+    if (isLaneATrustLimited(input.agent.laneATrustLevel)) {
+      return { ok: false, status: 403, error: "This agent's trust level (Limited) does not allow add-on tools." };
     }
 
     const grantError = checkPluginToolGrant(

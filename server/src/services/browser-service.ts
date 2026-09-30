@@ -58,7 +58,7 @@ import {
   isPurchaseTotalStillAcceptable,
   NOK_APPROVAL_THRESHOLD,
   purchaseRequestPayloadSchema,
-  readLaneABrowserAccess,
+  effectiveLaneABrowserAccess,
   type ParsedTotal,
   type PurchaseCapKind,
 } from "@paperclipai/shared";
@@ -103,6 +103,8 @@ export interface BrowserAccessAgent {
    */
   adapterConfig: unknown;
   status: string;
+  /** DUR-4070: a "limited"-trust agent gets no browser access at all, regardless of adapterConfig.laneA.browserAccess. */
+  laneATrustLevel?: string | null;
 }
 
 class RemoteBrowserDriver implements BrowserDriver {
@@ -278,7 +280,13 @@ export function browserService(db: Db, deps: BrowserServiceDeps = {}) {
 
   async function loadAgent(agentId: string): Promise<BrowserAccessAgent> {
     const [agent] = await db
-      .select({ id: agents.id, companyId: agents.companyId, adapterConfig: agents.adapterConfig, status: agents.status })
+      .select({
+        id: agents.id,
+        companyId: agents.companyId,
+        adapterConfig: agents.adapterConfig,
+        status: agents.status,
+        laneATrustLevel: agents.laneATrustLevel,
+      })
       .from(agents)
       .where(eq(agents.id, agentId));
     if (!agent) throw notFound("Agent not found");
@@ -295,7 +303,7 @@ export function browserService(db: Db, deps: BrowserServiceDeps = {}) {
    * it may touch a gated tool.
    */
   function assertBrowserAccessAllowed(agent: BrowserAccessAgent) {
-    if (readLaneABrowserAccess(agent.adapterConfig) === "off") {
+    if (effectiveLaneABrowserAccess(agent) === "off") {
       throw forbidden("This agent's browser access is off. A board user can turn it on in the agent's settings.");
     }
     if (agent.status === "terminated" || agent.status === "pending_approval") {
@@ -313,7 +321,7 @@ export function browserService(db: Db, deps: BrowserServiceDeps = {}) {
    */
   async function assertBookAndBuyAccessLevel(agent: BrowserAccessAgent) {
     assertBrowserAccessAllowed(agent);
-    if (readLaneABrowserAccess(agent.adapterConfig) !== "book_and_buy") {
+    if (effectiveLaneABrowserAccess(agent) !== "book_and_buy") {
       throw forbidden("This agent can browse but cannot book or purchase. A board user can turn booking on in the agent's settings.");
     }
     if (process.env.PAPERCLIP_BROWSER_DISABLED === "1") {
