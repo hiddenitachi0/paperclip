@@ -78,6 +78,13 @@ export function collectProjectExecutionWorkspaceCommandPaths(policy: unknown): s
  * that could set any of these could redirect that credential to a host it
  * chooses and have it exfiltrated on the runner's next tick. Same board-only
  * bar as the credential bind/unbind routes themselves.
+ *
+ * DUR-4139: `mode` and `askFirstActions` decide whether a deploy needs a
+ * request_board_approval card at all (see deploy-policy-enforcement.ts) --
+ * an agent key that could set either of these on its own project could
+ * switch itself to `auto_after_review` and clear the ask-first list in the
+ * same write that requests the deploy, defeating the whole point of the
+ * policy. Same board-only bar as the fields above.
  */
 export function collectDeployPolicyCommandPaths(deployPolicy: unknown): string[] {
   if (!isRecord(deployPolicy)) return [];
@@ -105,6 +112,12 @@ export function collectDeployPolicyCommandPaths(deployPolicy: unknown): string[]
   }
   if (hasOwn(deployPolicy, "sftpAllowlist")) {
     paths.push("deployPolicy.sftpAllowlist");
+  }
+  if (hasOwn(deployPolicy, "mode")) {
+    paths.push("deployPolicy.mode");
+  }
+  if (hasOwn(deployPolicy, "askFirstActions")) {
+    paths.push("deployPolicy.askFirstActions");
   }
   return paths;
 }
