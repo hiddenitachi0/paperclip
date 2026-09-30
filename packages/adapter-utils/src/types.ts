@@ -181,7 +181,9 @@ export interface AdapterModel {
   label: string;
 }
 
-export type AdapterModelProfileKey = "cheap";
+// DUR-4144: kept in sync by hand with packages/shared/src/constants.ts
+// MODEL_PROFILE_KEYS -- adapter-utils cannot depend on @paperclipai/shared.
+export type AdapterModelProfileKey = "cheap" | "planner";
 
 export interface AdapterModelProfileDefinition {
   key: AdapterModelProfileKey;
