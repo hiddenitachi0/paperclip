@@ -10,8 +10,8 @@ import {
   type StartVideoStorylineRenderInput,
   type VideoStorylineProvider,
 } from "@paperclipai/shared";
-import type { MediaJobHandle, MediaJobInput, MediaJobProvider } from "@paperclipai/plugin-media-studio";
-import { FalVideoProvider, SogniVideoProvider } from "@paperclipai/plugin-media-studio";
+import type { MediaJobHandle, MediaJobInput, MediaJobProvider } from "./video-provider-clients.js";
+import { FalVideoProvider, SogniVideoProvider } from "./video-provider-clients.js";
 import { badRequest, conflict, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { getStorageService } from "../storage/index.js";
@@ -25,14 +25,13 @@ import { executePinnedHttpRequest, validateAndResolveFetchUrl } from "./safe-out
 
 /**
  * DUR-4127: render orchestration for a video storyline. Reuses the Fal/Sogni
- * *provider HTTP clients* from the media-studio plugin package
- * (FalVideoProvider/SogniVideoProvider -- plain classes, no ctx dependency)
- * rather than that plugin's ctx-bound job engine (media-jobs.ts), because
- * this needs first-class DB-table bookkeeping (video_shot_render_jobs) a
- * plugin entity cannot give cross-cutting queries over. See the PR's
- * "Questions for Filip" for why this crosses from server/src into a plugin
- * package's exports, and why that is a deliberate first-party reuse rather
- * than a sandbox bypass.
+ * *provider HTTP clients* (FalVideoProvider/SogniVideoProvider -- plain
+ * classes, no ctx dependency) rather than the media-studio plugin's
+ * ctx-bound job engine (media-jobs.ts), because this needs first-class
+ * DB-table bookkeeping (video_shot_render_jobs) a plugin entity cannot give
+ * cross-cutting queries over. See video-provider-clients.ts for why those
+ * classes are duplicated there rather than imported from the plugin
+ * package.
  *
  * Drives shots strictly in `orderIndex` order: shot N is only started once
  * shot N-1 is `done` (or there is no shot N-1). On a shot failure, the chain
