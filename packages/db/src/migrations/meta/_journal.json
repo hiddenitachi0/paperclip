@@ -1324,6 +1324,13 @@
       "when": 1787160580000,
       "tag": "0189_lane_a_provider_routing",
       "breakpoints": true
+    },
+    {
+      "idx": 190,
+      "version": "7",
+      "when": 1787160590000,
+      "tag": "0190_lane_a_trust_and_assignment",
+      "breakpoints": true
     }
   ]
 }

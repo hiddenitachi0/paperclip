@@ -242,6 +242,108 @@ describe("lane A routes", () => {
         targetAgentId: "11111111-1111-4111-8111-111111111111",
         conversationId,
         requester: { userId: "board-user-1", agentId: null },
+        // DUR-4070: the route must pass the agent's assignment list through so
+        // the service can refuse a person this agent is not assigned to.
+        targetAgent: { name: "Agent", laneAAssignedUserIds: [] },
+        actor: expect.objectContaining({ type: "board", userId: "board-user-1" }),
+      });
+    });
+  });
+
+  // DUR-4070: only assigned people (+ the company owner) may chat with a
+  // quick agent. This is a route-level plumbing test — the assignment logic
+  // itself is service-level (lane-a-assignment.test.ts) — but it is exactly
+  // the kind of "forgot to thread the field through" bug that would silently
+  // reopen the hole (or, the other way, lock every assigned person out), so
+  // it is asserted at each of the four call sites below.
+  describe("DUR-4070: laneAAssignedUserIds is threaded from the agent row to the service", () => {
+    const assignedUserIds = ["assigned-user-1"];
+
+    it("messages", async () => {
+      mockAgentService.getById.mockResolvedValue(makeAgent({ ...({ laneAAssignedUserIds: assignedUserIds } as object) }));
+      mockLaneAService.sendMessage.mockResolvedValue({ conversationId: "c", response: "hi", turnCount: 1, stopReason: "end_turn" });
+      const app = await createApp({
+        type: "board",
+        userId: "board-user-1",
+        companyIds: ["11111111-1111-4111-8111-111111111112"],
+        source: "session",
+        isInstanceAdmin: false,
+      });
+
+      await request(app)
+        .post("/api/lane-a/11111111-1111-4111-8111-111111111111/messages")
+        .send({ companyId: "11111111-1111-4111-8111-111111111112", message: "hi" });
+
+      expect(mockLaneAService.sendMessage.mock.calls[0][0].targetAgent).toMatchObject({
+        laneAAssignedUserIds: assignedUserIds,
+      });
+    });
+
+    it("continue", async () => {
+      mockAgentService.getById.mockResolvedValue(makeAgent({ ...({ laneAAssignedUserIds: assignedUserIds } as object) }));
+      (mockLaneAService as Record<string, unknown>).continueConversation = vi
+        .fn()
+        .mockResolvedValue({ conversationId: "c", recap: "", turnCount: 0, stopReason: "end_turn" });
+      const app = await createApp({
+        type: "board",
+        userId: "board-user-1",
+        companyIds: ["11111111-1111-4111-8111-111111111112"],
+        source: "session",
+        isInstanceAdmin: false,
+      });
+
+      await request(app)
+        .post("/api/lane-a/11111111-1111-4111-8111-111111111111/continue")
+        .send({ companyId: "11111111-1111-4111-8111-111111111112" });
+
+      expect((mockLaneAService as any).continueConversation.mock.calls[0][0].targetAgent).toMatchObject({
+        laneAAssignedUserIds: assignedUserIds,
+      });
+    });
+
+    it("looks", async () => {
+      mockAgentService.getById.mockResolvedValue(makeAgent({ ...({ laneAAssignedUserIds: assignedUserIds } as object) }));
+      (mockLaneAService as Record<string, unknown>).listLooks = vi.fn().mockResolvedValue({ available: false, text: "" });
+      const app = await createApp({
+        type: "board",
+        userId: "board-user-1",
+        companyIds: ["11111111-1111-4111-8111-111111111112"],
+        source: "session",
+        isInstanceAdmin: false,
+      });
+
+      await request(app)
+        .get("/api/lane-a/11111111-1111-4111-8111-111111111111/looks")
+        .query({ companyId: "11111111-1111-4111-8111-111111111112" });
+
+      expect((mockLaneAService as any).listLooks.mock.calls[0][0].targetAgent).toMatchObject({
+        laneAAssignedUserIds: assignedUserIds,
+      });
+    });
+
+    it("getConversation", async () => {
+      mockAgentService.getById.mockResolvedValue(makeAgent({ ...({ laneAAssignedUserIds: assignedUserIds } as object) }));
+      mockLaneAService.getConversation.mockResolvedValue({
+        conversationId: "c1",
+        turnCount: 0,
+        expired: false,
+        turnCapReached: false,
+        messages: [],
+      });
+      const app = await createApp({
+        type: "board",
+        userId: "board-user-1",
+        companyIds: ["11111111-1111-4111-8111-111111111112"],
+        source: "session",
+        isInstanceAdmin: false,
+      });
+
+      await request(app)
+        .get("/api/lane-a/11111111-1111-4111-8111-111111111111/conversations/c1")
+        .query({ companyId: "11111111-1111-4111-8111-111111111112" });
+
+      expect(mockLaneAService.getConversation.mock.calls[0][0].targetAgent).toMatchObject({
+        laneAAssignedUserIds: assignedUserIds,
       });
     });
   });

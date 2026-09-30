@@ -106,6 +106,8 @@ export function laneARoutes(db: Db, options: { laneA?: LaneAServiceOptions } = {
         laneABaseUrl: targetAgent.laneABaseUrl ?? null,
         // "Creativity" (sampling temperature); null = the model host's default.
         laneATemperature: targetAgent.laneATemperature ?? null,
+        // DUR-4070: who besides the company owner may chat with this agent.
+        laneAAssignedUserIds: (targetAgent.laneAAssignedUserIds as string[] | null) ?? [],
         // OpenRouter "model hosts"; null = OpenRouter picks.
         laneAProviderRouting: targetAgent.laneAProviderRouting ?? null,
       },
@@ -241,6 +243,8 @@ export function laneARoutes(db: Db, options: { laneA?: LaneAServiceOptions } = {
         laneAMaxOutputTokens: targetAgent.laneAMaxOutputTokens ?? null,
         laneAProvider: targetAgent.laneAProvider ?? null,
         laneABaseUrl: targetAgent.laneABaseUrl ?? null,
+        // DUR-4070: who besides the company owner may chat with this agent.
+        laneAAssignedUserIds: (targetAgent.laneAAssignedUserIds as string[] | null) ?? [],
       },
       requester: requesterFor(req),
       actor: req.actor,
@@ -270,7 +274,13 @@ export function laneARoutes(db: Db, options: { laneA?: LaneAServiceOptions } = {
 
     const result = await laneA.listLooks({
       companyId,
-      targetAgent: { id: targetAgent.id, name: targetAgent.name, laneAEnabled: targetAgent.laneAEnabled },
+      targetAgent: {
+        id: targetAgent.id,
+        name: targetAgent.name,
+        laneAEnabled: targetAgent.laneAEnabled,
+        // DUR-4070: who besides the company owner may chat with this agent.
+        laneAAssignedUserIds: (targetAgent.laneAAssignedUserIds as string[] | null) ?? [],
+      },
       requester: requesterFor(req),
       actor: req.actor,
     });
@@ -299,6 +309,14 @@ export function laneARoutes(db: Db, options: { laneA?: LaneAServiceOptions } = {
       targetAgentId: targetAgent.id,
       conversationId,
       requester: requesterFor(req),
+      // DUR-4070: same "assigned people + owner" rule as the chat routes —
+      // reading an earlier conversation is otherwise a second way to reach
+      // an agent's answers without ever being allowed to talk to it.
+      targetAgent: {
+        name: targetAgent.name,
+        laneAAssignedUserIds: (targetAgent.laneAAssignedUserIds as string[] | null) ?? [],
+      },
+      actor: req.actor,
     });
     res.json(result);
   });
