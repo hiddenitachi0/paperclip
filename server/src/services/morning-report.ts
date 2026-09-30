@@ -97,17 +97,23 @@ const MAX_OUTPUT_CHARS_FOR_SUMMARIES = MORNING_REPORT_SUMMARY_MAX_OUTPUT_TOKENS 
 
 /**
  * Instructions for the one model call a report still costs (DUR-4059
- * direction change): the model writes ONLY a short opening and one-sentence
- * summaries for the given headlines, as strict JSON, never the report itself.
- * Every list in the report (weather, headlines, hobby, sport, prices) is
- * rendered by code from the facts, so nothing Filip needs depends on this
- * call succeeding, finishing, or being trusted with formatting/links.
+ * direction change; DUR-4133 added "mood"): the model writes ONLY a short
+ * opening, a short mood description, and one-sentence summaries for the
+ * given headlines, as strict JSON, never the report itself. Every list in
+ * the report (weather, headlines, hobby, sport, prices) is rendered by code
+ * from the facts, so nothing Filip needs depends on this call succeeding,
+ * finishing, or being trusted with formatting/links. "mood" is a plain
+ * description (never a quoted headline title): it becomes the mood picture's
+ * prompt, so a quoted headline here is exactly the garbled-text bug DUR-4133
+ * fixed.
  */
 export const MORNING_REPORT_SUMMARY_TASK =
-  "You write two short things for a daily morning briefing, using only the facts given below: do not invent, round " +
+  "You write three short things for a daily morning briefing, using only the facts given below: do not invent, round " +
   'differently, or add any number, headline or fact not present below. Answer with ONLY one JSON object, no markdown, ' +
   'no code fences, no commentary, matching exactly this shape: {"opening": "a friendly 3-5 sentence opening for the day, ' +
-  'plain text only, mentioning the weather and the most notable news in your own words", "headlines": [{"n": 1, ' +
+  'plain text only, mentioning the weather and the most notable news in your own words", "mood": "the overall mood of ' +
+  "today's news in at most 8 plain words (for example 'tense but hopeful'), your own description, never a quoted " +
+  'headline or title", "headlines": [{"n": 1, ' +
   '"summary": "one plain-text sentence summarizing headline 1, using only its title"}, ...one entry per numbered headline ' +
   "given below] }. Plain text only in every string: never HTML, never markdown links, never a URL.";
 
@@ -671,6 +677,7 @@ function sanitizeModelText(text: string, maxLength: number): string {
 
 interface ParsedSummaryResponse {
   opening?: unknown;
+  mood?: unknown;
   headlines?: unknown;
 }
 
@@ -733,21 +740,49 @@ function buildSummaryDigest(input: {
   return lines.join("\n");
 }
 
-/** Code-written (no model call): Maja dressed for today's weather, in her own default look. */
+/** Code-written (no model call): Maja dressed for today's weather, in her own default look — DUR-4133: always fully clothed, regardless of the look. */
 function weatherPicturePrompt(agentName: string, places: string[], conditionsSummary: string): string {
   return (
     `A warm, friendly full-body illustration of ${agentName} dressed appropriately for today's weather in ${places.join(" and ")}: ` +
-    `${conditionsSummary}. Illustration style, no text, no numbers, no logos.`
+    `${conditionsSummary}. Fully clothed, dressed for the weather, safe for work. Illustration style, no text, no numbers, no logos.`
   );
 }
 
-/** Code-written (no model call): one picture capturing today's overall news mood, not one per headline. */
-function moodPicturePrompt(headlines: MorningReportFactItem[]): string | null {
-  if (headlines.length === 0) return null;
-  const topics = headlines.slice(0, 3).map((h) => h.title).join("; ");
+/** "rising"/"falling"/"flat": the average of every price's % change that has one (DUR-4133); null with no price data at all. */
+export function priceDirection(prices: MorningReportPriceFact[]): "rising" | "falling" | "flat" | null {
+  const changes = prices.map((p) => p.changePercent).filter((c): c is number => c !== null);
+  if (changes.length === 0) return null;
+  const average = changes.reduce((sum, c) => sum + c, 0) / changes.length;
+  if (average > 0.1) return "rising";
+  if (average < -0.1) return "falling";
+  return "flat";
+}
+
+/** At most `maxWords` plain words (DUR-4133): the model's mood answer is a short description, never a headline quoted at length. */
+export function sanitizeMoodWords(text: string, maxWords = 8): string {
+  const words = sanitizeModelText(text, 200).split(/\s+/).filter(Boolean);
+  return words.slice(0, maxWords).join(" ");
+}
+
+/** Code-written (no model call), used when the model's mood is missing or the model call failed entirely (DUR-4133): built only from prices and weather, never headlines. */
+export function deterministicMood(direction: ReturnType<typeof priceDirection>, conditionsSummary: string | null): string {
+  const priceWord = direction === "rising" ? "upbeat" : direction === "falling" ? "subdued" : "steady";
+  return conditionsSummary ? `${priceWord}, weather-led` : priceWord;
+}
+
+/**
+ * Code-written (no model call): one abstract or scenic illustration for
+ * today's overall mood — never a person, never quoted headline text (DUR-4133:
+ * quoting headline titles verbatim is what made the model paint garbled
+ * text before).
+ */
+function moodPicturePrompt(mood: string, direction: ReturnType<typeof priceDirection>, conditionsSummary: string | null): string {
+  const priceClause = direction ? `Prices are ${direction} today. ` : "";
+  const weatherClause = conditionsSummary ? `Today's weather: ${conditionsSummary}. ` : "";
   return (
-    "An editorial illustration capturing the overall mood of today's news, inspired by (but not depicting any " +
-    `real person, brand or logo from) these headlines: ${topics}. No text, no numbers.`
+    `An abstract or scenic illustration (a landscape, sky or light study; no people) capturing today's overall mood: ${mood}. ` +
+    `${priceClause}${weatherClause}` +
+    "No people, no text, no letters, no words, no logos, no watermark."
   );
 }
 
@@ -846,7 +881,14 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
   }
 
   /** Maja's weather picture and one mood picture, via Media Studio (laneA.makePicture) — the same "quick picture tool" chat pictures use. Never throws: a failed picture just means fewer images, never a failed report. */
-  async function collectImages(agentRow: AgentRow, places: string[], conditionsSummary: string | null, headlines: MorningReportFactItem[], localDate: string): Promise<{ images: MorningReportImageFact[]; notes: string[] }> {
+  async function collectImages(
+    agentRow: AgentRow,
+    places: string[],
+    conditionsSummary: string | null,
+    mood: string,
+    direction: ReturnType<typeof priceDirection>,
+    localDate: string,
+  ): Promise<{ images: MorningReportImageFact[]; notes: string[] }> {
     const images: MorningReportImageFact[] = [];
     const notes: string[] = [];
     if (!agentRow.laneAEnabled) return { images, notes };
@@ -857,6 +899,8 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
           agentId: agentRow.id,
           prompt: weatherPicturePrompt(agentRow.name, places, conditionsSummary),
           runLabel: `morning-report-weather:${agentRow.id}:${localDate}`,
+          // Keeps agentRow's own look (DUR-4133: that is intended for the weather picture), but never unsafe regardless of the look's own content-filter setting.
+          safeForWork: true,
         });
         if (picture.ok) images.push({ fileId: picture.fileId, caption: `${agentRow.name}, dressed for today's weather in ${places.join(" and ")}.`, kind: "weather" });
         else notes.push(`No weather picture this time: ${picture.reason}`);
@@ -864,20 +908,20 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
         notes.push(`No weather picture this time: ${err instanceof Error ? err.message.slice(0, 200) : "the picture failed"}.`);
       }
     }
-    const moodPrompt = moodPicturePrompt(headlines);
-    if (moodPrompt) {
-      try {
-        const picture = await laneA.makePicture({
-          companyId: agentRow.companyId,
-          agentId: agentRow.id,
-          prompt: moodPrompt,
-          runLabel: `morning-report-mood:${agentRow.id}:${localDate}`,
-        });
-        if (picture.ok) images.push({ fileId: picture.fileId, caption: "Today's mood, in one picture.", kind: "mood" });
-        else notes.push(`No mood picture this time: ${picture.reason}`);
-      } catch (err) {
-        notes.push(`No mood picture this time: ${err instanceof Error ? err.message.slice(0, 200) : "the picture failed"}.`);
-      }
+    try {
+      const picture = await laneA.makePicture({
+        companyId: agentRow.companyId,
+        agentId: agentRow.id,
+        prompt: moodPicturePrompt(mood, direction, conditionsSummary),
+        runLabel: `morning-report-mood:${agentRow.id}:${localDate}`,
+        // DUR-4133: never any person's look (not Maja's, not any other saved look), and never unsafe.
+        look: "none",
+        safeForWork: true,
+      });
+      if (picture.ok) images.push({ fileId: picture.fileId, caption: "Today's mood, in one picture.", kind: "mood" });
+      else notes.push(`No mood picture this time: ${picture.reason}`);
+    } catch (err) {
+      notes.push(`No mood picture this time: ${err instanceof Error ? err.message.slice(0, 200) : "the picture failed"}.`);
     }
     return { images, notes };
   }
@@ -954,6 +998,7 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
     // always a complete, safe report on their own.
     let opening = deterministicOpening(places);
     let headlineItems: MorningReportFactItem[] = headlines.items;
+    let modelMood: string | null = null;
     if (!agentRow.laneAEnabled) {
       notes.push("This agent is not a quick agent any more, so headline summaries were not written.");
     } else {
@@ -988,6 +1033,9 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
             if (typeof parsed.opening === "string" && parsed.opening.trim()) {
               opening = sanitizeModelText(parsed.opening, 1200);
             }
+            if (typeof parsed.mood === "string" && parsed.mood.trim()) {
+              modelMood = sanitizeMoodWords(parsed.mood);
+            }
             headlineItems = applyHeadlineSummaries(headlines.items, parsed.headlines);
           }
         }
@@ -1000,7 +1048,12 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
 
     // Pictures via Media Studio, after the one summaries model call, never
     // blocking it: a failed picture must never lose the report (DUR-4059).
-    const pictures = await collectImages(agentRow, places, weather.conditionsSummary, headlineItems, localDate);
+    // The mood picture's prompt (DUR-4133) is built from the model's own
+    // mood words when it answered, else purely from prices and weather —
+    // never from headline titles.
+    const direction = priceDirection(prices.facts);
+    const mood = modelMood ?? deterministicMood(direction, weather.conditionsSummary);
+    const pictures = await collectImages(agentRow, places, weather.conditionsSummary, mood, direction, localDate);
     notes.push(...pictures.notes);
 
     const facts: MorningReportFacts = {

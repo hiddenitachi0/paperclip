@@ -3409,6 +3409,10 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     prompt: string;
     /** Shown in the activity log next to the plugin's own entries (e.g. the alert id). */
     runLabel: string;
+    /** "none" skips every source of a look (named, mentioned, automatic, default) — DUR-4133: for a picture that must never carry any person's look. */
+    look?: string;
+    /** Forces Sogni's content filter on and a fixed safety negative prompt, regardless of any look's own setting — DUR-4133: for a picture nobody reviews before it goes out (e.g. the morning report). */
+    safeForWork?: boolean;
   }): Promise<{ ok: true; fileId: string; seed: number | null } | { ok: false; reason: string }> {
     const [agentRow] = await db
       .select({
@@ -3468,7 +3472,11 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     try {
       const executed = await execution.execute({
         tool: tool.name,
-        parameters: { prompt: params.prompt },
+        parameters: {
+          prompt: params.prompt,
+          ...(params.look ? { look: params.look } : {}),
+          ...(params.safeForWork ? { safeForWork: true } : {}),
+        },
         runContext: { agentId: agentRow.id, runId: pluginRun.run.runId, companyId: params.companyId, projectId: "" },
         agent: { laneAEnabled: true, pluginToolGrants, laneATrustLevel: agentRow.laneATrustLevel },
       });
