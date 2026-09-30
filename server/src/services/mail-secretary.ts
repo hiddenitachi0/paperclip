@@ -101,6 +101,8 @@ export interface MailSecretaryItemSummary {
   delegateAgentId: string | null;
   delegationStatus: string;
   delegationCategory: string | null;
+  /** What was (or, in practice mode, would have been) handed to the delegate -- the whole point of the practice-mode report. */
+  delegatedContent: string | null;
   createdAt: string;
 }
 
@@ -203,6 +205,7 @@ export function mailSecretaryService(db: Db, deps: MailSecretaryServiceDeps = {}
       delegateAgentId: row.delegateAgentId,
       delegationStatus: row.delegationStatus,
       delegationCategory: row.delegationCategory,
+      delegatedContent: row.delegatedContent,
       createdAt: row.createdAt.toISOString(),
     };
   }
@@ -595,7 +598,7 @@ export function mailSecretaryService(db: Db, deps: MailSecretaryServiceDeps = {}
     filters: MailInboxFilterRow[],
     message: FetchedMailMessage,
     now: Date,
-  ): Promise<void> {
+  ): Promise<MailItemDecision> {
     const candidate = { from: message.from, subject: message.subject, body: message.bodyText };
     const matchedFilter = filters.find((filter) =>
       mailFilterMatches({ field: filter.field as never, matchType: filter.matchType as never, value: filter.value }, candidate),
@@ -622,7 +625,7 @@ export function mailSecretaryService(db: Db, deps: MailSecretaryServiceDeps = {}
         filterLabel: matchedFilter.label,
         delegationStatus: "none" satisfies MailDelegationStatus,
       });
-      return;
+      return "ignored_by_filter";
     }
 
     let classification: MailClassification | null = null;
@@ -641,7 +644,7 @@ export function mailSecretaryService(db: Db, deps: MailSecretaryServiceDeps = {}
         decision: "kept_for_filip" satisfies MailItemDecision,
         delegationStatus: "none" satisfies MailDelegationStatus,
       });
-      return;
+      return "kept_for_filip";
     }
 
     if (classification.ignore) {
@@ -651,7 +654,7 @@ export function mailSecretaryService(db: Db, deps: MailSecretaryServiceDeps = {}
         classification: classification as unknown as Record<string, unknown>,
         delegationStatus: "none" satisfies MailDelegationStatus,
       });
-      return;
+      return "ignored_by_classifier";
     }
 
     const canDelegate = classification.delegateToMaja && Boolean(row.delegateAgentId);
@@ -662,7 +665,7 @@ export function mailSecretaryService(db: Db, deps: MailSecretaryServiceDeps = {}
         classification: classification as unknown as Record<string, unknown>,
         delegationStatus: "none" satisfies MailDelegationStatus,
       });
-      return;
+      return "kept_for_filip";
     }
 
     const framed = frameDelegatedMailContent({ from: message.from, subject: message.subject, body: message.bodyText });
@@ -678,6 +681,7 @@ export function mailSecretaryService(db: Db, deps: MailSecretaryServiceDeps = {}
       delegationCategory: classification.category,
       delegatedContent: framed,
     });
+    return "delegated_to_maja";
   }
 
   async function tickInbox(row: MailInboxRow, now: Date): Promise<MailTickResult> {
@@ -747,7 +751,21 @@ export function mailSecretaryService(db: Db, deps: MailSecretaryServiceDeps = {}
         .where(and(eq(mailInboxFilters.inboxId, row.id), eq(mailInboxFilters.enabled, true)));
       for (const message of messages) {
         try {
-          await triageOneMessage(row, filters, message, now);
+          const decision = await triageOneMessage(row, filters, message, now);
+          switch (decision) {
+            case "ignored_by_filter":
+              result.ignoredByFilter += 1;
+              break;
+            case "ignored_by_classifier":
+              result.ignoredByClassifier += 1;
+              break;
+            case "kept_for_filip":
+              result.keptForFilip += 1;
+              break;
+            case "delegated_to_maja":
+              result.delegated += 1;
+              break;
+          }
         } catch (err) {
           result.errors += 1;
           logger.error({ err, inboxId: row.id, uid: message.uid }, "mail-secretary: failed to triage a message");
@@ -792,6 +810,10 @@ export function mailSecretaryService(db: Db, deps: MailSecretaryServiceDeps = {}
         const result = await tickInbox(row, now);
         total.checked += result.checked;
         total.fetched += result.fetched;
+        total.ignoredByFilter += result.ignoredByFilter;
+        total.ignoredByClassifier += result.ignoredByClassifier;
+        total.keptForFilip += result.keptForFilip;
+        total.delegated += result.delegated;
         total.errors += result.errors;
       } catch (err) {
         total.errors += 1;
