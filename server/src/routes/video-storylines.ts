@@ -1,4 +1,4 @@
-import { Router, type Request } from "express";
+import { Router, type Request, type RequestHandler } from "express";
 import type { Db } from "@paperclipai/db";
 import { createRequestScopedDb } from "@paperclipai/db";
 import {
@@ -14,7 +14,9 @@ import {
 import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
 import { assertBoardOrAgent, assertBoardOrgAccess, assertCompanyAccess } from "./authz.js";
+import { notFound } from "../errors.js";
 import { logActivity } from "../services/activity-log.js";
+import { getStorageService } from "../storage/index.js";
 import { videoStorylineService, type VideoStorylineActor } from "../services/video-storylines.js";
 import { videoStorylineRenderService } from "../services/video-storyline-render.js";
 import { videoStorylineSettingsService } from "../services/video-storyline-settings.js";
@@ -56,13 +58,30 @@ export function videoStorylineRoutes(rawDb: Db) {
    * ticket's ground rule that this ships default-off. Checked here, not
    * buried in one service call, so a disabled company gets a consistent
    * 422 across list/create/render/etc rather than only at render time.
+   *
+   * This is two middlewares, not one: `companyScopeFromParam`'s `checkAccess`
+   * callback runs from inside its company-id resolver -- i.e. BEFORE
+   * `runInCompanyScope` ever establishes the request's AsyncLocalStorage
+   * scope (see that function's doc comment) -- so it must stay limited to
+   * actor-only checks (assertBoardOrAgent/assertCompanyAccess, which only
+   * read `req.actor`). `settings.assertEnabled` does a real `db.select()`
+   * through the request-scoped proxy, which throws "outside any
+   * AsyncLocalStorage-tracked scope" if run pre-scope; it has to run as its
+   * own middleware placed after `companyScopeFromParam` in the route's
+   * handler chain, once scope is live.
    */
-  function gatedScope() {
-    return companyScopeFromParam(rawDb, async (req, companyId) => {
-      assertBoardOrAgent(req);
-      assertCompanyAccess(req, companyId);
-      await settings.assertEnabled(companyId);
-    });
+  const assertVideoStorylinesEnabled: RequestHandler = (req, res, next) => {
+    settings.assertEnabled(req.params.companyId as string).then(() => next(), next);
+  };
+
+  function gatedScope(): RequestHandler[] {
+    return [
+      companyScopeFromParam(rawDb, (req, companyId) => {
+        assertBoardOrAgent(req);
+        assertCompanyAccess(req, companyId);
+      }),
+      assertVideoStorylinesEnabled,
+    ];
   }
 
   // ─── Settings (feature flag, ships default off) ──────────────────────
@@ -97,14 +116,14 @@ export function videoStorylineRoutes(rawDb: Db) {
 
   // ─── Storylines ────────────────────────────────────────────────────────
 
-  router.get("/companies/:companyId/video-storylines", gatedScope(), async (req, res) => {
+  router.get("/companies/:companyId/video-storylines", ...gatedScope(), async (req, res) => {
     res.json(await storylines.listStorylines(req.params.companyId as string));
   });
 
   router.post(
     "/companies/:companyId/video-storylines",
     validate(createVideoStorylineSchema),
-    gatedScope(),
+    ...gatedScope(),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       const row = await storylines.createStoryline(companyId, req.body, actorOf(req));
@@ -112,14 +131,14 @@ export function videoStorylineRoutes(rawDb: Db) {
     },
   );
 
-  router.get("/companies/:companyId/video-storylines/:storylineId", gatedScope(), async (req, res) => {
+  router.get("/companies/:companyId/video-storylines/:storylineId", ...gatedScope(), async (req, res) => {
     res.json(await storylines.getStoryline(req.params.companyId as string, req.params.storylineId as string));
   });
 
   router.patch(
     "/companies/:companyId/video-storylines/:storylineId",
     validate(updateVideoStorylineSchema),
-    gatedScope(),
+    ...gatedScope(),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       const storylineId = req.params.storylineId as string;
@@ -127,20 +146,20 @@ export function videoStorylineRoutes(rawDb: Db) {
     },
   );
 
-  router.delete("/companies/:companyId/video-storylines/:storylineId", gatedScope(), async (req, res) => {
+  router.delete("/companies/:companyId/video-storylines/:storylineId", ...gatedScope(), async (req, res) => {
     const companyId = req.params.companyId as string;
     const storylineId = req.params.storylineId as string;
     await storylines.deleteStoryline(companyId, storylineId, actorOf(req));
     res.status(204).end();
   });
 
-  router.get("/companies/:companyId/video-storylines/:storylineId/progress", gatedScope(), async (req, res) => {
+  router.get("/companies/:companyId/video-storylines/:storylineId/progress", ...gatedScope(), async (req, res) => {
     const companyId = req.params.companyId as string;
     const storylineId = req.params.storylineId as string;
     res.json(await storylines.getProgress(companyId, storylineId));
   });
 
-  router.post("/companies/:companyId/video-storylines/:storylineId/estimate", gatedScope(), async (req, res) => {
+  router.post("/companies/:companyId/video-storylines/:storylineId/estimate", ...gatedScope(), async (req, res) => {
     const companyId = req.params.companyId as string;
     const storylineId = req.params.storylineId as string;
     res.json(await render.estimate(companyId, storylineId));
@@ -149,7 +168,7 @@ export function videoStorylineRoutes(rawDb: Db) {
   router.post(
     "/companies/:companyId/video-storylines/:storylineId/render/start",
     validate(startVideoStorylineRenderSchema),
-    gatedScope(),
+    ...gatedScope(),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       const storylineId = req.params.storylineId as string;
@@ -157,9 +176,52 @@ export function videoStorylineRoutes(rawDb: Db) {
     },
   );
 
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/render/cancel",
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      res.json(await render.cancelRender(companyId, storylineId, actorOf(req)));
+    },
+  );
+
+  /**
+   * DUR-4170: streams the finished stitched film, same pattern as
+   * assets.ts's GET /assets/:assetId/content -- content-type/length off the
+   * stored row, inline disposition, company-scoped access via gatedScope().
+   */
+  router.get(
+    "/companies/:companyId/video-storylines/:storylineId/final/content",
+    ...gatedScope(),
+    async (req, res, next) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      const storyline = await storylines.getStorylineRow(companyId, storylineId);
+      if (!storyline.finalObjectKey) {
+        throw notFound("This storyline has no finished video yet.");
+      }
+
+      const storage = getStorageService();
+      const object = await storage.getObject(companyId, storyline.finalObjectKey);
+      const responseContentType = storyline.finalContentType || object.contentType || "video/mp4";
+      res.setHeader("Content-Type", responseContentType);
+      res.setHeader("Content-Length", String(storyline.finalByteSize || object.contentLength || 0));
+      res.setHeader("Cache-Control", "private, max-age=60");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      const filename = `${(storyline.title || "video-storyline").replaceAll('"', "")}.mp4`;
+      res.setHeader("Content-Disposition", `inline; filename="${filename}"`);
+
+      object.stream.on("error", (err) => {
+        next(err);
+      });
+      object.stream.pipe(res);
+    },
+  );
+
   // ─── Scenes ──────────────────────────────────────────────────────────
 
-  router.get("/companies/:companyId/video-storylines/:storylineId/scenes", gatedScope(), async (req, res) => {
+  router.get("/companies/:companyId/video-storylines/:storylineId/scenes", ...gatedScope(), async (req, res) => {
     const companyId = req.params.companyId as string;
     const storylineId = req.params.storylineId as string;
     res.json(await storylines.listScenes(companyId, storylineId));
@@ -168,7 +230,7 @@ export function videoStorylineRoutes(rawDb: Db) {
   router.post(
     "/companies/:companyId/video-storylines/:storylineId/scenes",
     validate(createVideoSceneSchema),
-    gatedScope(),
+    ...gatedScope(),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       const storylineId = req.params.storylineId as string;
@@ -180,7 +242,7 @@ export function videoStorylineRoutes(rawDb: Db) {
   router.patch(
     "/companies/:companyId/video-storylines/:storylineId/scenes/:sceneId",
     validate(updateVideoSceneSchema),
-    gatedScope(),
+    ...gatedScope(),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       const storylineId = req.params.storylineId as string;
@@ -189,7 +251,7 @@ export function videoStorylineRoutes(rawDb: Db) {
     },
   );
 
-  router.delete("/companies/:companyId/video-storylines/:storylineId/scenes/:sceneId", gatedScope(), async (req, res) => {
+  router.delete("/companies/:companyId/video-storylines/:storylineId/scenes/:sceneId", ...gatedScope(), async (req, res) => {
     const companyId = req.params.companyId as string;
     const storylineId = req.params.storylineId as string;
     const sceneId = req.params.sceneId as string;
@@ -199,7 +261,7 @@ export function videoStorylineRoutes(rawDb: Db) {
 
   // ─── Shots ───────────────────────────────────────────────────────────
 
-  router.get("/companies/:companyId/video-storylines/:storylineId/shots", gatedScope(), async (req, res) => {
+  router.get("/companies/:companyId/video-storylines/:storylineId/shots", ...gatedScope(), async (req, res) => {
     const companyId = req.params.companyId as string;
     const storylineId = req.params.storylineId as string;
     res.json(await storylines.listShots(companyId, storylineId));
@@ -208,7 +270,7 @@ export function videoStorylineRoutes(rawDb: Db) {
   router.post(
     "/companies/:companyId/video-storylines/:storylineId/shots",
     validate(createVideoShotSchema),
-    gatedScope(),
+    ...gatedScope(),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       const storylineId = req.params.storylineId as string;
@@ -220,7 +282,7 @@ export function videoStorylineRoutes(rawDb: Db) {
   router.patch(
     "/companies/:companyId/video-storylines/:storylineId/shots/:shotId",
     validate(updateVideoShotSchema),
-    gatedScope(),
+    ...gatedScope(),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       const storylineId = req.params.storylineId as string;
@@ -229,7 +291,7 @@ export function videoStorylineRoutes(rawDb: Db) {
     },
   );
 
-  router.delete("/companies/:companyId/video-storylines/:storylineId/shots/:shotId", gatedScope(), async (req, res) => {
+  router.delete("/companies/:companyId/video-storylines/:storylineId/shots/:shotId", ...gatedScope(), async (req, res) => {
     const companyId = req.params.companyId as string;
     const storylineId = req.params.storylineId as string;
     const shotId = req.params.shotId as string;
@@ -239,7 +301,7 @@ export function videoStorylineRoutes(rawDb: Db) {
 
   router.post(
     "/companies/:companyId/video-storylines/:storylineId/shots/:shotId/rerender",
-    gatedScope(),
+    ...gatedScope(),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       const storylineId = req.params.storylineId as string;
