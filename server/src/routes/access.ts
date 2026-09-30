@@ -1248,6 +1248,11 @@ async function loadCompanyMemberRecords(
 type CompanyMemberRecord = Awaited<ReturnType<typeof loadCompanyMemberRecords>>[number];
 
 const humanRoleRank: Record<HumanCompanyMembershipRole, number> = {
+  // DUR-4094: ranks below viewer -- grantsForHumanRole("employee") is always
+  // [], so an employee actor never holds users:invite or member-management
+  // permissions in the first place, but this keeps the rank table exhaustive
+  // and correct if that ever changes.
+  employee: 0,
   viewer: 1,
   operator: 2,
   admin: 3,

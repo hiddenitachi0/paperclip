@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { assertBoardOrgAccess, assertCompanyAccess, hasBoardOrgAccess } from "../routes/authz.js";
+import { describe, expect, it, vi } from "vitest";
+import { assertBoardOrgAccess, assertCompanyAccess, assertLightAllowed, hasBoardOrgAccess } from "../routes/authz.js";
+import type { accessService } from "../services/access.js";
 
 function makeReq(input: {
   method?: string;
@@ -153,5 +154,99 @@ describe("assertBoardOrgAccess", () => {
 
     expect(hasBoardOrgAccess(req)).toBe(false);
     expect(() => assertBoardOrgAccess(req)).toThrow("Company membership or instance admin access required");
+  });
+});
+
+// DUR-4094: the "Employee (light)" role's central default-deny gate. Every
+// one of assertCompanyAccess's ~300 existing call sites must refuse this
+// role unless the specific route opted in with assertLightAllowed, GET
+// included -- this is the one test that proves that refusal actually fires
+// from the shared gate rather than depending on every route to remember it.
+describe("assertCompanyAccess — Employee (light) default deny (DUR-4094)", () => {
+  function employeeReq(method: string) {
+    return {
+      method,
+      actor: {
+        type: "board",
+        userId: "employee-1",
+        source: "session",
+        companyIds: ["company-1"],
+        memberships: [{ companyId: "company-1", membershipRole: "employee", status: "active" }],
+      },
+    } as Express.Request;
+  }
+
+  it("refuses a GET for an employee role that no route has opted in", () => {
+    const req = employeeReq("GET");
+    expect(() => assertCompanyAccess(req, "company-1")).toThrow(
+      "Employee (light) accounts can only use features an admin has turned on for them.",
+    );
+  });
+
+  it("allows the GET once the route has set req.lightRouteOptIn", () => {
+    const req = employeeReq("GET");
+    req.lightRouteOptIn = true;
+    expect(() => assertCompanyAccess(req, "company-1")).not.toThrow();
+  });
+
+  it("still leaves non-employee roles (e.g. viewer) unaffected", () => {
+    const req = {
+      method: "GET",
+      actor: {
+        type: "board",
+        userId: "viewer-1",
+        source: "session",
+        companyIds: ["company-1"],
+        memberships: [{ companyId: "company-1", membershipRole: "viewer", status: "active" }],
+      },
+    } as Express.Request;
+    expect(() => assertCompanyAccess(req, "company-1")).not.toThrow();
+  });
+});
+
+describe("assertLightAllowed (DUR-4094)", () => {
+  function fakeAccess(hasPermission: boolean): ReturnType<typeof accessService> {
+    return { hasPermission: vi.fn().mockResolvedValue(hasPermission) } as unknown as ReturnType<typeof accessService>;
+  }
+
+  function employeeReq() {
+    return {
+      method: "GET",
+      actor: {
+        type: "board",
+        userId: "employee-1",
+        source: "session",
+        companyIds: ["company-1"],
+        memberships: [{ companyId: "company-1", membershipRole: "employee", status: "active" }],
+      },
+    } as Express.Request;
+  }
+
+  it("throws for an employee with no matching feature grant", async () => {
+    const req = employeeReq();
+    await expect(assertLightAllowed(req, "company-1", "feature:pa_chat", fakeAccess(false))).rejects.toThrow(
+      /has not been given "feature:pa_chat" access/,
+    );
+  });
+
+  it("allows an employee once the admin has granted the named feature", async () => {
+    const req = employeeReq();
+    await expect(assertLightAllowed(req, "company-1", "feature:pa_chat", fakeAccess(true))).resolves.not.toThrow();
+    expect(req.lightRouteOptIn).toBe(true);
+  });
+
+  it("is a no-op for a non-employee role, regardless of grants", async () => {
+    const req = {
+      method: "GET",
+      actor: {
+        type: "board",
+        userId: "admin-1",
+        source: "session",
+        companyIds: ["company-1"],
+        memberships: [{ companyId: "company-1", membershipRole: "admin", status: "active" }],
+      },
+    } as Express.Request;
+    await expect(assertLightAllowed(req, "company-1", "feature:pa_chat", fakeAccess(false))).resolves.not.toThrow();
+    expect(req.lightRouteOptIn).toBe(true);
   });
 });
