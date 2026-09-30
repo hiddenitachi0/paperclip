@@ -922,7 +922,7 @@ export function pluginRoutes(
     // mirroring the liveness gate `resolveAgentKeyRunId` already applies to
     // the header, applied here to the body field instead.
     if (actor.type === "agent" && !actor.runId && !ANCHOR_ACTIVE_RUN_STATUSES.has(run.status)) {
-      return { error: '"runContext.runId" does not name a currently active run', pluginToolGrants, laneAEnabled };
+      return { error: '"runContext.runId" does not name a currently active run', pluginToolGrants, laneAEnabled, laneATrustLevel };
     }
 
     const [project] = await db
