@@ -25,7 +25,7 @@
  */
 import { createRequire } from "node:module";
 import path from "node:path";
-import { readLaneABrowserAccess } from "@paperclipai/shared";
+import { effectiveLaneABrowserAccess } from "@paperclipai/shared";
 import { logger } from "../middleware/logger.js";
 
 const require = createRequire(import.meta.url);
@@ -47,11 +47,13 @@ function resolveBrowserMcpDistPath(): string | null {
 
 export interface BrowserAccessAgentInfo {
   adapterConfig?: unknown;
+  /** DUR-4070: a "limited"-trust agent never gets the browser tool offered, regardless of the switch. */
+  laneATrustLevel?: string | null;
 }
 
-/** `null` when the switch is off (the default) or the server package isn't built -- either way, add nothing. */
+/** `null` when the switch is off (the default), the agent's trust level is "limited", or the server package isn't built -- either way, add nothing. */
 export function resolveBrowserMcpServerEntry(agent: BrowserAccessAgentInfo): Record<string, unknown> | null {
-  if (readLaneABrowserAccess(agent.adapterConfig) === "off") return null;
+  if (effectiveLaneABrowserAccess(agent) === "off") return null;
   const distPath = resolveBrowserMcpDistPath();
   if (!distPath) return null;
   return {

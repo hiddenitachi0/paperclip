@@ -813,13 +813,30 @@ export function pluginRoutes(
     // the same row to decide (services/plugin-tool-execution.ts).
     pluginToolGrants: string[];
     laneAEnabled: boolean;
+    // DUR-4098: without this, a full agent whose lane_a_trust_level is
+    // "limited" never gets refused on this route — isLaneATrustLimited()
+    // in the shared execute service normalizes a missing value to "full".
+    laneATrustLevel: string | null;
   }
+
+  // DUR-4096 (round 4): mirrors `AGENT_KEY_ACTIVE_RUN_STATUSES` in
+  // middleware/auth.ts -- the statuses `resolveAgentKeyRunId` itself treats
+  // as "this run is really live right now" when deciding whether to trust
+  // the `x-paperclip-run-id` header. Kept as its own local copy rather than
+  // an import, matching this file's existing pattern of local
+  // ACTIVE_RUN_STATUSES-shaped constants elsewhere in the codebase.
+  const ANCHOR_ACTIVE_RUN_STATUSES = new Set(["queued", "running"]);
 
   async function validateToolRunContextScope(
     runContext: ToolRunContext,
     actor: Request["actor"],
   ): Promise<ToolRunContextScopeResult> {
-    const noGrants: ToolRunContextScopeResult = { error: null, pluginToolGrants: [], laneAEnabled: false };
+    const noGrants: ToolRunContextScopeResult = {
+      error: null,
+      pluginToolGrants: [],
+      laneAEnabled: false,
+      laneATrustLevel: null,
+    };
 
     // DUR-174: an agent-authenticated caller must be the same agent named in
     // runContext.agentId, so two agents (e.g. two personas) in one company
@@ -831,11 +848,32 @@ export function pluginRoutes(
       return { ...noGrants, error: '"runContext.agentId" does not match the authenticated agent' };
     }
 
+    // DUR-4096 (round 3): `runContext.runId` is caller-supplied in the POST
+    // body -- nothing upstream of this function verifies it names the run
+    // actually issuing the request. `actor.runId` is the one anchor the
+    // caller cannot pick: for an agent JWT it is baked into the signed token
+    // at mint time (auth.ts ignores any differing header), and for a
+    // long-lived agent API key it is independently confirmed by
+    // `resolveAgentKeyRunId` to be one of this agent's own *currently
+    // active* runs. Without this, a live run could name a different, real
+    // (possibly already-ended) run of its own agent as `runContext.runId`,
+    // which `deriveInvocationScope`/`assertRunIdMatchesLiveInvocation`
+    // downstream would then trust as "the live run" -- defeating the
+    // checkout/Lane-A enforcement `createComment`/`createAttachment` rely on
+    // that value for. When `actor.runId` is absent (e.g. an agent API key
+    // call with no run bound to it at all) there is no live run to anchor
+    // against, so this check is skipped rather than invented; those calls
+    // already carried no run-liveness guarantee before this fix.
+    if (actor.type === "agent" && actor.runId && actor.runId !== runContext.runId) {
+      return { ...noGrants, error: '"runContext.runId" does not match the authenticated run' };
+    }
+
     const [agent] = await db
       .select({
         companyId: agents.companyId,
         pluginToolGrants: agents.pluginToolGrants,
         laneAEnabled: agents.laneAEnabled,
+        laneATrustLevel: agents.laneATrustLevel,
       })
       .from(agents)
       .where(eq(agents.id, runContext.agentId))
@@ -845,17 +883,46 @@ export function pluginRoutes(
     }
     const pluginToolGrants = (agent.pluginToolGrants as string[] | null) ?? [];
     const laneAEnabled = agent.laneAEnabled === true;
+    const laneATrustLevel = agent.laneATrustLevel ?? null;
 
     const [run] = await db
-      .select({ companyId: heartbeatRuns.companyId, agentId: heartbeatRuns.agentId })
+      .select({ companyId: heartbeatRuns.companyId, agentId: heartbeatRuns.agentId, status: heartbeatRuns.status })
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runContext.runId))
       .limit(1);
     if (!run || run.companyId !== runContext.companyId) {
-      return { error: '"runContext.runId" does not belong to "runContext.companyId"', pluginToolGrants, laneAEnabled };
+      return {
+        error: '"runContext.runId" does not belong to "runContext.companyId"',
+        pluginToolGrants,
+        laneAEnabled,
+        laneATrustLevel,
+      };
     }
     if (run.agentId !== runContext.agentId) {
-      return { error: '"runContext.runId" does not belong to "runContext.agentId"', pluginToolGrants, laneAEnabled };
+      return {
+        error: '"runContext.runId" does not belong to "runContext.agentId"',
+        pluginToolGrants,
+        laneAEnabled,
+        laneATrustLevel,
+      };
+    }
+
+    // DUR-4096 (round 4): the round-3 anchor above only fires when
+    // `actor.runId` is populated -- an agent API key call with no run bound
+    // to it (no `x-paperclip-run-id` header, or one naming a run
+    // `resolveAgentKeyRunId` rejected, including a real but *ended* run of
+    // the same agent) leaves `actor.runId` undefined and skips that anchor
+    // entirely. Pre-round-4, that made `runContext.runId` trusted again
+    // purely for naming a real run of the right agent/company -- including
+    // one long since completed -- reopening the exact "borrow any of my
+    // own past runs to fake liveness" spoof round 3 closed for the JWT
+    // path (security review, DUR-4096 round 4). An API-key caller with no
+    // bound active run has no basis to assert any specific runId is live,
+    // so independently require the named run to still be in flight --
+    // mirroring the liveness gate `resolveAgentKeyRunId` already applies to
+    // the header, applied here to the body field instead.
+    if (actor.type === "agent" && !actor.runId && !ANCHOR_ACTIVE_RUN_STATUSES.has(run.status)) {
+      return { error: '"runContext.runId" does not name a currently active run', pluginToolGrants, laneAEnabled, laneATrustLevel };
     }
 
     const [project] = await db
@@ -864,10 +931,15 @@ export function pluginRoutes(
       .where(eq(projects.id, runContext.projectId))
       .limit(1);
     if (!project || project.companyId !== runContext.companyId) {
-      return { error: '"runContext.projectId" does not belong to "runContext.companyId"', pluginToolGrants, laneAEnabled };
+      return {
+        error: '"runContext.projectId" does not belong to "runContext.companyId"',
+        pluginToolGrants,
+        laneAEnabled,
+        laneATrustLevel,
+      };
     }
 
-    return { error: null, pluginToolGrants, laneAEnabled };
+    return { error: null, pluginToolGrants, laneAEnabled, laneATrustLevel };
   }
 
   // DUR-189: for a full agent an empty/absent grants list means unrestricted
@@ -1144,7 +1216,11 @@ export function pluginRoutes(
       tool,
       parameters,
       runContext,
-      agent: { laneAEnabled: scope.laneAEnabled, pluginToolGrants: scope.pluginToolGrants },
+      agent: {
+        laneAEnabled: scope.laneAEnabled,
+        pluginToolGrants: scope.pluginToolGrants,
+        laneATrustLevel: scope.laneATrustLevel,
+      },
     });
     if (!outcome.ok) {
       res.status(outcome.status).json({ error: outcome.error });

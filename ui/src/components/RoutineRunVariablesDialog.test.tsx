@@ -82,6 +82,8 @@ function createProject(): Project {
     targetDate: null,
     color: "#22c55e",
     icon: null,
+    productionUrl: null,
+    hostingTarget: null,
     env: null,
     pauseReason: null,
     pausedAt: null,
@@ -92,6 +94,7 @@ function createProject(): Project {
       allowIssueOverride: true,
     },
     deployPolicy: null,
+    deployTransport: "git_push",
     codebase: {
       workspaceId: null,
       repoUrl: null,

@@ -438,7 +438,7 @@ ci_wait_state_prune() {
 # a valid, matching, enabled deploy policy.
 resolve_deploy_vars() {
   python3 - "$1" "$2" <<'PY'
-import json, shlex, sys
+import json, re, shlex, sys
 
 approval = json.loads(sys.argv[1])
 project = json.loads(sys.argv[2])
@@ -501,6 +501,58 @@ app_health_paths = "\n".join(
 )
 rollback = policy.get("rollback") or "none"
 
+# DUR-4068: which upload mechanism ships the fetched checkout above to its
+# production target. "git_push" (default) is everything above this line,
+# unchanged: deployTargetPath IS the live target, and run_recipe (docker
+# compose or a custom command) is what actually swaps it in. "sftp" reuses
+# the exact same fetch into deployTargetPath, but then uploads only the
+# explicit allowlist below to a remote host instead of running a recipe here
+# — see upload_via_sftp.
+deploy_transport = project.get("deployTransport") or "git_push"
+if deploy_transport not in ("git_push", "sftp"):
+    print(f"unknown deployTransport {deploy_transport!r}", file=sys.stderr)
+    sys.exit(1)
+
+requesting_agent_id = policy.get("requestingAgentId") or ""
+
+sftp_host = ""
+sftp_port = ""
+sftp_username = ""
+sftp_remote_path = ""
+sftp_allowlist = ""
+if deploy_transport == "sftp":
+    sftp_host = (policy.get("sftpHost") or "").strip()
+    if not sftp_host:
+        print("deploy_policy.sftpHost is empty", file=sys.stderr)
+        sys.exit(1)
+    sftp_port = str(policy.get("sftpPort") or 22)
+    sftp_username = (policy.get("sftpUsername") or "").strip()
+    if not sftp_username:
+        print("deploy_policy.sftpUsername is empty", file=sys.stderr)
+        sys.exit(1)
+    sftp_remote_path = (policy.get("sftpRemotePath") or "").strip()
+    if not sftp_remote_path:
+        print("deploy_policy.sftpRemotePath is empty", file=sys.stderr)
+        sys.exit(1)
+    allowlist_entries = [str(entry).strip() for entry in (policy.get("sftpAllowlist") or []) if str(entry).strip()]
+    if not allowlist_entries:
+        print("deploy_policy.sftpAllowlist is empty", file=sys.stderr)
+        sys.exit(1)
+    # DUR-4068: defense in depth. The API already refuses to save an unsafe
+    # entry (deploy-policy-validation.ts), but this runner must never trust
+    # that every stored row went through that check — an older row, or one
+    # written by anything other than the API, is not proof of anything.
+    # Never a wildcard/whole-tree upload either: only these exact entries.
+    for entry in allowlist_entries:
+        segments = re.split(r"[\\/]", entry)
+        if entry.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", entry) or any(seg == ".." for seg in segments):
+            print(f"deploy_policy.sftpAllowlist entry {entry!r} is not a safe relative path", file=sys.stderr)
+            sys.exit(1)
+    sftp_allowlist = "\n".join(allowlist_entries)
+    if not requesting_agent_id:
+        print("deploy_policy.requestingAgentId is empty -- required to resolve the SFTP credential", file=sys.stderr)
+        sys.exit(1)
+
 fields = {
     "DV_PROJECT_ID": project_id or "",
     "DV_WORKSPACE_ID": workspace_id or "",
@@ -518,6 +570,13 @@ fields = {
     "DV_APP_HEALTH_PATHS": app_health_paths,
     "DV_ROLLBACK": rollback,
     "DV_ALLOW_BACKWARD_DEPLOY": allow_backward_deploy,
+    "DV_DEPLOY_TRANSPORT": deploy_transport,
+    "DV_REQUESTING_AGENT_ID": requesting_agent_id,
+    "DV_SFTP_HOST": sftp_host,
+    "DV_SFTP_PORT": sftp_port,
+    "DV_SFTP_USERNAME": sftp_username,
+    "DV_SFTP_REMOTE_PATH": sftp_remote_path,
+    "DV_SFTP_ALLOWLIST": sftp_allowlist,
 }
 for key, value in fields.items():
     print(f"{key}={shlex.quote(value)}")
@@ -1290,6 +1349,96 @@ run_recipe() { # target_dir, kind, services, command, compose_files, env_file
   esac
 }
 
+# DUR-4068: the sftp-transport counterpart to run_recipe above. Used in place
+# of run_recipe, at every call site, whenever this project's deployTransport
+# is "sftp" instead of the default "git_push" -- the checkout at target_dir
+# is fetched exactly the same way either transport (see resolve_deploy_vars),
+# only what happens to it after differs: run_recipe swaps target_dir in
+# place as the live target; this uploads the caller-supplied explicit
+# allowlist of files out of target_dir to a remote host instead. Same exit
+# contract as run_recipe (0 = ok, non-zero = failed) so both callers can
+# treat the two transports identically.
+upload_via_sftp() { # aid, target_dir, allowlist(newline-separated repo-relative paths), host, port, username, remote_path, requesting_agent_id, company_id -> 0 ok, 1 failed
+  local aid="$1" target_dir="$2" allowlist="$3" host="$4" port="$5" username="$6" remote_path="$7" requesting_agent_id="$8" company_id="$9"
+
+  # DUR-4068: the ONLY place this runner ever reads the value back out, via
+  # the instance-admin-only route (server/src/routes/agents.ts) bound to
+  # exactly one agent -- never a project-level or CLI-supplied credential.
+  local cred_json kind value
+  cred_json="$(cli_json secrets deploy-sftp-credential -C "$company_id" -A "$requesting_agent_id" 2>>"$LOG")" || {
+    log "runner: $aid could not resolve the SFTP deploy credential bound to agent $requesting_agent_id"
+    return 1
+  }
+  kind="$(printf '%s' "$cred_json" | python3 -c 'import json,sys; d=json.load(sys.stdin) or {}; print(d.get("kind") or "")' 2>/dev/null)"
+  value="$(printf '%s' "$cred_json" | python3 -c 'import json,sys; d=json.load(sys.stdin) or {}; print(d.get("value") or "")' 2>/dev/null)"
+  if [ -z "$kind" ] || [ -z "$value" ]; then
+    log "runner: $aid no SFTP deploy credential is bound to agent $requesting_agent_id yet -- an operator needs to bind one (POST /agents/$requesting_agent_id/deploy-sftp-credential)"
+    return 1
+  fi
+
+  # DUR-4068: the credential lives on disk only inside this one temp dir, for
+  # only as long as this function runs -- the RETURN trap below removes it on
+  # every exit path (success, a failed upload, or an early `return 1` above),
+  # never left behind for a later run or another process to find. Never
+  # printed to $LOG or anywhere else.
+  local tmp_dir
+  tmp_dir="$(mktemp -d)" || {
+    log "runner: $aid could not create a temp dir for the SFTP credential"
+    return 1
+  }
+  chmod 700 "$tmp_dir"
+  # shellcheck disable=SC2064 -- intentionally expanding $tmp_dir now, not at trap time
+  trap "rm -rf '$tmp_dir'" RETURN
+
+  local netrc_file="$tmp_dir/netrc" key_file="$tmp_dir/id_key"
+  local -a curl_auth_args
+  case "$kind" in
+    sftp_password)
+      printf 'machine %s login %s password %s\n' "$host" "$username" "$value" >"$netrc_file"
+      chmod 600 "$netrc_file"
+      curl_auth_args=(--netrc-file "$netrc_file")
+      ;;
+    sftp_private_key)
+      # HANDOFF: preferred over a password where the host supports it, but
+      # curl/libssh2 key-auth setups vary (some builds want an explicit
+      # --pubkey alongside --key) -- flag to an operator switching to this if
+      # uploads fail with an auth error despite a correct key.
+      printf '%s\n' "$value" >"$key_file"
+      chmod 600 "$key_file"
+      curl_auth_args=(--user "$username:" --key "$key_file")
+      ;;
+    *)
+      log "runner: $aid SFTP credential bound to agent $requesting_agent_id has an unrecognized kind ($kind)"
+      return 1
+      ;;
+  esac
+
+  local entry local_path remote_target failures=0 uploaded=0
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    local_path="$target_dir/$entry"
+    if [ ! -f "$local_path" ]; then
+      log "runner: $aid SFTP allowlist entry $entry does not exist in $target_dir -- nothing uploaded for it"
+      failures=$((failures + 1))
+      continue
+    fi
+    remote_target="sftp://$host:$port$remote_path/$entry"
+    if curl -sS --disable-epsv --ftp-create-dirs "${curl_auth_args[@]}" -T "$local_path" "$remote_target" 2>>"$LOG"; then
+      uploaded=$((uploaded + 1))
+    else
+      log "runner: $aid SFTP upload of $entry to $remote_target failed"
+      failures=$((failures + 1))
+    fi
+  done <<<"$allowlist"
+
+  if [ "$failures" -gt 0 ]; then
+    log "runner: $aid SFTP upload finished with $failures failure(s) out of $((uploaded + failures)) file(s)"
+    return 1
+  fi
+  log "runner: $aid SFTP upload finished — $uploaded file(s) uploaded to $username@$host:$remote_path"
+  return 0
+}
+
 # DUR-3967: what to do about a card whose automated checks have not (yet) come
 # back green -- either they are still running, or a later tick could no longer
 # get an answer out of GitHub for a card we already know was mid-check.
@@ -1609,8 +1758,14 @@ print(d.get("decidedAt") or d.get("updatedAt") or d.get("createdAt") or "")' 2>/
   # matcher.
   after_commit="$(git -C "$DV_DEPLOY_TARGET_PATH" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 
-  run_recipe "$DV_DEPLOY_TARGET_PATH" "$DV_DEPLOY_KIND" "$DV_DEPLOY_SERVICES" "$DV_DEPLOY_COMMAND" "$DV_COMPOSE_FILES" "$DV_ENV_FILE"
-  local recipe_status=$?
+  local recipe_status
+  if [ "$DV_DEPLOY_TRANSPORT" = "sftp" ]; then
+    upload_via_sftp "$aid" "$DV_DEPLOY_TARGET_PATH" "$DV_SFTP_ALLOWLIST" "$DV_SFTP_HOST" "$DV_SFTP_PORT" "$DV_SFTP_USERNAME" "$DV_SFTP_REMOTE_PATH" "$DV_REQUESTING_AGENT_ID" "$company_id"
+    recipe_status=$?
+  else
+    run_recipe "$DV_DEPLOY_TARGET_PATH" "$DV_DEPLOY_KIND" "$DV_DEPLOY_SERVICES" "$DV_DEPLOY_COMMAND" "$DV_COMPOSE_FILES" "$DV_ENV_FILE"
+    recipe_status=$?
+  fi
   if [ "$recipe_status" -ne 0 ]; then
     log "runner: $aid recipe ($DV_DEPLOY_KIND) failed (status $recipe_status)"
     local diag_path
@@ -1739,8 +1894,14 @@ maybe_rollback() { # approval_id, before_commit, after_commit -> stdout: failure
   fi
   log "runner: $aid rolling back $DV_DEPLOY_TARGET_PATH to $before"
   git -C "$DV_DEPLOY_TARGET_PATH" reset --hard --quiet "$before" 2>>"$LOG"
-  run_recipe "$DV_DEPLOY_TARGET_PATH" "$DV_DEPLOY_KIND" "$DV_DEPLOY_SERVICES" "$DV_DEPLOY_COMMAND" "$DV_COMPOSE_FILES" "$DV_ENV_FILE"
-  local rollback_status=$?
+  local rollback_status
+  if [ "$DV_DEPLOY_TRANSPORT" = "sftp" ]; then
+    upload_via_sftp "$aid" "$DV_DEPLOY_TARGET_PATH" "$DV_SFTP_ALLOWLIST" "$DV_SFTP_HOST" "$DV_SFTP_PORT" "$DV_SFTP_USERNAME" "$DV_SFTP_REMOTE_PATH" "$DV_REQUESTING_AGENT_ID" "$company_id"
+    rollback_status=$?
+  else
+    run_recipe "$DV_DEPLOY_TARGET_PATH" "$DV_DEPLOY_KIND" "$DV_DEPLOY_SERVICES" "$DV_DEPLOY_COMMAND" "$DV_COMPOSE_FILES" "$DV_ENV_FILE"
+    rollback_status=$?
+  fi
   if [ "$rollback_status" -eq 3 ]; then
     log "runner: $aid rollback build also failed, but nothing was swapped — the running container is untouched, no manual intervention needed"
   elif [ "$rollback_status" -ne 0 ]; then

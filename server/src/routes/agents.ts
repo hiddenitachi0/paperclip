@@ -98,6 +98,8 @@ import type {
 } from "@paperclipai/adapter-utils";
 import { skillVersionSelectionMap } from "../services/runtime-skill-selections.js";
 import { secretService } from "../services/secrets.js";
+import { deploySftpCredentialService } from "../services/deploy-sftp-credential.js";
+import { bindDeploySftpCredentialSchema } from "@paperclipai/shared";
 import {
   detectAdapterModel,
   findActiveServerAdapter,
@@ -229,6 +231,7 @@ export function agentRoutes(
   });
   const issueApprovalsSvc = issueApprovalService(db);
   const secretsSvc = secretService(db, rawDb);
+  const deploySftpCredentials = deploySftpCredentialService(db);
   const instructions = agentInstructionsService();
   const companySkills = companySkillService(db, rawDb);
   const workspaceOperations = workspaceOperationService(db);
@@ -2932,6 +2935,10 @@ export function agentRoutes(
           laneABaseUrl: agent.laneABaseUrl ?? null,
           // "Creativity" chosen at hire time, same reason.
           laneATemperature: agent.laneATemperature ?? null,
+          // DUR-4070: the trust-level ceiling and assigned-people list chosen
+          // at hire time, same reason as the rest of QUICK_AGENT_FIELDS.
+          laneATrustLevel: agent.laneATrustLevel ?? null,
+          laneAAssignedUserIds: agent.laneAAssignedUserIds ?? [],
           // OpenRouter "model hosts" chosen at hire time, same reason.
           laneAProviderRouting: agent.laneAProviderRouting ?? null,
           // DUR-4017: the daily briefing settings chosen at hire time, same
@@ -3340,6 +3347,74 @@ export function agentRoutes(
       path: pathValue,
     });
   });
+
+  // DUR-4068: bind the operator-supplied secret to this agent's SFTP deploy
+  // credential slot. Board-only, same as everything else that touches which
+  // secret backs a credential — distinct from the instance-admin-only resolve
+  // route below, which is the ONLY path that ever reads the value back out.
+  router.post(
+    "/agents/:id/deploy-sftp-credential",
+    scopeFromAgentParam(),
+    validate(bindDeploySftpCredentialSchema),
+    async (req, res) => {
+      assertBoard(req);
+      const id = req.params.id as string;
+      const existing = await svc.getById(id);
+      if (!existing) {
+        res.status(404).json({ error: "Agent not found" });
+        return;
+      }
+      await deploySftpCredentials.bindCredential(existing.companyId, existing.id, req.body.secretId);
+      await logActivity(db, {
+        companyId: existing.companyId,
+        actorType: "user",
+        actorId: req.actor.type === "board" ? (req.actor.userId ?? "board") : "board",
+        action: "agent.deploy_sftp_credential_bound",
+        entityType: "agent",
+        entityId: existing.id,
+      });
+      res.status(204).end();
+    },
+  );
+
+  router.delete("/agents/:id/deploy-sftp-credential", scopeFromAgentParam(), async (req, res) => {
+    assertBoard(req);
+    const id = req.params.id as string;
+    const existing = await svc.getById(id);
+    if (!existing) {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+    await deploySftpCredentials.unbindCredential(existing.companyId, existing.id);
+    await logActivity(db, {
+      companyId: existing.companyId,
+      actorType: "user",
+      actorId: req.actor.type === "board" ? (req.actor.userId ?? "board") : "board",
+      action: "agent.deploy_sftp_credential_unbound",
+      entityType: "agent",
+      entityId: existing.id,
+    });
+    res.status(204).end();
+  });
+
+  // DUR-4068: the narrowly-scoped SFTP credential endpoint, modelled on
+  // deploy-github-token (secrets.ts) and the persona-account publish-token
+  // route. Instance-admin-only -- the agent this credential is bound to never
+  // calls this itself; only the on-box deploy runner does.
+  router.get(
+    "/companies/:companyId/agents/:agentId/deploy-sftp-credential",
+    companyScopeFromParam(rawDb, (req) => assertInstanceAdmin(req)),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const agentId = req.params.agentId as string;
+      const actorId = req.actor.type === "board" ? (req.actor.userId ?? "board") : "board";
+      const credential = await deploySftpCredentials.resolveCredential(companyId, agentId, {
+        actorType: "user",
+        actorId,
+      });
+      res.json(credential ?? { kind: null, value: null });
+    },
+  );
 
   router.get("/agents/:id/instructions-bundle", scopeFromAgentParam(), async (req, res) => {
     const id = req.params.id as string;

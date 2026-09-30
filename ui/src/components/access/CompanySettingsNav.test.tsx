@@ -29,7 +29,7 @@ vi.mock("@/components/PageTabBar", () => ({
     return (
       <div>
         <div data-testid="active-tab">{props.value}</div>
-        <button type="button" onClick={() => props.onValueChange?.("invites")}>
+        <button type="button" onClick={() => props.onValueChange?.("cloud-upstream")}>
           switch-tab
         </button>
       </div>
@@ -68,11 +68,12 @@ describe("CompanySettingsNav", () => {
     expect(getCompanySettingsTab("/PAP/company/settings")).toBe("general");
     expect(getCompanySettingsTab("/company/settings/environments")).toBe("instance-environments");
     expect(getCompanySettingsTab("/company/settings/cloud-upstream")).toBe("cloud-upstream");
-    expect(getCompanySettingsTab("/company/settings/members")).toBe("members");
-    expect(getCompanySettingsTab("/PAP/company/settings/members")).toBe("members");
-    expect(getCompanySettingsTab("/company/settings/access")).toBe("members");
-    expect(getCompanySettingsTab("/PAP/company/settings/access")).toBe("members");
-    expect(getCompanySettingsTab("/company/settings/invites")).toBe("invites");
+    expect(getCompanySettingsTab("/company/settings/people")).toBe("people");
+    expect(getCompanySettingsTab("/company/settings/members")).toBe("people");
+    expect(getCompanySettingsTab("/PAP/company/settings/members")).toBe("people");
+    expect(getCompanySettingsTab("/company/settings/access")).toBe("people");
+    expect(getCompanySettingsTab("/PAP/company/settings/access")).toBe("people");
+    expect(getCompanySettingsTab("/company/settings/invites")).toBe("people");
     expect(getCompanySettingsTab("/company/settings/connections")).toBe("connections");
     expect(getCompanySettingsTab("/PAP/company/settings/connections")).toBe("connections");
     expect(getCompanySettingsTab("/PAP/company/settings/secrets")).toBe("secrets");
@@ -88,22 +89,21 @@ describe("CompanySettingsNav", () => {
   });
 
   it("renders the active tab and navigates when a different tab is selected", async () => {
-    currentPathname = "/PAP/company/settings/members";
+    currentPathname = "/PAP/company/settings/people";
     const root = createRoot(container);
 
     await act(async () => {
       root.render(<CompanySettingsNav />);
     });
 
-    expect(container.textContent).toContain("members");
+    expect(container.textContent).toContain("people");
     expect(pageTabBarMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        value: "members",
+        value: "people",
         items: [
           { value: "general", label: "General" },
           { value: "cloud-upstream", label: "Cloud upstream" },
-          { value: "members", label: "Members" },
-          { value: "invites", label: "Invites" },
+          { value: "people", label: "People" },
           { value: "connections", label: "Connections" },
           { value: "secrets", label: "Secrets" },
           { value: "instance-profile", label: "Instance profile" },
@@ -126,7 +126,7 @@ describe("CompanySettingsNav", () => {
       button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
-    expect(navigateMock).toHaveBeenCalledWith("/company/settings/invites");
+    expect(navigateMock).toHaveBeenCalledWith("/company/settings/cloud-upstream");
 
     await act(async () => {
       root.unmount();

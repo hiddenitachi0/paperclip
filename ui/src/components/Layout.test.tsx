@@ -475,8 +475,7 @@ describe("Layout", () => {
     const selectorText = selector?.textContent?.toLowerCase() ?? "";
     expect(selectorText).toContain("general");
     expect(selectorText).toContain("cloud upstream");
-    expect(selectorText).toContain("members");
-    expect(selectorText).toContain("invites");
+    expect(selectorText).toContain("people");
     expect(selectorText).toContain("secrets");
     expect(selectorText).toContain("instance general");
     expect(selectorText).toContain("instance environments");

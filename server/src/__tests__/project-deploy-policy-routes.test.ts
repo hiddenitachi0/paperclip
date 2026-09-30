@@ -235,6 +235,99 @@ describe("project deployment settings routes", () => {
       expect(mockProjectService.create).not.toHaveBeenCalled();
     });
 
+    /**
+     * DUR-4106: the SFTP transport fields decide which real host the deploy
+     * runner authenticates a bound credential to -- exactly the same
+     * board-only bar as previewCommand/deployCommand, and for higher stakes
+     * (a redirected host gets the credential value itself, not just a shell
+     * command on the box).
+     */
+    it("refuses an agent key that tries to set the SFTP host on an existing project", async () => {
+      const app = await createApp(agentActor);
+      const res = await request(app)
+        .patch("/api/projects/project-1")
+        .send({
+          deployPolicy: policy({
+            workspaceId: WORKSPACE_ID,
+            deployTargetPath: "/root/dashboard",
+            healthCheckUrl: "https://dashboard.example.com/health",
+            sftpHost: "attacker.example.com",
+          }),
+        });
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toMatch(/deployPolicy\.sftpHost/);
+      expect(mockProjectService.update).not.toHaveBeenCalled();
+    });
+
+    it("refuses an agent key that tries to set the requesting agent on an existing project", async () => {
+      const app = await createApp(agentActor);
+      const res = await request(app)
+        .patch("/api/projects/project-1")
+        .send({
+          deployPolicy: policy({
+            workspaceId: WORKSPACE_ID,
+            deployTargetPath: "/root/dashboard",
+            healthCheckUrl: "https://dashboard.example.com/health",
+            requestingAgentId: "11111111-1111-4111-8111-111111111111",
+          }),
+        });
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toMatch(/deployPolicy\.requestingAgentId/);
+      expect(mockProjectService.update).not.toHaveBeenCalled();
+    });
+
+    it("refuses an agent key that tries to switch a project's deploy transport to sftp", async () => {
+      const app = await createApp(agentActor);
+      const res = await request(app)
+        .patch("/api/projects/project-1")
+        .send({ deployTransport: "sftp" });
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toMatch(/deployTransport/);
+      expect(mockProjectService.update).not.toHaveBeenCalled();
+    });
+
+    it("refuses an agent key that tries to create a project with SFTP allowlist/remote-path fields set", async () => {
+      const app = await createApp(agentActor);
+      const res = await request(app)
+        .post(`/api/companies/${COMPANY_ID}/projects`)
+        .send({
+          name: "Dashboard",
+          deployTransport: "sftp",
+          deployPolicy: policy({
+            workspaceId: WORKSPACE_ID,
+            deployTargetPath: "/root/dashboard",
+            healthCheckUrl: "https://dashboard.example.com/health",
+            sftpAllowlist: ["dist/index.html"],
+          }),
+        });
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toMatch(/deployTransport|deployPolicy\.sftpAllowlist/);
+      expect(mockProjectService.create).not.toHaveBeenCalled();
+    });
+
+    it("lets a person on the board set the SFTP host and switch the deploy transport", async () => {
+      const app = await createApp(boardActor);
+      const res = await request(app)
+        .patch("/api/projects/project-1")
+        .send({
+          deployTransport: "sftp",
+          deployPolicy: policy({ enabled: false, sftpHost: "sftp.example.com" }),
+        });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockProjectService.update).toHaveBeenCalledWith(
+        "project-1",
+        expect.objectContaining({
+          deployTransport: "sftp",
+          deployPolicy: expect.objectContaining({ sftpHost: "sftp.example.com" }),
+        }),
+      );
+    });
+
     it("lets a person on the board set the preview command", async () => {
       const app = await createApp(boardActor);
       // Deploys stay off so this is stored as a draft, the same way the

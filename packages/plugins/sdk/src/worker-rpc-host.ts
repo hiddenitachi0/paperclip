@@ -866,8 +866,29 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
           return callHost("issues.listComments", { issueId, companyId });
         },
 
-        async createComment(issueId: string, body: string, companyId: string, options?: { authorAgentId?: string }) {
-          return callHost("issues.createComment", { issueId, body, companyId, authorAgentId: options?.authorAgentId });
+        async createComment(
+          issueId: string,
+          body: string,
+          companyId: string,
+          options?: { authorAgentId?: string; runId?: string | null },
+        ) {
+          // DUR-4096: attributing a comment to an agent without proving that
+          // agent's (or its run's) access to the issue is exactly the
+          // impersonation-adjacent gap this ticket closed -- the host
+          // rejects an attributed call with no runId, but failing fast here
+          // gives plugin authors a clearer error than a round trip.
+          if (options?.authorAgentId && !options?.runId) {
+            throw new Error(
+              "createComment requires options.runId when options.authorAgentId is set (the invoking tool call's or background job's run id)",
+            );
+          }
+          return callHost("issues.createComment", {
+            issueId,
+            body,
+            companyId,
+            authorAgentId: options?.authorAgentId,
+            runId: options?.runId ?? null,
+          });
         },
 
         async createAttachment(

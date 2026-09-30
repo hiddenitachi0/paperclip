@@ -1,5 +1,28 @@
 import { describe, expect, it } from "vitest";
-import { deployPolicySchema } from "./project.js";
+import { createProjectSchema, deployPolicySchema, updateProjectSchema } from "./project.js";
+
+describe("createProjectSchema / updateProjectSchema display fields", () => {
+  it("accepts productionUrl and hostingTarget on create", () => {
+    const parsed = createProjectSchema.parse({
+      name: "Nordstrand",
+      productionUrl: "https://nordstrand.example.com",
+      hostingTarget: "VPS via deploy-runner",
+    });
+    expect(parsed.productionUrl).toBe("https://nordstrand.example.com");
+    expect(parsed.hostingTarget).toBe("VPS via deploy-runner");
+  });
+
+  it("defaults productionUrl and hostingTarget to undefined when omitted", () => {
+    const parsed = createProjectSchema.parse({ name: "Nordstrand" });
+    expect(parsed.productionUrl).toBeUndefined();
+    expect(parsed.hostingTarget).toBeUndefined();
+  });
+
+  it("allows clearing productionUrl and hostingTarget to null on update", () => {
+    const parsed = updateProjectSchema.parse({ productionUrl: null, hostingTarget: null });
+    expect(parsed).toEqual({ productionUrl: null, hostingTarget: null });
+  });
+});
 
 describe("deployPolicySchema", () => {
   const valid = {
