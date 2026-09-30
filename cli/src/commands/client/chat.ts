@@ -21,6 +21,9 @@ import {
  *                 (GET /api/attachments/:id/content), base64 in JSON, so the
  *                 bridge can upload it to Telegram without handing Telegram
  *                 a private Paperclip address.
+ *   chat media    DUR-4062: the same, but for a Media Studio video or audio
+ *                 file (image/*, video/* or audio/* — not JUST a picture),
+ *                 up to a larger byte limit (video files are bigger).
  *
  *   chat continue start a new quick-agent conversation that carries the relevant
  *                 part of this person's recent chat with the agent
@@ -176,6 +179,28 @@ export function registerChatCommands(program: Command): void {
 
   addCommonClientOptions(
     chat
+      .command("media")
+      .description(
+        "The bytes of a Media Studio video or audio (or picture) file, as base64 in JSON. With --json a refusal is printed as {ok:false,...} and exits 0.",
+      )
+      .argument("<fileId>", "The file's id (a company file or issue attachment)")
+      .requiredOption("-C, --company-id <id>", "Company ID")
+      .action(async (fileId: string, opts: BaseClientOptions) => {
+        try {
+          const outcome = await runChatMedia(fileId, opts);
+          if (!outcome.ok && !opts.json) {
+            throw new ApiRequestError(outcome.status, outcome.error);
+          }
+          printOutput(outcome, { json: opts.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+    { includeCompany: false },
+  );
+
+  addCommonClientOptions(
+    chat
       .command("answers")
       .description("Status and the agent's latest answer for tasks in one company (at most 50 ids)")
       .argument("<issueIds...>", "Task IDs")
@@ -222,6 +247,44 @@ export async function runChatImage(fileId: string, opts: BaseClientOptions): Pro
     if (!contentType.startsWith("image/")) return { ok: false, status: 415, error: "That file is not a picture." };
     if (result.bytes.length > CHAT_IMAGE_MAX_BYTES) {
       return { ok: false, status: 413, error: "That picture is too large to send." };
+    }
+    return {
+      ok: true,
+      fileId,
+      contentType,
+      byteSize: result.bytes.length,
+      contentBase64: result.bytes.toString("base64"),
+    };
+  } catch (err) {
+    if (err instanceof ApiRequestError) return { ok: false, status: err.status, error: err.message };
+    throw err;
+  }
+}
+
+/** Telegram's own upload limit for a video, audio file or document over the Bot API. */
+export const CHAT_MEDIA_MAX_BYTES = 50 * 1024 * 1024;
+
+export type ChatMediaOutcome =
+  | { ok: true; fileId: string; contentType: string; byteSize: number; contentBase64: string }
+  | { ok: false; status: number; error: string };
+
+/**
+ * DUR-4062: one Media Studio file's bytes — a picture, a video or an
+ * audio/music file. Same shape and access rules as `chat image`, but not
+ * limited to image/* content types, and with video's larger byte limit.
+ */
+export async function runChatMedia(fileId: string, opts: BaseClientOptions): Promise<ChatMediaOutcome> {
+  const ctx = resolveCommandContext(opts, { requireCompany: true });
+  if (!FILE_ID_PATTERN.test(fileId)) return { ok: false, status: 400, error: "That is not a file id." };
+  try {
+    const result = await ctx.api.getBytes(apiPath`/api/attachments/${fileId}/content`, { ignoreNotFound: true });
+    if (!result) return { ok: false, status: 404, error: "That file was not found." };
+    const contentType = (result.contentType ?? "").split(";")[0]!.trim().toLowerCase();
+    if (!/^(image|video|audio)\//.test(contentType)) {
+      return { ok: false, status: 415, error: "That file is not a picture, video or audio file." };
+    }
+    if (result.bytes.length > CHAT_MEDIA_MAX_BYTES) {
+      return { ok: false, status: 413, error: "That file is too large to send." };
     }
     return {
       ok: true,

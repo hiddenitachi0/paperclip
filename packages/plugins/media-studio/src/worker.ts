@@ -54,17 +54,27 @@ import {
   ACTION_LOOKS_SAVE,
   ACTION_SOGNI_LORAS,
   ACTION_SOGNI_MODELS,
+  CHECK_MEDIA_JOB_DESCRIPTION,
+  CHECK_MEDIA_JOB_PARAMETERS,
+  GENERATE_AUDIO_DESCRIPTION,
+  GENERATE_AUDIO_PARAMETERS,
   GENERATE_IMAGE_DESCRIPTION,
   GENERATE_IMAGE_PARAMETERS,
+  GENERATE_VIDEO_DESCRIPTION,
+  GENERATE_VIDEO_PARAMETERS,
   LIST_LOOKS_DESCRIPTION,
   MAIN_PAGE_ROUTE,
   MAX_REFERENCE_FILES,
   QUICK_PICTURE_DESCRIPTION,
   QUICK_PICTURE_PARAMETERS,
+  TOOL_CHECK_MEDIA_JOB,
   TOOL_GENERATE,
+  TOOL_GENERATE_AUDIO,
+  TOOL_GENERATE_VIDEO,
   TOOL_LIST_LOOKS,
   TOOL_QUICK_PICTURE,
 } from "./manifest.js";
+import { JOB_KEY_MEDIA_POLL, advanceMediaJobs, findOwnMediaJob, startMediaJob } from "./media-jobs.js";
 import {
   FAL_QUICK_STEPS,
   QUICK_PICTURE_PROVIDER_TIMEOUT_MS,
@@ -1757,6 +1767,9 @@ const plugin = definePlugin({
       );
     }
 
+    registerMediaJobTools(ctx);
+    ctx.jobs.register(JOB_KEY_MEDIA_POLL, (job) => advanceMediaJobs(ctx, job.runId));
+
     ctx.logger.info(`media-studio plugin ready (main page: ${MAIN_PAGE_ROUTE})`);
   },
 
@@ -1764,6 +1777,184 @@ const plugin = definePlugin({
     return { status: "ok", message: "Media Studio ready" };
   },
 });
+
+// ─── Video and music/audio (DUR-4062) ─────────────────────────────────────────
+//
+// Both are background jobs (media-jobs.ts): the tool starts the job and
+// returns a job id right away, never a blocking wait. The finished file
+// lands in the company's Files, and — with a task — a comment there, once
+// the media-generation-poll job (jobs.schedule) notices it is done.
+
+function readSeedParam(value: unknown): number | undefined | "invalid" {
+  const seed = parseSeed(value);
+  return seed === "invalid" ? "invalid" : (seed ?? undefined);
+}
+
+/**
+ * DUR-4091 finding 1: generate-video/generate-audio take `issueId` straight
+ * from the model's own tool-call parameters. The tool call itself still runs
+ * on the calling agent's live, checked-out run, so — unlike the background
+ * job that later delivers the result — this is the one point where the host
+ * can still verify the agent actually owns that issue right now, the same
+ * rule `createAttachment` already enforces for generate-image. Returns an
+ * error string when the calling agent may not use this issueId, or null when
+ * it is clear to proceed.
+ */
+async function assertOwnedIssueId(
+  ctx: PluginContext,
+  runCtx: { agentId: string; runId: string; companyId: string },
+  issueId: string,
+): Promise<string | null> {
+  try {
+    await ctx.issues.assertCheckoutOwner({
+      issueId,
+      companyId: runCtx.companyId,
+      actorAgentId: runCtx.agentId,
+      actorRunId: runCtx.runId,
+    });
+    return null;
+  } catch {
+    return "You can only post this to a task you're currently checked out on and working.";
+  }
+}
+
+function registerMediaJobTools(ctx: PluginContext): void {
+  ctx.tools.register(
+    TOOL_GENERATE_VIDEO,
+    { displayName: "Generate video", description: GENERATE_VIDEO_DESCRIPTION, parametersSchema: GENERATE_VIDEO_PARAMETERS as unknown as Record<string, unknown> },
+    async (params, runCtx): Promise<ToolResult> => {
+      const rawParams = (params ?? {}) as Record<string, unknown>;
+      const prompt = typeof rawParams.prompt === "string" ? rawParams.prompt.trim() : "";
+      if (!prompt) return { error: "prompt is required" };
+      const issueId = typeof rawParams.issueId === "string" && rawParams.issueId.trim() ? rawParams.issueId.trim() : null;
+      if (issueId) {
+        const ownershipError = await assertOwnedIssueId(ctx, runCtx, issueId);
+        if (ownershipError) return { error: ownershipError };
+      }
+
+      const rawProvider = typeof rawParams.provider === "string" ? rawParams.provider.trim().toLowerCase() : "";
+      if (rawProvider && rawProvider !== "fal" && rawProvider !== "sogni") {
+        return { error: `"${String(rawParams.provider)}" is not a video service. Use fal or sogni, or leave it out.` };
+      }
+      const seed = readSeedParam(rawParams.seed);
+      if (seed === "invalid") return { error: `The seed must be a whole number from 0 to ${MAX_SEED}.` };
+      const durationSeconds = readOptionalNumber(rawParams.durationSeconds);
+      if (durationSeconds === "invalid") return { error: "durationSeconds must be a number." };
+      const aspectRatio = typeof rawParams.aspectRatio === "string" && rawParams.aspectRatio.trim() ? rawParams.aspectRatio.trim() : undefined;
+      const model = typeof rawParams.model === "string" && rawParams.model.trim() ? rawParams.model.trim() : undefined;
+
+      let startImage: string | undefined;
+      const startImageFileId = typeof rawParams.startImageFileId === "string" ? rawParams.startImageFileId.trim() : "";
+      if (startImageFileId) {
+        try {
+          [startImage] = await loadReferenceImages(ctx, runCtx.companyId, [startImageFileId]);
+        } catch (err) {
+          return { error: err instanceof Error ? err.message : String(err) };
+        }
+      }
+
+      const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
+      const settingsProvider = String(cfg.provider ?? "").toLowerCase();
+      const provider = rawProvider || (settingsProvider === "fal" || settingsProvider === "sogni" ? settingsProvider : "fal");
+
+      // Same daily-picture-limit reservation as generate-image, reserved before the provider is called (DUR-4000).
+      const reservation = await ctx.personas.reserveDailyGeneration(runCtx.companyId, { runId: runCtx.runId });
+      if (!reservation.allowed) return { error: `Daily image limit (${reservation.cap ?? 0}) reached for this agent today.` };
+
+      try {
+        const started = await startMediaJob(
+          ctx,
+          runCtx,
+          "video",
+          provider,
+          { kind: "video", prompt, model, startImage, seed, durationSeconds: durationSeconds ?? undefined, aspectRatio },
+          issueId,
+        );
+        return {
+          content:
+            `Started making the video with ${started.provider === "fal" ? "Fal.ai" : "Sogni"} (${started.model}). This takes a few minutes — ` +
+            `${issueId ? "I will post it on this task" : "it will be saved to the company's Files"} once it's ready. Job id: ${started.jobId}.`,
+          data: { jobId: started.jobId, status: "started", provider: started.provider, model: started.model, issueId },
+        };
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  ctx.tools.register(
+    TOOL_GENERATE_AUDIO,
+    { displayName: "Generate audio", description: GENERATE_AUDIO_DESCRIPTION, parametersSchema: GENERATE_AUDIO_PARAMETERS as unknown as Record<string, unknown> },
+    async (params, runCtx): Promise<ToolResult> => {
+      const rawParams = (params ?? {}) as Record<string, unknown>;
+      const prompt = typeof rawParams.prompt === "string" ? rawParams.prompt.trim() : "";
+      if (!prompt) return { error: "prompt is required" };
+      const issueId = typeof rawParams.issueId === "string" && rawParams.issueId.trim() ? rawParams.issueId.trim() : null;
+      if (issueId) {
+        const ownershipError = await assertOwnedIssueId(ctx, runCtx, issueId);
+        if (ownershipError) return { error: ownershipError };
+      }
+
+      const rawMode = typeof rawParams.mode === "string" && rawParams.mode.trim() ? rawParams.mode.trim().toLowerCase() : "music";
+      if (rawMode !== "music" && rawMode !== "speech") {
+        return { error: `"${String(rawParams.mode)}" is not "music" or "speech".` };
+      }
+      const voice = typeof rawParams.voice === "string" && rawParams.voice.trim() ? rawParams.voice.trim() : undefined;
+      const model = typeof rawParams.model === "string" && rawParams.model.trim() ? rawParams.model.trim() : undefined;
+      const seed = readSeedParam(rawParams.seed);
+      if (seed === "invalid") return { error: `The seed must be a whole number from 0 to ${MAX_SEED}.` };
+      const durationSeconds = readOptionalNumber(rawParams.durationSeconds);
+      if (durationSeconds === "invalid") return { error: "durationSeconds must be a number." };
+
+      const reservation = await ctx.personas.reserveDailyGeneration(runCtx.companyId, { runId: runCtx.runId });
+      if (!reservation.allowed) return { error: `Daily image limit (${reservation.cap ?? 0}) reached for this agent today.` };
+
+      try {
+        const started = await startMediaJob(
+          ctx,
+          runCtx,
+          "audio",
+          "fal",
+          { kind: "audio", prompt, mode: rawMode, voice, model, seed, durationSeconds: durationSeconds ?? undefined },
+          issueId,
+        );
+        return {
+          content:
+            `Started making the ${rawMode} with Fal.ai (${started.model}). This can take a while — ` +
+            `${issueId ? "I will post it on this task" : "it will be saved to the company's Files"} once it's ready. Job id: ${started.jobId}.`,
+          data: { jobId: started.jobId, status: "started", provider: started.provider, model: started.model, mode: rawMode, issueId },
+        };
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  ctx.tools.register(
+    TOOL_CHECK_MEDIA_JOB,
+    { displayName: "Check video/audio job", description: CHECK_MEDIA_JOB_DESCRIPTION, parametersSchema: CHECK_MEDIA_JOB_PARAMETERS as unknown as Record<string, unknown> },
+    async (params, runCtx): Promise<ToolResult> => {
+      const jobId = typeof (params as Record<string, unknown> | null)?.jobId === "string" ? (params as Record<string, unknown>).jobId as string : "";
+      if (!jobId.trim()) return { error: "jobId is required" };
+      const record = await findOwnMediaJob(ctx, runCtx.companyId, runCtx.agentId, jobId.trim());
+      if (!record) return { error: "No such job (or it was not started by you)." };
+      const data = record.data as { kind: string; progress: string | null; error: string | null; resultFileId: string | null };
+      if (record.status === "running") {
+        return {
+          content: `Still working on the ${data.kind}${data.progress ? ` (${data.progress})` : ""}.`,
+          data: { status: "running", progress: data.progress ?? null },
+        };
+      }
+      if (record.status === "failed") {
+        return { content: `Could not make the ${data.kind}: ${data.error}`, data: { status: "failed", error: data.error } };
+      }
+      return {
+        content: `The ${data.kind} is ready: file id ${data.resultFileId} in the company's Files.`,
+        data: { status: "done", fileId: data.resultFileId },
+      };
+    },
+  );
+}
 
 // ─── Sogni's tools (upscale, remove background, restore, ...) ────────────────
 
