@@ -86,6 +86,8 @@ export interface IssueAssigneeAdapterOverrides {
   modelProfile?: ModelProfileKey;
   adapterConfig?: Record<string, unknown>;
   useProjectWorkspace?: boolean;
+  /** DUR-4144: "Plan first on Opus, then build on Sonnet" New Task switch. */
+  planFirstOnOpus?: boolean;
 }
 
 export type DocumentFormat = "markdown";

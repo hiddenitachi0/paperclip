@@ -8262,6 +8262,35 @@ export function issueRoutes(
         interaction.status === "accepted" &&
         acceptedPlanTarget?.issueId === issue.id &&
         acceptedPlanTarget.key === "plan";
+
+      // DUR-4144: "Plan first on Opus, then build on Sonnet" is a one-shot
+      // switch -- clear it the moment its plan is accepted so the fresh
+      // session that follows (forceFreshSession below) builds on the agent's
+      // normal model instead of planning again on every future run.
+      const planFirstOverrides = issue.assigneeAdapterOverrides as Record<string, unknown> | null;
+      if (acceptedPlanConfirmation && planFirstOverrides?.planFirstOnOpus === true) {
+        await svc.update(issue.id, {
+          assigneeAdapterOverrides: { ...planFirstOverrides, planFirstOnOpus: false },
+        });
+        await logActivity(db, {
+          companyId: issue.companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          action: "issue.updated",
+          entityType: "issue",
+          entityId: issue.id,
+          details: {
+            identifier: issue.identifier,
+            source: "plan_first_on_opus_cleared",
+            interactionId: interaction.id,
+            assigneeAdapterOverrides: { ...planFirstOverrides, planFirstOnOpus: false },
+            _previous: { assigneeAdapterOverrides: planFirstOverrides },
+          },
+        });
+      }
+
       queueResolvedInteractionContinuationWakeup({
         heartbeat: rawHeartbeat,
         issue: continuationWakeIssue,

@@ -134,6 +134,11 @@ export const issueAssigneeAdapterOverridesSchema = z
     modelProfile: z.enum(MODEL_PROFILE_KEYS).optional(),
     adapterConfig: z.record(z.string(), z.unknown()).optional(),
     useProjectWorkspace: z.boolean().optional(),
+    // DUR-4144: New Task switch "Plan first on Opus, then build on Sonnet".
+    // The first run uses the "planner" model profile and writes the `plan`
+    // document; once the plan is accepted the server clears this flag so the
+    // following fresh-session run falls back to the normal/cheap model.
+    planFirstOnOpus: z.boolean().optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
