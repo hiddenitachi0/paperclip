@@ -855,6 +855,7 @@ const CREATED_OPERATIONS = new Set([
   "POST /api/issues/{id}/interactions",
   "POST /api/issues/{id}/comments",
   "POST /api/companies/{companyId}/issues/{issueId}/attachments",
+  "POST /api/companies/{companyId}/files",
   "POST /api/companies/{companyId}/projects",
   "POST /api/projects/{id}/workspaces",
   "POST /api/companies/{companyId}/routines",
@@ -4394,6 +4395,15 @@ registry.registerPath({
   tags: ["assets"],
   summary: "Upload an attachment to an issue",
   request: { params: z.object({ companyId: z.string(), issueId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/companies/{companyId}/files",
+  tags: ["assets"],
+  summary: "Upload a company file that is not tied to an issue (for example a picture saved from the Media Studio editor)",
+  request: { params: z.object({ companyId: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized },
 });
 
