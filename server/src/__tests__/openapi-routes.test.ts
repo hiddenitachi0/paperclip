@@ -103,6 +103,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "payment-notices.ts",
   // Payment card routes (DUR-4040) are board-only, switched off by default, and not yet in the public OpenAPI document.
   "payment-cards.ts",
+  // Private-workspace emergency-access routes (DUR-4094) are owner/admin-only and not yet in the public OpenAPI document.
+  "private-access.ts",
 ]);
 
 function createApp() {
