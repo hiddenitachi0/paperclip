@@ -122,6 +122,7 @@ export function projectRoutes(rawDb: Db) {
     deployPolicy: unknown,
     companyId: string,
     projectId: string | null,
+    // paperclip:allow-git-push: enum default value (ProjectDeployTransport), not a git command invocation
     deployTransport: "git_push" | "sftp" = "git_push",
   ) {
     if (!deployPolicy || typeof deployPolicy !== "object" || Array.isArray(deployPolicy)) return;
@@ -312,6 +313,7 @@ export function projectRoutes(rawDb: Db) {
       projectData.deployPolicy,
       companyId,
       null,
+      // paperclip:allow-git-push: enum default value (ProjectDeployTransport), not a git command invocation
       (projectData.deployTransport as "git_push" | "sftp" | undefined) ?? "git_push",
     );
     const project = await svc.create(companyId, projectData);

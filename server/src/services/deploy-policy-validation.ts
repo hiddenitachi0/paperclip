@@ -63,6 +63,7 @@ function hasWhitespace(value: string) {
 export function describeDeployPolicyProblems(
   policy: ProjectDeployPolicy,
   context: DeployPolicyValidationContext,
+  // paperclip:allow-git-push: enum default value (ProjectDeployTransport), not a git command invocation
   deployTransport: ProjectDeployTransport = "git_push",
 ): string[] {
   const problems: string[] = [];
