@@ -33,8 +33,8 @@ function input(overrides: Partial<TradingRiskGateInput> = {}): TradingRiskGateIn
   };
 }
 
-/** A cap-free config, for tests that isolate a single check other than position/exposure/approval. */
-const PERMISSIVE_CONFIG: TradingRiskConfig = { ...DEFAULT_TRADING_RISK_CONFIG, maxPositionNok: 1_000_000, maxTotalExposureNok: 1_000_000, approvalAboveNok: null };
+/** A cap-free config, for tests that isolate a single check other than position/exposure/approval. approvalAboveNok is a large finite number (not null) so these tests don't trip the "null = every order needs approval" rule below. */
+const PERMISSIVE_CONFIG: TradingRiskConfig = { ...DEFAULT_TRADING_RISK_CONFIG, maxPositionNok: 1_000_000, maxTotalExposureNok: 1_000_000, approvalAboveNok: 1_000_000_000 };
 
 describe("evaluateTradingRiskGate", () => {
   it("allows a plain buy well within every limit", () => {
@@ -107,9 +107,10 @@ describe("evaluateTradingRiskGate", () => {
     expect(verdict).toEqual({ kind: "needs_approval", reasonForOperator: expect.any(String) });
   });
 
-  it("never requires approval when approvalAboveNok is null", () => {
-    const verdict = evaluateTradingRiskGate(input({ riskConfig: PERMISSIVE_CONFIG, requestedQuantity: 1, quotePriceNok: 100_000, cashNok: 200_000 }));
-    expect(verdict).toEqual({ kind: "allow" });
+  it("always requires approval when approvalAboveNok is null (the design report's 'every trade at first')", () => {
+    const config: TradingRiskConfig = { ...PERMISSIVE_CONFIG, approvalAboveNok: null };
+    const verdict = evaluateTradingRiskGate(input({ riskConfig: config, requestedQuantity: 1, quotePriceNok: 1 }));
+    expect(verdict).toEqual({ kind: "needs_approval", reasonForOperator: expect.any(String) });
   });
 
   it("checks limits in a fixed order so the first real problem is always the reported reason", () => {

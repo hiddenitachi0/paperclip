@@ -82,11 +82,12 @@ export function evaluateTradingRiskGate(input: TradingRiskGateInput): TradingRis
     }
   }
 
-  if (riskConfig.approvalAboveNok !== null && orderValueNok >= riskConfig.approvalAboveNok) {
-    return {
-      kind: "needs_approval",
-      reasonForOperator: `${side === "buy" ? "Buy" : "Sell"} about ${Math.round(orderValueNok)} kr of the position; this is above the ${riskConfig.approvalAboveNok} kr approval threshold.`,
-    };
+  if (riskConfig.approvalAboveNok === null || orderValueNok >= riskConfig.approvalAboveNok) {
+    const reasonForOperator =
+      riskConfig.approvalAboveNok === null
+        ? `${side === "buy" ? "Buy" : "Sell"} about ${Math.round(orderValueNok)} kr of the position; this strategy requires approval on every trade.`
+        : `${side === "buy" ? "Buy" : "Sell"} about ${Math.round(orderValueNok)} kr of the position; this is above the ${riskConfig.approvalAboveNok} kr approval threshold.`;
+    return { kind: "needs_approval", reasonForOperator };
   }
 
   return { kind: "allow" };
