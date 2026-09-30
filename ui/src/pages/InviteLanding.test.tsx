@@ -548,16 +548,16 @@ describe("InviteLandingPage", () => {
     expect(container.textContent).toContain("Request to join Acme Robotics");
     expect(container.textContent).toContain("A company admin must approve your request to join.");
     expect(container.textContent).toContain(
-      "Ask them to visit Company Settings → Members to approve your request.",
+      "Ask them to visit Company Settings → People to approve your request.",
     );
     expect(container.querySelector('img[alt="Acme Robotics logo"]')).not.toBeNull();
-    expect(container.textContent).not.toContain("http://localhost/company/settings/members");
+    expect(container.textContent).not.toContain("http://localhost/company/settings/people");
 
     const approvalLinks = Array.from(container.querySelectorAll("a")).filter(
-      (link) => link.textContent === "Company Settings → Members",
+      (link) => link.textContent === "Company Settings → People",
     );
     expect(approvalLinks).toHaveLength(2);
-    const expectedApprovalUrl = `${window.location.origin}/company/settings/members`;
+    const expectedApprovalUrl = `${window.location.origin}/company/settings/people`;
     for (const link of approvalLinks) {
       expect(link.getAttribute("href")).toBe(expectedApprovalUrl);
     }

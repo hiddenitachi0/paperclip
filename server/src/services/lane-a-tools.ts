@@ -189,6 +189,12 @@ export interface LaneAToolContext {
   /** agents.lane_a_enabled off the same row; the plugin execute service picks its grant rule from it. */
   laneAEnabled?: boolean;
   /**
+   * DUR-4070: agents.lane_a_trust_level off the same row. "limited" makes
+   * the plugin execute service refuse every add-on tool call outright,
+   * regardless of pluginToolGrants.
+   */
+  laneATrustLevel?: string | null;
+  /**
    * This message's web session: the addresses read_web_page may open (the
    * ones the requester wrote in their own message, plus the ones web_search
    * returned in this message). Absent means read_web_page opens nothing.

@@ -32,9 +32,12 @@ import {
   normalizeLaneAProvider,
   resolveLaneAModelForProvider,
   laneATemperatureForCall,
+  laneAProviderRoutingForCall,
   readLaneAWebSearchSwitch,
+  isLaneATrustLimited,
   type ChatHandedOverTask,
   type LaneAProvider,
+  type LaneAProviderRouting,
 } from "@paperclipai/shared";
 import { HttpError, conflict, forbidden, notFound, tooManyRequests, unprocessable } from "../errors.js";
 import {
@@ -686,6 +689,19 @@ export interface LaneATargetAgent {
    * unaffected; when absent the service reads the stored value off the row.
    */
   laneATemperature?: number | null;
+  /**
+   * DUR-4070: company-member userIds this quick agent may answer, besides
+   * the company's owner (always allowed). Optional so existing callers/tests
+   * are unaffected; absent reads the same as empty ("the owner only").
+   */
+  laneAAssignedUserIds?: string[] | null;
+  /**
+   * "Model hosts" (OpenRouter only): hosts the model may only use / try first
+   * / never use. Null/absent = OpenRouter picks. Optional so existing callers
+   * and tests are unaffected; when absent the service reads the stored value
+   * off the row.
+   */
+  laneAProviderRouting?: LaneAProviderRouting | null;
 }
 
 /**
@@ -741,7 +757,9 @@ export function resolveLaneASettings(agent: LaneATargetAgent) {
   // Null when unset, out of range, or the model is known to refuse one;
   // clamped to 0-1 for Claude.
   const temperature = laneATemperatureForCall(provider, model, agent.laneATemperature);
-  return { provider, model, baseUrl, maxOutputTokens, dailyCallCap, temperature };
+  // Null unless the provider is OpenRouter and the operator picked hosts.
+  const providerRouting = laneAProviderRoutingForCall(provider, agent.laneAProviderRouting);
+  return { provider, model, baseUrl, maxOutputTokens, dailyCallCap, temperature, providerRouting };
 }
 
 /**
@@ -1189,6 +1207,33 @@ export const LANE_A_NO_TOOLS_NOTE =
   "look up tasks, weather or company data. If the person asks for any of that, say so plainly in one sentence and " +
   "suggest they switch your quick-answer model to one that supports tools. Never pretend you did it.";
 
+/**
+ * Told instead of LANE_A_NO_TOOLS_NOTE when the operator limited the quick
+ * agent to certain OpenRouter hosts and none of them supports tools: the fix
+ * is then in the host list, not necessarily the model, and the person should
+ * hear that plainly.
+ */
+export function laneANoToolsNoteForPinnedHosts(hosts: string[]): string {
+  const list = hosts.join(", ");
+  const which = hosts.length === 1 ? `The model host chosen for you (${list}) does` : `The model hosts chosen for you (${list}) do`;
+  return (
+    `${which} not support tools, so in this conversation you cannot make pictures, hand work to a colleague, ` +
+    "look up tasks, weather or company data. If the person asks for any of that, say so plainly in one sentence: " +
+    "the chosen model hosts don't support tools, so they should add a host that does in your quick-agent settings " +
+    "(under Model hosts) or pick another model. Never pretend you did it."
+  );
+}
+
+/**
+ * The key "this model refuses tools" is remembered under. With pinned or
+ * excluded hosts it includes them, so changing the host list tries tools
+ * again straight away instead of an hour later.
+ */
+export function laneAToolsRefusalKey(model: string, routing?: LaneAProviderRouting | null): string {
+  if (!routing || (!routing.only && !routing.ignore)) return model;
+  return `${model}|only=${(routing.only ?? []).join(",")}|ignore=${(routing.ignore ?? []).join(",")}`;
+}
+
 /** How long a "this model refuses tools" answer is remembered before trying tools again. */
 export const LANE_A_TOOLS_REFUSED_TTL_MS = 60 * 60 * 1000;
 const modelsRefusingTools = new Map<string, number>();
@@ -1222,6 +1267,19 @@ export function isLaneAToolsUnsupportedError(err: unknown): boolean {
   return /(function[ _-]?call(ing)?|tool[ _-]?(use|calling|call|choice)?s?)[^.]{0,40}(not|n't)[ _-]?support|not[ _-]?support(ed)?[^.]{0,40}(function[ _-]?call(ing)?|tools?)\b|no endpoints found that support tool/i.test(
     err.message,
   );
+}
+
+/**
+ * OpenRouter found no host for the request as sent: "No endpoints found that
+ * can handle the requested parameters". With tools offered, require_parameters
+ * is on, so once the creativity setting is already off (or was never sent)
+ * the tools are what no allowed host supports — typically because the
+ * operator limited the quick agent to hosts that don't do tools.
+ */
+export function isLaneAOpenRouterNoHostForParametersError(err: unknown): boolean {
+  if (!(err instanceof LaneAProviderError) || err.provider !== "openrouter") return false;
+  if (err.kind !== "upstream" || err.status === null || err.status < 400 || err.status >= 500) return false;
+  return /no endpoints found that can handle the requested parameters/i.test(err.message);
 }
 
 /**
@@ -1268,6 +1326,61 @@ export function laneAProviderErrorToHttp(err: unknown, kind: LaneAWorkKind): unk
     );
   }
   return new HttpError(502, `Lane A model call failed: ${err.message}`, { provider: err.provider });
+}
+
+/**
+ * DUR-4070: a quick agent answers only its assigned people
+ * (agents.lane_a_assigned_user_ids) and the company's owner -- everyone else
+ * in the company gets a plain refusal instead of a chat answer. This is
+ * strictly about PEOPLE: an agent-actor requester (a colleague agent using
+ * Lane A, e.g. "hand off to a colleague") is a different, unaffected trust
+ * boundary and always passes.
+ *
+ * Exempt, matching the "+ company owner" bypass this codebase already uses
+ * for owner-only settings (assertCompanyOwnerOrInstanceAdmin in
+ * routes/authz.ts): the local single-operator board actor (source
+ * "local_implicit" -- there is only one person in that deployment, already
+ * trusted with everything) and an instance admin (already trusted across
+ * every company). A board_delegate token is treated the same as the board
+ * actor it delegates for, since it carries the same userId/memberships.
+ *
+ * Pure and exported so it can be unit-tested without a database.
+ */
+export function personIsAssignedToQuickAgent(params: {
+  companyId: string;
+  assignedUserIds: string[];
+  requester: LaneARequester;
+  actor?: AuthorizationActor;
+}): boolean {
+  if (params.requester.agentId) return true;
+  const actor = params.actor;
+  if (!actor || (actor.type !== "board" && actor.type !== "board_delegate")) return true;
+  if (actor.source === "local_implicit" || actor.isInstanceAdmin) return true;
+  const userId = params.requester.userId ?? actor.userId ?? null;
+  if (!userId) return true;
+  const membership = (actor.memberships ?? []).find((item) => item.companyId === params.companyId);
+  if (membership?.status === "active" && membership.membershipRole === "owner") return true;
+  return params.assignedUserIds.includes(userId);
+}
+
+function assertPersonAssignedToQuickAgent(params: {
+  companyId: string;
+  targetAgent: { name: string; laneAAssignedUserIds?: string[] | null };
+  requester: LaneARequester;
+  actor?: AuthorizationActor;
+}) {
+  const allowed = personIsAssignedToQuickAgent({
+    companyId: params.companyId,
+    assignedUserIds: params.targetAgent.laneAAssignedUserIds ?? [],
+    requester: params.requester,
+    actor: params.actor,
+  });
+  if (allowed) return;
+  throw forbidden(
+    `${params.targetAgent.name} only answers the people it is assigned to. ` +
+      `Ask the company's owner to add you on ${params.targetAgent.name}'s settings page.`,
+    { code: "LANE_A_NOT_ASSIGNED" },
+  );
 }
 
 /** The model service's own error sentence out of "X answered 400: {json}", else the whole message. */
@@ -1604,6 +1717,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         laneABaseUrl: agents.laneABaseUrl,
         laneAModel: agents.laneAModel,
         laneATemperature: agents.laneATemperature,
+        laneAProviderRouting: agents.laneAProviderRouting,
         // DUR-4000: which person does this job, so the prompt can say so,
         // and the job's limits box (its standing rules ride in the prompt).
         personaId: agents.personaId,
@@ -1613,6 +1727,9 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         // may call; the shared execute service picks the grant rule from them.
         pluginToolGrants: agents.pluginToolGrants,
         laneAEnabled: agents.laneAEnabled,
+        // DUR-4070: the trust-level ceiling every capability below now
+        // checks first.
+        laneATrustLevel: agents.laneATrustLevel,
       })
       .from(agents)
       .where(and(eq(agents.id, agentId), eq(agents.companyId, companyId)));
@@ -1757,6 +1874,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     maxOutputTokens?: number;
     /** Sampling temperature, already resolved for this provider/model. Null = send none. */
     temperature?: number | null;
+    /** OpenRouter "model hosts", already resolved for this provider. Null = OpenRouter picks. */
+    providerRouting?: LaneAProviderRouting | null;
     /** DUR-3972: offer read_business_data this turn (the company has an active sales source). */
     offerBusinessData?: boolean;
     /** DUR-3997: offer read_company_file this turn (the company has an active file-server connection). */
@@ -1796,10 +1915,17 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     let response: Awaited<ReturnType<LaneAProviderClient["complete"]>> | undefined;
 
     const modelId = params.model ?? LANE_A_MODEL;
+    const providerRouting = params.providerRouting ?? null;
+    const toolsRefusalKey = laneAToolsRefusalKey(modelId, providerRouting);
+    // With hosts pinned, a tools refusal means those hosts can't do tools:
+    // say that, so the operator knows to change the host list.
+    const noToolsNote = providerRouting?.only
+      ? laneANoToolsNoteForPinnedHosts(providerRouting.only)
+      : LANE_A_NO_TOOLS_NOTE;
     // Some hosted models answer "function calling not supported" whenever tools
     // are offered. For those the quick agent still chats, without tools, and
     // says so plainly when asked for something only a tool can do.
-    let toolsOff = tools.length === 0 || laneAModelRefusesTools(modelId);
+    let toolsOff = tools.length === 0 || laneAModelRefusesTools(toolsRefusalKey);
     // A host that refuses the creativity setting still gets an answer: the
     // call is repeated once without it, and the rest of the turn goes without.
     let temperatureOff = typeof params.temperature !== "number";
@@ -1808,10 +1934,11 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         client.complete({
           model: modelId,
           maxTokens: params.maxOutputTokens ?? LANE_A_MAX_OUTPUT_TOKENS,
-          system: withTools || tools.length === 0 ? systemPrompt : `${systemPrompt}\n\n${LANE_A_NO_TOOLS_NOTE}`,
+          system: withTools || tools.length === 0 ? systemPrompt : `${systemPrompt}\n\n${noToolsNote}`,
           messages,
           ...(withTools ? { tools } : {}),
           ...(temperatureOff ? {} : { temperature: params.temperature }),
+          ...(providerRouting ? { providerRouting } : {}),
         });
       const request = async (withTools: boolean) => {
         try {
@@ -1826,18 +1953,21 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       try {
         return await request(true);
       } catch (err) {
-        if (!isLaneAToolsUnsupportedError(err)) throw err;
+        const toolsRefused =
+          isLaneAToolsUnsupportedError(err) || (temperatureOff && isLaneAOpenRouterNoHostForParametersError(err));
+        if (!toolsRefused) throw err;
         // Say why, once per refusal: without this the only trace of a model
         // host dropping the tools is an agent that suddenly "can't" use them.
         logger.warn(
           {
             provider: err instanceof LaneAProviderError ? err.provider : null,
             model: modelId,
+            pinnedHosts: providerRouting?.only ?? null,
             reason: err instanceof Error ? err.message.slice(0, 500) : String(err),
           },
           "lane A: the model's host refused tools; answering without tools for the next hour",
         );
-        rememberLaneAModelRefusesTools(modelId);
+        rememberLaneAModelRefusesTools(toolsRefusalKey);
         toolsOff = true;
         return request(false);
       }
@@ -1971,7 +2101,11 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
                     // person asked, e.g. Media Studio's keyword looks.
                     requesterMessage: message,
                   },
-                  agent: { laneAEnabled: ctx.laneAEnabled ?? true, pluginToolGrants: ctx.pluginToolGrants ?? [] },
+                  agent: {
+                    laneAEnabled: ctx.laneAEnabled ?? true,
+                    pluginToolGrants: ctx.pluginToolGrants ?? [],
+                    laneATrustLevel: ctx.laneATrustLevel,
+                  },
                 });
                 outcome = executed.ok
                   ? describePluginToolResultForModel(executed.result.result)
@@ -2097,6 +2231,15 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     if (!params.targetAgent.laneAEnabled) {
       throw forbidden("Lane A is not enabled for this agent");
     }
+    // DUR-4070: who may talk to this quick agent at all, before anything
+    // else (including the daily cap and the model call) is spent on someone
+    // who should have gotten a plain refusal.
+    assertPersonAssignedToQuickAgent({
+      companyId: params.companyId,
+      targetAgent: params.targetAgent,
+      requester: params.requester,
+      actor: params.actor,
+    });
     // DUR-3989: paused / over-limit agents do not get a model call, in chat
     // exactly as in transform. Checked before anything else can spend.
     await assertAgentMayWork({ companyId: params.companyId, targetAgent: params.targetAgent, kind: "chat" });
@@ -2132,6 +2275,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       laneABaseUrl: params.targetAgent.laneABaseUrl ?? agentRow?.laneABaseUrl ?? null,
       laneAModel: params.targetAgent.laneAModel ?? agentRow?.laneAModel ?? null,
       laneATemperature: params.targetAgent.laneATemperature ?? agentRow?.laneATemperature ?? null,
+      laneAProviderRouting: params.targetAgent.laneAProviderRouting ?? agentRow?.laneAProviderRouting ?? null,
     });
     const chatModel = assertLaneASettingsRunnable(chatSettings);
     const credential = await resolveLaneACredential({
@@ -2148,7 +2292,12 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       credential,
     });
 
-    const pluginToolGrants = (agentRow?.pluginToolGrants as string[] | null) ?? [];
+    // DUR-4070: the one dial that gates plugin tools, business data, company
+    // files, web search, browser access and memory together. "limited"
+    // overrides every one of those six below, regardless of what their own
+    // switch/grant already stores on this row.
+    const trustLimited = isLaneATrustLimited(agentRow?.laneATrustLevel);
+    const pluginToolGrants = trustLimited ? [] : ((agentRow?.pluginToolGrants as string[] | null) ?? []);
     const [mcpToolset, { history, businessDataInHistory, earlierConversation }, colleagues] = await Promise.all([
       // DUR-4004: "API with a key" tools are folded into this toolset's
       // toolIndex, so the add-on clash set below covers them too.
@@ -2179,6 +2328,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       runId: signedRunIdFromActor(params.actor),
       pluginToolGrants,
       laneAEnabled: agentRow?.laneAEnabled ?? true,
+      laneATrustLevel: agentRow?.laneATrustLevel,
       // The addresses read_web_page may open this message: the requester's
       // own words (never the caller's untrusted context), plus what
       // web_search returns below.
@@ -2188,10 +2338,11 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     // DUR-3972: offer the sales tool only when this company has an active
     // sales source. While the instance switch is off, the prompt stays exactly
     // as it was. Fails open to "not offered": a broken check must not turn a
-    // normal chat message into an error.
+    // normal chat message into an error. DUR-4070: never offered at all to a
+    // "limited"-trust agent, regardless of the instance switch/company source.
     let businessDataPrompt: { available: boolean; companyName: string } | undefined;
     try {
-      if (await businessData.featureOn()) {
+      if (!trustLimited && (await businessData.featureOn())) {
         const available = await businessData.isAvailable(params.companyId);
         businessDataPrompt = { available, companyName: await businessData.companyName(params.companyId) };
       }
@@ -2201,10 +2352,11 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     }
     // DUR-3997: offer the file tool only when this company has at least one
     // active file-server connection (and the same instance switch is on).
-    // Fails open to "not offered", like the sales tool.
+    // Fails open to "not offered", like the sales tool. DUR-4070: never
+    // offered to a "limited"-trust agent.
     let companyFilesPrompt: { servers: CompanyFileServerSummary[] } | undefined;
     try {
-      const servers = await companyFiles.listAvailable(params.companyId);
+      const servers = trustLimited ? [] : await companyFiles.listAvailable(params.companyId);
       if (servers.length > 0) companyFilesPrompt = { servers };
     } catch (err) {
       logger.warn({ err, companyId: params.companyId }, "lane A: company-files availability check failed");
@@ -2215,12 +2367,14 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     // one) was asked to remember. remember/forget are offered only to a person
     // signed in to the board; the tools check the same rule again. Fails open
     // to "no notebook this turn": a broken read must not break the chat.
+    // DUR-4070: a "limited"-trust agent gets no notebook at all -- its notes
+    // are not even read into the prompt, let alone offered as tools.
     let memoryPrompt: { notes: LaneAMemoryPromptNote[]; toolsOffered: boolean } | undefined;
     try {
-      const notes = await agentMemoryService(db).listForAgent(params.companyId, params.targetAgent.id);
+      const notes = trustLimited ? [] : await agentMemoryService(db).listForAgent(params.companyId, params.targetAgent.id);
       memoryPrompt = {
         notes,
-        toolsOffered: Boolean(params.requester.userId) && params.actor?.type === "board",
+        toolsOffered: !trustLimited && Boolean(params.requester.userId) && params.actor?.type === "board",
       };
     } catch (err) {
       logger.warn({ err, companyId: params.companyId, agentId: params.targetAgent.id }, "lane A: memory notebook could not be read");
@@ -2229,8 +2383,9 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
 
     // "Can search the web": read off the agent row (never from the caller),
     // so no route can widen what a quick agent may reach. web_search also
-    // needs the company's Brave key; fails closed to "not offered".
-    const webSwitchOn = readLaneAWebSearchSwitch(agentRow?.adapterConfig);
+    // needs the company's Brave key; fails closed to "not offered". DUR-4070:
+    // never offered to a "limited"-trust agent, regardless of the switch.
+    const webSwitchOn = !trustLimited && readLaneAWebSearchSwitch(agentRow?.adapterConfig);
     let webPrompt: { search: boolean; readPages: boolean } = { search: false, readPages: false };
     if (webSwitchOn) {
       let hasKey = false;
@@ -2276,6 +2431,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         model: chatModel,
         maxOutputTokens: chatSettings.maxOutputTokens,
         temperature: chatSettings.temperature,
+        providerRouting: chatSettings.providerRouting,
         offerBusinessData: businessDataPrompt?.available === true,
         offerCompanyFiles: companyFilesPrompt !== undefined,
         offerMemory: memoryPrompt?.toolsOffered === true,
@@ -2408,7 +2564,18 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     targetAgentId: string;
     conversationId: string;
     requester: LaneARequester;
+    /** DUR-4070: which people may read this agent's chat history. Optional so existing test callers keep working; omitted = not checked (matches this endpoint's pre-DUR-4070 behavior). */
+    targetAgent?: { name: string; laneAAssignedUserIds?: string[] | null };
+    actor?: AuthorizationActor;
   }) {
+    if (params.targetAgent) {
+      assertPersonAssignedToQuickAgent({
+        companyId: params.companyId,
+        targetAgent: params.targetAgent,
+        requester: params.requester,
+        actor: params.actor,
+      });
+    }
     const [conversation] = await db
       .select()
       .from(laneAConversations)
@@ -2598,6 +2765,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       laneABaseUrl: params.targetAgent.laneABaseUrl ?? agentRow?.laneABaseUrl ?? null,
       laneAModel: params.targetAgent.laneAModel ?? agentRow?.laneAModel ?? null,
       laneATemperature: params.targetAgent.laneATemperature ?? agentRow?.laneATemperature ?? null,
+      laneAProviderRouting: params.targetAgent.laneAProviderRouting ?? agentRow?.laneAProviderRouting ?? null,
     });
     const model = assertLaneASettingsRunnable(settings);
 
@@ -2655,6 +2823,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           maxOutputChars: params.maxOutputChars,
         }),
         temperature: settings.temperature,
+        providerRouting: settings.providerRouting,
       });
     } finally {
       release();
@@ -2704,6 +2873,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     maxOutputTokens: number;
     /** Sampling temperature, already resolved for this provider/model. Null = send none. */
     temperature?: number | null;
+    /** OpenRouter "model hosts", already resolved for this provider. Null = OpenRouter picks. */
+    providerRouting?: LaneAProviderRouting | null;
   }) {
     try {
       const send = (withTemperature: boolean) =>
@@ -2713,6 +2884,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           system: params.systemPrompt,
           messages: [{ role: "user", content: params.message }],
           ...(withTemperature ? { temperature: params.temperature } : {}),
+          ...(params.providerRouting ? { providerRouting: params.providerRouting } : {}),
         });
       const withTemperature = typeof params.temperature === "number";
       let response: Awaited<ReturnType<typeof send>>;
@@ -2893,6 +3065,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     if (!userId || requester.agentId || params.actor?.type !== "board") {
       throw forbidden("Only a person signed in to Paperclip can continue an earlier conversation.");
     }
+    assertPersonAssignedToQuickAgent({ companyId, targetAgent, requester, actor: params.actor });
     await assertAgentMayWork({ companyId, targetAgent, kind: "chat" });
 
     const now = params.now ?? new Date();
@@ -2974,6 +3147,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         laneAProvider: targetAgent.laneAProvider ?? agentRow?.laneAProvider ?? null,
         laneABaseUrl: targetAgent.laneABaseUrl ?? agentRow?.laneABaseUrl ?? null,
         laneAModel: targetAgent.laneAModel ?? agentRow?.laneAModel ?? null,
+        laneAProviderRouting: targetAgent.laneAProviderRouting ?? agentRow?.laneAProviderRouting ?? null,
       });
       const model = assertLaneASettingsRunnable(settings);
       const credential = await resolveLaneACredential({
@@ -2999,6 +3173,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           maxTokens: Math.min(LANE_A_CONTINUE_SELECTION_MAX_OUTPUT_TOKENS, settings.maxOutputTokens),
           system: request.system,
           messages: [{ role: "user", content: request.user }],
+          ...(settings.providerRouting ? { providerRouting: settings.providerRouting } : {}),
         });
       } catch (err) {
         throw providerErrorToHttp(err, "chat");
@@ -3101,7 +3276,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
    */
   async function listLooks(params: {
     companyId: string;
-    targetAgent: Pick<LaneATargetAgent, "id" | "name" | "laneAEnabled">;
+    targetAgent: Pick<LaneATargetAgent, "id" | "name" | "laneAEnabled" | "laneAAssignedUserIds">;
     requester: LaneARequester;
     actor?: AuthorizationActor;
   }): Promise<{ available: boolean; text: string }> {
@@ -3109,6 +3284,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     if (!params.requester.userId || params.requester.agentId || params.actor?.type !== "board") {
       throw forbidden("Only a person signed in to Paperclip can list looks here.");
     }
+    assertPersonAssignedToQuickAgent({ companyId, targetAgent, requester: params.requester, actor: params.actor });
     const agentRow = await loadLaneAAgentRow(companyId, targetAgent.id);
     const grants = (agentRow?.pluginToolGrants as string[] | null) ?? [];
     const tool = grants.find((name) => name.endsWith(`:${LANE_A_LIST_LOOKS_TOOL}`));
@@ -3132,7 +3308,11 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         tool,
         parameters: {},
         runContext: { agentId: targetAgent.id, runId: pluginRun.run.runId, companyId, projectId: "" },
-        agent: { laneAEnabled: agentRow?.laneAEnabled ?? true, pluginToolGrants: grants },
+        agent: {
+          laneAEnabled: agentRow?.laneAEnabled ?? true,
+          pluginToolGrants: grants,
+          laneATrustLevel: agentRow?.laneATrustLevel,
+        },
       });
       if (!executed.ok) return { available: true, text: `Could not list looks: ${executed.error}` };
       return { available: true, text: describePluginToolResultForModel(executed.result.result).content };
@@ -3170,6 +3350,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         name: agents.name,
         laneAEnabled: agents.laneAEnabled,
         pluginToolGrants: agents.pluginToolGrants,
+        laneATrustLevel: agents.laneATrustLevel,
         status: agents.status,
       })
       .from(agents)
@@ -3177,6 +3358,9 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     if (!agentRow) return { ok: false, reason: "The agent was not found." };
     if (!agentRow.laneAEnabled) {
       return { ok: false, reason: `${agentRow.name} is not a quick agent, so it cannot make pictures.` };
+    }
+    if (isLaneATrustLimited(agentRow.laneATrustLevel)) {
+      return { ok: false, reason: `${agentRow.name}'s trust level (Limited) does not allow add-on tools, including pictures.` };
     }
     try {
       await assertAgentMayWork({
@@ -3220,7 +3404,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         tool: tool.name,
         parameters: { prompt: params.prompt },
         runContext: { agentId: agentRow.id, runId: pluginRun.run.runId, companyId: params.companyId, projectId: "" },
-        agent: { laneAEnabled: true, pluginToolGrants },
+        agent: { laneAEnabled: true, pluginToolGrants, laneATrustLevel: agentRow.laneATrustLevel },
       });
       if (!executed.ok) return { ok: false, reason: `The picture was not made: ${executed.error}` };
       const described = describePluginToolResultForModel(executed.result.result);

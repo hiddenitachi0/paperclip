@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   type AnyPgColumn,
   pgTable,
@@ -9,6 +10,7 @@ import {
   timestamp,
   jsonb,
   index,
+  check,
 } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { environments } from "./environments.js";
@@ -108,6 +110,18 @@ export const agents = pgTable(
     // Null = send no temperature, i.e. the model host's own default, which is
     // what every quick agent did before this column existed.
     laneATemperature: real("lane_a_temperature"),
+    // Migration 0189: quick-agent "model hosts" for OpenRouter — which hosts
+    // (OpenRouter provider slugs such as "deepinfra") a call may only use,
+    // should try first, or must never use. Validated by the API
+    // (laneAProviderRoutingSchema in packages/shared). Only read when the
+    // quick agent's provider is OpenRouter. Null = no preference, i.e. what
+    // every quick agent did before this column existed.
+    laneAProviderRouting: jsonb("lane_a_provider_routing").$type<{
+      only?: string[];
+      order?: string[];
+      ignore?: string[];
+      allowFallbacks?: boolean;
+    }>(),
     // DUR-4013 step 3 (migration 0183). Whether, and how far, this agent may
     // drive the browser worker: "off" (default, no browser tool offered at
     // all) | "browse_and_forms" (navigate/read/click/type/fill forms, no
@@ -196,6 +210,26 @@ export const agents = pgTable(
     // (assertNoToolLibraryAssignmentFields), only the dedicated assignment
     // route writes it. Empty means none.
     apiToolIds: jsonb("api_tool_ids").$type<string[]>().notNull().default([]),
+    // DUR-4070 (migration 0189): the one dial that gates plugin tools,
+    // business data, company files, web search, browser access and memory
+    // together — "limited" (none of the six, regardless of any other
+    // per-tool switch/grant already stored on this row) | "standard" |
+    // "full" (both read the existing per-tool switches unchanged; only
+    // "limited" adds a restriction). Defaults to "full" for every agent,
+    // existing and new, so this column ships with zero behavior change until
+    // an operator explicitly turns an agent down. Board-settable only, same
+    // guard posture as the rest of QUICK_AGENT_FIELDS
+    // (assertNoAgentLaneAFlagMutation in server/src/routes/agents.ts).
+    laneATrustLevel: text("lane_a_trust_level").notNull().default("full"),
+    // DUR-4070 (migration 0189): company-member userIds (company_memberships
+    // principalId) this quick agent may answer, in addition to the company's
+    // owner, who can always reach it. Empty (the default for every existing
+    // and new agent) means "the owner only" -- so this column also ships with
+    // zero behavior change for a single-operator company. Live selection,
+    // read fresh on every Lane A call (services/lane-a.ts), never a snapshot.
+    // Board-settable only, same guard posture as the rest of
+    // QUICK_AGENT_FIELDS.
+    laneAAssignedUserIds: jsonb("lane_a_assigned_user_ids").$type<string[]>().notNull().default([]),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -203,5 +237,9 @@ export const agents = pgTable(
     companyStatusIdx: index("agents_company_status_idx").on(table.companyId, table.status),
     companyReportsToIdx: index("agents_company_reports_to_idx").on(table.companyId, table.reportsTo),
     companyDefaultEnvironmentIdx: index("agents_company_default_environment_idx").on(table.companyId, table.defaultEnvironmentId),
+    laneATrustLevelCheck: check(
+      "agents_lane_a_trust_level_check",
+      sql`${table.laneATrustLevel} IN ('limited', 'standard', 'full')`,
+    ),
   }),
 );

@@ -149,6 +149,8 @@ function makeProject(overrides: Partial<Project>): Project {
     targetDate: null,
     color: "#ef4444",
     icon: null,
+    productionUrl: null,
+    hostingTarget: null,
     env: null,
     pauseReason: null,
     pausedAt: null,

@@ -24,8 +24,16 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
  * would be a third list to keep in sync, which is the same bug again.
  */
 describe("every page in the sidebar is recognised as a page, not a company", () => {
+  // Personas moved from Sidebar.tsx into the Agents section (SidebarAgents.tsx)
+  // in DUR-4060, so both files need scanning for SidebarNavItem links.
   const sidebar = readFileSync(path.join(HERE, "../components/Sidebar.tsx"), "utf8");
-  const links = [...new Set([...sidebar.matchAll(/SidebarNavItem\s+to="(\/[^"]+)"/g)].map((m) => m[1]!))];
+  const sidebarAgents = readFileSync(path.join(HERE, "../components/SidebarAgents.tsx"), "utf8");
+  const linkPattern = /SidebarNavItem\s+to="(\/[^"]+)"/g;
+  const links = [
+    ...new Set(
+      [...sidebar.matchAll(linkPattern), ...sidebarAgents.matchAll(linkPattern)].map((m) => m[1]!),
+    ),
+  ];
 
   it("finds the sidebar links (guards the regex itself)", () => {
     expect(links.length).toBeGreaterThan(10);
@@ -122,6 +130,19 @@ describe("company routes", () => {
     expect(extractCompanyPrefixFromPath("/jobs")).toBeNull();
     expect(applyCompanyPrefix("/jobs", "DUR")).toBe("/DUR/jobs");
     expect(toCompanyRelativePath("/DUR/jobs")).toBe("/jobs");
+  });
+
+  // Regression for DUR-4060: /media-studio is a plugin-provided page route
+  // reached from the main menu, but plain host <Link>/<Navigate> (e.g. the
+  // Company settings "Open Media Studio looks" link and the old
+  // /company/settings/media-studio-looks redirect) go through applyCompanyPrefix,
+  // which needs the route listed here or it misreads "media-studio" as a
+  // company prefix, same defect family as /tools and /jobs above.
+  it("treats /media-studio as a board route that needs a company prefix", () => {
+    expect(isBoardPathWithoutPrefix("/media-studio")).toBe(true);
+    expect(extractCompanyPrefixFromPath("/media-studio")).toBeNull();
+    expect(applyCompanyPrefix("/media-studio?tab=looks", "DUR")).toBe("/DUR/media-studio?tab=looks");
+    expect(toCompanyRelativePath("/DUR/media-studio?tab=looks")).toBe("/media-studio?tab=looks");
   });
 
   it("preserves artifact deep-link anchors when applying the company prefix", () => {
