@@ -815,6 +815,14 @@ export function pluginRoutes(
     laneAEnabled: boolean;
   }
 
+  // DUR-4096 (round 4): mirrors `AGENT_KEY_ACTIVE_RUN_STATUSES` in
+  // middleware/auth.ts -- the statuses `resolveAgentKeyRunId` itself treats
+  // as "this run is really live right now" when deciding whether to trust
+  // the `x-paperclip-run-id` header. Kept as its own local copy rather than
+  // an import, matching this file's existing pattern of local
+  // ACTIVE_RUN_STATUSES-shaped constants elsewhere in the codebase.
+  const ANCHOR_ACTIVE_RUN_STATUSES = new Set(["queued", "running"]);
+
   async function validateToolRunContextScope(
     runContext: ToolRunContext,
     actor: Request["actor"],
@@ -867,7 +875,7 @@ export function pluginRoutes(
     const laneAEnabled = agent.laneAEnabled === true;
 
     const [run] = await db
-      .select({ companyId: heartbeatRuns.companyId, agentId: heartbeatRuns.agentId })
+      .select({ companyId: heartbeatRuns.companyId, agentId: heartbeatRuns.agentId, status: heartbeatRuns.status })
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runContext.runId))
       .limit(1);
@@ -876,6 +884,24 @@ export function pluginRoutes(
     }
     if (run.agentId !== runContext.agentId) {
       return { error: '"runContext.runId" does not belong to "runContext.agentId"', pluginToolGrants, laneAEnabled };
+    }
+
+    // DUR-4096 (round 4): the round-3 anchor above only fires when
+    // `actor.runId` is populated -- an agent API key call with no run bound
+    // to it (no `x-paperclip-run-id` header, or one naming a run
+    // `resolveAgentKeyRunId` rejected, including a real but *ended* run of
+    // the same agent) leaves `actor.runId` undefined and skips that anchor
+    // entirely. Pre-round-4, that made `runContext.runId` trusted again
+    // purely for naming a real run of the right agent/company -- including
+    // one long since completed -- reopening the exact "borrow any of my
+    // own past runs to fake liveness" spoof round 3 closed for the JWT
+    // path (security review, DUR-4096 round 4). An API-key caller with no
+    // bound active run has no basis to assert any specific runId is live,
+    // so independently require the named run to still be in flight --
+    // mirroring the liveness gate `resolveAgentKeyRunId` already applies to
+    // the header, applied here to the body field instead.
+    if (actor.type === "agent" && !actor.runId && !ANCHOR_ACTIVE_RUN_STATUSES.has(run.status)) {
+      return { error: '"runContext.runId" does not name a currently active run', pluginToolGrants, laneAEnabled };
     }
 
     const [project] = await db
