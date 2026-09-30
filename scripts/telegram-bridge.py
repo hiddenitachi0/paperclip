@@ -117,6 +117,20 @@ TASK_ANSWERS_PER_CALL = 50  # the server's limit per call
 QUICK_ANSWER_MAX_IMAGES = 4
 TG_PHOTO_MAX_BYTES = 10 * 1024 * 1024
 TG_PHOTO_TYPES = ("image/jpeg", "image/png", "image/webp", "image/gif")
+# DUR-4062: Media Studio's generate-video/generate-audio finish as a
+# background job (they can take minutes), so their file never rides along
+# with the immediate quick-answer the way a picture does — it lands later as
+# a comment on the task (media-jobs.ts's deliverResult), picked up here by
+# notify_task_answers the same way any other task answer is. Telegram's own
+# Bot API upload limit for a video/audio/document is 50 MB.
+TG_VIDEO_MAX_BYTES = 50 * 1024 * 1024
+TG_AUDIO_MAX_BYTES = 50 * 1024 * 1024
+# Matches media-jobs.ts's own wording ("Your video is ready: <filename>
+# (file id <uuid>)."). Kept in one place so a wording change there is one edit here.
+MEDIA_JOB_ANSWER_RE = re.compile(
+    r"Your (video|audio) is ready: \S.*\(file id ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\)",
+    re.I,
+)
 # A research task delivers its result page as the issue document with this key
 # (RESEARCH_RESULT_DOCUMENT_KEY in packages/shared/src/research-tasks.ts; a test
 # pins that they match). The chat links straight to it.
@@ -1440,6 +1454,46 @@ def format_task_answer(bot, item, entry, answer):
     return f"{head}\n\n{body}{footer}"
 
 
+def fetch_media(bot, file_id):
+    """(bytes, content type) of a Media Studio video or audio file in the
+    bot's company, or None. Same shape as fetch_picture, but through `chat
+    media` (not limited to pictures, and with video's larger byte limit)."""
+    data = cli("chat", "media", file_id, "-C", bot["companyId"])
+    if not (isinstance(data, dict) and data.get("ok") is True and isinstance(data.get("contentBase64"), str)):
+        return None
+    try:
+        payload = base64.b64decode(data["contentBase64"], validate=True)
+    except Exception:
+        return None
+    content_type = str(data.get("contentType") or "").lower()
+    if not payload or not (content_type.startswith("video/") or content_type.startswith("audio/")):
+        return None
+    return payload, content_type
+
+
+def send_task_answer(bot, chat_id, text, answer):
+    """Send one task answer into its chat: a video/audio message when the
+    answer is a media job's "your <kind> is ready" comment (MEDIA_JOB_ANSWER_RE)
+    and the file fetches within Telegram's size limit, otherwise plain text
+    exactly as before. True when Telegram accepted it."""
+    token = bot["token"]
+    match = MEDIA_JOB_ANSWER_RE.search(str((answer or {}).get("body") or ""))
+    if match:
+        kind, file_id = match.group(1).lower(), match.group(2).lower()
+        media = fetch_media(bot, file_id)
+        if media is not None:
+            payload, content_type = media
+            max_bytes = TG_VIDEO_MAX_BYTES if kind == "video" else TG_AUDIO_MAX_BYTES
+            if len(payload) <= max_bytes:
+                extension = content_type.split("/", 1)[1].split("+", 1)[0] or kind
+                method, field = ("sendVideo", "video") if kind == "video" else ("sendAudio", "audio")
+                caption = tg_truncate(text, TG_CAPTION_LIMIT)
+                if tg_upload(token, method, field, f"{kind}.{extension}", content_type, payload,
+                             chat_id=chat_id, caption=caption) is not None:
+                    return True
+    return tg(token, "sendMessage", chat_id=chat_id, text=text, disable_web_page_preview=True) is not None
+
+
 def notify_task_answers(state, bots):
     """Post each chat task's answer into the chat the task came from, once.
 
@@ -1482,12 +1536,14 @@ def notify_task_answers(state, bots):
             comment_id = (answer or {}).get("commentId")
             is_new = bool(comment_id) and comment_id != entry.get("postedCommentId")
             text = None
+            media_answer = None
             if is_new:
                 text = format_task_answer(bot, it, entry, answer)
+                media_answer = answer
             elif is_finished and not entry.get("postedCommentId"):
                 text = format_task_answer(bot, it, entry, None)
             if text is not None:
-                if tg(token, "sendMessage", chat_id=chat, text=text, disable_web_page_preview=True) is None:
+                if not send_task_answer(bot, chat, text, media_answer):
                     continue  # not delivered; try again next pass
                 if is_new:
                     posted[iid] = comment_id

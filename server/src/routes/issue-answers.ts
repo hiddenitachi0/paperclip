@@ -1,6 +1,7 @@
 import { Router } from "express";
 import type { Db } from "@paperclipai/db";
-import { createRequestScopedDb } from "@paperclipai/db";
+import { createRequestScopedDb, pluginEntities, plugins } from "@paperclipai/db";
+import { and, eq, sql } from "drizzle-orm";
 import { badRequest } from "../errors.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
 import { redactKnownLeakedSecretPatterns, redactSensitiveText } from "../redaction.js";
@@ -62,6 +63,63 @@ export function pickLatestAgentAnswer<T extends AnswerCandidate>(comments: T[] |
     .filter((c) => c.authorType === "agent" && !c.deletedAt && c.presentation?.kind !== "system_notice")
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   return replies[0] ?? null;
+}
+
+/**
+ * DUR-4091 finding 2: `scripts/telegram-bridge.py`'s MEDIA_JOB_ANSWER_RE
+ * trusts any comment shaped like "Your video is ready: ... (file id <uuid>)"
+ * as proof of a real Media Studio delivery and uploads that file id's bytes
+ * to Telegram — with no check that the id actually names a finished job's
+ * own result. A comment merely shaped like this (however it got onto the
+ * issue) could make the bridge fetch and send an arbitrary same-company
+ * file. This is the one place every such comment passes through before it
+ * reaches the bridge (`chat answers` / GET issue-answers), so it is where
+ * the claim is verified against the job record that would have produced it
+ * (packages/plugins/media-studio/src/media-jobs.ts's deliverResult) —
+ * matching plugin, company, entity type, "done" status, result file id and
+ * issue id. A claim that does not match a real job has its file-id trigger
+ * stripped so the bridge relays it as plain text instead of fetching media.
+ */
+const MEDIA_JOB_READY_RE =
+  /^(Your (?:video|audio) is ready: .*\(file id )([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(\).*)$/is;
+const MEDIA_STUDIO_PLUGIN_KEY = "paperclip.media-studio";
+const MEDIA_JOB_ENTITY_TYPE = "media-generation-job";
+
+async function verifyMediaJobDelivery(
+  rawDb: Db,
+  companyId: string,
+  issueId: string,
+  fileId: string,
+): Promise<boolean> {
+  const [row] = await rawDb
+    .select({ id: pluginEntities.id })
+    .from(pluginEntities)
+    .innerJoin(plugins, eq(pluginEntities.pluginId, plugins.id))
+    .where(
+      and(
+        eq(plugins.pluginKey, MEDIA_STUDIO_PLUGIN_KEY),
+        eq(pluginEntities.companyId, companyId),
+        eq(pluginEntities.entityType, MEDIA_JOB_ENTITY_TYPE),
+        eq(pluginEntities.status, "done"),
+        sql`${pluginEntities.data} ->> 'resultFileId' = ${fileId}`,
+        sql`${pluginEntities.data} ->> 'issueId' = ${issueId}`,
+      ),
+    )
+    .limit(1);
+  return row != null;
+}
+
+/**
+ * Neutralize an unverified media-ready claim so the bridge cannot parse a
+ * file id out of it, while still relaying the rest of the message as text.
+ */
+async function sanitizeMediaJobAnswerBody(rawDb: Db, companyId: string, issueId: string, body: string): Promise<string> {
+  const match = MEDIA_JOB_READY_RE.exec(body);
+  if (!match) return body;
+  const [, prefix, fileId, suffix] = match;
+  const verified = await verifyMediaJobDelivery(rawDb, companyId, issueId, fileId!);
+  if (verified) return body;
+  return `${prefix}unverified${suffix}`;
 }
 
 /** Secret redaction for text that is about to leave Paperclip. */
@@ -135,6 +193,9 @@ export function issueAnswerRoutes(rawDb: Db) {
         });
         const answer = pickLatestAgentAnswer(comments);
         const resultDoc = await documents.getIssueDocumentByKey(issue.id, RESEARCH_RESULT_DOCUMENT_KEY);
+        const answerBody = answer
+          ? await sanitizeMediaJobAnswerBody(rawDb, issue.companyId, issue.id, redactAnswerText(answer.body))
+          : null;
         results.push({
           id: issue.id,
           companyId: issue.companyId,
@@ -145,7 +206,7 @@ export function issueAnswerRoutes(rawDb: Db) {
             ? {
                 commentId: answer.id,
                 authorAgentId: answer.authorAgentId ?? null,
-                body: redactAnswerText(answer.body),
+                body: answerBody!,
                 createdAt: answer.createdAt,
               }
             : null,
