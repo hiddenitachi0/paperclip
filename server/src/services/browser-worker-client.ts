@@ -1,16 +1,20 @@
 /**
- * DUR-4013 step 3: the server's HTTP client for the browser worker's
- * control endpoint (design section "Server↔worker control"). Holds the
- * `PAPERCLIP_SERVER_BROWSER_TOKEN` bearer token -- never sent to an agent,
- * kept out of agent envs the same way as every other `PAPERCLIP_SERVER_`
- * variable (`packages/adapter-utils/src/server-env-secrets.ts`).
+ * DUR-4013 step 3 / DUR-4065: the server's HTTP client for the browser
+ * worker's control endpoint (design section "Server↔worker control"). Holds
+ * the `PAPERCLIP_SERVER_BROWSER_TOKEN` bearer token -- never sent to an
+ * agent, kept out of agent envs the same way as every other
+ * `PAPERCLIP_SERVER_` variable (`packages/adapter-utils/src/server-env-secrets.ts`).
  *
- * The worker container and its compose wiring are a separate infra task
- * (design step 2); this client talks over `PAPERCLIP_SERVER_BROWSER_WORKER_URL`
- * so it type-checks and unit-tests today against a fake and starts working
- * for real the moment that URL is configured, with no code change.
+ * Talks over the Unix socket on the shared `browser-control` volume
+ * (`PAPERCLIP_SERVER_BROWSER_WORKER_SOCKET`) in production -- per the design,
+ * the worker has no network route back to the server, database or tailnet,
+ * so a plain HTTP URL is not reachable from it at all. The HTTP URL option
+ * (`PAPERCLIP_SERVER_BROWSER_WORKER_URL`) is kept for local/test setups where
+ * running a worker container with a shared volume is impractical. If both are
+ * set, the socket wins.
  */
 
+import { request as httpRequest } from "node:http";
 import type {
   AccessibilitySnapshot,
   ElementDescriptor,
@@ -47,17 +51,33 @@ export interface BrowserWorkerClient {
 export class BrowserWorkerNotConfiguredError extends Error {
   constructor() {
     super(
-      "The browser worker is not configured on this instance yet (PAPERCLIP_SERVER_BROWSER_WORKER_URL / " +
-        "PAPERCLIP_SERVER_BROWSER_TOKEN are unset). Step 2's compose overlay has not been deployed here.",
+      "The browser worker is not configured on this instance yet (PAPERCLIP_SERVER_BROWSER_WORKER_SOCKET / " +
+        "PAPERCLIP_SERVER_BROWSER_WORKER_URL / PAPERCLIP_SERVER_BROWSER_TOKEN are unset). The browser overlay " +
+        "has not been deployed here.",
     );
     this.name = "BrowserWorkerNotConfiguredError";
   }
 }
 
 export interface HttpBrowserWorkerClientConfig {
-  baseUrl: string;
+  /** Unix socket path on the shared browser-control volume. Wins over baseUrl when both are set. */
+  socketPath?: string;
+  /** Plain HTTP URL to the worker. Local/test convenience only -- not reachable in production. */
+  baseUrl?: string;
   token: string;
   fetchImpl?: typeof fetch;
+}
+
+function parseWorkerResponseBody<T>(path: string, status: number, ok: boolean, text: string): T {
+  const parsed = text ? (JSON.parse(text) as unknown) : null;
+  if (!ok) {
+    const message =
+      parsed && typeof parsed === "object" && "error" in parsed && typeof (parsed as { error: unknown }).error === "string"
+        ? (parsed as { error: string }).error
+        : `Browser worker request to ${path} failed with ${status}`;
+    throw new Error(message);
+  }
+  return parsed as T;
 }
 
 /**
@@ -70,8 +90,17 @@ export class HttpBrowserWorkerClient implements BrowserWorkerClient {
   constructor(private readonly config: HttpBrowserWorkerClientConfig) {}
 
   private async request<T>(path: string, body?: unknown): Promise<T> {
+    if (this.config.socketPath) {
+      return this.requestOverSocket<T>(this.config.socketPath, path, body);
+    }
+    return this.requestOverHttp<T>(path, body);
+  }
+
+  private async requestOverHttp<T>(path: string, body?: unknown): Promise<T> {
     const fetchImpl = this.config.fetchImpl ?? fetch;
-    const response = await fetchImpl(`${this.config.baseUrl.replace(/\/+$/, "")}${path}`, {
+    const baseUrl = this.config.baseUrl;
+    if (!baseUrl) throw new Error("HttpBrowserWorkerClient: neither socketPath nor baseUrl is configured");
+    const response = await fetchImpl(`${baseUrl.replace(/\/+$/, "")}${path}`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${this.config.token}`,
@@ -80,15 +109,40 @@ export class HttpBrowserWorkerClient implements BrowserWorkerClient {
       body: JSON.stringify(body ?? {}),
     });
     const text = await response.text();
-    const parsed = text ? (JSON.parse(text) as unknown) : null;
-    if (!response.ok) {
-      const message =
-        parsed && typeof parsed === "object" && "error" in parsed && typeof (parsed as { error: unknown }).error === "string"
-          ? (parsed as { error: string }).error
-          : `Browser worker request to ${path} failed with ${response.status}`;
-      throw new Error(message);
-    }
-    return parsed as T;
+    return parseWorkerResponseBody<T>(path, response.status, response.ok, text);
+  }
+
+  private requestOverSocket<T>(socketPath: string, path: string, body?: unknown): Promise<T> {
+    const payload = JSON.stringify(body ?? {});
+    return new Promise<T>((resolve, reject) => {
+      const req = httpRequest(
+        {
+          socketPath,
+          path,
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${this.config.token}`,
+            "Content-Type": "application/json",
+            "Content-Length": Buffer.byteLength(payload),
+          },
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          res.on("end", () => {
+            try {
+              const text = Buffer.concat(chunks).toString("utf8");
+              const ok = (res.statusCode ?? 0) >= 200 && (res.statusCode ?? 0) < 300;
+              resolve(parseWorkerResponseBody<T>(path, res.statusCode ?? 0, ok, text));
+            } catch (err) {
+              reject(err);
+            }
+          });
+        },
+      );
+      req.on("error", reject);
+      req.end(payload);
+    });
   }
 
   async openSession(input: { agentId: string; companyId: string; purpose: string }): Promise<BrowserWorkerSessionHandle> {
@@ -189,8 +243,9 @@ export class UnconfiguredBrowserWorkerClient implements BrowserWorkerClient {
 }
 
 export function createBrowserWorkerClientFromEnv(env: NodeJS.ProcessEnv = process.env): BrowserWorkerClient {
+  const socketPath = env.PAPERCLIP_SERVER_BROWSER_WORKER_SOCKET?.trim();
   const baseUrl = env.PAPERCLIP_SERVER_BROWSER_WORKER_URL?.trim();
   const token = env.PAPERCLIP_SERVER_BROWSER_TOKEN?.trim();
-  if (!baseUrl || !token) return new UnconfiguredBrowserWorkerClient();
-  return new HttpBrowserWorkerClient({ baseUrl, token });
+  if (!token || (!socketPath && !baseUrl)) return new UnconfiguredBrowserWorkerClient();
+  return new HttpBrowserWorkerClient({ socketPath, baseUrl, token });
 }

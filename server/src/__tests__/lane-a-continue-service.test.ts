@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import {
   activityLog,
@@ -60,7 +60,24 @@ d("continue an earlier quick-agent conversation", () => {
     db = createDb(started.connectionString);
   }, 90_000);
 
+  // "Today" and "yesterday" are Oslo calendar days, and the seeded messages are
+  // "N minutes ago": run every test at an Oslo midday so a CI run just after
+  // midnight never pushes a message onto the previous day. The fake clock is
+  // the latest Oslo midday that is not in the future, so rows the database
+  // stamps with its own (real) clock are never older than the fake "now" and
+  // never trip the idle timeout. Only Date is faked; real timers keep the
+  // database and the service's awaits working.
+  beforeEach(() => {
+    const realNow = Date.now();
+    const osloDay = new Date(realNow).toLocaleDateString("en-CA", { timeZone: "Europe/Oslo" });
+    let midday = new Date(`${osloDay}T10:00:00Z`).getTime();
+    if (midday > realNow) midday -= 24 * 60 * 60_000;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(midday));
+  });
+
   afterEach(async () => {
+    vi.useRealTimers();
     await db.delete(laneAMessages);
     await db.delete(laneAConversations);
     await db.delete(activityLog);
@@ -132,11 +149,15 @@ d("continue an earlier quick-agent conversation", () => {
     return conversation!.id;
   }
 
+  // DUR-4070: "filip" is this fixture's company owner throughout the file, so
+  // he passes the "assigned people + owner" gate without being added to any
+  // agent's laneAAssignedUserIds -- exactly the "default: owner only" rule.
   const board = (companyId: string, userId = "filip") => ({
     type: "board" as const,
     userId,
     companyIds: [companyId],
     source: "session" as const,
+    memberships: [{ companyId, membershipRole: "owner", status: "active" }],
   });
   const filip = { userId: "filip", agentId: null };
 
