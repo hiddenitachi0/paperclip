@@ -303,6 +303,71 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     return storylines.toShotSummary(await storylines.getShotRow(companyId, storylineId, shotId));
   }
 
+  /**
+   * DUR-4170: stop an in-flight render cleanly. Only valid from "rendering"
+   * (an actual provider job may be running) or "paused" (stopped already,
+   * but the operator wants to abandon rather than re-render) -- "stitching"
+   * is explicitly refused rather than silently ignored, since stitchOne has
+   * no cancellation hook and would otherwise race this and clobber whatever
+   * status this sets once it finishes (see video-storyline-stitch.ts).
+   * Provider-side cancellation is best-effort (mirrors the tick's own
+   * give-up-after-timeout path above): a provider/network failure here must
+   * never block the storyline from reaching "cancelled".
+   */
+  async function cancelRender(companyId: string, storylineId: string, actor: VideoStorylineActor) {
+    const storyline = await storylines.getStorylineRow(companyId, storylineId);
+    if (storyline.status === "stitching") {
+      throw conflict("A stitch is currently running for this storyline. Wait for it to finish before cancelling.");
+    }
+    if (!["rendering", "paused"].includes(storyline.status)) {
+      throw conflict(`This storyline is ${storyline.status.replace(/_/g, " ")} and has no in-flight render to cancel.`);
+    }
+
+    const runningJobs = await db
+      .select()
+      .from(videoShotRenderJobs)
+      .where(and(eq(videoShotRenderJobs.storylineId, storylineId), eq(videoShotRenderJobs.status, "running")));
+
+    for (const job of runningJobs) {
+      try {
+        const apiKey = await resolveProviderApiKey(companyId, job.provider as VideoStorylineProvider, actor.agentId ?? actor.actorId);
+        const handle: MediaJobHandle = { externalId: job.externalId, model: job.model, provider: job.provider };
+        await buildProvider(job.provider as VideoStorylineProvider, apiKey, job.model).cancel(handle);
+      } catch (err) {
+        logger.warn({ err, jobId: job.id }, "video-storyline-render: best-effort provider cancel failed during cancelRender");
+      }
+      await db
+        .update(videoShotRenderJobs)
+        .set({ status: "failed", error: "Cancelled by user.", completedAt: nowOf(), updatedAt: nowOf() })
+        .where(eq(videoShotRenderJobs.id, job.id));
+    }
+
+    const runningShotIds = runningJobs.map((job) => job.shotId);
+    if (runningShotIds.length > 0) {
+      await db
+        .update(videoShots)
+        .set({ status: "failed", errorMessage: "Cancelled by user.", updatedAt: nowOf() })
+        .where(inArray(videoShots.id, runningShotIds));
+    }
+
+    await db
+      .update(videoStorylines)
+      .set({ status: "cancelled", errorMessage: null, updatedAt: nowOf() })
+      .where(eq(videoStorylines.id, storylineId));
+
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      action: "video_storyline.render_cancelled",
+      entityType: "video_storyline",
+      entityId: storylineId,
+      details: { cancelledJobCount: runningJobs.length },
+    });
+    return storylines.getStoryline(companyId, storylineId);
+  }
+
   async function assertMediaContentType(contentType: string): Promise<string> {
     const normalized = (contentType || "").trim().toLowerCase();
     if (!normalized.startsWith(CONTENT_TYPE_PREFIX)) {
@@ -440,5 +505,5 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     return { advanced, failed };
   }
 
-  return { estimate, startRender, reRenderShot, tick };
+  return { estimate, startRender, reRenderShot, cancelRender, tick };
 }
