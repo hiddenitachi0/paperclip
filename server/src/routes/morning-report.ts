@@ -45,6 +45,12 @@ export function morningReportRoutes(rawDb: Db, deps: MorningReportServiceDeps = 
     res.json({ reports: await svc.outbox(req.params.companyId as string) });
   });
 
+  // One report's facts, for the full briefing page (DUR-4075). Board-only
+  // and company-scoped, same as the rest of this router.
+  router.get("/companies/:companyId/morning-report-outbox/:reportId", memberScope(), async (req, res) => {
+    res.json(await svc.getOne(req.params.companyId as string, idParam(req, "reportId", "report")));
+  });
+
   router.post(
     "/companies/:companyId/morning-report-outbox/:reportId/ack",
     memberScope(),
@@ -53,6 +59,13 @@ export function morningReportRoutes(rawDb: Db, deps: MorningReportServiceDeps = 
       res.json(await svc.ack(req.params.companyId as string, idParam(req, "reportId", "report"), req.body));
     },
   );
+
+  // "Send a test report now" (DUR-4059): the Morning report settings card's
+  // test button. Board-only, same as the rest of this router — an agent
+  // cannot trigger its own report on demand.
+  router.post("/companies/:companyId/agents/:agentId/morning-report/test", memberScope(), async (req, res) => {
+    res.json(await svc.sendTestReportNow(req.params.companyId as string, idParam(req, "agentId", "agent")));
+  });
 
   return router;
 }

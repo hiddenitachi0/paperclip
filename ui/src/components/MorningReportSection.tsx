@@ -1,14 +1,18 @@
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { agentsApi } from "../api/agents";
+import { morningReportsApi } from "../api/morning-reports";
+import { ApiError } from "../api/client";
 import { queryKeys } from "../lib/queryKeys";
 import { useToastActions } from "../context/ToastContext";
+import { Link } from "@/lib/router";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ToggleSwitch } from "@/components/ui/toggle-switch";
 import { Label } from "@/components/ui/label";
+import type { MorningReportOutboxItem } from "@paperclipai/shared";
 
 /**
  * MorningReportSettings is the JSONB value stored in agents.morning_report_settings.
@@ -210,6 +214,25 @@ export function MorningReportSection({
 
   const saving = saveMutation.isPending || toggleMutation.isPending;
 
+  const [testResult, setTestResult] = useState<MorningReportOutboxItem | null>(null);
+  const [testError, setTestError] = useState<string | null>(null);
+
+  const testMutation = useMutation({
+    mutationFn: () => morningReportsApi.sendTestNow(agent.companyId, agent.id),
+    onMutate: () => {
+      setTestResult(null);
+      setTestError(null);
+    },
+    onSuccess: (result) => setTestResult(result),
+    onError: (err) => {
+      setTestError(
+        err instanceof ApiError
+          ? err.message
+          : "Could not send a test report right now. Try again in a moment.",
+      );
+    },
+  });
+
   return (
     <Card>
       <CardHeader>
@@ -231,6 +254,38 @@ export function MorningReportSection({
 
       {settings.enabled && (
         <CardContent className="space-y-6">
+          {/* Send a test report now (DUR-4075): try changes without waiting for the scheduled time */}
+          <div className="space-y-2">
+            <div className="flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => testMutation.mutate()}
+                disabled={testMutation.isPending}
+              >
+                {testMutation.isPending ? "Sending test report…" : "Send a test report now"}
+              </Button>
+              <Button size="sm" variant="ghost" asChild>
+                <Link to={`/agents/${agent.id}/morning-reports`}>Past reports</Link>
+              </Button>
+            </div>
+            {testResult && (
+              <div className="rounded-md border border-border bg-muted/40 p-3 text-sm space-y-1.5">
+                <p className="text-muted-foreground">Test report sent. Here is what it says:</p>
+                <p className="whitespace-pre-line">{testResult.text}</p>
+                <Link
+                  to={`/agents/${agent.id}/morning-reports/${testResult.id}`}
+                  className="text-primary hover:underline inline-block"
+                >
+                  Open the full briefing page
+                </Link>
+              </div>
+            )}
+            {testError && (
+              <p className="text-sm text-destructive">{testError}</p>
+            )}
+          </div>
+
           {/* Delivery time */}
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-1.5">
