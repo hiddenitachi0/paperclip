@@ -813,6 +813,10 @@ export function pluginRoutes(
     // the same row to decide (services/plugin-tool-execution.ts).
     pluginToolGrants: string[];
     laneAEnabled: boolean;
+    // DUR-4098: without this, a full agent whose lane_a_trust_level is
+    // "limited" never gets refused on this route — isLaneATrustLimited()
+    // in the shared execute service normalizes a missing value to "full".
+    laneATrustLevel: string | null;
   }
 
   // DUR-4096 (round 4): mirrors `AGENT_KEY_ACTIVE_RUN_STATUSES` in
@@ -827,7 +831,12 @@ export function pluginRoutes(
     runContext: ToolRunContext,
     actor: Request["actor"],
   ): Promise<ToolRunContextScopeResult> {
-    const noGrants: ToolRunContextScopeResult = { error: null, pluginToolGrants: [], laneAEnabled: false };
+    const noGrants: ToolRunContextScopeResult = {
+      error: null,
+      pluginToolGrants: [],
+      laneAEnabled: false,
+      laneATrustLevel: null,
+    };
 
     // DUR-174: an agent-authenticated caller must be the same agent named in
     // runContext.agentId, so two agents (e.g. two personas) in one company
@@ -864,6 +873,7 @@ export function pluginRoutes(
         companyId: agents.companyId,
         pluginToolGrants: agents.pluginToolGrants,
         laneAEnabled: agents.laneAEnabled,
+        laneATrustLevel: agents.laneATrustLevel,
       })
       .from(agents)
       .where(eq(agents.id, runContext.agentId))
@@ -873,6 +883,7 @@ export function pluginRoutes(
     }
     const pluginToolGrants = (agent.pluginToolGrants as string[] | null) ?? [];
     const laneAEnabled = agent.laneAEnabled === true;
+    const laneATrustLevel = agent.laneATrustLevel ?? null;
 
     const [run] = await db
       .select({ companyId: heartbeatRuns.companyId, agentId: heartbeatRuns.agentId, status: heartbeatRuns.status })
@@ -880,10 +891,20 @@ export function pluginRoutes(
       .where(eq(heartbeatRuns.id, runContext.runId))
       .limit(1);
     if (!run || run.companyId !== runContext.companyId) {
-      return { error: '"runContext.runId" does not belong to "runContext.companyId"', pluginToolGrants, laneAEnabled };
+      return {
+        error: '"runContext.runId" does not belong to "runContext.companyId"',
+        pluginToolGrants,
+        laneAEnabled,
+        laneATrustLevel,
+      };
     }
     if (run.agentId !== runContext.agentId) {
-      return { error: '"runContext.runId" does not belong to "runContext.agentId"', pluginToolGrants, laneAEnabled };
+      return {
+        error: '"runContext.runId" does not belong to "runContext.agentId"',
+        pluginToolGrants,
+        laneAEnabled,
+        laneATrustLevel,
+      };
     }
 
     // DUR-4096 (round 4): the round-3 anchor above only fires when
@@ -910,10 +931,15 @@ export function pluginRoutes(
       .where(eq(projects.id, runContext.projectId))
       .limit(1);
     if (!project || project.companyId !== runContext.companyId) {
-      return { error: '"runContext.projectId" does not belong to "runContext.companyId"', pluginToolGrants, laneAEnabled };
+      return {
+        error: '"runContext.projectId" does not belong to "runContext.companyId"',
+        pluginToolGrants,
+        laneAEnabled,
+        laneATrustLevel,
+      };
     }
 
-    return { error: null, pluginToolGrants, laneAEnabled };
+    return { error: null, pluginToolGrants, laneAEnabled, laneATrustLevel };
   }
 
   // DUR-189: for a full agent an empty/absent grants list means unrestricted
@@ -1190,7 +1216,11 @@ export function pluginRoutes(
       tool,
       parameters,
       runContext,
-      agent: { laneAEnabled: scope.laneAEnabled, pluginToolGrants: scope.pluginToolGrants },
+      agent: {
+        laneAEnabled: scope.laneAEnabled,
+        pluginToolGrants: scope.pluginToolGrants,
+        laneATrustLevel: scope.laneATrustLevel,
+      },
     });
     if (!outcome.ok) {
       res.status(outcome.status).json({ error: outcome.error });

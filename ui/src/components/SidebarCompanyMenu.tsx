@@ -296,7 +296,7 @@ export function SidebarCompanyMenu({ open: controlledOpen, onOpenChange }: Sideb
         <DropdownMenuSeparator />
         <DropdownMenuItem asChild disabled={isEditingOrder}>
           <Link
-            to="/company/settings/invites"
+            to="/company/settings/people?invite=1"
             onClick={(event) => {
               if (isEditingOrder) {
                 event.preventDefault();

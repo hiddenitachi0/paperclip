@@ -284,9 +284,11 @@ export {
   type UpdateAgentPermissions,
   type McpServerConfig,
   LANE_A_INSTRUCTIONS_MAX_LENGTH,
+  LANE_A_ASSIGNED_USER_IDS_MAX_LENGTH,
   QUICK_AGENT_FIELDS,
   laneAProviderModelIssue,
   laneAAdapterConfigSchema,
+  laneAProviderRoutingSchema,
   type QuickAgentField,
 } from "./agent.js";
 

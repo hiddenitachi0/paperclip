@@ -45,8 +45,8 @@ import { CloudUpstream } from "./pages/CloudUpstream";
 import { CloudUpstreamUxLab } from "./pages/CloudUpstreamUxLab";
 import { BootstrapSetupUxLab } from "./pages/BootstrapSetupUxLab";
 import { CompanySettingsPluginPage } from "./pages/CompanySettingsPluginPage";
-import { CompanyAccess, CompanyAccessLegacyRoute } from "./pages/CompanyAccess";
-import { CompanyInvites } from "./pages/CompanyInvites";
+import { CompanyAccessLegacyRoute } from "./pages/CompanyAccess";
+import { CompanyPeople } from "./pages/CompanyPeople";
 import { CompanySkills } from "./pages/CompanySkills";
 import { CompanyMcpTools } from "./pages/CompanyMcpTools";
 import { Personas } from "./pages/Personas";
@@ -100,10 +100,11 @@ function boardRoutes() {
       <Route path="company/settings" element={<CompanySettings />} />
       <Route path="company/settings/environments" element={<Navigate to="/company/settings/instance/environments" replace />} />
       <Route path="company/settings/cloud-upstream" element={<CloudUpstream />} />
-      <Route path="company/settings/members" element={<CompanyAccess />} />
+      <Route path="company/settings/people" element={<CompanyPeople />} />
+      <Route path="company/settings/members" element={<Navigate to="/company/settings/people" replace />} />
       <Route path="company/settings/access" element={<CompanyAccessLegacyRoute />} />
       <Route path="company/settings/cloud-upstream" element={<CloudUpstream />} />
-      <Route path="company/settings/invites" element={<CompanyInvites />} />
+      <Route path="company/settings/invites" element={<Navigate to="/company/settings/people" replace />} />
       <Route path="company/export/*" element={<CompanyExport />} />
       <Route path="company/import" element={<CompanyImport />} />
       <Route path="company/settings/connections" element={<CompanyConnections />} />
@@ -121,6 +122,11 @@ function boardRoutes() {
       <Route path="company/settings/instance/plugins" element={<PluginManager />} />
       <Route path="company/settings/instance/plugins/:pluginId" element={<PluginSettings />} />
       <Route path="company/settings/instance/adapters" element={<AdapterManager />} />
+      {/* Media Studio's "Looks" page moved from Company settings into a Looks
+          tab on its own main-menu page (DUR-4060); keep the old settings URL
+          working. */}
+      <Route path="company/settings/media-studio-looks" element={<Navigate to="/media-studio?tab=looks" replace />} />
+      <Route path="company/settings/media-studio-looks/*" element={<Navigate to="/media-studio?tab=looks" replace />} />
       <Route path="company/settings/:settingsRoutePath/*" element={<CompanySettingsPluginPage />} />
       <Route path="skills/*" element={<CompanySkills />} />
       <Route path="tools" element={<CompanyMcpTools />} />

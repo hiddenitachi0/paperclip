@@ -218,7 +218,7 @@ describe("POST /api/lane-a/:agentId/transform", () => {
 
   it("passes the per-agent settings through to the service", async () => {
     mockAgentService.getById.mockResolvedValue(
-      makeAgent({ laneAModel: "claude-haiku-4-5", laneAMaxOutputTokens: 400, laneATransformDailyCallCap: 50, laneATemperature: 0.6 }),
+      makeAgent({ laneAModel: "claude-haiku-4-5", laneAMaxOutputTokens: 400, laneATransformDailyCallCap: 50, laneATemperature: 0.6, laneAProviderRouting: { only: ["deepinfra"] } } as never),
     );
     const app = await createApp(serviceActor(COMPANY_A));
 
@@ -229,6 +229,7 @@ describe("POST /api/lane-a/:agentId/transform", () => {
       laneAMaxOutputTokens: 400,
       laneATransformDailyCallCap: 50,
       laneATemperature: 0.6,
+      laneAProviderRouting: { only: ["deepinfra"] },
     });
   });
 

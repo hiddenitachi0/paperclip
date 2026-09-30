@@ -17,17 +17,53 @@ import {
   LANE_A_MIN_TEMPERATURE,
   LANE_A_MIN_TRANSFORM_DAILY_CALL_CAP,
   LANE_A_PROVIDERS,
+  LANE_A_PROVIDER_ROUTING_MAX_ENTRIES,
+  LANE_A_PROVIDER_SLUG_RE,
   laneAModelIssueForProvider,
 } from "../lane-a-models.js";
 import { envBindingSchema, envBindingSecretRefSchema, envConfigSchema } from "./secret.js";
 import { BROWSER_ACCESS_LEVELS } from "../browser-access.js";
+import { LANE_A_TRUST_LEVELS } from "../lane-a-trust.js";
 import { trustAuthorizationPolicySchema, trustPresetSchema } from "./trust-policy.js";
 import { agentDesiredSkillSelectionSchema } from "./adapter-skills.js";
 import { validateAdapterModelEffort } from "../model-effort.js";
 import { morningReportSettingsSchema } from "../morning-report.js";
 
+const laneAProviderSlugSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .regex(
+    LANE_A_PROVIDER_SLUG_RE,
+    "A model host must be a short OpenRouter host name in lower case letters, digits, dots, dashes or underscores, for example deepinfra.",
+  );
+
+const laneAProviderSlugListSchema = z
+  .array(laneAProviderSlugSchema)
+  .max(LANE_A_PROVIDER_ROUTING_MAX_ENTRIES, `List at most ${LANE_A_PROVIDER_ROUTING_MAX_ENTRIES} model hosts.`)
+  .optional();
+
+/**
+ * Quick-agent "model hosts" (agents.lane_a_provider_routing): which OpenRouter
+ * hosts a quick agent's calls may only use (`only`), try first (`order`) or
+ * never use (`ignore`), and whether OpenRouter may fall back to others.
+ * Used only when the quick agent's provider is OpenRouter. Null = no
+ * preference (OpenRouter picks), exactly as before the setting existed.
+ */
+export const laneAProviderRoutingSchema = z
+  .object({
+    only: laneAProviderSlugListSchema,
+    order: laneAProviderSlugListSchema,
+    ignore: laneAProviderSlugListSchema,
+    allowFallbacks: z.boolean().optional(),
+  })
+  .strict();
+
 /** Upper bound for agents.laneAInstructions (roughly 2k tokens); it is prepended to every quick-agent call. */
 export const LANE_A_INSTRUCTIONS_MAX_LENGTH = 8000;
+
+/** Upper bound for agents.laneAAssignedUserIds -- generous for any real company roster, cheap to validate. */
+export const LANE_A_ASSIGNED_USER_IDS_MAX_LENGTH = 500;
 
 /**
  * The quick-agent ("Lane A") fields, named once. Several places have to agree
@@ -59,10 +95,21 @@ export const QUICK_AGENT_FIELDS = [
   // temperature). Null = the model host's own default. Board-only like the
   // rest: it changes how the agent talks to people.
   "laneATemperature",
+  // Which OpenRouter hosts the quick agent's model may (or may never) run on.
+  // Null = OpenRouter picks. Board-only like the rest: it decides where the
+  // company's prompts are sent.
+  "laneAProviderRouting",
   // DUR-4017: the daily briefing settings (on/off, delivery time, sources to
   // pull). Board-only like the rest of this list — an agent cannot switch its
   // own daily report on or change what it is told to fetch and say.
   "morningReportSettings",
+  // DUR-4070: the trust-level ceiling (limited/standard/full) and the list
+  // of company-member userIds this quick agent may answer (plus the
+  // company's owner, always). Board-only for the same reason as the rest of
+  // this list: an agent that could widen its own tool rights or its own
+  // audience has no ceiling at all.
+  "laneATrustLevel",
+  "laneAAssignedUserIds",
 ] as const;
 export type QuickAgentField = (typeof QUICK_AGENT_FIELDS)[number];
 
@@ -534,6 +581,9 @@ const createAgentObjectSchema = z.object({
     .max(LANE_A_MAX_TEMPERATURE, `Creativity must be between ${LANE_A_MIN_TEMPERATURE} and ${LANE_A_MAX_TEMPERATURE}.`)
     .nullable()
     .optional(),
+  // Which OpenRouter hosts the model may (or may never) run on. Null = no
+  // preference. Ignored at call time for every provider but OpenRouter.
+  laneAProviderRouting: laneAProviderRoutingSchema.nullable().optional(),
   // DUR-4000 (PERSONA_JOB_FIELDS): which person does this job, and the
   // job's own limits. Board-only on create, hire and PATCH — enforced in
   // server/src/routes/agents.ts (assertNoAgentPersonaJobFieldMutation), not
@@ -547,6 +597,16 @@ const createAgentObjectSchema = z.object({
   // DUR-4013 (BROWSER_ACCESS_FIELDS): board-only on create, hire and PATCH —
   // enforced in server/src/routes/agents.ts (assertNoAgentBrowserAccessFieldMutation).
   browserAccess: browserAccessSchema.optional(),
+  // DUR-4070 (QUICK_AGENT_FIELDS): the trust-level ceiling. Left out entirely
+  // => the column default ("full"), i.e. exactly today's behaviour.
+  laneATrustLevel: z.enum(LANE_A_TRUST_LEVELS).optional(),
+  // DUR-4070 (QUICK_AGENT_FIELDS): company-member userIds this quick agent
+  // may answer, besides the company's owner. Left out entirely => the column
+  // default ([]), i.e. "the owner only".
+  laneAAssignedUserIds: z
+    .array(z.string().trim().min(1).max(200))
+    .max(LANE_A_ASSIGNED_USER_IDS_MAX_LENGTH)
+    .optional(),
 });
 
 export const createAgentSchema = createAgentObjectSchema.superRefine(refineAgentModelEffort);

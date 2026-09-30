@@ -22,7 +22,6 @@ import {
   Pin,
   MessagesSquare,
   RadioTower,
-  UserRound,
   Sparkles,
   ScrollText,
   TrendingUp,
@@ -194,7 +193,6 @@ export function Sidebar() {
           <SidebarNavItem to="/files" label="Files" icon={Package} />
           <SidebarNavItem to="/skills" label="Skills" icon={Boxes} />
           <SidebarNavItem to="/tools" label="Tools" icon={Plug} />
-          <SidebarNavItem to="/personas" label="Personas" icon={UserRound} />
           {showWorkspacesLink ? (
             <SidebarNavItem to="/workspaces" label="Workspaces" icon={GitBranch} />
           ) : null}

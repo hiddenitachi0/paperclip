@@ -54,7 +54,7 @@ import {
   GENERATE_IMAGE_DESCRIPTION,
   GENERATE_IMAGE_PARAMETERS,
   LIST_LOOKS_DESCRIPTION,
-  LOOKS_PAGE_ROUTE,
+  MAIN_PAGE_ROUTE,
   MAX_REFERENCE_FILES,
   QUICK_PICTURE_DESCRIPTION,
   QUICK_PICTURE_PARAMETERS,
@@ -1652,7 +1652,7 @@ const plugin = definePlugin({
       );
     }
 
-    ctx.logger.info(`media-studio plugin ready (looks page: ${LOOKS_PAGE_ROUTE})`);
+    ctx.logger.info(`media-studio plugin ready (main page: ${MAIN_PAGE_ROUTE})`);
   },
 
   async onHealth() {

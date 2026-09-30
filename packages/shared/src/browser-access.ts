@@ -14,6 +14,8 @@
  * ceiling (server/src/routes/agents.ts).
  */
 
+import { isLaneATrustLimited } from "./lane-a-trust.js";
+
 export const BROWSER_ACCESS_LEVELS = ["off", "browse_and_forms", "book_and_buy"] as const;
 
 export type BrowserAccessLevel = (typeof BROWSER_ACCESS_LEVELS)[number];
@@ -30,4 +32,20 @@ export function readLaneABrowserAccess(adapterConfig: unknown): BrowserAccessLev
 /** Ordering for the board-only "cannot raise its own level" guard: off < browse_and_forms < book_and_buy. */
 export function browserAccessLevelRank(level: BrowserAccessLevel): number {
   return BROWSER_ACCESS_LEVELS.indexOf(level);
+}
+
+/**
+ * DUR-4070: the browser-access level to actually act on, once the agent's
+ * trust level is folded in. A "limited"-trust agent gets "off" regardless of
+ * what adapterConfig.laneA.browserAccess stores -- every consumer (the MCP
+ * server entry, the browser worker's own gate, payment-card autofill) should
+ * call this instead of `readLaneABrowserAccess` directly so none of them can
+ * be the one place that forgets the trust-level ceiling.
+ */
+export function effectiveLaneABrowserAccess(agent: {
+  adapterConfig?: unknown;
+  laneATrustLevel?: string | null;
+}): BrowserAccessLevel {
+  if (isLaneATrustLimited(agent.laneATrustLevel)) return "off";
+  return readLaneABrowserAccess(agent.adapterConfig);
 }

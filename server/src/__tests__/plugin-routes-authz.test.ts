@@ -1604,6 +1604,36 @@ describe("DUR-189 plugin tool grants", () => {
     expect(executeTool).toHaveBeenCalled();
   });
 
+  it("refuses tool execution for a full agent whose lane_a_trust_level is 'limited', even with empty grants (DUR-4098)", async () => {
+    const executeTool = vi.fn().mockResolvedValue({ content: "ok" });
+    const { app } = await createApp(agentActor(), {}, {
+      db: createSelectQueueDb([
+        [{ companyId: companyA, pluginToolGrants: [], laneAEnabled: false, laneATrustLevel: "limited" }],
+        [{ companyId: companyA, agentId: agentA }],
+        [{ companyId: companyA }],
+      ]),
+      toolDeps: {
+        toolDispatcher: {
+          listToolsForAgent: vi.fn(),
+          getTool: vi.fn(() => ({ name: "paperclip.example:search" })),
+          executeTool,
+        },
+      },
+    });
+
+    const res = await request(app)
+      .post("/api/plugins/tools/execute")
+      .send({
+        tool: "paperclip.example:search",
+        parameters: {},
+        runContext: { agentId: agentA, runId: runA, companyId: companyA, projectId: projectA },
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("Limited");
+    expect(executeTool).not.toHaveBeenCalled();
+  });
+
   it("rejects an agent actor trying to sync its own plugin-tool grants (board-only)", async () => {
     const { app } = await createApp(agentActor(), {}, {
       db: createSelectQueueDb([[{ id: agentA, companyId: companyA }]]),
