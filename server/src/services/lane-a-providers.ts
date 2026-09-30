@@ -28,7 +28,9 @@ import Anthropic from "@anthropic-ai/sdk";
 import {
   LANE_A_PROVIDER_CATALOGUE,
   normalizeLaneAProvider,
+  normalizeLaneAProviderRouting,
   type LaneAProvider,
+  type LaneAProviderRouting,
 } from "@paperclipai/shared";
 
 /** A tool the model may call, provider-neutral (JSON-schema input). */
@@ -70,6 +72,12 @@ export interface LaneACompletionRequest {
    * (laneATemperatureForCall in @paperclipai/shared).
    */
   temperature?: number | null;
+  /**
+   * OpenRouter only: which hosts the model may run on (the operator's "model
+   * hosts" setting). Absent/null = OpenRouter picks. Ignored for every other
+   * provider.
+   */
+  providerRouting?: LaneAProviderRouting | null;
 }
 
 export type LaneAStop = "end_turn" | "tool_use" | "max_tokens" | "other";
@@ -371,6 +379,21 @@ export function buildOpenAiCompatibleBody(provider: LaneAProvider, request: Lane
     // without looking). Require a host that supports every parameter; if none
     // does, OpenRouter says so and the quick agent retries without tools.
     if (provider === "openrouter") body.provider = { require_parameters: true };
+  }
+  // The operator's "model hosts" setting (OpenRouter only): merged into the
+  // same `provider` object, in OpenRouter's own field names. Without it
+  // OpenRouter may pick a host that does not support tools (29 Sep: Mistral
+  // Small 3.2 24B wanted on DeepInfra, sent to Venice).
+  if (provider === "openrouter") {
+    const routing = normalizeLaneAProviderRouting(request.providerRouting);
+    if (routing) {
+      const preferences: Record<string, unknown> = {};
+      if (routing.only) preferences.only = routing.only;
+      if (routing.order) preferences.order = routing.order;
+      if (routing.ignore) preferences.ignore = routing.ignore;
+      if (typeof routing.allowFallbacks === "boolean") preferences.allow_fallbacks = routing.allowFallbacks;
+      body.provider = { ...((body.provider as Record<string, unknown> | undefined) ?? {}), ...preferences };
+    }
   }
   // OpenAI's reasoning models refuse `max_tokens` and want
   // `max_completion_tokens`; every other OpenAI-compatible server (OpenRouter,

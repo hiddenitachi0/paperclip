@@ -11,6 +11,7 @@ import {
   LANE_A_MIN_TRANSFORM_DAILY_CALL_CAP,
   LANE_A_PROVIDERS,
   LANE_A_PROVIDER_CATALOGUE,
+  LANE_A_PROVIDER_ROUTING_MAX_ENTRIES,
   LANE_A_ANTHROPIC_MAX_TEMPERATURE,
   LANE_A_TEMPERATURE_PRESETS,
   LANE_A_TRANSFORM_MAX_TOTAL_CHARS,
@@ -21,6 +22,8 @@ import {
   laneATransformWorstCaseDailyCents,
   normalizeLaneAProvider,
   normalizeLaneATrustLevel,
+  normalizeLaneAProviderRouting,
+  parseLaneAProviderSlugList,
   formatAgentDisplayName,
   readLaneABrowserAccess,
   readLaneAWebSearchSwitch,
@@ -30,6 +33,7 @@ import {
   type CompanySecret,
   type LaneAProvider,
   type LaneATrustLevel,
+  type LaneAProviderRouting,
 } from "@paperclipai/shared";
 import { AlertCircle, CheckCircle2, Circle, Loader2 } from "lucide-react";
 import { Link } from "@/lib/router";
@@ -113,6 +117,7 @@ export function QuickAgentSection({
     laneATrustLevel?: string | null;
     /** DUR-4070: company-member userIds this quick agent may chat with, besides the company's owner. */
     laneAAssignedUserIds?: string[] | null;
+    laneAProviderRouting?: LaneAProviderRouting | null;
   };
   companyId?: string;
 }) {
@@ -677,6 +682,14 @@ export function QuickAgentSection({
             </label>
           )}
 
+          {provider === "openrouter" && (
+            <ModelHostsSetting
+              value={agent.laneAProviderRouting ?? null}
+              disabled={settingMutation.isPending}
+              onSave={(next) => settingMutation.mutateAsync({ laneAProviderRouting: next })}
+            />
+          )}
+
           <CreativitySetting
             value={agent.laneATemperature ?? null}
             provider={provider}
@@ -925,6 +938,120 @@ function CreativitySetting({
         </span>
       )}
     </label>
+  );
+}
+
+/**
+ * "Model hosts" (OpenRouter only): OpenRouter can send the same model to
+ * different hosts, and some of them don't support tools. The operator lists
+ * the hosts to use only, and/or the ones never to use. Both empty = no
+ * preference (null), i.e. OpenRouter picks, as before. Any other routing
+ * fields already stored (a try-first order, the fallback switch) are kept.
+ */
+function ModelHostsSetting({
+  value,
+  disabled,
+  onSave,
+}: {
+  value: LaneAProviderRouting | null;
+  disabled?: boolean;
+  onSave: (next: LaneAProviderRouting | null) => Promise<unknown>;
+}) {
+  const saved = normalizeLaneAProviderRouting(value);
+  const savedOnly = (saved?.only ?? []).join(", ");
+  const savedIgnore = (saved?.ignore ?? []).join(", ");
+  const [onlyDraft, setOnlyDraft] = useState<string | null>(null);
+  const [ignoreDraft, setIgnoreDraft] = useState<string | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+  const only = onlyDraft ?? savedOnly;
+  const ignore = ignoreDraft ?? savedIgnore;
+  const dirty =
+    (onlyDraft !== null && onlyDraft !== savedOnly) || (ignoreDraft !== null && ignoreDraft !== savedIgnore);
+
+  const save = async () => {
+    const parsedOnly = parseLaneAProviderSlugList(only);
+    const parsedIgnore = parseLaneAProviderSlugList(ignore);
+    const invalid = [...parsedOnly.invalid, ...parsedIgnore.invalid];
+    if (invalid.length > 0) {
+      setProblem(
+        `"${invalid[0]}" is not a host name. Use the short names OpenRouter shows, like deepinfra or mistral, separated by commas.`,
+      );
+      return;
+    }
+    if (
+      parsedOnly.slugs.length > LANE_A_PROVIDER_ROUTING_MAX_ENTRIES ||
+      parsedIgnore.slugs.length > LANE_A_PROVIDER_ROUTING_MAX_ENTRIES
+    ) {
+      setProblem(`List at most ${LANE_A_PROVIDER_ROUTING_MAX_ENTRIES} hosts in each field.`);
+      return;
+    }
+    setProblem(null);
+    const { only: _oldOnly, ignore: _oldIgnore, ...kept } = saved ?? {};
+    const next: LaneAProviderRouting = {
+      ...kept,
+      ...(parsedOnly.slugs.length > 0 ? { only: parsedOnly.slugs } : {}),
+      ...(parsedIgnore.slugs.length > 0 ? { ignore: parsedIgnore.slugs } : {}),
+    };
+    try {
+      await onSave(normalizeLaneAProviderRouting(next));
+      setOnlyDraft(null);
+      setIgnoreDraft(null);
+    } catch {
+      // The card already shows why it could not be saved; keep what was typed.
+    }
+  };
+
+  return (
+    <div className="space-y-2" data-testid="quick-agent-model-hosts">
+      <div className="space-y-1">
+        <p className="text-xs font-medium">Model hosts</p>
+        <p className="text-xs text-muted-foreground">
+          OpenRouter can send the same model to different hosts. Some hosts don't support tools. List the hosts you
+          want (for example deepinfra) to stop it picking one that doesn't.
+        </p>
+      </div>
+      <label className="block space-y-1">
+        <span className="text-xs text-muted-foreground">Use only these hosts</span>
+        <Input
+          type="text"
+          value={only}
+          placeholder="deepinfra"
+          disabled={disabled}
+          data-testid="model-hosts-only"
+          onChange={(event) => setOnlyDraft(event.target.value)}
+        />
+      </label>
+      <label className="block space-y-1">
+        <span className="text-xs text-muted-foreground">Never use these hosts</span>
+        <Input
+          type="text"
+          value={ignore}
+          placeholder="venice"
+          disabled={disabled}
+          data-testid="model-hosts-ignore"
+          onChange={(event) => setIgnoreDraft(event.target.value)}
+        />
+      </label>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          size="sm"
+          variant="secondary"
+          disabled={!dirty || disabled}
+          data-testid="model-hosts-save"
+          onClick={() => void save()}
+        >
+          Save
+        </Button>
+        <span className="text-xs text-muted-foreground">
+          Separate hosts with commas. Leave both empty to let OpenRouter pick.
+        </span>
+      </div>
+      {problem && (
+        <p className="text-xs text-destructive" data-testid="model-hosts-problem">
+          {problem}
+        </p>
+      )}
+    </div>
   );
 }
 

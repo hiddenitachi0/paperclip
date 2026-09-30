@@ -384,6 +384,8 @@ describe.sequential("every quick-agent field is handled on the employment path",
     // DUR-4070: the trust-level ceiling and the assigned-people list.
     laneATrustLevel: "limited",
     laneAAssignedUserIds: ["11111111-1111-4111-8111-111111111199"],
+    // OpenRouter "model hosts".
+    laneAProviderRouting: { only: ["deepinfra"], ignore: ["venice"] },
     // DUR-4017: the daily briefing settings.
     morningReportSettings: {
       enabled: true,
@@ -513,6 +515,34 @@ describe.sequential("every quick-agent field is handled on the employment path",
     mockAgentService.update.mockClear();
     const tooHigh = await request(app).patch(`/api/agents/${ACTOR_AGENT_ID}`).send({ laneATemperature: 2 });
     expect(tooHigh.status).toBe(400);
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
+
+  it("the board saves OpenRouter model hosts through PATCH; a host that is not a name is refused before anything is saved", async () => {
+    mockAgentService.update.mockReset();
+    mockAgentService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) =>
+      makeAgent({ id: ACTOR_AGENT_ID, ...patch }),
+    );
+    const app = await createApp("board");
+
+    const saved = await request(app)
+      .patch(`/api/agents/${ACTOR_AGENT_ID}`)
+      .send({ laneAProviderRouting: { only: ["DeepInfra"], ignore: ["venice"] } });
+    expect(saved.status, JSON.stringify(saved.body)).toBe(200);
+    expect(mockAgentService.update.mock.calls[0]?.[1]).toMatchObject({
+      laneAProviderRouting: { only: ["deepinfra"], ignore: ["venice"] },
+    });
+
+    mockAgentService.update.mockClear();
+    const cleared = await request(app).patch(`/api/agents/${ACTOR_AGENT_ID}`).send({ laneAProviderRouting: null });
+    expect(cleared.status, JSON.stringify(cleared.body)).toBe(200);
+    expect(mockAgentService.update.mock.calls[0]?.[1]).toMatchObject({ laneAProviderRouting: null });
+
+    mockAgentService.update.mockClear();
+    const bad = await request(app)
+      .patch(`/api/agents/${ACTOR_AGENT_ID}`)
+      .send({ laneAProviderRouting: { only: ["deep infra"] } });
+    expect(bad.status).toBe(400);
     expect(mockAgentService.update).not.toHaveBeenCalled();
   });
 

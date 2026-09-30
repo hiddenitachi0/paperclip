@@ -1,3 +1,4 @@
+import type { LaneAProviderRouting } from "../lane-a-models.js";
 import type {
   AgentAdapterType,
   ModelProfileKey,
@@ -160,6 +161,8 @@ export interface Agent {
   laneATrustLevel?: string | null;
   /** DUR-4070: company-member userIds this quick agent may chat with, besides the company's owner (always allowed). Board-only, default []. */
   laneAAssignedUserIds?: string[] | null;
+  /** Quick-agent "model hosts" (OpenRouter only): hosts to use only / try first / never use. Null = OpenRouter picks. Board-only. */
+  laneAProviderRouting?: LaneAProviderRouting | null;
   createdAt: Date;
   updatedAt: Date;
 }

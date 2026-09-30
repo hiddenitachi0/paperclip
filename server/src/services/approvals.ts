@@ -1,7 +1,7 @@
 import { and, asc, eq, inArray, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentInstructionsRevisions, agents, approvalComments, approvals, personaPosts } from "@paperclipai/db";
-import { hireMonthlySpendingLimitCentsFromPayload, parseAgentLimits } from "@paperclipai/shared";
+import { hireMonthlySpendingLimitCentsFromPayload, normalizeLaneAProviderRouting, parseAgentLimits } from "@paperclipai/shared";
 import {
   instructionsChangeRequestPayloadSchema,
   modelBoostRequestPayloadSchema,
@@ -446,6 +446,9 @@ export function approvalService(db: Db) {
             laneAAssignedUserIds: Array.isArray(payload.laneAAssignedUserIds)
               ? payload.laneAAssignedUserIds.filter((id): id is string => typeof id === "string")
               : [],
+            // Cleaned on the way in: anything that is not a valid host list
+            // reads as "no preference" (null), like a hire made before it existed.
+            laneAProviderRouting: normalizeLaneAProviderRouting(payload.laneAProviderRouting),
             // DUR-4017: the daily briefing settings the card carries, read
             // back for the same reason. Anything not an object reads as
             // "never configured" (null), matching a hire made before this

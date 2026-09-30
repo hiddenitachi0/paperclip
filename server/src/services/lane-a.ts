@@ -32,10 +32,12 @@ import {
   normalizeLaneAProvider,
   resolveLaneAModelForProvider,
   laneATemperatureForCall,
+  laneAProviderRoutingForCall,
   readLaneAWebSearchSwitch,
   isLaneATrustLimited,
   type ChatHandedOverTask,
   type LaneAProvider,
+  type LaneAProviderRouting,
 } from "@paperclipai/shared";
 import { HttpError, conflict, forbidden, notFound, tooManyRequests, unprocessable } from "../errors.js";
 import {
@@ -693,6 +695,13 @@ export interface LaneATargetAgent {
    * are unaffected; absent reads the same as empty ("the owner only").
    */
   laneAAssignedUserIds?: string[] | null;
+  /**
+   * "Model hosts" (OpenRouter only): hosts the model may only use / try first
+   * / never use. Null/absent = OpenRouter picks. Optional so existing callers
+   * and tests are unaffected; when absent the service reads the stored value
+   * off the row.
+   */
+  laneAProviderRouting?: LaneAProviderRouting | null;
 }
 
 /**
@@ -748,7 +757,9 @@ export function resolveLaneASettings(agent: LaneATargetAgent) {
   // Null when unset, out of range, or the model is known to refuse one;
   // clamped to 0-1 for Claude.
   const temperature = laneATemperatureForCall(provider, model, agent.laneATemperature);
-  return { provider, model, baseUrl, maxOutputTokens, dailyCallCap, temperature };
+  // Null unless the provider is OpenRouter and the operator picked hosts.
+  const providerRouting = laneAProviderRoutingForCall(provider, agent.laneAProviderRouting);
+  return { provider, model, baseUrl, maxOutputTokens, dailyCallCap, temperature, providerRouting };
 }
 
 /**
@@ -1196,6 +1207,33 @@ export const LANE_A_NO_TOOLS_NOTE =
   "look up tasks, weather or company data. If the person asks for any of that, say so plainly in one sentence and " +
   "suggest they switch your quick-answer model to one that supports tools. Never pretend you did it.";
 
+/**
+ * Told instead of LANE_A_NO_TOOLS_NOTE when the operator limited the quick
+ * agent to certain OpenRouter hosts and none of them supports tools: the fix
+ * is then in the host list, not necessarily the model, and the person should
+ * hear that plainly.
+ */
+export function laneANoToolsNoteForPinnedHosts(hosts: string[]): string {
+  const list = hosts.join(", ");
+  const which = hosts.length === 1 ? `The model host chosen for you (${list}) does` : `The model hosts chosen for you (${list}) do`;
+  return (
+    `${which} not support tools, so in this conversation you cannot make pictures, hand work to a colleague, ` +
+    "look up tasks, weather or company data. If the person asks for any of that, say so plainly in one sentence: " +
+    "the chosen model hosts don't support tools, so they should add a host that does in your quick-agent settings " +
+    "(under Model hosts) or pick another model. Never pretend you did it."
+  );
+}
+
+/**
+ * The key "this model refuses tools" is remembered under. With pinned or
+ * excluded hosts it includes them, so changing the host list tries tools
+ * again straight away instead of an hour later.
+ */
+export function laneAToolsRefusalKey(model: string, routing?: LaneAProviderRouting | null): string {
+  if (!routing || (!routing.only && !routing.ignore)) return model;
+  return `${model}|only=${(routing.only ?? []).join(",")}|ignore=${(routing.ignore ?? []).join(",")}`;
+}
+
 /** How long a "this model refuses tools" answer is remembered before trying tools again. */
 export const LANE_A_TOOLS_REFUSED_TTL_MS = 60 * 60 * 1000;
 const modelsRefusingTools = new Map<string, number>();
@@ -1229,6 +1267,19 @@ export function isLaneAToolsUnsupportedError(err: unknown): boolean {
   return /(function[ _-]?call(ing)?|tool[ _-]?(use|calling|call|choice)?s?)[^.]{0,40}(not|n't)[ _-]?support|not[ _-]?support(ed)?[^.]{0,40}(function[ _-]?call(ing)?|tools?)\b|no endpoints found that support tool/i.test(
     err.message,
   );
+}
+
+/**
+ * OpenRouter found no host for the request as sent: "No endpoints found that
+ * can handle the requested parameters". With tools offered, require_parameters
+ * is on, so once the creativity setting is already off (or was never sent)
+ * the tools are what no allowed host supports — typically because the
+ * operator limited the quick agent to hosts that don't do tools.
+ */
+export function isLaneAOpenRouterNoHostForParametersError(err: unknown): boolean {
+  if (!(err instanceof LaneAProviderError) || err.provider !== "openrouter") return false;
+  if (err.kind !== "upstream" || err.status === null || err.status < 400 || err.status >= 500) return false;
+  return /no endpoints found that can handle the requested parameters/i.test(err.message);
 }
 
 /**
@@ -1666,6 +1717,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         laneABaseUrl: agents.laneABaseUrl,
         laneAModel: agents.laneAModel,
         laneATemperature: agents.laneATemperature,
+        laneAProviderRouting: agents.laneAProviderRouting,
         // DUR-4000: which person does this job, so the prompt can say so,
         // and the job's limits box (its standing rules ride in the prompt).
         personaId: agents.personaId,
@@ -1822,6 +1874,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     maxOutputTokens?: number;
     /** Sampling temperature, already resolved for this provider/model. Null = send none. */
     temperature?: number | null;
+    /** OpenRouter "model hosts", already resolved for this provider. Null = OpenRouter picks. */
+    providerRouting?: LaneAProviderRouting | null;
     /** DUR-3972: offer read_business_data this turn (the company has an active sales source). */
     offerBusinessData?: boolean;
     /** DUR-3997: offer read_company_file this turn (the company has an active file-server connection). */
@@ -1861,10 +1915,17 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     let response: Awaited<ReturnType<LaneAProviderClient["complete"]>> | undefined;
 
     const modelId = params.model ?? LANE_A_MODEL;
+    const providerRouting = params.providerRouting ?? null;
+    const toolsRefusalKey = laneAToolsRefusalKey(modelId, providerRouting);
+    // With hosts pinned, a tools refusal means those hosts can't do tools:
+    // say that, so the operator knows to change the host list.
+    const noToolsNote = providerRouting?.only
+      ? laneANoToolsNoteForPinnedHosts(providerRouting.only)
+      : LANE_A_NO_TOOLS_NOTE;
     // Some hosted models answer "function calling not supported" whenever tools
     // are offered. For those the quick agent still chats, without tools, and
     // says so plainly when asked for something only a tool can do.
-    let toolsOff = tools.length === 0 || laneAModelRefusesTools(modelId);
+    let toolsOff = tools.length === 0 || laneAModelRefusesTools(toolsRefusalKey);
     // A host that refuses the creativity setting still gets an answer: the
     // call is repeated once without it, and the rest of the turn goes without.
     let temperatureOff = typeof params.temperature !== "number";
@@ -1873,10 +1934,11 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         client.complete({
           model: modelId,
           maxTokens: params.maxOutputTokens ?? LANE_A_MAX_OUTPUT_TOKENS,
-          system: withTools || tools.length === 0 ? systemPrompt : `${systemPrompt}\n\n${LANE_A_NO_TOOLS_NOTE}`,
+          system: withTools || tools.length === 0 ? systemPrompt : `${systemPrompt}\n\n${noToolsNote}`,
           messages,
           ...(withTools ? { tools } : {}),
           ...(temperatureOff ? {} : { temperature: params.temperature }),
+          ...(providerRouting ? { providerRouting } : {}),
         });
       const request = async (withTools: boolean) => {
         try {
@@ -1891,18 +1953,21 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       try {
         return await request(true);
       } catch (err) {
-        if (!isLaneAToolsUnsupportedError(err)) throw err;
+        const toolsRefused =
+          isLaneAToolsUnsupportedError(err) || (temperatureOff && isLaneAOpenRouterNoHostForParametersError(err));
+        if (!toolsRefused) throw err;
         // Say why, once per refusal: without this the only trace of a model
         // host dropping the tools is an agent that suddenly "can't" use them.
         logger.warn(
           {
             provider: err instanceof LaneAProviderError ? err.provider : null,
             model: modelId,
+            pinnedHosts: providerRouting?.only ?? null,
             reason: err instanceof Error ? err.message.slice(0, 500) : String(err),
           },
           "lane A: the model's host refused tools; answering without tools for the next hour",
         );
-        rememberLaneAModelRefusesTools(modelId);
+        rememberLaneAModelRefusesTools(toolsRefusalKey);
         toolsOff = true;
         return request(false);
       }
@@ -2210,6 +2275,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       laneABaseUrl: params.targetAgent.laneABaseUrl ?? agentRow?.laneABaseUrl ?? null,
       laneAModel: params.targetAgent.laneAModel ?? agentRow?.laneAModel ?? null,
       laneATemperature: params.targetAgent.laneATemperature ?? agentRow?.laneATemperature ?? null,
+      laneAProviderRouting: params.targetAgent.laneAProviderRouting ?? agentRow?.laneAProviderRouting ?? null,
     });
     const chatModel = assertLaneASettingsRunnable(chatSettings);
     const credential = await resolveLaneACredential({
@@ -2365,6 +2431,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         model: chatModel,
         maxOutputTokens: chatSettings.maxOutputTokens,
         temperature: chatSettings.temperature,
+        providerRouting: chatSettings.providerRouting,
         offerBusinessData: businessDataPrompt?.available === true,
         offerCompanyFiles: companyFilesPrompt !== undefined,
         offerMemory: memoryPrompt?.toolsOffered === true,
@@ -2698,6 +2765,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       laneABaseUrl: params.targetAgent.laneABaseUrl ?? agentRow?.laneABaseUrl ?? null,
       laneAModel: params.targetAgent.laneAModel ?? agentRow?.laneAModel ?? null,
       laneATemperature: params.targetAgent.laneATemperature ?? agentRow?.laneATemperature ?? null,
+      laneAProviderRouting: params.targetAgent.laneAProviderRouting ?? agentRow?.laneAProviderRouting ?? null,
     });
     const model = assertLaneASettingsRunnable(settings);
 
@@ -2755,6 +2823,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           maxOutputChars: params.maxOutputChars,
         }),
         temperature: settings.temperature,
+        providerRouting: settings.providerRouting,
       });
     } finally {
       release();
@@ -2804,6 +2873,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     maxOutputTokens: number;
     /** Sampling temperature, already resolved for this provider/model. Null = send none. */
     temperature?: number | null;
+    /** OpenRouter "model hosts", already resolved for this provider. Null = OpenRouter picks. */
+    providerRouting?: LaneAProviderRouting | null;
   }) {
     try {
       const send = (withTemperature: boolean) =>
@@ -2813,6 +2884,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           system: params.systemPrompt,
           messages: [{ role: "user", content: params.message }],
           ...(withTemperature ? { temperature: params.temperature } : {}),
+          ...(params.providerRouting ? { providerRouting: params.providerRouting } : {}),
         });
       const withTemperature = typeof params.temperature === "number";
       let response: Awaited<ReturnType<typeof send>>;
@@ -3075,6 +3147,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         laneAProvider: targetAgent.laneAProvider ?? agentRow?.laneAProvider ?? null,
         laneABaseUrl: targetAgent.laneABaseUrl ?? agentRow?.laneABaseUrl ?? null,
         laneAModel: targetAgent.laneAModel ?? agentRow?.laneAModel ?? null,
+        laneAProviderRouting: targetAgent.laneAProviderRouting ?? agentRow?.laneAProviderRouting ?? null,
       });
       const model = assertLaneASettingsRunnable(settings);
       const credential = await resolveLaneACredential({
@@ -3100,6 +3173,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           maxTokens: Math.min(LANE_A_CONTINUE_SELECTION_MAX_OUTPUT_TOKENS, settings.maxOutputTokens),
           system: request.system,
           messages: [{ role: "user", content: request.user }],
+          ...(settings.providerRouting ? { providerRouting: settings.providerRouting } : {}),
         });
       } catch (err) {
         throw providerErrorToHttp(err, "chat");

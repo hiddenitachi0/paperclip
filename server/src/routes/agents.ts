@@ -2936,6 +2936,8 @@ export function agentRoutes(
           // at hire time, same reason as the rest of QUICK_AGENT_FIELDS.
           laneATrustLevel: agent.laneATrustLevel ?? null,
           laneAAssignedUserIds: agent.laneAAssignedUserIds ?? [],
+          // OpenRouter "model hosts" chosen at hire time, same reason.
+          laneAProviderRouting: agent.laneAProviderRouting ?? null,
           // DUR-4017: the daily briefing settings chosen at hire time, same
           // reason — the card is what the board reads, and the legacy branch
           // in approvals.ts rebuilds the agent from it.

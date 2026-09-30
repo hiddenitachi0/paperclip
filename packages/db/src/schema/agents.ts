@@ -110,6 +110,18 @@ export const agents = pgTable(
     // Null = send no temperature, i.e. the model host's own default, which is
     // what every quick agent did before this column existed.
     laneATemperature: real("lane_a_temperature"),
+    // Migration 0189: quick-agent "model hosts" for OpenRouter — which hosts
+    // (OpenRouter provider slugs such as "deepinfra") a call may only use,
+    // should try first, or must never use. Validated by the API
+    // (laneAProviderRoutingSchema in packages/shared). Only read when the
+    // quick agent's provider is OpenRouter. Null = no preference, i.e. what
+    // every quick agent did before this column existed.
+    laneAProviderRouting: jsonb("lane_a_provider_routing").$type<{
+      only?: string[];
+      order?: string[];
+      ignore?: string[];
+      allowFallbacks?: boolean;
+    }>(),
     // DUR-4013 step 3 (migration 0183). Whether, and how far, this agent may
     // drive the browser worker: "off" (default, no browser tool offered at
     // all) | "browse_and_forms" (navigate/read/click/type/fill forms, no

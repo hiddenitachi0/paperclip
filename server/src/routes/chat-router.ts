@@ -179,6 +179,8 @@ export function chatRouterRoutes(db: Db, options: { laneA?: LaneAServiceOptions 
           // refusing someone the operator explicitly assigned, on the exact
           // two paths the ticket asks to cover.
           laneAAssignedUserIds: (targetAgent.laneAAssignedUserIds as string[] | null) ?? [],
+          // OpenRouter "model hosts"; null = OpenRouter picks.
+          laneAProviderRouting: targetAgent.laneAProviderRouting ?? null,
         },
         requester,
         actor: req.actor,
