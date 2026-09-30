@@ -2,18 +2,26 @@ import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { agents, companies, companyMemberships, createDb, laneAMessages, morningReportOutbox } from "@paperclipai/db";
-import { DEFAULT_MORNING_REPORT_SETTINGS, MORNING_REPORT_RSS_FEEDS, type MorningReportSettings } from "@paperclipai/shared";
+import {
+  DEFAULT_MORNING_REPORT_SETTINGS,
+  MORNING_REPORT_RSS_FEEDS,
+  type MorningReportPriceFact,
+  type MorningReportSettings,
+} from "@paperclipai/shared";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { agentService } from "../services/agents.ts";
 import { secretService } from "../services/secrets.ts";
 import { resetWatcherSourceState } from "../services/watcher-sources.ts";
 import {
   dedupeHeadlines,
+  deterministicMood,
   dueMorningReport,
   looksLikeNewRelease,
   matchesMorningReportTopics,
   morningReportService,
   parseRssItems,
+  priceDirection,
+  sanitizeMoodWords,
   type MorningReportServiceDeps,
 } from "../services/morning-report.ts";
 
@@ -101,6 +109,43 @@ describe("parseRssItems", () => {
     ]);
     const atom = `<feed><entry><title>Atom item</title><link href="https://example.com/b"/></entry></feed>`;
     expect(parseRssItems(atom)).toEqual([{ title: "Atom item", url: "https://example.com/b", pubDate: null }]);
+  });
+});
+
+// DUR-4133: the mood picture's inputs, computed purely from prices/weather —
+// never from headline text.
+function priceFact(symbol: string, changePercent: number | null): MorningReportPriceFact {
+  return { symbol, price: 100, currency: "USD", changePercent, history: [] };
+}
+
+describe("priceDirection", () => {
+  it("averages the % change of every symbol that has one, ignoring symbols with none", () => {
+    expect(priceDirection([priceFact("BTC", 5), priceFact("ETH", 3)])).toBe("rising");
+    expect(priceDirection([priceFact("BTC", -5), priceFact("ETH", -3)])).toBe("falling");
+    expect(priceDirection([priceFact("BTC", 0.05), priceFact("ETH", -0.05)])).toBe("flat");
+    expect(priceDirection([priceFact("BTC", 5), priceFact("ETH", null)])).toBe("rising");
+  });
+
+  it("is null with no price data at all", () => {
+    expect(priceDirection([])).toBeNull();
+    expect(priceDirection([priceFact("BTC", null)])).toBeNull();
+  });
+});
+
+describe("sanitizeMoodWords", () => {
+  it("keeps at most 8 words and strips HTML angle brackets", () => {
+    expect(sanitizeMoodWords("tense but hopeful")).toBe("tense but hopeful");
+    expect(sanitizeMoodWords("one two three four five six seven eight nine ten")).toBe("one two three four five six seven eight");
+    expect(sanitizeMoodWords("<b>tense</b> but hopeful")).toBe("btense/b but hopeful");
+  });
+});
+
+describe("deterministicMood — the fallback when the model's mood is missing (DUR-4133)", () => {
+  it("is built only from price direction and weather, never headlines", () => {
+    expect(deterministicMood("rising", "Sunny, 20C")).toBe("upbeat, weather-led");
+    expect(deterministicMood("falling", "Rain, 8C")).toBe("subdued, weather-led");
+    expect(deterministicMood("flat", null)).toBe("steady");
+    expect(deterministicMood(null, null)).toBe("steady");
   });
 });
 
@@ -576,6 +621,78 @@ d("morning report tick", () => {
         { fileId: "11111111-1111-1111-1111-111111111111", caption: expect.stringContaining("dressed for today's weather"), kind: "weather" },
       ]);
       expect(row!.note ?? "").toContain("No mood picture this time");
+    });
+
+    // DUR-4133: the mood picture must never carry Maja's (or any) look, and
+    // both pictures must stay safe for work regardless of the company's own
+    // Sogni content-filter setting.
+    it("asks for no look and safe-for-work on the mood picture, and safe-for-work (keeping the look) on the weather picture", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent(companyId, { ...baseSettings, sources: ["bbc"] });
+      feeds[BBC_URL] = rssXml([{ title: "A headline to set the mood", link: "https://bbc.example/mood" }]);
+      makePicture.mockResolvedValue({ ok: true, fileId: "11111111-1111-1111-1111-111111111111", seed: 1 });
+
+      await service().tick(OSLO_WINTER_0700);
+      await settle();
+      await outboxRowsFor(agentId);
+
+      expect(makePicture).toHaveBeenCalledTimes(2);
+      const [weatherCall, moodCall] = makePicture.mock.calls.map((call) => call[0]);
+      expect(weatherCall).toMatchObject({ safeForWork: true });
+      expect(weatherCall.look).toBeUndefined();
+      expect(weatherCall.prompt).toContain("Fully clothed, dressed for the weather, safe for work.");
+      expect(moodCall).toMatchObject({ look: "none", safeForWork: true });
+    });
+
+    // DUR-4133 requirement 3 & 5: the mood picture's prompt is built from
+    // mood + price direction + weather, in code, and never quotes a
+    // headline's title (that verbatim quoting produced garbled text before).
+    it("builds the mood picture's prompt from the model's mood, price direction and weather — never a headline title", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent(companyId, { ...baseSettings, sources: ["bbc"], priceSymbols: ["BTC"] });
+      const distinctiveHeadline = "Zorbax Corp merges with Flibbertigibbet Holdings";
+      feeds[BBC_URL] = rssXml([{ title: distinctiveHeadline, link: "https://bbc.example/headline" }]);
+      coingeckoPrices.bitcoin = { usd: 65000, usd_24h_change: 5 };
+      transform.mockResolvedValue({
+        text: JSON.stringify({ opening: "Good morning!", mood: "tense but hopeful", headlines: [{ n: 1, summary: "A merger." }] }),
+        model: "fake",
+        provider: "anthropic",
+        truncated: false,
+        stopReason: "stop",
+      });
+      makePicture.mockResolvedValue({ ok: true, fileId: "11111111-1111-1111-1111-111111111111", seed: 1 });
+
+      await service().tick(OSLO_WINTER_0700);
+      await settle();
+
+      const [, moodCall] = makePicture.mock.calls.map((call) => call[0]);
+      expect(moodCall.prompt).toContain("tense but hopeful");
+      expect(moodCall.prompt).toContain("rising");
+      expect(moodCall.prompt).toContain("Oslo:");
+      expect(moodCall.prompt).not.toContain(distinctiveHeadline);
+      expect(moodCall.prompt).not.toContain("Zorbax");
+      expect(moodCall.prompt).toMatch(/no people/i);
+    });
+
+    // DUR-4133 requirement 3: "If the model call fails, derive the mood from prices + weather only."
+    it("falls back to a mood derived only from prices and weather when the model gives no mood", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent(companyId, { ...baseSettings, sources: ["bbc"], priceSymbols: ["BTC"] });
+      const distinctiveHeadline = "Quorlath Industries unveils new widget line";
+      feeds[BBC_URL] = rssXml([{ title: distinctiveHeadline, link: "https://bbc.example/headline" }]);
+      coingeckoPrices.bitcoin = { usd: 65000, usd_24h_change: -6 };
+      transform.mockRejectedValue(new Error("model host unavailable"));
+      makePicture.mockResolvedValue({ ok: true, fileId: "11111111-1111-1111-1111-111111111111", seed: 1 });
+
+      await service().tick(OSLO_WINTER_0700);
+      await settle();
+
+      const [, moodCall] = makePicture.mock.calls.map((call) => call[0]);
+      expect(moodCall.prompt).toContain("subdued");
+      expect(moodCall.prompt).toContain("falling");
+      expect(moodCall.prompt).not.toContain(distinctiveHeadline);
+      expect(moodCall.prompt).not.toContain("Quorlath");
+      expect(moodCall).toMatchObject({ look: "none", safeForWork: true });
     });
   });
 
