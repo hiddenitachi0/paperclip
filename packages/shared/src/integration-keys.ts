@@ -151,3 +151,11 @@ export const GITHUB_TOKEN_SECRET_NAMES = ["GITHUB_TOKEN", "GH_TOKEN", "PAPERCLIP
  * `gitPush` entries.
  */
 export const PUSH_CAPABILITY_ENV_KEYS = ["GH_TOKEN", "GITHUB_TOKEN"] as const;
+
+/**
+ * Secret NAMES, in priority order, that a by-name EODHD-key lookup checks —
+ * the same convention watchers already ask an operator to use for an Oslo
+ * Børs source (see WATCHER_SOURCE_INFO.oslo_stock in watchers.ts). Consumed
+ * by the morning report's direct (no-watcher) DNB.OL price fetch.
+ */
+export const EODHD_SECRET_NAMES = ["EODHD", "EODHD_API_KEY", "EODHD key"] as const;

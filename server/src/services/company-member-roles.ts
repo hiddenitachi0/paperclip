@@ -6,6 +6,7 @@ const HUMAN_COMPANY_MEMBERSHIP_ROLES: HumanCompanyMembershipRole[] = [
   "admin",
   "operator",
   "viewer",
+  "employee",
 ];
 
 export function normalizeHumanRole(
@@ -53,6 +54,12 @@ export function grantsForHumanRole(
     case "operator":
       return [{ permissionKey: "tasks:assign", scope: null }];
     case "viewer":
+      return [];
+    // DUR-4094: no management grant, ever, by role alone. Everything an
+    // Employee (light) may reach comes from a per-person feature:* grant an
+    // admin adds explicitly (see LIGHT_EMPLOYEE_FEATURE_KEYS), never from the
+    // role itself.
+    case "employee":
       return [];
   }
 }

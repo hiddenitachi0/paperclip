@@ -23,6 +23,7 @@ import { mcpToolLibraryRoutes } from "./routes/mcp-tool-library.js";
 import { apiToolRoutes } from "./routes/api-tools.js";
 import { webSearchRoutes } from "./routes/web-search.js";
 import { agentMemoryRoutes } from "./routes/agent-memories.js";
+import { privateAccessRoutes } from "./routes/private-access.js";
 import { browserRoutes } from "./routes/browser.js";
 import { paymentNoticesRoutes } from "./routes/payment-notices.js";
 import { paymentCardRoutes } from "./routes/payment-cards.js";
@@ -323,6 +324,7 @@ export async function createApp(
   api.use(goalRoutes(db));
   api.use(boardChatRoutes(db, { deploymentMode: opts.deploymentMode }));
   api.use(laneARoutes(db));
+  api.use(privateAccessRoutes(db));
   api.use(chatRouterRoutes(db));
   api.use(issueAnswerRoutes(db));
   api.use(approvalRoutes(db, {

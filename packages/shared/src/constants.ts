@@ -1014,6 +1014,12 @@ export const HUMAN_COMPANY_MEMBERSHIP_ROLES = [
   "admin",
   "operator",
   "viewer",
+  // DUR-4094: blocked-by-default on the server -- see
+  // server/src/routes/authz.ts refuseLightEmployeeWithoutOptIn. Every page
+  // and action is refused for this role unless a route has explicitly opted
+  // in with assertLightAllowed, the same default-deny shape DUR-3977 uses
+  // for company service tokens.
+  "employee",
 ] as const;
 export type HumanCompanyMembershipRole = (typeof HUMAN_COMPANY_MEMBERSHIP_ROLES)[number];
 
@@ -1022,6 +1028,7 @@ export const HUMAN_COMPANY_MEMBERSHIP_ROLE_LABELS: Record<HumanCompanyMembership
   admin: "Admin",
   operator: "Operator",
   viewer: "Viewer",
+  employee: "Employee (light)",
 };
 
 export const INSTANCE_USER_ROLES = ["instance_admin"] as const;
@@ -1057,8 +1064,22 @@ export const PERMISSION_KEYS = [
   // DEPLOY_APPROVAL_KEYS in server/src/services/agent-roles.ts).
   "deploys:request",
   "merges:request",
+  // DUR-4094: what an admin has switched on for one "Employee (light)"
+  // member. Stored as ordinary principal_permission_grants rows
+  // (principalType "user"), checked by assertLightAllowed -- never implies
+  // any of the management rights above, and non-employee roles ignore them.
+  "feature:pa_chat",
+  "feature:media_studio",
+  "feature:own_files",
 ] as const;
 export type PermissionKey = (typeof PERMISSION_KEYS)[number];
+
+export const LIGHT_EMPLOYEE_FEATURE_KEYS = [
+  "feature:pa_chat",
+  "feature:media_studio",
+  "feature:own_files",
+] as const;
+export type LightEmployeeFeatureKey = (typeof LIGHT_EMPLOYEE_FEATURE_KEYS)[number];
 
 // ---------------------------------------------------------------------------
 // Plugin System — see doc/plugins/PLUGIN_SPEC.md for the full specification

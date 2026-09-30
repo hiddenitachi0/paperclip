@@ -14,6 +14,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compatibility.js";
 
 vi.hoisted(() => {
   process.env.PAPERCLIP_HOME = "/tmp/paperclip-test-home";
@@ -27,7 +28,12 @@ const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : 
 
 type Db = ReturnType<typeof createDb>;
 
-async function createApp(db: Db, companyId: string, userId: string) {
+async function createApp(
+  db: Db,
+  companyId: string,
+  userId: string,
+  actorOverrides: Partial<Express.Request["actor"]> = {},
+) {
   process.env.PAPERCLIP_LOG_DIR = "/tmp/paperclip-test-home/logs";
   process.env.PAPERCLIP_IN_WORKTREE = "false";
   const { accessRoutes } = await import("../routes/access.js");
@@ -41,6 +47,7 @@ async function createApp(db: Db, companyId: string, userId: string) {
       companyIds: [companyId],
       memberships: [{ companyId, membershipRole: "owner", status: "active" }],
       isInstanceAdmin: true,
+      ...actorOverrides,
     };
     next();
   });
@@ -76,6 +83,18 @@ async function createCompanyWithOwner(db: Db) {
     })
     .returning()
     .then((rows) => rows[0]!);
+  // Every real owner-creation path (board-claim.ts's instance claim flow,
+  // middleware/auth.ts's cloud_tenant provisioning) seeds the role's default
+  // grants via ensureHumanRoleDefaultGrants immediately after inserting the
+  // membership row -- permission decisions are made against materialized
+  // principalPermissionGrants rows, never derived from membershipRole at
+  // decide-time. Mirror that here so this fixture reflects a real Owner.
+  await ensureHumanRoleDefaultGrants(db, {
+    companyId: company.id,
+    principalId: owner.principalId,
+    membershipRole: "owner",
+    grantedByUserId: null,
+  });
   return { company, owner };
 }
 
@@ -98,6 +117,143 @@ describeEmbeddedPostgres("access routes permissions upgrade compatibility", () =
   afterAll(async () => {
     await tempDb?.cleanup();
   });
+
+  it("DUR-4076: lets an Admin (users:invite but no users:manage_permissions) GET the member list", async () => {
+    const { company, owner } = await createCompanyWithOwner(db);
+    const admin = await db
+      .insert(companyMemberships)
+      .values({
+        companyId: company.id,
+        principalType: "user",
+        principalId: `admin-${randomUUID()}`,
+        status: "active",
+        membershipRole: "admin",
+      })
+      .returning()
+      .then((rows) => rows[0]!);
+    // Admin role grants users:invite but not users:manage_permissions -- see
+    // grantsForHumanRole in company-member-roles.ts. Grants are materialized
+    // DB rows (not derived from membershipRole at decide-time), so seed the
+    // row an invite-accept flow would have created.
+    await db.insert(principalPermissionGrants).values({
+      companyId: company.id,
+      principalType: "user",
+      principalId: admin.principalId,
+      permissionKey: "users:invite",
+      scope: null,
+      grantedByUserId: owner.principalId,
+    });
+
+    const res = await request(
+      await createApp(db, company.id, admin.principalId, { source: "session", isInstanceAdmin: false }),
+    ).get(`/api/companies/${company.id}/members`);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const memberIds = res.body.members.map((m: { id: string }) => m.id).sort();
+    expect(memberIds).toEqual([admin.id, owner.id].sort());
+    // Admins should not see raw permission grants (privacy protection)
+    for (const member of res.body.members) {
+      expect(member).not.toHaveProperty("grants");
+    }
+  }, 30_000);
+
+  it("DUR-4117: lets a real production-style Owner (default role grants, non-local-implicit session) GET the member list", async () => {
+    const { company, owner } = await createCompanyWithOwner(db);
+
+    // Force a real permission-grant decision instead of the local_implicit
+    // board bypass, the same as a signed-in Owner hitting this route over a
+    // normal session -- proves the Owner's default grants (materialized by
+    // createCompanyWithOwner via ensureHumanRoleDefaultGrants, matching
+    // board-claim.ts and middleware/auth.ts's cloud_tenant provisioning)
+    // are sufficient on their own, with no bypass involved.
+    const res = await request(
+      await createApp(db, company.id, owner.principalId, { source: "session", isInstanceAdmin: false }),
+    ).get(`/api/companies/${company.id}/members`);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const memberIds = res.body.members.map((m: { id: string }) => m.id);
+    expect(memberIds).toEqual([owner.id]);
+  }, 30_000);
+
+  it("DUR-4076: rejects a member without users:invite (viewer) from GET-ing the member list", async () => {
+    const { company } = await createCompanyWithOwner(db);
+    const viewer = await db
+      .insert(companyMemberships)
+      .values({
+        companyId: company.id,
+        principalType: "user",
+        principalId: `viewer-${randomUUID()}`,
+        status: "active",
+        membershipRole: "viewer",
+      })
+      .returning()
+      .then((rows) => rows[0]!);
+
+    const res = await request(
+      await createApp(db, company.id, viewer.principalId, { source: "session", isInstanceAdmin: false }),
+    ).get(`/api/companies/${company.id}/members`);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+  }, 30_000);
+
+  it("DUR-4117: rejects a member without users:invite (operator) from GET-ing the member list", async () => {
+    const { company } = await createCompanyWithOwner(db);
+    const operator = await db
+      .insert(companyMemberships)
+      .values({
+        companyId: company.id,
+        principalType: "user",
+        principalId: `operator-${randomUUID()}`,
+        status: "active",
+        membershipRole: "operator",
+      })
+      .returning()
+      .then((rows) => rows[0]!);
+    // grantsForHumanRole("operator") is only tasks:assign -- no users:invite.
+
+    const res = await request(
+      await createApp(db, company.id, operator.principalId, { source: "session", isInstanceAdmin: false }),
+    ).get(`/api/companies/${company.id}/members`);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+  }, 30_000);
+
+  it("DUR-4076: Owners still see raw permission grants in member list", async () => {
+    const { company, owner } = await createCompanyWithOwner(db);
+    const member = await db
+      .insert(companyMemberships)
+      .values({
+        companyId: company.id,
+        principalType: "user",
+        principalId: `member-${randomUUID()}`,
+        status: "active",
+        membershipRole: "admin",
+      })
+      .returning()
+      .then((rows) => rows[0]!);
+    await db.insert(principalPermissionGrants).values({
+      companyId: company.id,
+      principalType: "user",
+      principalId: member.principalId,
+      permissionKey: "users:invite",
+      scope: null,
+      grantedByUserId: owner.principalId,
+    });
+
+    const res = await request(
+      await createApp(db, company.id, owner.principalId, { source: "session", isInstanceAdmin: false }),
+    ).get(`/api/companies/${company.id}/members`);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const memberData = res.body.members.find((m: { id: string }) => m.id === member.id);
+    expect(memberData).toBeDefined();
+    expect(memberData).toHaveProperty("grants");
+    expect(memberData.grants).toHaveLength(1);
+    expect(memberData.grants[0]).toMatchObject({
+      permissionKey: "users:invite",
+      principalId: member.principalId,
+    });
+  }, 30_000);
 
   it("rejects owner self-lockout through the member route after the permissions upgrade", async () => {
     const { company, owner } = await createCompanyWithOwner(db);
