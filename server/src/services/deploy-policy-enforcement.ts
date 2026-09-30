@@ -19,7 +19,7 @@ import { parseProjectDeployPolicy } from "./deploy-policy.js";
  * all, by design -- there is no field to lie about.
  *
  * What is enforced today:
- *  - `preview_only` refuses the live deploy request outright (git push and
+ *  - `preview_only` refuses the live deploy request outright (Git deploy and
  *    SFTP both go live; a project in preview-only has no server-enforced
  *    way to reach either).
  *  - A non-empty `askFirstActions` list means the card is always required --
@@ -65,7 +65,7 @@ export function evaluateDeployPolicyForRequest(deployPolicyRaw: unknown): Deploy
     return {
       allowed: false,
       refusalReason:
-        "This project's deploy policy is set to preview only. Live deploys (git push or SFTP) are disabled -- " +
+        "This project's deploy policy is set to preview only. Live deploys (Git or SFTP) are disabled -- " +
         "run the project's preview instead, or ask the board to change the deploy mode first.",
       mode,
       askFirstActions,

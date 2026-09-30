@@ -36,7 +36,7 @@ describe("DUR-4139: deploy policy mode/ask-first enforcement", () => {
     const decision = evaluateDeployPolicyForRequest({ enabled: true, mode: "preview_only" });
     expect(decision.allowed).toBe(false);
     expect(decision.refusalReason).toMatch(/preview only/i);
-    expect(decision.refusalReason).toMatch(/git push or SFTP/i);
+    expect(decision.refusalReason).toMatch(/Git or SFTP/i);
   });
 
   it("refuses a preview_only request regardless of the ask-first list", () => {

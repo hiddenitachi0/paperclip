@@ -225,7 +225,7 @@ describe("DUR-4139: deploy approval filing enforces the project's deploy policy"
     async () => {
       mockEvaluateDeployPolicyForProject.mockResolvedValue({
         allowed: false,
-        refusalReason: "This project's deploy policy is set to preview only. Live deploys (git push or SFTP) are disabled.",
+        refusalReason: "This project's deploy policy is set to preview only. Live deploys (Git or SFTP) are disabled.",
         mode: "preview_only",
         askFirstActions: [],
       });
