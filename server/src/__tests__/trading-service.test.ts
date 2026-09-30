@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDb, companies, type Db } from "@paperclipai/db";
 import { usdToNok, type CreateTradingStrategyInput, type TradingRiskConfig, type TradingRuleConfig } from "@paperclipai/shared";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
+import { approvalService } from "../services/approvals.ts";
 import { tradingService } from "../services/trading.ts";
 import { fakeTradingMarketData } from "../services/trading-market-data.ts";
 
@@ -221,6 +222,109 @@ d("tradingService", () => {
     const orders = await trading.listOrders(companyId, strategy.id);
     expect(orders[0]).toMatchObject({ status: "pending_approval" });
     expect(orders[0]!.approvalId).toBeTruthy();
+
+    // resolvePendingApprovals scans pending_approval orders across every company -- reject and re-tick so this order doesn't sit there (undecided, unexpired) for a later test's own resolvePendingApprovals scan to trip over.
+    await approvalService(db).reject(orders[0]!.approvalId!, "test-cleanup");
+    await trading.tick(new Date(now.getTime() + 60_000));
+
+    await trading.setStatus(companyId, strategy.id, "paused");
+  });
+
+  it("fills a pending_approval order once the operator approves it, on the next tick", async () => {
+    const companyId = await seedCompany();
+    const now = new Date("2026-01-01T00:00:00Z");
+    const trading = tradingService(db, {
+      now: () => now,
+      marketData: fakeTradingMarketData({ candles: { BTC: BUY_CANDLES }, quotes: { BTC: { bidUsd: BUY_QUOTE_USD, askUsd: BUY_QUOTE_USD, at: now } } }),
+    });
+    const strategy = await trading.createStrategy(
+      companyId,
+      { ...STRATEGY_INPUT, riskConfig: riskConfig({ approvalAboveNok: null }) },
+      { actorType: "user", actorId: "u1" },
+    );
+    await trading.setStatus(companyId, strategy.id, "running");
+    await trading.tick(now);
+    const pending = (await trading.listOrders(companyId, strategy.id))[0]!;
+    expect(pending.status).toBe("pending_approval");
+
+    await approvalService(db).approve(pending.approvalId!, "operator-1");
+
+    // resolvePendingApprovals runs at the top of every tick, before claiming new due strategies -- the strategy itself stays paused-for-new-signals-wise, nothing else to claim here.
+    const later = new Date(now.getTime() + 60_000);
+    const result = await trading.tick(later);
+    expect(result.approvalsResolved).toBe(1);
+
+    const orders = await trading.listOrders(companyId, strategy.id);
+    expect(orders.find((o) => o.id === pending.id)).toMatchObject({ status: "rejected" }); // superseded by the fresh fill row, see resolvePendingApprovals's own comment
+    const filled = orders.find((o) => o.status === "filled");
+    expect(filled).toMatchObject({ side: "buy" });
+
+    const row = await trading.requireStrategy(companyId, strategy.id);
+    expect(row.cashNok).toBeCloseTo(2_000 - 1_000 - 2.5, 6);
+
+    await trading.setStatus(companyId, strategy.id, "paused");
+  });
+
+  it("never fills a pending_approval order the operator rejects", async () => {
+    const companyId = await seedCompany();
+    const now = new Date("2026-01-01T00:00:00Z");
+    const trading = tradingService(db, {
+      now: () => now,
+      marketData: fakeTradingMarketData({ candles: { BTC: BUY_CANDLES }, quotes: { BTC: { bidUsd: BUY_QUOTE_USD, askUsd: BUY_QUOTE_USD, at: now } } }),
+    });
+    const strategy = await trading.createStrategy(
+      companyId,
+      { ...STRATEGY_INPUT, riskConfig: riskConfig({ approvalAboveNok: null }) },
+      { actorType: "user", actorId: "u1" },
+    );
+    await trading.setStatus(companyId, strategy.id, "running");
+    await trading.tick(now);
+    const pending = (await trading.listOrders(companyId, strategy.id))[0]!;
+
+    await approvalService(db).reject(pending.approvalId!, "operator-1");
+
+    const later = new Date(now.getTime() + 60_000);
+    const result = await trading.tick(later);
+    expect(result.approvalsResolved).toBe(1);
+
+    const orders = await trading.listOrders(companyId, strategy.id);
+    expect(orders).toHaveLength(1); // no fresh fill row -- unlike the approve path, a rejection never creates a second order
+    expect(orders[0]).toMatchObject({ status: "rejected", rejectionReason: "The operator rejected the trade card." });
+
+    const row = await trading.requireStrategy(companyId, strategy.id);
+    expect(row.cashNok).toBe(2_000); // untouched
+
+    await trading.setStatus(companyId, strategy.id, "paused");
+  });
+
+  it("expires a pending_approval order nobody decided in time, without ever filling it", async () => {
+    const companyId = await seedCompany();
+    const now = new Date("2026-01-01T00:00:00Z");
+    const trading = tradingService(db, {
+      now: () => now,
+      marketData: fakeTradingMarketData({ candles: { BTC: BUY_CANDLES }, quotes: { BTC: { bidUsd: BUY_QUOTE_USD, askUsd: BUY_QUOTE_USD, at: now } } }),
+    });
+    const strategy = await trading.createStrategy(
+      companyId,
+      { ...STRATEGY_INPUT, riskConfig: riskConfig({ approvalAboveNok: null }) },
+      { actorType: "user", actorId: "u1" },
+    );
+    await trading.setStatus(companyId, strategy.id, "running");
+    await trading.tick(now);
+
+    // TRADING_TRADE_APPROVAL_EXPIRY_MS is 5 minutes -- nobody decided the card, so it's expired by the time the next tick runs.
+    const later = new Date(now.getTime() + 6 * 60_000);
+    const result = await trading.tick(later);
+    expect(result.approvalsResolved).toBe(1);
+
+    const orders = await trading.listOrders(companyId, strategy.id);
+    expect(orders[0]).toMatchObject({ status: "expired_approval" });
+
+    const row = await trading.requireStrategy(companyId, strategy.id);
+    expect(row.cashNok).toBe(2_000); // untouched
+
+    const ledgerEntries = await trading.listLedgerEntries(companyId, strategy.id);
+    expect(ledgerEntries.map((e) => e.eventType)).toContain("order_rejected");
 
     await trading.setStatus(companyId, strategy.id, "paused");
   });
