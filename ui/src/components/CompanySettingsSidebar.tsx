@@ -7,7 +7,6 @@ import {
   Eye,
   FlaskConical,
   KeyRound,
-  MailPlus,
   MonitorCog,
   Plug,
   Puzzle,
@@ -116,8 +115,8 @@ export function CompanySettingsSidebar() {
             />
           ) : null}
           <SidebarNavItem
-            to="/company/settings/members"
-            label="Members"
+            to="/company/settings/people"
+            label="People"
             icon={Users}
             badge={badges?.joinRequests ?? 0}
             end
@@ -133,7 +132,6 @@ export function CompanySettingsSidebar() {
                 end
               />
             ))}
-          <SidebarNavItem to="/company/settings/invites" label="Invites" icon={MailPlus} end />
           <SidebarNavItem to="/company/settings/connections" label="Connections" icon={Plug} end />
           <SidebarNavItem to="/company/settings/secrets" label="Secrets" icon={KeyRound} end />
         </div>

@@ -260,6 +260,8 @@ const projectFields = {
   targetDate: z.string().optional().nullable(),
   color: z.string().optional().nullable(),
   icon: z.enum(PROJECT_ICON_NAMES).optional().nullable(),
+  productionUrl: z.string().optional().nullable(),
+  hostingTarget: z.string().optional().nullable(),
   env: envConfigSchema.optional().nullable(),
   executionWorkspacePolicy: projectExecutionWorkspacePolicySchema.optional().nullable(),
   deployPolicy: deployPolicySchema.optional().nullable(),

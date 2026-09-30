@@ -17,6 +17,8 @@ export const projects = pgTable(
     targetDate: date("target_date"),
     color: text("color"),
     icon: text("icon"),
+    productionUrl: text("production_url"),
+    hostingTarget: text("hosting_target"),
     env: jsonb("env").$type<AgentEnvConfig>(),
     pauseReason: text("pause_reason"),
     pausedAt: timestamp("paused_at", { withTimezone: true }),

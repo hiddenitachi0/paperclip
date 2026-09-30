@@ -109,6 +109,8 @@ export type ProjectFieldSaveState = "idle" | "saving" | "saved" | "error";
 export type ProjectConfigFieldKey =
   | "name"
   | "description"
+  | "production_url"
+  | "hosting_target"
   | "status"
   | "goals"
   | "env"
@@ -751,6 +753,45 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
             <p className="text-sm text-muted-foreground">
               {project.description?.trim() || "No description"}
             </p>
+          )}
+        </PropertyRow>
+        <PropertyRow
+          label={<FieldLabel label="Production URL" state={fieldState("production_url")} />}
+        >
+          {onUpdate || onFieldUpdate ? (
+            <DraftInput
+              value={project.productionUrl ?? ""}
+              onCommit={(productionUrl) => commitField("production_url", { productionUrl: productionUrl || null })}
+              immediate
+              className="w-full rounded border border-border bg-transparent px-2 py-1 text-sm outline-none"
+              placeholder="https://example.com"
+            />
+          ) : project.productionUrl ? (
+            <a
+              href={project.productionUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="text-sm text-primary hover:underline break-all"
+            >
+              {project.productionUrl}
+            </a>
+          ) : (
+            <span className="text-sm text-muted-foreground">Not set</span>
+          )}
+        </PropertyRow>
+        <PropertyRow
+          label={<FieldLabel label="Hosting Target" state={fieldState("hosting_target")} />}
+        >
+          {onUpdate || onFieldUpdate ? (
+            <DraftInput
+              value={project.hostingTarget ?? ""}
+              onCommit={(hostingTarget) => commitField("hosting_target", { hostingTarget: hostingTarget || null })}
+              immediate
+              className="w-full rounded border border-border bg-transparent px-2 py-1 text-sm outline-none"
+              placeholder="e.g. VPS via deploy-runner"
+            />
+          ) : (
+            <span className="text-sm">{project.hostingTarget || "Not set"}</span>
           )}
         </PropertyRow>
         <PropertyRow label={<FieldLabel label="Status" state={fieldState("status")} />}>

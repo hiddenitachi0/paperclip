@@ -1336,7 +1336,14 @@
       "idx": 191,
       "version": "7",
       "when": 1787160600000,
-      "tag": "0191_project_deploy_transport",
+      "tag": "0191_project_display_fields",
+      "breakpoints": true
+    },
+    {
+      "idx": 192,
+      "version": "7",
+      "when": 1787160610000,
+      "tag": "0192_project_deploy_transport",
       "breakpoints": true
     }
   ]
