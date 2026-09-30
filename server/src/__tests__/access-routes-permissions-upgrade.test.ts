@@ -138,6 +138,10 @@ describeEmbeddedPostgres("access routes permissions upgrade compatibility", () =
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     const memberIds = res.body.members.map((m: { id: string }) => m.id).sort();
     expect(memberIds).toEqual([admin.id, owner.id].sort());
+    // Admins should not see raw permission grants (privacy protection)
+    for (const member of res.body.members) {
+      expect(member).not.toHaveProperty("grants");
+    }
   }, 30_000);
 
   it("DUR-4076: rejects a member without users:invite (viewer) from GET-ing the member list", async () => {
@@ -159,6 +163,43 @@ describeEmbeddedPostgres("access routes permissions upgrade compatibility", () =
     ).get(`/api/companies/${company.id}/members`);
 
     expect(res.status, JSON.stringify(res.body)).toBe(403);
+  }, 30_000);
+
+  it("DUR-4076: Owners still see raw permission grants in member list", async () => {
+    const { company, owner } = await createCompanyWithOwner(db);
+    const member = await db
+      .insert(companyMemberships)
+      .values({
+        companyId: company.id,
+        principalType: "user",
+        principalId: `member-${randomUUID()}`,
+        status: "active",
+        membershipRole: "admin",
+      })
+      .returning()
+      .then((rows) => rows[0]!);
+    await db.insert(principalPermissionGrants).values({
+      companyId: company.id,
+      principalType: "user",
+      principalId: member.principalId,
+      permissionKey: "users:invite",
+      scope: null,
+      grantedByUserId: owner.principalId,
+    });
+
+    const res = await request(
+      await createApp(db, company.id, owner.principalId, { source: "session", isInstanceAdmin: false }),
+    ).get(`/api/companies/${company.id}/members`);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const memberData = res.body.members.find((m: { id: string }) => m.id === member.id);
+    expect(memberData).toBeDefined();
+    expect(memberData).toHaveProperty("grants");
+    expect(memberData.grants).toHaveLength(1);
+    expect(memberData.grants[0]).toMatchObject({
+      permissionKey: "users:invite",
+      principalId: member.principalId,
+    });
   }, 30_000);
 
   it("rejects owner self-lockout through the member route after the permissions upgrade", async () => {
