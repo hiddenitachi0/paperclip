@@ -48,6 +48,8 @@ function makeProject(id: string, name: string): Project {
     targetDate: null,
     color: null,
     icon: null,
+    productionUrl: null,
+    hostingTarget: null,
     env: null,
     pauseReason: null,
     pausedAt: null,

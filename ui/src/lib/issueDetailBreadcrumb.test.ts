@@ -83,6 +83,8 @@ describe("issueDetailBreadcrumb", () => {
         targetDate: null,
         color: null,
         icon: null,
+        productionUrl: null,
+        hostingTarget: null,
         env: null,
         pauseReason: null,
         pausedAt: null,
