@@ -1,24 +1,42 @@
 import { and, desc, eq, gte, isNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, morningReportOutbox, runInPooledScope, watcherPricePoints, watchers } from "@paperclipai/db";
 import {
-  MORNING_REPORT_DEFAULT_PLACE,
+  agents,
+  companyMemberships,
+  laneAConversations,
+  laneAMessages,
+  morningReportOutbox,
+  runInPooledScope,
+  watcherPricePoints,
+  watchers,
+} from "@paperclipai/db";
+import {
+  MORNING_REPORT_DEFAULT_PLACES,
   MORNING_REPORT_RSS_FEEDS,
   parseMorningReportSettings,
+  WATCHER_SOURCE_INFO,
+  type MorningReportFacts,
+  type MorningReportFactItem,
   type MorningReportHobbyTopic,
+  type MorningReportImageFact,
   type MorningReportOutboxItem,
   type MorningReportOutboxStatus,
+  type MorningReportPriceFact,
+  type MorningReportPricePoint,
   type MorningReportPriceSymbol,
   type MorningReportSettings,
   type MorningReportSource,
   type MorningReportSportFollow,
   type MorningReportTopic,
+  type MorningReportWeatherFact,
+  type WatcherSource,
 } from "@paperclipai/shared";
 import { notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
 import { formatWeatherReport } from "./lane-a-tools.js";
 import { laneAService } from "./lane-a.js";
+import { secretService } from "./secrets.js";
 import { webSearchService, type WebSearchServiceDeps } from "./web-search.js";
 import { WATCHER_PRICE_SOURCES, isWatcherQuoteError } from "./watcher-sources.js";
 
@@ -61,26 +79,57 @@ export const MORNING_REPORT_LEASE_MS = 10 * 60_000;
 export const MORNING_REPORT_OUTBOX_MAX_AGE_MS = 24 * 3_600_000;
 const HTTP_TIMEOUT_MS = 8_000;
 const OUTBOX_BATCH = 20;
-/** ~1024 output tokens, expressed as the chars-equivalent lane-a.ts's transform() takes (see resolveTransformMaxTokens). */
-const MAX_OUTPUT_CHARS_FOR_1024_TOKENS = 1024 * 4;
 const HOBBY_MAX_AGE_HOURS = 24 * 7;
 const SEARCH_RESULTS_PER_SOURCE = 5;
+/** How many of a price's most recent watcher readings become its sparkline history (DUR-4059). */
+const PRICE_HISTORY_POINTS = 7;
 
-/** Instructions for the one model call a report costs. The facts travel as data, never in here. */
-export const MORNING_REPORT_TASK =
-  "You write one daily morning briefing message to the person you work for, in English, using only the facts given below. " +
-  "Organize it with short, clearly labelled sections (for example Weather, Headlines, Hobby news, Sport, Prices) in whatever " +
-  "order reads best. Use the facts exactly as given: do not invent, round differently, or add any number, headline or fact " +
-  "not present below. Keep it skimmable — plain prose or short bullet points, at most a few sentences per section. If a " +
-  "section has no facts, leave it out entirely rather than saying there is nothing to report.";
+/**
+ * Realistic cap for the one model call a report still costs (DUR-4059
+ * review): a numbered JSON list of short per-headline summaries plus a short
+ * opening genuinely needs more room than the old whole-report call did, so
+ * this is deliberately larger than a short answer would need — a smaller cap
+ * was exactly what caused the old call to cut off mid-list. Expressed as the
+ * chars-equivalent lane-a.ts's transform() takes (see resolveTransformMaxTokens).
+ */
+const MORNING_REPORT_SUMMARY_MAX_OUTPUT_TOKENS = 3_000;
+const MAX_OUTPUT_CHARS_FOR_SUMMARIES = MORNING_REPORT_SUMMARY_MAX_OUTPUT_TOKENS * 4;
+
+/**
+ * Instructions for the one model call a report still costs (DUR-4059
+ * direction change): the model writes ONLY a short opening and one-sentence
+ * summaries for the given headlines, as strict JSON, never the report itself.
+ * Every list in the report (weather, headlines, hobby, sport, prices) is
+ * rendered by code from the facts, so nothing Filip needs depends on this
+ * call succeeding, finishing, or being trusted with formatting/links.
+ */
+export const MORNING_REPORT_SUMMARY_TASK =
+  "You write two short things for a daily morning briefing, using only the facts given below: do not invent, round " +
+  'differently, or add any number, headline or fact not present below. Answer with ONLY one JSON object, no markdown, ' +
+  'no code fences, no commentary, matching exactly this shape: {"opening": "a friendly 3-5 sentence opening for the day, ' +
+  'plain text only, mentioning the weather and the most notable news in your own words", "headlines": [{"n": 1, ' +
+  '"summary": "one plain-text sentence summarizing headline 1, using only its title"}, ...one entry per numbered headline ' +
+  "given below] }. Plain text only in every string: never HTML, never markdown links, never a URL.";
 
 export interface MorningReportServiceDeps extends WebSearchServiceDeps {
   now?: () => Date;
   fetchImpl?: typeof fetch;
-  laneA?: { transform: ReturnType<typeof laneAService>["transform"] };
+  laneA?: {
+    transform: ReturnType<typeof laneAService>["transform"];
+    makePicture: ReturnType<typeof laneAService>["makePicture"];
+  };
   webSearch?: { search: ReturnType<typeof webSearchService>["search"] };
+  secrets?: { resolveStockDataKey: ReturnType<typeof secretService>["resolveStockDataKey"] };
   /** Test seam: how a claimed report is handed off. Production detaches it onto the pool. */
   dispatch?: (work: () => Promise<void>) => void;
+  /**
+   * Whether the full briefing page (DUR-4075) is live yet. Defaults to the
+   * PAPERCLIP_MORNING_REPORT_BRIEFING_PAGE_ENABLED env var so the link is
+   * switched off everywhere until that page ships, without a code change
+   * here. A report written while this is false never carries the link, even
+   * after it flips true — see MorningReportFacts.briefingPageLive.
+   */
+  briefingPageLive?: boolean;
 }
 
 // ─── Local time, DST-safe ──────────────────────────────────────────────────
@@ -115,10 +164,11 @@ export function dueMorningReport(
   return { due: true, localDate: date };
 }
 
-function resolvePlace(settings: MorningReportSettings, localDate: string): string {
-  if (!settings.placeOverride) return MORNING_REPORT_DEFAULT_PLACE;
-  if (settings.placeOverrideUntil && settings.placeOverrideUntil < localDate) return MORNING_REPORT_DEFAULT_PLACE;
-  return settings.placeOverride;
+/** The place override alone when set (and not expired), otherwise both default places (DUR-4059). */
+function resolvePlaces(settings: MorningReportSettings, localDate: string): string[] {
+  if (!settings.placeOverride) return [...MORNING_REPORT_DEFAULT_PLACES];
+  if (settings.placeOverrideUntil && settings.placeOverrideUntil < localDate) return [...MORNING_REPORT_DEFAULT_PLACES];
+  return [settings.placeOverride];
 }
 
 // ─── RSS (minimal, dependency-free) ────────────────────────────────────────
@@ -259,28 +309,67 @@ async function fetchRss(fetchImpl: typeof fetch, url: string, limit: number): Pr
   return parseRssItems(await response.text(), limit);
 }
 
-async function fetchWeatherSection(fetchImpl: typeof fetch, place: string): Promise<{ text: string | null; note: string | null }> {
+/** One place's weather: the formatted block (for the facts) and a short "place: conditions" line (for the picture prompt). */
+async function fetchOnePlaceWeather(
+  fetchImpl: typeof fetch,
+  place: string,
+): Promise<{ place: string; block: string; condition: string } | { note: string }> {
   try {
     const geo = (await fetchJson(
       fetchImpl,
       `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(place)}&count=1&language=en&format=json`,
     )) as { results?: Array<{ name: string; latitude: number; longitude: number; country?: string; admin1?: string }> };
     const found = geo.results?.[0];
-    if (!found) return { text: null, note: `Weather: could not find a place called "${place}".` };
+    if (!found) return { note: `Weather: could not find a place called "${place}".` };
     const forecast = await fetchJson(
       fetchImpl,
       `https://api.open-meteo.com/v1/forecast?latitude=${found.latitude}&longitude=${found.longitude}` +
         `&current=temperature_2m,wind_speed_10m,precipitation,weather_code` +
         `&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,weather_code&forecast_days=3&timezone=auto`,
     );
-    return { text: formatWeatherReport(found, forecast), note: null };
+    const block = formatWeatherReport(found, forecast);
+    // formatWeatherReport's first line always reads "Now in <where>: <conditions>" — reworded to
+    // "<place>: <conditions>" so two places read as a short list in the picture prompt.
+    const firstLine = block.split("\n")[0] ?? block;
+    const condition = firstLine.replace(/^Now in [^:]+:\s*/, `${place}: `);
+    return { place, block, condition };
   } catch (err) {
-    return { text: null, note: `Weather: the forecast service did not answer (${err instanceof Error ? err.message : "unknown reason"}).` };
+    return { note: `Weather (${place}): the forecast service did not answer (${err instanceof Error ? err.message : "unknown reason"}).` };
   }
+}
+
+/** Every configured place's weather (DUR-4059: Drøbak and Oslo by default, or just the one override place), one fact per place plus a short summary for the weather picture prompt. A place that fails degrades to a note, never losing the others. */
+async function fetchWeatherSection(
+  fetchImpl: typeof fetch,
+  places: string[],
+): Promise<{ items: MorningReportWeatherFact[]; conditionsSummary: string | null; notes: string[] }> {
+  const results = await Promise.all(places.map((place) => fetchOnePlaceWeather(fetchImpl, place)));
+  const items: MorningReportWeatherFact[] = [];
+  const conditions: string[] = [];
+  const notes: string[] = [];
+  for (const result of results) {
+    if ("note" in result) notes.push(result.note);
+    else {
+      items.push({ place: result.place, text: result.block });
+      conditions.push(result.condition);
+    }
+  }
+  return {
+    items,
+    conditionsSummary: conditions.length > 0 ? conditions.join("; ") : null,
+    notes,
+  };
 }
 
 type BraveSearch = (query: string) => Promise<{ title: string; url: string }[]>;
 
+/**
+ * DUR-4059 review: log per source how many items were fetched, survived the
+ * topic filter, and were finally kept (after cross-source dedupe and the
+ * maxHeadlines cap), so a thin headline day shows why in the server log —
+ * `stats.sourcesChecked`/`itemsFound` in the facts (see composeReport) is the
+ * plain-language, operator-facing version of the same count.
+ */
 async function collectHeadlines(params: {
   sources: MorningReportSource[];
   topics: MorningReportTopic[];
@@ -290,22 +379,42 @@ async function collectHeadlines(params: {
 }): Promise<{ items: { title: string; url: string; source: MorningReportSource }[]; notes: string[] }> {
   const notes: string[] = [];
   const collected: { title: string; url: string; source: MorningReportSource; pubDate: string | null }[] = [];
+  const fetchedPerSource = new Map<MorningReportSource, number>();
   for (const source of params.sources) {
     const feed = MORNING_REPORT_RSS_FEEDS[source];
     try {
       if (feed) {
-        for (const item of await fetchRss(params.fetchImpl, feed, 20)) collected.push({ ...item, source });
+        const got = await fetchRss(params.fetchImpl, feed, 20);
+        fetchedPerSource.set(source, got.length);
+        for (const item of got) collected.push({ ...item, source });
       } else {
-        for (const result of await params.braveSearch(`${source} news`)) {
-          collected.push({ title: result.title, url: result.url, source, pubDate: null });
-        }
+        const got = await params.braveSearch(`${source} news`);
+        fetchedPerSource.set(source, got.length);
+        for (const result of got) collected.push({ title: result.title, url: result.url, source, pubDate: null });
       }
     } catch (err) {
+      fetchedPerSource.set(source, 0);
       notes.push(`${source}: could not fetch headlines (${err instanceof Error ? err.message : "unknown reason"}).`);
     }
   }
   const onTopic = collected.filter((item) => matchesMorningReportTopics(item.title, params.topics));
+  const onTopicPerSource = new Map<MorningReportSource, number>();
+  for (const item of onTopic) onTopicPerSource.set(item.source, (onTopicPerSource.get(item.source) ?? 0) + 1);
   const items = dedupeHeadlines(onTopic).slice(0, params.maxHeadlines).map(({ title, url, source }) => ({ title, url, source }));
+  const keptPerSource = new Map<MorningReportSource, number>();
+  for (const item of items) keptPerSource.set(item.source, (keptPerSource.get(item.source) ?? 0) + 1);
+  for (const source of params.sources) {
+    logger.info(
+      {
+        event: "morning_report.headline_source",
+        source,
+        fetched: fetchedPerSource.get(source) ?? 0,
+        onTopic: onTopicPerSource.get(source) ?? 0,
+        kept: keptPerSource.get(source) ?? 0,
+      },
+      `morning-report: ${source} fetched ${fetchedPerSource.get(source) ?? 0}, ${onTopicPerSource.get(source) ?? 0} on-topic, ${keptPerSource.get(source) ?? 0} kept after dedupe/cap`,
+    );
+  }
   return { items, notes };
 }
 
@@ -364,17 +473,42 @@ async function collectSportNews(params: {
   return { items: dedupeHeadlines(collected).slice(0, 5), notes };
 }
 
+/**
+ * Which live-quote source (and the symbol spelling that source expects) each
+ * closed-list price symbol maps to. DNB.OL is Oslo Børs's own spelling; the
+ * EODHD source appends ".OL" itself (see osloStockSource in
+ * watcher-sources.ts), so it wants the bare "DNB".
+ */
+const PRICE_SYMBOL_SOURCE: Record<MorningReportPriceSymbol, { source: WatcherSource; sourceSymbol: string }> = {
+  BTC: { source: "crypto", sourceSymbol: "BTC" },
+  SOL: { source: "crypto", sourceSymbol: "SOL" },
+  ETH: { source: "crypto", sourceSymbol: "ETH" },
+  "DNB.OL": { source: "oslo_stock", sourceSymbol: "DNB" },
+};
+
+/**
+ * Prices, direct (DUR-4059): a symbol with watcher history uses it, exactly
+ * as before. Otherwise — the common case, since prices must work without
+ * Filip ever creating a watcher — this fetches the live quote itself, from
+ * the right source for that symbol (crypto needs no key; an Oslo Børs symbol
+ * needs the company's EODHD key, read by name, never stored on this call).
+ * Earlier code always tried the crypto source here regardless of symbol,
+ * which is why DNB.OL never got a fallback price even with a key configured.
+ */
 async function collectPrices(
   db: Db,
   companyId: string,
   symbols: MorningReportPriceSymbol[],
   fetchImpl: typeof fetch,
   now: Date,
-): Promise<{ lines: string[]; notes: string[] }> {
-  if (symbols.length === 0) return { lines: [], notes: [] };
-  const lines: string[] = [];
+  resolveStockDataKey: (companyId: string) => Promise<string | null>,
+): Promise<{ facts: MorningReportPriceFact[]; notes: string[] }> {
+  if (symbols.length === 0) return { facts: [], notes: [] };
+  const facts: MorningReportPriceFact[] = [];
   const notes: string[] = [];
   for (const symbol of symbols) {
+    const mapping = PRICE_SYMBOL_SOURCE[symbol];
+    const currency = WATCHER_SOURCE_INFO[mapping.source].currency;
     const rows = await db
       .select({ price: watcherPricePoints.price, observedAt: watcherPricePoints.observedAt })
       .from(watcherPricePoints)
@@ -387,43 +521,241 @@ async function collectPrices(
       // The reading closest to (but not under) 18 hours old stands in for
       // "yesterday's close" without needing a calendar-aware close price.
       const base = rows.find((row) => latest.observedAt.getTime() - row.observedAt.getTime() >= 18 * 3_600_000) ?? null;
-      if (base) {
-        const change = ((latest.price - base.price) / base.price) * 100;
-        lines.push(`${symbol}: ${latest.price} (${change >= 0 ? "+" : ""}${change.toFixed(2)}% vs ~24h ago)`);
-      } else {
-        lines.push(`${symbol}: ${latest.price} (no ~24h-old price yet to compare)`);
-      }
+      // DUR-4059: a short sparkline history from the same watcher readings
+      // already fetched above — oldest first, at most PRICE_HISTORY_POINTS.
+      const history: MorningReportPricePoint[] = rows
+        .slice(0, PRICE_HISTORY_POINTS)
+        .reverse()
+        .map((row) => ({ price: row.price, observedAt: row.observedAt.toISOString() }));
+      facts.push({
+        symbol,
+        price: latest.price,
+        currency,
+        changePercent: base ? ((latest.price - base.price) / base.price) * 100 : null,
+        history,
+      });
       continue;
     }
     try {
-      const quotes = await WATCHER_PRICE_SOURCES.crypto.fetchQuotes({ symbols: [symbol], now }, { fetchImpl });
-      const quote = quotes.get(symbol);
-      if (quote && !isWatcherQuoteError(quote)) {
-        lines.push(`${symbol}: ${quote.price} (no price history yet to compare)`);
+      let quotes;
+      if (mapping.source === "oslo_stock") {
+        const key = await resolveStockDataKey(companyId);
+        if (!key) {
+          notes.push(
+            `${symbol}: no stock data key is configured for this company, so this price could not be fetched. ` +
+              `Save a free EODHD key (eodhd.com) as a company secret named "EODHD" to show it.`,
+          );
+          continue;
+        }
+        quotes = await WATCHER_PRICE_SOURCES.oslo_stock.fetchQuotes({ symbols: [mapping.sourceSymbol], key, now }, { fetchImpl });
       } else {
-        notes.push(`${symbol}: no price available (no watcher history, and it is not a known live-quote symbol).`);
+        quotes = await WATCHER_PRICE_SOURCES.crypto.fetchQuotes({ symbols: [mapping.sourceSymbol], now }, { fetchImpl });
+      }
+      const quote = quotes.get(mapping.sourceSymbol);
+      if (quote && !isWatcherQuoteError(quote)) {
+        // No watcher history exists yet for this symbol (the common case —
+        // prices must work without Filip ever creating a watcher), so there
+        // is no cheap sparkline source here; see "Questions for Filip" in
+        // the PR for the real 7-day-fetch fast-follow.
+        facts.push({
+          symbol,
+          price: quote.price,
+          currency,
+          changePercent: quote.reference ? ((quote.price - quote.reference.price) / quote.reference.price) * 100 : null,
+          history: [],
+        });
+      } else {
+        notes.push(`${symbol}: ${isWatcherQuoteError(quote) ? quote.message : "no price available right now."}`);
       }
     } catch {
       notes.push(`${symbol}: no price available right now.`);
     }
   }
-  return { lines, notes };
+  return { facts, notes };
 }
 
-function formatFactsAsPlainText(sections: {
-  weather: string | null;
-  headlines: { title: string }[];
-  hobby: { title: string }[];
-  sport: { title: string }[];
-  prices: string[];
+function formatPriceLine(fact: MorningReportPriceFact): string {
+  const price = `${fact.price} ${fact.currency}`;
+  if (fact.changePercent === null) return `${fact.symbol}: ${price} (no ~24h-old price yet to compare)`;
+  const sign = fact.changePercent >= 0 ? "+" : "";
+  return `${fact.symbol}: ${price} (${sign}${fact.changePercent.toFixed(2)}% vs ~24h ago)`;
+}
+
+/**
+ * DUR-4059 review: every list here is rendered from the facts by code, never
+ * by a model, and every section that was configured says something even when
+ * it found nothing — a section never just silently disappears, so a thin day
+ * is visible instead of looking like a working, uneventful one. `settings` is
+ * only used to tell "not configured" (omit the section) apart from
+ * "configured but nothing found" (say so in one line).
+ */
+function renderFullReportText(
+  facts: Pick<MorningReportFacts, "opening" | "weather" | "headlines" | "hobby" | "sport" | "prices" | "stats">,
+  settings: Pick<MorningReportSettings, "sources" | "hobbyTopics" | "sportFollows" | "priceSymbols">,
+): string {
+  const parts: string[] = [facts.opening];
+  parts.push(facts.weather.length > 0 ? `Weather:\n${facts.weather.map((w) => w.text).join("\n\n")}` : "Weather: unavailable today.");
+  if (settings.sources.length > 0) {
+    parts.push(
+      facts.headlines.length > 0
+        ? `Headlines:\n${facts.headlines
+            .map((h, i) => `${i + 1}. ${h.title}${h.summary ? ` — ${h.summary}` : ""} (${h.url})`)
+            .join("\n")}`
+        : "Headlines: no new headlines found today.",
+    );
+  }
+  if (settings.hobbyTopics.length > 0) {
+    parts.push(
+      facts.hobby.length > 0
+        ? `Hobby news:\n${facts.hobby.map((h) => `- ${h.title} (${h.url})`).join("\n")}`
+        : "Hobby news: nothing new today.",
+    );
+  }
+  if (settings.sportFollows.length > 0) {
+    parts.push(
+      facts.sport.length > 0 ? `Sport:\n${facts.sport.map((h) => `- ${h.title} (${h.url})`).join("\n")}` : "Sport: nothing new today.",
+    );
+  }
+  if (settings.priceSymbols.length > 0) {
+    parts.push(
+      facts.prices.length > 0 ? `Prices:\n${facts.prices.map(formatPriceLine).join("\n")}` : "Prices: unavailable today.",
+    );
+  }
+  if (settings.sources.length > 0) {
+    parts.push(`Sources checked: ${facts.stats.sourcesChecked}, headlines found: ${facts.stats.itemsFound}.`);
+  }
+  return parts.join("\n\n");
+}
+
+/** A short, always-safe opening used when the model call fails, is truncated, or is not available. Never a model call. */
+function deterministicOpening(places: string[]): string {
+  return `Good morning! Here is your briefing for ${places.join(" and ")}.`;
+}
+
+/**
+ * DUR-4059 direction change: the short, plain-text Telegram teaser — today's
+ * weather in both places, the single most important headline, one price
+ * move. Built entirely in code, never by a model, and never containing HTML
+ * or markdown: the Telegram bridge sends it with no parse_mode, so any stray
+ * angle bracket in a headline title is shown literally rather than parsed.
+ * The bridge appends the briefing-page link itself, only when
+ * facts.briefingPageLive is true — this function never mentions the link.
+ */
+function buildTeaser(input: {
+  weather: MorningReportWeatherFact[];
+  headlines: MorningReportFactItem[];
+  prices: MorningReportPriceFact[];
 }): string {
-  const parts: string[] = [];
-  if (sections.weather) parts.push(`Weather:\n${sections.weather}`);
-  if (sections.headlines.length > 0) parts.push(`Headlines:\n${sections.headlines.map((h) => `- ${h.title}`).join("\n")}`);
-  if (sections.hobby.length > 0) parts.push(`Hobby news:\n${sections.hobby.map((h) => `- ${h.title}`).join("\n")}`);
-  if (sections.sport.length > 0) parts.push(`Sport:\n${sections.sport.map((h) => `- ${h.title}`).join("\n")}`);
-  if (sections.prices.length > 0) parts.push(`Prices:\n${sections.prices.join("\n")}`);
-  return parts.length > 0 ? parts.join("\n\n") : "Nothing to report today.";
+  const lines: string[] = [];
+  lines.push(
+    input.weather.length > 0
+      ? input.weather.map((w) => (w.text.split("\n")[0] ?? w.text).trim()).join("; ")
+      : "Weather: unavailable today.",
+  );
+  lines.push(input.headlines.length > 0 ? `Top story: ${input.headlines[0]!.title}` : "Headlines: nothing new today.");
+  const notable = input.prices.find((p) => p.changePercent !== null) ?? input.prices[0];
+  if (notable) lines.push(formatPriceLine(notable));
+  return lines.join("\n");
+}
+
+/**
+ * Neutralizes any HTML the model might produce (DUR-4059 direction change:
+ * "no HTML or markdown links from the model are ever rendered as markup") —
+ * defense in depth on top of the Telegram bridge never using parse_mode for
+ * model-written text: even if a future caller renders this as HTML by
+ * mistake, there is no angle bracket left to form a tag.
+ */
+function sanitizeModelText(text: string, maxLength: number): string {
+  return text.replace(/[<>]/g, "").trim().slice(0, maxLength);
+}
+
+interface ParsedSummaryResponse {
+  opening?: unknown;
+  headlines?: unknown;
+}
+
+/** Best-effort JSON extraction from a model answer that is supposed to be strict JSON but might carry code fences or stray prose. Returns null on anything that does not parse. */
+function parseSummaryJson(text: string): ParsedSummaryResponse | null {
+  const trimmed = text.trim();
+  const candidates = [trimmed];
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced) candidates.push(fenced[1]!.trim());
+  const braces = trimmed.match(/\{[\s\S]*\}/);
+  if (braces) candidates.push(braces[0]);
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as ParsedSummaryResponse;
+    } catch {
+      // Try the next candidate.
+    }
+  }
+  return null;
+}
+
+/** Applies the model's per-headline summaries by position (n is 1-based, matching the numbering the model was given). Any entry that is malformed, out of range, or missing is simply skipped — a headline with no summary is still a complete, safe headline (title + link). */
+function applyHeadlineSummaries(
+  items: MorningReportFactItem[],
+  headlinesField: unknown,
+): MorningReportFactItem[] {
+  if (!Array.isArray(headlinesField)) return items;
+  const summaries = new Map<number, string>();
+  for (const entry of headlinesField) {
+    if (!entry || typeof entry !== "object") continue;
+    const n = (entry as Record<string, unknown>).n;
+    const summary = (entry as Record<string, unknown>).summary;
+    if (typeof n !== "number" || !Number.isInteger(n)) continue;
+    if (typeof summary !== "string" || !summary.trim()) continue;
+    summaries.set(n, sanitizeModelText(summary, 400));
+  }
+  return items.map((item, i) => {
+    const summary = summaries.get(i + 1);
+    return summary ? { ...item, summary } : item;
+  });
+}
+
+/** The compact, plain-text digest the one summaries model call reads — titles and short facts only, never a URL (so the model has nothing to turn into a link). */
+function buildSummaryDigest(input: {
+  places: string[];
+  weather: MorningReportWeatherFact[];
+  headlines: MorningReportFactItem[];
+  prices: MorningReportPriceFact[];
+}): string {
+  const lines: string[] = [`Places: ${input.places.join(", ")}.`];
+  for (const w of input.weather) lines.push(`Weather ${w.place}: ${(w.text.split("\n")[0] ?? w.text).trim()}`);
+  if (input.prices.length > 0) lines.push(`Prices: ${input.prices.map(formatPriceLine).join("; ")}`);
+  if (input.headlines.length > 0) {
+    lines.push("Headlines, numbered (write one summary per number, using only the title given):");
+    input.headlines.forEach((h, i) => lines.push(`${i + 1}. ${h.title} [${h.source}]`));
+  } else {
+    lines.push("Headlines: none today.");
+  }
+  return lines.join("\n");
+}
+
+/** Code-written (no model call): Maja dressed for today's weather, in her own default look. */
+function weatherPicturePrompt(agentName: string, places: string[], conditionsSummary: string): string {
+  return (
+    `A warm, friendly full-body illustration of ${agentName} dressed appropriately for today's weather in ${places.join(" and ")}: ` +
+    `${conditionsSummary}. Illustration style, no text, no numbers, no logos.`
+  );
+}
+
+/** Code-written (no model call): one picture capturing today's overall news mood, not one per headline. */
+function moodPicturePrompt(headlines: MorningReportFactItem[]): string | null {
+  if (headlines.length === 0) return null;
+  const topics = headlines.slice(0, 3).map((h) => h.title).join("; ");
+  return (
+    "An editorial illustration capturing the overall mood of today's news, inspired by (but not depicting any " +
+    `real person, brand or logo from) these headlines: ${topics}. No text, no numbers.`
+  );
+}
+
+/** The numbered list Filip sees in Telegram's headlines section, so a later "tell me more about number 3" resolves to the right item. */
+function conversationMessageForReport(text: string, facts: MorningReportFacts): string {
+  if (facts.headlines.length === 0) return text;
+  const numbered = facts.headlines.map((h, i) => `${i + 1}. ${h.title} (${h.url})`).join("\n");
+  return `${text}\n\nHeadlines, numbered as sent:\n${numbered}`;
 }
 
 // ─── The service ────────────────────────────────────────────────────────────
@@ -431,8 +763,10 @@ function formatFactsAsPlainText(sections: {
 export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}) {
   const laneA = deps.laneA ?? laneAService(db);
   const webSearch = deps.webSearch ?? webSearchService(db, deps);
+  const secrets = deps.secrets ?? secretService(db);
   const nowOf = () => deps.now?.() ?? new Date();
   const fetchImpl = deps.fetchImpl ?? fetch;
+  const briefingPageLive = deps.briefingPageLive ?? process.env.PAPERCLIP_MORNING_REPORT_BRIEFING_PAGE_ENABLED === "true";
   const dispatch =
     deps.dispatch ??
     ((work: () => Promise<void>) => {
@@ -450,6 +784,99 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
       );
       return results.map((r) => ({ title: r.title, url: r.url }));
     };
+  }
+
+  /**
+   * Appends the report as an assistant turn in a fresh Lane A conversation
+   * owned by the company's board owner, so a later Telegram reply ("tell me
+   * more about number 3") continues the same chat history the normal quick-
+   * agent chat path reads (server/src/services/lane-a.ts's
+   * loadReplayHistory). The Telegram bridge must still point that chat at
+   * this conversationId (it keeps its own token+chat_id mapping) — see the
+   * outbox `conversationId` field and scripts/telegram-bridge.py.
+   *
+   * Never throws: no board owner, the agent not being a quick agent, or any
+   * write failure all just mean no conversation link, never a failed report.
+   */
+  async function appendReportToConversation(agentRow: AgentRow, text: string, facts: MorningReportFacts, now: Date): Promise<string | null> {
+    if (!agentRow.laneAEnabled) return null;
+    try {
+      const [owner] = await db
+        .select({ userId: companyMemberships.principalId })
+        .from(companyMemberships)
+        .where(
+          and(
+            eq(companyMemberships.companyId, agentRow.companyId),
+            eq(companyMemberships.principalType, "user"),
+            eq(companyMemberships.membershipRole, "owner"),
+            eq(companyMemberships.status, "active"),
+          ),
+        )
+        .limit(1);
+      if (!owner) return null;
+      const [conversation] = await db
+        .insert(laneAConversations)
+        .values({
+          companyId: agentRow.companyId,
+          agentId: agentRow.id,
+          requestedByUserId: owner.userId,
+          requestedByAgentId: null,
+          turnCount: 1,
+          createdAt: now,
+          lastMessageAt: now,
+        })
+        .returning();
+      if (!conversation) return null;
+      await db.insert(laneAMessages).values({
+        companyId: agentRow.companyId,
+        conversationId: conversation.id,
+        agentId: agentRow.id,
+        role: "assistant",
+        content: conversationMessageForReport(text, facts),
+        createdAt: now,
+      });
+      return conversation.id;
+    } catch (err) {
+      logger.warn({ err, agentId: agentRow.id }, "morning-report: could not link the report into a Lane A conversation");
+      return null;
+    }
+  }
+
+  /** Maja's weather picture and one mood picture, via Media Studio (laneA.makePicture) — the same "quick picture tool" chat pictures use. Never throws: a failed picture just means fewer images, never a failed report. */
+  async function collectImages(agentRow: AgentRow, places: string[], conditionsSummary: string | null, headlines: MorningReportFactItem[], localDate: string): Promise<{ images: MorningReportImageFact[]; notes: string[] }> {
+    const images: MorningReportImageFact[] = [];
+    const notes: string[] = [];
+    if (!agentRow.laneAEnabled) return { images, notes };
+    if (conditionsSummary) {
+      try {
+        const picture = await laneA.makePicture({
+          companyId: agentRow.companyId,
+          agentId: agentRow.id,
+          prompt: weatherPicturePrompt(agentRow.name, places, conditionsSummary),
+          runLabel: `morning-report-weather:${agentRow.id}:${localDate}`,
+        });
+        if (picture.ok) images.push({ fileId: picture.fileId, caption: `${agentRow.name}, dressed for today's weather in ${places.join(" and ")}.`, kind: "weather" });
+        else notes.push(`No weather picture this time: ${picture.reason}`);
+      } catch (err) {
+        notes.push(`No weather picture this time: ${err instanceof Error ? err.message.slice(0, 200) : "the picture failed"}.`);
+      }
+    }
+    const moodPrompt = moodPicturePrompt(headlines);
+    if (moodPrompt) {
+      try {
+        const picture = await laneA.makePicture({
+          companyId: agentRow.companyId,
+          agentId: agentRow.id,
+          prompt: moodPrompt,
+          runLabel: `morning-report-mood:${agentRow.id}:${localDate}`,
+        });
+        if (picture.ok) images.push({ fileId: picture.fileId, caption: "Today's mood, in one picture.", kind: "mood" });
+        else notes.push(`No mood picture this time: ${picture.reason}`);
+      } catch (err) {
+        notes.push(`No mood picture this time: ${err instanceof Error ? err.message.slice(0, 200) : "the picture failed"}.`);
+      }
+    }
+    return { images, notes };
   }
 
   // ─── The tick ──────────────────────────────────────────────────────────
@@ -495,31 +922,37 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
     return rows.length;
   }
 
-  async function composeReport(agentRow: AgentRow, settings: MorningReportSettings, localDate: string, now: Date): Promise<void> {
+  async function composeReport(
+    agentRow: AgentRow,
+    settings: MorningReportSettings,
+    localDate: string,
+    now: Date,
+    opts: { isTest?: boolean } = {},
+  ): Promise<string> {
     const braveSearch = braveSearchFor(agentRow.companyId, agentRow.id);
-    const place = resolvePlace(settings, localDate);
+    const places = resolvePlaces(settings, localDate);
     const [weather, headlines, hobby, sport, prices] = await Promise.all([
-      fetchWeatherSection(fetchImpl, place),
+      fetchWeatherSection(fetchImpl, places),
       collectHeadlines({ sources: settings.sources, topics: settings.topics, maxHeadlines: settings.maxHeadlines, fetchImpl, braveSearch }),
       collectHobbyNews({ hobbyTopics: settings.hobbyTopics, fetchImpl, braveSearch, now }),
       collectSportNews({ sportFollows: settings.sportFollows, braveSearch }),
-      collectPrices(db, agentRow.companyId, settings.priceSymbols, fetchImpl, now),
+      collectPrices(db, agentRow.companyId, settings.priceSymbols, fetchImpl, now, (companyId) => secrets.resolveStockDataKey(companyId)),
     ]);
-    const notes: string[] = [];
-    if (weather.note) notes.push(weather.note);
+    const notes: string[] = [...weather.notes];
     notes.push(...headlines.notes, ...hobby.notes, ...sport.notes, ...prices.notes);
 
-    const factsText = formatFactsAsPlainText({
-      weather: weather.text,
-      headlines: headlines.items,
-      hobby: hobby.items,
-      sport: sport.items,
-      prices: prices.lines,
-    });
+    const stats = { sourcesChecked: settings.sources.length, itemsFound: headlines.items.length };
 
-    let text = factsText;
+    // DUR-4059 direction change: the model writes ONLY a short opening and
+    // per-headline summaries, as JSON, never the report itself — every list
+    // above already exists in full regardless of what happens next. A
+    // truncated or unparsable answer is discarded whole (never "half a
+    // list"): the deterministic opening and plain title+link headlines are
+    // always a complete, safe report on their own.
+    let opening = deterministicOpening(places);
+    let headlineItems: MorningReportFactItem[] = headlines.items;
     if (!agentRow.laneAEnabled) {
-      notes.push("This agent is not a quick agent any more, so the facts were sent as they are.");
+      notes.push("This agent is not a quick agent any more, so headline summaries were not written.");
     } else {
       try {
         const written = await laneA.transform({
@@ -536,36 +969,74 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
             laneAMaxOutputTokens: agentRow.laneAMaxOutputTokens ?? null,
             laneATransformDailyCallCap: agentRow.laneATransformDailyCallCap ?? null,
           },
-          input: factsText,
-          task: MORNING_REPORT_TASK,
-          // One call a day; capped at min(the agent's own laneAMaxOutputTokens,
-          // 1024) — transform()'s maxOutputChars already takes the min of the
-          // agent's resolved token cap and this chars-equivalent budget (see
-          // resolveTransformMaxTokens in lane-a.ts).
-          maxOutputChars: MAX_OUTPUT_CHARS_FOR_1024_TOKENS,
+          input: buildSummaryDigest({ places, weather: weather.items, headlines: headlines.items, prices: prices.facts }),
+          task: MORNING_REPORT_SUMMARY_TASK,
+          maxOutputChars: MAX_OUTPUT_CHARS_FOR_SUMMARIES,
         });
-        const words = written.text.trim();
-        if (words) text = words;
-        else notes.push(`${agentRow.name} gave no text, so the facts were sent as they are.`);
+        if (written.truncated) {
+          notes.push(
+            `${agentRow.name}'s summary was cut off before it finished, so the opening and headlines were sent without it instead of a half-written one.`,
+          );
+        } else {
+          const parsed = parseSummaryJson(written.text);
+          if (!parsed) {
+            notes.push(`${agentRow.name} did not answer with the expected JSON, so the opening and headlines were sent without it.`);
+          } else {
+            if (typeof parsed.opening === "string" && parsed.opening.trim()) {
+              opening = sanitizeModelText(parsed.opening, 1200);
+            }
+            headlineItems = applyHeadlineSummaries(headlines.items, parsed.headlines);
+          }
+        }
       } catch (err) {
         const reason = err instanceof Error ? err.message : "unknown reason";
-        notes.push(`${agentRow.name} could not write this one (${reason.slice(0, 200)}), so the facts were sent as they are.`);
+        notes.push(`${agentRow.name} could not write summaries this time (${reason.slice(0, 200)}), so the opening and headlines were sent without it.`);
       }
     }
+    if (opts.isTest) opening = `🧪 Test report\n${opening}`;
 
-    await db.insert(morningReportOutbox).values({
-      companyId: agentRow.companyId,
-      agentId: agentRow.id,
-      status: "ready",
-      text,
-      note: notes.length > 0 ? notes.join(" ").slice(0, 1000) : null,
-      createdAt: now,
-      readyAt: now,
-    });
-    await db
-      .update(agents)
-      .set({ morningReportLastSentDate: localDate, morningReportLeaseUntil: null })
-      .where(eq(agents.id, agentRow.id));
+    // Pictures via Media Studio, after the one summaries model call, never
+    // blocking it: a failed picture must never lose the report (DUR-4059).
+    const pictures = await collectImages(agentRow, places, weather.conditionsSummary, headlineItems, localDate);
+    notes.push(...pictures.notes);
+
+    const facts: MorningReportFacts = {
+      places,
+      weather: weather.items,
+      headlines: headlineItems,
+      hobby: hobby.items,
+      sport: sport.items,
+      prices: prices.facts,
+      images: pictures.images,
+      opening,
+      teaser: buildTeaser({ weather: weather.items, headlines: headlineItems, prices: prices.facts }),
+      stats,
+      briefingPageLive,
+      notes,
+    };
+    const text = renderFullReportText(facts, settings);
+    const conversationId = await appendReportToConversation(agentRow, text, facts, now);
+
+    const [inserted] = await db
+      .insert(morningReportOutbox)
+      .values({
+        companyId: agentRow.companyId,
+        agentId: agentRow.id,
+        status: "ready",
+        text,
+        facts,
+        conversationId,
+        note: notes.length > 0 ? notes.join(" ").slice(0, 1000) : null,
+        createdAt: now,
+        readyAt: now,
+      })
+      .returning({ id: morningReportOutbox.id });
+    if (!opts.isTest) {
+      await db
+        .update(agents)
+        .set({ morningReportLastSentDate: localDate, morningReportLeaseUntil: null })
+        .where(eq(agents.id, agentRow.id));
+    }
     await logActivity(db, {
       companyId: agentRow.companyId,
       actorType: "system",
@@ -574,8 +1045,9 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
       entityType: "agent",
       entityId: agentRow.id,
       agentId: agentRow.id,
-      details: { localDate },
+      details: { localDate, isTest: Boolean(opts.isTest) },
     }).catch(() => undefined);
+    return inserted!.id;
   }
 
   function dispatchCompose(row: AgentRow, settings: MorningReportSettings, localDate: string, now: Date) {
@@ -590,6 +1062,25 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
     });
   }
 
+  /**
+   * "Send a test report now" (DUR-4059): composes and queues a report right
+   * away, ignoring the due-time/lease/once-a-day gate, so Filip can try
+   * changes without waiting for 07:00. Runs in the caller's own request (not
+   * detached), because the whole point is to see the result immediately.
+   * Never marks the day as sent — the real scheduled report still fires.
+   */
+  async function sendTestReportNow(companyId: string, agentId: string): Promise<MorningReportOutboxItem> {
+    const [row] = await db.select().from(agents).where(and(eq(agents.id, agentId), eq(agents.companyId, companyId)));
+    if (!row) throw notFound("That agent was not found.");
+    const settings = parseMorningReportSettings(row.morningReportSettings);
+    const now = nowOf();
+    const { date: localDate } = localDateTimeParts(now, settings.timezone);
+    const outboxId = await composeReport(row, settings, localDate, now, { isTest: true });
+    const [outboxRow] = await db.select().from(morningReportOutbox).where(eq(morningReportOutbox.id, outboxId));
+    if (!outboxRow) throw new Error("The test report was written but could not be read back.");
+    return toOutboxItem(outboxRow);
+  }
+
   async function tick(now: Date = nowOf()) {
     const expired = await expireStaleOutbox(now);
     const due = await claimDueAgents(now);
@@ -601,6 +1092,18 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
 
   // ─── Outbox (the Telegram bridge) ───────────────────────────────────────
 
+  function toOutboxItem(row: typeof morningReportOutbox.$inferSelect): MorningReportOutboxItem {
+    return {
+      id: row.id,
+      companyId: row.companyId,
+      agentId: row.agentId,
+      text: row.text,
+      facts: row.facts ?? null,
+      conversationId: row.conversationId ?? null,
+      createdAt: row.createdAt.toISOString(),
+    };
+  }
+
   async function outbox(companyId: string): Promise<MorningReportOutboxItem[]> {
     const cutoff = new Date(nowOf().getTime() - MORNING_REPORT_OUTBOX_MAX_AGE_MS);
     const rows = await db
@@ -609,13 +1112,23 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
       .where(and(eq(morningReportOutbox.companyId, companyId), eq(morningReportOutbox.status, "ready"), gte(morningReportOutbox.readyAt, cutoff)))
       .orderBy(morningReportOutbox.createdAt)
       .limit(OUTBOX_BATCH);
-    return rows.map((row) => ({
-      id: row.id,
-      companyId: row.companyId,
-      agentId: row.agentId,
-      text: row.text,
-      createdAt: row.createdAt.toISOString(),
-    }));
+    return rows.map(toOutboxItem);
+  }
+
+  /**
+   * One report's facts, for the full briefing page (DUR-4075's child task).
+   * Unlike outbox() this is not limited to 'ready'/unexpired rows — the page
+   * is read after Telegram has already delivered the report, by which point
+   * status has moved on to 'delivered'. Company-scoped like every other route
+   * here; the route itself is board-only (see routes/morning-report.ts).
+   */
+  async function getOne(companyId: string, id: string): Promise<MorningReportOutboxItem> {
+    const [row] = await db
+      .select()
+      .from(morningReportOutbox)
+      .where(and(eq(morningReportOutbox.id, id), eq(morningReportOutbox.companyId, companyId)));
+    if (!row) throw notFound("That report was not found.");
+    return toOutboxItem(row);
   }
 
   function toStatus(status: string): MorningReportOutboxStatus {
@@ -647,5 +1160,5 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
     return { id: (updated ?? row).id, status: toStatus((updated ?? row).status) };
   }
 
-  return { tick, composeReport, outbox, ack };
+  return { tick, composeReport, sendTestReportNow, outbox, getOne, ack };
 }
