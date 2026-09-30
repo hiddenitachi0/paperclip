@@ -2087,6 +2087,10 @@ function mergeInviteDefaults(
       role: humanRole,
       grants: grantsForHumanRole(humanRole),
     };
+  } else {
+    // Nothing rank-checks a caller-supplied `human` field when humanRole is
+    // null, so it must never pass through unvalidated.
+    delete merged.human;
   }
   if (agentMessage) {
     merged.agentMessage = agentMessage;
