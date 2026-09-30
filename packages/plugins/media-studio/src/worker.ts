@@ -865,6 +865,14 @@ async function prepareSogni(
 }
 
 /**
+ * DUR-4133: the fixed "things to avoid" text forced onto a picture made with
+ * `safeForWork: true`, regardless of any look's own content-filter setting
+ * or "always avoid" text — used for pictures nobody reviews before they go
+ * out (the morning report's illustrations).
+ */
+export const SAFE_FOR_WORK_AVOID = "nudity, nsfw, text, letters, words, watermark, logo";
+
+/**
  * Validate the tool input and apply a saved look. Nothing here spends
  * anything: it runs before the daily limit is reserved, so a typo in a look
  * name does not use up one of the day's pictures.
@@ -891,18 +899,30 @@ export async function prepareGeneration(
   if (rawProvider && !isPictureService(rawProvider)) {
     return { error: `"${String(params.provider)}" is not a picture service. Use fal (Fal.ai) or sogni (Sogni), or leave it out.` };
   }
+  // DUR-4133: forces the content filter on and a fixed safety negative
+  // prompt, regardless of any look's own setting. Not in any tool's public
+  // parameters schema, so an ordinary chat agent cannot set it — only
+  // first-party server code building `parameters` directly (the morning
+  // report's pictures) does.
+  const safeForWork = params.safeForWork === true;
 
   // Which look, in order: the one named as look; else one the request's
   // text names ("in look Maja Night"); else the first automatic look rule
-  // that applies right now; else the agent's default look.
+  // that applies right now; else the agent's default look. "none" skips all
+  // of that — not named, not mentioned, no automatic rule, no default — for
+  // pictures that must never carry any person's look (DUR-4133: the morning
+  // report's mood picture).
   let look: Look | null = null;
   let lookReason: LookReason | null = null;
   let ruleText: string | null = null;
-  const lookName = typeof params.look === "string" ? params.look.trim() : "";
-  if (lookName) {
+  const rawLook = typeof params.look === "string" ? params.look.trim() : "";
+  const noLook = rawLook.toLowerCase() === "none";
+  if (noLook) {
+    // Leave look/lookReason null: no named, mentioned, automatic or default look.
+  } else if (rawLook) {
     const looks = await loadLooks(ctx, companyId);
-    look = findLook(looks, lookName) ?? null;
-    if (!look) return { error: `There is no saved look called "${lookName}". ${lookNamesSentence(looks)}` };
+    look = findLook(looks, rawLook) ?? null;
+    if (!look) return { error: `There is no saved look called "${rawLook}". ${lookNamesSentence(looks)}` };
     lookReason = "look-input";
   } else {
     const looks = await loadLooks(ctx, companyId);
@@ -996,6 +1016,18 @@ export async function prepareGeneration(
   if (look && assembled.leftOut.length > 0) {
     const labels = SHEET_FIELDS.filter((f) => assembled.leftOut.includes(f.key)).map((f) => f.label.toLowerCase());
     notes.push(`The look's ${labels.join(", ")} ${labels.length === 1 ? "was" : "were"} left out, because the request describes ${labels.length === 1 ? "it" : "them"}.`);
+  }
+  if (safeForWork) {
+    // Wins over any look's content filter setting (forcing the filter ON is
+    // never a privilege escalation, unlike a look forcing it off).
+    input.safeContentFilter = true;
+    if (negativeAllowed) {
+      const merged = input.negativePrompt ? `${input.negativePrompt}, ${SAFE_FOR_WORK_AVOID}` : SAFE_FOR_WORK_AVOID;
+      if (merged.length <= SOGNI_NEGATIVE_PROMPT_MAX) input.negativePrompt = merged;
+      else input.prompt = `${input.prompt}\n\nKeep out of the picture: ${SAFE_FOR_WORK_AVOID}.`;
+    } else {
+      input.prompt = `${input.prompt}\n\nKeep out of the picture: ${SAFE_FOR_WORK_AVOID}.`;
+    }
   }
   // An explicit seed wins over the look's fixed seed: "same look, but try
   // the seed from that other picture" is a normal thing to ask.
