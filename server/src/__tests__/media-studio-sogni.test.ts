@@ -962,11 +962,14 @@ describe("media-studio looks with Sogni models and LoRAs", () => {
     expect(listed.data.looks[0]).toMatchObject({ modelName: "Dark Beast Z-Image Turbo v9", contentFilter: "off" });
   });
 
-  // DUR-4133: a trusted caller's `safeForWork: true` (the morning report's
-  // pictures, which nobody reviews before they go out) must win over even a
-  // look an owner/admin saved with the filter off — forcing the filter ON is
-  // never a privilege escalation, unlike a look forcing it off.
-  it("safeForWork forces the content filter back on and adds the safety negative prompt, even for a look saved with the filter off", async () => {
+  // DUR-4138 (was DUR-4133's "forces the filter back on"): a trusted caller's
+  // `safeForWork: true` (the morning report's pictures, which nobody reviews
+  // before they go out) adds "Fully clothed." to the prompt and the fixed
+  // safety negative prompt, but no longer touches the provider's own content
+  // filter switch — a look an owner/admin explicitly saved with the filter
+  // off (e.g. Filip's own Sogni setting) is respected exactly like any other
+  // picture, since overriding it silently was the DUR-4138 bug.
+  it("safeForWork adds 'Fully clothed.' and the safety negative prompt, without touching a look's own filter-off setting", async () => {
     await setup();
     // chroma1-hd_fp8_scaled (unlike Dark Beast) is not "off-required", and it
     // supports "things to avoid" text, so the negative-prompt assertion below
@@ -976,7 +979,8 @@ describe("media-studio looks with Sogni models and LoRAs", () => {
     const result = await run({ prompt: "a sofa at night", look: "After dark", safeForWork: true });
     expect(result.error).toBeUndefined();
     const body = starts(fake)[0]!.body as any;
-    expect(body.safe_content_filter).toBe(true);
+    expect(body.safe_content_filter).toBe(false);
+    expect(body.input.steps[0].arguments.prompt).toContain("Fully clothed.");
     expect(body.input.steps[0].arguments.negativePrompt).toContain("nudity");
   });
 

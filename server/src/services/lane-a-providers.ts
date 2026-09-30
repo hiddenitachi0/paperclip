@@ -78,6 +78,15 @@ export interface LaneACompletionRequest {
    * provider.
    */
   providerRouting?: LaneAProviderRouting | null;
+  /**
+   * DUR-4138: asks an OpenAI-compatible host for strict JSON output
+   * (`response_format: { type: "json_object" }`) — only meaningful for a
+   * caller whose system prompt already demands one JSON object (transform()
+   * calls with no tools). Ignored by the Anthropic client (no equivalent in
+   * this SDK path) and by a host/model that does not support it — the caller
+   * must still parse defensively.
+   */
+  responseFormat?: "json_object";
 }
 
 export type LaneAStop = "end_turn" | "tool_use" | "max_tokens" | "other";
@@ -405,6 +414,10 @@ export function buildOpenAiCompatibleBody(provider: LaneAProvider, request: Lane
   if (typeof request.temperature === "number" && Number.isFinite(request.temperature)) {
     body.temperature = request.temperature;
   }
+  // DUR-4138: JSON mode, asked for, never assumed honored — the caller still
+  // extracts/validates defensively (a host or model that ignores this
+  // parameter answers exactly as it did before).
+  if (request.responseFormat === "json_object") body.response_format = { type: "json_object" };
   return body;
 }
 

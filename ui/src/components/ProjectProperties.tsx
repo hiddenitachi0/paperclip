@@ -1,7 +1,13 @@
 import { useEffect, useState } from "react";
 import { Link } from "@/lib/router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { GitHubTokenCheckReport, Project, ProjectDeployPolicy } from "@paperclipai/shared";
+import type {
+  GitHubTokenCheckReport,
+  Project,
+  ProjectDeployAskFirstAction,
+  ProjectDeployPolicy,
+  ProjectDeployTransport,
+} from "@paperclipai/shared";
 import { StatusBadge } from "./StatusBadge";
 import { cn, formatDate } from "../lib/utils";
 import { agentsApi } from "../api/agents";
@@ -51,11 +57,52 @@ function toDeployDraft(deployPolicy: ProjectDeployPolicy | null | undefined) {
     deployBranch: deployPolicy?.deployBranch ?? "",
     previewCommand: deployPolicy?.previewCommand ?? "",
     previewHealthPath: deployPolicy?.previewHealthPath ?? "",
+    mode: deployPolicy?.mode ?? "approval_every_time",
+    askFirstActions: deployPolicy?.askFirstActions ?? [],
+    sftpHost: deployPolicy?.sftpHost ?? "",
+    sftpPort: deployPolicy?.sftpPort ? String(deployPolicy.sftpPort) : "",
+    sftpUsername: deployPolicy?.sftpUsername ?? "",
+    sftpRemotePath: deployPolicy?.sftpRemotePath ?? "",
+    sftpAllowlist: deployPolicy?.sftpAllowlist ?? [],
     ...(deployPolicy?.mirrorBranch ? { mirrorBranch: deployPolicy.mirrorBranch } : {}),
   };
 }
 
 type DeployDraft = ReturnType<typeof toDeployDraft>;
+
+const DEPLOY_MODE_OPTIONS: { value: NonNullable<ProjectDeployPolicy["mode"]>; label: string; hint: string }[] = [
+  {
+    value: "approval_every_time",
+    label: "Every deploy needs my approval",
+    hint: "Today's behavior. Every merged change becomes a card for you to approve before it deploys.",
+  },
+  {
+    value: "auto_after_review",
+    label: "Deploy automatically once it's reviewed",
+    hint: "No approval card, unless the change also matches one of the categories below.",
+  },
+  {
+    value: "preview_only",
+    label: "Never deploy automatically, just give me a preview link",
+    hint: "Every change becomes a preview link. You push it live yourself when you're ready.",
+  },
+];
+
+const ASK_FIRST_ACTION_OPTIONS: { value: ProjectDeployAskFirstAction; label: string }[] = [
+  { value: "delete_or_overwrite_foreign_file", label: "Deleting or overwriting a file it didn't create" },
+  { value: "live_data_write", label: "Writing to live/production data" },
+  { value: "access_policy_change", label: "Changing who can access something" },
+  { value: "structural_change", label: "A structural change (schema, architecture)" },
+  { value: "costs_money", label: "Anything that costs money" },
+  { value: "publish_new_public_content", label: "Publishing new public content" },
+];
+
+function toggleAskFirstAction(
+  current: ProjectDeployAskFirstAction[],
+  action: ProjectDeployAskFirstAction,
+): ProjectDeployAskFirstAction[] {
+  return current.includes(action) ? current.filter((entry) => entry !== action) : [...current, action];
+}
 
 /** What gets sent to the server: empty optional strings/lists are dropped so the strict schema stays happy. */
 function toDeployPolicyPayload(draft: DeployDraft): Record<string, unknown> {
@@ -68,6 +115,12 @@ function toDeployPolicyPayload(draft: DeployDraft): Record<string, unknown> {
     mirrorBranch,
     previewCommand,
     previewHealthPath,
+    askFirstActions,
+    sftpHost,
+    sftpPort,
+    sftpUsername,
+    sftpRemotePath,
+    sftpAllowlist,
     ...rest
   } = draft;
   return {
@@ -80,6 +133,12 @@ function toDeployPolicyPayload(draft: DeployDraft): Record<string, unknown> {
     ...(mirrorBranch ? { mirrorBranch } : {}),
     ...(previewCommand.trim() ? { previewCommand: previewCommand.trim() } : {}),
     ...(previewHealthPath.trim() ? { previewHealthPath: previewHealthPath.trim() } : {}),
+    ...(askFirstActions.length > 0 ? { askFirstActions } : {}),
+    ...(sftpHost.trim() ? { sftpHost: sftpHost.trim() } : {}),
+    ...(sftpPort.trim() && Number.isFinite(Number(sftpPort.trim())) ? { sftpPort: Number(sftpPort.trim()) } : {}),
+    ...(sftpUsername.trim() ? { sftpUsername: sftpUsername.trim() } : {}),
+    ...(sftpRemotePath.trim() ? { sftpRemotePath: sftpRemotePath.trim() } : {}),
+    ...(sftpAllowlist.length > 0 ? { sftpAllowlist } : {}),
   };
 }
 
@@ -136,7 +195,15 @@ export type ProjectConfigFieldKey =
   | "deploy_env_file"
   | "deploy_compose_files"
   | "deploy_preview_command"
-  | "deploy_preview_health_path";
+  | "deploy_preview_health_path"
+  | "deploy_transport"
+  | "deploy_mode"
+  | "deploy_ask_first_actions"
+  | "deploy_sftp_host"
+  | "deploy_sftp_port"
+  | "deploy_sftp_username"
+  | "deploy_sftp_remote_path"
+  | "deploy_sftp_allowlist";
 
 function SaveIndicator({ state }: { state: ProjectFieldSaveState }) {
   if (state === "saving") {
@@ -591,6 +658,13 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
     });
   };
   const showDeployForm = deployDraft.enabled || deployFormOpen;
+
+  /** `deployTransport` lives on the project itself, not inside deployPolicy. */
+  const commitDeployTransport = (deployTransport: ProjectDeployTransport) => {
+    Promise.resolve(commitField("deploy_transport", { deployTransport })).catch((error: unknown) => {
+      setDeployError(errorMessage(error, "Could not save the deploy transport."));
+    });
+  };
 
   const isAbsolutePath = (value: string) => value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value);
 
@@ -1491,6 +1565,91 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
                 <div>
                   <div className="mb-1 flex items-center gap-1.5">
                     <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <span>How code reaches the server</span>
+                      <SaveIndicator state={fieldState("deploy_transport")} />
+                    </label>
+                  </div>
+                  <select
+                    className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs outline-none"
+                    value={project.deployTransport}
+                    onChange={(e) => commitDeployTransport(e.target.value as ProjectDeployTransport)}
+                  >
+                    <option value="git_push">Git: fetch the repo and run a recipe on the server</option>
+                    <option value="sftp">SFTP: upload an explicit list of files to a host</option>
+                  </select>
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    {project.deployTransport === "sftp"
+                      ? "The runner still fetches the repo below, then uploads only the allowlisted files over SFTP. No Docker Compose recipe runs."
+                      : "The runner fetches the repo into the folder below and runs the recipe there."}
+                  </p>
+                </div>
+
+                <div>
+                  <div className="mb-1 flex items-center gap-1.5">
+                    <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <span>When to deploy</span>
+                      <SaveIndicator state={fieldState("deploy_mode")} />
+                    </label>
+                  </div>
+                  <select
+                    className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs outline-none"
+                    value={deployDraft.mode}
+                    onChange={(e) =>
+                      commitDeployField("deploy_mode", { mode: e.target.value as DeployDraft["mode"] })}
+                  >
+                    {DEPLOY_MODE_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    {DEPLOY_MODE_OPTIONS.find((option) => option.value === deployDraft.mode)?.hint}
+                  </p>
+                </div>
+
+                <div>
+                  <div className="mb-1 flex items-center gap-1.5">
+                    <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <span>Ask me first when the change involves</span>
+                      <SaveIndicator state={fieldState("deploy_ask_first_actions")} />
+                    </label>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-border text-[10px] text-muted-foreground hover:text-foreground"
+                          aria-label="Ask-first categories help"
+                        >
+                          ?
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="top" className="max-w-[280px]">
+                        Whichever categories you check here always create an approval card for you, no matter what
+                        &ldquo;When to deploy&rdquo; is set to above.
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
+                  <div className="space-y-1.5">
+                    {ASK_FIRST_ACTION_OPTIONS.map((option) => (
+                      <label key={option.value} className="flex items-center gap-2 text-xs">
+                        <input
+                          type="checkbox"
+                          checked={deployDraft.askFirstActions.includes(option.value)}
+                          onChange={() =>
+                            commitDeployField("deploy_ask_first_actions", {
+                              askFirstActions: toggleAskFirstAction(deployDraft.askFirstActions, option.value),
+                            })}
+                        />
+                        {option.label}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <div className="mb-1 flex items-center gap-1.5">
+                    <label className="flex items-center gap-2 text-xs text-muted-foreground">
                       <span>Agent that requests deploys</span>
                       <SaveIndicator state={fieldState("deploy_requesting_agent")} />
                     </label>
@@ -1557,25 +1716,6 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
                 <div>
                   <div className="mb-1 flex items-center gap-1.5">
                     <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <span>How to deploy</span>
-                      <SaveIndicator state={fieldState("deploy_kind")} />
-                    </label>
-                  </div>
-                  <select
-                    className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs outline-none"
-                    value={deployDraft.deployKind}
-                    onChange={(e) =>
-                      commitDeployField("deploy_kind", { deployKind: e.target.value as DeployDraft["deployKind"] })}
-                  >
-                    <option value="compose_recreate">Docker Compose: restart the containers with the new code</option>
-                    <option value="compose_build_swap">Docker Compose: build the new version first, then swap it in</option>
-                    <option value="custom">Run a custom command</option>
-                  </select>
-                </div>
-
-                <div>
-                  <div className="mb-1 flex items-center gap-1.5">
-                    <label className="flex items-center gap-2 text-xs text-muted-foreground">
                       <span>Folder on the server</span>
                       <SaveIndicator state={fieldState("deploy_target_path")} />
                     </label>
@@ -1588,81 +1728,194 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
                     placeholder="/root/my-project"
                   />
                   <p className="mt-1 text-[11px] text-muted-foreground">
-                    Where the project is checked out on the server that runs it. Must be a full path starting with /.
+                    {project.deployTransport === "sftp"
+                      ? "Where the runner fetches the repo before uploading the allowlisted files out of it. Must be a full path starting with /."
+                      : "Where the project is checked out on the server that runs it. Must be a full path starting with /."}
                   </p>
                 </div>
 
-                {deployDraft.deployKind === "custom" ? (
-                  <div>
-                    <div className="mb-1 flex items-center gap-1.5">
-                      <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                        <span>Command to run</span>
-                        <SaveIndicator state={fieldState("deploy_command")} />
-                      </label>
+                {project.deployTransport === "sftp" ? (
+                  <div className="rounded-md border border-border/60 bg-muted/20 p-3 space-y-3">
+                    <p className="text-[11px] text-muted-foreground">
+                      The SFTP password or key is never entered here — an operator binds a Secret to the requesting
+                      agent separately (Agent settings → SFTP deploy credential). This form only says where to upload
+                      and which files may go.
+                    </p>
+                    <div>
+                      <div className="mb-1 flex items-center gap-1.5">
+                        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                          <span>SFTP host</span>
+                          <SaveIndicator state={fieldState("deploy_sftp_host")} />
+                        </label>
+                      </div>
+                      <DraftInput
+                        value={deployDraft.sftpHost}
+                        onCommit={(value) => commitDeployField("deploy_sftp_host", { sftpHost: value })}
+                        immediate
+                        className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs font-mono outline-none"
+                        placeholder="ftp.example.com"
+                      />
                     </div>
-                    <DraftInput
-                      value={deployDraft.deployCommand}
-                      onCommit={(value) => commitDeployField("deploy_command", { deployCommand: value })}
-                      immediate
-                      className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs font-mono outline-none"
-                      placeholder="bash ./scripts/deploy.sh"
-                    />
-                    <p className="mt-1 text-[11px] text-muted-foreground">Run inside the folder above after the new code is fetched.</p>
+                    <div>
+                      <div className="mb-1 flex items-center gap-1.5">
+                        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                          <span>SFTP port (optional)</span>
+                          <SaveIndicator state={fieldState("deploy_sftp_port")} />
+                        </label>
+                      </div>
+                      <DraftInput
+                        value={deployDraft.sftpPort}
+                        onCommit={(value) => commitDeployField("deploy_sftp_port", { sftpPort: value })}
+                        immediate
+                        className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs font-mono outline-none"
+                        placeholder="22"
+                      />
+                    </div>
+                    <div>
+                      <div className="mb-1 flex items-center gap-1.5">
+                        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                          <span>SFTP username</span>
+                          <SaveIndicator state={fieldState("deploy_sftp_username")} />
+                        </label>
+                      </div>
+                      <DraftInput
+                        value={deployDraft.sftpUsername}
+                        onCommit={(value) => commitDeployField("deploy_sftp_username", { sftpUsername: value })}
+                        immediate
+                        className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs font-mono outline-none"
+                        placeholder="deploy"
+                      />
+                    </div>
+                    <div>
+                      <div className="mb-1 flex items-center gap-1.5">
+                        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                          <span>Remote directory</span>
+                          <SaveIndicator state={fieldState("deploy_sftp_remote_path")} />
+                        </label>
+                      </div>
+                      <DraftInput
+                        value={deployDraft.sftpRemotePath}
+                        onCommit={(value) => commitDeployField("deploy_sftp_remote_path", { sftpRemotePath: value })}
+                        immediate
+                        className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs font-mono outline-none"
+                        placeholder="/httpdocs"
+                      />
+                      <p className="mt-1 text-[11px] text-muted-foreground">No spaces.</p>
+                    </div>
+                    <div>
+                      <div className="mb-1 flex items-center gap-1.5">
+                        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                          <span>Files allowed to upload (comma-separated)</span>
+                          <SaveIndicator state={fieldState("deploy_sftp_allowlist")} />
+                        </label>
+                      </div>
+                      <DraftInput
+                        value={deployDraft.sftpAllowlist.join(", ")}
+                        onCommit={(value) =>
+                          commitDeployField("deploy_sftp_allowlist", { sftpAllowlist: splitCommaList(value) })}
+                        className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs font-mono outline-none"
+                        placeholder="dist/index.html, dist/assets/app.js"
+                      />
+                      <p className="mt-1 text-[11px] text-muted-foreground">
+                        Exact paths inside the project folder, no wildcards. There is no whole-tree upload — only
+                        files listed here are ever sent.
+                      </p>
+                    </div>
                   </div>
                 ) : (
                   <>
                     <div>
                       <div className="mb-1 flex items-center gap-1.5">
                         <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                          <span>Services to restart (comma-separated)</span>
-                          <SaveIndicator state={fieldState("deploy_services")} />
+                          <span>How to deploy</span>
+                          <SaveIndicator state={fieldState("deploy_kind")} />
                         </label>
                       </div>
-                      <DraftInput
-                        value={deployDraft.deployServices.join(", ")}
-                        onCommit={(value) => commitDeployField("deploy_services", { deployServices: splitCommaList(value) })}
-                        className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs font-mono outline-none"
-                        placeholder="web, worker"
-                      />
-                      <p className="mt-1 text-[11px] text-muted-foreground">
-                        The service names from the Compose file. Leave empty to restart all of them.
-                      </p>
+                      <select
+                        className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs outline-none"
+                        value={deployDraft.deployKind}
+                        onChange={(e) =>
+                          commitDeployField("deploy_kind", { deployKind: e.target.value as DeployDraft["deployKind"] })}
+                      >
+                        <option value="compose_recreate">Docker Compose: restart the containers with the new code</option>
+                        <option value="compose_build_swap">Docker Compose: build the new version first, then swap it in</option>
+                        <option value="custom">Run a custom command</option>
+                      </select>
                     </div>
-                    <div>
-                      <div className="mb-1 flex items-center gap-1.5">
-                        <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                          <span>Environment file (optional)</span>
-                          <SaveIndicator state={fieldState("deploy_env_file")} />
-                        </label>
+
+                    {deployDraft.deployKind === "custom" ? (
+                      <div>
+                        <div className="mb-1 flex items-center gap-1.5">
+                          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                            <span>Command to run</span>
+                            <SaveIndicator state={fieldState("deploy_command")} />
+                          </label>
+                        </div>
+                        <DraftInput
+                          value={deployDraft.deployCommand}
+                          onCommit={(value) => commitDeployField("deploy_command", { deployCommand: value })}
+                          immediate
+                          className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs font-mono outline-none"
+                          placeholder="bash ./scripts/deploy.sh"
+                        />
+                        <p className="mt-1 text-[11px] text-muted-foreground">Run inside the folder above after the new code is fetched.</p>
                       </div>
-                      <DraftInput
-                        value={deployDraft.envFile}
-                        onCommit={(value) => commitDeployField("deploy_env_file", { envFile: value })}
-                        immediate
-                        className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs font-mono outline-none"
-                        placeholder=".env"
-                      />
-                      <p className="mt-1 text-[11px] text-muted-foreground">
-                        Passed to Docker Compose as its env file. A path inside the project folder.
-                      </p>
-                    </div>
-                    <div>
-                      <div className="mb-1 flex items-center gap-1.5">
-                        <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                          <span>Compose files (optional, comma-separated)</span>
-                          <SaveIndicator state={fieldState("deploy_compose_files")} />
-                        </label>
-                      </div>
-                      <DraftInput
-                        value={deployDraft.composeFiles.join(", ")}
-                        onCommit={(value) => commitDeployField("deploy_compose_files", { composeFiles: splitCommaList(value) })}
-                        className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs font-mono outline-none"
-                        placeholder="docker/docker-compose.yml, docker/docker-compose.prod.yml"
-                      />
-                      <p className="mt-1 text-[11px] text-muted-foreground">
-                        Only needed when the Compose file is not the docker-compose.yml at the top of the project folder.
-                      </p>
-                    </div>
+                    ) : (
+                      <>
+                        <div>
+                          <div className="mb-1 flex items-center gap-1.5">
+                            <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                              <span>Services to restart (comma-separated)</span>
+                              <SaveIndicator state={fieldState("deploy_services")} />
+                            </label>
+                          </div>
+                          <DraftInput
+                            value={deployDraft.deployServices.join(", ")}
+                            onCommit={(value) => commitDeployField("deploy_services", { deployServices: splitCommaList(value) })}
+                            className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs font-mono outline-none"
+                            placeholder="web, worker"
+                          />
+                          <p className="mt-1 text-[11px] text-muted-foreground">
+                            The service names from the Compose file. Leave empty to restart all of them.
+                          </p>
+                        </div>
+                        <div>
+                          <div className="mb-1 flex items-center gap-1.5">
+                            <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                              <span>Environment file (optional)</span>
+                              <SaveIndicator state={fieldState("deploy_env_file")} />
+                            </label>
+                          </div>
+                          <DraftInput
+                            value={deployDraft.envFile}
+                            onCommit={(value) => commitDeployField("deploy_env_file", { envFile: value })}
+                            immediate
+                            className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs font-mono outline-none"
+                            placeholder=".env"
+                          />
+                          <p className="mt-1 text-[11px] text-muted-foreground">
+                            Passed to Docker Compose as its env file. A path inside the project folder.
+                          </p>
+                        </div>
+                        <div>
+                          <div className="mb-1 flex items-center gap-1.5">
+                            <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                              <span>Compose files (optional, comma-separated)</span>
+                              <SaveIndicator state={fieldState("deploy_compose_files")} />
+                            </label>
+                          </div>
+                          <DraftInput
+                            value={deployDraft.composeFiles.join(", ")}
+                            onCommit={(value) => commitDeployField("deploy_compose_files", { composeFiles: splitCommaList(value) })}
+                            className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs font-mono outline-none"
+                            placeholder="docker/docker-compose.yml, docker/docker-compose.prod.yml"
+                          />
+                          <p className="mt-1 text-[11px] text-muted-foreground">
+                            Only needed when the Compose file is not the docker-compose.yml at the top of the project folder.
+                          </p>
+                        </div>
+                      </>
+                    )}
                   </>
                 )}
 

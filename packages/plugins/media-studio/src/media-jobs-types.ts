@@ -16,6 +16,19 @@ export interface MediaJobInput {
   model?: string;
   /** image-to-video / continue-from-last-frame: a data: URI of the starting frame. */
   startImage?: string;
+  /**
+   * DUR-4127: additional character/Look reference pictures (data: URIs) a
+   * caller would like considered *alongside* `startImage`. Carried through
+   * the type so a caller (video-storyline-render.ts) can express the intent,
+   * but neither FalVideoProvider nor SogniVideoProvider consumes it today --
+   * Fal's image-to-video endpoint and Sogni's assumed video tool (see
+   * video.ts's own doc comment) only confirm a single reference image each,
+   * not several combined with a continuity frame in the same call. A caller
+   * that sets this should not assume the pictures are actually used; see the
+   * DUR-4127 PR's "Questions for Filip" for what confirming real
+   * multi-reference support on either provider would take.
+   */
+  referenceImages?: string[];
   /** Music vs. speech, for an audio job (ignored for video). */
   mode?: "music" | "speech";
   /** Text-to-speech only: which voice, when the model takes one. */

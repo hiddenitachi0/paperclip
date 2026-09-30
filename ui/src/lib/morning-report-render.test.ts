@@ -18,10 +18,17 @@ const facts: MorningReportFacts = {
     { symbol: "BTC", price: 65000, currency: "USD", changePercent: 1.2, history: [] },
     { symbol: "DNB.OL", price: 210.5, currency: "NOK", changePercent: -0.4, history: [] },
   ],
-  images: [{ fileId: "file-1", caption: "Maja dressed for the weather", kind: "weather" }],
+  images: [
+    { fileId: "file-1", caption: "Maja dressed for the weather", kind: "weather" },
+    { fileId: "file-2", caption: "Today's mood, in one picture.", kind: "mood" },
+  ],
   opening: "Good morning! A calm day in the markets.",
   teaser: "Drøbak 8°C, Oslo 6°C. Big news story. BTC +1.2%.",
-  stats: { sourcesChecked: 3, itemsFound: 6 },
+  // Deliberately different from a recount of distinct sources across the kept
+  // fact lists (which would be 3): stats.sourcesChecked counts every source
+  // the agent checked, including ones with zero kept items after filtering —
+  // this is the exact "2 sources checked" vs "report says 11" bug (DUR-4138).
+  stats: { sourcesChecked: 11, itemsFound: 6 },
   briefingPageLive: true,
   notes: ["No stock data key configured for ETH."],
 };
@@ -52,10 +59,11 @@ describe("isSafeExternalUrl", () => {
 });
 
 describe("summarizeCoverage", () => {
-  it("counts distinct sources and total items across fact and price lists", () => {
-    // sources: bbc, nettavisen, zelda_dungeon = 3 distinct (bbc appears twice)
-    // items found: 4 fact items + 2 prices = 6
-    expect(summarizeCoverage(facts)).toEqual({ sourcesChecked: 3, itemsFound: 6 });
+  it("reads facts.stats directly, not a recount of distinct sources across kept items", () => {
+    // A recount over headlines/hobby/sport would give 3 (bbc, nettavisen,
+    // zelda_dungeon); facts.stats.sourcesChecked (11) is the real answer —
+    // every source the agent checked, including ones filtered/deduped away.
+    expect(summarizeCoverage(facts)).toEqual({ sourcesChecked: 11, itemsFound: 6 });
   });
 
   it("returns zero for an empty facts object", () => {
@@ -81,6 +89,7 @@ describe("buildStandaloneReportHtml", () => {
   it("renders every fact section from a realistic fixture", () => {
     const html = buildStandaloneReportHtml(report, "Maja", [
       { fileId: "file-1", caption: "Maja dressed for the weather", dataUrl: "data:image/png;base64,AAAA" },
+      { fileId: "file-2", caption: "Today's mood, in one picture.", dataUrl: "data:image/png;base64,MOOD" },
     ]);
 
     expect(html).toContain("Maja's morning report");
@@ -95,7 +104,20 @@ describe("buildStandaloneReportHtml", () => {
     expect(html).toContain("Drøbak");
     expect(html).toContain("Cloudy, 8°C");
     expect(html).toContain("data:image/png;base64,AAAA");
-    expect(html).toContain("3 sources checked, 6 items found.");
+    expect(html).toContain("data:image/png;base64,MOOD");
+    // facts.stats, not a recount (DUR-4138) — see summarizeCoverage.
+    expect(html).toContain("11 sources checked, 6 items found.");
+  });
+
+  it("orders sections the same way the live briefing page does: mood image, headlines, weather, prices, hobby, sport, notes", () => {
+    const html = buildStandaloneReportHtml(report, "Maja", [
+      { fileId: "file-1", caption: "Maja dressed for the weather", dataUrl: "data:image/png;base64,AAAA" },
+      { fileId: "file-2", caption: "Today's mood, in one picture.", dataUrl: "data:image/png;base64,MOOD" },
+    ]);
+    const order = ["data:image/png;base64,MOOD", "Big news story", "Cloudy, 8°C", "BTC", "Zelda update", "Zuccarello scores", "No stock data key configured"];
+    const indices = order.map((marker) => html.indexOf(marker));
+    for (const i of indices) expect(i).toBeGreaterThan(-1);
+    for (let i = 1; i < indices.length; i++) expect(indices[i]).toBeGreaterThan(indices[i - 1]!);
   });
 
   it("only ever embeds already-fetched data: URIs for images, never a live network reference", () => {
