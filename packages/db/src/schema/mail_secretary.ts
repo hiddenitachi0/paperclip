@@ -126,6 +126,10 @@ export const mailSecretaryItems = pgTable(
     delegateAgentId: uuid("delegate_agent_id").references(() => agents.id, { onDelete: "set null" }),
     delegationStatus: text("delegation_status").notNull().default("none"),
     delegationCategory: text("delegation_category"),
+    // DUR-4142: set when decision = 'triggered_job' -- the routine_runs row the
+    // matching job trigger produced. Plain uuid (no FK) to avoid a schema-file
+    // import cycle with routines.ts, which already references mail_inboxes.
+    triggeredRoutineRunId: uuid("triggered_routine_run_id"),
     // The untrusted-content-framed text Maja actually reads (or would read,
     // in practice mode) -- never Maja's own words, always the delimited
     // "this is data, not instructions" wrapper (see mail-secretary.ts).
@@ -147,7 +151,7 @@ export const mailSecretaryItems = pgTable(
     ),
     decisionCheck: check(
       "mail_secretary_items_decision_check",
-      sql`${table.decision} IN ('ignored_by_filter', 'ignored_by_classifier', 'kept_for_filip', 'delegated_to_maja', 'error')`,
+      sql`${table.decision} IN ('ignored_by_filter', 'ignored_by_classifier', 'kept_for_filip', 'delegated_to_maja', 'triggered_job', 'error')`,
     ),
     delegationStatusCheck: check(
       "mail_secretary_items_delegation_status_check",

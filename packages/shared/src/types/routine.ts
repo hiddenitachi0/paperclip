@@ -1,6 +1,8 @@
 import type {
   IssueOriginKind,
   IssuePriority,
+  JobRunMode,
+  ModelProfileKey,
   RoutineCatchUpPolicy,
   RoutineConcurrencyPolicy,
   RoutineStatus,
@@ -8,6 +10,7 @@ import type {
   RoutineTriggerSigningMode,
   RoutineVariableType,
 } from "../constants.js";
+import type { MailFilterField, MailFilterMatchType } from "../mail-secretary.js";
 import type { EnvBinding } from "./secrets.js";
 import type { ExecutionWorkspaceMode, IssueExecutionWorkspaceSettings } from "./workspace-runtime.js";
 
@@ -84,6 +87,11 @@ export interface Routine {
   originId?: string | null;
   variables: RoutineVariable[];
   env?: RoutineEnvConfig | null;
+  runMode: JobRunMode;
+  modelProfile: ModelProfileKey | null;
+  effort: string | null;
+  outputFormat: string | null;
+  requiresApprovalBeforeDone: boolean;
   latestRevisionId: string | null;
   latestRevisionNumber: number;
   createdByAgentId: string | null;
@@ -126,6 +134,11 @@ export interface RoutineRevisionSnapshotRoutineV1 {
   originId?: string | null;
   variables: RoutineVariable[];
   env: RoutineEnvConfig | null;
+  runMode: JobRunMode;
+  modelProfile: ModelProfileKey | null;
+  effort: string | null;
+  outputFormat: string | null;
+  requiresApprovalBeforeDone: boolean;
 }
 
 export interface RoutineRevisionSnapshotTriggerV1 {
@@ -139,6 +152,10 @@ export interface RoutineRevisionSnapshotTriggerV1 {
   signingMode: RoutineTriggerSigningMode | null;
   replayWindowSec: number | null;
   customerInboxChannel: string | null;
+  mailInboxId: string | null;
+  mailRuleField: MailFilterField | null;
+  mailRuleMatchType: MailFilterMatchType | null;
+  mailRuleValue: string | null;
 }
 
 export interface RoutineRevisionSnapshotV1 {
@@ -181,6 +198,10 @@ export interface RoutineTrigger {
   signingMode: string | null;
   replayWindowSec: number | null;
   customerInboxChannel: string | null;
+  mailInboxId: string | null;
+  mailRuleField: MailFilterField | null;
+  mailRuleMatchType: MailFilterMatchType | null;
+  mailRuleValue: string | null;
   lastRotatedAt: Date | null;
   lastResult: string | null;
   createdByAgentId: string | null;
@@ -216,6 +237,13 @@ export interface RoutineTriggerSecretMaterial {
   webhookSecret: string;
 }
 
+/** A Position (company_agent_role) a job is attached to -- see RoutinePosition. */
+export interface RoutinePositionSummary {
+  id: string;
+  name: string;
+  key: string;
+}
+
 export interface RoutineDetail extends Routine {
   project: RoutineProjectSummary | null;
   assignee: RoutineAgentSummary | null;
@@ -224,6 +252,7 @@ export interface RoutineDetail extends Routine {
   triggers: RoutineTrigger[];
   recentRuns: RoutineRunSummary[];
   activeIssue: RoutineIssueSummary | null;
+  positions: RoutinePositionSummary[];
 }
 
 export interface RoutineRunSummary extends RoutineRun {
@@ -249,4 +278,5 @@ export interface RoutineListItem extends Routine {
   triggers: Pick<RoutineTrigger, "id" | "kind" | "label" | "enabled" | "cronExpression" | "timezone" | "nextRunAt" | "lastFiredAt" | "lastResult">[];
   lastRun: RoutineRunSummary | null;
   activeIssue: RoutineIssueSummary | null;
+  positions: RoutinePositionSummary[];
 }

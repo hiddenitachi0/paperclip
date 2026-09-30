@@ -569,14 +569,27 @@ export type RoutineConcurrencyPolicy = (typeof ROUTINE_CONCURRENCY_POLICIES)[num
 export const ROUTINE_CATCH_UP_POLICIES = ["skip_missed", "enqueue_missed_with_cap"] as const;
 export type RoutineCatchUpPolicy = (typeof ROUTINE_CATCH_UP_POLICIES)[number];
 
-export const ROUTINE_TRIGGER_KINDS = ["schedule", "webhook", "api"] as const;
+// DUR-4142: "mail_secretary_rule" is the event trigger -- "a job can also
+// start on an email matched the secretary's rule" -- fired from
+// triageOneMessage in server/src/services/mail-secretary.ts.
+export const ROUTINE_TRIGGER_KINDS = ["schedule", "webhook", "api", "mail_secretary_rule"] as const;
 export type RoutineTriggerKind = (typeof ROUTINE_TRIGGER_KINDS)[number];
 
 export const ROUTINE_TRIGGER_SIGNING_MODES = ["bearer", "hmac_sha256", "github_hmac", "none"] as const;
 export type RoutineTriggerSigningMode = (typeof ROUTINE_TRIGGER_SIGNING_MODES)[number];
 
-export const ROUTINE_VARIABLE_TYPES = ["text", "textarea", "number", "boolean", "select", "date"] as const;
+// DUR-4142: "file" lets a job ask for an upload (e.g. the contract to
+// revise). Its value is the id of an issue_attachments row created via
+// POST /companies/:companyId/routines/:routineId/run-attachments ahead of
+// the run, not the file content itself -- see dispatchRoutineRun.
+export const ROUTINE_VARIABLE_TYPES = ["text", "textarea", "number", "boolean", "select", "date", "file"] as const;
 export type RoutineVariableType = (typeof ROUTINE_VARIABLE_TYPES)[number];
+
+// DUR-4142 "Jobs": run mode is a hint only -- see the routines schema comment
+// (packages/db/src/schema/routines.ts) and dispatchRoutineRun for exactly
+// what it changes today.
+export const JOB_RUN_MODES = ["quick_agent", "full_agent"] as const;
+export type JobRunMode = (typeof JOB_RUN_MODES)[number];
 
 // DUR-68: a webhook trigger with a non-null customerInboxChannel is owned by
 // the generic customer-inbox door (POST /api/customer-inbox/:publicId)
