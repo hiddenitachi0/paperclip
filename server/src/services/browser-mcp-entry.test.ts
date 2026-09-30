@@ -24,4 +24,26 @@ describe("resolveBrowserMcpServerEntry", () => {
   it("also offers the tool at book_and_buy (this phase only serves browse-and-forms tools regardless of level)", () => {
     expect(resolveBrowserMcpServerEntry({ adapterConfig: { laneA: { browserAccess: "book_and_buy" } } })).not.toBeNull();
   });
+
+  // DUR-4070: a "limited"-trust agent must never get the browser tool
+  // offered, no matter what its own browserAccess switch says.
+  it("adds nothing for a limited-trust agent even at book_and_buy", () => {
+    expect(
+      resolveBrowserMcpServerEntry({
+        adapterConfig: { laneA: { browserAccess: "book_and_buy" } },
+        laneATrustLevel: "limited",
+      }),
+    ).toBeNull();
+  });
+
+  it("still offers the tool for standard/full trust, unchanged", () => {
+    for (const trust of ["standard", "full", null, undefined] as const) {
+      expect(
+        resolveBrowserMcpServerEntry({
+          adapterConfig: { laneA: { browserAccess: "book_and_buy" } },
+          laneATrustLevel: trust,
+        }),
+      ).not.toBeNull();
+    }
+  });
 });

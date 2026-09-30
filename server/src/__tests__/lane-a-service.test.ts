@@ -1226,6 +1226,10 @@ describeEmbeddedPostgres("lane A service", () => {
       { companyId, principalType: "user", principalId: "viewer-1", status: "active", membershipRole: "viewer" },
       { companyId, principalType: "user", principalId: "operator-1", status: "active", membershipRole: "operator" },
     ]);
+    // DUR-4070: this test is about the tasks:assign permission check further
+    // downstream, not the assignment gate -- assign both non-owner members to
+    // Ada so they clear that gate and reach the check under test.
+    target.laneAAssignedUserIds = ["viewer-1", "operator-1"];
 
     const toolTurn = {
       content: [
@@ -1465,6 +1469,10 @@ describeEmbeddedPostgres("lane A service", () => {
     await db.insert(companyMemberships).values([
       { companyId, principalType: "user", principalId: "viewer-1", status: "active", membershipRole: "viewer" },
     ]);
+    // DUR-4070: this test is about the tasks:assign permission check, not the
+    // assignment gate -- assign the non-owner viewer to Maja so they clear
+    // that gate and reach the check under test.
+    maja.laneAAssignedUserIds = ["viewer-1"];
     const toolTurn = {
       content: [
         { type: "tool_use", id: "call_1", name: "start_research_task", input: { kind: "price_hunt", brief: "Best price on a Moccamaster KBG Select in Norway" } },

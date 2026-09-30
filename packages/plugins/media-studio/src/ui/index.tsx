@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { PluginCompanySettingsPageProps, PluginDetailTabProps } from "@paperclipai/plugin-sdk/ui";
-import { usePluginAction } from "@paperclipai/plugin-sdk/ui";
+import type { PluginCompanySettingsPageProps, PluginDetailTabProps, PluginPageProps, PluginSidebarProps } from "@paperclipai/plugin-sdk/ui";
+import { usePluginAction, useHostNavigation } from "@paperclipai/plugin-sdk/ui";
 
 // The plugin UI is served as a standalone ES module, so it must not import from
 // sibling plugin files (only bare specifiers resolve). Keep these in sync with
 // manifest.ts / providers.ts.
 const PLUGIN_ID = "paperclip.media-studio";
+const MAIN_PAGE_ROUTE = "media-studio";
 const ACTION_GENERATE = "generate";
 const PROVIDER = "media-studio";
 const ACTION_LOOKS_LIST = "looks.list";
@@ -2114,3 +2115,93 @@ const secondaryBtn: React.CSSProperties = { ...baseBtn, background: "#e7f5ff", c
 const approveBtn: React.CSSProperties = { ...baseBtn, background: "#087f5b", color: "#fff" };
 const dangerBtn: React.CSSProperties = { ...baseBtn, background: "#f03e3e", color: "#fff" };
 const ghostBtn: React.CSSProperties = { ...baseBtn, background: "transparent", color: "#495057", borderColor: "#ced4da" };
+
+function ImageIcon({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+      <circle cx="8.5" cy="8.5" r="1.5" />
+      <path d="M21 15l-5-5L5 21" />
+    </svg>
+  );
+}
+
+/** Main-menu link (Work section), next to Tools/Projects. */
+export function SidebarLink(_props: PluginSidebarProps) {
+  const nav = useHostNavigation();
+  return (
+    <a
+      {...nav.linkProps(`/${MAIN_PAGE_ROUTE}`)}
+      className="flex items-center gap-2.5 px-3 py-2 text-[13px] font-medium text-foreground/80 transition-colors hover:bg-accent/50 hover:text-foreground"
+      style={{ textDecoration: "none" }}
+    >
+      <span aria-hidden className="shrink-0"><ImageIcon /></span>
+      <span className="flex-1 truncate">Media Studio</span>
+    </a>
+  );
+}
+
+type MediaStudioTabKey = "create" | "looks";
+
+/** Reads ?tab= from the current URL without pulling in the host router (standalone module). */
+function initialTabFromLocation(): MediaStudioTabKey {
+  if (typeof window === "undefined") return "create";
+  const tab = new URLSearchParams(window.location.search).get("tab");
+  return tab === "looks" ? "looks" : "create";
+}
+
+const tabBtn: React.CSSProperties = { padding: "8px 14px", borderRadius: 8, border: "1px solid transparent", cursor: "pointer", fontSize: 13, fontWeight: 600, background: "transparent" };
+const tabBtnActive: React.CSSProperties = { ...tabBtn, background: "#e7f5ff", color: "#1971c2", borderColor: "#a5d8ff" };
+const tabBtnInactive: React.CSSProperties = { ...tabBtn, color: "#495057" };
+
+/**
+ * Media Studio's own top-level page, reached from the main menu. Tabs: Create
+ * (make a picture) and Looks (saved styles, model + LoRA presets, default and
+ * automatic looks). Edit (work on an existing picture) is planned but not
+ * built yet.
+ */
+export function MediaStudioPage({ context }: PluginPageProps) {
+  const nav = useHostNavigation();
+  const [tab, setTab] = useState<MediaStudioTabKey>(initialTabFromLocation);
+
+  const selectTab = (next: MediaStudioTabKey) => {
+    setTab(next);
+    nav.navigate(`/${MAIN_PAGE_ROUTE}?tab=${next}`, { replace: true });
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div>
+        <h1 style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>Media Studio</h1>
+        <p style={{ fontSize: 13, color: "#868e96", margin: "4px 0 0" }}>
+          Make pictures, and save the looks (styles) your agents use to make them.
+        </p>
+      </div>
+      <div role="tablist" aria-label="Media Studio" style={{ display: "flex", gap: 8, borderBottom: "1px solid rgba(128,128,128,0.25)", paddingBottom: 8 }}>
+        <button type="button" role="tab" aria-selected={tab === "create"} style={tab === "create" ? tabBtnActive : tabBtnInactive} onClick={() => selectTab("create")}>
+          Create
+        </button>
+        <button type="button" role="tab" aria-selected={tab === "looks"} style={tab === "looks" ? tabBtnActive : tabBtnInactive} onClick={() => selectTab("looks")}>
+          Looks
+        </button>
+      </div>
+      {tab === "create" ? <MediaStudioCreateTab /> : <MediaStudioLooksPage context={context} />}
+    </div>
+  );
+}
+
+/**
+ * The Create tab: for now this points people at where picture-making already
+ * happens (a task's Media Studio tab, or asking an agent). A standalone
+ * "make a picture here" flow is future work, tracked separately.
+ */
+function MediaStudioCreateTab() {
+  return (
+    <div style={card}>
+      <p style={{ fontSize: 13, margin: 0 }}>
+        To make a picture right now, open a task and use its Media Studio tab, or just ask an agent
+        (for example, "make me a picture of..."). A way to make pictures directly from this page is coming soon.
+      </p>
+    </div>
+  );
+}

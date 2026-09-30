@@ -265,6 +265,16 @@ d("paymentCardService", () => {
       await expect(service().resolveForFill(companyId, clearanceId, { agentId })).rejects.toMatchObject({ status: 403 });
     });
 
+    // DUR-4070: the trust-level ceiling must close this exact door -- reading
+    // a payment card's secret value -- even when the agent's own switch is
+    // book_and_buy; this is the ONLY reader of a card's secret material, so a
+    // gap here would have let a downgrade to Limited be silently ignored.
+    it("refuses when the agent's trust level is limited, even at book_and_buy", async () => {
+      const { companyId, agentId, clearanceId } = await reservedSetup({ browserAccess: "book_and_buy" });
+      await db.update(agents).set({ laneATrustLevel: "limited" }).where(eq(agents.id, agentId));
+      await expect(service().resolveForFill(companyId, clearanceId, { agentId })).rejects.toMatchObject({ status: 403 });
+    });
+
     it("404s when no card is reserved for the clearance", async () => {
       const companyId = await seedCompany();
       const agentId = await seedAgent(companyId);

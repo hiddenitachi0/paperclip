@@ -437,4 +437,45 @@ describe("POST /chat/classify", () => {
       laneAProviderRouting: { only: ["deepinfra"] },
     });
   });
+
+  // DUR-4070: this router (not routes/lane-a.ts) is what both the web chat
+  // box and the Telegram bridge's `chat send` actually call (see this file's
+  // module docstring). Forgetting to read laneAAssignedUserIds off the row
+  // here would make every one of this agent's assigned people read as "owner
+  // only" on both of those paths, even though the operator assigned them.
+  it("passes this agent's assigned people into Lane A", async () => {
+    mockAgentService.getById.mockResolvedValue(
+      makeAgent({ laneAAssignedUserIds: ["employee-1", "employee-2"] } as never),
+    );
+    mockLaneAService.sendMessage.mockResolvedValue({
+      conversationId: "conv-1",
+      response: "Hi!",
+      turnCount: 1,
+      stopReason: "end_turn",
+    });
+    const app = await createApp(boardActor());
+
+    await request(app).post(`/api/chat/${targetAgentId}/messages`).send({ companyId, message: "hi" });
+
+    expect(mockLaneAService.sendMessage.mock.calls[0][0].targetAgent).toMatchObject({
+      laneAAssignedUserIds: ["employee-1", "employee-2"],
+    });
+  });
+
+  it("defaults to no assigned people (owner only) when the agent row has none", async () => {
+    mockAgentService.getById.mockResolvedValue(makeAgent());
+    mockLaneAService.sendMessage.mockResolvedValue({
+      conversationId: "conv-1",
+      response: "Hi!",
+      turnCount: 1,
+      stopReason: "end_turn",
+    });
+    const app = await createApp(boardActor());
+
+    await request(app).post(`/api/chat/${targetAgentId}/messages`).send({ companyId, message: "hi" });
+
+    expect(mockLaneAService.sendMessage.mock.calls[0][0].targetAgent).toMatchObject({
+      laneAAssignedUserIds: [],
+    });
+  });
 });
