@@ -312,6 +312,7 @@ const storybookProject: Project = {
   pausedAt: null,
   executionWorkspacePolicy: null,
   deployPolicy: null,
+  deployTransport: "git_push",
   codebase: {
     workspaceId: "workspace-board-ui",
     repoUrl: "https://github.com/paperclipai/paperclip",

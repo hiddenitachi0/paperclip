@@ -590,6 +590,25 @@ export function registerSecretCommands(program: Command): void {
 
   addCommonClientOptions(
     secrets
+      .command("deploy-sftp-credential")
+      .description("Resolve an agent's SFTP deploy credential for the on-box deploy runner (instance-admin only)")
+      .requiredOption("-C, --company-id <id>", "Company ID")
+      .requiredOption("-A, --agent-id <id>", "Agent ID the credential is bound to")
+      .action(async (opts: SecretListOptions & { agentId: string }) => {
+        try {
+          const ctx = resolveCommandContext(opts, { requireCompany: true });
+          const result = await ctx.api.get<{ kind: string | null; value: string | null }>(
+            apiPath`/api/companies/${ctx.companyId}/agents/${opts.agentId}/deploy-sftp-credential`,
+          );
+          printOutput(result, { json: ctx.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+  );
+
+  addCommonClientOptions(
+    secrets
       .command("provider-configs")
       .description("List company secret provider vault configs")
       .requiredOption("-C, --company-id <id>", "Company ID")

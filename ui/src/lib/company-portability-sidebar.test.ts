@@ -55,6 +55,7 @@ function makeProject(id: string, name: string): Project {
     pausedAt: null,
     executionWorkspacePolicy: null,
     deployPolicy: null,
+    deployTransport: "git_push",
     archivedAt: null,
     goalIds: [],
     goals: [],
