@@ -1,4 +1,4 @@
-import type { ProjectDeployPolicy } from "@paperclipai/shared";
+import type { ProjectDeployPolicy, ProjectDeployTransport } from "@paperclipai/shared";
 
 /**
  * Plain-language completeness check for a project's deploy settings.
@@ -63,6 +63,7 @@ function hasWhitespace(value: string) {
 export function describeDeployPolicyProblems(
   policy: ProjectDeployPolicy,
   context: DeployPolicyValidationContext,
+  deployTransport: ProjectDeployTransport = "git_push",
 ): string[] {
   const problems: string[] = [];
   const enabled = policy.enabled === true;
@@ -74,7 +75,9 @@ export function describeDeployPolicyProblems(
   const deployBranch = (policy.deployBranch ?? "").trim();
   const mirrorBranch = (policy.mirrorBranch ?? "").trim();
 
-  // Workspace: must be one of this project's, and must have a repo to fetch from.
+  // Workspace: must be one of this project's, and must have a repo to fetch
+  // from. Needed for BOTH transports — SFTP still fetches the repo into the
+  // local folder below before uploading the allowlisted files out of it.
   if (workspaceId) {
     const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId);
     if (!workspace) {
@@ -89,7 +92,9 @@ export function describeDeployPolicyProblems(
     problems.push("Choose which workspace to deploy from before letting agents request deploys.");
   }
 
-  // Folder on the server.
+  // Folder on the server: for git_push this is also the live target; for sftp
+  // it is the local checkout the runner fetches into and reads the allowlist
+  // out of before uploading.
   if (targetPath) {
     if (!isAbsolutePath(targetPath)) {
       problems.push(
@@ -100,7 +105,10 @@ export function describeDeployPolicyProblems(
     problems.push("Fill in the folder on the server where this project is checked out, for example /root/my-project.");
   }
 
-  // Health check.
+  // Health check: required for BOTH transports. scripts/deploy-runner.sh
+  // refuses to act on a policy with an empty healthCheckUrl regardless of
+  // transport, so this cannot be sftp-only without leaving the runner's
+  // refusal "silent from the operator's point of view" for that transport.
   if (healthCheckUrl) {
     if (!isHttpUrl(healthCheckUrl)) {
       problems.push(
@@ -112,6 +120,46 @@ export function describeDeployPolicyProblems(
     problems.push(
       "Fill in the health check web address. After every deploy the runner opens it and rolls back if it does not answer OK.",
     );
+  }
+
+  // DUR-4068: SFTP transport uploads an explicit allowlist to a configured
+  // host instead of running a git-checkout-based recipe on the box, so the
+  // remaining "completeness" requirements are its own, checked only when this
+  // project's deployTransport is actually "sftp".
+  if (deployTransport === "sftp") {
+    const sftpHost = (policy.sftpHost ?? "").trim();
+    const sftpUsername = (policy.sftpUsername ?? "").trim();
+    const sftpRemotePath = (policy.sftpRemotePath ?? "").trim();
+    const sftpAllowlist = (policy.sftpAllowlist ?? []).map((entry) => entry.trim()).filter(Boolean);
+    if (!sftpHost && enabled) {
+      problems.push("Fill in the SFTP host to upload to before letting agents request deploys.");
+    }
+    if (!sftpUsername && enabled) {
+      problems.push("Fill in the SFTP username before letting agents request deploys.");
+    }
+    if (sftpRemotePath && hasWhitespace(sftpRemotePath)) {
+      problems.push(`The SFTP remote path cannot contain spaces (got "${sftpRemotePath}").`);
+    } else if (!sftpRemotePath && enabled) {
+      problems.push("Fill in the remote directory on the SFTP host to upload into before letting agents request deploys.");
+    }
+    if (sftpAllowlist.length === 0 && enabled) {
+      problems.push(
+        "List the exact files the deploy runner may upload over SFTP. There is no whole-tree or wildcard upload.",
+      );
+    }
+    for (const entry of policy.sftpAllowlist ?? []) {
+      const trimmedEntry = entry.trim();
+      if (trimmedEntry && !isRelativeInsideProject(trimmedEntry)) {
+        problems.push(
+          `Each file in the SFTP allowlist must be a path inside the project folder, with no ".." segments and no absolute path (got "${entry}").`,
+        );
+      }
+    }
+    if (policy.sftpPort !== undefined && (!Number.isInteger(policy.sftpPort) || policy.sftpPort <= 0)) {
+      problems.push(`The SFTP port must be a positive whole number (got "${policy.sftpPort}").`);
+    }
+    problems.push(...describeRequestingAgentProblems(policy, context));
+    return problems;
   }
 
   // DUR-3974: the pages that must still work after a deploy. Format only —
@@ -182,17 +230,25 @@ export function describeDeployPolicyProblems(
     );
   }
 
-  // Requesting agent.
-  if (policy.requestingAgentId) {
-    const agent = context.agents.find((candidate) => candidate.id === policy.requestingAgentId);
-    if (!agent) {
-      problems.push("The agent chosen to request deploys is not part of this company any more. Choose another agent.");
-    } else if (agent.status === "terminated") {
-      problems.push(`The agent chosen to request deploys, ${agent.name}, has been terminated. Choose another agent.`);
-    }
-  }
+  problems.push(...describeRequestingAgentProblems(policy, context));
 
   return problems;
+}
+
+/** Shared by both transports: whoever may request a deploy must still be a real, non-terminated agent. */
+function describeRequestingAgentProblems(
+  policy: ProjectDeployPolicy,
+  context: DeployPolicyValidationContext,
+): string[] {
+  if (!policy.requestingAgentId) return [];
+  const agent = context.agents.find((candidate) => candidate.id === policy.requestingAgentId);
+  if (!agent) {
+    return ["The agent chosen to request deploys is not part of this company any more. Choose another agent."];
+  }
+  if (agent.status === "terminated") {
+    return [`The agent chosen to request deploys, ${agent.name}, has been terminated. Choose another agent.`];
+  }
+  return [];
 }
 
 /** One operator-facing message for an HTTP 422, built from the problem list. */

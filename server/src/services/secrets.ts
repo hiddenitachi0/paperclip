@@ -86,6 +86,7 @@ const DEDICATED_TARGET_LABELS: Record<(typeof DEDICATED_SECRET_BINDING_TARGET_TY
   telegram_bot: "a Telegram bot",
   persona_account: "a persona account",
   site_login: "a site login",
+  deploy_sftp_credential: "a project's SFTP deploy credential",
 };
 
 /**

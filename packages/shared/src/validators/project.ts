@@ -10,6 +10,22 @@ const gitRemoteUrlSchema = z
   .url()
   .refine((value) => !hasEmbeddedGitCredential(value), { message: EMBEDDED_GIT_CREDENTIAL_ERROR_MESSAGE });
 
+/** See ProjectDeployTransport (types/workspace-runtime.ts). */
+export const deployTransportSchema = z.enum(["git_push", "sftp"]);
+
+/** See ProjectDeployPolicyMode (types/workspace-runtime.ts). */
+export const deployPolicyModeSchema = z.enum(["auto_after_review", "approval_every_time", "preview_only"]);
+
+/** See ProjectDeployAskFirstAction (types/workspace-runtime.ts). */
+export const deployAskFirstActionSchema = z.enum([
+  "delete_or_overwrite_foreign_file",
+  "live_data_write",
+  "access_policy_change",
+  "structural_change",
+  "costs_money",
+  "publish_new_public_content",
+]);
+
 const executionWorkspaceStrategySchema = z
   .object({
     type: z.enum(["project_primary", "git_worktree", "adapter_managed", "cloud_sandbox"]).optional(),
@@ -103,6 +119,27 @@ export const deployPolicySchema = z
      * preview link is worth handing to the operator.
      */
     previewHealthPath: z.string().optional(),
+    /**
+     * DUR-4068: governs whether a production deploy for this project's own
+     * site needs a board approval card. Unset = today's behavior (always a
+     * card, same as "approval_every_time").
+     */
+    mode: deployPolicyModeSchema.optional(),
+    /**
+     * DUR-4068: action categories that always force a request_board_approval
+     * card regardless of `mode`.
+     */
+    askFirstActions: z.array(deployAskFirstActionSchema).optional(),
+    /** SFTP host. Only meaningful when the project's deployTransport is "sftp". */
+    sftpHost: z.string().optional(),
+    sftpPort: z.number().int().positive().optional(),
+    sftpUsername: z.string().optional(),
+    sftpRemotePath: z.string().optional(),
+    /**
+     * Explicit list of local (repo-relative) files the deploy runner may
+     * upload over SFTP — never a wildcard/whole-tree upload (DUR-4068).
+     */
+    sftpAllowlist: z.array(z.string()).optional(),
   })
   .strict();
 
@@ -226,6 +263,8 @@ const projectFields = {
   env: envConfigSchema.optional().nullable(),
   executionWorkspacePolicy: projectExecutionWorkspacePolicySchema.optional().nullable(),
   deployPolicy: deployPolicySchema.optional().nullable(),
+  /** DUR-4068: unset/omitted stores "git_push", today's default behavior. */
+  deployTransport: deployTransportSchema.optional().default("git_push"),
   archivedAt: z.string().datetime().optional().nullable(),
 };
 

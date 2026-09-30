@@ -9,6 +9,7 @@ import {
   updateAgentPermissionsSchema,
   updateAgentInstructionsPathSchema,
   updateAgentInstructionsBundleSchema,
+  bindDeploySftpCredentialSchema,
   upsertAgentInstructionsFileSchema,
   createAgentKeySchema,
   wakeAgentSchema,
@@ -1537,6 +1538,36 @@ registry.registerPath({
     body: jsonBody(updateAgentInstructionsPathSchema),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/agents/{id}/deploy-sftp-credential",
+  tags: ["agents"],
+  summary: "Bind a secret as this agent's SFTP deploy credential (board only)",
+  request: {
+    params: z.object({ id: z.string() }),
+    body: jsonBody(bindDeploySftpCredentialSchema),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "delete",
+  path: "/api/agents/{id}/deploy-sftp-credential",
+  tags: ["agents"],
+  summary: "Unbind this agent's SFTP deploy credential (board only)",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/agents/{agentId}/deploy-sftp-credential",
+  tags: ["agents"],
+  summary: "Resolve an agent's SFTP deploy credential for the on-box deploy runner (instance admin only)",
+  request: { params: z.object({ companyId: z.string(), agentId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
 });
 
 registry.registerPath({

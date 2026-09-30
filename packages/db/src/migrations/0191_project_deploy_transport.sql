@@ -1,0 +1,13 @@
+-- DUR-4068 (backend: schema, types, API, deploy-runner for deploy policy +
+-- SFTP). Purely additive, no existing row rewritten, no existing column
+-- touched.
+--
+-- projects.deploy_transport: which upload mechanism the deploy runner uses
+-- for a project's production target -- "git_push" (default, today's
+-- behavior, unchanged) or "sftp" (new). Kept as its own plain column rather
+-- than folded into deploy_policy's jsonb because it decides which OTHER
+-- deploy_policy fields (git repo/branch vs. SFTP host/allowlist) apply.
+-- Validated in the app layer (packages/shared/src/validators/project.ts),
+-- like deploy_policy's own deployKind/rollback enums -- no CHECK constraint,
+-- consistent with that existing convention.
+ALTER TABLE "projects" ADD COLUMN IF NOT EXISTS "deploy_transport" text NOT NULL DEFAULT 'git_push';

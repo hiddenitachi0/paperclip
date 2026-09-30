@@ -1,4 +1,10 @@
-import type { ProjectDeployKind, ProjectDeployPolicy, ProjectDeployRollbackStrategy } from "@paperclipai/shared";
+import type {
+  ProjectDeployAskFirstAction,
+  ProjectDeployKind,
+  ProjectDeployPolicy,
+  ProjectDeployPolicyMode,
+  ProjectDeployRollbackStrategy,
+} from "@paperclipai/shared";
 import { asString, asStringArray, parseObject } from "../adapters/utils.js";
 
 function isDeployKind(value: unknown): value is ProjectDeployKind {
@@ -7,6 +13,23 @@ function isDeployKind(value: unknown): value is ProjectDeployKind {
 
 function isDeployRollbackStrategy(value: unknown): value is ProjectDeployRollbackStrategy {
   return value === "git_previous" || value === "none";
+}
+
+function isDeployPolicyMode(value: unknown): value is ProjectDeployPolicyMode {
+  return value === "auto_after_review" || value === "approval_every_time" || value === "preview_only";
+}
+
+const ASK_FIRST_ACTIONS = new Set<ProjectDeployAskFirstAction>([
+  "delete_or_overwrite_foreign_file",
+  "live_data_write",
+  "access_policy_change",
+  "structural_change",
+  "costs_money",
+  "publish_new_public_content",
+]);
+
+function isAskFirstAction(value: unknown): value is ProjectDeployAskFirstAction {
+  return typeof value === "string" && ASK_FIRST_ACTIONS.has(value as ProjectDeployAskFirstAction);
 }
 
 export function parseProjectDeployPolicy(raw: unknown): ProjectDeployPolicy | null {
@@ -33,5 +56,14 @@ export function parseProjectDeployPolicy(raw: unknown): ProjectDeployPolicy | nu
     ...(typeof parsed.mirrorBranch === "string" ? { mirrorBranch: parsed.mirrorBranch } : {}),
     ...(typeof parsed.previewCommand === "string" ? { previewCommand: parsed.previewCommand } : {}),
     ...(typeof parsed.previewHealthPath === "string" ? { previewHealthPath: parsed.previewHealthPath } : {}),
+    ...(isDeployPolicyMode(parsed.mode) ? { mode: parsed.mode } : {}),
+    ...(Array.isArray(parsed.askFirstActions)
+      ? { askFirstActions: parsed.askFirstActions.filter(isAskFirstAction) }
+      : {}),
+    ...(typeof parsed.sftpHost === "string" ? { sftpHost: parsed.sftpHost } : {}),
+    ...(typeof parsed.sftpPort === "number" ? { sftpPort: parsed.sftpPort } : {}),
+    ...(typeof parsed.sftpUsername === "string" ? { sftpUsername: parsed.sftpUsername } : {}),
+    ...(typeof parsed.sftpRemotePath === "string" ? { sftpRemotePath: parsed.sftpRemotePath } : {}),
+    ...(Array.isArray(parsed.sftpAllowlist) ? { sftpAllowlist: asStringArray(parsed.sftpAllowlist) } : {}),
   };
 }

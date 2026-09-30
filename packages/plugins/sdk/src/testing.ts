@@ -1050,6 +1050,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
             pausedAt: null,
             executionWorkspacePolicy: null,
             deployPolicy: null,
+            deployTransport: "git_push",
             codebase: {
               workspaceId: null,
               repoUrl: null,
