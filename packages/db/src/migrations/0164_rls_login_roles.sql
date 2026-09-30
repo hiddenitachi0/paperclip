@@ -287,7 +287,7 @@ DECLARE
     'plugins',
     'principal_permission_grants',
     -- DUR-4094 emergency-access audit trail. Created (and granted on) in
-    -- 0192_private_access_events.sql; listed here so the login-role lists
+    -- 0193_private_access_events.sql; listed here so the login-role lists
     -- match the schema, as for the tables above. Company-scoped, so it is
     -- in both lists.
     'private_access_events',
@@ -461,7 +461,7 @@ DECLARE
     'plugin_webhook_deliveries',
     'principal_permission_grants',
     -- DUR-4094 emergency-access audit trail. Created (and granted on) in
-    -- 0192_private_access_events.sql; listed here so the login-role lists
+    -- 0193_private_access_events.sql; listed here so the login-role lists
     -- match the schema, as for the tables above. Company-scoped, so it is
     -- in both lists.
     'private_access_events',
