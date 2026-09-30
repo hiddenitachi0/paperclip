@@ -131,6 +131,8 @@ export const MAIL_INBOX_DEFAULT_PRACTICE_MODE = true;
 const mailInboxFields = {
   name: z.string().trim().min(1, "Give the inbox a name, e.g. \"Filip's inbox\".").max(80),
   agentId: z.string().uuid("Pick the quick agent this secretary duty runs as."),
+  /** Who relevant mail is delegated to (e.g. Maja). Not required -- delegation-eligible mail is kept for Filip instead when unset. */
+  delegateAgentId: z.string().uuid().nullable(),
   imapHost: z.string().trim().min(1, "Enter the IMAP server address.").max(255),
   imapPort: z.number().int().min(1).max(65535),
   imapSecure: z.boolean(),
@@ -152,6 +154,7 @@ export const createMailInboxSchema = z
     imapPort: mailInboxFields.imapPort.default(993),
     imapSecure: mailInboxFields.imapSecure.default(true),
     imapMailbox: mailInboxFields.imapMailbox.default("INBOX"),
+    delegateAgentId: mailInboxFields.delegateAgentId.optional().default(null),
     credentialSecretId: mailInboxFields.credentialSecretId.optional().default(null),
     enabled: mailInboxFields.enabled.default(true),
     practiceMode: mailInboxFields.practiceMode.default(MAIL_INBOX_DEFAULT_PRACTICE_MODE),

@@ -39,6 +39,12 @@ export const mailInboxes = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
     agentId: uuid("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+    // DUR-4093: the agent relevant mail is delegated to (Filip's decision:
+    // Maja, for reporting-relevant newsletter items, purchase receipts and
+    // booking confirmations). Not hardcoded to any one agent -- an operator
+    // picks it per inbox, and it may be left unset (delegation-eligible mail
+    // then falls back to 'kept_for_filip' instead of being dropped).
+    delegateAgentId: uuid("delegate_agent_id").references(() => agents.id, { onDelete: "set null" }),
     name: text("name").notNull(),
     imapHost: text("imap_host").notNull(),
     imapPort: integer("imap_port").notNull().default(993),

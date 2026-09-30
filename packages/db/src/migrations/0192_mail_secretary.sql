@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS "mail_inboxes" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"company_id" uuid NOT NULL,
 	"agent_id" uuid NOT NULL,
+	"delegate_agent_id" uuid,
 	"name" text NOT NULL,
 	"imap_host" text NOT NULL,
 	"imap_port" integer DEFAULT 993 NOT NULL,
@@ -108,6 +109,9 @@ DO $$ BEGIN
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'mail_inboxes_agent_id_agents_id_fk') THEN
     ALTER TABLE "mail_inboxes" ADD CONSTRAINT "mail_inboxes_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'mail_inboxes_delegate_agent_id_agents_id_fk') THEN
+    ALTER TABLE "mail_inboxes" ADD CONSTRAINT "mail_inboxes_delegate_agent_id_agents_id_fk" FOREIGN KEY ("delegate_agent_id") REFERENCES "public"."agents"("id") ON DELETE set null ON UPDATE no action;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'mail_inboxes_credential_secret_id_company_secrets_id_fk') THEN
     ALTER TABLE "mail_inboxes" ADD CONSTRAINT "mail_inboxes_credential_secret_id_company_secrets_id_fk" FOREIGN KEY ("credential_secret_id") REFERENCES "public"."company_secrets"("id") ON DELETE set null ON UPDATE no action;
