@@ -32,6 +32,12 @@ export const ACTION_LOOK_RULES_PREVIEW = "lookRules.preview";
 export const ACTION_SOGNI_MODELS = "sogni.models";
 /** The LoRAs that work with one Sogni model, for the looks page. */
 export const ACTION_SOGNI_LORAS = "sogni.loras";
+/** Which AI edit services (Sogni/Fal) are configured, for the Edit tab. */
+export const ACTION_EDIT_CAPABILITIES = "edit.capabilities";
+/** Run one Sogni picture tool on a picture the person is editing (no daily cap: not an agent call). */
+export const ACTION_EDIT_SOGNI = "edit.sogni";
+/** Run a Fal.ai prompt edit ("make variations" / "edit with a prompt") on a picture the person is editing. */
+export const ACTION_EDIT_FAL = "edit.fal";
 export const ISSUE_TAB_SLOT = "media-studio-issue-tab";
 export const ISSUE_TAB_EXPORT = "MediaStudioIssueTab";
 export const LOOKS_PAGE_EXPORT = "MediaStudioLooksPage";

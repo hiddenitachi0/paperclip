@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PluginCompanySettingsPageProps, PluginDetailTabProps, PluginPageProps, PluginSidebarProps } from "@paperclipai/plugin-sdk/ui";
 import { usePluginAction, useHostNavigation } from "@paperclipai/plugin-sdk/ui";
+import { MediaStudioEditTab } from "./edit-tab.js";
 
 // The plugin UI is served as a standalone ES module, so it must not import from
 // sibling plugin files (only bare specifiers resolve). Keep these in sync with
@@ -2141,13 +2142,13 @@ export function SidebarLink(_props: PluginSidebarProps) {
   );
 }
 
-type MediaStudioTabKey = "create" | "looks";
+type MediaStudioTabKey = "create" | "edit" | "looks";
 
 /** Reads ?tab= from the current URL without pulling in the host router (standalone module). */
 function initialTabFromLocation(): MediaStudioTabKey {
   if (typeof window === "undefined") return "create";
   const tab = new URLSearchParams(window.location.search).get("tab");
-  return tab === "looks" ? "looks" : "create";
+  return tab === "looks" || tab === "edit" ? tab : "create";
 }
 
 const tabBtn: React.CSSProperties = { padding: "8px 14px", borderRadius: 8, border: "1px solid transparent", cursor: "pointer", fontSize: 13, fontWeight: 600, background: "transparent" };
@@ -2156,9 +2157,9 @@ const tabBtnInactive: React.CSSProperties = { ...tabBtn, color: "#495057" };
 
 /**
  * Media Studio's own top-level page, reached from the main menu. Tabs: Create
- * (make a picture) and Looks (saved styles, model + LoRA presets, default and
- * automatic looks). Edit (work on an existing picture) is planned but not
- * built yet.
+ * (make a picture), Edit (work on an existing picture -- crop, rotate,
+ * resize, adjust, add text, AI edits; DUR-4063) and Looks (saved styles,
+ * model + LoRA presets, default and automatic looks).
  */
 export function MediaStudioPage({ context }: PluginPageProps) {
   const nav = useHostNavigation();
@@ -2174,18 +2175,21 @@ export function MediaStudioPage({ context }: PluginPageProps) {
       <div>
         <h1 style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>Media Studio</h1>
         <p style={{ fontSize: 13, color: "#868e96", margin: "4px 0 0" }}>
-          Make pictures, and save the looks (styles) your agents use to make them.
+          Make pictures, edit them, and save the looks (styles) your agents use to make them.
         </p>
       </div>
       <div role="tablist" aria-label="Media Studio" style={{ display: "flex", gap: 8, borderBottom: "1px solid rgba(128,128,128,0.25)", paddingBottom: 8 }}>
         <button type="button" role="tab" aria-selected={tab === "create"} style={tab === "create" ? tabBtnActive : tabBtnInactive} onClick={() => selectTab("create")}>
           Create
         </button>
+        <button type="button" role="tab" aria-selected={tab === "edit"} style={tab === "edit" ? tabBtnActive : tabBtnInactive} onClick={() => selectTab("edit")}>
+          Edit
+        </button>
         <button type="button" role="tab" aria-selected={tab === "looks"} style={tab === "looks" ? tabBtnActive : tabBtnInactive} onClick={() => selectTab("looks")}>
           Looks
         </button>
       </div>
-      {tab === "create" ? <MediaStudioCreateTab /> : <MediaStudioLooksPage context={context} />}
+      {tab === "create" ? <MediaStudioCreateTab /> : tab === "edit" ? <MediaStudioEditTab context={context} /> : <MediaStudioLooksPage context={context} />}
     </div>
   );
 }

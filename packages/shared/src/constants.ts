@@ -755,6 +755,18 @@ export const SECRET_BINDING_TARGET_TYPES = [
   // DEDICATED_SECRET_BINDING_TARGET_TYPES below): a login saved for one agent
   // cannot also be attached to another agent or connection.
   "site_login",
+  // DUR-4068: the SFTP credential for a website project's production deploy
+  // target, bound to the one agent (a project's configured requestingAgentId,
+  // typically the Website Developer boss) that may deploy it (target_id =
+  // the agent id). Never resolved by that agent directly -- only by the
+  // instance-admin-only deploy-sftp-credential route the on-box deploy
+  // runner calls, modelled on deploy-github-token. Dedicated (see
+  // DEDICATED_SECRET_BINDING_TARGET_TYPES below) and deliberately its own
+  // target type rather than "agent": the generic agent adapterConfig sync
+  // (agent-secret-bindings.ts) replaces ALL of an agent's "agent" bindings on
+  // every adapterConfig save, which would silently delete this credential the
+  // next time someone edited that agent's config.
+  "deploy_sftp_credential",
 ] as const;
 export type SecretBindingTargetType = (typeof SECRET_BINDING_TARGET_TYPES)[number];
 
@@ -767,6 +779,7 @@ export const DEDICATED_SECRET_BINDING_TARGET_TYPES = [
   "telegram_bot",
   "persona_account",
   "site_login",
+  "deploy_sftp_credential",
 ] as const satisfies readonly SecretBindingTargetType[];
 
 // DUR-134: platforms a persona_accounts row can target. Fanvue only for now

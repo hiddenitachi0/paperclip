@@ -14,9 +14,16 @@ approvals/tasks still live in Paperclip and the web UI.
   carry a secret value). When nobody asked (a card the board filed itself) or
   nobody on the way up has a bot, it goes to the company's notice bot — see
   company_notice_bot for how that one is chosen.
-- Outbound, morning reports: a quick agent's daily report waits in
-  Paperclip's morning-report outbox and is sent through the agent's own bot
-  once, then acknowledged (like a watcher alert, text only).
+- Outbound, morning reports: a quick agent's daily report waits in Paperclip's
+  morning-report outbox and is sent through the agent's own bot once, then
+  acknowledged (like a watcher alert). DUR-4059 direction change: ONE message
+  — the weather picture Media Studio made (if any) with a short plain-text
+  caption (today's weather, the top headline, one price move) and the
+  briefing-page link once that page is live; no picture made, or a report
+  from before this change, sends the same content as plain text instead. When
+  the report carries a Lane A conversationId, the chat is pointed at it
+  afterwards so a reply like "tell me more about number 3" continues the same
+  history the report is part of.
 - Outbound, market watchers: an alert a watcher's quick agent wrote (a price
   move, maybe with a picture) waits in Paperclip's watcher outbox; it is sent
   through that agent's bot (or its boss's) and acknowledged, once.
@@ -1702,8 +1709,63 @@ def ack_morning_report(company_id, report_id, outcome="delivered"):
     return cli("morning-report", "outbox:ack", report_id, "-C", company_id, "--outcome", outcome) is not None
 
 
+def morning_report_page_url(bot, agent_id, report_id):
+    """The full briefing page's URL for one report (frontend route, DUR-4075)."""
+    return f"{bot['uiBase']}/agents/{agent_id}/morning-reports/{report_id}"
+
+
+def morning_report_teaser_text(bot, agent_id, report_id, facts):
+    """The plain-text teaser (DUR-4059 direction change: ONE Telegram message, no long text, no
+    HTML): facts['teaser'] — already at most a few short lines, built entirely in code on the
+    backend, never by a model — plus the briefing-page link, appended only when
+    facts['briefingPageLive'] says the page actually exists yet (DUR-4075). Sent with no
+    parse_mode, so even a stray '<' or '>' in a headline title (or, in principle, in
+    model-written text) is shown literally rather than parsed as markup."""
+    teaser = str(facts.get("teaser") or "").strip()
+    if facts.get("briefingPageLive") and agent_id:
+        link = f"Full briefing: {morning_report_page_url(bot, agent_id, report_id)}"
+        return f"{teaser}\n\n{link}" if teaser else link
+    return teaser
+
+
+def send_report_image(bot, chat_id, image, picture_cache):
+    """One report picture (Maja dressed for today's weather, or the mood picture) into one chat, as
+    a photo with its caption. `picture_cache` is a plain dict the caller keeps for one report's whole
+    delivery, so the same fileId is fetched once even with several chats or images. Best-effort: a
+    picture that cannot be fetched or sent never affects the report's own delivery/ack (DUR-4059,
+    same rule as send_watcher_alert)."""
+    if not isinstance(image, dict):
+        return False
+    file_id = image.get("fileId")
+    if not isinstance(file_id, str) or not UUID_RE.match(file_id):
+        return False
+    if file_id not in picture_cache:
+        picture_cache[file_id] = fetch_picture(bot, file_id)
+    picture = picture_cache[file_id]
+    if picture is None:
+        return False
+    payload, content_type = picture
+    if content_type not in TG_PHOTO_TYPES or len(payload) > TG_PHOTO_MAX_BYTES:
+        return False
+    extension = content_type.split("/", 1)[1].split("+", 1)[0] or "img"
+    filename = f"report-{file_id[:8]}.{extension}"
+    caption = str(image.get("caption") or "")[:TG_CAPTION_LIMIT]
+    return tg_upload(bot["token"], "sendPhoto", "photo", filename, content_type, payload,
+                      chat_id=chat_id, caption=caption) is not None
+
+
 def notify_morning_reports(state, bots):
-    """Send every report waiting in each company's morning-report outbox, once."""
+    """Send every report waiting in each company's morning-report outbox, once. DUR-4059 direction
+    change: a report with structured facts is now ONE Telegram message — the "dressed for the
+    weather" picture (if Media Studio made one) with a short plain-text caption (facts['teaser']:
+    today's weather, the top headline, one price move) and the briefing-page link, only once that
+    page is live (facts['briefingPageLive']). No long text, no HTML, no per-section messages: every
+    other detail (all headlines/hobby/sport/prices with sources, the mood picture) lives on the
+    full briefing page instead. When Media Studio made no weather picture, the same caption is sent
+    as a plain text message instead — the report is never lost for want of a picture. A report
+    written before DUR-4059 (facts is null) is just the written text, exactly as before. When the
+    report carries a Lane A conversationId, later replies in that chat are pointed at it, so "tell
+    me more about number 3" continues the same history the report is part of."""
     by_company = defaultdict(list)
     for b in bots:
         by_company[b["companyId"]].append(b)
@@ -1737,15 +1799,33 @@ def notify_morning_reports(state, bots):
             chats = deliverable_chats(state, bot["token"], allowed_users_for(bot))
             if not chats:
                 continue  # nobody has started this bot yet: try again next pass
-            text = str(it.get("text") or "").strip()
-            if not text:
+            facts = it.get("facts") if isinstance(it.get("facts"), dict) else None
+            on_behalf_of = f"\n(on behalf of {names.get(agent_id, 'a teammate')})" if escalated and agent_id else ""
+            if facts:
+                message = morning_report_teaser_text(bot, agent_id, report_id, facts) + on_behalf_of
+                images = facts.get("images") if isinstance(facts.get("images"), list) else []
+                weather_image = next((im for im in images if isinstance(im, dict) and im.get("kind") == "weather"), None)
+            else:
+                message = str(it.get("text") or "").strip() + on_behalf_of
+                weather_image = None
+            if not message.strip():
                 continue
-            if escalated and agent_id:
-                text += f"\n(on behalf of {names.get(agent_id, 'a teammate')})"
+            conversation_id = it.get("conversationId")
+            conversation_id = conversation_id if isinstance(conversation_id, str) and UUID_RE.match(conversation_id) else None
+            picture_cache = {}
             delivered = False
             for chat in chats:
-                if send_text_checked(bot["token"], chat, text):
-                    delivered = True
+                # DUR-4059: exactly one message per chat — the weather picture with the
+                # teaser as its caption, or (no picture made, or this is a pre-DUR-4059
+                # report) the same content as a plain text message.
+                sent_as_photo = weather_image is not None and send_report_image(
+                    bot, chat, {**weather_image, "caption": message}, picture_cache
+                )
+                if not sent_as_photo and not send_text_checked(bot["token"], chat, message):
+                    continue
+                delivered = True
+                if conversation_id:
+                    set_conversation(state, bot["token"], chat, conversation_id)
             if not delivered:
                 continue  # Telegram refused; the next pass tries again
             sent_before.add(report_id)

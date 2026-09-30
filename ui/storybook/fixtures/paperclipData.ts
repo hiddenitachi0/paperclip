@@ -620,6 +620,7 @@ function createProject(overrides: Partial<Project> = {}): Project {
       cleanupPolicy: null,
     },
     deployPolicy: null,
+    deployTransport: "git_push",
     codebase: {
       workspaceId: "workspace-board-ui",
       repoUrl: "https://github.com/paperclipai/paperclip",
