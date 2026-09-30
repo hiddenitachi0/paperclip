@@ -332,7 +332,7 @@ d("tradingService", () => {
   it("reconcileOnBoot pauses every running strategy with pauseReason 'restart', and leaves paused ones alone", async () => {
     const companyId = await seedCompany();
     const now = new Date("2026-01-01T00:00:00Z");
-    const trading = tradingService(db, { now: () => now });
+    const trading = tradingService(db, { now: () => now, marketData: fakeTradingMarketData({}) });
 
     const running = await trading.createStrategy(companyId, STRATEGY_INPUT, { actorType: "user", actorId: "u1" });
     await trading.setStatus(companyId, running.id, "running");
@@ -355,7 +355,7 @@ d("tradingService", () => {
 
   it("the kill switch pauses and resumes, writing a kill_switch ledger entry each time", async () => {
     const companyId = await seedCompany();
-    const trading = tradingService(db, { now: () => new Date("2026-01-01T00:00:00Z") });
+    const trading = tradingService(db, { now: () => new Date("2026-01-01T00:00:00Z"), marketData: fakeTradingMarketData({}) });
     const strategy = await trading.createStrategy(companyId, STRATEGY_INPUT, { actorType: "user", actorId: "u1" });
     expect(strategy.status).toBe("paused"); // every strategy is created paused
 
@@ -373,5 +373,41 @@ d("tradingService", () => {
       { action: "pause", fromStatus: "running" },
       { action: "resume", fromStatus: "paused" },
     ]);
+  });
+
+  it("dashboard's buy-and-hold benchmark tracks the asset's price move, not just starting cash", async () => {
+    const companyId = await seedCompany();
+    const createdAt = new Date("2026-01-01T00:00:00Z");
+    const later = new Date("2026-01-02T00:00:00Z");
+
+    // Strategy is created while BTC is worth 20 USD; asserts against a
+    // trading service pinned to a later "now" where BTC has doubled to 40 USD.
+    const creationTrading = tradingService(db, {
+      now: () => createdAt,
+      marketData: fakeTradingMarketData({ quotes: { BTC: { bidUsd: 20, askUsd: 20, at: createdAt } } }),
+    });
+    const strategy = await creationTrading.createStrategy(companyId, STRATEGY_INPUT, { actorType: "user", actorId: "u1" });
+    expect(strategy.startingQuoteNok).toBeCloseTo(usdToNok(20), 6);
+
+    const laterTrading = tradingService(db, {
+      now: () => later,
+      marketData: fakeTradingMarketData({ quotes: { BTC: { bidUsd: 40, askUsd: 40, at: later } } }),
+    });
+    const summary = await laterTrading.dashboard(companyId, strategy.id);
+    // Never traded, so cash is untouched -- buy-and-hold must show the doubled
+    // value (2_000 -> 4_000), not just echo startingCashNok back unchanged.
+    expect(summary.buyAndHoldValueNok).toBeCloseTo(STRATEGY_INPUT.startingCashNok * 2, 6);
+  });
+
+  it("dashboard's buy-and-hold benchmark is null when the creation-time quote fetch failed", async () => {
+    const companyId = await seedCompany();
+    const now = new Date("2026-01-01T00:00:00Z");
+    // No BTC fixture at all -- fetchQuote returns a "no_data" error at creation, same as a real upstream outage.
+    const trading = tradingService(db, { now: () => now, marketData: fakeTradingMarketData({}) });
+    const strategy = await trading.createStrategy(companyId, STRATEGY_INPUT, { actorType: "user", actorId: "u1" });
+    expect(strategy.startingQuoteNok).toBeNull();
+
+    const summary = await trading.dashboard(companyId, strategy.id);
+    expect(summary.buyAndHoldValueNok).toBeNull();
   });
 });

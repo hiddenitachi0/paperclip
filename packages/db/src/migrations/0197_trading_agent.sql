@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS "trading_strategies" (
 	"rule_config" jsonb NOT NULL,
 	"risk_config" jsonb NOT NULL,
 	"starting_cash_nok" integer NOT NULL,
+	"starting_quote_nok" double precision,
 	"cash_nok" double precision NOT NULL,
 	"position_quantity" double precision DEFAULT 0 NOT NULL,
 	"position_cost_nok" double precision DEFAULT 0 NOT NULL,

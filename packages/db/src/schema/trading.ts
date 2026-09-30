@@ -76,6 +76,10 @@ export const tradingStrategies = pgTable(
     ruleConfig: jsonb("rule_config").notNull(),
     riskConfig: jsonb("risk_config").notNull(),
     startingCashNok: integer("starting_cash_nok").notNull(),
+    // The asset's NOK price at creation time, used to compute the dashboard's
+    // buy-and-hold benchmark. Null if the initial quote fetch failed -- the
+    // benchmark degrades to null in that case rather than blocking creation.
+    startingQuoteNok: doublePrecision("starting_quote_nok"),
     cashNok: doublePrecision("cash_nok").notNull(),
     positionQuantity: doublePrecision("position_quantity").notNull().default(0),
     positionCostNok: doublePrecision("position_cost_nok").notNull().default(0),

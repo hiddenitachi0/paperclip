@@ -82,6 +82,13 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
 
   async function createStrategy(companyId: string, input: CreateTradingStrategyInput, actor: { actorType: "user" | "agent"; actorId: string }): Promise<TradingStrategyRow> {
     const now = nowOf();
+    // Best-effort: record the asset's price at creation so the dashboard can
+    // later compute a real buy-and-hold benchmark. A failed fetch here must
+    // not block creating the strategy -- startingQuoteNok just stays null and
+    // the benchmark degrades to null (same convention as dashboard()'s own
+    // quoteNok-unavailable case) until the next successful quote.
+    const quote = await marketData.fetchQuote(input.asset, now);
+    const startingQuoteNok = isTradingMarketDataError(quote) ? null : usdToNok(quote.bidUsd);
     const [row] = await db
       .insert(tradingStrategies)
       .values({
@@ -95,6 +102,7 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
         ruleConfig: input.ruleConfig,
         riskConfig: input.riskConfig,
         startingCashNok: input.startingCashNok,
+        startingQuoteNok,
         cashNok: input.startingCashNok,
         peakEquityNok: input.startingCashNok,
         createdByUserId: actor.actorType === "user" ? actor.actorId : null,
@@ -177,7 +185,7 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
       realizedPnlNok: totalRealized,
       unrealizedPnlNok,
       totalPnlNok: totalRealized + unrealizedPnlNok,
-      buyAndHoldValueNok: quoteNok !== null ? (row.startingCashNok / quoteNok) * quoteNok : null,
+      buyAndHoldValueNok: quoteNok !== null && row.startingQuoteNok !== null ? (row.startingCashNok / row.startingQuoteNok) * quoteNok : null,
       feesPaidNok: totalFees,
       ordersToday: row.ordersTodayDate === today ? row.ordersToday : 0,
       realizedPnlToday: row.realizedPnlTodayDate === today ? row.realizedPnlTodayNok : 0,
