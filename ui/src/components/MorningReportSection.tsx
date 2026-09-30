@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { agentsApi } from "../api/agents";
 import { morningReportsApi } from "../api/morning-reports";
+import { pluginsApi } from "../api/plugins";
 import { ApiError } from "../api/client";
 import { queryKeys } from "../lib/queryKeys";
 import { useToastActions } from "../context/ToastContext";
@@ -12,7 +13,50 @@ import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ToggleSwitch } from "@/components/ui/toggle-switch";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type { MorningReportOutboxItem } from "@paperclipai/shared";
+
+/**
+ * DUR-4138: picture source choice for one report picture (weather or mood) —
+ * mirrors packages/shared/src/morning-report.ts's
+ * `MorningReportPictureSource`/`MORNING_REPORT_PICTURE_PROVIDERS` by hand (ui
+ * does not depend on the media-studio plugin package, so this stays a local
+ * copy, same as the rest of this file's settings shape).
+ */
+export type MorningReportPictureSource =
+  | { kind: "default" }
+  | { kind: "look"; lookId: string }
+  | { kind: "model"; provider: "sogni" | "fal"; model: string };
+
+export const DEFAULT_MORNING_REPORT_PICTURE_SOURCE: MorningReportPictureSource = { kind: "default" };
+
+function parsePictureSource(value: unknown): MorningReportPictureSource {
+  if (!value || typeof value !== "object") return DEFAULT_MORNING_REPORT_PICTURE_SOURCE;
+  const v = value as Record<string, unknown>;
+  if (v.kind === "look" && typeof v.lookId === "string" && v.lookId.trim()) {
+    return { kind: "look", lookId: v.lookId };
+  }
+  if (v.kind === "model" && (v.provider === "sogni" || v.provider === "fal") && typeof v.model === "string" && v.model.trim()) {
+    return { kind: "model", provider: v.provider, model: v.model };
+  }
+  return DEFAULT_MORNING_REPORT_PICTURE_SOURCE;
+}
+
+/**
+ * DUR-4138: the media-studio plugin's own id/action key, hardcoded here the
+ * same way `plugin_tool_grants` names are hardcoded elsewhere (e.g.
+ * "paperclip.media-studio:generate-image" in ui/src/api/plugins.ts) — the ui
+ * package has no build dependency on packages/plugins/media-studio, so these
+ * cannot be imported; keep in sync by hand with
+ * packages/plugins/media-studio/src/manifest.ts's PLUGIN_ID/ACTION_LOOKS_LIST.
+ */
+const MEDIA_STUDIO_PLUGIN_ID = "paperclip.media-studio";
+const MEDIA_STUDIO_ACTION_LOOKS_LIST = "looks.list";
+
+interface MediaStudioLookOption {
+  id: string;
+  name: string;
+}
 
 /**
  * MorningReportSettings is the JSONB value stored in agents.morning_report_settings.
@@ -31,6 +75,10 @@ export type MorningReportSettings = {
   sportFollows: string[];
   priceSymbols: string[];
   maxHeadlines: number;
+  /** DUR-4138: which look/model to use for the weather picture; absent (older saved settings) reads as "the agent's own default look". */
+  weatherPicture: MorningReportPictureSource;
+  /** DUR-4138: same as weatherPicture, for the mood picture. */
+  moodPicture: MorningReportPictureSource;
 };
 
 export const DEFAULT_MORNING_REPORT_SETTINGS: MorningReportSettings = {
@@ -45,6 +93,8 @@ export const DEFAULT_MORNING_REPORT_SETTINGS: MorningReportSettings = {
   sportFollows: ["mats_zuccarello_nhl"],
   priceSymbols: ["BTC", "SOL", "ETH", "DNB.OL"],
   maxHeadlines: 10,
+  weatherPicture: DEFAULT_MORNING_REPORT_PICTURE_SOURCE,
+  moodPicture: DEFAULT_MORNING_REPORT_PICTURE_SOURCE,
 };
 
 const NEWS_SOURCES = [
@@ -103,6 +153,8 @@ function parseMorningReportSettings(raw: unknown): MorningReportSettings {
     sportFollows: Array.isArray(r.sportFollows) ? (r.sportFollows as string[]) : DEFAULT_MORNING_REPORT_SETTINGS.sportFollows,
     priceSymbols: Array.isArray(r.priceSymbols) ? (r.priceSymbols as string[]) : DEFAULT_MORNING_REPORT_SETTINGS.priceSymbols,
     maxHeadlines: typeof r.maxHeadlines === "number" ? r.maxHeadlines : 10,
+    weatherPicture: parsePictureSource(r.weatherPicture),
+    moodPicture: parsePictureSource(r.moodPicture),
   };
 }
 
@@ -133,6 +185,96 @@ function CheckboxGroup({
           <span className="text-sm">{item.label}</span>
         </label>
       ))}
+    </div>
+  );
+}
+
+/**
+ * DUR-4138: one picture's look/model choice — "use my default look" (the
+ * agent's own default, same as before this setting existed), a saved Media
+ * Studio look (by id), or a picture model picked directly (provider + a
+ * free-text model name: Media Studio has no model-listing endpoint for the
+ * ui to call here, and Sogni's own model catalog changes over time, so a
+ * plain text field is the same tradeoff the looks page itself makes when
+ * Sogni's live model list cannot be fetched).
+ */
+function PictureSourcePicker({
+  value,
+  onChange,
+  looks,
+  looksLoading,
+  disabled,
+}: {
+  value: MorningReportPictureSource;
+  onChange: (next: MorningReportPictureSource) => void;
+  looks: MediaStudioLookOption[];
+  looksLoading: boolean;
+  disabled?: boolean;
+}) {
+  return (
+    <div className="space-y-2">
+      <Select
+        value={value.kind}
+        onValueChange={(kind) => {
+          if (kind === "look") onChange({ kind: "look", lookId: looks[0]?.id ?? "" });
+          else if (kind === "model") onChange({ kind: "model", provider: "sogni", model: "" });
+          else onChange({ kind: "default" });
+        }}
+        disabled={disabled}
+      >
+        <SelectTrigger size="sm" className="w-56">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="default">Use my default look</SelectItem>
+          <SelectItem value="look">A saved look</SelectItem>
+          <SelectItem value="model">A specific model</SelectItem>
+        </SelectContent>
+      </Select>
+
+      {value.kind === "look" && (
+        <Select
+          value={value.lookId}
+          onValueChange={(lookId) => onChange({ kind: "look", lookId })}
+          disabled={disabled || looksLoading}
+        >
+          <SelectTrigger size="sm" className="w-56">
+            <SelectValue placeholder={looksLoading ? "Loading looks…" : "Choose a saved look"} />
+          </SelectTrigger>
+          <SelectContent>
+            {looks.map((look) => (
+              <SelectItem key={look.id} value={look.id}>
+                {look.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      )}
+
+      {value.kind === "model" && (
+        <div className="flex gap-2">
+          <Select
+            value={value.provider}
+            onValueChange={(provider) => onChange({ kind: "model", provider: provider as "sogni" | "fal", model: value.model })}
+            disabled={disabled}
+          >
+            <SelectTrigger size="sm" className="w-28">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="sogni">Sogni</SelectItem>
+              <SelectItem value="fal">Fal.ai</SelectItem>
+            </SelectContent>
+          </Select>
+          <Input
+            value={value.model}
+            onChange={(e) => onChange({ kind: "model", provider: value.provider, model: e.target.value })}
+            placeholder="Model name"
+            disabled={disabled}
+            className="w-40"
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -213,6 +355,26 @@ export function MorningReportSection({
   });
 
   const saving = saveMutation.isPending || toggleMutation.isPending;
+
+  // DUR-4138: saved Media Studio looks, for the weather/mood picture pickers
+  // below — fetched only once the card is open (settings.enabled), via the
+  // same host-callable action proxy the looks page itself uses.
+  const looksQuery = useQuery({
+    queryKey: ["morning-report-looks", agent.companyId],
+    queryFn: async () => {
+      const response = await pluginsApi.bridgePerformAction(
+        MEDIA_STUDIO_PLUGIN_ID,
+        MEDIA_STUDIO_ACTION_LOOKS_LIST,
+        {},
+        agent.companyId,
+      );
+      const data = response.data as { looks?: MediaStudioLookOption[] } | undefined;
+      return Array.isArray(data?.looks) ? data.looks : [];
+    },
+    enabled: settings.enabled,
+    staleTime: 60_000,
+  });
+  const looks = looksQuery.data ?? [];
 
   const [testResult, setTestResult] = useState<MorningReportOutboxItem | null>(null);
   const [testError, setTestError] = useState<string | null>(null);
@@ -415,6 +577,29 @@ export function MorningReportSection({
               items={PRICE_SYMBOLS}
               selected={settings.priceSymbols}
               onChange={(v) => update({ priceSymbols: v })}
+              disabled={saving}
+            />
+          </div>
+
+          {/* DUR-4138: per-picture look/model choice */}
+          <div className="space-y-2">
+            <Label>Weather picture</Label>
+            <PictureSourcePicker
+              value={settings.weatherPicture}
+              onChange={(v) => update({ weatherPicture: v })}
+              looks={looks}
+              looksLoading={looksQuery.isLoading}
+              disabled={saving}
+            />
+          </div>
+
+          <div className="space-y-2">
+            <Label>Mood picture</Label>
+            <PictureSourcePicker
+              value={settings.moodPicture}
+              onChange={(v) => update({ moodPicture: v })}
+              looks={looks}
+              looksLoading={looksQuery.isLoading}
               disabled={saving}
             />
           </div>
