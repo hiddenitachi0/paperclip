@@ -11,13 +11,19 @@ import {
   LANE_A_MIN_TRANSFORM_DAILY_CALL_CAP,
   LANE_A_PROVIDERS,
   LANE_A_PROVIDER_CATALOGUE,
+  LANE_A_PROVIDER_ROUTING_MAX_ENTRIES,
   LANE_A_ANTHROPIC_MAX_TEMPERATURE,
   LANE_A_TEMPERATURE_PRESETS,
   LANE_A_TRANSFORM_MAX_TOTAL_CHARS,
+  LANE_A_TRUST_LEVELS,
+  LANE_A_TRUST_LEVEL_LABELS,
   laneAModelAcceptsTemperature,
   laneAModelsForProvider,
   laneATransformWorstCaseDailyCents,
   normalizeLaneAProvider,
+  normalizeLaneATrustLevel,
+  normalizeLaneAProviderRouting,
+  parseLaneAProviderSlugList,
   formatAgentDisplayName,
   readLaneABrowserAccess,
   readLaneAWebSearchSwitch,
@@ -26,9 +32,12 @@ import {
   type BrowserAccessLevel,
   type CompanySecret,
   type LaneAProvider,
+  type LaneATrustLevel,
+  type LaneAProviderRouting,
 } from "@paperclipai/shared";
 import { AlertCircle, CheckCircle2, Circle, Loader2 } from "lucide-react";
 import { Link } from "@/lib/router";
+import { accessApi } from "../api/access";
 import { agentsApi } from "../api/agents";
 import { budgetsApi } from "../api/budgets";
 import { dataConnectionsApi } from "../api/dataConnections";
@@ -104,6 +113,11 @@ export function QuickAgentSection({
     laneAProvider?: string | null;
     laneABaseUrl?: string | null;
     laneATemperature?: number | null;
+    /** DUR-4070: the trust-level ceiling (limited/standard/full). Null/absent reads as "full". */
+    laneATrustLevel?: string | null;
+    /** DUR-4070: company-member userIds this quick agent may chat with, besides the company's owner. */
+    laneAAssignedUserIds?: string[] | null;
+    laneAProviderRouting?: LaneAProviderRouting | null;
   };
   companyId?: string;
 }) {
@@ -231,6 +245,22 @@ export function QuickAgentSection({
   const browserAccess = readLaneABrowserAccess(agent.adapterConfig);
   const saveBrowserAccess = (next: BrowserAccessLevel) =>
     settingMutation.mutate({ adapterConfig: { laneA: { ...currentLaneA, browserAccess: next } } });
+
+  // ─── DUR-4070: trust level + who may chat with this quick agent ────────
+  const trustLevel = normalizeLaneATrustLevel(agent.laneATrustLevel);
+  const saveTrustLevel = (next: LaneATrustLevel) => settingMutation.mutate({ laneATrustLevel: next });
+  const assignedUserIds = agent.laneAAssignedUserIds ?? [];
+  const membersQuery = useQuery({
+    queryKey: queryKeys.access.companyMembers(effectiveCompanyId),
+    queryFn: () => accessApi.listMembers(effectiveCompanyId),
+    enabled: Boolean(effectiveCompanyId),
+  });
+  const toggleAssignedUser = (userId: string, next: boolean) =>
+    settingMutation.mutate({
+      laneAAssignedUserIds: next
+        ? [...assignedUserIds, userId]
+        : assignedUserIds.filter((id) => id !== userId),
+    });
 
   // ─── DUR-3997 slice 4: readiness ────────────────────────────────────────
   // Paperclip's own key is only readable by an instance admin (the route is
@@ -536,6 +566,72 @@ export function QuickAgentSection({
           </select>
         </div>
 
+        {/* DUR-4070: the trust-level ceiling. */}
+        <div className="space-y-2 border-t pt-4" data-testid="quick-agent-trust-level">
+          <div className="space-y-1.5">
+            <p className="text-sm font-medium">Trust level</p>
+            <p className="text-xs text-muted-foreground">
+              One dial for add-on tools, business data, company files, web search, browser access, and its
+              memory notebook. Limited switches all of those off, no matter what is ticked elsewhere on this
+              agent. Only you can change this.
+            </p>
+          </div>
+          <select
+            className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
+            data-testid="quick-agent-trust-level-select"
+            value={trustLevel}
+            disabled={settingMutation.isPending}
+            onChange={(event) => saveTrustLevel(event.target.value as LaneATrustLevel)}
+          >
+            {LANE_A_TRUST_LEVELS.map((level) => (
+              <option key={level} value={level}>
+                {LANE_A_TRUST_LEVEL_LABELS[level]}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* DUR-4070: who may chat with this quick agent at all. */}
+        <div className="space-y-2 border-t pt-4" data-testid="quick-agent-assigned-people">
+          <div className="space-y-1.5">
+            <p className="text-sm font-medium">Who can chat with {displayName}</p>
+            <p className="text-xs text-muted-foreground">
+              The company's owner can always chat with {displayName}. Tick anyone else who should be able to.
+              Everyone not ticked gets a plain "not assigned" reply instead of an answer — in the chat box and
+              on Telegram alike. Only you can change this.
+            </p>
+          </div>
+          {membersQuery.isPending ? (
+            <p className="text-xs text-muted-foreground">Loading the member list…</p>
+          ) : membersQuery.isError ? (
+            <p className="text-xs text-destructive">Could not load the member list.</p>
+          ) : (
+            <ul className="space-y-1.5" data-testid="quick-agent-assigned-people-list">
+              {(membersQuery.data?.members ?? [])
+                .filter((member) => member.status === "active")
+                .map((member) => {
+                  const isOwner = member.membershipRole === "owner";
+                  const checked = isOwner || assignedUserIds.includes(member.principalId);
+                  const label = member.user?.name || member.user?.email || member.principalId;
+                  return (
+                    <li key={member.id} className="flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={isOwner || settingMutation.isPending}
+                        onChange={(event) => toggleAssignedUser(member.principalId, event.target.checked)}
+                      />
+                      <span>
+                        {label}
+                        {isOwner && <span className="text-xs text-muted-foreground"> (owner, always allowed)</span>}
+                      </span>
+                    </li>
+                  );
+                })}
+            </ul>
+          )}
+        </div>
+
         {/* DUR-3977: the settings that decide what a batch of rewrites costs
             and how far it can run before it stops on its own. */}
         <div className="space-y-3 border-t pt-4">
@@ -584,6 +680,14 @@ export function QuickAgentSection({
                 ))}
               </select>
             </label>
+          )}
+
+          {provider === "openrouter" && (
+            <ModelHostsSetting
+              value={agent.laneAProviderRouting ?? null}
+              disabled={settingMutation.isPending}
+              onSave={(next) => settingMutation.mutateAsync({ laneAProviderRouting: next })}
+            />
           )}
 
           <CreativitySetting
@@ -834,6 +938,120 @@ function CreativitySetting({
         </span>
       )}
     </label>
+  );
+}
+
+/**
+ * "Model hosts" (OpenRouter only): OpenRouter can send the same model to
+ * different hosts, and some of them don't support tools. The operator lists
+ * the hosts to use only, and/or the ones never to use. Both empty = no
+ * preference (null), i.e. OpenRouter picks, as before. Any other routing
+ * fields already stored (a try-first order, the fallback switch) are kept.
+ */
+function ModelHostsSetting({
+  value,
+  disabled,
+  onSave,
+}: {
+  value: LaneAProviderRouting | null;
+  disabled?: boolean;
+  onSave: (next: LaneAProviderRouting | null) => Promise<unknown>;
+}) {
+  const saved = normalizeLaneAProviderRouting(value);
+  const savedOnly = (saved?.only ?? []).join(", ");
+  const savedIgnore = (saved?.ignore ?? []).join(", ");
+  const [onlyDraft, setOnlyDraft] = useState<string | null>(null);
+  const [ignoreDraft, setIgnoreDraft] = useState<string | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+  const only = onlyDraft ?? savedOnly;
+  const ignore = ignoreDraft ?? savedIgnore;
+  const dirty =
+    (onlyDraft !== null && onlyDraft !== savedOnly) || (ignoreDraft !== null && ignoreDraft !== savedIgnore);
+
+  const save = async () => {
+    const parsedOnly = parseLaneAProviderSlugList(only);
+    const parsedIgnore = parseLaneAProviderSlugList(ignore);
+    const invalid = [...parsedOnly.invalid, ...parsedIgnore.invalid];
+    if (invalid.length > 0) {
+      setProblem(
+        `"${invalid[0]}" is not a host name. Use the short names OpenRouter shows, like deepinfra or mistral, separated by commas.`,
+      );
+      return;
+    }
+    if (
+      parsedOnly.slugs.length > LANE_A_PROVIDER_ROUTING_MAX_ENTRIES ||
+      parsedIgnore.slugs.length > LANE_A_PROVIDER_ROUTING_MAX_ENTRIES
+    ) {
+      setProblem(`List at most ${LANE_A_PROVIDER_ROUTING_MAX_ENTRIES} hosts in each field.`);
+      return;
+    }
+    setProblem(null);
+    const { only: _oldOnly, ignore: _oldIgnore, ...kept } = saved ?? {};
+    const next: LaneAProviderRouting = {
+      ...kept,
+      ...(parsedOnly.slugs.length > 0 ? { only: parsedOnly.slugs } : {}),
+      ...(parsedIgnore.slugs.length > 0 ? { ignore: parsedIgnore.slugs } : {}),
+    };
+    try {
+      await onSave(normalizeLaneAProviderRouting(next));
+      setOnlyDraft(null);
+      setIgnoreDraft(null);
+    } catch {
+      // The card already shows why it could not be saved; keep what was typed.
+    }
+  };
+
+  return (
+    <div className="space-y-2" data-testid="quick-agent-model-hosts">
+      <div className="space-y-1">
+        <p className="text-xs font-medium">Model hosts</p>
+        <p className="text-xs text-muted-foreground">
+          OpenRouter can send the same model to different hosts. Some hosts don't support tools. List the hosts you
+          want (for example deepinfra) to stop it picking one that doesn't.
+        </p>
+      </div>
+      <label className="block space-y-1">
+        <span className="text-xs text-muted-foreground">Use only these hosts</span>
+        <Input
+          type="text"
+          value={only}
+          placeholder="deepinfra"
+          disabled={disabled}
+          data-testid="model-hosts-only"
+          onChange={(event) => setOnlyDraft(event.target.value)}
+        />
+      </label>
+      <label className="block space-y-1">
+        <span className="text-xs text-muted-foreground">Never use these hosts</span>
+        <Input
+          type="text"
+          value={ignore}
+          placeholder="venice"
+          disabled={disabled}
+          data-testid="model-hosts-ignore"
+          onChange={(event) => setIgnoreDraft(event.target.value)}
+        />
+      </label>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          size="sm"
+          variant="secondary"
+          disabled={!dirty || disabled}
+          data-testid="model-hosts-save"
+          onClick={() => void save()}
+        >
+          Save
+        </Button>
+        <span className="text-xs text-muted-foreground">
+          Separate hosts with commas. Leave both empty to let OpenRouter pick.
+        </span>
+      </div>
+      {problem && (
+        <p className="text-xs text-destructive" data-testid="model-hosts-problem">
+          {problem}
+        </p>
+      )}
+    </div>
   );
 }
 

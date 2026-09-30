@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { laneAProviderErrorToHttp } from "../services/lane-a.js";
+import {
+  LANE_A_NO_TOOLS_NOTE,
+  isLaneAOpenRouterNoHostForParametersError,
+  laneANoToolsNoteForPinnedHosts,
+  laneAProviderErrorToHttp,
+  laneAToolsRefusalKey,
+} from "../services/lane-a.js";
 import { LaneAProviderError } from "../services/lane-a-providers.js";
 import { HttpError } from "../errors.js";
 
@@ -48,5 +54,66 @@ describe("laneAProviderErrorToHttp", () => {
     expect((auth.details as { code?: string }).code).toBe("LANE_A_KEY_REFUSED");
     const limited = laneAProviderErrorToHttp(new LaneAProviderError({ kind: "rate_limit", provider: "local", status: 429, message: "Local model is rate limited." }), "chat") as HttpError;
     expect(limited.status).toBe(429);
+  });
+});
+
+/**
+ * 29 Sep: the operator can limit an OpenRouter quick agent to certain hosts
+ * ("model hosts"). When none of the chosen hosts supports tools, the quick
+ * agent still chats without tools, and says plainly that the chosen hosts
+ * don't support tools, so the fix (another host) is obvious.
+ */
+describe("tools refused by the chosen model hosts", () => {
+  const openRouterRefusal = (message: string, status = 404) =>
+    new LaneAProviderError({
+      kind: "upstream",
+      provider: "openrouter",
+      status,
+      message: `OpenRouter answered ${status}: ${message}`,
+    });
+
+  it("recognises OpenRouter finding no host for the request as sent", () => {
+    expect(
+      isLaneAOpenRouterNoHostForParametersError(
+        openRouterRefusal('{"error":{"message":"No endpoints found that can handle the requested parameters.","code":404}}'),
+      ),
+    ).toBe(true);
+    expect(
+      isLaneAOpenRouterNoHostForParametersError(
+        openRouterRefusal("No endpoints found that can handle the requested parameters.", 503),
+      ),
+    ).toBe(false);
+    expect(
+      isLaneAOpenRouterNoHostForParametersError(
+        new LaneAProviderError({
+          kind: "upstream",
+          provider: "local",
+          status: 404,
+          message: "No endpoints found that can handle the requested parameters.",
+        }),
+      ),
+    ).toBe(false);
+    expect(isLaneAOpenRouterNoHostForParametersError(openRouterRefusal("The model does not exist."))).toBe(false);
+  });
+
+  it("names the chosen hosts and says plainly they don't support tools", () => {
+    const one = laneANoToolsNoteForPinnedHosts(["deepinfra"]);
+    expect(one).toContain("The model host chosen for you (deepinfra) does not support tools");
+    expect(one).toContain("the chosen model hosts don't support tools");
+    expect(one).toContain("Never pretend you did it.");
+    expect(laneANoToolsNoteForPinnedHosts(["deepinfra", "venice"])).toContain(
+      "The model hosts chosen for you (deepinfra, venice) do not support tools",
+    );
+    expect(one).not.toBe(LANE_A_NO_TOOLS_NOTE);
+  });
+
+  it("remembers a tools refusal per host choice, so changing the hosts tries tools again", () => {
+    const model = "mistralai/mistral-small-3.2-24b-instruct";
+    expect(laneAToolsRefusalKey(model, null)).toBe(model);
+    expect(laneAToolsRefusalKey(model, { order: ["deepinfra"] })).toBe(model);
+    expect(laneAToolsRefusalKey(model, { only: ["venice"] })).not.toBe(
+      laneAToolsRefusalKey(model, { only: ["deepinfra"] }),
+    );
+    expect(laneAToolsRefusalKey(model, { ignore: ["venice"] })).not.toBe(model);
   });
 });

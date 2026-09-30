@@ -82,6 +82,8 @@ function createProject(): Project {
     targetDate: null,
     color: "#22c55e",
     icon: null,
+    productionUrl: null,
+    hostingTarget: null,
     env: null,
     pauseReason: null,
     pausedAt: null,

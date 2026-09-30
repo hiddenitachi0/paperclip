@@ -266,11 +266,22 @@ export type PluginRpcErrorCode =
 // ---------------------------------------------------------------------------
 
 /**
- * Company scope attached by the host to one top-level plugin invocation.
- * Absence of this metadata means the invocation is instance/global scoped.
+ * Company (and, when available, run) scope attached by the host to one
+ * top-level plugin invocation. Absence of this metadata means the
+ * invocation is instance/global scoped.
+ *
+ * `runId` is populated only for invocations dispatched from a live,
+ * server-verified tool call (`executeTool`, whose `runContext.runId` the
+ * route layer already validated against `heartbeat_runs` before dispatch --
+ * see `validateToolRunContextScope` in `server/src/routes/plugins.ts`). It
+ * is never derived from anything the plugin process itself supplies. A
+ * background job/webhook/scheduler dispatch has no live tool invocation, so
+ * this is absent there -- callers must not treat "no runId here" as "no
+ * run", only as "no host-verified live run for this call".
  */
 export interface PluginInvocationScope {
   companyId: string;
+  runId?: string | null;
 }
 
 /**
@@ -1433,7 +1444,26 @@ export interface WorkerToHostMethods {
     result: IssueComment[],
   ];
   "issues.createComment": [
-    params: { issueId: string; body: string; companyId: string; authorAgentId?: string },
+    params: {
+      issueId: string;
+      body: string;
+      companyId: string;
+      authorAgentId?: string;
+      /**
+       * The invoking tool call's (or background job's) run id. Required and
+       * host-enforced whenever `authorAgentId` is set (DUR-4096): an
+       * attributed comment is an impersonation-adjacent primitive -- it
+       * reads, in the issue thread, as if that agent said something -- so
+       * the host verifies the run's access to `issueId` (checkout, or a
+       * narrower Lane-A carve-out, or the run resolving to the issue's
+       * current assignee) the same way `createAttachment` verifies runId
+       * before letting a plugin attach. Omit both `runId` and
+       * `authorAgentId` for an unattributed system/plugin comment on an
+       * issue id the plugin's own code resolved (never from model/tool-call
+       * input) -- that path is unchanged from before DUR-4096.
+       */
+      runId?: string | null;
+    },
     result: IssueComment,
   ];
   "issues.createAttachment": [

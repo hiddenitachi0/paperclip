@@ -1330,6 +1330,32 @@ async function filterMemberDataByRole(
   });
 }
 
+// DUR-4100: invite creation previously only checked the `users:invite`
+// permission, which any admin holds -- with no check on the *level* being
+// granted. That let an Admin mint an invite carrying humanRole "owner",
+// self-escalating whoever accepted it above the inviter. A person may only
+// invite at or below their own company role; agents (who hold no human
+// company role) are capped at "admin" so an owner-level invite always
+// requires a genuine Owner actor.
+async function assertActorCanAssignInviteHumanRole(
+  req: Request,
+  access: ReturnType<typeof accessService>,
+  companyId: string,
+  targetHumanRole: HumanCompanyMembershipRole | null,
+) {
+  if (!targetHumanRole) return;
+  if (req.actor.type === "agent") {
+    if (humanRoleRank[targetHumanRole] > humanRoleRank.admin) {
+      throw forbidden("Only a company owner can create an owner-level invite.");
+    }
+    return;
+  }
+  const actorRole = await resolveActorHumanRole(req, access, companyId);
+  if (!actorRole || humanRoleRank[targetHumanRole] > humanRoleRank[actorRole]) {
+    throw forbidden("You can only create invites at or below your own company role.");
+  }
+}
+
 async function addCompanyMemberRemovalAccess(
   req: Request,
   db: Db,
@@ -2075,6 +2101,10 @@ function mergeInviteDefaults(
       role: humanRole,
       grants: grantsForHumanRole(humanRole),
     };
+  } else {
+    // Nothing rank-checks a caller-supplied `human` field when humanRole is
+    // null, so it must never pass through unvalidated.
+    delete merged.human;
   }
   if (agentMessage) {
     merged.agentMessage = agentMessage;
@@ -3244,6 +3274,12 @@ export function accessRoutes(
       input.allowedJoinTypes === "agent"
         ? null
         : input.humanRole ?? "operator";
+    await assertActorCanAssignInviteHumanRole(
+      input.req,
+      access,
+      input.companyId,
+      effectiveHumanRole,
+    );
     const insertValues = {
       companyId: input.companyId,
       inviteType: "company_join" as const,
