@@ -1,0 +1,116 @@
+# DUR-4151/DUR-4161 (web data engine): infra overlay adding Crawl4AI as an
+# internal-only worker for the competitor-watch and product-grabber features.
+# Layer on top of the base compose AND docker-compose.browser.yml (this file
+# depends on the `browser-internal` network and `browser-egress` service that
+# file defines) the same way docker-compose.prod.yml is layered:
+#
+#   docker compose --env-file .env \
+#     -f docker/docker-compose.yml -f docker/docker-compose.prod.yml \
+#     -f docker/docker-compose.browser.yml -f docker/docker-compose.crawl4ai.yml \
+#     up -d
+#
+# This file is a PR only. It does not go on a deploy card in this sprint --
+# Filip decides separately whether/when to run it on the host. See "Host
+# steps for Filip" in the PR description for what a human still has to do
+# before this can go live (the pinned image digest, the two tokens below,
+# host firewall/capacity notes).
+#
+# Design: see DUR-4151 description (web data engine: Crawl4AI-backed
+# competitor watch + product grabber, Apache-2.0, credit line kept per
+# https://github.com/unclecode/crawl4ai). One service, `unclecode/crawl4ai`
+# (official image, pinned by digest so we control exactly what we run --
+# see "Host steps for Filip" for how that digest is generated and verified):
+#
+#  - `crawl4ai`: Crawl4AI's own FastAPI/Gunicorn server on its default port
+#    11235 (never published to the host). Runs as the image's own non-root
+#    `appuser` (uid/gid 999), filesystem read-only with tmpfs for the paths
+#    the upstream image itself writes to (its browser profile cache, run
+#    output dir and its bundled Redis data dir), every Linux capability
+#    dropped, no-new-privileges. It is on TWO internal-only networks and
+#    nothing else:
+#      - `crawl4ai-internal` (this file, `internal: true`): the only peer on
+#        it is `server`, for the control-plane HTTP calls in
+#        server/src/services/crawl4ai-client.ts. No route to the host or the
+#        public internet.
+#      - `browser-internal` (owned by docker-compose.browser.yml, already
+#        `internal: true`): the only OTHER peer already on that network is
+#        `browser-egress`, the same forward proxy the `browser` service uses
+#        to reach the public web. crawl4ai-client.ts sets `proxy_config` on
+#        every crawl request it sends so Crawl4AI's own browser/HTTP fetches
+#        go through that proxy -- this is the service's only route out, and
+#        deliberately the existing one rather than a second egress path.
+#
+#    Crawl4AI requires its own bearer token (`CRAWL4AI_API_TOKEN`) or it
+#    binds loopback-only inside the container and refuses every request --
+#    we set that from PAPERCLIP_SERVER_CRAWL4AI_TOKEN, same host secret the
+#    `server` container gets so crawl4ai-client.ts can present it. The
+#    PAPERCLIP_SERVER_ prefix keeps it out of every agent's own environment
+#    already (packages/adapter-utils/src/server-env-secrets.ts), same as the
+#    browser worker's token.
+#
+#    Downloads are refused per-request by crawl4ai-client.ts
+#    (`accept_downloads: false` on every `browser_config` it sends) rather
+#    than by a container flag -- Crawl4AI does not document a server-wide
+#    "downloads off" switch, so the client is the enforcement point. Do not
+#    add a container-level downloads directory/volume to work around this.
+#
+#    No agent-written hooks: crawl4ai-client.ts exposes a narrow, fixed set
+#    of options (bypass-cache, a bounded page timeout) and never accepts or
+#    forwards raw hook/JS-code text from a caller. Crawl4AI's own hooks/
+#    js_code RCE surface was removed upstream in 0.9.x, but the client stays
+#    narrow regardless -- see that file's own comment.
+x-crawl4ai-image: &crawl4ai-image
+  image: "${PAPERCLIP_CRAWL4AI_IMAGE:?set in .env to a digest-pinned unclecode/crawl4ai ref, see Host steps for Filip}"
+
+services:
+  server:
+    environment:
+      PAPERCLIP_SERVER_CRAWL4AI_TOKEN: "${PAPERCLIP_SERVER_CRAWL4AI_TOKEN:?set in .env, see Host steps for Filip}"
+      PAPERCLIP_SERVER_CRAWL4AI_URL: "http://crawl4ai:11235"
+    networks:
+      - crawl4ai-internal
+
+  crawl4ai:
+    <<: *crawl4ai-image
+    init: true
+    read_only: true
+    user: "999:999"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Crawl4AI drives a private, sized tmpfs for its Chromium's shared
+    # memory instead of a host /dev/shm bind mount (same reasoning as the
+    # `browser` service in docker-compose.browser.yml).
+    shm_size: "1gb"
+    tmpfs:
+      - /tmp:mode=1777,size=1g
+      - /var/lib/redis:mode=0700,size=256m,uid=999,gid=999
+      - /var/lib/crawl4ai/outputs:mode=0700,size=1g,uid=999,gid=999
+      - /home/appuser/.crawl4ai:mode=0700,size=512m,uid=999,gid=999
+      - /home/appuser/.cache/url_seeder:mode=0700,size=256m,uid=999,gid=999
+    mem_limit: "2g"
+    mem_reservation: "1g"
+    cpus: 1.5
+    pids_limit: 512
+    environment:
+      CRAWL4AI_API_TOKEN: "${PAPERCLIP_SERVER_CRAWL4AI_TOKEN:?set in .env, see Host steps for Filip}"
+    networks:
+      - crawl4ai-internal
+      - browser-internal
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:11235/health', timeout=5).status == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
+    restart: unless-stopped
+
+networks:
+  crawl4ai-internal:
+    internal: true
+  # Owned by docker-compose.browser.yml; referenced here only to attach
+  # `crawl4ai` to it. Compose merges this with that file's `internal: true`
+  # definition when both files are layered in the same invocation -- this
+  # file must never be deployed without docker-compose.browser.yml.
+  browser-internal: {}
