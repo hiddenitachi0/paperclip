@@ -1359,6 +1359,13 @@
       "when": 1787160630000,
       "tag": "0194_private_access_events",
       "breakpoints": true
+    },
+    {
+      "idx": 195,
+      "version": "7",
+      "when": 1787160640000,
+      "tag": "0195_mail_secretary",
+      "breakpoints": true
     }
   ]
 }

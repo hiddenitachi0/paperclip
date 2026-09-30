@@ -767,6 +767,12 @@ export const SECRET_BINDING_TARGET_TYPES = [
   // every adapterConfig save, which would silently delete this credential the
   // next time someone edited that agent's config.
   "deploy_sftp_credential",
+  // DUR-4093: the IMAP password for a mail_inboxes row (config_path
+  // 'imap_password'). Never resolved by any agent -- only by the
+  // server-side mail secretary service, which makes every IMAP connection
+  // itself, read-only. Not dedicated, like watcher: the same mailbox
+  // password may back more than one inbox config if an operator wants that.
+  "mail_inbox",
 ] as const;
 export type SecretBindingTargetType = (typeof SECRET_BINDING_TARGET_TYPES)[number];
 

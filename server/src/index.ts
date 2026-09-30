@@ -74,6 +74,7 @@ import { schedulerLiveness } from "./services/scheduler-liveness.js";
 import { watcherService } from "./services/watchers.js";
 import { morningReportService } from "./services/morning-report.js";
 import { paymentCardService } from "./services/payment-cards.js";
+import { mailSecretaryService } from "./services/mail-secretary.js";
 import { describeTickPhases } from "./services/scheduler-tick-phases.js";
 import {
   SCHEDULER_TICK_CHAIN,
@@ -1024,6 +1025,7 @@ export async function startServer(): Promise<StartedServer> {
     const marketWatchers = watcherService(schedulerDb as any);
     const morningReports = morningReportService(schedulerDb as any);
     const paymentCards = paymentCardService(schedulerDb as any);
+    const mailSecretary = mailSecretaryService(schedulerDb as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(schedulerDb as any);
     const quietModeAlerts = quietModeAlertsService(schedulerDb as any);
     const personaPublisherSweep = config.personaPublishingSweepEnabled
@@ -1421,6 +1423,32 @@ export async function startServer(): Promise<StartedServer> {
           })
           .catch((err) => {
             logger.error({ err }, "payment-card tick failed");
+          }),
+      );
+
+      // Mail secretary: due inboxes (see services/mail-secretary.ts). Reads
+      // over IMAP read-only, applies ignore filters in code, classifies with
+      // one tool-less model call, and routes -- ignore, keep for Filip, or
+      // delegate a framed copy to whichever agent the inbox names. Refuses
+      // to run for an inbox whose agent is not dialed to laneATrustLevel
+      // "limited" (DUR-4070).
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.mailSecretary, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: mailSecretary",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:mailSecretary",
+          },
+          () => mailSecretary.tick(new Date()),
+        )
+          .then((result) => {
+            if (result.errors > 0 || result.fetched > 0) {
+              logger.info({ ...result }, "mail-secretary tick");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "mail-secretary tick failed");
           }),
       );
 

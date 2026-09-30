@@ -133,6 +133,7 @@ export { dataReadEvents } from "./data_read_events.js";
 export { trustedCodeFingerprints } from "./trusted_code_fingerprints.js";
 export { watchers, watcherPricePoints, watcherAlerts } from "./watchers.js";
 export { morningReportOutbox } from "./morning_report.js";
+export { mailInboxes, mailInboxFilters, mailSecretaryItems } from "./mail_secretary.js";
 export { paymentNotices } from "./payment_notices.js";
 export { companyPaymentSettings } from "./company_payment_settings.js";
 export { paymentCards } from "./payment_cards.js";
