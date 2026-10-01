@@ -2390,6 +2390,12 @@ export {
 } from "./product-grabber.js";
 
 export {
+  updateEmailSettingsSchema,
+  type EmailSettings,
+  type UpdateEmailSettingsInput,
+} from "./email-settings.js";
+
+export {
   MAIL_DELEGATION_CATEGORIES,
   MAIL_DELEGATION_STATUSES,
   MAIL_FILTER_FIELDS,

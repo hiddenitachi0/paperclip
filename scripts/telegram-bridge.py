@@ -1024,7 +1024,7 @@ def handed_over_tasks(result):
             "issueId": issue_id,
             "identifier": identifier if isinstance(identifier, str) else "",
             "title": title if isinstance(title, str) else "",
-            "colleague": action.get("tool") == "route_to_agent",
+            "colleague": action.get("tool") in ("route_to_agent", "start_job"),
         })
     return tasks
 
