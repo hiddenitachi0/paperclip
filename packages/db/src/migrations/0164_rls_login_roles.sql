@@ -216,6 +216,9 @@ DECLARE
     'document_annotation_threads',
     'document_revisions',
     'documents',
+    -- DUR-4277 email on/off per company. Created (and granted on) in
+    -- 0205_email_company_settings.sql; company-scoped, so it is in both lists.
+    'email_company_settings',
     'environment_custom_image_setup_sessions',
     'environment_custom_image_templates',
     'environment_leases',
@@ -466,6 +469,9 @@ DECLARE
     'document_annotation_threads',
     'document_revisions',
     'documents',
+    -- DUR-4277 email on/off per company. Created (and granted on) in
+    -- 0205_email_company_settings.sql; company-scoped, so it is in both lists.
+    'email_company_settings',
     'environment_leases',
     'escalation_grants',
     'execution_workspaces',
