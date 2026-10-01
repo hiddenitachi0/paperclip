@@ -208,6 +208,45 @@ describe("ProjectDeployHistoryCard", () => {
     expect(mockApprovalsApi.create).not.toHaveBeenCalled();
   });
 
+  it("lists earlier retained releases with their own rollback button", async () => {
+    const older = { commit: "cccccccccccc", approvalId: "approval-older", deployedAt: "2026-08-20T10:00:00Z" };
+    mockApprovalsApi.create.mockResolvedValue({ id: "approval-new-older" });
+    const el = await render(
+      <ProjectDeployHistoryCardView
+        companyId="co-1"
+        projectId="proj-1"
+        workspaceId="ws-1"
+        history={{ current, previous, releases: [current, previous, older] }}
+        isLoading={false}
+        error={null}
+        confirm={() => true}
+      />,
+    );
+    const list = el.querySelector('[data-testid="deploy-history-earlier-releases"]');
+    expect(list?.textContent).toContain("cccccccc");
+    const button = el.querySelector(`[data-testid="deploy-history-rollback-${older.commit}"]`) as HTMLButtonElement;
+    await act(async () => {
+      button.click();
+    });
+    await flush();
+    const [, input] = mockApprovalsApi.create.mock.calls[0] as [string, { payload: Record<string, unknown> }];
+    expect(input.payload).toMatchObject({ commit: "cccccccccccc", allowBackwardDeploy: true });
+  });
+
+  it("shows no earlier-releases section when only current/previous are on record", async () => {
+    const el = await render(
+      <ProjectDeployHistoryCardView
+        companyId="co-1"
+        projectId="proj-1"
+        workspaceId="ws-1"
+        history={{ current, previous, releases: [current, previous] }}
+        isLoading={false}
+        error={null}
+      />,
+    );
+    expect(el.querySelector('[data-testid="deploy-history-earlier-releases"]')).toBeNull();
+  });
+
   it("offers no rollback when only one version has ever been live", async () => {
     const el = await render(
       <ProjectDeployHistoryCardView
