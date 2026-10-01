@@ -14,6 +14,7 @@ import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
+  companyJobSettings,
   activityLog,
   agents,
   companies,
@@ -85,6 +86,8 @@ describeEmbeddedPostgres("start_job (DUR-4142)", () => {
       issuePrefix,
       requireBoardApprovalForNewAgents: false,
     });
+    // Jobs are off per company until switched on (#484); these cases start in the on state.
+    await db.insert(companyJobSettings).values({ companyId, jobsEnabled: true });
 
     const positionId = randomUUID();
     await db.insert(companyAgentRoles).values({
@@ -217,5 +220,24 @@ describeEmbeddedPostgres("start_job (DUR-4142)", () => {
     const runs = await db.select().from(jobRuns);
     expect(runs).toHaveLength(0);
     void otherAgentId;
+  });
+
+  it("refuses to start anything while the company has Jobs switched off", async () => {
+    const { companyId, quickAgentId } = await seedFixture();
+    // The job exists from when Jobs were on; the owner has since switched Jobs off.
+    await db.update(companyJobSettings).set({ jobsEnabled: false }).where(eq(companyJobSettings.companyId, companyId));
+    const deps = createDbLaneAToolDeps(db, { jobServiceOptions: { heartbeat: { wakeup: async () => null } } });
+    const execute = createLaneABuiltinToolExecutor(deps);
+
+    const result = await execute(
+      "start_job",
+      { colleague: "Legal Advisor Agent", job: "Revise contract" },
+      ctxFor(companyId, quickAgentId),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.content).toContain("switched off");
+    const runs = await db.select().from(jobRuns);
+    expect(runs).toHaveLength(0);
   });
 });

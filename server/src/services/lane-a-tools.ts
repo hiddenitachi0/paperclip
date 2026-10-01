@@ -877,7 +877,21 @@ export function createLaneABuiltinToolExecutor(deps: LaneAToolDeps) {
         summary: `Refused to start a job on ${match.name}: the person asking may not assign tasks to them.`,
       };
     }
-    const runnable = await deps.startJob.listRunnable(ctx.companyId, match.id);
+    const jobsOff = {
+      ok: false as const,
+      content: "Jobs are switched off for this company, so no job was started. An owner or admin can turn them on in the company settings.",
+      summary: "Refused to start a job: Jobs are switched off for this company.",
+    };
+    // The company Jobs switch (#484) answers 403 from the jobs service; say so plainly.
+    const isJobsOff = (err: unknown) =>
+      err instanceof HttpError && err.status === 403 && /not enabled/i.test(err.message);
+    let runnable: Awaited<ReturnType<typeof deps.startJob.listRunnable>>;
+    try {
+      runnable = await deps.startJob.listRunnable(ctx.companyId, match.id);
+    } catch (err) {
+      if (isJobsOff(err)) return jobsOff;
+      throw err;
+    }
     if (runnable.length === 0) {
       return {
         ok: false,
@@ -900,13 +914,19 @@ export function createLaneABuiltinToolExecutor(deps: LaneAToolDeps) {
       };
     }
     const job = found[0]!;
-    const result = await deps.startJob.run({
-      companyId: ctx.companyId,
-      jobId: job.id,
-      runAgentId: match.id,
-      note: note || null,
-      ctx,
-    });
+    let result: Awaited<ReturnType<typeof deps.startJob.run>>;
+    try {
+      result = await deps.startJob.run({
+        companyId: ctx.companyId,
+        jobId: job.id,
+        runAgentId: match.id,
+        note: note || null,
+        ctx,
+      });
+    } catch (err) {
+      if (isJobsOff(err)) return jobsOff;
+      throw err;
+    }
     const ref = result.identifier ?? result.issueId ?? job.id;
     return {
       ok: true,
