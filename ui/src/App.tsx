@@ -54,7 +54,7 @@ import { CompanySkills } from "./pages/CompanySkills";
 import { CompanyMcpTools } from "./pages/CompanyMcpTools";
 import { Personas } from "./pages/Personas";
 import { PersonaDetail } from "./pages/PersonaDetail";
-import { Jobs } from "./pages/Jobs";
+import { Positions } from "./pages/Positions";
 import { Secrets } from "./pages/Secrets";
 import { CompanyExport } from "./pages/CompanyExport";
 import { CompanyImport } from "./pages/CompanyImport";
@@ -135,7 +135,7 @@ function boardRoutes() {
       <Route path="tools" element={<CompanyMcpTools />} />
       <Route path="personas" element={<Personas />} />
       <Route path="personas/:personaId" element={<PersonaDetail />} />
-      <Route path="jobs" element={<Jobs />} />
+      <Route path="positions" element={<Positions />} />
       <Route path="settings" element={<LegacySettingsRedirect />} />
       <Route path="settings/*" element={<LegacySettingsRedirect />} />
       <Route path="plugins/:pluginId" element={<PluginPage />} />
@@ -172,7 +172,10 @@ function boardRoutes() {
       {import.meta.env.DEV ? (
         <Route path="tests/perf/long-thread" element={<IssueChatLongThreadPerf />} />
       ) : null}
-      <Route path="routines" element={<Routines />} />
+      <Route path="jobs" element={<Routines />} />
+      <Route path="routines" element={<LegacyRoutinesRedirect />} />
+      <Route path="routines/:routineId" element={<LegacyRoutinesRedirect />} />
+      <Route path="routines/:routineId/:section" element={<LegacyRoutinesRedirect />} />
       <Route path="watchers" element={<Watchers />} />
       <Route
         path="review-queue"
@@ -210,8 +213,8 @@ function boardRoutes() {
         path="pipelines/:pipelineId/cases/:caseId"
         element={<PipelinesExperimentalGate><PipelineItemLegacyRedirect /></PipelinesExperimentalGate>}
       />
-      <Route path="routines/:routineId" element={<RoutineDetail />} />
-      <Route path="routines/:routineId/:section" element={<RoutineDetail />} />
+      <Route path="jobs/:routineId" element={<RoutineDetail />} />
+      <Route path="jobs/:routineId/:section" element={<RoutineDetail />} />
       <Route path="execution-workspaces/:workspaceId" element={<ExecutionWorkspaceDetail />} />
       <Route path="execution-workspaces/:workspaceId/services" element={<ExecutionWorkspaceDetail />} />
       <Route path="execution-workspaces/:workspaceId/configuration" element={<ExecutionWorkspaceDetail />} />
@@ -425,6 +428,15 @@ function LegacyArtifactsRedirect() {
   );
 }
 
+// Permanent redirect for the old /routines path (renamed to /jobs) — keeps
+// bookmarks and shared links working, preserving the active filters/search.
+function LegacyRoutinesRedirect() {
+  const location = useLocation();
+  const { routineId, section } = useParams<{ routineId?: string; section?: string }>();
+  const base = routineId ? (section ? `/jobs/${routineId}/${section}` : `/jobs/${routineId}`) : "/jobs";
+  return <Navigate to={`${base}${location.search}${location.hash}`} replace />;
+}
+
 function NoCompaniesStartPage() {
   const { openOnboarding } = useDialogActions();
   const { t } = useTranslation();
@@ -488,6 +500,7 @@ export function App() {
           <Route path="u/:userSlug" element={<UnprefixedBoardRedirect />} />
           <Route path="skills/*" element={<UnprefixedBoardRedirect />} />
           <Route path="jobs" element={<UnprefixedBoardRedirect />} />
+          <Route path="positions" element={<UnprefixedBoardRedirect />} />
           <Route path="tools" element={<UnprefixedBoardRedirect />} />
           <Route path="settings" element={<LegacySettingsRedirect />} />
           <Route path="settings/*" element={<LegacySettingsRedirect />} />
