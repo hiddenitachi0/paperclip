@@ -71,6 +71,7 @@ import { PluginSettings } from "./pages/PluginSettings";
 import { AdapterManager } from "./pages/AdapterManager";
 import { PluginPage } from "./pages/PluginPage";
 import { OrgChart } from "./pages/OrgChart";
+import { WorkflowMap } from "./pages/WorkflowMap";
 import { NewAgent } from "./pages/NewAgent";
 import { AuthPage } from "./pages/Auth";
 import { BoardClaimPage } from "./pages/BoardClaim";
@@ -175,6 +176,7 @@ function boardRoutes() {
       <Route path="routines" element={<LegacyRoutinesRedirect />} />
       <Route path="routines/:routineId" element={<LegacyRoutinesRedirect />} />
       <Route path="routines/:routineId/:section" element={<LegacyRoutinesRedirect />} />
+      <Route path="workflow-map" element={<WorkflowMap />} />
       <Route path="watchers" element={<Watchers />} />
       <Route
         path="review-queue"

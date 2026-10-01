@@ -132,6 +132,7 @@ import {
 export const SCHEDULER_TICK_CHAINS = [
   "tickTimers",
   "tickScheduledTriggers",
+  "tickScheduledJobTriggers",
   "mergeDeployVisibility",
   "deployApprovalFeedback",
   "deployCarriedIssues",
@@ -187,7 +188,8 @@ export const TICK_PHASE_TIMED_CHAINS: ReadonlySet<SchedulerTickChain> = new Set<
  */
 export const SCHEDULER_TICK_CHAIN_LABELS: Record<SchedulerTickChain, string> = {
   tickTimers: "waking agents on their timers",
-  tickScheduledTriggers: "starting scheduled jobs",
+  tickScheduledTriggers: "starting scheduled routines",
+  tickScheduledJobTriggers: "starting scheduled position jobs",
   mergeDeployVisibility: "following merges and deploys",
   deployApprovalFeedback: "following up on deploy approvals",
   deployCarriedIssues: "checking which tasks a deploy carried",

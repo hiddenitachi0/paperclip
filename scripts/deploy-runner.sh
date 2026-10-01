@@ -182,6 +182,13 @@ COMMENT_RETRY_SLEEP_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_COMMENT_RETRY_SLEEP:-5}"
 # volume the server container mounts at /paperclip — read it back with
 # GET /api/companies/:companyId/deploy-runner/status.
 STATUS_PATH="${PAPERCLIP_DEPLOY_RUNNER_STATUS_PATH:-/paperclip/deploy-runner/status.jsonl}"
+# DUR-4162: how many lines record_status() keeps the shared status.jsonl
+# trimmed to. Raised from 500 so a project's configured release-retention
+# count (default 10, up to 50 -- see deploy-history.ts) has enough log depth
+# to resolve even on a box where other companies deploy often enough to
+# crowd older lines out of a smaller window. Keep in step with MAX_LIMIT in
+# server/src/services/deploy-runner-status.ts.
+STATUS_LOG_MAX_LINES="${PAPERCLIP_DEPLOY_RUNNER_STATUS_LOG_MAX_LINES:-5000}"
 # DUR-259: how long a compose_recreate/compose_build_swap recipe waits for
 # in-flight heartbeat runs (across every company, not just this approval's)
 # to finish before recreating the shared docker-server-1 container — see
@@ -304,8 +311,8 @@ if os.environ.get("COMMIT"):
 print(json.dumps(entry))
 ' 2>>"$LOG")"
   [ -z "$line" ] && return 0
-  docker exec "${CLI_EXEC_ENV[@]}" -e STATUS_LINE="$line" -e STATUS_PATH="$STATUS_PATH" "$DOCKER_SERVER_CONTAINER" sh -c \
-    'mkdir -p "$(dirname "$STATUS_PATH")" && printf "%s\n" "$STATUS_LINE" >> "$STATUS_PATH" && tail -n 500 "$STATUS_PATH" > "$STATUS_PATH.tmp" 2>/dev/null && mv "$STATUS_PATH.tmp" "$STATUS_PATH"' \
+  docker exec "${CLI_EXEC_ENV[@]}" -e STATUS_LINE="$line" -e STATUS_PATH="$STATUS_PATH" -e STATUS_LOG_MAX_LINES="$STATUS_LOG_MAX_LINES" "$DOCKER_SERVER_CONTAINER" sh -c \
+    'mkdir -p "$(dirname "$STATUS_PATH")" && printf "%s\n" "$STATUS_LINE" >> "$STATUS_PATH" && tail -n "$STATUS_LOG_MAX_LINES" "$STATUS_PATH" > "$STATUS_PATH.tmp" 2>/dev/null && mv "$STATUS_PATH.tmp" "$STATUS_PATH"' \
     >/dev/null 2>>"$LOG" || log "runner: $aid failed to record status line (non-fatal)"
 }
 
