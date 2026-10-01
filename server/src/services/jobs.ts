@@ -35,6 +35,7 @@ import { nextCronTickInTimeZone } from "./routines.js";
 import { queueIssueAssignmentWakeup, type IssueAssignmentWakeupDeps } from "./issue-assignment-wakeup.js";
 import { heartbeatService } from "./heartbeat.js";
 import { logActivity } from "./activity-log.js";
+import { frameUntrustedMailField } from "./mail-secretary.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 
 type Actor = { agentId?: string | null; userId?: string | null; runId?: string | null };
@@ -620,12 +621,17 @@ export function jobService(
     // packages/db/src/schema/jobs.ts) to the mail secretary's inbound-mail
     // pipeline. mail-secretary.ts calls this once per fetched message with
     // the inbox's own IMAP address (the only "address" a message carries --
-    // the IMAP client never parses a To: header), already run through
-    // frameDelegatedMailContent so any injection attempt in the mail body
-    // cannot be read as instructions. A job opts in to the content by
-    // declaring variables named email_from/email_subject/email_body;
-    // resolveFormValues ignores undeclared keys, so this is a no-op for any
-    // other job accidentally sharing an email trigger address.
+    // the IMAP client never parses a To: header). message.bodyText arrives
+    // already run through frameDelegatedMailContent; message.from/subject
+    // arrive raw, so this function frames them itself (DUR-4260) before they
+    // reach formValues -- otherwise a job template that interpolates
+    // {{email_from}}/{{email_subject}} directly (not just {{email_body}})
+    // would place attacker-controlled header text into a dispatched issue's
+    // title/description with no untrusted-text marking at all. A job opts in
+    // to the content by declaring variables named
+    // email_from/email_subject/email_body; resolveFormValues ignores
+    // undeclared keys, so this is a no-op for any other job accidentally
+    // sharing an email trigger address.
     fireEmailJobTriggers: async (
       companyId: string,
       inboxAddress: string,
@@ -670,8 +676,8 @@ export function jobService(
             source: "email",
             runAgentId: runAgent.id,
             formValues: {
-              email_from: message.from,
-              email_subject: message.subject,
+              email_from: frameUntrustedMailField(message.from),
+              email_subject: frameUntrustedMailField(message.subject),
               email_body: message.bodyText,
             },
             idempotencyKey: message.messageId ? `email-trigger:${trigger.id}:${message.messageId}` : null,

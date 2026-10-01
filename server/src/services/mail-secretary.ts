@@ -153,6 +153,20 @@ export function frameDelegatedMailContent(input: { from: string; subject: string
   return lines.join("\n");
 }
 
+/**
+ * Same defuse-and-mark convention as frameDelegatedMailContent, for a single
+ * header-style field (sender or subject) interpolated on its own into
+ * agent-facing text -- e.g. a job template variable like {{email_subject}} --
+ * rather than composed into frameDelegatedMailContent's own body block.
+ * DUR-4260: job email triggers pass email_from/email_subject through as
+ * separate template variables, so each one needs its own untrusted-text
+ * markers; without this a job's instructions template could read raw,
+ * unmarked attacker-controlled header text as if it were an instruction.
+ */
+export function frameUntrustedMailField(value: string): string {
+  return [MAIL_START, defuse(value) || "(empty)", MAIL_END].join("\n");
+}
+
 function iso(date: Date | null | undefined): string | null {
   return date ? date.toISOString() : null;
 }
