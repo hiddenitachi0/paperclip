@@ -199,6 +199,34 @@ d("tradingService", () => {
     await trading.setStatus(companyId, strategy.id, "paused");
   });
 
+  it("halts on a single-tick price jump beyond the protected circuit-breaker ceiling, without placing an order", async () => {
+    const companyId = await seedCompany();
+    const now = new Date("2026-01-01T00:00:00Z");
+    // Last two closes jump 20 -> 30, a 50% single-tick move -- well past the 15% ceiling.
+    // Still a "buy" signal by the SMA rule, which is the point: the breaker must fire before the rule/risk gate ever gets a say.
+    const jumpCandles = { closes: [20, 20, 20, 30], lastCandleAt: now };
+    const trading = tradingService(db, {
+      now: () => now,
+      marketData: fakeTradingMarketData({ candles: { BTC: jumpCandles }, quotes: { BTC: { bidUsd: 30, askUsd: 30, at: now } } }),
+    });
+    const strategy = await trading.createStrategy(companyId, STRATEGY_INPUT, { actorType: "user", actorId: "u1" });
+    await trading.setStatus(companyId, strategy.id, "running");
+
+    const result = await trading.tick(now);
+    expect(result).toMatchObject({ checked: 1, filled: 0, blocked: 0, halted: 1 });
+
+    const row = await trading.requireStrategy(companyId, strategy.id);
+    expect(row.status).toBe("halted_risk");
+    expect(row.pauseReason).toBe("circuit_breaker");
+    expect(row.cashNok).toBe(2_000); // untouched -- no order was even attempted
+
+    expect(await trading.listOrders(companyId, strategy.id)).toHaveLength(0);
+
+    const ledgerEntries = await trading.listLedgerEntries(companyId, strategy.id);
+    expect(ledgerEntries.map((e) => e.eventType)).toEqual(["circuit_breaker", "kill_switch"]);
+    expect(ledgerEntries[0]!.detail).toMatchObject({ reason: "single_tick_price_jump" });
+  });
+
   it("requires operator approval on every trade when approvalAboveNok is null, and never fills on its own", async () => {
     const companyId = await seedCompany();
     const now = new Date("2026-01-01T00:00:00Z");

@@ -40,6 +40,23 @@ function priceBandBreach(signalPriceNok: number, quotePriceNok: number, bandPct:
   return drift * 100 > bandPct;
 }
 
+/**
+ * Candle-over-candle jump, as a %, between the two most recent closes --
+ * distinct from priceBandBreach above, which only compares the current
+ * candle's close against the live quote within the same tick. A flash
+ * crash/spike (or a bad print) can move both of those together while still
+ * being exactly the kind of single-tick jump the design's circuit breaker
+ * (TRADING_CIRCUIT_BREAKER_PRICE_JUMP_PCT) is meant to catch. Returns null
+ * when there isn't a prior close to compare against.
+ */
+export function singleTickPriceJumpPct(closes: number[]): number | null {
+  if (closes.length < 2) return null;
+  const prev = closes[closes.length - 2]!;
+  const last = closes[closes.length - 1]!;
+  if (prev <= 0) return null;
+  return (Math.abs(last - prev) / prev) * 100;
+}
+
 export function evaluateTradingRiskGate(input: TradingRiskGateInput): TradingRiskVerdict {
   const { side, signalPriceNok, quotePriceNok, requestedQuantity, riskConfig, cashNok, positionQuantity, positionCostNok, ordersToday, realizedPnlTodayNok, peakEquityNok, currentEquityNok } =
     input;

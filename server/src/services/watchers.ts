@@ -1,16 +1,18 @@
 import { and, asc, desc, eq, gte, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, runInPooledScope, watcherAlerts, watcherPricePoints, watchers } from "@paperclipai/db";
+import { agents, runInPooledScope, watcherAlerts, watcherPricePoints, watcherWebPageSnapshots, watchers } from "@paperclipai/db";
 import {
   WATCHER_MAX_ALERTS_PER_DAY,
   WATCHER_MAX_PER_COMPANY,
   WATCHER_SOURCE_INFO,
   describeWatcherRule,
+  describeWatcherWebPageRule,
   formatWatcherPrice,
   watcherCheckEveryProblem,
   watcherRuleSchema,
   watcherSymbolName,
   watcherSymbolProblem,
+  watcherWebPageRuleSchema,
   type CreateWatcherInput,
   type UpdateWatcherInput,
   type WatcherAlertFacts,
@@ -20,6 +22,7 @@ import {
   type WatcherRule,
   type WatcherSource,
   type WatcherSummary,
+  type WatcherWebPageRule,
 } from "@paperclipai/shared";
 import { conflict, notFound, tooManyRequests, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
@@ -35,6 +38,13 @@ import {
   type WatcherSourceDeps,
 } from "./watcher-sources.js";
 import { evaluateWatcherRule, watcherRuleHistoryHours } from "./watcher-rules.js";
+import { evaluateWatcherWebPageRule, type WatcherWebPageSnapshot } from "./watcher-web-page-rules.js";
+import {
+  createWatcherWebPageFetcher,
+  isWatcherWebPageFetchError,
+  type WatcherWebPageFetchResult,
+  type WatcherWebPageFetcher,
+} from "./watcher-web-page.js";
 
 /**
  * Watchers: scheduled price checks that alert the operator on Telegram only
@@ -111,6 +121,8 @@ export interface WatcherServiceDeps extends WatcherSourceDeps {
    * pool (runInPooledScope); tests pass a function that collects the promise.
    */
   dispatch?: (work: () => Promise<void>) => void;
+  /** Test seam: swap the real (Crawl4AI-backed) fetcher for a fake with fixed responses. */
+  webPageFetcher?: WatcherWebPageFetcher;
 }
 
 function utcDay(date: Date): string {
@@ -124,6 +136,21 @@ function iso(date: Date | null | undefined): string | null {
 function readRule(row: Pick<WatcherRow, "rule">): WatcherRule | null {
   const parsed = watcherRuleSchema.safeParse(row.rule);
   return parsed.success ? parsed.data : null;
+}
+
+function readWebPageRule(row: Pick<WatcherRow, "rule">): WatcherWebPageRule | null {
+  const parsed = watcherWebPageRuleSchema.safeParse(row.rule);
+  return parsed.success ? parsed.data : null;
+}
+
+/** Either rule shape, picked by the watcher's own source -- see watcherWebPageRuleSchema vs watcherRuleSchema. */
+function readAnyRule(row: Pick<WatcherRow, "source" | "rule">): WatcherRule | WatcherWebPageRule | null {
+  return row.source === "web_page" ? readWebPageRule(row) : readRule(row);
+}
+
+function describeAnyRule(row: Pick<WatcherRow, "source" | "symbol">, rule: WatcherRule | WatcherWebPageRule): string {
+  if (row.source === "web_page") return describeWatcherWebPageRule(rule as WatcherWebPageRule);
+  return describeWatcherRule(rule as WatcherRule, subjectOf(row), currencyOf(row));
 }
 
 function subjectOf(row: Pick<WatcherRow, "source" | "symbol">): string {
@@ -147,6 +174,7 @@ function windowWords(hours: number): string {
 /** The facts in one plain line: "Bitcoin (BTC): $87,300, +5.2% in 24 hours (from $83,000)". */
 export function watcherFactsLine(facts: WatcherAlertFacts): string {
   const head = facts.subject === facts.symbol ? facts.symbol : `${facts.subject} (${facts.symbol})`;
+  if (facts.price === null) return facts.changeSummary ? `${head}: ${facts.changeSummary}` : head;
   let line = `${head}: ${formatWatcherPrice(facts.price, facts.currency)}`;
   if (facts.changePercent !== null && facts.basePrice !== null) {
     const span = facts.windowHours ? ` in ${windowWords(facts.windowHours)}` : facts.ruleText.includes("since the last alert") ? " since the last alert" : "";
@@ -157,7 +185,8 @@ export function watcherFactsLine(facts: WatcherAlertFacts): string {
 
 /** The whole alert without any agent: what goes out when the agent cannot write it. */
 export function watcherPlainAlertText(facts: WatcherAlertFacts): string {
-  const head = facts.isTest ? `🧪 Test alert from the watcher "${facts.watcherName}"` : `📈 ${facts.watcherName}`;
+  const emoji = facts.price === null ? "🔔" : "📈";
+  const head = facts.isTest ? `🧪 Test alert from the watcher "${facts.watcherName}"` : `${emoji} ${facts.watcherName}`;
   return `${head}\n${watcherFactsLine(facts)}\nRule: ${facts.ruleText}.`;
 }
 
@@ -167,19 +196,26 @@ export function watcherFactsForAgent(facts: WatcherAlertFacts): string {
     `Watcher: ${facts.watcherName}`,
     `What it watches: ${facts.subject} (${facts.symbol})`,
     `Rule that fired: ${facts.ruleText}`,
-    `Price now: ${formatWatcherPrice(facts.price, facts.currency)}`,
   ];
-  if (facts.basePrice !== null && facts.changePercent !== null) {
-    lines.push(`Measured from: ${formatWatcherPrice(facts.basePrice, facts.currency)}`);
-    lines.push(`Change: ${formatSignedPercent(facts.changePercent)}`);
+  if (facts.price !== null) {
+    lines.push(`Price now: ${formatWatcherPrice(facts.price, facts.currency)}`);
+    if (facts.basePrice !== null && facts.changePercent !== null) {
+      lines.push(`Measured from: ${formatWatcherPrice(facts.basePrice, facts.currency)}`);
+      lines.push(`Change: ${formatSignedPercent(facts.changePercent)}`);
+    }
+    if (facts.windowHours) lines.push(`Within: ${windowWords(facts.windowHours)}`);
+  } else if (facts.changeSummary) {
+    lines.push(`What changed: ${facts.changeSummary}`);
   }
-  if (facts.windowHours) lines.push(`Within: ${windowWords(facts.windowHours)}`);
   if (facts.isTest) lines.push("This is a TEST alert the person asked for, not a real move. Say that it is a test.");
   return lines.join("\n");
 }
 
 /** A picture description written by code (no model call): the mood follows the direction of the move. */
 export function watcherPicturePrompt(facts: WatcherAlertFacts): string {
+  if (facts.price === null) {
+    return `A clean, editorial illustration representing a web page update: ${facts.changeSummary ?? facts.ruleText}, no text, no numbers`;
+  }
   const up = (facts.changePercent ?? 0) >= 0;
   const what = facts.source === "crypto" ? `a shiny ${facts.subject} coin` : `the ${facts.subject} stock ticker on a trading screen`;
   return up
@@ -205,6 +241,7 @@ export function watcherService(db: Db, deps: WatcherServiceDeps = {}) {
         logger.error({ err }, "watchers: writing an alert failed");
       });
     });
+  const webPageFetcher = deps.webPageFetcher ?? createWatcherWebPageFetcher();
 
   // ─── Reading ───────────────────────────────────────────────────────────────
 
@@ -224,7 +261,7 @@ export function watcherService(db: Db, deps: WatcherServiceDeps = {}) {
   }
 
   function toSummary(row: WatcherRow, agentName: string | null, alerts: WatcherAlertRow[], now: Date): WatcherSummary {
-    const rule = readRule(row) ?? ({ kind: "since_last_alert", percent: 99 } as WatcherRule);
+    const rule = readAnyRule(row) ?? ({ kind: "since_last_alert", percent: 99 } as WatcherRule);
     const today = utcDay(now);
     const subject = subjectOf(row);
     return {
@@ -238,7 +275,7 @@ export function watcherService(db: Db, deps: WatcherServiceDeps = {}) {
       subject,
       currency: currencyOf(row),
       rule,
-      ruleText: readRule(row) ? describeWatcherRule(rule, subject, currencyOf(row)) : "The rule could not be read. Edit the watcher and save it again.",
+      ruleText: readAnyRule(row) ? describeAnyRule(row, rule) : "The rule could not be read. Edit the watcher and save it again.",
       checkEveryMinutes: row.checkEveryMinutes,
       cooldownMinutes: row.cooldownMinutes,
       enabled: row.enabled,
@@ -408,7 +445,7 @@ export function watcherService(db: Db, deps: WatcherServiceDeps = {}) {
       agentId: patch.agentId ?? row.agentId,
       source: (patch.source ?? row.source) as WatcherSource,
       symbol: (patch.symbol ?? row.symbol).trim().toUpperCase(),
-      rule: patch.rule ?? readRule(row),
+      rule: patch.rule ?? readAnyRule(row),
       checkEveryMinutes: patch.checkEveryMinutes ?? row.checkEveryMinutes,
       cooldownMinutes: patch.cooldownMinutes ?? row.cooldownMinutes,
       enabled: patch.enabled ?? row.enabled,
@@ -581,7 +618,7 @@ export function watcherService(db: Db, deps: WatcherServiceDeps = {}) {
       : { countersDay: today, checksToday: 0, alertsToday: 0 };
   }
 
-  async function recordFailure(row: WatcherRow, error: WatcherQuoteError, now: Date) {
+  async function recordFailure(row: WatcherRow, error: { kind: string; message: string }, now: Date) {
     const failures = row.consecutiveFailures + 1;
     const interval = row.checkEveryMinutes * 60_000;
     const backoff = Math.min(interval * 2 ** Math.min(failures, 8), WATCHER_MAX_BACKOFF_MS);
@@ -712,6 +749,7 @@ export function watcherService(db: Db, deps: WatcherServiceDeps = {}) {
       changePercent: outcome.changePercent,
       windowHours: outcome.windowHours,
       ruleText: describeWatcherRule(rule, subjectOf(row), currencyOf(row)),
+      changeSummary: null,
       isTest: false,
       observedAt: quote.observedAt.toISOString(),
     };
@@ -739,7 +777,131 @@ export function watcherService(db: Db, deps: WatcherServiceDeps = {}) {
     return alert!.id;
   }
 
-  async function checkWatchers(rows: WatcherRow[], now: Date): Promise<{ checked: number; failed: number; fired: number }> {
+  async function loadWebPageSnapshot(watcherId: string): Promise<WatcherWebPageSnapshot | null> {
+    const [row] = await db
+      .select({
+        lastPrice: watcherWebPageSnapshots.lastPrice,
+        lastInStock: watcherWebPageSnapshots.lastInStock,
+        lastItemKeys: watcherWebPageSnapshots.lastItemKeys,
+        lastContentHash: watcherWebPageSnapshots.lastContentHash,
+      })
+      .from(watcherWebPageSnapshots)
+      .where(eq(watcherWebPageSnapshots.watcherId, watcherId));
+    return row ?? null;
+  }
+
+  /** Web-page watchers' analog of recordSuccess: a fetch result compared to a last-seen snapshot, not a price history window. */
+  async function recordWebPageSuccess(row: WatcherRow, fetched: WatcherWebPageFetchResult, now: Date): Promise<string | null> {
+    const rule = readWebPageRule(row);
+    const c = counters(row, now);
+    const next = new Date(now.getTime() + row.checkEveryMinutes * 60_000);
+    const base = {
+      lastCheckAt: now,
+      consecutiveFailures: 0,
+      nextCheckAt: next,
+      checkLeaseUntil: null,
+      countersDay: c.countersDay,
+      checksToday: c.checksToday + 1,
+    };
+    if (!rule) {
+      await db
+        .update(watchers)
+        .set({ ...base, lastCheckOk: false, lastCheckMessage: "The rule could not be read. Edit the watcher and save it again.", alertsToday: c.alertsToday })
+        .where(eq(watchers.id, row.id));
+      return null;
+    }
+
+    const previous = await loadWebPageSnapshot(row.id);
+    const outcome = evaluateWatcherWebPageRule(rule, fetched, previous, row.conditionMet);
+
+    const cooling = row.lastAlertAt !== null && now.getTime() - row.lastAlertAt.getTime() < row.cooldownMinutes * 60_000;
+    const capped = c.alertsToday >= WATCHER_MAX_ALERTS_PER_DAY;
+    const fires = outcome.wantsAlert && !cooling && !capped;
+
+    // Only the `price` rule has a crossing to remember (the same shape as the numeric `level` rule).
+    const conditionMet = rule.kind === "price" ? (outcome.conditionNow ? fires || row.conditionMet : false) : row.conditionMet;
+
+    let message: string | null = null;
+    if (outcome.wantsAlert && cooling) message = "The rule fired, but the watcher is in its quiet time after the last alert.";
+    if (outcome.wantsAlert && capped) message = `The rule fired, but today's ${WATCHER_MAX_ALERTS_PER_DAY} alerts are used up.`;
+
+    await db
+      .update(watchers)
+      .set({
+        ...base,
+        lastCheckOk: true,
+        lastCheckMessage: message,
+        conditionMet,
+        ...(fires && rule.kind === "price" ? { lastAlertPrice: outcome.nextSnapshot.lastPrice } : {}),
+        ...(fires ? { lastAlertAt: now } : {}),
+        alertsToday: c.alertsToday + (fires ? 1 : 0),
+      })
+      .where(eq(watchers.id, row.id));
+
+    await db
+      .insert(watcherWebPageSnapshots)
+      .values({
+        companyId: row.companyId,
+        watcherId: row.id,
+        lastPrice: outcome.nextSnapshot.lastPrice,
+        lastInStock: outcome.nextSnapshot.lastInStock,
+        lastItemKeys: outcome.nextSnapshot.lastItemKeys,
+        lastContentHash: outcome.nextSnapshot.lastContentHash,
+        observedAt: fetched.observedAt,
+      })
+      .onConflictDoUpdate({
+        target: watcherWebPageSnapshots.watcherId,
+        set: {
+          lastPrice: outcome.nextSnapshot.lastPrice,
+          lastInStock: outcome.nextSnapshot.lastInStock,
+          lastItemKeys: outcome.nextSnapshot.lastItemKeys,
+          lastContentHash: outcome.nextSnapshot.lastContentHash,
+          observedAt: fetched.observedAt,
+          updatedAt: now,
+        },
+      });
+
+    if (!fires) return null;
+    const facts: WatcherAlertFacts = {
+      watcherName: row.name,
+      source: row.source as WatcherSource,
+      symbol: row.symbol,
+      subject: subjectOf(row),
+      currency: currencyOf(row),
+      price: null,
+      basePrice: null,
+      changePercent: null,
+      windowHours: null,
+      ruleText: describeWatcherWebPageRule(rule),
+      changeSummary: outcome.changeSummary,
+      isTest: false,
+      observedAt: fetched.observedAt.toISOString(),
+    };
+    const [alert] = await db
+      .insert(watcherAlerts)
+      .values({
+        companyId: row.companyId,
+        watcherId: row.id,
+        agentId: row.agentId,
+        status: "composing",
+        facts: facts as unknown as Record<string, unknown>,
+        createdAt: now,
+      })
+      .returning({ id: watcherAlerts.id });
+    await logActivity(db, {
+      companyId: row.companyId,
+      actorType: "system",
+      actorId: "watchers",
+      action: "watcher.fired",
+      entityType: "watcher",
+      entityId: row.id,
+      agentId: row.agentId,
+      details: { name: row.name, symbol: row.symbol, changeSummary: outcome.changeSummary, alertId: alert!.id },
+    }).catch(() => undefined);
+    return alert!.id;
+  }
+
+  async function checkPriceWatchers(rows: WatcherRow[], now: Date): Promise<{ failed: number; fired: number }> {
     let failed = 0;
     let fired = 0;
     const prices = await fetchPrices(rows, now);
@@ -758,7 +920,47 @@ export function watcherService(db: Db, deps: WatcherServiceDeps = {}) {
         // The lease expires on its own; the watcher is checked again then.
       }
     }
-    return { checked: rows.length, failed, fired };
+    return { failed, fired };
+  }
+
+  async function checkWebPageWatchers(rows: WatcherRow[], now: Date): Promise<{ failed: number; fired: number }> {
+    let failed = 0;
+    let fired = 0;
+    for (const row of rows) {
+      try {
+        const rule = readWebPageRule(row);
+        if (!rule) {
+          failed += 1;
+          await recordFailure(row, { kind: "upstream", message: "The rule could not be read." }, now);
+          continue;
+        }
+        const fetched = await webPageFetcher.fetch(rule, now);
+        if (isWatcherWebPageFetchError(fetched)) {
+          failed += 1;
+          await recordFailure(row, fetched, now);
+          continue;
+        }
+        if (await recordWebPageSuccess(row, fetched, now)) fired += 1;
+      } catch (err) {
+        failed += 1;
+        logger.error({ err, watcherId: row.id }, "watchers: recording a web-page check failed");
+      }
+    }
+    return { failed, fired };
+  }
+
+  async function checkWatchers(rows: WatcherRow[], now: Date): Promise<{ checked: number; failed: number; fired: number }> {
+    const priceRows = rows.filter((row) => row.source !== "web_page");
+    const webPageRows = rows.filter((row) => row.source === "web_page");
+    const [priceResult, webPageResult] = await Promise.all([
+      priceRows.length > 0 ? checkPriceWatchers(priceRows, now) : { failed: 0, fired: 0 },
+      webPageRows.length > 0 ? checkWebPageWatchers(webPageRows, now) : { failed: 0, fired: 0 },
+    ]);
+    return {
+      checked: rows.length,
+      failed: priceResult.failed + webPageResult.failed,
+      fired: priceResult.fired + webPageResult.fired,
+    };
   }
 
   async function expireStaleAlerts(now: Date): Promise<number> {
@@ -922,32 +1124,54 @@ export function watcherService(db: Db, deps: WatcherServiceDeps = {}) {
     if (c.alertsToday >= WATCHER_MAX_ALERTS_PER_DAY) {
       throw tooManyRequests(`This watcher has sent its ${WATCHER_MAX_ALERTS_PER_DAY} alerts for today (tests count too). Try again tomorrow.`);
     }
-    const rule = readRule(row);
+    const rule = readAnyRule(row);
     if (!rule) throw unprocessable("Set the rule again: the saved one could not be read.");
-    let price = row.lastPrice;
-    let observedAt = row.lastPriceAt ?? now;
-    if (price === null) {
-      const quote = (await fetchPrices([row], now)).get(row.id);
-      if (!quote || isWatcherQuoteError(quote)) {
-        throw unprocessable(`No price to test with yet. ${quote?.message ?? ""}`.trim());
+    let facts: WatcherAlertFacts;
+    if (row.source === "web_page") {
+      const fetched = await webPageFetcher.fetch(rule as WatcherWebPageRule, now);
+      if (isWatcherWebPageFetchError(fetched)) throw unprocessable(`No page data to test with yet. ${fetched.message}`.trim());
+      facts = {
+        watcherName: row.name,
+        source: row.source as WatcherSource,
+        symbol: row.symbol,
+        subject: subjectOf(row),
+        currency: currencyOf(row),
+        price: null,
+        basePrice: null,
+        changePercent: null,
+        windowHours: null,
+        ruleText: describeWatcherWebPageRule(rule as WatcherWebPageRule),
+        changeSummary: fetched.snippet || "No change detected yet.",
+        isTest: true,
+        observedAt: fetched.observedAt.toISOString(),
+      };
+    } else {
+      let price = row.lastPrice;
+      let observedAt = row.lastPriceAt ?? now;
+      if (price === null) {
+        const quote = (await fetchPrices([row], now)).get(row.id);
+        if (!quote || isWatcherQuoteError(quote)) {
+          throw unprocessable(`No price to test with yet. ${quote?.message ?? ""}`.trim());
+        }
+        price = quote.price;
+        observedAt = quote.observedAt;
       }
-      price = quote.price;
-      observedAt = quote.observedAt;
+      facts = {
+        watcherName: row.name,
+        source: row.source as WatcherSource,
+        symbol: row.symbol,
+        subject: subjectOf(row),
+        currency: currencyOf(row),
+        price,
+        basePrice: null,
+        changePercent: null,
+        windowHours: null,
+        ruleText: describeWatcherRule(rule as WatcherRule, subjectOf(row), currencyOf(row)),
+        changeSummary: null,
+        isTest: true,
+        observedAt: observedAt.toISOString(),
+      };
     }
-    const facts: WatcherAlertFacts = {
-      watcherName: row.name,
-      source: row.source as WatcherSource,
-      symbol: row.symbol,
-      subject: subjectOf(row),
-      currency: currencyOf(row),
-      price,
-      basePrice: null,
-      changePercent: null,
-      windowHours: null,
-      ruleText: describeWatcherRule(rule, subjectOf(row), currencyOf(row)),
-      isTest: true,
-      observedAt: observedAt.toISOString(),
-    };
     // Counted like any alert, so the test button cannot become a way round
     // the daily ceiling; cooldown and baseline are left alone.
     await db

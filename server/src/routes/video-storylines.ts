@@ -2,9 +2,11 @@ import { Router, type Request, type RequestHandler } from "express";
 import type { Db } from "@paperclipai/db";
 import { createRequestScopedDb } from "@paperclipai/db";
 import {
+  approveVideoDirectorRunSchema,
   createVideoSceneSchema,
   createVideoShotSchema,
   createVideoStorylineSchema,
+  draftVideoDirectorShotsSchema,
   startVideoStorylineRenderSchema,
   updateVideoSceneSchema,
   updateVideoShotSchema,
@@ -20,6 +22,7 @@ import { getStorageService } from "../storage/index.js";
 import { videoStorylineService, type VideoStorylineActor } from "../services/video-storylines.js";
 import { videoStorylineRenderService } from "../services/video-storyline-render.js";
 import { videoStorylineSettingsService } from "../services/video-storyline-settings.js";
+import { videoStorylineDirectorService } from "../services/video-storyline-director.js";
 
 /**
  * DUR-4127: company-scoped CRUD + render orchestration for video
@@ -44,6 +47,7 @@ export function videoStorylineRoutes(rawDb: Db) {
   const storylines = videoStorylineService(db);
   const render = videoStorylineRenderService(db);
   const settings = videoStorylineSettingsService(db);
+  const director = videoStorylineDirectorService(db);
 
   function scope() {
     return companyScopeFromParam(rawDb, (req, companyId) => {
@@ -84,6 +88,39 @@ export function videoStorylineRoutes(rawDb: Db) {
     ];
   }
 
+  /**
+   * DUR-4196: round-2 fields (transitions/music on a storyline, transitionIn
+   * on a shot) ride the same PATCH/POST routes round 1 already has, rather
+   * than new endpoints -- so gating by route alone would either block round-1
+   * edits for a company without round 2, or let round-2 fields through
+   * ungated. Checked by VALUE against the round-1-equivalent default, not by
+   * key presence: createVideoStorylineSchema/createVideoShotSchema fill in
+   * defaults ("cut"/null) for any field the caller omits, so by the time this
+   * runs every key is already present on a create request -- presence alone
+   * would wrongly gate every single storyline/shot creation.
+   */
+  function hasAdvancedStorylineValues(body: Record<string, unknown>): boolean {
+    return (
+      (typeof body.defaultTransition === "string" && body.defaultTransition !== "cut") ||
+      body.musicAssetId != null ||
+      body.musicSourceKey != null
+    );
+  }
+
+  function hasAdvancedShotValues(body: Record<string, unknown>): boolean {
+    return body.transitionIn != null;
+  }
+
+  function assertAdvancedIfValuesPresent(touches: (body: Record<string, unknown>) => boolean): RequestHandler {
+    return (req, res, next) => {
+      if (!touches((req.body ?? {}) as Record<string, unknown>)) {
+        next();
+        return;
+      }
+      settings.assertAdvancedEnabled(req.params.companyId as string).then(() => next(), next);
+    };
+  }
+
   // ─── Settings (feature flag, ships default off) ──────────────────────
 
   router.get("/companies/:companyId/video-storylines/settings", scope(), async (req, res) => {
@@ -114,6 +151,40 @@ export function videoStorylineRoutes(rawDb: Db) {
     },
   );
 
+  /**
+   * DUR-4196: the round-2 flag (director AI, still-frame preview,
+   * transitions/music) -- deliberately separate from the round-1 toggle
+   * above so an existing on company keeps exactly its round-1 behavior until
+   * it opts into round 2 too. Same board-only bar as the round-1 toggle.
+   */
+  router.get("/companies/:companyId/video-storylines/settings/advanced", scope(), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    res.json({ enabled: await settings.isAdvancedEnabled(companyId) });
+  });
+
+  router.patch(
+    "/companies/:companyId/video-storylines/settings/advanced",
+    validate(updateVideoStorylineSettingsSchema),
+    companyScopeFromParam(rawDb, (req, companyId) => {
+      assertBoardOrgAccess(req);
+      assertCompanyAccess(req, companyId);
+    }),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const enabled = await settings.setAdvancedEnabled(companyId, req.body.enabled);
+      await logActivity(db, {
+        companyId,
+        actorType: "user",
+        actorId: req.actor.userId ?? "board",
+        action: "video_storylines.advanced_settings_updated",
+        entityType: "company",
+        entityId: companyId,
+        details: { enabled },
+      });
+      res.json({ enabled });
+    },
+  );
+
   // ─── Storylines ────────────────────────────────────────────────────────
 
   router.get("/companies/:companyId/video-storylines", ...gatedScope(), async (req, res) => {
@@ -124,6 +195,7 @@ export function videoStorylineRoutes(rawDb: Db) {
     "/companies/:companyId/video-storylines",
     validate(createVideoStorylineSchema),
     ...gatedScope(),
+    assertAdvancedIfValuesPresent(hasAdvancedStorylineValues),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       const row = await storylines.createStoryline(companyId, req.body, actorOf(req));
@@ -139,6 +211,7 @@ export function videoStorylineRoutes(rawDb: Db) {
     "/companies/:companyId/video-storylines/:storylineId",
     validate(updateVideoStorylineSchema),
     ...gatedScope(),
+    assertAdvancedIfValuesPresent(hasAdvancedStorylineValues),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       const storylineId = req.params.storylineId as string;
@@ -271,6 +344,7 @@ export function videoStorylineRoutes(rawDb: Db) {
     "/companies/:companyId/video-storylines/:storylineId/shots",
     validate(createVideoShotSchema),
     ...gatedScope(),
+    assertAdvancedIfValuesPresent(hasAdvancedShotValues),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       const storylineId = req.params.storylineId as string;
@@ -283,6 +357,7 @@ export function videoStorylineRoutes(rawDb: Db) {
     "/companies/:companyId/video-storylines/:storylineId/shots/:shotId",
     validate(updateVideoShotSchema),
     ...gatedScope(),
+    assertAdvancedIfValuesPresent(hasAdvancedShotValues),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       const storylineId = req.params.storylineId as string;
@@ -307,6 +382,82 @@ export function videoStorylineRoutes(rawDb: Db) {
       const storylineId = req.params.storylineId as string;
       const shotId = req.params.shotId as string;
       res.json(await render.reRenderShot(companyId, storylineId, shotId, actorOf(req)));
+    },
+  );
+
+  /**
+   * DUR-4196: one-click still-frame preview render -- a round-2 (advanced)
+   * feature, same as the director AI routes below. Gated here only by the
+   * round-1 flag (gatedScope()); render.renderPreview itself calls
+   * settings.assertAdvancedEnabled, same pattern startRender/reRenderShot
+   * use for the round-1 flag.
+   */
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/shots/:shotId/preview",
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      const shotId = req.params.shotId as string;
+      res.json(await render.renderPreview(companyId, storylineId, shotId, actorOf(req)));
+    },
+  );
+
+  // ─── Director AI ──────────────────────────────────────────────────────
+
+  router.get(
+    "/companies/:companyId/video-storylines/:storylineId/director/runs",
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      res.json(await director.listRuns(companyId, storylineId));
+    },
+  );
+
+  router.get(
+    "/companies/:companyId/video-storylines/:storylineId/director/runs/:runId",
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      const runId = req.params.runId as string;
+      res.json(await director.getRun(companyId, storylineId, runId));
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/director/draft",
+    validate(draftVideoDirectorShotsSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      const row = await director.draftShots(companyId, storylineId, req.body, actorOf(req));
+      res.status(201).json(row);
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/director/runs/:runId/approve",
+    validate(approveVideoDirectorRunSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      const runId = req.params.runId as string;
+      res.json(await director.approveRun(companyId, storylineId, runId, req.body, actorOf(req)));
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/director/runs/:runId/reject",
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      const runId = req.params.runId as string;
+      res.json(await director.rejectRun(companyId, storylineId, runId, actorOf(req)));
     },
   );
 
