@@ -1,5 +1,7 @@
 import { api } from "./client";
 
+export type ProjectDeployHistoryStatus = "ok" | "needs_attention";
+
 // Mirrors server/src/services/deploy-runner-status.ts's DeployRunnerStatusEntry.
 export type DeployRunnerStatusEntry = {
   ts: string;
@@ -20,6 +22,8 @@ export type ProjectDeployHistoryEntry = {
   commit: string;
   approvalId: string;
   deployedAt: string;
+  /** DUR-4233: "needs_attention" when the app deployed fine but a TLS/domain check flagged something. */
+  status: ProjectDeployHistoryStatus;
 };
 
 export type ProjectDeployHistory = {

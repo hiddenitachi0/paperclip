@@ -8,9 +8,9 @@ import {
   shortSha,
 } from "./rollback-deploy";
 
-const current = { commit: "bbbbbbbbbbbb", approvalId: "a2", deployedAt: "2026-09-02T10:00:00Z" };
-const previous = { commit: "aaaaaaaaaaaa", approvalId: "a1", deployedAt: "2026-09-01T10:00:00Z" };
-const older = { commit: "cccccccccccc", approvalId: "a0", deployedAt: "2026-08-20T10:00:00Z" };
+const current = { commit: "bbbbbbbbbbbb", approvalId: "a2", deployedAt: "2026-09-02T10:00:00Z", status: "ok" as const };
+const previous = { commit: "aaaaaaaaaaaa", approvalId: "a1", deployedAt: "2026-09-01T10:00:00Z", status: "ok" as const };
+const older = { commit: "cccccccccccc", approvalId: "a0", deployedAt: "2026-08-20T10:00:00Z", status: "ok" as const };
 
 describe("buildRollbackDeployApproval", () => {
   it("files an ordinary deploy card for the previous commit with the rollback flag set", () => {

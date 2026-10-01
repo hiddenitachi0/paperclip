@@ -7,7 +7,7 @@ import { readDeployRunnerStatus, type DeployRunnerStatusEntry } from "./deploy-r
 import { secretService } from "./secrets.js";
 import { ghFetch, gitHubApiBase } from "./github-fetch.js";
 import {
-  DEPLOY_SUCCESS_MARKER,
+  isCompletedDeployOutcome,
   approvalPayloadKind,
   approvalPayloadMergeCommitSha,
   approvalPayloadOriginalIssueIds,
@@ -374,9 +374,7 @@ export function deployCarriedIssuesService(
 
       const entries = getStatusEntries(approval.companyId);
       const completedEntry = entries.find(
-        (entry) =>
-          entry.approvalId === approval.id &&
-          (entry.body.includes(DEPLOY_SUCCESS_MARKER) || entry.outcome === "carried"),
+        (entry) => entry.approvalId === approval.id && isCompletedDeployOutcome(entry),
       );
       // Not completed (or not yet visible in the trimmed status log) -- leave unswept so the
       // next tick re-checks once deploy-runner records completion.

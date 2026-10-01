@@ -44,8 +44,8 @@ describe("selectProjectDeployHistory", () => {
     ];
     const history = selectProjectDeployHistory(entries, new Set(["a1", "a2", "a3"]));
     expect(history).toEqual([
-      { commit: "cccccccccccc", approvalId: "a3", deployedAt: "2026-09-03T10:00:00Z" },
-      { commit: "bbbbbbbbbbbb", approvalId: "a2", deployedAt: "2026-09-02T10:00:00Z" },
+      { commit: "cccccccccccc", approvalId: "a3", deployedAt: "2026-09-03T10:00:00Z", status: "ok" },
+      { commit: "bbbbbbbbbbbb", approvalId: "a2", deployedAt: "2026-09-02T10:00:00Z", status: "ok" },
     ]);
   });
 
@@ -87,6 +87,20 @@ describe("selectProjectDeployHistory", () => {
     expect(history.map((h) => h.commit)).toEqual(["dddddddddddd", "cccccccccccc", "bbbbbbbbbbbb", "aaaaaaaaaaaa"]);
   });
 
+  it("DUR-4233: tags an entry outcome:needs_attention with status needs_attention, not ok", async () => {
+    const { selectProjectDeployHistory } = await import("../services/deploy-history.js");
+    const flagged = line({
+      approvalId: "a1",
+      ts: "2026-09-01T10:00:00Z",
+      outcome: "needs_attention",
+      commit: "aaaaaaaaaaaa",
+      body: "Deployed to /opt/app — commit aaaaaaaaaaaa is live and the app itself checks out. Needs attention: TLS certificate expires in 3 day(s).",
+    });
+    expect(selectProjectDeployHistory([flagged], new Set(["a1"]))).toEqual([
+      { commit: "aaaaaaaaaaaa", approvalId: "a1", deployedAt: "2026-09-01T10:00:00Z", status: "needs_attention" },
+    ]);
+  });
+
   it("falls back to the commit named in the body for older log lines without a commit field", async () => {
     const { selectProjectDeployHistory } = await import("../services/deploy-history.js");
     const legacy = line({
@@ -95,7 +109,7 @@ describe("selectProjectDeployHistory", () => {
       body: "Deployed to /opt/app — commit abcdef123456 is live and healthy (health check: http://x).",
     });
     expect(selectProjectDeployHistory([legacy], new Set(["a1"]))).toEqual([
-      { commit: "abcdef123456", approvalId: "a1", deployedAt: "2026-09-01T10:00:00Z" },
+      { commit: "abcdef123456", approvalId: "a1", deployedAt: "2026-09-01T10:00:00Z", status: "ok" },
     ]);
   });
 });
@@ -273,8 +287,8 @@ describe("GET /companies/:companyId/projects/:projectId/deploy-history", () => {
     const app = await createApp(fakeDbWithApprovalIds(["a1", "a2"]));
     const res = await request(app).get(`/api/companies/${COMPANY_ID}/projects/${PROJECT_ID}/deploy-history`);
     expect(res.status).toBe(200);
-    const bbb = { commit: "bbbbbbbbbbbb", approvalId: "a2", deployedAt: "2026-09-02T10:00:00Z" };
-    const aaa = { commit: "aaaaaaaaaaaa", approvalId: "a1", deployedAt: "2026-09-01T10:00:00Z" };
+    const bbb = { commit: "bbbbbbbbbbbb", approvalId: "a2", deployedAt: "2026-09-02T10:00:00Z", status: "ok" };
+    const aaa = { commit: "aaaaaaaaaaaa", approvalId: "a1", deployedAt: "2026-09-01T10:00:00Z", status: "ok" };
     expect(res.body).toEqual({
       current: bbb,
       previous: aaa,
