@@ -141,6 +141,10 @@ DECLARE
     'agent_runtime_state',
     'agent_task_sessions',
     'agent_wakeup_requests',
+    -- DUR-4197. Created, granted on and policed in
+    -- 0204_agent_work_summaries.sql; listed here so the login-role lists
+    -- match the schema, as for the tables above.
+    'agent_work_summaries',
     'agents',
     'approval_comments',
     'approvals',
@@ -400,6 +404,10 @@ DECLARE
     'agent_runtime_state',
     'agent_task_sessions',
     'agent_wakeup_requests',
+    -- DUR-4197. Created, granted on and policed in
+    -- 0204_agent_work_summaries.sql; listed here so the login-role lists
+    -- match the schema, as for the tables above.
+    'agent_work_summaries',
     'agents',
     'approval_comments',
     'approvals',
