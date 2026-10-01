@@ -101,6 +101,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "morning-report.ts",
   // Trading agent routes (DUR-4171) are board-only paper-trading controls and not yet in the public OpenAPI document.
   "trading.ts",
+  // Product grabber routes (DUR-4187) are a new backend feature not yet in the public OpenAPI document.
+  "product-grabber.ts",
   // Mail secretary routes (DUR-4093) are board-only inbox/filter configuration and not yet in the public OpenAPI document.
   "mail-secretary.ts",
   // Payment notice routes (DUR-4037, the booking gate's Telegram outbox) are board-only, switched off by default, and not yet in the public OpenAPI document.
