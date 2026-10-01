@@ -102,6 +102,19 @@ describe("createRobotsTxtChecker", () => {
     expect(await checker.isAllowed("https://example.com/blocked")).toBe(false);
     expect(fetchImpl).toHaveBeenCalledWith("https://example.com/robots.txt", { headers: { "User-Agent": "TestBot/1.0" } });
   });
+
+  it("never falls back to an unpinned fetch when DNS resolution itself fails", async () => {
+    // A thrown/rejected lookup is not proof the hostname is unreachable -- a resolver hiccup
+    // on this one lookup doesn't guarantee a later, independent resolution (e.g. by a plain
+    // `fetch`) would also fail. Falling back to an unpinned fetch here would resurrect the
+    // exact TOCTOU gap this module exists to close.
+    const fetchImpl = vi.fn().mockResolvedValue(new Response("User-agent: *\nDisallow: /", { status: 200 }));
+    const lookupImpl = vi.fn().mockRejectedValue(new Error("resolver hiccup"));
+    const checker = createRobotsTxtChecker({ userAgent: "TestBot/1.0", fetchImpl: fetchImpl as any, lookupImpl });
+
+    expect(await checker.isAllowed("https://flaky-resolver.example.com/anything")).toBe(true);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
 });
 
 describe("isDisallowedAddress", () => {

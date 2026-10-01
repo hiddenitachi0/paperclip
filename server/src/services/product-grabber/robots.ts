@@ -240,14 +240,20 @@ export function createRobotsTxtChecker(options: RobotsTxtCheckerOptions): Robots
       const hostname = new URL(origin).hostname;
       const addresses = await resolveAddresses(hostname);
       const vetted = addresses?.find(({ address, family }) => !isDisallowedAddress(address, family));
-      if (addresses && !vetted) {
-        // Every resolved address is loopback/private/link-local/metadata (whether typed
-        // that way or only resolving that way at request time, i.e. DNS rebinding). Skip
-        // the direct fetch; the real page fetch is proxied through Crawl4AI/browser-egress
-        // separately and gets its own check there.
+      if (!vetted) {
+        // No vetted address to pin to -- either every resolved address is loopback/private/
+        // link-local/metadata (whether typed that way or only resolving that way at request
+        // time, i.e. DNS rebinding), or resolution itself failed/threw (`addresses` is null).
+        // Either way, skip the direct fetch rather than falling back to a plain, unpinned
+        // `fetch` that would let the HTTP client re-resolve the hostname on its own -- exactly
+        // the TOCTOU gap this module exists to close. A resolution failure is not evidence the
+        // hostname is unreachable: a transient/adversarial resolver hiccup on this lookup does
+        // not guarantee the HTTP client's own, independent resolution moments later would also
+        // fail. The real page fetch is proxied through Crawl4AI/browser-egress separately and
+        // gets its own check there.
         robots = parseRobotsTxt("");
       } else {
-        const fetchImpl = callerFetchImpl ?? (vetted ? createPinnedFetch(vetted.address, vetted.family) : fetch);
+        const fetchImpl = callerFetchImpl ?? createPinnedFetch(vetted.address, vetted.family);
         const response = await fetchImpl(`${origin}/robots.txt`, { headers: { "User-Agent": options.userAgent } });
         robots = response.ok ? parseRobotsTxt(await response.text()) : parseRobotsTxt("");
       }
