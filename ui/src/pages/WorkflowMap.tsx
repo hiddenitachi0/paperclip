@@ -341,7 +341,7 @@ export function WorkflowMap() {
       id: "section:routines",
       type: "sectionLabel",
       position: { x: 0, y: sectionTop },
-      data: { label: "Routines", hint: "Automations and what starts them" },
+      data: { label: "Jobs", hint: "Automations and what starts them" },
       draggable: false,
       selectable: false,
     });

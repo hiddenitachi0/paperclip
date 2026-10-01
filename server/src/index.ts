@@ -76,6 +76,7 @@ import { morningReportService } from "./services/morning-report.js";
 import { paymentCardService } from "./services/payment-cards.js";
 import { mailSecretaryService } from "./services/mail-secretary.js";
 import { videoStorylineRenderService } from "./services/video-storyline-render.js";
+import { tradingService } from "./services/trading.js";
 import { videoStorylineStitchService } from "./services/video-storyline-stitch.js";
 import { describeTickPhases } from "./services/scheduler-tick-phases.js";
 import {
@@ -1030,6 +1031,7 @@ export async function startServer(): Promise<StartedServer> {
     const mailSecretary = mailSecretaryService(schedulerDb as any);
     const videoStorylineRender = videoStorylineRenderService(schedulerDb as any);
     const videoStorylineStitch = videoStorylineStitchService(schedulerDb as any);
+    const tradingAgent = tradingService(schedulerDb as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(schedulerDb as any);
     const quietModeAlerts = quietModeAlertsService(schedulerDb as any);
     const personaPublisherSweep = config.personaPublishingSweepEnabled
@@ -1127,6 +1129,15 @@ export async function startServer(): Promise<StartedServer> {
       const setupCleanup = await environmentCustomImages.cleanupExpiredSetupSessions();
       if (setupCleanup.timedOut > 0 || setupCleanup.failed > 0) {
         logger.warn({ ...setupCleanup }, "startup environment customImage setup cleanup changed sessions");
+      }
+
+      // DUR-4171: the trading agent's ground rule is "starts paused after
+      // restart" -- a running strategy must never resume unattended after a
+      // deploy or crash, so every strategy still marked "running" is paused
+      // here, once, before the tick timer below is ever armed.
+      const tradingReconciled = await tradingAgent.reconcileOnBoot();
+      if (tradingReconciled.pausedCount > 0) {
+        logger.warn({ ...tradingReconciled }, "startup trading-agent reconciliation paused running strategies");
       }
 
       // DUR-100: verify every active routine's declared schedule chains actually
@@ -1498,6 +1509,31 @@ export async function startServer(): Promise<StartedServer> {
           })
           .catch((err) => {
             logger.error({ err }, "video-storyline-stitch tick failed");
+          }),
+      );
+
+      // DUR-4171: the trading agent's tick -- resolves any pending trade
+      // approval cards, then runs the deterministic rule engine and risk
+      // gate for every strategy whose checkEveryMinutes interval is due.
+      // Paper-trading only in this ticket; the code that trades is this
+      // tick, never an LLM.
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.tradingAgent, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: tradingAgent",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:tradingAgent",
+          },
+          () => tradingAgent.tick(new Date()),
+        )
+          .then((result) => {
+            if (result.filled > 0 || result.blocked > 0 || result.approvalRequested > 0 || result.halted > 0) {
+              logger.info({ ...result }, "trading-agent tick");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "trading-agent tick failed");
           }),
       );
 

@@ -67,7 +67,7 @@ function errorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
-export function Jobs() {
+export function Positions() {
   const { selectedCompanyId } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
   const { pushToast } = useToastActions();
@@ -79,7 +79,7 @@ export function Jobs() {
   const [duplicatingJob, setDuplicatingJob] = useState<Job | null>(null);
 
   useEffect(() => {
-    setBreadcrumbs([{ label: "Jobs" }]);
+    setBreadcrumbs([{ label: "Positions" }]);
   }, [setBreadcrumbs]);
 
   const { data: jobs, isLoading, error } = useQuery({
@@ -99,9 +99,9 @@ export function Jobs() {
     onSuccess: () => {
       invalidateJobs();
       setFormOpen(false);
-      pushToast({ title: "Job created", tone: "success" });
+      pushToast({ title: "Position created", tone: "success" });
     },
-    onError: (error) => pushToast({ title: "Could not create job", body: errorMessage(error, ""), tone: "error" }),
+    onError: (error) => pushToast({ title: "Could not create position", body: errorMessage(error, ""), tone: "error" }),
   });
 
   const updateJob = useMutation({
@@ -110,9 +110,9 @@ export function Jobs() {
       invalidateJobs();
       setFormOpen(false);
       setEditingJobId(null);
-      pushToast({ title: "Job saved", tone: "success" });
+      pushToast({ title: "Position saved", tone: "success" });
     },
-    onError: (error) => pushToast({ title: "Could not save job", body: errorMessage(error, ""), tone: "error" }),
+    onError: (error) => pushToast({ title: "Could not save position", body: errorMessage(error, ""), tone: "error" }),
   });
 
   const deleteJob = useMutation({
@@ -120,9 +120,9 @@ export function Jobs() {
     onSuccess: () => {
       invalidateJobs();
       setDeletingJob(null);
-      pushToast({ title: "Job deleted", tone: "success" });
+      pushToast({ title: "Position deleted", tone: "success" });
     },
-    onError: (error) => pushToast({ title: "Could not delete job", body: errorMessage(error, ""), tone: "error" }),
+    onError: (error) => pushToast({ title: "Could not delete position", body: errorMessage(error, ""), tone: "error" }),
   });
 
   const duplicateJob = useMutation({
@@ -130,9 +130,9 @@ export function Jobs() {
       jobsApi.duplicateToCompany(id, targetCompanyId),
     onSuccess: () => {
       setDuplicatingJob(null);
-      pushToast({ title: "Job copied", body: "A one-time copy — it will not stay in sync with the original.", tone: "success" });
+      pushToast({ title: "Position copied", body: "A one-time copy — it will not stay in sync with the original.", tone: "success" });
     },
-    onError: (error) => pushToast({ title: "Could not copy job", body: errorMessage(error, ""), tone: "error" }),
+    onError: (error) => pushToast({ title: "Could not copy position", body: errorMessage(error, ""), tone: "error" }),
   });
 
   const editingJob = jobs?.find((job) => job.id === editingJobId) ?? null;
@@ -159,15 +159,15 @@ export function Jobs() {
     <div className="mx-auto max-w-3xl space-y-6">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-lg font-semibold">Jobs</h1>
+          <h1 className="text-lg font-semibold">Positions</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Set up a starting point for a job — instructions, tools, and rights — and hand it to any agent in one step.
-            Assigning a job copies its defaults onto that agent once; it will not keep them in sync if you change the job later.
+            Set up a starting point for a position — instructions, tools, and rights — and hand it to any agent in one step.
+            Assigning a position copies its defaults onto that agent once; it will not keep them in sync if you change the position later.
           </p>
         </div>
         <Button onClick={openCreate}>
           <Plus className="mr-1.5 h-3.5 w-3.5" />
-          New job
+          New position
         </Button>
       </div>
 
@@ -178,8 +178,8 @@ export function Jobs() {
       ) : !jobs || jobs.length === 0 ? (
         <EmptyState
           icon={Briefcase}
-          message="No jobs yet. Create one to give agents a ready-made starting point."
-          action="New job"
+          message="No positions yet. Create one to give agents a ready-made starting point."
+          action="New position"
           onAction={openCreate}
         />
       ) : (
@@ -235,7 +235,7 @@ export function Jobs() {
           if (!open) setEditingJobId(null);
         }}
         initialDraft={editingJob ? draftFromJob(editingJob) : emptyDraft()}
-        title={editingJob ? "Edit job" : "New job"}
+        title={editingJob ? "Edit position" : "New position"}
         onSubmit={handleSubmit}
         isPending={createJob.isPending || updateJob.isPending}
       />
@@ -245,7 +245,7 @@ export function Jobs() {
           <AlertDialogHeader>
             <AlertDialogTitle>Delete "{deletingJob?.name}"?</AlertDialogTitle>
             <AlertDialogDescription>
-              Agents that were already assigned this job keep what they have. This only removes the job itself, so it can no
+              Agents that were already assigned this position keep what they have. This only removes the position itself, so it can no
               longer be assigned to anyone new.
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -321,7 +321,7 @@ function JobFormDialog({
           <div className="space-y-1.5">
             <label className="text-xs text-muted-foreground">Description</label>
             <Textarea
-              placeholder="A short, plain-language description of what this job is for."
+              placeholder="A short, plain-language description of what this position is for."
               value={draft.description}
               onChange={(event) => setDraft((prev) => ({ ...prev, description: event.target.value }))}
               rows={2}
@@ -331,7 +331,7 @@ function JobFormDialog({
           <div className="space-y-1.5">
             <label className="text-xs text-muted-foreground">Starting instructions</label>
             <Textarea
-              placeholder="The initial instructions an agent gets when it's assigned this job."
+              placeholder="The initial instructions an agent gets when it's assigned this position."
               value={draft.instructions}
               onChange={(event) => setDraft((prev) => ({ ...prev, instructions: event.target.value }))}
               rows={6}
@@ -399,7 +399,7 @@ function DuplicateJobDialog({
         <DialogHeader>
           <DialogTitle>Copy "{job?.name}" to another company</DialogTitle>
           <DialogDescription>
-            This makes a one-time copy. It will not stay in sync — editing one job later has no effect on the other.
+            This makes a one-time copy. It will not stay in sync — editing one position later has no effect on the other.
           </DialogDescription>
         </DialogHeader>
 

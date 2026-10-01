@@ -9,9 +9,9 @@ import {
   SquarePen,
   Network,
   Briefcase,
+  IdCard,
   Boxes,
   Plug,
-  Repeat,
   Eye,
   GitBranch,
   GitFork,
@@ -185,7 +185,7 @@ export function Sidebar() {
 
         <SidebarSection label="Work">
           <SidebarNavItem to="/issues" label="Tasks" icon={CircleDot} />
-          <SidebarNavItem to="/routines" label="Routines" icon={Repeat} />
+          <SidebarNavItem to="/jobs" label="Jobs" icon={Briefcase} />
           <SidebarNavItem to="/workflow-map" label="Workflow Map" icon={GitFork} />
           <SidebarNavItem to="/watchers" label="Watchers" icon={Eye} />
           {showPipelines ? (
@@ -223,7 +223,7 @@ export function Sidebar() {
 
         <SidebarSection label="Company">
           <SidebarNavItem to="/org" label="Org" icon={Network} />
-          <SidebarNavItem to="/jobs" label="Jobs" icon={Briefcase} />
+          <SidebarNavItem to="/positions" label="Positions" icon={IdCard} />
           <SidebarNavItem to="/costs" label="Costs" icon={DollarSign} />
           <SidebarNavItem to="/goal-adoption" label="Goal Adoption" icon={TrendingUp} />
           <SidebarNavItem to="/changelog" label="Changelog" icon={ScrollText} />
