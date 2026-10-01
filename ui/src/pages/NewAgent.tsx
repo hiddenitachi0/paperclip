@@ -183,7 +183,7 @@ export function NewAgent() {
           await jobsApi.assignToAgent(result.agent.id, jobId);
         } catch (error) {
           pushToast({
-            title: "Agent created, but the job could not be assigned",
+            title: "Agent created, but the position could not be assigned",
             body: error instanceof Error ? error.message : "Try assigning it from the agent's page.",
             tone: "error",
           });
@@ -331,7 +331,7 @@ export function NewAgent() {
           <div className="px-4 pb-2">
             <textarea
               className="w-full bg-transparent outline-none text-sm text-muted-foreground placeholder:text-muted-foreground/40 border border-border rounded-md px-2 py-1.5 resize-y min-h-[44px]"
-              placeholder="Personality — backstory, likes and dislikes, how they behave. Leave blank unless this job should feel like someone, or attach a persona instead."
+              placeholder="Personality — backstory, likes and dislikes, how they behave. Leave blank unless this position should feel like someone, or attach a persona instead."
               value={personality}
               onChange={(e) => setPersonality(e.target.value.slice(0, 20000))}
               maxLength={20000}
@@ -347,7 +347,7 @@ export function NewAgent() {
           </div>
         )}
 
-        {/* Property chips: Job + Reports To */}
+        {/* Property chips: Position + Reports To */}
         <div className="flex items-center gap-1.5 px-4 py-2 border-t border-border flex-wrap">
           <ReportsToPicker
             agents={agents ?? []}
@@ -361,14 +361,14 @@ export function NewAgent() {
             value={jobId}
             onChange={setJobId}
             disabled={isFirstAgent}
-            placeholder="No job"
+            placeholder="No position"
           />
         </div>
 
         {selectedJob ? (
           <div className="border-t border-border px-4 py-2 text-xs text-muted-foreground">
             Assigning "{selectedJob.name}" copies its instructions, tools, and rights onto this agent once when it's
-            created. Changing the job later won't change this agent.
+            created. Changing the position later won't change this agent.
           </div>
         ) : null}
 

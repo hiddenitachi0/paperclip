@@ -132,7 +132,7 @@ describe("MarkdownBody", () => {
     expect(html).toContain("--paperclip-mention-project-color:#336699");
     expect(html).toContain('href="/skills/skill-789"');
     expect(html).toContain('data-mention-kind="skill"');
-    expect(html).toContain('href="/routines/routine-123"');
+    expect(html).toContain('href="/jobs/routine-123"');
     expect(html).toContain('data-mention-kind="routine"');
   });
 
