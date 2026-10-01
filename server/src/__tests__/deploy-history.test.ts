@@ -124,6 +124,112 @@ describe("resolveReleaseRetentionCount", () => {
   });
 });
 
+function failLine(approvalId: string, ts: string, body: string, outcome?: string, commit?: string): DeployRunnerStatusEntry {
+  return line({ approvalId, ts, body, outcome, commit });
+}
+
+describe("selectProjectDeployHistoryEntries", () => {
+  it("includes both pass and fail terminal entries, newest first", async () => {
+    const { selectProjectDeployHistoryEntries } = await import("../services/deploy-history.js");
+    const entries = [
+      successLine("a1", "aaaaaaaaaaaa", "2026-09-01T10:00:00Z"),
+      failLine("a2", "2026-09-02T10:00:00Z", "Deploy failed — health check never returned 200 after deploying bbbbbbbbbbbb.", undefined, "bbbbbbbbbbbb"),
+      successLine("a3", "cccccccccccc", "2026-09-03T10:00:00Z"),
+    ];
+    const items = selectProjectDeployHistoryEntries(entries, new Set(["a1", "a2", "a3"]), {}, 10);
+    expect(items).toEqual([
+      { commit: "cccccccccccc", approvalId: "a3", deployedAt: "2026-09-03T10:00:00Z", status: "pass" },
+      { commit: "bbbbbbbbbbbb", approvalId: "a2", deployedAt: "2026-09-02T10:00:00Z", status: "fail" },
+      { commit: "aaaaaaaaaaaa", approvalId: "a1", deployedAt: "2026-09-01T10:00:00Z", status: "pass" },
+    ]);
+  });
+
+  it("excludes interim started/waiting_for_checks lines and no-op carried lines", async () => {
+    const { selectProjectDeployHistoryEntries } = await import("../services/deploy-history.js");
+    const entries = [
+      failLine("a1", "2026-09-01T10:00:00Z", "Deploy started — the deploy runner is working on this approval.", "started"),
+      failLine("a1", "2026-09-01T10:01:00Z", "Still waiting for the automated checks.", "waiting_for_checks"),
+      failLine("a2", "2026-09-01T11:00:00Z", "Skipped — its change shipped as part of another deploy.", "carried", "dddddddddddd"),
+    ];
+    const items = selectProjectDeployHistoryEntries(entries, new Set(["a1", "a2"]), {}, 10);
+    expect(items).toEqual([]);
+  });
+
+  it("treats checks_timed_out and checks_failed as terminal fails", async () => {
+    const { selectProjectDeployHistoryEntries } = await import("../services/deploy-history.js");
+    const entries = [
+      failLine("a1", "2026-09-01T10:00:00Z", "Deploy not started — the automated checks never passed.", "checks_timed_out"),
+      failLine("a2", "2026-09-02T10:00:00Z", "Deploy stopped — the automated checks did not pass.", "checks_failed"),
+    ];
+    const items = selectProjectDeployHistoryEntries(entries, new Set(["a1", "a2"]), {}, 10);
+    expect(items.map((i) => i.status)).toEqual(["fail", "fail"]);
+  });
+
+  it("filters by status", async () => {
+    const { selectProjectDeployHistoryEntries } = await import("../services/deploy-history.js");
+    const entries = [
+      successLine("a1", "aaaaaaaaaaaa", "2026-09-01T10:00:00Z"),
+      failLine("a2", "2026-09-02T10:00:00Z", "Deploy failed — could not fetch project proj-1."),
+    ];
+    const ids = new Set(["a1", "a2"]);
+    expect(selectProjectDeployHistoryEntries(entries, ids, { status: "pass" }, 10).map((i) => i.approvalId)).toEqual(["a1"]);
+    expect(selectProjectDeployHistoryEntries(entries, ids, { status: "fail" }, 10).map((i) => i.approvalId)).toEqual(["a2"]);
+  });
+
+  it("filters by date range, inclusive on both ends", async () => {
+    const { selectProjectDeployHistoryEntries } = await import("../services/deploy-history.js");
+    const entries = [
+      successLine("a1", "aaaaaaaaaaaa", "2026-09-01T10:00:00Z"),
+      successLine("a2", "bbbbbbbbbbbb", "2026-09-02T10:00:00Z"),
+      successLine("a3", "cccccccccccc", "2026-09-03T10:00:00Z"),
+    ];
+    const ids = new Set(["a1", "a2", "a3"]);
+    const fromMs = Date.parse("2026-09-02T10:00:00Z");
+    const toMs = Date.parse("2026-09-02T10:00:00Z");
+    expect(selectProjectDeployHistoryEntries(entries, ids, { fromMs, toMs }, 10).map((i) => i.approvalId)).toEqual(["a2"]);
+  });
+
+  it("never collects more than `cap` matching entries, even with no filters", async () => {
+    const { selectProjectDeployHistoryEntries } = await import("../services/deploy-history.js");
+    const entries = [
+      successLine("a1", "aaaaaaaaaaaa", "2026-09-01T10:00:00Z"),
+      successLine("a2", "bbbbbbbbbbbb", "2026-09-02T10:00:00Z"),
+      successLine("a3", "cccccccccccc", "2026-09-03T10:00:00Z"),
+    ];
+    const items = selectProjectDeployHistoryEntries(entries, new Set(["a1", "a2", "a3"]), {}, 2);
+    expect(items.map((i) => i.approvalId)).toEqual(["a3", "a2"]);
+  });
+
+  it("falls back to null commit when the failure body names none", async () => {
+    const { selectProjectDeployHistoryEntries } = await import("../services/deploy-history.js");
+    const entries = [failLine("a1", "2026-09-01T10:00:00Z", "Deploy failed — could not fetch project proj-1.")];
+    const items = selectProjectDeployHistoryEntries(entries, new Set(["a1"]), {}, 10);
+    expect(items).toEqual([{ commit: null, approvalId: "a1", deployedAt: "2026-09-01T10:00:00Z", status: "fail" }]);
+  });
+});
+
+describe("parseDateBoundary", () => {
+  it("anchors a bare date to UTC midnight for a start boundary", async () => {
+    const { parseDateBoundary } = await import("../services/deploy-history.js");
+    expect(parseDateBoundary("2026-09-01", false)).toBe(Date.parse("2026-09-01T00:00:00.000Z"));
+  });
+
+  it("anchors a bare date to the end of day for an end boundary", async () => {
+    const { parseDateBoundary } = await import("../services/deploy-history.js");
+    expect(parseDateBoundary("2026-09-01", true)).toBe(Date.parse("2026-09-01T23:59:59.999Z"));
+  });
+
+  it("accepts a full ISO timestamp as-is", async () => {
+    const { parseDateBoundary } = await import("../services/deploy-history.js");
+    expect(parseDateBoundary("2026-09-01T06:30:00Z", false)).toBe(Date.parse("2026-09-01T06:30:00Z"));
+  });
+
+  it("returns null for unparseable input", async () => {
+    const { parseDateBoundary } = await import("../services/deploy-history.js");
+    expect(parseDateBoundary("not-a-date", false)).toBeNull();
+  });
+});
+
 // The route reads through the company-scope middleware (companyScopeFromParam +
 // createRequestScopedDb), so the fake must satisfy the reserved-connection
 // lifecycle and answer the real drizzle query for `.select({ id })` with
@@ -169,7 +275,16 @@ describe("GET /companies/:companyId/projects/:projectId/deploy-history", () => {
     expect(res.status).toBe(200);
     const bbb = { commit: "bbbbbbbbbbbb", approvalId: "a2", deployedAt: "2026-09-02T10:00:00Z" };
     const aaa = { commit: "aaaaaaaaaaaa", approvalId: "a1", deployedAt: "2026-09-01T10:00:00Z" };
-    expect(res.body).toEqual({ current: bbb, previous: aaa, releases: [bbb, aaa] });
+    expect(res.body).toEqual({
+      current: bbb,
+      previous: aaa,
+      releases: [bbb, aaa],
+      entries: [
+        { ...bbb, status: "pass" },
+        { ...aaa, status: "pass" },
+      ],
+      pagination: { limit: 10, offset: 0, total: 2, hasMore: false },
+    });
     // DEFAULT_RELEASE_RETENTION_COUNT (10) * the per-release log-line budget.
     expect(mockReadDeployRunnerStatus).toHaveBeenCalledWith(COMPANY_ID, 400);
   });
@@ -179,7 +294,13 @@ describe("GET /companies/:companyId/projects/:projectId/deploy-history", () => {
     const app = await createApp(fakeDbWithApprovalIds([]));
     const res = await request(app).get(`/api/companies/${COMPANY_ID}/projects/${PROJECT_ID}/deploy-history`);
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ current: null, previous: null, releases: [] });
+    expect(res.body).toEqual({
+      current: null,
+      previous: null,
+      releases: [],
+      entries: [],
+      pagination: { limit: 10, offset: 0, total: 0, hasMore: false },
+    });
   });
 
   it("refuses a caller without access to the company", async () => {
