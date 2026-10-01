@@ -3015,7 +3015,7 @@ export function PipelineItemDetailView({ pipelineId, caseId }: { pipelineId: str
                     {retryPlan.data.routine ? (
                       <>
                         <Link
-                          to={`/routines/${retryPlan.data.routine.id}`}
+                          to={`/jobs/${retryPlan.data.routine.id}`}
                           className="font-medium underline-offset-2 hover:underline"
                         >
                           {retryPlan.data.routine.title}
