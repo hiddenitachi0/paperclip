@@ -15,7 +15,7 @@ import { z } from "zod";
 
 // ─── Sources ─────────────────────────────────────────────────────────────────
 
-export const WATCHER_SOURCES = ["crypto", "us_stock", "oslo_stock"] as const;
+export const WATCHER_SOURCES = ["crypto", "us_stock", "oslo_stock", "web_page"] as const;
 export type WatcherSource = (typeof WATCHER_SOURCES)[number];
 
 export interface WatcherSourceInfo {
@@ -74,6 +74,32 @@ export const WATCHER_SOURCE_INFO: Record<WatcherSource, WatcherSourceInfo> = {
     minCheckMinutes: 360,
     keyLabel: "EODHD key",
     symbolHint: "The Oslo Børs ticker, for example DNB or EQNR.",
+  },
+  web_page: {
+    source: "web_page",
+    label: "Web page",
+    // DUR-4168: the fetch (server/src/services/watcher-web-page.ts) and rule
+    // evaluation (server/src/services/watcher-web-page-rules.ts) are wired
+    // into the scheduler tick as their own path (checkWebPageWatchers in
+    // server/src/services/watchers.ts), separate from the numeric
+    // fetchPrices/evaluateWatcherRule pipeline the other three sources
+    // share -- a web-page rule has no price history to window over, only a
+    // last-seen snapshot (watcher_web_page_snapshots). The real fetch goes
+    // through the shared Crawl4AI worker client (DUR-4161); until that
+    // worker overlay is deployed on an instance every check fails the same
+    // safe, backed-off way any other source's upstream failure already
+    // does, so `available: true` here is itself safe pre-deploy.
+    available: true,
+    needsKey: false,
+    note: "Checks a web page through the Crawl4AI worker (DUR-4161), respecting robots.txt.",
+    currency: "",
+    // Open question for Filip (carried over from the design doc): hourly is
+    // proposed as the floor for every one of the four kinds below, absent a
+    // stated need for faster competitor-price checks. Flag if any one of
+    // them (the "price" kind, most likely) needs to be checked more often.
+    minCheckMinutes: 60,
+    keyLabel: null,
+    symbolHint: "A short label for this watcher -- the page address and what to watch live in the rule, below.",
   },
 };
 
@@ -202,19 +228,171 @@ export function describeWatcherRule(rule: WatcherRule, subject: string, currency
   }
 }
 
+// ─── Web-page watch (source "web_page") ──────────────────────────────────────
+//
+// DUR-4168. A web-page watcher tracks a URL, not a market symbol, so "what to
+// watch" and "what counts as a hit" both live inside its own rule below, not
+// in the symbol field every other source uses for a ticker. Four independent
+// kinds, each with its own config -- none of them reuse watcherRuleSchema's
+// change/level/since_last_alert shape, on purpose: a price-delta rule has
+// nothing useful to say about "this item is back in stock" or "a paragraph on
+// this page changed".
+
+export const WATCHER_WEB_PAGE_KINDS = ["price", "stock", "new_products", "text_change"] as const;
+export type WatcherWebPageKind = (typeof WATCHER_WEB_PAGE_KINDS)[number];
+
+const WATCHER_WEB_PAGE_URL_MAX = 2048;
+const WATCHER_WEB_PAGE_SELECTOR_MAX = 300;
+const WATCHER_WEB_PAGE_NOT_REACHABLE = "That address is not reachable from the server. Use the page's public address.";
+
+/**
+ * A best-effort SSRF guard on the URL an operator types in: http(s) only, and
+ * no literal loopback/private/link-local address -- which also covers the
+ * cloud metadata address, 169.254.169.254 -- or a bare "localhost".
+ *
+ * This is the first filter, at the edge of the type system, and it is
+ * deliberately not the only one: the real fetch never happens from this
+ * process and never from here directly. It is proxied through the Crawl4AI
+ * worker (server/src/services/crawl4ai-client.ts, DUR-4161), which routes its
+ * own outbound requests through the existing browser-egress proxy -- the
+ * layer that can still catch a hostname that resolves to a private address
+ * only at request time (DNS rebinding), which a one-off string check here
+ * cannot. See the PR description for how the two layers divide this up.
+ */
+export function watcherWebPageUrlProblem(rawUrl: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return "Use a full web address, starting with http:// or https://.";
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return "Use a web address starting with http:// or https://.";
+  }
+  const host = url.hostname.toLowerCase();
+  if (host === "localhost" || host === "metadata.google.internal") return WATCHER_WEB_PAGE_NOT_REACHABLE;
+  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4) {
+    const a = Number(ipv4[1]);
+    const b = Number(ipv4[2]);
+    const isPrivateV4 =
+      a === 127 || // 127.0.0.0/8 loopback
+      a === 10 || // 10.0.0.0/8
+      (a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12
+      (a === 192 && b === 168) || // 192.168.0.0/16
+      (a === 169 && b === 254) || // 169.254.0.0/16 link-local, incl. cloud metadata
+      a === 0;
+    if (isPrivateV4) return WATCHER_WEB_PAGE_NOT_REACHABLE;
+  }
+  // IPv6 loopback (::1) and link-local (fe80::/10); URL puts brackets around
+  // a literal IPv6 host, so check both the bracketed and bare forms.
+  const bare = host.replace(/^\[/, "").replace(/\]$/, "");
+  if (bare === "::1" || bare.startsWith("fe80:")) return WATCHER_WEB_PAGE_NOT_REACHABLE;
+  return null;
+}
+
+const watcherWebPageUrlField = z
+  .string()
+  .trim()
+  .min(1, "Enter the page's web address.")
+  .max(WATCHER_WEB_PAGE_URL_MAX, "That address is too long.")
+  .superRefine((value, ctx) => {
+    const problem = watcherWebPageUrlProblem(value);
+    if (problem) ctx.addIssue({ code: z.ZodIssueCode.custom, message: problem });
+  });
+
+const watcherWebPageSelectorField = z
+  .string()
+  .trim()
+  .min(1, 'Say what to watch on the page (a CSS selector, or words from near it, like ".price" or "Add to cart").')
+  .max(WATCHER_WEB_PAGE_SELECTOR_MAX, "Keep the selector short.");
+
+export const watcherWebPageRuleSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("price"),
+      url: watcherWebPageUrlField,
+      selector: watcherWebPageSelectorField,
+      direction: z.enum(["below", "above"]),
+      targetPrice: z.number().positive("The price must be above zero.").max(1e12),
+      currency: z.string().trim().min(1).max(8).default("USD"),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("stock"),
+      url: watcherWebPageUrlField,
+      selector: watcherWebPageSelectorField,
+      /** The exact (case-insensitive) words that mean "in stock" where the selector points, e.g. "Add to cart". */
+      inStockPhrase: z
+        .string()
+        .trim()
+        .min(1, 'Say what the page shows when the item is in stock, for example "Add to cart".')
+        .max(120),
+      alertWhen: z.enum(["becomes_in_stock", "becomes_out_of_stock", "either"]),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("new_products"),
+      url: watcherWebPageUrlField,
+      /** A CSS selector matching one element per product/listing item. */
+      selector: watcherWebPageSelectorField,
+      /** What makes two products the same across checks. */
+      identifyBy: z.enum(["href", "text"]).default("href"),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("text_change"),
+      url: watcherWebPageUrlField,
+      /** Empty means "anywhere on the page". */
+      selector: z.string().trim().max(WATCHER_WEB_PAGE_SELECTOR_MAX, "Keep the selector short.").default(""),
+    })
+    .strict(),
+]);
+export type WatcherWebPageRule = z.infer<typeof watcherWebPageRuleSchema>;
+
+/** The web-page rule in one plain sentence, the same spirit as describeWatcherRule above. */
+export function describeWatcherWebPageRule(rule: WatcherWebPageRule): string {
+  switch (rule.kind) {
+    case "price": {
+      const verb = rule.direction === "below" ? "drops to or below" : "rises to or above";
+      return `The price at ${rule.url} ${verb} ${rule.currency} ${rule.targetPrice}`;
+    }
+    case "stock": {
+      const tail =
+        rule.alertWhen === "becomes_in_stock"
+          ? "comes back in stock"
+          : rule.alertWhen === "becomes_out_of_stock"
+            ? "goes out of stock"
+            : "changes stock status";
+      return `The item at ${rule.url} ${tail}`;
+    }
+    case "new_products":
+      return `A new product appears at ${rule.url}`;
+    case "text_change":
+      return rule.selector ? `The "${rule.selector}" part of ${rule.url} changes` : `Anything on ${rule.url} changes`;
+  }
+}
+
 // ─── Create / update ─────────────────────────────────────────────────────────
 
 const watcherFields = {
   name: z.string().trim().min(1, "Give the watcher a name.").max(80, "Keep the name to 80 characters."),
   agentId: z.string().uuid("Pick the quick agent that sends the alerts."),
   source: z.enum(WATCHER_SOURCES),
+  // Max is generous enough for a web-page watcher's short display label
+  // (the URL and selector live in `rule`, below); every other source's own
+  // pattern (watcherSymbolProblem) already caps its tickers well under this.
   symbol: z
     .string()
     .trim()
     .min(1, "Pick what to watch.")
-    .max(12)
+    .max(60, "Keep it to 60 characters.")
     .transform((value) => value.toUpperCase()),
-  rule: watcherRuleSchema,
+  /** Either the symbol-source rule (change/level/since_last_alert) or a web-page rule; cross-checked against `source` below. */
+  rule: z.union([watcherRuleSchema, watcherWebPageRuleSchema]),
   checkEveryMinutes: z
     .number()
     .int()
@@ -231,6 +409,29 @@ const watcherFields = {
   keySecretId: z.string().uuid().nullable(),
 };
 
+/**
+ * Cross-field check zod's own per-field schemas cannot express: a web-page
+ * rule only belongs to a web_page watcher, and vice versa. Shared by create
+ * and update (update's fields are all optional, so this is a no-op unless a
+ * request sends both `source` and `rule`).
+ */
+function checkWatcherRuleMatchesSource(
+  data: { source?: WatcherSource; rule?: WatcherRule | WatcherWebPageRule },
+  ctx: z.RefinementCtx,
+): void {
+  if (!data.source || !data.rule) return;
+  const isWebPageRule = (WATCHER_WEB_PAGE_KINDS as readonly string[]).includes(data.rule.kind);
+  if (data.source === "web_page" && !isWebPageRule) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["rule", "kind"],
+      message: "Pick a web-page rule: price, stock, new products, or text change.",
+    });
+  } else if (data.source !== "web_page" && isWebPageRule) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["rule", "kind"], message: "That rule is only for a web-page watcher." });
+  }
+}
+
 export const createWatcherSchema = z
   .object({
     ...watcherFields,
@@ -240,7 +441,8 @@ export const createWatcherSchema = z
     withPicture: watcherFields.withPicture.default(false),
     keySecretId: watcherFields.keySecretId.optional().default(null),
   })
-  .strict();
+  .strict()
+  .superRefine(checkWatcherRuleMatchesSource);
 export type CreateWatcherInput = z.infer<typeof createWatcherSchema>;
 
 export const updateWatcherSchema = z
@@ -257,7 +459,8 @@ export const updateWatcherSchema = z
     keySecretId: watcherFields.keySecretId,
   })
   .partial()
-  .strict();
+  .strict()
+  .superRefine(checkWatcherRuleMatchesSource);
 export type UpdateWatcherInput = z.infer<typeof updateWatcherSchema>;
 
 /**
@@ -277,6 +480,12 @@ export function watcherSymbolProblem(source: WatcherSource, symbol: string): str
     return WATCHER_OSLO_STOCK_SYMBOL_PATTERN.test(symbol)
       ? null
       : "Type the Oslo Børs ticker, for example DNB or EQNR.";
+  }
+  if (source === "web_page") {
+    // The page address and the selector live in the rule, not here (see
+    // watcherWebPageRuleSchema): this is only ever reached once `available`
+    // is turned on, and at that point `symbol` is just a display label.
+    return symbol.length > 0 ? null : "Give this watcher a short label.";
   }
   return WATCHER_US_STOCK_SYMBOL_PATTERN.test(symbol)
     ? null
@@ -308,7 +517,8 @@ export interface WatcherAlertFacts {
   symbol: string;
   subject: string;
   currency: string;
-  price: number;
+  /** Null for a web-page watcher's non-price rule kinds (stock/new_products/text_change): there is no price to show. */
+  price: number | null;
   /** The price the move is measured from, when there is one. */
   basePrice: number | null;
   /** Signed percent change from basePrice, when there is one. */
@@ -316,6 +526,8 @@ export interface WatcherAlertFacts {
   /** Hours the change was measured over, when the rule has a window. */
   windowHours: number | null;
   ruleText: string;
+  /** Web-page watchers only: what changed, in one sentence (see evaluateWatcherWebPageRule in the server package). */
+  changeSummary: string | null;
   isTest: boolean;
   observedAt: string;
 }
@@ -344,7 +556,7 @@ export interface WatcherSummary {
   symbol: string;
   subject: string;
   currency: string;
-  rule: WatcherRule;
+  rule: WatcherRule | WatcherWebPageRule;
   ruleText: string;
   checkEveryMinutes: number;
   cooldownMinutes: number;

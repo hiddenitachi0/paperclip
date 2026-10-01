@@ -2344,14 +2344,18 @@ export {
   WATCHER_US_STOCK_SYMBOL_PATTERN,
   WATCHER_OSLO_STOCK_SYMBOL_PATTERN,
   WATCHER_DEFAULT_RULE,
+  WATCHER_WEB_PAGE_KINDS,
   watcherCheckEveryProblem,
   ackWatcherOutboxSchema,
   createWatcherSchema,
   describeWatcherRule,
+  describeWatcherWebPageRule,
   findWatcherCoin,
   formatWatcherPrice,
   updateWatcherSchema,
   watcherRuleSchema,
+  watcherWebPageRuleSchema,
+  watcherWebPageUrlProblem,
   watcherSymbolName,
   watcherSymbolProblem,
   type AckWatcherOutboxInput,
@@ -2367,6 +2371,8 @@ export {
   type WatcherSource,
   type WatcherSourceInfo,
   type WatcherSummary,
+  type WatcherWebPageKind,
+  type WatcherWebPageRule,
 } from "./watchers.js";
 
 export {
@@ -2417,6 +2423,34 @@ export {
   type UpdateMailInboxFilterInput,
   type UpdateMailInboxInput,
 } from "./mail-secretary.js";
+
+export {
+  MAIL_ACCOUNT_DEFAULT_CHECK_MINUTES,
+  MAIL_ACCOUNT_EMERGENCY_ACCESS_REASON_MIN_LENGTH,
+  MAIL_ACCOUNT_MAX_CHECK_MINUTES,
+  MAIL_ACCOUNT_MIN_CHECK_MINUTES,
+  MAIL_ACCOUNT_TICK_BATCH,
+  MAIL_LIST_DEFAULT_LIMIT,
+  MAIL_LIST_MAX_LIMIT,
+  MAIL_MESSAGE_DIRECTIONS,
+  MAIL_MESSAGE_FOLDERS,
+  MAIL_SEARCH_MAX_QUERY_LENGTH,
+  MAIL_SEARCH_MIN_QUERY_LENGTH,
+  composeMailDraftSchema,
+  createMailAccountSchema,
+  mailAccountEmergencyAccessSchema,
+  moveMailMessageSchema,
+  updateMailAccountSchema,
+  updateMailDraftSchema,
+  type ComposeMailDraftInput,
+  type CreateMailAccountInput,
+  type MailAccountEmergencyAccessInput,
+  type MailMessageDirection,
+  type MailMessageFolder,
+  type MoveMailMessageInput,
+  type UpdateMailAccountInput,
+  type UpdateMailDraftInput,
+} from "./mail-accounts.js";
 
 export {
   MEDIA_STUDIO_PLUGIN_KEY,
