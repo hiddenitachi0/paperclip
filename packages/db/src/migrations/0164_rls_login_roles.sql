@@ -165,6 +165,10 @@ DECLARE
     -- DUR-4037. Created (and granted on) in 0187_payment_notices_and_settings.sql;
     -- listed here so the login-role lists match the schema, as for the tables above.
     'company_payment_settings',
+    -- DUR-4187 product grabber. Created (and granted on) in
+    -- 0198_product_grabber_staging.sql; company-scoped, listed here so the
+    -- login-role lists match the schema.
+    'company_product_grabber_settings',
     'company_secret_bindings',
     'company_secret_provider_configs',
     'company_secret_versions',
@@ -185,6 +189,14 @@ DECLARE
     'company_speech_settings',
     'company_user_sidebar_preferences',
     'cost_events',
+    -- CRM. Created (and granted on) in 0199_crm_base.sql; listed here so the
+    -- login-role lists match the schema, as for the tables above.
+    'crm_activities',
+    'crm_contact_org_roles',
+    'crm_contacts',
+    'crm_external_refs',
+    'crm_facts',
+    'crm_organizations',
     'cross_company_access_log',
     'cross_company_instructions',
     'customer_inbox_conversations',
@@ -297,6 +309,9 @@ DECLARE
     -- match the schema, as for the tables above. Company-scoped, so it is
     -- in both lists.
     'private_access_events',
+    -- DUR-4187 product grabber, created in 0198_product_grabber_staging.sql;
+    -- company-scoped, so it belongs in this list too.
+    'product_grabber_staged_items',
     'project_goals',
     'project_memberships',
     'project_workspaces',
@@ -344,7 +359,7 @@ DECLARE
     'video_shot_render_jobs',
     'video_shots',
     'video_storylines',
-    -- DUR-4196 director AI. Created (and granted on) in 0198_video_storyline_director_and_transitions.sql.
+    -- DUR-4196 director AI. Created (and granted on) in 0200_video_storyline_director_and_transitions.sql.
     'video_storyline_director_runs',
     'workspace_operations',
     'workspace_runtime_services'
@@ -389,6 +404,10 @@ DECLARE
     -- DUR-4037. Created (and granted on) in 0187_payment_notices_and_settings.sql;
     -- listed here so the login-role lists match the schema, as for the tables above.
     'company_payment_settings',
+    -- DUR-4187 product grabber. Created (and granted on) in
+    -- 0198_product_grabber_staging.sql; company-scoped, listed here so the
+    -- login-role lists match the schema.
+    'company_product_grabber_settings',
     'company_secret_bindings',
     'company_secret_provider_configs',
     'company_secrets',
@@ -403,6 +422,14 @@ DECLARE
     'company_speech_settings',
     'company_user_sidebar_preferences',
     'cost_events',
+    -- CRM. Created (and granted on) in 0199_crm_base.sql; listed here so the
+    -- login-role lists match the schema, as for the tables above.
+    'crm_activities',
+    'crm_contact_org_roles',
+    'crm_contacts',
+    'crm_external_refs',
+    'crm_facts',
+    'crm_organizations',
     'customer_inbox_conversations',
     'customer_inbox_deliveries',
     -- DUR-3972 slice S1, created in 0168_data_connections.sql; company-scoped,
@@ -494,6 +521,9 @@ DECLARE
     -- match the schema, as for the tables above. Company-scoped, so it is
     -- in both lists.
     'private_access_events',
+    -- DUR-4187 product grabber, created in 0198_product_grabber_staging.sql;
+    -- company-scoped, so it belongs in this list too.
+    'product_grabber_staged_items',
     'project_goals',
     'project_memberships',
     'project_workspaces',
@@ -532,7 +562,7 @@ DECLARE
     'video_shot_render_jobs',
     'video_shots',
     'video_storylines',
-    -- DUR-4196 director AI. Created (and granted on) in 0198_video_storyline_director_and_transitions.sql. Company-scoped, so it is in both lists.
+    -- DUR-4196 director AI. Created (and granted on) in 0200_video_storyline_director_and_transitions.sql. Company-scoped, so it is in both lists.
     'video_storyline_director_runs',
     'workspace_operations',
     'workspace_runtime_services'
