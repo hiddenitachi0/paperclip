@@ -74,6 +74,7 @@ export type {
   OrphanedScheduleChain,
   IndeterminateScheduleRoutine,
 } from "./routines.js";
+export { jobService, type JobService } from "./jobs.js";
 export { costService } from "./costs.js";
 export { laneAService } from "./lane-a.js";
 export {
@@ -124,6 +125,7 @@ export {
   type PrincipalAccessCompatibilityBackfillStats,
 } from "./principal-access-compatibility.js";
 export { seedDurStarterJobs, DUR_COMPANY_ID } from "./agent-role-seed.js";
+export { seedLegalAdvisorStarterPack } from "./job-starter-pack-seed.js";
 export {
   resolveAgentRoleProvisioning,
   addAgentCatalogOverride,

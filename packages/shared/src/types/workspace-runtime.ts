@@ -245,6 +245,12 @@ export interface ProjectDeployPolicy {
    * upload over SFTP — never a wildcard/whole-tree upload (DUR-4068).
    */
   sftpAllowlist?: string[];
+  /**
+   * DUR-4162: how many past successful/needs-attention releases deploy
+   * history keeps for this project (default 10 when unset). Bounds how far
+   * back "rollback to any release" can reach.
+   */
+  releaseRetentionCount?: number;
 }
 
 export interface IssueExecutionWorkspaceSettings {

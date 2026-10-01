@@ -140,6 +140,12 @@ export const deployPolicySchema = z
      * upload over SFTP — never a wildcard/whole-tree upload (DUR-4068).
      */
     sftpAllowlist: z.array(z.string()).optional(),
+    /**
+     * DUR-4162: how many past releases deploy history keeps for this
+     * project. Unset means the default of 10 applies (see
+     * DEFAULT_RELEASE_RETENTION_COUNT in server/src/services/deploy-history.ts).
+     */
+    releaseRetentionCount: z.number().int().min(1).max(50).optional(),
   })
   .strict();
 

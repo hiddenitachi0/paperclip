@@ -24,6 +24,7 @@ import { IssueDetail } from "./pages/IssueDetail";
 import { IssueChatLongThreadPerf } from "./pages/IssueChatLongThreadPerf";
 import { Routines } from "./pages/Routines";
 import { Watchers } from "./pages/Watchers";
+import { ProductGrabber } from "./pages/ProductGrabber";
 import { Learnings, PipelineItemDetail, PipelineItemLegacyRedirect, Pipelines, ReviewQueue } from "./pages/Pipelines";
 import { PipelineSettings } from "./pages/PipelineSettings";
 import { RoutineDetail } from "./pages/RoutineDetail";
@@ -71,6 +72,7 @@ import { PluginSettings } from "./pages/PluginSettings";
 import { AdapterManager } from "./pages/AdapterManager";
 import { PluginPage } from "./pages/PluginPage";
 import { OrgChart } from "./pages/OrgChart";
+import { WorkflowMap } from "./pages/WorkflowMap";
 import { NewAgent } from "./pages/NewAgent";
 import { AuthPage } from "./pages/Auth";
 import { BoardClaimPage } from "./pages/BoardClaim";
@@ -175,7 +177,9 @@ function boardRoutes() {
       <Route path="routines" element={<LegacyRoutinesRedirect />} />
       <Route path="routines/:routineId" element={<LegacyRoutinesRedirect />} />
       <Route path="routines/:routineId/:section" element={<LegacyRoutinesRedirect />} />
+      <Route path="workflow-map" element={<WorkflowMap />} />
       <Route path="watchers" element={<Watchers />} />
+      <Route path="product-grabber" element={<ProductGrabber />} />
       <Route
         path="review-queue"
         element={<PipelinesExperimentalGate><ReviewQueue /></PipelinesExperimentalGate>}
