@@ -238,7 +238,7 @@ describe("ProjectDeployHistoryCard", () => {
   });
 
   it("lists earlier retained releases with their own rollback button", async () => {
-    const older = { commit: "cccccccccccc", approvalId: "approval-older", deployedAt: "2026-08-20T10:00:00Z" };
+    const older = { commit: "cccccccccccc", approvalId: "approval-older", deployedAt: "2026-08-20T10:00:00Z", status: "ok" as const };
     mockApprovalsApi.create.mockResolvedValue({ id: "approval-new-older" });
     const el = await render(
       <ProjectDeployHistoryCardView
