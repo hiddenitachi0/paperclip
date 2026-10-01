@@ -67,7 +67,11 @@ services:
     environment:
       PAPERCLIP_SERVER_CRAWL4AI_TOKEN: "${PAPERCLIP_SERVER_CRAWL4AI_TOKEN:?set in .env, see Host steps for Filip}"
       PAPERCLIP_SERVER_CRAWL4AI_URL: "http://crawl4ai:11235"
+    # List `default` explicitly: giving a service its own `networks:` list
+    # REPLACES the implicit default network, which cut `server` off from
+    # `db` on 1 Oct 2026 (production down ~4 min). Never remove it.
     networks:
+      - default
       - crawl4ai-internal
 
   crawl4ai:
