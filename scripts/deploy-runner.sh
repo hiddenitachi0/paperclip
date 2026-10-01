@@ -166,6 +166,10 @@ PORT_WAIT_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_PORT_WAIT_SECONDS:-30}"
 # DUR-3905: overridable so tests can point check_ci_status() at a local fake
 # HTTP server instead of the real GitHub API.
 GITHUB_API_BASE="${PAPERCLIP_DEPLOY_RUNNER_GITHUB_API_BASE:-https://api.github.com}"
+# DUR-4233: an https healthCheckUrl whose certificate expires within this many
+# days (or has already expired, or whose host no longer resolves) is reported
+# as "needs_attention" rather than "ok" -- see tls_domain_check().
+TLS_EXPIRY_WARNING_DAYS="${PAPERCLIP_DEPLOY_RUNNER_TLS_EXPIRY_WARNING_DAYS:-14}"
 # Durable, on-host location for the failing container's logs, captured just
 # before a rollback recreates it and destroys them — see maybe_rollback()
 # and capture_failure_diagnostics() (DUR-163's evidence gap). Deliberately
@@ -663,6 +667,74 @@ health_check() { # url -> 0 if any of HEALTH_RETRIES probes returns HTTP 200
     sleep "$HEALTH_SLEEP_SECONDS"
   done
   return 1
+}
+
+# DUR-4233 -----------------------------------------------------------------
+# health_check() above only proves the app answers 200. It says nothing about
+# whether the PUBLIC-facing address it was reached on is actually trustworthy
+# -- an expiring/expired TLS certificate, or a domain that has stopped
+# resolving the way the operator expects, neither of which the previous
+# commit's rollback would fix (it sits behind the exact same cert/DNS). This
+# is deliberately advisory only: process_approval reports its result as
+# "needs_attention" on an otherwise-healthy deploy, never as a failure, and
+# never rolls back over it.
+#
+# Skips silently (prints "ok") for a plain http:// healthCheckUrl, or one with
+# no resolvable host at all -- there is no TLS to check, and a malformed URL
+# is already reported elsewhere (deploy-policy-validation.ts requires a valid
+# http(s) URL before a project can even enable deploys).
+tls_domain_check() { # url -> prints "ok" (exit 0) or a one-line reason (exit 1)
+  local url="$1"
+  PAPERCLIP_TLS_WARNING_DAYS="$TLS_EXPIRY_WARNING_DAYS" python3 - "$url" <<'PY'
+import os
+import socket
+import ssl
+import sys
+from datetime import datetime, timezone
+from urllib.parse import urlparse
+
+url = sys.argv[1]
+parsed = urlparse(url)
+host = parsed.hostname
+
+if parsed.scheme != "https" or not host:
+    print("ok")
+    sys.exit(0)
+
+try:
+    socket.getaddrinfo(host, None)
+except OSError as err:
+    print(f"domain {host} did not resolve ({err})")
+    sys.exit(1)
+
+port = parsed.port or 443
+ctx = ssl.create_default_context()
+try:
+    with socket.create_connection((host, port), timeout=10) as sock:
+        with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+            cert = ssock.getpeercert()
+except Exception as err:
+    print(f"TLS handshake to {host}:{port} failed ({err})")
+    sys.exit(1)
+
+not_after = cert.get("notAfter") if cert else None
+if not not_after:
+    print(f"TLS certificate for {host} has no expiry field")
+    sys.exit(1)
+
+expires = datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
+days_left = (expires - datetime.now(timezone.utc)).days
+warning_days = int(os.environ.get("PAPERCLIP_TLS_WARNING_DAYS", "14"))
+
+if days_left < 0:
+    print(f"TLS certificate for {host} expired {-days_left} day(s) ago")
+    sys.exit(1)
+if days_left < warning_days:
+    print(f"TLS certificate for {host} expires in {days_left} day(s)")
+    sys.exit(1)
+
+print("ok")
+PY
 }
 
 # DUR-3974 ---------------------------------------------------------------
@@ -2031,10 +2103,20 @@ print(d.get("decidedAt") or d.get("updatedAt") or d.get("createdAt") or "")' 2>/
   if [ -z "${DV_APP_HEALTH_PATHS//[[:space:]]/}" ]; then
     checked_note=" Only the health check address and the front page were opened afterwards, because this project does not list any pages to check. You can add the pages that matter under \"Pages that must still work\" in the project's deploy settings, and future deploys will be undone automatically if one of them breaks."
   fi
-  # DUR-237: record the deployed commit as a structured field here too (not just in the free-text
-  # body) so deploy-completion-gate.ts can confirm ANY issue whose merge commit matches — not only
-  # the issue this approval happens to be linked to — without parsing prose.
-  comment "$aid" "$company_id" "Deployed to $DV_DEPLOY_TARGET_PATH — commit $after_commit is live and healthy (health check: $DV_HEALTH_CHECK_URL).$checked_note" "" "$after_commit"
+  # DUR-4233: the app itself is confirmed healthy above -- this last check is about the
+  # PUBLIC-facing address it was reached on (TLS cert validity/expiry, domain resolution), which a
+  # rollback would never fix since the previous commit sits behind the exact same cert/DNS. Advisory
+  # only: it changes which outcome this deploy is reported as, never whether it succeeded.
+  local tls_result
+  if tls_result="$(tls_domain_check "$DV_HEALTH_CHECK_URL")"; then
+    # DUR-237: record the deployed commit as a structured field here too (not just in the
+    # free-text body) so deploy-completion-gate.ts can confirm ANY issue whose merge commit
+    # matches — not only the issue this approval happens to be linked to — without parsing prose.
+    comment "$aid" "$company_id" "Deployed to $DV_DEPLOY_TARGET_PATH — commit $after_commit is live and healthy (health check: $DV_HEALTH_CHECK_URL).$checked_note" "ok" "$after_commit"
+  else
+    log "runner: $aid TLS/domain check needs attention: $tls_result"
+    comment "$aid" "$company_id" "Deployed to $DV_DEPLOY_TARGET_PATH — commit $after_commit is live and the app itself checks out (health check: $DV_HEALTH_CHECK_URL).$checked_note Needs attention: $tls_result. This is a certificate/domain issue, not an app problem -- rolling back would not fix it. Check deploy-runner.log." "needs_attention" "$after_commit"
+  fi
 }
 
 # DUR-163: docker logs for the container being replaced only exist as long as

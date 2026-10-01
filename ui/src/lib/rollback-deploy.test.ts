@@ -1,8 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { buildRollbackDeployApproval, rollbackConfirmText, rollbackDeployNote, shortSha } from "./rollback-deploy";
+import {
+  buildOlderReleaseRollbackApproval,
+  buildRollbackDeployApproval,
+  olderReleaseRollbackConfirmText,
+  rollbackConfirmText,
+  rollbackDeployNote,
+  shortSha,
+} from "./rollback-deploy";
 
-const current = { commit: "bbbbbbbbbbbb", approvalId: "a2", deployedAt: "2026-09-02T10:00:00Z" };
-const previous = { commit: "aaaaaaaaaaaa", approvalId: "a1", deployedAt: "2026-09-01T10:00:00Z" };
+const current = { commit: "bbbbbbbbbbbb", approvalId: "a2", deployedAt: "2026-09-02T10:00:00Z", status: "ok" as const };
+const previous = { commit: "aaaaaaaaaaaa", approvalId: "a1", deployedAt: "2026-09-01T10:00:00Z", status: "ok" as const };
+const older = { commit: "cccccccccccc", approvalId: "a0", deployedAt: "2026-08-20T10:00:00Z", status: "ok" as const };
 
 describe("buildRollbackDeployApproval", () => {
   it("files an ordinary deploy card for the previous commit with the rollback flag set", () => {
@@ -33,5 +41,30 @@ describe("buildRollbackDeployApproval", () => {
 
   it("shortens shas to eight characters", () => {
     expect(shortSha(" 0123456789abcdef ")).toBe("01234567");
+  });
+});
+
+describe("buildOlderReleaseRollbackApproval", () => {
+  it("files an ordinary deploy card for an older release with the rollback flag set", () => {
+    const input = buildOlderReleaseRollbackApproval({ projectId: "proj-1", workspaceId: "ws-1", current, target: older });
+    expect(input.type).toBe("request_board_approval");
+    expect(input.payload).toMatchObject({
+      kind: "deploy",
+      projectId: "proj-1",
+      workspaceId: "ws-1",
+      commit: "cccccccccccc",
+      allowBackwardDeploy: true,
+    });
+    expect(input.payload.title).toBe("Roll production back to cccccccc");
+    // An older release isn't literally "live right before" current -- the note must not
+    // overclaim that, unlike the one-step-back rollbackDeployNote above.
+    expect(input.payload.note).not.toContain("the version that was live before");
+  });
+
+  it("asks before filing and makes clear nothing changes until the card is approved", () => {
+    const text = olderReleaseRollbackConfirmText(older, current);
+    expect(text).toContain("Nothing changes yet");
+    expect(text).toContain("cccccccc");
+    expect(text).toContain("bbbbbbbb");
   });
 });

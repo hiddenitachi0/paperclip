@@ -359,3 +359,46 @@ describe("start_research_task", () => {
     expect(result.task).toEqual({ issueId: "issue-1", identifier: "DUR-12", title: "Fix the login page" });
   });
 });
+
+describe("search_conversations", () => {
+  it("is on the allow-list with a schema that takes one required query string", () => {
+    expect(LANE_A_BUILTIN_TOOL_NAMES).toContain("search_conversations");
+    const def = buildLaneABuiltinToolDefinitions().find((tool) => tool.name === "search_conversations")!;
+    expect(def.input_schema).toMatchObject({ required: ["query"], additionalProperties: false });
+  });
+
+  it("refuses plainly where it is not wired", async () => {
+    const deps = makeDeps();
+    const result = await createLaneABuiltinToolExecutor(deps)("search_conversations", { query: "delivery address" }, ctx());
+    expect(result).toMatchObject({ ok: false, summary: "Conversation search is not available on this path." });
+  });
+
+  it("requires a query", async () => {
+    const deps = makeDeps({ searchConversations: vi.fn(async () => []) });
+    const result = await createLaneABuiltinToolExecutor(deps)("search_conversations", {}, ctx());
+    expect(result).toMatchObject({ ok: false, summary: "Searched conversations without a query." });
+    expect(deps.searchConversations).not.toHaveBeenCalled();
+  });
+
+  it("passes the query and ctx through, and says plainly when nothing was found", async () => {
+    const searchConversations = vi.fn(async () => []);
+    const deps = makeDeps({ searchConversations });
+    const result = await createLaneABuiltinToolExecutor(deps)("search_conversations", { query: "delivery address" }, ctx());
+    expect(searchConversations).toHaveBeenCalledWith("delivery address", expect.objectContaining({ companyId }));
+    expect(result).toMatchObject({ ok: true, summary: 'Searched past conversations for "delivery address": nothing found.' });
+    expect(result.content).toContain('No earlier conversation');
+  });
+
+  it("renders found hits with date and who said it", async () => {
+    const hits = [
+      { conversationId: "c1", createdAt: new Date("2026-09-20T10:00:00.000Z"), role: "user" as const, content: "The delivery address is 12 Main Street." },
+      { conversationId: "c1", createdAt: new Date("2026-09-20T10:00:05.000Z"), role: "assistant" as const, content: "Got it, 12 Main Street." },
+    ];
+    const deps = makeDeps({ searchConversations: vi.fn(async () => hits) });
+    const result = await createLaneABuiltinToolExecutor(deps)("search_conversations", { query: "delivery address" }, ctx());
+    expect(result.ok).toBe(true);
+    expect(result.content).toContain("- (2026-09-20, them) \"The delivery address is 12 Main Street.\"");
+    expect(result.content).toContain("- (2026-09-20, you) \"Got it, 12 Main Street.\"");
+    expect(result.summary).toBe('Searched past conversations for "delivery address": found 2.');
+  });
+});

@@ -28,6 +28,7 @@ import {
   ShoppingCart,
   TrendingUp,
   CandlestickChart,
+  Mail,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { NavLink } from "@/lib/router";
@@ -41,6 +42,7 @@ import { useSidebar } from "../context/SidebarContext";
 import { heartbeatsApi } from "../api/heartbeats";
 import { instanceSettingsApi } from "../api/instanceSettings";
 import { productGrabberApi } from "../api/productGrabber";
+import { emailSettingsApi } from "../api/emailSettings";
 import { queryKeys } from "../lib/queryKeys";
 import { useInboxBadge } from "../hooks/useInboxBadge";
 import { Button } from "@/components/ui/button";
@@ -75,6 +77,12 @@ export function Sidebar() {
     enabled: Boolean(selectedCompanyId),
   });
   const showProductGrabber = productGrabberSettings?.enabled === true;
+  const { data: emailSettings } = useQuery({
+    queryKey: selectedCompanyId ? queryKeys.email.settings(selectedCompanyId) : ["email", "__none__"],
+    queryFn: () => emailSettingsApi.getSettings(selectedCompanyId!),
+    enabled: Boolean(selectedCompanyId),
+  });
+  const showEmail = emailSettings?.enabled === true;
   // IA flag: branch the sidebar nav presentation. Default ON =
   // streamlined (top-level Projects link). Users can opt out in experiments to
   // get classic (per-project collapsible, no Projects nav link). Issue/Task
@@ -198,6 +206,7 @@ export function Sidebar() {
           <SidebarNavItem to="/workflow-map" label="Workflow Map" icon={GitFork} />
           <SidebarNavItem to="/watchers" label="Watchers" icon={Eye} />
           <SidebarNavItem to="/trading" label="Trading" icon={CandlestickChart} />
+          {showEmail ? <SidebarNavItem to="/email" label="Email" icon={Mail} /> : null}
           {showProductGrabber ? (
             <SidebarNavItem to="/product-grabber" label="Product grabber" icon={ShoppingCart} />
           ) : null}

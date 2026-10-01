@@ -48,6 +48,7 @@ const BOARD_ROUTE_ROOTS = new Set([
   "usage",
   "activity",
   "inbox",
+  "email",
   "board-chat",
   "u",
   "design-guide",

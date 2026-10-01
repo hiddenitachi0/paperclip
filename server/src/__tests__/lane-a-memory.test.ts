@@ -244,6 +244,45 @@ describe("the prompt section", () => {
     expect(section).toContain(`(${100 - shown.length} older notes were left out to keep this short.`);
   });
 
+  it("ranks notes by relevance to the message, pulling a relevant old note ahead of newer unrelated ones", () => {
+    const old = { id: "11111111-0000-4000-8000-000000000001", text: "The delivery address is 12 Main Street.", createdAt: at("2026-01-01") };
+    const newer1 = { id: "22222222-0000-4000-8000-000000000002", text: "I like short replies.", createdAt: at("2026-09-01") };
+    const newer2 = { id: "33333333-0000-4000-8000-000000000003", text: "Call me Chris, not Christopher.", createdAt: at("2026-09-15") };
+    const section = buildMemoryPromptSection({
+      notes: [newer2, newer1, old],
+      toolsOffered: true,
+      message: "What was the delivery address again?",
+      tokenBudget: 20,
+    });
+    const shown = section.split("\n").filter((line) => line.startsWith("- ["));
+    expect(shown).toHaveLength(1);
+    expect(shown[0]).toContain("12 Main Street");
+    expect(section).toContain("2 older notes were left out");
+  });
+
+  it("falls back to newest-first when the message matches nothing, or there is no message", () => {
+    const notes = [
+      { id: DOG.id, text: DOG.text, createdAt: at("2026-09-27") },
+      { id: COFFEE.id, text: COFFEE.text, createdAt: at("2026-09-20") },
+    ];
+    const noMessage = buildMemoryPromptSection({ notes, toolsOffered: true });
+    const noMatch = buildMemoryPromptSection({ notes, toolsOffered: true, message: "unrelated topic entirely" });
+    for (const section of [noMessage, noMatch]) {
+      expect(section.indexOf("Rex")).toBeLessThan(section.indexOf("coffee"));
+    }
+  });
+
+  it("packed selection still reads newest-first even though it was picked by relevance", () => {
+    const relevantOld = { id: "11111111-0000-4000-8000-000000000001", text: "Project codename is Falcon.", createdAt: at("2026-01-01") };
+    const relevantNew = { id: "22222222-0000-4000-8000-000000000002", text: "Falcon ships in March.", createdAt: at("2026-09-01") };
+    const section = buildMemoryPromptSection({
+      notes: [relevantNew, relevantOld],
+      toolsOffered: true,
+      message: "Tell me about Falcon.",
+    });
+    expect(section.indexOf("ships in March")).toBeLessThan(section.indexOf("codename is Falcon"));
+  });
+
   it("sits in the system prompt after the rules and before the persona and the operator's instructions; absent, the prompt is as before", () => {
     const base = {
       agentName: "Front desk",

@@ -5,7 +5,7 @@ import type { DashboardPulse } from "@paperclipai/shared";
 import { notFound } from "../errors.js";
 import { budgetService } from "./budgets.js";
 import { readDeployRunnerStatus, type DeployRunnerStatusEntry } from "./deploy-runner-status.js";
-import { DEPLOY_SUCCESS_MARKER } from "./deploy-completion-gate.js";
+import { isCompletedDeployOutcome } from "./deploy-completion-gate.js";
 
 const DASHBOARD_RUN_ACTIVITY_DAYS = 14;
 const PULSE_LIST_LIMIT = 10;
@@ -25,7 +25,7 @@ export function getUtcDayStart(date: Date): Date {
 }
 
 function isSuccessfulDeployEntry(entry: DeployRunnerStatusEntry): boolean {
-  return entry.outcome !== "started" && (entry.outcome === "carried" || entry.body.includes(DEPLOY_SUCCESS_MARKER));
+  return isCompletedDeployOutcome(entry);
 }
 
 function payloadString(payload: unknown, key: string): string | null {

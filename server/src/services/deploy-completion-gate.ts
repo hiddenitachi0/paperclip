@@ -49,6 +49,48 @@ import { logger } from "../middleware/logger.js";
 // not just answer the narrower "is THIS issue's own gate satisfied" question below.
 export const DEPLOY_SUCCESS_MARKER = "is live and healthy";
 
+// DUR-4233: scripts/deploy-runner.sh writes this on a deploy whose app itself checked out fine
+// (health check + page verification both passed) but whose TLS certificate or domain resolution
+// needs a human look -- a rollback would not fix either, since the previous commit sits behind
+// the exact same cert/DNS. The deployed commit really is live, so every consumer that treats
+// DEPLOY_SUCCESS_MARKER/outcome:"ok" as "this shipped" must treat this the same way.
+export const DEPLOY_NEEDS_ATTENTION_OUTCOME = "needs_attention";
+
+export type DeployOutcomeStatus = "ok" | "needs_attention" | "failed";
+
+/**
+ * True for any status-log entry that represents a real, health-checked deploy actually reaching
+ * production -- a plain success (`outcome: "ok"`, or no outcome field at all for entries written
+ * before DUR-4233 started setting it, matched on the legacy `DEPLOY_SUCCESS_MARKER` body text) or
+ * one flagged `needs_attention` (deployed, but its TLS/domain check wants a look). Excludes
+ * "started" (not a terminal outcome) and "carried" (a different approval's own success line is
+ * the one that should count). Every call site that used to string-match DEPLOY_SUCCESS_MARKER
+ * directly to decide "did this commit ship" must use this instead, so a needs_attention deploy
+ * is never mistaken for one that never completed.
+ */
+export function isDeployedOutcome(entry: DeployRunnerStatusEntry): boolean {
+  if (entry.outcome === "carried" || entry.outcome === "started") return false;
+  if (entry.outcome === "ok" || entry.outcome === DEPLOY_NEEDS_ATTENTION_OUTCOME) return true;
+  return entry.body.includes(DEPLOY_SUCCESS_MARKER);
+}
+
+/** The tri-state status a deployed (per `isDeployedOutcome`) entry reports, for history/UI display. */
+export function resolveDeployedStatus(entry: DeployRunnerStatusEntry): Exclude<DeployOutcomeStatus, "failed"> | null {
+  if (!isDeployedOutcome(entry)) return null;
+  return entry.outcome === DEPLOY_NEEDS_ATTENTION_OUTCOME ? "needs_attention" : "ok";
+}
+
+/**
+ * Broader than `isDeployedOutcome`: also true for `outcome: "carried"` (DUR-152), where THIS
+ * approval's own commit shipped as part of a *different* approval's deploy rather than its own.
+ * "Did this approval's request end up completed, one way or another" is the question every gate
+ * (deploy-completion-gate, deploy-carried-issues, the approvals route, the dashboard pulse) needs
+ * answered the same way -- they do not care which of the three ways it happened.
+ */
+export function isCompletedDeployOutcome(entry: DeployRunnerStatusEntry): boolean {
+  return isDeployedOutcome(entry) || entry.outcome === "carried";
+}
+
 export function approvalPayloadKind(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
   const kind = (payload as Record<string, unknown>).kind;
@@ -174,11 +216,7 @@ function deployApprovalCompletedInStatusLog(
 ): boolean {
   if (deployApprovalIds.length === 0) return false;
   const idSet = new Set(deployApprovalIds);
-  return statusEntries.some(
-    (entry) =>
-      idSet.has(entry.approvalId) &&
-      (entry.body.includes(DEPLOY_SUCCESS_MARKER) || entry.outcome === "carried"),
-  );
+  return statusEntries.some((entry) => idSet.has(entry.approvalId) && isCompletedDeployOutcome(entry));
 }
 
 export interface DeployCompletionGateInput {
@@ -341,9 +379,7 @@ export async function evaluateDeployCompletionDoneGate(
     );
     const shippedUnderAnotherApproval = projectDeployApprovalIds.some((approvalId) => {
       const entry = getStatusEntries().find(
-        (candidate) =>
-          candidate.approvalId === approvalId &&
-          (candidate.body.includes(DEPLOY_SUCCESS_MARKER) || candidate.outcome === "carried"),
+        (candidate) => candidate.approvalId === approvalId && isCompletedDeployOutcome(candidate),
       );
       return entry ? commitsMatch(mergeCommitSha, extractDeployedCommit(entry)) : false;
     });
