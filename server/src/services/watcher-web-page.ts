@@ -20,6 +20,7 @@ import { watcherWebPageUrlProblem, type WatcherWebPageRule } from "@paperclipai/
 import { createCrawl4aiClientFromEnv, Crawl4aiNotConfiguredError, type Crawl4aiClient } from "./crawl4ai-client.js";
 import { createRobotsTxtChecker, type RobotsTxtChecker } from "./product-grabber/robots.js";
 import { PerHostRateLimiter } from "./product-grabber/rate-limiter.js";
+import { createSafeOutboundFetch, PUBLIC_WEB_PAGE_OUTBOUND_POLICY, type SafeOutboundFetchDeps } from "./safe-outbound-fetch.js";
 
 export const WATCHER_WEB_PAGE_USER_AGENT = "PaperclipWatcherBot/1.0 (+https://paperclip.ing)";
 export const WATCHER_WEB_PAGE_MIN_HOST_INTERVAL_MS = 3_000;
@@ -119,7 +120,7 @@ function readRule(rule: WatcherWebPageRule, html: string): WatcherWebPageFetchRe
   return { ...empty, contentHash: hash, snippet: snippetOf(text) };
 }
 
-export interface WatcherWebPageFetcherDeps {
+export interface WatcherWebPageFetcherDeps extends SafeOutboundFetchDeps {
   crawl4ai?: Crawl4aiClient;
   robots?: RobotsTxtChecker;
   rateLimiter?: PerHostRateLimiter;
@@ -132,10 +133,34 @@ export interface WatcherWebPageFetcherDeps {
  * `UnconfiguredCrawl4aiClient` and every call fails the same safe,
  * plain-sentence way `WATCHER_SOURCE_INFO`'s other "not available yet"
  * sources already do -- never a thrown error reaching the scheduler.
+ *
+ * DUR-4249: unlike product-grabber's use of the same robots.ts checker
+ * (always a fixed per-vendor hostname from `registry.findTemplate`), this
+ * feature's URL is owner/admin-typed with no allowlist, so the default
+ * `fetchImpl` (robots.ts's direct, unproxied `fetch`) would let an operator
+ * reach an internal address -- including one that only resolves there via
+ * DNS rebinding after `watcherWebPageUrlProblem`'s literal-IP check already
+ * passed. The robots.txt request is routed through the same
+ * resolve-then-pin, public-address-only, no-redirect-bounce outbound guard
+ * (`PUBLIC_WEB_PAGE_OUTBOUND_POLICY`) that quick agents' read_web_page tool
+ * already uses for the same "arbitrary operator/agent URL" shape, instead of
+ * a bespoke check here. A host the guard refuses throws, which
+ * `getRobotsForOrigin` already treats the same as any other robots.txt
+ * fetch failure: fail open (allow), since the real page fetch below never
+ * uses this path -- it always goes through Crawl4AI's own browser-egress
+ * proxy regardless of what robots.txt said.
  */
 export function createWatcherWebPageFetcher(deps: WatcherWebPageFetcherDeps = {}): WatcherWebPageFetcher {
   const crawl4ai = deps.crawl4ai ?? createCrawl4aiClientFromEnv();
-  const robots = deps.robots ?? createRobotsTxtChecker({ userAgent: WATCHER_WEB_PAGE_USER_AGENT });
+  const robots =
+    deps.robots ??
+    createRobotsTxtChecker({
+      userAgent: WATCHER_WEB_PAGE_USER_AGENT,
+      fetchImpl: createSafeOutboundFetch(PUBLIC_WEB_PAGE_OUTBOUND_POLICY, {
+        lookup: deps.lookup,
+        testOnlyDial: deps.testOnlyDial,
+      }),
+    });
   const rateLimiter = deps.rateLimiter ?? new PerHostRateLimiter(WATCHER_WEB_PAGE_MIN_HOST_INTERVAL_MS);
 
   return {
