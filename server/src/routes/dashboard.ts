@@ -3,7 +3,7 @@ import type { Db } from "@paperclipai/db";
 import { createRequestScopedDb } from "@paperclipai/db";
 import { dashboardService } from "../services/dashboard.js";
 import { stalledTasksService } from "../services/stalled-tasks.js";
-import { assertCompanyAccess } from "./authz.js";
+import { assertBoard, assertCompanyAccess } from "./authz.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
 
 export function dashboardRoutes(db: Db) {
@@ -21,6 +21,24 @@ export function dashboardRoutes(db: Db) {
     const summary = await svc.summary(companyId);
     res.json(summary);
   });
+
+  // Paperclip pulse (DUR-4199/DUR-4154): the always-visible status panel's
+  // backend. Board-only -- unlike the summary above, this surfaces today's
+  // spend and daily budget policy, which the plan scopes to company members,
+  // not agent API keys. The access check runs inside companyScopeFromParam's
+  // resolver (not after), so an unauthorized caller never reserves a scoped
+  // connection in the first place.
+  router.get(
+    "/companies/:companyId/dashboard/pulse",
+    companyScopeFromParam(db, (req, companyId) => {
+      assertBoard(req);
+      assertCompanyAccess(req, companyId);
+    }),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      res.json(await svc.pulse(companyId));
+    },
+  );
 
   // Open work nobody is moving -- the Now page's fifth "Needs you" source.
   // One call returns the rows ready to render: the page polls every few
