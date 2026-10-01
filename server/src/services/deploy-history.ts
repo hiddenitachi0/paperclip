@@ -1,7 +1,7 @@
 import { and, eq, sql } from "drizzle-orm";
 import { approvals, projects, type Db } from "@paperclipai/db";
 import { readDeployRunnerStatus, type DeployRunnerStatusEntry } from "./deploy-runner-status.js";
-import { DEPLOY_SUCCESS_MARKER, extractDeployedCommit } from "./deploy-completion-gate.js";
+import { extractDeployedCommit, resolveDeployedStatus, type DeployOutcomeStatus } from "./deploy-completion-gate.js";
 
 // DUR-4162: how many past releases readProjectDeployHistory returns when a
 // project's deploy_policy.releaseRetentionCount is unset. Mirrors the bound
@@ -32,6 +32,13 @@ export type ProjectDeployHistoryEntry = {
   commit: string;
   approvalId: string;
   deployedAt: string;
+  /**
+   * DUR-4233: "ok" for a clean deploy, "needs_attention" when the app itself checked out fine
+   * but the runner's TLS/domain check flagged something a rollback would not fix. Never
+   * "failed" here -- a failed attempt never reaches `selectProjectDeployHistory` at all (see
+   * `resolveDeployedStatus`), so this list only ever holds versions that were genuinely live.
+   */
+  status: Exclude<DeployOutcomeStatus, "failed">;
 };
 
 export type ProjectDeployHistory = {
@@ -49,10 +56,6 @@ export type ProjectDeployHistory = {
   releases: ProjectDeployHistoryEntry[];
 };
 
-function isSuccessfulDeploy(entry: DeployRunnerStatusEntry): boolean {
-  return entry.outcome !== "carried" && entry.outcome !== "started" && entry.body.includes(DEPLOY_SUCCESS_MARKER);
-}
-
 /**
  * Pure selection: walks the runner log oldest -> newest, keeps only this
  * project's successful deploys, and returns the most recent distinct
@@ -69,12 +72,13 @@ export function selectProjectDeployHistory(
   for (let i = entries.length - 1; i >= 0 && newestFirst.length < limit; i -= 1) {
     const entry = entries[i]!;
     if (!projectApprovalIds.has(entry.approvalId)) continue;
-    if (!isSuccessfulDeploy(entry)) continue;
+    const status = resolveDeployedStatus(entry);
+    if (!status) continue;
     const commit = extractDeployedCommit(entry);
     if (!commit) continue;
     const last = newestFirst[newestFirst.length - 1];
     if (last && commitsRefer(last.commit, commit)) continue;
-    newestFirst.push({ commit, approvalId: entry.approvalId, deployedAt: entry.ts });
+    newestFirst.push({ commit, approvalId: entry.approvalId, deployedAt: entry.ts, status });
   }
   return newestFirst;
 }

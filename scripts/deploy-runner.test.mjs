@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
 import http from "node:http";
+import https from "node:https";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { describe, it } from "node:test";
 
 // DUR-44 regression coverage: scripts/deploy-runner.sh must never mark an
 // approval "processed" without either delivering a comment for it (success,
@@ -262,6 +263,58 @@ const ONE_DAY_MS = 24 * ONE_HOUR_MS;
 
 test("deploy-runner.sh passes bash syntax validation", () => {
   assertSuccess(run("bash", ["-n", SCRIPT]), "bash -n");
+});
+
+// DUR-4233: distinguishes "the app answers 200" (health_check()) from "the public-facing TLS
+// cert/domain is trustworthy" (tls_domain_check()) -- a deploy whose app is fine but whose
+// cert is expiring/invalid is reported "needs_attention", not rolled back, since the previous
+// commit sits behind the exact same cert/DNS.
+function runTlsDomainCheck(url, env = {}) {
+  const script = `set -uo pipefail\nsource "${SCRIPT}"\ntls_domain_check "${url}"`;
+  return run("bash", ["-c", script], { env: { ...process.env, ...env } });
+}
+
+describe("tls_domain_check", () => {
+  it("skips the check entirely for a plain http:// address", () => {
+    const result = runTlsDomainCheck("http://example.invalid/health");
+    assertSuccess(result, "tls_domain_check http://");
+    assert.equal(result.stdout.trim(), "ok");
+  });
+
+  it("flags a domain that does not resolve", () => {
+    const result = runTlsDomainCheck("https://nonexistent-domain-xyz-123456.invalid/health");
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /did not resolve/);
+  });
+
+  it("flags an untrusted/self-signed certificate as needing attention", async () => {
+    const certDir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-tls-test-"));
+    try {
+      const keyPath = path.join(certDir, "key.pem");
+      const certPath = path.join(certDir, "cert.pem");
+      const genResult = run("openssl", [
+        "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "5",
+        "-keyout", keyPath, "-out", certPath, "-subj", "/CN=127.0.0.1",
+      ]);
+      assertSuccess(genResult, "openssl req");
+
+      const server = https.createServer(
+        { key: readFileSync(keyPath), cert: readFileSync(certPath) },
+        (_req, res) => res.end("ok"),
+      );
+      await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const port = server.address().port;
+      try {
+        const result = runTlsDomainCheck(`https://127.0.0.1:${port}/`);
+        assert.equal(result.status, 1, `expected a self-signed cert to fail verification\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+        assert.match(result.stdout, /TLS handshake.*failed/);
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    } finally {
+      rmSync(certDir, { recursive: true, force: true });
+    }
+  });
 });
 
 test("two approved deploy approvals for the same project in one poll cycle both end up with a comment", () => {
@@ -1035,6 +1088,164 @@ test("DUR-237: a successful deploy also records the deployed commit as a structu
       expectedCommit,
       "deploy-completion-gate.ts needs the structured commit field on a plain success too, not only 'carried' (DUR-237)",
     );
+  } finally {
+    scenario.cleanup();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// DUR-4233: when the app itself deploys cleanly but tls_domain_check flags the public address
+// (expiring cert, domain not resolving), the deploy must still be reported as a completed deploy
+// -- not a failure -- just with outcome "needs_attention" instead of "ok", and the comment must
+// say plainly that this is a cert/domain issue a rollback would not fix.
+test("DUR-4233: a successful deploy whose TLS/domain check fails is reported needs_attention, not failed", () => {
+  const scenario = makeScenario();
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-tls-attention-test-"));
+  try {
+    const targetPath = path.join(dir, "target");
+    const gitEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "test",
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+    };
+    const g = (args) => {
+      const result = spawnSync("git", args, { cwd: targetPath, encoding: "utf8", env: gitEnv });
+      assert.equal(result.status, 0, `git ${args.join(" ")} failed\n${result.stderr}`);
+      return result.stdout.trim();
+    };
+    mkdirSync(targetPath, { recursive: true });
+    g(["init", "--quiet", "-b", "custom"]);
+    writeFileSync(path.join(targetPath, "f.txt"), "A");
+    g(["add", "f.txt"]);
+    g(["commit", "--quiet", "-m", "A"]);
+
+    const project = {
+      id: "proj-1",
+      deployPolicy: {
+        enabled: true,
+        workspaceId: "ws-1",
+        deployKind: "custom",
+        deployTargetPath: targetPath,
+        healthCheckUrl: "https://example.invalid/health",
+      },
+      workspaces: [{ id: "ws-1", repoUrl: "https://example.invalid/repo.git", repoRef: "custom" }],
+    };
+    scenario.writeJson("project-proj-1.json", project);
+    scenario.writeJson("approval-aid-1.json", {
+      id: "aid-1",
+      payload: { projectId: "proj-1", workspaceId: "ws-1", commit: "irrelevant", kind: "deploy" },
+    });
+
+    const statusPath = path.join(scenario.dir, "status.jsonl");
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      run_recipe() { return 0; }
+      health_check() { return 0; }
+      tls_domain_check() { echo "TLS certificate for example.invalid expires in 3 day(s)"; return 1; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+        PAPERCLIP_DEPLOY_RUNNER_STATUS_PATH: statusPath,
+      },
+    });
+    assertSuccess(result, "process_approval");
+
+    const comments = scenario.commentsFor("aid-1");
+    assert.equal(comments.length, 1);
+    assert.match(comments[0], /is live and the app itself checks out/);
+    assert.match(comments[0], /Needs attention: TLS certificate for example\.invalid expires in 3 day\(s\)/);
+    assert.match(comments[0], /rolling back would not fix it/);
+    assert.doesNotMatch(comments[0], /Deploy failed/);
+
+    const statusLines = readFileSync(statusPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const entries = statusLines.filter((e) => e.approvalId === "aid-1");
+    assert.equal(entries.length, 2, `expected a started line followed by the outcome line, got: ${JSON.stringify(entries)}`);
+    const entry = entries[1];
+    assert.equal(entry.outcome, "needs_attention");
+  } finally {
+    scenario.cleanup();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-4233: a successful deploy whose TLS/domain check passes is reported with outcome=ok", () => {
+  const scenario = makeScenario();
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-tls-ok-test-"));
+  try {
+    const targetPath = path.join(dir, "target");
+    const gitEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "test",
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+    };
+    const g = (args) => {
+      const result = spawnSync("git", args, { cwd: targetPath, encoding: "utf8", env: gitEnv });
+      assert.equal(result.status, 0, `git ${args.join(" ")} failed\n${result.stderr}`);
+      return result.stdout.trim();
+    };
+    mkdirSync(targetPath, { recursive: true });
+    g(["init", "--quiet", "-b", "custom"]);
+    writeFileSync(path.join(targetPath, "f.txt"), "A");
+    g(["add", "f.txt"]);
+    g(["commit", "--quiet", "-m", "A"]);
+
+    const project = {
+      id: "proj-1",
+      deployPolicy: {
+        enabled: true,
+        workspaceId: "ws-1",
+        deployKind: "custom",
+        deployTargetPath: targetPath,
+        healthCheckUrl: "https://example.invalid/health",
+      },
+      workspaces: [{ id: "ws-1", repoUrl: "https://example.invalid/repo.git", repoRef: "custom" }],
+    };
+    scenario.writeJson("project-proj-1.json", project);
+    scenario.writeJson("approval-aid-1.json", {
+      id: "aid-1",
+      payload: { projectId: "proj-1", workspaceId: "ws-1", commit: "irrelevant", kind: "deploy" },
+    });
+
+    const statusPath = path.join(scenario.dir, "status.jsonl");
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      run_recipe() { return 0; }
+      health_check() { return 0; }
+      tls_domain_check() { echo "ok"; return 0; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+        PAPERCLIP_DEPLOY_RUNNER_STATUS_PATH: statusPath,
+      },
+    });
+    assertSuccess(result, "process_approval");
+
+    const comments = scenario.commentsFor("aid-1");
+    assert.equal(comments.length, 1);
+    assert.match(comments[0], /is live and healthy/);
+    assert.doesNotMatch(comments[0], /Needs attention/);
+
+    const statusLines = readFileSync(statusPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const entry = statusLines.filter((e) => e.approvalId === "aid-1" && e.outcome !== "started").pop();
+    assert.equal(entry.outcome, "ok");
   } finally {
     scenario.cleanup();
     rmSync(dir, { recursive: true, force: true });

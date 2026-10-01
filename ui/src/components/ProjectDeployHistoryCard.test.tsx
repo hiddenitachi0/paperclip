@@ -22,8 +22,8 @@ vi.mock("@/lib/router", () => ({
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
-const current = { commit: "bbbbbbbbbbbb", approvalId: "approval-current", deployedAt: "2026-09-02T10:00:00Z" };
-const previous = { commit: "aaaaaaaaaaaa", approvalId: "approval-previous", deployedAt: "2026-09-01T10:00:00Z" };
+const current = { commit: "bbbbbbbbbbbb", approvalId: "approval-current", deployedAt: "2026-09-02T10:00:00Z", status: "ok" as const };
+const previous = { commit: "aaaaaaaaaaaa", approvalId: "approval-previous", deployedAt: "2026-09-01T10:00:00Z", status: "ok" as const };
 
 let root: ReturnType<typeof createRoot> | null = null;
 let container: HTMLDivElement | null = null;
@@ -206,6 +206,35 @@ describe("ProjectDeployHistoryCard", () => {
     });
     await flush();
     expect(mockApprovalsApi.create).not.toHaveBeenCalled();
+  });
+
+  it("flags the live version with a needs-attention badge when its TLS/domain check failed", async () => {
+    const flagged = { ...current, status: "needs_attention" as const };
+    const el = await render(
+      <ProjectDeployHistoryCardView
+        companyId="co-1"
+        projectId="proj-1"
+        workspaceId="ws-1"
+        history={{ current: flagged, previous }}
+        isLoading={false}
+        error={null}
+      />,
+    );
+    expect(el.querySelector('[data-testid="deploy-history-needs-attention"]')).not.toBeNull();
+  });
+
+  it("shows no needs-attention badge for a clean deploy", async () => {
+    const el = await render(
+      <ProjectDeployHistoryCardView
+        companyId="co-1"
+        projectId="proj-1"
+        workspaceId="ws-1"
+        history={{ current, previous }}
+        isLoading={false}
+        error={null}
+      />,
+    );
+    expect(el.querySelector('[data-testid="deploy-history-needs-attention"]')).toBeNull();
   });
 
   it("offers no rollback when only one version has ever been live", async () => {

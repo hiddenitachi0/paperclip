@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ProjectDeployPolicy } from "@paperclipai/shared";
 import { RotateCcw } from "lucide-react";
 import { Link } from "@/lib/router";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { approvalsApi } from "../api/approvals";
@@ -136,6 +137,15 @@ export function ProjectDeployHistoryCardView({
                   {shortSha(current.commit)}
                   <span className="ml-2 font-sans text-muted-foreground">deployed {timeAgo(current.deployedAt)}</span>
                 </p>
+                {current.status === "needs_attention" ? (
+                  <Badge
+                    variant="outline"
+                    className="mt-1 border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                    data-testid="deploy-history-needs-attention"
+                  >
+                    Needs attention
+                  </Badge>
+                ) : null}
                 <Link to={`/approvals/${current.approvalId}`} className="text-xs text-muted-foreground underline-offset-2 hover:underline">
                   See the deploy card
                 </Link>

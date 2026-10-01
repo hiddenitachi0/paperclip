@@ -1,10 +1,14 @@
 import { api } from "./client";
 
+export type ProjectDeployHistoryStatus = "ok" | "needs_attention";
+
 export type ProjectDeployHistoryEntry = {
   /** The commit the deploy runner put live, as it logged it (usually a 12-char short sha). */
   commit: string;
   approvalId: string;
   deployedAt: string;
+  /** DUR-4233: "needs_attention" when the app deployed fine but a TLS/domain check flagged something. */
+  status: ProjectDeployHistoryStatus;
 };
 
 export type ProjectDeployHistory = {
