@@ -676,8 +676,8 @@ export function jobService(
             source: "email",
             runAgentId: runAgent.id,
             formValues: {
-              email_from: frameUntrustedMailField(message.from),
-              email_subject: frameUntrustedMailField(message.subject),
+              email_from: frameUntrustedMailField(message.from, "sender address"),
+              email_subject: frameUntrustedMailField(message.subject, "subject line"),
               email_body: message.bodyText,
             },
             idempotencyKey: message.messageId ? `email-trigger:${trigger.id}:${message.messageId}` : null,

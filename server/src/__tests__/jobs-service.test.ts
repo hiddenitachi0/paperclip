@@ -238,7 +238,7 @@ describeEmbeddedPostgres("job service dispatch (DUR-4182)", () => {
 
       const [issueRow] = await db.select().from(issues).where(eq(issues.id, runs[0].linkedIssueId!));
       expect(issueRow.description).toBe(
-        `From ${frameUntrustedMailField("counterparty@acme.test")}: ${frameUntrustedMailField("Please review")}`,
+        `From ${frameUntrustedMailField("counterparty@acme.test", "sender address")}: ${frameUntrustedMailField("Please review", "subject line")}`,
       );
 
       const [updatedTrigger] = await db.select().from(jobTriggers).where(eq(jobTriggers.id, trigger.id));
