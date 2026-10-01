@@ -30,6 +30,7 @@ import { ProductGrabber } from "./pages/ProductGrabber";
 import { Email } from "./pages/Email";
 import { Learnings, PipelineItemDetail, PipelineItemLegacyRedirect, Pipelines, ReviewQueue } from "./pages/Pipelines";
 import { PipelineSettings } from "./pages/PipelineSettings";
+import { PipelineCanvas } from "./pages/PipelineCanvas";
 import { RoutineDetail } from "./pages/RoutineDetail";
 import { UserProfile } from "./pages/UserProfile";
 import { ExecutionWorkspaceDetail } from "./pages/ExecutionWorkspaceDetail";
@@ -209,6 +210,10 @@ function boardRoutes() {
       <Route
         path="pipelines/:pipelineId/settings"
         element={<PipelinesExperimentalGate><PipelineSettings /></PipelinesExperimentalGate>}
+      />
+      <Route
+        path="pipelines/:pipelineId/canvas"
+        element={<PipelinesExperimentalGate><PipelineCanvas /></PipelinesExperimentalGate>}
       />
       <Route
         path="pipelines/:pipelineId/items/:caseId"
@@ -497,6 +502,7 @@ export function App() {
           <Route path="pipelines/:pipelineId" element={<UnprefixedBoardRedirect />} />
           <Route path="pipelines/:pipelineId/add" element={<UnprefixedBoardRedirect />} />
           <Route path="pipelines/:pipelineId/settings" element={<UnprefixedBoardRedirect />} />
+          <Route path="pipelines/:pipelineId/canvas" element={<UnprefixedBoardRedirect />} />
           <Route path="pipelines/:pipelineId/items/:caseId" element={<UnprefixedBoardRedirect />} />
           <Route path="pipelines/:pipelineId/cases/:caseId" element={<UnprefixedBoardRedirect />} />
           <Route path="files" element={<UnprefixedBoardRedirect />} />

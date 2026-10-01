@@ -66,7 +66,7 @@ import {
   resolveLiveDeployCommit,
   summarizeChangedPaths,
 } from "../services/deploy-change-guard.js";
-import { DEPLOY_SUCCESS_MARKER } from "../services/deploy-completion-gate.js";
+import { isCompletedDeployOutcome } from "../services/deploy-completion-gate.js";
 import { readDeployRunnerStatus, type DeployRunnerStatusEntry } from "../services/deploy-runner-status.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { redactEventPayload } from "../redaction.js";
@@ -1092,7 +1092,7 @@ function findDuplicateApprovedDeploy(
             "you really need a second one.",
       };
     }
-    if (entry.body.includes(DEPLOY_SUCCESS_MARKER) || entry.outcome === "carried") {
+    if (isCompletedDeployOutcome(entry)) {
       return {
         id: candidate.id,
         message:

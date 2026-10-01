@@ -98,6 +98,7 @@ export {
   readLaneAWebSearchSwitch,
   type CompanyWebSearchSettings,
 } from "./web-search.js";
+export { readLaneAConversationSearchSwitch } from "./lane-a-conversation-search.js";
 export {
   BROWSER_ACCESS_LEVELS,
   readLaneABrowserAccess,
