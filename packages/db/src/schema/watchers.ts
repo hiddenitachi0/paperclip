@@ -69,7 +69,7 @@ export const watchers = pgTable(
   (table) => ({
     companyIdx: index("watchers_company_idx").on(table.companyId, table.createdAt),
     dueIdx: index("watchers_due_idx").on(table.enabled, table.nextCheckAt),
-    sourceCheck: check("watchers_source_check", sql`${table.source} IN ('crypto', 'us_stock', 'oslo_stock')`),
+    sourceCheck: check("watchers_source_check", sql`${table.source} IN ('crypto', 'us_stock', 'oslo_stock', 'web_page')`),
     checkEveryCheck: check("watchers_check_every_minutes_check", sql`${table.checkEveryMinutes} >= 5`),
     cooldownCheck: check("watchers_cooldown_minutes_check", sql`${table.cooldownMinutes} >= 0`),
   }),
@@ -128,5 +128,39 @@ export const watcherAlerts = pgTable(
       "watcher_alerts_status_check",
       sql`${table.status} IN ('composing', 'ready', 'delivered', 'failed', 'expired')`,
     ),
+  }),
+);
+
+/**
+ * DUR-4168: the last seen state of a web-page watcher's rule, so the next
+ * check has something to compare against. One row per watcher (not per
+ * check, unlike watcher_price_points: a web page has no numeric history to
+ * window over, only "what did we see last time").
+ *
+ * Which columns are set depends on the watcher's rule kind: `price` sets
+ * last_price, `stock` sets last_in_stock, `new_products` sets
+ * last_item_keys, `text_change` sets last_content_hash (+ last_snippet for
+ * the alert's short diff). The others stay null for a given kind.
+ */
+export const watcherWebPageSnapshots = pgTable(
+  "watcher_web_page_snapshots",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    watcherId: uuid("watcher_id")
+      .notNull()
+      .references(() => watchers.id, { onDelete: "cascade" })
+      .unique(),
+    lastPrice: doublePrecision("last_price"),
+    lastInStock: boolean("last_in_stock"),
+    lastItemKeys: jsonb("last_item_keys").$type<string[]>(),
+    lastContentHash: text("last_content_hash"),
+    lastSnippet: text("last_snippet"),
+    observedAt: timestamp("observed_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    companyIdx: index("watcher_web_page_snapshots_company_idx").on(table.companyId),
   }),
 );

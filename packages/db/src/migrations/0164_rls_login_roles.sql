@@ -351,6 +351,7 @@ DECLARE
     -- the login-role lists match the schema, as for the tables above.
     'watcher_alerts',
     'watcher_price_points',
+    'watcher_web_page_snapshots',
     'watchers',
     -- DUR-4127 video storylines. Created (and granted on) in
     -- 0196_video_storylines.sql; listed here so the login-role lists match
@@ -560,6 +561,7 @@ DECLARE
     -- the login-role lists match the schema, as for the tables above.
     'watcher_alerts',
     'watcher_price_points',
+    'watcher_web_page_snapshots',
     'watchers',
     -- DUR-4127 video storylines. Created (and granted on) in
     -- 0196_video_storylines.sql; listed here so the login-role lists match
