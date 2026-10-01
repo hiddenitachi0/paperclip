@@ -1,7 +1,18 @@
 import { and, eq, sql } from "drizzle-orm";
-import { approvals, type Db } from "@paperclipai/db";
+import { approvals, projects, type Db } from "@paperclipai/db";
 import { readDeployRunnerStatus, type DeployRunnerStatusEntry } from "./deploy-runner-status.js";
 import { DEPLOY_SUCCESS_MARKER, extractDeployedCommit } from "./deploy-completion-gate.js";
+
+// DUR-4162: how many past releases readProjectDeployHistory returns when a
+// project's deploy_policy.releaseRetentionCount is unset. Mirrors the bound
+// enforced by releaseRetentionCount's own validator (packages/shared).
+export const DEFAULT_RELEASE_RETENTION_COUNT = 10;
+const MAX_RELEASE_RETENTION_COUNT = 50;
+// Each retained release can take several status-log lines ("started", one or
+// more health-probe retries, the terminal outcome), so the status log read
+// must cover comfortably more lines than the release count it is meant to
+// resolve.
+const STATUS_LOG_LINES_PER_RELEASE = 40;
 
 /**
  * DUR-3952 follow-up (operator rollback button): which versions of a project
@@ -28,6 +39,14 @@ export type ProjectDeployHistory = {
   current: ProjectDeployHistoryEntry | null;
   /** The version that was live before `current` -- the rollback target. */
   previous: ProjectDeployHistoryEntry | null;
+  /**
+   * DUR-4162: up to the project's configured release-retention count
+   * (default DEFAULT_RELEASE_RETENTION_COUNT), newest first. `releases[0]`
+   * and `releases[1]` are always the same entries as `current`/`previous` --
+   * the two older fields are kept so existing callers (the one-step-back
+   * rollback button) don't need to change.
+   */
+  releases: ProjectDeployHistoryEntry[];
 };
 
 function isSuccessfulDeploy(entry: DeployRunnerStatusEntry): boolean {
@@ -83,14 +102,39 @@ export async function listProjectDeployApprovalIds(db: Db, companyId: string, pr
   return new Set(rows.map((row) => row.id));
 }
 
+/**
+ * DUR-4162: clamps a project's deploy_policy.releaseRetentionCount to the
+ * same [1, 50] bound its validator enforces (packages/shared), and falls
+ * back to DEFAULT_RELEASE_RETENTION_COUNT when unset or invalid -- a
+ * malformed value already stored in a policy JSON blob must not crash a
+ * history read.
+ */
+export function resolveReleaseRetentionCount(deployPolicy: Record<string, unknown> | null | undefined): number {
+  const raw = deployPolicy?.releaseRetentionCount;
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return DEFAULT_RELEASE_RETENTION_COUNT;
+  return Math.min(MAX_RELEASE_RETENTION_COUNT, Math.max(1, Math.floor(raw)));
+}
+
 export async function readProjectDeployHistory(
   db: Db,
   companyId: string,
   projectId: string,
-  deps: { readStatusLog?: (companyId: string) => DeployRunnerStatusEntry[] } = {},
+  deps: { readStatusLog?: (companyId: string, limit: number) => DeployRunnerStatusEntry[] } = {},
 ): Promise<ProjectDeployHistory> {
-  const readStatusLog = deps.readStatusLog ?? ((cid: string) => readDeployRunnerStatus(cid, 500));
-  const approvalIds = await listProjectDeployApprovalIds(db, companyId, projectId);
-  const [current = null, previous = null] = selectProjectDeployHistory(readStatusLog(companyId), approvalIds, 2);
-  return { current, previous };
+  const readStatusLog = deps.readStatusLog ?? ((cid: string, limit: number) => readDeployRunnerStatus(cid, limit));
+
+  const [approvalIds, projectRow] = await Promise.all([
+    listProjectDeployApprovalIds(db, companyId, projectId),
+    db
+      .select({ deployPolicy: projects.deployPolicy })
+      .from(projects)
+      .where(and(eq(projects.id, projectId), eq(projects.companyId, companyId)))
+      .then((rows) => rows[0]),
+  ]);
+
+  const retention = resolveReleaseRetentionCount(projectRow?.deployPolicy);
+  const statusLogLimit = Math.min(5000, retention * STATUS_LOG_LINES_PER_RELEASE);
+  const releases = selectProjectDeployHistory(readStatusLog(companyId, statusLogLimit), approvalIds, retention);
+
+  return { current: releases[0] ?? null, previous: releases[1] ?? null, releases };
 }
