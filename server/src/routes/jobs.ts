@@ -245,15 +245,20 @@ export function jobRoutes(db: Db, options: { heartbeat?: IssueAssignmentWakeupDe
     assertCompanyAccess(req, existing.companyId);
     if (req.actor.type === "agent" && !req.actor.agentId) throw unauthorized();
     if (req.actor.type !== "board") {
+      // Gate on the *target* holding a linked position, not the caller. A
+      // job's task is always assigned to `runAgentId` (required by
+      // runJobSchema, even for a self-run), so gating on "caller holds any
+      // linked position" instead/in addition would let any position holder
+      // direct the job's task -- attacker-controlled title/instructions,
+      // model profile and effort included -- onto an unrelated agent who
+      // never qualified for this job. Requiring the target to hold the
+      // position covers both self-run and the Telegram-bridge "Maja starts a
+      // job on a qualified colleague" case without that escalation.
       const detail = await svc.getDetail(existing.id);
       const positionIds = detail?.positions.map((p) => p.id) ?? [];
-      const callerHoldsPosition =
-        req.actor.type === "agent" && req.actor.agentId
-          ? await assertAgentHoldsAnyPosition(existing.companyId, req.actor.agentId, positionIds)
-          : false;
       const targetHoldsPosition = await assertAgentHoldsAnyPosition(existing.companyId, req.body.runAgentId, positionIds);
-      if (!callerHoldsPosition && !targetHoldsPosition) {
-        throw forbidden("Neither the caller nor the target agent holds a position linked to this job");
+      if (!targetHoldsPosition) {
+        throw forbidden("The target agent does not hold a position linked to this job");
       }
     }
     const run = await svc.runJob(existing.id, req.body, actorTuple(req));
