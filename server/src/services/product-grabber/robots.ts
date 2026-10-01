@@ -90,6 +90,14 @@ export function parseRobotsTxt(text: string): ParsedRobots {
 }
 
 export interface RobotsTxtCheckerOptions {
+  /**
+   * Overridable in tests to stub the network call. When NOT supplied, the real
+   * implementation pins the TCP connection to the already-resolved, already-vetted
+   * address from `lookupImpl` (see `createPinnedFetch` below) -- it does not let the
+   * HTTP client re-resolve the hostname and potentially land on a different address
+   * than the one that was checked (the DNS-rebinding TOCTOU gap this module exists
+   * to close). A caller-supplied `fetchImpl` bypasses pinning, same as before.
+   */
   fetchImpl?: typeof fetch;
   /** Resolves a hostname to its addresses. Overridable in tests; defaults to a real DNS lookup. */
   lookupImpl?: (hostname: string) => Promise<{ address: string; family: number }[]>;
@@ -131,26 +139,77 @@ function isDisallowedAddress(address: string, family: number): boolean {
   return host === "::1" || host.startsWith("fe80:") || host.startsWith("fc") || host.startsWith("fd");
 }
 
+/**
+ * Builds a one-shot `fetch`-shaped function whose TCP connection is pinned to `address`
+ * via a custom `lookup`, so the HTTP client cannot perform its own, independent DNS
+ * resolution of the hostname at connect time. Without this, checking `lookupImpl(hostname)`
+ * and then calling plain `fetch(url)` are two unrelated DNS queries -- exactly what a
+ * DNS-rebinding attacker needs: answer the first (check) query with a public address and
+ * the second (connect) query, moments later, with a private/metadata one. Pinning closes
+ * that gap by reusing the one resolution that was actually vetted.
+ *
+ * Host/SNI/cert validation are unaffected: `hostname` in the request options stays the
+ * typed hostname, only `lookup` is overridden, so TLS still validates the certificate
+ * against the real hostname, not the pinned IP.
+ */
+/** Exported only for the pinning test below -- not part of the module's public surface. */
+export function createPinnedFetch(address: string, family: number): typeof fetch {
+  return async function pinnedFetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
+    const url = input instanceof Request ? new URL(input.url) : new URL(input);
+    const isHttps = url.protocol === "https:";
+    const transportModule = isHttps ? await import("node:https") : await import("node:http");
+    const headers: Record<string, string> = {};
+    if (init?.headers) {
+      for (const [key, value] of new Headers(init.headers)) headers[key] = value;
+    }
+
+    return new Promise<Response>((resolve, reject) => {
+      const req = transportModule.request(
+        {
+          hostname: url.hostname,
+          port: url.port || (isHttps ? 443 : 80),
+          path: url.pathname + url.search,
+          headers,
+          timeout: 10_000,
+          lookup: (_hostname: string, _options: unknown, callback: (err: NodeJS.ErrnoException | null, address: string, family: number) => void) =>
+            callback(null, address, family),
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          res.on("end", () => {
+            resolve(new Response(Buffer.concat(chunks), { status: res.statusCode ?? 0 }));
+          });
+          res.on("error", reject);
+        },
+      );
+      req.on("timeout", () => req.destroy(new Error("robots.txt fetch timed out")));
+      req.on("error", reject);
+      req.end();
+    });
+  };
+}
+
 /** Fetches and caches robots.txt per host, serving `isAllowed` off the cache. */
 export function createRobotsTxtChecker(options: RobotsTxtCheckerOptions): RobotsTxtChecker {
-  const fetchImpl = options.fetchImpl ?? fetch;
+  // A caller-supplied fetchImpl (tests) is used as-is, unpinned. The production default
+  // goes through createPinnedFetch per-request instead, once an address has been vetted.
+  const callerFetchImpl = options.fetchImpl;
   const cacheTtlMs = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
   const cache = new Map<string, { robots: ParsedRobots; expiresAt: number }>();
   let lookupImpl = options.lookupImpl;
 
-  async function resolvesToDisallowedAddress(hostname: string): Promise<boolean> {
+  async function resolveAddresses(hostname: string): Promise<{ address: string; family: number }[] | null> {
     if (!lookupImpl) {
       const dns = await import("node:dns/promises");
       lookupImpl = (host) => dns.lookup(host, { all: true, verbatim: true });
     }
-    let addresses: { address: string; family: number }[];
     try {
-      addresses = await lookupImpl(hostname);
+      return await lookupImpl(hostname);
     } catch {
       // Can't resolve -- nothing to fetch either way; let the normal 404/error path fail open below.
-      return false;
+      return null;
     }
-    return addresses.some(({ address, family }) => isDisallowedAddress(address, family));
   }
 
   async function getRobotsForOrigin(origin: string): Promise<ParsedRobots> {
@@ -160,13 +219,16 @@ export function createRobotsTxtChecker(options: RobotsTxtCheckerOptions): Robots
     let robots: ParsedRobots;
     try {
       const hostname = new URL(origin).hostname;
-      if (await resolvesToDisallowedAddress(hostname)) {
-        // This hostname resolves to an address the server itself should never fetch directly
-        // (loopback/private/link-local/metadata), whether typed that way or only at request
-        // time (DNS rebinding). Skip the direct fetch; the real page fetch is proxied through
-        // Crawl4AI/browser-egress separately and gets its own check there.
+      const addresses = await resolveAddresses(hostname);
+      const vetted = addresses?.find(({ address, family }) => !isDisallowedAddress(address, family));
+      if (addresses && !vetted) {
+        // Every resolved address is loopback/private/link-local/metadata (whether typed
+        // that way or only resolving that way at request time, i.e. DNS rebinding). Skip
+        // the direct fetch; the real page fetch is proxied through Crawl4AI/browser-egress
+        // separately and gets its own check there.
         robots = parseRobotsTxt("");
       } else {
+        const fetchImpl = callerFetchImpl ?? (vetted ? createPinnedFetch(vetted.address, vetted.family) : fetch);
         const response = await fetchImpl(`${origin}/robots.txt`, { headers: { "User-Agent": options.userAgent } });
         robots = response.ok ? parseRobotsTxt(await response.text()) : parseRobotsTxt("");
       }
