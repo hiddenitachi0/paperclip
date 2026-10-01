@@ -2309,6 +2309,19 @@ export {
 } from "./watchers.js";
 
 export {
+  PRODUCT_GRABBER_STAGING_STATUSES,
+  extractProductGrabberUrlSchema,
+  reviewProductGrabberStagedItemSchema,
+  updateProductGrabberSettingsSchema,
+  type ExtractProductGrabberUrlInput,
+  type ProductGrabberSettings,
+  type ProductGrabberStagedItemSummary,
+  type ProductGrabberStagingStatus,
+  type ReviewProductGrabberStagedItemInput,
+  type UpdateProductGrabberSettingsInput,
+} from "./product-grabber.js";
+
+export {
   MAIL_DELEGATION_CATEGORIES,
   MAIL_DELEGATION_STATUSES,
   MAIL_FILTER_FIELDS,
