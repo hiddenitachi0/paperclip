@@ -26,6 +26,7 @@ import {
   Sparkles,
   ScrollText,
   TrendingUp,
+  CandlestickChart,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { NavLink } from "@/lib/router";
@@ -188,6 +189,7 @@ export function Sidebar() {
           <SidebarNavItem to="/jobs" label="Jobs" icon={Briefcase} />
           <SidebarNavItem to="/workflow-map" label="Workflow Map" icon={GitFork} />
           <SidebarNavItem to="/watchers" label="Watchers" icon={Eye} />
+          <SidebarNavItem to="/trading" label="Trading" icon={CandlestickChart} />
           {showPipelines ? (
             <SidebarNavItem to="/pipelines" label="Pipelines" icon={GitBranch} />
           ) : null}

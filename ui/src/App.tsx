@@ -24,6 +24,8 @@ import { IssueDetail } from "./pages/IssueDetail";
 import { IssueChatLongThreadPerf } from "./pages/IssueChatLongThreadPerf";
 import { Routines } from "./pages/Routines";
 import { Watchers } from "./pages/Watchers";
+import { Trading } from "./pages/Trading";
+import { TradingStrategyDetail } from "./pages/TradingStrategyDetail";
 import { Learnings, PipelineItemDetail, PipelineItemLegacyRedirect, Pipelines, ReviewQueue } from "./pages/Pipelines";
 import { PipelineSettings } from "./pages/PipelineSettings";
 import { RoutineDetail } from "./pages/RoutineDetail";
@@ -178,6 +180,8 @@ function boardRoutes() {
       <Route path="routines/:routineId/:section" element={<LegacyRoutinesRedirect />} />
       <Route path="workflow-map" element={<WorkflowMap />} />
       <Route path="watchers" element={<Watchers />} />
+      <Route path="trading" element={<Trading />} />
+      <Route path="trading/:strategyId" element={<TradingStrategyDetail />} />
       <Route
         path="review-queue"
         element={<PipelinesExperimentalGate><ReviewQueue /></PipelinesExperimentalGate>}
