@@ -153,6 +153,7 @@ export const SCHEDULER_TICK_CHAINS = [
   "mailSecretary",
   "videoStorylineRender",
   "videoStorylineStitch",
+  "tradingAgent",
 ] as const;
 
 export type SchedulerTickChain = (typeof SCHEDULER_TICK_CHAINS)[number];
@@ -208,6 +209,7 @@ export const SCHEDULER_TICK_CHAIN_LABELS: Record<SchedulerTickChain, string> = {
   mailSecretary: "checking mail inboxes",
   videoStorylineRender: "rendering video storyline shots",
   videoStorylineStitch: "stitching finished video storylines",
+  tradingAgent: "checking the trading agent",
 };
 
 /** At most one skip line per chain per minute, however often it skips. */

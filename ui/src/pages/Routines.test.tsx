@@ -33,7 +33,7 @@ vi.mock("@/lib/router", () => ({
     </a>
   ),
   useNavigate: () => navigateMock,
-  useLocation: () => ({ pathname: "/routines", search: currentSearch ? `?${currentSearch}` : "", hash: "" }),
+  useLocation: () => ({ pathname: "/jobs", search: currentSearch ? `?${currentSearch}` : "", hash: "" }),
   useSearchParams: () => [new URLSearchParams(currentSearch), vi.fn()],
 }));
 
@@ -538,7 +538,7 @@ describe("Routines page", () => {
     }
 
     const text = container.textContent ?? "";
-    expect(text).toContain("1 routine");
+    expect(text).toContain("1 job");
     expect(text).toContain("Morning sync");
     expect(text).not.toContain("Archived cleanup");
 
@@ -608,14 +608,14 @@ describe("Routines page", () => {
     });
 
     let createButton = Array.from(container.querySelectorAll("button")).find((button) =>
-      button.textContent?.includes("Create routine"),
+      button.textContent?.includes("Create job"),
     );
     for (let attempts = 0; attempts < 5 && !createButton; attempts += 1) {
       await act(async () => {
         await flush();
       });
       createButton = Array.from(container.querySelectorAll("button")).find((button) =>
-        button.textContent?.includes("Create routine"),
+        button.textContent?.includes("Create job"),
       );
     }
 

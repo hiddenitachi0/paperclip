@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createDb, companies, videoStorylines } from "@paperclipai/db";
+import { createDb, assets, companies, videoStorylines } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { videoStorylineService, type VideoStorylineActor } from "../services/video-storylines.ts";
 
@@ -145,6 +145,85 @@ d("videoStorylineService", () => {
       expect(progress.doneShots).toBe(0);
       expect(progress.budgetCapCents).toBe(10_000);
       expect(progress.shots).toHaveLength(2);
+    });
+  });
+
+  /**
+   * DUR-4196: transitions/music on a storyline, transitionIn on a shot.
+   * Covers the one correctness trap in updateStoryline's music fields: the
+   * DB has a hard CHECK that musicAssetId/musicSourceKey are never both set
+   * (video_storylines_music_source_exclusive_check), so setting one must
+   * clear the other's EXISTING stored value, not just reject a payload that
+   * sends both at once.
+   */
+  describe("transitions and music (round 2)", () => {
+    it("persists defaultTransition/defaultTransitionDurationMs/music fields on create and update", async () => {
+      const companyId = await seedCompany();
+      const storyline = await service().createStoryline(
+        companyId,
+        { title: "T", projectId: null, providerId: "fal", model: null, budgetCapCents: null, characterReferenceAssetIds: [], defaultTransition: "fade", defaultTransitionDurationMs: 800 },
+        ACTOR,
+      );
+      expect(storyline.defaultTransition).toBe("fade");
+      expect(storyline.defaultTransitionDurationMs).toBe(800);
+      expect(storyline.musicVolumeDb).toBe(-18);
+
+      const updated = await service().updateStoryline(
+        companyId,
+        storyline.id,
+        { defaultTransition: "dissolve", musicSourceKey: "stock-track-1" },
+        ACTOR,
+      );
+      expect(updated.defaultTransition).toBe("dissolve");
+      expect(updated.musicSourceKey).toBe("stock-track-1");
+      expect(updated.musicAssetId).toBeNull();
+    });
+
+    it("clears musicSourceKey when musicAssetId is set on a later update, and vice versa", async () => {
+      const companyId = await seedCompany();
+      const storyline = await service().createStoryline(
+        companyId,
+        { title: "T", projectId: null, providerId: "fal", model: null, budgetCapCents: null, characterReferenceAssetIds: [], musicSourceKey: "stock-track-1" },
+        ACTOR,
+      );
+      expect(storyline.musicSourceKey).toBe("stock-track-1");
+
+      // A later update that only mentions musicAssetId must not leave the DB
+      // with both columns set -- that would violate the exclusivity CHECK.
+      const assetId = randomUUID();
+      await db.insert(assets).values({
+        id: assetId,
+        companyId,
+        provider: "local",
+        objectKey: `music/${assetId}.mp3`,
+        contentType: "audio/mpeg",
+        byteSize: 1,
+        sha256: "0".repeat(64),
+        originalFilename: "music.mp3",
+      });
+      const updated = await service().updateStoryline(companyId, storyline.id, { musicAssetId: assetId }, ACTOR);
+      expect(updated.musicAssetId).toBe(assetId);
+      expect(updated.musicSourceKey).toBeNull();
+
+      const revert = await service().updateStoryline(companyId, storyline.id, { musicSourceKey: "stock-track-2" }, ACTOR);
+      expect(revert.musicSourceKey).toBe("stock-track-2");
+      expect(revert.musicAssetId).toBeNull();
+    });
+
+    it("persists transitionIn on a shot, inheriting the storyline default when null", async () => {
+      const companyId = await seedCompany();
+      const storyline = await service().createStoryline(companyId, { title: "T", projectId: null, providerId: "fal", model: null, budgetCapCents: null, characterReferenceAssetIds: [] }, ACTOR);
+      const scene = await service().createScene(companyId, storyline.id, { title: "", notes: null, orderIndex: 0 }, ACTOR);
+      const shot = await service().createShot(
+        companyId,
+        storyline.id,
+        { sceneId: scene.id, orderIndex: 0, prompt: "shot 1", cameraNotes: null, durationSeconds: 5, lookReferenceAssetIds: [], transitionIn: "fade" },
+        ACTOR,
+      );
+      expect(shot.transitionIn).toBe("fade");
+
+      const updated = await service().updateShot(companyId, storyline.id, shot.id, { transitionIn: null }, ACTOR);
+      expect(updated.transitionIn).toBeNull();
     });
   });
 });

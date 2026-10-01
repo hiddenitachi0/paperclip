@@ -115,7 +115,7 @@ describe("AgentJobSection", () => {
     await render();
 
     await waitForAssertion(() => {
-      expect(container.textContent).toContain("No job assigned.");
+      expect(container.textContent).toContain("No position assigned.");
     });
   });
 
@@ -130,7 +130,7 @@ describe("AgentJobSection", () => {
     await render();
 
     await waitForAssertion(() => {
-      expect(container.textContent).toContain("Could not load this agent's job");
+      expect(container.textContent).toContain("Could not load this agent's position");
     });
   });
 
