@@ -32,6 +32,17 @@ function errorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+/** Scraped addresses are untrusted: only ever link to or load plain http(s) URLs. */
+function safeWebUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.href : null;
+  } catch {
+    return null;
+  }
+}
+
 function firstTextField(rawFields: Record<string, unknown>, keys: string[]): string | null {
   for (const key of keys) {
     const value = rawFields[key];
@@ -55,12 +66,13 @@ function StagedProductRow({
 }) {
   const title = firstTextField(item.rawFields, ["title", "name"]) ?? item.vendor;
   const price = firstTextField(item.rawFields, ["price", "priceText"]);
-  const thumbnail = item.imageUrls[0];
+  const thumbnail = safeWebUrl(item.imageUrls[0]);
+  const sourceHref = safeWebUrl(item.sourceUrl);
 
   return (
     <li className="flex items-start gap-4 px-4 py-3" data-testid="product-grabber-row">
       {thumbnail ? (
-        <img src={thumbnail} alt="" className="h-16 w-16 shrink-0 rounded-md border border-border object-cover" />
+        <img src={thumbnail} alt="" referrerPolicy="no-referrer" className="h-16 w-16 shrink-0 rounded-md border border-border object-cover" />
       ) : (
         <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-md border border-border bg-muted">
           <ShoppingCart className="h-5 w-5 text-muted-foreground" />
@@ -79,14 +91,18 @@ function StagedProductRow({
           {item.vendor}
           {price ? ` · ${price}` : ""}
         </p>
-        <a
-          href={item.sourceUrl}
-          target="_blank"
-          rel="noreferrer"
-          className="block truncate text-xs text-muted-foreground underline-offset-2 hover:underline"
-        >
-          {item.sourceUrl}
-        </a>
+        {sourceHref ? (
+          <a
+            href={sourceHref}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="block truncate text-xs text-muted-foreground underline-offset-2 hover:underline"
+          >
+            {item.sourceUrl}
+          </a>
+        ) : (
+          <p className="truncate text-xs text-muted-foreground">{item.sourceUrl}</p>
+        )}
         <p className="text-xs text-muted-foreground">Fetched {timeAgo(item.createdAt)}</p>
       </div>
       {canManage && item.status === "pending" ? (

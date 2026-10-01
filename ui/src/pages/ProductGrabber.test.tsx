@@ -124,6 +124,24 @@ describe("ProductGrabber page", () => {
     expect(row.textContent).toContain("https://www.ellos.no/produkt/sweater");
   });
 
+  it("never links to or loads a non-web address taken from a scraped page", async () => {
+    mockProductGrabberApi.listStagedItems.mockResolvedValue([
+      { ...sweater, sourceUrl: "javascript:alert(1)", imageUrls: ["javascript:alert(2)"] },
+    ]);
+    await render();
+    const row = container.querySelector('[data-testid="product-grabber-row"]')!;
+    expect(row.querySelector("a")).toBeNull();
+    expect(row.querySelector("img")).toBeNull();
+    expect(row.textContent).toContain("javascript:alert(1)");
+  });
+
+  it("loads a product picture without telling the shop where it is shown", async () => {
+    await render();
+    const img = container.querySelector('[data-testid="product-grabber-row"] img')!;
+    expect(img.getAttribute("src")).toBe("https://www.ellos.no/images/sweater.jpg");
+    expect(img.getAttribute("referrerpolicy")).toBe("no-referrer");
+  });
+
   it("an owner can approve or reject a waiting product", async () => {
     await render();
     await act(async () => buttonByText("Approve")!.click());
