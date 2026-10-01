@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, ilike, or } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { crmActivities, crmContactOrgRoles, crmContacts, crmFacts, crmOrganizations } from "@paperclipai/db";
 import type {
@@ -9,10 +9,13 @@ import type {
   CreateCrmOrganization,
   UpdateCrmContact,
   UpdateCrmOrganization,
+  UpsertCrmContact,
 } from "@paperclipai/shared";
 import { notFound, unprocessable } from "../errors.js";
 
 type ActorRef = { agentId?: string | null; userId?: string | null };
+
+const SEARCH_RESULT_LIMIT = 20;
 
 export function crmService(db: Db) {
   return {
@@ -27,7 +30,20 @@ export function crmService(db: Db) {
         .where(and(eq(crmContacts.id, id), eq(crmContacts.companyId, companyId)))
         .then((rows) => rows[0] ?? null);
       if (!row) throw notFound("Contact not found");
-      return row;
+
+      const organizationRoles = await db
+        .select({
+          roleId: crmContactOrgRoles.id,
+          role: crmContactOrgRoles.role,
+          startDate: crmContactOrgRoles.startDate,
+          endDate: crmContactOrgRoles.endDate,
+          organization: crmOrganizations,
+        })
+        .from(crmContactOrgRoles)
+        .innerJoin(crmOrganizations, eq(crmOrganizations.id, crmContactOrgRoles.organizationId))
+        .where(and(eq(crmContactOrgRoles.contactId, id), eq(crmContactOrgRoles.companyId, companyId)));
+
+      return { ...row, organizations: organizationRoles };
     },
 
     createContact: (companyId: string, data: CreateCrmContact, actor: ActorRef) =>
@@ -78,7 +94,20 @@ export function crmService(db: Db) {
         .where(and(eq(crmOrganizations.id, id), eq(crmOrganizations.companyId, companyId)))
         .then((rows) => rows[0] ?? null);
       if (!row) throw notFound("Organisation not found");
-      return row;
+
+      const contactRoles = await db
+        .select({
+          roleId: crmContactOrgRoles.id,
+          role: crmContactOrgRoles.role,
+          startDate: crmContactOrgRoles.startDate,
+          endDate: crmContactOrgRoles.endDate,
+          contact: crmContacts,
+        })
+        .from(crmContactOrgRoles)
+        .innerJoin(crmContacts, eq(crmContacts.id, crmContactOrgRoles.contactId))
+        .where(and(eq(crmContactOrgRoles.organizationId, id), eq(crmContactOrgRoles.companyId, companyId)));
+
+      return { ...row, contacts: contactRoles };
     },
 
     createOrganization: (companyId: string, data: CreateCrmOrganization, actor: ActorRef) =>
@@ -230,6 +259,71 @@ export function crmService(db: Db) {
         })
         .returning()
         .then((rows) => rows[0]);
+    },
+
+    // --- Search (crm.search tool) ---
+    search: async (companyId: string, query: string) => {
+      const pattern = `%${query}%`;
+      const contacts = await db
+        .select()
+        .from(crmContacts)
+        .where(
+          and(
+            eq(crmContacts.companyId, companyId),
+            or(ilike(crmContacts.firstName, pattern), ilike(crmContacts.lastName, pattern), ilike(crmContacts.email, pattern)),
+          ),
+        )
+        .orderBy(desc(crmContacts.createdAt))
+        .limit(SEARCH_RESULT_LIMIT);
+
+      const organizations = await db
+        .select()
+        .from(crmOrganizations)
+        .where(
+          and(
+            eq(crmOrganizations.companyId, companyId),
+            or(ilike(crmOrganizations.name, pattern), ilike(crmOrganizations.email, pattern)),
+          ),
+        )
+        .orderBy(desc(crmOrganizations.createdAt))
+        .limit(SEARCH_RESULT_LIMIT);
+
+      return { contacts, organizations };
+    },
+
+    // --- Upsert (crm.upsert_contact tool) ---
+    upsertContact: async (companyId: string, data: UpsertCrmContact, actor: ActorRef) => {
+      const dedupConditions = data.email
+        ? eq(crmContacts.email, data.email)
+        : and(eq(crmContacts.firstName, data.firstName), eq(crmContacts.lastName, data.lastName));
+
+      const existing = await db
+        .select()
+        .from(crmContacts)
+        .where(and(eq(crmContacts.companyId, companyId), dedupConditions))
+        .then((rows) => rows[0] ?? null);
+
+      if (existing) {
+        const updated = await db
+          .update(crmContacts)
+          .set({ ...data, updatedAt: new Date() })
+          .where(and(eq(crmContacts.id, existing.id), eq(crmContacts.companyId, companyId)))
+          .returning()
+          .then((rows) => rows[0]);
+        return { contact: updated, created: false };
+      }
+
+      const created = await db
+        .insert(crmContacts)
+        .values({
+          ...data,
+          companyId,
+          createdByAgentId: actor.agentId ?? null,
+          createdByUserId: actor.userId ?? null,
+        })
+        .returning()
+        .then((rows) => rows[0]);
+      return { contact: created, created: true };
     },
   };
 }

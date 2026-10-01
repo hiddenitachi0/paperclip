@@ -50,13 +50,32 @@ export const createCrmActivitySchema = z.object({
 });
 export type CreateCrmActivity = z.infer<typeof createCrmActivitySchema>;
 
-export const createCrmFactSchema = z.object({
-  contactId: z.string().uuid().optional().nullable(),
-  organizationId: z.string().uuid().optional().nullable(),
-  factKey: z.string().min(1),
-  value: z.string().min(1),
-  sourceUrl: z.string().optional().nullable(),
-  sourceMessageId: z.string().optional().nullable(),
-  observedAt: z.coerce.date(),
-});
+export const createCrmFactSchema = z
+  .object({
+    contactId: z.string().uuid().optional().nullable(),
+    organizationId: z.string().uuid().optional().nullable(),
+    factKey: z.string().min(1),
+    value: z.string().min(1),
+    sourceUrl: z.string().optional().nullable(),
+    sourceMessageId: z.string().optional().nullable(),
+    observedAt: z.coerce.date(),
+  })
+  .refine((data) => Boolean(data.sourceUrl) || Boolean(data.sourceMessageId), {
+    message: "A fact requires evidence: sourceUrl or sourceMessageId",
+  });
 export type CreateCrmFact = z.infer<typeof createCrmFactSchema>;
+
+export const upsertCrmContactSchema = z.object({
+  firstName: z.string().min(1),
+  lastName: z.string().min(1),
+  email: z.string().email().optional().nullable(),
+  phone: z.string().optional().nullable(),
+  title: z.string().optional().nullable(),
+  notes: z.string().optional().nullable(),
+});
+export type UpsertCrmContact = z.infer<typeof upsertCrmContactSchema>;
+
+export const crmSearchQuerySchema = z.object({
+  q: z.string().min(1),
+});
+export type CrmSearchQuery = z.infer<typeof crmSearchQuerySchema>;

@@ -1472,6 +1472,8 @@ export {
   createCrmContactOrgRoleSchema,
   createCrmActivitySchema,
   createCrmFactSchema,
+  upsertCrmContactSchema,
+  crmSearchQuerySchema,
   type CrmActivityType,
   type CreateCrmContact,
   type UpdateCrmContact,
@@ -1480,6 +1482,8 @@ export {
   type CreateCrmContactOrgRole,
   type CreateCrmActivity,
   type CreateCrmFact,
+  type UpsertCrmContact,
+  type CrmSearchQuery,
 } from "./validators/crm.js";
 export {
   ADMIN_AUTH_CHECK_STATUSES,

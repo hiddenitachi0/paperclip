@@ -214,6 +214,7 @@ describeEmbeddedPostgres("crmRoutes company-scope wiring (DUR-4191)", () => {
       .send({
         contactId: contactRes.body.id,
         factKey: "annual_revenue",
+        sourceUrl: "https://example.com/evidence",
         value: "1000000",
         observedAt: new Date().toISOString(),
       });

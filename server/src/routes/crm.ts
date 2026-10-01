@@ -7,24 +7,33 @@ import {
   createCrmContactSchema,
   createCrmFactSchema,
   createCrmOrganizationSchema,
+  crmSearchQuerySchema,
   updateCrmContactSchema,
   updateCrmOrganizationSchema,
+  upsertCrmContactSchema,
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
+import { badRequest } from "../errors.js";
 import { logActivity } from "../services/index.js";
 import { crmService } from "../services/crm.js";
 
 /**
- * DUR-4191 (DUR-4150 slice): CRUD + list routes for the CRM data model --
- * contacts, organisations, contact-org roles, activities, facts. Every
- * route is scoped by `:companyId` through `companyScopeFromParam`, the same
+ * DUR-4191/DUR-4192 (DUR-4150 slice): CRUD + list routes for the CRM data
+ * model -- contacts, organisations, contact-org roles, activities, facts --
+ * plus the five agent-callable tool endpoints (crm.search, crm.get,
+ * crm.log_activity, crm.record_fact, crm.upsert_contact). Every route is
+ * scoped by `:companyId` through `companyScopeFromParam`, the same
  * primitive goals.ts and data-connections.ts use, so cross-company reads
  * and writes are refused before any query runs. Board users and agents
  * both get full access via `assertCompanyAccess` (unlike the owner-only
- * data-connections routes) -- the parent ticket calls out agent tools as
- * part of this slice.
+ * data-connections routes) -- agents call these same REST routes as their
+ * "tools" (the codebase has no separate tool-calling registry for
+ * first-party domains; `crm.get`/`crm.log_activity`/`crm.record_fact` map
+ * onto the contact/organisation GET, activity POST, and fact POST routes
+ * below, with `crm.search` and `crm.upsert_contact` added as dedicated
+ * routes for cross-entity search and dedup-on-create).
  */
 export function crmRoutes(rawDb: Db) {
   const router = Router();
@@ -38,6 +47,14 @@ export function crmRoutes(rawDb: Db) {
   function actorRef(actor: ReturnType<typeof getActorInfo>) {
     return { agentId: actor.agentId, userId: actor.actorType === "user" ? actor.actorId : null, runId: actor.runId };
   }
+
+  // --- Search (crm.search tool) ---
+  router.get("/companies/:companyId/crm/search", scope(), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const parsed = crmSearchQuerySchema.safeParse({ q: req.query.q });
+    if (!parsed.success) throw badRequest("q query parameter is required", parsed.error.flatten());
+    res.json(await svc.search(companyId, parsed.data.q));
+  });
 
   // --- Contacts ---
   router.get("/companies/:companyId/crm/contacts", scope(), async (req, res) => {
@@ -67,6 +84,28 @@ export function crmRoutes(rawDb: Db) {
         details: { firstName: created.firstName, lastName: created.lastName, email: created.email },
       });
       res.status(201).json(created);
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/crm/contacts/upsert",
+    scope(),
+    validate(upsertCrmContactSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const actor = getActorInfo(req);
+      const { contact, created } = await svc.upsertContact(companyId, req.body, actorRef(actor));
+      await logActivity(db, {
+        companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        action: created ? "crm_contact.created" : "crm_contact.updated",
+        entityType: "crm_contact",
+        entityId: contact.id,
+        details: { firstName: contact.firstName, lastName: contact.lastName, email: contact.email, upserted: true },
+      });
+      res.status(created ? 201 : 200).json(contact);
     },
   );
 
