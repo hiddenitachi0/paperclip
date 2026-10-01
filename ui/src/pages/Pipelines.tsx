@@ -1765,6 +1765,11 @@ function PipelineBoard({ pipelineId }: { pipelineId: string }) {
             </Link>
           </Button>
           <Button variant="outline" size="icon" asChild>
+            <Link to={`/pipelines/${pipelineId}/canvas`} aria-label="Edit on canvas" title="Edit on canvas">
+              <GitBranch className="h-4 w-4" />
+            </Link>
+          </Button>
+          <Button variant="outline" size="icon" asChild>
             <Link to={`/pipelines/${pipelineId}/settings`} aria-label="Pipeline settings" title="Pipeline settings">
               <Settings className="h-4 w-4" />
             </Link>
