@@ -2,7 +2,17 @@ import { randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { activityLog, companies, createDb, crmActivities, crmContactOrgRoles, crmContacts, crmFacts, crmOrganizations } from "@paperclipai/db";
+import {
+  activityLog,
+  agents,
+  companies,
+  createDb,
+  crmActivities,
+  crmContactOrgRoles,
+  crmContacts,
+  crmFacts,
+  crmOrganizations,
+} from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -54,6 +64,7 @@ describeEmbeddedPostgres("crmRoutes company-scope wiring (DUR-4191)", () => {
     await db.delete(crmContacts);
     await db.delete(crmOrganizations);
     await db.delete(activityLog);
+    await db.delete(agents);
     await db.delete(companies);
   });
 
@@ -61,17 +72,32 @@ describeEmbeddedPostgres("crmRoutes company-scope wiring (DUR-4191)", () => {
     await tempDb?.cleanup();
   });
 
-  function createApp(companyIds: string[], actorType: "board" | "agent" = "board") {
+  // `agentId` set => request authenticates as that agent (must belong to
+  // `companyIds[0]`). Omitted => a board/session actor with full access to
+  // every company in `companyIds`, matching the real auth middleware's
+  // "board" actor shape (not "local_implicit", which bypasses the
+  // company-membership check this test is specifically exercising).
+  function createApp(companyIds: string[], agentId?: string) {
     if (!crmRoutes || !errorHandler) {
       throw new Error("crm route test dependencies were not loaded");
     }
     const app = express();
     app.use(express.json());
     app.use((req, _res, next) => {
-      (req as any).actor =
-        actorType === "board"
-          ? { type: "board", source: "local_implicit", userId: randomUUID(), companyIds }
-          : { type: "agent", source: "agent_jwt", agentId: randomUUID(), runId: randomUUID(), companyIds };
+      (req as any).actor = agentId
+        ? { type: "agent", source: "agent_jwt", agentId, runId: randomUUID(), companyId: companyIds[0] }
+        : {
+            type: "board",
+            source: "session",
+            userId: randomUUID(),
+            companyIds,
+            isInstanceAdmin: false,
+            memberships: companyIds.map((companyId) => ({
+              companyId,
+              status: "active",
+              membershipRole: "owner",
+            })),
+          };
       next();
     });
     app.use("/api", crmRoutes(db));
@@ -87,6 +113,22 @@ describeEmbeddedPostgres("crmRoutes company-scope wiring (DUR-4191)", () => {
       issuePrefix: `C${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
     });
     return companyId;
+  }
+
+  async function seedAgent(companyId: string) {
+    const agentId = randomUUID();
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "CRM Agent",
+      role: "engineer",
+      status: "running",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    return agentId;
   }
 
   it("creates and lists a contact scoped to the requesting company", async () => {
@@ -153,7 +195,8 @@ describeEmbeddedPostgres("crmRoutes company-scope wiring (DUR-4191)", () => {
 
   it("creates an activity and a fact tied to a contact, agent-authored", async () => {
     const companyId = await seedCompany();
-    const app = createApp([companyId], "agent");
+    const agentId = await seedAgent(companyId);
+    const app = createApp([companyId], agentId);
 
     const contactRes = await request(app)
       .post(`/api/companies/${companyId}/crm/contacts`)
@@ -175,7 +218,7 @@ describeEmbeddedPostgres("crmRoutes company-scope wiring (DUR-4191)", () => {
         observedAt: new Date().toISOString(),
       });
     expect(factRes.status).toBe(201);
-    expect(factRes.body.createdByAgentId).toBeTruthy();
+    expect(factRes.body.createdByAgentId).toBe(agentId);
   });
 
   it("returns 404 for a contact that does not exist in the requesting company", async () => {
