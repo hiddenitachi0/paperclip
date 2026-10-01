@@ -1394,6 +1394,20 @@
       "when": 1790700020000,
       "tag": "0199_crm_base",
       "breakpoints": true
+    },
+    {
+      "idx": 200,
+      "version": "7",
+      "when": 1790710000000,
+      "tag": "0200_video_storyline_director_and_transitions",
+      "breakpoints": true
+    },
+    {
+      "idx": 201,
+      "version": "7",
+      "when": 1790815405119,
+      "tag": "0201_jobs",
+      "breakpoints": true
     }
   ]
 }

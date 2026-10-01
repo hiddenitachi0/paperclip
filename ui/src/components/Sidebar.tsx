@@ -25,6 +25,7 @@ import {
   RadioTower,
   Sparkles,
   ScrollText,
+  ShoppingCart,
   TrendingUp,
   CandlestickChart,
 } from "lucide-react";
@@ -39,6 +40,7 @@ import { useCompany } from "../context/CompanyContext";
 import { useSidebar } from "../context/SidebarContext";
 import { heartbeatsApi } from "../api/heartbeats";
 import { instanceSettingsApi } from "../api/instanceSettings";
+import { productGrabberApi } from "../api/productGrabber";
 import { queryKeys } from "../lib/queryKeys";
 import { useInboxBadge } from "../hooks/useInboxBadge";
 import { Button } from "@/components/ui/button";
@@ -67,6 +69,12 @@ export function Sidebar() {
   const liveRunCount = liveRuns?.length ?? 0;
   const showWorkspacesLink = experimentalSettings?.enableIsolatedWorkspaces === true;
   const showPipelines = experimentalSettings?.enablePipelines === true;
+  const { data: productGrabberSettings } = useQuery({
+    queryKey: selectedCompanyId ? queryKeys.productGrabber.settings(selectedCompanyId) : ["product-grabber", "__none__"],
+    queryFn: () => productGrabberApi.getSettings(selectedCompanyId!),
+    enabled: Boolean(selectedCompanyId),
+  });
+  const showProductGrabber = productGrabberSettings?.enabled === true;
   // IA flag: branch the sidebar nav presentation. Default ON =
   // streamlined (top-level Projects link). Users can opt out in experiments to
   // get classic (per-project collapsible, no Projects nav link). Issue/Task
@@ -190,6 +198,9 @@ export function Sidebar() {
           <SidebarNavItem to="/workflow-map" label="Workflow Map" icon={GitFork} />
           <SidebarNavItem to="/watchers" label="Watchers" icon={Eye} />
           <SidebarNavItem to="/trading" label="Trading" icon={CandlestickChart} />
+          {showProductGrabber ? (
+            <SidebarNavItem to="/product-grabber" label="Product grabber" icon={ShoppingCart} />
+          ) : null}
           {showPipelines ? (
             <SidebarNavItem to="/pipelines" label="Pipelines" icon={GitBranch} />
           ) : null}

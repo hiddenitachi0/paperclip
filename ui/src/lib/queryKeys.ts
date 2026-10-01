@@ -308,6 +308,12 @@ export const queryKeys = {
     dashboard: (companyId: string, strategyId: string) => ["trading-dashboard", companyId, strategyId] as const,
     orders: (companyId: string, strategyId: string) => ["trading-orders", companyId, strategyId] as const,
   },
+  // Product grabber: vendor site -> staging list -> human approval.
+  productGrabber: {
+    settings: (companyId: string) => ["product-grabber", "settings", companyId] as const,
+    stagedItems: (companyId: string, status?: string) =>
+      ["product-grabber", "staged-items", companyId, status ?? "all"] as const,
+  },
   // DUR-4004: "API with a key" tools.
   apiTools: {
     list: (companyId: string) => ["api-tools", companyId] as const,
