@@ -55,6 +55,12 @@ vi.mock("@/lib/router", () => ({
   useParams: () => ({ "*": currentRoute }),
   useNavigate: () => mockNavigate,
   useSearchParams: () => [mockSearchParams, vi.fn()],
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  Link: ({ to, children, ...props }: any) => (
+    <a href={to} {...props}>
+      {children}
+    </a>
+  ),
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
