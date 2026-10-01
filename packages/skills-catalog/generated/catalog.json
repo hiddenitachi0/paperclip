@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "packageName": "@paperclipai/skills-catalog",
   "packageVersion": "0.3.1",
-  "generatedAt": "2026-09-11T11:05:30.233Z",
+  "generatedAt": "2026-09-30T23:52:44.472Z",
   "skills": [
     {
       "id": "paperclipai:bundled:docs:doc-maintenance",
@@ -309,6 +309,39 @@
         }
       ],
       "contentHash": "sha256:27d7de9b36d40583243908e21b2d83fc49819c18e401ce22db86163c5e41dfa1"
+    },
+    {
+      "id": "paperclipai:bundled:software-development:lean-coding",
+      "key": "paperclipai/bundled/software-development/lean-coding",
+      "kind": "bundled",
+      "category": "software-development",
+      "slug": "lean-coding",
+      "name": "lean-coding",
+      "description": "Check whether new code needs to exist before writing it — search for an existing solution, prefer the standard library, and write the smallest correct change. Never cuts safety, accessibility, or needed error handling.",
+      "path": "catalog/bundled/software-development/lean-coding",
+      "entrypoint": "SKILL.md",
+      "trustLevel": "markdown_only",
+      "compatibility": "compatible",
+      "defaultInstall": true,
+      "recommendedForRoles": [
+        "engineer"
+      ],
+      "requires": [],
+      "tags": [
+        "code-quality",
+        "minimalism",
+        "refactoring",
+        "efficiency"
+      ],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "kind": "skill",
+          "sizeBytes": 4027,
+          "sha256": "2d7c357f572d961c6ca88e65dc97b862f24dd964997da1a309a5706ccefbc4c4"
+        }
+      ],
+      "contentHash": "sha256:7cc3308a959c3de77740355669029ca10d28f4d76029584f88bc7e617c894a13"
     },
     {
       "id": "paperclipai:optional:browser:agent-browser",
