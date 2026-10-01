@@ -2983,6 +2983,18 @@ registry.registerPath({
 
 registry.registerPath({
   method: "get",
+  path: "/api/companies/{companyId}/deploy-runner/status/stream",
+  tags: ["deploy-runner"],
+  summary: "Server-Sent Events tail of the deploy runner's activity feed for a company",
+  request: {
+    params: z.object({ companyId: z.string() }),
+    query: z.object({ approvalId: z.string().optional() }),
+  },
+  responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "get",
   path: "/api/companies/{companyId}/projects/{projectId}/deploy-history",
   tags: ["deploy-runner"],
   summary: "The current and previously live versions of a project, per the deploy runner's log",
