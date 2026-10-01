@@ -67,6 +67,8 @@ import {
   reconcileCodexLocalManagedHomesOnStartup,
   reconcilePersistedRuntimeServicesOnStartup,
   routineService,
+  jobService,
+  seedLegalAdvisorStarterPack,
   logScheduleChainBootstrapVerification,
   startSecretSurfaceScanner,
 } from "./services/index.js";
@@ -670,6 +672,10 @@ export async function startServer(): Promise<StartedServer> {
   if (durStarterJobsSeeded.created.length > 0) {
     logger.info(durStarterJobsSeeded, "Seeded DUR starter jobs");
   }
+  const legalAdvisorStarterPackSeeded = await seedLegalAdvisorStarterPack(db as any);
+  if (legalAdvisorStarterPackSeeded.createdJobs.length > 0 || legalAdvisorStarterPackSeeded.createdPosition) {
+    logger.info(legalAdvisorStarterPackSeeded, "Seeded Legal Advisor Jobs starter pack");
+  }
   if (config.deploymentMode === "authenticated") {
     const {
       createBetterAuthHandler,
@@ -1020,6 +1026,7 @@ export async function startServer(): Promise<StartedServer> {
     // Same reason as above: routine-triggered runs dispatch through the
     // heartbeat service, so they must use the raw-db instance.
     const routines = routineService(schedulerDb as any, { pluginWorkerManager, heartbeat });
+    const jobs = jobService(schedulerDb as any, { pluginWorkerManager, heartbeat });
     const mergeDeployVisibility = mergeDeployVisibilityService(schedulerDb as any);
     const deployCarriedIssues = deployCarriedIssuesService(schedulerDb as any);
     const deployApprovalFeedback = deployApprovalFeedbackService(schedulerDb as any);
@@ -1244,6 +1251,26 @@ export async function startServer(): Promise<StartedServer> {
           })
           .catch((err) => {
             logger.error({ err }, "routine scheduler tick failed");
+          }),
+      );
+
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.tickScheduledJobTriggers, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: tickScheduledJobTriggers",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:tickScheduledJobTriggers",
+          },
+          () => jobs.tickScheduledJobTriggers(new Date()),
+        )
+          .then((result) => {
+            if (result.enqueued > 0) {
+              logger.info({ ...result }, "job scheduler tick enqueued runs");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "job scheduler tick failed");
           }),
       );
 

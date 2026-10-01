@@ -113,6 +113,10 @@ const explicitOpenApiCoverageExclusions = new Set([
   "private-access.ts",
   // Video storyline routes (DUR-4127) are a new backend feature, off by default, and not yet in the public OpenAPI document.
   "video-storylines.ts",
+  // CRM routes (DUR-4150/DUR-4191/DUR-4192) are a new backend feature not yet in the public OpenAPI document.
+  "crm.ts",
+  // Positions/Jobs routes (DUR-4182) are a new backend feature not yet in the public OpenAPI document.
+  "jobs.ts",
 ]);
 
 function createApp() {
