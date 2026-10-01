@@ -1036,7 +1036,7 @@ export async function startServer(): Promise<StartedServer> {
     const marketWatchers = watcherService(schedulerDb as any);
     const morningReports = morningReportService(schedulerDb as any);
     const paymentCards = paymentCardService(schedulerDb as any);
-    const mailSecretary = mailSecretaryService(schedulerDb as any);
+    const mailSecretary = mailSecretaryService(schedulerDb as any, { fireEmailJobTriggers: jobs.fireEmailJobTriggers });
     const mailAccounts = mailAccountsService(schedulerDb as any);
     const videoStorylineRender = videoStorylineRenderService(schedulerDb as any);
     const videoStorylineStitch = videoStorylineStitchService(schedulerDb as any);
