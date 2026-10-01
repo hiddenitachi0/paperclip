@@ -90,7 +90,17 @@ export function parseRobotsTxt(text: string): ParsedRobots {
 }
 
 export interface RobotsTxtCheckerOptions {
+  /**
+   * Overridable in tests to stub the network call. When NOT supplied, the real
+   * implementation pins the TCP connection to the already-resolved, already-vetted
+   * address from `lookupImpl` (see `createPinnedFetch` below) -- it does not let the
+   * HTTP client re-resolve the hostname and potentially land on a different address
+   * than the one that was checked (the DNS-rebinding TOCTOU gap this module exists
+   * to close). A caller-supplied `fetchImpl` bypasses pinning, same as before.
+   */
   fetchImpl?: typeof fetch;
+  /** Resolves a hostname to its addresses. Overridable in tests; defaults to a real DNS lookup. */
+  lookupImpl?: (hostname: string) => Promise<{ address: string; family: number }[]>;
   /** How long a host's parsed robots.txt is cached before being re-fetched. */
   cacheTtlMs?: number;
   userAgent: string;
@@ -102,11 +112,124 @@ export interface RobotsTxtChecker {
   isAllowed(url: string): Promise<boolean>;
 }
 
+/**
+ * True for loopback/private/link-local/unique-local addresses, including the
+ * cloud metadata address -- the same ranges `watcherWebPageUrlProblem`
+ * (packages/shared/src/watchers.ts) rejects as literal hostnames. Checked
+ * here against the *resolved* address, not the typed hostname, because this
+ * is the one fetch in the watcher/product-grabber path that still runs
+ * directly from the server process rather than through the browser-egress
+ * proxy -- so it is the one spot DNS rebinding (a hostname that only
+ * resolves to an internal address at request time) can reach.
+ */
+function isDisallowedIpv4(address: string): boolean {
+  const parts = address.split(".").map(Number);
+  const [a, b] = parts;
+  return (
+    a === 127 || // 127.0.0.0/8 loopback
+    a === 10 || // 10.0.0.0/8
+    (a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12
+    (a === 192 && b === 168) || // 192.168.0.0/16
+    (a === 169 && b === 254) || // 169.254.0.0/16 link-local, incl. cloud metadata
+    a === 0
+  );
+}
+
+/** Exported only for the address-classification tests below -- not part of the module's public surface. */
+export function isDisallowedAddress(address: string, family: number): boolean {
+  if (family === 4) return isDisallowedIpv4(address);
+  const host = address.toLowerCase();
+  // "::ffff:a.b.c.d" is the IPv4-mapped IPv6 notation -- a live, routable alias for the
+  // embedded IPv4 address (e.g. "::ffff:127.0.0.1" connects to IPv4 loopback), not just a
+  // different string for the same disallow checks below. Unwrap it and re-run the family-4
+  // logic, or an attacker-controlled DNS zone can return it as an AAAA record to reach
+  // loopback/private/metadata addresses past the family-6 prefix checks.
+  const mapped = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(host);
+  if (mapped) return isDisallowedIpv4(mapped[1]);
+  return host === "::1" || host.startsWith("fe80:") || host.startsWith("fc") || host.startsWith("fd");
+}
+
+/**
+ * Builds a one-shot `fetch`-shaped function whose TCP connection is pinned to `address`
+ * via a custom `lookup`, so the HTTP client cannot perform its own, independent DNS
+ * resolution of the hostname at connect time. Without this, checking `lookupImpl(hostname)`
+ * and then calling plain `fetch(url)` are two unrelated DNS queries -- exactly what a
+ * DNS-rebinding attacker needs: answer the first (check) query with a public address and
+ * the second (connect) query, moments later, with a private/metadata one. Pinning closes
+ * that gap by reusing the one resolution that was actually vetted.
+ *
+ * Host/SNI/cert validation are unaffected: `hostname` in the request options stays the
+ * typed hostname, only `lookup` is overridden, so TLS still validates the certificate
+ * against the real hostname, not the pinned IP.
+ */
+/** Exported only for the pinning test below -- not part of the module's public surface. */
+export function createPinnedFetch(address: string, family: number): typeof fetch {
+  return async function pinnedFetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
+    const url = input instanceof Request ? new URL(input.url) : new URL(input);
+    const isHttps = url.protocol === "https:";
+    const transportModule = isHttps ? await import("node:https") : await import("node:http");
+    const headers: Record<string, string> = {};
+    if (init?.headers) {
+      for (const [key, value] of new Headers(init.headers)) headers[key] = value;
+    }
+
+    return new Promise<Response>((resolve, reject) => {
+      // `autoSelectFamily` is a real, Node-honored `net.connect` option that `http`/`https`
+      // request options forward straight through to the socket, but @types/node's
+      // http.RequestOptions/https.RequestOptions don't declare it -- hence the cast.
+      const requestOptions = {
+        hostname: url.hostname,
+        port: url.port || (isHttps ? 443 : 80),
+        path: url.pathname + url.search,
+        headers,
+        timeout: 10_000,
+        // Node >=18's `net` defaults to `autoSelectFamily: true` (Happy Eyeballs), which drives
+        // `lookup` with its `all`-style multi-address callback signature regardless of what this
+        // single-address callback returns, and throws ERR_INVALID_IP_ADDRESS against it. The
+        // pinned address is already vetted and singular, so disable the dual-stack path entirely.
+        autoSelectFamily: false,
+        lookup: (_hostname: string, _options: unknown, callback: (err: NodeJS.ErrnoException | null, address: string, family: number) => void) =>
+          callback(null, address, family),
+      };
+      const req = transportModule.request(
+        requestOptions as unknown as Parameters<typeof transportModule.request>[0],
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          res.on("end", () => {
+            resolve(new Response(Buffer.concat(chunks), { status: res.statusCode ?? 0 }));
+          });
+          res.on("error", reject);
+        },
+      );
+      req.on("timeout", () => req.destroy(new Error("robots.txt fetch timed out")));
+      req.on("error", reject);
+      req.end();
+    });
+  };
+}
+
 /** Fetches and caches robots.txt per host, serving `isAllowed` off the cache. */
 export function createRobotsTxtChecker(options: RobotsTxtCheckerOptions): RobotsTxtChecker {
-  const fetchImpl = options.fetchImpl ?? fetch;
+  // A caller-supplied fetchImpl (tests) is used as-is, unpinned. The production default
+  // goes through createPinnedFetch per-request instead, once an address has been vetted.
+  const callerFetchImpl = options.fetchImpl;
   const cacheTtlMs = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
   const cache = new Map<string, { robots: ParsedRobots; expiresAt: number }>();
+  let lookupImpl = options.lookupImpl;
+
+  async function resolveAddresses(hostname: string): Promise<{ address: string; family: number }[] | null> {
+    if (!lookupImpl) {
+      const dns = await import("node:dns/promises");
+      lookupImpl = (host) => dns.lookup(host, { all: true, verbatim: true });
+    }
+    try {
+      return await lookupImpl(hostname);
+    } catch {
+      // Can't resolve -- nothing to fetch either way; let the normal 404/error path fail open below.
+      return null;
+    }
+  }
 
   async function getRobotsForOrigin(origin: string): Promise<ParsedRobots> {
     const cached = cache.get(origin);
@@ -114,8 +237,26 @@ export function createRobotsTxtChecker(options: RobotsTxtCheckerOptions): Robots
 
     let robots: ParsedRobots;
     try {
-      const response = await fetchImpl(`${origin}/robots.txt`, { headers: { "User-Agent": options.userAgent } });
-      robots = response.ok ? parseRobotsTxt(await response.text()) : parseRobotsTxt("");
+      const hostname = new URL(origin).hostname;
+      const addresses = await resolveAddresses(hostname);
+      const vetted = addresses?.find(({ address, family }) => !isDisallowedAddress(address, family));
+      if (!vetted) {
+        // No vetted address to pin to -- either every resolved address is loopback/private/
+        // link-local/metadata (whether typed that way or only resolving that way at request
+        // time, i.e. DNS rebinding), or resolution itself failed/threw (`addresses` is null).
+        // Either way, skip the direct fetch rather than falling back to a plain, unpinned
+        // `fetch` that would let the HTTP client re-resolve the hostname on its own -- exactly
+        // the TOCTOU gap this module exists to close. A resolution failure is not evidence the
+        // hostname is unreachable: a transient/adversarial resolver hiccup on this lookup does
+        // not guarantee the HTTP client's own, independent resolution moments later would also
+        // fail. The real page fetch is proxied through Crawl4AI/browser-egress separately and
+        // gets its own check there.
+        robots = parseRobotsTxt("");
+      } else {
+        const fetchImpl = callerFetchImpl ?? createPinnedFetch(vetted.address, vetted.family);
+        const response = await fetchImpl(`${origin}/robots.txt`, { headers: { "User-Agent": options.userAgent } });
+        robots = response.ok ? parseRobotsTxt(await response.text()) : parseRobotsTxt("");
+      }
     } catch {
       robots = parseRobotsTxt("");
     }

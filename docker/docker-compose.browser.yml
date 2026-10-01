@@ -80,7 +80,7 @@ services:
       # already-restricted container). Do not add `seccomp:unconfined` here.
     tmpfs:
       - /tmp:mode=1777,size=1g
-      - /home/pwuser:mode=0700,size=1g,uid=1000,gid=1000
+      - /home/pwuser:mode=0700,size=1g,uid=1001,gid=1001
     shm_size: "1gb"
     mem_limit: "2g"
     cpus: 1.5
@@ -97,8 +97,32 @@ services:
     networks:
       - browser-internal
     depends_on:
-      - browser-egress
+      browser-egress:
+        condition: service_started
+      browser-control-init:
+        condition: service_completed_successfully
     restart: unless-stopped
+
+  # One-shot: a fresh named volume is owned by root, and `browser` runs as
+  # pwuser (uid 1001 in the Playwright base image), so it could not create
+  # its control socket (EACCES on 1 Oct 2026). Hand the directory to pwuser
+  # before `browser` starts. Only CHOWN/FOWNER, no network, exits at once.
+  browser-control-init:
+    <<: *browser-worker-image
+    entrypoint: ["sh", "-c", "chown 1001:1001 /run/browser-control && chmod 0770 /run/browser-control"]
+    user: "0:0"
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - FOWNER
+    security_opt:
+      - no-new-privileges:true
+    network_mode: none
+    volumes:
+      - browser-control:/run/browser-control
+    restart: "no"
 
   browser-egress:
     <<: *browser-worker-image

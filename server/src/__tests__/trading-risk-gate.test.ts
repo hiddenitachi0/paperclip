@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_TRADING_RISK_CONFIG, type TradingRiskConfig } from "@paperclipai/shared";
-import { evaluateTradingRiskGate, tradingFeeNok, type TradingRiskGateInput } from "../services/trading-risk-gate.js";
+import { evaluateTradingRiskGate, singleTickPriceJumpPct, tradingFeeNok, type TradingRiskGateInput } from "../services/trading-risk-gate.js";
 
 /**
  * The risk gate is the last line of defense before a paper order is filled --
@@ -129,5 +129,25 @@ describe("tradingFeeNok", () => {
 
   it("is zero for a zero fee rate", () => {
     expect(tradingFeeNok(1_000, 0)).toBe(0);
+  });
+});
+
+describe("singleTickPriceJumpPct", () => {
+  it("returns null with fewer than two closes", () => {
+    expect(singleTickPriceJumpPct([])).toBeNull();
+    expect(singleTickPriceJumpPct([100])).toBeNull();
+  });
+
+  it("computes the % move between the two most recent closes only", () => {
+    // Only the last pair (100 -> 150) matters, not the full candle history.
+    expect(singleTickPriceJumpPct([20, 20, 100, 150])).toBeCloseTo(50);
+  });
+
+  it("is symmetric for a drop", () => {
+    expect(singleTickPriceJumpPct([200, 100])).toBeCloseTo(50);
+  });
+
+  it("returns null rather than dividing by a non-positive prior close", () => {
+    expect(singleTickPriceJumpPct([0, 10])).toBeNull();
   });
 });

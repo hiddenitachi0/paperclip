@@ -89,6 +89,10 @@ export const statusBadge: Record<string, string> = {
   blocked: "bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-300",
   done: "bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-300",
   cancelled: "bg-muted text-muted-foreground",
+
+  // Trading strategy statuses (DUR-4227) — halted_risk is a safety stop, not
+  // a routine pause, so it reads red rather than the neutral "paused" orange.
+  halted_risk: "bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-300",
 };
 
 export const statusBadgeDefault = "bg-muted text-muted-foreground";
