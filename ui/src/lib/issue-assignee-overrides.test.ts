@@ -94,4 +94,62 @@ describe("buildAssigneeAdapterOverrides", () => {
       adapterConfig: { variant: "max" },
     });
   });
+
+  // DUR-4144: "Plan first on Opus, then build on Sonnet" is independent of lane.
+  describe("planFirstOnOpus", () => {
+    it("is sent on its own with the primary lane", () => {
+      expect(
+        buildAssigneeAdapterOverrides({
+          adapterType: "claude_local",
+          lane: "primary",
+          modelOverride: "",
+          thinkingEffortOverride: "",
+          chrome: false,
+          planFirstOnOpus: true,
+        }),
+      ).toEqual({ planFirstOnOpus: true });
+    });
+
+    it("is merged alongside modelProfile=cheap", () => {
+      expect(
+        buildAssigneeAdapterOverrides({
+          adapterType: "claude_local",
+          lane: "cheap",
+          modelOverride: "",
+          thinkingEffortOverride: "",
+          chrome: false,
+          planFirstOnOpus: true,
+        }),
+      ).toEqual({ modelProfile: "cheap", planFirstOnOpus: true });
+    });
+
+    it("is merged alongside custom adapterConfig overrides", () => {
+      expect(
+        buildAssigneeAdapterOverrides({
+          adapterType: "claude_local",
+          lane: "custom",
+          modelOverride: "claude-haiku-4-5",
+          thinkingEffortOverride: "",
+          chrome: false,
+          planFirstOnOpus: true,
+        }),
+      ).toEqual({
+        adapterConfig: { model: "claude-haiku-4-5" },
+        planFirstOnOpus: true,
+      });
+    });
+
+    it("is omitted entirely when false/unset, preserving prior null/lane-only behavior", () => {
+      expect(
+        buildAssigneeAdapterOverrides({
+          adapterType: "claude_local",
+          lane: "primary",
+          modelOverride: "",
+          thinkingEffortOverride: "",
+          chrome: false,
+          planFirstOnOpus: false,
+        }),
+      ).toBeNull();
+    });
+  });
 });

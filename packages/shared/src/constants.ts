@@ -86,7 +86,12 @@ export const AGENT_ROLE_LABELS: Record<AgentRole, string> = {
 export const AGENT_DEFAULT_MAX_CONCURRENT_RUNS = 20;
 export const WORKSPACE_BRANCH_ROUTINE_VARIABLE = "workspaceBranch";
 
-export const MODEL_PROFILE_KEYS = ["cheap"] as const;
+// DUR-4144: "planner" is the plan-on-a-stronger-model lane, used for the
+// first run of a "plan first on Opus, then build on Sonnet" job before the
+// plan is accepted. Only claude_local ships a profile definition for it today
+// (see packages/adapters/claude-local/src/index.ts); other adapters simply
+// fall back to the agent's normal model until they add one.
+export const MODEL_PROFILE_KEYS = ["cheap", "planner"] as const;
 export type ModelProfileKey = (typeof MODEL_PROFILE_KEYS)[number];
 
 export const AGENT_ICON_NAMES = [
@@ -281,6 +286,11 @@ export const TASK_WATCHDOG_PRODUCT_BUG_ORIGIN_KIND = "task_watchdog_product_bug"
 export const ISSUE_ORIGIN_KINDS = [
   "manual",
   "routine_execution",
+  // DUR-4182: a task created by a Job "run" (one-press action attached to a
+  // Position). Looked up by job-approval-gate.ts to find the originating job
+  // and decide whether the job's requiresApproval flag gates this issue's
+  // done transition.
+  "job_execution",
   "stale_active_run_evaluation",
   "harness_liveness_escalation",
   "issue_productivity_review",
@@ -578,6 +588,26 @@ export type RoutineTriggerSigningMode = (typeof ROUTINE_TRIGGER_SIGNING_MODES)[n
 export const ROUTINE_VARIABLE_TYPES = ["text", "textarea", "number", "boolean", "select", "date"] as const;
 export type RoutineVariableType = (typeof ROUTINE_VARIABLE_TYPES)[number];
 
+// DUR-4182: Position Jobs — one-press job definitions attached to one or more
+// positions (company_agent_roles). Deliberately a separate set of enums from
+// the ROUTINE_* ones above rather than widening those: jobs are not assigned
+// to a single agent the way a routine is, and widening the routine enums to
+// fit jobs would touch every existing routine call site for no benefit.
+export const JOB_VARIABLE_TYPES = ["text", "textarea", "number", "boolean", "select", "date", "file_upload"] as const;
+export type JobVariableType = (typeof JOB_VARIABLE_TYPES)[number];
+
+// "quick_agent" maps to a cheap/fast model profile for lightweight jobs (e.g.
+// a persona like Maja firing a job on a colleague); "full_agent" runs the
+// assignee's normal configured model/effort unless the job overrides it.
+export const JOB_RUN_MODES = ["quick_agent", "full_agent"] as const;
+export type JobRunMode = (typeof JOB_RUN_MODES)[number];
+
+export const JOB_TRIGGER_KINDS = ["manual", "schedule", "webhook", "api", "email"] as const;
+export type JobTriggerKind = (typeof JOB_TRIGGER_KINDS)[number];
+
+export const JOB_STATUSES = ["active", "archived"] as const;
+export type JobStatus = (typeof JOB_STATUSES)[number];
+
 // DUR-68: a webhook trigger with a non-null customerInboxChannel is owned by
 // the generic customer-inbox door (POST /api/customer-inbox/:publicId)
 // rather than the old generic fire route. "Any source that can push a
@@ -706,6 +736,9 @@ export const SECRET_BINDING_TARGET_TYPES = [
   "project",
   "environment",
   "routine",
+  // DUR-4182: webhook auth secret for a job_triggers row, same shape as
+  // "routine" above (routineWebhookSecretConfigPath-style config path).
+  "job",
   "plugin",
   "issue",
   "run",
@@ -773,6 +806,12 @@ export const SECRET_BINDING_TARGET_TYPES = [
   // itself, read-only. Not dedicated, like watcher: the same mailbox
   // password may back more than one inbox config if an operator wants that.
   "mail_inbox",
+  // DUR-4194: the IMAP and SMTP passwords for a mail_accounts row
+  // (config_path 'imap_password' / 'smtp_password'). Unlike mail_inbox,
+  // dedicated (see DEDICATED_SECRET_BINDING_TARGET_TYPES below): a per-person
+  // mailbox's credential is that person's alone, never shared across two
+  // mail accounts the way one watcher's price-check key might be.
+  "mail_account",
 ] as const;
 export type SecretBindingTargetType = (typeof SECRET_BINDING_TARGET_TYPES)[number];
 
@@ -786,6 +825,7 @@ export const DEDICATED_SECRET_BINDING_TARGET_TYPES = [
   "persona_account",
   "site_login",
   "deploy_sftp_credential",
+  "mail_account",
 ] as const satisfies readonly SecretBindingTargetType[];
 
 // DUR-134: platforms a persona_accounts row can target. Fanvue only for now

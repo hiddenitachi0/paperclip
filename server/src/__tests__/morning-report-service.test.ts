@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
-import { agents, companies, companyMemberships, createDb, laneAMessages, morningReportOutbox } from "@paperclipai/db";
+import { agents, companies, companyMemberships, createDb, laneAMessages, morningReportOutbox, personas } from "@paperclipai/db";
 import {
   DEFAULT_MORNING_REPORT_SETTINGS,
   MORNING_REPORT_RSS_FEEDS,
@@ -274,9 +274,9 @@ d("morning report tick", () => {
     return companyId;
   }
 
-  async function seedAgent(companyId: string, settings: MorningReportSettings) {
+  async function seedAgent(companyId: string, settings: MorningReportSettings, name = "Maja") {
     const created = await agentService(db).create(companyId, {
-      name: "Maja",
+      name,
       role: "general",
       status: "active",
       adapterType: "claude_local",
@@ -290,6 +290,14 @@ d("morning report tick", () => {
       .set({ laneAEnabled: true, morningReportSettings: settings as unknown as Record<string, unknown> })
       .where(eq(agents.id, created.id));
     return created.id;
+  }
+
+  /** DUR-4190: attaches a persona (a person, e.g. "Maja") to an agent whose job name may be something generic like "Assistant". */
+  async function seedPersona(companyId: string, agentId: string, displayName: string) {
+    const personaId = randomUUID();
+    await db.insert(personas).values({ id: personaId, companyId, displayName });
+    await db.update(agents).set({ personaId }).where(eq(agents.id, agentId));
+    return personaId;
   }
 
   async function outboxRowsFor(agentId: string) {
@@ -703,6 +711,45 @@ d("morning report tick", () => {
       expect(moodCall.prompt).toContain("downcast");
       expect(moodCall).toMatchObject({ safeForWork: true });
       expect(moodCall.look).toBeUndefined();
+    });
+
+    // DUR-4190: a follow-up to PR #436 — the picture prompts used to always
+    // say the agent's job name ("Assistant"), even when a persona ("Maja")
+    // was attached, because they read agentRow.name directly.
+    it("uses the persona's display name, not the agent's job name, in both picture prompts and the weather caption", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent(companyId, { ...baseSettings, sources: ["bbc"] }, "Assistant");
+      await seedPersona(companyId, agentId, "Maja");
+      feeds[BBC_URL] = rssXml([{ title: "A headline to set the mood", link: "https://bbc.example/mood" }]);
+      makePicture.mockResolvedValue({ ok: true, fileId: "11111111-1111-1111-1111-111111111111", seed: 1 });
+
+      await service().tick(OSLO_WINTER_0700);
+      await settle();
+
+      const [weatherCall, moodCall] = makePicture.mock.calls.map((call) => call[0]);
+      expect(weatherCall.prompt).toContain("Maja");
+      expect(weatherCall.prompt).not.toContain("Assistant");
+      expect(moodCall.prompt).toContain("Maja");
+      expect(moodCall.prompt).not.toContain("Assistant");
+
+      const [row] = await outboxRowsFor(agentId);
+      const weatherImage = row!.facts!.images.find((i) => i.kind === "weather");
+      expect(weatherImage!.caption).toContain("Maja");
+      expect(weatherImage!.caption).not.toContain("Assistant");
+    });
+
+    it("falls back to the agent's job name when it has no persona attached", async () => {
+      const companyId = await seedCompany();
+      await seedAgent(companyId, { ...baseSettings, sources: ["bbc"] }, "Assistant");
+      feeds[BBC_URL] = rssXml([{ title: "A headline to set the mood", link: "https://bbc.example/mood" }]);
+      makePicture.mockResolvedValue({ ok: true, fileId: "11111111-1111-1111-1111-111111111111", seed: 1 });
+
+      await service().tick(OSLO_WINTER_0700);
+      await settle();
+
+      const [weatherCall, moodCall] = makePicture.mock.calls.map((call) => call[0]);
+      expect(weatherCall.prompt).toContain("Assistant");
+      expect(moodCall.prompt).toContain("Assistant");
     });
   });
 

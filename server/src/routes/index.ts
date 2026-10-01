@@ -11,6 +11,7 @@ export { fileResourceRoutes, createFileResourceLimiter } from "./file-resources.
 export { routineRoutes } from "./routines.js";
 export { customerInboxRoutes } from "./customer-inbox.js";
 export { goalRoutes } from "./goals.js";
+export { crmRoutes } from "./crm.js";
 export { approvalRoutes } from "./approvals.js";
 export { deployRunnerRoutes } from "./deploy-runner.js";
 export { secretRoutes } from "./secrets.js";

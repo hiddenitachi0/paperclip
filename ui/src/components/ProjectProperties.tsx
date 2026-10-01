@@ -1614,6 +1614,8 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
                       <span>Ask me first when the change involves</span>
                       <SaveIndicator state={fieldState("deploy_ask_first_actions")} />
                     </label>
+                    {/* Security semantics (fails closed, board-only, survives future auto-approval) are
+                        documented in docs/guides/board-operator/approvals.md under "Deploy". */}
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <button
@@ -1626,7 +1628,9 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
                       </TooltipTrigger>
                       <TooltipContent side="top" className="max-w-[280px]">
                         Whichever categories you check here always create an approval card for you, no matter what
-                        &ldquo;When to deploy&rdquo; is set to above.
+                        &ldquo;When to deploy&rdquo; is set to above &mdash; no agent role can change this list, and
+                        an ambiguous deploy always gets a card rather than skipping one. See the Approvals guide for
+                        the full security semantics.
                       </TooltipContent>
                     </Tooltip>
                   </div>

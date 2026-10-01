@@ -2142,13 +2142,13 @@ export function SidebarLink(_props: PluginSidebarProps) {
   );
 }
 
-type MediaStudioTabKey = "create" | "edit" | "looks";
+type MediaStudioTabKey = "create" | "edit" | "looks" | "storylines";
 
 /** Reads ?tab= from the current URL without pulling in the host router (standalone module). */
 function initialTabFromLocation(): MediaStudioTabKey {
   if (typeof window === "undefined") return "create";
   const tab = new URLSearchParams(window.location.search).get("tab");
-  return tab === "looks" || tab === "edit" ? tab : "create";
+  return tab === "looks" || tab === "edit" || tab === "storylines" ? tab : "create";
 }
 
 const tabBtn: React.CSSProperties = { padding: "8px 14px", borderRadius: 8, border: "1px solid transparent", cursor: "pointer", fontSize: 13, fontWeight: 600, background: "transparent" };
@@ -2188,8 +2188,19 @@ export function MediaStudioPage({ context }: PluginPageProps) {
         <button type="button" role="tab" aria-selected={tab === "looks"} style={tab === "looks" ? tabBtnActive : tabBtnInactive} onClick={() => selectTab("looks")}>
           Looks
         </button>
+        <button type="button" role="tab" aria-selected={tab === "storylines"} style={tab === "storylines" ? tabBtnActive : tabBtnInactive} onClick={() => selectTab("storylines")}>
+          Storylines
+        </button>
       </div>
-      {tab === "create" ? <MediaStudioCreateTab /> : tab === "edit" ? <MediaStudioEditTab context={context} /> : <MediaStudioLooksPage context={context} />}
+      {tab === "create" ? (
+        <MediaStudioCreateTab />
+      ) : tab === "edit" ? (
+        <MediaStudioEditTab context={context} />
+      ) : tab === "storylines" ? (
+        <MediaStudioStorylinesPage context={context} />
+      ) : (
+        <MediaStudioLooksPage context={context} />
+      )}
     </div>
   );
 }
@@ -2206,6 +2217,815 @@ function MediaStudioCreateTab() {
         To make a picture right now, open a task and use its Media Studio tab, or just ask an agent
         (for example, "make me a picture of..."). A way to make pictures directly from this page is coming soon.
       </p>
+    </div>
+  );
+}
+
+// ─── Storylines (DUR-4128, frontend half of DUR-4095) ─────────────────────
+//
+// Write out a story, split it into scenes and shots, fine-tune each shot,
+// see a cost estimate before rendering, render scene by scene, and watch
+// progress. Talks directly to the server's /video-storylines routes (plain
+// REST, not a plugin action) -- see server/src/routes/video-storylines.ts.
+//
+// Copies of packages/shared/src/video-storylines.ts's limits/enums: this UI
+// bundles standalone and cannot import @paperclipai/shared (only bare
+// specifiers to installed deps resolve). Keep these in sync by hand.
+const VIDEO_SHOT_MIN_DURATION_SECONDS = 1;
+const VIDEO_SHOT_MAX_DURATION_SECONDS = 60;
+const VIDEO_SHOT_DEFAULT_DURATION_SECONDS = 5;
+const VIDEO_STORYLINE_PROVIDER_OPTIONS: Array<{ value: "fal" | "sogni"; label: string }> = [
+  { value: "fal", label: "Fal.ai" },
+  { value: "sogni", label: "Sogni" },
+];
+
+interface VideoStorylineSummary {
+  id: string;
+  companyId: string;
+  projectId: string | null;
+  title: string;
+  status: string;
+  providerId: string;
+  model: string | null;
+  budgetCapCents: number | null;
+  spentCents: number;
+  estimatedTotalCents: number | null;
+  estimatedTotalSeconds: number | null;
+  characterReferenceAssetIds: string[];
+  finalObjectKey: string | null;
+  finalByteSize: number | null;
+  finalDurationSeconds: number | null;
+  stitchBlockedReason: string | null;
+  errorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface VideoSceneSummary {
+  id: string;
+  storylineId: string;
+  orderIndex: number;
+  title: string;
+  notes: string | null;
+  createdAt: string;
+}
+
+interface VideoShotSummary {
+  id: string;
+  storylineId: string;
+  sceneId: string;
+  orderIndex: number;
+  prompt: string;
+  cameraNotes: string | null;
+  durationSeconds: number;
+  lookReferenceAssetIds: string[];
+  status: string;
+  providerId: string | null;
+  model: string | null;
+  resultObjectKey: string | null;
+  resultByteSize: number | null;
+  estimatedCostCents: number | null;
+  actualCostCents: number | null;
+  attempt: number;
+  errorMessage: string | null;
+  createdAt: string;
+}
+
+interface VideoStorylineShotProgress {
+  id: string;
+  orderIndex: number;
+  status: string;
+  attempt: number;
+  errorMessage: string | null;
+}
+
+interface VideoStorylineProgress {
+  storylineId: string;
+  status: string;
+  totalShots: number;
+  doneShots: number;
+  failedShots: number;
+  renderingShots: number;
+  spentCents: number;
+  budgetCapCents: number | null;
+  stitchBlockedReason: string | null;
+  shots: VideoStorylineShotProgress[];
+}
+
+function formatMoney(cents: number | null): string {
+  if (cents === null) return "not set";
+  return `$${(cents / 100).toFixed(2)}`;
+}
+
+function storylineStatusLabel(status: string): string {
+  switch (status) {
+    case "draft":
+      return "Draft";
+    case "estimated":
+      return "Cost estimated";
+    case "rendering":
+      return "Rendering";
+    case "paused":
+      return "Paused";
+    case "ready_to_stitch":
+      return "Ready to combine into one video";
+    case "stitching":
+      return "Combining clips into one video";
+    case "done":
+      return "Done";
+    case "failed":
+      return "Failed";
+    case "cancelled":
+      return "Cancelled";
+    default:
+      return status;
+  }
+}
+
+function shotStatusLabel(status: string): string {
+  switch (status) {
+    case "draft":
+      return "Not started";
+    case "queued":
+      return "Waiting to render";
+    case "rendering":
+      return "Rendering";
+    case "done":
+      return "Done";
+    case "failed":
+      return "Failed";
+    default:
+      return status;
+  }
+}
+
+const RENDERING_STORYLINE_STATUSES = new Set(["rendering", "stitching"]);
+const EDITABLE_STORYLINE_STATUSES = new Set(["draft", "estimated", "paused", "failed"]);
+
+/** A small multi-select of the company's saved Looks, for picking character reference pictures. Reuses the Looks list already fetched for the Looks tab rather than building a new picker. */
+function LookReferencePicker(props: {
+  looks: Look[];
+  selectedFileIds: string[];
+  onChange: (fileIds: string[]) => void;
+  max: number;
+}) {
+  const usable = props.looks.filter((look) => look.referenceFileIds.length > 0);
+  if (usable.length === 0) {
+    return (
+      <p style={{ fontSize: 12, color: "#868e96", margin: 0 }}>
+        No saved looks with a reference picture yet. Add one on the Looks tab to use it as a character here.
+      </p>
+    );
+  }
+  const toggle = (fileId: string) => {
+    if (props.selectedFileIds.includes(fileId)) {
+      props.onChange(props.selectedFileIds.filter((id) => id !== fileId));
+    } else if (props.selectedFileIds.length < props.max) {
+      props.onChange([...props.selectedFileIds, fileId]);
+    }
+  };
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+      {usable.map((look) => {
+        const fileId = look.referenceFileIds[0]!;
+        const checked = props.selectedFileIds.includes(fileId);
+        return (
+          <label
+            key={look.id}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 4,
+              fontSize: 12,
+              padding: "4px 8px",
+              borderRadius: 8,
+              border: "1px solid rgba(128,128,128,0.35)",
+              background: checked ? "#e7f5ff" : "transparent",
+              cursor: "pointer",
+            }}
+          >
+            <input type="checkbox" checked={checked} onChange={() => toggle(fileId)} />
+            {look.name}
+          </label>
+        );
+      })}
+    </div>
+  );
+}
+
+export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
+  const companyId = context.companyId;
+  const listLooks = usePluginAction(ACTION_LOOKS_LIST);
+
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [settingsBusy, setSettingsBusy] = useState(false);
+
+  const [looks, setLooks] = useState<Look[]>([]);
+  const [storylines, setStorylines] = useState<VideoStorylineSummary[] | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [scenes, setScenes] = useState<VideoSceneSummary[]>([]);
+  const [shots, setShots] = useState<VideoShotSummary[]>([]);
+  const [progress, setProgress] = useState<VideoStorylineProgress | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const [newTitle, setNewTitle] = useState("");
+  const [newProvider, setNewProvider] = useState<"fal" | "sogni">("fal");
+
+  const [newSceneTitle, setNewSceneTitle] = useState("");
+  const [shotDrafts, setShotDrafts] = useState<Record<string, { prompt: string; cameraNotes: string; durationSeconds: number; lookReferenceAssetIds: string[] }>>({});
+
+  const loadSettings = useCallback(async () => {
+    if (!companyId) return;
+    try {
+      const res = await hostFetchJson<{ enabled: boolean }>(`/api/companies/${companyId}/video-storylines/settings`);
+      setEnabled(res.enabled);
+    } catch (e) {
+      setSettingsError(e instanceof Error ? e.message : String(e));
+    }
+  }, [companyId]);
+
+  useEffect(() => {
+    void loadSettings();
+  }, [loadSettings]);
+
+  useEffect(() => {
+    listLooks({})
+      .then((res) => setLooks((res as LooksResponse).looks ?? []))
+      .catch(() => setLooks([]));
+  }, [listLooks]);
+
+  const toggleEnabled = async (next: boolean) => {
+    if (!companyId) return;
+    setSettingsBusy(true);
+    setSettingsError(null);
+    try {
+      const res = await hostFetchJson<{ enabled: boolean }>(`/api/companies/${companyId}/video-storylines/settings`, {
+        method: "PATCH",
+        body: JSON.stringify({ enabled: next }),
+      });
+      setEnabled(res.enabled);
+    } catch (e) {
+      setSettingsError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSettingsBusy(false);
+    }
+  };
+
+  const loadStorylines = useCallback(async () => {
+    if (!companyId || !enabled) return;
+    try {
+      const res = await hostFetchJson<VideoStorylineSummary[]>(`/api/companies/${companyId}/video-storylines`);
+      setStorylines(res);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [companyId, enabled]);
+
+  useEffect(() => {
+    void loadStorylines();
+  }, [loadStorylines]);
+
+  const selected = storylines?.find((s) => s.id === selectedId) ?? null;
+
+  const loadDetail = useCallback(async () => {
+    if (!companyId || !selectedId) return;
+    try {
+      const [sceneRes, shotRes] = await Promise.all([
+        hostFetchJson<VideoSceneSummary[]>(`/api/companies/${companyId}/video-storylines/${selectedId}/scenes`),
+        hostFetchJson<VideoShotSummary[]>(`/api/companies/${companyId}/video-storylines/${selectedId}/shots`),
+      ]);
+      setScenes(sceneRes);
+      setShots(shotRes);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [companyId, selectedId]);
+
+  useEffect(() => {
+    void loadDetail();
+  }, [loadDetail]);
+
+  const loadProgress = useCallback(async () => {
+    if (!companyId || !selectedId) return;
+    try {
+      const res = await hostFetchJson<VideoStorylineProgress>(`/api/companies/${companyId}/video-storylines/${selectedId}/progress`);
+      setProgress(res);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [companyId, selectedId]);
+
+  // Poll progress every 4s while the storyline is actively rendering/combining, so the
+  // operator sees shots finish without having to refresh the page.
+  useEffect(() => {
+    if (!selectedId) {
+      setProgress(null);
+      return;
+    }
+    void loadProgress();
+    if (!selected || !RENDERING_STORYLINE_STATUSES.has(selected.status)) return;
+    const id = window.setInterval(() => {
+      void loadProgress();
+      void loadStorylines();
+    }, 4000);
+    return () => window.clearInterval(id);
+  }, [selectedId, selected?.status, loadProgress, loadStorylines]);
+
+  const createStoryline = async () => {
+    if (!companyId || !newTitle.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const row = await hostFetchJson<VideoStorylineSummary>(`/api/companies/${companyId}/video-storylines`, {
+        method: "POST",
+        body: JSON.stringify({ title: newTitle.trim(), providerId: newProvider }),
+      });
+      setNewTitle("");
+      await loadStorylines();
+      setSelectedId(row.id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteStoryline = async (id: string) => {
+    if (!companyId) return;
+    if (!window.confirm("Delete this storyline? Scenes, shots and progress are lost for good.")) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await hostFetchJson(`/api/companies/${companyId}/video-storylines/${id}`, { method: "DELETE" });
+      if (selectedId === id) setSelectedId(null);
+      await loadStorylines();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const updateBudgetCap = async (dollars: string) => {
+    if (!companyId || !selectedId) return;
+    const cents = dollars.trim() === "" ? null : Math.round(Number(dollars) * 100);
+    if (cents !== null && (!Number.isFinite(cents) || cents < 0)) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await hostFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ budgetCapCents: cents }),
+      });
+      await loadStorylines();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const addScene = async () => {
+    if (!companyId || !selectedId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await hostFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}/scenes`, {
+        method: "POST",
+        body: JSON.stringify({ title: newSceneTitle.trim(), orderIndex: scenes.length }),
+      });
+      setNewSceneTitle("");
+      await loadDetail();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteScene = async (sceneId: string) => {
+    if (!companyId || !selectedId) return;
+    if (!window.confirm("Delete this scene and all its shots?")) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await hostFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}/scenes/${sceneId}`, { method: "DELETE" });
+      await loadDetail();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const shotDraftFor = (sceneId: string) =>
+    shotDrafts[sceneId] ?? { prompt: "", cameraNotes: "", durationSeconds: VIDEO_SHOT_DEFAULT_DURATION_SECONDS, lookReferenceAssetIds: [] };
+
+  const setShotDraft = (sceneId: string, next: Partial<ReturnType<typeof shotDraftFor>>) => {
+    setShotDrafts((prev) => ({ ...prev, [sceneId]: { ...shotDraftFor(sceneId), ...next } }));
+  };
+
+  const addShot = async (sceneId: string) => {
+    if (!companyId || !selectedId) return;
+    const draft = shotDraftFor(sceneId);
+    if (!draft.prompt.trim()) return;
+    const shotsInScene = shots.filter((s) => s.sceneId === sceneId).length;
+    setBusy(true);
+    setError(null);
+    try {
+      await hostFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}/shots`, {
+        method: "POST",
+        body: JSON.stringify({
+          sceneId,
+          orderIndex: shotsInScene,
+          prompt: draft.prompt.trim(),
+          cameraNotes: draft.cameraNotes.trim() || null,
+          durationSeconds: draft.durationSeconds,
+          lookReferenceAssetIds: draft.lookReferenceAssetIds,
+        }),
+      });
+      setShotDrafts((prev) => ({ ...prev, [sceneId]: { prompt: "", cameraNotes: "", durationSeconds: VIDEO_SHOT_DEFAULT_DURATION_SECONDS, lookReferenceAssetIds: [] } }));
+      await loadDetail();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteShot = async (shotId: string) => {
+    if (!companyId || !selectedId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await hostFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}/shots/${shotId}`, { method: "DELETE" });
+      await loadDetail();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const rerenderShot = async (shotId: string) => {
+    if (!companyId || !selectedId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await hostFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}/shots/${shotId}/rerender`, { method: "POST" });
+      await loadProgress();
+      await loadStorylines();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const [estimate, setEstimate] = useState<VideoStorylineSummary | null>(null);
+  const runEstimate = async () => {
+    if (!companyId || !selectedId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await hostFetchJson<VideoStorylineSummary>(`/api/companies/${companyId}/video-storylines/${selectedId}/estimate`, { method: "POST" });
+      setEstimate(res);
+      await loadStorylines();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const startRender = async () => {
+    if (!companyId || !selectedId || !selected) return;
+    const overBudget =
+      estimate?.estimatedTotalCents !== null &&
+      estimate?.estimatedTotalCents !== undefined &&
+      selected.budgetCapCents !== null &&
+      estimate.estimatedTotalCents > selected.budgetCapCents;
+    const costLine = estimate
+      ? `This will cost about ${formatMoney(estimate.estimatedTotalCents)} for ${estimate.estimatedTotalSeconds ?? 0} seconds of video.`
+      : "Get a cost estimate first so you know roughly what this will cost.";
+    const budgetWarning = overBudget
+      ? `\n\nHeads up: that's more than your budget cap of ${formatMoney(selected.budgetCapCents)}. Rendering will stop partway through once it hits the cap.`
+      : "";
+    if (!window.confirm(`Start rendering this storyline now?\n\n${costLine}${budgetWarning}\n\nIt renders clip by clip in the background; you can watch progress here.`)) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await hostFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}/render/start`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      await loadStorylines();
+      await loadProgress();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const cancelRender = async () => {
+    if (!companyId || !selectedId) return;
+    if (!window.confirm("Cancel this render? Shots already finished are kept; anything still in progress is stopped.")) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await hostFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}/render/cancel`, { method: "POST" });
+      await loadStorylines();
+      await loadProgress();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (enabled === null) {
+    return <div style={card}><p style={{ fontSize: 13, margin: 0 }}>Loading...</p></div>;
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={card}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div>
+            <strong style={{ fontSize: 13 }}>Video storylines</strong>
+            <p style={{ fontSize: 12, color: "#868e96", margin: "2px 0 0" }}>
+              Write out a story, split it into scenes and shots, and render a long video clip by clip. Off by default.
+            </p>
+          </div>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+            <input type="checkbox" checked={enabled} disabled={settingsBusy} onChange={(e) => void toggleEnabled(e.target.checked)} />
+            Turned on
+          </label>
+        </div>
+        {settingsError && <div style={errorBox}>{settingsError}</div>}
+      </div>
+
+      {!enabled ? (
+        <div style={card}>
+          <p style={{ fontSize: 13, margin: 0 }}>
+            Video storylines are turned off for this company. Turn it on above to write a storyline and start rendering.
+          </p>
+        </div>
+      ) : (
+        <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
+          <div style={{ ...card, width: 280, flexShrink: 0 }}>
+            <strong style={{ fontSize: 13 }}>Storylines</strong>
+            <div style={field}>
+              <input style={input} placeholder="Title, e.g. Zelda theory video" value={newTitle} onChange={(e) => setNewTitle(e.target.value)} />
+              <select style={input} value={newProvider} onChange={(e) => setNewProvider(e.target.value as "fal" | "sogni")}>
+                {VIDEO_STORYLINE_PROVIDER_OPTIONS.map((p) => (
+                  <option key={p.value} value={p.value}>{p.label}</option>
+                ))}
+              </select>
+              <button type="button" style={primaryBtn} disabled={busy || !newTitle.trim()} onClick={() => void createStoryline()}>
+                New storyline
+              </button>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 8 }}>
+              {(storylines ?? []).length === 0 && <p style={{ fontSize: 12, color: "#868e96", margin: 0 }}>No storylines yet.</p>}
+              {(storylines ?? []).map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => setSelectedId(s.id)}
+                  style={{
+                    textAlign: "left",
+                    padding: "8px 10px",
+                    borderRadius: 8,
+                    border: "1px solid rgba(128,128,128,0.35)",
+                    background: s.id === selectedId ? "#e7f5ff" : "transparent",
+                    cursor: "pointer",
+                  }}
+                >
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>{s.title}</div>
+                  <div style={{ fontSize: 11, color: "#868e96" }}>{storylineStatusLabel(s.status)}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
+            {error && <div style={errorBox}>{error}</div>}
+            {!selected ? (
+              <div style={card}>
+                <p style={{ fontSize: 13, margin: 0 }}>Pick a storyline on the left, or start a new one.</p>
+              </div>
+            ) : (
+              <>
+                <div style={card}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                    <div>
+                      <strong style={{ fontSize: 14 }}>{selected.title}</strong>
+                      <div style={{ fontSize: 12, color: "#868e96" }}>{storylineStatusLabel(selected.status)}</div>
+                    </div>
+                    <button type="button" style={dangerBtn} disabled={busy} onClick={() => void deleteStoryline(selected.id)}>
+                      Delete
+                    </button>
+                  </div>
+                  {selected.errorMessage && <div style={errorBox}>{selected.errorMessage}</div>}
+                  <div style={field}>
+                    <label style={{ fontSize: 12, color: "#868e96" }}>Budget cap (stops rendering once spend would go over this)</label>
+                    <input
+                      style={input}
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      placeholder="e.g. 20.00"
+                      defaultValue={selected.budgetCapCents !== null ? (selected.budgetCapCents / 100).toFixed(2) : ""}
+                      disabled={!EDITABLE_STORYLINE_STATUSES.has(selected.status)}
+                      onBlur={(e) => void updateBudgetCap(e.target.value)}
+                    />
+                  </div>
+                  <p style={{ fontSize: 12, color: "#868e96", margin: 0 }}>
+                    Spent so far: {formatMoney(selected.spentCents)} of {formatMoney(selected.budgetCapCents)}
+                  </p>
+                  <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+                    <button type="button" style={secondaryBtn} disabled={busy || shots.length === 0} onClick={() => void runEstimate()}>
+                      Get cost estimate
+                    </button>
+                    <button
+                      type="button"
+                      style={primaryBtn}
+                      disabled={busy || shots.length === 0 || selected.budgetCapCents === null || !EDITABLE_STORYLINE_STATUSES.has(selected.status)}
+                      onClick={() => void startRender()}
+                    >
+                      Start render
+                    </button>
+                    {RENDERING_STORYLINE_STATUSES.has(selected.status) && (
+                      <button type="button" style={dangerBtn} disabled={busy} onClick={() => void cancelRender()}>
+                        Cancel render
+                      </button>
+                    )}
+                  </div>
+                  {estimate && estimate.id === selected.id && (
+                    <p style={{ fontSize: 12, margin: 0 }}>
+                      Estimate: about {formatMoney(estimate.estimatedTotalCents)} for {estimate.estimatedTotalSeconds ?? 0} seconds of video
+                      ({shots.length} shot{shots.length === 1 ? "" : "s"}). This is a ballpark, not a quote.
+                    </p>
+                  )}
+                </div>
+
+                {progress && (
+                  <div style={card}>
+                    <strong style={{ fontSize: 13 }}>Progress</strong>
+                    <div style={{ height: 8, borderRadius: 4, background: "rgba(128,128,128,0.2)", overflow: "hidden" }}>
+                      <div
+                        style={{
+                          height: "100%",
+                          width: progress.totalShots > 0 ? `${(progress.doneShots / progress.totalShots) * 100}%` : "0%",
+                          background: "#087f5b",
+                        }}
+                      />
+                    </div>
+                    <p style={{ fontSize: 12, margin: 0 }}>
+                      {progress.doneShots} of {progress.totalShots} shots done
+                      {progress.renderingShots > 0 ? `, ${progress.renderingShots} rendering now` : ""}
+                      {progress.failedShots > 0 ? `, ${progress.failedShots} failed` : ""}.
+                      Spent {formatMoney(progress.spentCents)} of {formatMoney(progress.budgetCapCents)}.
+                    </p>
+                    {progress.stitchBlockedReason && <div style={errorBox}>{progress.stitchBlockedReason}</div>}
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      {progress.shots.map((shot) => (
+                        <div key={shot.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12 }}>
+                          <span>
+                            Shot {shot.orderIndex + 1}: {shotStatusLabel(shot.status)}
+                            {shot.errorMessage ? ` — ${shot.errorMessage}` : ""}
+                          </span>
+                          {shot.status === "failed" && (
+                            <button type="button" style={ghostBtn} disabled={busy} onClick={() => void rerenderShot(shot.id)}>
+                              Try again
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {selected.status === "done" && selected.finalObjectKey && (
+                  <div style={card}>
+                    <strong style={{ fontSize: 13 }}>Finished video</strong>
+                    <video
+                      controls
+                      style={{ width: "100%", borderRadius: 8, background: "#000" }}
+                      src={`/api/companies/${companyId}/video-storylines/${selected.id}/final/content`}
+                    />
+                    <div>
+                      <a
+                        href={`/api/companies/${companyId}/video-storylines/${selected.id}/final/content`}
+                        download={`${selected.title || "video-storyline"}.mp4`}
+                        style={{ color: "#1971c2", fontSize: 12 }}
+                      >
+                        Download video
+                        {selected.finalByteSize ? ` (${(selected.finalByteSize / (1024 * 1024)).toFixed(1)} MB)` : ""}
+                      </a>
+                    </div>
+                  </div>
+                )}
+
+                <div style={card}>
+                  <strong style={{ fontSize: 13 }}>Scenes</strong>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <input style={{ ...input, flex: 1 }} placeholder="Scene title (optional)" value={newSceneTitle} onChange={(e) => setNewSceneTitle(e.target.value)} />
+                    <button
+                      type="button"
+                      style={secondaryBtn}
+                      disabled={busy || !EDITABLE_STORYLINE_STATUSES.has(selected.status)}
+                      onClick={() => void addScene()}
+                    >
+                      Add scene
+                    </button>
+                  </div>
+                  {scenes.length === 0 && <p style={{ fontSize: 12, color: "#868e96", margin: 0 }}>No scenes yet. Add one to start writing shots.</p>}
+                  {scenes
+                    .slice()
+                    .sort((a, b) => a.orderIndex - b.orderIndex)
+                    .map((scene, sceneIdx) => {
+                      const sceneShots = shots.filter((sh) => sh.sceneId === scene.id).sort((a, b) => a.orderIndex - b.orderIndex);
+                      const draft = shotDraftFor(scene.id);
+                      return (
+                        <div key={scene.id} style={{ border: "1px solid rgba(128,128,128,0.25)", borderRadius: 8, padding: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                          <div style={{ display: "flex", justifyContent: "space-between" }}>
+                            <strong style={{ fontSize: 12 }}>Scene {sceneIdx + 1}{scene.title ? `: ${scene.title}` : ""}</strong>
+                            <button
+                              type="button"
+                              style={ghostBtn}
+                              disabled={busy || !EDITABLE_STORYLINE_STATUSES.has(selected.status)}
+                              onClick={() => void deleteScene(scene.id)}
+                            >
+                              Delete scene
+                            </button>
+                          </div>
+                          {sceneShots.map((shot) => (
+                            <div key={shot.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 12, borderTop: "1px solid rgba(128,128,128,0.15)", paddingTop: 6 }}>
+                              <div>
+                                <div>{shot.prompt}</div>
+                                <div style={{ color: "#868e96" }}>
+                                  {shot.durationSeconds}s{shot.cameraNotes ? ` · ${shot.cameraNotes}` : ""} · {shotStatusLabel(shot.status)}
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                style={ghostBtn}
+                                disabled={busy || !EDITABLE_STORYLINE_STATUSES.has(selected.status)}
+                                onClick={() => void deleteShot(shot.id)}
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          ))}
+                          {EDITABLE_STORYLINE_STATUSES.has(selected.status) && (
+                            <div style={{ display: "flex", flexDirection: "column", gap: 6, background: "rgba(128,128,128,0.06)", borderRadius: 6, padding: 8 }}>
+                              <textarea
+                                style={{ ...input, minHeight: 50 }}
+                                placeholder="Describe what happens in this shot"
+                                value={draft.prompt}
+                                onChange={(e) => setShotDraft(scene.id, { prompt: e.target.value })}
+                              />
+                              <div style={{ display: "flex", gap: 6 }}>
+                                <input
+                                  style={{ ...input, flex: 1 }}
+                                  placeholder="Camera notes (optional)"
+                                  value={draft.cameraNotes}
+                                  onChange={(e) => setShotDraft(scene.id, { cameraNotes: e.target.value })}
+                                />
+                                <input
+                                  style={{ ...input, width: 90 }}
+                                  type="number"
+                                  min={VIDEO_SHOT_MIN_DURATION_SECONDS}
+                                  max={VIDEO_SHOT_MAX_DURATION_SECONDS}
+                                  value={draft.durationSeconds}
+                                  onChange={(e) => setShotDraft(scene.id, { durationSeconds: Number(e.target.value) || VIDEO_SHOT_DEFAULT_DURATION_SECONDS })}
+                                />
+                              </div>
+                              <LookReferencePicker
+                                looks={looks}
+                                selectedFileIds={draft.lookReferenceAssetIds}
+                                onChange={(ids) => setShotDraft(scene.id, { lookReferenceAssetIds: ids })}
+                                max={8}
+                              />
+                              <button type="button" style={secondaryBtn} disabled={busy || !draft.prompt.trim()} onClick={() => void addShot(scene.id)}>
+                                Add shot
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

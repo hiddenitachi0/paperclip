@@ -163,6 +163,7 @@ import { evaluateDeployCompletionDoneGate } from "../services/deploy-completion-
 import { evaluateDoneGateCritic } from "../services/done-gate-critic.js";
 import { evaluateOriginCommitDoneGate } from "../services/origin-commit-gate.js";
 import { evaluateFeatureLaunchDoneGate } from "../services/feature-launch-gate.js";
+import { evaluateJobApprovalDoneGate } from "../services/job-approval-gate.js";
 import { evaluateBlockedNeedsAskGate } from "../services/blocked-needs-ask-gate.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
 import { feedbackService } from "../services/feedback.js";
@@ -6577,6 +6578,24 @@ export function issueRoutes(
       return;
     }
     const originCommitWarning = originCommitGateResult?.warningOnly ? originCommitGateResult.message : null;
+    // DUR-4182: composes with the gates above -- a Job's own `requiresApproval`
+    // flag, checked only for issues a job run created (originKind "job_execution").
+    const jobApprovalGateResult = await evaluateJobApprovalDoneGate({
+      db,
+      issue: {
+        id: existing.id,
+        companyId: existing.companyId,
+        originKind: existing.originKind,
+        originId: existing.originId,
+      },
+      actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
+      requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
+      currentStatus: existing.status,
+    });
+    if (jobApprovalGateResult) {
+      res.status(409).json({ error: jobApprovalGateResult.message });
+      return;
+    }
     // DUR-313: composes with the gates above -- this asks a narrower question again,
     // "did the operator explicitly sign off on THIS being a finished, user-facing
     // launch", independent of whether the work itself is done or already deployed.
@@ -8262,6 +8281,35 @@ export function issueRoutes(
         interaction.status === "accepted" &&
         acceptedPlanTarget?.issueId === issue.id &&
         acceptedPlanTarget.key === "plan";
+
+      // DUR-4144: "Plan first on Opus, then build on Sonnet" is a one-shot
+      // switch -- clear it the moment its plan is accepted so the fresh
+      // session that follows (forceFreshSession below) builds on the agent's
+      // normal model instead of planning again on every future run.
+      const planFirstOverrides = issue.assigneeAdapterOverrides as Record<string, unknown> | null;
+      if (acceptedPlanConfirmation && planFirstOverrides?.planFirstOnOpus === true) {
+        await svc.update(issue.id, {
+          assigneeAdapterOverrides: { ...planFirstOverrides, planFirstOnOpus: false },
+        });
+        await logActivity(db, {
+          companyId: issue.companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          action: "issue.updated",
+          entityType: "issue",
+          entityId: issue.id,
+          details: {
+            identifier: issue.identifier,
+            source: "plan_first_on_opus_cleared",
+            interactionId: interaction.id,
+            assigneeAdapterOverrides: { ...planFirstOverrides, planFirstOnOpus: false },
+            _previous: { assigneeAdapterOverrides: planFirstOverrides },
+          },
+        });
+      }
+
       queueResolvedInteractionContinuationWakeup({
         heartbeat: rawHeartbeat,
         issue: continuationWakeIssue,

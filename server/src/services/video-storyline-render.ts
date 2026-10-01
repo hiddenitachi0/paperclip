@@ -6,11 +6,12 @@ import {
   MEDIA_STUDIO_PLUGIN_KEY,
   VIDEO_RENDER_JOB_MAX_AGE_MS,
   VIDEO_RENDER_TICK_BATCH,
+  VIDEO_SHOT_MIN_DURATION_SECONDS,
   estimateVideoStorylineCostCents,
   type StartVideoStorylineRenderInput,
   type VideoStorylineProvider,
 } from "@paperclipai/shared";
-import type { MediaJobHandle, MediaJobInput, MediaJobProvider } from "./video-provider-clients.js";
+import type { MediaJobHandle, MediaJobInput, MediaJobProvider, MediaPollOutcome } from "./video-provider-clients.js";
 import { FalVideoProvider, SogniVideoProvider } from "./video-provider-clients.js";
 import { badRequest, conflict, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
@@ -45,6 +46,10 @@ const CLIP_DOWNLOAD_TIMEOUT_MS = 3 * 60_000;
 const CLIP_MAX_BYTES = 500 * 1024 * 1024;
 const CONTENT_TYPE_PREFIX = "video/";
 const MAX_REFERENCE_IMAGES = 4;
+/** DUR-4196 still-frame preview: the shortest allowed clip, polled synchronously -- see renderPreview's doc comment. */
+const PREVIEW_DURATION_SECONDS = VIDEO_SHOT_MIN_DURATION_SECONDS;
+const PREVIEW_POLL_INTERVAL_MS = 2_000;
+const PREVIEW_POLL_TIMEOUT_MS = 90_000;
 
 /** SSRF-guarded FetchImpl, reused for both provider API calls and downloading finished clips -- see safe-outbound-fetch.ts. */
 async function safeFetch(url: string, init?: RequestInit, maxResponseBytes = 8 * 1024 * 1024): Promise<Response> {
@@ -303,6 +308,200 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     return storylines.toShotSummary(await storylines.getShotRow(companyId, storylineId, shotId));
   }
 
+  /**
+   * DUR-4196: a cheap still-frame render of one shot -- same prompt and
+   * continuity/reference pictures the real render would use, but the
+   * shortest allowed clip duration, with only its LAST FRAME kept (the same
+   * extractLastFrameDataUri beginShotRender uses for continuity). Lets an
+   * operator QA composition/likeness before paying for a full-length render.
+   *
+   * Deliberately does NOT touch video_shot_render_jobs or shot.status (the
+   * real render pipeline's bookkeeping) -- only the shot's preview_*
+   * columns -- so it can run whether the shot is draft, done, or failed,
+   * and never races beginShotRender or the tick. Polls the provider
+   * synchronously, bounded by PREVIEW_POLL_TIMEOUT_MS, rather than going
+   * through the async tick: a 1-second clip finishes in well under that, and
+   * "one-click preview" means a direct answer, not a second job to poll from
+   * the UI.
+   */
+  async function renderPreview(companyId: string, storylineId: string, shotId: string, actor: VideoStorylineActor) {
+    await settings.assertAdvancedEnabled(companyId);
+    const storyline = await storylines.getStorylineRow(companyId, storylineId);
+    if (storyline.status === "stitching") {
+      throw conflict("A stitch is currently running for this storyline. Wait for it to finish before rendering a preview.");
+    }
+    const shot = await storylines.getShotRow(companyId, storylineId, shotId);
+    if (shot.status === "queued" || shot.status === "rendering") {
+      throw conflict("This shot is currently rendering. Wait for it to finish before rendering a preview.");
+    }
+
+    const providerId = (shot.providerId ?? storyline.providerId) as VideoStorylineProvider;
+    const model = shot.model ?? storyline.model;
+    const previewEstimate = estimateVideoStorylineCostCents([{ durationSeconds: PREVIEW_DURATION_SECONDS }], providerId);
+    if (storyline.budgetCapCents !== null && storyline.spentCents + previewEstimate.estimatedTotalCents > storyline.budgetCapCents) {
+      throw unprocessable(
+        `Rendering a preview (estimated ${previewEstimate.estimatedTotalCents} cents) would exceed the budget cap (${storyline.budgetCapCents} cents). Raise the cap first.`,
+      );
+    }
+
+    const apiKey = await resolveProviderApiKey(companyId, providerId, actor.agentId ?? actor.actorId);
+    const provider = buildProvider(providerId, apiKey, model);
+
+    let continuityImage: string | undefined;
+    const previous = await closestPreviousDoneShot(storyline.id, shot.orderIndex);
+    if (previous?.resultObjectKey && previous.resultProvider && previous.resultContentType) {
+      const clip = await downloadClipFromStorage(companyId, previous.resultProvider, previous.resultObjectKey);
+      if (clip) continuityImage = (await extractLastFrameDataUri(clip)) ?? undefined;
+    }
+    const referenceAssetIds = [...shot.lookReferenceAssetIds, ...storyline.characterReferenceAssetIds];
+    const referenceImages = await loadReferenceImages(db, companyId, referenceAssetIds);
+    const startImage = continuityImage ?? referenceImages[0];
+
+    const handle = await provider.start({
+      kind: "video",
+      prompt: shot.prompt,
+      model: model ?? undefined,
+      startImage,
+      referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
+      durationSeconds: PREVIEW_DURATION_SECONDS,
+    });
+
+    const deadline = nowOf().getTime() + PREVIEW_POLL_TIMEOUT_MS;
+    let outcome: MediaPollOutcome = { status: "running" };
+    while (nowOf().getTime() < deadline) {
+      outcome = await provider.poll(handle);
+      if (outcome.status !== "running") break;
+      await new Promise((resolve) => setTimeout(resolve, PREVIEW_POLL_INTERVAL_MS));
+    }
+    if (outcome.status === "running") {
+      try {
+        await provider.cancel(handle);
+      } catch {
+        // Best effort -- the request still fails either way.
+      }
+      throw unprocessable("The preview did not finish in time. Try again in a moment.");
+    }
+    if (outcome.status === "failed") {
+      throw unprocessable(`Preview render failed: ${outcome.error}`);
+    }
+
+    const { buffer, contentType } = await downloadResultBytes(outcome.result);
+    await assertMediaContentType(contentType);
+    const frameDataUri = await extractLastFrameDataUri(buffer);
+    if (!frameDataUri) {
+      throw unprocessable("Still-frame extraction needs ffmpeg, which is not available on this host.");
+    }
+    const match = /^data:([^;,]+);base64,(.*)$/s.exec(frameDataUri);
+    if (!match) throw new Error("extractLastFrameDataUri returned an unrecognized data URI");
+    const frameBuffer = Buffer.from(match[2]!, "base64");
+
+    const stored = await getStorageService().putFile({
+      companyId,
+      namespace: `video-storylines/${storyline.id}/previews`,
+      originalFilename: `shot-${String(shot.orderIndex).padStart(6, "0")}-preview.jpg`,
+      contentType: match[1]!,
+      body: frameBuffer,
+    });
+
+    const generatedAt = nowOf();
+    const [row] = await db
+      .update(videoShots)
+      .set({
+        previewProvider: stored.provider,
+        previewObjectKey: stored.objectKey,
+        previewContentType: stored.contentType,
+        previewByteSize: stored.byteSize,
+        previewSha256: stored.sha256,
+        previewGeneratedAt: generatedAt,
+        updatedAt: generatedAt,
+      })
+      .where(eq(videoShots.id, shotId))
+      .returning();
+    if (!row) throw new Error("Video shot preview update returned no row");
+
+    await db
+      .update(videoStorylines)
+      .set({ spentCents: storyline.spentCents + previewEstimate.estimatedTotalCents, updatedAt: generatedAt })
+      .where(eq(videoStorylines.id, storylineId));
+
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      action: "video_shot.preview_rendered",
+      entityType: "video_shot",
+      entityId: shotId,
+      details: { orderIndex: shot.orderIndex, costCents: previewEstimate.estimatedTotalCents },
+    });
+    return storylines.toShotSummary(row);
+  }
+
+  /**
+   * DUR-4170: stop an in-flight render cleanly. Only valid from "rendering"
+   * (an actual provider job may be running) or "paused" (stopped already,
+   * but the operator wants to abandon rather than re-render) -- "stitching"
+   * is explicitly refused rather than silently ignored, since stitchOne has
+   * no cancellation hook and would otherwise race this and clobber whatever
+   * status this sets once it finishes (see video-storyline-stitch.ts).
+   * Provider-side cancellation is best-effort (mirrors the tick's own
+   * give-up-after-timeout path above): a provider/network failure here must
+   * never block the storyline from reaching "cancelled".
+   */
+  async function cancelRender(companyId: string, storylineId: string, actor: VideoStorylineActor) {
+    const storyline = await storylines.getStorylineRow(companyId, storylineId);
+    if (storyline.status === "stitching") {
+      throw conflict("A stitch is currently running for this storyline. Wait for it to finish before cancelling.");
+    }
+    if (!["rendering", "paused"].includes(storyline.status)) {
+      throw conflict(`This storyline is ${storyline.status.replace(/_/g, " ")} and has no in-flight render to cancel.`);
+    }
+
+    const runningJobs = await db
+      .select()
+      .from(videoShotRenderJobs)
+      .where(and(eq(videoShotRenderJobs.storylineId, storylineId), eq(videoShotRenderJobs.status, "running")));
+
+    for (const job of runningJobs) {
+      try {
+        const apiKey = await resolveProviderApiKey(companyId, job.provider as VideoStorylineProvider, actor.agentId ?? actor.actorId);
+        const handle: MediaJobHandle = { externalId: job.externalId, model: job.model, provider: job.provider };
+        await buildProvider(job.provider as VideoStorylineProvider, apiKey, job.model).cancel(handle);
+      } catch (err) {
+        logger.warn({ err, jobId: job.id }, "video-storyline-render: best-effort provider cancel failed during cancelRender");
+      }
+      await db
+        .update(videoShotRenderJobs)
+        .set({ status: "failed", error: "Cancelled by user.", completedAt: nowOf(), updatedAt: nowOf() })
+        .where(eq(videoShotRenderJobs.id, job.id));
+    }
+
+    const runningShotIds = runningJobs.map((job) => job.shotId);
+    if (runningShotIds.length > 0) {
+      await db
+        .update(videoShots)
+        .set({ status: "failed", errorMessage: "Cancelled by user.", updatedAt: nowOf() })
+        .where(inArray(videoShots.id, runningShotIds));
+    }
+
+    await db
+      .update(videoStorylines)
+      .set({ status: "cancelled", errorMessage: null, updatedAt: nowOf() })
+      .where(eq(videoStorylines.id, storylineId));
+
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      action: "video_storyline.render_cancelled",
+      entityType: "video_storyline",
+      entityId: storylineId,
+      details: { cancelledJobCount: runningJobs.length },
+    });
+    return storylines.getStoryline(companyId, storylineId);
+  }
+
   async function assertMediaContentType(contentType: string): Promise<string> {
     const normalized = (contentType || "").trim().toLowerCase();
     if (!normalized.startsWith(CONTENT_TYPE_PREFIX)) {
@@ -440,5 +639,5 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     return { advanced, failed };
   }
 
-  return { estimate, startRender, reRenderShot, tick };
+  return { estimate, startRender, reRenderShot, renderPreview, cancelRender, tick };
 }

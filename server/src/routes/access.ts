@@ -1322,10 +1322,10 @@ async function assertCanManageCompanyMember(
   if (reason) throw forbidden(reason);
 }
 
-async function filterMemberDataByRole(
+function filterMemberDataByRole(
   members: CompanyMemberRecord[],
   actorRole: HumanCompanyMembershipRole | null,
-): Promise<Array<Omit<CompanyMemberRecord, "grants"> | CompanyMemberRecord>> {
+): Array<Omit<CompanyMemberRecord, "grants"> | CompanyMemberRecord> {
   return members.map((member) => {
     if (actorRole === "owner") {
       return member;
@@ -1381,7 +1381,7 @@ async function addCompanyMemberRemovalAccess(
         .then((rows) => rows.map((row) => row.userId)),
     )
     : new Set<string>();
-  const filtered = await filterMemberDataByRole(members, actorRole);
+  const filtered = filterMemberDataByRole(members, actorRole);
   return Promise.all(
     filtered.map(async (member) => {
       const reason = await getProtectedMemberReason(req, access, companyId, member, {

@@ -30,6 +30,7 @@ import {
   projects,
   routineRuns,
   routines,
+  routineTriggers,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -78,6 +79,7 @@ describeEmbeddedPostgres("pipeline routes", () => {
     await db.delete(issueComments);
     await db.delete(activityLog);
     await db.delete(routineRuns);
+    await db.delete(routineTriggers);
     await db.delete(heartbeatRuns);
     await db.delete(issues);
     await db.delete(executionWorkspaces);
@@ -303,6 +305,88 @@ describeEmbeddedPostgres("pipeline routes", () => {
     await http.post(`/api/cases/${blocked.body.case.id}/automations/retry-me/retry`).expect(200);
 
     await http.delete(`/api/pipelines/${pipelineId}/stages/${stageId}?moveCasesToStageId=${qaStage.body.id}`).expect(200);
+  });
+
+  it("lists pipelines with essential metadata and returns connected routines, triggers, approval state and watchers in the detail payload", async () => {
+    const company = await seedCompany();
+    const http = request(app(boardActor));
+    const agent = await seedAutomationAgent(company.id);
+
+    const pipeline = await http
+      .post(`/api/companies/${company.id}/pipelines`)
+      .send({ key: "canvas-detail", name: "Canvas detail" })
+      .expect(201);
+    const pipelineId = pipeline.body.id as string;
+    const inProgressStageId = pipeline.body.stages.find((stage: { key: string }) => stage.key === "in_progress").id as string;
+
+    await http
+      .patch(`/api/pipelines/${pipelineId}/stages/${inProgressStageId}`)
+      .send({
+        config: {
+          automation: {
+            assigneeAgentId: agent.id,
+            instructionsBody: "Draft the case output.",
+          },
+        },
+      })
+      .expect(200);
+
+    const listed = await http.get(`/api/companies/${company.id}/pipelines`).expect(200);
+    const listedPipeline = listed.body.find((row: { id: string }) => row.id === pipelineId);
+    expect(listedPipeline).toMatchObject({
+      id: pipelineId,
+      key: "canvas-detail",
+      stageCount: 5,
+      openCaseCount: 0,
+    });
+    expect(listedPipeline.stages).toHaveLength(5);
+
+    const detailBeforeTrigger = await http.get(`/api/pipelines/${pipelineId}`).expect(200);
+    const automatedStage = detailBeforeTrigger.body.stages.find((stage: { key: string }) => stage.key === "in_progress");
+    const routineId = automatedStage.config.automation.routineId as string;
+    await db.insert(routineTriggers).values({
+      companyId: company.id,
+      routineId,
+      kind: "schedule",
+      label: "Nightly run",
+      enabled: true,
+      cronExpression: "0 2 * * *",
+      timezone: "UTC",
+    });
+
+    const inReview = await http.post(`/api/pipelines/${pipelineId}/cases`).send({ caseKey: "case-needs-review", title: "Needs review" }).expect(201);
+    await http
+      .post(`/api/cases/${inReview.body.case.id}/transition`)
+      .send({ toStageKey: "review", expectedVersion: 1 })
+      .expect(200);
+
+    const detail = await http.get(`/api/pipelines/${pipelineId}`).expect(200);
+
+    expect(detail.body.routines).toHaveLength(1);
+    expect(detail.body.routines[0]).toMatchObject({
+      id: routineId,
+      stageKeys: ["in_progress"],
+      triggers: [
+        {
+          kind: "schedule",
+          label: "Nightly run",
+          enabled: true,
+          cronExpression: "0 2 * * *",
+          timezone: "UTC",
+        },
+      ],
+    });
+
+    const reviewStage = detail.body.stages.find((stage: { key: string }) => stage.key === "review");
+    expect(reviewStage.approvalState).toEqual({
+      required: true,
+      approver: { kind: "any_human", id: null },
+      pendingCount: 1,
+    });
+    const intakeStage = detail.body.stages.find((stage: { key: string }) => stage.key === "intake");
+    expect(intakeStage.approvalState).toEqual({ required: false, approver: null, pendingCount: 0 });
+
+    expect(detail.body.watchers).toEqual([]);
   });
 
   it("patches case content and workspaceRef in one service transaction", async () => {
