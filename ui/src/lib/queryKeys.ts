@@ -314,6 +314,17 @@ export const queryKeys = {
     stagedItems: (companyId: string, status?: string) =>
       ["product-grabber", "staged-items", companyId, status ?? "all"] as const,
   },
+  // Email: per-person mailbox -- inbox, compose, AI drafts only (human sends).
+  email: {
+    settings: (companyId: string) => ["email", "settings", companyId] as const,
+    accounts: (companyId: string) => ["email", "accounts", companyId] as const,
+    messages: (companyId: string, accountId: string, folder: string) =>
+      ["email", "messages", companyId, accountId, folder] as const,
+    search: (companyId: string, accountId: string, q: string, folder?: string) =>
+      ["email", "search", companyId, accountId, q, folder ?? "all"] as const,
+    message: (companyId: string, accountId: string, messageId: string) =>
+      ["email", "message", companyId, accountId, messageId] as const,
+  },
   // DUR-4004: "API with a key" tools.
   apiTools: {
     list: (companyId: string) => ["api-tools", companyId] as const,

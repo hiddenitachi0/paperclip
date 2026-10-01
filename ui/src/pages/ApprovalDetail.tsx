@@ -30,6 +30,7 @@ import { CheckCircle2, ChevronRight, Sparkles } from "lucide-react";
 import { formatAgentDisplayName, type ApprovalComment } from "@paperclipai/shared";
 import { MarkdownBody } from "../components/MarkdownBody";
 import { ApprovalPreviewPanel } from "../components/ApprovalPreviewPanel";
+import { DeployRunnerLogViewer } from "../components/DeployRunnerLogViewer";
 
 export function ApprovalDetail() {
   const { approvalId } = useParams<{ approvalId: string }>();
@@ -202,6 +203,7 @@ export function ApprovalDetail() {
   // plumbing. Non-persona approvals are untouched (see the coordination note
   // in DUR-177 about not restructuring this file more than items 16-18 need).
   const isPersonaApproval = approvalIsPersonaRequest(payload);
+  const isDeployApproval = payload.kind === "deploy";
   const TypeIcon = typeIcon[approval.type] ?? defaultTypeIcon;
   const branchInfo = approvalDeployBranchInfo(payload);
   const unsupportedDeployKindWarning = approvalUnsupportedDeployKindWarning(approval.type, payload);
@@ -448,6 +450,12 @@ export function ApprovalDetail() {
           )}
         </div>
       </div>
+
+      {isDeployApproval && resolvedCompanyId && (
+        <div className="border border-border rounded-lg p-4">
+          <DeployRunnerLogViewer companyId={resolvedCompanyId} approvalId={approval.id} active />
+        </div>
+      )}
 
       <div className="border border-border rounded-lg p-4 space-y-3">
         <h3 className="text-sm font-medium">Comments ({comments?.length ?? 0})</h3>

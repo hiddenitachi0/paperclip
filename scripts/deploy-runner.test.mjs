@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
 import http from "node:http";
+import https from "node:https";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { describe, it } from "node:test";
 
 // DUR-44 regression coverage: scripts/deploy-runner.sh must never mark an
 // approval "processed" without either delivering a comment for it (success,
@@ -262,6 +263,58 @@ const ONE_DAY_MS = 24 * ONE_HOUR_MS;
 
 test("deploy-runner.sh passes bash syntax validation", () => {
   assertSuccess(run("bash", ["-n", SCRIPT]), "bash -n");
+});
+
+// DUR-4233: distinguishes "the app answers 200" (health_check()) from "the public-facing TLS
+// cert/domain is trustworthy" (tls_domain_check()) -- a deploy whose app is fine but whose
+// cert is expiring/invalid is reported "needs_attention", not rolled back, since the previous
+// commit sits behind the exact same cert/DNS.
+function runTlsDomainCheck(url, env = {}) {
+  const script = `set -uo pipefail\nsource "${SCRIPT}"\ntls_domain_check "${url}"`;
+  return run("bash", ["-c", script], { env: { ...process.env, ...env } });
+}
+
+describe("tls_domain_check", () => {
+  it("skips the check entirely for a plain http:// address", () => {
+    const result = runTlsDomainCheck("http://example.invalid/health");
+    assertSuccess(result, "tls_domain_check http://");
+    assert.equal(result.stdout.trim(), "ok");
+  });
+
+  it("flags a domain that does not resolve", () => {
+    const result = runTlsDomainCheck("https://nonexistent-domain-xyz-123456.invalid/health");
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /did not resolve/);
+  });
+
+  it("flags an untrusted/self-signed certificate as needing attention", async () => {
+    const certDir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-tls-test-"));
+    try {
+      const keyPath = path.join(certDir, "key.pem");
+      const certPath = path.join(certDir, "cert.pem");
+      const genResult = run("openssl", [
+        "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "5",
+        "-keyout", keyPath, "-out", certPath, "-subj", "/CN=127.0.0.1",
+      ]);
+      assertSuccess(genResult, "openssl req");
+
+      const server = https.createServer(
+        { key: readFileSync(keyPath), cert: readFileSync(certPath) },
+        (_req, res) => res.end("ok"),
+      );
+      await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const port = server.address().port;
+      try {
+        const result = runTlsDomainCheck(`https://127.0.0.1:${port}/`);
+        assert.equal(result.status, 1, `expected a self-signed cert to fail verification\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+        assert.match(result.stdout, /TLS handshake.*failed/);
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    } finally {
+      rmSync(certDir, { recursive: true, force: true });
+    }
+  });
 });
 
 test("two approved deploy approvals for the same project in one poll cycle both end up with a comment", () => {
@@ -1035,6 +1088,164 @@ test("DUR-237: a successful deploy also records the deployed commit as a structu
       expectedCommit,
       "deploy-completion-gate.ts needs the structured commit field on a plain success too, not only 'carried' (DUR-237)",
     );
+  } finally {
+    scenario.cleanup();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// DUR-4233: when the app itself deploys cleanly but tls_domain_check flags the public address
+// (expiring cert, domain not resolving), the deploy must still be reported as a completed deploy
+// -- not a failure -- just with outcome "needs_attention" instead of "ok", and the comment must
+// say plainly that this is a cert/domain issue a rollback would not fix.
+test("DUR-4233: a successful deploy whose TLS/domain check fails is reported needs_attention, not failed", () => {
+  const scenario = makeScenario();
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-tls-attention-test-"));
+  try {
+    const targetPath = path.join(dir, "target");
+    const gitEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "test",
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+    };
+    const g = (args) => {
+      const result = spawnSync("git", args, { cwd: targetPath, encoding: "utf8", env: gitEnv });
+      assert.equal(result.status, 0, `git ${args.join(" ")} failed\n${result.stderr}`);
+      return result.stdout.trim();
+    };
+    mkdirSync(targetPath, { recursive: true });
+    g(["init", "--quiet", "-b", "custom"]);
+    writeFileSync(path.join(targetPath, "f.txt"), "A");
+    g(["add", "f.txt"]);
+    g(["commit", "--quiet", "-m", "A"]);
+
+    const project = {
+      id: "proj-1",
+      deployPolicy: {
+        enabled: true,
+        workspaceId: "ws-1",
+        deployKind: "custom",
+        deployTargetPath: targetPath,
+        healthCheckUrl: "https://example.invalid/health",
+      },
+      workspaces: [{ id: "ws-1", repoUrl: "https://example.invalid/repo.git", repoRef: "custom" }],
+    };
+    scenario.writeJson("project-proj-1.json", project);
+    scenario.writeJson("approval-aid-1.json", {
+      id: "aid-1",
+      payload: { projectId: "proj-1", workspaceId: "ws-1", commit: "irrelevant", kind: "deploy" },
+    });
+
+    const statusPath = path.join(scenario.dir, "status.jsonl");
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      run_recipe() { return 0; }
+      health_check() { return 0; }
+      tls_domain_check() { echo "TLS certificate for example.invalid expires in 3 day(s)"; return 1; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+        PAPERCLIP_DEPLOY_RUNNER_STATUS_PATH: statusPath,
+      },
+    });
+    assertSuccess(result, "process_approval");
+
+    const comments = scenario.commentsFor("aid-1");
+    assert.equal(comments.length, 1);
+    assert.match(comments[0], /is live and the app itself checks out/);
+    assert.match(comments[0], /Needs attention: TLS certificate for example\.invalid expires in 3 day\(s\)/);
+    assert.match(comments[0], /rolling back would not fix it/);
+    assert.doesNotMatch(comments[0], /Deploy failed/);
+
+    const statusLines = readFileSync(statusPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const entries = statusLines.filter((e) => e.approvalId === "aid-1");
+    assert.equal(entries.length, 2, `expected a started line followed by the outcome line, got: ${JSON.stringify(entries)}`);
+    const entry = entries[1];
+    assert.equal(entry.outcome, "needs_attention");
+  } finally {
+    scenario.cleanup();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-4233: a successful deploy whose TLS/domain check passes is reported with outcome=ok", () => {
+  const scenario = makeScenario();
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-tls-ok-test-"));
+  try {
+    const targetPath = path.join(dir, "target");
+    const gitEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "test",
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+    };
+    const g = (args) => {
+      const result = spawnSync("git", args, { cwd: targetPath, encoding: "utf8", env: gitEnv });
+      assert.equal(result.status, 0, `git ${args.join(" ")} failed\n${result.stderr}`);
+      return result.stdout.trim();
+    };
+    mkdirSync(targetPath, { recursive: true });
+    g(["init", "--quiet", "-b", "custom"]);
+    writeFileSync(path.join(targetPath, "f.txt"), "A");
+    g(["add", "f.txt"]);
+    g(["commit", "--quiet", "-m", "A"]);
+
+    const project = {
+      id: "proj-1",
+      deployPolicy: {
+        enabled: true,
+        workspaceId: "ws-1",
+        deployKind: "custom",
+        deployTargetPath: targetPath,
+        healthCheckUrl: "https://example.invalid/health",
+      },
+      workspaces: [{ id: "ws-1", repoUrl: "https://example.invalid/repo.git", repoRef: "custom" }],
+    };
+    scenario.writeJson("project-proj-1.json", project);
+    scenario.writeJson("approval-aid-1.json", {
+      id: "aid-1",
+      payload: { projectId: "proj-1", workspaceId: "ws-1", commit: "irrelevant", kind: "deploy" },
+    });
+
+    const statusPath = path.join(scenario.dir, "status.jsonl");
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      run_recipe() { return 0; }
+      health_check() { return 0; }
+      tls_domain_check() { echo "ok"; return 0; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+        PAPERCLIP_DEPLOY_RUNNER_STATUS_PATH: statusPath,
+      },
+    });
+    assertSuccess(result, "process_approval");
+
+    const comments = scenario.commentsFor("aid-1");
+    assert.equal(comments.length, 1);
+    assert.match(comments[0], /is live and healthy/);
+    assert.doesNotMatch(comments[0], /Needs attention/);
+
+    const statusLines = readFileSync(statusPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const entry = statusLines.filter((e) => e.approvalId === "aid-1" && e.outcome !== "started").pop();
+    assert.equal(entry.outcome, "ok");
   } finally {
     scenario.cleanup();
     rmSync(dir, { recursive: true, force: true });
@@ -3833,23 +4044,22 @@ test("DUR-3974: a deploy that dies between the stop and the recipe still has its
 // records every invocation and simulates success/failure per target file, and
 // `cli_json` is stubbed to return a canned credential the way the real
 // instance-admin-only route would.
-test("upload_via_sftp resolves the agent-bound credential, uploads only files that exist locally via a chmod-600 netrc, and never lets the credential value reach the log", () => {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-test-"));
-  try {
-    const targetDir = path.join(dir, "target");
-    mkdirSync(path.join(targetDir, "assets"), { recursive: true });
-    writeFileSync(path.join(targetDir, "index.html"), "<html></html>");
-    writeFileSync(path.join(targetDir, "assets", "app.js"), "console.log(1)");
-    // Deliberately no assets/missing.js on disk — the allowlist below names it anyway.
-
-    const binDir = path.join(dir, "bin");
-    mkdirSync(binDir, { recursive: true });
-    const curlCallsLog = path.join(dir, "curl-calls.log");
-    const netrcSnapshotLog = path.join(dir, "netrc-snapshot.log");
-    const fakeCurl = [
-      "#!/usr/bin/env bash",
-      "set -uo pipefail",
-      `printf '%s\\n' "$*" >> "${curlCallsLog}"`,
+// DUR-4236: a fake `curl` that understands both the transfer form
+// (`-T local sftp://.../path`) and the quote-command form (`-Q "verb args"
+// sftp://.../`) upload_via_sftp now issues for the staging-then-swap
+// convention. Every invocation is logged verbatim. By default everything
+// succeeds; a test can set failRegex to make any call whose full argument
+// string matches it fail instead (exit 1), which is how the swap-failure and
+// staging-failure tests below simulate a specific remote operation going
+// wrong without faking an entire SFTP server.
+function writeFakeCurl(binDir, { callsLog, netrcSnapshotLog, failRegex } = {}) {
+  const lines = [
+    "#!/usr/bin/env bash",
+    "set -uo pipefail",
+    `printf '%s\\n' "$*" >> "${callsLog}"`,
+  ];
+  if (netrcSnapshotLog) {
+    lines.push(
       'netrc=""',
       'args=("$@")',
       'n=${#args[@]}',
@@ -3861,16 +4071,101 @@ test("upload_via_sftp resolves the agent-bound credential, uploads only files th
       'if [ -n "$netrc" ]; then',
       `  { printf 'PERM=%s\\n' "$(stat -c %a "$netrc" 2>/dev/null)"; cat "$netrc"; } >> "${netrcSnapshotLog}" 2>/dev/null`,
       "fi",
-      'last="${args[$((n-1))]}"',
-      'case "$last" in',
-      "  *missing*) exit 7 ;;",
-      "  *) exit 0 ;;",
-      "esac",
-    ].join("\n");
-    writeFileSync(path.join(binDir, "curl"), fakeCurl, { mode: 0o755 });
+    );
+  }
+  if (failRegex) {
+    lines.push(`if printf '%s' "$*" | grep -Eq -- '${failRegex}'; then exit 1; fi`);
+  }
+  lines.push("exit 0");
+  writeFileSync(path.join(binDir, "curl"), lines.join("\n"), { mode: 0o755 });
+}
+
+test("upload_via_sftp resolves the agent-bound credential via a chmod-600 netrc, then stages and swaps every allowlisted file into place with a rename — never a direct write to the live path", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-test-"));
+  try {
+    const targetDir = path.join(dir, "target");
+    mkdirSync(path.join(targetDir, "assets"), { recursive: true });
+    writeFileSync(path.join(targetDir, "index.html"), "<html></html>");
+    writeFileSync(path.join(targetDir, "assets", "app.js"), "console.log(1)");
+
+    const binDir = path.join(dir, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const curlCallsLog = path.join(dir, "curl-calls.log");
+    const netrcSnapshotLog = path.join(dir, "netrc-snapshot.log");
+    writeFakeCurl(binDir, { callsLog: curlCallsLog, netrcSnapshotLog });
 
     const logFile = path.join(dir, "runner.log");
-    const allowlist = "index.html\\nassets/app.js\\nassets/missing.js";
+    const allowlist = "index.html\\nassets/app.js";
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      cli_json() { printf '{"kind":"sftp_password","value":"s3cr3t-value"}'; }
+      upload_via_sftp "aid-1" "${targetDir}" "$(printf '${allowlist}')" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1"
+      echo "STATUS=$?"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, PAPERCLIP_DEPLOY_RUNNER_LOG: logFile },
+    });
+    assert.match(result.stdout, /STATUS=0/, `expected success\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+
+    const calls = readFileSync(curlCallsLog, "utf8").trim().split("\n").filter(Boolean);
+
+    // Nothing ever writes straight to the live path — every -T transfer
+    // target lands under .deploy-staging/, and the live path is only ever
+    // touched by a -Q rename/mkdir/rm quote command.
+    const transferCalls = calls.filter((c) => c.includes(" -T "));
+    assert.equal(transferCalls.length, 2, `expected exactly one staging upload per allowlisted file, got: ${JSON.stringify(calls)}`);
+    for (const call of transferCalls) {
+      assert.ok(call.includes("/.deploy-staging/aid-1/"), `a file transfer must target the staging subdirectory, got: ${call}`);
+      assert.ok(!/sftp:\/\/[^ ]+\/var\/www\/site\/(index\.html|assets\/app\.js)(\s|$)/.test(call), `a file transfer must never target the live path directly, got: ${call}`);
+    }
+    assert.ok(
+      calls.some((c) => c.includes("-Q rename /var/www/site/.deploy-staging/aid-1/index.html /var/www/site/index.html")),
+      "index.html must be swapped into place with a rename from staging",
+    );
+    assert.ok(
+      calls.some((c) => c.includes("-Q rename /var/www/site/.deploy-staging/aid-1/assets/app.js /var/www/site/assets/app.js")),
+      "assets/app.js must be swapped into place with a rename from staging",
+    );
+    assert.ok(
+      calls.some((c) => c.includes("-Q mkdir /var/www/site/assets")),
+      "a nested destination directory must be created before the rename that needs it",
+    );
+    assert.ok(
+      calls.some((c) => c.includes("-Q rmdir /var/www/site/.deploy-staging/aid-1")),
+      "the per-release staging directory must be cleaned up after a successful swap",
+    );
+
+    const log = readFileSync(logFile, "utf8");
+    assert.doesNotMatch(log, /s3cr3t-value/, "the resolved credential value must never be written to the deploy-runner log");
+
+    const netrcSnapshot = readFileSync(netrcSnapshotLog, "utf8");
+    assert.match(netrcSnapshot, /PERM=600/, "the temporary .netrc file must be chmod 600");
+    assert.match(
+      netrcSnapshot,
+      /machine sftp\.example\.invalid login deployer password s3cr3t-value/,
+      "the netrc must carry the resolved host/username/password",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("upload_via_sftp fails closed and swaps nothing when an allowlisted file does not exist locally", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-missing-test-"));
+  try {
+    const targetDir = path.join(dir, "target");
+    mkdirSync(path.join(targetDir, "assets"), { recursive: true });
+    writeFileSync(path.join(targetDir, "index.html"), "<html></html>");
+    // Deliberately no assets/missing.js on disk — the allowlist below names it anyway.
+
+    const binDir = path.join(dir, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const curlCallsLog = path.join(dir, "curl-calls.log");
+    writeFakeCurl(binDir, { callsLog: curlCallsLog });
+
+    const logFile = path.join(dir, "runner.log");
+    const allowlist = "index.html\\nassets/missing.js";
     const script = `
       set -uo pipefail
       source "${SCRIPT}"
@@ -3888,22 +4183,285 @@ test("upload_via_sftp resolves the agent-bound credential, uploads only files th
     );
 
     const calls = readFileSync(curlCallsLog, "utf8").trim().split("\n").filter(Boolean);
-    assert.equal(calls.length, 2, `curl must only be invoked for files that actually exist locally, got: ${JSON.stringify(calls)}`);
-    assert.ok(calls.some((c) => c.includes("sftp://sftp.example.invalid:22/var/www/site/index.html")), "index.html must be uploaded");
-    assert.ok(calls.some((c) => c.includes("sftp://sftp.example.invalid:22/var/www/site/assets/app.js")), "assets/app.js must be uploaded");
     assert.ok(!calls.some((c) => c.includes("missing.js")), "the missing local file must never be handed to curl at all");
+    assert.ok(!calls.some((c) => c.includes("-Q rename")), "a missing allowlist entry must block the swap for every file, not just its own");
 
-    const log = readFileSync(logFile, "utf8");
-    assert.doesNotMatch(log, /s3cr3t-value/, "the resolved credential value must never be written to the deploy-runner log");
-    assert.match(log, /missing/, "the missing allowlist entry must be logged as a failure, not silently dropped");
+    assert.match(readFileSync(logFile, "utf8"), /missing/, "the missing allowlist entry must be logged as a failure, not silently dropped");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
-    const netrcSnapshot = readFileSync(netrcSnapshotLog, "utf8");
-    assert.match(netrcSnapshot, /PERM=600/, "the temporary .netrc file must be chmod 600");
-    assert.match(
-      netrcSnapshot,
-      /machine sftp\.example\.invalid login deployer password s3cr3t-value/,
-      "the netrc must carry the resolved host/username/password",
+test("DUR-4236: when one file fails to stage, nothing is swapped into the live path at all — no rename call is ever issued", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-stage-fail-test-"));
+  try {
+    const targetDir = path.join(dir, "target");
+    mkdirSync(targetDir, { recursive: true });
+    writeFileSync(path.join(targetDir, "index.html"), "<html></html>");
+    writeFileSync(path.join(targetDir, "broken.html"), "<html>broken</html>");
+
+    const binDir = path.join(dir, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const curlCallsLog = path.join(dir, "curl-calls.log");
+    // The staging upload of broken.html fails; index.html's staging upload still succeeds.
+    writeFakeCurl(binDir, { callsLog: curlCallsLog, failRegex: "-T [^ ]*broken\\.html" });
+
+    const logFile = path.join(dir, "runner.log");
+    const allowlist = "index.html\\nbroken.html";
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      cli_json() { printf '{"kind":"sftp_password","value":"s3cr3t-value"}'; }
+      upload_via_sftp "aid-1" "${targetDir}" "$(printf '${allowlist}')" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1"
+      echo "STATUS=$?"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, PAPERCLIP_DEPLOY_RUNNER_LOG: logFile },
+    });
+    assert.match(result.stdout, /STATUS=1/, `expected failure\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+
+    const calls = readFileSync(curlCallsLog, "utf8").trim().split("\n").filter(Boolean);
+    assert.ok(!calls.some((c) => c.includes("-Q rename")), `a failed staging upload must never lead to any live-path rename, got: ${JSON.stringify(calls)}`);
+    // Whatever did get staged (index.html) is cleaned back up rather than left behind.
+    assert.ok(
+      calls.some((c) => c.includes("-Q rm /var/www/site/.deploy-staging/aid-1/index.html")),
+      "the successfully staged file must be cleaned up when the overall upload fails",
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-4236: a swap whose rename fails restores the previous live file from its backup and reports failure", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-swap-fail-test-"));
+  try {
+    const targetDir = path.join(dir, "target");
+    mkdirSync(targetDir, { recursive: true });
+    writeFileSync(path.join(targetDir, "index.html"), "<html>new</html>");
+
+    const binDir = path.join(dir, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const curlCallsLog = path.join(dir, "curl-calls.log");
+    // The rename that swaps the staged file into place fails; everything else succeeds.
+    writeFakeCurl(binDir, {
+      callsLog: curlCallsLog,
+      failRegex: "-Q rename /var/www/site/\\.deploy-staging/aid-1/index\\.html /var/www/site/index\\.html",
+    });
+
+    const logFile = path.join(dir, "runner.log");
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      cli_json() { printf '{"kind":"sftp_password","value":"s3cr3t-value"}'; }
+      upload_via_sftp "aid-1" "${targetDir}" "index.html" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1"
+      echo "STATUS=$?"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, PAPERCLIP_DEPLOY_RUNNER_LOG: logFile },
+    });
+    assert.match(result.stdout, /STATUS=1/, `expected failure\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+
+    const calls = readFileSync(curlCallsLog, "utf8").trim().split("\n").filter(Boolean);
+    assert.ok(
+      calls.some((c) => c.includes("-Q rename /var/www/site/index.html /var/www/site/index.html.deploy-bak")),
+      "the previous live file must be moved aside before the swap is attempted",
+    );
+    assert.ok(
+      calls.some((c) => c.includes("-Q rename /var/www/site/index.html.deploy-bak /var/www/site/index.html")),
+      "a failed swap must restore the previous live file from its backup",
+    );
+    assert.match(readFileSync(logFile, "utf8"), /restoring the previous file/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("upload_via_sftp fails closed (no upload attempted) when no credential is bound to the requesting agent yet", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-nocred-test-"));
+  try {
+    const targetDir = path.join(dir, "target");
+    mkdirSync(targetDir, { recursive: true });
+    writeFileSync(path.join(targetDir, "index.html"), "<html></html>");
+
+    const binDir = path.join(dir, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const curlCallsLog = path.join(dir, "curl-calls.log");
+    writeFileSync(
+      path.join(binDir, "curl"),
+      ["#!/usr/bin/env bash", `printf '%s\\n' "$*" >> "${curlCallsLog}"`, "exit 0"].join("\n"),
+      { mode: 0o755 },
+    );
+
+    const logFile = path.join(dir, "runner.log");
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      cli_json() { printf '{"kind":null,"value":null}'; }
+      upload_via_sftp "aid-1" "${targetDir}" "index.html" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1"
+      echo "STATUS=$?"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, PAPERCLIP_DEPLOY_RUNNER_LOG: logFile },
+    });
+    assert.match(result.stdout, /STATUS=1/, `expected failure when no credential is bound\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.ok(!existsSync(curlCallsLog), "curl must never be invoked when no credential is bound yet");
+    assert.match(readFileSync(logFile, "utf8"), /no SFTP deploy credential is bound/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// DUR-4236: sftp_added_entries() is what lets a rollback tell "this file
+// existed in the version we're rolling back to" apart from "this release
+// introduced it", using git history at before_commit rather than the working
+// tree's current state (which has already moved on to after_commit by the
+// time a rollback runs).
+test("sftp_added_entries reports only allowlist entries absent from git at before_commit", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-added-entries-test-"));
+  try {
+    spawnSync("git", ["init", "--quiet", "-b", "custom"], { cwd: dir });
+    spawnSync("git", ["config", "user.email", "test@example.invalid"], { cwd: dir });
+    spawnSync("git", ["config", "user.name", "Test"], { cwd: dir });
+    writeFileSync(path.join(dir, "index.html"), "<html>v1</html>");
+    spawnSync("git", ["add", "."], { cwd: dir });
+    spawnSync("git", ["commit", "--quiet", "-m", "v1"], { cwd: dir });
+    const beforeCommit = spawnSync("git", ["rev-parse", "--short=12", "HEAD"], { cwd: dir, encoding: "utf8" }).stdout.trim();
+
+    // The new release adds a page and updates the existing one.
+    writeFileSync(path.join(dir, "index.html"), "<html>v2</html>");
+    writeFileSync(path.join(dir, "new-page.html"), "<html>new</html>");
+    spawnSync("git", ["add", "."], { cwd: dir });
+    spawnSync("git", ["commit", "--quiet", "-m", "v2"], { cwd: dir });
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      sftp_added_entries "${dir}" "$(printf 'index.html\\nnew-page.html')" "${beforeCommit}"
+    `;
+    const result = run("bash", ["-c", script]);
+    assertSuccess(result, "sftp_added_entries");
+    const added = result.stdout.trim().split("\n").filter(Boolean);
+    assert.deepEqual(added, ["new-page.html"], `expected only the genuinely new file, got: ${JSON.stringify(added)}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("sftp_added_entries is a no-op when before_commit is unknown (first-ever deploy)", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-added-entries-unknown-test-"));
+  try {
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      sftp_added_entries "${dir}" "index.html" "unknown"
+      echo "STATUS=$?"
+    `;
+    const result = run("bash", ["-c", script]);
+    assert.match(result.stdout, /^STATUS=0$/m, `expected a clean no-op\nstdout:\n${result.stdout}`);
+    assert.equal(result.stdout.replace(/STATUS=0\n?/, "").trim(), "", "expected no entries reported");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// DUR-4236: the rollback-only counterpart to upload_via_sftp that deletes
+// files a failed release added and the version being rolled back to never
+// had, so a rollback doesn't just overwrite shared files and leave new ones
+// live forever.
+test("sftp_remove_remote_entries deletes each given entry via the SFTP rm quote command, and refuses an unsafe path", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-remove-test-"));
+  try {
+    const binDir = path.join(dir, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const curlCallsLog = path.join(dir, "curl-calls.log");
+    writeFakeCurl(binDir, { callsLog: curlCallsLog });
+
+    const logFile = path.join(dir, "runner.log");
+    const entries = "new-page.html\\nhas space.html";
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      cli_json() { printf '{"kind":"sftp_password","value":"s3cr3t-value"}'; }
+      sftp_remove_remote_entries "aid-1" "$(printf '${entries}')" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1"
+      echo "STATUS=$?"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, PAPERCLIP_DEPLOY_RUNNER_LOG: logFile },
+    });
+    assert.match(result.stdout, /STATUS=1/, "expected failure overall because one entry is unsafe and refused");
+
+    const calls = readFileSync(curlCallsLog, "utf8").trim().split("\n").filter(Boolean);
+    assert.ok(calls.some((c) => c.includes("-Q rm /var/www/site/new-page.html")), "the safe entry must be removed");
+    assert.ok(!calls.some((c) => c.includes("has space.html")), "an entry with whitespace must never be handed to curl");
+    assert.match(readFileSync(logFile, "utf8"), /refusing to remove/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("sftp_remove_remote_entries is a no-op (no credential lookup, no curl) when there is nothing to remove", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-remove-noop-test-"));
+  try {
+    const binDir = path.join(dir, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const curlCallsLog = path.join(dir, "curl-calls.log");
+    writeFakeCurl(binDir, { callsLog: curlCallsLog });
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      cli_json() { echo "cli_json must not be called when there is nothing to remove" >&2; exit 1; }
+      sftp_remove_remote_entries "aid-1" "" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1"
+      echo "STATUS=$?"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: { ...process.env, PATH: `${binDir}:${process.env.PATH}` },
+    });
+    assert.match(result.stdout, /STATUS=0/, `expected a clean no-op\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.ok(!existsSync(curlCallsLog), "curl must never be invoked when there is nothing to remove");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// DUR-4236: wiring check — maybe_rollback's sftp branch must hand whatever
+// sftp_added_entries it was given to sftp_remove_remote_entries, on top of
+// the existing re-upload of the old allowlist. Both are stubbed so this
+// isolates the wiring from either function's own (separately tested) logic.
+test("maybe_rollback cleans up added files via sftp_remove_remote_entries when rolling back an sftp deploy", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-maybe-rollback-sftp-test-"));
+  try {
+    const targetDir = path.join(dir, "target");
+    mkdirSync(targetDir, { recursive: true });
+    spawnSync("git", ["init", "--quiet", "-b", "custom"], { cwd: targetDir });
+
+    const callsLog = path.join(dir, "calls.log");
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      DV_ROLLBACK="git_previous"
+      DV_DEPLOY_TRANSPORT="sftp"
+      DV_DEPLOY_TARGET_PATH="${targetDir}"
+      DV_SFTP_ALLOWLIST="index.html"
+      DV_SFTP_HOST="sftp.example.invalid"
+      DV_SFTP_PORT="22"
+      DV_SFTP_USERNAME="deployer"
+      DV_SFTP_REMOTE_PATH="/var/www/site"
+      DV_REQUESTING_AGENT_ID="agent-1"
+      company_id="co-1"
+      capture_failure_diagnostics() { printf ''; }
+      upload_via_sftp() { echo "upload_via_sftp $*" >> "${callsLog}"; return 0; }
+      sftp_remove_remote_entries() { echo "sftp_remove_remote_entries $*" >> "${callsLog}"; return 0; }
+      maybe_rollback "aid-1" "before123" "after456" "$(printf 'new-page.html')"
+    `;
+    const result = run("bash", ["-c", script]);
+    assertSuccess(result, "maybe_rollback");
+
+    const calls = existsSync(callsLog) ? readFileSync(callsLog, "utf8").trim().split("\n").filter(Boolean) : [];
+    assert.ok(calls.some((c) => c.startsWith("upload_via_sftp")), "the old allowlist must still be re-uploaded");
+    const removeCall = calls.find((c) => c.startsWith("sftp_remove_remote_entries"));
+    assert.ok(removeCall, `expected sftp_remove_remote_entries to be called, got: ${JSON.stringify(calls)}`);
+    assert.ok(removeCall.includes("new-page.html"), "the added-entries list must be passed through to the cleanup call");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
