@@ -132,7 +132,7 @@ export { companySpeechSettings, speechUsageEvents } from "./speech.js";
 export { dataConnections, dataDatasetSources, type DataConnectionObserved } from "./data_connections.js";
 export { dataReadEvents } from "./data_read_events.js";
 export { trustedCodeFingerprints } from "./trusted_code_fingerprints.js";
-export { watchers, watcherPricePoints, watcherAlerts } from "./watchers.js";
+export { watchers, watcherPricePoints, watcherAlerts, watcherWebPageSnapshots } from "./watchers.js";
 export { morningReportOutbox } from "./morning_report.js";
 export { mailInboxes, mailInboxFilters, mailSecretaryItems } from "./mail_secretary.js";
 export { paymentNotices } from "./payment_notices.js";

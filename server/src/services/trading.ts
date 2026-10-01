@@ -3,6 +3,7 @@ import type { Db } from "@paperclipai/db";
 import { approvals, tradingOrders, tradingStrategies } from "@paperclipai/db";
 import {
   TRADING_CIRCUIT_BREAKER_MAX_CONSECUTIVE_ERRORS,
+  TRADING_CIRCUIT_BREAKER_PRICE_JUMP_PCT,
   TRADING_TICK_BATCH,
   TRADING_TRADE_APPROVAL_EXPIRY_MS,
   evaluateTradingRule,
@@ -20,7 +21,7 @@ import { notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { approvalService } from "./approvals.js";
 import { ccxtTradingMarketData, isTradingMarketDataError, type TradingMarketDataSource } from "./trading-market-data.js";
-import { evaluateTradingRiskGate, tradingFeeNok } from "./trading-risk-gate.js";
+import { evaluateTradingRiskGate, singleTickPriceJumpPct, tradingFeeNok } from "./trading-risk-gate.js";
 import { tradingLedgerService } from "./trading-ledger.js";
 
 /**
@@ -377,6 +378,12 @@ export function tradingService(db: Db, deps: TradingServiceDeps = {}) {
     if (isTradingMarketDataError(quote)) {
       await recordTickFailure(row, quote.message, now);
       return quote.kind === "upstream" || quote.kind === "no_data" ? "error" : "halted";
+    }
+
+    const jumpPct = singleTickPriceJumpPct(candles.closes);
+    if (jumpPct !== null && jumpPct > TRADING_CIRCUIT_BREAKER_PRICE_JUMP_PCT) {
+      await haltStrategy(row, "circuit_breaker", now, { reason: "single_tick_price_jump", jumpPct });
+      return "halted";
     }
 
     const signal = evaluateTradingRule(candles.closes, ruleConfig);
