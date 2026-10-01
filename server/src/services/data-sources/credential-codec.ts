@@ -36,6 +36,8 @@ export function credentialSecretValues(credential: DataConnectionCredentialInput
       return [credential.consumerSecret, credential.consumerKey];
     case "api_token":
       return [credential.apiToken];
+    case "paperless_api_token":
+      return [credential.apiToken];
     case "password":
       return [credential.password];
     case "private_key":
@@ -52,6 +54,8 @@ export function encodeCredential(credential: DataConnectionCredentialInput): str
     case "consumer_key_secret":
       return JSON.stringify({ consumerKey: credential.consumerKey, consumerSecret: credential.consumerSecret });
     case "api_token":
+      return credential.apiToken;
+    case "paperless_api_token":
       return credential.apiToken;
     case "password":
       return credential.password;
@@ -100,6 +104,8 @@ export function decodeCredential(kind: string, raw: string): DataConnectionCrede
     }
     case "api_token":
       return raw ? { kind: "api_token", apiToken: raw } : unreadable();
+    case "paperless_api_token":
+      return raw ? { kind: "paperless_api_token", apiToken: raw } : unreadable();
     case "password":
       return raw ? { kind: "password", password: raw } : unreadable();
     case "private_key": {

@@ -21,9 +21,9 @@ import { companySecrets } from "./company_secrets.js";
  * DUR-3972 slice S1 / DUR-3997 slice 3: a company's connection to an outside
  * business-data source, made by a board user in company settings.
  *
- * Kinds: 'shopify' and the three file-server kinds 'ftp_file', 'ftps_file',
- * 'sftp_file' (readable today), plus 'woocommerce' and 'fiken' (accepted and
- * stored; their adapters come later). Shopify keeps its own columns from S1
+ * Kinds: 'shopify', the three file-server kinds 'ftp_file', 'ftps_file',
+ * 'sftp_file', and 'paperless_ngx' (readable today), plus 'woocommerce' and
+ * 'fiken' (accepted and stored; their adapters come later). Shopify keeps its own columns from S1
  * (shop_domain, api_version); every other kind stores its non-secret settings
  * in `config` and leaves those two columns null. The check constraints below
  * tie the shape to the kind, so a Shopify row without a *.myshopify.com
@@ -64,7 +64,15 @@ export type DataConnectionObserved = {
   checkedAt?: string | null;
 };
 
-export const DATA_CONNECTION_KIND_VALUES = ["shopify", "woocommerce", "fiken", "ftp_file", "ftps_file", "sftp_file"] as const;
+export const DATA_CONNECTION_KIND_VALUES = [
+  "shopify",
+  "woocommerce",
+  "fiken",
+  "ftp_file",
+  "ftps_file",
+  "sftp_file",
+  "paperless_ngx",
+] as const;
 export const DATA_CONNECTION_ACCESS_VALUES = ["read", "read_write"] as const;
 export const DATA_CONNECTION_CREDENTIAL_KIND_VALUES = [
   "admin_access_token",
@@ -73,8 +81,9 @@ export const DATA_CONNECTION_CREDENTIAL_KIND_VALUES = [
   "api_token",
   "password",
   "private_key",
+  "paperless_api_token",
 ] as const;
-export const DATA_DATASET_VALUES = ["sales", "finance", "custom"] as const;
+export const DATA_DATASET_VALUES = ["sales", "finance", "custom", "documents"] as const;
 
 export const dataConnections = pgTable(
   "data_connections",
@@ -111,7 +120,7 @@ export const dataConnections = pgTable(
     idCompanyUq: unique("data_connections_id_company_uq").on(table.id, table.companyId),
     kindCheck: check(
       "data_connections_kind_check",
-      sql`${table.kind} IN ('shopify', 'woocommerce', 'fiken', 'ftp_file', 'ftps_file', 'sftp_file')`,
+      sql`${table.kind} IN ('shopify', 'woocommerce', 'fiken', 'ftp_file', 'ftps_file', 'sftp_file', 'paperless_ngx')`,
     ),
     // A Shopify row must carry a *.myshopify.com address and an API version
     // (the S1 rule, unchanged for Shopify); other kinds keep their settings in
@@ -124,7 +133,7 @@ export const dataConnections = pgTable(
     // SFTP-only; plain FTP and FTPS take a password.
     credentialKindCheck: check(
       "data_connections_credential_kind_check",
-      sql`(${table.kind} = 'shopify' AND ${table.credentialKind} IN ('admin_access_token', 'client_credentials')) OR (${table.kind} = 'woocommerce' AND ${table.credentialKind} = 'consumer_key_secret') OR (${table.kind} = 'fiken' AND ${table.credentialKind} = 'api_token') OR (${table.kind} IN ('ftp_file', 'ftps_file') AND ${table.credentialKind} = 'password') OR (${table.kind} = 'sftp_file' AND ${table.credentialKind} IN ('password', 'private_key'))`,
+      sql`(${table.kind} = 'shopify' AND ${table.credentialKind} IN ('admin_access_token', 'client_credentials')) OR (${table.kind} = 'woocommerce' AND ${table.credentialKind} = 'consumer_key_secret') OR (${table.kind} = 'fiken' AND ${table.credentialKind} = 'api_token') OR (${table.kind} IN ('ftp_file', 'ftps_file') AND ${table.credentialKind} = 'password') OR (${table.kind} = 'sftp_file' AND ${table.credentialKind} IN ('password', 'private_key')) OR (${table.kind} = 'paperless_ngx' AND ${table.credentialKind} = 'paperless_api_token')`,
     ),
     accessCheck: check("data_connections_access_check", sql`${table.access} IN ('read', 'read_write')`),
     statusCheck: check(
@@ -169,7 +178,7 @@ export const dataDatasetSources = pgTable(
     }).onDelete("cascade"),
     datasetCheck: check(
       "data_dataset_sources_dataset_check",
-      sql`${table.dataset} IN ('sales', 'finance', 'custom')`,
+      sql`${table.dataset} IN ('sales', 'finance', 'custom', 'documents')`,
     ),
   }),
 );

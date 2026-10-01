@@ -67,10 +67,11 @@ d("DUR-3997 migration 0173_data_connection_kinds", () => {
 
   it("widened the kind, credential-kind and dataset rules and relaxed the Shopify-only columns", async () => {
     const s = await snapshot();
-    // 0174 (file servers) widens this further with ftp_file/ftps_file at
-    // migrated head; the four kinds 0173 introduced are all present.
+    // 0174 (file servers) widens this further with ftp_file/ftps_file, and
+    // 0208 (paperless-ngx) further still with paperless_ngx, at migrated
+    // head; the four kinds 0173 introduced are all present.
     expect(s.kind).toBe(
-      "CHECK ((kind = ANY (ARRAY['shopify'::text, 'woocommerce'::text, 'fiken'::text, 'ftp_file'::text, 'ftps_file'::text, 'sftp_file'::text])))",
+      "CHECK ((kind = ANY (ARRAY['shopify'::text, 'woocommerce'::text, 'fiken'::text, 'ftp_file'::text, 'ftps_file'::text, 'sftp_file'::text, 'paperless_ngx'::text])))",
     );
     expect(s.shopDomain).toContain("kind <> 'shopify'::text");
     expect(s.shopDomain).toContain("shop_domain IS NOT NULL");
@@ -81,10 +82,11 @@ d("DUR-3997 migration 0173_data_connection_kinds", () => {
       "kind = 'woocommerce'::text) AND (credential_kind = 'consumer_key_secret'::text",
       "kind = 'fiken'::text) AND (credential_kind = 'api_token'::text",
       "kind = 'sftp_file'::text) AND (credential_kind = ANY (ARRAY['password'::text, 'private_key'::text]",
+      "kind = 'paperless_ngx'::text) AND (credential_kind = 'paperless_api_token'::text",
     ]) {
       expect(s.credentialKind, pair).toContain(pair);
     }
-    expect(s.dataset).toBe("CHECK ((dataset = ANY (ARRAY['sales'::text, 'finance'::text, 'custom'::text])))");
+    expect(s.dataset).toBe("CHECK ((dataset = ANY (ARRAY['sales'::text, 'finance'::text, 'custom'::text, 'documents'::text])))");
     // Untouched on purpose.
     expect(s.pk).toBe("PRIMARY KEY (company_id, dataset)");
     expect(s.fk).toBe("FOREIGN KEY (connection_id, company_id) REFERENCES data_connections(id, company_id) ON DELETE CASCADE");
@@ -123,12 +125,14 @@ d("DUR-3997 migration 0173_data_connection_kinds", () => {
     for (const statement of statements) {
       await db.execute(sql.raw(statement));
     }
-    // 0174 widens the same kind/credential-kind/access constraints AFTER 0173,
-    // so re-running 0173 alone reverts them; re-run 0174 too to restore the
-    // migrated-head state this snapshot was taken at. Each file stays a no-op
-    // on the state its own predecessor leaves.
-    for (const statement of statementsOf(fileURLToPath(new URL("./migrations/0174_file_server_connections.sql", import.meta.url)))) {
-      await db.execute(sql.raw(statement));
+    // 0174 and 0208 both widen the same kind/credential-kind/dataset
+    // constraints AFTER 0173, so re-running 0173 alone reverts them; re-run
+    // both too to restore the migrated-head state this snapshot was taken
+    // at. Each file stays a no-op on the state its own predecessor leaves.
+    for (const tag of ["0174_file_server_connections", "0208_paperless_ngx_connection"]) {
+      for (const statement of statementsOf(fileURLToPath(new URL(`./migrations/${tag}.sql`, import.meta.url)))) {
+        await db.execute(sql.raw(statement));
+      }
     }
     const after = await snapshot();
     expect(after).toEqual(before);

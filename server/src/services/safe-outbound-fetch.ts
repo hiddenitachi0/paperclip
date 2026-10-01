@@ -399,6 +399,143 @@ export function createWooCommerceOutboundPolicy(storeUrl: string): OutboundHostP
   };
 }
 
+/**
+ * paperless-ngx (DUR-4302): each company's container lives on the host's
+ * internal network, never publicly reachable, one port per company -- the
+ * mirror image of every policy above, which requires https and a *public*
+ * address. This policy pins to the exact host and port recorded on that
+ * company's own connection row (set only by a board owner/admin or a host
+ * step, never by an agent or a tool call) and the fetch built from it
+ * (createPinnedInternalFetch) refuses:
+ *   - any other host or port than the one pinned,
+ *   - any redirect at all (none are ever followed, even same-host),
+ *   - any resolved address that is NOT private/internal -- so a DNS answer
+ *     that later points the pinned name at a public address is refused at
+ *     request time, not followed.
+ * Nothing here reaches the public internet; it is the one transport allowed
+ * to reach an internal address at all, and only this one, pinned, host:port.
+ */
+export interface PinnedInternalHostPolicy {
+  sourceKind: "paperless_ngx";
+  protocol: "http:" | "https:";
+  host: string;
+  port: number;
+  timeoutMs: number;
+  maxResponseBytes: number;
+}
+
+/** Built from the host/port on that company's own `paperless_ngx` connection row. Never from input at request time. */
+export function createPaperlessNgxOutboundPolicy(host: string, port: number): PinnedInternalHostPolicy {
+  return {
+    sourceKind: "paperless_ngx",
+    protocol: "http:",
+    host: host.toLowerCase(),
+    port,
+    timeoutMs: DATA_SOURCE_REQUEST_TIMEOUT_MS,
+    maxResponseBytes: DATA_SOURCE_MAX_RESPONSE_BYTES,
+  };
+}
+
+/**
+ * A fetch that can reach only the single pinned host:port in `policy`, and
+ * only at a private/internal address. The opposite address rule from
+ * createSafeOutboundFetch on purpose: this transport's whole point is to
+ * reach a container that is never publicly reachable, so a resolved address
+ * that turns out to be public is refused, not trusted.
+ */
+export function createPinnedInternalFetch(
+  policy: PinnedInternalHostPolicy,
+  deps: SafeOutboundFetchDeps = {},
+): OutboundFetch {
+  const guarded = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    if (typeof input !== "string" && !(input instanceof URL)) {
+      throw new SafeOutboundFetchError("invalid_url", "The address is not valid.");
+    }
+    const url = input.toString();
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new SafeOutboundFetchError("invalid_url", "The address is not valid.");
+    }
+    if (parsed.protocol !== policy.protocol) {
+      throw new SafeOutboundFetchError(
+        "protocol_not_allowed",
+        `Only ${policy.protocol.replace(/:$/, "")} is allowed for paperless-ngx.`,
+      );
+    }
+    if (parsed.username || parsed.password) {
+      throw new SafeOutboundFetchError("credentials_in_url", "The address cannot contain a username or password.");
+    }
+    const host = parsed.hostname.toLowerCase();
+    const defaultPort = policy.protocol === "https:" ? 443 : 80;
+    const port = parsed.port ? Number(parsed.port) : defaultPort;
+    if (host !== policy.host || port !== policy.port) {
+      throw new SafeOutboundFetchError(
+        "host_not_allowed",
+        "This address does not match the paperless-ngx container configured for this company.",
+      );
+    }
+
+    const signal = init?.signal
+      ? AbortSignal.any([AbortSignal.timeout(policy.timeoutMs), init.signal])
+      : AbortSignal.timeout(policy.timeoutMs);
+    let target: ValidatedFetchTarget;
+    try {
+      target = await validateAndResolveFetchUrl(parsed.toString(), {
+        lookup: deps.lookup,
+        // Inverted from every public-facing policy: every resolved address
+        // must be private/internal, or the request is refused.
+        isBlockedAddress: (ip) => !isNonPublicAddress(ip),
+        requireAllPublic: true,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      if (message.startsWith("All resolved IPs") || message.includes("must be public")) {
+        throw new SafeOutboundFetchError(
+          "address_not_internal",
+          `${host} resolved to a public address and will not be contacted.`,
+        );
+      }
+      throw new SafeOutboundFetchError("dns_failed", `Could not find the address ${host}.`);
+    }
+
+    let response: PinnedHttpResponse;
+    try {
+      response = await executePinnedHttpRequest(target, { method: init?.method, headers: init?.headers, body: init?.body }, signal, {
+        maxResponseBytes: policy.maxResponseBytes,
+        testOnlyDial: deps.testOnlyDial,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      if (message.startsWith("Response body exceeded")) {
+        throw new SafeOutboundFetchError("response_too_large", `The response from ${host} was too large.`);
+      }
+      if (signal.aborted) {
+        throw new SafeOutboundFetchError("timeout", `${host} did not respond within ${Math.round(policy.timeoutMs / 1000)} seconds.`);
+      }
+      throw new SafeOutboundFetchError("network_error", `Could not reach ${host}.`);
+    }
+
+    // No redirect is ever followed, same host or not: the only valid
+    // destination is the one pinned host:port.
+    if (response.status >= 300 && response.status < 400) {
+      throw new SafeOutboundFetchError(
+        "redirect_refused",
+        `${host} tried to redirect the request to another address. That is not allowed.`,
+      );
+    }
+
+    const bodyAllowed = response.status !== 204 && response.status !== 205 && response.status >= 200;
+    return new Response(bodyAllowed ? new Uint8Array(response.bodyBytes) : null, {
+      status: response.status < 200 || response.status > 599 ? 502 : response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
+  };
+  return ((input: RequestInfo | URL, init?: RequestInit) => guarded(input, init)) as OutboundFetch;
+}
+
 export type SafeOutboundRefusalCode =
   | "invalid_url"
   | "protocol_not_allowed"
@@ -406,6 +543,7 @@ export type SafeOutboundRefusalCode =
   | "credentials_in_url"
   | "port_not_allowed"
   | "address_not_public"
+  | "address_not_internal"
   | "dns_failed"
   | "redirect_refused"
   | "response_too_large"

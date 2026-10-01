@@ -27,6 +27,7 @@ export type SecretKindProvider =
   | "github"
   | "shopify"
   | "fiken"
+  | "paperless_ngx"
   | "telegram"
   | "slack"
   | "brave"
@@ -73,6 +74,7 @@ export const SECRET_KIND_IDS = [
   "github_token",
   "shopify_admin_token",
   "fiken_api_token",
+  "paperless_ngx_api_token",
   "telegram_bot_token",
   "slack_bot_token",
   "brave_search_api_key",
@@ -191,6 +193,14 @@ export const SECRET_KINDS: readonly SecretKindDescriptor[] = [
     label: "Fiken API token",
     description: "Token for the Fiken accounting API, used by the Fiken data source.",
     provider: "fiken",
+    category: "data_source",
+    testable: false,
+  },
+  {
+    id: "paperless_ngx_api_token",
+    label: "paperless-ngx API token",
+    description: "Token for this company's own paperless-ngx container, used by the Documents data source.",
+    provider: "paperless_ngx",
     category: "data_source",
     testable: false,
   },

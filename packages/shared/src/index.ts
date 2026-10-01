@@ -1444,6 +1444,7 @@ export {
   createFikenConnectionSchema,
   createFtpFileConnectionSchema,
   createFtpsFileConnectionSchema,
+  createPaperlessNgxConnectionSchema,
   createSftpFileConnectionSchema,
   createShopifyConnectionSchema,
   createWooCommerceConnectionSchema,
@@ -1458,6 +1459,9 @@ export {
   normalizeRemotePathInput,
   normalizeShopDomainInput,
   normalizeStoreUrlInput,
+  PAPERLESS_NGX_HOST_MESSAGE,
+  paperlessNgxConnectionConfigSchema,
+  paperlessNgxCredentialSchema,
   setDatasetSourceSchema,
   sftpCredentialSchema,
   sftpFileConnectionConfigSchema,
@@ -1484,6 +1488,7 @@ export {
   type FileServerConnectionConfig,
   type FileServerCredentialInput,
   type FileServerKind,
+  type PaperlessNgxCredentialInput,
   type SetDatasetSourceInput,
   type SftpCredentialInput,
   type ShopifyCredentialInput,
@@ -2526,6 +2531,8 @@ export {
   type VideoStorylineShotProgress,
   type VideoStorylineStatus,
 } from "./video-storylines.js";
+
+export { DOCUMENTS_PLUGIN_KEY, DOCUMENTS_SETTINGS_KEY } from "./documents.js";
 
 export {
   DEFAULT_TRADING_RISK_CONFIG,

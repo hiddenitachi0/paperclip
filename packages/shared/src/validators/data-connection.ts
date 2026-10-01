@@ -20,7 +20,7 @@ import { z } from "zod";
  * unchanged.
  */
 
-export const DATA_CONNECTION_KINDS = ["shopify", "woocommerce", "fiken", "ftp_file", "ftps_file", "sftp_file"] as const;
+export const DATA_CONNECTION_KINDS = ["shopify", "woocommerce", "fiken", "ftp_file", "ftps_file", "sftp_file", "paperless_ngx"] as const;
 export type DataConnectionKind = (typeof DATA_CONNECTION_KINDS)[number];
 
 /**
@@ -59,6 +59,7 @@ export const DATA_CONNECTION_KIND_LABELS: Record<DataConnectionKind, string> = {
   ftp_file: "FTP server",
   ftps_file: "FTPS server (encrypted)",
   sftp_file: "SFTP server (encrypted)",
+  paperless_ngx: "paperless-ngx",
 };
 
 /**
@@ -69,7 +70,13 @@ export const DATA_CONNECTION_KIND_LABELS: Record<DataConnectionKind, string> = {
  * what the settings screen shows before anything is saved, and a test keeps
  * the two in step.
  */
-export const SUPPORTED_DATA_CONNECTION_KINDS: readonly DataConnectionKind[] = ["shopify", "ftp_file", "ftps_file", "sftp_file"];
+export const SUPPORTED_DATA_CONNECTION_KINDS: readonly DataConnectionKind[] = [
+  "shopify",
+  "ftp_file",
+  "ftps_file",
+  "sftp_file",
+  "paperless_ngx",
+];
 
 /**
  * `read_write` exists for file-server connections only (the company's own
@@ -93,6 +100,7 @@ export const DATA_CONNECTION_CREDENTIAL_KINDS = [
   "api_token",
   "password",
   "private_key",
+  "paperless_api_token",
 ] as const;
 export type DataConnectionCredentialKind = (typeof DATA_CONNECTION_CREDENTIAL_KINDS)[number];
 
@@ -103,6 +111,7 @@ export const DATA_CONNECTION_CREDENTIAL_KINDS_BY_KIND: Record<DataConnectionKind
   ftp_file: ["password"],
   ftps_file: ["password"],
   sftp_file: ["password", "private_key"],
+  paperless_ngx: ["paperless_api_token"],
 };
 
 export const DATA_CONNECTION_STATUSES = ["draft", "active", "error", "disabled"] as const;
@@ -113,7 +122,7 @@ export type DataConnectionStatus = (typeof DATA_CONNECTION_STATUSES)[number];
  * today; "finance" (Fiken) and "custom" (files) are accepted by the database
  * so those kinds can be granted when their adapters ship.
  */
-export const DATA_DATASETS = ["sales", "finance", "custom"] as const;
+export const DATA_DATASETS = ["sales", "finance", "custom", "documents"] as const;
 export type DataDataset = (typeof DATA_DATASETS)[number];
 
 export const DATA_READ_CHANNELS = ["quick_chat", "telegram", "settings_test"] as const;
@@ -302,6 +311,18 @@ export const fikenCredentialSchema = z.object({
 }).strict();
 export type FikenCredentialInput = z.infer<typeof fikenCredentialSchema>;
 
+/** A paperless-ngx API token (Settings → API tokens in that company's own container). */
+export const paperlessNgxCredentialSchema = z.object({
+  kind: z.literal("paperless_api_token"),
+  apiToken: z
+    .string()
+    .trim()
+    .min(16, "The API token is too short. Paste the whole value from paperless-ngx.")
+    .max(512)
+    .refine(noWhitespace, { message: "The API token must be one continuous string without spaces." }),
+}).strict();
+export type PaperlessNgxCredentialInput = z.infer<typeof paperlessNgxCredentialSchema>;
+
 /** FTP, FTPS and SFTP: a password. */
 export const fileServerPasswordCredentialSchema = z.object({
   kind: z.literal("password"),
@@ -340,6 +361,7 @@ export const dataConnectionCredentialSchema = z.discriminatedUnion("kind", [
   wooCommerceCredentialSchema,
   fikenCredentialSchema,
   ...sftpCredentialSchema.options,
+  paperlessNgxCredentialSchema,
 ]);
 export type DataConnectionCredentialInput = z.infer<typeof dataConnectionCredentialSchema>;
 
@@ -370,6 +392,44 @@ export const createFikenConnectionSchema = z.object({
   name: connectionNameSchema("Fiken"),
   companySlug: fikenCompanySlugSchema,
   credential: fikenCredentialSchema,
+  dailyLookupCap: dailyLookupCapSchema.optional(),
+}).strict();
+
+/**
+ * One paperless-ngx container per company (DUR-4302), bound to an
+ * internal/localhost-only address on the host -- the opposite of every other
+ * kind's address rule above, which requires a *public* https name. This is
+ * deliberately NOT `storeUrlSchema`/`isPublicLookingHostName`: those refuse
+ * localhost, bare names and .internal/.lan suffixes, which is exactly the
+ * shape a company's own container has. Set only by a board owner/admin (or a
+ * host step), never by an agent or a tool call.
+ */
+export const PAPERLESS_NGX_HOST_MESSAGE =
+  "Enter the container's internal host or address, for example localhost or paperless-acme.internal.";
+
+const paperlessNgxHostSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .min(1, PAPERLESS_NGX_HOST_MESSAGE)
+  .max(253)
+  .refine(noWhitespace, { message: PAPERLESS_NGX_HOST_MESSAGE })
+  .refine((value) => !/[\u0000-\u001f\u007f]/.test(value), { message: PAPERLESS_NGX_HOST_MESSAGE });
+
+const paperlessNgxPortSchema = z.number().int().min(1).max(65_535);
+
+export const paperlessNgxConnectionConfigSchema = z.object({
+  /** This company's container's own internal hostname or IP. Never a public address. */
+  host: paperlessNgxHostSchema,
+  port: paperlessNgxPortSchema,
+}).strip();
+
+export const createPaperlessNgxConnectionSchema = z.object({
+  kind: z.literal("paperless_ngx"),
+  name: connectionNameSchema("paperless-ngx"),
+  host: paperlessNgxHostSchema,
+  port: paperlessNgxPortSchema,
+  credential: paperlessNgxCredentialSchema,
   dailyLookupCap: dailyLookupCapSchema.optional(),
 }).strict();
 
@@ -459,6 +519,7 @@ export const createDataConnectionSchema = z.discriminatedUnion("kind", [
   createFtpFileConnectionSchema,
   createFtpsFileConnectionSchema,
   createSftpFileConnectionSchema,
+  createPaperlessNgxConnectionSchema,
 ]);
 export type CreateDataConnectionInput = z.infer<typeof createDataConnectionSchema>;
 
@@ -500,7 +561,8 @@ export type DataConnectionConfig =
   | ({ kind: "fiken" } & z.infer<typeof fikenConnectionConfigSchema>)
   | ({ kind: "ftp_file" } & z.infer<typeof ftpFileConnectionConfigSchema>)
   | ({ kind: "ftps_file" } & z.infer<typeof ftpsFileConnectionConfigSchema>)
-  | ({ kind: "sftp_file" } & z.infer<typeof sftpFileConnectionConfigSchema>);
+  | ({ kind: "sftp_file" } & z.infer<typeof sftpFileConnectionConfigSchema>)
+  | ({ kind: "paperless_ngx" } & z.infer<typeof paperlessNgxConnectionConfigSchema>);
 
 /**
  * `status` can only be switched between on ("active") and off ("disabled")

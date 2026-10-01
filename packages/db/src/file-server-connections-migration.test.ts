@@ -65,8 +65,10 @@ d("DUR-3997 migration 0174_file_server_connections", () => {
     // clause allows only 'password' (the INSERT test below proves it too).
     expect(s.credentialKind).toContain("['ftp_file'::text, 'ftps_file'::text])) AND (credential_kind = 'password'::text)");
     expect(s.access).toBe("CHECK ((access = ANY (ARRAY['read'::text, 'read_write'::text])))");
-    // Untouched by 0174.
-    expect(s.dataset).toBe("CHECK ((dataset = ANY (ARRAY['sales'::text, 'finance'::text, 'custom'::text])))");
+    // Untouched by 0174, widened later by 0208 (paperless-ngx) at migrated head.
+    expect(s.dataset).toBe("CHECK ((dataset = ANY (ARRAY['sales'::text, 'finance'::text, 'custom'::text, 'documents'::text])))");
+    // 0208 (paperless-ngx) widens the credential-kind rule further still, at migrated head.
+    expect(s.credentialKind).toContain("kind = 'paperless_ngx'::text) AND (credential_kind = 'paperless_api_token'::text");
     expect(s.shopDomain).toContain("myshopify");
   });
 
@@ -120,12 +122,21 @@ d("DUR-3997 migration 0174_file_server_connections", () => {
 
   it("is idempotent: running the file a second time changes nothing and keeps one of each constraint", async () => {
     const before = await snapshot();
-    const statements = readFileSync(MIGRATION_PATH, "utf8")
-      .split("--> statement-breakpoint")
-      .map((statement) => statement.trim())
-      .filter((statement) => statement.length > 0);
+    const statementsOf = (path: string) =>
+      readFileSync(path, "utf8")
+        .split("--> statement-breakpoint")
+        .map((statement) => statement.trim())
+        .filter((statement) => statement.length > 0);
+    const statements = statementsOf(MIGRATION_PATH);
     expect(statements.length).toBeGreaterThanOrEqual(2);
     for (const statement of statements) await db.execute(sql.raw(statement));
+    // 0208 (paperless-ngx) widens the same kind/credential-kind/dataset
+    // constraints AFTER 0174, so re-running 0174 alone reverts them; re-run
+    // 0208 too to restore the migrated-head state this snapshot was taken at.
+    // Each file stays a no-op on the state its own predecessor leaves.
+    for (const statement of statementsOf(fileURLToPath(new URL("./migrations/0208_paperless_ngx_connection.sql", import.meta.url)))) {
+      await db.execute(sql.raw(statement));
+    }
     expect(await snapshot()).toEqual(before);
     const counts = (await db.execute(sql`
       SELECT count(*)::int AS n FROM pg_constraint
