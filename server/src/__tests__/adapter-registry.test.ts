@@ -261,7 +261,12 @@ describe("server adapter registry", () => {
     await expect(listAdapterModelProfiles("claude_local")).resolves.toEqual([
       expect.objectContaining({
         key: "cheap",
-        adapterConfig: expect.objectContaining({ model: "claude-sonnet-4-6" }),
+        adapterConfig: expect.objectContaining({ model: "claude-sonnet-5" }),
+        source: "adapter_default",
+      }),
+      expect.objectContaining({
+        key: "planner",
+        adapterConfig: expect.objectContaining({ model: "claude-opus-5" }),
         source: "adapter_default",
       }),
     ]);
