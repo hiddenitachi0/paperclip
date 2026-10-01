@@ -230,6 +230,10 @@ export type {
   PipelineCaseOutputSourceRole,
   PipelineCaseOutputsResponse,
   PipelineCaseWorkProductOutputItem,
+  PipelineConnectedRoutine,
+  PipelineConnectedRoutineTrigger,
+  PipelineConnectedWatcher,
+  PipelineStageApprovalState,
   PipelineStageAutomation,
 } from "./types/pipeline.js";
 export {
