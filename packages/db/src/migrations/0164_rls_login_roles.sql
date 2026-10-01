@@ -359,7 +359,9 @@ DECLARE
     'video_shot_render_jobs',
     'video_shots',
     'video_storylines',
-    -- DUR-4182 Positions/Jobs. Created (and granted on) in 0200_jobs.sql;
+    -- DUR-4196 director AI. Created (and granted on) in 0200_video_storyline_director_and_transitions.sql.
+    'video_storyline_director_runs',
+    -- DUR-4182 Positions/Jobs. Created (and granted on) in 0201_jobs.sql;
     -- listed here so the login-role lists match the schema, as for the
     -- tables above.
     'job_positions',
@@ -567,7 +569,9 @@ DECLARE
     'video_shot_render_jobs',
     'video_shots',
     'video_storylines',
-    -- DUR-4182 Positions/Jobs. Created (and granted on) in 0200_jobs.sql;
+    -- DUR-4196 director AI. Created (and granted on) in 0200_video_storyline_director_and_transitions.sql. Company-scoped, so it is in both lists.
+    'video_storyline_director_runs',
+    -- DUR-4182 Positions/Jobs. Created (and granted on) in 0201_jobs.sql;
     -- listed here so the login-role lists match the schema, as for the
     -- tables above. Company-scoped, so it is in both lists.
     'job_positions',

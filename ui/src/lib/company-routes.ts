@@ -35,6 +35,7 @@ const BOARD_ROUTE_ROOTS = new Set([
   "execution-workspaces",
   "issues",
   "routines",
+  "workflow-map",
   "watchers",
   "goals",
   "files",
