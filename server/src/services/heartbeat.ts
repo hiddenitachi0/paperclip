@@ -90,6 +90,7 @@ import {
   HEARTBEAT_RUN_SAFE_RESULT_JSON_MAX_BYTES,
   mergeHeartbeatRunResultJson,
 } from "./heartbeat-run-summary.js";
+import { saveAgentWorkSummary } from "./agent-work-summaries.js";
 import {
   RUN_SILENT_ERROR_CODE,
   RUN_TOO_LONG_ERROR_CODE,
@@ -13820,6 +13821,22 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         });
         const livenessRun = finalizedRun;
         await refreshContinuationSummaryForRun(livenessRun, agent);
+        if (outcome === "succeeded") {
+          try {
+            const workSummaryText = await buildDetectedSuccessfulRunProgressSummary(livenessRun);
+            if (workSummaryText) {
+              await saveAgentWorkSummary(db, {
+                companyId: livenessRun.companyId,
+                agentId: agent.id,
+                issueId: issueId ?? null,
+                runId: livenessRun.id,
+                summary: workSummaryText,
+              });
+            }
+          } catch (err) {
+            logger.warn({ err, runId: livenessRun.id }, "failed to save agent work summary");
+          }
+        }
         const skipRunIssueComment = parseObject(livenessRun.contextSnapshot).skipIssueComment === true;
         if (issueId && outcome === "succeeded" && !skipRunIssueComment) {
           try {
