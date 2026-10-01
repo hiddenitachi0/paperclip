@@ -123,10 +123,40 @@ export function describeDeployPolicyProblems(
     );
   }
 
-  // DUR-4068: SFTP transport uploads an explicit allowlist to a configured
-  // host instead of running a git-checkout-based recipe on the box, so the
-  // remaining "completeness" requirements are its own, checked only when this
-  // project's deployTransport is actually "sftp".
+  // DUR-3974 / DUR-4236: the pages that must still work after a deploy.
+  // Format is checked for every transport. Whether an empty list is allowed
+  // differs by transport: for git_push it's a deliberate opt-in safety net
+  // (every project that exists today started with an empty one, and blocking
+  // on it would turn a safety improvement into an outage of its own), but for
+  // sftp there is no git-based rollback to fall back on if the upload breaks
+  // the site, so an sftp project is required to list at least one page —
+  // see the sftp branch below.
+  for (const page of policy.appHealthCheckPaths ?? []) {
+    const trimmed = page.trim();
+    if (!trimmed) continue;
+    // The field this comes from is "Pages that must still work
+    // (comma-separated)" and is split on commas, so telling the operator to
+    // put each page on its own line — as this once did — asks for something
+    // the form cannot do. Say what the field actually accepts.
+    if (hasWhitespace(trimmed)) {
+      problems.push(
+        `A page address cannot contain spaces (got "${trimmed}"). Separate several pages with commas, like ` +
+          "/, /dashboard, /reports. If a space is really part of the address, write it as %20.",
+      );
+      continue;
+    }
+    if (!trimmed.startsWith("/") && !isHttpUrl(trimmed)) {
+      problems.push(
+        'Each page to check must start with "/" (for example /dashboard) or be a full web address starting with ' +
+          `http:// or https:// (got "${trimmed}").`,
+      );
+    }
+  }
+
+  // DUR-4068 / DUR-4236: SFTP transport uploads an explicit allowlist to a
+  // configured host instead of running a git-checkout-based recipe on the
+  // box, so the remaining "completeness" requirements are its own, checked
+  // only when this project's deployTransport is actually "sftp".
   if (deployTransport === "sftp") {
     const sftpHost = (policy.sftpHost ?? "").trim();
     const sftpUsername = (policy.sftpUsername ?? "").trim();
@@ -159,35 +189,21 @@ export function describeDeployPolicyProblems(
     if (policy.sftpPort !== undefined && (!Number.isInteger(policy.sftpPort) || policy.sftpPort <= 0)) {
       problems.push(`The SFTP port must be a positive whole number (got "${policy.sftpPort}").`);
     }
+    // DUR-4236: an sftp/website deploy has no git-based rollback to fall back
+    // on for verifying the live site after a swap — the runner can only tell
+    // the upload "worked" from the generic health-check address unless the
+    // operator names real pages to re-check. Required (not just formatted)
+    // for this transport specifically; git_push projects keep the opt-in
+    // empty-list behavior from DUR-3974 above.
+    const appHealthCheckPaths = (policy.appHealthCheckPaths ?? []).map((page) => page.trim()).filter(Boolean);
+    if (appHealthCheckPaths.length === 0 && enabled) {
+      problems.push(
+        'List at least one page under "Pages that must still work" for an SFTP website deploy, for example / or /index.html. ' +
+          "Without one, the runner can only confirm the health-check address answered — not that the uploaded site itself still works.",
+      );
+    }
     problems.push(...describeRequestingAgentProblems(policy, context));
     return problems;
-  }
-
-  // DUR-3974: the pages that must still work after a deploy. Format only —
-  // leaving the list empty is allowed on purpose (every project that exists
-  // today has an empty one, and blocking on it would turn a safety
-  // improvement into an outage of its own). The runner says out loud on the
-  // card when a deploy was only checked against the one health-check address.
-  for (const page of policy.appHealthCheckPaths ?? []) {
-    const trimmed = page.trim();
-    if (!trimmed) continue;
-    // The field this comes from is "Pages that must still work
-    // (comma-separated)" and is split on commas, so telling the operator to
-    // put each page on its own line — as this once did — asks for something
-    // the form cannot do. Say what the field actually accepts.
-    if (hasWhitespace(trimmed)) {
-      problems.push(
-        `A page address cannot contain spaces (got "${trimmed}"). Separate several pages with commas, like ` +
-          "/, /dashboard, /reports. If a space is really part of the address, write it as %20.",
-      );
-      continue;
-    }
-    if (!trimmed.startsWith("/") && !isHttpUrl(trimmed)) {
-      problems.push(
-        'Each page to check must start with "/" (for example /dashboard) or be a full web address starting with ' +
-          `http:// or https:// (got "${trimmed}").`,
-      );
-    }
   }
 
   // Recipe.
