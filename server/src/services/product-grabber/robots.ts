@@ -122,20 +122,30 @@ export interface RobotsTxtChecker {
  * proxy -- so it is the one spot DNS rebinding (a hostname that only
  * resolves to an internal address at request time) can reach.
  */
-function isDisallowedAddress(address: string, family: number): boolean {
-  if (family === 4) {
-    const parts = address.split(".").map(Number);
-    const [a, b] = parts;
-    return (
-      a === 127 || // 127.0.0.0/8 loopback
-      a === 10 || // 10.0.0.0/8
-      (a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12
-      (a === 192 && b === 168) || // 192.168.0.0/16
-      (a === 169 && b === 254) || // 169.254.0.0/16 link-local, incl. cloud metadata
-      a === 0
-    );
-  }
+function isDisallowedIpv4(address: string): boolean {
+  const parts = address.split(".").map(Number);
+  const [a, b] = parts;
+  return (
+    a === 127 || // 127.0.0.0/8 loopback
+    a === 10 || // 10.0.0.0/8
+    (a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12
+    (a === 192 && b === 168) || // 192.168.0.0/16
+    (a === 169 && b === 254) || // 169.254.0.0/16 link-local, incl. cloud metadata
+    a === 0
+  );
+}
+
+/** Exported only for the address-classification tests below -- not part of the module's public surface. */
+export function isDisallowedAddress(address: string, family: number): boolean {
+  if (family === 4) return isDisallowedIpv4(address);
   const host = address.toLowerCase();
+  // "::ffff:a.b.c.d" is the IPv4-mapped IPv6 notation -- a live, routable alias for the
+  // embedded IPv4 address (e.g. "::ffff:127.0.0.1" connects to IPv4 loopback), not just a
+  // different string for the same disallow checks below. Unwrap it and re-run the family-4
+  // logic, or an attacker-controlled DNS zone can return it as an AAAA record to reach
+  // loopback/private/metadata addresses past the family-6 prefix checks.
+  const mapped = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(host);
+  if (mapped) return isDisallowedIpv4(mapped[1]);
   return host === "::1" || host.startsWith("fe80:") || host.startsWith("fc") || host.startsWith("fd");
 }
 
@@ -164,16 +174,25 @@ export function createPinnedFetch(address: string, family: number): typeof fetch
     }
 
     return new Promise<Response>((resolve, reject) => {
+      // `autoSelectFamily` is a real, Node-honored `net.connect` option that `http`/`https`
+      // request options forward straight through to the socket, but @types/node's
+      // http.RequestOptions/https.RequestOptions don't declare it -- hence the cast.
+      const requestOptions = {
+        hostname: url.hostname,
+        port: url.port || (isHttps ? 443 : 80),
+        path: url.pathname + url.search,
+        headers,
+        timeout: 10_000,
+        // Node >=18's `net` defaults to `autoSelectFamily: true` (Happy Eyeballs), which drives
+        // `lookup` with its `all`-style multi-address callback signature regardless of what this
+        // single-address callback returns, and throws ERR_INVALID_IP_ADDRESS against it. The
+        // pinned address is already vetted and singular, so disable the dual-stack path entirely.
+        autoSelectFamily: false,
+        lookup: (_hostname: string, _options: unknown, callback: (err: NodeJS.ErrnoException | null, address: string, family: number) => void) =>
+          callback(null, address, family),
+      };
       const req = transportModule.request(
-        {
-          hostname: url.hostname,
-          port: url.port || (isHttps ? 443 : 80),
-          path: url.pathname + url.search,
-          headers,
-          timeout: 10_000,
-          lookup: (_hostname: string, _options: unknown, callback: (err: NodeJS.ErrnoException | null, address: string, family: number) => void) =>
-            callback(null, address, family),
-        },
+        requestOptions as unknown as Parameters<typeof transportModule.request>[0],
         (res) => {
           const chunks: Buffer[] = [];
           res.on("data", (chunk: Buffer) => chunks.push(chunk));

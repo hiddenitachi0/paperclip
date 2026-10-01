@@ -4,7 +4,7 @@ const httpRequestMock = vi.fn();
 vi.mock("node:http", () => ({ request: (...args: unknown[]) => httpRequestMock(...args) }));
 vi.mock("node:https", () => ({ request: (...args: unknown[]) => httpRequestMock(...args) }));
 
-const { createPinnedFetch, createRobotsTxtChecker, parseRobotsTxt } = await import("./robots.js");
+const { createPinnedFetch, createRobotsTxtChecker, isDisallowedAddress, parseRobotsTxt } = await import("./robots.js");
 
 describe("parseRobotsTxt", () => {
   it("allows everything when the file is empty", () => {
@@ -101,6 +101,32 @@ describe("createRobotsTxtChecker", () => {
 
     expect(await checker.isAllowed("https://example.com/blocked")).toBe(false);
     expect(fetchImpl).toHaveBeenCalledWith("https://example.com/robots.txt", { headers: { "User-Agent": "TestBot/1.0" } });
+  });
+});
+
+describe("isDisallowedAddress", () => {
+  it("disallows IPv4 loopback/private/link-local addresses", () => {
+    expect(isDisallowedAddress("127.0.0.1", 4)).toBe(true);
+    expect(isDisallowedAddress("169.254.169.254", 4)).toBe(true);
+    expect(isDisallowedAddress("93.184.216.34", 4)).toBe(false);
+  });
+
+  it("disallows IPv4-mapped IPv6 addresses by unwrapping to the embedded IPv4 address", () => {
+    // "::ffff:a.b.c.d" is a live, routable alias for the IPv4 address -- not just a string
+    // that happens to look similar. An attacker-controlled DNS zone can return this as an
+    // AAAA record to reach loopback/private/metadata addresses once pinning is wired up.
+    expect(isDisallowedAddress("::ffff:127.0.0.1", 6)).toBe(true);
+    expect(isDisallowedAddress("::ffff:169.254.169.254", 6)).toBe(true);
+    expect(isDisallowedAddress("::ffff:10.0.0.5", 6)).toBe(true);
+    expect(isDisallowedAddress("::ffff:93.184.216.34", 6)).toBe(false);
+  });
+
+  it("still disallows the native IPv6 loopback/link-local/unique-local ranges", () => {
+    expect(isDisallowedAddress("::1", 6)).toBe(true);
+    expect(isDisallowedAddress("fe80::1", 6)).toBe(true);
+    expect(isDisallowedAddress("fc00::1", 6)).toBe(true);
+    expect(isDisallowedAddress("fd00::1", 6)).toBe(true);
+    expect(isDisallowedAddress("2001:4860:4860::8888", 6)).toBe(false);
   });
 });
 
