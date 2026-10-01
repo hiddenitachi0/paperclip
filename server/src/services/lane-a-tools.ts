@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type Anthropic from "@anthropic-ai/sdk";
+import { and, desc, eq, ne } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { laneAConversations, laneAMessages } from "@paperclipai/db";
 import { formatAgentDisplayName } from "@paperclipai/shared";
 import { accessService } from "./access.js";
 import { agentService } from "./agents.js";
@@ -11,7 +13,7 @@ import { logActivity } from "./activity-log.js";
 import { HttpError } from "../errors.js";
 import { AGENT_MEMORY_MAX_LENGTH, AGENT_MEMORY_MAX_NOTES, normalizeAgentMemoryText } from "@paperclipai/shared/validators/agent-memory";
 import { agentMemoryService } from "./agent-memories.js";
-import { matchMemory, memoryRef } from "./lane-a-memory.js";
+import { matchMemory, memoryRef, words as wordsOf } from "./lane-a-memory.js";
 import { queueIssueAssignmentWakeup } from "./issue-assignment-wakeup.js";
 import {
   BUSINESS_DATA_LOOKUP_TIMEOUT_MS,
@@ -72,6 +74,7 @@ export const LANE_A_BUILTIN_TOOL_NAMES = [
   "read_company_file",
   "remember",
   "forget",
+  "search_conversations",
 ] as const;
 export type LaneABuiltinToolName = (typeof LANE_A_BUILTIN_TOOL_NAMES)[number];
 
@@ -112,6 +115,18 @@ export const WEB_SEARCH_TOOL = "web_search";
  */
 export const START_RESEARCH_TASK_TOOL = "start_research_task";
 export const READ_WEB_PAGE_TOOL = "read_web_page";
+/**
+ * DUR-4197: a quick agent's own past conversations with the same person (or
+ * colleague), so it is not cold on every new chat. Offered only when the
+ * agent's "Can search past conversations" switch
+ * (readLaneAConversationSearchSwitch) is on; off by default. Always scoped to
+ * this company, this quick agent, and the current requester's own
+ * conversations -- never another person's and never another company's.
+ */
+export const SEARCH_CONVERSATIONS_TOOL = "search_conversations";
+/** How many past messages a search may scan before ranking, and how many it may return. */
+export const LANE_A_CONVERSATION_SEARCH_SCAN_LIMIT = 300;
+export const LANE_A_CONVERSATION_SEARCH_RESULT_LIMIT = 5;
 /** Upper bound on the text a tool hands back to the model. */
 const TOOL_RESULT_MAX_CHARS = 4_000;
 const ROUTE_REQUEST_MAX_CHARS = 20_000;
@@ -267,6 +282,20 @@ export interface LaneAToolDeps {
   webSearch?(request: WebSearchRequest, ctx: LaneAToolContext): Promise<{ results: WebSearchResult[]; used: number; cap: number }>;
   /** One public https page through the guarded fetch. Throws WebToolError. Absent means not wired. */
   readWebPage?(url: string, ctx: LaneAToolContext): Promise<FetchedWebPage>;
+  /**
+   * DUR-4197: this quick agent's own past messages with the current requester,
+   * ranked by relevance to `query`. Already scoped to company + agent +
+   * requester by the implementation; the tool layer never widens that. Absent
+   * means search_conversations is not wired here.
+   */
+  searchConversations?(query: string, ctx: LaneAToolContext): Promise<LaneAConversationSearchHit[]>;
+}
+
+export interface LaneAConversationSearchHit {
+  conversationId: string;
+  createdAt: Date;
+  role: "user" | "assistant";
+  content: string;
 }
 
 export function buildLaneABuiltinToolDefinitions(): Anthropic.Tool[] {
@@ -518,6 +547,24 @@ export function buildLaneABuiltinToolDefinitions(): Anthropic.Tool[] {
           },
         },
         required: ["note"],
+      },
+    },
+    {
+      name: SEARCH_CONVERSATIONS_TOOL,
+      description:
+        "Search your own past conversations with this same person (or colleague) for something they or you said " +
+        "earlier. Use it to pick up continuity instead of asking something they already told you. Only ever returns " +
+        "your own conversations with the current requester in this company; never another person's chats.",
+      input_schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          query: {
+            type: "string",
+            description: "What to look for, in plain words (e.g. 'delivery address' or 'what we agreed on price').",
+          },
+        },
+        required: ["query"],
       },
     },
   ];
@@ -1113,6 +1160,40 @@ export function createLaneABuiltinToolExecutor(deps: LaneAToolDeps) {
     }
   }
 
+  async function searchConversations(input: Record<string, unknown>, ctx: LaneAToolContext): Promise<LaneAToolResult> {
+    if (!deps.searchConversations) {
+      return {
+        ok: false,
+        content: "Past conversations cannot be searched from here. Say so plainly.",
+        summary: "Conversation search is not available on this path.",
+      };
+    }
+    const query = readString(input, "query").slice(0, 300);
+    if (!query) {
+      return {
+        ok: false,
+        content: "'query' is required: what to look for in past conversations. Nothing was searched.",
+        summary: "Searched conversations without a query.",
+      };
+    }
+    const hits = await deps.searchConversations(query, ctx);
+    if (hits.length === 0) {
+      return {
+        ok: true,
+        content: `No earlier conversation with this person mentions "${clip(query, 120)}".`,
+        summary: `Searched past conversations for "${clip(query, 80)}": nothing found.`,
+      };
+    }
+    const lines = hits.map(
+      (hit) => `- (${hit.createdAt.toISOString().slice(0, 10)}, ${hit.role === "user" ? "them" : "you"}) "${clip(hit.content, 200)}"`,
+    );
+    return {
+      ok: true,
+      content: `Earlier conversations mentioning "${clip(query, 120)}":\n${lines.join("\n")}`,
+      summary: `Searched past conversations for "${clip(query, 80)}": found ${hits.length}.`,
+    };
+  }
+
   return async function execute(
     name: string,
     input: Record<string, unknown>,
@@ -1141,6 +1222,8 @@ export function createLaneABuiltinToolExecutor(deps: LaneAToolDeps) {
         return webSearch(input, ctx);
       case READ_WEB_PAGE_TOOL:
         return readWebPage(input, ctx);
+      case SEARCH_CONVERSATIONS_TOOL:
+        return searchConversations(input, ctx);
       default:
         return {
           ok: false,
@@ -1313,6 +1396,56 @@ export function createDbLaneAToolDeps(
       async remove(ctx, memoryId) {
         return memories.remove(ctx.companyId, ctx.agent.id, memoryId, memoryActor(ctx));
       },
+    },
+    // DUR-4197: ranked by word overlap with the query, the same scoring
+    // rankNotesByRelevance (lane-a-memory.ts) uses for the memory notebook.
+    // Scoped at the query itself (company + this quick agent + this
+    // requester's own rows): the tool layer above never sees, and cannot
+    // widen, that scope.
+    async searchConversations(query, ctx) {
+      const requesterCondition = ctx.requester.userId
+        ? eq(laneAConversations.requestedByUserId, ctx.requester.userId)
+        : ctx.requester.agentId
+          ? eq(laneAConversations.requestedByAgentId, ctx.requester.agentId)
+          : null;
+      if (!requesterCondition) return [];
+      const conditions = [
+        eq(laneAMessages.companyId, ctx.companyId),
+        eq(laneAMessages.agentId, ctx.agent.id),
+        requesterCondition,
+        ne(laneAMessages.role, "recap"),
+        ne(laneAMessages.conversationId, ctx.conversationId),
+      ];
+      const rows = await db
+        .select({
+          conversationId: laneAMessages.conversationId,
+          createdAt: laneAMessages.createdAt,
+          role: laneAMessages.role,
+          content: laneAMessages.content,
+        })
+        .from(laneAMessages)
+        .innerJoin(laneAConversations, eq(laneAMessages.conversationId, laneAConversations.id))
+        .where(and(...conditions))
+        .orderBy(desc(laneAMessages.createdAt))
+        .limit(LANE_A_CONVERSATION_SEARCH_SCAN_LIMIT);
+
+      const queryWords = [...new Set(wordsOf(query))];
+      if (queryWords.length === 0) return [];
+      return rows
+        .map((row) => {
+          const rowWords = new Set(wordsOf(row.content));
+          const hits = queryWords.filter((word) => rowWords.has(word)).length;
+          return { row, hits };
+        })
+        .filter((entry) => entry.hits > 0)
+        .sort((a, b) => b.hits - a.hits || b.row.createdAt.getTime() - a.row.createdAt.getTime())
+        .slice(0, LANE_A_CONVERSATION_SEARCH_RESULT_LIMIT)
+        .map((entry) => ({
+          conversationId: entry.row.conversationId,
+          createdAt: entry.row.createdAt,
+          role: entry.row.role === "assistant" ? "assistant" as const : "user" as const,
+          content: entry.row.content,
+        }));
     },
   };
 }
