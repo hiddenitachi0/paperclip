@@ -615,6 +615,84 @@ export function jobService(
       });
     },
 
+    // DUR-4142: wires job "email" triggers (DUR-4182 added the column,
+    // `emailMatchAddress`, as match-configuration storage only -- see
+    // packages/db/src/schema/jobs.ts) to the mail secretary's inbound-mail
+    // pipeline. mail-secretary.ts calls this once per fetched message with
+    // the inbox's own IMAP address (the only "address" a message carries --
+    // the IMAP client never parses a To: header), already run through
+    // frameDelegatedMailContent so any injection attempt in the mail body
+    // cannot be read as instructions. A job opts in to the content by
+    // declaring variables named email_from/email_subject/email_body;
+    // resolveFormValues ignores undeclared keys, so this is a no-op for any
+    // other job accidentally sharing an email trigger address.
+    fireEmailJobTriggers: async (
+      companyId: string,
+      inboxAddress: string,
+      message: { from: string; subject: string; bodyText: string; messageId: string | null },
+    ): Promise<number> => {
+      const normalizedAddress = inboxAddress.trim().toLowerCase();
+      if (!normalizedAddress) return 0;
+      const triggers = await db
+        .select()
+        .from(jobTriggers)
+        .where(
+          and(
+            eq(jobTriggers.companyId, companyId),
+            eq(jobTriggers.kind, "email"),
+            eq(jobTriggers.enabled, true),
+            sql`lower(trim(${jobTriggers.emailMatchAddress})) = ${normalizedAddress}`,
+          ),
+        );
+      let fired = 0;
+      for (const trigger of triggers) {
+        const job = await getJobById(trigger.jobId);
+        if (!job || job.status !== "active") continue;
+        const positions = await db
+          .select({ positionId: jobPositions.positionId })
+          .from(jobPositions)
+          .where(eq(jobPositions.jobId, job.id));
+        const positionIds = positions.map((row) => row.positionId);
+        const runAgent = positionIds.length
+          ? await db
+              .select({ id: agents.id })
+              .from(agents)
+              .where(and(eq(agents.companyId, companyId), inArray(agents.roleId, positionIds)))
+              .limit(1)
+              .then((rows) => rows[0] ?? null)
+          : null;
+        await db.update(jobTriggers).set({ lastFiredAt: new Date() }).where(eq(jobTriggers.id, trigger.id));
+        if (!runAgent) continue;
+        try {
+          await dispatchJobRun({
+            job,
+            trigger,
+            source: "email",
+            runAgentId: runAgent.id,
+            formValues: {
+              email_from: message.from,
+              email_subject: message.subject,
+              email_body: message.bodyText,
+            },
+            idempotencyKey: message.messageId ? `email-trigger:${trigger.id}:${message.messageId}` : null,
+            actor: {},
+          });
+          fired += 1;
+        } catch (err) {
+          await logActivity(db, {
+            companyId,
+            actorType: "system",
+            actorId: "job-email-trigger",
+            action: "job.email_run_failed",
+            entityType: "job_trigger",
+            entityId: trigger.id,
+            details: { jobId: job.id, error: err instanceof Error ? err.message : String(err) },
+          });
+        }
+      }
+      return fired;
+    },
+
     // Mirrors routines' `tickScheduledTriggers` at a much smaller scope: jobs
     // have no concurrency policy or catch-up-run limit (a one-press job is
     // meant to run exactly once per due tick, assigned to whichever agent

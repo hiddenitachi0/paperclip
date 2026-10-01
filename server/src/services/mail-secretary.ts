@@ -54,6 +54,16 @@ export interface MailSecretaryServiceDeps {
     maxMessages: number,
   ) => Promise<FetchedMailMessage[]>;
   classifier?: { classify: (params: { from: string; subject: string; body: string }) => Promise<MailClassification> };
+  // DUR-4142: fires any job "email" trigger whose emailMatchAddress matches
+  // this inbox, independent of the ignore-filter/classifier decision below
+  // (a job trigger is its own mechanism, not a secretary ignore rule).
+  // Injected so this file never imports jobs.ts directly; see jobService's
+  // fireEmailJobTriggers for the real implementation.
+  fireEmailJobTriggers?: (
+    companyId: string,
+    inboxAddress: string,
+    message: { from: string; subject: string; bodyText: string; messageId: string | null },
+  ) => Promise<number>;
 }
 
 export interface MailInboxSummary {
@@ -151,6 +161,7 @@ export function mailSecretaryService(db: Db, deps: MailSecretaryServiceDeps = {}
   const secrets = secretService(db);
   const classifier = deps.classifier ?? mailSecretaryClassifierService();
   const fetchMessages = deps.fetchMessages ?? fetchNewMailMessages;
+  const fireEmailJobTriggers = deps.fireEmailJobTriggers;
   const nowOf = () => deps.now?.() ?? new Date();
 
   // ─── Reading ─────────────────────────────────────────────────────────────
@@ -599,6 +610,19 @@ export function mailSecretaryService(db: Db, deps: MailSecretaryServiceDeps = {}
     message: FetchedMailMessage,
     now: Date,
   ): Promise<MailItemDecision> {
+    if (fireEmailJobTriggers) {
+      try {
+        await fireEmailJobTriggers(row.companyId, row.imapUsername, {
+          from: message.from,
+          subject: message.subject,
+          bodyText: frameDelegatedMailContent({ from: message.from, subject: message.subject, body: message.bodyText }),
+          messageId: message.messageId,
+        });
+      } catch (err) {
+        logger.warn({ err, inboxId: row.id, uid: message.uid }, "mail-secretary: email job trigger firing failed");
+      }
+    }
+
     const candidate = { from: message.from, subject: message.subject, body: message.bodyText };
     const matchedFilter = filters.find((filter) =>
       mailFilterMatches({ field: filter.field as never, matchType: filter.matchType as never, value: filter.value }, candidate),
