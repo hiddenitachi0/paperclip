@@ -37,6 +37,7 @@ const BOARD_ROUTE_ROOTS = new Set([
   "routines",
   "workflow-map",
   "watchers",
+  "product-grabber",
   "goals",
   "files",
   "artifacts",
