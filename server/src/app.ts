@@ -43,6 +43,7 @@ import { pipelineRoutes } from "./routes/pipelines.js";
 import { environmentRoutes } from "./routes/environments.js";
 import { executionWorkspaceRoutes } from "./routes/execution-workspaces.js";
 import { goalRoutes } from "./routes/goals.js";
+import { crmRoutes } from "./routes/crm.js";
 import { boardChatRoutes } from "./routes/board-chat.js";
 import { laneARoutes } from "./routes/lane-a.js";
 import { chatRouterRoutes } from "./routes/chat-router.js";
@@ -324,6 +325,7 @@ export async function createApp(
   api.use(executionWorkspaceRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(previewEnvironmentRoutes(db, { service: previewEnvironments }));
   api.use(goalRoutes(db));
+  api.use(crmRoutes(db));
   api.use(boardChatRoutes(db, { deploymentMode: opts.deploymentMode }));
   api.use(laneARoutes(db));
   api.use(privateAccessRoutes(db));
