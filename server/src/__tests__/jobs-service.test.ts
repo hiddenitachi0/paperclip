@@ -12,6 +12,7 @@ import {
   agents,
   companies,
   companyAgentRoles,
+  companyJobSettings,
   createDb,
   executionWorkspaces,
   heartbeatRuns,
@@ -59,6 +60,7 @@ describeEmbeddedPostgres("job service dispatch (DUR-4182)", () => {
     await db.delete(projects);
     await db.delete(agents);
     await db.delete(companyAgentRoles);
+    await db.delete(companyJobSettings);
     await db.delete(companies);
   });
 
@@ -75,6 +77,10 @@ describeEmbeddedPostgres("job service dispatch (DUR-4182)", () => {
       issuePrefix,
       requireBoardApprovalForNewAgents: false,
     });
+    // DUR-4142: Jobs ships behind company_job_settings.jobs_enabled (default
+    // off); this fixture opts the test company in so the rest of the suite
+    // exercises the feature itself, not the flag.
+    await db.insert(companyJobSettings).values({ companyId, jobsEnabled: true });
 
     const positionId = randomUUID();
     await db.insert(companyAgentRoles).values({
@@ -310,5 +316,34 @@ describeEmbeddedPostgres("job service dispatch (DUR-4182)", () => {
       });
       expect(fired).toBe(0);
     });
+  });
+
+  it("rejects creating or running a job when company_job_settings.jobs_enabled is not on", async () => {
+    const companyId = randomUUID();
+    const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix,
+      requireBoardApprovalForNewAgents: false,
+    });
+    // Deliberately no company_job_settings row -- absence reads as "off".
+    const svc = jobService(db, { heartbeat: { wakeup: async () => null } });
+
+    await expect(
+      svc.create(
+        companyId,
+        {
+          title: "Revise contract",
+          instructions: "Revise it.",
+          status: "active",
+          variables: [],
+          runMode: "full_agent",
+          requiresApproval: false,
+          positionIds: [],
+        } as never,
+        {},
+      ),
+    ).rejects.toThrow(/not enabled/i);
   });
 });

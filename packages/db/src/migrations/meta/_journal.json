@@ -1429,6 +1429,13 @@
       "when": 1790823100000,
       "tag": "0204_agent_work_summaries",
       "breakpoints": true
+    },
+    {
+      "idx": 205,
+      "version": "7",
+      "when": 1790885700000,
+      "tag": "0205_company_job_settings",
+      "breakpoints": true
     }
   ]
 }

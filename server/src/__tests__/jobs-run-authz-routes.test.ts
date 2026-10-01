@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { activityLog, agents, companies, companyAgentRoles, createDb, issues, jobPositions, jobRuns, jobs, jobTriggers } from "@paperclipai/db";
+import { activityLog, agents, companies, companyAgentRoles, companyJobSettings, createDb, issues, jobPositions, jobRuns, jobs, jobTriggers } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -58,6 +58,7 @@ describeEmbeddedPostgres("POST /jobs/:id/run position authz (DUR-4182)", () => {
     await db.delete(issues);
     await db.delete(agents);
     await db.delete(companyAgentRoles);
+    await db.delete(companyJobSettings);
     await db.delete(companies);
   });
 
@@ -89,6 +90,7 @@ describeEmbeddedPostgres("POST /jobs/:id/run position authz (DUR-4182)", () => {
       issuePrefix,
       requireBoardApprovalForNewAgents: false,
     });
+    await db.insert(companyJobSettings).values({ companyId, jobsEnabled: true });
 
     const linkedPositionId = randomUUID();
     const unrelatedPositionId = randomUUID();

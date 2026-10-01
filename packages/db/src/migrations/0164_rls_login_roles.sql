@@ -158,6 +158,10 @@ DECLARE
     'cloud_upstream_runs',
     'companies',
     'company_agent_roles',
+    -- DUR-4142. Created, granted on and policed in
+    -- 0205_company_job_settings.sql; listed here so the login-role lists
+    -- match the schema, as for the tables above.
+    'company_job_settings',
     'company_logos',
     'company_mcp_oauth_connections',
     -- DUR-4004. Created (and granted on) in 0177_company_api_tools.sql; listed
@@ -417,6 +421,10 @@ DECLARE
     'cloud_upstream_connections',
     'cloud_upstream_runs',
     'company_agent_roles',
+    -- DUR-4142. Created, granted on and policed in
+    -- 0205_company_job_settings.sql; listed here so the login-role lists
+    -- match the schema, as for the tables above.
+    'company_job_settings',
     'company_logos',
     'company_mcp_oauth_connections',
     -- DUR-4004. Created (and granted on) in 0177_company_api_tools.sql; listed
