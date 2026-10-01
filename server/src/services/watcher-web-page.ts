@@ -156,6 +156,9 @@ export function createWatcherWebPageFetcher(deps: WatcherWebPageFetcherDeps = {}
     deps.robots ??
     createRobotsTxtChecker({
       userAgent: WATCHER_WEB_PAGE_USER_AGENT,
+      // robots.ts vets the resolved address itself before fetching (#470);
+      // give it the same resolver the outbound guard uses.
+      lookupImpl: deps.lookup,
       fetchImpl: createSafeOutboundFetch(PUBLIC_WEB_PAGE_OUTBOUND_POLICY, {
         lookup: deps.lookup,
         testOnlyDial: deps.testOnlyDial,
