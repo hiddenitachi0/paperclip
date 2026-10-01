@@ -14,7 +14,7 @@ import {
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
-import { assertCompanyAccess, getActorInfo } from "./authz.js";
+import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { badRequest } from "../errors.js";
 import { logActivity } from "../services/index.js";
 import { crmService } from "../services/crm.js";
@@ -27,13 +27,19 @@ import { crmService } from "../services/crm.js";
  * scoped by `:companyId` through `companyScopeFromParam`, the same
  * primitive goals.ts and data-connections.ts use, so cross-company reads
  * and writes are refused before any query runs. Board users and agents
- * both get full access via `assertCompanyAccess` (unlike the owner-only
- * data-connections routes) -- agents call these same REST routes as their
- * "tools" (the codebase has no separate tool-calling registry for
- * first-party domains; `crm.get`/`crm.log_activity`/`crm.record_fact` map
- * onto the contact/organisation GET, activity POST, and fact POST routes
- * below, with `crm.search` and `crm.upsert_contact` added as dedicated
- * routes for cross-entity search and dedup-on-create).
+ * both get full access via `assertCompanyAccess` for the routes behind the
+ * five named DUR-4192 agent tools (unlike the owner-only data-connections
+ * routes) -- agents call these same REST routes as their "tools" (the
+ * codebase has no separate tool-calling registry for first-party domains;
+ * `crm.get`/`crm.log_activity`/`crm.record_fact` map onto the
+ * contact/organisation GET, activity POST, and fact POST routes below, with
+ * `crm.search` and `crm.upsert_contact` added as dedicated routes for
+ * cross-entity search and dedup-on-create).
+ *
+ * DUR-4205: contact/organisation DELETE and PATCH, and contact-org-role
+ * creation, are NOT among those five tools -- deletes here are hard deletes
+ * (no soft-delete column) with no human approval step, so those routes use
+ * `boardScope()` (assertBoard + assertCompanyAccess) instead of `scope()`.
  */
 export function crmRoutes(rawDb: Db) {
   const router = Router();
@@ -42,6 +48,13 @@ export function crmRoutes(rawDb: Db) {
 
   function scope() {
     return companyScopeFromParam(rawDb, assertCompanyAccess);
+  }
+
+  function boardScope() {
+    return companyScopeFromParam(rawDb, (req, companyId) => {
+      assertBoard(req);
+      assertCompanyAccess(req, companyId);
+    });
   }
 
   function actorRef(actor: ReturnType<typeof getActorInfo>) {
@@ -111,7 +124,7 @@ export function crmRoutes(rawDb: Db) {
 
   router.patch(
     "/companies/:companyId/crm/contacts/:id",
-    scope(),
+    boardScope(),
     validate(updateCrmContactSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
@@ -132,7 +145,7 @@ export function crmRoutes(rawDb: Db) {
     },
   );
 
-  router.delete("/companies/:companyId/crm/contacts/:id", scope(), async (req, res) => {
+  router.delete("/companies/:companyId/crm/contacts/:id", boardScope(), async (req, res) => {
     const companyId = req.params.companyId as string;
     const id = req.params.id as string;
     const removed = await svc.removeContact(companyId, id);
@@ -183,7 +196,7 @@ export function crmRoutes(rawDb: Db) {
 
   router.patch(
     "/companies/:companyId/crm/organisations/:id",
-    scope(),
+    boardScope(),
     validate(updateCrmOrganizationSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
@@ -204,7 +217,7 @@ export function crmRoutes(rawDb: Db) {
     },
   );
 
-  router.delete("/companies/:companyId/crm/organisations/:id", scope(), async (req, res) => {
+  router.delete("/companies/:companyId/crm/organisations/:id", boardScope(), async (req, res) => {
     const companyId = req.params.companyId as string;
     const id = req.params.id as string;
     const removed = await svc.removeOrganization(companyId, id);
@@ -232,7 +245,7 @@ export function crmRoutes(rawDb: Db) {
 
   router.post(
     "/companies/:companyId/crm/contact-org-roles",
-    scope(),
+    boardScope(),
     validate(createCrmContactOrgRoleSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;

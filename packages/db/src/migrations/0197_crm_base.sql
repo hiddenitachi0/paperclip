@@ -145,3 +145,32 @@ ALTER TABLE "crm_external_refs" ADD CONSTRAINT "crm_external_refs_company_id_fk"
 ALTER TABLE "crm_external_refs" ADD CONSTRAINT "crm_external_refs_contact_id_fk" FOREIGN KEY ("contact_id") REFERENCES "crm_contacts"("id") ON DELETE CASCADE;
 --> statement-breakpoint
 ALTER TABLE "crm_external_refs" ADD CONSTRAINT "crm_external_refs_organization_id_fk" FOREIGN KEY ("organization_id") REFERENCES "crm_organizations"("id") ON DELETE CASCADE;
+--> statement-breakpoint
+-- Row-level security and grants, the same guarded shape 0177/0180/0181 used,
+-- so these tables stay in line with the rest of the tenant tables on a
+-- database where those roles exist. Company isolation does NOT rest on this:
+-- every query in the code filters on the caller's company.
+DO $$
+DECLARE
+  t text;
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'paperclip_app_scoped') THEN
+    FOREACH t IN ARRAY ARRAY['crm_organizations', 'crm_contacts', 'crm_contact_org_roles', 'crm_activities', 'crm_facts', 'crm_external_refs'] LOOP
+      EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I TO paperclip_app_scoped', t);
+      EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_policies WHERE tablename = t AND policyname = 'paperclip_company_scope'
+      ) THEN
+        EXECUTE format(
+          'CREATE POLICY paperclip_company_scope ON %I USING (company_id = NULLIF(current_setting(''app.current_company_id'', true), '''')::uuid OR pg_has_role(current_user, ''paperclip_app_bypass'', ''member'')) WITH CHECK (company_id = NULLIF(current_setting(''app.current_company_id'', true), '''')::uuid OR pg_has_role(current_user, ''paperclip_app_bypass'', ''member''))',
+          t
+        );
+      END IF;
+    END LOOP;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'paperclip_app_bypass_login') THEN
+    FOREACH t IN ARRAY ARRAY['crm_organizations', 'crm_contacts', 'crm_contact_org_roles', 'crm_activities', 'crm_facts', 'crm_external_refs'] LOOP
+      EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I TO paperclip_app_bypass_login', t);
+    END LOOP;
+  END IF;
+END $$;

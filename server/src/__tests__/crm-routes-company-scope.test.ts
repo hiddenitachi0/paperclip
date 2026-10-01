@@ -229,4 +229,52 @@ describeEmbeddedPostgres("crmRoutes company-scope wiring (DUR-4191)", () => {
     const res = await request(app).get(`/api/companies/${companyId}/crm/contacts/${randomUUID()}`);
     expect(res.status).toBe(404);
   });
+
+  // DUR-4205: an agent is only meant to reach the five named DUR-4192 tools
+  // (search, get, log_activity, record_fact, upsert_contact). Delete,
+  // direct update and contact-org-role creation are board-only -- agents
+  // get a 403 before the handler (and the hard delete / mutation) ever runs.
+  it("refuses an agent on contact/organisation delete, update, and contact-org-role creation", async () => {
+    const companyId = await seedCompany();
+    const agentId = await seedAgent(companyId);
+    const boardApp = createApp([companyId]);
+    const agentApp = createApp([companyId], agentId);
+
+    const contactRes = await request(boardApp)
+      .post(`/api/companies/${companyId}/crm/contacts`)
+      .send({ firstName: "Ada", lastName: "Lovelace" });
+    const orgRes = await request(boardApp)
+      .post(`/api/companies/${companyId}/crm/organisations`)
+      .send({ name: "Acme Corp" });
+
+    const patchContactRes = await request(agentApp)
+      .patch(`/api/companies/${companyId}/crm/contacts/${contactRes.body.id}`)
+      .send({ notes: "agent edit" });
+    expect(patchContactRes.status).toBe(403);
+
+    const deleteContactRes = await request(agentApp).delete(
+      `/api/companies/${companyId}/crm/contacts/${contactRes.body.id}`,
+    );
+    expect(deleteContactRes.status).toBe(403);
+
+    const patchOrgRes = await request(agentApp)
+      .patch(`/api/companies/${companyId}/crm/organisations/${orgRes.body.id}`)
+      .send({ name: "Agent-renamed Corp" });
+    expect(patchOrgRes.status).toBe(403);
+
+    const deleteOrgRes = await request(agentApp).delete(
+      `/api/companies/${companyId}/crm/organisations/${orgRes.body.id}`,
+    );
+    expect(deleteOrgRes.status).toBe(403);
+
+    const roleRes = await request(agentApp)
+      .post(`/api/companies/${companyId}/crm/contact-org-roles`)
+      .send({ contactId: contactRes.body.id, organizationId: orgRes.body.id, role: "advisor" });
+    expect(roleRes.status).toBe(403);
+
+    // Confirm nothing actually changed under the agent's refused requests.
+    const stillThereRes = await request(boardApp).get(`/api/companies/${companyId}/crm/contacts/${contactRes.body.id}`);
+    expect(stillThereRes.status).toBe(200);
+    expect(stillThereRes.body.notes).not.toBe("agent edit");
+  });
 });
