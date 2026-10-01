@@ -151,6 +151,7 @@ export const SCHEDULER_TICK_CHAINS = [
   "morningReport",
   "paymentCardExpiry",
   "mailSecretary",
+  "mailAccountSync",
   "videoStorylineRender",
   "videoStorylineStitch",
 ] as const;
@@ -206,6 +207,7 @@ export const SCHEDULER_TICK_CHAIN_LABELS: Record<SchedulerTickChain, string> = {
   morningReport: "sending morning reports",
   paymentCardExpiry: "expiring old payment cards",
   mailSecretary: "checking mail inboxes",
+  mailAccountSync: "syncing personal mail accounts",
   videoStorylineRender: "rendering video storyline shots",
   videoStorylineStitch: "stitching finished video storylines",
 };

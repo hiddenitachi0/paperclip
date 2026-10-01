@@ -778,6 +778,12 @@ export const SECRET_BINDING_TARGET_TYPES = [
   // itself, read-only. Not dedicated, like watcher: the same mailbox
   // password may back more than one inbox config if an operator wants that.
   "mail_inbox",
+  // DUR-4194: the IMAP and SMTP passwords for a mail_accounts row
+  // (config_path 'imap_password' / 'smtp_password'). Unlike mail_inbox,
+  // dedicated (see DEDICATED_SECRET_BINDING_TARGET_TYPES below): a per-person
+  // mailbox's credential is that person's alone, never shared across two
+  // mail accounts the way one watcher's price-check key might be.
+  "mail_account",
 ] as const;
 export type SecretBindingTargetType = (typeof SECRET_BINDING_TARGET_TYPES)[number];
 
@@ -791,6 +797,7 @@ export const DEDICATED_SECRET_BINDING_TARGET_TYPES = [
   "persona_account",
   "site_login",
   "deploy_sftp_credential",
+  "mail_account",
 ] as const satisfies readonly SecretBindingTargetType[];
 
 // DUR-134: platforms a persona_accounts row can target. Fanvue only for now

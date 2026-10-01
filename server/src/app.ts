@@ -30,6 +30,7 @@ import { paymentCardRoutes } from "./routes/payment-cards.js";
 import { watcherRoutes } from "./routes/watchers.js";
 import { morningReportRoutes } from "./routes/morning-report.js";
 import { mailSecretaryRoutes } from "./routes/mail-secretary.js";
+import { mailAccountsRoutes } from "./routes/mail-accounts.js";
 import { videoStorylineRoutes } from "./routes/video-storylines.js";
 import { mcpOAuthRoutes } from "./routes/mcp-oauth.js";
 import { projectRoutes } from "./routes/projects.js";
@@ -306,6 +307,7 @@ export async function createApp(
   api.use(watcherRoutes(db));
   api.use(morningReportRoutes(db));
   api.use(mailSecretaryRoutes(db));
+  api.use(mailAccountsRoutes(db));
   api.use(videoStorylineRoutes(db));
   api.use(mcpOAuthRoutes(db));
   api.use(assetRoutes(db, opts.storageService));

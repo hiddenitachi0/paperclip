@@ -75,6 +75,7 @@ import { watcherService } from "./services/watchers.js";
 import { morningReportService } from "./services/morning-report.js";
 import { paymentCardService } from "./services/payment-cards.js";
 import { mailSecretaryService } from "./services/mail-secretary.js";
+import { mailAccountsService } from "./services/mail-accounts.js";
 import { videoStorylineRenderService } from "./services/video-storyline-render.js";
 import { videoStorylineStitchService } from "./services/video-storyline-stitch.js";
 import { describeTickPhases } from "./services/scheduler-tick-phases.js";
@@ -1028,6 +1029,7 @@ export async function startServer(): Promise<StartedServer> {
     const morningReports = morningReportService(schedulerDb as any);
     const paymentCards = paymentCardService(schedulerDb as any);
     const mailSecretary = mailSecretaryService(schedulerDb as any);
+    const mailAccounts = mailAccountsService(schedulerDb as any);
     const videoStorylineRender = videoStorylineRenderService(schedulerDb as any);
     const videoStorylineStitch = videoStorylineStitchService(schedulerDb as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(schedulerDb as any);
@@ -1453,6 +1455,30 @@ export async function startServer(): Promise<StartedServer> {
           })
           .catch((err) => {
             logger.error({ err }, "mail-secretary tick failed");
+          }),
+      );
+
+      // Per-person mail accounts (DUR-4194): sync due accounts' inboxes over
+      // IMAP, read-only (see services/mail-account-imap-client.ts). Never
+      // sends -- sending only ever happens through the sendDraft route, a
+      // human action, never a scheduled tick.
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.mailAccountSync, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: mailAccountSync",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:mailAccountSync",
+          },
+          () => mailAccounts.tick(new Date()),
+        )
+          .then((result) => {
+            if (result.errors > 0 || result.fetched > 0) {
+              logger.info({ ...result }, "mail-account sync tick");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "mail-account sync tick failed");
           }),
       );
 

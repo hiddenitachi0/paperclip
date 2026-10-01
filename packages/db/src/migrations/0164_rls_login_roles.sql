@@ -246,11 +246,19 @@ DECLARE
     'labels',
     'lane_a_conversations',
     'lane_a_messages',
+    -- Per-person mail accounts (DUR-4194). Created (and granted on) in
+    -- 0197_mail_accounts.sql; listed here so the login-role lists match the
+    -- schema, as for the tables above.
+    'mail_accounts',
     -- Mail secretary (DUR-4093). Created (and granted on) in
     -- 0195_mail_secretary.sql; listed here so the login-role lists match the
     -- schema, as for the tables above.
     'mail_inbox_filters',
     'mail_inboxes',
+    -- Per-person mail accounts (DUR-4194). Created (and granted on) in
+    -- 0197_mail_accounts.sql; listed here so the login-role lists match the
+    -- schema, as for the tables above.
+    'mail_messages',
     'mail_secretary_items',
     -- Morning report (migration 0183): the outbox row per day a report
     -- was generated. Created (and granted on) in 0183_morning_report.sql;
@@ -441,11 +449,19 @@ DECLARE
     'labels',
     'lane_a_conversations',
     'lane_a_messages',
+    -- Per-person mail accounts (DUR-4194). Created (and granted on) in
+    -- 0197_mail_accounts.sql; listed here so the login-role lists match the
+    -- schema, as for the tables above.
+    'mail_accounts',
     -- Mail secretary (DUR-4093). Created (and granted on) in
     -- 0195_mail_secretary.sql; listed here so the login-role lists match the
     -- schema, as for the tables above.
     'mail_inbox_filters',
     'mail_inboxes',
+    -- Per-person mail accounts (DUR-4194). Created (and granted on) in
+    -- 0197_mail_accounts.sql; listed here so the login-role lists match the
+    -- schema, as for the tables above.
+    'mail_messages',
     'mail_secretary_items',
     -- Morning report (migration 0183): the outbox row per day a report
     -- was generated. Created (and granted on) in 0183_morning_report.sql;
