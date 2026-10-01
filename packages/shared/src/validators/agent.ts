@@ -410,6 +410,7 @@ const agentModelProfileConfigSchema = z.object({
 export const agentRuntimeConfigSchema = z.object({
   modelProfiles: z.object({
     cheap: agentModelProfileConfigSchema.optional(),
+    planner: agentModelProfileConfigSchema.optional(),
   }).strict().optional(),
   // DUR-68: if this agent stops handling a customer-inbox task, tickTimers'
   // customer-inbox-handoff sweep reassigns it to reportsTo after this many
@@ -466,7 +467,7 @@ function refineAgentModelEffort(
     if (profileError) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: `${profileKey === "cheap" ? "Cheap model" : profileKey} profile: ${profileError}`,
+        message: `${profileKey === "cheap" ? "Cheap model" : profileKey === "planner" ? "Planner model" : profileKey} profile: ${profileError}`,
         path: ["runtimeConfig", "modelProfiles", profileKey, "adapterConfig"],
       });
     }

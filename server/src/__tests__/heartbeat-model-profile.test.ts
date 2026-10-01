@@ -8,8 +8,20 @@ import {
   buildResolvedAdapterConfigRunMetadata,
   mergeModelProfileAdapterConfig,
   normalizeModelProfileWakeContext,
+  parseIssueAssigneeAdapterOverrides,
+  resolveEffectiveIssueModelProfile,
   resolveModelProfileApplication,
 } from "../services/heartbeat.ts";
+
+const plannerProfile: AdapterModelProfileDefinition = {
+  key: "planner",
+  label: "Planner",
+  adapterConfig: {
+    model: "claude-opus-5",
+    effort: "high",
+  },
+  source: "adapter_default",
+};
 
 const cheapProfile: AdapterModelProfileDefinition = {
   key: "cheap",
@@ -145,6 +157,62 @@ describe("heartbeat model profile application", () => {
     });
 
     expect(contextSnapshot).toMatchObject({ modelProfile: "cheap" });
+  });
+
+  it("resolves the planner profile's adapter defaults for an adapter that supports it", () => {
+    const modelProfile = resolveModelProfileApplication({
+      adapterModelProfiles: [cheapProfile, plannerProfile],
+      agentRuntimeConfig: {},
+      issueModelProfile: "planner",
+      contextSnapshot: {},
+    });
+
+    expect(modelProfile).toMatchObject({
+      requested: "planner",
+      requestedBy: "issue_override",
+      applied: "planner",
+      configSource: "adapter_default",
+      fallbackReason: null,
+      adapterConfig: { model: "claude-opus-5", effort: "high" },
+    });
+  });
+});
+
+// DUR-4144: New Task switch "Plan first on Opus, then build on Sonnet". The
+// first run of a job with this switch on must use the planner profile; once
+// its plan is accepted (server/src/routes/issues.ts clears the flag), later
+// runs must fall back to whatever modelProfile the issue/agent would
+// otherwise use.
+describe("DUR-4144 plan-first-on-Opus issue switch", () => {
+  it("parses planFirstOnOpus off a raw assigneeAdapterOverrides value", () => {
+    expect(parseIssueAssigneeAdapterOverrides({ planFirstOnOpus: true })).toEqual({
+      modelProfile: null,
+      adapterConfig: null,
+      useProjectWorkspace: null,
+      planFirstOnOpus: true,
+    });
+  });
+
+  it("treats a missing/false planFirstOnOpus as off and returns null for an otherwise-empty override", () => {
+    expect(parseIssueAssigneeAdapterOverrides({})).toBeNull();
+    expect(parseIssueAssigneeAdapterOverrides({ planFirstOnOpus: false })).toBeNull();
+  });
+
+  it("forces the planner profile while the switch is on, regardless of any explicit modelProfile", () => {
+    expect(
+      resolveEffectiveIssueModelProfile({ modelProfile: "cheap", planFirstOnOpus: true }),
+    ).toBe("planner");
+    expect(
+      resolveEffectiveIssueModelProfile({ modelProfile: null, planFirstOnOpus: true }),
+    ).toBe("planner");
+  });
+
+  it("falls back to the issue's explicit modelProfile once the switch is off", () => {
+    expect(
+      resolveEffectiveIssueModelProfile({ modelProfile: "cheap", planFirstOnOpus: false }),
+    ).toBe("cheap");
+    expect(resolveEffectiveIssueModelProfile({ modelProfile: null, planFirstOnOpus: false })).toBeNull();
+    expect(resolveEffectiveIssueModelProfile(null)).toBeNull();
   });
 });
 

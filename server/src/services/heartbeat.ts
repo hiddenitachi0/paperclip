@@ -2046,6 +2046,8 @@ interface ParsedIssueAssigneeAdapterOverrides {
   modelProfile: ModelProfileKey | null;
   adapterConfig: Record<string, unknown> | null;
   useProjectWorkspace: boolean | null;
+  /** DUR-4144: "Plan first on Opus, then build on Sonnet" New Task switch. */
+  planFirstOnOpus: boolean;
 }
 
 type ModelProfileRequestSource = "issue_override" | "wake_context";
@@ -2778,7 +2780,7 @@ export function resolveRuntimeSessionParamsForWorkspace(input: {
   };
 }
 
-function parseIssueAssigneeAdapterOverrides(
+export function parseIssueAssigneeAdapterOverrides(
   raw: unknown,
 ): ParsedIssueAssigneeAdapterOverrides | null {
   const parsed = parseObject(raw);
@@ -2792,12 +2794,30 @@ function parseIssueAssigneeAdapterOverrides(
     typeof parsed.useProjectWorkspace === "boolean"
       ? parsed.useProjectWorkspace
       : null;
-  if (!modelProfile && !adapterConfig && useProjectWorkspace === null) return null;
+  const planFirstOnOpus = parsed.planFirstOnOpus === true;
+  if (!modelProfile && !adapterConfig && useProjectWorkspace === null && !planFirstOnOpus) return null;
   return {
     modelProfile,
     adapterConfig,
     useProjectWorkspace,
+    planFirstOnOpus,
   };
+}
+
+/**
+ * DUR-4144: "Plan first on Opus, then build on Sonnet" forces the "planner"
+ * model profile for every run up to and including the one that writes the
+ * plan document. The switch is self-consuming -- the interaction-accept
+ * route (server/src/routes/issues.ts) clears `planFirstOnOpus` the moment the
+ * plan confirmation is accepted -- so once that happens this simply falls
+ * through to whatever modelProfile the issue/agent would otherwise use.
+ */
+export function resolveEffectiveIssueModelProfile(
+  overrides: Pick<ParsedIssueAssigneeAdapterOverrides, "modelProfile" | "planFirstOnOpus"> | null,
+): ModelProfileKey | null {
+  if (!overrides) return null;
+  if (overrides.planFirstOnOpus) return "planner";
+  return overrides.modelProfile ?? null;
 }
 
 /**
@@ -12134,7 +12154,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const modelProfileApplication = resolveModelProfileApplication({
       adapterModelProfiles,
       agentRuntimeConfig: agent.runtimeConfig,
-      issueModelProfile: issueAssigneeOverrides?.modelProfile ?? null,
+      issueModelProfile: resolveEffectiveIssueModelProfile(issueAssigneeOverrides),
       contextSnapshot: context,
       profileResolutionFallbackReason,
     });
