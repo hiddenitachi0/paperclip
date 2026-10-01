@@ -26,6 +26,7 @@ const BOARD_ROUTE_ROOTS = new Set([
   "skills",
   "tools",
   "jobs",
+  "positions",
   "teams-catalog",
   "org",
   "agents",

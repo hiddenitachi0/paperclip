@@ -39,10 +39,10 @@ export function AgentProperties({ agent, runtimeState }: AgentPropertiesProps) {
 
   const reportsToAgent = agent.reportsTo ? agents?.find((a) => a.id === agent.reportsTo) : null;
 
-  // DUR-146 Stage 1 item 17: a job name (company_agent_roles) is what an
+  // DUR-146 Stage 1 item 17: a position name (company_agent_roles) is what an
   // operator actually assigned, and is the plain-language label they'd
   // recognize — the legacy `agent.role` enum (still authorization-compatible
-  // under the hood) is a fallback only for agents nobody has given a job yet.
+  // under the hood) is a fallback only for agents nobody has given a position yet.
   const { data: roleState } = useQuery({
     queryKey: ["agents", "role-state", agent.id] as const,
     queryFn: () => jobsApi.getAgentRoleState(agent.id),
@@ -62,7 +62,7 @@ export function AgentProperties({ agent, runtimeState }: AgentPropertiesProps) {
             </span>
           </PropertyRow>
         )}
-        <PropertyRow label={roleState?.job ? "Job" : "Role"}>
+        <PropertyRow label={roleState?.job ? "Position" : "Role"}>
           <span className="text-sm">{roleDisplayLabel}</span>
         </PropertyRow>
         {agent.title && (
