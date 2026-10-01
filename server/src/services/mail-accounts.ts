@@ -155,6 +155,37 @@ function assertConfigAccess(actor: MailAccountActor, row: MailAccountRow): void 
   throw forbidden("Only this mailbox's owner, or a company owner/admin, can change its settings.");
 }
 
+/**
+ * A company owner/admin who is NOT the mailbox owner must not be able to
+ * repoint an already-bound credential at a connection target they chose
+ * (changing imapHost/imapPort/imapUsername, or the smtp equivalents) --
+ * the next sync tick or send would then authenticate the owner's real
+ * stored password against that admin-chosen host. The owner themself can
+ * always repoint their own connection (they already hold the password), and
+ * an admin may still rebind/clear the credential itself -- but if they do
+ * both at once the row never carries the old secret into the new target.
+ */
+function assertConnectionTargetChangeAllowed(
+  actor: MailAccountActor,
+  row: MailAccountRow,
+  next: { imapHost: string; imapPort: number; imapUsername: string; smtpHost: string; smtpPort: number; smtpUsername: string },
+  credentialChanged: { imap: boolean; smtp: boolean },
+): void {
+  if (isOwner(actor, row)) return;
+  const imapTargetChanged = next.imapHost !== row.imapHost || next.imapPort !== row.imapPort || next.imapUsername !== row.imapUsername;
+  if (imapTargetChanged && row.imapCredentialSecretId && !credentialChanged.imap) {
+    throw forbidden(
+      "Changing the IMAP host/port/username on an account with a bound credential requires the mailbox owner, or clearing/replacing the credential in the same change.",
+    );
+  }
+  const smtpTargetChanged = next.smtpHost !== row.smtpHost || next.smtpPort !== row.smtpPort || next.smtpUsername !== row.smtpUsername;
+  if (smtpTargetChanged && row.smtpCredentialSecretId && !credentialChanged.smtp) {
+    throw forbidden(
+      "Changing the SMTP host/port/username on an account with a bound credential requires the mailbox owner, or clearing/replacing the credential in the same change.",
+    );
+  }
+}
+
 export function mailAccountsService(db: Db, deps: MailAccountServiceDeps = {}) {
   const secrets = secretService(db);
   const privateAccess = privateAccessService(db);
@@ -379,6 +410,10 @@ export function mailAccountsService(db: Db, deps: MailAccountServiceDeps = {}) {
       next.imapUsername !== row.imapUsername ||
       next.imapMailbox !== row.imapMailbox ||
       next.imapCredentialSecretId !== row.imapCredentialSecretId;
+    assertConnectionTargetChangeAllowed(actor, row, next, {
+      imap: next.imapCredentialSecretId !== row.imapCredentialSecretId,
+      smtp: next.smtpCredentialSecretId !== row.smtpCredentialSecretId,
+    });
     const now = nowOf();
     await db
       .update(mailAccounts)

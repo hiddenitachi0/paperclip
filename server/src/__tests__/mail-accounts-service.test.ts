@@ -258,6 +258,60 @@ d("mail accounts", () => {
       const rows = await db.select().from(mailMessages);
       expect(rows).toHaveLength(0);
     });
+
+    it("refuses an admin's IMAP host/port repoint on an already-bound account, instead of silently pointing the owner's real password at it", async () => {
+      const companyId = await seedCompany();
+      const account = await makeAccount(companyId, "owner-1");
+      await expect(
+        service().updateAccount(
+          companyId,
+          account.id,
+          { imapHost: "evil.attacker.example", imapPort: 993 } as never,
+          boardActor("admin-1", true),
+        ),
+      ).rejects.toThrow(/requires the mailbox owner|clearing\/replacing the credential/);
+      const unchanged = await service().getAccount(companyId, account.id, boardActor("owner-1"));
+      expect(unchanged).toMatchObject({ imapHost: "imap.example.com", imapPort: 993 });
+    });
+
+    it("refuses an admin's SMTP host/port repoint on an already-bound account", async () => {
+      const companyId = await seedCompany();
+      const account = await makeAccount(companyId, "owner-1");
+      await expect(
+        service().updateAccount(
+          companyId,
+          account.id,
+          { smtpHost: "evil.attacker.example", smtpPort: 587 } as never,
+          boardActor("admin-1", true),
+        ),
+      ).rejects.toThrow(/requires the mailbox owner|clearing\/replacing the credential/);
+    });
+
+    it("lets an admin repoint the IMAP host if the credential is cleared/replaced in the same change", async () => {
+      const companyId = await seedCompany();
+      const account = await makeAccount(companyId, "owner-1");
+      await expect(
+        service().updateAccount(
+          companyId,
+          account.id,
+          { imapHost: "new-host.example.com", imapPort: 993, imapCredentialSecretId: null } as never,
+          boardActor("admin-1", true),
+        ),
+      ).resolves.toMatchObject({ imapHost: "new-host.example.com", hasImapCredential: false });
+    });
+
+    it("still lets the owner themself repoint their own IMAP host/port", async () => {
+      const companyId = await seedCompany();
+      const account = await makeAccount(companyId, "owner-1");
+      await expect(
+        service().updateAccount(
+          companyId,
+          account.id,
+          { imapHost: "new-host.example.com", imapPort: 993 } as never,
+          boardActor("owner-1"),
+        ),
+      ).resolves.toMatchObject({ imapHost: "new-host.example.com" });
+    });
   });
 
   describe("sendDraft: owner-as-board-actor only, never an agent", () => {
