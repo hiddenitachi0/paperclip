@@ -88,6 +88,7 @@ const DEDICATED_TARGET_LABELS: Record<(typeof DEDICATED_SECRET_BINDING_TARGET_TY
   persona_account: "a persona account",
   site_login: "a site login",
   deploy_sftp_credential: "a project's SFTP deploy credential",
+  mail_account: "a mail account's IMAP/SMTP credential",
 };
 
 /**
