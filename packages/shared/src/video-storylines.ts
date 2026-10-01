@@ -71,6 +71,9 @@ export const VIDEO_DIRECTOR_MAX_SHOT_COUNT = 10;
 export const VIDEO_DIRECTOR_DEFAULT_SHOT_COUNT = 3;
 /** How many of the storyline's most-recent shots the director AI is shown for continuity -- the ticket's "track the last ~10 shots" rule. */
 export const VIDEO_DIRECTOR_CONTEXT_SHOT_COUNT = 10;
+/** Same model/shape as the mail secretary's classifier (mail-secretary.ts) -- one cheap, tool-less structured-output call. */
+export const VIDEO_DIRECTOR_MODEL = "claude-sonnet-5";
+export const VIDEO_DIRECTOR_MAX_OUTPUT_TOKENS = 4_000;
 
 // ─── Feature flag (ships default off) ───────────────────────────────────
 

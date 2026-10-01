@@ -2,9 +2,11 @@ import { Router, type Request, type RequestHandler } from "express";
 import type { Db } from "@paperclipai/db";
 import { createRequestScopedDb } from "@paperclipai/db";
 import {
+  approveVideoDirectorRunSchema,
   createVideoSceneSchema,
   createVideoShotSchema,
   createVideoStorylineSchema,
+  draftVideoDirectorShotsSchema,
   startVideoStorylineRenderSchema,
   updateVideoSceneSchema,
   updateVideoShotSchema,
@@ -20,6 +22,7 @@ import { getStorageService } from "../storage/index.js";
 import { videoStorylineService, type VideoStorylineActor } from "../services/video-storylines.js";
 import { videoStorylineRenderService } from "../services/video-storyline-render.js";
 import { videoStorylineSettingsService } from "../services/video-storyline-settings.js";
+import { videoStorylineDirectorService } from "../services/video-storyline-director.js";
 
 /**
  * DUR-4127: company-scoped CRUD + render orchestration for video
@@ -44,6 +47,7 @@ export function videoStorylineRoutes(rawDb: Db) {
   const storylines = videoStorylineService(db);
   const render = videoStorylineRenderService(db);
   const settings = videoStorylineSettingsService(db);
+  const director = videoStorylineDirectorService(db);
 
   function scope() {
     return companyScopeFromParam(rawDb, (req, companyId) => {
@@ -378,6 +382,82 @@ export function videoStorylineRoutes(rawDb: Db) {
       const storylineId = req.params.storylineId as string;
       const shotId = req.params.shotId as string;
       res.json(await render.reRenderShot(companyId, storylineId, shotId, actorOf(req)));
+    },
+  );
+
+  /**
+   * DUR-4196: one-click still-frame preview render -- a round-2 (advanced)
+   * feature, same as the director AI routes below. Gated here only by the
+   * round-1 flag (gatedScope()); render.renderPreview itself calls
+   * settings.assertAdvancedEnabled, same pattern startRender/reRenderShot
+   * use for the round-1 flag.
+   */
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/shots/:shotId/preview",
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      const shotId = req.params.shotId as string;
+      res.json(await render.renderPreview(companyId, storylineId, shotId, actorOf(req)));
+    },
+  );
+
+  // ─── Director AI ──────────────────────────────────────────────────────
+
+  router.get(
+    "/companies/:companyId/video-storylines/:storylineId/director/runs",
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      res.json(await director.listRuns(companyId, storylineId));
+    },
+  );
+
+  router.get(
+    "/companies/:companyId/video-storylines/:storylineId/director/runs/:runId",
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      const runId = req.params.runId as string;
+      res.json(await director.getRun(companyId, storylineId, runId));
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/director/draft",
+    validate(draftVideoDirectorShotsSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      const row = await director.draftShots(companyId, storylineId, req.body, actorOf(req));
+      res.status(201).json(row);
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/director/runs/:runId/approve",
+    validate(approveVideoDirectorRunSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      const runId = req.params.runId as string;
+      res.json(await director.approveRun(companyId, storylineId, runId, req.body, actorOf(req)));
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/director/runs/:runId/reject",
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      const runId = req.params.runId as string;
+      res.json(await director.rejectRun(companyId, storylineId, runId, actorOf(req)));
     },
   );
 
