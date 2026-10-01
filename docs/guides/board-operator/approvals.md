@@ -17,6 +17,18 @@ The approval includes the proposed agent's name, role, capabilities, adapter con
 
 The CEO's initial strategic plan requires board approval before the CEO can start moving tasks to `in_progress`. This ensures human sign-off on the company direction.
 
+### Deploy
+
+When an agent finishes work destined for a live site or environment, it files a `kind:"deploy"` approval before the deploy actually runs. Each project has its own deploy policy, set from the project's Settings panel (deploy transport, mode, and ask-first categories):
+
+- **`preview_only`** — live deploys (both Git push and SFTP) are refused server-side before a card is even created. Agents can still run the project's preview command; there is no way to reach a live deploy target while this mode is set.
+- **`approval_every_time`** — every deploy request creates a card in your queue. This is the default if no mode is set.
+- **`auto_after_review`** — reserved for a future automation path and currently behaves identically to `approval_every_time`. Turning deploy approvals fully automatic is a deliberately separate, board-gated change (mirroring how `merge_pr` automation works) and has not shipped yet.
+
+**Ask-first categories** (`askFirstActions`) are an allowlist of change categories (e.g. schema/data changes, dependency changes) that always force a card, regardless of the mode above — including under a future automated `auto_after_review`. The server enforces this from the project's own stored policy only; it never trusts anything an agent supplies about the deploy itself, so an unrecognized or ambiguous change still fails closed to "show me a card" rather than silently skipping one.
+
+Both `deployPolicy` fields and the SFTP connection fields (host, credential binding, upload allowlist) are board-only to edit — no agent role can change what triggers its own approval gate.
+
 ## Approval Workflow
 
 ```

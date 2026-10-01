@@ -2730,6 +2730,22 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
     }
   };
 
+  const cancelRender = async () => {
+    if (!companyId || !selectedId) return;
+    if (!window.confirm("Cancel this render? Shots already finished are kept; anything still in progress is stopped.")) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await hostFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}/render/cancel`, { method: "POST" });
+      await loadStorylines();
+      await loadProgress();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   if (enabled === null) {
     return <div style={card}><p style={{ fontSize: 13, margin: 0 }}>Loading...</p></div>;
   }
@@ -2843,6 +2859,11 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                     >
                       Start render
                     </button>
+                    {RENDERING_STORYLINE_STATUSES.has(selected.status) && (
+                      <button type="button" style={dangerBtn} disabled={busy} onClick={() => void cancelRender()}>
+                        Cancel render
+                      </button>
+                    )}
                   </div>
                   {estimate && estimate.id === selected.id && (
                     <p style={{ fontSize: 12, margin: 0 }}>
@@ -2885,6 +2906,27 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                           )}
                         </div>
                       ))}
+                    </div>
+                  </div>
+                )}
+
+                {selected.status === "done" && selected.finalObjectKey && (
+                  <div style={card}>
+                    <strong style={{ fontSize: 13 }}>Finished video</strong>
+                    <video
+                      controls
+                      style={{ width: "100%", borderRadius: 8, background: "#000" }}
+                      src={`/api/companies/${companyId}/video-storylines/${selected.id}/final/content`}
+                    />
+                    <div>
+                      <a
+                        href={`/api/companies/${companyId}/video-storylines/${selected.id}/final/content`}
+                        download={`${selected.title || "video-storyline"}.mp4`}
+                        style={{ color: "#1971c2", fontSize: 12 }}
+                      >
+                        Download video
+                        {selected.finalByteSize ? ` (${(selected.finalByteSize / (1024 * 1024)).toFixed(1)} MB)` : ""}
+                      </a>
                     </div>
                   </div>
                 )}
