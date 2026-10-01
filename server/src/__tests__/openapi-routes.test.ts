@@ -117,6 +117,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "video-storylines.ts",
   // CRM routes (DUR-4150/DUR-4191/DUR-4192) are a new backend feature not yet in the public OpenAPI document.
   "crm.ts",
+  // Agent work-history search routes (DUR-4197) sit next to the quick-agent memory notebook and are not yet in the public OpenAPI document.
+  "agent-work-summaries.ts",
   // Positions/Jobs routes (DUR-4182) are a new backend feature not yet in the public OpenAPI document.
   "jobs.ts",
 ]);

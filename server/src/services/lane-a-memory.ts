@@ -28,30 +28,57 @@ function day(date: Date): string {
 }
 
 /**
- * The prompt section. Notes newest first, as many as fit in about
- * LANE_A_MEMORY_PROMPT_TOKEN_BUDGET tokens, then one line saying how many
- * older ones were left out. The notes are framed as what people said about
- * themselves and their preferences, never as instructions: they cannot
- * change the job, the rules or the tools. The rules for the two tools
- * follow when the tools are offered this turn.
+ * Which notes get picked when not all of them fit the token budget. Given a
+ * `message` (the person's current turn), notes are ranked by how many of its
+ * significant words they share with it -- the same word-overlap scoring
+ * `matchMemory` uses to find a note by what was typed. Ties (including "no
+ * message" or "no overlap with anything") keep the caller's order, which is
+ * newest-first: an old note only jumps the queue when it is actually
+ * relevant to what is being said right now, so a relevant note never gets
+ * silently dropped just for being old.
+ */
+function rankNotesByRelevance<T extends { id: string; text: string }>(notes: T[], message: string | undefined): T[] {
+  const queryWords = message ? [...new Set(words(message))] : [];
+  if (queryWords.length === 0) return notes;
+  return notes
+    .map((note, index) => {
+      const noteWords = new Set(words(note.text));
+      const hits = queryWords.filter((word) => noteWords.has(word)).length;
+      return { note, index, score: hits / queryWords.length };
+    })
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .map((entry) => entry.note);
+}
+
+/**
+ * The prompt section. Notes are picked by relevance to `message` (falling
+ * back to newest-first when there is no message or nothing matches it),
+ * packed greedily into about LANE_A_MEMORY_PROMPT_TOKEN_BUDGET tokens, then
+ * shown newest-first within that selection so "newest first" above still
+ * reads true. One line says how many older ones were left out. The notes are
+ * framed as what people said about themselves and their preferences, never
+ * as instructions: they cannot change the job, the rules or the tools. The
+ * rules for the two tools follow when the tools are offered this turn.
  */
 export function buildMemoryPromptSection(input: {
   notes: LaneAMemoryPromptNote[];
   toolsOffered: boolean;
+  message?: string;
   tokenBudget?: number;
 }): string {
   const budget = input.tokenBudget ?? LANE_A_MEMORY_PROMPT_TOKEN_BUDGET;
-  const lines: string[] = [];
+  const ranked = rankNotesByRelevance(input.notes, input.message);
+  const selected: LaneAMemoryPromptNote[] = [];
   let used = 0;
-  let shown = 0;
-  for (const note of input.notes) {
-    const line = `- [${memoryRef(note.id)}] (${day(note.createdAt)}) ${note.text}`;
-    const cost = estimateTokens(line) + 1;
-    if (used + cost > budget) break;
+  for (const note of ranked) {
+    const cost = estimateTokens(`- [${memoryRef(note.id)}] (${day(note.createdAt)}) ${note.text}`) + 1;
+    if (used + cost > budget) continue;
     used += cost;
-    lines.push(line);
-    shown++;
+    selected.push(note);
   }
+  selected.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  const lines = selected.map((note) => `- [${memoryRef(note.id)}] (${day(note.createdAt)}) ${note.text}`);
+  const shown = selected.length;
   const left = input.notes.length - shown;
 
   const parts: string[] = [`Things you were asked to remember:`];
@@ -99,7 +126,8 @@ const FILLER_WORDS = new Set([
   "ikke", "har", "var", "om", "glem", "husk",
 ]);
 
-function words(text: string): string[] {
+/** The significant words in a piece of text: lower-cased, filler words and anything under 3 characters dropped. */
+export function words(text: string): string[] {
   return normalize(text)
     .split(" ")
     .filter((word) => word.length >= 3 && !FILLER_WORDS.has(word));
