@@ -142,6 +142,31 @@ async function falQueueCancel(fetchImpl: FetchImpl, apiKey: string, handle: Medi
 
 export const FAL_DEFAULT_VIDEO_MODEL = "fal-ai/kling-video/v1.6/standard/text-to-video";
 export const FAL_DEFAULT_IMAGE_TO_VIDEO_MODEL = "fal-ai/kling-video/v1.6/standard/image-to-video";
+/**
+ * DUR-4196: the face-drift fix. The only Fal model in this codebase's lineup
+ * whose API accepts BOTH a literal continuity frame (`start_image_url`) and
+ * named character/object reference pictures (`elements[].reference_image_urls`)
+ * in the same generation call -- see the PR description's model research
+ * note (fal.ai/models/fal-ai/kling-video/v3/pro/image-to-video/api). Before
+ * this, every shot after the first silently dropped its character reference
+ * pictures whenever a continuity frame was available (FalVideoProvider only
+ * ever read input.startImage; input.referenceImages was computed in
+ * video-storyline-render.ts but never sent to either provider).
+ */
+export const FAL_DEFAULT_COMBINED_MODEL = "fal-ai/kling-video/v3/pro/image-to-video";
+
+/**
+ * Kling v3's documented element shape wants a `frontal_image_url` plus 1-3
+ * `reference_image_urls`. When there is only one character picture in total,
+ * it is reused as its own sole "additional angle" rather than guessing
+ * whether Fal's API tolerates an empty array for a field its docs call
+ * required.
+ */
+function buildFalElement(referenceImages: readonly string[]): { frontal_image_url: string; reference_image_urls: string[] } | null {
+  if (referenceImages.length === 0) return null;
+  const [frontal, ...rest] = referenceImages;
+  return { frontal_image_url: frontal!, reference_image_urls: rest.length > 0 ? rest.slice(0, 3) : [frontal!] };
+}
 
 export class FalVideoProvider implements MediaJobProvider {
   readonly name = "fal";
@@ -150,12 +175,27 @@ export class FalVideoProvider implements MediaJobProvider {
     private readonly fetchImpl: FetchImpl,
     private readonly defaultModel = FAL_DEFAULT_VIDEO_MODEL,
     private readonly defaultImageToVideoModel = FAL_DEFAULT_IMAGE_TO_VIDEO_MODEL,
+    private readonly defaultCombinedModel = FAL_DEFAULT_COMBINED_MODEL,
   ) {}
 
   async start(input: MediaJobInput): Promise<MediaJobHandle> {
-    const model = input.model ?? (input.startImage ? this.defaultImageToVideoModel : this.defaultModel);
+    const element = buildFalElement(input.referenceImages ?? []);
+    // Only switch to the combined model when the caller did not pin an exact
+    // model themselves -- an explicit input.model always wins, same as the
+    // other two defaults below.
+    const useCombined = !input.model && element !== null;
+    const model = input.model ?? (useCombined ? this.defaultCombinedModel : input.startImage ? this.defaultImageToVideoModel : this.defaultModel);
     const body: Record<string, unknown> = { prompt: input.prompt };
-    if (input.startImage) body.image_url = input.startImage;
+    if (useCombined) {
+      // v3 pro's start_image_url is effectively required; when there is no
+      // continuity frame yet (the storyline's first shot), fall back to the
+      // character's own frontal picture so likeness still drives the model
+      // rather than silently losing it to a bare text-to-video call.
+      body.start_image_url = input.startImage ?? element!.frontal_image_url;
+      body.elements = [element];
+    } else if (input.startImage) {
+      body.image_url = input.startImage;
+    }
     if (input.aspectRatio) body.aspect_ratio = input.aspectRatio;
     if (typeof input.durationSeconds === "number") body.duration = String(input.durationSeconds);
     if (typeof input.seed === "number") body.seed = input.seed;
@@ -182,6 +222,16 @@ export class FalVideoProvider implements MediaJobProvider {
 // whose arguments take a `prompt` and `model`, and that image-to-video /
 // continue-from-last-frame is the same media_references upload edit_image
 // already uses, with the frame at sourceImageIndex -1.
+//
+// DUR-4196: the same face-drift fix as FalVideoProvider, under the same
+// "unconfirmed, flagged for Filip" banner -- Sogni's own docs describe a
+// reference-to-video mode taking 1-9 reference images tagged [Image 1]..
+// [Image 9] in the prompt, separate from start/end frame control. This class
+// now uploads the continuity frame (if any) AND every character reference
+// picture as media_references, rather than only the continuity frame.
+// sourceImageIndex still marks which uploaded image is the continuity frame;
+// the rest ride along as plain context pictures the same way edit_image's
+// other reference pictures already do.
 
 const SOGNI_API_BASE = "https://api.sogni.ai";
 
@@ -209,14 +259,21 @@ export class SogniVideoProvider implements MediaJobProvider {
   async start(input: MediaJobInput): Promise<MediaJobHandle> {
     const model = input.model ?? this.options.defaultModel ?? "sogni-video";
     const mediaReferences: Array<{ kind: "image"; url: string }> = [];
-    if (input.startImage) mediaReferences.push({ kind: "image", url: await this.uploadStartFrame(input.startImage) });
+    let sourceImageIndex: number | undefined;
+    if (input.startImage) {
+      mediaReferences.push({ kind: "image", url: await this.uploadReferenceImage(input.startImage) });
+      sourceImageIndex = mediaReferences.length - 1;
+    }
+    for (const reference of (input.referenceImages ?? []).slice(0, 3)) {
+      mediaReferences.push({ kind: "image", url: await this.uploadReferenceImage(reference) });
+    }
     const step: Json = {
       id: "video",
       toolName: "generate_video",
       arguments: {
         prompt: input.prompt,
         model,
-        ...(mediaReferences.length > 0 ? { sourceImageIndex: -1 } : {}),
+        ...(sourceImageIndex !== undefined ? { sourceImageIndex } : {}),
         ...(typeof input.seed === "number" ? { seed: input.seed } : {}),
         ...(typeof input.durationSeconds === "number" ? { durationSeconds: input.durationSeconds } : {}),
       },
@@ -285,8 +342,8 @@ export class SogniVideoProvider implements MediaJobProvider {
     }
   }
 
-  /** Upload the continue-from-last-frame / image-to-video starting frame, the same way SogniProvider uploads reference pictures. */
-  private async uploadStartFrame(dataUri: string): Promise<string> {
+  /** Upload a continuity frame or a character reference picture (same upload mechanics for both), the same way SogniProvider uploads reference pictures. */
+  private async uploadReferenceImage(dataUri: string): Promise<string> {
     const match = /^data:([^;,]+);base64,(.*)$/s.exec(dataUri);
     const contentType = match?.[1]?.toLowerCase() === "image/jpg" ? "image/jpeg" : match?.[1]?.toLowerCase();
     if (!match || !contentType || !["image/png", "image/jpeg", "image/webp", "image/gif"].includes(contentType)) {

@@ -196,7 +196,7 @@ export function sortRoutines(
 }
 
 function buildRoutinesTabHref(tab: RoutinesTab) {
-  return tab === "runs" ? "/routines?tab=runs" : "/routines";
+  return tab === "runs" ? "/jobs?tab=runs" : "/jobs";
 }
 
 export function Routines() {
@@ -241,7 +241,7 @@ export function Routines() {
   const [routineViewState, setRoutineViewState] = useState<RoutineViewState>(() => getRoutineViewState(routineViewStateKey));
 
   useEffect(() => {
-    setBreadcrumbs([{ label: "Routines" }]);
+    setBreadcrumbs([{ label: "Jobs" }]);
   }, [setBreadcrumbs]);
 
   useEffect(() => {
@@ -310,13 +310,13 @@ export function Routines() {
       setAdvancedOpen(false);
       await queryClient.invalidateQueries({ queryKey: queryKeys.routines.list(selectedCompanyId!) });
       pushToast({
-        title: "Routine created",
+        title: "Job created",
         body: routine.assigneeAgentId
           ? "Add the first trigger to turn it into a live workflow."
           : "Draft saved. Add a default agent before enabling automation.",
         tone: "success",
       });
-      navigate(`/routines/${routine.id}?tab=triggers`);
+      navigate(`/jobs/${routine.id}?tab=triggers`);
     },
   });
   const updateIssue = useMutation({
@@ -343,8 +343,8 @@ export function Routines() {
     },
     onError: (mutationError) => {
       pushToast({
-        title: "Failed to update routine",
-        body: mutationError instanceof Error ? mutationError.message : "Paperclip could not update the routine.",
+        title: "Failed to update job",
+        body: mutationError instanceof Error ? mutationError.message : "Paperclip could not update the job.",
         tone: "error",
       });
     },
@@ -378,8 +378,8 @@ export function Routines() {
     },
     onError: (mutationError) => {
       pushToast({
-        title: "Routine run failed",
-        body: mutationError instanceof Error ? mutationError.message : "Paperclip could not start the routine run.",
+        title: "Job run failed",
+        body: mutationError instanceof Error ? mutationError.message : "Paperclip could not start the job run.",
         tone: "error",
       });
     },
@@ -464,7 +464,7 @@ export function Routines() {
     if (!enabled && !routine.assigneeAgentId) {
       pushToast({
         title: "Default agent required",
-        body: "Set a default agent before enabling routine automation.",
+        body: "Set a default agent before enabling job automation.",
         tone: "warn",
       });
       return;
@@ -483,7 +483,7 @@ export function Routines() {
   }
 
   if (!selectedCompanyId) {
-    return <EmptyState icon={Repeat} message="Select a company to view routines." />;
+    return <EmptyState icon={Repeat} message="Select a company to view jobs." />;
   }
 
   if (isLoading) {
@@ -495,15 +495,15 @@ export function Routines() {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div className="space-y-1">
           <h1 className="text-2xl font-semibold tracking-tight">
-            Routines
+            Jobs
           </h1>
           <p className="text-sm text-muted-foreground">
-            Recurring work definitions that materialize into auditable execution tasks.
+            Ready-made pieces of work agents can run — on a schedule, on a trigger, or with one press.
           </p>
         </div>
         <Button onClick={() => setComposerOpen(true)}>
           <Plus className="mr-2 h-4 w-4" />
-          Create routine
+          Create job
         </Button>
       </div>
 
@@ -513,14 +513,14 @@ export function Routines() {
           value={activeTab}
           onValueChange={handleTabChange}
           items={[
-            { value: "routines", label: "Routines" },
+            { value: "routines", label: "Jobs" },
             { value: "runs", label: "Recent Runs" },
           ]}
         />
         <TabsContent value="routines" className="space-y-4">
           <div className="flex items-center justify-between gap-3">
             <p className="text-sm text-muted-foreground">
-              {visibleRoutines.length} routine{visibleRoutines.length === 1 ? "" : "s"}
+              {visibleRoutines.length} job{visibleRoutines.length === 1 ? "" : "s"}
             </p>
             <div className="flex items-center gap-1">
               <Popover>
@@ -626,9 +626,9 @@ export function Routines() {
         >
           <div className="shrink-0 flex flex-wrap items-center justify-between gap-3 border-b border-border/60 px-5 py-3">
             <div>
-              <p className="text-xs font-medium uppercase tracking-[0.2em] text-muted-foreground">New routine</p>
+              <p className="text-xs font-medium uppercase tracking-[0.2em] text-muted-foreground">New job</p>
               <p className="text-sm text-muted-foreground">
-                Define the recurring work first. Default project and agent are optional for draft routines.
+                Define the work first. Default project and agent are optional for draft jobs.
               </p>
             </div>
             <Button
@@ -649,7 +649,7 @@ export function Routines() {
               <textarea
                 ref={titleInputRef}
                 className="w-full resize-none overflow-hidden bg-transparent text-xl font-semibold outline-none placeholder:text-muted-foreground/50"
-                placeholder="Routine title"
+                placeholder="Job title"
                 rows={1}
                 value={draft.title}
                 onChange={(event) => {
@@ -844,7 +844,7 @@ export function Routines() {
 
           <div className="shrink-0 flex flex-col gap-3 border-t border-border/60 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
             <div className="text-sm text-muted-foreground">
-              After creation, Paperclip takes you straight to trigger setup. Draft routines stay paused until you add a default agent.
+              After creation, Paperclip takes you straight to trigger setup. Draft jobs stay paused until you add a default agent.
             </div>
             <div className="flex flex-col gap-2 sm:items-end">
               <Button
@@ -855,11 +855,11 @@ export function Routines() {
                 }
               >
                 <Plus className="mr-2 h-4 w-4" />
-                {createRoutine.isPending ? "Creating..." : "Create routine"}
+                {createRoutine.isPending ? "Creating..." : "Create job"}
               </Button>
               {createRoutine.isError ? (
                 <p className="text-sm text-destructive">
-                  {createRoutine.error instanceof Error ? createRoutine.error.message : "Failed to create routine"}
+                  {createRoutine.error instanceof Error ? createRoutine.error.message : "Failed to create job"}
                 </p>
               ) : null}
             </div>
@@ -870,7 +870,7 @@ export function Routines() {
       {error ? (
         <Card>
           <CardContent className="pt-6 text-sm text-destructive">
-            {error instanceof Error ? error.message : "Failed to load routines"}
+            {error instanceof Error ? error.message : "Failed to load jobs"}
           </CardContent>
         </Card>
       ) : null}
@@ -881,7 +881,7 @@ export function Routines() {
             <div className="py-12">
               <EmptyState
                 icon={Repeat}
-                message="No active routines. Use Create routine to define the first recurring workflow."
+                message="No active jobs. Use Create job to define the first one."
               />
             </div>
           ) : (
@@ -926,7 +926,7 @@ export function Routines() {
                           agentById={agentById}
                           runningRoutineId={runningRoutineId}
                           statusMutationRoutineId={statusMutationRoutineId}
-                          href={`/routines/${routine.id}`}
+                          href={`/jobs/${routine.id}`}
                           runNowButton
                           divider={false}
                           onRunNow={handleRunNow}

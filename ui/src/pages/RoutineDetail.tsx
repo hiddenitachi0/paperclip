@@ -174,7 +174,7 @@ export function RoutineDetail() {
     (next: RoutineSectionKey, options?: { replace?: boolean }) => {
       if (!routineId) return;
       writeLastSection(routineId, next);
-      navigate(`/routines/${routineId}/${next}`, { replace: options?.replace ?? true });
+      navigate(`/jobs/${routineId}/${next}`, { replace: options?.replace ?? true });
     },
     [navigate, routineId],
   );
@@ -324,7 +324,7 @@ export function RoutineDetail() {
 
   useEffect(() => {
     if (!routine) return;
-    setBreadcrumbs([{ label: "Routines", href: "/routines" }, { label: routine.title }]);
+    setBreadcrumbs([{ label: "Jobs", href: "/jobs" }, { label: routine.title }]);
     if (!routineDefaults) return;
     const changedRoutine = hydratedRoutineIdRef.current !== routine.id;
     if (changedRoutine || !isEditDirty) {
@@ -337,7 +337,7 @@ export function RoutineDetail() {
     autoResizeTextarea(titleInputRef.current);
   }, [editDraft.title, routine?.id]);
 
-  // Persist the section the user lands on so a bare /routines/:id remembers it.
+  // Persist the section the user lands on so a bare /jobs/:id remembers it.
   useEffect(() => {
     if (routineId && isRoutineSection(sectionParam)) {
       writeLastSection(routineId, sectionParam);
@@ -650,23 +650,23 @@ export function RoutineDetail() {
   );
 
   if (!selectedCompanyId) {
-    return <EmptyState icon={Repeat} message="Select a company to view routines." />;
+    return <EmptyState icon={Repeat} message="Select a company to view jobs." />;
   }
 
-  // Back-compat redirect: `?tab=x` → `/routines/:id/x`.
+  // Back-compat redirect: `?tab=x` → `/jobs/:id/x`.
   const legacyTab = new URLSearchParams(window.location.search).get("tab");
   if (routineId && legacyTab && LEGACY_TAB_TO_SECTION[legacyTab]) {
-    return <Navigate to={`/routines/${routineId}/${LEGACY_TAB_TO_SECTION[legacyTab]}`} replace />;
+    return <Navigate to={`/jobs/${routineId}/${LEGACY_TAB_TO_SECTION[legacyTab]}`} replace />;
   }
 
-  // Bare /routines/:id → remembered section or overview.
+  // Bare /jobs/:id → remembered section or overview.
   if (routineId && !sectionParam) {
     const landing = readLastSection(routineId) ?? "overview";
-    return <Navigate to={`/routines/${routineId}/${landing}`} replace />;
+    return <Navigate to={`/jobs/${routineId}/${landing}`} replace />;
   }
   // Unknown section → overview.
   if (routineId && sectionParam && !isRoutineSection(sectionParam)) {
-    return <Navigate to={`/routines/${routineId}/overview`} replace />;
+    return <Navigate to={`/jobs/${routineId}/overview`} replace />;
   }
 
   if (isLoading) {
@@ -836,7 +836,7 @@ export function RoutineDetail() {
         <div className="flex min-h-0 flex-1">
           <RoutineSubSidebar
             activeSection={section}
-            hrefFor={(target) => `/routines/${routineId}/${target}`}
+            hrefFor={(target) => `/jobs/${routineId}/${target}`}
             isSectionDirty={isSectionDirty}
             hasLiveRun={hasLiveRun}
             onNavigate={(target) => writeLastSection(routineId!, target)}

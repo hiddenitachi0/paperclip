@@ -75,6 +75,18 @@ describe("selectProjectDeployHistory", () => {
     expect(history[0]?.approvalId).toBe("a3");
   });
 
+  it("returns more than two releases when given a higher limit (configurable retention)", async () => {
+    const { selectProjectDeployHistory } = await import("../services/deploy-history.js");
+    const entries = [
+      successLine("a1", "aaaaaaaaaaaa", "2026-09-01T10:00:00Z"),
+      successLine("a2", "bbbbbbbbbbbb", "2026-09-02T10:00:00Z"),
+      successLine("a3", "cccccccccccc", "2026-09-03T10:00:00Z"),
+      successLine("a4", "dddddddddddd", "2026-09-04T10:00:00Z"),
+    ];
+    const history = selectProjectDeployHistory(entries, new Set(["a1", "a2", "a3", "a4"]), 10);
+    expect(history.map((h) => h.commit)).toEqual(["dddddddddddd", "cccccccccccc", "bbbbbbbbbbbb", "aaaaaaaaaaaa"]);
+  });
+
   it("falls back to the commit named in the body for older log lines without a commit field", async () => {
     const { selectProjectDeployHistory } = await import("../services/deploy-history.js");
     const legacy = line({
@@ -85,6 +97,30 @@ describe("selectProjectDeployHistory", () => {
     expect(selectProjectDeployHistory([legacy], new Set(["a1"]))).toEqual([
       { commit: "abcdef123456", approvalId: "a1", deployedAt: "2026-09-01T10:00:00Z" },
     ]);
+  });
+});
+
+describe("resolveReleaseRetentionCount", () => {
+  it("defaults to 10 when unset, null, or not a policy object", async () => {
+    const { resolveReleaseRetentionCount, DEFAULT_RELEASE_RETENTION_COUNT } = await import("../services/deploy-history.js");
+    expect(DEFAULT_RELEASE_RETENTION_COUNT).toBe(10);
+    expect(resolveReleaseRetentionCount(undefined)).toBe(10);
+    expect(resolveReleaseRetentionCount(null)).toBe(10);
+    expect(resolveReleaseRetentionCount({})).toBe(10);
+  });
+
+  it("honors a configured count, clamped to [1, 50]", async () => {
+    const { resolveReleaseRetentionCount } = await import("../services/deploy-history.js");
+    expect(resolveReleaseRetentionCount({ releaseRetentionCount: 25 })).toBe(25);
+    expect(resolveReleaseRetentionCount({ releaseRetentionCount: 0 })).toBe(1);
+    expect(resolveReleaseRetentionCount({ releaseRetentionCount: 999 })).toBe(50);
+    expect(resolveReleaseRetentionCount({ releaseRetentionCount: 3.7 })).toBe(3);
+  });
+
+  it("falls back to the default for a malformed stored value rather than throwing", async () => {
+    const { resolveReleaseRetentionCount } = await import("../services/deploy-history.js");
+    expect(resolveReleaseRetentionCount({ releaseRetentionCount: "10" as unknown as number })).toBe(10);
+    expect(resolveReleaseRetentionCount({ releaseRetentionCount: Number.NaN })).toBe(10);
   });
 });
 
@@ -131,11 +167,11 @@ describe("GET /companies/:companyId/projects/:projectId/deploy-history", () => {
     const app = await createApp(fakeDbWithApprovalIds(["a1", "a2"]));
     const res = await request(app).get(`/api/companies/${COMPANY_ID}/projects/${PROJECT_ID}/deploy-history`);
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({
-      current: { commit: "bbbbbbbbbbbb", approvalId: "a2", deployedAt: "2026-09-02T10:00:00Z" },
-      previous: { commit: "aaaaaaaaaaaa", approvalId: "a1", deployedAt: "2026-09-01T10:00:00Z" },
-    });
-    expect(mockReadDeployRunnerStatus).toHaveBeenCalledWith(COMPANY_ID, 500);
+    const bbb = { commit: "bbbbbbbbbbbb", approvalId: "a2", deployedAt: "2026-09-02T10:00:00Z" };
+    const aaa = { commit: "aaaaaaaaaaaa", approvalId: "a1", deployedAt: "2026-09-01T10:00:00Z" };
+    expect(res.body).toEqual({ current: bbb, previous: aaa, releases: [bbb, aaa] });
+    // DEFAULT_RELEASE_RETENTION_COUNT (10) * the per-release log-line budget.
+    expect(mockReadDeployRunnerStatus).toHaveBeenCalledWith(COMPANY_ID, 400);
   });
 
   it("returns nulls when the runner has never deployed this project", async () => {
@@ -143,7 +179,7 @@ describe("GET /companies/:companyId/projects/:projectId/deploy-history", () => {
     const app = await createApp(fakeDbWithApprovalIds([]));
     const res = await request(app).get(`/api/companies/${COMPANY_ID}/projects/${PROJECT_ID}/deploy-history`);
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ current: null, previous: null });
+    expect(res.body).toEqual({ current: null, previous: null, releases: [] });
   });
 
   it("refuses a caller without access to the company", async () => {

@@ -111,7 +111,14 @@ export function emptyWatcherDraft(agentId = ""): WatcherDraft {
 
 export function draftFromWatcher(watcher: WatcherSummary): WatcherDraft {
   const draft = emptyWatcherDraft(watcher.agentId);
-  const rule = watcher.rule;
+  // DUR-4168: a web-page watcher's rule has no change/level/since_last_alert shape to
+  // edit here yet (that form is separate follow-up work) -- fall back to the default
+  // rule rather than mis-type it as one of the three kinds this dialog understands.
+  const rawRule = watcher.rule;
+  const rule: WatcherRule =
+    rawRule.kind === "change" || rawRule.kind === "level" || rawRule.kind === "since_last_alert"
+      ? rawRule
+      : WATCHER_DEFAULT_RULE;
   return {
     ...draft,
     name: watcher.name,

@@ -57,6 +57,11 @@ export interface VideoStorylineSummary {
   finalDurationSeconds: number | null;
   stitchBlockedReason: string | null;
   errorMessage: string | null;
+  defaultTransition: string;
+  defaultTransitionDurationMs: number;
+  musicAssetId: string | null;
+  musicSourceKey: string | null;
+  musicVolumeDb: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -88,6 +93,11 @@ export interface VideoShotSummary {
   actualCostCents: number | null;
   attempt: number;
   errorMessage: string | null;
+  transitionIn: string | null;
+  previewObjectKey: string | null;
+  previewContentType: string | null;
+  previewByteSize: number | null;
+  previewGeneratedAt: string | null;
   createdAt: string;
 }
 
@@ -110,6 +120,11 @@ function toStorylineSummary(row: StorylineRow): VideoStorylineSummary {
     finalDurationSeconds: row.finalDurationSeconds,
     stitchBlockedReason: row.stitchBlockedReason,
     errorMessage: row.errorMessage,
+    defaultTransition: row.defaultTransition,
+    defaultTransitionDurationMs: row.defaultTransitionDurationMs,
+    musicAssetId: row.musicAssetId,
+    musicSourceKey: row.musicSourceKey,
+    musicVolumeDb: row.musicVolumeDb,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -145,6 +160,11 @@ function toShotSummary(row: ShotRow): VideoShotSummary {
     actualCostCents: row.actualCostCents,
     attempt: row.attempt,
     errorMessage: row.errorMessage,
+    transitionIn: row.transitionIn,
+    previewObjectKey: row.previewObjectKey,
+    previewContentType: row.previewContentType,
+    previewByteSize: row.previewByteSize,
+    previewGeneratedAt: iso(row.previewGeneratedAt),
     createdAt: row.createdAt.toISOString(),
   };
 }
@@ -245,6 +265,11 @@ export function videoStorylineService(db: Db) {
         model: input.model,
         budgetCapCents: input.budgetCapCents,
         characterReferenceAssetIds: input.characterReferenceAssetIds,
+        defaultTransition: input.defaultTransition,
+        defaultTransitionDurationMs: input.defaultTransitionDurationMs,
+        musicAssetId: input.musicAssetId,
+        musicSourceKey: input.musicSourceKey,
+        musicVolumeDb: input.musicVolumeDb,
         createdByAgentId: actor.agentId,
         createdByUserId: actor.actorType === "user" ? actor.actorId : null,
         createdAt: now,
@@ -271,6 +296,13 @@ export function videoStorylineService(db: Db) {
   ): Promise<VideoStorylineSummary> {
     const existing = await getStorylineRow(companyId, storylineId);
     assertStorylineEditable(existing);
+    // Mutual exclusivity (video_storylines_music_source_exclusive_check) is
+    // enforced against the FULL resulting row, not just this payload: setting
+    // one music field must clear the other's existing stored value, or a
+    // request that only touches musicAssetId could collide with a
+    // musicSourceKey left over from an earlier update.
+    const settingMusicAssetId = input.musicAssetId !== undefined && input.musicAssetId !== null;
+    const settingMusicSourceKey = input.musicSourceKey !== undefined && input.musicSourceKey !== null;
     const [row] = await db
       .update(videoStorylines)
       .set({
@@ -280,6 +312,15 @@ export function videoStorylineService(db: Db) {
         ...(input.characterReferenceAssetIds !== undefined
           ? { characterReferenceAssetIds: input.characterReferenceAssetIds }
           : {}),
+        ...(input.defaultTransition !== undefined ? { defaultTransition: input.defaultTransition } : {}),
+        ...(input.defaultTransitionDurationMs !== undefined
+          ? { defaultTransitionDurationMs: input.defaultTransitionDurationMs }
+          : {}),
+        ...(input.musicAssetId !== undefined ? { musicAssetId: input.musicAssetId } : {}),
+        ...(input.musicSourceKey !== undefined ? { musicSourceKey: input.musicSourceKey } : {}),
+        ...(settingMusicAssetId && input.musicSourceKey === undefined ? { musicSourceKey: null } : {}),
+        ...(settingMusicSourceKey && input.musicAssetId === undefined ? { musicAssetId: null } : {}),
+        ...(input.musicVolumeDb !== undefined ? { musicVolumeDb: input.musicVolumeDb } : {}),
         updatedAt: new Date(),
       })
       .where(eq(videoStorylines.id, storylineId))
@@ -433,6 +474,7 @@ export function videoStorylineService(db: Db) {
         cameraNotes: input.cameraNotes,
         durationSeconds: input.durationSeconds,
         lookReferenceAssetIds: input.lookReferenceAssetIds,
+        transitionIn: input.transitionIn,
         createdAt: now,
         updatedAt: now,
       })
@@ -474,6 +516,7 @@ export function videoStorylineService(db: Db) {
         ...(input.cameraNotes !== undefined ? { cameraNotes: input.cameraNotes } : {}),
         ...(input.durationSeconds !== undefined ? { durationSeconds: input.durationSeconds } : {}),
         ...(input.lookReferenceAssetIds !== undefined ? { lookReferenceAssetIds: input.lookReferenceAssetIds } : {}),
+        ...(input.transitionIn !== undefined ? { transitionIn: input.transitionIn } : {}),
         updatedAt: new Date(),
       })
       .where(eq(videoShots.id, shotId))

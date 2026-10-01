@@ -1,21 +1,25 @@
 import { buffer as streamToBuffer } from "node:stream/consumers";
 import { and, asc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { videoShots, videoStorylines } from "@paperclipai/db";
+import { assets, videoShots, videoStorylines } from "@paperclipai/db";
+import type { VideoShotTransition } from "@paperclipai/shared";
 import { logger } from "../middleware/logger.js";
 import { getStorageService } from "../storage/index.js";
 import { logActivity } from "./activity-log.js";
-import { checkFfmpegAvailable, stitchClips } from "./video-ffmpeg.js";
+import { addMusicBed, checkFfmpegAvailable, stitchClips, stitchClipsWithTransitions, type ShotTransitionInput } from "./video-ffmpeg.js";
 
 /**
  * DUR-4127: the stitching worker. Picks up storylines sitting in
  * "ready_to_stitch" (every shot done -- see video-storyline-render.ts's
  * onShotDone), downloads each shot's clip from storage in order, and hands
- * them to ffmpeg's concat demuxer (video-ffmpeg.ts#stitchClips). Ground
- * rule: never install ffmpeg, never block a storyline on its absence -- a
- * host without it just parks the storyline with stitchBlockedReason set and
- * the tick moves on, no differently from any other "waiting on ops" state
- * this codebase already has.
+ * them to ffmpeg's concat demuxer (video-ffmpeg.ts#stitchClips) -- or, when
+ * any shot has a non-"cut" transition, the pairwise xfade path
+ * (stitchClipsWithTransitions). DUR-4196 adds an optional music bed
+ * (addMusicBed) laid under the result. Ground rule: never install ffmpeg,
+ * never block a storyline on its absence -- a host without it just parks the
+ * storyline with stitchBlockedReason set and the tick moves on, no
+ * differently from any other "waiting on ops" state this codebase already
+ * has.
  */
 
 const STITCH_TICK_BATCH = 5;
@@ -31,6 +35,26 @@ export function videoStorylineStitchService(db: Db, deps: VideoStorylineStitchDe
     const storage = getStorageService();
     const object = await storage.getObject(companyId, objectKey);
     return streamToBuffer(object.stream);
+  }
+
+  /**
+   * DUR-4196: the optional music bed. Only an uploaded asset (musicAssetId)
+   * is resolvable today -- musicSourceKey (a licensed/stock track id) has no
+   * resolver yet (no licensed-source picker exists), so a storyline left
+   * with one set is treated the same as "ffmpeg unavailable": parked with
+   * stitchBlockedReason, never silently stitched without the music the user
+   * asked for.
+   */
+  async function loadMusicBed(
+    companyId: string,
+    storyline: typeof videoStorylines.$inferSelect,
+  ): Promise<{ buffer: Buffer; volumeDb: number } | "unsupported" | null> {
+    if (storyline.musicSourceKey) return "unsupported";
+    if (!storyline.musicAssetId) return null;
+    const [asset] = await db.select().from(assets).where(and(eq(assets.id, storyline.musicAssetId), eq(assets.companyId, companyId)));
+    if (!asset) return "unsupported";
+    const buffer = await downloadClip(companyId, asset.objectKey);
+    return { buffer, volumeDb: storyline.musicVolumeDb };
   }
 
   async function stitchOne(storyline: typeof videoStorylines.$inferSelect): Promise<"stitched" | "blocked" | "failed"> {
@@ -56,14 +80,48 @@ export function videoStorylineStitchService(db: Db, deps: VideoStorylineStitchDe
       return "failed";
     }
 
+    const musicBed = await loadMusicBed(storyline.companyId, storyline);
+    if (musicBed === "unsupported") {
+      await db
+        .update(videoStorylines)
+        .set({
+          status: "ready_to_stitch",
+          stitchBlockedReason: "This storyline's music bed could not be resolved (licensed-track music isn't supported yet; use an uploaded music file, or clear the music bed to stitch without one).",
+          updatedAt: nowOf(),
+        })
+        .where(eq(videoStorylines.id, storyline.id));
+      return "blocked";
+    }
+
     await db.update(videoStorylines).set({ status: "stitching", stitchBlockedReason: null, updatedAt: nowOf() }).where(eq(videoStorylines.id, storyline.id));
 
     try {
-      const clipBuffers: Buffer[] = [];
-      for (const shot of shots) {
-        clipBuffers.push(await downloadClip(storyline.companyId, shot.resultObjectKey!));
+      // DUR-4196: every shot's resolved transition-in (falling back to the
+      // storyline's default) -- shot 0 always renders "cut" regardless of
+      // what's stored, since there is no previous clip to transition from.
+      const allCut = shots.every((shot, index) => index === 0 || (shot.transitionIn ?? storyline.defaultTransition) === "cut");
+      let stitched: Awaited<ReturnType<typeof stitchClips>>;
+      if (allCut) {
+        const clipBuffers: Buffer[] = [];
+        for (const shot of shots) {
+          clipBuffers.push(await downloadClip(storyline.companyId, shot.resultObjectKey!));
+        }
+        stitched = await stitchClips(clipBuffers);
+      } else {
+        const shotInputs: ShotTransitionInput[] = [];
+        for (const [index, shot] of shots.entries()) {
+          const transitionIn = (index === 0 ? "cut" : (shot.transitionIn ?? storyline.defaultTransition)) as VideoShotTransition;
+          shotInputs.push({
+            buffer: await downloadClip(storyline.companyId, shot.resultObjectKey!),
+            transitionIn,
+            transitionDurationMs: storyline.defaultTransitionDurationMs,
+          });
+        }
+        stitched = await stitchClipsWithTransitions(shotInputs);
       }
-      const stitched = await stitchClips(clipBuffers);
+      if (musicBed) {
+        stitched = await addMusicBed(stitched, musicBed);
+      }
       const durationSeconds = shots.reduce((sum, s) => sum + s.durationSeconds, 0);
       const stored = await getStorageService().putFile({
         companyId: storyline.companyId,
