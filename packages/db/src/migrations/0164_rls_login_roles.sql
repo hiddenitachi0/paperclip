@@ -165,6 +165,10 @@ DECLARE
     -- DUR-4037. Created (and granted on) in 0187_payment_notices_and_settings.sql;
     -- listed here so the login-role lists match the schema, as for the tables above.
     'company_payment_settings',
+    -- DUR-4187 product grabber. Created (and granted on) in
+    -- 0198_product_grabber_staging.sql; company-scoped, listed here so the
+    -- login-role lists match the schema.
+    'company_product_grabber_settings',
     'company_secret_bindings',
     'company_secret_provider_configs',
     'company_secret_versions',
@@ -297,6 +301,9 @@ DECLARE
     -- match the schema, as for the tables above. Company-scoped, so it is
     -- in both lists.
     'private_access_events',
+    -- DUR-4187 product grabber, created in 0198_product_grabber_staging.sql;
+    -- company-scoped, so it belongs in this list too.
+    'product_grabber_staged_items',
     'project_goals',
     'project_memberships',
     'project_workspaces',
@@ -387,6 +394,10 @@ DECLARE
     -- DUR-4037. Created (and granted on) in 0187_payment_notices_and_settings.sql;
     -- listed here so the login-role lists match the schema, as for the tables above.
     'company_payment_settings',
+    -- DUR-4187 product grabber. Created (and granted on) in
+    -- 0198_product_grabber_staging.sql; company-scoped, listed here so the
+    -- login-role lists match the schema.
+    'company_product_grabber_settings',
     'company_secret_bindings',
     'company_secret_provider_configs',
     'company_secrets',
@@ -492,6 +503,9 @@ DECLARE
     -- match the schema, as for the tables above. Company-scoped, so it is
     -- in both lists.
     'private_access_events',
+    -- DUR-4187 product grabber, created in 0198_product_grabber_staging.sql;
+    -- company-scoped, so it belongs in this list too.
+    'product_grabber_staged_items',
     'project_goals',
     'project_memberships',
     'project_workspaces',
