@@ -107,6 +107,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "mail-secretary.ts",
   // Per-person mail accounts (DUR-4194) are a new backend feature not yet in the public OpenAPI document.
   "mail-accounts.ts",
+  // Company email on/off setting (DUR-4277) is a new board-only setting not yet in the public OpenAPI document.
+  "email-settings.ts",
   // Payment notice routes (DUR-4037, the booking gate's Telegram outbox) are board-only, switched off by default, and not yet in the public OpenAPI document.
   "payment-notices.ts",
   // Payment card routes (DUR-4040) are board-only, switched off by default, and not yet in the public OpenAPI document.
