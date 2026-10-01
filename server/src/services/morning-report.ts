@@ -38,6 +38,7 @@ import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
 import { formatWeatherReport } from "./lane-a-tools.js";
 import { laneAService } from "./lane-a.js";
+import { personaService } from "./personas.js";
 import { secretService } from "./secrets.js";
 import { webSearchService, type WebSearchServiceDeps } from "./web-search.js";
 import { WATCHER_PRICE_SOURCES, isWatcherQuoteError } from "./watcher-sources.js";
@@ -136,6 +137,7 @@ export interface MorningReportServiceDeps extends WebSearchServiceDeps {
   };
   webSearch?: { search: ReturnType<typeof webSearchService>["search"] };
   secrets?: { resolveStockDataKey: ReturnType<typeof secretService>["resolveStockDataKey"] };
+  personas?: { getPersonaByAgentId: ReturnType<typeof personaService>["getPersonaByAgentId"] };
   /** Test seam: how a claimed report is handed off. Production detaches it onto the pool. */
   dispatch?: (work: () => Promise<void>) => void;
   /**
@@ -893,9 +895,9 @@ function buildSummaryDigest(input: {
 }
 
 /** Code-written (no model call): Maja dressed for today's weather, in her own default look — DUR-4133: always fully clothed, regardless of the look. */
-function weatherPicturePrompt(agentName: string, places: string[], conditionsSummary: string): string {
+function weatherPicturePrompt(displayName: string, places: string[], conditionsSummary: string): string {
   return (
-    `A warm, friendly full-body illustration of ${agentName} dressed appropriately for today's weather in ${places.join(" and ")}: ` +
+    `A warm, friendly full-body illustration of ${displayName} dressed appropriately for today's weather in ${places.join(" and ")}: ` +
     `${conditionsSummary}. Fully clothed, dressed for the weather, safe for work. Illustration style, no text, no numbers, no logos.`
   );
 }
@@ -996,7 +998,7 @@ export function moodSentiment(mood: string, direction: ReturnType<typeof priceDi
  * words, never a headline title).
  */
 function moodPicturePrompt(
-  agentName: string,
+  displayName: string,
   mood: string,
   sentiment: "happy" | "sad",
   themeKeywords: string[],
@@ -1016,7 +1018,7 @@ function moodPicturePrompt(
           : "";
   const weatherClause = conditionsSummary ? `Today's weather: ${conditionsSummary}. ` : "";
   return (
-    `A full-body illustration of ${agentName}, ${expression}, a visual recap of today's overall mood: ${mood}. ` +
+    `A full-body illustration of ${displayName}, ${expression}, a visual recap of today's overall mood: ${mood}. ` +
     `${themeClause}${priceClause}${weatherClause}` +
     "Illustration style, no text, no letters, no words, no numbers, no logos, no watermark."
   );
@@ -1035,6 +1037,7 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
   const laneA = deps.laneA ?? laneAService(db);
   const webSearch = deps.webSearch ?? webSearchService(db, deps);
   const secrets = deps.secrets ?? secretService(db);
+  const personas = deps.personas ?? personaService(db);
   const nowOf = () => deps.now?.() ?? new Date();
   const fetchImpl = deps.fetchImpl ?? fetch;
   // The briefing page (DUR-4075) ships together with this service, so the
@@ -1124,6 +1127,13 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
     return {};
   }
 
+  /** The persona's display name when the agent has one attached, job name otherwise — the name shown and prompted for in the two report pictures (DUR-4190: these prompts used to always say the job name, e.g. "Assistant", even when a persona like "Maja" was attached). */
+  async function pictureDisplayName(agentRow: AgentRow): Promise<string> {
+    if (!agentRow.personaId) return agentRow.name;
+    const persona = await personas.getPersonaByAgentId(agentRow.id);
+    return persona?.displayName?.trim() || agentRow.name;
+  }
+
   async function collectImages(
     agentRow: AgentRow,
     settings: MorningReportSettings,
@@ -1137,12 +1147,13 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
     const images: MorningReportImageFact[] = [];
     const notes: string[] = [];
     if (!agentRow.laneAEnabled) return { images, notes };
+    const displayName = await pictureDisplayName(agentRow);
     if (conditionsSummary) {
       try {
         const picture = await laneA.makePicture({
           companyId: agentRow.companyId,
           agentId: agentRow.id,
-          prompt: weatherPicturePrompt(agentRow.name, places, conditionsSummary),
+          prompt: weatherPicturePrompt(displayName, places, conditionsSummary),
           runLabel: `morning-report-weather:${agentRow.id}:${localDate}`,
           // DUR-4138: "fully clothed" and a fixed negative prompt only — never
           // forces the provider's content filter, which follows the chosen
@@ -1150,7 +1161,7 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
           safeForWork: true,
           ...pictureSourceParams(resolveMorningReportPictureSource(settings.weatherPicture)),
         });
-        if (picture.ok) images.push({ fileId: picture.fileId, caption: `${agentRow.name}, dressed for today's weather in ${places.join(" and ")}.`, kind: "weather" });
+        if (picture.ok) images.push({ fileId: picture.fileId, caption: `${displayName}, dressed for today's weather in ${places.join(" and ")}.`, kind: "weather" });
         else notes.push(`No weather picture this time: ${picture.reason}`);
       } catch (err) {
         notes.push(`No weather picture this time: ${err instanceof Error ? err.message.slice(0, 200) : "the picture failed"}.`);
@@ -1161,7 +1172,7 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
       const picture = await laneA.makePicture({
         companyId: agentRow.companyId,
         agentId: agentRow.id,
-        prompt: moodPicturePrompt(agentRow.name, mood, sentiment, themeKeywords, direction, conditionsSummary),
+        prompt: moodPicturePrompt(displayName, mood, sentiment, themeKeywords, direction, conditionsSummary),
         runLabel: `morning-report-mood:${agentRow.id}:${localDate}`,
         // DUR-4138 (was DUR-4133's look:"none"): the mood picture now shows
         // the persona, via the chosen look (default: the agent's own default

@@ -139,3 +139,4 @@ export { companyPaymentSettings } from "./company_payment_settings.js";
 export { companyProductGrabberSettings, productGrabberStagedItems } from "./product_grabber.js";
 export { paymentCards } from "./payment_cards.js";
 export { videoStorylines, videoScenes, videoShots, videoShotRenderJobs } from "./video_storylines.js";
+export { tradingStrategies, tradingOrders, tradingFifoLots, tradingLedgerEntries, tradingDailyStats } from "./trading.js";

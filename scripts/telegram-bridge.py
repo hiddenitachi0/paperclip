@@ -1421,6 +1421,9 @@ HELP_TEXT = (
     "• `/looks` → the saved picture looks\n"
     "• `/project <name>` → a project\n"
     "• `/status` → what's happening now\n"
+    "• `/trading` → list trading strategies and their status\n"
+    "• `/pause` → kill switch: pause every running trading strategy\n"
+    "• `/resume <strategy id>` → resume one paused/halted strategy\n"
     "• `/help` → this list")
 
 
@@ -1911,6 +1914,47 @@ def handle_message(state, bot, m):
         for r in runs[:6]:
             lines.append(f"• {r.get('agentName')} — {r.get('status')}")
         tg(token, "sendMessage", chat_id=chat_id, text="\n".join(lines), parse_mode="Markdown")
+        return
+    if low == "/trading":
+        rows = cli("trading", "list", "-C", company_id) or []
+        if not rows:
+            send_plain(token, chat_id, "No trading strategies configured yet.")
+            return
+        lines = ["*Trading strategies:*"]
+        for r in rows:
+            reason = f" ({r.get('pauseReason')})" if r.get("pauseReason") else ""
+            lines.append(f"• `{r.get('id')}` {r.get('name')} ({r.get('asset')}) — {r.get('status')}{reason}")
+        tg(token, "sendMessage", chat_id=chat_id, text="\n".join(lines), parse_mode="Markdown")
+        return
+    if low == "/pause":
+        # Kill switch: no strategy id needed on purpose, so it works even when
+        # the operator can't recall one under pressure -- stops everything.
+        paused = cli("trading", "pause-all", "-C", company_id)
+        if paused is None:
+            send_plain(token, chat_id, "Couldn't reach the trading agent — nothing was paused.")
+            return
+        if not paused:
+            send_plain(token, chat_id, "Nothing was running — no strategy to pause.")
+            return
+        names = ", ".join(r.get("name") or r.get("id") for r in paused)
+        send_plain(token, chat_id, f"⏸ Paused: {names}")
+        return
+    if command == "/resume":
+        # Resuming (unlike pausing) always names a strategy: a strategy the
+        # risk gate halted needs a deliberate look before it trades again.
+        words = text.split(maxsplit=1)
+        strategy_id = words[1].strip() if len(words) > 1 else ""
+        if not strategy_id:
+            send_plain(token, chat_id, "Usage: `/resume <strategy id>` — see `/trading` for ids.")
+            return
+        # strategy_id is user-supplied free text from Telegram; pass it through
+        # an env var + quoted "$SID" reference (same pattern as /project below),
+        # never interpolated straight into the shell command string.
+        updated = cli_env({"SID": strategy_id}, "trading", "status", '"$SID"', "-C", company_id, "--status", "running")
+        if updated is None:
+            send_plain(token, chat_id, "Couldn't resume that strategy — check the id with /trading.")
+            return
+        send_plain(token, chat_id, f"▶️ Resumed {updated.get('name') or strategy_id}.")
         return
     if low.startswith("/project "):
         name = text[len("/project "):].strip()
