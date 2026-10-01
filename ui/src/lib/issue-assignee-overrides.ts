@@ -12,6 +12,8 @@ export interface BuildAssigneeAdapterOverridesInput {
   modelOverride: string;
   thinkingEffortOverride: string;
   chrome: boolean;
+  /** DUR-4144: New Task switch "Plan first on Opus, then build on Sonnet". */
+  planFirstOnOpus?: boolean;
 }
 
 /**
@@ -23,6 +25,11 @@ export interface BuildAssigneeAdapterOverridesInput {
  *               adapter config from the agent's runtimeConfig + adapter default.
  * - "custom"  → preserves the legacy explicit override path
  *               (`adapterConfig.model`, thinking effort, chrome).
+ *
+ * `planFirstOnOpus` is independent of lane: it forces the "planner" profile
+ * for the first (plan-writing) run regardless of the lane chosen for the
+ * build runs that follow, and is only honored by adapters that ship a
+ * "planner" model profile (see packages/shared MODEL_PROFILE_KEYS).
  */
 export function buildAssigneeAdapterOverrides(
   input: BuildAssigneeAdapterOverridesInput,
@@ -32,12 +39,14 @@ export function buildAssigneeAdapterOverrides(
     return null;
   }
 
+  const planFirstOnOpus = input.planFirstOnOpus ? { planFirstOnOpus: true } : null;
+
   if (input.lane === "primary") {
-    return null;
+    return planFirstOnOpus;
   }
 
   if (input.lane === "cheap") {
-    return { modelProfile: "cheap" };
+    return { modelProfile: "cheap", ...planFirstOnOpus };
   }
 
   const adapterConfig: Record<string, unknown> = {};
@@ -55,6 +64,6 @@ export function buildAssigneeAdapterOverrides(
     adapterConfig.chrome = true;
   }
 
-  if (Object.keys(adapterConfig).length === 0) return null;
-  return { adapterConfig };
+  if (Object.keys(adapterConfig).length === 0) return planFirstOnOpus;
+  return { adapterConfig, ...planFirstOnOpus };
 }

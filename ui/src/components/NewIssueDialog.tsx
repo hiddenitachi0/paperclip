@@ -112,6 +112,7 @@ interface IssueDraft {
   assigneeModelOverride: string;
   assigneeThinkingEffort: string;
   assigneeChrome: boolean;
+  planFirstOnOpus?: boolean;
   executionWorkspaceMode?: string;
   selectedExecutionWorkspaceId?: string;
   useIsolatedExecutionWorkspace?: boolean;
@@ -431,6 +432,7 @@ export function NewIssueDialog() {
   const [assigneeModelOverride, setAssigneeModelOverride] = useState("");
   const [assigneeThinkingEffort, setAssigneeThinkingEffort] = useState("");
   const [assigneeChrome, setAssigneeChrome] = useState(false);
+  const [planFirstOnOpus, setPlanFirstOnOpus] = useState(false);
   const [executionWorkspaceMode, setExecutionWorkspaceMode] = useState<string>("shared_workspace");
   const [selectedExecutionWorkspaceId, setSelectedExecutionWorkspaceId] = useState("");
   const [workMode, setWorkMode] = useState<IssueWorkMode>("standard");
@@ -562,6 +564,14 @@ export function NewIssueDialog() {
     () => (assigneeCheapProfiles ?? []).find((profile) => profile.key === "cheap") ?? null,
     [assigneeCheapProfiles],
   );
+  // DUR-4144: "Plan first on Opus, then build on Sonnet" only makes sense for
+  // adapters that ship a "planner" model profile — reuses the same
+  // adapter-model-profiles fetch as the cheap lane.
+  const assigneePlannerProfile = useMemo(
+    () => (assigneeCheapProfiles ?? []).find((profile) => profile.key === "planner") ?? null,
+    [assigneeCheapProfiles],
+  );
+  const assigneeSupportsPlanner = Boolean(assigneeSupportsCheapLane && assigneePlannerProfile);
   const mentionOptions = useMemo<MentionOption[]>(() => {
     return buildMarkdownMentionOptions({
       agents,
@@ -689,6 +699,7 @@ export function NewIssueDialog() {
       assigneeModelOverride,
       assigneeThinkingEffort,
       assigneeChrome,
+      planFirstOnOpus,
       executionWorkspaceMode,
       selectedExecutionWorkspaceId,
       workMode,
@@ -713,6 +724,7 @@ export function NewIssueDialog() {
     assigneeModelOverride,
     assigneeThinkingEffort,
     assigneeChrome,
+    planFirstOnOpus,
     executionWorkspaceMode,
     selectedExecutionWorkspaceId,
     workMode,
@@ -802,6 +814,7 @@ export function NewIssueDialog() {
       setAssigneeModelOverride("");
       setAssigneeThinkingEffort("");
       setAssigneeChrome(false);
+      setPlanFirstOnOpus(false);
       setExecutionWorkspaceMode(defaultExecutionWorkspaceMode);
       setWorkMode(nextWorkMode);
       setSelectedExecutionWorkspaceId(newIssueDefaults.executionWorkspaceId ?? "");
@@ -840,6 +853,7 @@ export function NewIssueDialog() {
       setAssigneeModelOverride("");
       setAssigneeThinkingEffort("");
       setAssigneeChrome(false);
+      setPlanFirstOnOpus(false);
       setExecutionWorkspaceMode(defaultExecutionWorkspaceModeForIssueDefaults(newIssueDefaults, defaultProject));
       setWorkMode(nextWorkMode);
       setSelectedExecutionWorkspaceId(newIssueDefaults.executionWorkspaceId ?? "");
@@ -887,6 +901,7 @@ export function NewIssueDialog() {
       setAssigneeModelOverride(draft.assigneeModelOverride ?? "");
       setAssigneeThinkingEffort(draft.assigneeThinkingEffort ?? "");
       setAssigneeChrome(draft.assigneeChrome ?? false);
+      setPlanFirstOnOpus(draft.planFirstOnOpus ?? false);
       setExecutionWorkspaceMode(
         hasExplicitExecutionWorkspaceId || hasExplicitExecutionWorkspaceMode
           ? defaultExecutionWorkspaceModeForIssueDefaults(newIssueDefaults, restoredProject)
@@ -934,6 +949,7 @@ export function NewIssueDialog() {
       setAssigneeModelOverride("");
       setAssigneeThinkingEffort("");
       setAssigneeChrome(false);
+      setPlanFirstOnOpus(false);
       setExecutionWorkspaceMode(defaultExecutionWorkspaceModeForIssueDefaults(newIssueDefaults, defaultProject));
       setSelectedExecutionWorkspaceId(newIssueDefaults.executionWorkspaceId ?? "");
       executionWorkspaceDefaultProjectId.current = hasExplicitProjectWorkspaceId || newIssueDefaults.executionWorkspaceId || defaultProject
@@ -966,6 +982,7 @@ export function NewIssueDialog() {
       setAssigneeModelOverride("");
       setAssigneeThinkingEffort("");
       setAssigneeChrome(false);
+      setPlanFirstOnOpus(false);
       return;
     }
     // Read the operator's lane from the ref, never from the render snapshot: this pass may
@@ -1050,6 +1067,7 @@ export function NewIssueDialog() {
     setAssigneeModelOverride("");
     setAssigneeThinkingEffort("");
     setAssigneeChrome(false);
+    setPlanFirstOnOpus(false);
     setExecutionWorkspaceMode("shared_workspace");
     setSelectedExecutionWorkspaceId("");
     setWorkMode("standard");
@@ -1087,6 +1105,7 @@ export function NewIssueDialog() {
     setAssigneeModelOverride("");
     setAssigneeThinkingEffort("");
     setAssigneeChrome(false);
+    setPlanFirstOnOpus(false);
     setExecutionWorkspaceMode("shared_workspace");
     setSelectedExecutionWorkspaceId("");
     setWorkMode("standard");
@@ -1113,6 +1132,7 @@ export function NewIssueDialog() {
       modelOverride: assigneeModelOverride,
       thinkingEffortOverride: assigneeThinkingEffort,
       chrome: assigneeChrome,
+      planFirstOnOpus: assigneeSupportsPlanner ? planFirstOnOpus : false,
     });
     const selectedProject = orderedProjects.find((project) => project.id === projectId);
     const executionWorkspacePolicy =
@@ -2195,6 +2215,22 @@ export function NewIssueDialog() {
                     <p className="text-[11px] text-muted-foreground">Override the model and effort for this task only.</p>
                   )}
                 </div>
+                {assigneeSupportsPlanner && (
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between rounded-md border border-border px-2 py-1.5">
+                      <div className="text-xs text-muted-foreground">Plan first on Opus, then build on Sonnet</div>
+                      <ToggleSwitch
+                        checked={planFirstOnOpus}
+                        onCheckedChange={() => setPlanFirstOnOpus(!planFirstOnOpus)}
+                      />
+                    </div>
+                    {planFirstOnOpus && (
+                      <p className="text-[11px] text-muted-foreground">
+                        The first run writes a plan on the stronger planner model; once you accept that plan, later runs switch to the model/lane chosen above.
+                      </p>
+                    )}
+                  </div>
+                )}
                 {assigneeModelLane !== "cheap" && (
                   <div className="space-y-1.5">
                     <div className="text-xs text-muted-foreground">Model</div>
