@@ -25,8 +25,19 @@ export const modelProfiles: AdapterModelProfileDefinition[] = [
     label: "Cheap",
     description: "Use Claude Sonnet as the lower-cost Claude Code lane while preserving the agent's primary model.",
     adapterConfig: {
-      model: "claude-sonnet-4-6",
+      model: "claude-sonnet-5",
       effort: "low",
+    },
+    source: "adapter_default",
+  },
+  {
+    key: "planner",
+    label: "Planner",
+    description:
+      "Use Claude Opus for the plan-writing run of a \"plan first on Opus, then build on Sonnet\" job, while preserving the agent's primary model for the build runs that follow.",
+    adapterConfig: {
+      model: "claude-opus-5",
+      effort: "high",
     },
     source: "adapter_default",
   },
@@ -40,7 +51,7 @@ Core fields:
 - cwd (string, optional): default absolute working directory fallback for the agent process (created if missing when possible)
 - instructionsFilePath (string, optional): absolute path to a markdown instructions file injected at runtime
 - model (string, optional): Claude model id
-- effort (string, optional): reasoning effort passed via --effort (low|medium|high)
+- effort (string, optional): reasoning effort passed via --effort (low|medium|high|xhigh|max)
 - chrome (boolean, optional): pass --chrome when running Claude
 - promptTemplate (string, optional): run prompt template
 - maxTurnsPerRun (number, optional): max turns for one run

@@ -165,6 +165,10 @@ DECLARE
     -- DUR-4037. Created (and granted on) in 0187_payment_notices_and_settings.sql;
     -- listed here so the login-role lists match the schema, as for the tables above.
     'company_payment_settings',
+    -- DUR-4187 product grabber. Created (and granted on) in
+    -- 0198_product_grabber_staging.sql; company-scoped, listed here so the
+    -- login-role lists match the schema.
+    'company_product_grabber_settings',
     'company_secret_bindings',
     'company_secret_provider_configs',
     'company_secret_versions',
@@ -185,7 +189,7 @@ DECLARE
     'company_speech_settings',
     'company_user_sidebar_preferences',
     'cost_events',
-    -- CRM. Created (and granted on) in 0197_crm_base.sql; listed here so the
+    -- CRM. Created (and granted on) in 0199_crm_base.sql; listed here so the
     -- login-role lists match the schema, as for the tables above.
     'crm_activities',
     'crm_contact_org_roles',
@@ -305,6 +309,9 @@ DECLARE
     -- match the schema, as for the tables above. Company-scoped, so it is
     -- in both lists.
     'private_access_events',
+    -- DUR-4187 product grabber, created in 0198_product_grabber_staging.sql;
+    -- company-scoped, so it belongs in this list too.
+    'product_grabber_staged_items',
     'project_goals',
     'project_memberships',
     'project_workspaces',
@@ -324,6 +331,14 @@ DECLARE
     -- 0166_telegram_bots.sql; the name is listed here for the same reason
     -- company_service_tokens is, above.
     'telegram_bots',
+    -- DUR-4153/DUR-4171 trading agent (paper-trading only). Created (and
+    -- granted on) in 0197_trading_agent.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'trading_daily_stats',
+    'trading_fifo_lots',
+    'trading_ledger_entries',
+    'trading_orders',
+    'trading_strategies',
     -- DUR-3994 Stage 2. Created (and granted on) in
     -- 0169_trusted_code_fingerprints.sql; instance-wide (no company_id), so it
     -- is in this list only, not in the company-scoped one below.
@@ -387,6 +402,10 @@ DECLARE
     -- DUR-4037. Created (and granted on) in 0187_payment_notices_and_settings.sql;
     -- listed here so the login-role lists match the schema, as for the tables above.
     'company_payment_settings',
+    -- DUR-4187 product grabber. Created (and granted on) in
+    -- 0198_product_grabber_staging.sql; company-scoped, listed here so the
+    -- login-role lists match the schema.
+    'company_product_grabber_settings',
     'company_secret_bindings',
     'company_secret_provider_configs',
     'company_secrets',
@@ -401,7 +420,7 @@ DECLARE
     'company_speech_settings',
     'company_user_sidebar_preferences',
     'cost_events',
-    -- CRM. Created (and granted on) in 0197_crm_base.sql; listed here so the
+    -- CRM. Created (and granted on) in 0199_crm_base.sql; listed here so the
     -- login-role lists match the schema, as for the tables above.
     'crm_activities',
     'crm_contact_org_roles',
@@ -500,6 +519,9 @@ DECLARE
     -- match the schema, as for the tables above. Company-scoped, so it is
     -- in both lists.
     'private_access_events',
+    -- DUR-4187 product grabber, created in 0198_product_grabber_staging.sql;
+    -- company-scoped, so it belongs in this list too.
+    'product_grabber_staged_items',
     'project_goals',
     'project_memberships',
     'project_workspaces',
@@ -517,6 +539,13 @@ DECLARE
     -- DUR-3978 slice 2, created in 0166_telegram_bots.sql; company-scoped, so
     -- it belongs in this list too.
     'telegram_bots',
+    -- DUR-4153/DUR-4171 trading agent (paper-trading only), created in
+    -- 0197_trading_agent.sql; company-scoped, so it belongs in this list too.
+    'trading_daily_stats',
+    'trading_fifo_lots',
+    'trading_ledger_entries',
+    'trading_orders',
+    'trading_strategies',
     'untracked_write_incidents',
     -- Watchers. Created (and granted on) in 0181_watchers.sql; listed here so
     -- the login-role lists match the schema, as for the tables above.

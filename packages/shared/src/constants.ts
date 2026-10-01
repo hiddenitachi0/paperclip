@@ -86,7 +86,12 @@ export const AGENT_ROLE_LABELS: Record<AgentRole, string> = {
 export const AGENT_DEFAULT_MAX_CONCURRENT_RUNS = 20;
 export const WORKSPACE_BRANCH_ROUTINE_VARIABLE = "workspaceBranch";
 
-export const MODEL_PROFILE_KEYS = ["cheap"] as const;
+// DUR-4144: "planner" is the plan-on-a-stronger-model lane, used for the
+// first run of a "plan first on Opus, then build on Sonnet" job before the
+// plan is accepted. Only claude_local ships a profile definition for it today
+// (see packages/adapters/claude-local/src/index.ts); other adapters simply
+// fall back to the agent's normal model until they add one.
+export const MODEL_PROFILE_KEYS = ["cheap", "planner"] as const;
 export type ModelProfileKey = (typeof MODEL_PROFILE_KEYS)[number];
 
 export const AGENT_ICON_NAMES = [
