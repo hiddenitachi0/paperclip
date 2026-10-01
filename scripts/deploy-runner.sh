@@ -1356,21 +1356,25 @@ run_recipe() { # target_dir, kind, services, command, compose_files, env_file
   esac
 }
 
-# DUR-4068: the sftp-transport counterpart to run_recipe above. Used in place
-# of run_recipe, at every call site, whenever this project's deployTransport
-# is "sftp" instead of the default "git_push" -- the checkout at target_dir
-# is fetched exactly the same way either transport (see resolve_deploy_vars),
-# only what happens to it after differs: run_recipe swaps target_dir in
-# place as the live target; this uploads the caller-supplied explicit
-# allowlist of files out of target_dir to a remote host instead. Same exit
-# contract as run_recipe (0 = ok, non-zero = failed) so both callers can
-# treat the two transports identically.
-upload_via_sftp() { # aid, target_dir, allowlist(newline-separated repo-relative paths), host, port, username, remote_path, requesting_agent_id, company_id -> 0 ok, 1 failed
-  local aid="$1" target_dir="$2" allowlist="$3" host="$4" port="$5" username="$6" remote_path="$7" requesting_agent_id="$8" company_id="$9"
+# DUR-4068: resolves the SFTP deploy credential bound to requesting_agent_id
+# and builds the curl auth args + a chmod-700 temp dir holding whatever
+# on-disk material that auth needs (a netrc file or a private key). Shared by
+# upload_via_sftp and sftp_remove_remote_entries (DUR-4236) so there is only
+# one place that ever reads the credential value back out, via the
+# instance-admin-only route (server/src/routes/agents.ts) bound to exactly
+# one agent -- never a project-level or CLI-supplied credential.
+#
+# Sets two variables in the CALLER's scope (bash dynamic scoping: declare
+# `local -a curl_auth_args` and `local tmp_dir` in the caller before calling
+# this, same as company_id is already relied on across this file) rather than
+# printing them, because curl_auth_args is an array. Deliberately does NOT set
+# the temp-dir cleanup trap itself -- a `trap ... RETURN` set here would fire
+# when THIS function returns, not when the caller does, and would delete the
+# credential material before the caller ever uses it. The caller must set
+# `trap "rm -rf '$tmp_dir'" RETURN` itself immediately after a successful call.
+sftp_resolve_credential() { # aid, host, username, requesting_agent_id, company_id -> 0 ok (curl_auth_args[] + tmp_dir set in caller scope), 1 failed (nothing created)
+  local aid="$1" host="$2" username="$3" requesting_agent_id="$4" company_id="$5"
 
-  # DUR-4068: the ONLY place this runner ever reads the value back out, via
-  # the instance-admin-only route (server/src/routes/agents.ts) bound to
-  # exactly one agent -- never a project-level or CLI-supplied credential.
   local cred_json kind value
   cred_json="$(cli_json secrets deploy-sftp-credential -C "$company_id" -A "$requesting_agent_id" 2>>"$LOG")" || {
     log "runner: $aid could not resolve the SFTP deploy credential bound to agent $requesting_agent_id"
@@ -1384,21 +1388,15 @@ upload_via_sftp() { # aid, target_dir, allowlist(newline-separated repo-relative
   fi
 
   # DUR-4068: the credential lives on disk only inside this one temp dir, for
-  # only as long as this function runs -- the RETURN trap below removes it on
-  # every exit path (success, a failed upload, or an early `return 1` above),
-  # never left behind for a later run or another process to find. Never
-  # printed to $LOG or anywhere else.
-  local tmp_dir
+  # only as long as the caller's RETURN trap allows -- never printed to $LOG
+  # or anywhere else.
   tmp_dir="$(mktemp -d)" || {
     log "runner: $aid could not create a temp dir for the SFTP credential"
     return 1
   }
   chmod 700 "$tmp_dir"
-  # shellcheck disable=SC2064 -- intentionally expanding $tmp_dir now, not at trap time
-  trap "rm -rf '$tmp_dir'" RETURN
 
   local netrc_file="$tmp_dir/netrc" key_file="$tmp_dir/id_key"
-  local -a curl_auth_args
   case "$kind" in
     sftp_password)
       printf 'machine %s login %s password %s\n' "$host" "$username" "$value" >"$netrc_file"
@@ -1416,11 +1414,86 @@ upload_via_sftp() { # aid, target_dir, allowlist(newline-separated repo-relative
       ;;
     *)
       log "runner: $aid SFTP credential bound to agent $requesting_agent_id has an unrecognized kind ($kind)"
+      rm -rf "$tmp_dir"
       return 1
       ;;
   esac
+  return 0
+}
 
-  local entry local_path remote_target failures=0 uploaded=0
+# DUR-4236: best-effort, non-recursive-by-hand directory creation for a
+# relative path under remote_path -- SFTP's MKDIR (unlike POSIX mkdir -p)
+# only ever creates one level, so a nested destination like assets/img/ needs
+# one quote command per path segment. Every call is allowed to fail silently
+# (the segment already existing is by far the common case on a redeploy) --
+# the rename this clears the way for is what actually proves the directory is
+# there; this is just clearing the one error (ENOENT on the parent) that a
+# missing directory would otherwise cause.
+sftp_quote_mkdir_p() { # reldir, host, port, remote_path -> best-effort, relies on caller's curl_auth_args[]
+  local reldir="$1" host="$2" port="$3" remote_path="$4" accum="" segment
+  [ -n "$reldir" ] && [ "$reldir" != "." ] || return 0
+  local -a segs
+  IFS='/' read -ra segs <<<"$reldir"
+  for segment in "${segs[@]}"; do
+    [ -n "$segment" ] || continue
+    accum="$accum/$segment"
+    curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "mkdir $remote_path$accum" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"
+  done
+}
+
+# DUR-4236: best-effort removal of everything this run staged, whether the
+# release shipped or not. Relies on the caller's (upload_via_sftp's) local
+# `curl_auth_args` and `staged_entries` arrays being in scope, the same
+# dynamic-scoping convention company_id already uses across this file.
+# Never allowed to affect the function's own exit status -- a stray leftover
+# staging file is a cosmetic problem, not a reason to report a deploy that
+# otherwise succeeded as failed.
+sftp_cleanup_staging() { # aid, staging_dir, host, port, remote_path
+  local aid="$1" staging_dir="$2" host="$3" port="$4" remote_path="$5" entry
+  for entry in "${staged_entries[@]}"; do
+    curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "rm $staging_dir/$entry" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"
+  done
+  curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "rmdir $staging_dir" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"
+}
+
+# DUR-4068/DUR-4236: the sftp-transport counterpart to run_recipe above. Used
+# in place of run_recipe, at every call site, whenever this project's
+# deployTransport is "sftp" instead of the default "git_push" -- the checkout
+# at target_dir is fetched exactly the same way either transport (see
+# resolve_deploy_vars), only what happens to it after differs: run_recipe
+# swaps target_dir in place as the live target; this uploads the
+# caller-supplied explicit allowlist of files out of target_dir to a remote
+# host instead. Same exit contract as run_recipe (0 = ok, non-zero = failed)
+# so both callers can treat the two transports identically.
+#
+# DUR-4236: staging-then-swap, not direct-to-live. Every allowlisted file is
+# uploaded in full to a per-approval staging subdirectory first; the live
+# path is only ever touched by an instant SFTP rename once the matching
+# staged upload is confirmed complete, never by a curl -T that writes
+# straight into the path something else may be serving mid-transfer. If any
+# file fails to stage, nothing at the live path is touched at all. Files are
+# swapped into place one at a time with a rename-old-aside / rename-new-in /
+# remove-old-aside dance (see the per-entry loop below) because plain SFTP
+# RENAME (SSH_FXP_RENAME) -- the only rename curl's -Q quote command issues --
+# refuses to overwrite an existing destination; there is no portable "atomic
+# overwrite" primitive in the base SFTP protocol curl exposes, so a file that
+# already exists at $dest is briefly absent (not half-written) during its own
+# swap rather than genuinely atomic. See doc/plans/ (DUR-4236 PR) for the open
+# question of whether this project's actual SFTP provider supports these
+# quote commands (rename/mkdir/rm) at all -- that is unverified from this repo
+# and flagged for Filip.
+upload_via_sftp() { # aid, target_dir, allowlist(newline-separated repo-relative paths), host, port, username, remote_path, requesting_agent_id, company_id -> 0 ok, 1 failed
+  local aid="$1" target_dir="$2" allowlist="$3" host="$4" port="$5" username="$6" remote_path="$7" requesting_agent_id="$8" company_id="$9"
+
+  local -a curl_auth_args=()
+  local tmp_dir=""
+  sftp_resolve_credential "$aid" "$host" "$username" "$requesting_agent_id" "$company_id" || return 1
+  # shellcheck disable=SC2064 -- intentionally expanding $tmp_dir now, not at trap time
+  trap "rm -rf '$tmp_dir'" RETURN
+
+  local staging_dir="$remote_path/.deploy-staging/$aid"
+  local entry local_path staged_target failures=0 staged=0
+  local -a staged_entries=()
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
     local_path="$target_dir/$entry"
@@ -1429,20 +1502,117 @@ upload_via_sftp() { # aid, target_dir, allowlist(newline-separated repo-relative
       failures=$((failures + 1))
       continue
     fi
-    remote_target="sftp://$host:$port$remote_path/$entry"
-    if curl -sS --disable-epsv --ftp-create-dirs "${curl_auth_args[@]}" -T "$local_path" "$remote_target" 2>>"$LOG"; then
-      uploaded=$((uploaded + 1))
+    staged_target="sftp://$host:$port$staging_dir/$entry"
+    if curl -sS --disable-epsv --ftp-create-dirs "${curl_auth_args[@]}" -T "$local_path" "$staged_target" 2>>"$LOG"; then
+      staged=$((staged + 1))
+      staged_entries+=("$entry")
     else
-      log "runner: $aid SFTP upload of $entry to $remote_target failed"
+      log "runner: $aid SFTP staging upload of $entry to $staged_target failed"
       failures=$((failures + 1))
     fi
   done <<<"$allowlist"
 
   if [ "$failures" -gt 0 ]; then
-    log "runner: $aid SFTP upload finished with $failures failure(s) out of $((uploaded + failures)) file(s)"
+    log "runner: $aid SFTP staging upload finished with $failures failure(s) out of $((staged + failures)) file(s) -- nothing was swapped into the live path, live site untouched"
+    sftp_cleanup_staging "$aid" "$staging_dir" "$host" "$port" "$remote_path"
     return 1
   fi
-  log "runner: $aid SFTP upload finished — $uploaded file(s) uploaded to $username@$host:$remote_path"
+  log "runner: $aid SFTP staging upload finished — $staged file(s) staged, swapping into $username@$host:$remote_path"
+
+  local dest reldir swap_failures=0 swapped=0
+  for entry in "${staged_entries[@]}"; do
+    dest="$remote_path/$entry"
+    staged_target="$staging_dir/$entry"
+    reldir="$(dirname "$entry")"
+    sftp_quote_mkdir_p "$reldir" "$host" "$port" "$remote_path"
+    # Best-effort: move whatever is currently live aside first -- see the
+    # function-level comment above for why plain SFTP rename cannot overwrite
+    # $dest directly. A failure here just means there was nothing at $dest yet
+    # (a brand new file), which is the common case for a project's first
+    # deploy or a newly added path -- not swallowed, just not fatal.
+    curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "rename $dest $dest.deploy-bak" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"
+    if curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "rename $staged_target $dest" "sftp://$host:$port$remote_path/" 2>>"$LOG"; then
+      swapped=$((swapped + 1))
+      curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "rm $dest.deploy-bak" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"
+    else
+      log "runner: $aid SFTP swap of staged $entry into $dest failed -- restoring the previous file at $dest if there was one"
+      curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "rename $dest.deploy-bak $dest" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"
+      swap_failures=$((swap_failures + 1))
+    fi
+  done
+
+  sftp_cleanup_staging "$aid" "$staging_dir" "$host" "$port" "$remote_path"
+
+  if [ "$swap_failures" -gt 0 ]; then
+    log "runner: $aid SFTP swap finished with $swap_failures failure(s) out of $((swapped + swap_failures)) file(s) -- live path may be a mix of old and new files, needs attention"
+    return 1
+  fi
+  log "runner: $aid SFTP upload finished — $swapped file(s) live at $username@$host:$remote_path"
+  return 0
+}
+
+# DUR-4236: diffs the allowlist against git history at before_commit (not the
+# working tree's current state, which by the time this is called has already
+# moved on to after_commit) to find entries this release introduced -- i.e.
+# the ones a rollback must actively delete from the remote host rather than
+# just overwrite, since SFTP has no equivalent of `git reset --hard` that
+# also prunes files a later commit added. before_commit is a short (--short=12)
+# rev, which `git cat-file -e` resolves exactly like any other git ref.
+sftp_added_entries() { # target_dir, allowlist(newline-separated), before_commit -> stdout: newline-separated allowlist entries present in target_dir now but absent from git at before_commit
+  local target_dir="$1" allowlist="$2" before="$3" entry
+  case "$before" in ""|unknown) return 0 ;; esac
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    if [ -f "$target_dir/$entry" ] && ! git -C "$target_dir" cat-file -e "$before:$entry" 2>/dev/null; then
+      printf '%s\n' "$entry"
+    fi
+  done <<<"$allowlist"
+}
+
+# DUR-4236: rollback counterpart to upload_via_sftp's swap -- removes files a
+# failed release added that the version being rolled back to never had.
+# Without this, maybe_rollback's re-upload of the old allowlist only
+# overwrites files that still exist in both versions; a path the failed
+# release introduced (a new page, a new asset) stays live forever even after
+# "rolling back". Uses curl's SFTP "rm" quote command (SSH_FXP_REMOVE), a core
+# SFTP v3 operation. Entries with whitespace or quote characters are refused
+# rather than attempted -- the allowlist is operator-configured, not
+# agent-controlled, but curl's quote-command string is whitespace-tokenized
+# with no escaping, so a stray space could delete the wrong path.
+sftp_remove_remote_entries() { # aid, entries(newline), host, port, username, remote_path, requesting_agent_id, company_id -> 0 ok (incl. nothing to do), 1 some deletion failed
+  local aid="$1" entries="$2" host="$3" port="$4" username="$5" remote_path="$6" requesting_agent_id="$7" company_id="$8"
+  entries="$(printf '%s\n' "$entries" | sed '/^[[:space:]]*$/d')"
+  [ -n "$entries" ] || return 0
+
+  local -a curl_auth_args=()
+  local tmp_dir=""
+  sftp_resolve_credential "$aid" "$host" "$username" "$requesting_agent_id" "$company_id" || return 1
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp_dir'" RETURN
+
+  local entry failures=0 removed=0
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    case "$entry" in
+      *[[:space:]]*|*\'*|*\"*)
+        log "runner: $aid refusing to remove SFTP rollback-cleanup path with whitespace/quote characters: $entry"
+        failures=$((failures + 1))
+        continue
+        ;;
+    esac
+    if curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "rm $remote_path/$entry" "sftp://$host:$port$remote_path/" 2>>"$LOG"; then
+      removed=$((removed + 1))
+    else
+      log "runner: $aid could not remove $remote_path/$entry from the SFTP host while cleaning up a rolled-back release -- it may need manual removal"
+      failures=$((failures + 1))
+    fi
+  done <<<"$entries"
+
+  if [ "$failures" -gt 0 ]; then
+    log "runner: $aid rollback cleanup finished with $failures file(s) that could not be removed out of $((removed + failures))"
+    return 1
+  fi
+  log "runner: $aid rollback cleanup removed $removed file(s) this release had added"
   return 0
 }
 
@@ -1765,6 +1935,16 @@ print(d.get("decidedAt") or d.get("updatedAt") or d.get("createdAt") or "")' 2>/
   # matcher.
   after_commit="$(git -C "$DV_DEPLOY_TARGET_PATH" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 
+  # DUR-4236: computed here, while $DV_DEPLOY_TARGET_PATH is still checked out
+  # at after_commit, and handed to every maybe_rollback call below -- a
+  # rollback resets the checkout back to before_commit before it can ask this
+  # same question, by which point the files this release added no longer
+  # exist locally to compare against git history.
+  local sftp_added_entries_list=""
+  if [ "$DV_DEPLOY_TRANSPORT" = "sftp" ]; then
+    sftp_added_entries_list="$(sftp_added_entries "$DV_DEPLOY_TARGET_PATH" "$DV_SFTP_ALLOWLIST" "$before_commit")"
+  fi
+
   local recipe_status
   if [ "$DV_DEPLOY_TRANSPORT" = "sftp" ]; then
     upload_via_sftp "$aid" "$DV_DEPLOY_TARGET_PATH" "$DV_SFTP_ALLOWLIST" "$DV_SFTP_HOST" "$DV_SFTP_PORT" "$DV_SFTP_USERNAME" "$DV_SFTP_REMOTE_PATH" "$DV_REQUESTING_AGENT_ID" "$company_id"
@@ -1776,7 +1956,7 @@ print(d.get("decidedAt") or d.get("updatedAt") or d.get("createdAt") or "")' 2>/
   if [ "$recipe_status" -ne 0 ]; then
     log "runner: $aid recipe ($DV_DEPLOY_KIND) failed (status $recipe_status)"
     local diag_path
-    diag_path="$(maybe_rollback "$aid" "$before_commit" "$after_commit")"
+    diag_path="$(maybe_rollback "$aid" "$before_commit" "$after_commit" "$sftp_added_entries_list")"
     # DUR-3974: the recipe is what would have started the services this deploy
     # stopped before swapping the files. It didn't, so (unless the rollback's
     # own recipe already did) they are still down — never leave production
@@ -1794,7 +1974,7 @@ print(d.get("decidedAt") or d.get("updatedAt") or d.get("createdAt") or "")' 2>/
   if ! health_check "$DV_HEALTH_CHECK_URL"; then
     log "runner: $aid health check failed at $DV_HEALTH_CHECK_URL"
     local diag_path
-    diag_path="$(maybe_rollback "$aid" "$before_commit" "$after_commit")"
+    diag_path="$(maybe_rollback "$aid" "$before_commit" "$after_commit" "$sftp_added_entries_list")"
     maybe_end_quiet_mode_drain "$aid" "$DV_HEALTH_CHECK_URL"
     comment "$aid" "$company_id" "Deploy failed — health check against $DV_HEALTH_CHECK_URL never returned 200 after deploying $after_commit. $( [ "$DV_ROLLBACK" = git_previous ] && echo "Rolled back to $before_commit and re-recreated." || echo "No rollback configured; the running version may be unhealthy." )$( [ -n "$diag_path" ] && echo " Failing container logs captured to $diag_path before rollback." ) Check deploy-runner.log."
     return
@@ -1808,7 +1988,7 @@ print(d.get("decidedAt") or d.get("updatedAt") or d.get("createdAt") or "")' 2>/
   if ! broken_pages="$(verify_pages_after_deploy "$aid" "$page_baseline")"; then
     log "runner: $aid pages that worked before this deploy are failing after it: $broken_pages"
     local diag_path
-    diag_path="$(maybe_rollback "$aid" "$before_commit" "$after_commit")"
+    diag_path="$(maybe_rollback "$aid" "$before_commit" "$after_commit" "$sftp_added_entries_list")"
     # DUR-3974: do not TELL the operator the site is working again — check.
     # The same pages, the same baseline, after the rollback. A rollback that
     # did not actually fix it is the one case where he has to be interrupted,
@@ -1890,8 +2070,8 @@ capture_failure_diagnostics() { # approval_id, commit -> stdout: path written (e
   printf '%s' "$out"
 }
 
-maybe_rollback() { # approval_id, before_commit, after_commit -> stdout: failure-diagnostics log path (empty if rollback isn't configured or nothing could be captured)
-  local aid="$1" before="$2" after="${3:-unknown}"
+maybe_rollback() { # approval_id, before_commit, after_commit, sftp_added_entries(newline, sftp transport only) -> stdout: failure-diagnostics log path (empty if rollback isn't configured or nothing could be captured)
+  local aid="$1" before="$2" after="${3:-unknown}" added_entries="${4:-}"
   [ "$DV_ROLLBACK" = "git_previous" ] || return 0
   local diag_path
   diag_path="$(capture_failure_diagnostics "$aid" "$after")"
@@ -1905,6 +2085,17 @@ maybe_rollback() { # approval_id, before_commit, after_commit -> stdout: failure
   if [ "$DV_DEPLOY_TRANSPORT" = "sftp" ]; then
     upload_via_sftp "$aid" "$DV_DEPLOY_TARGET_PATH" "$DV_SFTP_ALLOWLIST" "$DV_SFTP_HOST" "$DV_SFTP_PORT" "$DV_SFTP_USERNAME" "$DV_SFTP_REMOTE_PATH" "$DV_REQUESTING_AGENT_ID" "$company_id"
     rollback_status=$?
+    # DUR-4236: the re-upload above only overwrites files that exist in both
+    # versions. Anything the failed release added that $before never had must
+    # be deleted explicitly, or it stays live forever even after "rolling
+    # back" -- best-effort, and deliberately not folded into rollback_status:
+    # a leftover added file is a real problem to flag, but it should never
+    # read as "the rollback recipe failed" (which restart/health-check logic
+    # elsewhere treats as leaving the running version untouched/broken).
+    if [ -n "$added_entries" ]; then
+      sftp_remove_remote_entries "$aid" "$added_entries" "$DV_SFTP_HOST" "$DV_SFTP_PORT" "$DV_SFTP_USERNAME" "$DV_SFTP_REMOTE_PATH" "$DV_REQUESTING_AGENT_ID" "$company_id" \
+        || log "runner: $aid rollback left at least one file the failed release added still live on the SFTP host — see the lines above for which path(s)"
+    fi
   else
     run_recipe "$DV_DEPLOY_TARGET_PATH" "$DV_DEPLOY_KIND" "$DV_DEPLOY_SERVICES" "$DV_DEPLOY_COMMAND" "$DV_COMPOSE_FILES" "$DV_ENV_FILE"
     rollback_status=$?

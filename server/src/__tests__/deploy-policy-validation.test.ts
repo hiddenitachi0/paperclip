@@ -150,6 +150,40 @@ describe("describeDeployPolicyProblems", () => {
     expect(describeDeployPolicyProblems(policy({ appHealthCheckPaths: [] }), context)).toEqual([]);
     expect(describeDeployPolicyProblems(policy(), context)).toEqual([]);
   });
+
+  // DUR-4236: an sftp/website deploy has no git-based rollback to prove the
+  // live site still works, so (unlike git_push) listing a page is required,
+  // not just well-formatted, once the project is switched on.
+  function sftpPolicy(overrides: Partial<ProjectDeployPolicy> = {}): ProjectDeployPolicy {
+    return policy({
+      sftpHost: "sftp.example.com",
+      sftpUsername: "deployer",
+      sftpRemotePath: "/var/www/site",
+      sftpAllowlist: ["dist/index.html"],
+      appHealthCheckPaths: ["/"],
+      ...overrides,
+    });
+  }
+
+  it("requires at least one page to check for an enabled sftp project", () => {
+    expect(
+      describeDeployPolicyProblems(sftpPolicy({ appHealthCheckPaths: [] }), context, "sftp"),
+    ).toEqual([expect.stringMatching(/Pages that must still work/)]);
+    expect(
+      describeDeployPolicyProblems(sftpPolicy({ appHealthCheckPaths: [] }), context, "sftp"),
+    ).not.toEqual([]);
+  });
+
+  it("does not require a page for a disabled sftp draft, or for git_push", () => {
+    expect(
+      describeDeployPolicyProblems(sftpPolicy({ enabled: false, appHealthCheckPaths: [] }), context, "sftp"),
+    ).toEqual([]);
+    expect(describeDeployPolicyProblems(policy({ appHealthCheckPaths: [] }), context, "git_push")).toEqual([]);
+  });
+
+  it("accepts a complete, enabled sftp policy with a page listed", () => {
+    expect(describeDeployPolicyProblems(sftpPolicy(), context, "sftp")).toEqual([]);
+  });
 });
 
 describe("formatDeployPolicyProblems", () => {
