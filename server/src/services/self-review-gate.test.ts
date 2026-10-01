@@ -24,6 +24,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "../__tests__/helpers/embedded-postgres.js";
 import {
+  MAX_SELF_REVIEW_PASSES_FOR_SHIFTING_DIFF,
   MAX_SELF_REVIEW_PASSES_FOR_UNREADABLE_DIFF,
   RISKY_SURFACE_CATEGORY_LABELS,
   SELF_REVIEW_PASS_CONTEXT_KEY,
@@ -1534,6 +1535,83 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
       expect(result).not.toBeNull();
       expect(result?.message).not.toMatch(/operator/i);
       expect(calls).toHaveLength(1);
+    });
+
+    it("DUR-4288: caps a diff that reads fine every time but never matches a prior pass (e.g. a shared workspace reused by other work between attempts), instead of looping forever", async () => {
+      const { companyId, projectId, agentId, issueId, repoRoot } = await seedIssueWithWorkspace({
+        changedFilePath: "server/src/services/deploy-history.ts",
+      });
+
+      // Each "attempt" below simulates a separate, later heartbeat run re-evaluating the gate
+      // after the issue's shared workspace has been reused and re-checked-out for unrelated
+      // work in between -- the diff reads fully and cleanly every time (non-null fingerprint),
+      // but it's a DIFFERENT diff every time, so it can never match a completed prior pass.
+      for (let attempt = 0; attempt < MAX_SELF_REVIEW_PASSES_FOR_SHIFTING_DIFF; attempt++) {
+        await runGit(repoRoot, ["checkout", "main"]);
+        await fs.writeFile(
+          path.join(repoRoot, `unrelated-work-${attempt}.txt`),
+          `other issue's work, attempt ${attempt}\n`,
+          "utf8",
+        );
+        await runGit(repoRoot, ["add", `unrelated-work-${attempt}.txt`]);
+        await runGit(repoRoot, ["commit", "-m", `Unrelated work from a different issue, attempt ${attempt}`]);
+
+        const runId = randomUUID();
+        await db.insert(heartbeatRuns).values({
+          id: runId,
+          companyId,
+          agentId,
+          invocationSource: "assignment",
+          status: "running",
+        });
+        const { wakeup, calls } = makeRecordingWakeup(db, companyId);
+
+        const result = await evaluateSelfReviewDoneGate({
+          db,
+          wakeup,
+          issue: { id: issueId, identifier: "T-1", companyId, projectId, executionPolicy: null },
+          actor: { actorType: "agent", agentId, runId },
+          requestedStatus: "done",
+          currentStatus: "in_progress",
+        });
+
+        // Still bounded within the cap: each of these schedules its own fresh pass, same as
+        // today, since this attempt count hasn't yet hit the cap.
+        expect(result).not.toBeNull();
+        expect(result?.message).not.toMatch(/operator/i);
+        expect(calls).toHaveLength(1);
+      }
+
+      // One more attempt, on yet another different diff -- the cap has now been reached, so
+      // this must decline loudly with an operator-facing message instead of scheduling a 7th
+      // pass that would never converge either.
+      await runGit(repoRoot, ["checkout", "main"]);
+      await fs.writeFile(path.join(repoRoot, "unrelated-work-final.txt"), "yet another attempt\n", "utf8");
+      await runGit(repoRoot, ["add", "unrelated-work-final.txt"]);
+      await runGit(repoRoot, ["commit", "-m", "Unrelated work from a different issue, final attempt"]);
+
+      const finalRunId = randomUUID();
+      await db.insert(heartbeatRuns).values({
+        id: finalRunId,
+        companyId,
+        agentId,
+        invocationSource: "assignment",
+        status: "running",
+      });
+      const { wakeup: finalWakeup, calls: finalCalls } = makeRecordingWakeup(db, companyId);
+
+      const finalResult = await evaluateSelfReviewDoneGate({
+        db,
+        wakeup: finalWakeup,
+        issue: { id: issueId, identifier: "T-1", companyId, projectId, executionPolicy: null },
+        actor: { actorType: "agent", agentId, runId: finalRunId },
+        requestedStatus: "done",
+        currentStatus: "in_progress",
+      });
+
+      expect(finalResult).not.toBeNull();
+      expect(finalResult?.message).toMatch(/operator/i);
+      expect(finalCalls).toHaveLength(0);
     });
   });
 

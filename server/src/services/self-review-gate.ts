@@ -614,6 +614,42 @@ export async function countSelfReviewPassWakesForIssue(
   ).length;
 }
 
+/**
+ * DUR-4288: counts EVERY self-review-pass wakeup ever requested for this issue, regardless of
+ * fingerprint (completed, pending, or null). Used to bound a distinct unbounded-loop shape from
+ * the one countSelfReviewPassWakesForIssue/MAX_SELF_REVIEW_PASSES_FOR_UNREADABLE_DIFF guards:
+ * a diff that reads successfully (non-null fingerprint) on every single attempt, but produces a
+ * DIFFERENT fingerprint each time, so findCompletedSelfReviewPassForIssue's exact-match lookup
+ * can never hit a `priorPass` -- not because the content is unreadable, but because something
+ * about what's actually being diffed keeps changing between evaluations (confirmed on DUR-4162:
+ * its execution workspace was a `shared_workspace`-mode checkout that other, unrelated issues
+ * kept reusing and re-checking-out between self-review-pass attempts, so each attempt silently
+ * diffed a different branch than the one before it). That shape has no cap today -- every
+ * attempt computes a real, non-null fingerprint, so neither the diffStructurallyUnreadable nor
+ * the workspaceFullyUnresolvable cap paths apply, and the loop runs forever. This is a coarser,
+ * last-resort safety net: once an issue has burned MAX_SELF_REVIEW_PASSES_FOR_SHIFTING_DIFF
+ * total attempts without ever landing a matching priorPass, stop trying to converge on its own
+ * and fail loud instead, the same way DUR-290 already does for the unreadable-diff shape.
+ */
+export async function countAllSelfReviewPassWakesForIssue(
+  db: Db,
+  input: { companyId: string; issueId: string },
+): Promise<number> {
+  const rows = await db
+    .select({ id: agentWakeupRequests.id })
+    .from(agentWakeupRequests)
+    .where(
+      and(
+        eq(agentWakeupRequests.companyId, input.companyId),
+        eq(agentWakeupRequests.reason, SELF_REVIEW_PASS_REASON),
+        like(agentWakeupRequests.idempotencyKey, `${SELF_REVIEW_PASS_REASON}:${input.issueId}:%`),
+      ),
+    );
+  return rows.length;
+}
+
+export const MAX_SELF_REVIEW_PASSES_FOR_SHIFTING_DIFF = 3;
+
 // DUR-293: mirrors heartbeat.ts's WakeupNotScheduledInfo. `wakeup` (heartbeat.wakeup /
 // enqueueWakeup) has many legitimate no-throw skip paths -- company inactive, heartbeat
 // disabled, an unresolved dependency blocker, etc -- that just write a "skipped" wakeup
@@ -766,19 +802,66 @@ export async function evaluateSelfReviewDoneGate(input: {
   // findCompletedSelfReviewPassForIssue), so left unchecked this would schedule a fresh pass on
   // every single attempt, forever, whenever a scheduled pass's own corrective run doesn't land
   // its handoff. Cap it instead of looping silently.
+  //
+  // DUR-4288: `workspaceFullyUnresolvable` (both reads null) ALSO always produces a null
+  // fingerprint, and hits the exact same unbounded-loop shape whenever it doesn't win the
+  // lenient priorPass match above (e.g. no self-review pass for this issue has ever reached
+  // `completed` -- the workspace resolution itself was flapping, not just its content, so
+  // nothing ever durably "finished" reviewing it). The original DUR-290 cap only covered the
+  // narrower `diffStructurallyUnreadable` shape; any case where `reviewedDiffFingerprint` is
+  // null is exactly the set of diffs that can never produce a matching priorPass on a future
+  // attempt, so cap on that directly rather than re-deriving each unreadable sub-shape.
   const diffStructurallyUnreadable = changedFilePaths !== null && diffContent === null;
-  if (diffStructurallyUnreadable) {
+  if (reviewedDiffFingerprint === null) {
     const priorPassCount = await countSelfReviewPassWakesForIssue(input.db, {
       companyId: input.issue.companyId,
       issueId: input.issue.id,
     });
     if (priorPassCount >= MAX_SELF_REVIEW_PASSES_FOR_UNREADABLE_DIFF) {
+      const capMessage = diffStructurallyUnreadable
+        ? "This task's diff is too large for me to fully read and review (it likely touches a " +
+          `large generated/vendored file), and ${priorPassCount} self-review pass(es) have already ` +
+          "been scheduled for it without resolving that. I'm not scheduling another one -- this " +
+          "needs an operator to look at it directly (e.g. split the diff, exclude the oversized " +
+          'file from review, or set this issue\'s execution policy to {"selfReview": false}).'
+        : "I can't reliably resolve this task's workspace to read a diff at all (it may be " +
+          `shared with/reused by other work), and ${priorPassCount} self-review pass(es) have ` +
+          "already been scheduled for it without resolving that. I'm not scheduling another one " +
+          "-- this needs an operator to look at it directly (e.g. re-check the status, or set " +
+          'this issue\'s execution policy to {"selfReview": false}).';
+      try {
+        await postSelfReviewPassNoticeComment(input.db, {
+          companyId: input.issue.companyId,
+          issueId: input.issue.id,
+          sourceRunId,
+          body: capMessage,
+        });
+      } catch {
+        // Best-effort — the blocking return below is what actually matters.
+      }
+      return { message: capMessage };
+    }
+  } else {
+    // DUR-4288: `reviewedDiffFingerprint` is non-null, meaning the diff read fully and cleanly
+    // on THIS attempt, yet `priorPass` above still missed -- either this is genuinely the
+    // issue's first attempt (count will be 0, cap won't trip), or earlier attempts already
+    // produced their own non-null fingerprints that never matched this one, which can only mean
+    // what's being diffed keeps changing between attempts (see
+    // countAllSelfReviewPassWakesForIssue above). Bound that the same way the null-fingerprint
+    // shape is bounded, just on total attempts rather than a specific unreadable signature.
+    const totalPassCount = await countAllSelfReviewPassWakesForIssue(input.db, {
+      companyId: input.issue.companyId,
+      issueId: input.issue.id,
+    });
+    if (totalPassCount >= MAX_SELF_REVIEW_PASSES_FOR_SHIFTING_DIFF) {
       const capMessage =
-        "This task's diff is too large for me to fully read and review (it likely touches a " +
-        `large generated/vendored file), and ${priorPassCount} self-review pass(es) have already ` +
-        "been scheduled for it without resolving that. I'm not scheduling another one -- this " +
-        "needs an operator to look at it directly (e.g. split the diff, exclude the oversized " +
-        'file from review, or set this issue\'s execution policy to {"selfReview": false}).';
+        `${totalPassCount} self-review pass(es) have already been scheduled for this task, each ` +
+        "time against a diff that read fine but didn't match any previous pass -- most likely " +
+        "because the diff being reviewed keeps changing between attempts (e.g. a shared/reused " +
+        "workspace checked out to different work each time), not because of anything in this " +
+        "task's own content. I'm not scheduling another one -- this needs an operator to look at " +
+        'it directly (e.g. confirm the work is actually complete, or set this issue\'s execution ' +
+        'policy to {"selfReview": false}).';
       try {
         await postSelfReviewPassNoticeComment(input.db, {
           companyId: input.issue.companyId,
