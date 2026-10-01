@@ -448,6 +448,7 @@ describe("DataSourcesSection", () => {
       "FTP server",
       "FTPS server (encrypted)",
       "SFTP server (encrypted)",
+      "paperless-ngx",
     ]);
     // Shopify fields are there by default, nothing else.
     expect(container.querySelector("#data-shop-domain")).not.toBeNull();
