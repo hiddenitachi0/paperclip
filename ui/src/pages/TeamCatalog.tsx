@@ -2014,10 +2014,10 @@ export function ApplySuccess({
         </div>
       )}
       <ul className="space-y-1 text-sm">
-        <li><a className="text-primary hover:underline" href="/agents/all">View imported agents →</a></li>
-        <li><a className="text-primary hover:underline" href="/projects">View imported projects →</a></li>
+        <li><Link className="text-primary hover:underline" to="/agents/all">View imported agents →</Link></li>
+        <li><Link className="text-primary hover:underline" to="/projects">View imported projects →</Link></li>
         <li><Link className="text-primary hover:underline" to="/jobs">View jobs →</Link></li>
-        <li><a className="text-primary hover:underline" href="/activity">View activity log →</a></li>
+        <li><Link className="text-primary hover:underline" to="/activity">View activity log →</Link></li>
       </ul>
       <div className="flex justify-end">
         <Button onClick={onClose}>Done</Button>
