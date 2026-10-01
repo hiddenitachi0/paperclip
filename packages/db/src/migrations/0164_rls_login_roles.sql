@@ -185,6 +185,14 @@ DECLARE
     'company_speech_settings',
     'company_user_sidebar_preferences',
     'cost_events',
+    -- CRM. Created (and granted on) in 0197_crm_base.sql; listed here so the
+    -- login-role lists match the schema, as for the tables above.
+    'crm_activities',
+    'crm_contact_org_roles',
+    'crm_contacts',
+    'crm_external_refs',
+    'crm_facts',
+    'crm_organizations',
     'cross_company_access_log',
     'cross_company_instructions',
     'customer_inbox_conversations',
@@ -393,6 +401,14 @@ DECLARE
     'company_speech_settings',
     'company_user_sidebar_preferences',
     'cost_events',
+    -- CRM. Created (and granted on) in 0197_crm_base.sql; listed here so the
+    -- login-role lists match the schema, as for the tables above.
+    'crm_activities',
+    'crm_contact_org_roles',
+    'crm_contacts',
+    'crm_external_refs',
+    'crm_facts',
+    'crm_organizations',
     'customer_inbox_conversations',
     'customer_inbox_deliveries',
     -- DUR-3972 slice S1, created in 0168_data_connections.sql; company-scoped,
