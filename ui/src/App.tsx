@@ -27,6 +27,7 @@ import { Watchers } from "./pages/Watchers";
 import { Trading } from "./pages/Trading";
 import { TradingStrategyDetail } from "./pages/TradingStrategyDetail";
 import { ProductGrabber } from "./pages/ProductGrabber";
+import { Email } from "./pages/Email";
 import { Learnings, PipelineItemDetail, PipelineItemLegacyRedirect, Pipelines, ReviewQueue } from "./pages/Pipelines";
 import { PipelineSettings } from "./pages/PipelineSettings";
 import { PipelineCanvas } from "./pages/PipelineCanvas";
@@ -185,6 +186,7 @@ function boardRoutes() {
       <Route path="trading" element={<Trading />} />
       <Route path="trading/:strategyId" element={<TradingStrategyDetail />} />
       <Route path="product-grabber" element={<ProductGrabber />} />
+      <Route path="email" element={<Email />} />
       <Route
         path="review-queue"
         element={<PipelinesExperimentalGate><ReviewQueue /></PipelinesExperimentalGate>}
