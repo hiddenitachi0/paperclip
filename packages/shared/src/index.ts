@@ -2425,6 +2425,34 @@ export {
 } from "./mail-secretary.js";
 
 export {
+  MAIL_ACCOUNT_DEFAULT_CHECK_MINUTES,
+  MAIL_ACCOUNT_EMERGENCY_ACCESS_REASON_MIN_LENGTH,
+  MAIL_ACCOUNT_MAX_CHECK_MINUTES,
+  MAIL_ACCOUNT_MIN_CHECK_MINUTES,
+  MAIL_ACCOUNT_TICK_BATCH,
+  MAIL_LIST_DEFAULT_LIMIT,
+  MAIL_LIST_MAX_LIMIT,
+  MAIL_MESSAGE_DIRECTIONS,
+  MAIL_MESSAGE_FOLDERS,
+  MAIL_SEARCH_MAX_QUERY_LENGTH,
+  MAIL_SEARCH_MIN_QUERY_LENGTH,
+  composeMailDraftSchema,
+  createMailAccountSchema,
+  mailAccountEmergencyAccessSchema,
+  moveMailMessageSchema,
+  updateMailAccountSchema,
+  updateMailDraftSchema,
+  type ComposeMailDraftInput,
+  type CreateMailAccountInput,
+  type MailAccountEmergencyAccessInput,
+  type MailMessageDirection,
+  type MailMessageFolder,
+  type MoveMailMessageInput,
+  type UpdateMailAccountInput,
+  type UpdateMailDraftInput,
+} from "./mail-accounts.js";
+
+export {
   MEDIA_STUDIO_PLUGIN_KEY,
   VIDEO_DIRECTOR_CONTEXT_SHOT_COUNT,
   VIDEO_DIRECTOR_DEFAULT_SHOT_COUNT,
