@@ -153,6 +153,20 @@ class HandOverTests(ResearchBridgeTestCase):
         self.assertIn("✅ DUR-40 is finished", text)
         self.assertNotIn("Maja finished", text)
 
+    def test_a_job_started_on_a_colleague_is_followed_like_a_hand_over(self):
+        self.cli_env.return_value = quick_with_actions("Done. Started \"Revise contract\" on Legal Advisor as DUR-41.", [{
+            "tool": "start_job", "summary": "Started job \"Revise contract\" on Legal Advisor as DUR-41.", "ok": True,
+            "task": {"issueId": ISSUE2, "identifier": "DUR-41", "title": "Revise contract"}}])
+        bridge.handle_message(self.state, BOT, message(OPERATOR, "Get the Legal Advisor to revise this contract"))
+        self.assertTrue(self.tasks()[ISSUE2]["colleague"])
+        self.cli.return_value = {"issues": [answer_item(ISSUE2, "done", "Revised.", result_page=False, identifier="DUR-41")]}
+
+        bridge.notify_task_answers(self.state, [BOT])
+
+        text = self.texts(OPERATOR)[-1]
+        self.assertIn("✅ DUR-41 is finished", text)
+        self.assertNotIn("Maja finished", text)
+
     def test_a_failed_or_malformed_action_starts_nothing_to_follow(self):
         self.cli_env.return_value = quick_with_actions("Sorry.", [
             research_action(ok=False),
@@ -198,6 +212,11 @@ class ContractTests(unittest.TestCase):
         tools = self.read("server", "src", "services", "lane-a-tools.ts")
         self.assertIn('"start_research_task"', tools)
         self.assertIn('"route_to_agent"', tools)
+        self.assertIn('"start_job"', tools)
+
+    def test_the_bridge_treats_start_job_as_a_colleague_hand_over(self):
+        bridge_src = self.read("scripts", "telegram-bridge.py")
+        self.assertIn("start_job", bridge_src)
 
 
 if __name__ == "__main__":
