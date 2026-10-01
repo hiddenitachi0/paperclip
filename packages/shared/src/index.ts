@@ -1616,6 +1616,19 @@ export {
   browserAccessSchema,
   type BrowserAccessField,
   type AgentBrowserAccessLevel,
+  jobVariableSchema,
+  createJobSchema,
+  updateJobSchema,
+  setJobPositionsSchema,
+  createJobTriggerSchema,
+  updateJobTriggerSchema,
+  runJobSchema,
+  type CreateJob,
+  type UpdateJob,
+  type SetJobPositions,
+  type CreateJobTrigger,
+  type UpdateJobTrigger,
+  type RunJob,
 } from "./validators/index.js";
 export { formatAgentDisplayName } from "./agent-display-name.js";
 

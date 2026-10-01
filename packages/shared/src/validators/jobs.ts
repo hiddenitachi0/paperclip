@@ -13,9 +13,9 @@ const jobVariableValueSchema = z.union([z.string(), z.number().finite(), z.boole
 export const jobVariableSchema = z
   .object({
     name: z.string().trim().regex(/^[A-Za-z][A-Za-z0-9_]*$/),
-    label: z.string().trim().max(120).optional().nullable(),
+    label: z.string().trim().max(120).optional().nullable().default(null),
     type: z.enum(JOB_VARIABLE_TYPES).optional().default("text"),
-    defaultValue: jobVariableValueSchema.optional().nullable(),
+    defaultValue: jobVariableValueSchema.optional().nullable().default(null),
     required: z.boolean().optional().default(true),
     options: z.array(z.string().trim().min(1).max(120)).max(50).optional().default([]),
   })
