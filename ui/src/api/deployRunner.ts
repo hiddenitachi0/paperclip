@@ -14,8 +14,15 @@ export type ProjectDeployHistoryEntry = {
 export type ProjectDeployHistory = {
   /** What is live right now, per the runner's most recent successful deploy. */
   current: ProjectDeployHistoryEntry | null;
-  /** What was live before `current` -- the version a rollback goes back to. */
+  /** What was live before `current` -- the version the one-click rollback button goes back to. */
   previous: ProjectDeployHistoryEntry | null;
+  /**
+   * DUR-4232: every retained release, newest first (bounded by the project's
+   * releaseRetentionCount). `releases[0]`/`releases[1]` are the same entries as
+   * `current`/`previous`. Optional because older cached/mocked responses may not
+   * include it yet.
+   */
+  releases?: ProjectDeployHistoryEntry[];
 };
 
 export const deployRunnerApi = {

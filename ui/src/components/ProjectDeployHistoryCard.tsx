@@ -10,7 +10,13 @@ import { ApiError } from "../api/client";
 import { deployRunnerApi, type ProjectDeployHistory } from "../api/deployRunner";
 import { useToastActions } from "../context/ToastContext";
 import { queryKeys } from "../lib/queryKeys";
-import { buildRollbackDeployApproval, rollbackConfirmText, shortSha } from "../lib/rollback-deploy";
+import {
+  buildOlderReleaseRollbackApproval,
+  buildRollbackDeployApproval,
+  olderReleaseRollbackConfirmText,
+  rollbackConfirmText,
+  shortSha,
+} from "../lib/rollback-deploy";
 import { timeAgo } from "../lib/timeAgo";
 
 /**
@@ -80,6 +86,8 @@ export function ProjectDeployHistoryCardView({
   const queryClient = useQueryClient();
   const current = history?.current ?? null;
   const previous = history?.previous ?? null;
+  // DUR-4232: anything retained beyond current/previous that a rollback can also target.
+  const earlierReleases = (history?.releases ?? []).slice(2);
 
   const fileRollback = useMutation({
     mutationFn: () => {
@@ -113,6 +121,37 @@ export function ProjectDeployHistoryCardView({
     if (!current || !previous) return;
     if (!confirm(rollbackConfirmText(previous, current))) return;
     fileRollback.mutate();
+  };
+
+  const fileOlderRollback = useMutation({
+    mutationFn: (target: typeof earlierReleases[number]) => {
+      if (!current) throw new Error("There is no current version to roll back from yet.");
+      return approvalsApi.create(companyId, buildOlderReleaseRollbackApproval({ projectId, workspaceId, current, target }));
+    },
+    onSuccess: (approval, target) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(companyId) });
+      pushToast({
+        title: `Rollback request filed for ${shortSha(target.commit)}`,
+        body: "Nothing has changed yet. Approve the card to move production back; reject it to keep the current version.",
+        tone: "success",
+        action: { label: "Open the card", href: `/approvals/${approval.id}` },
+      });
+    },
+    onError: (err: Error) => {
+      const waitingCardId = existingApprovalIdFromError(err);
+      pushToast({
+        title: waitingCardId ? "This rollback is already waiting for you" : "Could not file the rollback request",
+        body: err.message,
+        tone: waitingCardId ? "info" : "error",
+        action: waitingCardId ? { label: "Open the waiting card", href: `/approvals/${waitingCardId}` } : undefined,
+      });
+    },
+  });
+
+  const onOlderRollbackClick = (target: typeof earlierReleases[number]) => {
+    if (!current) return;
+    if (!confirm(olderReleaseRollbackConfirmText(target, current))) return;
+    fileOlderRollback.mutate(target);
   };
 
   return (
@@ -179,6 +218,32 @@ export function ProjectDeployHistoryCardView({
                   <RotateCcw className="h-3.5 w-3.5" />
                   {fileRollback.isPending ? "Filing..." : "Roll back to previous version"}
                 </Button>
+              </div>
+            ) : null}
+            {earlierReleases.length > 0 ? (
+              <div className="space-y-2 border-t border-border/60 pt-3" data-testid="deploy-history-earlier-releases">
+                <p className="text-muted-foreground">Earlier releases still on record:</p>
+                <ul className="space-y-1">
+                  {earlierReleases.map((release) => (
+                    <li key={release.approvalId} className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                      <span className="font-mono text-xs">
+                        {shortSha(release.commit)}
+                        <span className="ml-2 font-sans text-muted-foreground">deployed {timeAgo(release.deployedAt)}</span>
+                      </span>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => onOlderRollbackClick(release)}
+                        disabled={fileOlderRollback.isPending}
+                        data-testid={`deploy-history-rollback-${release.commit}`}
+                      >
+                        <RotateCcw className="h-3 w-3" />
+                        Roll back to this version
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
               </div>
             ) : null}
           </>
