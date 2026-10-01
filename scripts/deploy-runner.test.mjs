@@ -4276,6 +4276,92 @@ test("DUR-4236: a swap whose rename fails restores the previous live file from i
   }
 });
 
+// Security finding on DUR-4236's PR #476: unlike sftp_remove_remote_entries
+// (which already refuses an allowlist entry containing whitespace or a quote
+// character before issuing an SFTP rm), upload_via_sftp's swap loop had no
+// equivalent guard even though it feeds the same kind of entry into curl -Q
+// mkdir/rename quote commands, which are whitespace-tokenized with no
+// escaping. An ordinary allowlist entry with a space (an operator-configured
+// typo, not an attacker payload) would silently become two tokens in the
+// quote command instead of erroring.
+test("DUR-4236: upload_via_sftp refuses an allowlist entry containing whitespace before staging or swapping it", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-whitespace-test-"));
+  try {
+    const targetDir = path.join(dir, "target");
+    mkdirSync(targetDir, { recursive: true });
+    writeFileSync(path.join(targetDir, "index.html"), "<html>ok</html>");
+    writeFileSync(path.join(targetDir, "bad name.html"), "<html>bad</html>");
+
+    const binDir = path.join(dir, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const curlCallsLog = path.join(dir, "curl-calls.log");
+    writeFakeCurl(binDir, { callsLog: curlCallsLog });
+
+    const logFile = path.join(dir, "runner.log");
+    const allowlist = "index.html\nbad name.html";
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      cli_json() { printf '{"kind":"sftp_password","value":"s3cr3t-value"}'; }
+      upload_via_sftp "aid-1" "${targetDir}" "$(printf '${allowlist}')" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1"
+      echo "STATUS=$?"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, PAPERCLIP_DEPLOY_RUNNER_LOG: logFile },
+    });
+    assert.match(result.stdout, /STATUS=1/, `an unsafe entry must fail the whole upload closed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+
+    const calls = existsSync(curlCallsLog) ? readFileSync(curlCallsLog, "utf8") : "";
+    assert.doesNotMatch(calls, /bad name\.html/, "the unsafe entry must never reach a curl call (staged or swapped)");
+    assert.doesNotMatch(calls, /-Q (mkdir|rename)/, "a failed stage must never reach the swap's mkdir/rename quote commands");
+    assert.match(readFileSync(logFile, "utf8"), /contains whitespace or a quote character/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Security finding on DUR-4236's PR #476: the restore-rename issued after a
+// failed swap (moving $dest.deploy-bak back to $dest) ignored its own exit
+// status. If that restore itself fails -- e.g. a transient network blip
+// during the swap window, not just "there was nothing at $dest yet" -- the
+// live file is left completely missing rather than reverted, and the old
+// code logged this identically to an ordinary swap failure.
+test("DUR-4236: a swap failure whose restore-rename also fails is reported as a missing live file, not an ordinary swap failure", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-swap-missing-test-"));
+  try {
+    const targetDir = path.join(dir, "target");
+    mkdirSync(targetDir, { recursive: true });
+    writeFileSync(path.join(targetDir, "index.html"), "<html>new</html>");
+
+    const binDir = path.join(dir, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const curlCallsLog = path.join(dir, "curl-calls.log");
+    // Both the swap-in rename and the restore-rename fail; the backup-presence
+    // check (`-Q ls $dest.deploy-bak`) must still succeed so the failure is
+    // correctly attributed to "restore also failed", not "nothing was there".
+    writeFakeCurl(binDir, {
+      callsLog: curlCallsLog,
+      failRegex: "-Q rename /var/www/site/\\.deploy-staging/aid-1/index\\.html /var/www/site/index\\.html |-Q rename /var/www/site/index\\.html\\.deploy-bak /var/www/site/index\\.html ",
+    });
+
+    const logFile = path.join(dir, "runner.log");
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      cli_json() { printf '{"kind":"sftp_password","value":"s3cr3t-value"}'; }
+      upload_via_sftp "aid-1" "${targetDir}" "index.html" "sftp.example.invalid" "22" "deployer" "/var/www/site" "agent-1" "co-1"
+      echo "STATUS=$?"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, PAPERCLIP_DEPLOY_RUNNER_LOG: logFile },
+    });
+    assert.match(result.stdout, /STATUS=1/, `expected failure\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.match(readFileSync(logFile, "utf8"), /MISSING/, "a failed restore must be called out as a missing live file, distinct from an ordinary swap failure");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("upload_via_sftp fails closed (no upload attempted) when no credential is bound to the requesting agent yet", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-sftp-nocred-test-"));
   try {

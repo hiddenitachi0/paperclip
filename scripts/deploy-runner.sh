@@ -1568,6 +1568,20 @@ upload_via_sftp() { # aid, target_dir, allowlist(newline-separated repo-relative
   local -a staged_entries=()
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
+    # DUR-4236 follow-up: the swap loop below feeds $entry into curl's -Q quote
+    # commands (mkdir/rename) for the live swap, same as sftp_remove_remote_entries
+    # already refuses for rollback deletes. curl's quote-command string is
+    # whitespace-tokenized with no escaping, so an allowlist entry with a space or
+    # quote character would rename/create the wrong remote path instead of erroring.
+    # Refused here, before anything is staged, for the same reason
+    # sftp_remove_remote_entries refuses it before deleting.
+    case "$entry" in
+      *[[:space:]]*|*\'*|*\"*)
+        log "runner: $aid SFTP allowlist entry '$entry' contains whitespace or a quote character, which curl's unescaped quote-command swap cannot handle safely -- refusing to upload or swap it"
+        failures=$((failures + 1))
+        continue
+        ;;
+    esac
     local_path="$target_dir/$entry"
     if [ ! -f "$local_path" ]; then
       log "runner: $aid SFTP allowlist entry $entry does not exist in $target_dir -- nothing uploaded for it"
@@ -1591,7 +1605,7 @@ upload_via_sftp() { # aid, target_dir, allowlist(newline-separated repo-relative
   fi
   log "runner: $aid SFTP staging upload finished — $staged file(s) staged, swapping into $username@$host:$remote_path"
 
-  local dest reldir swap_failures=0 swapped=0
+  local dest reldir swap_failures=0 swapped=0 swap_missing=0
   for entry in "${staged_entries[@]}"; do
     dest="$remote_path/$entry"
     staged_target="$staging_dir/$entry"
@@ -1608,13 +1622,31 @@ upload_via_sftp() { # aid, target_dir, allowlist(newline-separated repo-relative
       curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "rm $dest.deploy-bak" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"
     else
       log "runner: $aid SFTP swap of staged $entry into $dest failed -- restoring the previous file at $dest if there was one"
-      curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "rename $dest.deploy-bak $dest" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"
       swap_failures=$((swap_failures + 1))
+      # DUR-4236 follow-up: this restore-rename's own exit status was previously
+      # ignored. $dest was already moved aside above, so if this rename also
+      # fails (e.g. a transient network blip, not just "nothing was there"),
+      # $dest is left missing entirely rather than reverted to the old file --
+      # a live site 404 for this path, not just a stale version. Distinguished
+      # from the common "there was nothing at $dest yet" case (also a non-zero
+      # exit, but harmless) by checking afterward whether $dest.deploy-bak is
+      # still there: if the restore rename actually ran and failed, the
+      # .deploy-bak file is still sitting where it was, unmoved.
+      if curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "rename $dest.deploy-bak $dest" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"; then
+        :
+      elif curl -sS --disable-epsv "${curl_auth_args[@]}" -Q "ls $dest.deploy-bak" "sftp://$host:$port$remote_path/" >/dev/null 2>>"$LOG"; then
+        log "runner: $aid SFTP restore of the previous file at $dest FAILED -- $dest is now MISSING on the live site (the old version is still at $dest.deploy-bak and must be renamed back manually)"
+        swap_missing=$((swap_missing + 1))
+      fi
     fi
   done
 
   sftp_cleanup_staging "$aid" "$staging_dir" "$host" "$port" "$remote_path"
 
+  if [ "$swap_missing" -gt 0 ]; then
+    log "runner: $aid SFTP swap finished with $swap_missing file(s) MISSING from the live site (restore-after-failed-swap also failed) and $((swap_failures - swap_missing)) other failure(s) out of $((swapped + swap_failures)) file(s) -- needs immediate manual attention"
+    return 1
+  fi
   if [ "$swap_failures" -gt 0 ]; then
     log "runner: $aid SFTP swap finished with $swap_failures failure(s) out of $((swapped + swap_failures)) file(s) -- live path may be a mix of old and new files, needs attention"
     return 1
