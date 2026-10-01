@@ -76,4 +76,25 @@ describe("createRobotsTxtChecker", () => {
     });
     expect(await networkError.isAllowed("https://example.com/anything")).toBe(true);
   });
+
+  it("never fetches robots.txt directly when the hostname resolves to a private/loopback/metadata address", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response("User-agent: *\nDisallow: /", { status: 200 }));
+    const lookupImpl = vi.fn().mockResolvedValue([{ address: "169.254.169.254", family: 4 }]);
+    const checker = createRobotsTxtChecker({ userAgent: "TestBot/1.0", fetchImpl: fetchImpl as any, lookupImpl });
+
+    // Allowed (fails open on the skipped robots fetch), and -- the actual security property --
+    // no direct request was ever issued to the resolved internal address.
+    expect(await checker.isAllowed("https://rebinds-to-metadata.example.com/anything")).toBe(true);
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(lookupImpl).toHaveBeenCalledWith("rebinds-to-metadata.example.com");
+  });
+
+  it("fetches normally when the hostname resolves to a public address", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response("User-agent: *\nDisallow: /blocked", { status: 200 }));
+    const lookupImpl = vi.fn().mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
+    const checker = createRobotsTxtChecker({ userAgent: "TestBot/1.0", fetchImpl: fetchImpl as any, lookupImpl });
+
+    expect(await checker.isAllowed("https://example.com/blocked")).toBe(false);
+    expect(fetchImpl).toHaveBeenCalledWith("https://example.com/robots.txt", { headers: { "User-Agent": "TestBot/1.0" } });
+  });
 });

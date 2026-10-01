@@ -91,6 +91,8 @@ export function parseRobotsTxt(text: string): ParsedRobots {
 
 export interface RobotsTxtCheckerOptions {
   fetchImpl?: typeof fetch;
+  /** Resolves a hostname to its addresses. Overridable in tests; defaults to a real DNS lookup. */
+  lookupImpl?: (hostname: string) => Promise<{ address: string; family: number }[]>;
   /** How long a host's parsed robots.txt is cached before being re-fetched. */
   cacheTtlMs?: number;
   userAgent: string;
@@ -102,11 +104,54 @@ export interface RobotsTxtChecker {
   isAllowed(url: string): Promise<boolean>;
 }
 
+/**
+ * True for loopback/private/link-local/unique-local addresses, including the
+ * cloud metadata address -- the same ranges `watcherWebPageUrlProblem`
+ * (packages/shared/src/watchers.ts) rejects as literal hostnames. Checked
+ * here against the *resolved* address, not the typed hostname, because this
+ * is the one fetch in the watcher/product-grabber path that still runs
+ * directly from the server process rather than through the browser-egress
+ * proxy -- so it is the one spot DNS rebinding (a hostname that only
+ * resolves to an internal address at request time) can reach.
+ */
+function isDisallowedAddress(address: string, family: number): boolean {
+  if (family === 4) {
+    const parts = address.split(".").map(Number);
+    const [a, b] = parts;
+    return (
+      a === 127 || // 127.0.0.0/8 loopback
+      a === 10 || // 10.0.0.0/8
+      (a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12
+      (a === 192 && b === 168) || // 192.168.0.0/16
+      (a === 169 && b === 254) || // 169.254.0.0/16 link-local, incl. cloud metadata
+      a === 0
+    );
+  }
+  const host = address.toLowerCase();
+  return host === "::1" || host.startsWith("fe80:") || host.startsWith("fc") || host.startsWith("fd");
+}
+
 /** Fetches and caches robots.txt per host, serving `isAllowed` off the cache. */
 export function createRobotsTxtChecker(options: RobotsTxtCheckerOptions): RobotsTxtChecker {
   const fetchImpl = options.fetchImpl ?? fetch;
   const cacheTtlMs = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
   const cache = new Map<string, { robots: ParsedRobots; expiresAt: number }>();
+  let lookupImpl = options.lookupImpl;
+
+  async function resolvesToDisallowedAddress(hostname: string): Promise<boolean> {
+    if (!lookupImpl) {
+      const dns = await import("node:dns/promises");
+      lookupImpl = (host) => dns.lookup(host, { all: true, verbatim: true });
+    }
+    let addresses: { address: string; family: number }[];
+    try {
+      addresses = await lookupImpl(hostname);
+    } catch {
+      // Can't resolve -- nothing to fetch either way; let the normal 404/error path fail open below.
+      return false;
+    }
+    return addresses.some(({ address, family }) => isDisallowedAddress(address, family));
+  }
 
   async function getRobotsForOrigin(origin: string): Promise<ParsedRobots> {
     const cached = cache.get(origin);
@@ -114,8 +159,17 @@ export function createRobotsTxtChecker(options: RobotsTxtCheckerOptions): Robots
 
     let robots: ParsedRobots;
     try {
-      const response = await fetchImpl(`${origin}/robots.txt`, { headers: { "User-Agent": options.userAgent } });
-      robots = response.ok ? parseRobotsTxt(await response.text()) : parseRobotsTxt("");
+      const hostname = new URL(origin).hostname;
+      if (await resolvesToDisallowedAddress(hostname)) {
+        // This hostname resolves to an address the server itself should never fetch directly
+        // (loopback/private/link-local/metadata), whether typed that way or only at request
+        // time (DNS rebinding). Skip the direct fetch; the real page fetch is proxied through
+        // Crawl4AI/browser-egress separately and gets its own check there.
+        robots = parseRobotsTxt("");
+      } else {
+        const response = await fetchImpl(`${origin}/robots.txt`, { headers: { "User-Agent": options.userAgent } });
+        robots = response.ok ? parseRobotsTxt(await response.text()) : parseRobotsTxt("");
+      }
     } catch {
       robots = parseRobotsTxt("");
     }
