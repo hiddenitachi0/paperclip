@@ -1464,6 +1464,28 @@ export {
   type WooCommerceCredentialInput,
 } from "./validators/data-connection.js";
 export {
+  CRM_ACTIVITY_TYPES,
+  createCrmContactSchema,
+  updateCrmContactSchema,
+  createCrmOrganizationSchema,
+  updateCrmOrganizationSchema,
+  createCrmContactOrgRoleSchema,
+  createCrmActivitySchema,
+  createCrmFactSchema,
+  upsertCrmContactSchema,
+  crmSearchQuerySchema,
+  type CrmActivityType,
+  type CreateCrmContact,
+  type UpdateCrmContact,
+  type CreateCrmOrganization,
+  type UpdateCrmOrganization,
+  type CreateCrmContactOrgRole,
+  type CreateCrmActivity,
+  type CreateCrmFact,
+  type UpsertCrmContact,
+  type CrmSearchQuery,
+} from "./validators/crm.js";
+export {
   ADMIN_AUTH_CHECK_STATUSES,
   ADMIN_AUTH_CHECK_TRIGGERS,
   SIGN_OUT_EVERYWHERE_SCOPES,
@@ -2307,6 +2329,19 @@ export {
   type WatcherSourceInfo,
   type WatcherSummary,
 } from "./watchers.js";
+
+export {
+  PRODUCT_GRABBER_STAGING_STATUSES,
+  extractProductGrabberUrlSchema,
+  reviewProductGrabberStagedItemSchema,
+  updateProductGrabberSettingsSchema,
+  type ExtractProductGrabberUrlInput,
+  type ProductGrabberSettings,
+  type ProductGrabberStagedItemSummary,
+  type ProductGrabberStagingStatus,
+  type ReviewProductGrabberStagedItemInput,
+  type UpdateProductGrabberSettingsInput,
+} from "./product-grabber.js";
 
 export {
   MAIL_DELEGATION_CATEGORIES,

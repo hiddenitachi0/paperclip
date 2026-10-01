@@ -33,11 +33,12 @@ interface AgentRoleOverridesFields {
 }
 
 /**
- * Shows an agent's job assignment plus, for tools and rights, which entries
- * came from the job vs. which were added/removed specifically on this agent.
- * DUR-115 hard rule: assignment is board-only. This section doesn't try to
- * detect the acting principal client-side — it just calls the endpoint and
- * surfaces the 403 the backend is required to return for agent callers.
+ * Shows an agent's position assignment plus, for tools and rights, which
+ * entries came from the position vs. which were added/removed specifically
+ * on this agent. DUR-115 hard rule: assignment is board-only. This section
+ * doesn't try to detect the acting principal client-side — it just calls the
+ * endpoint and surfaces the 403 the backend is required to return for agent
+ * callers.
  */
 export function AgentJobSection({ agentId, companyId }: { agentId: string; companyId?: string }) {
   const queryClient = useQueryClient();
@@ -91,12 +92,12 @@ export function AgentJobSection({ agentId, companyId }: { agentId: string; compa
     onSuccess: () => {
       invalidate();
       setPickingJob(false);
-      pushToast({ title: "Job assigned", tone: "success" });
+      pushToast({ title: "Position assigned", tone: "success" });
     },
     onError: (error) => {
       const status = error instanceof ApiError ? error.status : null;
       pushToast({
-        title: status === 403 ? "Only a person on the company's board can assign a job" : "Could not assign job",
+        title: status === 403 ? "Only a person on the company's board can assign a position" : "Could not assign position",
         body: status === 403 ? "Ask an operator to assign this from the board." : errorMessage(error, ""),
         tone: "error",
       });
@@ -151,12 +152,12 @@ export function AgentJobSection({ agentId, companyId }: { agentId: string; compa
   });
 
   if (isLoading) {
-    return <p className="text-xs text-muted-foreground">Loading job…</p>;
+    return <p className="text-xs text-muted-foreground">Loading position…</p>;
   }
   // Guard against a partial/unexpected response shape (not just a missing one)
   // so a backend contract drift renders the empty state instead of throwing.
   if (error || !roleState || !roleState.tools || !roleState.rights) {
-    return <p className="text-xs text-muted-foreground">Could not load this agent's job. Try again once the jobs feature is live.</p>;
+    return <p className="text-xs text-muted-foreground">Could not load this agent's position. Try again once the positions feature is live.</p>;
   }
 
   const tools = {
@@ -195,10 +196,10 @@ export function AgentJobSection({ agentId, companyId }: { agentId: string; compa
   return (
     <div>
       <div className="flex items-center justify-between gap-2">
-        <h3 className="text-sm font-medium">Job</h3>
+        <h3 className="text-sm font-medium">Position</h3>
         {!pickingJob ? (
           <Button size="sm" variant="outline" onClick={() => setPickingJob(true)}>
-            {roleState.job ? "Change job" : "Assign a job"}
+            {roleState.job ? "Change position" : "Assign a position"}
           </Button>
         ) : null}
       </div>
@@ -211,11 +212,11 @@ export function AgentJobSection({ agentId, companyId }: { agentId: string; compa
               value={roleState.job?.id ?? null}
               onChange={(jobId) => jobId && assignJob.mutate(jobId)}
               disabled={assignJob.isPending}
-              placeholder="Choose a job"
+              placeholder="Choose a position"
             />
             <p className="text-xs text-muted-foreground">
-              This copies the job's instructions, tools, and rights onto this agent once. It won't stay linked — later
-              changes to the job won't reach this agent.
+              This copies the position's instructions, tools, and rights onto this agent once. It won't stay linked — later
+              changes to the position won't reach this agent.
             </p>
             <Button size="sm" variant="ghost" onClick={() => setPickingJob(false)} disabled={assignJob.isPending}>
               Cancel
@@ -232,7 +233,7 @@ export function AgentJobSection({ agentId, companyId }: { agentId: string; compa
             </div>
           </div>
         ) : (
-          <p className="text-sm text-muted-foreground">No job assigned.</p>
+          <p className="text-sm text-muted-foreground">No position assigned.</p>
         )}
 
         <div>
@@ -242,7 +243,7 @@ export function AgentJobSection({ agentId, companyId }: { agentId: string; compa
           </div>
           <ul className="mt-1.5 space-y-1">
             {tools.fromJob.map((name) => (
-              <OverrideRow key={`from-job-${name}`} label={name} tag="From job" />
+              <OverrideRow key={`from-job-${name}`} label={name} tag="From position" />
             ))}
             {tools.added.map((name) => (
               <OverrideRow
@@ -285,7 +286,7 @@ export function AgentJobSection({ agentId, companyId }: { agentId: string; compa
           </div>
           <ul className="mt-1.5 space-y-1">
             {rights.fromJob.map((grant) => (
-              <OverrideRow key={`from-job-${grant.permissionKey}`} label={permissionLabel(grant.permissionKey)} tag="From job" />
+              <OverrideRow key={`from-job-${grant.permissionKey}`} label={permissionLabel(grant.permissionKey)} tag="From position" />
             ))}
             {rights.added.map((grant) => (
               <OverrideRow
@@ -331,7 +332,7 @@ export function AgentJobSection({ agentId, companyId }: { agentId: string; compa
           </div>
           <ul className="mt-1.5 space-y-1">
             {skills.fromJob.map((key) => (
-              <OverrideRow key={`from-job-${key}`} label={skillLabel(key)} tag="From job" />
+              <OverrideRow key={`from-job-${key}`} label={skillLabel(key)} tag="From position" />
             ))}
             {skills.added.map((key) => (
               <OverrideRow
@@ -402,7 +403,7 @@ function OverrideRow({
   muted,
 }: {
   label: string;
-  tag: "From job" | "Added" | "Removed";
+  tag: "From position" | "Added" | "Removed";
   onRemove?: () => void;
   removing?: boolean;
   muted?: boolean;
@@ -411,7 +412,7 @@ function OverrideRow({
     <li className={`flex items-center justify-between gap-2 rounded-md border border-border px-2.5 py-1 text-sm ${muted ? "opacity-60" : ""}`}>
       <span className="truncate">{label}</span>
       <span className="flex items-center gap-1.5 shrink-0">
-        <Badge variant={tag === "From job" ? "outline" : tag === "Added" ? "secondary" : "outline"}>{tag}</Badge>
+        <Badge variant={tag === "From position" ? "outline" : tag === "Added" ? "secondary" : "outline"}>{tag}</Badge>
         {onRemove ? (
           <button
             type="button"
