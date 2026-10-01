@@ -302,6 +302,12 @@ export const queryKeys = {
   watchers: {
     list: (companyId: string) => ["watchers", companyId] as const,
   },
+  // Trading agent: paper-trading strategies.
+  trading: {
+    list: (companyId: string) => ["trading-strategies", companyId] as const,
+    dashboard: (companyId: string, strategyId: string) => ["trading-dashboard", companyId, strategyId] as const,
+    orders: (companyId: string, strategyId: string) => ["trading-orders", companyId, strategyId] as const,
+  },
   // Product grabber: vendor site -> staging list -> human approval.
   productGrabber: {
     settings: (companyId: string) => ["product-grabber", "settings", companyId] as const,
