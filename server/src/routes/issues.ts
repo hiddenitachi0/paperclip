@@ -163,6 +163,7 @@ import { evaluateDeployCompletionDoneGate } from "../services/deploy-completion-
 import { evaluateDoneGateCritic } from "../services/done-gate-critic.js";
 import { evaluateOriginCommitDoneGate } from "../services/origin-commit-gate.js";
 import { evaluateFeatureLaunchDoneGate } from "../services/feature-launch-gate.js";
+import { evaluateJobApprovalDoneGate } from "../services/job-approval-gate.js";
 import { evaluateBlockedNeedsAskGate } from "../services/blocked-needs-ask-gate.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
 import { feedbackService } from "../services/feedback.js";
@@ -6577,6 +6578,24 @@ export function issueRoutes(
       return;
     }
     const originCommitWarning = originCommitGateResult?.warningOnly ? originCommitGateResult.message : null;
+    // DUR-4182: composes with the gates above -- a Job's own `requiresApproval`
+    // flag, checked only for issues a job run created (originKind "job_execution").
+    const jobApprovalGateResult = await evaluateJobApprovalDoneGate({
+      db,
+      issue: {
+        id: existing.id,
+        companyId: existing.companyId,
+        originKind: existing.originKind,
+        originId: existing.originId,
+      },
+      actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
+      requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
+      currentStatus: existing.status,
+    });
+    if (jobApprovalGateResult) {
+      res.status(409).json({ error: jobApprovalGateResult.message });
+      return;
+    }
     // DUR-313: composes with the gates above -- this asks a narrower question again,
     // "did the operator explicitly sign off on THIS being a finished, user-facing
     // launch", independent of whether the work itself is done or already deployed.

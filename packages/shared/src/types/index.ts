@@ -499,6 +499,16 @@ export type {
   RoutineExecutionIssueOrigin,
   RoutineListItem,
 } from "./routine.js";
+export type {
+  Job,
+  JobDetail,
+  JobListItem,
+  JobPositionSummary,
+  JobRun,
+  JobTrigger,
+  JobVariable,
+  JobVariableDefaultValue,
+} from "./jobs.js";
 export type { CostEvent, CostSummary, IssueCostSummary, CostByAgent, CostByProviderModel, CostByBiller, CostByAgentModel, CostWindowSpendRow, CostByProject } from "./cost.js";
 export type { GoalAdoptionSnapshot, GoalAdoptionTrendPoint } from "./goal-adoption.js";
 export type { FinanceEvent, FinanceSummary, FinanceByBiller, FinanceByKind } from "./finance.js";
@@ -514,7 +524,16 @@ export type {
   InstanceSchedulerHeartbeatAgent,
 } from "./heartbeat.js";
 export type { LiveEvent } from "./live.js";
-export type { DashboardRunActivityDay, DashboardSummary } from "./dashboard.js";
+export type {
+  DashboardRunActivityDay,
+  DashboardSummary,
+  DashboardPulse,
+  DashboardPulseApproval,
+  DashboardPulseBudget,
+  DashboardPulseCompletion,
+  DashboardPulseDeploy,
+  DashboardPulseExecution,
+} from "./dashboard.js";
 export type {
   TimelineActorType,
   TimelineEventKind,

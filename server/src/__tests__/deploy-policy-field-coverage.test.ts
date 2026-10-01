@@ -52,6 +52,7 @@ const FULLY_POPULATED_POLICY = {
   sftpUsername: "deployer",
   sftpRemotePath: "/var/www/site",
   sftpAllowlist: ["dist/index.html"],
+  releaseRetentionCount: 10,
 } as const;
 
 /**
@@ -71,6 +72,10 @@ const NOT_USED_BY_THE_RUNNER: Record<string, string> = {
   // not listed here any more.
   mode: "governs whether a deploy needs a request_board_approval card; decided server-side before the card is even filed",
   askFirstActions: "same as mode — routes specific action categories to a board approval card, server-side only",
+  // DUR-4162: the runner trims its own status.jsonl mirror by a flat
+  // STATUS_LOG_MAX_LINES env var; it never builds the releases[] history
+  // list itself, so it has no reason to read this field.
+  releaseRetentionCount: "resolved server-side in deploy-history.ts when building the releases[] list; the runner never reads deploy history",
 };
 
 describe("deploy policy fields reach every layer that has to know about them", () => {
