@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import { check, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { agents } from "./agents.js";
+import { assets } from "./assets.js";
 import { companies } from "./companies.js";
 import { projects } from "./projects.js";
 
@@ -62,6 +63,17 @@ export const videoStorylines = pgTable(
     // is not available on this host -- see video-storyline-stitch.ts.
     stitchBlockedReason: text("stitch_blocked_reason"),
     errorMessage: text("error_message"),
+    // DUR-4196 round 2: the transition applied between consecutive shots
+    // unless a shot sets its own videoShots.transitionIn, and the optional
+    // music bed stitched under the whole film -- see video-ffmpeg.ts and
+    // video-storyline-stitch.ts. musicAssetId (an upload) and musicSourceKey
+    // (a licensed/stock track id, opaque here) are mutually exclusive --
+    // enforced in packages/shared's updateVideoStorylineSchema, not here.
+    defaultTransition: text("default_transition").notNull().default("cut"),
+    defaultTransitionDurationMs: integer("default_transition_duration_ms").notNull().default(500),
+    musicAssetId: uuid("music_asset_id").references(() => assets.id, { onDelete: "set null" }),
+    musicSourceKey: text("music_source_key"),
+    musicVolumeDb: integer("music_volume_db").notNull().default(-18),
     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     createdByUserId: text("created_by_user_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -78,6 +90,16 @@ export const videoStorylines = pgTable(
     providerCheck: check("video_storylines_provider_check", sql`${table.providerId} IN ('fal', 'sogni')`),
     budgetCapCheck: check("video_storylines_budget_cap_check", sql`${table.budgetCapCents} IS NULL OR ${table.budgetCapCents} >= 0`),
     spentCentsCheck: check("video_storylines_spent_cents_check", sql`${table.spentCents} >= 0`),
+    defaultTransitionCheck: check("video_storylines_default_transition_check", sql`${table.defaultTransition} IN ('cut', 'fade', 'dissolve')`),
+    defaultTransitionDurationCheck: check(
+      "video_storylines_default_transition_duration_check",
+      sql`${table.defaultTransitionDurationMs} >= 0 AND ${table.defaultTransitionDurationMs} <= 5000`,
+    ),
+    musicVolumeCheck: check("video_storylines_music_volume_check", sql`${table.musicVolumeDb} >= -60 AND ${table.musicVolumeDb} <= 0`),
+    musicSourceExclusiveCheck: check(
+      "video_storylines_music_source_exclusive_check",
+      sql`${table.musicAssetId} IS NULL OR ${table.musicSourceKey} IS NULL`,
+    ),
   }),
 );
 
@@ -136,6 +158,19 @@ export const videoShots = pgTable(
     actualCostCents: integer("actual_cost_cents"),
     attempt: integer("attempt").notNull().default(0),
     errorMessage: text("error_message"),
+    // DUR-4196 round 2: null = inherit videoStorylines.defaultTransition; set
+    // to override just this shot's incoming transition.
+    transitionIn: text("transition_in"),
+    // DUR-4196 round 2: a cheap still-image render of this shot (same prompt
+    // + continuity/reference pictures the real render would use), so a user
+    // can QA composition/likeness before paying for the full video render.
+    // Overwritten on every re-request -- there is deliberately no history.
+    previewProvider: text("preview_provider"),
+    previewObjectKey: text("preview_object_key"),
+    previewContentType: text("preview_content_type"),
+    previewByteSize: integer("preview_byte_size"),
+    previewSha256: text("preview_sha256"),
+    previewGeneratedAt: timestamp("preview_generated_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -150,6 +185,7 @@ export const videoShots = pgTable(
       "video_shots_status_check",
       sql`${table.status} IN ('draft', 'queued', 'rendering', 'done', 'failed')`,
     ),
+    transitionInCheck: check("video_shots_transition_in_check", sql`${table.transitionIn} IS NULL OR ${table.transitionIn} IN ('cut', 'fade', 'dissolve')`),
   }),
 );
 
@@ -187,5 +223,41 @@ export const videoShotRenderJobs = pgTable(
       sql`${table.status} IN ('running', 'done', 'failed')`,
     ),
     providerCheck: check("video_shot_render_jobs_provider_check", sql`${table.provider} IN ('fal', 'sogni')`),
+  }),
+);
+
+/**
+ * DUR-4196 round 2: one row per "turn this idea into shots" call to the
+ * director AI (video-storyline-director.ts). Drafts are never written
+ * straight into video_shots -- the ticket's required path is idea -> AI
+ * prompts -> human approval -> render, so draftedShots stays a plain jsonb
+ * blob until approveRun copies the selected entries into real video_shots
+ * rows (status 'draft', same as a human-authored shot from then on).
+ */
+export const videoStorylineDirectorRuns = pgTable(
+  "video_storyline_director_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    storylineId: uuid("storyline_id").notNull().references(() => videoStorylines.id, { onDelete: "cascade" }),
+    sceneId: uuid("scene_id").notNull().references(() => videoScenes.id, { onDelete: "cascade" }),
+    idea: text("idea").notNull(),
+    status: text("status").notNull().default("drafting"),
+    draftedShots: jsonb("drafted_shots").$type<Array<{ prompt: string; cameraNotes: string | null; durationSeconds: number; castInView: string[] }>>().notNull().default([]),
+    errorMessage: text("error_message"),
+    createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    createdByUserId: text("created_by_user_id"),
+    decidedByAgentId: uuid("decided_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    decidedByUserId: text("decided_by_user_id"),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    storylineIdx: index("video_storyline_director_runs_storyline_idx").on(table.storylineId, table.createdAt),
+    statusCheck: check(
+      "video_storyline_director_runs_status_check",
+      sql`${table.status} IN ('drafting', 'ready_for_review', 'approved', 'rejected', 'failed')`,
+    ),
   }),
 );
