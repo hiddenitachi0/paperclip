@@ -249,4 +249,64 @@ describe("the rule builder's request", () => {
       problem: "Pick the secret that holds your Finnhub key.",
     });
   });
+
+  it("builds a web-page price rule, and says plainly what is missing", () => {
+    const draft = {
+      ...emptyWatcherDraft(MAJA),
+      source: "web_page" as const,
+      symbol: "Competitor price",
+      checkEveryMinutes: 60,
+      webPageKind: "price" as const,
+      webPageUrl: "https://example.com/product",
+      webPageSelector: ".price",
+      webPagePriceDirection: "below" as const,
+      webPageTargetPrice: "499",
+      webPageCurrency: "USD",
+    };
+    expect(watcherInputFromDraft(draft)).toMatchObject({
+      input: {
+        source: "web_page",
+        rule: {
+          kind: "price",
+          url: "https://example.com/product",
+          selector: ".price",
+          direction: "below",
+          targetPrice: 499,
+          currency: "USD",
+        },
+        name: "The price at https://example.com/product drops to or below USD 499",
+      },
+    });
+    expect(watcherInputFromDraft({ ...draft, webPageUrl: "not-a-url" })).toEqual({
+      problem: "Use a full web address, starting with http:// or https://.",
+    });
+    expect(watcherInputFromDraft({ ...draft, webPageUrl: "http://localhost/product" })).toEqual({
+      problem: "That address is not reachable from the server. Use the page's public address.",
+    });
+  });
+
+  it("builds a web-page stock rule", () => {
+    const draft = {
+      ...emptyWatcherDraft(MAJA),
+      source: "web_page" as const,
+      symbol: "Back in stock",
+      checkEveryMinutes: 60,
+      webPageKind: "stock" as const,
+      webPageUrl: "https://example.com/product",
+      webPageSelector: ".buy-box",
+      webPageInStockPhrase: "Add to cart",
+      webPageAlertWhen: "becomes_in_stock" as const,
+    };
+    expect(watcherInputFromDraft(draft)).toMatchObject({
+      input: {
+        rule: {
+          kind: "stock",
+          url: "https://example.com/product",
+          selector: ".buy-box",
+          inStockPhrase: "Add to cart",
+          alertWhen: "becomes_in_stock",
+        },
+      },
+    });
+  });
 });
