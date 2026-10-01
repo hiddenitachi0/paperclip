@@ -430,7 +430,6 @@ export function IssueProperties({
     : null;
   const assigneeAdapterType = assignee?.adapterType ?? null;
   const assigneeAdapterOverrides = issue.assigneeAdapterOverrides ?? null;
-  const showAssigneeAdapterOptions = assigneeAdapterOverrides !== null;
   const supportsAssigneeOverrides = Boolean(
     assigneeAdapterType && ISSUE_OVERRIDE_ADAPTER_TYPES.has(assigneeAdapterType),
   );
@@ -456,19 +455,28 @@ export function IssueProperties({
         ? queryKeys.agents.adapterModels(companyId, assigneeAdapterType)
         : ["agents", "none", "adapter-models", assigneeAdapterType ?? "none"],
     queryFn: () => agentsApi.adapterModels(companyId!, assigneeAdapterType!),
-    enabled: Boolean(companyId) && showAssigneeAdapterOptions && supportsAssigneeOverrides,
+    enabled: Boolean(companyId) && supportsAssigneeOverrides,
   });
   const { data: assigneeCheapProfiles } = useQuery({
     queryKey: companyId && assigneeAdapterType
       ? queryKeys.agents.adapterModelProfiles(companyId, assigneeAdapterType)
       : ["agents", "none", "adapter-model-profiles", assigneeAdapterType ?? "none"],
     queryFn: () => agentsApi.adapterModelProfiles(companyId!, assigneeAdapterType!),
-    enabled: Boolean(companyId) && showAssigneeAdapterOptions && assigneeSupportsCheapLane,
+    enabled: Boolean(companyId) && assigneeSupportsCheapLane,
   });
   const assigneeCheapProfile = useMemo(
     () => (assigneeCheapProfiles ?? []).find((profile) => profile.key === "cheap") ?? null,
     [assigneeCheapProfiles],
   );
+  // DUR-4144: "Plan first on Opus, then build on Sonnet" only makes sense for
+  // adapters that ship a "planner" model profile.
+  const assigneePlannerProfile = useMemo(
+    () => (assigneeCheapProfiles ?? []).find((profile) => profile.key === "planner") ?? null,
+    [assigneeCheapProfiles],
+  );
+  const assigneeSupportsPlanner = Boolean(assigneeSupportsCheapLane && assigneePlannerProfile);
+  const assigneePlanFirstOnOpus = assigneeAdapterOverrides?.planFirstOnOpus === true;
+  const showAssigneeAdapterOptions = assigneeAdapterOverrides !== null || assigneeSupportsPlanner;
   const modelOverrideOptions = useMemo<InlineEntityOption[]>(() => {
     const models = sortAdapterModels(assigneeAdapterModels ?? []);
     const options = models.map((model) => ({
@@ -492,9 +500,18 @@ export function IssueProperties({
     const nextConfig = compactRecord(adapterConfig);
     const next = compactRecord({
       useProjectWorkspace: assigneeAdapterOverrides?.useProjectWorkspace,
+      planFirstOnOpus: assigneePlanFirstOnOpus ? true : undefined,
       ...(Object.keys(nextConfig).length > 0 ? { adapterConfig: nextConfig } : {}),
     });
     return Object.keys(next).length > 0 ? next : null;
+  };
+  const setAssigneePlanFirstOnOpus = (next: boolean) => {
+    updateAssigneeAdapterOverrides(
+      compactRecord({
+        ...assigneeAdapterOverrides,
+        planFirstOnOpus: next ? true : undefined,
+      }),
+    );
   };
   const updateAssigneeOverrideConfig = (patch: Record<string, unknown>) => {
     updateAssigneeAdapterOverrides(
@@ -517,13 +534,17 @@ export function IssueProperties({
   };
   const setAssigneeOverrideLane = (lane: IssueModelLane) => {
     if (lane === "primary") {
-      updateAssigneeAdapterOverrides(null);
+      const next = compactRecord({
+        planFirstOnOpus: assigneePlanFirstOnOpus ? true : undefined,
+      });
+      updateAssigneeAdapterOverrides(Object.keys(next).length > 0 ? next : null);
       return;
     }
     if (lane === "cheap") {
       updateAssigneeAdapterOverrides(
         compactRecord({
           useProjectWorkspace: assigneeAdapterOverrides?.useProjectWorkspace,
+          planFirstOnOpus: assigneePlanFirstOnOpus ? true : undefined,
           modelProfile: "cheap",
         }),
       );
@@ -533,13 +554,14 @@ export function IssueProperties({
   };
   const assigneeOptionsTrigger = (() => {
     if (assigneeOverrideLane === "cheap") {
-      return <span className="text-sm">Cheap model</span>;
+      return <span className="text-sm">Cheap model{assigneePlanFirstOnOpus ? " · plan on Opus" : ""}</span>;
     }
     if (assigneeOverrideLane === "custom") {
       const details = [
         assigneeOverrideModel,
         assigneeOverrideThinkingEffort,
         assigneeOverrideChrome ? "Chrome" : "",
+        assigneePlanFirstOnOpus ? "plan on Opus" : "",
       ].filter(Boolean);
       return (
         <span className="min-w-0 truncate text-sm" title={details.length > 0 ? `Custom · ${details.join(" · ")}` : "Custom adapter options"}>
@@ -547,7 +569,11 @@ export function IssueProperties({
         </span>
       );
     }
-    return <span className="text-sm text-muted-foreground">Primary model</span>;
+    return (
+      <span className="text-sm text-muted-foreground">
+        Primary model{assigneePlanFirstOnOpus ? " · plan on Opus" : ""}
+      </span>
+    );
   })();
   const assigneeOptionsContent = supportsAssigneeOverrides ? (
     <div className="w-full space-y-3 p-2">
@@ -581,6 +607,22 @@ export function IssueProperties({
           </p>
         ) : null}
       </div>
+      {assigneeSupportsPlanner ? (
+        <div className="space-y-1">
+          <div className="flex items-center justify-between rounded-md border border-border px-2 py-1.5">
+            <div className="text-xs text-muted-foreground">Plan first on Opus, then build on Sonnet</div>
+            <ToggleSwitch
+              checked={assigneePlanFirstOnOpus}
+              onCheckedChange={(next) => setAssigneePlanFirstOnOpus(next)}
+            />
+          </div>
+          {assigneePlanFirstOnOpus ? (
+            <p className="text-xs text-muted-foreground">
+              The next run writes a plan on the stronger planner model; once the plan is accepted, later runs switch to the lane chosen above.
+            </p>
+          ) : null}
+        </div>
+      ) : null}
       {assigneeOverrideLane === "custom" ? (
         <>
           <div className="space-y-1.5">
