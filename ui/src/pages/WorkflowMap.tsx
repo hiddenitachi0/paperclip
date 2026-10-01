@@ -392,7 +392,7 @@ export function WorkflowMap() {
       id: "section:jobs",
       type: "sectionLabel",
       position: { x: 0, y: sectionTop },
-      data: { label: "Jobs", hint: "Position templates agents can be hired into" },
+      data: { label: "Positions", hint: "Position templates agents can be hired into" },
       draggable: false,
       selectable: false,
     });
@@ -466,7 +466,7 @@ export function WorkflowMap() {
           <GitFork className="h-3.5 w-3.5" /> Pipelines &amp; stages
         </span>
         <span className="inline-flex items-center gap-1.5">
-          <Repeat className="h-3.5 w-3.5" /> Routines &amp; triggers
+          <Repeat className="h-3.5 w-3.5" /> Jobs &amp; triggers
         </span>
         <span className="inline-flex items-center gap-1.5">
           <ShieldCheck className="h-3.5 w-3.5" /> Approvals

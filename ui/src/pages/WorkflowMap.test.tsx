@@ -125,7 +125,7 @@ describe("WorkflowMap", () => {
     const { container, unmount } = renderWithClient(<WorkflowMap />);
     await flush();
 
-    expect(container.textContent).toContain("Routines");
+    expect(container.textContent).toContain("Positions");
     expect(container.textContent).toContain("Morning report");
     expect(container.textContent).toContain("Runs on a schedule");
     expect(container.textContent).toContain("Approvals");
