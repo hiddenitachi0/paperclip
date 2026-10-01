@@ -412,6 +412,21 @@ export function createToolDefinitions(client: PaperclipApiClient): ToolDefinitio
       },
     ),
     makeTool(
+      "paperclipSearchWorkSummaries",
+      "Search this agent's own saved work-history summaries from past successful runs, newest first",
+      z.object({
+        q: z.string().trim().max(500).optional(),
+        limit: z.number().int().min(1).max(100).optional(),
+      }),
+      async ({ q, limit }) => {
+        const params = new URLSearchParams();
+        if (q) params.set("q", q);
+        if (limit) params.set("limit", String(limit));
+        const qs = params.toString();
+        return client.requestJson("GET", `/agents/me/work-summaries${qs ? `?${qs}` : ""}`);
+      },
+    ),
+    makeTool(
       "paperclipListGoals",
       "List goals in a company",
       z.object({ companyId: companyIdOptional }),

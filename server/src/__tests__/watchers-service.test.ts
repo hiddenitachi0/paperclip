@@ -13,6 +13,7 @@ import {
   secretAccessEvents,
   watcherAlerts,
   watcherPricePoints,
+  watcherWebPageSnapshots,
   watchers,
 } from "@paperclipai/db";
 import { WATCHER_MAX_ALERTS_PER_DAY } from "@paperclipai/shared";
@@ -21,6 +22,11 @@ import { agentService } from "../services/agents.ts";
 import { secretService } from "../services/secrets.ts";
 import { HttpError } from "../errors.ts";
 import { resetWatcherSourceState } from "../services/watcher-sources.ts";
+import {
+  createFakeWatcherWebPageFetcher,
+  type WatcherWebPageFetchError,
+  type WatcherWebPageFetchResult,
+} from "../services/watcher-web-page.ts";
 import {
   WATCHER_ALERT_TASK,
   resetWatcherKeyCache,
@@ -528,6 +534,120 @@ d("watchers", () => {
       expect((await alertsOf(watcher.id))[0]!.status).toBe("ready");
       await expect(service().list(otherCompany)).resolves.toEqual([]);
       await expect(service().testAlert(otherCompany, watcher.id, USER)).rejects.toMatchObject({ status: 404 });
+    });
+  });
+
+  describe("web-page watchers", () => {
+    const WATCHED_URL = "https://example.com/widget";
+
+    async function webPageWatcher(companyId: string, agentId: string, extra: Record<string, unknown> = {}) {
+      return service().create(
+        companyId,
+        {
+          name: "Widget price",
+          agentId,
+          source: "web_page",
+          symbol: "Widget",
+          rule: {
+            kind: "price",
+            url: WATCHED_URL,
+            selector: ".price",
+            direction: "below",
+            targetPrice: 100,
+            currency: "USD",
+          },
+          checkEveryMinutes: 60,
+          cooldownMinutes: 360,
+          enabled: true,
+          withPicture: false,
+          keySecretId: null,
+          ...extra,
+        } as never,
+        USER,
+      );
+    }
+
+    function fetchResult(overrides: Partial<WatcherWebPageFetchResult> = {}): WatcherWebPageFetchResult {
+      return { price: null, inStock: null, itemKeys: null, contentHash: null, snippet: "", observedAt: now, ...overrides };
+    }
+
+    it("reuses the tick/lease/compose pipeline through the fake fetcher: a price crossing fires, writes a snapshot, and composes an alert", async () => {
+      const companyId = await seedCompany();
+      const maja = await seedAgent(companyId);
+      const watcher = await webPageWatcher(companyId, maja);
+      const fake = createFakeWatcherWebPageFetcher(new Map([[WATCHED_URL, fetchResult({ price: 89, snippet: "$89" })]]));
+
+      const result = await service({ webPageFetcher: fake }).tick(now);
+      expect(result).toMatchObject({ checked: 1, failed: 0, fired: 1, composing: 1 });
+      await settle();
+
+      expect(transform).toHaveBeenCalledTimes(1);
+      const [alert] = await alertsOf(watcher.id);
+      expect(alert).toMatchObject({ status: "ready" });
+      expect((alert!.facts as { changeSummary: string }).changeSummary).toContain("89");
+
+      const [snapshot] = await db
+        .select()
+        .from(watcherWebPageSnapshots)
+        .where(eq(watcherWebPageSnapshots.watcherId, watcher.id));
+      expect(snapshot).toMatchObject({ lastPrice: 89 });
+
+      const saved = await row(watcher.id);
+      expect(saved).toMatchObject({ lastCheckOk: true, checkLeaseUntil: null });
+      expect(saved.nextCheckAt.getTime()).toBe(T0.getTime() + 60 * 60_000);
+    });
+
+    it("a robots.txt block backs off exactly like any other fetch failure, and never writes a snapshot or alert", async () => {
+      const companyId = await seedCompany();
+      const maja = await seedAgent(companyId);
+      const watcher = await webPageWatcher(companyId, maja);
+      const blocked: WatcherWebPageFetchError = {
+        kind: "robots_blocked",
+        message: "robots.txt for example.com disallows fetching this page.",
+      };
+      const fake = createFakeWatcherWebPageFetcher(new Map([[WATCHED_URL, blocked]]));
+
+      const result = await service({ webPageFetcher: fake }).tick(now);
+      expect(result).toMatchObject({ checked: 1, failed: 1, fired: 0 });
+
+      const saved = await row(watcher.id);
+      expect(saved).toMatchObject({ lastCheckOk: false, consecutiveFailures: 1 });
+      expect(saved.lastCheckMessage).toContain("disallows fetching");
+      expect(saved.nextCheckAt.getTime()).toBe(T0.getTime() + 2 * 60 * 60_000);
+      expect(await alertsOf(watcher.id)).toHaveLength(0);
+      const snapshots = await db
+        .select()
+        .from(watcherWebPageSnapshots)
+        .where(eq(watcherWebPageSnapshots.watcherId, watcher.id));
+      expect(snapshots).toHaveLength(0);
+    });
+
+    it("a second check that no longer crosses the target stays quiet, and does not re-fire on the same crossing", async () => {
+      const companyId = await seedCompany();
+      const maja = await seedAgent(companyId);
+      const watcher = await webPageWatcher(companyId, maja, { cooldownMinutes: 0 });
+      const fakeBelow = createFakeWatcherWebPageFetcher(new Map([[WATCHED_URL, fetchResult({ price: 89 })]]));
+      await service({ webPageFetcher: fakeBelow }).tick(now);
+      await settle();
+      expect(await alertsOf(watcher.id)).toHaveLength(1);
+
+      now = new Date(T0.getTime() + 60 * 60_000);
+      const fakeStillBelow = createFakeWatcherWebPageFetcher(new Map([[WATCHED_URL, fetchResult({ price: 85 })]]));
+      await service({ webPageFetcher: fakeStillBelow }).tick(now);
+      await settle();
+      expect(await alertsOf(watcher.id)).toHaveLength(1);
+
+      now = new Date(T0.getTime() + 120 * 60_000);
+      const fakeBackAbove = createFakeWatcherWebPageFetcher(new Map([[WATCHED_URL, fetchResult({ price: 150 })]]));
+      await service({ webPageFetcher: fakeBackAbove }).tick(now);
+      await settle();
+      expect(await alertsOf(watcher.id)).toHaveLength(1);
+
+      now = new Date(T0.getTime() + 180 * 60_000);
+      const fakeCrossesAgain = createFakeWatcherWebPageFetcher(new Map([[WATCHED_URL, fetchResult({ price: 90 })]]));
+      await service({ webPageFetcher: fakeCrossesAgain }).tick(now);
+      await settle();
+      expect(await alertsOf(watcher.id)).toHaveLength(2);
     });
   });
 

@@ -1426,8 +1426,22 @@
     {
       "idx": 204,
       "version": "7",
-      "when": 1790820020000,
-      "tag": "0204_totp_2fa",
+      "when": 1790823100000,
+      "tag": "0204_agent_work_summaries",
+      "breakpoints": true
+    },
+    {
+      "idx": 205,
+      "version": "7",
+      "when": 1790823110000,
+      "tag": "0205_email_company_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 206,
+      "version": "7",
+      "when": 1790823120000,
+      "tag": "0206_totp_2fa",
       "breakpoints": true
     }
   ]

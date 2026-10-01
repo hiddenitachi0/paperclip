@@ -141,6 +141,10 @@ DECLARE
     'agent_runtime_state',
     'agent_task_sessions',
     'agent_wakeup_requests',
+    -- DUR-4197. Created, granted on and policed in
+    -- 0204_agent_work_summaries.sql; listed here so the login-role lists
+    -- match the schema, as for the tables above.
+    'agent_work_summaries',
     'agents',
     'approval_comments',
     'approvals',
@@ -212,6 +216,9 @@ DECLARE
     'document_annotation_threads',
     'document_revisions',
     'documents',
+    -- DUR-4277 email on/off per company. Created (and granted on) in
+    -- 0205_email_company_settings.sql; company-scoped, so it is in both lists.
+    'email_company_settings',
     'environment_custom_image_setup_sessions',
     'environment_custom_image_templates',
     'environment_leases',
@@ -339,7 +346,7 @@ DECLARE
     -- 0166_telegram_bots.sql; the name is listed here for the same reason
     -- company_service_tokens is, above.
     'telegram_bots',
-    -- DUR-4157 2FA. Created (and granted on) in 0204_totp_2fa.sql;
+    -- DUR-4157 2FA. Created (and granted on) in 0206_totp_2fa.sql;
     -- user-scoped (no company_id), so it is in this list only, not in the
     -- company-scoped one below.
     'totp_session_tokens',
@@ -406,6 +413,10 @@ DECLARE
     'agent_runtime_state',
     'agent_task_sessions',
     'agent_wakeup_requests',
+    -- DUR-4197. Created, granted on and policed in
+    -- 0204_agent_work_summaries.sql; listed here so the login-role lists
+    -- match the schema, as for the tables above.
+    'agent_work_summaries',
     'agents',
     'approval_comments',
     'approvals',
@@ -464,6 +475,9 @@ DECLARE
     'document_annotation_threads',
     'document_revisions',
     'documents',
+    -- DUR-4277 email on/off per company. Created (and granted on) in
+    -- 0205_email_company_settings.sql; company-scoped, so it is in both lists.
+    'email_company_settings',
     'environment_leases',
     'escalation_grants',
     'execution_workspaces',

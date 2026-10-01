@@ -98,6 +98,7 @@ export {
   readLaneAWebSearchSwitch,
   type CompanyWebSearchSettings,
 } from "./web-search.js";
+export { readLaneAConversationSearchSwitch } from "./lane-a-conversation-search.js";
 export {
   BROWSER_ACCESS_LEVELS,
   readLaneABrowserAccess,
@@ -2387,6 +2388,12 @@ export {
   type ReviewProductGrabberStagedItemInput,
   type UpdateProductGrabberSettingsInput,
 } from "./product-grabber.js";
+
+export {
+  updateEmailSettingsSchema,
+  type EmailSettings,
+  type UpdateEmailSettingsInput,
+} from "./email-settings.js";
 
 export {
   MAIL_DELEGATION_CATEGORIES,

@@ -1,7 +1,7 @@
 import { and, eq, sql } from "drizzle-orm";
 import { approvals, projects, type Db } from "@paperclipai/db";
 import { readDeployRunnerStatus, type DeployRunnerStatusEntry } from "./deploy-runner-status.js";
-import { DEPLOY_SUCCESS_MARKER, extractDeployedCommit } from "./deploy-completion-gate.js";
+import { extractDeployedCommit, resolveDeployedStatus, type DeployOutcomeStatus } from "./deploy-completion-gate.js";
 
 // DUR-4162: how many past releases readProjectDeployHistory returns when a
 // project's deploy_policy.releaseRetentionCount is unset. Mirrors the bound
@@ -32,6 +32,13 @@ export type ProjectDeployHistoryEntry = {
   commit: string;
   approvalId: string;
   deployedAt: string;
+  /**
+   * DUR-4233: "ok" for a clean deploy, "needs_attention" when the app itself checked out fine
+   * but the runner's TLS/domain check flagged something a rollback would not fix. Never
+   * "failed" here -- a failed attempt never reaches `selectProjectDeployHistory` at all (see
+   * `resolveDeployedStatus`), so this list only ever holds versions that were genuinely live.
+   */
+  status: Exclude<DeployOutcomeStatus, "failed">;
 };
 
 export type ProjectDeployHistory = {
@@ -49,8 +56,24 @@ export type ProjectDeployHistory = {
   releases: ProjectDeployHistoryEntry[];
 };
 
+// DUR-4233: a deploy that went live counts as a success whether it was clean
+// ("ok") or live-but-flagged ("needs_attention"); resolveDeployedStatus is the
+// single source of truth for both the rollback list and the filtered history.
 function isSuccessfulDeploy(entry: DeployRunnerStatusEntry): boolean {
-  return entry.outcome !== "carried" && entry.outcome !== "started" && entry.body.includes(DEPLOY_SUCCESS_MARKER);
+  return resolveDeployedStatus(entry) !== null;
+}
+
+// DUR-4271: "fail" counterpart to isSuccessfulDeploy. "started" and
+// "waiting_for_checks" are interim log lines written while a deploy is still
+// in flight -- the approval's own terminal line (success or failure) follows
+// later, so neither counts as a failure on its own. "carried" means the
+// approval's target commit already shipped under a *different* approval; it
+// is a no-op, not a failed attempt. Everything else that isn't a recorded
+// success is a terminal failure: a rejected approval, a CI timeout, a failed
+// build/health-check, or any other "Deploy failed/stopped/not started" line.
+function isFailedDeploy(entry: DeployRunnerStatusEntry): boolean {
+  if (entry.outcome === "started" || entry.outcome === "waiting_for_checks" || entry.outcome === "carried") return false;
+  return !isSuccessfulDeploy(entry);
 }
 
 /**
@@ -69,12 +92,13 @@ export function selectProjectDeployHistory(
   for (let i = entries.length - 1; i >= 0 && newestFirst.length < limit; i -= 1) {
     const entry = entries[i]!;
     if (!projectApprovalIds.has(entry.approvalId)) continue;
-    if (!isSuccessfulDeploy(entry)) continue;
+    const status = resolveDeployedStatus(entry);
+    if (!status) continue;
     const commit = extractDeployedCommit(entry);
     if (!commit) continue;
     const last = newestFirst[newestFirst.length - 1];
     if (last && commitsRefer(last.commit, commit)) continue;
-    newestFirst.push({ commit, approvalId: entry.approvalId, deployedAt: entry.ts });
+    newestFirst.push({ commit, approvalId: entry.approvalId, deployedAt: entry.ts, status });
   }
   return newestFirst;
 }
@@ -85,6 +109,77 @@ function commitsRefer(a: string, b: string): boolean {
   const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a];
   return shorter.length >= 7 && longer.toLowerCase().startsWith(shorter.toLowerCase());
 }
+
+export type ProjectDeployHistoryStatus = "pass" | "fail";
+
+export type ProjectDeployHistoryListEntry = {
+  commit: string | null;
+  approvalId: string;
+  deployedAt: string;
+  status: ProjectDeployHistoryStatus;
+};
+
+export type ProjectDeployHistoryListFilters = {
+  status?: ProjectDeployHistoryStatus;
+  /** Inclusive lower bound on deployedAt, epoch milliseconds. */
+  fromMs?: number;
+  /** Inclusive upper bound on deployedAt, epoch milliseconds. */
+  toMs?: number;
+};
+
+// DUR-4271: parses a `from`/`to` query param (a bare date like "2026-09-01"
+// or a full ISO timestamp) into epoch milliseconds for comparison against a
+// status-log line's `ts`. A bare date is anchored to UTC midnight for `from`
+// and the last instant of that day for `to`, so "to=2026-09-01" includes
+// everything that happened on that day rather than excluding it outright.
+// Returns null for unparseable input so the route can 400 instead of
+// silently ignoring a typo'd filter.
+export function parseDateBoundary(raw: string, endOfDay: boolean): number | null {
+  const hasTime = /t/i.test(raw);
+  const iso = hasTime ? raw : `${raw}T${endOfDay ? "23:59:59.999" : "00:00:00.000"}Z`;
+  const ms = Date.parse(iso);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+/**
+ * DUR-4271: the same project-scoped window as selectProjectDeployHistory,
+ * but keeps every terminal attempt -- pass AND fail -- instead of only the
+ * ones that ended up live, and applies the optional status/date filters.
+ * `cap` is a hard ceiling on how many *matching* entries this ever
+ * collects, independent of whatever paging the caller applies on top: a
+ * filter or a deep page must never read further back into the log than the
+ * project's own release-retention window allows.
+ */
+export function selectProjectDeployHistoryEntries(
+  entries: DeployRunnerStatusEntry[],
+  projectApprovalIds: ReadonlySet<string>,
+  filters: ProjectDeployHistoryListFilters,
+  cap: number,
+): ProjectDeployHistoryListEntry[] {
+  const newestFirst: ProjectDeployHistoryListEntry[] = [];
+  for (let i = entries.length - 1; i >= 0 && newestFirst.length < cap; i -= 1) {
+    const entry = entries[i]!;
+    if (!projectApprovalIds.has(entry.approvalId)) continue;
+    const status: ProjectDeployHistoryStatus | null = isSuccessfulDeploy(entry) ? "pass" : isFailedDeploy(entry) ? "fail" : null;
+    if (!status) continue;
+    if (filters.status && status !== filters.status) continue;
+    if (filters.fromMs !== undefined || filters.toMs !== undefined) {
+      const ms = Date.parse(entry.ts);
+      if (filters.fromMs !== undefined && ms < filters.fromMs) continue;
+      if (filters.toMs !== undefined && ms > filters.toMs) continue;
+    }
+    newestFirst.push({ commit: extractDeployedCommit(entry), approvalId: entry.approvalId, deployedAt: entry.ts, status });
+  }
+  return newestFirst;
+}
+
+export type ProjectDeployHistoryListResult = {
+  items: ProjectDeployHistoryListEntry[];
+  total: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+};
 
 export async function listProjectDeployApprovalIds(db: Db, companyId: string, projectId: string): Promise<Set<string>> {
   const rows = await db
@@ -115,14 +210,11 @@ export function resolveReleaseRetentionCount(deployPolicy: Record<string, unknow
   return Math.min(MAX_RELEASE_RETENTION_COUNT, Math.max(1, Math.floor(raw)));
 }
 
-export async function readProjectDeployHistory(
+async function resolveProjectDeployContext(
   db: Db,
   companyId: string,
   projectId: string,
-  deps: { readStatusLog?: (companyId: string, limit: number) => DeployRunnerStatusEntry[] } = {},
-): Promise<ProjectDeployHistory> {
-  const readStatusLog = deps.readStatusLog ?? ((cid: string, limit: number) => readDeployRunnerStatus(cid, limit));
-
+): Promise<{ approvalIds: Set<string>; retention: number }> {
   const [approvalIds, projectRow] = await Promise.all([
     listProjectDeployApprovalIds(db, companyId, projectId),
     db
@@ -131,10 +223,50 @@ export async function readProjectDeployHistory(
       .where(and(eq(projects.id, projectId), eq(projects.companyId, companyId)))
       .then((rows) => rows[0]),
   ]);
+  return { approvalIds, retention: resolveReleaseRetentionCount(projectRow?.deployPolicy) };
+}
 
-  const retention = resolveReleaseRetentionCount(projectRow?.deployPolicy);
+type ReadStatusLog = (companyId: string, limit: number) => DeployRunnerStatusEntry[];
+
+export async function readProjectDeployHistory(
+  db: Db,
+  companyId: string,
+  projectId: string,
+  deps: { readStatusLog?: ReadStatusLog } = {},
+): Promise<ProjectDeployHistory> {
+  const readStatusLog = deps.readStatusLog ?? ((cid: string, limit: number) => readDeployRunnerStatus(cid, limit));
+
+  const { approvalIds, retention } = await resolveProjectDeployContext(db, companyId, projectId);
   const statusLogLimit = Math.min(5000, retention * STATUS_LOG_LINES_PER_RELEASE);
   const releases = selectProjectDeployHistory(readStatusLog(companyId, statusLogLimit), approvalIds, retention);
 
   return { current: releases[0] ?? null, previous: releases[1] ?? null, releases };
+}
+
+/**
+ * DUR-4271: the paged, filterable sibling of readProjectDeployHistory. Reuses
+ * the same approval-id/retention resolution and status-log window, but
+ * returns every terminal attempt (pass and fail) and applies the caller's
+ * filters/paging on top -- `cap` (the project's release-retention count) is
+ * still the hard ceiling on how many matching entries exist to page through.
+ */
+export async function readProjectDeployHistoryList(
+  db: Db,
+  companyId: string,
+  projectId: string,
+  filters: ProjectDeployHistoryListFilters,
+  paging: { limit: number; offset: number },
+  deps: { readStatusLog?: ReadStatusLog } = {},
+): Promise<ProjectDeployHistoryListResult> {
+  const readStatusLog = deps.readStatusLog ?? ((cid: string, limit: number) => readDeployRunnerStatus(cid, limit));
+
+  const { approvalIds, retention } = await resolveProjectDeployContext(db, companyId, projectId);
+  const statusLogLimit = Math.min(5000, retention * STATUS_LOG_LINES_PER_RELEASE);
+  const matched = selectProjectDeployHistoryEntries(readStatusLog(companyId, statusLogLimit), approvalIds, filters, retention);
+
+  const limit = Math.max(1, Math.min(paging.limit, retention));
+  const offset = Math.max(0, Math.min(paging.offset, matched.length));
+  const items = matched.slice(offset, offset + limit);
+
+  return { items, total: matched.length, limit, offset, hasMore: offset + items.length < matched.length };
 }

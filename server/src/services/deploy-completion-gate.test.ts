@@ -696,3 +696,52 @@ describe("evaluateDeployCompletionDoneGate (DUR-99)", () => {
     });
   });
 });
+
+// DUR-4233: the tri-state outcome classifiers every other consumer (deploy-history.ts,
+// deploy-carried-issues.ts, routes/approvals.ts, dashboard.ts) now shares instead of
+// string-matching DEPLOY_SUCCESS_MARKER themselves.
+describe("isDeployedOutcome / isCompletedDeployOutcome / resolveDeployedStatus (DUR-4233)", () => {
+  const baseEntry = { ts: "2026-09-01T10:00:00Z", approvalId: "a1", companyId: "co-1", commentDelivered: true, body: "" };
+
+  it("treats outcome:ok as deployed, with status ok", async () => {
+    const { isDeployedOutcome, isCompletedDeployOutcome, resolveDeployedStatus } = await import("./deploy-completion-gate.js");
+    const entry = { ...baseEntry, outcome: "ok" };
+    expect(isDeployedOutcome(entry)).toBe(true);
+    expect(isCompletedDeployOutcome(entry)).toBe(true);
+    expect(resolveDeployedStatus(entry)).toBe("ok");
+  });
+
+  it("treats outcome:needs_attention as deployed, with status needs_attention", async () => {
+    const { isDeployedOutcome, isCompletedDeployOutcome, resolveDeployedStatus } = await import("./deploy-completion-gate.js");
+    const entry = { ...baseEntry, outcome: "needs_attention" };
+    expect(isDeployedOutcome(entry)).toBe(true);
+    expect(isCompletedDeployOutcome(entry)).toBe(true);
+    expect(resolveDeployedStatus(entry)).toBe("needs_attention");
+  });
+
+  it("treats a legacy entry with no outcome field but the success marker in body as deployed/ok", async () => {
+    const { isDeployedOutcome, resolveDeployedStatus } = await import("./deploy-completion-gate.js");
+    const entry = { ...baseEntry, body: "Deployed to /opt/app — commit abc123456789 is live and healthy (health check: http://x)." };
+    expect(isDeployedOutcome(entry)).toBe(true);
+    expect(resolveDeployedStatus(entry)).toBe("ok");
+  });
+
+  it("excludes started and carried from isDeployedOutcome, but carried still counts as completed", async () => {
+    const { isDeployedOutcome, isCompletedDeployOutcome, resolveDeployedStatus } = await import("./deploy-completion-gate.js");
+    const started = { ...baseEntry, outcome: "started" };
+    const carried = { ...baseEntry, outcome: "carried" };
+    expect(isDeployedOutcome(started)).toBe(false);
+    expect(isCompletedDeployOutcome(started)).toBe(false);
+    expect(isDeployedOutcome(carried)).toBe(false);
+    expect(resolveDeployedStatus(carried)).toBeNull();
+    expect(isCompletedDeployOutcome(carried)).toBe(true);
+  });
+
+  it("treats a plain failure (no outcome, no success marker) as neither deployed nor completed", async () => {
+    const { isDeployedOutcome, isCompletedDeployOutcome, resolveDeployedStatus } = await import("./deploy-completion-gate.js");
+    const entry = { ...baseEntry, body: "Deploy failed — health check never returned 200." };
+    expect(isDeployedOutcome(entry)).toBe(false);
+    expect(isCompletedDeployOutcome(entry)).toBe(false);
+    expect(resolveDeployedStatus(entry)).toBeNull();
+  });
+});

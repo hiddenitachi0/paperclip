@@ -6,16 +6,21 @@ import {
   WATCHER_DEFAULT_RULE,
   WATCHER_SOURCES,
   WATCHER_SOURCE_INFO,
+  WATCHER_WEB_PAGE_KINDS,
   describeWatcherRule,
+  describeWatcherWebPageRule,
   watcherCheckEveryProblem,
   watcherRuleSchema,
   watcherSymbolName,
   watcherSymbolProblem,
+  watcherWebPageRuleSchema,
   type Agent,
   type CreateWatcherInput,
   type WatcherRule,
   type WatcherSource,
   type WatcherSummary,
+  type WatcherWebPageKind,
+  type WatcherWebPageRule,
 } from "@paperclipai/shared";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -86,6 +91,17 @@ export interface WatcherDraft {
   enabled: boolean;
   withPicture: boolean;
   keySecretId: string | null;
+  // Web page watcher (source "web_page"): its own rule shape, independent of
+  // the change/level/since_last_alert fields above.
+  webPageKind: WatcherWebPageKind;
+  webPageUrl: string;
+  webPageSelector: string;
+  webPagePriceDirection: "below" | "above";
+  webPageTargetPrice: string;
+  webPageCurrency: string;
+  webPageInStockPhrase: string;
+  webPageAlertWhen: "becomes_in_stock" | "becomes_out_of_stock" | "either";
+  webPageIdentifyBy: "href" | "text";
 }
 
 export function emptyWatcherDraft(agentId = ""): WatcherDraft {
@@ -106,19 +122,50 @@ export function emptyWatcherDraft(agentId = ""): WatcherDraft {
     enabled: true,
     withPicture: false,
     keySecretId: null,
+    webPageKind: "price",
+    webPageUrl: "",
+    webPageSelector: "",
+    webPagePriceDirection: "below",
+    webPageTargetPrice: "",
+    webPageCurrency: "USD",
+    webPageInStockPhrase: "",
+    webPageAlertWhen: "becomes_in_stock",
+    webPageIdentifyBy: "href",
   };
+}
+
+function isWebPageRule(rule: WatcherRule | WatcherWebPageRule): rule is WatcherWebPageRule {
+  return (WATCHER_WEB_PAGE_KINDS as readonly string[]).includes(rule.kind);
 }
 
 export function draftFromWatcher(watcher: WatcherSummary): WatcherDraft {
   const draft = emptyWatcherDraft(watcher.agentId);
-  // DUR-4168: a web-page watcher's rule has no change/level/since_last_alert shape to
-  // edit here yet (that form is separate follow-up work) -- fall back to the default
-  // rule rather than mis-type it as one of the three kinds this dialog understands.
   const rawRule = watcher.rule;
-  const rule: WatcherRule =
-    rawRule.kind === "change" || rawRule.kind === "level" || rawRule.kind === "since_last_alert"
-      ? rawRule
-      : WATCHER_DEFAULT_RULE;
+  if (watcher.source === "web_page" && isWebPageRule(rawRule)) {
+    return {
+      ...draft,
+      name: watcher.name,
+      source: watcher.source,
+      symbol: watcher.symbol,
+      webPageKind: rawRule.kind,
+      webPageUrl: "url" in rawRule ? rawRule.url : "",
+      webPageSelector: "selector" in rawRule ? rawRule.selector : "",
+      webPagePriceDirection: rawRule.kind === "price" ? rawRule.direction : draft.webPagePriceDirection,
+      webPageTargetPrice: rawRule.kind === "price" ? String(rawRule.targetPrice) : "",
+      webPageCurrency: rawRule.kind === "price" ? rawRule.currency : draft.webPageCurrency,
+      webPageInStockPhrase: rawRule.kind === "stock" ? rawRule.inStockPhrase : "",
+      webPageAlertWhen: rawRule.kind === "stock" ? rawRule.alertWhen : draft.webPageAlertWhen,
+      webPageIdentifyBy: rawRule.kind === "new_products" ? rawRule.identifyBy : draft.webPageIdentifyBy,
+      checkEveryMinutes: watcher.checkEveryMinutes,
+      cooldownMinutes: watcher.cooldownMinutes,
+      enabled: watcher.enabled,
+      withPicture: watcher.withPicture,
+      keySecretId: watcher.keySecretId,
+    };
+  }
+  // A numeric-source rule (change/level/since_last_alert); fall back to the
+  // default rule if a web_page rule somehow ended up on a non-web_page watcher.
+  const rule: WatcherRule = isWebPageRule(rawRule) ? WATCHER_DEFAULT_RULE : rawRule;
   return {
     ...draft,
     name: watcher.name,
@@ -142,8 +189,44 @@ function toNumber(value: string): number {
   return Number(value.replace(",", ".").replace(/\s/g, ""));
 }
 
+/** The web-page rule the draft describes, or a plain sentence saying what is missing. */
+function webPageRuleFromDraft(draft: WatcherDraft): { rule: WatcherWebPageRule } | { problem: string } {
+  const candidate =
+    draft.webPageKind === "price"
+      ? {
+          kind: "price",
+          url: draft.webPageUrl,
+          selector: draft.webPageSelector,
+          direction: draft.webPagePriceDirection,
+          targetPrice: toNumber(draft.webPageTargetPrice),
+          currency: draft.webPageCurrency,
+        }
+      : draft.webPageKind === "stock"
+        ? {
+            kind: "stock",
+            url: draft.webPageUrl,
+            selector: draft.webPageSelector,
+            inStockPhrase: draft.webPageInStockPhrase,
+            alertWhen: draft.webPageAlertWhen,
+          }
+        : draft.webPageKind === "new_products"
+          ? {
+              kind: "new_products",
+              url: draft.webPageUrl,
+              selector: draft.webPageSelector,
+              identifyBy: draft.webPageIdentifyBy,
+            }
+          : { kind: "text_change", url: draft.webPageUrl, selector: draft.webPageSelector };
+  const parsed = watcherWebPageRuleSchema.safeParse(candidate);
+  if (!parsed.success) {
+    return { problem: parsed.error.issues[0]?.message ?? "Finish the rule." };
+  }
+  return { rule: parsed.data };
+}
+
 /** The rule the draft describes, or a plain sentence saying what is missing. */
-export function ruleFromDraft(draft: WatcherDraft): { rule: WatcherRule } | { problem: string } {
+export function ruleFromDraft(draft: WatcherDraft): { rule: WatcherRule | WatcherWebPageRule } | { problem: string } {
+  if (draft.source === "web_page") return webPageRuleFromDraft(draft);
   const candidate =
     draft.ruleKind === "change"
       ? { kind: "change", direction: draft.direction, percent: toNumber(draft.percent), windowHours: draft.windowHours }
@@ -170,9 +253,12 @@ export function watcherInputFromDraft(draft: WatcherDraft): { input: CreateWatch
   if (everyProblem) return { problem: everyProblem };
   if (info.needsKey && !draft.keySecretId) return { problem: `Pick the secret that holds your ${info.keyLabel}.` };
   const subject = watcherSymbolName(draft.source, symbol);
+  const sentence = isWebPageRule(ruled.rule)
+    ? describeWatcherWebPageRule(ruled.rule)
+    : describeWatcherRule(ruled.rule, subject, info.currency);
   return {
     input: {
-      name: draft.name.trim() || describeWatcherRule(ruled.rule, subject, info.currency).slice(0, 80),
+      name: draft.name.trim() || sentence.slice(0, 80),
       agentId: draft.agentId,
       source: draft.source,
       symbol,
@@ -220,7 +306,12 @@ export function WatcherFormDialog({
   const info = WATCHER_SOURCE_INFO[draft.source];
   const ruled = ruleFromDraft(draft);
   const subject = watcherSymbolName(draft.source, draft.symbol.trim().toUpperCase() || "…");
-  const sentence = "rule" in ruled ? describeWatcherRule(ruled.rule, subject, info.currency) : null;
+  const sentence =
+    "rule" in ruled
+      ? isWebPageRule(ruled.rule)
+        ? describeWatcherWebPageRule(ruled.rule)
+        : describeWatcherRule(ruled.rule, subject, info.currency)
+      : null;
   const checkChoices = useMemo(
     () => CHECK_CHOICES.filter((choice) => choice.minutes >= info.minCheckMinutes),
     [info.minCheckMinutes],
@@ -239,6 +330,10 @@ export function WatcherFormDialog({
       checkEveryMinutes: Math.max(prev.checkEveryMinutes, nextInfo.minCheckMinutes),
       keySecretId: nextInfo.needsKey ? prev.keySecretId ?? suggestedKeys[source] ?? null : null,
     }));
+  }
+
+  function setWebPageKind(kind: WatcherWebPageKind) {
+    setDraft((prev) => ({ ...prev, webPageKind: kind }));
   }
 
   function submit() {
@@ -293,6 +388,15 @@ export function WatcherFormDialog({
                     </option>
                   ))}
                 </select>
+              ) : draft.source === "web_page" ? (
+                <Input
+                  aria-label="Watcher label"
+                  className="h-8 flex-1"
+                  placeholder="Competitor's price page"
+                  value={draft.symbol}
+                  onChange={(event) => set("symbol", event.target.value)}
+                  disabled={busy}
+                />
               ) : (
                 <Input
                   aria-label="Ticker"
@@ -319,6 +423,146 @@ export function WatcherFormDialog({
             />
           ) : null}
 
+          {draft.source === "web_page" ? (
+            <div className="space-y-1.5">
+              <label className="text-xs text-muted-foreground" htmlFor="watcher-page-url">Page address</label>
+              <Input
+                id="watcher-page-url"
+                className="h-8"
+                placeholder="https://example.com/product"
+                value={draft.webPageUrl}
+                onChange={(event) => set("webPageUrl", event.target.value)}
+                disabled={busy}
+              />
+
+              <label className="text-xs text-muted-foreground" htmlFor="watcher-page-kind">What to watch</label>
+              <select
+                id="watcher-page-kind"
+                className={`${selectClass} w-full`}
+                value={draft.webPageKind}
+                onChange={(event) => setWebPageKind(event.target.value as WatcherWebPageKind)}
+                disabled={busy}
+              >
+                <option value="price">A price</option>
+                <option value="stock">Stock status (in stock / out of stock)</option>
+                <option value="new_products">New products appearing</option>
+                <option value="text_change">Any text change</option>
+              </select>
+
+              {draft.webPageKind !== "text_change" ? (
+                <>
+                  <label className="text-xs text-muted-foreground" htmlFor="watcher-page-selector">
+                    Where on the page{" "}
+                    {draft.webPageKind === "new_products" ? "(one product/listing per match)" : ""}
+                  </label>
+                  <Input
+                    id="watcher-page-selector"
+                    className="h-8"
+                    placeholder='.price, or words like "Add to cart"'
+                    value={draft.webPageSelector}
+                    onChange={(event) => set("webPageSelector", event.target.value)}
+                    disabled={busy}
+                  />
+                </>
+              ) : (
+                <>
+                  <label className="text-xs text-muted-foreground" htmlFor="watcher-page-selector">
+                    Where on the page (optional — leave blank to watch the whole page)
+                  </label>
+                  <Input
+                    id="watcher-page-selector"
+                    className="h-8"
+                    placeholder="Optional CSS selector"
+                    value={draft.webPageSelector}
+                    onChange={(event) => set("webPageSelector", event.target.value)}
+                    disabled={busy}
+                  />
+                </>
+              )}
+
+              <div className="flex flex-wrap items-center gap-2 text-sm">
+                {draft.webPageKind === "price" ? (
+                  <>
+                    <span>Tell me when the price</span>
+                    <select
+                      aria-label="Above or below"
+                      className={selectClass}
+                      value={draft.webPagePriceDirection}
+                      onChange={(event) =>
+                        set("webPagePriceDirection", event.target.value as WatcherDraft["webPagePriceDirection"])
+                      }
+                      disabled={busy}
+                    >
+                      <option value="below">drops to or below</option>
+                      <option value="above">rises to or above</option>
+                    </select>
+                    <Input
+                      aria-label="Target price"
+                      className="h-8 w-28"
+                      inputMode="decimal"
+                      placeholder="499"
+                      value={draft.webPageTargetPrice}
+                      onChange={(event) => set("webPageTargetPrice", event.target.value)}
+                      disabled={busy}
+                    />
+                    <Input
+                      aria-label="Currency"
+                      className="h-8 w-16"
+                      placeholder="USD"
+                      value={draft.webPageCurrency}
+                      onChange={(event) => set("webPageCurrency", event.target.value)}
+                      disabled={busy}
+                    />
+                  </>
+                ) : draft.webPageKind === "stock" ? (
+                  <>
+                    <Input
+                      aria-label="In-stock words"
+                      className="h-8 flex-1"
+                      placeholder='Words shown when in stock, e.g. "Add to cart"'
+                      value={draft.webPageInStockPhrase}
+                      onChange={(event) => set("webPageInStockPhrase", event.target.value)}
+                      disabled={busy}
+                    />
+                    <select
+                      aria-label="When to tell you"
+                      className={selectClass}
+                      value={draft.webPageAlertWhen}
+                      onChange={(event) =>
+                        set("webPageAlertWhen", event.target.value as WatcherDraft["webPageAlertWhen"])
+                      }
+                      disabled={busy}
+                    >
+                      <option value="becomes_in_stock">comes back in stock</option>
+                      <option value="becomes_out_of_stock">goes out of stock</option>
+                      <option value="either">changes stock status either way</option>
+                    </select>
+                  </>
+                ) : draft.webPageKind === "new_products" ? (
+                  <>
+                    <span>Tell apart products by their</span>
+                    <select
+                      aria-label="Tell products apart by"
+                      className={selectClass}
+                      value={draft.webPageIdentifyBy}
+                      onChange={(event) =>
+                        set("webPageIdentifyBy", event.target.value as WatcherDraft["webPageIdentifyBy"])
+                      }
+                      disabled={busy}
+                    >
+                      <option value="href">link</option>
+                      <option value="text">text</option>
+                    </select>
+                  </>
+                ) : (
+                  <span>Tell me as soon as that part of the page changes.</span>
+                )}
+              </div>
+              <p className="text-sm font-medium" data-testid="watcher-rule-sentence">
+                {sentence ? `Tell me when ${sentence}.` : "Finish the rule above."}
+              </p>
+            </div>
+          ) : (
           <div className="space-y-1.5">
             <label className="text-xs text-muted-foreground" htmlFor="watcher-rule">When to tell you</label>
             <select
@@ -410,6 +654,7 @@ export function WatcherFormDialog({
               {sentence ? `Tell me when ${sentence}.` : "Finish the rule above."}
             </p>
           </div>
+          )}
 
           <div className="space-y-1.5">
             <label className="text-xs text-muted-foreground" htmlFor="watcher-agent">Who tells you (on Telegram)</label>

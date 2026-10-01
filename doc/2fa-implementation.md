@@ -136,7 +136,7 @@ verifySessionTotpStatus(userId, sessionId)
 ## Implementation Status
 
 ### Completed ✓
-- Database schema and migration (0204_totp_2fa.sql)
+- Database schema and migration (0206_totp_2fa.sql)
 - TOTP service implementation (totp-2fa.ts)
 - Security-focused service design
 - Documentation (this file)
@@ -220,7 +220,7 @@ POST /api/auth/totp/recovery-codes/regenerate
 ## Deployment Considerations
 
 ### Database Migrations
-- Run migration 0204_totp_2fa.sql to create tables
+- Run migration 0206_totp_2fa.sql to create tables
 - Existing users unaffected (no required fields)
 - Soft-delete via disabledAt allows historical tracking
 
