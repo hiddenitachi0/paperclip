@@ -23,6 +23,7 @@ import {
   pipelineTransitions,
   pipelines,
   routines,
+  routineTriggers,
   withCompanyScope,
 } from "@paperclipai/db";
 import { validate } from "../middleware/validate.js";
@@ -69,8 +70,11 @@ import {
   pipelineAutomationRetryScopeSchema,
   type PipelineStageAutomation,
   type PipelineCaseLiveness,
+  type PipelineConnectedRoutine,
+  type PipelineConnectedWatcher,
   type PipelineHealthFailedAutomationInput,
   type PipelineHealthStageInput,
+  type PipelineStageApprovalState,
 } from "@paperclipai/shared";
 import { documentAnnotationService } from "../services/document-annotations.js";
 import { logActivity } from "../services/activity-log.js";
@@ -297,6 +301,39 @@ function withDerivedStageAutomation(
         latestRoutineRevisionNumber: routine.latestRevisionNumber,
       },
     },
+  };
+}
+
+/**
+ * Review-kind stages (and any stage with `config.requireApproval`) gate on an
+ * approval decision via `reviewCase` -- see `listReviewCases` for the matching
+ * "cases currently awaiting review" query this count mirrors. `openCaseCount`
+ * is pre-aggregated per stage by the caller so this stays a pure function.
+ */
+function buildStageApprovalState(
+  stage: typeof pipelineStages.$inferSelect,
+  openCaseCount: number,
+): PipelineStageApprovalState {
+  const config = stage.config && typeof stage.config === "object" && !Array.isArray(stage.config)
+    ? stage.config as Record<string, unknown>
+    : {};
+  const required = stage.kind === "review" || config.requireApproval === true;
+  // Every stage carries a persisted `config.approver` (normalizeStageConfig
+  // defaults it to any_human even for non-review stages), so only surface it
+  // here when an approval is actually required -- otherwise the canvas would
+  // render an approver badge on ordinary working stages.
+  const rawApprover = required && config.approver && typeof config.approver === "object" && !Array.isArray(config.approver)
+    ? config.approver as Record<string, unknown>
+    : null;
+  return {
+    required,
+    approver: rawApprover
+      ? {
+          kind: typeof rawApprover.kind === "string" ? rawApprover.kind : null,
+          id: typeof rawApprover.id === "string" ? rawApprover.id : null,
+        }
+      : null,
+    pendingCount: required ? openCaseCount : 0,
   };
 }
 
@@ -1030,20 +1067,37 @@ export function pipelineRoutes(rawDb: Db, options: Parameters<typeof pipelineSer
       const routineId = stageAutomationRoutineId(stage.config);
       return routineId ? [routineId] : [];
     });
-    const routineRows = automationRoutineIds.length > 0
-      ? await db
-          .select({
-            id: routines.id,
-            assigneeAgentId: routines.assigneeAgentId,
-            title: routines.title,
-            description: routines.description,
-            env: routines.env,
-            latestRevisionId: routines.latestRevisionId,
-            latestRevisionNumber: routines.latestRevisionNumber,
-          })
-          .from(routines)
-          .where(and(eq(routines.companyId, companyId), inArray(routines.id, automationRoutineIds)))
-      : [];
+    const [routineRows, triggerRows, openCaseCountRows] = await Promise.all([
+      automationRoutineIds.length > 0
+        ? db
+            .select({
+              id: routines.id,
+              status: routines.status,
+              assigneeAgentId: routines.assigneeAgentId,
+              title: routines.title,
+              description: routines.description,
+              env: routines.env,
+              latestRevisionId: routines.latestRevisionId,
+              latestRevisionNumber: routines.latestRevisionNumber,
+            })
+            .from(routines)
+            .where(and(eq(routines.companyId, companyId), inArray(routines.id, automationRoutineIds)))
+        : Promise.resolve([]),
+      automationRoutineIds.length > 0
+        ? db
+            .select()
+            .from(routineTriggers)
+            .where(and(eq(routineTriggers.companyId, companyId), inArray(routineTriggers.routineId, automationRoutineIds)))
+        : Promise.resolve([]),
+      db
+        .select({
+          stageId: pipelineCases.stageId,
+          openCount: sql<number>`count(*) filter (where ${pipelineCases.terminalKind} is null)::int`,
+        })
+        .from(pipelineCases)
+        .where(eq(pipelineCases.pipelineId, pipelineId))
+        .groupBy(pipelineCases.stageId),
+    ]);
     const routineById = new Map(routineRows.map((row) => [
       row.id,
       {
@@ -1055,7 +1109,56 @@ export function pipelineRoutes(rawDb: Db, options: Parameters<typeof pipelineSer
         latestRevisionNumber: row.latestRevisionNumber,
       },
     ]));
-    res.json({ ...pipeline, stages: stages.map((stage) => withDerivedStageAutomation(stage, routineById)), transitions, documentKeys });
+    const stageKeysByRoutineId = new Map<string, string[]>();
+    for (const stage of stages) {
+      const routineId = stageAutomationRoutineId(stage.config);
+      if (!routineId) continue;
+      const stageKeys = stageKeysByRoutineId.get(routineId) ?? [];
+      stageKeys.push(stage.key);
+      stageKeysByRoutineId.set(routineId, stageKeys);
+    }
+    const triggersByRoutineId = new Map<string, typeof triggerRows>();
+    for (const trigger of triggerRows) {
+      const list = triggersByRoutineId.get(trigger.routineId) ?? [];
+      list.push(trigger);
+      triggersByRoutineId.set(trigger.routineId, list);
+    }
+    const connectedRoutines: PipelineConnectedRoutine[] = routineRows.map((row) => ({
+      id: row.id,
+      title: row.title,
+      status: row.status,
+      assigneeAgentId: row.assigneeAgentId,
+      stageKeys: stageKeysByRoutineId.get(row.id) ?? [],
+      triggers: (triggersByRoutineId.get(row.id) ?? []).map((trigger) => ({
+        id: trigger.id,
+        kind: trigger.kind,
+        label: trigger.label,
+        enabled: trigger.enabled,
+        cronExpression: trigger.cronExpression,
+        timezone: trigger.timezone,
+        nextRunAt: trigger.nextRunAt,
+        lastFiredAt: trigger.lastFiredAt,
+        publicId: trigger.publicId,
+        customerInboxChannel: trigger.customerInboxChannel,
+      })),
+    }));
+    const openCaseCountByStageId = new Map(openCaseCountRows.map((row) => [row.stageId, row.openCount]));
+    res.json({
+      ...pipeline,
+      stages: stages.map((stage) => ({
+        ...withDerivedStageAutomation(stage, routineById),
+        approvalState: buildStageApprovalState(stage, openCaseCountByStageId.get(stage.id) ?? 0),
+      })),
+      transitions,
+      documentKeys,
+      routines: connectedRoutines,
+      // `watchers` (packages/db/src/schema/watchers.ts) are company-level price
+      // alerts with no pipeline/stage foreign key today, so there is nothing to
+      // join here yet. Kept as an explicit empty array (rather than omitted) so
+      // the canvas client has a stable field to render against once a pipeline
+      // can own a watcher -- see "Questions for Filip" in the PR description.
+      watchers: [] as PipelineConnectedWatcher[],
+    });
   });
 
   // Setup-health warnings: surface any configuration that won't actually run

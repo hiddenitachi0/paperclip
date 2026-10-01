@@ -145,6 +145,7 @@ vi.mock("../services/index.js", () => ({
     agentMergeRequestGrantsInserted: 0,
   })),
   seedDurStarterJobs: vi.fn(async () => ({ created: [] })),
+  seedLegalAdvisorStarterPack: vi.fn(async () => ({ createdJobs: [], createdPosition: false })),
   feedbackService: feedbackServiceFactoryMock,
   bootstrapExecutionPolicyFromEnv: vi.fn(async () => null),
   heartbeatService: vi.fn(() => ({
