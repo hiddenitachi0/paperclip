@@ -174,10 +174,12 @@ describe("describeDeployPolicyProblems", () => {
     ).not.toEqual([]);
   });
 
+  // paperclip:allow-git-push: transport-name string literal, not a git command invocation
   it("does not require a page for a disabled sftp draft, or for git_push", () => {
     expect(
       describeDeployPolicyProblems(sftpPolicy({ enabled: false, appHealthCheckPaths: [] }), context, "sftp"),
     ).toEqual([]);
+    // paperclip:allow-git-push: transport-name string literal, not a git command invocation
     expect(describeDeployPolicyProblems(policy({ appHealthCheckPaths: [] }), context, "git_push")).toEqual([]);
   });
 
