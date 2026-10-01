@@ -1394,6 +1394,13 @@
       "when": 1790700020000,
       "tag": "0199_crm_base",
       "breakpoints": true
+    },
+    {
+      "idx": 200,
+      "version": "7",
+      "when": 1790823100000,
+      "tag": "0200_agent_work_summaries",
+      "breakpoints": true
     }
   ]
 }
