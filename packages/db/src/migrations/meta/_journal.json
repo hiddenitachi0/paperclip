@@ -1436,6 +1436,13 @@
       "when": 1790823110000,
       "tag": "0205_email_company_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 206,
+      "version": "7",
+      "when": 1790823120000,
+      "tag": "0206_totp_2fa",
+      "breakpoints": true
     }
   ]
 }

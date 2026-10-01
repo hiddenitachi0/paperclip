@@ -346,6 +346,10 @@ DECLARE
     -- 0166_telegram_bots.sql; the name is listed here for the same reason
     -- company_service_tokens is, above.
     'telegram_bots',
+    -- DUR-4157 2FA. Created (and granted on) in 0206_totp_2fa.sql;
+    -- user-scoped (no company_id), so it is in this list only, not in the
+    -- company-scoped one below.
+    'totp_session_tokens',
     -- DUR-4153/DUR-4171 trading agent (paper-trading only). Created (and
     -- granted on) in 0197_trading_agent.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
@@ -360,7 +364,9 @@ DECLARE
     'trusted_code_fingerprints',
     'untracked_write_incidents',
     'user',
+    'user_recovery_codes',
     'user_sidebar_preferences',
+    'user_totp_secrets',
     'verification',
     -- Watchers. Created (and granted on) in 0181_watchers.sql; listed here so
     -- the login-role lists match the schema, as for the tables above.
