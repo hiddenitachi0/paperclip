@@ -55,6 +55,7 @@ export const ROUTINE_SCHEDULER_BYPASS_ACTOR_TYPE = "scheduler";
 export const ROUTINE_SCHEDULER_BYPASS_ROUTES = [
   "heartbeat-scheduler:tickTimers",
   "heartbeat-scheduler:tickScheduledTriggers",
+  "heartbeat-scheduler:tickScheduledJobTriggers",
   "heartbeat-scheduler:mergeDeployVisibility",
   "heartbeat-scheduler:deployApprovalFeedback",
   "heartbeat-scheduler:deployCarriedIssues",
