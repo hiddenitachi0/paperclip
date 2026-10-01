@@ -71,6 +71,7 @@ export { externalObjectMentions } from "./external_object_mentions.js";
 export { issueRelations } from "./issue_relations.js";
 export { routines, routineRevisions, routineTriggers, routineRuns } from "./routines.js";
 export { jobs, jobPositions, jobTriggers, jobRuns } from "./jobs.js";
+export { companyJobSettings } from "./company_job_settings.js";
 export { pipelines, pipelineStages, pipelineTransitions } from "./pipelines.js";
 export {
   pipelineCases,

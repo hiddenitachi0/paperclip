@@ -1443,6 +1443,13 @@
       "when": 1790823120000,
       "tag": "0206_totp_2fa",
       "breakpoints": true
+    },
+    {
+      "idx": 207,
+      "version": "7",
+      "when": 1790823130000,
+      "tag": "0207_company_job_settings",
+      "breakpoints": true
     }
   ]
 }

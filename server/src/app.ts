@@ -24,6 +24,8 @@ import { apiToolRoutes } from "./routes/api-tools.js";
 import { webSearchRoutes } from "./routes/web-search.js";
 import { agentMemoryRoutes } from "./routes/agent-memories.js";
 import { agentWorkSummaryRoutes } from "./routes/agent-work-summaries.js";
+import { jobSettingsRoutes } from "./routes/job-settings.js";
+import { positionsJobsPathAliasMiddleware } from "./routes/positions-jobs-aliases.js";
 import { privateAccessRoutes } from "./routes/private-access.js";
 import { browserRoutes } from "./routes/browser.js";
 import { paymentNoticesRoutes } from "./routes/payment-notices.js";
@@ -285,6 +287,10 @@ export async function createApp(
 
   const api = Router();
   api.use(boardMutationGuard());
+  // DUR-4142: /positions is a path alias for /agent-roles (today's "Jobs"
+  // page renamed) -- must run before any route matching below. Does not
+  // touch /jobs, which is now a separate, real feature with its own routes.
+  api.use(positionsJobsPathAliasMiddleware());
   api.use(
     "/health",
     healthRoutes(db, {
@@ -308,6 +314,7 @@ export async function createApp(
   api.use(webSearchRoutes(db));
   api.use(agentMemoryRoutes(db));
   api.use(agentWorkSummaryRoutes(db));
+  api.use(jobSettingsRoutes(db));
   api.use(browserRoutes(db));
   api.use(paymentNoticesRoutes(db));
   api.use(paymentCardRoutes(db));

@@ -25,11 +25,12 @@ import type {
   UpdateJobTrigger,
 } from "@paperclipai/shared";
 import { getBuiltinRoutineVariableValues, interpolateRoutineTemplate } from "@paperclipai/shared";
-import { conflict, notFound, unauthorized, unprocessable } from "../errors.js";
+import { conflict, forbidden, notFound, unauthorized, unprocessable } from "../errors.js";
 import { getConfiguredSecretProvider } from "../secrets/configured-provider.js";
 import { getSecretProvider } from "../secrets/provider-registry.js";
 import { issueService } from "./issues.js";
 import { assertAssignableAgent } from "./agent-assignability.js";
+import { companyJobSettingsService } from "./company-job-settings.js";
 import { secretService } from "./secrets.js";
 import { nextCronTickInTimeZone } from "./routines.js";
 import { queueIssueAssignmentWakeup, type IssueAssignmentWakeupDeps } from "./issue-assignment-wakeup.js";
@@ -101,7 +102,19 @@ export function jobService(
 ) {
   const issueSvc = issueService(db);
   const secretsSvc = secretService(db);
+  const jobSettingsSvc = companyJobSettingsService(db);
   const heartbeat = options.heartbeat ?? heartbeatService(db, { pluginWorkerManager: options.pluginWorkerManager });
+
+  // DUR-4142: the Jobs surface ships behind company_job_settings.jobs_enabled
+  // (default off -- see that migration's comment), so a company that never
+  // opted in sees no behavior change. Checked at the two chokepoints that
+  // cover every path in: creating a job, and dispatching any run of one
+  // (manual, API, Telegram, schedule, webhook, email all funnel through
+  // dispatchJobRun).
+  async function assertJobsEnabled(companyId: string) {
+    const settings = await jobSettingsSvc.get(companyId);
+    if (!settings.jobsEnabled) throw forbidden("Jobs is not enabled for this company");
+  }
 
   async function getJobById(id: string): Promise<JobRow | null> {
     return db.select().from(jobs).where(eq(jobs.id, id)).then((rows) => rows[0] ?? null);
@@ -287,6 +300,7 @@ export function jobService(
     idempotencyKey?: string | null;
     actor: Actor;
   }) {
+    await assertJobsEnabled(input.job.companyId);
     await assertAssignableAgent(db, input.job.companyId, input.runAgentId, { kind: "work" });
 
     if (input.idempotencyKey) {
@@ -417,6 +431,7 @@ export function jobService(
     getDetail: async (id: string): Promise<JobDetail | null> => getDetailInternal(id),
 
     create: async (companyId: string, data: CreateJob, actor: Actor): Promise<JobDetail> => {
+      await assertJobsEnabled(companyId);
       const { positionIds, ...jobData } = data;
       await assertPositionsInCompany(companyId, positionIds);
       const [created] = await db
