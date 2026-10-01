@@ -1422,6 +1422,13 @@
       "when": 1790820010000,
       "tag": "0203_mail_accounts",
       "breakpoints": true
+    },
+    {
+      "idx": 204,
+      "version": "7",
+      "when": 1790823100000,
+      "tag": "0204_agent_work_summaries",
+      "breakpoints": true
     }
   ]
 }

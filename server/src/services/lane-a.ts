@@ -34,6 +34,7 @@ import {
   laneATemperatureForCall,
   laneAProviderRoutingForCall,
   readLaneAWebSearchSwitch,
+  readLaneAConversationSearchSwitch,
   isLaneATrustLimited,
   type ChatHandedOverTask,
   type LaneAProvider,
@@ -78,6 +79,7 @@ import {
   REMEMBER_TOOL,
   READ_WEB_PAGE_TOOL,
   WEB_SEARCH_TOOL,
+  SEARCH_CONVERSATIONS_TOOL,
   type LaneAToolColleague,
   type LaneAToolContext,
   type LaneAToolDeps,
@@ -292,13 +294,19 @@ export interface LaneASystemPromptInput {
    * one) was asked to remember, newest first, and whether remember/forget
    * are offered this turn. Absent leaves the prompt exactly as before.
    */
-  memory?: { notes: LaneAMemoryPromptNote[]; toolsOffered: boolean } | null;
+  memory?: { notes: LaneAMemoryPromptNote[]; toolsOffered: boolean; message?: string } | null;
   /**
    * Web tools this turn: `search` = web_search is offered (switch on and the
    * company has a Brave key), `readPages` = read_web_page is offered (switch
    * on). Absent leaves the prompt exactly as before.
    */
   webSearch?: { search: boolean; readPages: boolean } | null;
+  /**
+   * DUR-4197: whether search_conversations is offered this turn (the agent's
+   * "Can search past conversations" switch is on). Absent or false leaves the
+   * prompt exactly as before.
+   */
+  conversationSearch?: boolean;
   /**
    * A continued conversation's recap (lane-a-continue.ts): the earlier
    * messages picked for it, rendered as "Earlier conversation, recapped for
@@ -454,6 +462,11 @@ export function buildSystemPrompt(input: LaneASystemPromptInput): string {
         `You can also save a note when the person asks you to remember something (remember), and remove one when they ask you to forget it (forget).`,
       );
     }
+    if (input.conversationSearch) {
+      capabilities.push(
+        `You can also search your own past conversations with this person (search_conversations) to pick up continuity instead of asking something they already told you.`,
+      );
+    }
   }
   if (input.hasMcpTools) {
     capabilities.push(`You also have the tools granted to you in the Tools library.`);
@@ -507,6 +520,7 @@ export function buildSystemPrompt(input: LaneASystemPromptInput): string {
       buildMemoryPromptSection({
         notes: input.memory.notes,
         toolsOffered: input.memory.toolsOffered && input.hasBuiltinTools,
+        message: input.memory.message,
       }),
     );
   }
@@ -1913,6 +1927,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     offerWebSearch?: boolean;
     /** Offer read_web_page this turn ("Can search the web" is on). */
     offerReadWebPage?: boolean;
+    /** DUR-4197: offer search_conversations this turn ("Can search past conversations" is on). */
+    offerConversationSearch?: boolean;
   }): Promise<{
     text: string;
     inputTokens: number;
@@ -1928,7 +1944,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         (tool.name !== READ_COMPANY_FILE_TOOL || params.offerCompanyFiles === true) &&
         ((tool.name !== REMEMBER_TOOL && tool.name !== FORGET_TOOL) || params.offerMemory === true) &&
         (tool.name !== WEB_SEARCH_TOOL || params.offerWebSearch === true) &&
-        (tool.name !== READ_WEB_PAGE_TOOL || params.offerReadWebPage === true),
+        (tool.name !== READ_WEB_PAGE_TOOL || params.offerReadWebPage === true) &&
+        (tool.name !== SEARCH_CONVERSATIONS_TOOL || params.offerConversationSearch === true),
     );
     const tools: LaneATool[] = [...builtins, ...toolset.anthropicTools].map(fromAnthropicTool);
     const businessDataOutputs: BusinessDataTurnOutput[] = [];
@@ -2396,12 +2413,13 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     // to "no notebook this turn": a broken read must not break the chat.
     // DUR-4070: a "limited"-trust agent gets no notebook at all -- its notes
     // are not even read into the prompt, let alone offered as tools.
-    let memoryPrompt: { notes: LaneAMemoryPromptNote[]; toolsOffered: boolean } | undefined;
+    let memoryPrompt: { notes: LaneAMemoryPromptNote[]; toolsOffered: boolean; message?: string } | undefined;
     try {
       const notes = trustLimited ? [] : await agentMemoryService(db).listForAgent(params.companyId, params.targetAgent.id);
       memoryPrompt = {
         notes,
         toolsOffered: !trustLimited && Boolean(params.requester.userId) && params.actor?.type === "board",
+        message: params.message,
       };
     } catch (err) {
       logger.warn({ err, companyId: params.companyId, agentId: params.targetAgent.id }, "lane A: memory notebook could not be read");
@@ -2423,6 +2441,11 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       }
       webPrompt = { search: hasKey, readPages: true };
     }
+
+    // DUR-4197: "Can search past conversations" -- read off the agent row
+    // (never from the caller), same fail-closed shape as the web switch.
+    // Never offered to a "limited"-trust agent, regardless of the switch.
+    const conversationSearchOn = !trustLimited && readLaneAConversationSearchSwitch(agentRow?.adapterConfig);
 
     let text: string;
     let inputTokens: number;
@@ -2446,6 +2469,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         companyFiles: companyFilesPrompt,
         memory: memoryPrompt,
         webSearch: webPrompt,
+        conversationSearch: conversationSearchOn,
         earlierConversation,
       });
       const result = await callModel({
@@ -2464,6 +2488,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         offerMemory: memoryPrompt?.toolsOffered === true,
         offerWebSearch: webPrompt.search,
         offerReadWebPage: webPrompt.readPages,
+        offerConversationSearch: conversationSearchOn,
       });
       text = result.text;
       businessDataOutputs = result.businessDataOutputs;

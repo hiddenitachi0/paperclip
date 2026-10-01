@@ -23,6 +23,7 @@ export { companyMcpOAuthConnections } from "./company_mcp_oauth_connections.js";
 export { agents } from "./agents.js";
 export { agentDailyCounters } from "./agent_daily_counters.js";
 export { agentMemories } from "./agent_memories.js";
+export { agentWorkSummaries } from "./agent_work_summaries.js";
 export { agentMemberships } from "./agent_memberships.js";
 export { boardApiKeys } from "./board_api_keys.js";
 export { boardDelegateTokens } from "./board_delegate_tokens.js";

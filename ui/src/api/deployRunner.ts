@@ -1,5 +1,20 @@
 import { api } from "./client";
 
+// Mirrors server/src/services/deploy-runner-status.ts's DeployRunnerStatusEntry.
+export type DeployRunnerStatusEntry = {
+  ts: string;
+  approvalId: string;
+  companyId: string;
+  commentDelivered: boolean;
+  body: string;
+  outcome?: string;
+  commit?: string;
+};
+
+export type DeployRunnerStatusStreamEvent =
+  | { type: "snapshot"; entries: DeployRunnerStatusEntry[] }
+  | { type: "entries"; entries: DeployRunnerStatusEntry[] };
+
 export type ProjectDeployHistoryEntry = {
   /** The commit the deploy runner put live, as it logged it (usually a 12-char short sha). */
   commit: string;
