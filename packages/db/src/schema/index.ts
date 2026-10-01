@@ -140,3 +140,9 @@ export { companyProductGrabberSettings, productGrabberStagedItems } from "./prod
 export { paymentCards } from "./payment_cards.js";
 export { videoStorylines, videoScenes, videoShots, videoShotRenderJobs } from "./video_storylines.js";
 export { tradingStrategies, tradingOrders, tradingFifoLots, tradingLedgerEntries, tradingDailyStats } from "./trading.js";
+export { crmOrganizations } from "./crm_organizations.js";
+export { crmContacts } from "./crm_contacts.js";
+export { crmContactOrgRoles } from "./crm_contact_org_roles.js";
+export { crmActivities } from "./crm_activities.js";
+export { crmFacts } from "./crm_facts.js";
+export { crmExternalRefs } from "./crm_external_refs.js";
