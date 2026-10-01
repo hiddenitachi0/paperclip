@@ -1,18 +1,27 @@
-# Replace @cryppadotta if a different maintainer or team should own release infrastructure.
+# Durkan/Nordstrand CODEOWNERS
+# Update team/user handles to match your GitHub organization structure
 
-.github/** @cryppadotta @devinfoley @nickyleach
-scripts/release*.sh @cryppadotta @devinfoley @nickyleach
-scripts/release-*.mjs @cryppadotta @devinfoley @nickyleach
-scripts/create-github-release.sh @cryppadotta @devinfoley @nickyleach
-scripts/rollback-latest.sh @cryppadotta @devinfoley @nickyleach
-doc/RELEASING.md @cryppadotta @devinfoley @nickyleach
-doc/PUBLISHING.md @cryppadotta @devinfoley @nickyleach
-doc/RELEASE-AUTOMATION-SETUP.md @cryppadotta @devinfoley @nickyleach
-skills/** @cryppadotta @devinfoley @nickyleach
+# Release infrastructure and deployment
+.github/** @durkan-release-team
+scripts/release*.sh @durkan-release-team
+scripts/release-*.mjs @durkan-release-team
+scripts/create-github-release.sh @durkan-release-team
+scripts/rollback-latest.sh @durkan-release-team
+doc/RELEASING.md @durkan-release-team
+doc/PUBLISHING.md @durkan-release-team
+doc/RELEASE-AUTOMATION-SETUP.md @durkan-release-team
+skills/** @durkan-release-team
 
 # Package files — dependency changes require review
 # package.json matches recursively at all depths (covers root + all workspaces)
-package.json @cryppadotta @devinfoley @nickyleach
-pnpm-lock.yaml @cryppadotta @devinfoley @nickyleach
-pnpm-workspace.yaml @cryppadotta @devinfoley @nickyleach
-.npmrc @cryppadotta @devinfoley @nickyleach
+package.json @durkan-release-team
+pnpm-lock.yaml @durkan-release-team
+pnpm-workspace.yaml @durkan-release-team
+.npmrc @durkan-release-team
+
+# Security and infrastructure
+SECURITY.md @durkan-security-team
+doc/incident-response.md @durkan-security-team
+doc/security-overview.md @durkan-security-team
+doc/dpa-template.md @durkan-security-team
+doc/subprocessor-list.md @durkan-security-team

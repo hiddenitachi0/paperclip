@@ -438,9 +438,10 @@ export function buildSystemPrompt(input: LaneASystemPromptInput): string {
   const capabilities: string[] = [];
   if (input.hasBuiltinTools) {
     capabilities.push(
-      `You can do a few things through tools: hand work to a colleague (route_to_agent), take on a bigger research or ` +
-        `planning job yourself as a background task (start_research_task), look up the weather (get_weather), ` +
-        `tell the current time and date anywhere (get_time), and read a task summary (lookup_issue).`,
+      `You can do a few things through tools: hand work to a colleague (route_to_agent), start a ready-made ` +
+        `one-press job on a colleague who has it (start_job), take on a bigger research or planning job yourself ` +
+        `as a background task (start_research_task), look up the weather (get_weather), tell the current time and ` +
+        `date anywhere (get_time), and read a task summary (lookup_issue).`,
     );
     if (input.webSearch?.search) {
       capabilities.push(

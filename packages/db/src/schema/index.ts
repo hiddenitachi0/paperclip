@@ -1,7 +1,15 @@
 export { companies } from "./companies.js";
 export { companyLogos } from "./company_logos.js";
 export { crossCompanyAccessLog } from "./cross_company_access_log.js";
-export { authUsers, authSessions, authAccounts, authVerifications } from "./auth.js";
+export {
+  authUsers,
+  authSessions,
+  authAccounts,
+  authVerifications,
+  userTotpSecrets,
+  userRecoveryCodes,
+  totpSessionTokens,
+} from "./auth.js";
 export { instanceSettings } from "./instance_settings.js";
 export { instanceClaudeAuth } from "./instance_claude_auth.js";
 export { instanceServerAnthropicKey } from "./instance_server_anthropic_key.js";
@@ -140,6 +148,7 @@ export { mailAccounts, mailMessages } from "./mail_accounts.js";
 export { paymentNotices } from "./payment_notices.js";
 export { companyPaymentSettings } from "./company_payment_settings.js";
 export { companyProductGrabberSettings, productGrabberStagedItems } from "./product_grabber.js";
+export { emailCompanySettings } from "./email_company_settings.js";
 export { paymentCards } from "./payment_cards.js";
 export { videoStorylines, videoScenes, videoShots, videoShotRenderJobs, videoStorylineDirectorRuns } from "./video_storylines.js";
 export { tradingStrategies, tradingOrders, tradingFifoLots, tradingLedgerEntries, tradingDailyStats } from "./trading.js";

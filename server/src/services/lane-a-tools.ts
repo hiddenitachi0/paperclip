@@ -8,6 +8,7 @@ import { accessService } from "./access.js";
 import { agentService } from "./agents.js";
 import type { AuthorizationActor } from "./authorization.js";
 import { issueService } from "./issues.js";
+import { jobService } from "./jobs.js";
 import { heartbeatService } from "./heartbeat.js";
 import { logActivity } from "./activity-log.js";
 import { HttpError } from "../errors.js";
@@ -64,6 +65,7 @@ import { findResearchSkillLink } from "./research-skill-link.js";
 
 export const LANE_A_BUILTIN_TOOL_NAMES = [
   "route_to_agent",
+  "start_job",
   "start_research_task",
   "get_weather",
   "get_time",
@@ -127,10 +129,19 @@ export const SEARCH_CONVERSATIONS_TOOL = "search_conversations";
 /** How many past messages a search may scan before ranking, and how many it may return. */
 export const LANE_A_CONVERSATION_SEARCH_SCAN_LIMIT = 300;
 export const LANE_A_CONVERSATION_SEARCH_RESULT_LIMIT = 5;
+/**
+ * DUR-4142: run a one-press Job (Jobs feature) on a colleague who holds one
+ * of its linked Positions, e.g. "Revise contract" on the Legal Advisor.
+ * Always offered, like route_to_agent -- a company with no Jobs defined
+ * just gets "nobody has one-press jobs set up" from it.
+ */
+export const START_JOB_TOOL = "start_job";
 /** Upper bound on the text a tool hands back to the model. */
 const TOOL_RESULT_MAX_CHARS = 4_000;
 const ROUTE_REQUEST_MAX_CHARS = 20_000;
 const ROUTE_TITLE_MAX_LENGTH = 80;
+/** A job-run note is context, not the job's own checklist -- kept short. */
+const JOB_NOTE_MAX_CHARS = 2_000;
 
 // Mirrors chat-router.ts's SECRETARY_UNAVAILABLE_AGENT_STATUSES plus
 // pending_approval: none of these can pick up a task right now.
@@ -244,6 +255,24 @@ export interface LaneAToolDeps {
   }): Promise<{ id: string; identifier: string | null; status: string }>;
   lookupIssue(reference: string): Promise<LaneAToolIssueSummary | null>;
   /**
+   * DUR-4142: one-press Jobs. `listRunnable` is the authorization gate as
+   * well as the discovery list -- it is exactly jobService.list's own
+   * `agentId` filter (jobs linked to a position that agent holds), the same
+   * check routes/jobs.ts's run endpoint makes for a non-board caller, so a
+   * job this does not return for `runAgentId` is never offered to `run`.
+   * Absent means start_job is not wired here.
+   */
+  startJob?: {
+    listRunnable(companyId: string, agentId: string): Promise<Array<{ id: string; title: string }>>;
+    run(input: {
+      companyId: string;
+      jobId: string;
+      runAgentId: string;
+      note: string | null;
+      ctx: LaneAToolContext;
+    }): Promise<{ issueId: string | null; identifier: string | null; title: string }>;
+  };
+  /**
    * The research-and-plan skill as a `[research-and-plan](skill://…)`
    * mention for a research task's description, or null when the company does
    * not have it. Absent means no mention (the description still says what to
@@ -317,6 +346,29 @@ export function buildLaneABuiltinToolDefinitions(): Anthropic.Tool[] {
           title: { type: "string", description: "Optional short task title (max 80 characters)." },
         },
         required: ["agent", "request"],
+      },
+    },
+    {
+      name: START_JOB_TOOL,
+      description:
+        "Start a ready-made \"one-press\" job on a colleague who is hired for it (e.g. \"Revise contract\" on the " +
+        "Legal Advisor) -- it runs their own checklist/instructions automatically, so you do not have to write the " +
+        "request yourself. Only works when the colleague actually has that job; if it refuses, either try the " +
+        "exact title it lists back or fall back to route_to_agent.",
+      input_schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          colleague: { type: "string", description: "Colleague's name (or id) from the colleague list." },
+          job: { type: "string", description: "The job's exact title, e.g. \"Revise contract\"." },
+          note: {
+            type: "string",
+            description:
+              "Optional: what the person said that matters for this run (which document, what to focus on). " +
+              "Added as a note on the task; it does not change the job's own checklist.",
+          },
+        },
+        required: ["colleague", "job"],
       },
     },
     {
@@ -777,6 +829,95 @@ export function createLaneABuiltinToolExecutor(deps: LaneAToolDeps) {
     };
   }
 
+  async function startJob(input: Record<string, unknown>, ctx: LaneAToolContext): Promise<LaneAToolResult> {
+    const wantedColleague = readString(input, "colleague");
+    const wantedJob = readString(input, "job");
+    const note = readString(input, "note").slice(0, JOB_NOTE_MAX_CHARS);
+    if (!wantedColleague || !wantedJob) {
+      return { ok: false, content: "Both 'colleague' and 'job' are required.", summary: "Could not start a job: missing colleague or job name." };
+    }
+    if (!ctx.requester.userId) {
+      // Same restriction as route_to_agent: starting a job creates a task in
+      // someone else's name, so only a person may trigger it -- an agent
+      // talking to a quick agent gets a plain refusal, not a silent no-op.
+      return {
+        ok: false,
+        content: "Only a person can ask me to start a job on a colleague; this request came from another agent.",
+        summary: "Refused to start a job: the request did not come from a person.",
+      };
+    }
+    if (!deps.startJob) {
+      return {
+        ok: false,
+        content: "Starting a job on a colleague is not set up here. Use route_to_agent instead.",
+        summary: "start_job is not available on this path.",
+      };
+    }
+    const colleagues = await deps.listAgents(ctx.companyId);
+    const { match, candidates } = resolveColleague(colleagues, wantedColleague, ctx.agent.id);
+    if (!match) {
+      const names = candidates.map((c) => `${c.name} (${c.role})`).join(", ");
+      return {
+        ok: false,
+        content:
+          candidates.length > 1
+            ? `Several colleagues match "${wantedColleague}": ${names}. Ask which one is meant, then call again with the exact name.`
+            : `No available colleague named "${wantedColleague}".`,
+        summary: `Could not find a colleague called "${wantedColleague}".`,
+      };
+    }
+    // Same tasks:assign policy route_to_agent enforces: may the person
+    // asking direct work to this colleague at all. The job-specific check
+    // (does this colleague hold a linked position) comes next.
+    const decision = await deps.canAssignTask({ companyId: ctx.companyId, assigneeAgentId: match.id, ctx });
+    if (!decision.allowed) {
+      return {
+        ok: false,
+        content: `The person asking is not allowed to hand work to ${match.name}, so no job was started.`,
+        summary: `Refused to start a job on ${match.name}: the person asking may not assign tasks to them.`,
+      };
+    }
+    const runnable = await deps.startJob.listRunnable(ctx.companyId, match.id);
+    if (runnable.length === 0) {
+      return {
+        ok: false,
+        content: `${match.name} has no one-press jobs set up. Use route_to_agent to hand this over as an ordinary task instead.`,
+        summary: `${match.name} has no runnable jobs.`,
+      };
+    }
+    const needle = wantedJob.trim().toLowerCase();
+    const exact = runnable.filter((j) => j.title.trim().toLowerCase() === needle);
+    const found = exact.length > 0 ? exact : runnable.filter((j) => j.title.trim().toLowerCase().includes(needle));
+    if (found.length !== 1) {
+      const available = runnable.map((j) => j.title).join(", ");
+      return {
+        ok: false,
+        content:
+          found.length > 1
+            ? `Several of ${match.name}'s jobs match "${wantedJob}": ${found.map((j) => j.title).join(", ")}. Ask which one is meant, then call again with the exact title.`
+            : `"${wantedJob}" is not one of ${match.name}'s one-press jobs. Available: ${available}. Use route_to_agent for anything else.`,
+        summary: `Could not find a job called "${wantedJob}" for ${match.name}.`,
+      };
+    }
+    const job = found[0]!;
+    const result = await deps.startJob.run({
+      companyId: ctx.companyId,
+      jobId: job.id,
+      runAgentId: match.id,
+      note: note || null,
+      ctx,
+    });
+    const ref = result.identifier ?? result.issueId ?? job.id;
+    return {
+      ok: true,
+      content: `Done. Started "${job.title}" on ${match.name} as ${ref}, and woke them up to begin.`,
+      summary: `Started job "${job.title}" on ${match.name} as ${ref}.`,
+      ...(result.issueId
+        ? { task: { issueId: result.issueId, identifier: result.identifier, title: result.title || job.title } }
+        : {}),
+    };
+  }
+
   async function startResearchTask(input: Record<string, unknown>, ctx: LaneAToolContext): Promise<LaneAToolResult> {
     const brief = readString(input, "brief").slice(0, ROUTE_REQUEST_MAX_CHARS);
     const rawKind = readString(input, "kind");
@@ -1202,6 +1343,8 @@ export function createLaneABuiltinToolExecutor(deps: LaneAToolDeps) {
     switch (name) {
       case "route_to_agent":
         return routeToAgent(input, ctx);
+      case START_JOB_TOOL:
+        return startJob(input, ctx);
       case START_RESEARCH_TASK_TOOL:
         return startResearchTask(input, ctx);
       case "get_weather":
@@ -1237,12 +1380,18 @@ export function createLaneABuiltinToolExecutor(deps: LaneAToolDeps) {
 /** The real dependencies: company agents, issue create/lookup through the same services chat-router uses. */
 export function createDbLaneAToolDeps(
   db: Db,
-  options: { businessData?: BusinessDataServiceDeps; webSearch?: WebSearchServiceDeps } = {},
+  options: {
+    businessData?: BusinessDataServiceDeps;
+    webSearch?: WebSearchServiceDeps;
+    /** Lets tests stub the heartbeat wakeup a dispatched job run triggers, like jobService's own callers do. */
+    jobServiceOptions?: Parameters<typeof jobService>[1];
+  } = {},
 ): LaneAToolDeps {
   const businessData = businessDataService(db, options.businessData);
   const web = webSearchService(db, options.webSearch);
   const companyFiles = companyFileService(db, options.businessData);
   const memories = agentMemoryService(db);
+  const jobSvc = jobService(db, options.jobServiceOptions);
   const memoryActor = (ctx: LaneAToolContext) => ({
     actorType: "user" as const,
     actorId: ctx.requester.userId ?? "board",
@@ -1338,6 +1487,42 @@ export function createDbLaneAToolDeps(
         assigneeAgentId: issue.assigneeAgentId ?? null,
         updatedAt: issue.updatedAt,
       };
+    },
+    startJob: {
+      async listRunnable(companyId, agentId) {
+        const runnable = await jobSvc.list(companyId, { agentId });
+        return runnable.filter((job) => job.status === "active").map((job) => ({ id: job.id, title: job.title }));
+      },
+      async run({ companyId, jobId, runAgentId, note, ctx }) {
+        const actor = { agentId: ctx.requester.agentId ?? undefined, userId: ctx.requester.userId ?? undefined };
+        const run = await jobSvc.runJob(jobId, { runAgentId, source: "telegram", formValues: null }, actor);
+        await logActivity(db, {
+          companyId,
+          actorType: ctx.requester.userId ? "user" : "agent",
+          actorId: ctx.requester.userId ?? ctx.requester.agentId ?? "system",
+          agentId: ctx.agent.id,
+          action: "job.run_triggered",
+          entityType: "job_run",
+          entityId: run.id,
+          details: {
+            jobId,
+            source: "telegram",
+            status: run.status,
+            runAgentId,
+            quickAgentId: ctx.agent.id,
+            conversationId: ctx.conversationId,
+          },
+        });
+        const issue = run.linkedIssueId ? await issueService(db).getById(run.linkedIssueId) : null;
+        if (issue && note) {
+          await issueService(db).addComment(
+            issue.id,
+            `Context from the person who started this job via chat (${ctx.agent.name}): ${note}`,
+            { agentId: ctx.agent.id },
+          );
+        }
+        return { issueId: issue?.id ?? run.linkedIssueId ?? null, identifier: issue?.identifier ?? null, title: issue?.title ?? "" };
+      },
     },
     researchSkillLink: (companyId) => findResearchSkillLink(db, companyId),
     fetch: (input, init) => fetch(input, init),
