@@ -499,8 +499,33 @@ export const osloStockSource: WatcherPriceSource = {
   },
 };
 
+// ─── Web page: not fetched through this numeric price-quote abstraction ─────
+
+/**
+ * DUR-4168: a web-page watcher is not a price quote -- its four rule kinds
+ * (price/stock/new_products/text_change) are fetched and evaluated by
+ * watcher-web-page.ts and watcher-web-page-rules.ts, via their own path in
+ * the scheduler tick (checkWebPageWatchers in watchers.ts), not by anything
+ * here. This entry exists only so WATCHER_PRICE_SOURCES stays a total map
+ * over every WatcherSource; checkWatchers (watchers.ts) splits due watchers
+ * by source before calling fetchPrices, so this is never actually reached
+ * for a real watcher. Kept as a safe fallback (never throws) in case that
+ * split is ever bypassed.
+ */
+const webPageSource: WatcherPriceSource = {
+  source: "web_page",
+  async fetchQuotes(request) {
+    const results: WatcherQuoteResults = new Map();
+    for (const symbol of request.symbols) {
+      results.set(symbol, { kind: "unavailable", message: "Web page watchers are not checked by this scheduler yet." });
+    }
+    return results;
+  },
+};
+
 export const WATCHER_PRICE_SOURCES: Record<WatcherSource, WatcherPriceSource> = {
   crypto: cryptoSource,
   us_stock: usStockSource,
   oslo_stock: osloStockSource,
+  web_page: webPageSource,
 };

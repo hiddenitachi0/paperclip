@@ -17,7 +17,7 @@ import { badRequest } from "../errors.js";
  */
 export const PRIVATE_ACCESS_REASON_MIN_LENGTH = 10;
 
-export type PrivateAccessTargetKind = "lane_a_conversation";
+export type PrivateAccessTargetKind = "lane_a_conversation" | "mail_account";
 
 export function privateAccessService(db: Db) {
   async function recordAccess(params: {

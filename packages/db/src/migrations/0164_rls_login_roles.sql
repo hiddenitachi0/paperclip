@@ -258,11 +258,19 @@ DECLARE
     'labels',
     'lane_a_conversations',
     'lane_a_messages',
+    -- Per-person mail accounts (DUR-4194). Created (and granted on) in
+    -- 0203_mail_accounts.sql; listed here so the login-role lists match the
+    -- schema, as for the tables above.
+    'mail_accounts',
     -- Mail secretary (DUR-4093). Created (and granted on) in
     -- 0195_mail_secretary.sql; listed here so the login-role lists match the
     -- schema, as for the tables above.
     'mail_inbox_filters',
     'mail_inboxes',
+    -- Per-person mail accounts (DUR-4194). Created (and granted on) in
+    -- 0203_mail_accounts.sql; listed here so the login-role lists match the
+    -- schema, as for the tables above.
+    'mail_messages',
     'mail_secretary_items',
     -- Morning report (migration 0183): the outbox row per day a report
     -- was generated. Created (and granted on) in 0183_morning_report.sql;
@@ -351,6 +359,7 @@ DECLARE
     -- the login-role lists match the schema, as for the tables above.
     'watcher_alerts',
     'watcher_price_points',
+    'watcher_web_page_snapshots',
     'watchers',
     -- DUR-4127 video storylines. Created (and granted on) in
     -- 0196_video_storylines.sql; listed here so the login-role lists match
@@ -359,6 +368,15 @@ DECLARE
     'video_shot_render_jobs',
     'video_shots',
     'video_storylines',
+    -- DUR-4196 director AI. Created (and granted on) in 0200_video_storyline_director_and_transitions.sql.
+    'video_storyline_director_runs',
+    -- DUR-4182 Positions/Jobs. Created (and granted on) in 0201_jobs.sql;
+    -- listed here so the login-role lists match the schema, as for the
+    -- tables above.
+    'job_positions',
+    'job_runs',
+    'job_triggers',
+    'jobs',
     'workspace_operations',
     'workspace_runtime_services'
   ];
@@ -476,11 +494,19 @@ DECLARE
     'labels',
     'lane_a_conversations',
     'lane_a_messages',
+    -- Per-person mail accounts (DUR-4194). Created (and granted on) in
+    -- 0203_mail_accounts.sql; listed here so the login-role lists match the
+    -- schema, as for the tables above.
+    'mail_accounts',
     -- Mail secretary (DUR-4093). Created (and granted on) in
     -- 0195_mail_secretary.sql; listed here so the login-role lists match the
     -- schema, as for the tables above.
     'mail_inbox_filters',
     'mail_inboxes',
+    -- Per-person mail accounts (DUR-4194). Created (and granted on) in
+    -- 0203_mail_accounts.sql; listed here so the login-role lists match the
+    -- schema, as for the tables above.
+    'mail_messages',
     'mail_secretary_items',
     -- Morning report (migration 0183): the outbox row per day a report
     -- was generated. Created (and granted on) in 0183_morning_report.sql;
@@ -551,6 +577,7 @@ DECLARE
     -- the login-role lists match the schema, as for the tables above.
     'watcher_alerts',
     'watcher_price_points',
+    'watcher_web_page_snapshots',
     'watchers',
     -- DUR-4127 video storylines. Created (and granted on) in
     -- 0196_video_storylines.sql; listed here so the login-role lists match
@@ -560,6 +587,15 @@ DECLARE
     'video_shot_render_jobs',
     'video_shots',
     'video_storylines',
+    -- DUR-4196 director AI. Created (and granted on) in 0200_video_storyline_director_and_transitions.sql. Company-scoped, so it is in both lists.
+    'video_storyline_director_runs',
+    -- DUR-4182 Positions/Jobs. Created (and granted on) in 0201_jobs.sql;
+    -- listed here so the login-role lists match the schema, as for the
+    -- tables above. Company-scoped, so it is in both lists.
+    'job_positions',
+    'job_runs',
+    'job_triggers',
+    'jobs',
     'workspace_operations',
     'workspace_runtime_services'
   ];

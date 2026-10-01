@@ -105,6 +105,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "product-grabber.ts",
   // Mail secretary routes (DUR-4093) are board-only inbox/filter configuration and not yet in the public OpenAPI document.
   "mail-secretary.ts",
+  // Per-person mail accounts (DUR-4194) are a new backend feature not yet in the public OpenAPI document.
+  "mail-accounts.ts",
   // Payment notice routes (DUR-4037, the booking gate's Telegram outbox) are board-only, switched off by default, and not yet in the public OpenAPI document.
   "payment-notices.ts",
   // Payment card routes (DUR-4040) are board-only, switched off by default, and not yet in the public OpenAPI document.
@@ -115,6 +117,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "video-storylines.ts",
   // CRM routes (DUR-4150/DUR-4191/DUR-4192) are a new backend feature not yet in the public OpenAPI document.
   "crm.ts",
+  // Positions/Jobs routes (DUR-4182) are a new backend feature not yet in the public OpenAPI document.
+  "jobs.ts",
 ]);
 
 function createApp() {

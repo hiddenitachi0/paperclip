@@ -61,6 +61,7 @@ export { externalObjects } from "./external_objects.js";
 export { externalObjectMentions } from "./external_object_mentions.js";
 export { issueRelations } from "./issue_relations.js";
 export { routines, routineRevisions, routineTriggers, routineRuns } from "./routines.js";
+export { jobs, jobPositions, jobTriggers, jobRuns } from "./jobs.js";
 export { pipelines, pipelineStages, pipelineTransitions } from "./pipelines.js";
 export {
   pipelineCases,
@@ -131,14 +132,15 @@ export { companySpeechSettings, speechUsageEvents } from "./speech.js";
 export { dataConnections, dataDatasetSources, type DataConnectionObserved } from "./data_connections.js";
 export { dataReadEvents } from "./data_read_events.js";
 export { trustedCodeFingerprints } from "./trusted_code_fingerprints.js";
-export { watchers, watcherPricePoints, watcherAlerts } from "./watchers.js";
+export { watchers, watcherPricePoints, watcherAlerts, watcherWebPageSnapshots } from "./watchers.js";
 export { morningReportOutbox } from "./morning_report.js";
 export { mailInboxes, mailInboxFilters, mailSecretaryItems } from "./mail_secretary.js";
+export { mailAccounts, mailMessages } from "./mail_accounts.js";
 export { paymentNotices } from "./payment_notices.js";
 export { companyPaymentSettings } from "./company_payment_settings.js";
 export { companyProductGrabberSettings, productGrabberStagedItems } from "./product_grabber.js";
 export { paymentCards } from "./payment_cards.js";
-export { videoStorylines, videoScenes, videoShots, videoShotRenderJobs } from "./video_storylines.js";
+export { videoStorylines, videoScenes, videoShots, videoShotRenderJobs, videoStorylineDirectorRuns } from "./video_storylines.js";
 export { tradingStrategies, tradingOrders, tradingFifoLots, tradingLedgerEntries, tradingDailyStats } from "./trading.js";
 export { crmOrganizations } from "./crm_organizations.js";
 export { crmContacts } from "./crm_contacts.js";

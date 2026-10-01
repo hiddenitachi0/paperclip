@@ -67,6 +67,8 @@ import {
   reconcileCodexLocalManagedHomesOnStartup,
   reconcilePersistedRuntimeServicesOnStartup,
   routineService,
+  jobService,
+  seedLegalAdvisorStarterPack,
   logScheduleChainBootstrapVerification,
   startSecretSurfaceScanner,
 } from "./services/index.js";
@@ -75,6 +77,7 @@ import { watcherService } from "./services/watchers.js";
 import { morningReportService } from "./services/morning-report.js";
 import { paymentCardService } from "./services/payment-cards.js";
 import { mailSecretaryService } from "./services/mail-secretary.js";
+import { mailAccountsService } from "./services/mail-accounts.js";
 import { videoStorylineRenderService } from "./services/video-storyline-render.js";
 import { tradingService } from "./services/trading.js";
 import { videoStorylineStitchService } from "./services/video-storyline-stitch.js";
@@ -670,6 +673,10 @@ export async function startServer(): Promise<StartedServer> {
   if (durStarterJobsSeeded.created.length > 0) {
     logger.info(durStarterJobsSeeded, "Seeded DUR starter jobs");
   }
+  const legalAdvisorStarterPackSeeded = await seedLegalAdvisorStarterPack(db as any);
+  if (legalAdvisorStarterPackSeeded.createdJobs.length > 0 || legalAdvisorStarterPackSeeded.createdPosition) {
+    logger.info(legalAdvisorStarterPackSeeded, "Seeded Legal Advisor Jobs starter pack");
+  }
   if (config.deploymentMode === "authenticated") {
     const {
       createBetterAuthHandler,
@@ -1020,6 +1027,7 @@ export async function startServer(): Promise<StartedServer> {
     // Same reason as above: routine-triggered runs dispatch through the
     // heartbeat service, so they must use the raw-db instance.
     const routines = routineService(schedulerDb as any, { pluginWorkerManager, heartbeat });
+    const jobs = jobService(schedulerDb as any, { pluginWorkerManager, heartbeat });
     const mergeDeployVisibility = mergeDeployVisibilityService(schedulerDb as any);
     const deployCarriedIssues = deployCarriedIssuesService(schedulerDb as any);
     const deployApprovalFeedback = deployApprovalFeedbackService(schedulerDb as any);
@@ -1029,6 +1037,7 @@ export async function startServer(): Promise<StartedServer> {
     const morningReports = morningReportService(schedulerDb as any);
     const paymentCards = paymentCardService(schedulerDb as any);
     const mailSecretary = mailSecretaryService(schedulerDb as any);
+    const mailAccounts = mailAccountsService(schedulerDb as any);
     const videoStorylineRender = videoStorylineRenderService(schedulerDb as any);
     const videoStorylineStitch = videoStorylineStitchService(schedulerDb as any);
     const tradingAgent = tradingService(schedulerDb as any);
@@ -1244,6 +1253,26 @@ export async function startServer(): Promise<StartedServer> {
           })
           .catch((err) => {
             logger.error({ err }, "routine scheduler tick failed");
+          }),
+      );
+
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.tickScheduledJobTriggers, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: tickScheduledJobTriggers",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:tickScheduledJobTriggers",
+          },
+          () => jobs.tickScheduledJobTriggers(new Date()),
+        )
+          .then((result) => {
+            if (result.enqueued > 0) {
+              logger.info({ ...result }, "job scheduler tick enqueued runs");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "job scheduler tick failed");
           }),
       );
 
@@ -1464,6 +1493,30 @@ export async function startServer(): Promise<StartedServer> {
           })
           .catch((err) => {
             logger.error({ err }, "mail-secretary tick failed");
+          }),
+      );
+
+      // Per-person mail accounts (DUR-4194): sync due accounts' inboxes over
+      // IMAP, read-only (see services/mail-account-imap-client.ts). Never
+      // sends -- sending only ever happens through the sendDraft route, a
+      // human action, never a scheduled tick.
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.mailAccountSync, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: mailAccountSync",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:mailAccountSync",
+          },
+          () => mailAccounts.tick(new Date()),
+        )
+          .then((result) => {
+            if (result.errors > 0 || result.fetched > 0) {
+              logger.info({ ...result }, "mail-account sync tick");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "mail-account sync tick failed");
           }),
       );
 

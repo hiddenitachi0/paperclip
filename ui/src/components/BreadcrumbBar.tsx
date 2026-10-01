@@ -15,6 +15,7 @@ import {
 import { Fragment, useMemo } from "react";
 import { PluginSlotOutlet, usePluginSlots } from "@/plugins/slots";
 import { PluginLauncherOutlet, usePluginLaunchers } from "@/plugins/launchers";
+import { PulsePanel } from "@/components/pulse/PulsePanel";
 
 type GlobalToolbarContext = { companyId: string | null; companyPrefix: string | null };
 
@@ -46,7 +47,12 @@ export function BreadcrumbBar() {
     [selectedCompanyId, selectedCompany?.issuePrefix],
   );
 
-  const globalToolbarSlots = <GlobalToolbar context={globalToolbarSlotContext} />;
+  const globalToolbarSlots = (
+    <div className="ml-auto flex shrink-0 items-center gap-1">
+      <PulsePanel companyId={selectedCompanyId ?? null} />
+      <GlobalToolbar context={globalToolbarSlotContext} />
+    </div>
+  );
 
   if (isMobile && mobileToolbar) {
     return (

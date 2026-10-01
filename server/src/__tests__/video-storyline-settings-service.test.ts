@@ -82,4 +82,43 @@ d("videoStorylineSettingsService", () => {
     await svc.setEnabled(companyA, false);
     expect(await svc.isEnabled(companyA)).toBe(false);
   });
+
+  /**
+   * DUR-4196: the round-2 flag is deliberately a SECOND, narrower gate on
+   * top of round 1 -- turning round 1 on must never implicitly turn round 2
+   * on too, and assertAdvancedEnabled must still refuse a company that has
+   * round 2 on but round 1 off (an impossible state through the API, but the
+   * service itself should not trust that it can't happen).
+   */
+  describe("advanced (round 2) flag", () => {
+    it("defaults to off even once round 1 is on", async () => {
+      const companyId = await seedCompany();
+      const svc = videoStorylineSettingsService(db);
+      await svc.setEnabled(companyId, true);
+      expect(await svc.isAdvancedEnabled(companyId)).toBe(false);
+      await expect(svc.assertAdvancedEnabled(companyId)).rejects.toMatchObject({ status: 422 });
+    });
+
+    it("still refuses once round 1 is off again, even if round 2 was turned on", async () => {
+      const companyId = await seedCompany();
+      const svc = videoStorylineSettingsService(db);
+      await svc.setEnabled(companyId, true);
+      await svc.setAdvancedEnabled(companyId, true);
+      await svc.setEnabled(companyId, false);
+      await expect(svc.assertAdvancedEnabled(companyId)).rejects.toMatchObject({ status: 422 });
+    });
+
+    it("turns on and off, scoped to one company, independently of round 1", async () => {
+      const companyA = await seedCompany();
+      const companyB = await seedCompany();
+      const svc = videoStorylineSettingsService(db);
+      await svc.setEnabled(companyA, true);
+      await svc.setEnabled(companyB, true);
+
+      await svc.setAdvancedEnabled(companyA, true);
+      expect(await svc.isAdvancedEnabled(companyA)).toBe(true);
+      expect(await svc.isAdvancedEnabled(companyB)).toBe(false);
+      await expect(svc.assertAdvancedEnabled(companyA)).resolves.toBeUndefined();
+    });
+  });
 });
