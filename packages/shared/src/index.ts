@@ -2334,14 +2334,18 @@ export {
   WATCHER_US_STOCK_SYMBOL_PATTERN,
   WATCHER_OSLO_STOCK_SYMBOL_PATTERN,
   WATCHER_DEFAULT_RULE,
+  WATCHER_WEB_PAGE_KINDS,
   watcherCheckEveryProblem,
   ackWatcherOutboxSchema,
   createWatcherSchema,
   describeWatcherRule,
+  describeWatcherWebPageRule,
   findWatcherCoin,
   formatWatcherPrice,
   updateWatcherSchema,
   watcherRuleSchema,
+  watcherWebPageRuleSchema,
+  watcherWebPageUrlProblem,
   watcherSymbolName,
   watcherSymbolProblem,
   type AckWatcherOutboxInput,
@@ -2357,6 +2361,8 @@ export {
   type WatcherSource,
   type WatcherSourceInfo,
   type WatcherSummary,
+  type WatcherWebPageKind,
+  type WatcherWebPageRule,
 } from "./watchers.js";
 
 export {
