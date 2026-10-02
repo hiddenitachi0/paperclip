@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { eq } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 import {
   activityLog,
   agents,
@@ -1434,7 +1434,11 @@ describeEmbeddedPostgres("lane A service", () => {
     expect(noActor.actions[0]).toMatchObject({ tool: "route_to_agent", ok: false });
     expect(createIssueForAgent).toHaveBeenCalledTimes(1);
 
-    const logged = await db.select().from(activityLog).where(eq(activityLog.action, "lane_a.tool_called"));
+    const logged = await db
+      .select()
+      .from(activityLog)
+      .where(eq(activityLog.action, "lane_a.tool_called"))
+      .orderBy(asc(activityLog.createdAt));
     expect(logged.map((row) => (row.details as { ok: boolean }).ok)).toEqual([false, true, false]);
 
     vi.doUnmock("@anthropic-ai/sdk");
