@@ -2,11 +2,13 @@ import { Router, type Request, type RequestHandler } from "express";
 import type { Db } from "@paperclipai/db";
 import { createRequestScopedDb } from "@paperclipai/db";
 import {
+  answerVideoDirectorConversationSchema,
   approveVideoDirectorRunSchema,
   createVideoSceneSchema,
   createVideoShotSchema,
   createVideoStorylineSchema,
   draftVideoDirectorShotsSchema,
+  editVideoDirectorProposalSchema,
   startVideoStorylineRenderSchema,
   updateVideoSceneSchema,
   updateVideoShotSchema,
@@ -23,6 +25,10 @@ import { videoStorylineService, type VideoStorylineActor } from "../services/vid
 import { videoStorylineRenderService } from "../services/video-storyline-render.js";
 import { videoStorylineSettingsService } from "../services/video-storyline-settings.js";
 import { videoStorylineDirectorService } from "../services/video-storyline-director.js";
+import { videoStorylineDirectorConversationStore } from "../services/video-storyline-director-conversation.js";
+import { videoStorylineDirectorReviewService } from "../services/video-storyline-director-review.js";
+import { videoStorylineDirectorDialogueService } from "../services/video-storyline-director-dialogue.js";
+import { videoStorylineDirectorProposalsService } from "../services/video-storyline-director-proposals.js";
 
 /**
  * DUR-4127: company-scoped CRUD + render orchestration for video
@@ -48,6 +54,10 @@ export function videoStorylineRoutes(rawDb: Db) {
   const render = videoStorylineRenderService(db);
   const settings = videoStorylineSettingsService(db);
   const director = videoStorylineDirectorService(db);
+  const directorConversations = videoStorylineDirectorConversationStore(db);
+  const directorReview = videoStorylineDirectorReviewService(db);
+  const directorDialogue = videoStorylineDirectorDialogueService(db);
+  const directorProposals = videoStorylineDirectorProposalsService(db);
 
   function scope() {
     return companyScopeFromParam(rawDb, (req, companyId) => {
@@ -458,6 +468,95 @@ export function videoStorylineRoutes(rawDb: Db) {
       const storylineId = req.params.storylineId as string;
       const runId = req.params.runId as string;
       res.json(await director.rejectRun(companyId, storylineId, runId, actorOf(req)));
+    },
+  );
+
+  // ─── Director conversation (DUR-4327): whole-storyline review, ────────
+  // ─── turn-by-turn dialogue, per-shot proposals ─────────────────────────
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/director/review",
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      res.status(201).json(await directorReview.runReview(companyId, storylineId, actorOf(req)));
+    },
+  );
+
+  router.get(
+    "/companies/:companyId/video-storylines/:storylineId/director/conversation",
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      res.json(await directorConversations.getConversationDetail(companyId, storylineId));
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/director/conversation/answer",
+    validate(answerVideoDirectorConversationSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      res.json(await directorDialogue.answer(companyId, storylineId, req.body, actorOf(req)));
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/director/proposals/:shotId/accept",
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      const shotId = req.params.shotId as string;
+      res.json(await directorProposals.acceptProposal(companyId, storylineId, shotId, actorOf(req)));
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/director/proposals/:shotId/edit",
+    validate(editVideoDirectorProposalSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      const shotId = req.params.shotId as string;
+      res.json(await directorProposals.editProposal(companyId, storylineId, shotId, req.body, actorOf(req)));
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/director/proposals/:shotId/reject",
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      const shotId = req.params.shotId as string;
+      res.json(await directorProposals.rejectProposal(companyId, storylineId, shotId, actorOf(req)));
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/director/proposals/accept-all",
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      res.json(await directorProposals.acceptAll(companyId, storylineId, actorOf(req)));
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/shots/:shotId/restore-prompt",
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      const shotId = req.params.shotId as string;
+      res.json(await directorProposals.restorePrompt(companyId, storylineId, shotId, actorOf(req)));
     },
   );
 
