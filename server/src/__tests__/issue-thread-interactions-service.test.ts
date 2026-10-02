@@ -492,7 +492,17 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
         { questionId: "extras", optionIds: ["docs", "tests"], otherText: "Pair with release notes" },
       ],
       summaryMarkdown: "Ship Phase 1 with tests and docs.",
+      commentId: expect.any(String),
     });
+
+    // DUR-4310: the summary is also posted as a normal thread comment so it
+    // shows up in the agent's wake context, not just inside the card.
+    const postedComments = await db
+      .select()
+      .from(issueComments)
+      .where(eq(issueComments.id, (answered.result as { commentId: string }).commentId));
+    expect(postedComments).toHaveLength(1);
+    expect(postedComments[0]?.body).toBe("Ship Phase 1 with tests and docs.");
 
     await expect(interactionsSvc.answerQuestions({
       id: issueId,
@@ -1177,6 +1187,70 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       },
       resolvedByUserId: "local-board",
     });
+  });
+
+  it("accepts request_checkbox_confirmation with unticked boxes plus a note, posts the note as a comment, and does not supersede the card (DUR-4310)", async () => {
+    const { companyId, goalId, issueId } = await seedConfirmationIssue("Checkbox confirmation accept with note");
+
+    const created = await interactionsSvc.create({
+      id: issueId,
+      companyId,
+    }, {
+      kind: "request_checkbox_confirmation",
+      payload: {
+        version: 1,
+        prompt: "Which checks passed?",
+        options: [
+          { id: "file-a", label: "a.txt" },
+          { id: "file-b", label: "b.txt" },
+          { id: "file-c", label: "c.txt" },
+        ],
+        defaultSelectedOptionIds: ["file-a", "file-b", "file-c"],
+      },
+    }, {
+      userId: "local-board",
+    });
+
+    const accepted = await interactionsSvc.acceptInteraction({
+      id: issueId,
+      companyId,
+      goalId,
+      projectId: null,
+    }, created.id, {
+      selectedOptionIds: ["file-a", "file-b"],
+      note: "c.txt behaved correctly; the test for it was wrong, not the code.",
+    }, {
+      userId: "local-board",
+    });
+
+    expect(accepted.interaction).toMatchObject({
+      kind: "request_checkbox_confirmation",
+      status: "accepted",
+      result: {
+        version: 1,
+        outcome: "accepted",
+        selectedOptionIds: ["file-a", "file-b"],
+        notConfirmedOptions: ["c.txt"],
+        note: "c.txt behaved correctly; the test for it was wrong, not the code.",
+        commentId: expect.any(String),
+      },
+    });
+
+    // The note must reach the thread as a normal comment...
+    const commentId = (accepted.interaction.result as { commentId: string }).commentId;
+    const postedComments = await db
+      .select()
+      .from(issueComments)
+      .where(eq(issueComments.id, commentId));
+    expect(postedComments).toHaveLength(1);
+    expect(postedComments[0]?.body).toBe("c.txt behaved correctly; the test for it was wrong, not the code.");
+
+    // ...without superseding (reopening/expiring) the very card it is attached to.
+    const [interactionRow] = await db
+      .select()
+      .from(issueThreadInteractions)
+      .where(eq(issueThreadInteractions.id, created.id));
+    expect(interactionRow?.status).toBe("accepted");
   });
 
   it("enforces request_checkbox_confirmation selected option references and bounds", async () => {

@@ -29,6 +29,12 @@ import {
   type CompanyFileAnswer,
 } from "./company-files.js";
 import {
+  DOCUMENTS_LOOKUP_TIMEOUT_MS,
+  documentsDataService,
+  type DocumentsAnswer,
+  type DocumentsServiceDeps,
+} from "./documents-data.js";
+import {
   WEB_PAGE_TEXT_MAX_CHARS,
   WEB_SEARCH_MAX_COUNT,
   WebToolError,
@@ -74,6 +80,8 @@ export const LANE_A_BUILTIN_TOOL_NAMES = [
   "lookup_issue",
   "read_business_data",
   "read_company_file",
+  "search_documents",
+  "get_document",
   "remember",
   "forget",
   "search_conversations",
@@ -98,6 +106,10 @@ export const READ_BUSINESS_DATA_TOOL = "read_business_data";
 export const READ_COMPANY_FILE_TOOL = "read_company_file";
 /** A file read may connect, list or fetch up to 256 KB; the transport enforces this deadline itself. */
 export const LANE_A_COMPANY_FILE_TIMEOUT_MS = COMPANY_FILE_LOOKUP_TIMEOUT_MS;
+/** DUR-4303 (paperless-ngx documents): offered only when the company has documents switched on and connected. */
+export const SEARCH_DOCUMENTS_TOOL = "search_documents";
+export const GET_DOCUMENT_TOOL = "get_document";
+export const LANE_A_DOCUMENTS_TIMEOUT_MS = DOCUMENTS_LOOKUP_TIMEOUT_MS;
 /** Quick-agent memory notebook: save a note / remove a note, on a person's explicit request only. */
 export const REMEMBER_TOOL = "remember";
 export const FORGET_TOOL = "forget";
@@ -290,6 +302,13 @@ export interface LaneAToolDeps {
    * file server. Absent means the tool is not wired here.
    */
   readCompanyFile?(input: Record<string, unknown>, ctx: LaneAToolContext): Promise<CompanyFileAnswer>;
+  /**
+   * DUR-4303: one document search / one document read from the caller's own
+   * company's paperless-ngx container. Absent means the tools are not wired
+   * here, which answers with a plain refusal.
+   */
+  searchDocuments?(input: Record<string, unknown>, ctx: LaneAToolContext): Promise<DocumentsAnswer>;
+  getDocument?(input: Record<string, unknown>, ctx: LaneAToolContext): Promise<DocumentsAnswer>;
   /**
    * The quick agent's memory notebook (its persona's when it has one, else
    * its own). Absent means remember/forget are not wired here, which answers
@@ -562,6 +581,41 @@ export function buildLaneABuiltinToolDefinitions(): Anthropic.Tool[] {
           },
         },
         required: ["path"],
+      },
+    },
+    {
+      name: SEARCH_DOCUMENTS_TOOL,
+      description:
+        "Search this company's documents (paperless-ngx): invoices, letters, contracts, forms already scanned in. Returns up to 10 " +
+        "matches, each with its id, title, correspondent, date, tags and a short snippet around the match, in the order paperless-ngx " +
+        "itself ranks them. Use get_document with the id to read full details and get a download link. Relay refusals word for word.",
+      input_schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          query: { type: "string", description: "What to search for, in plain words, e.g. 'rental agreement 2026' or an invoice number." },
+          tags: {
+            type: "array",
+            items: { type: "string" },
+            description: "Optional: tag names to narrow the search, e.g. ['invoice', 'q3-2026'].",
+          },
+        },
+        required: ["query"],
+      },
+    },
+    {
+      name: GET_DOCUMENT_TOOL,
+      description:
+        "Read one document's full details by id (from search_documents) and get a short-lived download link for it. The link expires " +
+        "after a few minutes; give it to the person as-is if they want the file, and do not describe or invent its contents beyond " +
+        "what this tool returned. Relay refusals word for word.",
+      input_schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          id: { type: "integer", description: "The document's id, from a search_documents result." },
+        },
+        required: ["id"],
       },
     },
     {
@@ -1216,6 +1270,43 @@ export function createLaneABuiltinToolExecutor(deps: LaneAToolDeps) {
     };
   }
 
+  async function searchDocuments(input: Record<string, unknown>, ctx: LaneAToolContext): Promise<LaneAToolResult> {
+    if (!deps.searchDocuments) {
+      return {
+        ok: false,
+        content: "Documents cannot be searched from here. Say so plainly, and do not guess what a document contains.",
+        summary: "Document search is not available on this path.",
+      };
+    }
+    const answer = await deps.searchDocuments(input, ctx);
+    const query = readString(input, "query").slice(0, 120);
+    return {
+      ok: answer.ok,
+      content: answer.text,
+      summary: answer.ok
+        ? `Searched documents for "${query}" (lookup ${answer.lookupId}).`
+        : `Document search ${answer.outcome}${answer.refusalCode ? ` (${answer.refusalCode})` : ""}.`,
+    };
+  }
+
+  async function getDocument(input: Record<string, unknown>, ctx: LaneAToolContext): Promise<LaneAToolResult> {
+    if (!deps.getDocument) {
+      return {
+        ok: false,
+        content: "Documents cannot be read from here. Say so plainly, and do not guess what a document contains.",
+        summary: "Document read is not available on this path.",
+      };
+    }
+    const answer = await deps.getDocument(input, ctx);
+    return {
+      ok: answer.ok,
+      content: answer.text,
+      summary: answer.ok
+        ? `Read a document (lookup ${answer.lookupId}).`
+        : `Document read ${answer.outcome}${answer.refusalCode ? ` (${answer.refusalCode})` : ""}.`,
+    };
+  }
+
   /**
    * Only a person signed in to the board may change the notebook through a
    * quick agent. Another agent talking to it may not (it could plant notes
@@ -1375,6 +1466,10 @@ export function createLaneABuiltinToolExecutor(deps: LaneAToolDeps) {
         return readBusinessData(input, ctx);
       case "read_company_file":
         return readCompanyFile(input, ctx);
+      case SEARCH_DOCUMENTS_TOOL:
+        return searchDocuments(input, ctx);
+      case GET_DOCUMENT_TOOL:
+        return getDocument(input, ctx);
       case REMEMBER_TOOL:
         return remember(input, ctx);
       case FORGET_TOOL:
@@ -1403,6 +1498,7 @@ export function createDbLaneAToolDeps(
   options: {
     businessData?: BusinessDataServiceDeps;
     webSearch?: WebSearchServiceDeps;
+    documents?: DocumentsServiceDeps;
     /** Lets tests stub the heartbeat wakeup a dispatched job run triggers, like jobService's own callers do. */
     jobServiceOptions?: Parameters<typeof jobService>[1];
   } = {},
@@ -1410,6 +1506,7 @@ export function createDbLaneAToolDeps(
   const businessData = businessDataService(db, options.businessData);
   const web = webSearchService(db, options.webSearch);
   const companyFiles = companyFileService(db, options.businessData);
+  const documents = documentsDataService(db, options.documents);
   const memories = agentMemoryService(db);
   const jobSvc = jobService(db, options.jobServiceOptions);
   const memoryActor = (ctx: LaneAToolContext) => ({
@@ -1564,6 +1661,33 @@ export function createDbLaneAToolDeps(
     async readCompanyFile(input, ctx) {
       // Same rule: the company is the quick agent's own, from the server.
       return companyFiles.read(
+        {
+          companyId: ctx.companyId,
+          channel: "quick_chat",
+          agentId: ctx.agent.id,
+          userId: ctx.requester.userId,
+          runId: ctx.runId ?? null,
+          laneAConversationId: ctx.conversationId,
+        },
+        input,
+      );
+    },
+    async searchDocuments(input, ctx) {
+      // Same rule: the company is the quick agent's own, from the server.
+      return documents.searchDocuments(
+        {
+          companyId: ctx.companyId,
+          channel: "quick_chat",
+          agentId: ctx.agent.id,
+          userId: ctx.requester.userId,
+          runId: ctx.runId ?? null,
+          laneAConversationId: ctx.conversationId,
+        },
+        input,
+      );
+    },
+    async getDocument(input, ctx) {
+      return documents.getDocument(
         {
           companyId: ctx.companyId,
           channel: "quick_chat",

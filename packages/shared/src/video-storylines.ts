@@ -16,10 +16,33 @@ export const VIDEO_STORYLINE_STATUSES = [
   "ready_to_stitch",
   "stitching",
   "done",
+  // DUR-4318: the stitched file failed its automatic post-stitch quality
+  // check (see video-quality-check.ts) -- qualityCheckIssues explains what
+  // and where. The final file is still stored, just not presented as done.
+  "needs_attention",
   "failed",
   "cancelled",
 ] as const;
 export type VideoStorylineStatus = (typeof VIDEO_STORYLINE_STATUSES)[number];
+
+/** One finding from the post-stitch automatic quality check -- see video-quality-check.ts. shotIndex/timeSeconds are best-effort localization, null when the issue applies to the whole file. */
+export const VIDEO_QUALITY_ISSUE_CODES = [
+  "duration_mismatch",
+  "missing_audio_stream",
+  "black_stretch",
+  "frozen_stretch",
+  "silent_audio",
+  "clipped_audio",
+  "check_error",
+] as const;
+export type VideoQualityIssueCode = (typeof VIDEO_QUALITY_ISSUE_CODES)[number];
+
+export interface VideoStorylineQualityIssue {
+  code: VideoQualityIssueCode;
+  message: string;
+  shotIndex: number | null;
+  timeSeconds: number | null;
+}
 
 export const VIDEO_SHOT_STATUSES = ["draft", "queued", "rendering", "done", "failed"] as const;
 export type VideoShotStatus = (typeof VIDEO_SHOT_STATUSES)[number];
@@ -88,6 +111,15 @@ export const VIDEO_STORYLINES_SETTINGS_KEY = "videoStorylinesEnabled";
  * per the ticket's "ships off, doesn't change existing experience" rule.
  */
 export const VIDEO_STORYLINE_ADVANCED_SETTINGS_KEY = "videoStorylineAdvancedFeaturesEnabled";
+/**
+ * DUR-4317/DUR-4320: the per-company cents threshold that, when the current
+ * video-render cost estimate exceeds it, requires a kind:"video_render"
+ * board approval before startRender proceeds -- see
+ * video-storyline-settings.ts's getApprovalThresholdCents. Absent or not a
+ * number = no threshold configured = that extra gate stays off (the
+ * mandatory per-shot storyboard approval gate is unaffected either way).
+ */
+export const VIDEO_STORYLINE_APPROVAL_THRESHOLD_SETTINGS_KEY = "videoStorylineApprovalThresholdCents";
 
 // ─── Cost estimate (placeholder pricing -- see "Questions for Filip") ───
 

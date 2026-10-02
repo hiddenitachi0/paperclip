@@ -1457,6 +1457,27 @@
       "when": 1790823140000,
       "tag": "0208_paperless_ngx_connection",
       "breakpoints": true
+    },
+    {
+      "idx": 209,
+      "version": "7",
+      "when": 1790952492913,
+      "tag": "0209_video_storyline_quality_check",
+      "breakpoints": true
+    },
+    {
+      "idx": 210,
+      "version": "7",
+      "when": 1790952502913,
+      "tag": "0210_storyboard_approval_gate",
+      "breakpoints": true
+    },
+    {
+      "idx": 211,
+      "version": "7",
+      "when": 1790952512913,
+      "tag": "0211_video_storyline_director_conversation",
+      "breakpoints": true
     }
   ]
 }

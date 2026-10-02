@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import { promisify } from "node:util";
-import { and, desc, eq, inArray, isNotNull, like } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, like } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agentWakeupRequests,
@@ -356,6 +356,31 @@ export async function getChangedDiffContentForIssueWorkspace(
   }
 }
 
+/**
+ * DUR-4319: resolves the issue's workspace to the commit its diff currently sits at, so a
+ * self-review notice can say exactly which commit it covers. Reuses
+ * resolveIssueWorkspaceCheckout (not resolveIssueGitWorkspace) since this only needs a
+ * readable working tree, not a base ref -- a workspace with no recorded baseRef still has a
+ * HEAD.
+ */
+export async function getCurrentHeadShaForIssueWorkspace(
+  db: Db,
+  input: { companyId: string; issueId: string | null | undefined },
+): Promise<string | null> {
+  const resolved = await resolveIssueWorkspaceCheckout(db, input);
+  if (!resolved) return null;
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", resolved.workspacePath, "rev-parse", "HEAD"], {
+      cwd: resolved.workspacePath,
+      maxBuffer: RISKY_SURFACE_GIT_MAX_BUFFER_BYTES,
+    });
+    const sha = stdout.trim();
+    return sha.length > 0 ? sha : null;
+  } catch {
+    return null;
+  }
+}
+
 function buildAdversarialSurfaceLines(categories: readonly RiskySurfaceCategory[]): string[] {
   const categoryLabels = categories.map((category) => RISKY_SURFACE_CATEGORY_LABELS[category]).join(", ");
   return [
@@ -374,6 +399,13 @@ export function buildSelfReviewPassInstruction(input: {
   alreadyHandedOff: boolean;
   riskySurfaceCategories?: readonly RiskySurfaceCategory[];
   requestedStatus?: string | null;
+  /**
+   * DUR-4319: the commit a prior self-review pass on this issue already covered, if any.
+   * When present, the agent is told to review only what changed since that commit rather
+   * than re-reviewing the whole diff from scratch on every push -- the cost problem this
+   * ticket exists to fix.
+   */
+  sinceCommitSha?: string | null;
 }) {
   const issueLabel = input.issueIdentifier ?? "this issue";
   const lines = [
@@ -384,6 +416,12 @@ export function buildSelfReviewPassInstruction(input: {
     "- Look for bugs, mistakes, or loose ends you may have missed the first time.",
     "- Fix anything real that you find. Do not invent extra scope beyond the task.",
   ];
+  if (input.sinceCommitSha) {
+    lines.push(
+      "",
+      `This issue already has a review on file covering commit \`${input.sinceCommitSha}\`. You only need to check what changed between that commit and the current HEAD (\`git diff ${input.sinceCommitSha}..HEAD\`) -- parts that haven't changed since then were already reviewed and don't need re-checking, unless the risky-surface questions below say otherwise.`,
+    );
+  }
   const riskySurfaceCategories = input.riskySurfaceCategories ?? [];
   if (riskySurfaceCategories.length > 0) {
     lines.push("", ...buildAdversarialSurfaceLines(riskySurfaceCategories));
@@ -463,6 +501,117 @@ export async function findExistingSelfReviewPassNoticeCommentForRun(
     )
     .limit(1)
     .then((rows) => rows[0] ?? null);
+}
+
+/**
+ * DUR-4319: marker prefix identifying the single, update-in-place self-review notice comment
+ * for an issue, so a new push can find and edit it instead of posting a fresh comment every
+ * time (the cost/noise problem this ticket exists to fix). Kept as a plain text prefix on the
+ * comment body -- rather than a new DB column or a repurposed `metadata` field (that column is
+ * a strict, UI-rendering-only shape, see issueCommentMetadataSchema) -- so this stays a small,
+ * self-contained change local to this file.
+ */
+export const SELF_REVIEW_PASS_SUMMARY_MARKER = "<!-- paperclip:self-review-pass-summary:v1 -->";
+
+const REVIEWED_COMMIT_LINE_PATTERN = /\*\*Reviewed commit:\*\* `([0-9a-f]{7,40})`/i;
+
+/** Pure text parse: pulls the commit sha a summary comment's body last recorded, if any. */
+export function extractReviewedCommitShaFromSummaryBody(body: string): string | null {
+  const match = body.match(REVIEWED_COMMIT_LINE_PATTERN);
+  return match ? match[1] : null;
+}
+
+/**
+ * Composes the full body of the single self-review summary comment. `headSha` is the commit
+ * this pass actually reviewed (null when the workspace diff couldn't be read this time);
+ * `previousReviewedSha` is whatever commit the PRIOR version of this same comment recorded.
+ * When both are known and differ, the previous verdict is explicitly marked superseded rather
+ * than silently overwritten, per this ticket's acceptance bar: a verdict must never look like
+ * it applies to a commit it didn't actually see.
+ */
+export function buildSelfReviewPassSummaryBody(input: {
+  headSha: string | null;
+  previousReviewedSha: string | null;
+  content: string;
+}): string {
+  const effectiveSha = input.headSha ?? input.previousReviewedSha ?? null;
+  const lines = [SELF_REVIEW_PASS_SUMMARY_MARKER];
+  lines.push(
+    effectiveSha
+      ? `**Reviewed commit:** \`${effectiveSha}\``
+      : "**Reviewed commit:** (unknown — this issue's workspace diff couldn't be read)",
+  );
+  if (input.headSha && input.previousReviewedSha && input.previousReviewedSha !== input.headSha) {
+    lines.push(`_Supersedes the previous review of commit \`${input.previousReviewedSha}\`._`);
+  }
+  lines.push("", input.content);
+  return lines.join("\n");
+}
+
+/**
+ * Looks up the single existing self-review summary comment for an issue, if any, by its
+ * marker prefix -- not by run id or exact body match, since the body is expected to change on
+ * every push. There should only ever be one live (non-deleted) row per issue; `limit(1)` with
+ * a `createdAt desc` order is a defensive tie-breaker, not a documented multi-row case.
+ */
+export async function findSelfReviewPassSummaryComment(
+  db: Db,
+  input: { companyId: string; issueId: string },
+): Promise<{ id: string; body: string } | null> {
+  return db
+    .select({ id: issueComments.id, body: issueComments.body })
+    .from(issueComments)
+    .where(
+      and(
+        eq(issueComments.companyId, input.companyId),
+        eq(issueComments.issueId, input.issueId),
+        eq(issueComments.authorType, "system"),
+        isNull(issueComments.deletedAt),
+        like(issueComments.body, `${SELF_REVIEW_PASS_SUMMARY_MARKER}%`),
+      ),
+    )
+    .orderBy(desc(issueComments.createdAt))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+}
+
+/**
+ * Edits the issue's single self-review notice comment in place on each new push instead of
+ * posting a fresh one -- the core of DUR-4319. Finds the existing summary comment (if any) by
+ * marker prefix, carries forward its previously-recorded reviewed commit so the new body can
+ * mark it superseded, and UPDATEs that same row rather than inserting a new one. Only inserts
+ * when no summary comment exists yet for this issue.
+ */
+export async function upsertSelfReviewPassNoticeComment(
+  db: Db,
+  input: { companyId: string; issueId: string; sourceRunId?: string | null; headSha: string | null; content: string },
+): Promise<void> {
+  const existing = await findSelfReviewPassSummaryComment(db, {
+    companyId: input.companyId,
+    issueId: input.issueId,
+  });
+  const previousReviewedSha = existing ? extractReviewedCommitShaFromSummaryBody(existing.body) : null;
+  const body = buildSelfReviewPassSummaryBody({
+    headSha: input.headSha,
+    previousReviewedSha,
+    content: input.content,
+  });
+
+  if (existing) {
+    await db
+      .update(issueComments)
+      .set({ body, updatedAt: new Date(), createdByRunId: input.sourceRunId ?? null })
+      .where(eq(issueComments.id, existing.id));
+    return;
+  }
+
+  await db.insert(issueComments).values({
+    companyId: input.companyId,
+    issueId: input.issueId,
+    authorType: "system",
+    body,
+    createdByRunId: input.sourceRunId ?? null,
+  });
 }
 
 const OUTSTANDING_SELF_REVIEW_PASS_WAKE_STATUSES = ["queued", "deferred_issue_execution", "claimed"] as const;
@@ -824,6 +973,22 @@ export async function evaluateSelfReviewDoneGate(input: {
   // letting an unrelated older pass on this issue silently vouch for content it never saw.
   const workspaceFullyUnresolvable = changedFilePaths === null && diffContent === null;
 
+  // DUR-4319: resolved once per attempt so every comment posted below (the two cap messages
+  // and the ordinary instruction) can be upserted onto the issue's single self-review summary
+  // comment rather than inserted as a fresh one, and so the instruction can tell the agent
+  // which commit a prior pass already covered (if any).
+  const headSha = await getCurrentHeadShaForIssueWorkspace(input.db, {
+    companyId: input.issue.companyId,
+    issueId: input.issue.id,
+  });
+  const existingSummaryComment = await findSelfReviewPassSummaryComment(input.db, {
+    companyId: input.issue.companyId,
+    issueId: input.issue.id,
+  });
+  const previousReviewedSha = existingSummaryComment
+    ? extractReviewedCommitShaFromSummaryBody(existingSummaryComment.body)
+    : null;
+
   // DUR-245: this issue already used its one bounded extra pass under a different run, and
   // that pass reached a terminal state without landing the handoff (otherwise currentStatus
   // would already equal requestedStatus and we wouldn't be here). Scheduling yet another pass
@@ -890,11 +1055,12 @@ export async function evaluateSelfReviewDoneGate(input: {
           "-- this needs an operator to look at it directly (e.g. re-check the status, or set " +
           'this issue\'s execution policy to {"selfReview": false}).';
       try {
-        await postSelfReviewPassNoticeComment(input.db, {
+        await upsertSelfReviewPassNoticeComment(input.db, {
           companyId: input.issue.companyId,
           issueId: input.issue.id,
           sourceRunId,
-          body: capMessage,
+          headSha,
+          content: capMessage,
         });
       } catch {
         // Best-effort — the blocking return below is what actually matters.
@@ -923,11 +1089,12 @@ export async function evaluateSelfReviewDoneGate(input: {
         'it directly (e.g. confirm the work is actually complete, or set this issue\'s execution ' +
         'policy to {"selfReview": false}).';
       try {
-        await postSelfReviewPassNoticeComment(input.db, {
+        await upsertSelfReviewPassNoticeComment(input.db, {
           companyId: input.issue.companyId,
           issueId: input.issue.id,
           sourceRunId,
-          body: capMessage,
+          headSha,
+          content: capMessage,
         });
       } catch {
         // Best-effort — the blocking return below is what actually matters.
@@ -947,6 +1114,7 @@ export async function evaluateSelfReviewDoneGate(input: {
     alreadyHandedOff: false,
     riskySurfaceCategories,
     requestedStatus: input.requestedStatus,
+    sinceCommitSha: previousReviewedSha,
   });
 
   // DUR-293: input.wakeup resolving without throwing does NOT mean a corrective run was
@@ -1050,12 +1218,15 @@ export async function evaluateSelfReviewDoneGate(input: {
 
   try {
     // Best-effort: the wakeup is already scheduled (and is what actually re-gates the
-    // transition), so a failure here shouldn't change the gate's outcome.
-    await postSelfReviewPassNoticeComment(input.db, {
+    // transition), so a failure here shouldn't change the gate's outcome. DUR-4319: upserts
+    // onto the issue's single self-review summary comment (stamped with the commit it
+    // covers) instead of posting a fresh comment on every push.
+    await upsertSelfReviewPassNoticeComment(input.db, {
       companyId: input.issue.companyId,
       issueId: input.issue.id,
       sourceRunId,
-      body: instruction,
+      headSha,
+      content: instruction,
     });
   } catch {
     // Ignore — see comment above.

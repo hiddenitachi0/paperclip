@@ -152,6 +152,8 @@ export function MediaStudioEditTab({ context }: { context: PluginHostContext }) 
   const [targetH, setTargetH] = useState<number>(0);
   const [lockAspect, setLockAspect] = useState(true);
   const [textLayers, setTextLayers] = useState<TextLayer[]>([]);
+  /** Pictures before each AI edit, newest last, so an edit can be undone. */
+  const [history, setHistory] = useState<string[]>([]);
   const [newText, setNewText] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -192,7 +194,7 @@ export function MediaStudioEditTab({ context }: { context: PluginHostContext }) 
     };
   }, [pickerOpen, context.companyId, pickerItems]);
 
-  const loadImage = useCallback((src: string, label: string) => {
+  const loadImage = useCallback((src: string, label: string, options: { keepText?: boolean } = {}) => {
     setError(null);
     setSavedPath(null);
     const el = new Image();
@@ -204,7 +206,12 @@ export function MediaStudioEditTab({ context }: { context: PluginHostContext }) 
       setCropPct(null);
       setCropDraft(null);
       setCropMode(false);
-      setTextLayers([]);
+      // An AI edit or Undo replaces the picture but keeps the text on top of it
+      // (still editable and removable); opening a different picture starts clean.
+      if (!options.keepText) {
+        setTextLayers([]);
+        setHistory([]);
+      }
       setTargetW(el.naturalWidth);
       setTargetH(el.naturalHeight);
       setPickerOpen(false);
@@ -415,10 +422,38 @@ export function MediaStudioEditTab({ context }: { context: PluginHostContext }) 
     }
   };
 
+  /**
+   * The picture an AI edit works on: crop, rotation and colour adjustments
+   * applied, but WITHOUT the text layers, so text stays a separate layer the
+   * person can still change or remove after the edit.
+   */
   const currentImageDataUrl = useCallback((): string | null => {
-    const canvas = fullResCanvas();
-    return canvas ? canvas.toDataURL("image/png") : null;
-  }, [fullResCanvas]);
+    if (!img) return null;
+    const canvas = renderComposite({
+      img,
+      rotationDeg: adjustments.rotationDeg,
+      cropPct,
+      outW: targetW || img.naturalWidth,
+      outH: targetH || img.naturalHeight,
+      brightness: adjustments.brightness,
+      contrast: adjustments.contrast,
+      saturation: adjustments.saturation,
+      textLayers: [],
+    });
+    return canvas.toDataURL("image/png");
+  }, [img, adjustments, cropPct, targetW, targetH]);
+
+  const applyAiResult = (resultDataUrl: string, before: string) => {
+    setHistory((prev) => [...prev.slice(-9), before]);
+    loadImage(resultDataUrl, sourceLabel, { keepText: true });
+  };
+
+  const undoLastEdit = () => {
+    const previous = history[history.length - 1];
+    if (!previous) return;
+    setHistory((prev) => prev.slice(0, -1));
+    loadImage(previous, sourceLabel, { keepText: true });
+  };
 
   const runSogniEdit = async (tool: string, extra: Record<string, unknown>, busyKey: string) => {
     const imageDataUrl = currentImageDataUrl();
@@ -428,7 +463,7 @@ export function MediaStudioEditTab({ context }: { context: PluginHostContext }) 
     setSavedPath(null);
     try {
       const result = (await editSogni({ tool, imageDataUrl, ...extra })) as { imageDataUrl: string };
-      loadImage(result.imageDataUrl, sourceLabel);
+      applyAiResult(result.imageDataUrl, imageDataUrl);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -444,7 +479,7 @@ export function MediaStudioEditTab({ context }: { context: PluginHostContext }) 
     setSavedPath(null);
     try {
       const result = (await editFal({ imageDataUrl, prompt })) as { imageDataUrl: string };
-      loadImage(result.imageDataUrl, sourceLabel);
+      applyAiResult(result.imageDataUrl, imageDataUrl);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -646,7 +681,14 @@ export function MediaStudioEditTab({ context }: { context: PluginHostContext }) 
             </div>
 
             <div style={card}>
-              <p style={sectionTitle}>AI edits</p>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                <p style={sectionTitle}>AI edits</p>
+                {history.length > 0 ? (
+                  <button type="button" style={busy ? disabledBtn : ghostBtn} disabled={!!busy} onClick={undoLastEdit}>
+                    Undo last AI edit
+                  </button>
+                ) : null}
+              </div>
               {capabilities && !capabilities.sogni && !capabilities.fal ? (
                 <p style={{ fontSize: 12, color: "#868e96", margin: 0 }}>
                   Ask an admin to add a Sogni or Fal.ai API key in Media Studio settings to use AI edits.
@@ -664,7 +706,7 @@ export function MediaStudioEditTab({ context }: { context: PluginHostContext }) 
               ) : null}
               {capabilities?.sogni || capabilities?.fal ? (
                 <div style={field}>
-                  <label style={{ fontSize: 12 }}>Describe a change (for "Inpaint / replace an area" and "Edit with a prompt")</label>
+                  <label style={{ fontSize: 12 }}>Describe a change (for "Restore / clean up" and "Edit with a prompt")</label>
                   <textarea style={{ ...input, minHeight: 50 }} value={aiPrompt} onChange={(e) => setAiPrompt(e.target.value)} placeholder="e.g. replace the sky with a sunset" />
                 </div>
               ) : null}
@@ -676,7 +718,7 @@ export function MediaStudioEditTab({ context }: { context: PluginHostContext }) 
                     disabled={!!busy || !aiPrompt.trim()}
                     onClick={() => runSogniEdit("sogni-restore-photo", { prompt: aiPrompt.trim() }, "inpaint")}
                   >
-                    {busy === "inpaint" ? "Working…" : "Inpaint / replace an area"}
+                    {busy === "inpaint" ? "Working…" : "Restore / clean up (whole picture)"}
                   </button>
                 ) : null}
                 {capabilities?.fal ? (

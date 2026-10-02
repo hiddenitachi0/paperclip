@@ -73,12 +73,17 @@ d("videoStorylineRenderService budget gate", () => {
       ACTOR,
     );
     const scene = await storylines.createScene(companyId, storyline.id, { title: "", notes: null, orderIndex: 0 }, ACTOR);
-    await storylines.createShot(
+    const shot = await storylines.createShot(
       companyId,
       storyline.id,
       { sceneId: scene.id, orderIndex: 0, prompt: "A shot", cameraNotes: null, durationSeconds: 5, lookReferenceAssetIds: [] },
       ACTOR,
     );
+    // These tests are about the budget-cap gate, not the separate
+    // DUR-4317/DUR-4320 storyboard-approval gate -- pre-approve the shot
+    // (bypassing the real still-generation flow, which has its own
+    // dedicated tests) so startRender/reRenderShot reach the budget checks.
+    await db.update(videoShots).set({ storyboardStatus: "approved" }).where(eq(videoShots.id, shot.id));
     return { companyId, storylineId: storyline.id };
   }
 

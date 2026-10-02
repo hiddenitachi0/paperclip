@@ -2,14 +2,20 @@ import { Router, type Request, type RequestHandler } from "express";
 import type { Db } from "@paperclipai/db";
 import { createRequestScopedDb } from "@paperclipai/db";
 import {
+  answerVideoDirectorConversationSchema,
+  approveStoryboardShotSchema,
   approveVideoDirectorRunSchema,
   createVideoSceneSchema,
   createVideoShotSchema,
   createVideoStorylineSchema,
   draftVideoDirectorShotsSchema,
+  editVideoDirectorProposalSchema,
+  dropStoryboardShotSchema,
+  generateStoryboardStillSchema,
   startVideoStorylineRenderSchema,
   updateVideoSceneSchema,
   updateVideoShotSchema,
+  updateVideoStorylineApprovalThresholdSchema,
   updateVideoStorylineSchema,
   updateVideoStorylineSettingsSchema,
 } from "@paperclipai/shared";
@@ -21,8 +27,14 @@ import { logActivity } from "../services/activity-log.js";
 import { getStorageService } from "../storage/index.js";
 import { videoStorylineService, type VideoStorylineActor } from "../services/video-storylines.js";
 import { videoStorylineRenderService } from "../services/video-storyline-render.js";
+import { videoStorylineStitchService } from "../services/video-storyline-stitch.js";
 import { videoStorylineSettingsService } from "../services/video-storyline-settings.js";
+import { videoStorylineStillsService } from "../services/video-storyline-stills.js";
 import { videoStorylineDirectorService } from "../services/video-storyline-director.js";
+import { videoStorylineDirectorConversationStore } from "../services/video-storyline-director-conversation.js";
+import { videoStorylineDirectorReviewService } from "../services/video-storyline-director-review.js";
+import { videoStorylineDirectorDialogueService } from "../services/video-storyline-director-dialogue.js";
+import { videoStorylineDirectorProposalsService } from "../services/video-storyline-director-proposals.js";
 
 /**
  * DUR-4127: company-scoped CRUD + render orchestration for video
@@ -46,8 +58,14 @@ export function videoStorylineRoutes(rawDb: Db) {
   const db = createRequestScopedDb(rawDb);
   const storylines = videoStorylineService(db);
   const render = videoStorylineRenderService(db);
+  const stitch = videoStorylineStitchService(db);
   const settings = videoStorylineSettingsService(db);
   const director = videoStorylineDirectorService(db);
+  const directorConversations = videoStorylineDirectorConversationStore(db);
+  const directorReview = videoStorylineDirectorReviewService(db);
+  const directorDialogue = videoStorylineDirectorDialogueService(db);
+  const directorProposals = videoStorylineDirectorProposalsService(db);
+  const stills = videoStorylineStillsService(db);
 
   function scope() {
     return companyScopeFromParam(rawDb, (req, companyId) => {
@@ -185,6 +203,41 @@ export function videoStorylineRoutes(rawDb: Db) {
     },
   );
 
+  /**
+   * DUR-4317/DUR-4320: the per-company kind:"video_render" approval
+   * threshold (see video-storyline-settings.ts's getApprovalThresholdCents)
+   * -- board-only, same bar as the two feature-flag toggles above, since
+   * this is an owner/admin spend-policy decision, not something an agent
+   * should set for itself.
+   */
+  router.get("/companies/:companyId/video-storylines/settings/approval-threshold", scope(), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    res.json({ thresholdCents: await settings.getApprovalThresholdCents(companyId) });
+  });
+
+  router.patch(
+    "/companies/:companyId/video-storylines/settings/approval-threshold",
+    validate(updateVideoStorylineApprovalThresholdSchema),
+    companyScopeFromParam(rawDb, (req, companyId) => {
+      assertBoardOrgAccess(req);
+      assertCompanyAccess(req, companyId);
+    }),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const thresholdCents = await settings.setApprovalThresholdCents(companyId, req.body.thresholdCents);
+      await logActivity(db, {
+        companyId,
+        actorType: "user",
+        actorId: req.actor.userId ?? "board",
+        action: "video_storylines.approval_threshold_updated",
+        entityType: "company",
+        entityId: companyId,
+        details: { thresholdCents },
+      });
+      res.json({ thresholdCents });
+    },
+  );
+
   // ─── Storylines ────────────────────────────────────────────────────────
 
   router.get("/companies/:companyId/video-storylines", ...gatedScope(), async (req, res) => {
@@ -256,6 +309,23 @@ export function videoStorylineRoutes(rawDb: Db) {
       const companyId = req.params.companyId as string;
       const storylineId = req.params.storylineId as string;
       res.json(await render.cancelRender(companyId, storylineId, actorOf(req)));
+    },
+  );
+
+  /**
+   * DUR-4318: the recovery action off "needs_attention" -- the shots are
+   * already done, only the stitched file failed its quality check, so this
+   * re-queues for stitching (and a fresh quality check) instead of
+   * re-rendering every shot via render/start.
+   */
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/stitch/retry",
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      await stitch.retryStitch(companyId, storylineId);
+      res.json({ ok: true });
     },
   );
 
@@ -385,6 +455,55 @@ export function videoStorylineRoutes(rawDb: Db) {
     },
   );
 
+  // ─── Storyboard-of-stills approval gate (DUR-4317/DUR-4320) ───────────
+
+  /** Contact-sheet summary: every shot's storyboard status/still + per-shot and total cost -- see VideoStoryboardSummary's doc comment in packages/shared. */
+  router.get(
+    "/companies/:companyId/video-storylines/:storylineId/storyboard",
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      res.json(await stills.getStoryboardSummary(companyId, storylineId));
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/shots/:shotId/still",
+    validate(generateStoryboardStillSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      const shotId = req.params.shotId as string;
+      res.json(await stills.generateStill(companyId, storylineId, shotId, actorOf(req)));
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/shots/:shotId/approve",
+    validate(approveStoryboardShotSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      const shotId = req.params.shotId as string;
+      res.json(await stills.approveShot(companyId, storylineId, shotId, actorOf(req)));
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/shots/:shotId/drop",
+    validate(dropStoryboardShotSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      const shotId = req.params.shotId as string;
+      res.json(await stills.dropShot(companyId, storylineId, shotId, actorOf(req)));
+    },
+  );
+
   /**
    * DUR-4196: one-click still-frame preview render -- a round-2 (advanced)
    * feature, same as the director AI routes below. Gated here only by the
@@ -458,6 +577,95 @@ export function videoStorylineRoutes(rawDb: Db) {
       const storylineId = req.params.storylineId as string;
       const runId = req.params.runId as string;
       res.json(await director.rejectRun(companyId, storylineId, runId, actorOf(req)));
+    },
+  );
+
+  // ─── Director conversation (DUR-4327): whole-storyline review, ────────
+  // ─── turn-by-turn dialogue, per-shot proposals ─────────────────────────
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/director/review",
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      res.status(201).json(await directorReview.runReview(companyId, storylineId, actorOf(req)));
+    },
+  );
+
+  router.get(
+    "/companies/:companyId/video-storylines/:storylineId/director/conversation",
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      res.json(await directorConversations.getConversationDetail(companyId, storylineId));
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/director/conversation/answer",
+    validate(answerVideoDirectorConversationSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      res.json(await directorDialogue.answer(companyId, storylineId, req.body, actorOf(req)));
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/director/proposals/:shotId/accept",
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      const shotId = req.params.shotId as string;
+      res.json(await directorProposals.acceptProposal(companyId, storylineId, shotId, actorOf(req)));
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/director/proposals/:shotId/edit",
+    validate(editVideoDirectorProposalSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      const shotId = req.params.shotId as string;
+      res.json(await directorProposals.editProposal(companyId, storylineId, shotId, req.body, actorOf(req)));
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/director/proposals/:shotId/reject",
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      const shotId = req.params.shotId as string;
+      res.json(await directorProposals.rejectProposal(companyId, storylineId, shotId, actorOf(req)));
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/director/proposals/accept-all",
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      res.json(await directorProposals.acceptAll(companyId, storylineId, actorOf(req)));
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/shots/:shotId/restore-prompt",
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      const shotId = req.params.shotId as string;
+      res.json(await directorProposals.restorePrompt(companyId, storylineId, shotId, actorOf(req)));
     },
   );
 
