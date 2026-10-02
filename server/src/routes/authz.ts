@@ -300,6 +300,21 @@ export function assertCompanyOwnerOrInstanceAdmin(req: Request, companyId: strin
  * owner or admin. Refused: agents, service and delegate tokens, operators and
  * viewers -- with a plain sentence saying who can do it.
  */
+/**
+ * Boolean form of the owner/admin/instance-admin check above, for call
+ * sites that need to branch on the answer rather than refuse the request
+ * outright (e.g. DUR-4329/DUR-4335: gating whether a board actor may
+ * override a shared, cross-company spend cap, on an otherwise-allowed
+ * operator-writable route). Never throws.
+ */
+export function isCompanyOwnerOrAdmin(req: Request, companyId: string): boolean {
+  if (req.actor.type !== "board" && req.actor.type !== "board_delegate") return false;
+  if (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin) return true;
+  const membership = (req.actor.memberships ?? []).find((item) => item.companyId === companyId);
+  const role = membership?.status === "active" ? membership.membershipRole : null;
+  return role === "owner" || role === "admin";
+}
+
 export function assertCompanyOwnerAdminOrInstanceAdmin(req: Request, companyId: string, what = "this") {
   assertBoard(req);
   if (req.actor.source !== "local_implicit" && !req.actor.isInstanceAdmin) {
