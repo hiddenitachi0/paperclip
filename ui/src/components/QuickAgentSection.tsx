@@ -497,7 +497,7 @@ export function QuickAgentSection({
               value={agent.laneABaseUrl ?? null}
               placeholder={providerDescriptor.defaultBaseUrl ?? "http://localhost:11434/v1"}
               disabled={settingMutation.isPending}
-              onSave={(next) => settingMutation.mutate({ laneABaseUrl: next })}
+              onSave={(next) => settingMutation.mutateAsync({ laneABaseUrl: next })}
             />
           )}
         </div>
@@ -644,18 +644,26 @@ export function QuickAgentSection({
           </div>
 
           {providerDescriptor.freeForm ? (
-            <TextSetting
-              label="Model"
-              hint={
-                provider === "openrouter"
-                  ? "The OpenRouter model id, for example openai/gpt-4.1-mini or meta-llama/llama-3.3-70b-instruct. Paperclip has no price list for OpenRouter, so its cost is recorded as 0."
-                  : "The model name your local server exposes, for example llama3.1 or qwen2.5:7b. Local models cost nothing."
-              }
-              value={agent.laneAModel ?? null}
-              placeholder={provider === "openrouter" ? "openai/gpt-4.1-mini" : "llama3.1"}
-              disabled={settingMutation.isPending}
-              onSave={(next) => settingMutation.mutate({ laneAModel: next })}
-            />
+            <>
+              {!agent.laneAModel && (
+                <p className="text-xs text-amber-600 dark:text-amber-400" data-testid="quick-agent-model-missing-notice">
+                  Pick a model for {providerDescriptor.label} — quick answers won't work until one is set, and a
+                  message to this agent will be turned into a task instead.
+                </p>
+              )}
+              <TextSetting
+                label="Model"
+                hint={
+                  provider === "openrouter"
+                    ? "The OpenRouter model id, for example openai/gpt-4.1-mini or meta-llama/llama-3.3-70b-instruct. Paperclip has a price for some OpenRouter models; others are recorded as costing 0 until priced."
+                    : "The model name your local server exposes, for example llama3.1 or qwen2.5:7b. Local models cost nothing."
+                }
+                value={agent.laneAModel ?? null}
+                placeholder={provider === "openrouter" ? "openai/gpt-4.1-mini" : "llama3.1"}
+                disabled={settingMutation.isPending}
+                onSave={(next) => settingMutation.mutateAsync({ laneAModel: next })}
+              />
+            </>
           ) : (
             <label className="block space-y-1">
               <span className="text-xs text-muted-foreground">Model</span>
@@ -812,7 +820,18 @@ function rankSecretForProvider(provider: LaneAProvider): (secret: CompanySecret)
   };
 }
 
-/** A free-text value that may also be blank, meaning "use the default". */
+/**
+ * A free-text value that may also be blank, meaning "use the default".
+ *
+ * DUR-4353: this field used to save only on an explicit click of "Save", so
+ * a typed model id or model address was silently lost the moment the person
+ * clicked elsewhere, switched provider, or left the page — nothing told them
+ * the draft was never sent. It now also saves on blur and on Enter, warns
+ * before leaving the page with an unsaved draft, and shows a small
+ * saving/saved/unsaved indicator next to the label so a failed save (shown
+ * right here, not only in the card's own error line) is never mistaken for
+ * a successful one.
+ */
 function TextSetting({
   label,
   hint,
@@ -826,37 +845,80 @@ function TextSetting({
   value: string | null;
   placeholder?: string;
   disabled?: boolean;
-  onSave: (next: string | null) => void;
+  onSave: (next: string | null) => Promise<unknown>;
 }) {
   const [draft, setDraft] = useState<string | null>(null);
+  const [status, setStatus] = useState<"saving" | "saved" | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
   const shown = draft ?? (value ?? "");
   const dirty = draft !== null && draft !== (value ?? "");
 
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
+
+  const save = async () => {
+    if (!dirty || status === "saving") return;
+    const trimmed = shown.trim();
+    const next = trimmed === "" ? null : trimmed;
+    setStatus("saving");
+    setProblem(null);
+    try {
+      await onSave(next);
+      setDraft(null);
+      setStatus("saved");
+    } catch (err) {
+      setStatus(null);
+      setProblem(err instanceof ApiError ? err.message : "Could not save this setting.");
+    }
+  };
+
   return (
     <label className="block space-y-1">
-      <span className="text-xs text-muted-foreground">{label}</span>
+      <span className="flex items-center gap-2 text-xs text-muted-foreground">
+        {label}
+        {status === "saving" && <span data-testid="text-setting-status">Saving…</span>}
+        {status === "saved" && (
+          <span className="text-emerald-600 dark:text-emerald-400" data-testid="text-setting-status">
+            Saved
+          </span>
+        )}
+        {status === null && dirty && (
+          <span className="text-amber-600 dark:text-amber-400" data-testid="text-setting-status">
+            Unsaved
+          </span>
+        )}
+      </span>
       <div className="flex items-center gap-2">
         <Input
           type="text"
           value={shown}
           placeholder={placeholder}
           disabled={disabled}
-          onChange={(event) => setDraft(event.target.value)}
-        />
-        <Button
-          size="sm"
-          variant="secondary"
-          disabled={!dirty || disabled}
-          onClick={() => {
-            const trimmed = shown.trim();
-            onSave(trimmed === "" ? null : trimmed);
-            setDraft(null);
+          onChange={(event) => {
+            setDraft(event.target.value);
+            setStatus(null);
           }}
-        >
+          onBlur={() => void save()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              void save();
+            }
+          }}
+        />
+        <Button size="sm" variant="secondary" disabled={!dirty || disabled} onClick={() => void save()}>
           Save
         </Button>
       </div>
       <span className="block text-xs text-muted-foreground">{hint}</span>
+      {problem && <span className="block text-xs text-destructive">{problem}</span>}
     </label>
   );
 }
@@ -996,8 +1058,13 @@ function ModelHostsSetting({
       await onSave(normalizeLaneAProviderRouting(next));
       setOnlyDraft(null);
       setIgnoreDraft(null);
-    } catch {
-      // The card already shows why it could not be saved; keep what was typed.
+    } catch (err) {
+      // DUR-4353: this used to rely on the card's own error line, far above
+      // this field, to say why the save failed — easy to miss, which is how
+      // a rejected save could look just like a silently-dropped one. Show it
+      // here, next to the fields it is actually about, and keep what was
+      // typed so the operator does not have to retype it.
+      setProblem(err instanceof ApiError ? err.message : "Could not save the model hosts.");
     }
   };
 
