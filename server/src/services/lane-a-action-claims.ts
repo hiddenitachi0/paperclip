@@ -122,6 +122,18 @@ function toolNameMatchesFamily(family: LaneAActionClaimFamily, toolName: string)
   return (rule.toolNameIncludes ?? []).some((needle) => toolName.includes(needle));
 }
 
+/**
+ * A tool name we have specific family rules for, so we know exactly what it
+ * does (and, by elimination, what it does not do). Anything else is a
+ * company API tool or MCP connector with an arbitrary name -- we have no way
+ * to know it *isn't* the one that produced the claimed action.
+ */
+function isKnownBuiltinToolName(toolName: string): boolean {
+  return FAMILY_RULES.some(
+    (rule) => rule.toolNames.includes(toolName) || (rule.toolNameIncludes ?? []).some((needle) => toolName.includes(needle)),
+  );
+}
+
 /** Did a tool call matching this family actually succeed this turn? */
 export function isLaneAActionClaimFulfilled(family: LaneAActionClaimFamily, actions: LaneAAction[]): boolean {
   return actions.some((action) => {
@@ -129,7 +141,12 @@ export function isLaneAActionClaimFulfilled(family: LaneAActionClaimFamily, acti
     if (toolNameMatchesFamily(family, action.tool)) return true;
     // A picture/video/audio made by any tool (not just a name containing
     // "media_studio") still counts for the media family.
-    return family === "media" && Boolean((action as { image?: unknown }).image);
+    if (family === "media" && Boolean((action as { image?: unknown }).image)) return true;
+    // A successful call to a tool we have no family rule for (a company API
+    // tool or MCP connector) can do anything -- trust that it produced the
+    // claimed action rather than forcing a retry onto a tool that was never
+    // going to match any name we recognize.
+    return !isKnownBuiltinToolName(action.tool);
   });
 }
 
