@@ -49,7 +49,18 @@ describe("Media Studio main-menu link and page (DUR-4060)", () => {
     actions["looks.list"] = vi.fn(async () => ({ looks: [], canManage: true, maxReferenceFiles: 4 }));
     actions["looks.defaults.list"] = vi.fn(async () => ({ agents: [], defaults: {} }));
     installBridge();
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ artifacts: [] }), { status: 200 })));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (path: string) => {
+        if (typeof path === "string" && path.includes("/media-studio/direct/history")) {
+          return new Response(JSON.stringify([]), { status: 200 });
+        }
+        if (typeof path === "string" && path.includes("/media-studio/direct/estimate")) {
+          return new Response(JSON.stringify({ kind: "picture", provider: "fal", estimatedCostCents: 8 }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ artifacts: [] }), { status: 200 });
+      }),
+    );
     container = document.createElement("div");
     document.body.appendChild(container);
     window.history.replaceState(null, "", "/media-studio");
@@ -75,14 +86,14 @@ describe("Media Studio main-menu link and page (DUR-4060)", () => {
     root.render(<MediaStudioPage context={{ companyId: COMPANY } as never} />);
     await flush();
 
-    expect(container.textContent).toContain("Media Studio tab");
-    expect(actions["looks.list"]).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Make picture");
+    expect(actions["looks.list"]).toHaveBeenCalledTimes(1);
 
     const looksTab = [...container.querySelectorAll('[role="tab"]')].find((el) => el.textContent === "Looks")!;
     (looksTab as HTMLButtonElement).click();
     await flush();
 
-    expect(actions["looks.list"]).toHaveBeenCalledTimes(1);
+    expect(actions["looks.list"]).toHaveBeenCalledTimes(2);
     expect(navigate).toHaveBeenCalledWith("/media-studio?tab=looks", { replace: true });
   });
 
