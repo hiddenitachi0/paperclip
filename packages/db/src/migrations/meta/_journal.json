@@ -1450,6 +1450,13 @@
       "when": 1790823130000,
       "tag": "0207_company_job_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 208,
+      "version": "7",
+      "when": 1790823140000,
+      "tag": "0208_paperless_ngx_connection",
+      "breakpoints": true
     }
   ]
 }

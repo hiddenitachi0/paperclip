@@ -298,8 +298,8 @@ describe("credential kinds", () => {
     expect(updateDataConnectionSchema.safeParse({ credential: { kind: "password" } }).success).toBe(false);
   });
 
-  it("Shopify and the three file-server kinds are readable today; WooCommerce and Fiken are not", () => {
-    expect([...SUPPORTED_DATA_CONNECTION_KINDS].sort()).toEqual(["ftp_file", "ftps_file", "sftp_file", "shopify"]);
+  it("Shopify, the three file-server kinds and paperless-ngx are readable today; WooCommerce and Fiken are not", () => {
+    expect([...SUPPORTED_DATA_CONNECTION_KINDS].sort()).toEqual(["ftp_file", "ftps_file", "paperless_ngx", "sftp_file", "shopify"]);
     expect(SUPPORTED_DATA_CONNECTION_KINDS).not.toContain("woocommerce");
     expect(SUPPORTED_DATA_CONNECTION_KINDS).not.toContain("fiken");
   });

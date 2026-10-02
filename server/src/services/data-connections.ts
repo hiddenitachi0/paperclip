@@ -77,6 +77,8 @@ function secretKindForDataSource(kind: DataConnectionKind): SecretKind {
       return "shopify_admin_token";
     case "fiken":
       return "fiken_api_token";
+    case "paperless_ngx":
+      return "paperless_ngx_api_token";
     default:
       return "other";
   }
