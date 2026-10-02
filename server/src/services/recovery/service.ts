@@ -2711,11 +2711,19 @@ export function recoveryService(
       escalate = consecutiveFailureCount >= CONSECUTIVE_FAILURE_ESCALATION_THRESHOLD;
     }
 
+    const workspaceValidationPayloadForNextAction =
+      recoveryCause === "workspace_validation_failed" ? readWorkspaceValidationPayload(input.latestRun) : null;
+    // DUR-4316: name the other issue in the recovery note when the blocked
+    // worktree's branch name let us guess it, so the recovery owner knows
+    // whose work they'd be clobbering without having to go dig through git.
+    const otherIssueIdentifierGuess = readNonEmptyString(workspaceValidationPayloadForNextAction?.otherIssueIdentifierGuess);
     const baseNextAction = recoveryCause === SUCCESSFUL_RUN_MISSING_STATE_REASON
       ? "Choose and record a valid issue disposition without copying transcript content."
       : recoveryCause === "workspace_validation_failed"
-        ? readWorkspaceValidationPayload(input.latestRun)?.reason === "git_worktree_branch_incoherence"
-          ? "Repair the source issue git worktree branch incoherence, or choose a new execution workspace, before resuming adapter execution."
+        ? workspaceValidationPayloadForNextAction?.reason === "git_worktree_branch_incoherence"
+          ? otherIssueIdentifierGuess
+            ? `Repair the source issue git worktree branch incoherence, or choose a new execution workspace, before resuming adapter execution. The worktree appears to hold work for issue ${otherIssueIdentifierGuess}; do not overwrite it.`
+            : "Repair the source issue git worktree branch incoherence, or choose a new execution workspace, before resuming adapter execution."
           : "Repair the source issue workspace link, project workspace cwd, or git checkout before resuming adapter execution."
       : recoveryCause === "configuration_incomplete"
         ? "Bind the missing secret(s) named in the run failure to the agent/project/routine env before resuming adapter execution."

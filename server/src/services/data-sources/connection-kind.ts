@@ -153,12 +153,11 @@ export interface PendingReadContext extends DataSourceReadContextBase {
 }
 
 /**
- * What the paperless-ngx Test (and, later, its documents adapter) gets:
- * `fetch` is already pinned to this company's own container host:port and
- * already carries the `Authorization: Token …` header, through
- * createPinnedInternalFetch -- it can reach nothing else. No agent tool
- * reads through this context yet (DUR-4302 is plumbing only); that is a
- * separate, later slice.
+ * What the paperless-ngx Test and its documents adapter (DUR-4303:
+ * search_documents/get_document) get: `fetch` is already pinned to this
+ * company's own container host:port and already carries the
+ * `Authorization: Token …` header, through createPinnedInternalFetch -- it
+ * can reach nothing else.
  */
 export interface PaperlessReadContext extends DataSourceReadContextBase {
   kind: "paperless_ngx";

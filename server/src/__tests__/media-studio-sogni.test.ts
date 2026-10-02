@@ -370,6 +370,11 @@ describe("Sogni provider", () => {
     }
     expect(() => assertSogniStorageUrl("https://user:pw@b.s3-accelerate.amazonaws.com/x")).toThrow(/not Sogni's picture storage/);
     expect(assertSogniStorageUrl(ARTIFACT_URL).hostname).toBe("complete-images.s3-accelerate.amazonaws.com");
+    // Sogni's own media host (2 Oct 2026), exact match only.
+    expect(assertSogniStorageUrl("https://media.sogni.ai/results/abc/picture.png?sig=1").hostname).toBe("media.sogni.ai");
+    expect(() => assertSogniStorageUrl("https://evil.media.sogni.ai/picture.png")).toThrow(/not Sogni's picture storage/);
+    expect(() => assertSogniStorageUrl("https://media.sogni.ai.evil.example/picture.png")).toThrow(/not Sogni's picture storage/);
+    expect(() => assertSogniStorageUrl("http://media.sogni.ai/picture.png")).toThrow(/not Sogni's picture storage/);
   });
 
   it("uploads reference pictures to Sogni's storage and sends only Sogni's presigned addresses to edit_image", async () => {
