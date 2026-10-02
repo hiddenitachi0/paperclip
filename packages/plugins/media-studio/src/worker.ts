@@ -903,6 +903,13 @@ export const SAFE_FOR_WORK_AVOID = "nudity, nsfw, text, letters, words, watermar
  * anything: it runs before the daily limit is reserved, so a typo in a look
  * name does not use up one of the day's pictures.
  */
+/** True when the text names this model id as a whole token (case-insensitive). */
+function modelNamedIn(model: string, text: string): boolean {
+  const escaped = model.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (!escaped) return false;
+  return new RegExp(`(?<![\\w./-])${escaped}(?![\\w./-])`, "iu").test(text);
+}
+
 export async function prepareGeneration(
   ctx: PluginContext,
   companyId: string,
@@ -945,15 +952,20 @@ export async function prepareGeneration(
   let lookReason: LookReason | null = null;
   let ruleText: string | null = null;
   const rawLook = typeof params.look === "string" ? params.look.trim() : "";
+  let unknownLookName: string | null = null;
+  const notes: string[] = [];
   const noLook = rawLook.toLowerCase() === "none";
   if (noLook) {
     // Leave look/lookReason null: no named, mentioned, automatic or default look.
-  } else if (rawLook) {
-    const looks = await loadLooks(ctx, companyId);
-    look = findLook(looks, rawLook) ?? null;
-    if (!look) return { error: `There is no saved look called "${rawLook}". ${lookNamesSentence(looks)}` };
-    lookReason = "look-input";
   } else {
+    const looks = await loadLooks(ctx, companyId);
+    if (rawLook) {
+      look = findLook(looks, rawLook) ?? null;
+      if (look) lookReason = "look-input";
+      else unknownLookName = rawLook;
+    }
+  }
+  if (!noLook && !look) {
     const looks = await loadLooks(ctx, companyId);
     if (looks.length > 0) {
       const mentioned = lookMentionedIn(input.prompt, looks);
@@ -981,6 +993,12 @@ export async function prepareGeneration(
     }
   }
 
+  if (unknownLookName) {
+    notes.push(
+      `There is no saved look called "${unknownLookName}", so ${look ? `the look "${look.name}" was used instead` : "no look was used (none applies automatically and no default look is set)"}. ${lookNamesSentence(await loadLooks(ctx, companyId))}`,
+    );
+  }
+
   const referenceFileIds = [...(look?.referenceFileIds ?? [])];
   // The look's pictures keep their roles; pictures the agent adds are "other".
   const referenceRoles: ReferenceRole[] = [...(look?.referenceRoles ?? [])];
@@ -994,7 +1012,25 @@ export async function prepareGeneration(
   const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
   const settingsProvider = String(cfg.provider ?? "mock").toLowerCase();
   const catalog = sogniCatalogFor(ctx);
-  const callModel = input.model;
+  // A model named in the call only counts when a person asked for it by name.
+  let callModel = input.model;
+  if (callModel) {
+    const texts: Array<string | null | undefined> = [options.requesterMessage];
+    const issueId = typeof params.issueId === "string" ? params.issueId.trim() : "";
+    if (issueId) {
+      try {
+        const issue = await ctx.issues.get(issueId, companyId);
+        texts.push(issue?.title, issue?.description);
+      } catch {
+        // No readable task: nothing names the model.
+      }
+    }
+    if (!texts.some((t) => t && modelNamedIn(callModel!, t))) {
+      notes.push(`The model "${callModel}" was ignored, because nobody asked for it by name. The look's or the settings' model was used instead.`);
+      callModel = undefined;
+      input.model = undefined;
+    }
+  }
   // A model name that is neither a known Sogni key nor a Fal path may still be one of Sogni's many models.
   if (callModel && !serviceForModel(callModel) && isPictureService(settingsProvider)) await catalog.models();
   const chosen = chooseService(
@@ -1017,7 +1053,6 @@ export async function prepareGeneration(
     : Boolean(look?.model) && chosen.useLookModel;
   if (lookModelUsed && !callModel) input.model = look!.model!;
 
-  const notes: string[] = [];
   // Sogni's own limits, checked here so a mistake does not use up one of the day's pictures.
   let negativeAllowed = false;
   if (chosen.service === "sogni") {

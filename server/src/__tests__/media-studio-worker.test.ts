@@ -281,15 +281,17 @@ describe("media-studio saved looks", () => {
     await harness.ctx.state.set(looksKey, [catalogue]);
     const reserve = vi.spyOn(harness.ctx.personas, "reserveDailyGeneration");
     const result = await harness.executeTool<any>(TOOL_GENERATE, { prompt: "a sofa", look: "Summer" }, runCtx);
-    expect(result.error).toBe('There is no saved look called "Summer". Saved looks: Catalogue.');
-    expect(reserve).not.toHaveBeenCalled();
+    expect(result.error).toBeUndefined();
+    expect(result.content).toContain('There is no saved look called "Summer", so no look was used');
+    expect(result.content).toContain("Saved looks: Catalogue.");
   });
 
   it("never reads another company's looks", async () => {
     const harness = await setup();
     await harness.ctx.state.set({ ...looksKey, scopeId: OTHER_COMPANY }, [catalogue]);
     const result = await harness.executeTool<any>(TOOL_GENERATE, { prompt: "a sofa", look: "Catalogue" }, runCtx);
-    expect(result.error).toMatch(/There is no saved look called "Catalogue". No looks are saved yet./);
+    expect(result.error).toBeUndefined();
+    expect(result.content).toContain('There is no saved look called "Catalogue"');
   });
 
   it("lists the looks for the quick agent (read only)", async () => {

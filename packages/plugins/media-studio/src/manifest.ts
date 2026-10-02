@@ -103,7 +103,7 @@ export const GENERATE_IMAGE_PARAMETERS = {
     model: {
       type: "string",
       description:
-        "Optional. A specific model, only when the person names one. Fal models look like fal-ai/flux/schnell; Sogni models look like z-turbo or dark_beast_z_image_turbo_v9_bf16 (any model in Sogni's model list). A model picks its own service. Better: use a saved look, which can also carry the model's LoRAs.",
+        "Optional. A specific model, only when the person explicitly names one in their own message. Never invent or guess a model name; leave it out otherwise. A saved look carries its own model.",
     },
     provider: {
       type: "string",
@@ -174,7 +174,7 @@ export const GENERATE_VIDEO_PARAMETERS = {
       type: "string",
       description: "Optional. A file id of a picture in this company's Files (or a picture a saved Look made) to start the video from — image-to-video, or \"continue from last frame\" using an earlier clip's last frame.",
     },
-    model: { type: "string", description: "Optional. A specific video model, only when the person names one." },
+    model: { type: "string", description: "Optional. A specific video model, only when the person explicitly names one in their own message." },
     provider: { type: "string", enum: ["fal", "sogni"], description: "Optional. Which video service to use for this one video. Leave it out to use the one in Media Studio settings (falling back to fal if settings are not a video service)." },
     aspectRatio: { type: "string", description: "Optional video shape, e.g. 16:9, 9:16, 1:1. Leave it out for the model's own default." },
     durationSeconds: { type: "integer", minimum: 1, maximum: 60, description: "Optional length in seconds, when the model takes one." },
@@ -193,12 +193,12 @@ export const GENERATE_AUDIO_PARAMETERS = {
   properties: {
     prompt: { type: "string", description: "For mode \"music\": what it should sound like. For mode \"speech\": the words to say." },
     mode: { type: "string", enum: ["music", "speech"], description: "\"music\" (the usual) or \"speech\" (text-to-speech)." },
-    voice: { type: "string", description: "Optional, mode \"speech\" only. A specific voice, only when the person names one." },
+    voice: { type: "string", description: "Optional, mode \"speech\" only. A specific voice, only when the person explicitly names one in their own message." },
     issueId: {
       type: "string",
       description: "Optional. The task to post the finished audio to (as a comment with a Files link) once it's ready; only a task the person named or that is assigned to you. Leave it out to save it to the company's Files.",
     },
-    model: { type: "string", description: "Optional. A specific audio model, only when the person names one." },
+    model: { type: "string", description: "Optional. A specific audio model, only when the person explicitly names one in their own message." },
     durationSeconds: { type: "integer", minimum: 1, maximum: 300, description: "Optional length in seconds, mode \"music\" only, when the model takes one." },
     seed: { type: "integer", minimum: 0, maximum: 4294967295, description: "Optional. Reuse a seed for a close variation, when the model takes one." },
   },
@@ -253,6 +253,8 @@ const manifest: PaperclipPluginManifestV1 = {
     // agent currently owns the checkout on any issueId it supplies before a
     // background job is started against it.
     "issues.checkout",
+    // DUR-4360: read the attached task's title/description to see whether a person named a model.
+    "issues.read",
   ],
   entrypoints: {
     worker: "./dist/worker.js",
