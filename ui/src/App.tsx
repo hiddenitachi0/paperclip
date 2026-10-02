@@ -73,7 +73,7 @@ import { InstanceSettings } from "./pages/InstanceSettings";
 import { InstanceExperimentalSettings } from "./pages/InstanceExperimentalSettings";
 import { ProfileSettings } from "./pages/ProfileSettings";
 import { PluginManager } from "./pages/PluginManager";
-import { PluginSettings } from "./pages/PluginSettings";
+import { PluginSettingsRoute } from "./pages/PluginSettingsRoute";
 import { AdapterManager } from "./pages/AdapterManager";
 import { PluginPage } from "./pages/PluginPage";
 import { OrgChart } from "./pages/OrgChart";
@@ -129,7 +129,7 @@ function boardRoutes() {
       <Route path="company/settings/instance/heartbeats" element={<InstanceSettings />} />
       <Route path="company/settings/instance/experimental" element={<InstanceExperimentalSettings />} />
       <Route path="company/settings/instance/plugins" element={<PluginManager />} />
-      <Route path="company/settings/instance/plugins/:pluginId" element={<PluginSettings />} />
+      <Route path="company/settings/instance/plugins/:pluginId" element={<PluginSettingsRoute />} />
       <Route path="company/settings/instance/adapters" element={<AdapterManager />} />
       {/* Media Studio's "Looks" page moved from Company settings into a Looks
           tab on its own main-menu page (DUR-4060); keep the old settings URL

@@ -50,6 +50,7 @@ import {
   parseAssigneeValue,
 } from "@/lib/assignees";
 import { queryKeys } from "@/lib/queryKeys";
+import { PluginConfigPanel } from "@/components/PluginConfigForm";
 import {
   getRecentAssigneeSelectionIds,
   sortAgentsByRecency,
@@ -698,6 +699,7 @@ export function initPluginBridge(
       AssigneePicker: PluginSdkAssigneePicker,
       ProjectPicker: PluginSdkProjectPicker,
       ManagedRoutinesList: HostManagedRoutinesList,
+      PluginConfigForm: PluginConfigPanel,
     },
   };
 }

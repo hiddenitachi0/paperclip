@@ -49,6 +49,7 @@ import {
   ACTION_GENERATE,
   ACTION_LOOKS_DELETE,
   ACTION_LOOKS_LIST,
+  ACTION_SETTINGS_ACCESS,
   ACTION_LOOK_DEFAULTS_LIST,
   ACTION_LOOK_DEFAULTS_SET,
   ACTION_LOOK_RULES_LIST,
@@ -1505,6 +1506,11 @@ const plugin = definePlugin({
       if (!input.prompt) throw new Error("prompt is required");
       return runGeneration(ctx, input);
     });
+
+    // Tells the page whether to show the Settings tab: owners/admins only.
+    ctx.actions.register(ACTION_SETTINGS_ACCESS, async (_params, context) => ({
+      canManage: context.actor.type === "user" && context.actor.canManageCompany === true,
+    }));
 
     // Looks page (Company settings → Media Studio looks). Anyone in the
     // company may see the list; only an owner/admin may change it. The host
