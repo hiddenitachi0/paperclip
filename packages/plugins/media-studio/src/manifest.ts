@@ -14,6 +14,7 @@ export const TOOL_GENERATE_AUDIO = "generate-audio";
 export const TOOL_CHECK_MEDIA_JOB = "check-media-job";
 export const ACTION_GENERATE = "generate";
 export const ACTION_LOOKS_LIST = "looks.list";
+export const ACTION_SETTINGS_ACCESS = "settings.access";
 export const ACTION_LOOKS_SAVE = "looks.save";
 export const ACTION_LOOKS_DELETE = "looks.delete";
 /** The company's agents and each one's default look, for the looks page. */

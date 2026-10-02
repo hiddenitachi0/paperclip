@@ -283,6 +283,10 @@ DECLARE
     -- schema, as for the tables above.
     'mail_messages',
     'mail_secretary_items',
+    -- DUR-4329. Created, granted on and policed in
+    -- 0212_media_studio_direct_creations.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'media_studio_direct_creations',
     -- Morning report (migration 0183): the outbox row per day a report
     -- was generated. Created (and granted on) in 0183_morning_report.sql;
     -- listed here so the login-role lists match the schema, as for the
@@ -540,6 +544,10 @@ DECLARE
     -- schema, as for the tables above.
     'mail_messages',
     'mail_secretary_items',
+    -- DUR-4329. Created, granted on and policed in
+    -- 0212_media_studio_direct_creations.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'media_studio_direct_creations',
     -- Morning report (migration 0183): the outbox row per day a report
     -- was generated. Created (and granted on) in 0183_morning_report.sql;
     -- listed here so the login-role lists match the schema, as for the

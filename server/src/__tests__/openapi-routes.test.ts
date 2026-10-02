@@ -129,6 +129,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   // unauthenticated capability link handed out by get_document, not a
   // conventional REST route, and is not yet in the public OpenAPI document.
   "documents-download.ts",
+  // Media Studio Create tab direct-generation routes (DUR-4329) are board-only and not yet in the public OpenAPI document.
+  "media-studio-direct.ts",
 ]);
 
 function createApp() {

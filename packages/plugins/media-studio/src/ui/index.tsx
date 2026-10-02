@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PluginCompanySettingsPageProps, PluginDetailTabProps, PluginPageProps, PluginSidebarProps } from "@paperclipai/plugin-sdk/ui";
-import { usePluginAction, useHostNavigation } from "@paperclipai/plugin-sdk/ui";
+import { usePluginAction, useHostNavigation, PluginConfigForm } from "@paperclipai/plugin-sdk/ui";
 import { MediaStudioEditTab } from "./edit-tab.js";
 
 // The plugin UI is served as a standalone ES module, so it must not import from
@@ -11,6 +11,7 @@ const MAIN_PAGE_ROUTE = "media-studio";
 const ACTION_GENERATE = "generate";
 const PROVIDER = "media-studio";
 const ACTION_LOOKS_LIST = "looks.list";
+const ACTION_SETTINGS_ACCESS = "settings.access";
 const ACTION_LOOKS_SAVE = "looks.save";
 const ACTION_LOOKS_DELETE = "looks.delete";
 const ACTION_LOOK_DEFAULTS_LIST = "looks.defaults.list";
@@ -2142,13 +2143,13 @@ export function SidebarLink(_props: PluginSidebarProps) {
   );
 }
 
-type MediaStudioTabKey = "create" | "edit" | "looks" | "storylines";
+type MediaStudioTabKey = "create" | "edit" | "looks" | "storylines" | "settings";
 
 /** Reads ?tab= from the current URL without pulling in the host router (standalone module). */
 function initialTabFromLocation(): MediaStudioTabKey {
   if (typeof window === "undefined") return "create";
   const tab = new URLSearchParams(window.location.search).get("tab");
-  return tab === "looks" || tab === "edit" || tab === "storylines" ? tab : "create";
+  return tab === "looks" || tab === "edit" || tab === "storylines" || tab === "settings" ? tab : "create";
 }
 
 const tabBtn: React.CSSProperties = { padding: "8px 14px", borderRadius: 8, border: "1px solid transparent", cursor: "pointer", fontSize: 13, fontWeight: 600, background: "transparent" };
@@ -2164,6 +2165,20 @@ const tabBtnInactive: React.CSSProperties = { ...tabBtn, color: "#495057" };
 export function MediaStudioPage({ context }: PluginPageProps) {
   const nav = useHostNavigation();
   const [tab, setTab] = useState<MediaStudioTabKey>(initialTabFromLocation);
+  // Settings is for owners/admins only; everyone else never sees the tab, and a
+  // link straight to it shows the Create tab instead.
+  const checkSettingsAccess = usePluginAction(ACTION_SETTINGS_ACCESS);
+  const [canManageSettings, setCanManageSettings] = useState<boolean | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    checkSettingsAccess({})
+      .then((result) => { if (!cancelled) setCanManageSettings((result as { canManage?: boolean } | null)?.canManage === true); })
+      .catch(() => { if (!cancelled) setCanManageSettings(false); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const showSettings = canManageSettings === true;
+  const activeTab: MediaStudioTabKey = tab === "settings" && canManageSettings === false ? "create" : tab;
 
   const selectTab = (next: MediaStudioTabKey) => {
     setTab(next);
@@ -2179,24 +2194,31 @@ export function MediaStudioPage({ context }: PluginPageProps) {
         </p>
       </div>
       <div role="tablist" aria-label="Media Studio" style={{ display: "flex", gap: 8, borderBottom: "1px solid rgba(128,128,128,0.25)", paddingBottom: 8 }}>
-        <button type="button" role="tab" aria-selected={tab === "create"} style={tab === "create" ? tabBtnActive : tabBtnInactive} onClick={() => selectTab("create")}>
+        <button type="button" role="tab" aria-selected={activeTab === "create"} style={activeTab === "create" ? tabBtnActive : tabBtnInactive} onClick={() => selectTab("create")}>
           Create
         </button>
-        <button type="button" role="tab" aria-selected={tab === "edit"} style={tab === "edit" ? tabBtnActive : tabBtnInactive} onClick={() => selectTab("edit")}>
+        <button type="button" role="tab" aria-selected={activeTab === "edit"} style={activeTab === "edit" ? tabBtnActive : tabBtnInactive} onClick={() => selectTab("edit")}>
           Edit
         </button>
-        <button type="button" role="tab" aria-selected={tab === "looks"} style={tab === "looks" ? tabBtnActive : tabBtnInactive} onClick={() => selectTab("looks")}>
+        <button type="button" role="tab" aria-selected={activeTab === "looks"} style={activeTab === "looks" ? tabBtnActive : tabBtnInactive} onClick={() => selectTab("looks")}>
           Looks
         </button>
-        <button type="button" role="tab" aria-selected={tab === "storylines"} style={tab === "storylines" ? tabBtnActive : tabBtnInactive} onClick={() => selectTab("storylines")}>
+        <button type="button" role="tab" aria-selected={activeTab === "storylines"} style={activeTab === "storylines" ? tabBtnActive : tabBtnInactive} onClick={() => selectTab("storylines")}>
           Storylines
         </button>
+        {showSettings ? (
+          <button type="button" role="tab" aria-selected={activeTab === "settings"} style={activeTab === "settings" ? tabBtnActive : tabBtnInactive} onClick={() => selectTab("settings")}>
+            Settings
+          </button>
+        ) : null}
       </div>
-      {tab === "create" ? (
+      {activeTab === "create" ? (
         <MediaStudioCreateTab />
-      ) : tab === "edit" ? (
+      ) : activeTab === "settings" ? (
+        showSettings ? <PluginConfigForm pluginId={PLUGIN_ID} /> : null
+      ) : activeTab === "edit" ? (
         <MediaStudioEditTab context={context} />
-      ) : tab === "storylines" ? (
+      ) : activeTab === "storylines" ? (
         <MediaStudioStorylinesPage context={context} />
       ) : (
         <MediaStudioLooksPage context={context} />

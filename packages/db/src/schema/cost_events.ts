@@ -11,7 +11,13 @@ export const costEvents = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     companyId: uuid("company_id").notNull().references(() => companies.id),
-    agentId: uuid("agent_id").notNull().references(() => agents.id),
+    // DUR-4329: nullable for a board-user-triggered cost with no agent
+    // involved at all (Media Studio's Create tab direct generation) --
+    // every other write path still always sets this. createdByUserId below
+    // is this row's counterpart to assets.createdByUserId (same bare text
+    // column, no FK: board user identity isn't a packages/db table).
+    agentId: uuid("agent_id").references(() => agents.id),
+    createdByUserId: text("created_by_user_id"),
     issueId: uuid("issue_id").references(() => issues.id),
     projectId: uuid("project_id").references(() => projects.id),
     goalId: uuid("goal_id").references(() => goals.id),
