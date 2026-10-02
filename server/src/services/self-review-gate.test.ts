@@ -37,16 +37,20 @@ import {
   detectRiskySurfaceFromDiff,
   detectRiskySurfaceFromDiffContent,
   evaluateSelfReviewDoneGate,
+  extractReviewedCommitShaFromSummaryBody,
   MISSING_RUN_ID_GATE_MESSAGE,
   findCompletedSelfReviewPassForIssue,
   findExistingSelfReviewPassNoticeCommentForRun,
   findOutstandingSelfReviewPassForIssue,
+  findSelfReviewPassSummaryComment,
   getChangedDiffContentForIssueWorkspace,
   getChangedFilePathsForIssueWorkspace,
+  getCurrentHeadShaForIssueWorkspace,
   isSelfReviewPassContext,
   isSelfReviewPassRun,
   issueExecutionPolicyOptsOutOfSelfReview,
   postSelfReviewPassNoticeComment,
+  upsertSelfReviewPassNoticeComment,
   type SelfReviewGateWakeup,
   type SelfReviewGateWakeupNotScheduledInfo,
 } from "./self-review-gate.js";
@@ -1954,6 +1958,165 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
 
       expect(result).toBeNull();
       expect(calls).toHaveLength(0);
+    });
+  });
+
+  describe("DUR-4319: extractReviewedCommitShaFromSummaryBody", () => {
+    it("extracts the reviewed commit sha from a summary body", () => {
+      const sha = extractReviewedCommitShaFromSummaryBody(
+        "<!-- paperclip:self-review-pass-summary:v1 -->\n**Reviewed commit:** `abc1234`\n\nSome instruction text.",
+      );
+      expect(sha).toBe("abc1234");
+    });
+
+    it("returns null when the body has no reviewed-commit line", () => {
+      expect(extractReviewedCommitShaFromSummaryBody("Some ordinary comment body.")).toBeNull();
+    });
+  });
+
+  describe("DUR-4319: upsertSelfReviewPassNoticeComment / findSelfReviewPassSummaryComment", () => {
+    it("inserts a single summary comment on first use, stamped with the reviewed commit", async () => {
+      const { companyId, issueId, runId } = await seedCodeIssueFixture();
+
+      await upsertSelfReviewPassNoticeComment(db, {
+        companyId,
+        issueId,
+        sourceRunId: runId,
+        headSha: "aaa1111",
+        content: "First review content.",
+      });
+
+      const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+      expect(comments).toHaveLength(1);
+      expect(comments[0]?.body).toContain("**Reviewed commit:** `aaa1111`");
+      expect(comments[0]?.body).toContain("First review content.");
+      expect(comments[0]?.authorType).toBe("system");
+
+      const found = await findSelfReviewPassSummaryComment(db, { companyId, issueId });
+      expect(found?.id).toBe(comments[0]?.id);
+    });
+
+    it("edits the same comment in place on a later push, marking the prior commit superseded instead of posting a new one", async () => {
+      const { companyId, agentId, issueId, runId } = await seedCodeIssueFixture();
+
+      await upsertSelfReviewPassNoticeComment(db, {
+        companyId,
+        issueId,
+        sourceRunId: runId,
+        headSha: "aaa1111",
+        content: "First review content.",
+      });
+      const afterFirst = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+      const firstCommentId = afterFirst[0]?.id;
+
+      const secondRunId = randomUUID();
+      await db.insert(heartbeatRuns).values({
+        id: secondRunId,
+        companyId,
+        agentId,
+        invocationSource: "assignment",
+        status: "running",
+      });
+      await upsertSelfReviewPassNoticeComment(db, {
+        companyId,
+        issueId,
+        sourceRunId: secondRunId,
+        headSha: "bbb2222",
+        content: "Second review content.",
+      });
+
+      const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+      // Still exactly one comment -- edited in place, not appended.
+      expect(comments).toHaveLength(1);
+      expect(comments[0]?.id).toBe(firstCommentId);
+      expect(comments[0]?.body).toContain("**Reviewed commit:** `bbb2222`");
+      expect(comments[0]?.body).toContain("Second review content.");
+      expect(comments[0]?.body).toContain("Supersedes the previous review of commit `aaa1111`");
+      // The old content was replaced, not retained verbatim alongside the new verdict.
+      expect(comments[0]?.body).not.toContain("First review content.");
+      expect(comments[0]?.createdByRunId).toBe(secondRunId);
+    });
+  });
+
+  describe("DUR-4319: evaluateSelfReviewDoneGate upserts one summary comment per issue across pushes", () => {
+    async function seedIssueWithWorkspace(input: { changedFilePath: string; content?: string }) {
+      const { companyId, agentId, projectId, issueId, runId } = await seedCodeIssueFixture();
+      const repoRoot = await createTempRepoWithChange(input.changedFilePath, input.content);
+      const executionWorkspaceId = randomUUID();
+      await db.insert(executionWorkspaces).values({
+        id: executionWorkspaceId,
+        companyId,
+        projectId,
+        mode: "shared_workspace",
+        strategyType: "project_primary",
+        name: "test workspace",
+        status: "active",
+        providerType: "local_fs",
+        cwd: repoRoot,
+        baseRef: "base",
+        sourceIssueId: issueId,
+      });
+      await db.update(issues).set({ executionWorkspaceId }).where(eq(issues.id, issueId));
+      return { companyId, agentId, projectId, issueId, runId, executionWorkspaceId, repoRoot };
+    }
+
+    it("DUR-4319 acceptance: repeated pushes leave one up-to-date comment showing the current reviewed commit, never silently applying an old verdict to a newer commit", async () => {
+      const { companyId, projectId, agentId, issueId, repoRoot } = await seedIssueWithWorkspace({
+        changedFilePath: "ui/src/components/WidgetCard.tsx",
+      });
+      await runGit(repoRoot, ["config", "user.name", "Paperclip Test"]);
+
+      // DUR-4288's unrelated total-attempts cap (MAX_SELF_REVIEW_PASSES_FOR_SHIFTING_DIFF)
+      // bounds how many genuinely-different diffs on one issue get their own pass, regardless
+      // of this ticket's change, so this stays under that cap to isolate what DUR-4319 is
+      // actually testing: upsert-in-place, not the unrelated runaway-loop safety valve.
+      const pushCount = MAX_SELF_REVIEW_PASSES_FOR_SHIFTING_DIFF;
+      const headShas: string[] = [];
+      for (let push = 0; push < pushCount; push++) {
+        if (push > 0) {
+          const filePath = path.join(repoRoot, `ui/src/components/WidgetCard${push}.tsx`);
+          await fs.writeFile(filePath, `// push ${push}\n`, "utf8");
+          await runGit(repoRoot, ["add", "."]);
+          await runGit(repoRoot, ["commit", "-m", `Push ${push}`]);
+        }
+        const { stdout } = await execFileAsync("git", ["-C", repoRoot, "rev-parse", "HEAD"]);
+        headShas.push(stdout.trim());
+
+        const runId = randomUUID();
+        await db.insert(heartbeatRuns).values({
+          id: runId,
+          companyId,
+          agentId,
+          invocationSource: "assignment",
+          status: "running",
+        });
+        const { wakeup } = makeRecordingWakeup(db, companyId);
+
+        await evaluateSelfReviewDoneGate({
+          db,
+          wakeup,
+          issue: { id: issueId, identifier: "T-1", companyId, projectId, executionPolicy: null },
+          actor: { actorType: "agent", agentId, runId },
+          requestedStatus: "done",
+          currentStatus: "in_progress",
+        });
+      }
+
+      const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+      // Exactly one review comment survives every push.
+      expect(comments).toHaveLength(1);
+      const finalBody = comments[0]?.body ?? "";
+      const lastSha = headShas[pushCount - 1];
+      const priorSha = headShas[pushCount - 2];
+      expect(finalBody).toContain(`**Reviewed commit:** \`${lastSha}\``);
+      // The verdict covering an earlier, now-superseded commit never silently reads as still
+      // covering it -- it's marked superseded, and that exact "reviewed commit" line for the
+      // prior sha is gone from the current body.
+      expect(finalBody).not.toContain(`**Reviewed commit:** \`${priorSha}\``);
+      expect(finalBody).toContain(`Supersedes the previous review of commit \`${priorSha}\``);
+      // The instruction for this last pass told the agent to only check what changed since
+      // the previously-reviewed commit, not to re-review the whole diff from scratch.
+      expect(finalBody).toContain(`already has a review on file covering commit \`${priorSha}\``);
     });
   });
 
