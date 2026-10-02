@@ -5,7 +5,10 @@ import {
 } from "@paperclipai/shared";
 import { unprocessable } from "../../errors.js";
 import { createPaperlessNgxOutboundPolicy, createPinnedInternalFetch, type OutboundFetch } from "../safe-outbound-fetch.js";
-import type { PaperlessReadContext } from "./connection-kind.js";
+import type { DataSourceReadContext, PaperlessReadContext } from "./connection-kind.js";
+import { DataSourceUpstreamError } from "./contract.js";
+import type { DocumentsAdapter, DocumentsOutcome } from "./documents-contract.js";
+import { getPaperlessDocument, PaperlessDocumentNotFoundError, searchPaperlessDocuments } from "./paperless-documents-client.js";
 import type { DataSourceKindDefinition, OpenReadContextInput } from "./registry.js";
 import { runPaperlessConnectionCheck } from "./paperless-connection-check.js";
 
@@ -14,11 +17,41 @@ import { runPaperlessConnectionCheck } from "./paperless-connection-check.js";
  * container per company (Filip, 1 Oct 2026), never publicly reachable --
  * `openPaperlessContext` is the one place that builds the pinned, internal-
  * only, host:port-exact transport (createPinnedInternalFetch) and attaches
- * the company's own token to it. No adapter reads through this context yet:
- * the `search_documents`/`get_document` agent tools are a separate, later
- * slice (see doc/plans/2026-10-01-paperless-ngx-documents-integration.md).
- * Until that slice ships, the only thing that uses this context is "Test".
+ * the company's own token to it.
+ *
+ * DUR-4303: `adapters.documents` is the read-only search_documents/
+ * get_document surface, through this same pinned context -- it never opens
+ * its own transport, so every document read is bound to the exact same
+ * host:port-pinned, company-own-token-carrying fetch "Test" already uses.
  */
+function documentsAdapterFor(context: PaperlessReadContext): DocumentsAdapter {
+  async function run<T>(fn: () => Promise<T>): Promise<DocumentsOutcome<T>> {
+    const startRequests = context.stats().requests;
+    const startedAt = Date.now();
+    try {
+      const result = await fn();
+      return { ok: true, result, audit: { upstreamRequests: context.stats().requests - startRequests, durationMs: Date.now() - startedAt } };
+    } catch (error) {
+      const audit = { upstreamRequests: context.stats().requests - startRequests, durationMs: Date.now() - startedAt };
+      if (error instanceof PaperlessDocumentNotFoundError) {
+        return { ok: false, refusal: { code: "not_found", message: `No document with id ${error.documentId} in paperless-ngx.` }, audit };
+      }
+      if (error instanceof DataSourceUpstreamError) {
+        return { ok: false, refusal: { code: error.code === "unexpected_shape" ? "unexpected_shape" : "upstream_error", message: error.message }, audit };
+      }
+      throw error;
+    }
+  }
+
+  return {
+    search(request) {
+      return run(() => searchPaperlessDocuments(context, request));
+    },
+    get(documentId) {
+      return run(() => getPaperlessDocument(context, documentId));
+    },
+  };
+}
 
 function configOf(input: OpenReadContextInput) {
   const { connection } = input;
@@ -90,6 +123,16 @@ export const paperlessNgxDataSource: DataSourceKindDefinition = {
     return { ok: true, problems: [] };
   },
   openReadContext: openPaperlessContext,
+  adapters: {
+    documents(context: DataSourceReadContext) {
+      if (context.kind !== "paperless_ngx") {
+        throw unprocessable("This connection is of another kind than the paperless-ngx documents adapter expected.", {
+          code: "data_source_kind_mismatch",
+        });
+      }
+      return documentsAdapterFor(context);
+    },
+  },
   async check(input) {
     const context = openPaperlessContext(input);
     const outcome = await runPaperlessConnectionCheck(context);
@@ -114,5 +157,4 @@ export const paperlessNgxDataSource: DataSourceKindDefinition = {
       stats: context.stats(),
     };
   },
-  adapters: {},
 };
