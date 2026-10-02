@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { and, desc, eq, gte, lt, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { companies, costEvents, mediaStudioDirectCreations } from "@paperclipai/db";
+import { companies, costEvents, mediaStudioDirectCreations, withCompanyScope } from "@paperclipai/db";
 import {
   MEDIA_STUDIO_DIRECT_BILLING_CODE,
   MEDIA_STUDIO_DIRECT_REWRITE_BILLING_CODE,
@@ -13,7 +13,7 @@ import {
   type MediaStudioDirectKind,
   type MediaStudioDirectRewritePromptInput,
 } from "@paperclipai/shared";
-import { notFound, tooManyRequests, unprocessable } from "../errors.js";
+import { forbidden, notFound, tooManyRequests, unprocessable } from "../errors.js";
 import { readAnthropicApiKey } from "../env-values.js";
 import { normalizeContentType, isAllowedContentType, normalizeIssueAttachmentMaxBytes } from "../attachment-types.js";
 import { getStorageService } from "../storage/index.js";
@@ -67,6 +67,8 @@ const REWRITE_DAILY_CALL_CAP_PER_COMPANY = 50;
 
 export interface MediaStudioDirectActor {
   userId: string;
+  /** Company owner/admin or instance admin -- see authz.ts's isCompanyOwnerOrAdmin. Gates confirmBudgetCapCents (DUR-4335 review: an operator must not be able to neutralize the shared, cross-company Fal-account cap just by passing a large override). */
+  isCompanyAdmin: boolean;
 }
 
 async function safeFetch(url: string, init?: RequestInit, maxResponseBytes = MEDIA_MAX_BYTES): Promise<Response> {
@@ -188,16 +190,6 @@ export function mediaStudioDirectService(db: Db, deps: { now?: () => Date } = {}
     return { start: new Date(Date.UTC(year, month, 1, 0, 0, 0, 0)), end: new Date(Date.UTC(year, month + 1, 1, 0, 0, 0, 0)) };
   }
 
-  /** Instance-wide (no companyId filter): the per-plugin cap protects the shared Fal account regardless of which company spent against it. */
-  async function directCreateMonthSpendCents(): Promise<number> {
-    const { start, end } = currentUtcMonthWindow();
-    const [row] = await db
-      .select({ total: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::int` })
-      .from(costEvents)
-      .where(and(eq(costEvents.billingCode, MEDIA_STUDIO_DIRECT_BILLING_CODE), gte(costEvents.occurredAt, start), lt(costEvents.occurredAt, end)));
-    return Number(row?.total ?? 0);
-  }
-
   async function getCompanyRow(companyId: string) {
     const [row] = await db.select().from(companies).where(eq(companies.id, companyId));
     if (!row) throw notFound("Company not found");
@@ -205,31 +197,150 @@ export function mediaStudioDirectService(db: Db, deps: { now?: () => Date } = {}
   }
 
   /**
+   * Checks both spend gates and, if they pass, immediately inserts the
+   * costEvents row for the full estimate -- before the (possibly
+   * minutes-long, for video/audio) provider call ever starts. Reserving the
+   * spend up front, inside a transaction-scoped advisory lock keyed to this
+   * company, is what closes the race DUR-4335's security review flagged: a
+   * plain check-then-insert (read the cached total, call the slow provider,
+   * insert afterwards) lets N concurrent requests all read the same
+   * pre-spend total and all pass, overrunning the cap by up to N times the
+   * estimate. Callers that fail after reserving MUST call
+   * releaseReservation(companyId, costEventId) to compensate -- see
+   * createPicture/createVideo/createAudio.
+   *
    * Two independent gates, in order: the company's own monthly budget (a
    * hard ceiling -- never overridable here, since it is a cross-feature
    * guardrail the rest of the company relies on too) and the Media Studio
-   * plugin's own direct-create cap (confirmBudgetCapCents may override this
-   * one for a single call, the same "support a confirmBudgetCapCents
-   * override param" shape video-storyline-render.ts's startRender uses).
+   * plugin's own direct-create cap, which protects one shared Fal account
+   * across every company on the instance. confirmBudgetCapCents may
+   * override only the second gate, and only for a company owner/admin or
+   * instance admin (actor.isCompanyAdmin) -- DUR-4335's review found that
+   * without this check, any operator-role board member could pass an
+   * arbitrarily large confirmBudgetCapCents and permanently neutralize the
+   * shared-account cap for every other company too, not just their own.
    */
-  async function assertWithinBudget(companyId: string, estimateCents: number, confirmBudgetCapCents?: number): Promise<void> {
-    const company = await getCompanyRow(companyId);
-    if (company.budgetMonthlyCents > 0 && company.spentMonthlyCents + estimateCents > company.budgetMonthlyCents) {
-      throw unprocessable(
-        `This would cost about ${estimateCents} cents on top of ${company.spentMonthlyCents} cents already spent this month, over the company's ${company.budgetMonthlyCents}-cent monthly budget. Raise the company budget to continue.`,
-        { reason: "company_budget", estimateCents, spentMonthlyCents: company.spentMonthlyCents, budgetMonthlyCents: company.budgetMonthlyCents },
+  async function reserveSpend(
+    companyId: string,
+    actor: MediaStudioDirectActor,
+    estimateCents: number,
+    confirmBudgetCapCents: number | undefined,
+    params: { provider: string; model: string; billingCode: string },
+  ): Promise<{ costEventId: string }> {
+    if (confirmBudgetCapCents != null && !actor.isCompanyAdmin) {
+      throw forbidden(
+        "Only the company's owner or an admin can override Media Studio's shared direct-creation spend cap. Ask an admin, or omit confirmBudgetCapCents.",
+        { reason: "cap_override_forbidden" },
       );
     }
-    const capCents = confirmBudgetCapCents ?? (await directCreatePluginCapCents());
-    if (capCents !== null) {
-      const spentCents = await directCreateMonthSpendCents();
-      if (spentCents + estimateCents > capCents) {
+    const configuredCapCents = await directCreatePluginCapCents();
+    const capCents = confirmBudgetCapCents ?? configuredCapCents;
+
+    return withCompanyScope(db, companyId, async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`media_studio_direct_spend:${companyId}`}))`);
+
+      const [company] = await tx.select().from(companies).where(eq(companies.id, companyId));
+      if (!company) throw notFound("Company not found");
+      const { start, end } = currentUtcMonthWindow();
+      if (company.budgetMonthlyCents > 0 && company.spentMonthlyCents + estimateCents > company.budgetMonthlyCents) {
         throw unprocessable(
-          `This would push Media Studio's direct-creation spend this month to ${spentCents + estimateCents} cents, over the ${capCents}-cent cap. Pass a higher confirmBudgetCapCents to proceed anyway, or ask an admin to raise the cap.`,
-          { reason: "direct_create_cap", estimateCents, spentCents, capCents },
+          `This would cost about ${estimateCents} cents on top of ${company.spentMonthlyCents} cents already spent this month, over the company's ${company.budgetMonthlyCents}-cent monthly budget. Raise the company budget to continue.`,
+          { reason: "company_budget", estimateCents, spentMonthlyCents: company.spentMonthlyCents, budgetMonthlyCents: company.budgetMonthlyCents },
         );
       }
-    }
+
+      if (capCents !== null) {
+        const [spendRow] = await tx
+          .select({ total: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::int` })
+          .from(costEvents)
+          .where(and(eq(costEvents.billingCode, MEDIA_STUDIO_DIRECT_BILLING_CODE), gte(costEvents.occurredAt, start), lt(costEvents.occurredAt, end)));
+        const spentCents = Number(spendRow?.total ?? 0);
+        if (spentCents + estimateCents > capCents) {
+          throw unprocessable(
+            `This would push Media Studio's direct-creation spend this month to ${spentCents + estimateCents} cents, over the ${capCents}-cent cap. Pass a higher confirmBudgetCapCents to proceed anyway, or ask an admin to raise the cap.`,
+            { reason: "direct_create_cap", estimateCents, spentCents, capCents },
+          );
+        }
+      }
+
+      const [event] = await tx
+        .insert(costEvents)
+        .values({
+          companyId,
+          agentId: null,
+          createdByUserId: actor.userId,
+          provider: params.provider,
+          biller: params.provider,
+          billingType: "metered_api",
+          billingCode: params.billingCode,
+          model: params.model,
+          inputTokens: 0,
+          outputTokens: 0,
+          cachedInputTokens: 0,
+          costCents: estimateCents,
+          occurredAt: nowOf(),
+        })
+        .returning();
+
+      const [companySpendRow] = await tx
+        .select({ total: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::int` })
+        .from(costEvents)
+        .where(and(eq(costEvents.companyId, companyId), gte(costEvents.occurredAt, start), lt(costEvents.occurredAt, end)));
+      await tx
+        .update(companies)
+        .set({ spentMonthlyCents: Number(companySpendRow?.total ?? 0), updatedAt: new Date() })
+        .where(eq(companies.id, companyId));
+
+      return { costEventId: event.id };
+    });
+  }
+
+  /** Compensates a reserveSpend() call whose provider call or file-save failed afterward -- deletes the reserved cost event and recomputes the company's cached monthly total, under the same per-company advisory lock so a concurrent reservation never reads a total that is mid-compensation. */
+  async function releaseReservation(companyId: string, costEventId: string): Promise<void> {
+    await withCompanyScope(db, companyId, async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`media_studio_direct_spend:${companyId}`}))`);
+      await tx.delete(costEvents).where(eq(costEvents.id, costEventId));
+      const { start, end } = currentUtcMonthWindow();
+      const [companySpendRow] = await tx
+        .select({ total: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::int` })
+        .from(costEvents)
+        .where(and(eq(costEvents.companyId, companyId), gte(costEvents.occurredAt, start), lt(costEvents.occurredAt, end)));
+      await tx
+        .update(companies)
+        .set({ spentMonthlyCents: Number(companySpendRow?.total ?? 0), updatedAt: new Date() })
+        .where(eq(companies.id, companyId));
+    });
+  }
+
+  /** Finishes a reservation once the provider call succeeded: refreshes the cost event's provider/model to what the provider actually used (the reservation was made with the requested model, before generation), writes the direct-creation record, and logs the activity. */
+  async function finalizeReservedCreation(
+    companyId: string,
+    actor: MediaStudioDirectActor,
+    costEventId: string,
+    params: { kind: MediaStudioDirectKind; provider: string; model: string; prompt: string | null; costCents: number; fileId: string },
+  ): Promise<void> {
+    await db.update(costEvents).set({ provider: params.provider, biller: params.provider, model: params.model }).where(eq(costEvents.id, costEventId));
+    await db.insert(mediaStudioDirectCreations).values({
+      companyId,
+      createdByUserId: actor.userId,
+      kind: params.kind,
+      provider: params.provider,
+      model: params.model,
+      prompt: params.prompt,
+      costCents: params.costCents,
+      fileId: params.fileId,
+      costEventId,
+    });
+    await logActivity(db, {
+      companyId,
+      actorType: "user",
+      actorId: actor.userId,
+      agentId: null,
+      action: `media_studio_direct.${params.kind}_created`,
+      entityType: "company_file",
+      entityId: params.fileId,
+      details: { costCents: params.costCents, provider: params.provider, model: params.model },
+    });
   }
 
   async function saveResultFile(
@@ -320,73 +431,94 @@ export function mediaStudioDirectService(db: Db, deps: { now?: () => Date } = {}
 
   async function createPicture(companyId: string, actor: MediaStudioDirectActor, input: CreateMediaStudioDirectPictureInput) {
     const estimate = estimateMediaStudioDirectCostCents({ kind: "picture", provider: input.provider });
-    await assertWithinBudget(companyId, estimate.estimatedCostCents, input.confirmBudgetCapCents);
-
-    const apiKey = await resolveFalApiKey(companyId, actor.userId);
-    const provider = new FalDirectPictureProvider(apiKey, safeFetch);
-    const result = await provider.generate({ prompt: input.prompt, model: input.model, seed: input.seed });
-    const { contentBase64, contentType } = await pictureResultBytes(result);
-    const file = await saveResultFile(companyId, actor, contentBase64, contentType, `picture-${result.provider}-${Date.now()}.${extensionFor(contentType)}`);
-
-    await recordCreation(companyId, actor, {
-      kind: "picture",
-      provider: result.provider,
-      model: result.model,
-      prompt: input.prompt,
-      costCents: estimate.estimatedCostCents,
-      fileId: file.id,
+    const reservation = await reserveSpend(companyId, actor, estimate.estimatedCostCents, input.confirmBudgetCapCents, {
+      provider: input.provider,
+      model: input.model ?? "pending",
       billingCode: MEDIA_STUDIO_DIRECT_BILLING_CODE,
     });
+    try {
+      const apiKey = await resolveFalApiKey(companyId, actor.userId);
+      const provider = new FalDirectPictureProvider(apiKey, safeFetch);
+      const result = await provider.generate({ prompt: input.prompt, model: input.model, seed: input.seed });
+      const { contentBase64, contentType } = await pictureResultBytes(result);
+      const file = await saveResultFile(companyId, actor, contentBase64, contentType, `picture-${result.provider}-${Date.now()}.${extensionFor(contentType)}`);
 
-    return { ...attachmentResponse(file.id, file.contentType), costCents: estimate.estimatedCostCents, seed: result.seed, provider: result.provider, model: result.model };
+      await finalizeReservedCreation(companyId, actor, reservation.costEventId, {
+        kind: "picture",
+        provider: result.provider,
+        model: result.model,
+        prompt: input.prompt,
+        costCents: estimate.estimatedCostCents,
+        fileId: file.id,
+      });
+
+      return { ...attachmentResponse(file.id, file.contentType), costCents: estimate.estimatedCostCents, seed: result.seed, provider: result.provider, model: result.model };
+    } catch (err) {
+      await releaseReservation(companyId, reservation.costEventId);
+      throw err;
+    }
   }
 
   async function createVideo(companyId: string, actor: MediaStudioDirectActor, input: CreateMediaStudioDirectVideoInput) {
     const estimate = estimateMediaStudioDirectCostCents({ kind: "video", provider: input.provider, durationSeconds: input.durationSeconds });
-    await assertWithinBudget(companyId, estimate.estimatedCostCents, input.confirmBudgetCapCents);
-
-    const apiKey = await resolveFalApiKey(companyId, actor.userId);
-    const provider = new FalVideoProvider(apiKey, safeFetch);
-    const handle = await provider.start({ kind: "video", prompt: input.prompt, model: input.model, durationSeconds: input.durationSeconds, seed: input.seed });
-    const result = await pollUntilDone(provider, handle as MediaStudioDirectJobHandle, VIDEO_POLL_TIMEOUT_MS);
-    const { contentBase64, contentType } = await mediaResultBytes(result, "video/", "a video");
-    const file = await saveResultFile(companyId, actor, contentBase64, contentType, `video-${handle.provider}-${Date.now()}.${extensionFor(contentType)}`);
-
-    await recordCreation(companyId, actor, {
-      kind: "video",
-      provider: handle.provider,
-      model: handle.model,
-      prompt: input.prompt,
-      costCents: estimate.estimatedCostCents,
-      fileId: file.id,
+    const reservation = await reserveSpend(companyId, actor, estimate.estimatedCostCents, input.confirmBudgetCapCents, {
+      provider: input.provider,
+      model: input.model ?? "pending",
       billingCode: MEDIA_STUDIO_DIRECT_BILLING_CODE,
     });
+    try {
+      const apiKey = await resolveFalApiKey(companyId, actor.userId);
+      const provider = new FalVideoProvider(apiKey, safeFetch);
+      const handle = await provider.start({ kind: "video", prompt: input.prompt, model: input.model, durationSeconds: input.durationSeconds, seed: input.seed });
+      const result = await pollUntilDone(provider, handle as MediaStudioDirectJobHandle, VIDEO_POLL_TIMEOUT_MS);
+      const { contentBase64, contentType } = await mediaResultBytes(result, "video/", "a video");
+      const file = await saveResultFile(companyId, actor, contentBase64, contentType, `video-${handle.provider}-${Date.now()}.${extensionFor(contentType)}`);
 
-    return { ...attachmentResponse(file.id, file.contentType), costCents: estimate.estimatedCostCents, provider: handle.provider, model: handle.model };
+      await finalizeReservedCreation(companyId, actor, reservation.costEventId, {
+        kind: "video",
+        provider: handle.provider,
+        model: handle.model,
+        prompt: input.prompt,
+        costCents: estimate.estimatedCostCents,
+        fileId: file.id,
+      });
+
+      return { ...attachmentResponse(file.id, file.contentType), costCents: estimate.estimatedCostCents, provider: handle.provider, model: handle.model };
+    } catch (err) {
+      await releaseReservation(companyId, reservation.costEventId);
+      throw err;
+    }
   }
 
   async function createAudio(companyId: string, actor: MediaStudioDirectActor, input: CreateMediaStudioDirectAudioInput) {
     const estimate = estimateMediaStudioDirectCostCents({ kind: "audio", provider: input.provider, durationSeconds: input.durationSeconds });
-    await assertWithinBudget(companyId, estimate.estimatedCostCents, input.confirmBudgetCapCents);
-
-    const apiKey = await resolveFalApiKey(companyId, actor.userId);
-    const provider = new FalDirectAudioProvider(apiKey, safeFetch);
-    const handle = await provider.start({ prompt: input.prompt, mode: input.mode, voice: input.voice, model: input.model, durationSeconds: input.durationSeconds });
-    const result = await pollUntilDone(provider, handle, AUDIO_POLL_TIMEOUT_MS);
-    const { contentBase64, contentType } = await mediaResultBytes(result, "audio/", "audio");
-    const file = await saveResultFile(companyId, actor, contentBase64, contentType, `audio-${handle.provider}-${Date.now()}.${extensionFor(contentType)}`);
-
-    await recordCreation(companyId, actor, {
-      kind: "audio",
-      provider: handle.provider,
-      model: handle.model,
-      prompt: input.prompt,
-      costCents: estimate.estimatedCostCents,
-      fileId: file.id,
+    const reservation = await reserveSpend(companyId, actor, estimate.estimatedCostCents, input.confirmBudgetCapCents, {
+      provider: input.provider,
+      model: input.model ?? "pending",
       billingCode: MEDIA_STUDIO_DIRECT_BILLING_CODE,
     });
+    try {
+      const apiKey = await resolveFalApiKey(companyId, actor.userId);
+      const provider = new FalDirectAudioProvider(apiKey, safeFetch);
+      const handle = await provider.start({ prompt: input.prompt, mode: input.mode, voice: input.voice, model: input.model, durationSeconds: input.durationSeconds });
+      const result = await pollUntilDone(provider, handle, AUDIO_POLL_TIMEOUT_MS);
+      const { contentBase64, contentType } = await mediaResultBytes(result, "audio/", "audio");
+      const file = await saveResultFile(companyId, actor, contentBase64, contentType, `audio-${handle.provider}-${Date.now()}.${extensionFor(contentType)}`);
 
-    return { ...attachmentResponse(file.id, file.contentType), costCents: estimate.estimatedCostCents, provider: handle.provider, model: handle.model };
+      await finalizeReservedCreation(companyId, actor, reservation.costEventId, {
+        kind: "audio",
+        provider: handle.provider,
+        model: handle.model,
+        prompt: input.prompt,
+        costCents: estimate.estimatedCostCents,
+        fileId: file.id,
+      });
+
+      return { ...attachmentResponse(file.id, file.contentType), costCents: estimate.estimatedCostCents, provider: handle.provider, model: handle.model };
+    } catch (err) {
+      await releaseReservation(companyId, reservation.costEventId);
+      throw err;
+    }
   }
 
   async function countRewriteCallsToday(companyId: string): Promise<number> {

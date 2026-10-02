@@ -144,7 +144,7 @@ d("Media Studio Create tab direct generation (DUR-4329)", () => {
       await setMediaStudioConfig({});
 
       await expect(
-        mediaStudioDirectService(db).createPicture(companyId, { userId: "owner-user" }, { prompt: "a cat", provider: "fal" }),
+        mediaStudioDirectService(db).createPicture(companyId, { userId: "owner-user", isCompanyAdmin: true }, { prompt: "a cat", provider: "fal" }),
       ).rejects.toMatchObject({ status: 422, details: { reason: "company_budget" } });
       expect(mockedExecute).not.toHaveBeenCalled();
     });
@@ -154,12 +154,12 @@ d("Media Studio Create tab direct generation (DUR-4329)", () => {
       await setMediaStudioConfig({ directCreateMonthlyCapCents: MEDIA_STUDIO_DIRECT_PICTURE_COST_CENTS.fal - 1 });
 
       await expect(
-        mediaStudioDirectService(db).createPicture(companyId, { userId: "owner-user" }, { prompt: "a cat", provider: "fal" }),
+        mediaStudioDirectService(db).createPicture(companyId, { userId: "owner-user", isCompanyAdmin: true }, { prompt: "a cat", provider: "fal" }),
       ).rejects.toMatchObject({ status: 422, details: { reason: "direct_create_cap" } });
       expect(mockedExecute).not.toHaveBeenCalled();
     });
 
-    it("lets confirmBudgetCapCents override the plugin cap for a single call", async () => {
+    it("lets confirmBudgetCapCents override the plugin cap for a single call, for a company owner/admin", async () => {
       const companyId = await seedCompany({ budgetMonthlyCents: 100_000 });
       const secretId = await seedFalSecret(companyId);
       await setMediaStudioConfig({ falKeySecretRef: secretId, directCreateMonthlyCapCents: MEDIA_STUDIO_DIRECT_PICTURE_COST_CENTS.fal - 1 });
@@ -170,10 +170,47 @@ d("Media Studio Create tab direct generation (DUR-4329)", () => {
 
       const result = await mediaStudioDirectService(db).createPicture(
         companyId,
-        { userId: "owner-user" },
+        { userId: "owner-user", isCompanyAdmin: true },
         { prompt: "a cat", provider: "fal", confirmBudgetCapCents: 1_000 },
       );
       expect(result.costCents).toBe(MEDIA_STUDIO_DIRECT_PICTURE_COST_CENTS.fal);
+    });
+
+    it("refuses confirmBudgetCapCents from a non-admin (operator) -- DUR-4335 security review fix", async () => {
+      const companyId = await seedCompany({ budgetMonthlyCents: 100_000 });
+      const secretId = await seedFalSecret(companyId);
+      await setMediaStudioConfig({ falKeySecretRef: secretId, directCreateMonthlyCapCents: MEDIA_STUDIO_DIRECT_PICTURE_COST_CENTS.fal - 1 });
+
+      await expect(
+        mediaStudioDirectService(db).createPicture(
+          companyId,
+          { userId: "operator-user", isCompanyAdmin: false },
+          { prompt: "a cat", provider: "fal", confirmBudgetCapCents: 1_000_000 },
+        ),
+      ).rejects.toMatchObject({ status: 403, details: { reason: "cap_override_forbidden" } });
+      // Refused before ever reserving spend or calling the provider.
+      expect(mockedExecute).not.toHaveBeenCalled();
+      const [companyRow] = await db.select().from(companies).where(eq(companies.id, companyId));
+      expect(companyRow.spentMonthlyCents).toBe(0);
+    });
+
+    it("releases the spend reservation (and the company's cached spend) if the provider call fails after the budget check passes", async () => {
+      const companyId = await seedCompany({ budgetMonthlyCents: 100_000 });
+      const secretId = await seedFalSecret(companyId);
+      await setMediaStudioConfig({ falKeySecretRef: secretId });
+
+      mockedExecute.mockRejectedValueOnce(new Error("upstream boom"));
+
+      await expect(
+        mediaStudioDirectService(db).createPicture(companyId, { userId: "owner-user", isCompanyAdmin: true }, { prompt: "a cat", provider: "fal" }),
+      ).rejects.toThrow();
+
+      const [companyRow] = await db.select().from(companies).where(eq(companies.id, companyId));
+      expect(companyRow.spentMonthlyCents).toBe(0);
+      const remainingEvents = await db.select().from(costEvents).where(eq(costEvents.companyId, companyId));
+      expect(remainingEvents).toHaveLength(0);
+      const remainingCreations = await db.select().from(mediaStudioDirectCreations).where(eq(mediaStudioDirectCreations.companyId, companyId));
+      expect(remainingCreations).toHaveLength(0);
     });
   });
 
@@ -189,7 +226,7 @@ d("Media Studio Create tab direct generation (DUR-4329)", () => {
 
       const result = await mediaStudioDirectService(db).createPicture(
         companyId,
-        { userId: "owner-user" },
+        { userId: "owner-user", isCompanyAdmin: true },
         { prompt: "a friendly robot", provider: "fal" },
       );
 
@@ -231,12 +268,12 @@ d("Media Studio Create tab direct generation (DUR-4329)", () => {
       );
 
       const direct = mediaStudioDirectService(db);
-      const first = await direct.createPicture(companyId, { userId: "user-a" }, { prompt: "first", provider: "fal" });
+      const first = await direct.createPicture(companyId, { userId: "user-a", isCompanyAdmin: false }, { prompt: "first", provider: "fal" });
       await new Promise((resolve) => setTimeout(resolve, 5));
-      const second = await direct.createPicture(companyId, { userId: "user-a" }, { prompt: "second", provider: "fal" });
-      await direct.createPicture(companyId, { userId: "user-b" }, { prompt: "someone else's", provider: "fal" });
+      const second = await direct.createPicture(companyId, { userId: "user-a", isCompanyAdmin: false }, { prompt: "second", provider: "fal" });
+      await direct.createPicture(companyId, { userId: "user-b", isCompanyAdmin: false }, { prompt: "someone else's", provider: "fal" });
 
-      const entries = await direct.history(companyId, { userId: "user-a" });
+      const entries = await direct.history(companyId, { userId: "user-a", isCompanyAdmin: false });
       expect(entries.map((e) => e.fileId)).toEqual([second.fileId, first.fileId]);
       expect(entries.every((e) => e.kind === "picture")).toBe(true);
     });
@@ -261,7 +298,7 @@ d("Media Studio Create tab direct generation (DUR-4329)", () => {
       }
 
       await expect(
-        mediaStudioDirectService(db).rewritePrompt(companyId, { userId: "owner-user" }, { prompt: "make this better" }),
+        mediaStudioDirectService(db).rewritePrompt(companyId, { userId: "owner-user", isCompanyAdmin: true }, { prompt: "make this better" }),
       ).rejects.toMatchObject({ status: 429, details: { reason: "daily_call_cap" } });
     });
   });

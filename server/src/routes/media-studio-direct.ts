@@ -14,8 +14,9 @@ import {
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
-import { assertBoard, assertCompanyAccess } from "./authz.js";
+import { assertBoard, assertCompanyAccess, isCompanyOwnerOrAdmin } from "./authz.js";
 import { mediaStudioDirectService, type MediaStudioDirectActor } from "../services/media-studio-direct.js";
+import type { Request } from "express";
 
 /**
  * DUR-4329: Media Studio's Create tab direct generation. Board-only
@@ -27,8 +28,8 @@ import { mediaStudioDirectService, type MediaStudioDirectActor } from "../servic
  * request/response contract.
  */
 
-function actorOf(req: { actor: { userId?: string | null } }): MediaStudioDirectActor {
-  return { userId: req.actor.userId ?? "unknown" };
+function actorOf(req: Request, companyId: string): MediaStudioDirectActor {
+  return { userId: req.actor.userId ?? "unknown", isCompanyAdmin: isCompanyOwnerOrAdmin(req, companyId) };
 }
 
 export function mediaStudioDirectRoutes(rawDb: Db) {
@@ -59,7 +60,7 @@ export function mediaStudioDirectRoutes(rawDb: Db) {
     validate(createMediaStudioDirectPictureSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
-      const result = await direct.createPicture(companyId, actorOf(req), req.body as CreateMediaStudioDirectPictureInput);
+      const result = await direct.createPicture(companyId, actorOf(req, companyId), req.body as CreateMediaStudioDirectPictureInput);
       res.status(201).json(result);
     },
   );
@@ -70,7 +71,7 @@ export function mediaStudioDirectRoutes(rawDb: Db) {
     validate(createMediaStudioDirectVideoSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
-      const result = await direct.createVideo(companyId, actorOf(req), req.body as CreateMediaStudioDirectVideoInput);
+      const result = await direct.createVideo(companyId, actorOf(req, companyId), req.body as CreateMediaStudioDirectVideoInput);
       res.status(201).json(result);
     },
   );
@@ -81,7 +82,7 @@ export function mediaStudioDirectRoutes(rawDb: Db) {
     validate(createMediaStudioDirectAudioSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
-      const result = await direct.createAudio(companyId, actorOf(req), req.body as CreateMediaStudioDirectAudioInput);
+      const result = await direct.createAudio(companyId, actorOf(req, companyId), req.body as CreateMediaStudioDirectAudioInput);
       res.status(201).json(result);
     },
   );
@@ -92,7 +93,7 @@ export function mediaStudioDirectRoutes(rawDb: Db) {
     validate(mediaStudioDirectRewritePromptSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
-      const result = await direct.rewritePrompt(companyId, actorOf(req), req.body as { prompt: string; kind?: "picture" | "video" | "audio" });
+      const result = await direct.rewritePrompt(companyId, actorOf(req, companyId), req.body as { prompt: string; kind?: "picture" | "video" | "audio" });
       res.json(result);
     },
   );
@@ -101,7 +102,7 @@ export function mediaStudioDirectRoutes(rawDb: Db) {
     const companyId = req.params.companyId as string;
     const rawLimit = Number(req.query.limit);
     const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(100, Math.floor(rawLimit)) : undefined;
-    const entries = await direct.history(companyId, actorOf(req), limit);
+    const entries = await direct.history(companyId, actorOf(req, companyId), limit);
     res.json(entries);
   });
 
