@@ -116,6 +116,14 @@ describe("media-studio default look per agent: making pictures", () => {
     expect(result.content).toContain('Used the saved look "Catalogue".');
   });
 
+  it("matches a saved look by name case-insensitively (DUR-4371: 'Maja night' for the saved look 'Maja Night')", async () => {
+    const harness = await setup();
+    const calls = fakeFal(harness);
+    const result = await harness.executeTool<any>(TOOL_GENERATE, { prompt: "a sofa", look: "Maja night" }, majaRun);
+    expect(calls[0]!.body.prompt).toBe("a sofa\n\nStyle: maja night style");
+    expect(result.data).toMatchObject({ look: "Maja Night", lookReason: "look-input" });
+  });
+
   it("takes the agent from the run, never from the input", async () => {
     const harness = await setup(undefined, { [OLE]: CATALOGUE.id });
     const calls = fakeFal(harness);

@@ -1246,6 +1246,30 @@ export const LANE_A_NO_TOOLS_NOTE =
   "suggest they switch your quick-answer model to one that supports tools. Never pretend you did it.";
 
 /**
+ * DUR-4371: a model that just ran a tool sometimes answers with no text at
+ * all (observed with a local qwen3-abliterated model after list-looks). The
+ * retry call drops tools entirely, so this nudge is the only instruction the
+ * model gets for that round.
+ */
+export const LANE_A_EMPTY_REPLY_NUDGE =
+  "Answer the person now in one or two sentences, based on the tool results.";
+
+/** Same nudge, worded for a round that made no tool call at all. */
+export const LANE_A_EMPTY_REPLY_NUDGE_NO_TOOLS = "Answer the person's last message now in one or two sentences.";
+
+/**
+ * DUR-4371: the plain reply sent when the model is still empty after the
+ * retry (see LANE_A_EMPTY_REPLY_NUDGE). Never an empty string: the person
+ * must hear that something happened, not silence.
+ */
+export function laneAEmptyReplyFallback(actions: LaneAAction[]): string {
+  if (actions.length === 0) {
+    return "I didn't get an answer back to send you. Try asking again, or say it a different way.";
+  }
+  return "I did that, but the model gave no answer to send you. Try asking again, or say exactly what you want.";
+}
+
+/**
  * Told instead of LANE_A_NO_TOOLS_NOTE when the operator limited the quick
  * agent to certain OpenRouter hosts and none of them supports tools: the fix
  * is then in the host list, not necessarily the model, and the person should
@@ -2261,13 +2285,36 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         messages.push({ role: "tool", results: toolResults });
         if (refusedForCap > 0 && executedThisRound === 0) finalRound = true;
       }
+
+      // DUR-4371: a small local model sometimes stops with no text at all,
+      // most often right after a tool call. Retry once, with tools dropped
+      // so the model cannot dodge into another tool call instead of
+      // answering, before falling back to a plain non-empty reply.
+      if (response !== undefined && response.text.trim().length === 0) {
+        messages.push({
+          role: "user",
+          content: actions.length > 0 ? LANE_A_EMPTY_REPLY_NUDGE : LANE_A_EMPTY_REPLY_NUDGE_NO_TOOLS,
+        });
+        const retry = await client.complete({
+          model: modelId,
+          maxTokens: params.maxOutputTokens ?? LANE_A_MAX_OUTPUT_TOKENS,
+          system: tools.length === 0 ? systemPrompt : `${systemPrompt}\n\n${noToolsNote}`,
+          messages,
+          ...(temperatureOff ? {} : { temperature: params.temperature }),
+          ...(providerRouting ? { providerRouting } : {}),
+        });
+        inputTokens += retry.usage.inputTokens;
+        outputTokens += retry.usage.outputTokens;
+        response = retry;
+      }
     } catch (err) {
       throw providerErrorToHttp(err, "chat");
     }
 
     const finalResponse = response!;
+    const text = finalResponse.text.trim().length > 0 ? finalResponse.text : laneAEmptyReplyFallback(actions);
     return {
-      text: finalResponse.text,
+      text,
       inputTokens,
       outputTokens,
       stopReason: finalResponse.stopReason,
