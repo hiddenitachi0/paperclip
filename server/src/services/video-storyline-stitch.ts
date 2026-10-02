@@ -3,10 +3,12 @@ import { and, asc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { assets, videoShots, videoStorylines } from "@paperclipai/db";
 import type { VideoShotTransition } from "@paperclipai/shared";
+import { conflict, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { getStorageService } from "../storage/index.js";
 import { logActivity } from "./activity-log.js";
 import { addMusicBed, checkFfmpegAvailable, stitchClips, stitchClipsWithTransitions, type ShotTransitionInput } from "./video-ffmpeg.js";
+import { runVideoQualityCheck, type VideoQualityCheckShotPlan } from "./video-quality-check.js";
 
 /**
  * DUR-4127: the stitching worker. Picks up storylines sitting in
@@ -20,6 +22,13 @@ import { addMusicBed, checkFfmpegAvailable, stitchClips, stitchClipsWithTransiti
  * storyline with stitchBlockedReason set and the tick moves on, no
  * differently from any other "waiting on ops" state this codebase already
  * has.
+ *
+ * DUR-4318: before a stitched file is presented as "done", it is run
+ * through video-quality-check.ts's automatic check (duration/streams via
+ * ffprobe, sampled black/frozen stretches, audio silence/clipping). A
+ * failed check lands the storyline on "needs_attention" instead, with
+ * qualityCheckIssues/errorMessage explaining what to look at and where --
+ * the file itself is still stored so it can be inspected.
  */
 
 const STITCH_TICK_BATCH = 5;
@@ -57,7 +66,7 @@ export function videoStorylineStitchService(db: Db, deps: VideoStorylineStitchDe
     return { buffer, volumeDb: storyline.musicVolumeDb };
   }
 
-  async function stitchOne(storyline: typeof videoStorylines.$inferSelect): Promise<"stitched" | "blocked" | "failed"> {
+  async function stitchOne(storyline: typeof videoStorylines.$inferSelect): Promise<"stitched" | "needs_attention" | "blocked" | "failed"> {
     if (!(await checkFfmpegAvailable())) {
       await db
         .update(videoStorylines)
@@ -123,6 +132,15 @@ export function videoStorylineStitchService(db: Db, deps: VideoStorylineStitchDe
         stitched = await addMusicBed(stitched, musicBed);
       }
       const durationSeconds = shots.reduce((sum, s) => sum + s.durationSeconds, 0);
+
+      // DUR-4318: check the stitched file before it is ever shown as "done".
+      const shotPlans: VideoQualityCheckShotPlan[] = shots.map((shot, index) => ({
+        durationSeconds: shot.durationSeconds,
+        transitionIn: (index === 0 ? "cut" : (shot.transitionIn ?? storyline.defaultTransition)) as VideoShotTransition,
+        transitionDurationMs: storyline.defaultTransitionDurationMs,
+      }));
+      const qualityCheck = await runVideoQualityCheck(stitched.buffer, { shots: shotPlans, expectAudio: musicBed !== null });
+
       const stored = await getStorageService().putFile({
         companyId: storyline.companyId,
         namespace: `video-storylines/${storyline.id}`,
@@ -130,18 +148,23 @@ export function videoStorylineStitchService(db: Db, deps: VideoStorylineStitchDe
         contentType: stitched.contentType,
         body: stitched.buffer,
       });
+      const explanation = qualityCheck.passed
+        ? null
+        : `Automatic quality check found ${qualityCheck.issues.length} issue(s):\n${qualityCheck.issues.map((i) => `- ${i.message}`).join("\n")}`;
       await db
         .update(videoStorylines)
         .set({
-          status: "done",
+          status: qualityCheck.passed ? "done" : "needs_attention",
           finalProvider: stored.provider,
           finalObjectKey: stored.objectKey,
           finalContentType: stored.contentType,
           finalByteSize: stored.byteSize,
           finalSha256: stored.sha256,
           finalDurationSeconds: durationSeconds,
-          errorMessage: null,
+          errorMessage: explanation,
           stitchBlockedReason: null,
+          qualityCheckIssues: qualityCheck.issues,
+          qualityCheckedAt: nowOf(),
           updatedAt: nowOf(),
         })
         .where(eq(videoStorylines.id, storyline.id));
@@ -150,12 +173,12 @@ export function videoStorylineStitchService(db: Db, deps: VideoStorylineStitchDe
         actorType: "agent",
         actorId: storyline.createdByAgentId ?? storyline.createdByUserId ?? "system",
         agentId: storyline.createdByAgentId,
-        action: "video_storyline.stitched",
+        action: qualityCheck.passed ? "video_storyline.stitched" : "video_storyline.needs_attention",
         entityType: "video_storyline",
         entityId: storyline.id,
-        details: { shotCount: shots.length, durationSeconds, byteSize: stored.byteSize },
+        details: { shotCount: shots.length, durationSeconds, byteSize: stored.byteSize, qualityCheckIssues: qualityCheck.issues },
       });
-      return "stitched";
+      return qualityCheck.passed ? "stitched" : "needs_attention";
     } catch (err) {
       logger.error({ err, storylineId: storyline.id }, "video-storyline-stitch: stitch failed");
       await db
@@ -176,7 +199,7 @@ export function videoStorylineStitchService(db: Db, deps: VideoStorylineStitchDe
    * video-storyline-render.ts's tick -- one storyline failing to stitch is
    * logged and skipped, never stops the batch.
    */
-  async function tick(): Promise<{ stitched: number; blocked: number; failed: number }> {
+  async function tick(): Promise<{ stitched: number; needsAttention: number; blocked: number; failed: number }> {
     const pending = await db
       .select()
       .from(videoStorylines)
@@ -185,12 +208,14 @@ export function videoStorylineStitchService(db: Db, deps: VideoStorylineStitchDe
       .limit(STITCH_TICK_BATCH);
 
     let stitched = 0;
+    let needsAttention = 0;
     let blocked = 0;
     let failed = 0;
     for (const storyline of pending) {
       try {
         const outcome = await stitchOne(storyline);
         if (outcome === "stitched") stitched += 1;
+        else if (outcome === "needs_attention") needsAttention += 1;
         else if (outcome === "blocked") blocked += 1;
         else failed += 1;
       } catch (err) {
@@ -198,8 +223,35 @@ export function videoStorylineStitchService(db: Db, deps: VideoStorylineStitchDe
         failed += 1;
       }
     }
-    return { stitched, blocked, failed };
+    return { stitched, needsAttention, blocked, failed };
   }
 
-  return { tick, stitchOne };
+  /**
+   * DUR-4318: the operator's recovery path off "needs_attention" -- the shots
+   * themselves are already done, only the stitched file failed its quality
+   * check, so this re-queues for stitching (and a fresh quality check) rather
+   * than re-rendering every shot from scratch via render/start.
+   */
+  async function retryStitch(companyId: string, storylineId: string): Promise<void> {
+    const [storyline] = await db
+      .select()
+      .from(videoStorylines)
+      .where(and(eq(videoStorylines.id, storylineId), eq(videoStorylines.companyId, companyId)));
+    if (!storyline) throw notFound("Video storyline not found");
+    if (storyline.status !== "needs_attention") {
+      throw conflict(`This storyline is ${storyline.status.replace(/_/g, " ")}, not needing attention.`);
+    }
+    await db
+      .update(videoStorylines)
+      .set({
+        status: "ready_to_stitch",
+        errorMessage: null,
+        qualityCheckIssues: [],
+        qualityCheckedAt: null,
+        updatedAt: nowOf(),
+      })
+      .where(eq(videoStorylines.id, storylineId));
+  }
+
+  return { tick, stitchOne, retryStitch };
 }

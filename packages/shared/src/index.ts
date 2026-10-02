@@ -2500,6 +2500,7 @@ export {
   VIDEO_TRANSITION_DEFAULT_DURATION_MS,
   VIDEO_TRANSITION_MAX_DURATION_MS,
   VIDEO_TRANSITION_MIN_DURATION_MS,
+  VIDEO_QUALITY_ISSUE_CODES,
   approveVideoDirectorRunSchema,
   createVideoSceneSchema,
   createVideoShotSchema,
@@ -2533,6 +2534,8 @@ export {
   type VideoStorylineProvider,
   type VideoStorylineShotProgress,
   type VideoStorylineStatus,
+  type VideoQualityIssueCode,
+  type VideoStorylineQualityIssue,
 } from "./video-storylines.js";
 
 export {

@@ -1,5 +1,5 @@
 {
-  "id": "19945347-aa82-4f90-816c-3fef50e379cb",
+  "id": "9544db8c-2776-4b6e-8777-ee07815bb48a",
   "prevId": "bb1ad3a4-d25b-4e96-ae29-0e7b5c183258",
   "version": "7",
   "dialect": "postgresql",
@@ -35796,6 +35796,61 @@
           "primaryKey": false,
           "notNull": false
         },
+        "storyboard_status": {
+          "name": "storyboard_status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pending'"
+        },
+        "still_provider": {
+          "name": "still_provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "still_object_key": {
+          "name": "still_object_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "still_content_type": {
+          "name": "still_content_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "still_byte_size": {
+          "name": "still_byte_size",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "still_sha256": {
+          "name": "still_sha256",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "still_generated_at": {
+          "name": "still_generated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "still_estimated_cost_cents": {
+          "name": "still_estimated_cost_cents",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "still_actual_cost_cents": {
+          "name": "still_actual_cost_cents",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -35859,6 +35914,27 @@
           "columns": [
             {
               "expression": "scene_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "video_shots_storyline_storyboard_status_idx": {
+          "name": "video_shots_storyline_storyboard_status_idx",
+          "columns": [
+            {
+              "expression": "storyline_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "storyboard_status",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -35934,6 +36010,10 @@
         "video_shots_transition_in_check": {
           "name": "video_shots_transition_in_check",
           "value": "\"video_shots\".\"transition_in\" IS NULL OR \"video_shots\".\"transition_in\" IN ('cut', 'fade', 'dissolve')"
+        },
+        "video_shots_storyboard_status_check": {
+          "name": "video_shots_storyboard_status_check",
+          "value": "\"video_shots\".\"storyboard_status\" IN ('pending', 'approved', 'dropped')"
         }
       },
       "isRLSEnabled": false
@@ -36268,19 +36348,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "quality_check_issues": {
-          "name": "quality_check_issues",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'[]'::jsonb"
-        },
-        "quality_checked_at": {
-          "name": "quality_checked_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
         "default_transition": {
           "name": "default_transition",
           "type": "text",
@@ -36466,7 +36533,7 @@
       "checkConstraints": {
         "video_storylines_status_check": {
           "name": "video_storylines_status_check",
-          "value": "\"video_storylines\".\"status\" IN ('draft', 'estimated', 'rendering', 'paused', 'ready_to_stitch', 'stitching', 'done', 'needs_attention', 'failed', 'cancelled')"
+          "value": "\"video_storylines\".\"status\" IN ('draft', 'estimated', 'rendering', 'paused', 'ready_to_stitch', 'stitching', 'done', 'failed', 'cancelled')"
         },
         "video_storylines_provider_check": {
           "name": "video_storylines_provider_check",

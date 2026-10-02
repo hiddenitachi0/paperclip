@@ -25,6 +25,7 @@ import { logActivity } from "../services/activity-log.js";
 import { getStorageService } from "../storage/index.js";
 import { videoStorylineService, type VideoStorylineActor } from "../services/video-storylines.js";
 import { videoStorylineRenderService } from "../services/video-storyline-render.js";
+import { videoStorylineStitchService } from "../services/video-storyline-stitch.js";
 import { videoStorylineSettingsService } from "../services/video-storyline-settings.js";
 import { videoStorylineStillsService } from "../services/video-storyline-stills.js";
 import { videoStorylineDirectorService } from "../services/video-storyline-director.js";
@@ -51,6 +52,7 @@ export function videoStorylineRoutes(rawDb: Db) {
   const db = createRequestScopedDb(rawDb);
   const storylines = videoStorylineService(db);
   const render = videoStorylineRenderService(db);
+  const stitch = videoStorylineStitchService(db);
   const settings = videoStorylineSettingsService(db);
   const director = videoStorylineDirectorService(db);
   const stills = videoStorylineStillsService(db);
@@ -297,6 +299,23 @@ export function videoStorylineRoutes(rawDb: Db) {
       const companyId = req.params.companyId as string;
       const storylineId = req.params.storylineId as string;
       res.json(await render.cancelRender(companyId, storylineId, actorOf(req)));
+    },
+  );
+
+  /**
+   * DUR-4318: the recovery action off "needs_attention" -- the shots are
+   * already done, only the stitched file failed its quality check, so this
+   * re-queues for stitching (and a fresh quality check) instead of
+   * re-rendering every shot via render/start.
+   */
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/stitch/retry",
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      await stitch.retryStitch(companyId, storylineId);
+      res.json({ ok: true });
     },
   );
 
