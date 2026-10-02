@@ -32,6 +32,7 @@ import {
   normalizeLaneAProvider,
   resolveLaneAModelForProvider,
   laneATemperatureForCall,
+  laneAThinkingForCall,
   laneAProviderRoutingForCall,
   readLaneAWebSearchSwitch,
   readLaneAConversationSearchSwitch,
@@ -726,6 +727,13 @@ export interface LaneATargetAgent {
    */
   laneATemperature?: number | null;
   /**
+   * DUR-4367: "Thinking" ("on" | "off" | null). Null/absent = "model
+   * default", the same as before this setting existed. Optional so existing
+   * callers and tests are unaffected; when absent the service reads the
+   * stored value off the row.
+   */
+  laneAThinking?: string | null;
+  /**
    * DUR-4070: company-member userIds this quick agent may answer, besides
    * the company's owner (always allowed). Optional so existing callers/tests
    * are unaffected; absent reads the same as empty ("the owner only").
@@ -793,9 +801,12 @@ export function resolveLaneASettings(agent: LaneATargetAgent) {
   // Null when unset, out of range, or the model is known to refuse one;
   // clamped to 0-1 for Claude.
   const temperature = laneATemperatureForCall(provider, model, agent.laneATemperature);
+  // "none" when the operator chose "off" and the provider/model is known to
+  // accept the field; null (send nothing) otherwise.
+  const reasoningEffort = laneAThinkingForCall(provider, model, agent.laneAThinking);
   // Null unless the provider is OpenRouter and the operator picked hosts.
   const providerRouting = laneAProviderRoutingForCall(provider, agent.laneAProviderRouting);
-  return { provider, model, baseUrl, maxOutputTokens, dailyCallCap, temperature, providerRouting };
+  return { provider, model, baseUrl, maxOutputTokens, dailyCallCap, temperature, reasoningEffort, providerRouting };
 }
 
 /**
@@ -1783,6 +1794,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         laneABaseUrl: agents.laneABaseUrl,
         laneAModel: agents.laneAModel,
         laneATemperature: agents.laneATemperature,
+        laneAThinking: agents.laneAThinking,
         laneAProviderRouting: agents.laneAProviderRouting,
         // DUR-4000: which person does this job, so the prompt can say so,
         // and the job's limits box (its standing rules ride in the prompt).
@@ -1940,6 +1952,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     maxOutputTokens?: number;
     /** Sampling temperature, already resolved for this provider/model. Null = send none. */
     temperature?: number | null;
+    /** DUR-4367: `reasoning_effort`, already resolved for this provider/model. Null = send none. */
+    reasoningEffort?: "none" | null;
     /** OpenRouter "model hosts", already resolved for this provider. Null = OpenRouter picks. */
     providerRouting?: LaneAProviderRouting | null;
     /** DUR-3972: offer read_business_data this turn (the company has an active sales source). */
@@ -2010,6 +2024,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           messages,
           ...(withTools ? { tools } : {}),
           ...(temperatureOff ? {} : { temperature: params.temperature }),
+          ...(params.reasoningEffort ? { reasoningEffort: params.reasoningEffort } : {}),
           ...(providerRouting ? { providerRouting } : {}),
         });
       const request = async (withTools: boolean) => {
@@ -2347,6 +2362,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       laneABaseUrl: params.targetAgent.laneABaseUrl ?? agentRow?.laneABaseUrl ?? null,
       laneAModel: params.targetAgent.laneAModel ?? agentRow?.laneAModel ?? null,
       laneATemperature: params.targetAgent.laneATemperature ?? agentRow?.laneATemperature ?? null,
+      laneAThinking: params.targetAgent.laneAThinking ?? agentRow?.laneAThinking ?? null,
       laneAProviderRouting: params.targetAgent.laneAProviderRouting ?? agentRow?.laneAProviderRouting ?? null,
     });
     const chatModel = assertLaneASettingsRunnable(chatSettings);
@@ -2525,6 +2541,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         model: chatModel,
         maxOutputTokens: chatSettings.maxOutputTokens,
         temperature: chatSettings.temperature,
+        reasoningEffort: chatSettings.reasoningEffort,
         providerRouting: chatSettings.providerRouting,
         offerBusinessData: businessDataPrompt?.available === true,
         offerCompanyFiles: companyFilesPrompt !== undefined,
@@ -2902,6 +2919,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       laneABaseUrl: params.targetAgent.laneABaseUrl ?? agentRow?.laneABaseUrl ?? null,
       laneAModel: params.targetAgent.laneAModel ?? agentRow?.laneAModel ?? null,
       laneATemperature: params.targetAgent.laneATemperature ?? agentRow?.laneATemperature ?? null,
+      laneAThinking: params.targetAgent.laneAThinking ?? agentRow?.laneAThinking ?? null,
       laneAProviderRouting: params.targetAgent.laneAProviderRouting ?? agentRow?.laneAProviderRouting ?? null,
     });
     const model = assertLaneASettingsRunnable(settings);
@@ -2960,6 +2978,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           maxOutputChars: params.maxOutputChars,
         }),
         temperature: settings.temperature,
+        reasoningEffort: settings.reasoningEffort,
         providerRouting: settings.providerRouting,
         responseFormat: params.responseFormat,
       });
@@ -3011,6 +3030,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     maxOutputTokens: number;
     /** Sampling temperature, already resolved for this provider/model. Null = send none. */
     temperature?: number | null;
+    /** DUR-4367: `reasoning_effort`, already resolved for this provider/model. Null = send none. */
+    reasoningEffort?: "none" | null;
     /** OpenRouter "model hosts", already resolved for this provider. Null = OpenRouter picks. */
     providerRouting?: LaneAProviderRouting | null;
     /** DUR-4138: see LaneACompletionRequest.responseFormat. */
@@ -3024,6 +3045,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           system: params.systemPrompt,
           messages: [{ role: "user", content: params.message }],
           ...(withTemperature ? { temperature: params.temperature } : {}),
+          ...(params.reasoningEffort ? { reasoningEffort: params.reasoningEffort } : {}),
           ...(params.providerRouting ? { providerRouting: params.providerRouting } : {}),
           ...(params.responseFormat ? { responseFormat: params.responseFormat } : {}),
         });
