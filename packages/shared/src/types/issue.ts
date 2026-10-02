@@ -826,6 +826,8 @@ export interface SuggestTasksResult {
   createdTasks?: SuggestTasksResultCreatedTask[];
   skippedClientKeys?: string[];
   rejectionReason?: string | null;
+  note?: string | null;
+  commentId?: string | null;
 }
 
 export interface AskUserQuestionsQuestionOption {
@@ -934,12 +936,14 @@ export interface RequestConfirmationResult {
   version: 1;
   outcome: "accepted" | "rejected" | "superseded_by_comment" | "stale_target" | "auto_resolved";
   reason?: string | null;
+  note?: string | null;
   commentId?: string | null;
   staleTarget?: RequestConfirmationTarget | null;
 }
 
 export interface RequestCheckboxConfirmationResult extends RequestConfirmationResult {
   selectedOptionIds?: string[];
+  notConfirmedOptions?: string[];
 }
 
 /**

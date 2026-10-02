@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { MAX_ISSUE_REQUEST_DEPTH } from "../index.js";
 import {
+  acceptIssueThreadInteractionSchema,
   addIssueCommentSchema,
   askUserQuestionsPayloadSchema,
   createIssueSchema,
@@ -558,5 +559,40 @@ describe("createIssueThreadInteractionSchema expiry fields", () => {
     if (!result.success) {
       expect(result.error.issues.map((issue) => issue.message)).toContain("Set either expiresAfterHours or neverExpires, not both");
     }
+  });
+});
+
+// DUR-4310: an optional comment that travels with an accept (Done), not just a reason with a reject.
+describe("acceptIssueThreadInteractionSchema note field", () => {
+  it("omits note when not provided", () => {
+    const parsed = acceptIssueThreadInteractionSchema.parse({});
+    expect(parsed.note).toBeUndefined();
+  });
+
+  it("trims a provided note", () => {
+    const parsed = acceptIssueThreadInteractionSchema.parse({ note: "  looks right, double-check the date  " });
+    expect(parsed.note).toBe("looks right, double-check the date");
+  });
+
+  it("accepts an explicit null note", () => {
+    const parsed = acceptIssueThreadInteractionSchema.parse({ note: null });
+    expect(parsed.note).toBeNull();
+  });
+
+  it("accepts a note at the 4000 character limit and rejects one over it", () => {
+    const atLimit = "a".repeat(4000);
+    expect(acceptIssueThreadInteractionSchema.parse({ note: atLimit }).note).toBe(atLimit);
+    expect(() => acceptIssueThreadInteractionSchema.parse({ note: "a".repeat(4001) })).toThrow();
+  });
+
+  it("accepts a note alongside selectedOptionIds for a checkbox accept", () => {
+    const parsed = acceptIssueThreadInteractionSchema.parse({
+      selectedOptionIds: ["a"],
+      note: "a is stale, b and c are still referenced",
+    });
+    expect(parsed).toMatchObject({
+      selectedOptionIds: ["a"],
+      note: "a is stale, b and c are still referenced",
+    });
   });
 });

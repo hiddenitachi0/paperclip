@@ -87,6 +87,7 @@ describe("issueThreadInteractionService", () => {
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
+    mockAddComment.mockResolvedValue({ id: "33333333-3333-4333-8333-333333333333" });
   });
 
   it("create reuses an existing interaction for the same idempotency key", async () => {
@@ -219,7 +220,14 @@ describe("issueThreadInteractionService", () => {
         { questionId: "extras", optionIds: ["docs", "tests"] },
       ],
       summaryMarkdown: "Phase 1 with tests and docs.",
+      commentId: "33333333-3333-4333-8333-333333333333",
     });
+    expect(mockAddComment).toHaveBeenCalledWith(
+      "11111111-1111-4111-8111-111111111111",
+      "Phase 1 with tests and docs.",
+      expect.objectContaining({ userId: "local-board" }),
+      expect.objectContaining({ authorType: "user" }),
+    );
     expect(state.interactionUpdates).toHaveLength(1);
     expect(state.issueTouches).toHaveLength(1);
   });
