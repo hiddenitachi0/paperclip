@@ -14,9 +14,11 @@ import {
   LANE_A_PROVIDER_ROUTING_MAX_ENTRIES,
   LANE_A_ANTHROPIC_MAX_TEMPERATURE,
   LANE_A_TEMPERATURE_PRESETS,
+  LANE_A_THINKING_MODES,
   LANE_A_TRANSFORM_MAX_TOTAL_CHARS,
   LANE_A_TRUST_LEVELS,
   LANE_A_TRUST_LEVEL_LABELS,
+  laneAModelAcceptsReasoningEffort,
   laneAModelAcceptsTemperature,
   laneAModelsForProvider,
   laneATransformWorstCaseDailyCents,
@@ -32,6 +34,7 @@ import {
   type BrowserAccessLevel,
   type CompanySecret,
   type LaneAProvider,
+  type LaneAThinkingMode,
   type LaneATrustLevel,
   type LaneAProviderRouting,
 } from "@paperclipai/shared";
@@ -113,6 +116,8 @@ export function QuickAgentSection({
     laneAProvider?: string | null;
     laneABaseUrl?: string | null;
     laneATemperature?: number | null;
+    /** DUR-4367: "on" | "off" | null ("model default"). */
+    laneAThinking?: string | null;
     /** DUR-4070: the trust-level ceiling (limited/standard/full). Null/absent reads as "full". */
     laneATrustLevel?: string | null;
     /** DUR-4070: company-member userIds this quick agent may chat with, besides the company's owner. */
@@ -706,6 +711,14 @@ export function QuickAgentSection({
             onSave={(next) => settingMutation.mutateAsync({ laneATemperature: next })}
           />
 
+          <ThinkingSetting
+            value={(agent.laneAThinking as LaneAThinkingMode | null) ?? null}
+            provider={provider}
+            model={agent.laneAModel ?? null}
+            disabled={settingMutation.isPending}
+            onSave={(next) => settingMutation.mutateAsync({ laneAThinking: next })}
+          />
+
           <NumberSetting
             label="Longest answer (tokens)"
             hint={`Empty = ${LANE_A_DEFAULT_MAX_OUTPUT_TOKENS}. Stops an answer from becoming unexpectedly long and expensive.`}
@@ -997,6 +1010,76 @@ function CreativitySetting({
       {acceptsTemperature && provider === "anthropic" && value !== null && value > LANE_A_ANTHROPIC_MAX_TEMPERATURE && (
         <span className="block text-xs text-muted-foreground" data-testid="creativity-capped">
           Claude goes no higher than {LANE_A_ANTHROPIC_MAX_TEMPERATURE}, so this works like {LANE_A_ANTHROPIC_MAX_TEMPERATURE} here.
+        </span>
+      )}
+    </label>
+  );
+}
+
+// DUR-4367: "Thinking" (on / off / model default). Off asks the model to
+// skip its reasoning pass, which is most of the latency for a local
+// reasoning model — the fix for Telegram answers taking ~3x as long as the
+// same message sent directly to the model.
+function ThinkingSetting({
+  value,
+  provider,
+  model,
+  disabled,
+  onSave,
+}: {
+  value: LaneAThinkingMode | null;
+  provider: LaneAProvider;
+  model: string | null;
+  disabled?: boolean;
+  onSave: (next: LaneAThinkingMode | null) => Promise<unknown>;
+}) {
+  const [status, setStatus] = useState<"saving" | "saved" | null>(null);
+  const acceptsOff = laneAModelAcceptsReasoningEffort(provider, model);
+
+  const change = async (raw: string) => {
+    const next = raw === "" ? null : (raw as LaneAThinkingMode);
+    setStatus("saving");
+    try {
+      await onSave(next);
+      setStatus("saved");
+    } catch {
+      // The card already shows why it could not be saved.
+      setStatus(null);
+    }
+  };
+
+  return (
+    <label className="block space-y-1">
+      <span className="flex items-center gap-2 text-xs text-muted-foreground">
+        Thinking
+        {status === "saving" && <span data-testid="thinking-status">Saving…</span>}
+        {status === "saved" && (
+          <span className="text-emerald-600 dark:text-emerald-400" data-testid="thinking-status">
+            Saved
+          </span>
+        )}
+      </span>
+      <select
+        className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
+        value={value ?? ""}
+        disabled={disabled}
+        data-testid="thinking-select"
+        onChange={(event) => void change(event.target.value)}
+      >
+        <option value="">Model default</option>
+        {LANE_A_THINKING_MODES.map((mode) => (
+          <option key={mode} value={mode}>
+            {mode === "off" ? "Off" : "On"}
+          </option>
+        ))}
+      </select>
+      <span className="block text-xs text-muted-foreground">
+        Off skips the model's reasoning pass, which is usually most of the wait for a local reasoning model — on
+        gives it room to think first. Work agents that answer in Telegram or chat usually want it off.
+      </span>
+      {!acceptsOff && value === "off" && (
+        <span className="block text-xs text-muted-foreground" data-testid="thinking-not-used">
+          The model picked above does not take this setting, so it decides for itself.
         </span>
       )}
     </label>

@@ -157,6 +157,8 @@ export interface Agent {
   laneABaseUrl?: string | null;
   /** Quick-agent "creativity" (sampling temperature, 0-1.5). Null = the model host's default. Board-only. */
   laneATemperature?: number | null;
+  /** DUR-4367: "on" | "off" | null ("model default"). Off skips the model's reasoning pass where supported. Board-only. */
+  laneAThinking?: "on" | "off" | null;
   /** DUR-4070: limited | standard | full, the ceiling on plugin tools, business data, company files, web search, browser access and memory. Board-only, default "full". */
   laneATrustLevel?: string | null;
   /** DUR-4070: company-member userIds this quick agent may chat with, besides the company's owner (always allowed). Board-only, default []. */

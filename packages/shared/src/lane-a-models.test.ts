@@ -15,6 +15,9 @@ import {
   parseLaneAProviderSlugList,
   laneAModelAcceptsTemperature,
   laneATemperatureForCall,
+  LANE_A_THINKING_MODES,
+  laneAModelAcceptsReasoningEffort,
+  laneAThinkingForCall,
   laneAModelCostCents,
   laneAModelIssueForProvider,
   laneAProviderModelCostCents,
@@ -246,6 +249,58 @@ describe("quick-agent creativity (sampling temperature)", () => {
     expect(laneATemperatureForCall("local", "llama3.1", 3)).toBeNull();
     expect(laneATemperatureForCall("local", "llama3.1", -1)).toBeNull();
     expect(laneATemperatureForCall("local", "llama3.1", Number.NaN)).toBeNull();
+  });
+});
+
+describe("quick-agent thinking (DUR-4367)", () => {
+  const base = { name: "Front desk", adapterType: "claude_local" as const };
+
+  it("is a board-only quick-agent field", () => {
+    expect(QUICK_AGENT_FIELDS).toContain("laneAThinking");
+  });
+
+  it("accepts on/off/null (model default) on create and on PATCH", () => {
+    for (const value of [...LANE_A_THINKING_MODES, null]) {
+      expect(createAgentSchema.safeParse({ ...base, laneAThinking: value }).success, String(value)).toBe(true);
+      expect(updateAgentSchema.safeParse({ laneAThinking: value }).success, String(value)).toBe(true);
+    }
+    // Left out entirely: nothing is changed.
+    expect(updateAgentSchema.parse({})).not.toHaveProperty("laneAThinking");
+  });
+
+  it("refuses anything that is not on/off/null", () => {
+    for (const value of ["maybe", "ON", 1, true, ""]) {
+      expect(createAgentSchema.safeParse({ ...base, laneAThinking: value }).success, String(value)).toBe(false);
+      expect(updateAgentSchema.safeParse({ laneAThinking: value }).success, String(value)).toBe(false);
+    }
+  });
+
+  it("knows which providers/models accept reasoning_effort: OpenRouter and local yes, OpenAI reasoning models yes, everything else no", () => {
+    expect(laneAModelAcceptsReasoningEffort("openrouter", "x/y")).toBe(true);
+    expect(laneAModelAcceptsReasoningEffort("local", "llama3.1")).toBe(true);
+    expect(laneAModelAcceptsReasoningEffort("openai", "o4-mini")).toBe(true);
+    // Plain OpenAI chat models are not reasoning models and refuse an unknown field.
+    expect(laneAModelAcceptsReasoningEffort("openai", "gpt-4.1-mini")).toBe(false);
+    expect(laneAModelAcceptsReasoningEffort("google", "gemini-2.5-flash")).toBe(false);
+    expect(laneAModelAcceptsReasoningEffort("anthropic", "claude-haiku-4-5")).toBe(false);
+    // Null provider/model = Claude on the default model (Sonnet 5).
+    expect(laneAModelAcceptsReasoningEffort(null, null)).toBe(false);
+  });
+
+  it("resolves the value a call is made with: only 'off' ever sends anything, and only where accepted", () => {
+    expect(laneAThinkingForCall("openrouter", "x/y", "off")).toBe("none");
+    expect(laneAThinkingForCall("local", "llama3.1", "off")).toBe("none");
+    expect(laneAThinkingForCall("openai", "o4-mini", "off")).toBe("none");
+    // "on" and "model default" (null/undefined) never send anything, regardless of provider.
+    expect(laneAThinkingForCall("openrouter", "x/y", "on")).toBeNull();
+    expect(laneAThinkingForCall("openrouter", "x/y", null)).toBeNull();
+    expect(laneAThinkingForCall("openrouter", "x/y", undefined)).toBeNull();
+    // "off" on a provider/model not known to accept the field sends nothing.
+    expect(laneAThinkingForCall("google", "gemini-2.5-flash", "off")).toBeNull();
+    expect(laneAThinkingForCall("anthropic", "claude-haiku-4-5", "off")).toBeNull();
+    expect(laneAThinkingForCall("openai", "gpt-4.1-mini", "off")).toBeNull();
+    // A value that somehow got past validation is never forwarded.
+    expect(laneAThinkingForCall("openrouter", "x/y", "nonsense")).toBeNull();
   });
 });
 
