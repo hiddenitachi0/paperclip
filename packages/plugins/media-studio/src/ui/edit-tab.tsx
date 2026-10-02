@@ -253,6 +253,8 @@ export function MediaStudioEditTab({ context, initialFileId }: { context: Plugin
   useEffect(() => {
     if (!img || !canvasRef.current) return;
     const canvas = canvasRef.current;
+    // No 2D drawing support (e.g. jsdom in tests): nothing to draw.
+    if (!canvas.getContext("2d")) return;
     canvas.width = previewCanvasSize.width;
     canvas.height = previewCanvasSize.height;
     const composed = renderComposite({

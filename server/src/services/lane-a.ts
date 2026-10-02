@@ -57,6 +57,14 @@ import { budgetService } from "./budgets.js";
 import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
 import { resolveAgentMcpToolLibraryServers } from "./mcp-tool-library.js";
+import {
+  buildLaneAActionClaimFallbackLine,
+  buildLaneAActionClaimRetryNote,
+  detectLaneAActionClaim,
+  isLaneAActionClaimFulfilled,
+  pickLaneAForcedToolName,
+  type LaneAActionClaimFamily,
+} from "./lane-a-action-claims.js";
 import { loadLaneAApiTools, type LaneAApiToolClient } from "./lane-a-api-tools.js";
 import type { ApiToolServiceDeps } from "./api-tools.js";
 import { getPluginToolDispatcher, type PluginToolDispatcher } from "./plugin-tool-dispatcher.js";
@@ -2001,6 +2009,10 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     // A host that refuses the creativity setting still gets an answer: the
     // call is repeated once without it, and the rest of the turn goes without.
     let temperatureOff = typeof params.temperature !== "number";
+    // DUR-4355: set just before the one corrective retry's completeRound()
+    // call, cleared right after -- forces that single call onto the tool
+    // matching the claim the model just made and did not back up.
+    let forcedToolName: string | undefined;
     const completeRound = async () => {
       const send = (withTools: boolean) =>
         client.complete({
@@ -2009,6 +2021,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           system: withTools || tools.length === 0 ? systemPrompt : `${systemPrompt}\n\n${noToolsNote}`,
           messages,
           ...(withTools ? { tools } : {}),
+          ...(withTools && forcedToolName ? { toolChoice: { name: forcedToolName } } : {}),
           ...(temperatureOff ? {} : { temperature: params.temperature }),
           ...(providerRouting ? { providerRouting } : {}),
         });
@@ -2045,14 +2058,43 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       }
     };
 
+    // DUR-4355: set once, the first (and only) time a reply claims a
+    // tool-only action it did not back up with a successful call. Guards
+    // against retrying more than once, and carries the family through to the
+    // post-loop fallback/logging.
+    let claimRetry: { family: LaneAActionClaimFamily; matchedPhrase: string } | null = null;
+    let claimRetryOutcome: "recovered" | "failed" | null = null;
+
     try {
       for (let round = 0; round < LANE_A_MAX_MODEL_ROUNDS; round++) {
         response = await completeRound();
+        forcedToolName = undefined;
         inputTokens += response.usage.inputTokens;
         outputTokens += response.usage.outputTokens;
 
         const toolUseBlocks = response.toolCalls;
-        if (response.stop !== "tool_use" || toolUseBlocks.length === 0) break;
+        if (response.stop !== "tool_use" || toolUseBlocks.length === 0) {
+          // DUR-4355: the reply looks final -- before accepting it, check it
+          // is not claiming an action (picture/video/audio, memory, task,
+          // weather/price) that no tool actually performed this turn.
+          if (!claimRetry && !finalRound) {
+            const claim = detectLaneAActionClaim(response.text);
+            if (claim && !isLaneAActionClaimFulfilled(claim.family, actions)) {
+              const forced = toolsOff ? null : pickLaneAForcedToolName(claim.family, tools.map((tool) => tool.name));
+              claimRetry = claim;
+              if (forced) {
+                messages.push({ role: "assistant", content: response.text });
+                messages.push({ role: "user", content: buildLaneAActionClaimRetryNote(claim.family) });
+                forcedToolName = forced;
+                continue;
+              }
+              // No tool matching this claim was even offered this turn --
+              // nothing for a retry to call, so the fallback applies directly.
+              claimRetryOutcome = "failed";
+            }
+          }
+          break;
+        }
         // It was told it hit a limit and still asks for tools: stop here.
         if (finalRound) break;
 
@@ -2266,8 +2308,50 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     }
 
     const finalResponse = response!;
+    let finalText = finalResponse.text;
+    // DUR-4355: the retry round (if any) already had its chance to make the
+    // claimed tool call for real -- actions reflects every call that
+    // succeeded this turn, including that retry's. If the claim still is not
+    // backed up, the person is told plainly instead of being left with a
+    // claim nothing in the turn made true.
+    if (claimRetry) {
+      if (claimRetryOutcome !== "failed") {
+        claimRetryOutcome = isLaneAActionClaimFulfilled(claimRetry.family, actions) ? "recovered" : "failed";
+      }
+      if (claimRetryOutcome === "failed") {
+        finalText = buildLaneAActionClaimFallbackLine(claimRetry.family);
+      }
+      actions.push({
+        tool: "action_claim_check",
+        summary:
+          claimRetryOutcome === "recovered"
+            ? `Said it had done something (${claimRetry.family}) before calling the tool; the automatic retry called it.`
+            : `Said it had done something (${claimRetry.family}) without calling the tool, and the retry still did not call it; the person was told plainly instead.`,
+        ok: claimRetryOutcome === "recovered",
+      });
+      try {
+        await logActivity(db, {
+          companyId: ctx.companyId,
+          actorType: ctx.requester.userId ? "user" : "agent",
+          actorId: ctx.requester.userId ?? ctx.requester.agentId ?? "system",
+          agentId: ctx.agent.id,
+          action: "lane_a.unfulfilled_action_claim",
+          entityType: "agent",
+          entityId: ctx.agent.id,
+          details: {
+            conversationId: ctx.conversationId,
+            model: modelId,
+            family: claimRetry.family,
+            matchedPhrase: claimRetry.matchedPhrase.slice(0, 200),
+            retryOutcome: claimRetryOutcome,
+          },
+        });
+      } catch {
+        // The activity row must never break the turn; the reply is already safe.
+      }
+    }
     return {
-      text: finalResponse.text,
+      text: finalText,
       inputTokens,
       outputTokens,
       stopReason: finalResponse.stopReason,
