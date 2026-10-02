@@ -12,6 +12,8 @@ import { GeneralSettingsProvider } from "../context/GeneralSettingsContext";
 import { TooltipProvider } from "./ui/tooltip";
 import {
   pendingAskUserQuestionsInteraction,
+  pendingRequestCheckboxConfirmationInteraction,
+  acceptedRequestCheckboxConfirmationInteraction,
   commentExpiredAskUserQuestionsInteraction,
   additionalMoneyMovementSpoofedFactCheckRequestConfirmationInteraction,
   combiningMarkSpoofedFactCheckRequestConfirmationInteraction,
@@ -227,6 +229,7 @@ describe("IssueThreadInteractionCard", () => {
           optionIds: ["answers-inline"],
         },
       ],
+      undefined,
     );
   });
 
@@ -375,6 +378,42 @@ describe("IssueThreadInteractionCard", () => {
 
     expect(onAcceptInteraction).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "request_confirmation" }),
+      undefined,
+      undefined,
+      undefined,
+    );
+  });
+
+  it("sends a typed comment with the accept button on a confirmation card (DUR-4310)", async () => {
+    const onAcceptInteraction = vi.fn(async () => undefined);
+    const host = renderCard({
+      interaction: pendingRequestConfirmationInteraction,
+      onAcceptInteraction,
+    });
+
+    const textarea = host.querySelector("textarea");
+    expect(textarea).toBeTruthy();
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        "value",
+      )?.set;
+      valueSetter?.call(textarea, "Looks right, double-check the rollout date though");
+      textarea!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    const confirmButton = Array.from(host.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Approve plan"),
+    );
+    await act(async () => {
+      confirmButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(onAcceptInteraction).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "request_confirmation" }),
+      undefined,
+      undefined,
+      "Looks right, double-check the rollout date though",
     );
   });
 
@@ -465,7 +504,7 @@ describe("IssueThreadInteractionCard", () => {
     );
   });
 
-  it("declines immediately when decline reasons are disabled", async () => {
+  it("declines immediately when decline reasons are disabled, without requiring comment text", async () => {
     const onRejectInteraction = vi.fn(async () => undefined);
     const host = renderCard({
       interaction: disabledDeclineReasonRequestConfirmationInteraction,
@@ -481,7 +520,9 @@ describe("IssueThreadInteractionCard", () => {
       declineButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
-    expect(host.querySelector("textarea")).toBeNull();
+    // DUR-4310: the optional comment box is now shared with the accept path
+    // and always rendered, so it is no longer hidden by allowDeclineReason:
+    // false. What that flag still guarantees is that decline needs no text.
     expect(onRejectInteraction).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "request_confirmation" }),
       undefined,
@@ -812,6 +853,68 @@ describe("IssueThreadInteractionCard", () => {
       "![bug.png](https://cdn.example/shot.png)",
     );
   });
+
+  it("accepts a checkbox confirmation with some boxes unticked plus a comment (DUR-4310)", async () => {
+    const onAcceptInteraction = vi.fn(async () => undefined);
+    const host = renderCard({
+      interaction: pendingRequestCheckboxConfirmationInteraction,
+      onAcceptInteraction,
+    });
+
+    const optionCheckbox = host.querySelector('[aria-label="Old draft report"]');
+    expect(optionCheckbox).toBeTruthy();
+    await act(async () => {
+      optionCheckbox?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    const textarea = host.querySelector("textarea");
+    expect(textarea).toBeTruthy();
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        "value",
+      )?.set;
+      valueSetter?.call(textarea, "Only this one is actually stale, the rest are still in use");
+      textarea!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    const acceptButton = Array.from(host.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Delete selected"),
+    );
+    await act(async () => {
+      acceptButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(onAcceptInteraction).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "request_checkbox_confirmation" }),
+      undefined,
+      ["draft-march-report"],
+      "Only this one is actually stale, the rest are still in use",
+    );
+  });
+
+  it("shows the note and the not-confirmed option labels on a resolved checkbox confirmation (DUR-4310)", () => {
+    const host = renderCard({
+      interaction: {
+        ...acceptedRequestCheckboxConfirmationInteraction,
+        result: {
+          ...acceptedRequestCheckboxConfirmationInteraction.result,
+          version: 1,
+          outcome: "accepted",
+          selectedOptionIds: ["draft-march-report"],
+          notConfirmedOptions: ["Spec v1 (superseded)", "Scratch notes", "Import sample fixture"],
+          note: "Only the March report is stale, the rest are still referenced elsewhere.",
+        },
+      },
+    });
+
+    expect(host.textContent).toContain(
+      "Only the March report is stale, the rest are still referenced elsewhere.",
+    );
+    expect(host.textContent).toContain("Spec v1 (superseded)");
+    expect(host.textContent).toContain("Scratch notes");
+    expect(host.textContent).toContain("Import sample fixture");
+  });
 });
 
 // DUR-62: the weekly check-up card offers "Hide this for a month" per finding.
@@ -938,7 +1041,12 @@ describe("IssueThreadInteractionCard: weekly check-up findings", () => {
     await act(async () => {
       acceptButton?.click();
     });
-    expect(onAcceptInteraction).toHaveBeenCalledWith(checkupInteraction, ["agent_error:agent-1"]);
+    expect(onAcceptInteraction).toHaveBeenCalledWith(
+      checkupInteraction,
+      ["agent_error:agent-1"],
+      undefined,
+      undefined,
+    );
   });
 
   it("shows a finding this user already hid as hidden, not as a button", async () => {
