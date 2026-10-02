@@ -2942,6 +2942,12 @@ export function agentRoutes(
           laneAAssignedUserIds: agent.laneAAssignedUserIds ?? [],
           // OpenRouter "model hosts" chosen at hire time, same reason.
           laneAProviderRouting: agent.laneAProviderRouting ?? null,
+          // DUR-4347: backup pool, fallback chains and keyword routes chosen at
+          // hire time, same reason as the rest of QUICK_AGENT_FIELDS.
+          laneABackupModels: agent.laneABackupModels ?? [],
+          laneANoAnswerChainIds: agent.laneANoAnswerChainIds ?? [],
+          laneARefusalChainIds: agent.laneARefusalChainIds ?? [],
+          laneAKeywordRoutes: agent.laneAKeywordRoutes ?? [],
           // DUR-4017: the daily briefing settings chosen at hire time, same
           // reason — the card is what the board reads, and the legacy branch
           // in approvals.ts rebuilds the agent from it.
