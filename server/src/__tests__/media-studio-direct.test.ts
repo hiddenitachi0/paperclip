@@ -62,11 +62,17 @@ d("Media Studio Create tab direct generation (DUR-4329)", () => {
   let db!: ReturnType<typeof createDb>;
   let stopDb: (() => Promise<void>) | null = null;
   const previousKeyFile = process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE;
+  const previousBind = process.env.PAPERCLIP_BIND;
   const tmpDir = path.join(os.tmpdir(), `paperclip-dur4329-${randomUUID()}`);
 
   beforeAll(async () => {
     mkdirSync(tmpDir, { recursive: true });
     process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE = path.join(tmpDir, "master.key");
+    // saveResultFile's getStorageService() calls loadConfig(), which infers
+    // bind mode from $HOST -- an ambient non-loopback $HOST in this shell
+    // (unrelated to this feature) would otherwise fail config validation
+    // for the default "local_trusted" deployment mode.
+    process.env.PAPERCLIP_BIND = "loopback";
     const started = await startEmbeddedPostgresTestDatabase("media-studio-direct");
     stopDb = started.cleanup;
     db = createDb(started.connectionString);
@@ -96,6 +102,8 @@ d("Media Studio Create tab direct generation (DUR-4329)", () => {
     rmSync(tmpDir, { recursive: true, force: true });
     if (previousKeyFile === undefined) delete process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE;
     else process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE = previousKeyFile;
+    if (previousBind === undefined) delete process.env.PAPERCLIP_BIND;
+    else process.env.PAPERCLIP_BIND = previousBind;
   });
 
   beforeEach(() => {
