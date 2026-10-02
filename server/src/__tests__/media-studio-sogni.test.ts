@@ -476,7 +476,7 @@ describe("media-studio worker with Sogni", () => {
 
   /** Run a tool call while fake timers drive the 2-second polling. */
   async function run(params: Record<string, unknown>) {
-    const pending = harness.executeTool<any>(TOOL_GENERATE, params, runCtx);
+    const pending = harness.executeTool<any>(TOOL_GENERATE, params, { ...runCtx, requesterMessage: typeof params.model === "string" ? `please use the model ${params.model}` : undefined } as never);
     await vi.runAllTimersAsync();
     return pending;
   }
@@ -892,7 +892,7 @@ describe("media-studio looks with Sogni models and LoRAs", () => {
   }
 
   async function run(params: Record<string, unknown>) {
-    const pending = harness.executeTool<any>(TOOL_GENERATE, params, runCtx);
+    const pending = harness.executeTool<any>(TOOL_GENERATE, params, { ...runCtx, requesterMessage: typeof params.model === "string" ? `please use the model ${params.model}` : undefined } as never);
     await vi.runAllTimersAsync();
     return pending;
   }

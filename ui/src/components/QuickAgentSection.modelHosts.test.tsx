@@ -268,6 +268,29 @@ describe("QuickAgentSection model hosts", () => {
     });
   });
 
+  it("shows the server's rejection next to the fields, not only in the card's own error line", async () => {
+    // DUR-4353: Filip's host restrictions were saved three times and still
+    // ended up null; this used to swallow the server's own 422 silently
+    // (a code comment, not a message), so a rejected save looked identical
+    // to a successful one unless the operator noticed the card's error line
+    // far above this field.
+    mockAgentsApi.update.mockRejectedValue(
+      new ApiError("List at most 10 model hosts in each field.", 422, null),
+    );
+    const root = await render(agent(OPENROUTER));
+
+    await type(onlyInput()!, "deepinfra");
+    await clickSave();
+
+    expect(problem()?.textContent).toContain("List at most 10 model hosts in each field.");
+    // What was typed is kept, not wiped out by the failed save.
+    expect(onlyInput()?.value).toBe("deepinfra");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
   it("says which entry is not a host name instead of saving it", async () => {
     const root = await render(agent(OPENROUTER));
 

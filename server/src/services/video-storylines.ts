@@ -57,6 +57,8 @@ export interface VideoStorylineSummary {
   finalDurationSeconds: number | null;
   stitchBlockedReason: string | null;
   errorMessage: string | null;
+  qualityCheckIssues: Array<{ code: string; message: string; shotIndex: number | null; timeSeconds: number | null }>;
+  qualityCheckedAt: string | null;
   defaultTransition: string;
   defaultTransitionDurationMs: number;
   musicAssetId: string | null;
@@ -98,6 +100,21 @@ export interface VideoShotSummary {
   previewContentType: string | null;
   previewByteSize: number | null;
   previewGeneratedAt: string | null;
+  // DUR-4327: AI director proposal + restorable history (see video-storyline-director-proposals.ts).
+  proposedPrompt: string | null;
+  proposedCameraNotes: string | null;
+  proposedDurationSeconds: number | null;
+  proposedTransitionIn: string | null;
+  proposalStatus: string | null;
+  proposalConversationId: string | null;
+  promptHistory: Array<{ prompt: string; cameraNotes: string | null; durationSeconds: number; transitionIn: string | null; replacedAt: string }>;
+  storyboardStatus: string;
+  stillObjectKey: string | null;
+  stillContentType: string | null;
+  stillByteSize: number | null;
+  stillGeneratedAt: string | null;
+  stillEstimatedCostCents: number | null;
+  stillActualCostCents: number | null;
   createdAt: string;
 }
 
@@ -120,6 +137,8 @@ function toStorylineSummary(row: StorylineRow): VideoStorylineSummary {
     finalDurationSeconds: row.finalDurationSeconds,
     stitchBlockedReason: row.stitchBlockedReason,
     errorMessage: row.errorMessage,
+    qualityCheckIssues: row.qualityCheckIssues,
+    qualityCheckedAt: iso(row.qualityCheckedAt),
     defaultTransition: row.defaultTransition,
     defaultTransitionDurationMs: row.defaultTransitionDurationMs,
     musicAssetId: row.musicAssetId,
@@ -165,6 +184,20 @@ function toShotSummary(row: ShotRow): VideoShotSummary {
     previewContentType: row.previewContentType,
     previewByteSize: row.previewByteSize,
     previewGeneratedAt: iso(row.previewGeneratedAt),
+    proposedPrompt: row.proposedPrompt,
+    proposedCameraNotes: row.proposedCameraNotes,
+    proposedDurationSeconds: row.proposedDurationSeconds,
+    proposedTransitionIn: row.proposedTransitionIn,
+    proposalStatus: row.proposalStatus,
+    proposalConversationId: row.proposalConversationId,
+    promptHistory: row.promptHistory,
+    storyboardStatus: row.storyboardStatus,
+    stillObjectKey: row.stillObjectKey,
+    stillContentType: row.stillContentType,
+    stillByteSize: row.stillByteSize,
+    stillGeneratedAt: iso(row.stillGeneratedAt),
+    stillEstimatedCostCents: row.stillEstimatedCostCents,
+    stillActualCostCents: row.stillActualCostCents,
     createdAt: row.createdAt.toISOString(),
   };
 }
@@ -172,7 +205,7 @@ function toShotSummary(row: ShotRow): VideoShotSummary {
 /** A storyline being rendered/stitched owns its own shot tree via the render tick; hand edits mid-flight would race it. */
 const EDITABLE_STORYLINE_STATUSES = new Set(["draft", "estimated", "paused", "failed"]);
 
-function assertStorylineEditable(row: StorylineRow) {
+export function assertStorylineEditable(row: StorylineRow) {
   if (!EDITABLE_STORYLINE_STATUSES.has(row.status)) {
     throw conflict(
       `This storyline is ${row.status.replace(/_/g, " ")} and cannot be edited right now. Pause or wait for it to finish first.`,
@@ -535,6 +568,14 @@ export function videoStorylineService(db: Db) {
     assertStorylineEditable(storyline);
     await getShotRow(companyId, storylineId, shotId);
     if (input.sceneId !== undefined) await getSceneRow(companyId, storylineId, input.sceneId);
+    // DUR-4317/DUR-4320: editing anything that changes what the shot's
+    // still should look like (the prompt, camera notes, or which look
+    // references it uses) invalidates any existing approval/drop AND the
+    // still itself -- it must be regenerated and re-reviewed before this
+    // shot can render again. durationSeconds/orderIndex/sceneId/
+    // transitionIn don't affect the still's composition, so they leave
+    // storyboardStatus/the still columns alone.
+    const touchesStillContent = input.prompt !== undefined || input.cameraNotes !== undefined || input.lookReferenceAssetIds !== undefined;
     const row = await db
       .update(videoShots)
       .set({
@@ -545,6 +586,19 @@ export function videoStorylineService(db: Db) {
         ...(input.durationSeconds !== undefined ? { durationSeconds: input.durationSeconds } : {}),
         ...(input.lookReferenceAssetIds !== undefined ? { lookReferenceAssetIds: input.lookReferenceAssetIds } : {}),
         ...(input.transitionIn !== undefined ? { transitionIn: input.transitionIn } : {}),
+        ...(touchesStillContent
+          ? {
+              storyboardStatus: "pending" as const,
+              stillProvider: null,
+              stillObjectKey: null,
+              stillContentType: null,
+              stillByteSize: null,
+              stillSha256: null,
+              stillGeneratedAt: null,
+              stillEstimatedCostCents: null,
+              stillActualCostCents: null,
+            }
+          : {}),
         updatedAt: new Date(),
       })
       .where(eq(videoShots.id, shotId))
@@ -582,20 +636,28 @@ export function videoStorylineService(db: Db) {
     });
   }
 
-  /** Refreshes the cached estimatedTotalCents/Seconds shown before a render starts -- see POST .../estimate for the same computation exposed directly. */
+  /**
+   * Refreshes the cached estimatedTotalCents/Seconds shown before a render
+   * starts -- see POST .../estimate for the same computation exposed
+   * directly. DUR-4317/DUR-4320: dropped shots are excluded, same as
+   * video-storyline-render.ts's startRender does for its own live estimate
+   * -- a dropped shot never renders, so it should never count toward "what
+   * will this cost."
+   */
   async function recomputeEstimate(companyId: string, storylineId: string): Promise<VideoStorylineSummary> {
     const storyline = await getStorylineRow(companyId, storylineId);
-    const shots = await db
-      .select({ durationSeconds: videoShots.durationSeconds })
+    const allShots = await db
+      .select({ durationSeconds: videoShots.durationSeconds, storyboardStatus: videoShots.storyboardStatus })
       .from(videoShots)
       .where(eq(videoShots.storylineId, storylineId));
+    const shots = allShots.filter((s) => s.storyboardStatus !== "dropped");
     const estimate = estimateVideoStorylineCostCents(shots, storyline.providerId as "fal" | "sogni");
     const [row] = await db
       .update(videoStorylines)
       .set({
         estimatedTotalCents: estimate.estimatedTotalCents,
         estimatedTotalSeconds: estimate.totalSeconds,
-        status: storyline.status === "draft" && shots.length > 0 ? "estimated" : storyline.status,
+        status: storyline.status === "draft" && allShots.length > 0 ? "estimated" : storyline.status,
         updatedAt: new Date(),
       })
       .where(eq(videoStorylines.id, storylineId))

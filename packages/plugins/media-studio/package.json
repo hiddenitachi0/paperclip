@@ -19,12 +19,14 @@
     "typecheck": "pnpm --filter @paperclipai/plugin-sdk ensure-build-deps && tsc --noEmit"
   },
   "dependencies": {
-    "@paperclipai/plugin-sdk": "workspace:*"
+    "@paperclipai/plugin-sdk": "workspace:*",
+    "sharp": "^0.35.2"
   },
   "devDependencies": {
     "@types/node": "^22.19.21",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
+    "@types/sharp": "^0.32.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "typescript": "^5.7.3"

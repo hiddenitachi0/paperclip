@@ -94,9 +94,19 @@ CONVERSATION_ENDED_CODES = ("LANE_A_CONVERSATION_EXPIRED", "LANE_A_TURN_CAP_REAC
 # worse than before (fail-open to the old behaviour, not to silence).
 QUICK_UNAVAILABLE_STATUSES = (429, 502, 503, 504)
 # The quick-answer model is set up wrong (wrong model name or address, a key
-# the service refuses, no key): handing the message over as a full task would
-# only hide the mistake and cost a Claude run, so say what is wrong instead.
-QUICK_SETUP_ERROR_CODES = ("LANE_A_SETUP_REFUSED", "LANE_A_KEY_REFUSED", "LANE_A_KEY_MISSING", "LANE_A_KEY_UNRESOLVED")
+# the service refuses, no key, no model picked at all): handing the message
+# over as a full task would only hide the mistake and cost a Claude run, so
+# say what is wrong instead. DUR-4353: LANE_A_MODEL_MISSING was absent here,
+# so switching a quick agent's provider (which clears its model) silently fell
+# through to QUICK_UNAVAILABLE_STATUSES below and became a full task on every
+# message, with nothing telling the operator the model was never picked.
+QUICK_SETUP_ERROR_CODES = (
+    "LANE_A_SETUP_REFUSED",
+    "LANE_A_KEY_REFUSED",
+    "LANE_A_KEY_MISSING",
+    "LANE_A_KEY_UNRESOLVED",
+    "LANE_A_MODEL_MISSING",
+)
 # /cont: refusals meaning "nothing to continue from" (server/src/services/
 # lane-a-continue.ts); the server's own sentence is passed on as it is.
 CONTINUE_NOTHING_CODES = ("LANE_A_CONTINUE_NOTHING_FOUND", "LANE_A_CONTINUE_NO_MATCH")
@@ -606,6 +616,11 @@ def notify_approvals(state, bots):
                     # text — retry once as plain text so the alert still lands.
                     params.pop("parse_mode", None)
                     res = tg(bot["token"], "sendMessage", **params)
+                if res is None and "reply_markup" in params:
+                    # Last resort: the buttons themselves can be what Telegram
+                    # refuses; the "Open in Paperclip" link still works.
+                    params.pop("reply_markup", None)
+                    res = tg(bot["token"], "sendMessage", **params)
                 if res is not None:
                     sent = True
             # Only suppress future re-notification once it has actually been
@@ -784,10 +799,19 @@ def notify_interactions(state, bots):
                 it.get("kind") == "request_confirmation"
                 and (it.get("payload") or {}).get("rejectRequiresReason") is not True
             )
-            kb = None if not supports_inline_decision else {"inline_keyboard": [[
-                {"text": "✅ Approve", "callback_data": f"iaccept:{issue_id}:{iid}"},
-                {"text": "❌ Decline", "callback_data": f"ireject:{issue_id}:{iid}"},
-            ]]}
+            # Telegram refuses a whole message whose button data is over 64
+            # bytes ("iaccept:<issue uuid>:<interaction uuid>" was 81, so
+            # every plain confirmation failed and was retried every poll).
+            # Carry the short issue reference (e.g. DUR-4310) instead.
+            kb = None
+            if supports_inline_decision:
+                accept_data = f"ia:{issue_ref}:{iid}"
+                reject_data = f"ir:{issue_ref}:{iid}"
+                if max(len(accept_data.encode()), len(reject_data.encode())) <= CALLBACK_DATA_MAX_BYTES:
+                    kb = {"inline_keyboard": [[
+                        {"text": "✅ Approve", "callback_data": accept_data},
+                        {"text": "❌ Decline", "callback_data": reject_data},
+                    ]]}
             sent = False
             for chat in deliverable_chats(state, bot["token"], allowed_users_for(bot)):
                 params = dict(chat_id=chat, text=text, parse_mode="Markdown", disable_web_page_preview=True)
@@ -796,6 +820,12 @@ def notify_interactions(state, bots):
                 res = tg(bot["token"], "sendMessage", **params)
                 if res is None:
                     params.pop("parse_mode", None)
+                    res = tg(bot["token"], "sendMessage", **params)
+                if res is None and "reply_markup" in params:
+                    # Last resort: the buttons themselves can be what Telegram
+                    # refuses. The "Open in Paperclip" link still lets the
+                    # person act, so deliver the message without them.
+                    params.pop("reply_markup", None)
                     res = tg(bot["token"], "sendMessage", **params)
                 if res is not None:
                     sent = True
@@ -1838,6 +1868,9 @@ def notify_morning_reports(state, bots):
                 save_state(state)
             ack_morning_report(company_id, report_id)
 
+# Telegram limit for an inline button's callback_data.
+CALLBACK_DATA_MAX_BYTES = 64
+
 def handle_callback(cq):
     data = cq.get("data", "")
     action, _, rest = data.partition(":")
@@ -1851,13 +1884,16 @@ def handle_callback(cq):
     if action in ("approve", "reject") and rest:
         ok = cli("approval", "approve" if action == "approve" else "reject", rest) is not None
         label = "Approved ✅" if action == "approve" else "Rejected ❌"
-    elif action in ("iaccept", "ireject") and rest.count(":") == 1:
-        issue_id, _, interaction_id = rest.partition(":")
+    elif action in ("iaccept", "ireject", "ia", "ir") and rest.count(":") == 1:
+        # "ia"/"ir" carry the issue reference (DUR-4310); "iaccept"/"ireject"
+        # are the old long form, still accepted for messages already sent.
+        issue_ref, _, interaction_id = rest.partition(":")
+        accept = action in ("iaccept", "ia")
         ok = cli(
-            "issue", "interaction:accept" if action == "iaccept" else "interaction:reject",
-            issue_id, interaction_id,
+            "issue", "interaction:accept" if accept else "interaction:reject",
+            issue_ref, interaction_id,
         ) is not None
-        label = "Approved ✅" if action == "iaccept" else "Declined ❌"
+        label = "Approved ✅" if accept else "Declined ❌"
     else:
         tg(tgtoken, "answerCallbackQuery", callback_query_id=cq.get("id"))
         return

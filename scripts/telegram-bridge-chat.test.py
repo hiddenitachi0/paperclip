@@ -221,6 +221,23 @@ class QuickAnswerTests(BridgeChatTestCase):
         self.assertEqual(self.cli_env.call_count, 1)
         self.assertIn("set up wrong", self.texts(OPERATOR)[-1])
 
+    def test_a_missing_model_is_explained_and_not_turned_into_a_task(self):
+        # DUR-4353: switching a quick agent's provider in the settings page
+        # clears its model (the old one doesn't fit the new provider), and
+        # every message after that quietly became a full Claude task instead
+        # of telling the operator the model was never picked.
+        self.cli_env.return_value = refused(
+            503, "LANE_A_MODEL_MISSING", "This quick agent has no model picked for OpenRouter.")
+
+        bridge.handle_message(self.state, BOT, message(OPERATOR, "what's the weather in Oslo?"))
+
+        self.assertEqual(self.cli_env.call_count, 1)
+        self.assertEqual(self.tasks(), {})
+        reply = self.texts(OPERATOR)[-1]
+        self.assertIn("set up wrong", reply)
+        self.assertIn("no task was made", reply)
+        self.assertIn("no model picked for OpenRouter", reply)
+
     def test_any_other_refusal_is_reported_and_not_retried(self):
         self.cli_env.return_value = refused(404, None, "Agent not found")
 
@@ -470,6 +487,11 @@ class SharedContractTests(unittest.TestCase):
     def test_the_conversation_codes_the_bridge_reacts_to_still_exist_on_the_server(self):
         src = self.read("server", "src", "services", "lane-a.ts")
         for code in bridge.CONVERSATION_ENDED_CODES:
+            self.assertIn(f'"{code}"', src)
+
+    def test_the_setup_error_codes_the_bridge_reacts_to_still_exist_on_the_server(self):
+        src = self.read("server", "src", "services", "lane-a.ts")
+        for code in bridge.QUICK_SETUP_ERROR_CODES:
             self.assertIn(f'"{code}"', src)
 
     def test_the_cli_commands_and_options_the_bridge_uses_exist(self):

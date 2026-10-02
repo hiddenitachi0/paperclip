@@ -2,9 +2,10 @@ import type { Db } from "@paperclipai/db";
 import {
   MEDIA_STUDIO_PLUGIN_KEY,
   VIDEO_STORYLINE_ADVANCED_SETTINGS_KEY,
+  VIDEO_STORYLINE_APPROVAL_THRESHOLD_SETTINGS_KEY,
   VIDEO_STORYLINES_SETTINGS_KEY,
 } from "@paperclipai/shared";
-import { notFound, unprocessable } from "../errors.js";
+import { badRequest, notFound, unprocessable } from "../errors.js";
 import { pluginRegistryService } from "./plugin-registry.js";
 
 /**
@@ -81,5 +82,42 @@ export function videoStorylineSettingsService(db: Db) {
     }
   }
 
-  return { isEnabled, setEnabled, assertEnabled, isAdvancedEnabled, setAdvancedEnabled, assertAdvancedEnabled };
+  /**
+   * DUR-4317/DUR-4320: the per-company spend threshold that gates the
+   * kind:"video_render" board-approval card in video-storyline-render.ts's
+   * startRender -- null (the default) means "not configured", which leaves
+   * that extra gate off entirely, same opt-in posture as the two feature
+   * flags above. This is layered ON TOP OF the always-on, mandatory
+   * per-shot storyboardStatus==='approved' gate (that one has no setting --
+   * see beginShotRender), not a replacement for it.
+   */
+  async function getApprovalThresholdCents(companyId: string): Promise<number | null> {
+    const pluginId = await getPluginId();
+    const settings = await registry.getCompanySettings(pluginId, companyId);
+    const value = settings?.settingsJson?.[VIDEO_STORYLINE_APPROVAL_THRESHOLD_SETTINGS_KEY];
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  }
+
+  async function setApprovalThresholdCents(companyId: string, thresholdCents: number | null): Promise<number | null> {
+    if (thresholdCents !== null && (!Number.isInteger(thresholdCents) || thresholdCents < 0)) {
+      throw badRequest("thresholdCents must be a non-negative integer, or null to turn the threshold off.");
+    }
+    const pluginId = await getPluginId();
+    const existing = await registry.getCompanySettings(pluginId, companyId);
+    await registry.upsertCompanySettings(pluginId, companyId, {
+      settingsJson: { ...(existing?.settingsJson ?? {}), [VIDEO_STORYLINE_APPROVAL_THRESHOLD_SETTINGS_KEY]: thresholdCents },
+    });
+    return thresholdCents;
+  }
+
+  return {
+    isEnabled,
+    setEnabled,
+    assertEnabled,
+    isAdvancedEnabled,
+    setAdvancedEnabled,
+    assertAdvancedEnabled,
+    getApprovalThresholdCents,
+    setApprovalThresholdCents,
+  };
 }

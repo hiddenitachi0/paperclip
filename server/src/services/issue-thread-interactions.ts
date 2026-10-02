@@ -686,6 +686,43 @@ function resolveSelectedCheckboxConfirmationOptions(args: {
     .map((option) => option.id);
 }
 
+/**
+ * DUR-4310: unticked option labels, so an accept-with-note result unambiguously
+ * says *why* an option was left off ("4 of 5, because...") instead of just that
+ * it was unselected.
+ */
+function resolveNotConfirmedCheckboxOptionLabels(args: {
+  interaction: RequestCheckboxConfirmationInteraction;
+  selectedOptionIds: string[];
+}): string[] {
+  const selected = new Set(args.selectedOptionIds);
+  return args.interaction.payload.options
+    .filter((option) => !selected.has(option.id))
+    .map((option) => option.label);
+}
+
+/**
+ * Posts the operator's optional accept-note as a normal thread comment, by the
+ * actor who answered. Called directly on the service (not through the public
+ * POST /issues/:id/comments route), so it never runs the
+ * supersede-pending-interactions-on-comment scan -- that must not reopen or
+ * expire the very card this note is attached to.
+ */
+async function postInteractionNoteComment(args: {
+  db: Db;
+  issueId: string;
+  note: string;
+  actor: InteractionActor;
+}): Promise<string | null> {
+  const comment = await issueService(args.db).addComment(
+    args.issueId,
+    args.note,
+    { agentId: args.actor.agentId ?? undefined, userId: args.actor.userId ?? undefined },
+    { authorType: args.actor.userId ? "user" : args.actor.agentId ? "agent" : "system" },
+  );
+  return comment.id;
+}
+
 function normalizeQuestionAnswers(args: {
   questions: AskUserQuestionsInteraction["payload"]["questions"];
   answers: RespondIssueThreadInteraction["answers"];
@@ -1098,9 +1135,18 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
             selectedOptionIds: args.input.selectedOptionIds,
           })
         : undefined;
+    const notConfirmedOptions =
+      interaction.kind === "request_checkbox_confirmation" && selectedOptionIds
+        ? resolveNotConfirmedCheckboxOptionLabels({ interaction, selectedOptionIds })
+        : undefined;
+    const note = args.input.note?.trim() || null;
 
     const now = new Date();
     const result = await withCompanyScope(rawDb, args.issue.companyId, async (tx) => {
+      const commentId = note
+        ? await postInteractionNoteComment({ db: tx as unknown as Db, issueId: args.issue.id, note, actor: args.actor })
+        : null;
+
       const [updated] = await tx
         .update(issueThreadInteractions)
         .set({
@@ -1109,6 +1155,9 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
             version: 1,
             outcome: "accepted",
             ...(selectedOptionIds ? { selectedOptionIds } : {}),
+            ...(notConfirmedOptions && notConfirmedOptions.length > 0 ? { notConfirmedOptions } : {}),
+            ...(note ? { note } : {}),
+            ...(commentId ? { commentId } : {}),
           },
           resolvedByAgentId: args.actor.agentId ?? null,
           resolvedByUserId: args.actor.userId ?? null,
@@ -1589,6 +1638,11 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
           });
         }
 
+        const note = input.note?.trim() || null;
+        const commentId = note
+          ? await postInteractionNoteComment({ db: tx as unknown as Db, issueId: issue.id, note, actor })
+          : null;
+
         const [updated] = await tx
           .update(issueThreadInteractions)
           .set({
@@ -1596,6 +1650,8 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
               version: 1,
               createdTasks: [...createdByClientKey.values()],
               ...(skippedClientKeys.length > 0 ? { skippedClientKeys } : {}),
+              ...(note ? { note } : {}),
+              ...(commentId ? { commentId } : {}),
             },
             updatedAt: new Date(),
           })
@@ -1967,6 +2023,10 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
         questions: interaction.payload.questions,
         answers: input.answers,
       });
+      const note = input.summaryMarkdown?.trim() || null;
+      const commentId = note
+        ? await postInteractionNoteComment({ db, issueId: issue.id, note, actor })
+        : null;
 
       const [updated] = await db
         .update(issueThreadInteractions)
@@ -1976,6 +2036,7 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
             version: 1,
             answers: normalizedAnswers,
             summaryMarkdown: input.summaryMarkdown ?? null,
+            ...(commentId ? { commentId } : {}),
           },
           resolvedByAgentId: actor.agentId ?? null,
           resolvedByUserId: actor.userId ?? null,

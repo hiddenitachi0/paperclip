@@ -478,8 +478,17 @@ function readConfirmationResultForWake(result: unknown) {
   return {
     outcome: readNonEmptyString(parsed.outcome),
     reason: readNonEmptyString(parsed.reason) ?? readNonEmptyString(parsed.rejectionReason),
+    note: readNonEmptyString(parsed.note) ?? readNonEmptyString(parsed.summaryMarkdown),
     commentId: readNonEmptyString(parsed.commentId),
   };
+}
+
+function readNotConfirmedOptionsForWake(result: unknown): string[] | null {
+  const parsed = readObject(result);
+  const labels = Array.isArray(parsed.notConfirmedOptions)
+    ? parsed.notConfirmedOptions.filter((value): value is string => typeof value === "string" && value.length > 0)
+    : [];
+  return labels.length > 0 ? labels : null;
 }
 
 function hasIssueWorkspaceAuditChange(previous: Record<string, unknown>) {
@@ -1035,6 +1044,8 @@ function queueResolvedInteractionContinuationWakeup(input: {
   const planTarget = readPlanConfirmationTargetForIssue(input.interaction.payload, input.issue.id);
   const interactionResult = readConfirmationResultForWake(input.interaction.result);
   const checkboxSelection = readCheckboxSelectionForWake(input.interaction);
+  const resolutionNote = interactionResult?.note ?? null;
+  const notConfirmedOptions = readNotConfirmedOptionsForWake(input.interaction.result);
   const planReviewInteraction =
     planTarget && input.interaction.kind === "request_confirmation"
       ? {
@@ -1059,6 +1070,8 @@ function queueResolvedInteractionContinuationWakeup(input: {
       sourceRunId: input.interaction.sourceRunId ?? null,
       ...(planReviewInteraction ? { planReviewInteraction } : {}),
       ...(checkboxSelection ? { checkboxSelection } : {}),
+      ...(resolutionNote ? { note: resolutionNote } : {}),
+      ...(notConfirmedOptions ? { notConfirmedOptions } : {}),
       mutation: "interaction",
     },
     requestedByActorType: input.actor.actorType,
@@ -1073,6 +1086,8 @@ function queueResolvedInteractionContinuationWakeup(input: {
       sourceRunId: input.interaction.sourceRunId ?? null,
       ...(planReviewInteraction ? { planReviewInteraction } : {}),
       ...(checkboxSelection ? { checkboxSelection } : {}),
+      ...(resolutionNote ? { note: resolutionNote } : {}),
+      ...(notConfirmedOptions ? { notConfirmedOptions } : {}),
       wakeReason: "issue_commented",
       source: input.source,
       ...(forceFreshSession ? { forceFreshSession: true } : {}),
