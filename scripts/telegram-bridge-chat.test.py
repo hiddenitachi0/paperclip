@@ -256,6 +256,20 @@ class QuickAnswerTests(BridgeChatTestCase):
         self.assertEqual([s["text"] for s in sent], [tricky])
         self.assertNotIn("parse_mode", sent[0])
 
+    def test_dur_4371_an_empty_quick_answer_with_no_pictures_says_the_model_gave_no_answer(self):
+        # DUR-4371: the server now retries and falls back on its own, so this
+        # bridge-side wording is only a belt-and-suspenders fallback for a
+        # response shape the server missed. It must never read as the agent
+        # dismissing the person (the old "had nothing to add" wording did).
+        self.cli_env.return_value = quick(CONV1, "")
+
+        bridge.handle_message(self.state, BOT, message(OPERATOR, "show me in looks of maja night"))
+
+        text = self.texts(OPERATOR)[-1]
+        self.assertNotIn("had nothing to add", text)
+        self.assertIn("gave no answer", text)
+        self.assertIn("CEO", text)
+
     def test_a_long_quick_answer_is_split_into_messages_telegram_accepts(self):
         self.cli_env.return_value = quick(CONV1, "A long line of the answer 😀.\n" * 1000)
 

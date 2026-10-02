@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { eq } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 import {
   activityLog,
   agents,
@@ -672,6 +672,137 @@ describeEmbeddedPostgres("lane A service", () => {
     vi.resetModules();
   });
 
+  // ─── DUR-4371: never an empty final reply ────────────────────────────────
+
+  it("retries once with a nudge when the final reply is empty after a tool call, and answers with the retry's text", async () => {
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId, true, "Maja");
+    await agentService(db).syncPluginToolGrants(target.id, [PLUGIN_TOOL_NAMESPACED]);
+    const { dispatcher } = await seedPluginTool({ content: "Saved looks: Maja Night." });
+
+    const toolTurn = {
+      content: [{ type: "tool_use", id: "call_1", name: PLUGIN_TOOL_MODEL_NAME, input: { prompt: "a cat" } }],
+      usage: { input_tokens: 10, output_tokens: 5 },
+      stop_reason: "tool_use",
+    };
+    const emptyTurn = { content: [], usage: { input_tokens: 10, output_tokens: 0 }, stop_reason: "end_turn" };
+    const retryTurn = {
+      content: [{ type: "text", text: "Maja Night is one of your saved looks." }],
+      usage: { input_tokens: 10, output_tokens: 8 },
+      stop_reason: "end_turn",
+    };
+    const mockCreate = vi.fn().mockResolvedValueOnce(toolTurn).mockResolvedValueOnce(emptyTurn).mockResolvedValueOnce(retryTurn);
+    mockAnthropic(mockCreate);
+    vi.resetModules();
+    const { laneAService: freshLaneAService } = await import("../services/lane-a.ts");
+    const svc = freshLaneAService(db, { pluginToolDispatcher: dispatcher });
+
+    const result = await svc.sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "user-1", agentId: null },
+      message: "which looks do I have?",
+    });
+
+    expect(result.response).toBe("Maja Night is one of your saved looks.");
+    expect(mockCreate).toHaveBeenCalledTimes(3);
+    const retryRequest = mockCreate.mock.calls[2][0];
+    // The retry drops tools entirely, so the model cannot dodge into another
+    // tool call instead of answering.
+    expect(retryRequest.tools).toBeUndefined();
+    expect(retryRequest.messages.at(-1)).toMatchObject({ role: "user", content: expect.stringContaining("Answer the person now") });
+
+    vi.doUnmock("@anthropic-ai/sdk");
+    vi.resetModules();
+  });
+
+  it("falls back to a plain non-empty reply when the retry is also empty", async () => {
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId, true, "Maja");
+    await agentService(db).syncPluginToolGrants(target.id, [PLUGIN_TOOL_NAMESPACED]);
+    const { dispatcher } = await seedPluginTool({ content: "Saved looks: Maja Night." });
+
+    const toolTurn = {
+      content: [{ type: "tool_use", id: "call_1", name: PLUGIN_TOOL_MODEL_NAME, input: { prompt: "a cat" } }],
+      usage: { input_tokens: 10, output_tokens: 5 },
+      stop_reason: "tool_use",
+    };
+    const emptyTurn = { content: [], usage: { input_tokens: 10, output_tokens: 0 }, stop_reason: "end_turn" };
+    const mockCreate = vi.fn().mockResolvedValueOnce(toolTurn).mockResolvedValueOnce(emptyTurn).mockResolvedValueOnce(emptyTurn);
+    mockAnthropic(mockCreate);
+    vi.resetModules();
+    const { laneAService: freshLaneAService } = await import("../services/lane-a.ts");
+    const svc = freshLaneAService(db, { pluginToolDispatcher: dispatcher });
+
+    const result = await svc.sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "user-1", agentId: null },
+      message: "which looks do I have?",
+    });
+
+    expect(result.response.length).toBeGreaterThan(0);
+    expect(result.response).toContain("model gave no answer");
+    expect(mockCreate).toHaveBeenCalledTimes(3);
+
+    vi.doUnmock("@anthropic-ai/sdk");
+    vi.resetModules();
+  });
+
+  it("spends only one retry total: an action-claim retry that recovers still gets the plain fallback if the round after it is empty", async () => {
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId, true, "Ada");
+    await seedAgent(companyId, false, "Bob");
+
+    const mockCreate = vi
+      .fn()
+      // Round 1: claims the task was started, but calls no tool.
+      .mockResolvedValueOnce({
+        content: [{ type: "text", text: "I've started the job for you." }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+        stop_reason: "end_turn",
+      })
+      // Round 2 (forced onto route_to_agent by the claim-retry): the tool call succeeds for real.
+      .mockResolvedValueOnce({
+        content: [{ type: "tool_use", id: "call_1", name: "route_to_agent", input: { agent: "Bob", request: "Fix the login page" } }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+        stop_reason: "tool_use",
+      })
+      // Round 3: the model stops with no text at all. This must NOT spend a second (empty-reply) retry.
+      .mockResolvedValueOnce({ content: [], usage: { input_tokens: 10, output_tokens: 0 }, stop_reason: "end_turn" });
+    mockAnthropic(mockCreate);
+    vi.resetModules();
+    const { laneAService: freshLaneAService } = await import("../services/lane-a.ts");
+    const createIssueForAgent = vi.fn(async () => ({ id: "issue-1", identifier: "DUR-12", status: "todo" }));
+    const svc = freshLaneAService(db, { toolDeps: { createIssueForAgent } });
+
+    const result = await svc.sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "user-1", agentId: null },
+      actor: { type: "board", userId: "user-1", companyIds: [companyId], source: "local_implicit" },
+      message: "Can you get someone to fix the login page?",
+    });
+
+    // Exactly 3 model calls: the claim-retry round and the empty final round
+    // -- never a 4th nudge-retry call on top of the claim-retry.
+    expect(mockCreate).toHaveBeenCalledTimes(3);
+    // The claim was fulfilled (route_to_agent really ran), so the reply is
+    // the DUR-4371 empty-reply fallback, not the DUR-4355 "could not do it"
+    // fallback.
+    expect(result.response).toContain("model gave no answer");
+    expect(result.actions).toEqual([
+      expect.objectContaining({ tool: "route_to_agent", ok: true }),
+      expect.objectContaining({ tool: "action_claim_check", ok: true }),
+    ]);
+
+    vi.doUnmock("@anthropic-ai/sdk");
+    vi.resetModules();
+  });
+
   it("gives a quick agent no add-on tools unless they are ticked: nothing ticked means none, unlike a full agent", async () => {
     process.env.ANTHROPIC_API_KEY = "test-key";
     const companyId = await seedCompany();
@@ -739,9 +870,10 @@ describeEmbeddedPostgres("lane A service", () => {
       message: "keep making pictures forever",
     });
 
-    // One call per round up to the limit, one round refused, one last round.
+    // One call per round up to the limit, one round refused, one last round
+    // (still a tool call with no text, so DUR-4371's empty-reply retry fires once more).
     expect(call).toHaveBeenCalledTimes(LANE_A_MAX_ADDON_TOOL_CALLS);
-    expect(mockCreate).toHaveBeenCalledTimes(LANE_A_MAX_ADDON_TOOL_CALLS + 2);
+    expect(mockCreate).toHaveBeenCalledTimes(LANE_A_MAX_ADDON_TOOL_CALLS + 3);
 
     vi.doUnmock("@anthropic-ai/sdk");
     vi.resetModules();
@@ -1054,8 +1186,10 @@ describeEmbeddedPostgres("lane A service", () => {
 
     expect(mockCallTool).toHaveBeenCalledTimes(LANE_A_MAX_TOOL_CALLS);
     // One round refused past the limit, then one last round; it asked for
-    // tools again, so the loop stopped there.
-    expect(mockCreate).toHaveBeenCalledTimes(LANE_A_MAX_TOOL_CALLS + 2);
+    // tools again, so the loop stopped there with no text — DUR-4371's
+    // empty-reply retry fires once more (and is also empty, since the mock
+    // answers every call the same way).
+    expect(mockCreate).toHaveBeenCalledTimes(LANE_A_MAX_TOOL_CALLS + 3);
 
     unmockMcpSdk();
     vi.doUnmock("@anthropic-ai/sdk");
@@ -1300,7 +1434,11 @@ describeEmbeddedPostgres("lane A service", () => {
     expect(noActor.actions[0]).toMatchObject({ tool: "route_to_agent", ok: false });
     expect(createIssueForAgent).toHaveBeenCalledTimes(1);
 
-    const logged = await db.select().from(activityLog).where(eq(activityLog.action, "lane_a.tool_called"));
+    const logged = await db
+      .select()
+      .from(activityLog)
+      .where(eq(activityLog.action, "lane_a.tool_called"))
+      .orderBy(asc(activityLog.createdAt));
     expect(logged.map((row) => (row.details as { ok: boolean }).ok)).toEqual([false, true, false]);
 
     vi.doUnmock("@anthropic-ai/sdk");
