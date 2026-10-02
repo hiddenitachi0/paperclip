@@ -203,6 +203,18 @@ export const laneAAdapterConfigSchema = z
   .object({
     apiKey: envBindingSecretRefSchema.nullable().optional(),
     /**
+     * DUR-4378 follow-up (live incident, 2 Oct): adapterConfig.laneA.apiKey
+     * is one slot shared by every provider, so switching laneAProvider used
+     * to carry the previous provider's key forward (or drop it) instead of
+     * keeping each provider's own binding. server/src/routes/agents.ts
+     * stashes the outgoing provider's key here, keyed by provider, and
+     * restores the incoming provider's own key on every switch. This schema
+     * is `.strict()`, so it must list the field or any later PATCH that
+     * echoes adapterConfig.laneA back (e.g. a settings-form round trip) gets
+     * rejected with a 422 for an "unrecognized key".
+     */
+    apiKeyByProvider: z.record(z.string(), envBindingSecretRefSchema.nullable()).optional(),
+    /**
      * "Can search the web": offers the quick agent web_search (with the
      * company's Brave key, Connections → Web search) and read_web_page. Off
      * when absent. Board-only: an agent-authenticated caller cannot change it
