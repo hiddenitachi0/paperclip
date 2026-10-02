@@ -171,6 +171,33 @@ export const videoShots = pgTable(
     previewByteSize: integer("preview_byte_size"),
     previewSha256: text("preview_sha256"),
     previewGeneratedAt: timestamp("preview_generated_at", { withTimezone: true }),
+    // DUR-4317/DUR-4320: the storyboard-of-stills approval gate. A shot only
+    // ever reaches `beginShotRender` (the real, paid video-provider call)
+    // once this is 'approved' -- see video-storyline-render.ts's doc comment
+    // on beginShotRender for the exact enforcement point. 'dropped' removes
+    // the shot from the render queue entirely (it is skipped, never rendered,
+    // never counted toward cost) without deleting it. Deliberately a
+    // separate column from the existing preview* group above (DUR-4196's
+    // round-2 QA tool, which renders a real paid video clip and is untouched
+    // by this gate) and from `still*` below (a cheap storyboard still, not a
+    // video-clip-derived frame).
+    storyboardStatus: text("storyboard_status").notNull().default("pending"),
+    // Direct-storage pointer for the cheap storyboard still -- same
+    // reasoning as resultObjectKey/previewObjectKey above (never an
+    // `assets` row). Overwritten on every re-request, same as preview*;
+    // cleared back to null whenever an edit resets storyboardStatus to
+    // 'pending' (see updateShot in video-storylines.ts).
+    stillProvider: text("still_provider"),
+    stillObjectKey: text("still_object_key"),
+    stillContentType: text("still_content_type"),
+    stillByteSize: integer("still_byte_size"),
+    stillSha256: text("still_sha256"),
+    stillGeneratedAt: timestamp("still_generated_at", { withTimezone: true }),
+    // Shown before (estimated) and after (actual) generating this shot's
+    // still -- same before/after pairing resultByteSize's actualCostCents
+    // sibling already uses for the real render.
+    stillEstimatedCostCents: integer("still_estimated_cost_cents"),
+    stillActualCostCents: integer("still_actual_cost_cents"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -186,6 +213,11 @@ export const videoShots = pgTable(
       sql`${table.status} IN ('draft', 'queued', 'rendering', 'done', 'failed')`,
     ),
     transitionInCheck: check("video_shots_transition_in_check", sql`${table.transitionIn} IS NULL OR ${table.transitionIn} IN ('cut', 'fade', 'dissolve')`),
+    storyboardStatusCheck: check(
+      "video_shots_storyboard_status_check",
+      sql`${table.storyboardStatus} IN ('pending', 'approved', 'dropped')`,
+    ),
+    storylineStoryboardStatusIdx: index("video_shots_storyline_storyboard_status_idx").on(table.storylineId, table.storyboardStatus),
   }),
 );
 

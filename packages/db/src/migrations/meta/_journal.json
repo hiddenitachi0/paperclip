@@ -1457,6 +1457,13 @@
       "when": 1790823140000,
       "tag": "0208_paperless_ngx_connection",
       "breakpoints": true
+    },
+    {
+      "idx": 209,
+      "version": "7",
+      "when": 1790953101102,
+      "tag": "0209_lame_stellaris",
+      "breakpoints": true
     }
   ]
 }
