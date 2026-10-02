@@ -1556,7 +1556,7 @@ export async function startServer(): Promise<StartedServer> {
           () => videoStorylineStitch.tick(),
         )
           .then((result) => {
-            if (result.stitched > 0 || result.blocked > 0 || result.failed > 0) {
+            if (result.stitched > 0 || result.needsAttention > 0 || result.blocked > 0 || result.failed > 0) {
               logger.info({ ...result }, "video-storyline-stitch tick");
             }
           })

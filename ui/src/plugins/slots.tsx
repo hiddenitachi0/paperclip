@@ -420,29 +420,79 @@ async function importPluginModule(url: string): Promise<Record<string, unknown>>
     return import(/* @vite-ignore */ url);
   }
 
-  // Fetch the module source text
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch plugin module: ${response.status} ${response.statusText}`);
-  }
-
-  const source = await response.text();
-
-  // Rewrite bare specifier imports to blob URLs
-  const rewritten = rewriteBareSpecifiers(source);
-
-  // Create a blob URL from the rewritten source and import it
-  const blob = new Blob([rewritten], { type: "application/javascript" });
-  const blobUrl = URL.createObjectURL(blob);
-
+  const created: string[] = [];
   try {
-    const mod = await import(/* @vite-ignore */ blobUrl);
-    return mod;
+    const entryBlobUrl = await buildPluginModuleBlobUrl(
+      new URL(url, globalThis.location?.href ?? "http://localhost/").href,
+      new Map(),
+      new Set(),
+      created,
+    );
+    return await import(/* @vite-ignore */ entryBlobUrl);
   } finally {
-    // Clean up the blob URL after import (the module is already loaded)
-    URL.revokeObjectURL(blobUrl);
+    // Clean up the blob URLs after import (every module in the graph is loaded by now)
+    for (const blobUrl of created) URL.revokeObjectURL(blobUrl);
   }
 }
+
+/**
+ * `from "./x.js"`, `from '../x.js'` and side-effect `import "./x.js"`.
+ * Group 1: the keyword and spacing, 2: the quote, 3: the relative specifier.
+ */
+const RELATIVE_SPECIFIER_PATTERN = /(\bfrom\s*|\bimport\s*)(["'])(\.{1,2}\/[^"'\n]+)\2/g;
+
+/**
+ * Fetches one plugin UI file, loads the files it imports by relative path the
+ * same way (a module imported from a blob: URL cannot resolve "./edit-tab.js"
+ * by itself), points those imports at the children's blob URLs, rewrites bare
+ * specifiers to the host shims, and returns this file's blob URL. Each file is
+ * fetched once per load even when several files import it.
+ */
+async function buildPluginModuleBlobUrl(
+  url: string,
+  cache: Map<string, Promise<string>>,
+  ancestors: Set<string>,
+  created: string[],
+): Promise<string> {
+  if (ancestors.has(url)) {
+    throw new Error(`Plugin UI files import each other in a loop (${url}); bundle them into one file instead`);
+  }
+  const cached = cache.get(url);
+  if (cached) return cached;
+
+  const pending = (async () => {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch plugin module: ${response.status} ${response.statusText}`);
+    }
+    const source = await response.text();
+
+    const children = new Map<string, string>();
+    const path = new Set(ancestors).add(url);
+    for (const match of source.matchAll(RELATIVE_SPECIFIER_PATTERN)) {
+      const specifier = match[3]!;
+      if (children.has(specifier)) continue;
+      const childUrl = new URL(specifier, url).href;
+      if (new URL(childUrl).origin !== new URL(url).origin) {
+        throw new Error(`Plugin UI import leaves the plugin's own origin: ${specifier}`);
+      }
+      children.set(specifier, await buildPluginModuleBlobUrl(childUrl, cache, path, created));
+    }
+
+    const withChildren = source.replace(
+      RELATIVE_SPECIFIER_PATTERN,
+      (_all, keyword: string, quote: string, specifier: string) => `${keyword}${quote}${children.get(specifier)}${quote}`,
+    );
+    const rewritten = rewriteBareSpecifiers(withChildren);
+    const blobUrl = URL.createObjectURL(new Blob([rewritten], { type: "application/javascript" }));
+    created.push(blobUrl);
+    return blobUrl;
+  })();
+  cache.set(url, pending);
+  return pending;
+}
+
+export const _buildPluginModuleBlobUrlForTests = buildPluginModuleBlobUrl;
 
 /**
  * Dynamically import a plugin's UI entry module and register all named

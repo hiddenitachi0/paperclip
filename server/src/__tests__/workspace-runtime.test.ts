@@ -23,6 +23,7 @@ import {
   buildWorkspaceCommandEnv,
   buildWorkspaceRuntimeDesiredStatePatch,
   cleanupExecutionWorkspaceArtifacts,
+  ensureGitWorktreeBranchCoherent,
   ensurePersistedExecutionWorkspaceAvailable,
   ensureServerWorkspaceLinksCurrent,
   ensureRuntimeServicesForRun,
@@ -2787,6 +2788,130 @@ describe("realizeExecutionWorkspace", () => {
     // The untracked file must survive -- an unsafe repair must never touch a
     // dirty worktree.
     await expect(fs.readFile(path.join(worktreePath, "untracked.txt"), "utf8")).resolves.toBe("uncommitted work\n");
+  }, 15_000);
+
+  it("DUR-4316: ensureGitWorktreeBranchCoherent is a no-op when already on the expected branch", async () => {
+    const repoRoot = await createTempRepo();
+    const expectedBranch = "PAP-460-already-right-branch";
+    const worktreePath = path.join(repoRoot, ".paperclip", "worktrees", expectedBranch);
+    await fs.mkdir(path.dirname(worktreePath), { recursive: true });
+    await runGit(repoRoot, ["worktree", "add", "-b", expectedBranch, worktreePath, "HEAD"]);
+    const { recorder, operations } = createWorkspaceOperationRecorderDouble();
+
+    await expect(
+      ensureGitWorktreeBranchCoherent({
+        repoRoot,
+        worktreePath,
+        expectedBranchName: expectedBranch,
+        actualBranchName: expectedBranch,
+        sourceIssue: { id: "issue-460", identifier: "PAP-460", title: "Already right branch" },
+        executionWorkspaceId: "execution-workspace-460",
+        recorder,
+      }),
+    ).resolves.toBeUndefined();
+
+    // No repair, no git operation recorded -- the cheap branch-name comparison
+    // alone proved there was nothing to fix.
+    expect(operations).toEqual([]);
+    await expect(readGit(worktreePath, ["branch", "--show-current"])).resolves.toBe(expectedBranch);
+  }, 15_000);
+
+  it("DUR-4316: names the other issue in the blocked-run recovery note for dirty-wrong-branch worktrees", async () => {
+    const repoRoot = await createTempRepo();
+    const expectedBranch = "PAP-461-wants-this-branch";
+    const actualBranch = "PAP-999-someone-elses-feature";
+    const worktreePath = path.join(repoRoot, ".paperclip", "worktrees", expectedBranch);
+    await fs.mkdir(path.dirname(worktreePath), { recursive: true });
+    await runGit(repoRoot, ["branch", expectedBranch]);
+    await runGit(repoRoot, ["worktree", "add", "-b", actualBranch, worktreePath, "HEAD"]);
+    await fs.writeFile(path.join(worktreePath, "uncommitted.txt"), "PAP-999's uncommitted work\n", "utf8");
+
+    await expect(
+      ensureGitWorktreeBranchCoherent({
+        repoRoot,
+        worktreePath,
+        expectedBranchName: expectedBranch,
+        actualBranchName: actualBranch,
+        sourceIssue: { id: "issue-461", identifier: "PAP-461", title: "Wants this branch" },
+        executionWorkspaceId: "execution-workspace-461",
+      }),
+    ).rejects.toMatchObject({
+      code: "workspace_validation_failed",
+      message: expect.stringContaining("issue PAP-999"),
+      resultJson: {
+        workspaceValidation: expect.objectContaining({
+          reason: "git_worktree_branch_incoherence",
+          otherIssueIdentifierGuess: "PAP-999",
+          cleanliness: "dirty",
+          safeRepair: expect.objectContaining({ eligible: false, succeeded: false }),
+        }),
+      },
+    });
+
+    // Nothing lost: the untracked file is still on disk and the other
+    // branch's commit is unchanged, no matter whose it is.
+    await expect(fs.readFile(path.join(worktreePath, "uncommitted.txt"), "utf8"))
+      .resolves.toBe("PAP-999's uncommitted work\n");
+    await expect(readGit(worktreePath, ["branch", "--show-current"])).resolves.toBe(actualBranch);
+  }, 15_000);
+
+  it("DUR-4316: the other-issue guess is a plain string parse, not a cross-company database lookup", async () => {
+    const repoRoot = await createTempRepo();
+    const expectedBranch = "PAP-462-wants-this-branch";
+    // No issue with this identifier exists anywhere (no DB is even wired up in
+    // this test) -- if otherIssueIdentifierGuess still comes back, it proves
+    // the guess is derived from the branch name text alone, so this mechanism
+    // cannot cross a company boundary by querying another company's issues.
+    const actualBranch = "ZZZ-00000-nonexistent-issue-elsewhere";
+    const worktreePath = path.join(repoRoot, ".paperclip", "worktrees", expectedBranch);
+    await fs.mkdir(path.dirname(worktreePath), { recursive: true });
+    await runGit(repoRoot, ["branch", expectedBranch]);
+    await runGit(repoRoot, ["worktree", "add", "-b", actualBranch, worktreePath, "HEAD"]);
+    await fs.writeFile(path.join(worktreePath, "uncommitted.txt"), "not safe to switch\n", "utf8");
+
+    await expect(
+      ensureGitWorktreeBranchCoherent({
+        repoRoot,
+        worktreePath,
+        expectedBranchName: expectedBranch,
+        actualBranchName: actualBranch,
+        sourceIssue: { id: "issue-462", identifier: "PAP-462", title: "Wants this branch" },
+        executionWorkspaceId: "execution-workspace-462",
+      }),
+    ).rejects.toMatchObject({
+      resultJson: {
+        workspaceValidation: expect.objectContaining({
+          otherIssueIdentifierGuess: "ZZZ-00000",
+        }),
+      },
+    });
+
+    // And when the branch doesn't follow the identifier-prefixed naming
+    // convention at all, the guess is simply null -- never a guess borrowed
+    // from unrelated state.
+    const expectedBranch2 = "PAP-463-wants-this-branch";
+    const worktreePath2 = path.join(repoRoot, ".paperclip", "worktrees", expectedBranch2);
+    await fs.mkdir(path.dirname(worktreePath2), { recursive: true });
+    await runGit(repoRoot, ["branch", expectedBranch2]);
+    await runGit(repoRoot, ["worktree", "add", "-b", "freeform-branch-name", worktreePath2, "HEAD"]);
+    await fs.writeFile(path.join(worktreePath2, "uncommitted.txt"), "not safe to switch\n", "utf8");
+
+    await expect(
+      ensureGitWorktreeBranchCoherent({
+        repoRoot,
+        worktreePath: worktreePath2,
+        expectedBranchName: expectedBranch2,
+        actualBranchName: "freeform-branch-name",
+        sourceIssue: { id: "issue-463", identifier: "PAP-463", title: "Wants this branch" },
+        executionWorkspaceId: "execution-workspace-463",
+      }),
+    ).rejects.toMatchObject({
+      resultJson: {
+        workspaceValidation: expect.objectContaining({
+          otherIssueIdentifierGuess: null,
+        }),
+      },
+    });
   }, 15_000);
 
   it("does not reuse a missing persisted local filesystem workspace", async () => {

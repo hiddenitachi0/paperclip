@@ -210,13 +210,15 @@ import {
   buildSelfReviewPassInstruction,
   detectRiskySurfaceFromDiff,
   detectRiskySurfaceFromDiffContent,
-  findExistingSelfReviewPassNoticeCommentForRun,
+  extractReviewedCommitShaFromSummaryBody,
+  findSelfReviewPassSummaryComment,
   getChangedDiffContentForIssueWorkspace,
   getChangedFilePathsForIssueWorkspace,
+  getCurrentHeadShaForIssueWorkspace,
   issueExecutionPolicyOptsOutOfSelfReview,
   issueProjectHasGitWorkspace,
   isSelfReviewPassRun,
-  postSelfReviewPassNoticeComment,
+  upsertSelfReviewPassNoticeComment,
   SELF_REVIEW_PASS_REASON,
 } from "./self-review-gate.js";
 import {
@@ -7703,9 +7705,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             // a risky change that lands via this path would only ever get the confirmatory
             // prompt. DUR-91: also checks the diff content (not just changed file paths), so a
             // risky change in a generically-named file gets caught here too.
-            const [changedFilePaths, diffContent] = await Promise.all([
+            const [changedFilePaths, diffContent, headSha, existingSummaryComment] = await Promise.all([
               getChangedFilePathsForIssueWorkspace(db, { companyId: issue.companyId, issueId: issue.id }),
               getChangedDiffContentForIssueWorkspace(db, { companyId: issue.companyId, issueId: issue.id }),
+              getCurrentHeadShaForIssueWorkspace(db, { companyId: issue.companyId, issueId: issue.id }),
+              findSelfReviewPassSummaryComment(db, { companyId: issue.companyId, issueId: issue.id }),
             ]);
             const riskySurfaceCategories = [
               ...new Set([
@@ -7713,25 +7717,24 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                 ...(diffContent ? detectRiskySurfaceFromDiffContent(diffContent) : []),
               ]),
             ];
+            const previousReviewedSha = existingSummaryComment
+              ? extractReviewedCommitShaFromSummaryBody(existingSummaryComment.body)
+              : null;
             const noticeBody = buildSelfReviewPassInstruction({
               issueIdentifier: issue.identifier,
               alreadyHandedOff: true,
               riskySurfaceCategories,
+              sinceCommitSha: previousReviewedSha,
             });
-            const existingNotice = await findExistingSelfReviewPassNoticeCommentForRun(db, {
+            // DUR-4319: upserts onto the issue's single self-review summary comment instead
+            // of posting a fresh one per run/push.
+            await upsertSelfReviewPassNoticeComment(db, {
               companyId: issue.companyId,
               issueId: issue.id,
               sourceRunId: run.id,
-              body: noticeBody,
+              headSha,
+              content: noticeBody,
             });
-            if (!existingNotice) {
-              await postSelfReviewPassNoticeComment(db, {
-                companyId: issue.companyId,
-                issueId: issue.id,
-                sourceRunId: run.id,
-                body: noticeBody,
-              });
-            }
           } catch {
             // Ignore — the bounded retry itself is already scheduled and is what actually
             // enforces the self-review pass.

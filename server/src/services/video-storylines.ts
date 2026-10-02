@@ -57,6 +57,8 @@ export interface VideoStorylineSummary {
   finalDurationSeconds: number | null;
   stitchBlockedReason: string | null;
   errorMessage: string | null;
+  qualityCheckIssues: Array<{ code: string; message: string; shotIndex: number | null; timeSeconds: number | null }>;
+  qualityCheckedAt: string | null;
   defaultTransition: string;
   defaultTransitionDurationMs: number;
   musicAssetId: string | null;
@@ -120,6 +122,8 @@ function toStorylineSummary(row: StorylineRow): VideoStorylineSummary {
     finalDurationSeconds: row.finalDurationSeconds,
     stitchBlockedReason: row.stitchBlockedReason,
     errorMessage: row.errorMessage,
+    qualityCheckIssues: row.qualityCheckIssues,
+    qualityCheckedAt: iso(row.qualityCheckedAt),
     defaultTransition: row.defaultTransition,
     defaultTransitionDurationMs: row.defaultTransitionDurationMs,
     musicAssetId: row.musicAssetId,
@@ -187,6 +191,10 @@ function activityActor(actor: VideoStorylineActor) {
     agentId: actor.agentId,
   } as const;
 }
+
+
+/** Temporary offset used while renumbering a storyline's shots (far above any real position). */
+const SHOT_ORDER_PARK_OFFSET = 1_000_000;
 
 export function videoStorylineService(db: Db) {
   async function getStorylineRow(companyId: string, storylineId: string): Promise<StorylineRow> {
@@ -463,26 +471,50 @@ export function videoStorylineService(db: Db) {
       throw unprocessable(`A storyline may have at most ${VIDEO_STORYLINE_MAX_SHOTS} shots.`);
     }
     const now = new Date();
-    const row = await db
-      .insert(videoShots)
-      .values({
-        companyId,
-        storylineId,
-        sceneId: input.sceneId,
-        orderIndex: input.orderIndex,
-        prompt: input.prompt,
-        cameraNotes: input.cameraNotes,
-        durationSeconds: input.durationSeconds,
-        lookReferenceAssetIds: input.lookReferenceAssetIds,
-        transitionIn: input.transitionIn,
-        createdAt: now,
-        updatedAt: now,
-      })
-      .returning()
-      .then((rows) => rows[0])
-      .catch((err) => {
-        throw isUniqueViolation(err) ? conflict(`A shot already exists at position ${input.orderIndex}.`) : err;
-      });
+    // A shot's orderIndex is its place in the whole storyline (scene by scene),
+    // so the server decides it: the new shot goes at the end of its own scene and
+    // every shot is renumbered 0..n-1 in scene order. The client's orderIndex is
+    // ignored (the board UI used to send the position within the scene, which made
+    // the first shot of every scene after the first collide at 0).
+    const row = await db.transaction(async (tx) => {
+      // Move existing shots out of the way so the renumbering never collides.
+      await tx
+        .update(videoShots)
+        .set({ orderIndex: sql`${videoShots.orderIndex} + ${SHOT_ORDER_PARK_OFFSET}` })
+        .where(eq(videoShots.storylineId, storylineId));
+      const inserted = await tx
+        .insert(videoShots)
+        .values({
+          companyId,
+          storylineId,
+          sceneId: input.sceneId,
+          // Larger than every parked shot, so it sorts last within its scene.
+          orderIndex: SHOT_ORDER_PARK_OFFSET * 2,
+          prompt: input.prompt,
+          cameraNotes: input.cameraNotes,
+          durationSeconds: input.durationSeconds,
+          lookReferenceAssetIds: input.lookReferenceAssetIds,
+          transitionIn: input.transitionIn,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning()
+        .then((rows) => rows[0]);
+      if (!inserted) throw new Error("Video shot insert returned no row");
+      await tx.execute(sql`
+        UPDATE ${videoShots} AS s
+        SET order_index = r.rn
+        FROM (
+          SELECT s2.id, (row_number() OVER (ORDER BY sc.order_index, s2.order_index) - 1)::int AS rn
+          FROM ${videoShots} AS s2
+          JOIN ${videoScenes} AS sc ON sc.id = s2.scene_id
+          WHERE s2.storyline_id = ${storylineId}
+        ) AS r
+        WHERE s.id = r.id
+      `);
+      const [final] = await tx.select().from(videoShots).where(eq(videoShots.id, inserted.id));
+      return final;
+    });
     if (!row) throw new Error("Video shot insert returned no row");
     await recomputeEstimate(companyId, storylineId);
     await logActivity(db, {
