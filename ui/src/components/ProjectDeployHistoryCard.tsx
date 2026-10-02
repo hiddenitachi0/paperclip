@@ -157,8 +157,18 @@ export function ProjectDeployHistoryCardView({
   return (
     <Card className="border-border/70 bg-card/80" data-testid="project-deploy-history">
       <CardHeader className="pb-3">
-        <CardTitle className="text-base">Production version</CardTitle>
-        <CardDescription>What the deploy runner has put live for this project.</CardDescription>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <CardTitle className="text-base">Production version</CardTitle>
+            <CardDescription>What the deploy runner has put live for this project.</CardDescription>
+          </div>
+          <Link
+            to={`/projects/${projectId}/deploy-history`}
+            className="shrink-0 whitespace-nowrap text-xs text-muted-foreground underline-offset-2 hover:underline"
+          >
+            View full history
+          </Link>
+        </div>
       </CardHeader>
       <CardContent className="space-y-4 text-sm">
         {isLoading ? (

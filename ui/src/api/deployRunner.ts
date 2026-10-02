@@ -40,7 +40,46 @@ export type ProjectDeployHistory = {
   releases?: ProjectDeployHistoryEntry[];
 };
 
+export type ProjectDeployHistoryListStatus = "pass" | "fail";
+
+export type ProjectDeployHistoryListEntry = {
+  commit: string | null;
+  approvalId: string;
+  deployedAt: string;
+  status: ProjectDeployHistoryListStatus;
+};
+
+export type ProjectDeployHistoryListFilters = {
+  status?: ProjectDeployHistoryListStatus;
+  /** Inclusive, as a bare date ("2026-09-01") or ISO timestamp. */
+  from?: string;
+  /** Inclusive, as a bare date ("2026-09-01") or ISO timestamp. */
+  to?: string;
+};
+
+export type ProjectDeployHistoryListPage = {
+  entries: ProjectDeployHistoryListEntry[];
+  pagination: { limit: number; offset: number; total: number; hasMore: boolean };
+};
+
 export const deployRunnerApi = {
   projectDeployHistory: (companyId: string, projectId: string) =>
     api.get<ProjectDeployHistory>(`/companies/${companyId}/projects/${projectId}/deploy-history`),
+  projectDeployHistoryList: (
+    companyId: string,
+    projectId: string,
+    filters: ProjectDeployHistoryListFilters = {},
+    page: { limit?: number; offset?: number } = {},
+  ) => {
+    const params = new URLSearchParams();
+    if (filters.status) params.set("status", filters.status);
+    if (filters.from) params.set("from", filters.from);
+    if (filters.to) params.set("to", filters.to);
+    if (page.limit !== undefined) params.set("limit", String(page.limit));
+    if (page.offset !== undefined) params.set("offset", String(page.offset));
+    const qs = params.toString();
+    return api.get<ProjectDeployHistoryListPage>(
+      `/companies/${companyId}/projects/${projectId}/deploy-history${qs ? `?${qs}` : ""}`,
+    );
+  },
 };
