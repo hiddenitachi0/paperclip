@@ -36,6 +36,7 @@ import {
   BROWSER_ACCESS_FIELDS,
   parseAgentLimits,
   laneAProviderModelIssue,
+  normalizeLaneAProvider,
   readLaneAWebSearchSwitch,
   readLaneABrowserAccess,
   browserAccessLevelRank,
@@ -3642,6 +3643,43 @@ export function agentRoutes(
       if (laneAIssue) {
         res.status(422).json({ error: laneAIssue });
         return;
+      }
+      // DUR-4378 follow-up (live incident, 2 Oct): adapterConfig.laneA.apiKey
+      // is one shared slot reused across every provider. A bare provider
+      // switch with no adapterConfig in the same PATCH used to leave that
+      // slot exactly as it was, so switching OpenRouter -> local -> back to
+      // OpenRouter answered with "no OpenRouter key" because the slot still
+      // held whatever local's (empty) key was. Until each saved model in the
+      // directory has its own key, stash the outgoing provider's key under
+      // apiKeyByProvider and restore the incoming provider's own key (or
+      // null, if it never had one) on every switch, so no provider's key is
+      // ever silently dropped by picking a different one.
+      if (hasOwn(patchData, "laneAProvider")) {
+        const oldProvider = normalizeLaneAProvider(existing.laneAProvider);
+        const newProvider = normalizeLaneAProvider(patchData.laneAProvider as string | null);
+        if (newProvider !== oldProvider) {
+          const existingAdapterConfig = asRecord(existing.adapterConfig) ?? {};
+          const existingLaneA = asRecord(existingAdapterConfig.laneA) ?? {};
+          const existingByProvider = asRecord(existingLaneA.apiKeyByProvider) ?? {};
+          const nextByProvider: Record<string, unknown> = {
+            ...existingByProvider,
+            [oldProvider]: existingLaneA.apiKey ?? null,
+          };
+          const requestedAdapterConfigForSwitch = hasOwn(patchData, "adapterConfig")
+            ? (asRecord(patchData.adapterConfig) ?? {})
+            : {};
+          const requestedLaneAForSwitch = asRecord(requestedAdapterConfigForSwitch.laneA) ?? {};
+          patchData.adapterConfig = {
+            ...existingAdapterConfig,
+            ...requestedAdapterConfigForSwitch,
+            laneA: {
+              ...existingLaneA,
+              apiKey: nextByProvider[newProvider] ?? null,
+              apiKeyByProvider: nextByProvider,
+              ...requestedLaneAForSwitch,
+            },
+          };
+        }
       }
     }
     const replaceAdapterConfig = patchData.replaceAdapterConfig === true;
