@@ -57,6 +57,8 @@ export interface VideoStorylineSummary {
   finalDurationSeconds: number | null;
   stitchBlockedReason: string | null;
   errorMessage: string | null;
+  qualityCheckIssues: Array<{ code: string; message: string; shotIndex: number | null; timeSeconds: number | null }>;
+  qualityCheckedAt: string | null;
   defaultTransition: string;
   defaultTransitionDurationMs: number;
   musicAssetId: string | null;
@@ -120,6 +122,8 @@ function toStorylineSummary(row: StorylineRow): VideoStorylineSummary {
     finalDurationSeconds: row.finalDurationSeconds,
     stitchBlockedReason: row.stitchBlockedReason,
     errorMessage: row.errorMessage,
+    qualityCheckIssues: row.qualityCheckIssues,
+    qualityCheckedAt: iso(row.qualityCheckedAt),
     defaultTransition: row.defaultTransition,
     defaultTransitionDurationMs: row.defaultTransitionDurationMs,
     musicAssetId: row.musicAssetId,
