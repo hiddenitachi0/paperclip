@@ -87,6 +87,14 @@ export interface LaneACompletionRequest {
    * must still parse defensively.
    */
   responseFormat?: "json_object";
+  /**
+   * DUR-4355: force the model to call exactly this tool, for the one
+   * corrective retry after it claimed a tool-only action without calling
+   * one. Requires `tools` to include a tool of this name. Ignored by a
+   * provider/host with no equivalent (the model answers as it otherwise
+   * would, and the caller's own fallback still applies).
+   */
+  toolChoice?: { name: string };
 }
 
 export type LaneAStop = "end_turn" | "tool_use" | "max_tokens" | "other";
@@ -284,6 +292,9 @@ function createAnthropicLaneAClient(client: LaneAModelClient, apiKey: string | n
           system: request.system,
           messages: toAnthropicMessages(request.messages),
           ...(request.tools && request.tools.length > 0 ? { tools: request.tools.map(toAnthropicTool) } : {}),
+          ...(request.toolChoice && request.tools?.some((tool) => tool.name === request.toolChoice!.name)
+            ? { tool_choice: { type: "tool", name: request.toolChoice.name } }
+            : {}),
         });
         return fromAnthropicMessage(response as Anthropic.Message);
       } catch (err) {
@@ -388,6 +399,11 @@ export function buildOpenAiCompatibleBody(provider: LaneAProvider, request: Lane
     // without looking). Require a host that supports every parameter; if none
     // does, OpenRouter says so and the quick agent retries without tools.
     if (provider === "openrouter") body.provider = { require_parameters: true };
+    // DUR-4355: force the one corrective retry onto a specific tool, when the
+    // caller asked for it and that tool was actually offered this call.
+    if (request.toolChoice && request.tools.some((tool) => tool.name === request.toolChoice!.name)) {
+      body.tool_choice = { type: "function", function: { name: request.toolChoice.name } };
+    }
   }
   // The operator's "model hosts" setting (OpenRouter only): merged into the
   // same `provider` object, in OpenRouter's own field names. Without it
