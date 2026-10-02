@@ -337,6 +337,37 @@ def tg(token, method, http_timeout=20, **params):
         return None
 
 
+class TypingIndicator:
+    """Keeps Telegram's "typing..." shown in a chat for as long as a slow
+    reply is being worked on (DUR-4367). Telegram clears the indicator after
+    about 5 seconds, so it is re-sent on a background thread every ~4s until
+    the `with` block exits (the reply is ready to send, or the attempt gave
+    up)."""
+    INTERVAL_SECONDS = 4
+
+    def __init__(self, token, chat_id, action="typing"):
+        self.token = token
+        self.chat_id = chat_id
+        self.action = action
+        self._stop = threading.Event()
+        self._thread = None
+
+    def _loop(self):
+        while not self._stop.wait(self.INTERVAL_SECONDS):
+            tg(self.token, "sendChatAction", chat_id=self.chat_id, action=self.action)
+
+    def __enter__(self):
+        tg(self.token, "sendChatAction", chat_id=self.chat_id, action=self.action)
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc_info):
+        self._stop.set()
+        self._thread.join(timeout=1)
+        return False
+
+
 def cli(*parts):
     try:
         out = subprocess.check_output(
@@ -1123,35 +1154,38 @@ def ask_agent(state, bot, chat_id, text, force_task=False, came_by_voice=False):
     message is otherwise handled exactly like a typed one. It only decides
     whether the answer is also read aloud (see wants_voice_reply)."""
     token, agent_name = bot["token"], bot["name"]
-    tg(token, "sendChatAction", chat_id=chat_id, action="typing")
     conversation_id = None if force_task else get_conversation(state, token, chat_id)
     notes = []
-    if not paperclip_ready():
-        send_plain(token, chat_id, (
-            f"Paperclip is restarting. I'll pass this on to {agent_name} as soon as it's back, "
-            "usually within a minute."))
-        if not wait_for_paperclip():
+    # DUR-4367: "typing..." is shown the moment the message is received and
+    # kept visible (re-sent every ~4s) for as long as this takes, including a
+    # Paperclip-restart wait and any retry, so the person sees she is
+    # answering rather than wondering if the message arrived at all.
+    with TypingIndicator(token, chat_id):
+        if not paperclip_ready():
             send_plain(token, chat_id, (
-                f"Paperclip is still not back, so {agent_name} did not get your message. "
-                "Please send it again in a few minutes."))
+                f"Paperclip is restarting. I'll pass this on to {agent_name} as soon as it's back, "
+                "usually within a minute."))
+            if not wait_for_paperclip():
+                send_plain(token, chat_id, (
+                    f"Paperclip is still not back, so {agent_name} did not get your message. "
+                    "Please send it again in a few minutes."))
+                return
+        started_before = container_started_at()
+        res = chat_send(bot, text, conversation_id, "b" if force_task else None)
+        if _refused(res) and conversation_id and res.get("code") in CONVERSATION_ENDED_CODES:
+            set_conversation(state, token, chat_id, None)
+            notes.append("(The earlier conversation had ended, so this starts a fresh one.)")
+            res = chat_send(bot, text)
+        if _refused(res) and not force_task and res.get("code") in QUICK_SETUP_ERROR_CODES:
+            reason = str(res.get("error") or "").strip()[:400]
+            send_plain(token, chat_id, (
+                f"{agent_name}'s quick answers are set up wrong, so nothing was sent and no task was made. "
+                + (f"{reason} " if reason else "")
+                + f"Fix it on {agent_name}'s page in Paperclip, then send your message again."))
             return
-        tg(token, "sendChatAction", chat_id=chat_id, action="typing")
-    started_before = container_started_at()
-    res = chat_send(bot, text, conversation_id, "b" if force_task else None)
-    if _refused(res) and conversation_id and res.get("code") in CONVERSATION_ENDED_CODES:
-        set_conversation(state, token, chat_id, None)
-        notes.append("(The earlier conversation had ended, so this starts a fresh one.)")
-        res = chat_send(bot, text)
-    if _refused(res) and not force_task and res.get("code") in QUICK_SETUP_ERROR_CODES:
-        reason = str(res.get("error") or "").strip()[:400]
-        send_plain(token, chat_id, (
-            f"{agent_name}'s quick answers are set up wrong, so nothing was sent and no task was made. "
-            + (f"{reason} " if reason else "")
-            + f"Fix it on {agent_name}'s page in Paperclip, then send your message again."))
-        return
-    if _refused(res) and not force_task and res.get("status") in QUICK_UNAVAILABLE_STATUSES:
-        notes.append("Quick answers aren't available right now, so I've handed this over as a task.")
-        res = chat_send(bot, text, lane="b")
+        if _refused(res) and not force_task and res.get("status") in QUICK_UNAVAILABLE_STATUSES:
+            notes.append("Quick answers aren't available right now, so I've handed this over as a task.")
+            res = chat_send(bot, text, lane="b")
 
     if res is None and started_before is not None and container_started_at() != started_before:
         # Paperclip restarted while it was answering: the answer is lost, and
@@ -1279,35 +1313,37 @@ def handle_voice_message(state, bot, chat_id, m):
     if isinstance(size, int) and size > VOICE_MAX_BYTES:
         send_plain(token, chat_id, "That recording is larger than 20 MB. Please send a shorter one, or type it.")
         return
-    tg(token, "sendChatAction", chat_id=chat_id, action="typing")
-    if not paperclip_ready():
-        send_plain(token, chat_id, (
-            "Paperclip is restarting. I'll listen to your voice message as soon as it's back, usually within a minute."))
-        if not wait_for_paperclip():
+    # DUR-4367: typing shown immediately and kept alive while the recording is
+    # downloaded and transcribed, same as a typed message.
+    with TypingIndicator(token, chat_id):
+        if not paperclip_ready():
             send_plain(token, chat_id, (
-                f"Paperclip is still not back, so {agent_name} did not get your voice message. "
-                "Please send it again in a few minutes."))
+                "Paperclip is restarting. I'll listen to your voice message as soon as it's back, usually within a minute."))
+            if not wait_for_paperclip():
+                send_plain(token, chat_id, (
+                    f"Paperclip is still not back, so {agent_name} did not get your voice message. "
+                    "Please send it again in a few minutes."))
+                return
+        data, path_or_reason = download_telegram_file(token, media.get("file_id"))
+        if data is None:
+            if path_or_reason == "too_large":
+                send_plain(token, chat_id, "That recording is larger than 20 MB. Please send a shorter one, or type it.")
+            else:
+                send_plain(token, chat_id, "I couldn't get that voice message from Telegram. Please send it again.")
             return
-    data, path_or_reason = download_telegram_file(token, media.get("file_id"))
-    if data is None:
-        if path_or_reason == "too_large":
-            send_plain(token, chat_id, "That recording is larger than 20 MB. Please send a shorter one, or type it.")
-        else:
-            send_plain(token, chat_id, "I couldn't get that voice message from Telegram. Please send it again.")
-        return
-    res = transcribe_voice(bot, data, path_or_reason, duration)
-    if res is None:
-        send_plain(token, chat_id, (
-            "I didn't hear back from Paperclip, so I couldn't listen to that voice message. Please send it again."))
-        return
-    if _refused(res):
-        reason = str(res.get("error") or "").strip()[:300]
-        send_plain(token, chat_id, "I couldn't listen to that voice message." + (f" {reason}" if reason else ""))
-        return
-    transcript = str(res.get("text") or "").strip()
-    if not transcript:
-        send_plain(token, chat_id, "I couldn't hear any words in that voice message. Please try again, or type it.")
-        return
+        res = transcribe_voice(bot, data, path_or_reason, duration)
+        if res is None:
+            send_plain(token, chat_id, (
+                "I didn't hear back from Paperclip, so I couldn't listen to that voice message. Please send it again."))
+            return
+        if _refused(res):
+            reason = str(res.get("error") or "").strip()[:300]
+            send_plain(token, chat_id, "I couldn't listen to that voice message." + (f" {reason}" if reason else ""))
+            return
+        transcript = str(res.get("text") or "").strip()
+        if not transcript:
+            send_plain(token, chat_id, "I couldn't hear any words in that voice message. Please try again, or type it.")
+            return
     send_plain(token, chat_id, f"🎙️ You said: {tg_truncate(transcript, VOICE_ECHO_MAX)}")
     ask_agent(state, bot, chat_id, transcript, came_by_voice=True)
 
