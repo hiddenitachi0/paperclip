@@ -84,6 +84,27 @@ export interface GenerationInput {
  */
 export const FAL_REFERENCE_MODEL = "fal-ai/flux-pro/kontext/multi";
 
+/**
+ * The Fal model for masked inpainting: FLUX.1 [pro] Fill. Verified against
+ * Fal's own API docs (fal.ai/models/fal-ai/flux-pro/v1/fill/api, 2026-10):
+ * POST https://fal.run/fal-ai/flux-pro/v1/fill
+ *   body   {prompt, image_url, mask_url, num_images?, output_format?, safety_tolerance?, seed?}
+ *   (image_url/mask_url take an https URL or a base64 data: URI; mask_url
+ *   must match image_url's pixel dimensions)
+ *   result {images:[{url, width, height, content_type}], seed, has_nsfw_concepts, timings}
+ */
+export const FAL_FILL_MODEL = "fal-ai/flux-pro/v1/fill";
+
+export interface FillInput {
+  /** The picture to edit: an https URL or a base64 data: URI. */
+  image: string;
+  /** Black-and-white selection mask, same pixel dimensions as `image`: an https URL or a base64 data: URI. */
+  mask: string;
+  /** What to paint into the masked area. */
+  prompt: string;
+  seed?: number;
+}
+
 /** A Fal model id: path segments of letters, digits, dots, dashes, underscores. Never a URL. */
 const FAL_MODEL_ID_PATTERN = /^[a-z0-9][a-z0-9._-]*(\/[a-z0-9][a-z0-9._-]*)*$/i;
 
@@ -168,6 +189,40 @@ export class FalProvider implements GenerationProvider {
     const seed = typeof data.seed === "number" ? data.seed : (input.seed ?? null);
     const base = { provider: this.name, model, contentType: image.content_type ?? "image/jpeg", seed, meta: { seed } };
     // Fal answers with an https URL on its own CDN (or, rarely, inline bytes).
+    if (/^data:/i.test(image.url)) return { ...base, imageDataUrl: image.url };
+    if (!/^https:\/\//i.test(image.url)) throw new Error("fal.ai returned an image address that is not https");
+    return { ...base, imageUrl: image.url };
+  }
+
+  /**
+   * Masked inpainting on FLUX.1 [pro] Fill (`FAL_FILL_MODEL`): paint `prompt`
+   * into the area `mask` marks on `image`, leaving the rest to the model.
+   * The caller (worker.ts) composites the result back over the original
+   * pixels outside the mask — this method does not guarantee that itself.
+   */
+  async fillImage(input: FillInput): Promise<GenerationResult> {
+    const model = FAL_FILL_MODEL;
+    const body: Record<string, unknown> = {
+      prompt: input.prompt,
+      image_url: input.image,
+      mask_url: input.mask,
+      num_images: 1,
+      output_format: "jpeg",
+      // Always conservative: never a client-controllable setting (DUR-4331).
+      safety_tolerance: "2",
+    };
+    if (typeof input.seed === "number") body.seed = input.seed;
+    const res = await this.fetchImpl(`${this.baseUrl}/${model}`, {
+      method: "POST",
+      headers: { Authorization: `Key ${this.apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`fal.ai ${model} failed (${res.status}): ${await res.text()}`);
+    const data = (await res.json()) as { images?: Array<{ url: string; content_type?: string }>; seed?: number };
+    const image = data.images?.[0];
+    if (!image?.url) throw new Error("fal.ai returned no image");
+    const seed = typeof data.seed === "number" ? data.seed : (input.seed ?? null);
+    const base = { provider: this.name, model, contentType: image.content_type ?? "image/jpeg", seed, meta: { seed } };
     if (/^data:/i.test(image.url)) return { ...base, imageDataUrl: image.url };
     if (!/^https:\/\//i.test(image.url)) throw new Error("fal.ai returned an image address that is not https");
     return { ...base, imageUrl: image.url };

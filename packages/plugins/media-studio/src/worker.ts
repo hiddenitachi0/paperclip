@@ -1,6 +1,7 @@
 import { definePlugin, runWorker, type PluginContext, type ToolResult } from "@paperclipai/plugin-sdk";
 import {
   FAL_REFERENCE_MODEL,
+  FalProvider,
   MAX_SEED,
   assertFalModelId,
   isPictureService,
@@ -11,6 +12,7 @@ import {
   type PictureService,
   type ProviderConfig,
 } from "./providers.js";
+import { compositeMaskedEdit } from "./mask-composite.js";
 import {
   SOGNI_DEFAULT_MODEL,
   SOGNI_MAX_LORAS,
@@ -41,6 +43,8 @@ import {
 import {
   ACTION_EDIT_CAPABILITIES,
   ACTION_EDIT_FAL,
+  ACTION_EDIT_INPAINT,
+  ACTION_EDIT_SEGMENT,
   ACTION_EDIT_SOGNI,
   ACTION_GENERATE,
   ACTION_LOOKS_DELETE,
@@ -113,7 +117,7 @@ import {
   type CharacterSheet,
   type ReferenceRole,
 } from "./look-prompt.js";
-import { SOGNI_TOOLS, prepareSogniCall, sogniToolDescription, sogniToolParameters, type SogniToolDef } from "./sogni-tools.js";
+import { SOGNI_TOOLS, findSogniTool, prepareSogniCall, sogniToolDescription, sogniToolParameters, type SogniToolDef } from "./sogni-tools.js";
 
 /**
  * Resolve the operator-configured provider and run one generation. Shared by
@@ -245,6 +249,22 @@ async function toAttachmentBytes(
   }
   throw new Error("Provider returned neither imageDataUrl nor imageUrl");
 }
+
+/** Decode a base64 picture data: URL straight from the browser (the editor never sends a Paperclip address here). */
+function bytesFromDataUrl(dataUrl: string, label: string): Buffer {
+  const match = DATA_URL_PATTERN.exec(dataUrl);
+  if (!match || !match[2]) throw new Error(`${label} must be a picture.`);
+  return Buffer.from(match[3]!, "base64");
+}
+
+/**
+ * The fixed prompt for "Remove selected object" (DUR-4331): mode "remove"
+ * never takes a client-supplied prompt, so this path cannot be used to
+ * smuggle an unfiltered prompt past safeContentFilter under the guise of a
+ * removal. Exported so tests can assert the server ignores the client's text.
+ */
+export const INPAINT_REMOVE_PROMPT =
+  "Remove the selected object entirely and fill the area with background that realistically matches the surrounding picture (same lighting, texture and perspective). Do not add any new object, person, text or logo.";
 
 // ─── Saved looks ─────────────────────────────────────────────────────────────
 //
@@ -1732,9 +1752,12 @@ const plugin = definePlugin({
       const callParams: Record<string, unknown> = { ...raw, fileId: "editor" };
       delete callParams.tool;
       delete callParams.imageDataUrl;
-      // The host adds companyId to every action call; the Sogni tool schema is
-      // strict and refuses unknown fields, so it must not reach prepareSogniCall.
+      // The host bridge splices its own authorized companyId (and, for some
+      // calls, renderEnvironment) onto every action's params; neither is a
+      // Sogni argument, so they must not reach prepareSogniCall's strict
+      // schema check.
       delete callParams.companyId;
+      delete callParams.renderEnvironment;
       const prepared = prepareSogniCall(def, callParams, { defaultModel });
       if ("error" in prepared) throw new Error(prepared.error);
 
@@ -1798,6 +1821,123 @@ const plugin = definePlugin({
         const result = await impl.generate({ prompt, referenceImages: [imageDataUrl] });
         const { contentBase64, contentType } = await toAttachmentBytes(ctx, result);
         return { imageDataUrl: `data:${contentType};base64,${contentBase64}`, contentType, provider: "fal" };
+      } catch (err) {
+        throw new Error(errorText(err));
+      }
+    });
+
+    // "Select an object": DUR-4331's helper for the Edit tab's selection
+    // tools. Wraps Sogni's segment_image, but always as a black-and-white
+    // mask — never Sogni's own cutout option (applyMask is forced false
+    // regardless of what the caller sends) — since the result only ever
+    // feeds a selection, not a finished picture. Same non-agent path as
+    // edit.sogni: no daily cap, bytes come straight from the browser.
+    //
+    // Input:  { imageDataUrl, text?, points?: [{x,y,label}], boxes?: [{x0,y0,x1,y1,label?}] }
+    //         (at least one of text/points/boxes, per segment_image's own rule)
+    // Output: { imageDataUrl, contentType, provider: "sogni" } — a black-and-white mask, same picture dimensions.
+    ctx.actions.register(ACTION_EDIT_SEGMENT, async (params, context) => {
+      if (context.actor.type !== "user") throw new Error("This is only for a person editing a picture in Media Studio.");
+      if (!context.companyId) throw new Error("Open this page from inside a company.");
+      const raw = (params ?? {}) as Record<string, unknown>;
+      const imageDataUrl = typeof raw.imageDataUrl === "string" ? raw.imageDataUrl : "";
+      if (!/^data:image\//i.test(imageDataUrl)) throw new Error("Open a picture in the editor first.");
+
+      const def = findSogniTool("sogni-segment-image")!;
+      const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
+      const defaultModel = textOrNull(cfg.sogniModel) ?? SOGNI_DEFAULT_MODEL;
+      const callParams: Record<string, unknown> = { ...raw, fileId: "editor", applyMask: false };
+      delete callParams.imageDataUrl;
+      // See edit.sogni's identical guard above: the host-injected companyId
+      // (and renderEnvironment) are not Sogni arguments.
+      delete callParams.companyId;
+      delete callParams.renderEnvironment;
+      const prepared = prepareSogniCall(def, callParams, { defaultModel });
+      if ("error" in prepared) throw new Error(prepared.error);
+
+      const ref = typeof cfg.sogniKeySecretRef === "string" ? cfg.sogniKeySecretRef.trim() : "";
+      if (!ref) {
+        throw new Error("Ask an admin to add a Sogni API key in Media Studio settings to use AI edits.");
+      }
+      let apiKey: string;
+      try {
+        apiKey = await ctx.secrets.resolve(ref);
+      } catch (err) {
+        throw new Error(`The Sogni API key picked in Media Studio's settings could not be read: ${errorText(err)}`);
+      }
+      const sogni = new SogniProvider({
+        apiKey,
+        apiFetch: (url, init) => ctx.http.fetch(url, init),
+        transferFetch: guardedTransferFetch,
+        defaultModel,
+        tokenType: sogniTokenType(cfg),
+      });
+      try {
+        const made = await sogni.runPictureTool({
+          toolName: def.sogniTool,
+          arguments: prepared.arguments,
+          pictures: [imageDataUrl],
+          safeContentFilter: true,
+        });
+        const contentType = assertImageContentType(made.contentType);
+        return { imageDataUrl: `data:${contentType};base64,${made.contentBase64}`, contentType, provider: "sogni" };
+      } catch (err) {
+        throw new Error(errorText(err));
+      }
+    });
+
+    // "Replace selected area" / "Remove selected object": Fal's Fill model
+    // (FAL_FILL_MODEL) paints over the masked area. The model's own output
+    // is never trusted outside the mask: compositeMaskedEdit restores the
+    // original pixels there regardless of what the model actually returned
+    // — this is DUR-4326's acceptance criterion, enforced in code rather
+    // than assumed from model behavior. Same non-agent path as edit.fal: no
+    // daily cap, bytes come straight from the browser.
+    //
+    // Input:  { imageDataUrl, maskDataUrl, mode: "replace" | "remove", prompt? }
+    //         (prompt required for "replace"; ignored — overridden by a fixed
+    //         server-side prompt — for "remove")
+    // Output: { imageDataUrl, contentType: "image/png", provider: "fal" } — same dimensions as imageDataUrl.
+    ctx.actions.register(ACTION_EDIT_INPAINT, async (params, context) => {
+      if (context.actor.type !== "user") throw new Error("This is only for a person editing a picture in Media Studio.");
+      if (!context.companyId) throw new Error("Open this page from inside a company.");
+      const raw = (params ?? {}) as Record<string, unknown>;
+      const imageDataUrl = typeof raw.imageDataUrl === "string" ? raw.imageDataUrl : "";
+      if (!/^data:image\//i.test(imageDataUrl)) throw new Error("Open a picture in the editor first.");
+      const maskDataUrl = typeof raw.maskDataUrl === "string" ? raw.maskDataUrl : "";
+      if (!/^data:image\//i.test(maskDataUrl)) throw new Error("Select an area first.");
+      const mode = raw.mode === "remove" || raw.mode === "replace" ? raw.mode : "";
+      if (!mode) throw new Error('mode must be "replace" or "remove".');
+      const prompt =
+        mode === "remove"
+          ? INPAINT_REMOVE_PROMPT
+          : (() => {
+              const given = typeof raw.prompt === "string" ? raw.prompt.trim() : "";
+              if (!given) throw new Error("Describe what to put in the selected area first.");
+              return given;
+            })();
+
+      const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
+      const ref = typeof cfg.falKeySecretRef === "string" ? cfg.falKeySecretRef.trim() : "";
+      if (!ref) {
+        throw new Error("Ask an admin to add a Fal.ai API key in Media Studio settings to use AI edits.");
+      }
+      let falKey: string;
+      try {
+        falKey = await ctx.secrets.resolve(ref);
+      } catch (err) {
+        throw new Error(`The Fal.ai API key picked in Media Studio's settings could not be read: ${errorText(err)}`);
+      }
+      try {
+        const provider = new FalProvider(falKey, (url, init) => ctx.http.fetch(url, init));
+        const result = await provider.fillImage({ image: imageDataUrl, mask: maskDataUrl, prompt });
+        const { contentBase64: editedBase64 } = await toAttachmentBytes(ctx, result);
+        const composited = await compositeMaskedEdit({
+          original: bytesFromDataUrl(imageDataUrl, "The picture"),
+          edited: Buffer.from(editedBase64, "base64"),
+          mask: bytesFromDataUrl(maskDataUrl, "The mask"),
+        });
+        return { imageDataUrl: `data:image/png;base64,${composited.toString("base64")}`, contentType: "image/png", provider: "fal" };
       } catch (err) {
         throw new Error(errorText(err));
       }

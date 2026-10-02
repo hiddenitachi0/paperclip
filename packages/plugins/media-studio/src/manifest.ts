@@ -38,6 +38,10 @@ export const ACTION_EDIT_CAPABILITIES = "edit.capabilities";
 export const ACTION_EDIT_SOGNI = "edit.sogni";
 /** Run a Fal.ai prompt edit ("make variations" / "edit with a prompt") on a picture the person is editing. */
 export const ACTION_EDIT_FAL = "edit.fal";
+/** Select objects in a picture (Sogni) and return a black-and-white mask, for the Edit tab's selection tools (DUR-4331). */
+export const ACTION_EDIT_SEGMENT = "edit.segment";
+/** Masked replace/remove on a picture the person is editing (Fal fill, DUR-4331): server-side mask compositing guarantees the unselected area is unchanged. */
+export const ACTION_EDIT_INPAINT = "edit.inpaint";
 export const ISSUE_TAB_SLOT = "media-studio-issue-tab";
 export const ISSUE_TAB_EXPORT = "MediaStudioIssueTab";
 export const LOOKS_PAGE_EXPORT = "MediaStudioLooksPage";
