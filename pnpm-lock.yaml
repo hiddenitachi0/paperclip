@@ -573,6 +573,9 @@ importers:
       '@paperclipai/plugin-sdk':
         specifier: workspace:*
         version: link:../sdk
+      sharp:
+        specifier: ^0.35.2
+        version: 0.35.2
     devDependencies:
       '@types/node':
         specifier: ^22.19.21
@@ -583,6 +586,9 @@ importers:
       '@types/react-dom':
         specifier: ^19.2.3
         version: 19.2.3(@types/react@19.2.17)
+      '@types/sharp':
+        specifier: ^0.32.0
+        version: 0.32.0
       react:
         specifier: ^19.2.7
         version: 19.2.7
