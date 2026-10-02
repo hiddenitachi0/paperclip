@@ -40,6 +40,7 @@ import {
   MISSING_RUN_ID_GATE_MESSAGE,
   findCompletedSelfReviewPassForIssue,
   findExistingSelfReviewPassNoticeCommentForRun,
+  findOutstandingSelfReviewPassForIssue,
   getChangedDiffContentForIssueWorkspace,
   getChangedFilePathsForIssueWorkspace,
   isSelfReviewPassContext,
@@ -790,6 +791,124 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
     expect(comments).toHaveLength(0);
   });
 
+  it("DUR-4307: does not pile on a second self-review pass when a DIFFERENT run's pass for this issue is already outstanding (not yet completed)", async () => {
+    const { companyId, agentId, projectId, issueId } = await seedCodeIssueFixture();
+
+    // Simulate the first declined run already having a self-review pass scheduled, still
+    // sitting in `queued` -- its own corrective run hasn't dispatched or completed yet.
+    const firstSourceRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: firstSourceRunId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      status: "completed",
+    });
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "automation",
+      triggerDetail: "system",
+      reason: SELF_REVIEW_PASS_REASON,
+      payload: {},
+      status: "queued",
+      idempotencyKey: buildSelfReviewPassIdempotencyKey({ issueId, sourceRunId: firstSourceRunId }),
+      requestedByActorType: "system",
+      requestedByActorId: "issue_self_review_gate",
+    });
+
+    // A second, unrelated ordinary run (a ordinary heartbeat_timer retry, per DUR-4302) now
+    // attempts the same PATCH before that first pass has resolved either way.
+    const secondRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: secondRunId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      status: "running",
+    });
+    const { wakeup, calls } = makeRecordingWakeup(db, companyId);
+
+    const result = await evaluateSelfReviewDoneGate({
+      db,
+      wakeup,
+      issue: {
+        id: issueId,
+        identifier: `T-1`,
+        companyId,
+        projectId,
+        executionPolicy: null,
+      },
+      actor: { actorType: "agent", agentId, runId: secondRunId },
+      requestedStatus: "done",
+      currentStatus: "in_progress",
+    });
+
+    // Still blocked (the task genuinely isn't through its one bounded pass yet)...
+    expect(result).not.toBeNull();
+    // ...but no NEW wake was scheduled, and no new comment was posted -- the existing
+    // outstanding wake already covers this attempt.
+    expect(calls).toHaveLength(0);
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments).toHaveLength(0);
+
+    const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId));
+    expect(wakes).toHaveLength(1);
+  });
+
+  it("DUR-4307: once the outstanding pass completes, a later run is let through via the ordinary priorPass path (not re-blocked)", async () => {
+    const { companyId, agentId, projectId, issueId } = await seedCodeIssueFixture();
+
+    const firstSourceRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: firstSourceRunId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      status: "completed",
+    });
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "automation",
+      triggerDetail: "system",
+      reason: SELF_REVIEW_PASS_REASON,
+      payload: {},
+      status: "completed",
+      idempotencyKey: buildSelfReviewPassIdempotencyKey({ issueId, sourceRunId: firstSourceRunId }),
+      requestedByActorType: "system",
+      requestedByActorId: "issue_self_review_gate",
+    });
+
+    const laterRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: laterRunId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      status: "running",
+    });
+    const { wakeup, calls } = makeRecordingWakeup(db, companyId);
+
+    const result = await evaluateSelfReviewDoneGate({
+      db,
+      wakeup,
+      issue: {
+        id: issueId,
+        identifier: `T-1`,
+        companyId,
+        projectId,
+        executionPolicy: null,
+      },
+      actor: { actorType: "agent", agentId, runId: laterRunId },
+      requestedStatus: "done",
+      currentStatus: "in_progress",
+    });
+
+    expect(result).toBeNull();
+    expect(calls).toHaveLength(0);
+  });
+
   it("findCompletedSelfReviewPassForIssue only matches a terminal completed wake for this exact issue", async () => {
     const { companyId, agentId, issueId } = await seedCodeIssueFixture();
     const otherIssueId = randomUUID();
@@ -856,6 +975,78 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
     expect(
       await findCompletedSelfReviewPassForIssue(db, { companyId, issueId, matchingDiffFingerprint: null }),
     ).toBeNull();
+  });
+
+  it("DUR-4307: findOutstandingSelfReviewPassForIssue matches queued/deferred/claimed but not completed or a different issue", async () => {
+    const { companyId, agentId, issueId } = await seedCodeIssueFixture();
+    const otherIssueId = randomUUID();
+
+    expect(await findOutstandingSelfReviewPassForIssue(db, { companyId, issueId })).toBeNull();
+
+    // A completed wake must NOT count as outstanding -- that's priorPass's job.
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "automation",
+      reason: SELF_REVIEW_PASS_REASON,
+      payload: {},
+      status: "completed",
+      idempotencyKey: buildSelfReviewPassIdempotencyKey({ issueId, sourceRunId: randomUUID() }),
+    });
+    expect(await findOutstandingSelfReviewPassForIssue(db, { companyId, issueId })).toBeNull();
+
+    // A queued wake for a DIFFERENT issue must not count either.
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "automation",
+      reason: SELF_REVIEW_PASS_REASON,
+      payload: {},
+      status: "queued",
+      idempotencyKey: buildSelfReviewPassIdempotencyKey({ issueId: otherIssueId, sourceRunId: randomUUID() }),
+    });
+    expect(await findOutstandingSelfReviewPassForIssue(db, { companyId, issueId })).toBeNull();
+
+    // A queued wake for THIS issue counts as outstanding.
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "automation",
+      reason: SELF_REVIEW_PASS_REASON,
+      payload: {},
+      status: "queued",
+      idempotencyKey: buildSelfReviewPassIdempotencyKey({ issueId, sourceRunId: randomUUID() }),
+    });
+    expect(await findOutstandingSelfReviewPassForIssue(db, { companyId, issueId })).not.toBeNull();
+  });
+
+  it("DUR-4307: findOutstandingSelfReviewPassForIssue respects matchingDiffFingerprint the same way findCompletedSelfReviewPassForIssue does", async () => {
+    const { companyId, agentId, issueId } = await seedCodeIssueFixture();
+
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "automation",
+      reason: SELF_REVIEW_PASS_REASON,
+      payload: { reviewedDiffFingerprint: "fingerprint-a" },
+      status: "queued",
+      idempotencyKey: buildSelfReviewPassIdempotencyKey({ issueId, sourceRunId: randomUUID() }),
+    });
+
+    // Matching fingerprint -> found.
+    expect(
+      await findOutstandingSelfReviewPassForIssue(db, { companyId, issueId, matchingDiffFingerprint: "fingerprint-a" }),
+    ).not.toBeNull();
+    // Different fingerprint -> not found (a new/different diff still gets its own pass).
+    expect(
+      await findOutstandingSelfReviewPassForIssue(db, { companyId, issueId, matchingDiffFingerprint: "fingerprint-b" }),
+    ).toBeNull();
+    // null fingerprint never matches.
+    expect(
+      await findOutstandingSelfReviewPassForIssue(db, { companyId, issueId, matchingDiffFingerprint: null }),
+    ).toBeNull();
+    // undefined -- lenient, matches any outstanding pass regardless of fingerprint.
+    expect(await findOutstandingSelfReviewPassForIssue(db, { companyId, issueId })).not.toBeNull();
   });
 
   describe("DUR-3992: agent with no trusted run id", () => {
