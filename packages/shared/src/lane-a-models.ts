@@ -126,7 +126,20 @@ export const LANE_A_PROVIDER_CATALOGUE: Record<LaneAProvider, LaneAProviderDescr
     defaultModel: null,
     defaultBaseUrl: "https://openrouter.ai/api/v1",
     baseUrlEditable: true,
-    models: {},
+    // DUR-4353: freeForm providers accept any model id typed in (see
+    // laneAModelIssueForProvider below), but an id with no entry here prices
+    // at 0 (laneAModelPricing), so a company's real OpenRouter spend reads as
+    // free. Priced here are the ids Paperclip has actually been pointed at in
+    // production; add more as they come up. Price is OpenRouter's lowest-cost
+    // host for the model (2 Oct 2026: DeepInfra fp8), since that is the host
+    // OpenRouter picks by default with no "model hosts" restriction set.
+    models: {
+      "mistralai/mistral-small-3.2-24b-instruct": {
+        label: "Mistral Small 3.2 24B",
+        inputUsdPerMillion: 0.075,
+        outputUsdPerMillion: 0.2,
+      },
+    },
   },
   local: {
     label: "Local model",

@@ -94,9 +94,19 @@ CONVERSATION_ENDED_CODES = ("LANE_A_CONVERSATION_EXPIRED", "LANE_A_TURN_CAP_REAC
 # worse than before (fail-open to the old behaviour, not to silence).
 QUICK_UNAVAILABLE_STATUSES = (429, 502, 503, 504)
 # The quick-answer model is set up wrong (wrong model name or address, a key
-# the service refuses, no key): handing the message over as a full task would
-# only hide the mistake and cost a Claude run, so say what is wrong instead.
-QUICK_SETUP_ERROR_CODES = ("LANE_A_SETUP_REFUSED", "LANE_A_KEY_REFUSED", "LANE_A_KEY_MISSING", "LANE_A_KEY_UNRESOLVED")
+# the service refuses, no key, no model picked at all): handing the message
+# over as a full task would only hide the mistake and cost a Claude run, so
+# say what is wrong instead. DUR-4353: LANE_A_MODEL_MISSING was absent here,
+# so switching a quick agent's provider (which clears its model) silently fell
+# through to QUICK_UNAVAILABLE_STATUSES below and became a full task on every
+# message, with nothing telling the operator the model was never picked.
+QUICK_SETUP_ERROR_CODES = (
+    "LANE_A_SETUP_REFUSED",
+    "LANE_A_KEY_REFUSED",
+    "LANE_A_KEY_MISSING",
+    "LANE_A_KEY_UNRESOLVED",
+    "LANE_A_MODEL_MISSING",
+)
 # /cont: refusals meaning "nothing to continue from" (server/src/services/
 # lane-a-continue.ts); the server's own sentence is passed on as it is.
 CONTINUE_NOTHING_CODES = ("LANE_A_CONTINUE_NOTHING_FOUND", "LANE_A_CONTINUE_NO_MATCH")

@@ -413,13 +413,20 @@ export function userProfileRoutes(db: Db) {
         priority: issue.priority as UserProfileResponse["recentIssues"][number]["priority"],
       })),
       recentActivity,
-      topAgents: topAgents.map((entry) => ({
-        ...entry,
-        costCents: Number(entry.costCents),
-        inputTokens: Number(entry.inputTokens),
-        cachedInputTokens: Number(entry.cachedInputTokens),
-        outputTokens: Number(entry.outputTokens),
-      })),
+      // costEvents.agentId is nullable (DUR-4329: board-user-triggered costs
+      // have none), but this query only ever returns agent-driven rows --
+      // it inner-joins on issueId, which a board-user-triggered cost never
+      // sets. Filtered explicitly rather than relying on that join alone,
+      // so a row with no agent can never render as a bogus agent entry.
+      topAgents: topAgents
+        .filter((entry): entry is typeof entry & { agentId: string } => entry.agentId !== null)
+        .map((entry) => ({
+          ...entry,
+          costCents: Number(entry.costCents),
+          inputTokens: Number(entry.inputTokens),
+          cachedInputTokens: Number(entry.cachedInputTokens),
+          outputTokens: Number(entry.outputTokens),
+        })),
       topProviders: topProviders.map((entry) => ({
         ...entry,
         costCents: Number(entry.costCents),

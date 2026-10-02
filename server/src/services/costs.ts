@@ -53,22 +53,30 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
   const budgets = budgetService(db, budgetHooks);
   const escalationGrants = escalationGrantService(db);
   return {
+    // DUR-4329: data.agentId is null for a board-user-triggered cost with no
+    // agent involved at all (Media Studio's Create tab direct generation) --
+    // every other caller still always passes a real agentId, which is
+    // re-verified against companyId exactly as before.
     createEvent: async (companyId: string, data: Omit<typeof costEvents.$inferInsert, "companyId">) => {
-      const agent = await db
-        .select()
-        .from(agents)
-        .where(eq(agents.id, data.agentId))
-        .then((rows) => rows[0] ?? null);
+      const agentId = data.agentId ?? null;
+      if (agentId) {
+        const agent = await db
+          .select()
+          .from(agents)
+          .where(eq(agents.id, agentId))
+          .then((rows) => rows[0] ?? null);
 
-      if (!agent) throw notFound("Agent not found");
-      if (agent.companyId !== companyId) {
-        throw unprocessable("Agent does not belong to company");
+        if (!agent) throw notFound("Agent not found");
+        if (agent.companyId !== companyId) {
+          throw unprocessable("Agent does not belong to company");
+        }
       }
 
       const event = await db
         .insert(costEvents)
         .values({
           ...data,
+          agentId,
           companyId,
           biller: data.biller ?? data.provider,
           billingType: data.billingType ?? "unknown",
@@ -78,17 +86,19 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         .then((rows) => rows[0]);
 
       const [agentMonthSpend, companyMonthSpend] = await Promise.all([
-        getMonthlySpendTotal(db, { companyId, agentId: event.agentId }),
+        agentId ? getMonthlySpendTotal(db, { companyId, agentId }) : Promise.resolve(null),
         getMonthlySpendTotal(db, { companyId }),
       ]);
 
-      await db
-        .update(agents)
-        .set({
-          spentMonthlyCents: agentMonthSpend,
-          updatedAt: new Date(),
-        })
-        .where(eq(agents.id, event.agentId));
+      if (agentId && agentMonthSpend !== null) {
+        await db
+          .update(agents)
+          .set({
+            spentMonthlyCents: agentMonthSpend,
+            updatedAt: new Date(),
+          })
+          .where(eq(agents.id, agentId));
+      }
 
       await db
         .update(companies)

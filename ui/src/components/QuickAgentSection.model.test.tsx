@@ -8,8 +8,15 @@ import { ApiError } from "../api/client";
 import { QuickAgentSection } from "./QuickAgentSection";
 
 /**
- * The "Model hosts" setting on the quick-agent card (OpenRouter only): which
- * hosts the model may only use / never use, saved through the agent PATCH.
+ * DUR-4353: a quick agent's free-form "Model" field (OpenRouter, a local
+ * model) used to save only on an explicit click of its own "Save" button.
+ * Filip switched this quick agent's provider to OpenRouter, typed a model
+ * id, and it was never saved — laneAModel stayed null and every message
+ * afterward silently became a full task (503 LANE_A_MODEL_MISSING). These
+ * tests pin that the field now also saves on blur and on Enter, that a
+ * failed save is shown right next to the field (not only in the card's own
+ * far-away error line), and that a free-form provider with no model says so
+ * plainly next to the field it needs filled in.
  */
 
 const COMPANY = "11111111-1111-4111-8111-111111111111";
@@ -62,8 +69,8 @@ function secret(overrides: Partial<CompanySecret> = {}): CompanySecret {
   return {
     id: SECRET,
     companyId: COMPANY,
-    key: "openai_api_key__all_agents",
-    name: "OpenAI — all agents",
+    key: "openrouter_api_key__all_agents",
+    name: "OpenRouter — all agents",
     provider: "local_encrypted",
     status: "active",
     managedMode: "paperclip_managed",
@@ -72,7 +79,7 @@ function secret(overrides: Partial<CompanySecret> = {}): CompanySecret {
     providerMetadata: null,
     latestVersion: 1,
     description: null,
-    kind: "openai_api_key",
+    kind: "openrouter_api_key",
     lastTestAt: new Date("2026-09-22T10:00:00Z"),
     lastTestOk: true,
     lastTestMessage: null,
@@ -99,7 +106,7 @@ function agent(overrides: Record<string, unknown> = {}) {
     laneAModel: null,
     laneAMaxOutputTokens: null,
     laneATransformDailyCallCap: null,
-    laneAProvider: null,
+    laneAProvider: "openrouter",
     laneABaseUrl: null,
     laneATemperature: null,
     laneAProviderRouting: null,
@@ -120,9 +127,7 @@ async function flushReact() {
   }
 }
 
-const OPENROUTER = { laneAProvider: "openrouter", laneAModel: "mistralai/mistral-small-3.2-24b-instruct" };
-
-describe("QuickAgentSection model hosts", () => {
+describe("QuickAgentSection model field", () => {
   let container: HTMLDivElement;
 
   beforeEach(() => {
@@ -159,11 +164,9 @@ describe("QuickAgentSection model hosts", () => {
     return root;
   }
 
-  const section = () => container.querySelector<HTMLElement>('[data-testid="quick-agent-model-hosts"]');
-  const onlyInput = () => container.querySelector<HTMLInputElement>('[data-testid="model-hosts-only"]');
-  const ignoreInput = () => container.querySelector<HTMLInputElement>('[data-testid="model-hosts-ignore"]');
-  const saveButton = () => container.querySelector<HTMLButtonElement>('[data-testid="model-hosts-save"]');
-  const problem = () => container.querySelector<HTMLElement>('[data-testid="model-hosts-problem"]');
+  const modelInput = () => container.querySelector<HTMLInputElement>('input[placeholder="openai/gpt-4.1-mini"]');
+  const missingNotice = () => container.querySelector<HTMLElement>('[data-testid="quick-agent-model-missing-notice"]');
+  const statusText = () => container.querySelector<HTMLElement>('[data-testid="text-setting-status"]')?.textContent;
 
   async function type(input: HTMLInputElement, value: string) {
     await act(async () => {
@@ -174,92 +177,64 @@ describe("QuickAgentSection model hosts", () => {
     await flushReact();
   }
 
-  async function clickSave() {
+  it("shows a plain notice that a model is required when the provider is free-form and none is set", async () => {
+    const root = await render(agent());
+
+    expect(missingNotice()).not.toBeNull();
+    expect(missingNotice()!.textContent).toContain("Pick a model for OpenRouter");
+
     await act(async () => {
-      saveButton()!.click();
+      root.unmount();
+    });
+  });
+
+  it("has no notice once a model is set", async () => {
+    const root = await render(agent({ laneAModel: "mistralai/mistral-small-3.2-24b-instruct" }));
+
+    expect(missingNotice()).toBeNull();
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("saves on blur, not only on an explicit Save click", async () => {
+    const root = await render(agent());
+
+    await type(modelInput()!, "mistralai/mistral-small-3.2-24b-instruct");
+    expect(statusText()).toBe("Unsaved");
+    expect(mockAgentsApi.update).not.toHaveBeenCalled();
+
+    await act(async () => {
+      modelInput()!.focus();
+      modelInput()!.blur();
     });
     await flushReact();
-  }
 
-  it("shows the setting, with the plain-English help line, only for OpenRouter", async () => {
-    const root = await render(agent(OPENROUTER));
-
-    expect(section()).not.toBeNull();
-    expect(section()!.textContent).toContain("Model hosts");
-    expect(section()!.textContent).toContain("Use only these hosts");
-    expect(section()!.textContent).toContain("Never use these hosts");
-    expect(section()!.textContent).toContain(
-      "OpenRouter can send the same model to different hosts. Some hosts don't support tools. List the hosts you want (for example deepinfra) to stop it picking one that doesn't.",
-    );
-    expect(onlyInput()?.value).toBe("");
-    expect(ignoreInput()?.value).toBe("");
-    expect(saveButton()?.disabled).toBe(true);
-
-    await act(async () => {
-      root.unmount();
-    });
-  });
-
-  it("is not shown for Claude, OpenAI, Google or a local model", async () => {
-    for (const laneAProvider of [null, "anthropic", "openai", "google", "local"]) {
-      const root = await render(agent({ laneAProvider }));
-      expect(section(), String(laneAProvider)).toBeNull();
-      await act(async () => {
-        root.unmount();
-      });
-    }
-  });
-
-  it("saves the typed hosts, lower-cased and split on commas, through the agent PATCH", async () => {
-    const root = await render(agent(OPENROUTER));
-
-    await type(onlyInput()!, "DeepInfra, mistral");
-    await type(ignoreInput()!, "venice");
-    expect(saveButton()?.disabled).toBe(false);
-    await clickSave();
-
-    expect(mockAgentsApi.update).toHaveBeenCalledTimes(1);
     expect(mockAgentsApi.update).toHaveBeenCalledWith(
       AGENT,
-      { laneAProviderRouting: { only: ["deepinfra", "mistral"], ignore: ["venice"] } },
+      { laneAModel: "mistralai/mistral-small-3.2-24b-instruct" },
       COMPANY,
     );
-    expect(problem()).toBeNull();
+    expect(statusText()).toBe("Saved");
 
     await act(async () => {
       root.unmount();
     });
   });
 
-  it("shows the saved hosts, and clearing both fields saves null (OpenRouter picks again)", async () => {
-    const root = await render(
-      agent({ ...OPENROUTER, laneAProviderRouting: { only: ["deepinfra"], ignore: ["venice"] } }),
-    );
-    expect(onlyInput()?.value).toBe("deepinfra");
-    expect(ignoreInput()?.value).toBe("venice");
+  it("saves on Enter without needing a blur or a Save click", async () => {
+    const root = await render(agent());
 
-    await type(onlyInput()!, "");
-    await type(ignoreInput()!, "");
-    await clickSave();
-
-    expect(mockAgentsApi.update).toHaveBeenCalledWith(AGENT, { laneAProviderRouting: null }, COMPANY);
-
+    await type(modelInput()!, "mistralai/mistral-small-3.2-24b-instruct");
     await act(async () => {
-      root.unmount();
+      modelInput()!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     });
-  });
-
-  it("keeps a stored try-first order and fallback choice when only the host lists change", async () => {
-    const root = await render(
-      agent({ ...OPENROUTER, laneAProviderRouting: { order: ["deepinfra", "mistral"], allowFallbacks: false } }),
-    );
-
-    await type(onlyInput()!, "deepinfra");
-    await clickSave();
+    await flushReact();
 
     expect(mockAgentsApi.update).toHaveBeenCalledWith(
       AGENT,
-      { laneAProviderRouting: { only: ["deepinfra"], order: ["deepinfra", "mistral"], allowFallbacks: false } },
+      { laneAModel: "mistralai/mistral-small-3.2-24b-instruct" },
       COMPANY,
     );
 
@@ -268,37 +243,22 @@ describe("QuickAgentSection model hosts", () => {
     });
   });
 
-  it("shows the server's rejection next to the fields, not only in the card's own error line", async () => {
-    // DUR-4353: Filip's host restrictions were saved three times and still
-    // ended up null; this used to swallow the server's own 422 silently
-    // (a code comment, not a message), so a rejected save looked identical
-    // to a successful one unless the operator noticed the card's error line
-    // far above this field.
+  it("shows a failed save next to the field instead of only in the card's far-away error line", async () => {
     mockAgentsApi.update.mockRejectedValue(
-      new ApiError("List at most 10 model hosts in each field.", 422, null),
+      new ApiError("\"bad id\" does not look like a model id (letters, digits, dots, dashes, colons and slashes only).", 422, null),
     );
-    const root = await render(agent(OPENROUTER));
+    const root = await render(agent());
 
-    await type(onlyInput()!, "deepinfra");
-    await clickSave();
-
-    expect(problem()?.textContent).toContain("List at most 10 model hosts in each field.");
-    // What was typed is kept, not wiped out by the failed save.
-    expect(onlyInput()?.value).toBe("deepinfra");
-
+    await type(modelInput()!, "bad id");
     await act(async () => {
-      root.unmount();
+      modelInput()!.focus();
+      modelInput()!.blur();
     });
-  });
+    await flushReact();
 
-  it("says which entry is not a host name instead of saving it", async () => {
-    const root = await render(agent(OPENROUTER));
-
-    await type(onlyInput()!, "deepinfra, Deep Infra!");
-    await clickSave();
-
-    expect(mockAgentsApi.update).not.toHaveBeenCalled();
-    expect(problem()?.textContent).toContain('"Infra!" is not a host name.');
+    expect(container.textContent).toContain("does not look like a model id");
+    // The draft the operator typed is kept, not silently wiped.
+    expect(modelInput()!.value).toBe("bad id");
 
     await act(async () => {
       root.unmount();

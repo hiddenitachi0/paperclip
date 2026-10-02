@@ -1005,6 +1005,30 @@ export function secretService(db: Db, rawDb: Db = db) {
   }
 
   /**
+   * DUR-4329: same shape as resolveSecretValueForVideoRender above, for
+   * Media Studio's Create tab direct generation -- a board user, not an
+   * agent or a run, so the audit trail's actorId is the board user's own id
+   * rather than an agent/run id.
+   */
+  async function resolveSecretValueForMediaStudioDirect(
+    companyId: string,
+    secretId: string,
+    context: { actorId: string },
+  ): Promise<string> {
+    if (!context.actorId?.trim()) {
+      throw forbidden("Media Studio direct generation requires an actor context for the audit trail");
+    }
+    return (await resolveSecretValueInternal(companyId, secretId, "latest", {
+      accessContext: {
+        consumerType: "system",
+        consumerId: `media_studio_direct:${secretId}`,
+        actorType: "user",
+        actorId: context.actorId,
+      },
+    })).value;
+  }
+
+  /**
    * Resolve the company's GitHub token by the same secret-name convention as
    * managed workspace clones (see heartbeat.ts's resolveManagedCloneGitHubToken)
    * — first bound+resolvable secret named GITHUB_TOKEN/GH_TOKEN/PAPERCLIP_GITHUB_TOKEN
@@ -2270,6 +2294,7 @@ export function secretService(db: Db, rawDb: Db = db) {
     resolveSecretValueForPlugin,
     resolveSecretValueForBrowserFill,
     resolveSecretValueForVideoRender,
+    resolveSecretValueForMediaStudioDirect,
     resolveSecretValueForTest,
     resolveGitHubToken,
     resolveStockDataKey,
