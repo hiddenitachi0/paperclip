@@ -105,6 +105,7 @@ interface IssueThreadInteractionCardProps {
       | RequestCheckboxConfirmationInteraction,
     selectedClientKeys?: string[],
     selectedOptionIds?: string[],
+    note?: string,
   ) => Promise<void> | void;
   onRejectInteraction?: (
     interaction:
@@ -116,6 +117,7 @@ interface IssueThreadInteractionCardProps {
   onSubmitInteractionAnswers?: (
     interaction: AskUserQuestionsInteraction,
     answers: AskUserQuestionsAnswer[],
+    summaryMarkdown?: string,
   ) => Promise<void> | void;
   onCancelInteraction?: (
     interaction: AskUserQuestionsInteraction,
@@ -703,25 +705,25 @@ function SuggestTasksCard({
   onAcceptInteraction?: (
     interaction: SuggestTasksInteraction,
     selectedClientKeys?: string[],
+    selectedOptionIds?: string[],
+    note?: string,
   ) => Promise<void> | void;
   onRejectInteraction?: (
     interaction: SuggestTasksInteraction,
     reason?: string,
   ) => Promise<void> | void;
 }) {
-  const [rejecting, setRejecting] = useState(false);
   const [working, setWorking] = useState<"accept" | "reject" | null>(null);
-  const [rejectReason, setRejectReason] = useState(
-    interaction.result?.rejectionReason ?? "",
+  const [comment, setComment] = useState(
+    interaction.result?.rejectionReason ?? interaction.result?.note ?? "",
   );
 
   useEffect(() => {
-    setRejectReason(interaction.result?.rejectionReason ?? "");
+    setComment(interaction.result?.rejectionReason ?? interaction.result?.note ?? "");
     if (interaction.status !== "pending") {
-      setRejecting(false);
       setWorking(null);
     }
-  }, [interaction.result?.rejectionReason, interaction.status]);
+  }, [interaction.result?.rejectionReason, interaction.result?.note, interaction.status]);
 
   const roots = useMemo(
     () =>
@@ -763,7 +765,7 @@ function SuggestTasksCard({
     if (!onAcceptInteraction) return;
     setWorking("accept");
     try {
-      await onAcceptInteraction(interaction, [...selectedClientKeys]);
+      await onAcceptInteraction(interaction, [...selectedClientKeys], undefined, comment.trim() || undefined);
     } finally {
       setWorking(null);
     }
@@ -773,8 +775,7 @@ function SuggestTasksCard({
     if (!onRejectInteraction) return;
     setWorking("reject");
     try {
-      await onRejectInteraction(interaction, rejectReason.trim() || undefined);
-      setRejecting(false);
+      await onRejectInteraction(interaction, comment.trim() || undefined);
     } finally {
       setWorking(null);
     }
@@ -855,6 +856,11 @@ function SuggestTasksCard({
                 ? `Created ${createdCount} draft ${createdCount === 1 ? "issue" : "issues"} and skipped ${skippedCount} during review.`
                 : `Created all ${createdCount} draft ${createdCount === 1 ? "issue" : "issues"}.`}
           </p>
+          {interaction.result?.note ? (
+            <div className="mt-2 border-t border-emerald-500/30 pt-2">
+              <MarkdownBody>{interaction.result.note}</MarkdownBody>
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -874,85 +880,70 @@ function SuggestTasksCard({
 
       {interaction.status === "pending" ? (
         <div className="space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            <span>
+              {selectedCount === totalTasks
+                ? `All ${totalTasks} draft ${totalTasks === 1 ? "issue" : "issues"} selected`
+                : `${selectedCount} of ${totalTasks} draft ${totalTasks === 1 ? "issue" : "issues"} selected`}
+            </span>
+            {selectedCount < totalTasks ? (
               <span>
-                {selectedCount === totalTasks
-                  ? `All ${totalTasks} draft ${totalTasks === 1 ? "issue" : "issues"} selected`
-                  : `${selectedCount} of ${totalTasks} draft ${totalTasks === 1 ? "issue" : "issues"} selected`}
+                {isCheckup
+                  ? `${totalTasks - selectedCount} will be hidden for a month if you accept.`
+                  : `${totalTasks - selectedCount} will be skipped if you accept this interaction.`}
               </span>
-              {selectedCount < totalTasks ? (
-                <span>
-                  {isCheckup
-                    ? `${totalTasks - selectedCount} will be hidden for a month if you accept.`
-                    : `${totalTasks - selectedCount} will be skipped if you accept this interaction.`}
-                </span>
-              ) : null}
-            </div>
-
-            <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
-              <Button
-                size="sm"
-                disabled={!onAcceptInteraction || working !== null || selectedCount === 0}
-                onClick={() => void handleAccept()}
-              >
-                {working === "accept" ? (
-                  <>
-                    <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
-                    Accepting...
-                  </>
-                ) : (
-                  selectedCount === totalTasks ? "Accept drafts" : "Accept selected drafts"
-                )}
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={!onRejectInteraction || working !== null}
-                onClick={() => setRejecting((current) => !current)}
-              >
-                Reject
-              </Button>
-              {selectedCount < totalTasks ? (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={working !== null}
-                  onClick={() => setSelectedClientKeys(new Set(interaction.payload.tasks.map((task) => task.clientKey)))}
-                >
-                  Reset selection
-                </Button>
-              ) : null}
-            </div>
+            ) : null}
           </div>
 
-          {rejecting ? (
-            <div className="space-y-3">
-              <Textarea
-                value={rejectReason}
-                onChange={(event) => setRejectReason(event.target.value)}
-                placeholder="Add a short reason for rejecting this suggestion"
-                className="min-h-24 bg-background text-sm"
-              />
-              <div className="flex justify-end">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={!onRejectInteraction || working !== null}
-                  onClick={() => void handleReject()}
-                >
-                  {working === "reject" ? (
-                    <>
-                      <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
-                      Saving...
-                    </>
-                  ) : (
-                    "Save rejection"
-                  )}
-                </Button>
-              </div>
-            </div>
-          ) : null}
+          <Textarea
+            value={comment}
+            onChange={(event) => setComment(event.target.value)}
+            placeholder="Add a comment (optional)"
+            maxLength={4000}
+            className="min-h-20 bg-background text-sm"
+          />
+
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <Button
+              size="sm"
+              disabled={!onAcceptInteraction || working !== null || selectedCount === 0}
+              onClick={() => void handleAccept()}
+            >
+              {working === "accept" ? (
+                <>
+                  <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                  Accepting...
+                </>
+              ) : (
+                selectedCount === totalTasks ? "Accept drafts" : "Accept selected drafts"
+              )}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!onRejectInteraction || working !== null}
+              onClick={() => void handleReject()}
+            >
+              {working === "reject" ? (
+                <>
+                  <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                  Saving...
+                </>
+              ) : (
+                "Reject"
+              )}
+            </Button>
+            {selectedCount < totalTasks ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={working !== null}
+                onClick={() => setSelectedClientKeys(new Set(interaction.payload.tasks.map((task) => task.clientKey)))}
+              >
+                Reset selection
+              </Button>
+            ) : null}
+          </div>
         </div>
       ) : null}
     </div>
@@ -1022,12 +1013,14 @@ function AskUserQuestionsCard({
   onSubmitInteractionAnswers?: (
     interaction: AskUserQuestionsInteraction,
     answers: AskUserQuestionsAnswer[],
+    summaryMarkdown?: string,
   ) => Promise<void> | void;
   onCancelInteraction?: (
     interaction: AskUserQuestionsInteraction,
   ) => Promise<void> | void;
   externalReferences?: MarkdownExternalReferenceMap;
 }) {
+  const [comment, setComment] = useState(interaction.result?.summaryMarkdown ?? "");
   const [draftAnswers, setDraftAnswers] = useState<Record<string, string[]>>(() =>
     Object.fromEntries(
       (interaction.result?.answers ?? []).map((answer) => [
@@ -1132,6 +1125,7 @@ function AskUserQuestionsCard({
             ...(otherText ? { otherText } : {}),
           };
         }),
+        comment.trim() || undefined,
       );
     } finally {
       setWorking(false);
@@ -1243,6 +1237,14 @@ function AskUserQuestionsCard({
               </div>
             </div>
           ))}
+
+          <Textarea
+            value={comment}
+            onChange={(event) => setComment(event.target.value)}
+            placeholder="Add a comment (optional)"
+            maxLength={4000}
+            className="min-h-20 bg-background text-sm"
+          />
 
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border/70 bg-background/75 p-4">
             <div className="text-sm text-muted-foreground">
@@ -1428,9 +1430,16 @@ function RequestConfirmationResolution({
 
   if (interaction.status === "accepted") {
     return (
-      <div className="flex flex-wrap items-center gap-2 text-sm leading-6 text-foreground">
-        <span className="font-medium">Confirmed</span>
-        <RequestConfirmationTargetChip interaction={interaction} target={target} />
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-center gap-2 text-sm leading-6 text-foreground">
+          <span className="font-medium">Confirmed</span>
+          <RequestConfirmationTargetChip interaction={interaction} target={target} />
+        </div>
+        {interaction.result?.note ? (
+          <div className="rounded-sm border-l-2 border-emerald-500/70 bg-emerald-500/10 px-3 py-2 text-sm leading-6 text-emerald-900 dark:text-emerald-100">
+            <MarkdownBody>{interaction.result.note}</MarkdownBody>
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -1577,6 +1586,9 @@ function RequestConfirmationCard({
   isPlan?: boolean;
   onAcceptInteraction?: (
     interaction: RequestConfirmationInteraction,
+    selectedClientKeys?: string[],
+    selectedOptionIds?: string[],
+    note?: string,
   ) => Promise<void> | void;
   onRejectInteraction?: (
     interaction: RequestConfirmationInteraction,
@@ -1585,9 +1597,8 @@ function RequestConfirmationCard({
   onUploadImage?: (file: File) => Promise<string>;
   externalReferences?: MarkdownExternalReferenceMap;
 }) {
-  const [rejecting, setRejecting] = useState(false);
   const [working, setWorking] = useState<"accept" | "reject" | null>(null);
-  const [rejectReason, setRejectReason] = useState(interaction.result?.reason ?? "");
+  const [comment, setComment] = useState(interaction.result?.reason ?? interaction.result?.note ?? "");
   const [rejectAttempted, setRejectAttempted] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [shots, setShots] = useState<{ name: string; url: string }[]>([]);
@@ -1598,27 +1609,25 @@ function RequestConfirmationCard({
   // board can attach images when sending a plan back — no schema change needed.
   const allowScreenshots = isPlan && Boolean(onUploadImage);
   const rejectRequiresReason = interaction.payload.rejectRequiresReason === true;
-  const allowDeclineReason = interaction.payload.allowDeclineReason !== false;
-  const trimmedRejectReason = rejectReason.trim();
-  const canReject = !rejectRequiresReason || trimmedRejectReason.length > 0 || shots.length > 0;
+  const trimmedComment = comment.trim();
+  const canReject = !rejectRequiresReason || trimmedComment.length > 0 || shots.length > 0;
   const declineReasonInvalid = rejectRequiresReason && !canReject;
-  const declineReasonPlaceholder =
+  const commentPlaceholder =
     interaction.payload.declineReasonPlaceholder
     ?? (interaction.payload.acceptLabel === "Approve plan"
-      ? "Optional: what would you like revised?"
-      : "Optional: tell the agent what you'd change.");
+      ? "Add a comment (optional): what would you like revised?"
+      : "Add a comment (optional)");
 
   useEffect(() => {
-    setRejectReason(interaction.result?.reason ?? "");
+    setComment(interaction.result?.reason ?? interaction.result?.note ?? "");
     setRejectAttempted(false);
     setActionError(null);
     setShots([]);
     setUploadError(null);
     if (interaction.status !== "pending") {
-      setRejecting(false);
       setWorking(null);
     }
-  }, [interaction.id, interaction.result?.reason, interaction.status]);
+  }, [interaction.id, interaction.result?.reason, interaction.result?.note, interaction.status]);
 
   async function handleAddScreenshots(files: FileList | null) {
     if (!onUploadImage || !files || files.length === 0) return;
@@ -1640,7 +1649,7 @@ function RequestConfirmationCard({
   }
 
   function composeReason() {
-    const text = trimmedRejectReason;
+    const text = trimmedComment;
     if (shots.length === 0) return text || undefined;
     const images = shots.map((s) => `![${s.name}](${s.url})`).join("\n");
     return [text, images].filter(Boolean).join("\n\n");
@@ -1651,7 +1660,7 @@ function RequestConfirmationCard({
     setWorking("accept");
     setActionError(null);
     try {
-      await onAcceptInteraction(interaction);
+      await onAcceptInteraction(interaction, undefined, undefined, trimmedComment || undefined);
     } catch {
       setActionError("Try again");
     } finally {
@@ -1666,7 +1675,6 @@ function RequestConfirmationCard({
     setActionError(null);
     try {
       await onRejectInteraction(interaction, composeReason());
-      setRejecting(false);
     } catch {
       setActionError("Try again");
     } finally {
@@ -1704,10 +1712,88 @@ function RequestConfirmationCard({
 
       {interaction.status === "pending" && !approvalState?.outOfDate ? (
         <div className="space-y-3">
+          <Textarea
+            value={comment}
+            onChange={(event) => setComment(event.target.value)}
+            placeholder={commentPlaceholder}
+            aria-invalid={rejectAttempted && declineReasonInvalid}
+            className={cn(
+              "min-h-20 bg-background text-sm",
+              rejectAttempted && declineReasonInvalid
+                && "border-rose-500 focus-visible:ring-rose-500/25",
+            )}
+          />
+          {rejectAttempted && declineReasonInvalid ? (
+            <p className="text-xs text-destructive">A decline reason is required.</p>
+          ) : null}
+          {allowScreenshots ? (
+            <div className="space-y-2">
+              {shots.length > 0 ? (
+                <div className="flex flex-wrap gap-2">
+                  {shots.map((shot, index) => (
+                    <div
+                      key={`${shot.url}-${index}`}
+                      className="group relative h-16 w-16 overflow-hidden rounded-sm border border-border/70"
+                    >
+                      <img
+                        src={shot.url}
+                        alt={shot.name}
+                        className="h-full w-full object-cover"
+                      />
+                      <button
+                        type="button"
+                        aria-label={`Remove ${shot.name}`}
+                        className="absolute right-0.5 top-0.5 rounded-full bg-background/90 p-0.5 text-foreground opacity-0 transition-opacity group-hover:opacity-100"
+                        onClick={() =>
+                          setShots((current) => current.filter((_, i) => i !== index))
+                        }
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                className="hidden"
+                onChange={(event) => {
+                  void handleAddScreenshots(event.target.value ? event.target.files : null);
+                  event.target.value = "";
+                }}
+              />
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={working !== null || uploading}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                {uploading ? (
+                  <>
+                    <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                    Uploading...
+                  </>
+                ) : (
+                  <>
+                    <ImagePlus className="mr-2 h-3.5 w-3.5" />
+                    Attach screenshots
+                  </>
+                )}
+              </Button>
+              {uploadError ? (
+                <p className="text-xs text-destructive">{uploadError}</p>
+              ) : null}
+            </div>
+          ) : null}
+
           <div className="flex flex-wrap items-center justify-end gap-2">
             <Button
               size="sm"
-              variant={rejecting ? "outline" : isPlan ? "cta" : "default"}
+              variant={isPlan ? "cta" : "default"}
               disabled={!onAcceptInteraction || working !== null}
               onClick={() => void handleAccept()}
             >
@@ -1724,128 +1810,18 @@ function RequestConfirmationCard({
               size="sm"
               variant="outline"
               disabled={!onRejectInteraction || working !== null}
-              onClick={() => {
-                if (!allowDeclineReason) {
-                  void handleReject();
-                  return;
-                }
-                setRejectAttempted(false);
-                setRejecting((current) => !current);
-              }}
+              onClick={() => void handleReject()}
             >
-              {interaction.payload.rejectLabel ?? "Decline"}
+              {working === "reject" ? (
+                <>
+                  <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                  Saving...
+                </>
+              ) : (
+                interaction.payload.rejectLabel ?? "Decline"
+              )}
             </Button>
           </div>
-
-          {rejecting ? (
-            <div className="space-y-3 rounded-sm border border-border/70 bg-background/75 p-3">
-              <Textarea
-                value={rejectReason}
-                onChange={(event) => setRejectReason(event.target.value)}
-                placeholder={declineReasonPlaceholder}
-                aria-invalid={rejectAttempted && declineReasonInvalid}
-                className={cn(
-                  "min-h-24 bg-background text-sm",
-                  rejectAttempted && declineReasonInvalid
-                    && "border-rose-500 focus-visible:ring-rose-500/25",
-                )}
-              />
-              {rejectAttempted && declineReasonInvalid ? (
-                <p className="text-xs text-destructive">A decline reason is required.</p>
-              ) : null}
-              {allowScreenshots ? (
-                <div className="space-y-2">
-                  {shots.length > 0 ? (
-                    <div className="flex flex-wrap gap-2">
-                      {shots.map((shot, index) => (
-                        <div
-                          key={`${shot.url}-${index}`}
-                          className="group relative h-16 w-16 overflow-hidden rounded-sm border border-border/70"
-                        >
-                          <img
-                            src={shot.url}
-                            alt={shot.name}
-                            className="h-full w-full object-cover"
-                          />
-                          <button
-                            type="button"
-                            aria-label={`Remove ${shot.name}`}
-                            className="absolute right-0.5 top-0.5 rounded-full bg-background/90 p-0.5 text-foreground opacity-0 transition-opacity group-hover:opacity-100"
-                            onClick={() =>
-                              setShots((current) => current.filter((_, i) => i !== index))
-                            }
-                          >
-                            <X className="h-3 w-3" />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept="image/*"
-                    multiple
-                    className="hidden"
-                    onChange={(event) => {
-                      void handleAddScreenshots(event.target.value ? event.target.files : null);
-                      event.target.value = "";
-                    }}
-                  />
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    disabled={working !== null || uploading}
-                    onClick={() => fileInputRef.current?.click()}
-                  >
-                    {uploading ? (
-                      <>
-                        <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
-                        Uploading...
-                      </>
-                    ) : (
-                      <>
-                        <ImagePlus className="mr-2 h-3.5 w-3.5" />
-                        Attach screenshots
-                      </>
-                    )}
-                  </Button>
-                  {uploadError ? (
-                    <p className="text-xs text-destructive">{uploadError}</p>
-                  ) : null}
-                </div>
-              ) : null}
-              <div className="flex flex-wrap justify-end gap-2">
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={working !== null}
-                  onClick={() => {
-                    setRejecting(false);
-                    setRejectAttempted(false);
-                  }}
-                >
-                  Cancel decline
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={!onRejectInteraction || working !== null}
-                  onClick={() => void handleReject()}
-                >
-                  {working === "reject" ? (
-                    <>
-                      <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
-                      Saving...
-                    </>
-                  ) : (
-                    interaction.payload.rejectLabel ?? "Decline"
-                  )}
-                </Button>
-              </div>
-            </div>
-          ) : null}
 
           {actionError ? (
             <div className="rounded-sm border border-destructive/60 bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -1882,6 +1858,7 @@ function RequestCheckboxConfirmationResolution({
       : selectedLabels.slice(0, CHECKBOX_SUMMARY_LABEL_LIMIT);
     const hiddenCount = selectedLabels.length - CHECKBOX_SUMMARY_LABEL_LIMIT;
     const hasHiddenLabels = hiddenCount > 0;
+    const notConfirmedOptions = interaction.result?.notConfirmedOptions ?? [];
     const chipClassName =
       "inline-flex items-center rounded-sm border border-border/60 bg-transparent px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground";
 
@@ -1913,6 +1890,18 @@ function RequestCheckboxConfirmationResolution({
                 {expanded ? "Show less" : `+${hiddenCount} more`}
               </button>
             ) : null}
+          </div>
+        ) : null}
+        {notConfirmedOptions.length > 0 ? (
+          <div className="flex flex-wrap gap-1.5">
+            {notConfirmedOptions.map((label, index) => (
+              <TaskField key={`not-confirmed-${label}-${index}`} label="Not confirmed" value={label} tone="subtle" />
+            ))}
+          </div>
+        ) : null}
+        {interaction.result?.note ? (
+          <div className="rounded-sm border-l-2 border-emerald-500/70 bg-emerald-500/10 px-3 py-2 text-sm leading-6 text-emerald-900 dark:text-emerald-100">
+            <MarkdownBody>{interaction.result.note}</MarkdownBody>
           </div>
         ) : null}
       </div>
@@ -1991,6 +1980,7 @@ function RequestCheckboxConfirmationCard({
     interaction: RequestCheckboxConfirmationInteraction,
     selectedClientKeys: undefined,
     selectedOptionIds: string[],
+    note?: string,
   ) => Promise<void> | void;
   onRejectInteraction?: (
     interaction: RequestCheckboxConfirmationInteraction,
@@ -2013,9 +2003,8 @@ function RequestCheckboxConfirmationCard({
   );
 
   const [selectedOptionIds, setSelectedOptionIds] = useState<Set<string>>(() => new Set(defaultSelected));
-  const [rejecting, setRejecting] = useState(false);
   const [working, setWorking] = useState<"accept" | "reject" | null>(null);
-  const [rejectReason, setRejectReason] = useState(interaction.result?.reason ?? "");
+  const [comment, setComment] = useState(interaction.result?.reason ?? interaction.result?.note ?? "");
   const [rejectAttempted, setRejectAttempted] = useState(false);
   const [acceptAttempted, setAcceptAttempted] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -2024,23 +2013,21 @@ function RequestCheckboxConfirmationCard({
 
   useEffect(() => {
     setSelectedOptionIds(new Set(defaultSelected));
-    setRejectReason(interaction.result?.reason ?? "");
+    setComment(interaction.result?.reason ?? interaction.result?.note ?? "");
     setRejectAttempted(false);
     setAcceptAttempted(false);
     setActionError(null);
     if (interaction.status !== "pending") {
-      setRejecting(false);
       setWorking(null);
     }
-  }, [interaction.id, interaction.status, interaction.result?.reason, defaultSelected, optionSeed]);
+  }, [interaction.id, interaction.status, interaction.result?.reason, interaction.result?.note, defaultSelected, optionSeed]);
 
   const rejectRequiresReason = interaction.payload.rejectRequiresReason === true;
-  const allowDeclineReason = interaction.payload.allowDeclineReason !== false;
-  const trimmedRejectReason = rejectReason.trim();
-  const canReject = !rejectRequiresReason || trimmedRejectReason.length > 0;
+  const trimmedComment = comment.trim();
+  const canReject = !rejectRequiresReason || trimmedComment.length > 0;
   const declineReasonInvalid = rejectRequiresReason && !canReject;
-  const declineReasonPlaceholder =
-    interaction.payload.declineReasonPlaceholder ?? "Optional: tell the agent what you'd change.";
+  const commentPlaceholder =
+    interaction.payload.declineReasonPlaceholder ?? "Add a comment (optional)";
 
   const selectedCount = selectedOptionIds.size;
   const totalOptions = options.length;
@@ -2086,7 +2073,7 @@ function RequestCheckboxConfirmationCard({
     setWorking("accept");
     setActionError(null);
     try {
-      await onAcceptInteraction(interaction, undefined, [...selectedOptionIds]);
+      await onAcceptInteraction(interaction, undefined, [...selectedOptionIds], trimmedComment || undefined);
     } catch {
       setActionError("Try again");
     } finally {
@@ -2100,8 +2087,7 @@ function RequestCheckboxConfirmationCard({
     setWorking("reject");
     setActionError(null);
     try {
-      await onRejectInteraction(interaction, trimmedRejectReason || undefined);
-      setRejecting(false);
+      await onRejectInteraction(interaction, trimmedComment || undefined);
     } catch {
       setActionError("Try again");
     } finally {
@@ -2212,10 +2198,25 @@ function RequestCheckboxConfirmationCard({
           <p className="text-xs text-destructive">{validationMessage}</p>
         ) : null}
 
+        <Textarea
+          value={comment}
+          onChange={(event) => setComment(event.target.value)}
+          placeholder={commentPlaceholder}
+          aria-invalid={rejectAttempted && declineReasonInvalid}
+          className={cn(
+            "min-h-20 bg-background text-sm",
+            rejectAttempted && declineReasonInvalid
+              && "border-rose-500 focus-visible:ring-rose-500/25",
+          )}
+        />
+        {rejectAttempted && declineReasonInvalid ? (
+          <p className="text-xs text-destructive">A reason is required.</p>
+        ) : null}
+
         <div className="flex flex-wrap items-center justify-end gap-2">
           <Button
             size="sm"
-            variant={rejecting ? "outline" : "default"}
+            variant="default"
             disabled={!onAcceptInteraction || working !== null}
             onClick={() => void handleAccept()}
           >
@@ -2232,65 +2233,18 @@ function RequestCheckboxConfirmationCard({
             size="sm"
             variant="outline"
             disabled={!onRejectInteraction || working !== null}
-            onClick={() => {
-              if (!allowDeclineReason) {
-                void handleReject();
-                return;
-              }
-              setRejectAttempted(false);
-              setRejecting((current) => !current);
-            }}
+            onClick={() => void handleReject()}
           >
-            {interaction.payload.rejectLabel ?? "Request changes"}
+            {working === "reject" ? (
+              <>
+                <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                Saving...
+              </>
+            ) : (
+              interaction.payload.rejectLabel ?? "Request changes"
+            )}
           </Button>
         </div>
-
-        {rejecting ? (
-          <div className="space-y-3 rounded-sm border border-border/70 bg-background/75 p-3">
-            <Textarea
-              value={rejectReason}
-              onChange={(event) => setRejectReason(event.target.value)}
-              placeholder={declineReasonPlaceholder}
-              aria-invalid={rejectAttempted && declineReasonInvalid}
-              className={cn(
-                "min-h-24 bg-background text-sm",
-                rejectAttempted && declineReasonInvalid
-                  && "border-rose-500 focus-visible:ring-rose-500/25",
-              )}
-            />
-            {rejectAttempted && declineReasonInvalid ? (
-              <p className="text-xs text-destructive">A reason is required.</p>
-            ) : null}
-            <div className="flex flex-wrap justify-end gap-2">
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={working !== null}
-                onClick={() => {
-                  setRejecting(false);
-                  setRejectAttempted(false);
-                }}
-              >
-                Cancel
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={!onRejectInteraction || working !== null}
-                onClick={() => void handleReject()}
-              >
-                {working === "reject" ? (
-                  <>
-                    <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
-                    Saving...
-                  </>
-                ) : (
-                  interaction.payload.rejectLabel ?? "Request changes"
-                )}
-              </Button>
-            </div>
-          </div>
-        ) : null}
 
         {actionError ? (
           <div className="rounded-sm border border-destructive/60 bg-destructive/10 px-3 py-2 text-sm text-destructive">
