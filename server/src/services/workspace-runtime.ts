@@ -658,6 +658,13 @@ type GitWorktreeBranchIncoherenceEvidence = {
   repoRoot: string;
   expectedBranch: string;
   actualBranch: string | null;
+  // DUR-4316: best-effort issue identifier parsed out of `actualBranch` so a
+  // blocked run's recovery note can name the other issue, not just the raw
+  // branch string. This is a plain string parse of data the caller already
+  // resolved -- it never queries the database -- so it cannot leak another
+  // company's issue data; the worst case is `null` (branch didn't follow the
+  // `{{issue.identifier}}-{{slug}}` convention).
+  otherIssueIdentifierGuess: string | null;
   cleanliness: GitWorktreeCleanliness;
   statusEntryCount: number | null;
   provenance: {
@@ -689,6 +696,19 @@ type GitWorktreeBranchIncoherenceEvidence = {
 
 function formatBranchForMessage(branch: string | null | undefined) {
   return branch && branch.length > 0 ? branch : "<detached>";
+}
+
+// The default worktree branch template is `{{issue.identifier}}-{{slug}}`
+// (see realizeExecutionWorkspace below), so a worktree's actual branch name
+// normally carries the identifier of whichever issue it was provisioned for.
+// Used only to improve a blocked-run recovery message -- never for access
+// control or lookups.
+const BRANCH_LEADING_ISSUE_IDENTIFIER_RE = /^([A-Z][A-Z0-9]*-\d+)(?:-|$)/;
+
+function guessIssueIdentifierFromBranchName(branchName: string | null | undefined): string | null {
+  if (!branchName) return null;
+  const match = BRANCH_LEADING_ISSUE_IDENTIFIER_RE.exec(branchName.trim());
+  return match ? match[1]! : null;
 }
 
 function fingerprintWorkspaceBranchIncoherence(input: {
@@ -808,6 +828,7 @@ async function inspectGitWorktreeBranchIncoherence(input: {
     repoRoot: path.resolve(input.repoRoot),
     expectedBranch: input.expectedBranchName,
     actualBranch: input.actualBranchName,
+    otherIssueIdentifierGuess: guessIssueIdentifierFromBranchName(input.actualBranchName),
     cleanliness,
     statusEntryCount: statusLines?.length ?? null,
     provenance: {
@@ -833,8 +854,18 @@ async function inspectGitWorktreeBranchIncoherence(input: {
 }
 
 function branchIncoherenceValidationFailure(evidence: GitWorktreeBranchIncoherenceEvidence) {
+  // Name the other issue plainly when we have a reasonable guess and it
+  // isn't just this same issue's own branch (e.g. its "publish head"
+  // variant) -- that's the detail a human/agent needs to avoid clobbering
+  // someone else's unpushed or uncommitted work.
+  const otherIssueNote =
+    !evidence.safeRepair.succeeded &&
+    evidence.otherIssueIdentifierGuess &&
+    evidence.otherIssueIdentifierGuess !== evidence.sourceIdentifier
+      ? ` This worktree appears to hold work for issue ${evidence.otherIssueIdentifierGuess} (inferred from the branch name); leave it untouched and do not resume this run against it.`
+      : "";
   return new WorkspaceRuntimeValidationFailure(
-    `Execution workspace git worktree expected branch "${evidence.expectedBranch}" but found "${formatBranchForMessage(evidence.actualBranch)}" at "${evidence.worktreePath}". Safe repair ${evidence.safeRepair.succeeded ? "succeeded" : "was not completed"}: ${evidence.safeRepair.reason}.`,
+    `Execution workspace git worktree expected branch "${evidence.expectedBranch}" but found "${formatBranchForMessage(evidence.actualBranch)}" at "${evidence.worktreePath}". Safe repair ${evidence.safeRepair.succeeded ? "succeeded" : "was not completed"}: ${evidence.safeRepair.reason}.${otherIssueNote}`,
     {
       workspaceValidation: evidence,
     },

@@ -33,6 +33,7 @@ import type {
   DataSourceReadContext,
   SalesAdapter,
 } from "./connection-kind.js";
+import type { DocumentsAdapter } from "./documents-contract.js";
 import { paperlessNgxDataSource } from "./paperless-source.js";
 import { shopifyDataSource } from "./shopify-source.js";
 
@@ -123,6 +124,8 @@ export interface DataSourceKindDefinition {
     sales?: (context: DataSourceReadContext, options?: SalesAdapterOptions) => SalesAdapter;
     /** Exact product types in the catalog, for matching a person's words. */
     productTypes?: (context: DataSourceReadContext) => Promise<string[]>;
+    /** DUR-4303: search_documents/get_document, paperless-ngx today. */
+    documents?: (context: DataSourceReadContext) => DocumentsAdapter;
   };
 }
 

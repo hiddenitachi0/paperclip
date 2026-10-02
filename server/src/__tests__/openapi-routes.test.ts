@@ -125,6 +125,10 @@ const explicitOpenApiCoverageExclusions = new Set([
   "agent-work-summaries.ts",
   // Positions/Jobs routes (DUR-4182) are a new backend feature not yet in the public OpenAPI document.
   "jobs.ts",
+  // Paperless-ngx document download proxy (DUR-4303) is a short-lived,
+  // unauthenticated capability link handed out by get_document, not a
+  // conventional REST route, and is not yet in the public OpenAPI document.
+  "documents-download.ts",
 ]);
 
 function createApp() {
