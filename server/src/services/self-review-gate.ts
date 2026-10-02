@@ -465,7 +465,8 @@ export async function findExistingSelfReviewPassNoticeCommentForRun(
     .then((rows) => rows[0] ?? null);
 }
 
-const IDEMPOTENT_SELF_REVIEW_PASS_WAKE_STATUSES = ["queued", "deferred_issue_execution", "claimed", "completed"] as const;
+const OUTSTANDING_SELF_REVIEW_PASS_WAKE_STATUSES = ["queued", "deferred_issue_execution", "claimed"] as const;
+const IDEMPOTENT_SELF_REVIEW_PASS_WAKE_STATUSES = [...OUTSTANDING_SELF_REVIEW_PASS_WAKE_STATUSES, "completed"] as const;
 
 export async function findExistingSelfReviewPassWake(
   db: Db,
@@ -562,6 +563,50 @@ export async function findCompletedSelfReviewPassForIssue(
         eq(agentWakeupRequests.reason, SELF_REVIEW_PASS_REASON),
         like(agentWakeupRequests.idempotencyKey, `${SELF_REVIEW_PASS_REASON}:${input.issueId}:%`),
         eq(agentWakeupRequests.status, "completed"),
+      ),
+    );
+  if (input.matchingDiffFingerprint === undefined) {
+    return rows[0] ?? null;
+  }
+  const fingerprint = input.matchingDiffFingerprint;
+  return (
+    rows.find((row) => (row.payload as { reviewedDiffFingerprint?: string } | null)?.reviewedDiffFingerprint === fingerprint) ??
+    null
+  );
+}
+
+/**
+ * DUR-4307: sibling to findCompletedSelfReviewPassForIssue that looks for a self-review pass
+ * that is already IN FLIGHT for this issue (queued/deferred/claimed — i.e. not yet terminal),
+ * regardless of which run originally scheduled it. Without this, findExistingSelfReviewPassWake
+ * only protects the exact (issueId, sourceRunId) pair that scheduled a given wake, so a
+ * DIFFERENT run retrying the same PATCH before that wake resolves misses both that check and
+ * findCompletedSelfReviewPassForIssue (which only matches `completed` wakes) and schedules its
+ * own, redundant pass. Observed on DUR-4302: two ordinary heartbeat_timer runs each piled on a
+ * fresh self-review-pass wake while the original pass from the first declined run was still
+ * outstanding, because neither existing check recognizes an outstanding (not-yet-completed)
+ * wake for the same issue+diff scheduled by someone else's run.
+ *
+ * Same null-fingerprint and matching semantics as findCompletedSelfReviewPassForIssue:
+ * `matchingDiffFingerprint: null` never matches (nothing can vouch for unreadable content),
+ * `undefined` falls back to "any outstanding pass for this issue counts" for callers with no
+ * diff to compare against (an unresolvable workspace).
+ */
+export async function findOutstandingSelfReviewPassForIssue(
+  db: Db,
+  input: { companyId: string; issueId: string; matchingDiffFingerprint?: string | null },
+) {
+  if (input.matchingDiffFingerprint === null) return null;
+
+  const rows = await db
+    .select({ id: agentWakeupRequests.id, payload: agentWakeupRequests.payload })
+    .from(agentWakeupRequests)
+    .where(
+      and(
+        eq(agentWakeupRequests.companyId, input.companyId),
+        eq(agentWakeupRequests.reason, SELF_REVIEW_PASS_REASON),
+        like(agentWakeupRequests.idempotencyKey, `${SELF_REVIEW_PASS_REASON}:${input.issueId}:%`),
+        inArray(agentWakeupRequests.status, [...OUTSTANDING_SELF_REVIEW_PASS_WAKE_STATUSES]),
       ),
     );
   if (input.matchingDiffFingerprint === undefined) {
@@ -793,6 +838,21 @@ export async function evaluateSelfReviewDoneGate(input: {
     matchingDiffFingerprint: workspaceFullyUnresolvable ? undefined : reviewedDiffFingerprint,
   });
   if (priorPass) return null;
+
+  // DUR-4307: a self-review pass for this exact diff may already be in flight (scheduled by a
+  // DIFFERENT run than this one -- e.g. the originally-declined run's own corrective pass
+  // hasn't completed yet when an unrelated ordinary heartbeat_timer run retries the same PATCH
+  // in the meantime). findExistingSelfReviewPassWake above only catches the exact
+  // (issueId, sourceRunId) pair that scheduled a given wake, and priorPass above only matches a
+  // wake that already reached `completed` -- neither recognizes an outstanding wake scheduled by
+  // someone else's run. Without this check, every such retry schedules its own redundant pass,
+  // which is exactly the unbounded pile-up this gate is meant to prevent (see DUR-4302).
+  const outstandingPass = await findOutstandingSelfReviewPassForIssue(input.db, {
+    companyId: input.issue.companyId,
+    issueId: input.issue.id,
+    matchingDiffFingerprint: workspaceFullyUnresolvable ? undefined : reviewedDiffFingerprint,
+  });
+  if (outstandingPass) return { message: baseMessage };
 
   // DUR-290: `changedFilePaths !== null && diffContent === null` means a diff genuinely exists
   // (the workspace resolved and the cheaper path-only read succeeded) but couldn't be fully
