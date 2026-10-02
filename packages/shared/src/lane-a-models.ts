@@ -339,6 +339,97 @@ export function laneATemperatureForCall(provider: unknown, model: unknown, tempe
 }
 
 /**
+ * A plain http(s) address with no query string, fragment or sign-in part —
+ * the server appends `/chat/completions` to it, so any of those would ride
+ * along on every request. Shared by the main model's `laneABaseUrl` and every
+ * backup model's `baseUrl` (validators/agent.ts, validators/lane-a.ts) so the
+ * two never drift into checking different things.
+ */
+export function isPlainLaneABaseUrl(raw: string): boolean {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+    if (url.search || url.hash || url.username || url.password) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export const LANE_A_BASE_URL_INVALID_MESSAGE =
+  "The model address must be a plain http(s) URL with no query string or sign-in part, for example https://models.example.com/v1.";
+
+/**
+ * Quick agents, backup models (DUR-4343/DUR-4347): up to this many ordered
+ * fallback models, tried in order when the main one fails to answer (e.g. a
+ * local Ollama box asleep over Tailscale). Each entry is validated exactly
+ * like the main model (laneABackupModelIssue below): provider in the
+ * catalogue, model fits the provider, and a free-form provider (OpenRouter,
+ * local) must carry its own address — a backup entry is never allowed to
+ * silently fall back to OpenRouter's public default the way the main model
+ * does, since the whole point is that the operator named this one on purpose.
+ */
+export const LANE_A_MAX_BACKUP_MODELS = 3;
+
+export interface LaneABackupModelConfig {
+  provider: LaneAProvider;
+  model: string;
+  baseUrl?: string | null;
+  /** Same 0-1.5 range as the main model's "creativity"; null = the model host's own default. */
+  temperature?: number | null;
+}
+
+/**
+ * Why one backup-model entry cannot be used, in plain words, or null when it
+ * can. Reused by the zod validator (validators/lane-a.ts) and by anything
+ * that reads the stored jsonb defensively.
+ */
+export function laneABackupModelIssue(entry: {
+  provider?: unknown;
+  model?: unknown;
+  baseUrl?: unknown;
+}): string | null {
+  const provider = normalizeLaneAProvider(entry.provider);
+  const modelIssue = laneAModelIssueForProvider(provider, entry.model);
+  if (modelIssue) return modelIssue;
+  const descriptor = LANE_A_PROVIDER_CATALOGUE[provider];
+  if (descriptor.freeForm) {
+    const baseUrl = typeof entry.baseUrl === "string" ? entry.baseUrl.trim() : "";
+    if (!baseUrl) return `${descriptor.label} needs an address (base URL) for this backup model.`;
+    if (!isPlainLaneABaseUrl(baseUrl)) return LANE_A_BASE_URL_INVALID_MESSAGE;
+  }
+  return null;
+}
+
+/**
+ * The stored backup-model list, cleaned, or an empty array when there is
+ * nothing usable. Defensive on purpose, like normalizeLaneAProviderRouting
+ * below: the column is jsonb, and a bad stored value must never break a
+ * chat — a malformed entry is dropped rather than forwarded to the fallback
+ * loop, and the list is capped at LANE_A_MAX_BACKUP_MODELS regardless of what
+ * is stored.
+ */
+export function normalizeLaneABackupModels(value: unknown): LaneABackupModelConfig[] {
+  if (!Array.isArray(value)) return [];
+  const out: LaneABackupModelConfig[] = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const entry = raw as Record<string, unknown>;
+    if (laneABackupModelIssue(entry) !== null) continue;
+    const provider = normalizeLaneAProvider(entry.provider);
+    out.push({
+      provider,
+      model: entry.model as string,
+      baseUrl: typeof entry.baseUrl === "string" && entry.baseUrl.trim() ? entry.baseUrl.trim() : null,
+      temperature:
+        typeof entry.temperature === "number" && Number.isFinite(entry.temperature) ? entry.temperature : null,
+    });
+    if (out.length >= LANE_A_MAX_BACKUP_MODELS) break;
+  }
+  return out;
+}
+
+/**
  * Quick-agent "model hosts" (OpenRouter only). OpenRouter can serve the same
  * model from several hosts ("providers" in its API, e.g. deepinfra, venice),
  * and not every host supports tools. The operator can pin the hosts a quick

@@ -1,4 +1,15 @@
 import { z } from "zod";
+import {
+  LANE_A_BASE_URL_INVALID_MESSAGE,
+  LANE_A_BASE_URL_MAX_LENGTH,
+  LANE_A_FREE_FORM_MODEL_MAX_LENGTH,
+  LANE_A_MAX_BACKUP_MODELS,
+  LANE_A_MAX_TEMPERATURE,
+  LANE_A_MIN_TEMPERATURE,
+  LANE_A_PROVIDERS,
+  isPlainLaneABaseUrl,
+  laneABackupModelIssue,
+} from "../lane-a-models.js";
 
 // DUR-217: POST /api/lane-a/:agentId/messages body. Lane A is a direct
 // model-call text primitive — companyId scopes the request the same way
@@ -123,3 +134,47 @@ export const laneATransformSchema = z.object({
 });
 
 export type LaneATransform = z.infer<typeof laneATransformSchema>;
+
+// ─── DUR-4343/DUR-4347: quick-agent backup models ────────────────────────────
+//
+// Up to LANE_A_MAX_BACKUP_MODELS ordered fallback models, tried in order when
+// the main one fails to answer. Each entry is a complete provider+model
+// config, validated exactly like the main model (laneABackupModelIssue in
+// lane-a-models.ts) plus the same base-URL shape check the main model's
+// laneABaseUrl field uses (isPlainLaneABaseUrl) — one check, used in both
+// places, so they can never drift into accepting different addresses.
+
+export const laneABaseUrlSchema = z
+  .string()
+  .trim()
+  .max(LANE_A_BASE_URL_MAX_LENGTH)
+  .refine(isPlainLaneABaseUrl, LANE_A_BASE_URL_INVALID_MESSAGE);
+
+export const laneABackupModelConfigSchema = z
+  .object({
+    provider: z.enum(LANE_A_PROVIDERS),
+    model: z.string().trim().min(1).max(LANE_A_FREE_FORM_MODEL_MAX_LENGTH),
+    baseUrl: laneABaseUrlSchema.nullable().optional(),
+    temperature: z
+      .number()
+      .finite()
+      .min(LANE_A_MIN_TEMPERATURE, `Creativity must be between ${LANE_A_MIN_TEMPERATURE} and ${LANE_A_MAX_TEMPERATURE}.`)
+      .max(LANE_A_MAX_TEMPERATURE, `Creativity must be between ${LANE_A_MIN_TEMPERATURE} and ${LANE_A_MAX_TEMPERATURE}.`)
+      .nullable()
+      .optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    const issue = laneABackupModelIssue(value);
+    if (issue) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: issue, path: ["model"] });
+    }
+  });
+
+export type LaneABackupModelConfigInput = z.infer<typeof laneABackupModelConfigSchema>;
+
+export const laneABackupModelsSchema = z
+  .array(laneABackupModelConfigSchema)
+  .max(LANE_A_MAX_BACKUP_MODELS, `List at most ${LANE_A_MAX_BACKUP_MODELS} backup models.`);
+
+export type LaneABackupModelsInput = z.infer<typeof laneABackupModelsSchema>;

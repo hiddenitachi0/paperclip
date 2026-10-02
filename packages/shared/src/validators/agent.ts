@@ -8,7 +8,6 @@ import {
 import { agentAdapterTypeSchema } from "../adapter-type.js";
 import { DEFAULT_HIRE_MONTHLY_SPENDING_LIMIT_CENTS } from "../hire-spending-limit.js";
 import {
-  LANE_A_BASE_URL_MAX_LENGTH,
   LANE_A_FREE_FORM_MODEL_MAX_LENGTH,
   LANE_A_MAX_MAX_OUTPUT_TOKENS,
   LANE_A_MAX_TEMPERATURE,
@@ -21,6 +20,7 @@ import {
   LANE_A_PROVIDER_SLUG_RE,
   laneAModelIssueForProvider,
 } from "../lane-a-models.js";
+import { laneABackupModelsSchema, laneABaseUrlSchema } from "./lane-a.js";
 import { envBindingSchema, envBindingSecretRefSchema, envConfigSchema } from "./secret.js";
 import { BROWSER_ACCESS_LEVELS } from "../browser-access.js";
 import { LANE_A_TRUST_LEVELS } from "../lane-a-trust.js";
@@ -91,6 +91,11 @@ export const QUICK_AGENT_FIELDS = [
   // key, exactly as before.
   "laneAProvider",
   "laneABaseUrl",
+  // DUR-4343/DUR-4347: up to 3 ordered backup models, tried in order when the
+  // main one fails to answer. Board-only for the same reason as the rest of
+  // this list — an agent that could add its own backup chain could point its
+  // calls anywhere.
+  "laneABackupModels",
   // How playful and varied the quick agent's replies are (sampling
   // temperature). Null = the model host's own default. Board-only like the
   // rest: it changes how the agent talks to people.
@@ -540,24 +545,12 @@ const createAgentObjectSchema = z.object({
   laneAProvider: z.enum(LANE_A_PROVIDERS).nullable().optional(),
   // DUR-3997: OpenAI-compatible endpoint for OpenRouter / a local model.
   // Ignored for the fixed providers. http(s) only.
-  laneABaseUrl: z
-    .string()
-    .trim()
-    .max(LANE_A_BASE_URL_MAX_LENGTH)
-    .refine((raw) => {
-      try {
-        const url = new URL(raw);
-        if (url.protocol !== "http:" && url.protocol !== "https:") return false;
-        // The server appends /chat/completions to this; a query string,
-        // fragment or sign-in part would ride along on every request.
-        if (url.search || url.hash || url.username || url.password) return false;
-        return true;
-      } catch {
-        return false;
-      }
-    }, "The model address must be a plain http(s) URL with no query string or sign-in part, for example https://models.example.com/v1.")
-    .nullable()
-    .optional(),
+  laneABaseUrl: laneABaseUrlSchema.nullable().optional(),
+  // DUR-4343/DUR-4347: up to 3 ordered backup models, tried in order when the
+  // main one fails to answer. Each entry validated exactly like the main
+  // model (laneABackupModelConfigSchema); left out entirely => [], i.e. no
+  // backups, exactly today's behaviour.
+  laneABackupModels: laneABackupModelsSchema.optional(),
   laneAMaxOutputTokens: z
     .number()
     .int()

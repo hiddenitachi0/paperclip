@@ -111,21 +111,70 @@ export type LaneAModelClient = Pick<Anthropic, "messages">;
 export type LaneAProviderErrorKind = "auth" | "rate_limit" | "upstream" | "network";
 
 /**
+ * A provider's error text names the MODEL as unavailable rather than
+ * refusing the request: Ollama/LM Studio "model 'x' not found, try pulling
+ * it first", "model not loaded", vLLM "does not exist". These arrive as a
+ * 4xx (sometimes 404, sometimes 400) that would otherwise read as "our own
+ * request was bad" — but the fix is to try the next model, not to resend the
+ * same one.
+ */
+const MODEL_UNAVAILABLE_MESSAGE_RE =
+  /model[^.]{0,60}(not[ _-]?found|not[ _-]?loaded|does not exist|is not available|unavailable)/i;
+
+/**
+ * DUR-4347 (the quick-agent backup-model fallback loop): whether a failed
+ * call is worth retrying against the NEXT model in the chain, as opposed to
+ * surfacing straight to the caller. True for "this provider/host could not
+ * be reached or is temporarily overloaded" — connection failure, timeout,
+ * HTTP 5xx, 429, or the model itself being unavailable at this host. False
+ * for "our own request was rejected on its merits" — a bad/refused key, a
+ * content-policy refusal, or any other 4xx that is not a model-unavailable
+ * message: resending the exact same request to a different model would not
+ * fix a malformed request, and silently showing a different model's answer
+ * in place of a refusal is a different decision than the one the operator
+ * who set up the refusing model asked for.
+ */
+export function classifyLaneARetryable(input: {
+  kind: LaneAProviderErrorKind;
+  status: number | null;
+  message: string;
+}): boolean {
+  if (input.kind === "network") return true;
+  if (input.kind === "rate_limit") return true;
+  if (input.kind === "auth") return false;
+  // kind === "upstream"
+  if (input.status !== null && input.status >= 500 && input.status <= 599) return true;
+  return MODEL_UNAVAILABLE_MESSAGE_RE.test(input.message);
+}
+
+/**
  * A provider call that failed, classified so lane-a.ts can turn it into the
  * right HTTP answer (503 for a bad key, 429 for upstream rate limiting, 502
- * otherwise). `message` is already scrubbed.
+ * otherwise), and so the backup-model fallback loop (DUR-4347) can decide
+ * whether to try the next model in the chain. `message` is already scrubbed.
  */
 export class LaneAProviderError extends Error {
   readonly kind: LaneAProviderErrorKind;
   readonly provider: LaneAProvider;
   readonly status: number | null;
+  /** DUR-4347: whether the fallback loop may advance to the next model after this error. */
+  readonly retryable: boolean;
 
-  constructor(input: { kind: LaneAProviderErrorKind; provider: LaneAProvider; message: string; status?: number | null }) {
+  constructor(input: {
+    kind: LaneAProviderErrorKind;
+    provider: LaneAProvider;
+    message: string;
+    status?: number | null;
+    /** Overrides the default classification; only used by tests. */
+    retryable?: boolean;
+  }) {
     super(input.message);
     this.name = "LaneAProviderError";
     this.kind = input.kind;
     this.provider = input.provider;
     this.status = input.status ?? null;
+    this.retryable =
+      input.retryable ?? classifyLaneARetryable({ kind: input.kind, status: this.status, message: input.message });
   }
 }
 
@@ -314,6 +363,27 @@ function classifyAnthropicError(err: unknown, apiKey: string | null): unknown {
 // ─── OpenAI-compatible (OpenAI, Google, OpenRouter, local) ──────────────────
 
 const DEFAULT_OPENAI_COMPATIBLE_TIMEOUT_MS = 120_000;
+
+/**
+ * DUR-4347: the timeout a "local" provider attempt uses instead of the
+ * default 120s, everywhere in the fallback chain (not only on a backup) —
+ * the motivating case is the main model itself being a local Ollama box that
+ * is asleep over Tailscale, and a 120s hang before the first backup is even
+ * tried defeats the point of having one.
+ *
+ * This bounds the WHOLE call (connect through the last response byte), same
+ * as the normal timeout above — there is no separate connect-only phase in
+ * this client, so a local model slow enough to still be generating at 5s
+ * also times out and the loop advances to the next entry (or surfaces a
+ * plain error with no backups configured). That is a real behavior change
+ * for an existing local-only quick agent with a slow but working model: it
+ * previously had the full 120s. 5s is chosen because an unreachable/asleep
+ * host fails (connection refused/host down) in well under a second, so this
+ * mainly costs a slow-but-reachable host its remaining budget rather than
+ * adding risk to a fast one — flagged here for review in case a model is
+ * known to need longer than 5s to begin answering on the hardware it runs on.
+ */
+export const LANE_A_LOCAL_CHAIN_TIMEOUT_MS = 5_000;
 
 type OpenAiToolCallParam = {
   id: string;

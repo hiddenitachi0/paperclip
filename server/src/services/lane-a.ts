@@ -18,18 +18,22 @@ import {
   laneAMessages,
   type LaneAStoredToolCall,
   type LaneAToolImage,
+  type LaneAAttempt,
+  type LaneAAnsweredBy,
 } from "@paperclipai/db";
 import {
   LANE_A_API_KEY_CONFIG_PATH,
   LANE_A_DEFAULT_MAX_OUTPUT_TOKENS,
   LANE_A_DEFAULT_MODEL,
   LANE_A_DEFAULT_TRANSFORM_DAILY_CALL_CAP,
+  LANE_A_MAX_BACKUP_MODELS,
   LANE_A_TRANSFORM_BILLING_CODE,
   LANE_A_TRANSFORM_MAX_CONCURRENCY,
   envBindingSchema,
   laneAProviderLabel,
   laneAProviderModelCostCents,
   normalizeLaneAProvider,
+  normalizeLaneABackupModels,
   resolveLaneAModelForProvider,
   laneATemperatureForCall,
   laneAProviderRoutingForCall,
@@ -37,6 +41,7 @@ import {
   readLaneAConversationSearchSwitch,
   isLaneATrustLimited,
   type ChatHandedOverTask,
+  type LaneABackupModelConfig,
   type LaneAProvider,
   type LaneAProviderRouting,
 } from "@paperclipai/shared";
@@ -46,6 +51,7 @@ import {
   createLaneAProviderClient,
   fromAnthropicTool,
   resolveLaneABaseUrl,
+  LANE_A_LOCAL_CHAIN_TIMEOUT_MS,
   type LaneAChatMessage,
   type LaneAModelClient,
   type LaneAProviderClient,
@@ -738,6 +744,13 @@ export interface LaneATargetAgent {
    * off the row.
    */
   laneAProviderRouting?: LaneAProviderRouting | null;
+  /**
+   * DUR-4343/DUR-4347: up to 3 ordered backup models, tried in order when
+   * the main one fails to answer. Null/absent/empty = no backups, exactly
+   * today's behaviour. Optional so existing callers/tests are unaffected;
+   * when absent the service reads the stored value off the agent row.
+   */
+  laneABackupModels?: LaneABackupModelConfig[] | null;
 }
 
 /**
@@ -800,9 +813,11 @@ export function resolveLaneASettings(agent: LaneATargetAgent) {
 
 /**
  * The model a call is made with, or the plain-language refusal when a
- * free-form provider has none picked / a local model has no address.
+ * free-form provider has none picked / a local model has no address. Takes
+ * only the three fields it reads so a chain entry (resolveLaneAModelChain
+ * below) can be checked the same way the main settings are.
  */
-function assertLaneASettingsRunnable(settings: ReturnType<typeof resolveLaneASettings>): string {
+function assertLaneASettingsRunnable(settings: { provider: LaneAProvider; model: string | null; baseUrl: string | null }): string {
   const label = laneAProviderLabel(settings.provider);
   if (!settings.model) {
     throw new HttpError(
@@ -820,6 +835,77 @@ function assertLaneASettingsRunnable(settings: ReturnType<typeof resolveLaneASet
   }
   return settings.model;
 }
+
+/**
+ * DUR-4343/DUR-4347: one entry in the ordered model chain a turn tries,
+ * main first, then each configured backup in order. Only the fields that
+ * differ per entry — the rest (max output tokens, daily call cap, OpenRouter
+ * host routing) stay the agent-level settings regardless of which entry
+ * answers, so a backup never runs under different limits than the main
+ * model would have.
+ */
+export interface LaneAModelChainEntry {
+  label: LaneAAnsweredBy;
+  provider: LaneAProvider;
+  model: string | null;
+  baseUrl: string | null;
+  temperature: number | null;
+}
+
+const LANE_A_BACKUP_LABELS: readonly LaneAAnsweredBy[] = ["backup1", "backup2", "backup3"];
+
+/**
+ * The ordered chain one turn tries: the main model (resolved exactly as
+ * resolveLaneASettings does today), then up to LANE_A_MAX_BACKUP_MODELS
+ * configured backups, each resolved the same way (provider/model fit,
+ * baseUrl, temperature). Credential lookup happens per attempt in the
+ * fallback loop (runLaneAModelChain), not here — a backup's provider may
+ * need a different key than the main model's.
+ */
+export function resolveLaneAModelChain(
+  agent: LaneATargetAgent & { laneABackupModels?: unknown },
+): LaneAModelChainEntry[] {
+  const main = resolveLaneASettings(agent);
+  const chain: LaneAModelChainEntry[] = [
+    { label: "main", provider: main.provider, model: main.model, baseUrl: main.baseUrl, temperature: main.temperature },
+  ];
+  const backups = normalizeLaneABackupModels(agent.laneABackupModels).slice(0, LANE_A_MAX_BACKUP_MODELS);
+  backups.forEach((entry, index) => {
+    const provider = normalizeLaneAProvider(entry.provider);
+    const model = resolveLaneAModelForProvider(provider, entry.model);
+    const baseUrl = resolveLaneABaseUrl(provider, entry.baseUrl);
+    const temperature = laneATemperatureForCall(provider, model, entry.temperature);
+    chain.push({ label: LANE_A_BACKUP_LABELS[index]!, provider, model, baseUrl, temperature });
+  });
+  return chain;
+}
+
+/**
+ * DUR-4347: whether the fallback loop may try the NEXT chain entry after this
+ * error, as opposed to surfacing it straight to the caller. Covers two kinds
+ * of failure: the provider actually answered with something classified
+ * retryable (LaneAProviderError.retryable — connection failure, timeout,
+ * 5xx, 429, model unavailable), or this entry could not even be attempted
+ * because it has no model picked / no address / no usable key (the same
+ * plain-language 503s assertLaneASettingsRunnable and resolveLaneACredential
+ * already throw for the main model today) — those are configuration gaps in
+ * THIS entry, not a reason to give up on the whole chain.
+ */
+function laneAChainShouldAdvance(err: unknown): boolean {
+  if (err instanceof LaneAProviderError) return err.retryable;
+  if (err instanceof HttpError && err.status === 503) {
+    const code = (err.details as { code?: unknown } | undefined)?.code;
+    return typeof code === "string" && code.startsWith("LANE_A_");
+  }
+  return false;
+}
+
+/** One attempt the fallback loop made, before it is known whether it answered. */
+type LaneAChainAttemptRecord = { provider: LaneAProvider; model: string; outcome: "ok" | "error"; durationMs: number; costCents: number };
+
+type LaneAChainOutcome<R> =
+  | { ok: true; answeredBy: LaneAAnsweredBy; entry: LaneAModelChainEntry; result: R; attempts: LaneAChainAttemptRecord[] }
+  | { ok: false; error: unknown; attempts: LaneAChainAttemptRecord[] };
 
 /** One action the quick agent took while answering — surfaced to the operator. */
 export type LaneAAction = LaneAStoredToolCall;
@@ -1784,6 +1870,9 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         laneAModel: agents.laneAModel,
         laneATemperature: agents.laneATemperature,
         laneAProviderRouting: agents.laneAProviderRouting,
+        // DUR-4343/DUR-4347: the backup-model chain, read fresh off the row
+        // for the same reason as the rest of the provider settings above.
+        laneABackupModels: agents.laneABackupModels,
         // DUR-4000: which person does this job, so the prompt can say so,
         // and the job's limits box (its standing rules ride in the prompt).
         personaId: agents.personaId,
@@ -1900,6 +1989,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     provider: LaneAProvider;
     baseUrl: string | null;
     credential: LaneACredential;
+    /** DUR-4347: shorter timeout for a "local" chain entry (LANE_A_LOCAL_CHAIN_TIMEOUT_MS). Omitted = the client's normal default. */
+    timeoutMs?: number;
   }): LaneAProviderClient {
     return createLaneAProviderClient({
       provider: input.provider,
@@ -1908,7 +1999,72 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       anthropicClient:
         input.provider === "anthropic" && options.createModelClient ? options.createModelClient() : undefined,
       fetch: options.providerFetch,
+      timeoutMs: input.timeoutMs,
     });
+  }
+
+  /**
+   * DUR-4347: tries each entry of a resolved model chain in order, stopping
+   * at the first one that answers. `attemptOne` runs exactly one entry's
+   * model call (callModel for chat, callTransformModel for transform) given
+   * the client and resolved model/temperature/providerRouting for that
+   * entry; this function owns everything that is the SAME regardless of
+   * which call shape attemptOne uses: per-entry credential/client
+   * construction, the local-provider short timeout, cost pricing by whatever
+   * actually ran, and the attempts log.
+   *
+   * Entries with no resolvable model / no address fail the same plain
+   * 503 assertLaneASettingsRunnable always has, recorded as a failed attempt
+   * and advanced past rather than thrown immediately — a backup slot that is
+   * not fully configured must not block a LATER, usable backup.
+   */
+  async function runLaneAModelChain<R extends { inputTokens: number; outputTokens: number }>(params: {
+    chain: LaneAModelChainEntry[];
+    companyId: string;
+    agentId: string;
+    adapterConfig: unknown;
+    actor?: AuthorizationActor;
+    /** Test seam: a Claude test client makes the key optional for an anthropic entry. */
+    keyOptionalForAnthropic: boolean;
+    attemptOne: (client: LaneAProviderClient, entry: LaneAModelChainEntry) => Promise<R>;
+  }): Promise<LaneAChainOutcome<R>> {
+    const attempts: LaneAChainAttemptRecord[] = [];
+    let lastError: unknown;
+    for (const entry of params.chain) {
+      const startedAt = Date.now();
+      try {
+        const model = assertLaneASettingsRunnable(entry);
+        const credential = await resolveLaneACredential({
+          companyId: params.companyId,
+          agentId: params.agentId,
+          provider: entry.provider,
+          adapterConfig: params.adapterConfig,
+          actor: params.actor,
+          keyOptional: entry.provider === "anthropic" && params.keyOptionalForAnthropic,
+        });
+        const client = buildProviderClient({
+          provider: entry.provider,
+          baseUrl: entry.baseUrl,
+          credential,
+          timeoutMs: entry.provider === "local" ? LANE_A_LOCAL_CHAIN_TIMEOUT_MS : undefined,
+        });
+        const result = await params.attemptOne(client, entry);
+        const costCents = computeCostCents(entry.provider, model, result.inputTokens, result.outputTokens);
+        attempts.push({ provider: entry.provider, model, outcome: "ok", durationMs: Date.now() - startedAt, costCents });
+        return { ok: true, answeredBy: entry.label, entry, result, attempts };
+      } catch (err) {
+        lastError = err;
+        attempts.push({
+          provider: entry.provider,
+          model: entry.model ?? "",
+          outcome: "error",
+          durationMs: Date.now() - startedAt,
+          costCents: 0,
+        });
+        if (!laneAChainShouldAdvance(err)) break;
+      }
+    }
+    return { ok: false, error: lastError, attempts };
   }
 
   /**
@@ -2262,7 +2418,11 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         if (refusedForCap > 0 && executedThisRound === 0) finalRound = true;
       }
     } catch (err) {
-      throw providerErrorToHttp(err, "chat");
+      // DUR-4347: rethrown raw (not converted to an HttpError here) so the
+      // fallback loop in sendMessage can see the original LaneAProviderError
+      // and its `retryable` flag. The HTTP conversion happens exactly once,
+      // in sendMessage, after the whole chain is exhausted.
+      throw err;
     }
 
     const finalResponse = response!;
@@ -2341,28 +2501,22 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       : null;
     // DUR-4000: the job's standing rules, read off the same row.
     const standingRules = parseAgentLimits(agentRow?.limits).notes ?? null;
-    const chatSettings = resolveLaneASettings({
+    const mergedAgentForChain = {
       ...params.targetAgent,
       laneAProvider: params.targetAgent.laneAProvider ?? agentRow?.laneAProvider ?? null,
       laneABaseUrl: params.targetAgent.laneABaseUrl ?? agentRow?.laneABaseUrl ?? null,
       laneAModel: params.targetAgent.laneAModel ?? agentRow?.laneAModel ?? null,
       laneATemperature: params.targetAgent.laneATemperature ?? agentRow?.laneATemperature ?? null,
       laneAProviderRouting: params.targetAgent.laneAProviderRouting ?? agentRow?.laneAProviderRouting ?? null,
-    });
-    const chatModel = assertLaneASettingsRunnable(chatSettings);
-    const credential = await resolveLaneACredential({
-      companyId: params.companyId,
-      agentId: params.targetAgent.id,
-      provider: chatSettings.provider,
-      adapterConfig: agentRow?.adapterConfig,
-      actor: params.actor,
-      keyOptional: chatSettings.provider === "anthropic" && Boolean(options.createModelClient),
-    });
-    const client = buildProviderClient({
-      provider: chatSettings.provider,
-      baseUrl: chatSettings.baseUrl,
-      credential,
-    });
+      laneABackupModels: params.targetAgent.laneABackupModels ?? agentRow?.laneABackupModels ?? [],
+    };
+    // DUR-4343/DUR-4347: the chain this turn tries, main model first then
+    // each configured backup in order. maxOutputTokens is the agent-level
+    // ceiling, unchanged by which entry answers; OpenRouter host routing is
+    // re-resolved per entry below (laneAProviderRoutingForCall), since a
+    // backup's provider may not be the main model's.
+    const chatSettings = resolveLaneASettings(mergedAgentForChain);
+    const chain = resolveLaneAModelChain(mergedAgentForChain);
 
     // DUR-4070: the one dial that gates plugin tools, business data, company
     // files, web search, browser access and memory together. "limited"
@@ -2495,6 +2649,14 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     let stopReason: string | null;
     let actions: LaneAAction[];
     let businessDataOutputs: BusinessDataTurnOutput[] = [];
+    // DUR-4347: which chain entry actually answered, and the full attempt
+    // log, both stamped on the assistant row below for the message-detail
+    // view. Default to "main" with no other attempts for the (overwhelmingly
+    // common) turn that just answers on the first try.
+    let answeredBy: LaneAAnsweredBy = "main";
+    let answeredProvider: LaneAProvider = chatSettings.provider;
+    let answeredModel: string = chatSettings.model ?? "";
+    let attempts: LaneAChainAttemptRecord[] = [];
     try {
       const systemPrompt = buildSystemPrompt({
         agentName: params.targetAgent.name,
@@ -3043,7 +3205,9 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         stopReason: response.stopReason,
       };
     } catch (err) {
-      throw providerErrorToHttp(err, "transform");
+      // DUR-4347: rethrown raw, same reason as callModel above — transform's
+      // fallback loop needs the original error to decide whether to advance.
+      throw err;
     }
   }
 

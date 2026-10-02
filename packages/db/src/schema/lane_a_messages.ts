@@ -20,6 +20,25 @@ export interface LaneAToolImage {
   issueId: string | null;
 }
 
+/**
+ * One model call the fallback loop made while answering a turn (DUR-4347):
+ * which provider/model answered (or failed), how long it took, and what it
+ * cost. `outcome` is "ok" for the attempt that actually answered, "error"
+ * for one the loop moved past. Kept on the assistant row for the agent page
+ * / message-detail view — the reply text to the person is unchanged by any
+ * of this.
+ */
+export interface LaneAAttempt {
+  provider: string;
+  model: string;
+  outcome: "ok" | "error";
+  durationMs: number;
+  costCents: number;
+}
+
+/** Which chain entry actually answered a turn: the main model, or the Nth configured backup. */
+export type LaneAAnsweredBy = "main" | "backup1" | "backup2" | "backup3";
+
 /** One tool call a quick agent made while answering a message, kept for the operator to see. */
 export interface LaneAStoredToolCall {
   tool: string;
@@ -56,6 +75,13 @@ export const laneAMessages = pgTable(
     role: text("role").$type<"user" | "assistant" | "recap">().notNull(),
     content: text("content").notNull(),
     toolCalls: jsonb("tool_calls").$type<LaneAStoredToolCall[]>(),
+    // DUR-4347: per-attempt fallback-chain record and which entry answered,
+    // set only on the assistant row of a turn that had a backup chain to try
+    // (null for every row before this column, and for a turn with no
+    // backups configured — same reading either way: "main answered,
+    // nothing to show").
+    attempts: jsonb("attempts").$type<LaneAAttempt[]>(),
+    answeredBy: text("answered_by").$type<LaneAAnsweredBy>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

@@ -391,6 +391,11 @@ export {
   LANE_A_TRANSFORM_MAX_CONCURRENCY,
   LANE_A_TRANSFORM_MAX_TOTAL_CHARS,
   laneATransformPayloadChars,
+  laneABaseUrlSchema,
+  laneABackupModelConfigSchema,
+  laneABackupModelsSchema,
+  type LaneABackupModelConfigInput,
+  type LaneABackupModelsInput,
 } from "./lane-a.js";
 
 export {

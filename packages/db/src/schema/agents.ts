@@ -15,6 +15,7 @@ import {
 import { companies } from "./companies.js";
 import { environments } from "./environments.js";
 import { companyAgentRoles } from "./company_agent_roles.js";
+import type { LaneABackupModelConfig } from "@paperclipai/shared";
 
 export const agents = pgTable(
   "agents",
@@ -106,6 +107,14 @@ export const agents = pgTable(
     // in packages/shared), resolved binding-gated and audited at call time.
     laneAProvider: text("lane_a_provider"),
     laneABaseUrl: text("lane_a_base_url"),
+    // DUR-4343/DUR-4347 (migration 0210): up to 3 ordered backup models,
+    // tried in order when the main one fails to answer (e.g. a local Ollama
+    // box asleep over Tailscale). Each entry is a complete
+    // {provider, model, baseUrl?, temperature?} config, validated the same
+    // way the main model is (laneABackupModelsSchema in packages/shared).
+    // Empty for every agent that existed before this column, meaning
+    // "no backups, fail straight to the caller" — today's behaviour.
+    laneABackupModels: jsonb("lane_a_backup_models").$type<LaneABackupModelConfig[]>().notNull().default([]),
     // Migration 0179: quick-agent "creativity" (sampling temperature, 0-1.5).
     // Null = send no temperature, i.e. the model host's own default, which is
     // what every quick agent did before this column existed.

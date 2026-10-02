@@ -83,10 +83,16 @@ export {
   laneAModelCostCents,
   laneAProviderModelCostCents,
   laneATransformWorstCaseDailyCents,
+  isPlainLaneABaseUrl,
+  LANE_A_BASE_URL_INVALID_MESSAGE,
+  LANE_A_MAX_BACKUP_MODELS,
+  laneABackupModelIssue,
+  normalizeLaneABackupModels,
   type LaneAModel,
   type LaneAProvider,
   type LaneAModelPricing,
   type LaneAProviderDescriptor,
+  type LaneABackupModelConfig,
 } from "./lane-a-models.js";
 export {
   WEB_SEARCH_BINDING_TARGET_TYPE,
