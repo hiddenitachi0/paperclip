@@ -73,6 +73,15 @@ export interface LaneACompletionRequest {
    */
   temperature?: number | null;
   /**
+   * DUR-4367: `reasoning_effort` ("none" to skip the model's reasoning pass),
+   * already resolved for this provider/model by laneAThinkingForCall
+   * (@paperclipai/shared) — the caller has already dropped it for a model/
+   * provider not known to accept the field. Absent/null = send nothing, i.e.
+   * the model's own default behaviour. Ignored by the Anthropic client
+   * (extended thinking is a different, opt-in wire shape it does not use).
+   */
+  reasoningEffort?: "none" | null;
+  /**
    * OpenRouter only: which hosts the model may run on (the operator's "model
    * hosts" setting). Absent/null = OpenRouter picks. Ignored for every other
    * provider.
@@ -429,6 +438,12 @@ export function buildOpenAiCompatibleBody(provider: LaneAProvider, request: Lane
   // the host's own default applies, exactly as before the setting existed.
   if (typeof request.temperature === "number" && Number.isFinite(request.temperature)) {
     body.temperature = request.temperature;
+  }
+  // DUR-4367: "Thinking" off. The caller (laneAThinkingForCall) has already
+  // dropped this for a provider/model not known to accept the field, so it
+  // is sent as-is here.
+  if (request.reasoningEffort) {
+    body.reasoning_effort = request.reasoningEffort;
   }
   // DUR-4138: JSON mode, asked for, never assumed honored — the caller still
   // extracts/validates defensively (a host or model that ignores this

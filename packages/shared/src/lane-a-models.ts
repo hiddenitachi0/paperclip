@@ -352,6 +352,59 @@ export function laneATemperatureForCall(provider: unknown, model: unknown, tempe
 }
 
 /**
+ * DUR-4367: quick-agent "Thinking" (on / off / model default). Off asks the
+ * model to skip its reasoning pass — for a local reasoning model (Ollama's
+ * huihui_ai/qwen3-abliterated, for example) that is most of the latency: the
+ * same one-line message measured 4.6s with thinking on and 0.3s with it off.
+ * "model default" (null, the default for every quick agent that existed
+ * before this setting) sends nothing and leaves the model's own behaviour
+ * alone, exactly as before this setting existed. "on" is also a no-op on the
+ * wire today: every model this reaches already thinks by default when it is
+ * able to, so there is nothing additional to ask for yet.
+ */
+export const LANE_A_THINKING_MODES = ["on", "off"] as const;
+export type LaneAThinkingMode = (typeof LANE_A_THINKING_MODES)[number];
+
+/**
+ * Models known to accept an OpenAI-style `reasoning_effort` field. This is an
+ * allow-list, not a deny-list, on purpose: a strict host (plain OpenAI, for a
+ * model that was never a reasoning model) answers an unrecognised field with
+ * a 400, which would turn "turn thinking off" into "the chat stopped
+ * working". OpenRouter and a local OpenAI-compatible server (Ollama, LM
+ * Studio, llama.cpp, vLLM) are the cases this setting exists for and are both
+ * lenient (OpenRouter drops a parameter a model does not support; a local
+ * server is the operator's own and this is exactly the field the qwen3 case
+ * needs). OpenAI's own reasoning models (o-series, gpt-5) already take this
+ * field for their effort level, so "off" maps onto it too. Google's
+ * OpenAI-compatible shim is not on this list: unlike OpenRouter it is not
+ * known to tolerate an extra field, so nothing is sent there until that is
+ * checked. Anthropic never reaches this function (extended thinking is a
+ * different, opt-in wire shape it does not use); see laneAThinkingForCall.
+ */
+export function laneAModelAcceptsReasoningEffort(provider: unknown, model: unknown): boolean {
+  const key = normalizeLaneAProvider(provider);
+  if (key === "openrouter" || key === "local") return true;
+  if (key === "openai") {
+    const resolved = resolveLaneAModelForProvider(key, model);
+    return resolved !== null && /^(o\d|gpt-5)/i.test(resolved);
+  }
+  return false;
+}
+
+/**
+ * The `reasoning_effort` value to send for this provider/model, or null to
+ * send none. Only "off" ever sends anything: "model default" (null/absent)
+ * and "on" both leave the model's own behaviour alone, and a model not known
+ * to accept the field gets nothing regardless of the setting (a bad value
+ * must never break a chat).
+ */
+export function laneAThinkingForCall(provider: unknown, model: unknown, thinking: unknown): "none" | null {
+  if (thinking !== "off") return null;
+  if (!laneAModelAcceptsReasoningEffort(provider, model)) return null;
+  return "none";
+}
+
+/**
  * Quick-agent "model hosts" (OpenRouter only). OpenRouter can serve the same
  * model from several hosts ("providers" in its API, e.g. deepinfra, venice),
  * and not every host supports tools. The operator can pin the hosts a quick
