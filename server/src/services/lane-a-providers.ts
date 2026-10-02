@@ -73,6 +73,15 @@ export interface LaneACompletionRequest {
    */
   temperature?: number | null;
   /**
+   * DUR-4367: `reasoning_effort` ("none" to skip the model's reasoning pass),
+   * already resolved for this provider/model by laneAThinkingForCall
+   * (@paperclipai/shared) — the caller has already dropped it for a model/
+   * provider not known to accept the field. Absent/null = send nothing, i.e.
+   * the model's own default behaviour. Ignored by the Anthropic client
+   * (extended thinking is a different, opt-in wire shape it does not use).
+   */
+  reasoningEffort?: "none" | null;
+  /**
    * OpenRouter only: which hosts the model may run on (the operator's "model
    * hosts" setting). Absent/null = OpenRouter picks. Ignored for every other
    * provider.
@@ -87,6 +96,14 @@ export interface LaneACompletionRequest {
    * must still parse defensively.
    */
   responseFormat?: "json_object";
+  /**
+   * DUR-4355: force the model to call exactly this tool, for the one
+   * corrective retry after it claimed a tool-only action without calling
+   * one. Requires `tools` to include a tool of this name. Ignored by a
+   * provider/host with no equivalent (the model answers as it otherwise
+   * would, and the caller's own fallback still applies).
+   */
+  toolChoice?: { name: string };
 }
 
 export type LaneAStop = "end_turn" | "tool_use" | "max_tokens" | "other";
@@ -284,6 +301,9 @@ function createAnthropicLaneAClient(client: LaneAModelClient, apiKey: string | n
           system: request.system,
           messages: toAnthropicMessages(request.messages),
           ...(request.tools && request.tools.length > 0 ? { tools: request.tools.map(toAnthropicTool) } : {}),
+          ...(request.toolChoice && request.tools?.some((tool) => tool.name === request.toolChoice!.name)
+            ? { tool_choice: { type: "tool", name: request.toolChoice.name } }
+            : {}),
         });
         return fromAnthropicMessage(response as Anthropic.Message);
       } catch (err) {
@@ -388,6 +408,11 @@ export function buildOpenAiCompatibleBody(provider: LaneAProvider, request: Lane
     // without looking). Require a host that supports every parameter; if none
     // does, OpenRouter says so and the quick agent retries without tools.
     if (provider === "openrouter") body.provider = { require_parameters: true };
+    // DUR-4355: force the one corrective retry onto a specific tool, when the
+    // caller asked for it and that tool was actually offered this call.
+    if (request.toolChoice && request.tools.some((tool) => tool.name === request.toolChoice!.name)) {
+      body.tool_choice = { type: "function", function: { name: request.toolChoice.name } };
+    }
   }
   // The operator's "model hosts" setting (OpenRouter only): merged into the
   // same `provider` object, in OpenRouter's own field names. Without it
@@ -413,6 +438,12 @@ export function buildOpenAiCompatibleBody(provider: LaneAProvider, request: Lane
   // the host's own default applies, exactly as before the setting existed.
   if (typeof request.temperature === "number" && Number.isFinite(request.temperature)) {
     body.temperature = request.temperature;
+  }
+  // DUR-4367: "Thinking" off. The caller (laneAThinkingForCall) has already
+  // dropped this for a provider/model not known to accept the field, so it
+  // is sent as-is here.
+  if (request.reasoningEffort) {
+    body.reasoning_effort = request.reasoningEffort;
   }
   // DUR-4138: JSON mode, asked for, never assumed honored — the caller still
   // extracts/validates defensively (a host or model that ignores this

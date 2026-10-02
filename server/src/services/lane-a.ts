@@ -32,6 +32,8 @@ import {
   normalizeLaneAProvider,
   resolveLaneAModelForProvider,
   laneATemperatureForCall,
+  laneAThinkingForCall,
+  laneAModelAcceptsReasoningEffort,
   laneAProviderRoutingForCall,
   readLaneAWebSearchSwitch,
   readLaneAConversationSearchSwitch,
@@ -57,6 +59,14 @@ import { budgetService } from "./budgets.js";
 import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
 import { resolveAgentMcpToolLibraryServers } from "./mcp-tool-library.js";
+import {
+  buildLaneAActionClaimFallbackLine,
+  buildLaneAActionClaimRetryNote,
+  detectLaneAActionClaim,
+  isLaneAActionClaimFulfilled,
+  pickLaneAForcedToolName,
+  type LaneAActionClaimFamily,
+} from "./lane-a-action-claims.js";
 import { loadLaneAApiTools, type LaneAApiToolClient } from "./lane-a-api-tools.js";
 import type { ApiToolServiceDeps } from "./api-tools.js";
 import { getPluginToolDispatcher, type PluginToolDispatcher } from "./plugin-tool-dispatcher.js";
@@ -726,6 +736,13 @@ export interface LaneATargetAgent {
    */
   laneATemperature?: number | null;
   /**
+   * DUR-4367: "Thinking" ("on" | "off" | null). Null/absent = "model
+   * default", the same as before this setting existed. Optional so existing
+   * callers and tests are unaffected; when absent the service reads the
+   * stored value off the row.
+   */
+  laneAThinking?: string | null;
+  /**
    * DUR-4070: company-member userIds this quick agent may answer, besides
    * the company's owner (always allowed). Optional so existing callers/tests
    * are unaffected; absent reads the same as empty ("the owner only").
@@ -793,9 +810,12 @@ export function resolveLaneASettings(agent: LaneATargetAgent) {
   // Null when unset, out of range, or the model is known to refuse one;
   // clamped to 0-1 for Claude.
   const temperature = laneATemperatureForCall(provider, model, agent.laneATemperature);
+  // "none" when the operator chose "off" and the provider/model is known to
+  // accept the field; null (send nothing) otherwise.
+  const reasoningEffort = laneAThinkingForCall(provider, model, agent.laneAThinking);
   // Null unless the provider is OpenRouter and the operator picked hosts.
   const providerRouting = laneAProviderRoutingForCall(provider, agent.laneAProviderRouting);
-  return { provider, model, baseUrl, maxOutputTokens, dailyCallCap, temperature, providerRouting };
+  return { provider, model, baseUrl, maxOutputTokens, dailyCallCap, temperature, reasoningEffort, providerRouting };
 }
 
 /**
@@ -1244,6 +1264,30 @@ export const LANE_A_NO_TOOLS_NOTE =
   "Your current model cannot use tools, so in this conversation you cannot make pictures, hand work to a colleague, " +
   "look up tasks, weather or company data. If the person asks for any of that, say so plainly in one sentence and " +
   "suggest they switch your quick-answer model to one that supports tools. Never pretend you did it.";
+
+/**
+ * DUR-4371: a model that just ran a tool sometimes answers with no text at
+ * all (observed with a local qwen3-abliterated model after list-looks). The
+ * retry call drops tools entirely, so this nudge is the only instruction the
+ * model gets for that round.
+ */
+export const LANE_A_EMPTY_REPLY_NUDGE =
+  "Answer the person now in one or two sentences, based on the tool results.";
+
+/** Same nudge, worded for a round that made no tool call at all. */
+export const LANE_A_EMPTY_REPLY_NUDGE_NO_TOOLS = "Answer the person's last message now in one or two sentences.";
+
+/**
+ * DUR-4371: the plain reply sent when the model is still empty after the
+ * retry (see LANE_A_EMPTY_REPLY_NUDGE). Never an empty string: the person
+ * must hear that something happened, not silence.
+ */
+export function laneAEmptyReplyFallback(actions: LaneAAction[]): string {
+  if (actions.length === 0) {
+    return "I didn't get an answer back to send you. Try asking again, or say it a different way.";
+  }
+  return "I did that, but the model gave no answer to send you. Try asking again, or say exactly what you want.";
+}
 
 /**
  * Told instead of LANE_A_NO_TOOLS_NOTE when the operator limited the quick
@@ -1783,6 +1827,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         laneABaseUrl: agents.laneABaseUrl,
         laneAModel: agents.laneAModel,
         laneATemperature: agents.laneATemperature,
+        laneAThinking: agents.laneAThinking,
         laneAProviderRouting: agents.laneAProviderRouting,
         // DUR-4000: which person does this job, so the prompt can say so,
         // and the job's limits box (its standing rules ride in the prompt).
@@ -1935,11 +1980,15 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     ctx: LaneAToolContext;
     /** DUR-3997: the provider client for this one call, key already inside it. */
     client: LaneAProviderClient;
+    /** DUR-4371: which provider the client above talks to, so the empty-reply retry can check reasoning_effort support on its own, independent of the agent's normal `reasoningEffort` setting. */
+    provider: LaneAProvider;
     /** DUR-3977: per-agent model/output ceiling, defaults already applied by the caller. */
     model?: string;
     maxOutputTokens?: number;
     /** Sampling temperature, already resolved for this provider/model. Null = send none. */
     temperature?: number | null;
+    /** DUR-4367: `reasoning_effort`, already resolved for this provider/model. Null = send none. */
+    reasoningEffort?: "none" | null;
     /** OpenRouter "model hosts", already resolved for this provider. Null = OpenRouter picks. */
     providerRouting?: LaneAProviderRouting | null;
     /** DUR-3972: offer read_business_data this turn (the company has an active sales source). */
@@ -2001,6 +2050,10 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     // A host that refuses the creativity setting still gets an answer: the
     // call is repeated once without it, and the rest of the turn goes without.
     let temperatureOff = typeof params.temperature !== "number";
+    // DUR-4355: set just before the one corrective retry's completeRound()
+    // call, cleared right after -- forces that single call onto the tool
+    // matching the claim the model just made and did not back up.
+    let forcedToolName: string | undefined;
     const completeRound = async () => {
       const send = (withTools: boolean) =>
         client.complete({
@@ -2009,7 +2062,9 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           system: withTools || tools.length === 0 ? systemPrompt : `${systemPrompt}\n\n${noToolsNote}`,
           messages,
           ...(withTools ? { tools } : {}),
+          ...(withTools && forcedToolName ? { toolChoice: { name: forcedToolName } } : {}),
           ...(temperatureOff ? {} : { temperature: params.temperature }),
+          ...(params.reasoningEffort ? { reasoningEffort: params.reasoningEffort } : {}),
           ...(providerRouting ? { providerRouting } : {}),
         });
       const request = async (withTools: boolean) => {
@@ -2045,14 +2100,49 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       }
     };
 
+    // DUR-4355: set once, the first (and only) time a reply claims a
+    // tool-only action it did not back up with a successful call. Guards
+    // against retrying more than once, and carries the family through to the
+    // post-loop fallback/logging.
+    let claimRetry: { family: LaneAActionClaimFamily; matchedPhrase: string } | null = null;
+    let claimRetryOutcome: "recovered" | "failed" | null = null;
+    // DUR-4371/DUR-4355: the claim-retry round and the empty-reply retry both
+    // spend the turn's one allowed corrective model call. Once either has
+    // fired, a still-empty reply goes straight to the plain fallback instead
+    // of spending a second call.
+    let correctiveRetryUsed = false;
+
     try {
       for (let round = 0; round < LANE_A_MAX_MODEL_ROUNDS; round++) {
         response = await completeRound();
+        forcedToolName = undefined;
         inputTokens += response.usage.inputTokens;
         outputTokens += response.usage.outputTokens;
 
         const toolUseBlocks = response.toolCalls;
-        if (response.stop !== "tool_use" || toolUseBlocks.length === 0) break;
+        if (response.stop !== "tool_use" || toolUseBlocks.length === 0) {
+          // DUR-4355: the reply looks final -- before accepting it, check it
+          // is not claiming an action (picture/video/audio, memory, task,
+          // weather/price) that no tool actually performed this turn.
+          if (!claimRetry && !finalRound) {
+            const claim = detectLaneAActionClaim(response.text);
+            if (claim && !isLaneAActionClaimFulfilled(claim.family, actions)) {
+              const forced = toolsOff ? null : pickLaneAForcedToolName(claim.family, tools.map((tool) => tool.name));
+              claimRetry = claim;
+              if (forced) {
+                messages.push({ role: "assistant", content: response.text });
+                messages.push({ role: "user", content: buildLaneAActionClaimRetryNote(claim.family) });
+                forcedToolName = forced;
+                correctiveRetryUsed = true;
+                continue;
+              }
+              // No tool matching this claim was even offered this turn --
+              // nothing for a retry to call, so the fallback applies directly.
+              claimRetryOutcome = "failed";
+            }
+          }
+          break;
+        }
         // It was told it hit a limit and still asks for tools: stop here.
         if (finalRound) break;
 
@@ -2261,13 +2351,87 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         messages.push({ role: "tool", results: toolResults });
         if (refusedForCap > 0 && executedThisRound === 0) finalRound = true;
       }
+
+      // DUR-4371: a small local model sometimes stops with no text at all,
+      // most often right after a tool call. Retry once, with tools dropped
+      // so the model cannot dodge into another tool call instead of
+      // answering, before falling back to a plain non-empty reply. Skipped
+      // when the claim-retry above already spent this turn's one corrective
+      // call (DUR-4355's merge-conflict note: at most one retry total).
+      if (response !== undefined && response.text.trim().length === 0 && !correctiveRetryUsed) {
+        correctiveRetryUsed = true;
+        messages.push({
+          role: "user",
+          content: actions.length > 0 ? LANE_A_EMPTY_REPLY_NUDGE : LANE_A_EMPTY_REPLY_NUDGE_NO_TOOLS,
+        });
+        // Thinking off for this one nudge call, regardless of the agent's
+        // normal setting: an empty reply is exactly the failure mode a
+        // reasoning pass that never emits a final answer looks like.
+        const retryReasoningEffort = laneAModelAcceptsReasoningEffort(params.provider, modelId) ? "none" : null;
+        const retry = await client.complete({
+          model: modelId,
+          maxTokens: params.maxOutputTokens ?? LANE_A_MAX_OUTPUT_TOKENS,
+          system: tools.length === 0 ? systemPrompt : `${systemPrompt}\n\n${noToolsNote}`,
+          messages,
+          ...(temperatureOff ? {} : { temperature: params.temperature }),
+          ...(providerRouting ? { providerRouting } : {}),
+          ...(retryReasoningEffort ? { reasoningEffort: retryReasoningEffort } : {}),
+        });
+        inputTokens += retry.usage.inputTokens;
+        outputTokens += retry.usage.outputTokens;
+        response = retry;
+      }
     } catch (err) {
       throw providerErrorToHttp(err, "chat");
     }
 
     const finalResponse = response!;
+    // DUR-4371: a reply with no text at all (even after the one corrective
+    // retry above) never reaches the person as silence.
+    let finalText = finalResponse.text.trim().length > 0 ? finalResponse.text : laneAEmptyReplyFallback(actions);
+    // DUR-4355: the retry round (if any) already had its chance to make the
+    // claimed tool call for real -- actions reflects every call that
+    // succeeded this turn, including that retry's. If the claim still is not
+    // backed up, the person is told plainly instead of being left with a
+    // claim nothing in the turn made true.
+    if (claimRetry) {
+      if (claimRetryOutcome !== "failed") {
+        claimRetryOutcome = isLaneAActionClaimFulfilled(claimRetry.family, actions) ? "recovered" : "failed";
+      }
+      if (claimRetryOutcome === "failed") {
+        finalText = buildLaneAActionClaimFallbackLine(claimRetry.family);
+      }
+      actions.push({
+        tool: "action_claim_check",
+        summary:
+          claimRetryOutcome === "recovered"
+            ? `Said it had done something (${claimRetry.family}) before calling the tool; the automatic retry called it.`
+            : `Said it had done something (${claimRetry.family}) without calling the tool, and the retry still did not call it; the person was told plainly instead.`,
+        ok: claimRetryOutcome === "recovered",
+      });
+      try {
+        await logActivity(db, {
+          companyId: ctx.companyId,
+          actorType: ctx.requester.userId ? "user" : "agent",
+          actorId: ctx.requester.userId ?? ctx.requester.agentId ?? "system",
+          agentId: ctx.agent.id,
+          action: "lane_a.unfulfilled_action_claim",
+          entityType: "agent",
+          entityId: ctx.agent.id,
+          details: {
+            conversationId: ctx.conversationId,
+            model: modelId,
+            family: claimRetry.family,
+            matchedPhrase: claimRetry.matchedPhrase.slice(0, 200),
+            retryOutcome: claimRetryOutcome,
+          },
+        });
+      } catch {
+        // The activity row must never break the turn; the reply is already safe.
+      }
+    }
     return {
-      text: finalResponse.text,
+      text: finalText,
       inputTokens,
       outputTokens,
       stopReason: finalResponse.stopReason,
@@ -2347,6 +2511,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       laneABaseUrl: params.targetAgent.laneABaseUrl ?? agentRow?.laneABaseUrl ?? null,
       laneAModel: params.targetAgent.laneAModel ?? agentRow?.laneAModel ?? null,
       laneATemperature: params.targetAgent.laneATemperature ?? agentRow?.laneATemperature ?? null,
+      laneAThinking: params.targetAgent.laneAThinking ?? agentRow?.laneAThinking ?? null,
       laneAProviderRouting: params.targetAgent.laneAProviderRouting ?? agentRow?.laneAProviderRouting ?? null,
     });
     const chatModel = assertLaneASettingsRunnable(chatSettings);
@@ -2522,9 +2687,11 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         toolset,
         ctx,
         client,
+        provider: chatSettings.provider,
         model: chatModel,
         maxOutputTokens: chatSettings.maxOutputTokens,
         temperature: chatSettings.temperature,
+        reasoningEffort: chatSettings.reasoningEffort,
         providerRouting: chatSettings.providerRouting,
         offerBusinessData: businessDataPrompt?.available === true,
         offerCompanyFiles: companyFilesPrompt !== undefined,
@@ -2902,6 +3069,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       laneABaseUrl: params.targetAgent.laneABaseUrl ?? agentRow?.laneABaseUrl ?? null,
       laneAModel: params.targetAgent.laneAModel ?? agentRow?.laneAModel ?? null,
       laneATemperature: params.targetAgent.laneATemperature ?? agentRow?.laneATemperature ?? null,
+      laneAThinking: params.targetAgent.laneAThinking ?? agentRow?.laneAThinking ?? null,
       laneAProviderRouting: params.targetAgent.laneAProviderRouting ?? agentRow?.laneAProviderRouting ?? null,
     });
     const model = assertLaneASettingsRunnable(settings);
@@ -2960,6 +3128,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           maxOutputChars: params.maxOutputChars,
         }),
         temperature: settings.temperature,
+        reasoningEffort: settings.reasoningEffort,
         providerRouting: settings.providerRouting,
         responseFormat: params.responseFormat,
       });
@@ -3011,6 +3180,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     maxOutputTokens: number;
     /** Sampling temperature, already resolved for this provider/model. Null = send none. */
     temperature?: number | null;
+    /** DUR-4367: `reasoning_effort`, already resolved for this provider/model. Null = send none. */
+    reasoningEffort?: "none" | null;
     /** OpenRouter "model hosts", already resolved for this provider. Null = OpenRouter picks. */
     providerRouting?: LaneAProviderRouting | null;
     /** DUR-4138: see LaneACompletionRequest.responseFormat. */
@@ -3024,6 +3195,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           system: params.systemPrompt,
           messages: [{ role: "user", content: params.message }],
           ...(withTemperature ? { temperature: params.temperature } : {}),
+          ...(params.reasoningEffort ? { reasoningEffort: params.reasoningEffort } : {}),
           ...(params.providerRouting ? { providerRouting: params.providerRouting } : {}),
           ...(params.responseFormat ? { responseFormat: params.responseFormat } : {}),
         });

@@ -4,11 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import express from "express";
 import request from "supertest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
 import {
   MEDIA_STUDIO_DIRECT_AUDIO_COST_CENTS_PER_SECOND,
+  MEDIA_STUDIO_DIRECT_BILLING_CODE,
   MEDIA_STUDIO_DIRECT_PICTURE_COST_CENTS,
   MEDIA_STUDIO_DIRECT_REWRITE_BILLING_CODE,
 } from "@paperclipai/shared";
@@ -217,6 +218,76 @@ d("Media Studio Create tab direct generation (DUR-4329)", () => {
       expect(remainingEvents).toHaveLength(0);
       const remainingCreations = await db.select().from(mediaStudioDirectCreations).where(eq(mediaStudioDirectCreations.companyId, companyId));
       expect(remainingCreations).toHaveLength(0);
+    });
+
+    it("serializes the shared direct-create cap across two different companies racing it concurrently (DUR-4341)", async () => {
+      const pictureCost = MEDIA_STUDIO_DIRECT_PICTURE_COST_CENTS.fal;
+      const companyA = await seedCompany({ budgetMonthlyCents: 100_000 });
+      const companyB = await seedCompany({ budgetMonthlyCents: 100_000 });
+
+      // Other tests in this file (and other billing codes' events) may already
+      // have left rows behind -- set the cap relative to whatever is already
+      // there so this test is self-contained regardless of execution order.
+      const [baseline] = await db
+        .select({ total: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::int` })
+        .from(costEvents)
+        .where(eq(costEvents.billingCode, MEDIA_STUDIO_DIRECT_BILLING_CODE));
+      const baselineCents = Number(baseline?.total ?? 0);
+      await setMediaStudioConfig({ directCreateMonthlyCapCents: baselineCents + pictureCost });
+
+      // DUR-4341: exposed only for this test -- createPicture et al. would
+      // also fail on the unrelated per-company Fal-secret-ownership check,
+      // since the plugin config's falKeySecretRef can only ever belong to
+      // one company. reserveSpendForTest isolates the spend gate itself.
+      type TestService = {
+        reserveSpendForTest: (
+          companyId: string,
+          actor: { userId: string; isCompanyAdmin: boolean },
+          estimateCents: number,
+          confirmBudgetCapCents: number | undefined,
+          params: { provider: string; model: string; billingCode: string },
+        ) => Promise<{ costEventId: string }>;
+        releaseReservationForTest: (companyId: string, costEventId: string) => Promise<void>;
+      };
+      // Company A's instance is given an artificial delay right after it takes
+      // the shared-cap advisory lock, widening the race window deterministically
+      // instead of relying on incidental timing for the two calls to overlap.
+      // Without DUR-4341's fix, company B holds no lock that blocks on A's delay,
+      // so it reads the same pre-insert shared total and wrongly passes too.
+      const directA = mediaStudioDirectService(db, { testOnlyDelayMsAfterSharedCapLock: 300 }) as unknown as TestService;
+      const directB = mediaStudioDirectService(db) as unknown as TestService;
+      const params = { provider: "fal", model: "pending", billingCode: MEDIA_STUDIO_DIRECT_BILLING_CODE };
+
+      const companyIds = [companyA, companyB];
+      const results = await Promise.allSettled([
+        directA.reserveSpendForTest(companyA, { userId: "owner-a", isCompanyAdmin: true }, pictureCost, undefined, params),
+        (async () => {
+          // Give A a head start acquiring the shared lock first, so the fix's
+          // serialization (and the bug's absence of it) is deterministic.
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          return directB.reserveSpendForTest(companyB, { userId: "owner-b", isCompanyAdmin: true }, pictureCost, undefined, params);
+        })(),
+      ]);
+
+      const fulfilled = results.filter((r): r is PromiseFulfilledResult<{ costEventId: string }> => r.status === "fulfilled");
+      const rejected = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+      const winnerIndex = results.findIndex((r) => r.status === "fulfilled");
+
+      // With the shared cap sized for exactly one more reservation, only one
+      // of the two concurrent companies may win it; the fix (DUR-4341's
+      // second, fixed-key advisory lock) is what makes this deterministic --
+      // without it, both read the same pre-insert total and both pass.
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0]!.reason).toMatchObject({ status: 422, details: { reason: "direct_create_cap" } });
+
+      const [finalTotal] = await db
+        .select({ total: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::int` })
+        .from(costEvents)
+        .where(eq(costEvents.billingCode, MEDIA_STUDIO_DIRECT_BILLING_CODE));
+      expect(Number(finalTotal?.total ?? 0)).toBe(baselineCents + pictureCost);
+
+      await directA.releaseReservationForTest(companyIds[winnerIndex]!, fulfilled[0]!.value.costEventId);
     });
   });
 

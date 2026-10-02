@@ -132,7 +132,7 @@ function renderComposite(params: {
  * contrast / saturation, add text, and run AI edits (Sogni / Fal). Saving
  * always writes a brand-new file -- the picture you opened is never changed.
  */
-export function MediaStudioEditTab({ context }: { context: PluginHostContext }) {
+export function MediaStudioEditTab({ context, initialFileId }: { context: PluginHostContext; initialFileId?: string | null }) {
   const editSogni = usePluginAction(ACTION_EDIT_SOGNI);
   const editFal = usePluginAction(ACTION_EDIT_FAL);
   const getCapabilities = usePluginAction(ACTION_EDIT_CAPABILITIES);
@@ -178,6 +178,14 @@ export function MediaStudioEditTab({ context }: { context: PluginHostContext }) 
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Opened from Create tab's "Edit" result action (DUR-4330): skip the picker
+  // and load that exact file directly.
+  useEffect(() => {
+    if (!initialFileId) return;
+    loadImage(`/api/attachments/${initialFileId}/content`, "From the Create tab");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialFileId]);
 
   useEffect(() => {
     if (!pickerOpen || !context.companyId || pickerItems !== null) return;
@@ -245,6 +253,8 @@ export function MediaStudioEditTab({ context }: { context: PluginHostContext }) 
   useEffect(() => {
     if (!img || !canvasRef.current) return;
     const canvas = canvasRef.current;
+    // No 2D drawing support (e.g. jsdom in tests): nothing to draw.
+    if (!canvas.getContext("2d")) return;
     canvas.width = previewCanvasSize.width;
     canvas.height = previewCanvasSize.height;
     const composed = renderComposite({
