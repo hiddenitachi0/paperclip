@@ -416,6 +416,14 @@ export interface PluginPerformActionActorContext {
    * is in scope. Decided by the host from the session, never from params.
    */
   canManageCompany?: boolean;
+  /**
+   * True when the host checked that this board user is an instance admin
+   * (or the local single-user board) -- the same rule as `assertInstanceAdmin`
+   * (routes/authz.ts). Always false for agents. Narrower than
+   * `canManageCompany`, which is also true for a company owner/admin who is
+   * not an instance admin.
+   */
+  isInstanceAdmin?: boolean;
   /** Authenticated heartbeat/run id when available. */
   runId: string | null;
   /** Company id authorized by the host bridge for this action, when applicable. */

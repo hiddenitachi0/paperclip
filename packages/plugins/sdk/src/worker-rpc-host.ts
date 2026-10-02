@@ -1680,6 +1680,7 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
       companyId: stringOrNull(rawActor?.companyId),
       // Only a literal `true` from the host counts; anything else is "no".
       canManageCompany: rawActor?.canManageCompany === true,
+      isInstanceAdmin: rawActor?.isInstanceAdmin === true,
     });
     return Object.freeze({
       actor,

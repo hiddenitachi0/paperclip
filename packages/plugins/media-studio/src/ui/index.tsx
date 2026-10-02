@@ -2171,8 +2171,10 @@ export function MediaStudioPage({ context }: PluginPageProps) {
   const nav = useHostNavigation();
   const [tab, setTab] = useState<MediaStudioTabKey>(initialTabFromLocation);
   const [editFileId, setEditFileId] = useState<string | null>(initialEditFileIdFromLocation);
-  // Settings is for owners/admins only; everyone else never sees the tab, and a
-  // link straight to it shows the Create tab instead.
+  // Settings holds the instance-wide plugin config (API keys), saved through
+  // the instance-admin-gated generic route, so it's instance-admin only --
+  // not company owners/admins, who manage looks but not this. Everyone else
+  // never sees the tab, and a link straight to it shows the Create tab instead.
   const checkSettingsAccess = usePluginAction(ACTION_SETTINGS_ACCESS);
   const [canManageSettings, setCanManageSettings] = useState<boolean | null>(null);
   useEffect(() => {

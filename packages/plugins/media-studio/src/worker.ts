@@ -1542,9 +1542,13 @@ const plugin = definePlugin({
       return runGeneration(ctx, input);
     });
 
-    // Tells the page whether to show the Settings tab: owners/admins only.
+    // Tells the page whether to show the Settings tab. Saving goes through
+    // the generic plugin-config route (POST /plugins/:pluginId/config),
+    // which is instance-admin gated -- so the tab must match that, not the
+    // looser canManageCompany (company owner/admin) used elsewhere on this
+    // page, or a company owner/admin sees the tab and gets a save error.
     ctx.actions.register(ACTION_SETTINGS_ACCESS, async (_params, context) => ({
-      canManage: context.actor.type === "user" && context.actor.canManageCompany === true,
+      canManage: context.actor.type === "user" && context.actor.isInstanceAdmin === true,
     }));
 
     // Looks page (Company settings → Media Studio looks). Anyone in the
