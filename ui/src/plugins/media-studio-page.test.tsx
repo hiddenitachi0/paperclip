@@ -109,7 +109,8 @@ describe("Media Studio main-menu link and page (DUR-4060)", () => {
     expect(actions["looks.list"]).toHaveBeenCalledTimes(1);
   });
 
-  const tabLabels = () => [...container.querySelectorAll('[role="tab"]')].map((el) => el.textContent);
+  const tabLabels = () =>
+    [...container.querySelectorAll('[role="tablist"][aria-label="Media Studio"] [role="tab"]')].map((el) => el.textContent);
 
   it("shows the Settings tab to an owner/admin, after the four creative tabs", async () => {
     actions["settings.access"] = vi.fn(async () => ({ canManage: true }));
@@ -134,7 +135,7 @@ describe("Media Studio main-menu link and page (DUR-4060)", () => {
     root.render(<MediaStudioPage context={{ companyId: COMPANY } as never} />);
     await flush();
     expect(container.querySelector('[data-testid="config-form"]')).toBeNull();
-    expect(container.textContent).toContain("Media Studio tab");
+    expect(container.textContent).toContain("Make picture");
   });
 
   it("deep-links to the settings form for an admin from ?tab=settings", async () => {
