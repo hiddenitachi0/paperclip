@@ -8,6 +8,7 @@ import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
 import {
+  MEDIA_STUDIO_DIRECT_AUDIO_COST_CENTS_PER_SECOND,
   MEDIA_STUDIO_DIRECT_PICTURE_COST_CENTS,
   MEDIA_STUDIO_DIRECT_REWRITE_BILLING_CODE,
 } from "@paperclipai/shared";
@@ -48,6 +49,11 @@ const mockedExecute = vi.mocked(executePinnedHttpRequest);
 function fakeFalResponse(body: Record<string, unknown>) {
   const json = Buffer.from(JSON.stringify(body));
   return { status: 200, statusText: "OK", headers: { "content-type": "application/json" }, body: json.toString("utf8"), bodyBytes: json };
+}
+
+/** Fal's async queue API (music/speech, video) returns a `url` rather than a data URL, so mediaResultBytes makes a second outbound fetch for the raw bytes -- this fakes that fetch's response. */
+function fakeBinaryResponse(contentType: string, bytes: Buffer) {
+  return { status: 200, statusText: "OK", headers: { "content-type": contentType }, body: bytes.toString("binary"), bodyBytes: bytes };
 }
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -254,6 +260,45 @@ d("Media Studio Create tab direct generation (DUR-4329)", () => {
 
       const [companyRow] = await db.select().from(companies).where(eq(companies.id, companyId));
       expect(companyRow.spentMonthlyCents).toBe(MEDIA_STUDIO_DIRECT_PICTURE_COST_CENTS.fal);
+    });
+  });
+
+  describe("createAudio success path", () => {
+    it("generates via Fal's async queue (submit, poll, fetch bytes), saves the file, and records a cost event", async () => {
+      const companyId = await seedCompany({ budgetMonthlyCents: 100_000 });
+      const secretId = await seedFalSecret(companyId);
+      await setMediaStudioConfig({ falKeySecretRef: secretId });
+
+      mockedExecute
+        .mockResolvedValueOnce(fakeFalResponse({ request_id: "req-1" }))
+        .mockResolvedValueOnce(fakeFalResponse({ status: "COMPLETED" }))
+        .mockResolvedValueOnce(fakeFalResponse({ audio: { url: "https://fal.media/files/audio.mp3", content_type: "audio/mpeg" } }))
+        .mockResolvedValueOnce(fakeBinaryResponse("audio/mpeg", Buffer.from("fake-audio-bytes")));
+
+      const result = await mediaStudioDirectService(db).createAudio(
+        companyId,
+        { userId: "owner-user" },
+        { prompt: "a short upbeat jingle", provider: "fal", mode: "music", durationSeconds: 3 },
+      );
+
+      const expectedCostCents = Math.ceil(3 * MEDIA_STUDIO_DIRECT_AUDIO_COST_CENTS_PER_SECOND.fal);
+      expect(result.costCents).toBe(expectedCostCents);
+      expect(result.fileId).toBeTruthy();
+      expect(result.contentType).toBe("audio/mpeg");
+      expect(result.contentPath).toBe(`/api/attachments/${result.fileId}/content`);
+      // Submit + status poll + result fetch + the audio-bytes fetch itself.
+      expect(mockedExecute).toHaveBeenCalledTimes(4);
+
+      const [creationRow] = await db
+        .select()
+        .from(mediaStudioDirectCreations)
+        .where(and(eq(mediaStudioDirectCreations.companyId, companyId), eq(mediaStudioDirectCreations.fileId, result.fileId)));
+      expect(creationRow).toBeTruthy();
+      expect(creationRow!.kind).toBe("audio");
+      expect(creationRow!.costCents).toBe(expectedCostCents);
+
+      const [companyRow] = await db.select().from(companies).where(eq(companies.id, companyId));
+      expect(companyRow.spentMonthlyCents).toBe(expectedCostCents);
     });
   });
 
