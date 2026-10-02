@@ -75,6 +75,8 @@ import {
   isLaneABuiltinTool,
   READ_BUSINESS_DATA_TOOL,
   READ_COMPANY_FILE_TOOL,
+  SEARCH_DOCUMENTS_TOOL,
+  GET_DOCUMENT_TOOL,
   FORGET_TOOL,
   REMEMBER_TOOL,
   READ_WEB_PAGE_TOOL,
@@ -92,6 +94,7 @@ import {
   type BusinessDataServiceDeps,
 } from "./business-data.js";
 import { companyFileService, type CompanyFileServerSummary } from "./company-files.js";
+import { documentsDataService, type DocumentsServiceDeps } from "./documents-data.js";
 import { agentMemoryService } from "./agent-memories.js";
 import { buildMemoryPromptSection, type LaneAMemoryPromptNote } from "./lane-a-memory.js";
 import { createLaneAWebSession } from "./lane-a-web-tools.js";
@@ -268,6 +271,8 @@ export interface LaneASystemPromptInput {
   businessData?: { available: boolean; companyName: string };
   /** DUR-3997: the company's active file servers this turn; absent or empty leaves the prompt as it was. */
   companyFiles?: { servers: CompanyFileServerSummary[] };
+  /** DUR-4303: whether this company's documents (paperless-ngx) can be read this turn; absent leaves the prompt as it was. */
+  documents?: { companyName: string };
   /**
    * DUR-4000: the PERSON attached to this job (agents.persona_id), if any.
    * Absent leaves the prompt exactly as before. Present, the opening sentence
@@ -376,6 +381,16 @@ export function buildCompanyFilesPromptParagraph(servers: CompanyFileServerSumma
   ].join("\n");
 }
 
+/** DUR-4303: the rules a quick agent reads this company's paperless-ngx documents under. */
+export function buildDocumentsPromptParagraph(input: { companyName: string }): string {
+  return [
+    `Documents (search_documents, get_document):`,
+    `- search_documents(query, tags?) finds ${input.companyName}'s own scanned documents (invoices, letters, contracts, forms). It returns up to 10 matches with a short snippet around the match; quote only what it returned, never invent or guess what a document says.`,
+    `- get_document(id) reads one document's full details and gives a short-lived download link. Pass the link on exactly as given; it expires after a few minutes.`,
+    `- If the tool refuses, pass the refusal on word for word.`,
+  ].join("\n");
+}
+
 /** DUR-4000: the persona paragraph for a quick agent, or null when there is nothing to say. */
 function buildPersonaParagraph(persona: NonNullable<LaneASystemPromptInput["persona"]>): string | null {
   const traits = persona.traits?.trim();
@@ -458,6 +473,9 @@ export function buildSystemPrompt(input: LaneASystemPromptInput): string {
         `You can also list folders and read files on this company's connected file server${input.companyFiles.servers.length === 1 ? "" : "s"} (read_company_file).`,
       );
     }
+    if (input.documents) {
+      capabilities.push(`You can also search ${input.documents.companyName}'s scanned documents (search_documents, get_document).`);
+    }
     if (input.memory?.toolsOffered) {
       capabilities.push(
         `You can also save a note when the person asks you to remember something (remember), and remove one when they ask you to forget it (forget).`,
@@ -497,6 +515,9 @@ export function buildSystemPrompt(input: LaneASystemPromptInput): string {
   }
   if (input.companyFiles && input.companyFiles.servers.length > 0) {
     parts.push(buildCompanyFilesPromptParagraph(input.companyFiles.servers));
+  }
+  if (input.documents) {
+    parts.push(buildDocumentsPromptParagraph(input.documents));
   }
   if (input.webSearch && input.hasBuiltinTools) {
     parts.push(buildWebPromptParagraph(input.webSearch));
@@ -1182,6 +1203,8 @@ export interface LaneAServiceOptions {
   apiTools?: ApiToolServiceDeps;
   /** Test seam: web search's Brave and page fetches, DNS answer and clock. */
   webSearch?: WebSearchServiceDeps;
+  /** DUR-4303 test seam: the documents (paperless-ngx) service's connection deps and clock. */
+  documents?: DocumentsServiceDeps;
   /**
    * Test seam: the Claude client. When set, a Claude-provider call needs no
    * key at all (none is read or required). Production leaves it unset.
@@ -1422,11 +1445,12 @@ function providerErrorDetail(message: string): string {
 
 export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
   const toolDeps: LaneAToolDeps = {
-    ...createDbLaneAToolDeps(db, { businessData: options.businessData, webSearch: options.webSearch }),
+    ...createDbLaneAToolDeps(db, { businessData: options.businessData, webSearch: options.webSearch, documents: options.documents }),
     ...options.toolDeps,
   };
   const businessData = businessDataService(db, options.businessData);
   const companyFiles = companyFileService(db, options.businessData);
+  const documents = documentsDataService(db, options.documents);
   const executeBuiltinTool = createLaneABuiltinToolExecutor(toolDeps);
   const builtinToolDefinitions = buildLaneABuiltinToolDefinitions();
   const budgets = budgetService(db);
@@ -1922,6 +1946,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     offerBusinessData?: boolean;
     /** DUR-3997: offer read_company_file this turn (the company has an active file-server connection). */
     offerCompanyFiles?: boolean;
+    /** DUR-4303: offer search_documents/get_document this turn (the company has documents switched on and connected). */
+    offerDocuments?: boolean;
     /** Memory notebook: offer remember/forget this turn (a person signed in to the board is asking). */
     offerMemory?: boolean;
     /** Offer web_search this turn ("Can search the web" is on and the company has a Brave key). */
@@ -1943,6 +1969,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       (tool) =>
         (tool.name !== READ_BUSINESS_DATA_TOOL || params.offerBusinessData === true) &&
         (tool.name !== READ_COMPANY_FILE_TOOL || params.offerCompanyFiles === true) &&
+        ((tool.name !== SEARCH_DOCUMENTS_TOOL && tool.name !== GET_DOCUMENT_TOOL) || params.offerDocuments === true) &&
         ((tool.name !== REMEMBER_TOOL && tool.name !== FORGET_TOOL) || params.offerMemory === true) &&
         (tool.name !== WEB_SEARCH_TOOL || params.offerWebSearch === true) &&
         (tool.name !== READ_WEB_PAGE_TOOL || params.offerReadWebPage === true) &&
@@ -2408,6 +2435,20 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       companyFilesPrompt = undefined;
     }
 
+    // DUR-4303: offer the documents tools only when this company has
+    // documents switched on (instance switch + per-company flag) AND an
+    // active paperless-ngx connection. Fails open to "not offered", like the
+    // sales and file tools. Never offered to a "limited"-trust agent.
+    let documentsPrompt: { companyName: string } | undefined;
+    try {
+      if (!trustLimited && (await documents.isAvailable(params.companyId))) {
+        documentsPrompt = { companyName: await documents.companyName(params.companyId) };
+      }
+    } catch (err) {
+      logger.warn({ err, companyId: params.companyId }, "lane A: documents availability check failed");
+      documentsPrompt = undefined;
+    }
+
     // Memory notebook: the notes this quick agent (its persona, when it has
     // one) was asked to remember. remember/forget are offered only to a person
     // signed in to the board; the tools check the same rule again. Fails open
@@ -2468,6 +2509,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         standingRules,
         businessData: businessDataPrompt,
         companyFiles: companyFilesPrompt,
+        documents: documentsPrompt,
         memory: memoryPrompt,
         webSearch: webPrompt,
         conversationSearch: conversationSearchOn,
@@ -2486,6 +2528,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         providerRouting: chatSettings.providerRouting,
         offerBusinessData: businessDataPrompt?.available === true,
         offerCompanyFiles: companyFilesPrompt !== undefined,
+        offerDocuments: documentsPrompt !== undefined,
         offerMemory: memoryPrompt?.toolsOffered === true,
         offerWebSearch: webPrompt.search,
         offerReadWebPage: webPrompt.readPages,
