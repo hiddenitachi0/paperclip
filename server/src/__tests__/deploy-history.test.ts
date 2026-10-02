@@ -329,4 +329,66 @@ describe("GET /companies/:companyId/projects/:projectId/deploy-history", () => {
     expect(res.status).toBeGreaterThanOrEqual(400);
     expect(mockReadDeployRunnerStatus).not.toHaveBeenCalled();
   });
+
+  it("filters entries by status=fail via query param while leaving current/previous/releases untouched", async () => {
+    mockReadDeployRunnerStatus.mockReturnValue([
+      successLine("a1", "aaaaaaaaaaaa", "2026-09-01T10:00:00Z"),
+      failLine("a2", "2026-09-02T10:00:00Z", "Deploy failed — health check never returned 200 after deploying bbbbbbbbbbbb.", undefined, "bbbbbbbbbbbb"),
+      successLine("a3", "cccccccccccc", "2026-09-03T10:00:00Z"),
+    ]);
+    const app = await createApp(fakeDbWithApprovalIds(["a1", "a2", "a3"]));
+    const res = await request(app).get(`/api/companies/${COMPANY_ID}/projects/${PROJECT_ID}/deploy-history?status=fail`);
+    expect(res.status).toBe(200);
+    expect(res.body.entries).toEqual([
+      { commit: "bbbbbbbbbbbb", approvalId: "a2", deployedAt: "2026-09-02T10:00:00Z", status: "fail" },
+    ]);
+    expect(res.body.pagination).toEqual({ limit: 10, offset: 0, total: 1, hasMore: false });
+    // The fail-only filter must never leak into the backward-compatible fields.
+    expect(res.body.current).toEqual({ commit: "cccccccccccc", approvalId: "a3", deployedAt: "2026-09-03T10:00:00Z", status: "ok" });
+    expect(res.body.releases).toHaveLength(2);
+  });
+
+  it("filters entries by from/to date range via query params", async () => {
+    mockReadDeployRunnerStatus.mockReturnValue([
+      successLine("a1", "aaaaaaaaaaaa", "2026-09-01T10:00:00Z"),
+      successLine("a2", "bbbbbbbbbbbb", "2026-09-02T10:00:00Z"),
+      successLine("a3", "cccccccccccc", "2026-09-03T10:00:00Z"),
+    ]);
+    const app = await createApp(fakeDbWithApprovalIds(["a1", "a2", "a3"]));
+    const res = await request(app).get(
+      `/api/companies/${COMPANY_ID}/projects/${PROJECT_ID}/deploy-history?from=2026-09-02&to=2026-09-02`,
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.entries.map((e: { approvalId: string }) => e.approvalId)).toEqual(["a2"]);
+    expect(res.body.pagination).toEqual({ limit: 10, offset: 0, total: 1, hasMore: false });
+  });
+
+  it("pages entries via limit/offset query params", async () => {
+    mockReadDeployRunnerStatus.mockReturnValue([
+      successLine("a1", "aaaaaaaaaaaa", "2026-09-01T10:00:00Z"),
+      successLine("a2", "bbbbbbbbbbbb", "2026-09-02T10:00:00Z"),
+      successLine("a3", "cccccccccccc", "2026-09-03T10:00:00Z"),
+    ]);
+    const app = await createApp(fakeDbWithApprovalIds(["a1", "a2", "a3"]));
+    const res = await request(app).get(`/api/companies/${COMPANY_ID}/projects/${PROJECT_ID}/deploy-history?limit=1&offset=1`);
+    expect(res.status).toBe(200);
+    expect(res.body.entries).toEqual([
+      { commit: "bbbbbbbbbbbb", approvalId: "a2", deployedAt: "2026-09-02T10:00:00Z", status: "pass" },
+    ]);
+    expect(res.body.pagination).toEqual({ limit: 1, offset: 1, total: 3, hasMore: true });
+  });
+
+  it("400s on an invalid status value without reading the status log", async () => {
+    const app = await createApp(fakeDbWithApprovalIds([]));
+    const res = await request(app).get(`/api/companies/${COMPANY_ID}/projects/${PROJECT_ID}/deploy-history?status=bogus`);
+    expect(res.status).toBe(400);
+    expect(mockReadDeployRunnerStatus).not.toHaveBeenCalled();
+  });
+
+  it("400s on an unparseable from/to date without reading the status log", async () => {
+    const app = await createApp(fakeDbWithApprovalIds([]));
+    const res = await request(app).get(`/api/companies/${COMPANY_ID}/projects/${PROJECT_ID}/deploy-history?from=not-a-date`);
+    expect(res.status).toBe(400);
+    expect(mockReadDeployRunnerStatus).not.toHaveBeenCalled();
+  });
 });
