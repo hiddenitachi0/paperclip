@@ -52,6 +52,8 @@ import { FalVideoProvider } from "./video-provider-clients.js";
 const MEDIA_STUDIO_PLUGIN_KEY = "paperclip.media-studio";
 /** Config key read off the same instance-wide Media Studio plugin config as falKeySecretRef/sogniKeySecretRef (registry.getConfig) -- a ceiling on this new spend vector specifically, on top of (never instead of) each company's own budgetMonthlyCents. Unset or <= 0 means no extra cap. */
 const DIRECT_CREATE_CAP_CONFIG_KEY = "directCreateMonthlyCapCents";
+/** Fixed advisory-lock key (DUR-4341) serializing the shared direct-create cap's read+insert across every company, on top of the per-company lock keyed by companyId. */
+const SHARED_CAP_LOCK_KEY = "media_studio_direct_shared_cap";
 
 const VIDEO_POLL_TIMEOUT_MS = 150_000;
 const AUDIO_POLL_TIMEOUT_MS = 120_000;
@@ -157,7 +159,10 @@ async function pollUntilDone(provider: PollableProvider, handle: MediaStudioDire
   return outcome.result;
 }
 
-export function mediaStudioDirectService(db: Db, deps: { now?: () => Date } = {}) {
+export function mediaStudioDirectService(
+  db: Db,
+  deps: { now?: () => Date; /** Test-only (DUR-4341): widens the race window after taking the shared-cap advisory lock, to deterministically exercise concurrent reservations instead of relying on incidental timing. */ testOnlyDelayMsAfterSharedCapLock?: number } = {},
+) {
   const registry = pluginRegistryService(db);
   const secrets = secretService(db);
   const costs = costService(db);
@@ -219,6 +224,14 @@ export function mediaStudioDirectService(db: Db, deps: { now?: () => Date } = {}
    * without this check, any operator-role board member could pass an
    * arbitrarily large confirmBudgetCapCents and permanently neutralize the
    * shared-account cap for every other company too, not just their own.
+   *
+   * DUR-4341: the per-company advisory lock above only serializes against
+   * other reservations from the *same* company. The shared cap's read+insert
+   * also needs a second, fixed-key advisory lock (shared across every
+   * company) held for the same critical section, or two different companies
+   * calling this concurrently take different locks, both read the same
+   * pre-insert shared total, and both pass -- overrunning the shared cap by
+   * up to N x the per-call estimate when N companies race it.
    */
   async function reserveSpend(
     companyId: string,
@@ -250,11 +263,22 @@ export function mediaStudioDirectService(db: Db, deps: { now?: () => Date } = {}
       }
 
       if (capCents !== null) {
+        // DUR-4341: a second, fixed-key lock (distinct from the per-company
+        // lock above) so two different companies' shared-cap read+insert
+        // never interleave -- without it, each company only serializes
+        // against itself and both can read the same pre-insert shared total.
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${SHARED_CAP_LOCK_KEY}))`);
         const [spendRow] = await tx
           .select({ total: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::int` })
           .from(costEvents)
           .where(and(eq(costEvents.billingCode, MEDIA_STUDIO_DIRECT_BILLING_CODE), gte(costEvents.occurredAt, start), lt(costEvents.occurredAt, end)));
         const spentCents = Number(spendRow?.total ?? 0);
+        if (deps.testOnlyDelayMsAfterSharedCapLock) {
+          // DUR-4341 test-only: widens the window between reading the shared
+          // total and inserting against it, so a concurrent caller's read is
+          // forced to overlap deterministically instead of by timing luck.
+          await new Promise((resolve) => setTimeout(resolve, deps.testOnlyDelayMsAfterSharedCapLock));
+        }
         if (spentCents + estimateCents > capCents) {
           throw unprocessable(
             `This would push Media Studio's direct-creation spend this month to ${spentCents + estimateCents} cents, over the ${capCents}-cent cap. Pass a higher confirmBudgetCapCents to proceed anyway, or ask an admin to raise the cap.`,
@@ -625,5 +649,15 @@ export function mediaStudioDirectService(db: Db, deps: { now?: () => Date } = {}
     createAudio,
     rewritePrompt,
     history,
+    /**
+     * Test-only (DUR-4341): exercises the spend-reservation gate directly,
+     * the same way secrets.ts exposes resolveSecretValueForTest. Lets tests
+     * race the shared-cap advisory lock across companies without going
+     * through createPicture/createVideo/createAudio's unrelated per-company
+     * Fal-secret-ownership check, which would otherwise always fail for
+     * every company but the one that owns the single instance-wide secret.
+     */
+    reserveSpendForTest: reserveSpend,
+    releaseReservationForTest: releaseReservation,
   };
 }

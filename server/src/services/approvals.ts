@@ -1,7 +1,12 @@
 import { and, asc, desc, eq, inArray, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentInstructionsRevisions, agents, approvalComments, approvals, personaPosts } from "@paperclipai/db";
-import { hireMonthlySpendingLimitCentsFromPayload, normalizeLaneAProviderRouting, parseAgentLimits } from "@paperclipai/shared";
+import {
+  hireMonthlySpendingLimitCentsFromPayload,
+  LANE_A_THINKING_MODES,
+  normalizeLaneAProviderRouting,
+  parseAgentLimits,
+} from "@paperclipai/shared";
 import {
   instructionsChangeRequestPayloadSchema,
   modelBoostRequestPayloadSchema,
@@ -485,6 +490,9 @@ export function approvalService(db: Db) {
             laneABaseUrl: typeof payload.laneABaseUrl === "string" ? payload.laneABaseUrl : null,
             laneATemperature:
               typeof payload.laneATemperature === "number" ? payload.laneATemperature : null,
+            laneAThinking: LANE_A_THINKING_MODES.includes(payload.laneAThinking as "on" | "off")
+              ? (payload.laneAThinking as "on" | "off")
+              : null,
             // DUR-4070: the trust-level ceiling and assigned-people list the
             // card carries, read back for the same reason. An unrecognized
             // trust level reads as the column default ("full") via

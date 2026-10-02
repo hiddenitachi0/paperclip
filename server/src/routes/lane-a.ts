@@ -106,6 +106,8 @@ export function laneARoutes(db: Db, options: { laneA?: LaneAServiceOptions } = {
         laneABaseUrl: targetAgent.laneABaseUrl ?? null,
         // "Creativity" (sampling temperature); null = the model host's default.
         laneATemperature: targetAgent.laneATemperature ?? null,
+        // "Thinking" (on / off / model default); null = model default.
+        laneAThinking: (targetAgent.laneAThinking as "on" | "off" | null) ?? null,
         // DUR-4070: who besides the company owner may chat with this agent.
         laneAAssignedUserIds: (targetAgent.laneAAssignedUserIds as string[] | null) ?? [],
         // OpenRouter "model hosts"; null = OpenRouter picks.
@@ -176,6 +178,8 @@ export function laneARoutes(db: Db, options: { laneA?: LaneAServiceOptions } = {
         laneABaseUrl: targetAgent.laneABaseUrl ?? null,
         // "Creativity" (sampling temperature); null = the model host's default.
         laneATemperature: targetAgent.laneATemperature ?? null,
+        // "Thinking" (on / off / model default); null = model default.
+        laneAThinking: (targetAgent.laneAThinking as "on" | "off" | null) ?? null,
         // OpenRouter "model hosts"; null = OpenRouter picks.
         laneAProviderRouting: targetAgent.laneAProviderRouting ?? null,
       },
