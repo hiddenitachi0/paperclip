@@ -1471,6 +1471,13 @@
       "when": 1790952502913,
       "tag": "0210_storyboard_approval_gate",
       "breakpoints": true
+    },
+    {
+      "idx": 211,
+      "version": "7",
+      "when": 1790952512913,
+      "tag": "0211_video_storyline_director_conversation",
+      "breakpoints": true
     }
   ]
 }

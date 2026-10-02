@@ -100,6 +100,14 @@ export interface VideoShotSummary {
   previewContentType: string | null;
   previewByteSize: number | null;
   previewGeneratedAt: string | null;
+  // DUR-4327: AI director proposal + restorable history (see video-storyline-director-proposals.ts).
+  proposedPrompt: string | null;
+  proposedCameraNotes: string | null;
+  proposedDurationSeconds: number | null;
+  proposedTransitionIn: string | null;
+  proposalStatus: string | null;
+  proposalConversationId: string | null;
+  promptHistory: Array<{ prompt: string; cameraNotes: string | null; durationSeconds: number; transitionIn: string | null; replacedAt: string }>;
   storyboardStatus: string;
   stillObjectKey: string | null;
   stillContentType: string | null;
@@ -176,6 +184,13 @@ function toShotSummary(row: ShotRow): VideoShotSummary {
     previewContentType: row.previewContentType,
     previewByteSize: row.previewByteSize,
     previewGeneratedAt: iso(row.previewGeneratedAt),
+    proposedPrompt: row.proposedPrompt,
+    proposedCameraNotes: row.proposedCameraNotes,
+    proposedDurationSeconds: row.proposedDurationSeconds,
+    proposedTransitionIn: row.proposedTransitionIn,
+    proposalStatus: row.proposalStatus,
+    proposalConversationId: row.proposalConversationId,
+    promptHistory: row.promptHistory,
     storyboardStatus: row.storyboardStatus,
     stillObjectKey: row.stillObjectKey,
     stillContentType: row.stillContentType,
@@ -190,7 +205,7 @@ function toShotSummary(row: ShotRow): VideoShotSummary {
 /** A storyline being rendered/stitched owns its own shot tree via the render tick; hand edits mid-flight would race it. */
 const EDITABLE_STORYLINE_STATUSES = new Set(["draft", "estimated", "paused", "failed"]);
 
-function assertStorylineEditable(row: StorylineRow) {
+export function assertStorylineEditable(row: StorylineRow) {
   if (!EDITABLE_STORYLINE_STATUSES.has(row.status)) {
     throw conflict(
       `This storyline is ${row.status.replace(/_/g, " ")} and cannot be edited right now. Pause or wait for it to finish first.`,

@@ -186,6 +186,37 @@ export const videoShots = pgTable(
     previewByteSize: integer("preview_byte_size"),
     previewSha256: text("preview_sha256"),
     previewGeneratedAt: timestamp("preview_generated_at", { withTimezone: true }),
+    // DUR-4327: AI director (whole-storyline review/dialogue) proposal for
+    // this shot, staged separately from the live prompt/cameraNotes/
+    // durationSeconds/transitionIn fields above -- accept copies these into
+    // the live fields (pushing the previous live value onto promptHistory
+    // first); edit does the same with the person's adjusted text; reject
+    // just clears these four columns, leaving the live shot untouched. Null
+    // proposalStatus (not just an empty proposedPrompt) means "no director
+    // proposal is pending for this shot".
+    proposedPrompt: text("proposed_prompt"),
+    proposedCameraNotes: text("proposed_camera_notes"),
+    proposedDurationSeconds: integer("proposed_duration_seconds"),
+    proposedTransitionIn: text("proposed_transition_in"),
+    proposalStatus: text("proposal_status"),
+    proposalConversationId: uuid("proposal_conversation_id"),
+    // Append-only history of this shot's own prompt/cameraNotes/
+    // durationSeconds/transitionIn immediately before each director proposal
+    // was accepted/edited onto it, oldest first -- so a person can always
+    // restore-prompt their own original wording even after accepting a
+    // rewrite. Never written to on reject (the live shot never changed).
+    promptHistory: jsonb("prompt_history")
+      .$type<
+        Array<{
+          prompt: string;
+          cameraNotes: string | null;
+          durationSeconds: number;
+          transitionIn: string | null;
+          replacedAt: string;
+        }>
+      >()
+      .notNull()
+      .default([]),
     // DUR-4317/DUR-4320: the storyboard-of-stills approval gate. A shot only
     // ever reaches `beginShotRender` (the real, paid video-provider call)
     // once this is 'approved' -- see video-storyline-render.ts's doc comment
@@ -220,6 +251,7 @@ export const videoShots = pgTable(
     storylineOrderUq: uniqueIndex("video_shots_storyline_order_uq").on(table.storylineId, table.orderIndex),
     storylineStatusIdx: index("video_shots_storyline_status_idx").on(table.storylineId, table.status),
     sceneIdx: index("video_shots_scene_idx").on(table.sceneId),
+    proposalStatusIdx: index("video_shots_proposal_status_idx").on(table.proposalConversationId, table.proposalStatus),
     orderCheck: check("video_shots_order_index_check", sql`${table.orderIndex} >= 0`),
     durationCheck: check("video_shots_duration_seconds_check", sql`${table.durationSeconds} > 0 AND ${table.durationSeconds} <= 60`),
     attemptCheck: check("video_shots_attempt_check", sql`${table.attempt} >= 0`),
@@ -228,6 +260,18 @@ export const videoShots = pgTable(
       sql`${table.status} IN ('draft', 'queued', 'rendering', 'done', 'failed')`,
     ),
     transitionInCheck: check("video_shots_transition_in_check", sql`${table.transitionIn} IS NULL OR ${table.transitionIn} IN ('cut', 'fade', 'dissolve')`),
+    proposedTransitionInCheck: check(
+      "video_shots_proposed_transition_in_check",
+      sql`${table.proposedTransitionIn} IS NULL OR ${table.proposedTransitionIn} IN ('cut', 'fade', 'dissolve')`,
+    ),
+    proposedDurationCheck: check(
+      "video_shots_proposed_duration_seconds_check",
+      sql`${table.proposedDurationSeconds} IS NULL OR (${table.proposedDurationSeconds} > 0 AND ${table.proposedDurationSeconds} <= 60)`,
+    ),
+    proposalStatusCheck: check(
+      "video_shots_proposal_status_check",
+      sql`${table.proposalStatus} IS NULL OR ${table.proposalStatus} IN ('pending', 'accepted', 'edited', 'rejected')`,
+    ),
     storyboardStatusCheck: check(
       "video_shots_storyboard_status_check",
       sql`${table.storyboardStatus} IN ('pending', 'approved', 'dropped')`,
