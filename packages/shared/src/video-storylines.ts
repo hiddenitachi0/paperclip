@@ -111,6 +111,15 @@ export const VIDEO_STORYLINES_SETTINGS_KEY = "videoStorylinesEnabled";
  * per the ticket's "ships off, doesn't change existing experience" rule.
  */
 export const VIDEO_STORYLINE_ADVANCED_SETTINGS_KEY = "videoStorylineAdvancedFeaturesEnabled";
+/**
+ * DUR-4317/DUR-4320: the per-company cents threshold that, when the current
+ * video-render cost estimate exceeds it, requires a kind:"video_render"
+ * board approval before startRender proceeds -- see
+ * video-storyline-settings.ts's getApprovalThresholdCents. Absent or not a
+ * number = no threshold configured = that extra gate stays off (the
+ * mandatory per-shot storyboard approval gate is unaffected either way).
+ */
+export const VIDEO_STORYLINE_APPROVAL_THRESHOLD_SETTINGS_KEY = "videoStorylineApprovalThresholdCents";
 
 // ─── Cost estimate (placeholder pricing -- see "Questions for Filip") ───
 
