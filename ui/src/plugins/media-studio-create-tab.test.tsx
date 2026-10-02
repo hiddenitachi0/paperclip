@@ -33,7 +33,7 @@ function installBridge() {
 }
 
 async function flush() {
-  for (let i = 0; i < 4; i += 1) {
+  for (let i = 0; i < 20; i += 1) {
     await Promise.resolve();
     await new Promise((resolve) => window.setTimeout(resolve, 0));
   }
