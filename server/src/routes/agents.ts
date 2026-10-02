@@ -36,6 +36,7 @@ import {
   BROWSER_ACCESS_FIELDS,
   parseAgentLimits,
   laneAProviderModelIssue,
+  laneABackupRoutingIssues,
   readLaneAWebSearchSwitch,
   readLaneABrowserAccess,
   browserAccessLevelRank,
@@ -3639,6 +3640,28 @@ export function agentRoutes(
       });
       if (laneAIssue) {
         res.status(422).json({ error: laneAIssue });
+        return;
+      }
+      // DUR-4347: a fallback-chain id or keyword-route backupId must exist in
+      // the pool. A patch may touch only one of the four fields, so each is
+      // checked against the stored value of whichever it leaves out — same
+      // merge pattern as the provider/model check just above.
+      const routingIssues = laneABackupRoutingIssues({
+        laneABackupModels: hasOwn(patchData, "laneABackupModels")
+          ? (patchData.laneABackupModels as never)
+          : (existing.laneABackupModels as never),
+        laneANoAnswerChainIds: hasOwn(patchData, "laneANoAnswerChainIds")
+          ? (patchData.laneANoAnswerChainIds as never)
+          : (existing.laneANoAnswerChainIds as never),
+        laneARefusalChainIds: hasOwn(patchData, "laneARefusalChainIds")
+          ? (patchData.laneARefusalChainIds as never)
+          : (existing.laneARefusalChainIds as never),
+        laneAKeywordRoutes: hasOwn(patchData, "laneAKeywordRoutes")
+          ? (patchData.laneAKeywordRoutes as never)
+          : (existing.laneAKeywordRoutes as never),
+      });
+      if (routingIssues.length > 0) {
+        res.status(422).json({ error: routingIssues[0]!.message });
         return;
       }
     }

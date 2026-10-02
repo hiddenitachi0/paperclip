@@ -1,6 +1,6 @@
 {
-  "id": "9544db8c-2776-4b6e-8777-ee07815bb48a",
-  "prevId": "19945347-aa82-4f90-816c-3fef50e379cb",
+  "id": "a769347b-4707-4fbc-87b3-4ad17ed46463",
+  "prevId": "9544db8c-2776-4b6e-8777-ee07815bb48a",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -35796,6 +35796,49 @@
           "primaryKey": false,
           "notNull": false
         },
+        "proposed_prompt": {
+          "name": "proposed_prompt",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "proposed_camera_notes": {
+          "name": "proposed_camera_notes",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "proposed_duration_seconds": {
+          "name": "proposed_duration_seconds",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "proposed_transition_in": {
+          "name": "proposed_transition_in",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "proposal_status": {
+          "name": "proposal_status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "proposal_conversation_id": {
+          "name": "proposal_conversation_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "prompt_history": {
+          "name": "prompt_history",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
         "storyboard_status": {
           "name": "storyboard_status",
           "type": "text",
@@ -35924,6 +35967,27 @@
           "method": "btree",
           "with": {}
         },
+        "video_shots_proposal_status_idx": {
+          "name": "video_shots_proposal_status_idx",
+          "columns": [
+            {
+              "expression": "proposal_conversation_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "proposal_status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
         "video_shots_storyline_storyboard_status_idx": {
           "name": "video_shots_storyline_storyboard_status_idx",
           "columns": [
@@ -36011,9 +36075,268 @@
           "name": "video_shots_transition_in_check",
           "value": "\"video_shots\".\"transition_in\" IS NULL OR \"video_shots\".\"transition_in\" IN ('cut', 'fade', 'dissolve')"
         },
+        "video_shots_proposed_transition_in_check": {
+          "name": "video_shots_proposed_transition_in_check",
+          "value": "\"video_shots\".\"proposed_transition_in\" IS NULL OR \"video_shots\".\"proposed_transition_in\" IN ('cut', 'fade', 'dissolve')"
+        },
+        "video_shots_proposed_duration_seconds_check": {
+          "name": "video_shots_proposed_duration_seconds_check",
+          "value": "\"video_shots\".\"proposed_duration_seconds\" IS NULL OR (\"video_shots\".\"proposed_duration_seconds\" > 0 AND \"video_shots\".\"proposed_duration_seconds\" <= 60)"
+        },
+        "video_shots_proposal_status_check": {
+          "name": "video_shots_proposal_status_check",
+          "value": "\"video_shots\".\"proposal_status\" IS NULL OR \"video_shots\".\"proposal_status\" IN ('pending', 'accepted', 'edited', 'rejected')"
+        },
         "video_shots_storyboard_status_check": {
           "name": "video_shots_storyboard_status_check",
           "value": "\"video_shots\".\"storyboard_status\" IN ('pending', 'approved', 'dropped')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.video_storyline_director_conversations": {
+      "name": "video_storyline_director_conversations",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "storyline_id": {
+          "name": "storyline_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'reviewing'"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "video_storyline_director_conversations_storyline_uq": {
+          "name": "video_storyline_director_conversations_storyline_uq",
+          "columns": [
+            {
+              "expression": "storyline_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "video_storyline_director_conversations_company_idx": {
+          "name": "video_storyline_director_conversations_company_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "video_storyline_director_conversations_company_id_companies_id_fk": {
+          "name": "video_storyline_director_conversations_company_id_companies_id_fk",
+          "tableFrom": "video_storyline_director_conversations",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "video_storyline_director_conversations_storyline_id_video_storylines_id_fk": {
+          "name": "video_storyline_director_conversations_storyline_id_video_storylines_id_fk",
+          "tableFrom": "video_storyline_director_conversations",
+          "tableTo": "video_storylines",
+          "columnsFrom": [
+            "storyline_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "video_storyline_director_conversations_status_check": {
+          "name": "video_storyline_director_conversations_status_check",
+          "value": "\"video_storyline_director_conversations\".\"status\" IN ('reviewing', 'asking', 'proposing', 'done')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.video_storyline_director_messages": {
+      "name": "video_storyline_director_messages",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "conversation_id": {
+          "name": "conversation_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "role": {
+          "name": "role",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "payload": {
+          "name": "payload",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "video_storyline_director_messages_conversation_created_idx": {
+          "name": "video_storyline_director_messages_conversation_created_idx",
+          "columns": [
+            {
+              "expression": "conversation_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "video_storyline_director_messages_company_idx": {
+          "name": "video_storyline_director_messages_company_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "video_storyline_director_messages_company_id_companies_id_fk": {
+          "name": "video_storyline_director_messages_company_id_companies_id_fk",
+          "tableFrom": "video_storyline_director_messages",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "video_storyline_director_messages_conversation_id_video_storyline_director_conversations_id_fk": {
+          "name": "video_storyline_director_messages_conversation_id_video_storyline_director_conversations_id_fk",
+          "tableFrom": "video_storyline_director_messages",
+          "tableTo": "video_storyline_director_conversations",
+          "columnsFrom": [
+            "conversation_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "video_storyline_director_messages_role_check": {
+          "name": "video_storyline_director_messages_role_check",
+          "value": "\"video_storyline_director_messages\".\"role\" IN ('director', 'person')"
+        },
+        "video_storyline_director_messages_kind_check": {
+          "name": "video_storyline_director_messages_kind_check",
+          "value": "\"video_storyline_director_messages\".\"kind\" IN ('review', 'question', 'answer', 'proposal', 'system')"
         }
       },
       "isRLSEnabled": false
@@ -36348,6 +36671,19 @@
           "primaryKey": false,
           "notNull": false
         },
+        "quality_check_issues": {
+          "name": "quality_check_issues",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "quality_checked_at": {
+          "name": "quality_checked_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "default_transition": {
           "name": "default_transition",
           "type": "text",
@@ -36533,7 +36869,7 @@
       "checkConstraints": {
         "video_storylines_status_check": {
           "name": "video_storylines_status_check",
-          "value": "\"video_storylines\".\"status\" IN ('draft', 'estimated', 'rendering', 'paused', 'ready_to_stitch', 'stitching', 'done', 'failed', 'cancelled')"
+          "value": "\"video_storylines\".\"status\" IN ('draft', 'estimated', 'rendering', 'paused', 'ready_to_stitch', 'stitching', 'done', 'needs_attention', 'failed', 'cancelled')"
         },
         "video_storylines_provider_check": {
           "name": "video_storylines_provider_check",

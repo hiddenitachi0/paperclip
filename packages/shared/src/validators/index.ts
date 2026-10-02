@@ -391,6 +391,17 @@ export {
   LANE_A_TRANSFORM_MAX_CONCURRENCY,
   LANE_A_TRANSFORM_MAX_TOTAL_CHARS,
   laneATransformPayloadChars,
+  laneABackupModelEntrySchema,
+  type LaneABackupModelEntryInput,
+  laneABackupModelsSchema,
+  type LaneABackupModels,
+  laneAChainIdsSchema,
+  type LaneAChainIds,
+  laneAKeywordRouteSchema,
+  type LaneAKeywordRouteInput,
+  laneAKeywordRoutesSchema,
+  type LaneAKeywordRoutes,
+  laneABackupRoutingIssues,
 } from "./lane-a.js";
 
 export {

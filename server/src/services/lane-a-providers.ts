@@ -111,21 +111,89 @@ export type LaneAModelClient = Pick<Anthropic, "messages">;
 export type LaneAProviderErrorKind = "auth" | "rate_limit" | "upstream" | "network";
 
 /**
+ * DUR-4347: text that marks an upstream error body as the provider's OWN
+ * content-policy/moderation rejection, as opposed to an ordinary 4xx (a bad
+ * model id, a malformed request). Matched case-insensitively against the
+ * (already-scrubbed) error message. Deliberately broad: a false negative
+ * here just means a refusal is treated as a plain error (one message, no
+ * chain advance) instead of being routed to the refusal chain, which is the
+ * safe direction to be wrong in.
+ */
+const LANE_A_REFUSAL_ERROR_PATTERN =
+  /content[_ -]?polic|content[_ -]?filter|content[_ -]?management|moderation|safety system|flagged as potentially violating/i;
+
+/**
+ * DUR-4347: text that marks an upstream 4xx as "the model itself is not
+ * reachable" (a local box with nothing loaded, a typo'd id) rather than a
+ * malformed request -- retryable with a different pool entry even though the
+ * status code alone would normally say "our fault, don't retry".
+ */
+const LANE_A_MODEL_UNAVAILABLE_PATTERN = /model[^.]*(not loaded|not found|does not exist|is not available|unknown)/i;
+
+/**
+ * DUR-4347: whether a classified provider error is worth trying a different
+ * pool entry for. Connection failures, timeouts, rate limiting and 5xx are
+ * always retryable; a bad key is not (a different model on the SAME
+ * provider+key would fail identically, and the ticket's own list of
+ * retryable cases omits auth); an ordinary 4xx (bad request, unknown
+ * parameter) is not retryable UNLESS its text says the model itself could not
+ * be reached, which is exactly the "local box has nothing loaded" case a
+ * fallback chain exists for.
+ */
+function classifyLaneARetryable(kind: LaneAProviderErrorKind, status: number | null, message: string): boolean {
+  if (kind === "network" || kind === "rate_limit") return true;
+  if (kind === "auth") return false;
+  // kind === "upstream"
+  if (status !== null && status >= 500) return true;
+  return LANE_A_MODEL_UNAVAILABLE_PATTERN.test(message);
+}
+
+/**
+ * DUR-4347: whether a classified provider error IS the provider refusing to
+ * answer on content-policy/moderation grounds (as opposed to any other
+ * upstream failure). Only ever true for an "upstream" error whose text
+ * matches the refusal pattern -- a network failure or a bad key is never a
+ * refusal.
+ */
+function classifyLaneARefusal(kind: LaneAProviderErrorKind, message: string): boolean {
+  return kind === "upstream" && LANE_A_REFUSAL_ERROR_PATTERN.test(message);
+}
+
+/**
  * A provider call that failed, classified so lane-a.ts can turn it into the
  * right HTTP answer (503 for a bad key, 429 for upstream rate limiting, 502
- * otherwise). `message` is already scrubbed.
+ * otherwise) AND, since DUR-4347, so the fallback loop can decide whether to
+ * try the next pool entry (`retryable`) and whether to jump straight to the
+ * refusal chain (`refusal`). `message` is already scrubbed. Both flags default
+ * to a classification derived from `kind`/`status`/`message`; a throw site
+ * that already knows better (e.g. a dedicated "model not found" check) may
+ * pass an explicit value instead.
  */
 export class LaneAProviderError extends Error {
   readonly kind: LaneAProviderErrorKind;
   readonly provider: LaneAProvider;
   readonly status: number | null;
+  readonly retryable: boolean;
+  readonly refusal: boolean;
 
-  constructor(input: { kind: LaneAProviderErrorKind; provider: LaneAProvider; message: string; status?: number | null }) {
+  constructor(input: {
+    kind: LaneAProviderErrorKind;
+    provider: LaneAProvider;
+    message: string;
+    status?: number | null;
+    retryable?: boolean;
+    refusal?: boolean;
+  }) {
     super(input.message);
     this.name = "LaneAProviderError";
     this.kind = input.kind;
     this.provider = input.provider;
     this.status = input.status ?? null;
+    this.refusal = input.refusal ?? classifyLaneARefusal(input.kind, input.message);
+    // A refusal is never also "retryable" in the no-answer sense: it always
+    // routes to the refusal chain instead (lane-a.ts's loop), never to the
+    // next no-answer entry.
+    this.retryable = this.refusal ? false : (input.retryable ?? classifyLaneARetryable(input.kind, this.status, input.message));
   }
 }
 
@@ -158,6 +226,17 @@ export function resolveLaneABaseUrl(provider: unknown, baseUrl: string | null | 
   return custom ?? descriptor.defaultBaseUrl;
 }
 
+/**
+ * DUR-4347: a local model's address (Ollama, LM Studio, a Tailscale box that
+ * may be asleep) gets a much shorter connect timeout than the 120s every
+ * other provider uses, specifically so a fallback loop in lane-a.ts moves on
+ * to the next pool entry quickly instead of making the person wait two
+ * minutes to find out the main model's box is off. Per-attempt, not global:
+ * each call to createLaneAProviderClient/the fallback loop may still override
+ * it via `timeoutMs`.
+ */
+export const LANE_A_LOCAL_PROVIDER_TIMEOUT_MS = 5_000;
+
 export interface CreateLaneAProviderClientInput {
   provider: LaneAProvider;
   /** Null only when `anthropicClient` is injected (tests). */
@@ -188,7 +267,9 @@ export function createLaneAProviderClient(input: CreateLaneAProviderClientInput)
     apiKey: input.apiKey ?? "",
     baseUrl,
     fetchImpl: input.fetch ?? globalThis.fetch,
-    timeoutMs: input.timeoutMs ?? DEFAULT_OPENAI_COMPATIBLE_TIMEOUT_MS,
+    timeoutMs:
+      input.timeoutMs ??
+      (input.provider === "local" ? LANE_A_LOCAL_PROVIDER_TIMEOUT_MS : DEFAULT_OPENAI_COMPATIBLE_TIMEOUT_MS),
   });
 }
 
