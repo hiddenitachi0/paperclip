@@ -27,6 +27,24 @@ import { videoStorylineSettingsService } from "./video-storyline-settings.js";
 import { videoStorylineDirectorConversationStore } from "./video-storyline-director-conversation.js";
 
 /**
+ * Accepting/editing a director proposal or restoring an earlier prompt changes
+ * what the shot should look like, so -- like updateShot (DUR-4317) -- any
+ * approved or dropped storyboard still is invalid: back to "pending", still
+ * cleared, to be regenerated and re-reviewed before the shot can render.
+ */
+const STORYBOARD_STILL_RESET = {
+  storyboardStatus: "pending" as const,
+  stillProvider: null,
+  stillObjectKey: null,
+  stillContentType: null,
+  stillByteSize: null,
+  stillSha256: null,
+  stillGeneratedAt: null,
+  stillEstimatedCostCents: null,
+  stillActualCostCents: null,
+};
+
+/**
  * DUR-4327: the proposals step of the whole-storyline AI director
  * conversation -- one Anthropic call that rewrites a detailed prompt (+
  * camera notes, duration, transition) for every shot the review flagged,
@@ -292,6 +310,7 @@ export function videoStorylineDirectorProposalsService(db: Db) {
         proposedDurationSeconds: null,
         proposedTransitionIn: null,
         proposalStatus: status,
+        ...STORYBOARD_STILL_RESET,
         updatedAt: now,
       })
       .where(eq(videoShots.id, shot.id))
@@ -409,6 +428,7 @@ export function videoStorylineDirectorProposalsService(db: Db) {
         durationSeconds: previous.durationSeconds,
         transitionIn: previous.transitionIn,
         promptHistory: history.slice(0, -1),
+        ...STORYBOARD_STILL_RESET,
         updatedAt: new Date(),
       })
       .where(eq(videoShots.id, shotId))

@@ -1969,6 +1969,7 @@ export {
   featureLaunchRequestPayloadSchema,
   bookingRequestPayloadSchema,
   purchaseRequestPayloadSchema,
+  videoRenderRequestPayloadSchema,
   type CreateApproval,
   type UpsertBudgetPolicy,
   type ResolveBudgetIncident,
@@ -1988,6 +1989,7 @@ export {
   type FeatureLaunchRequestPayload,
   type BookingRequestPayload,
   type PurchaseRequestPayload,
+  type VideoRenderRequestPayload,
   envBindingPlainSchema,
   envBindingSecretRefSchema,
   envBindingSchema,
@@ -2489,6 +2491,7 @@ export {
   VIDEO_SHOT_TRANSITIONS,
   VIDEO_STORYLINES_SETTINGS_KEY,
   VIDEO_STORYLINE_ADVANCED_SETTINGS_KEY,
+  VIDEO_STORYLINE_APPROVAL_THRESHOLD_SETTINGS_KEY,
   VIDEO_STORYLINE_MAX_CHARACTER_REFERENCES,
   VIDEO_STORYLINE_MAX_SCENES,
   VIDEO_STORYLINE_MAX_SHOTS,
@@ -2497,6 +2500,7 @@ export {
   VIDEO_TRANSITION_DEFAULT_DURATION_MS,
   VIDEO_TRANSITION_MAX_DURATION_MS,
   VIDEO_TRANSITION_MIN_DURATION_MS,
+  VIDEO_QUALITY_ISSUE_CODES,
   approveVideoDirectorRunSchema,
   createVideoSceneSchema,
   createVideoShotSchema,
@@ -2530,6 +2534,8 @@ export {
   type VideoStorylineProvider,
   type VideoStorylineShotProgress,
   type VideoStorylineStatus,
+  type VideoQualityIssueCode,
+  type VideoStorylineQualityIssue,
 } from "./video-storylines.js";
 export {
   VIDEO_DIRECTOR_CONVERSATION_STATUSES,
@@ -2572,6 +2578,25 @@ export {
   type VideoShotPromptHistoryEntry,
   type VideoShotProposalStatus,
 } from "./video-storyline-director-conversation.js";
+
+export {
+  STILL_IMAGE_PROVIDER_COST_CENTS_PER_IMAGE,
+  VIDEO_SHOT_STORYBOARD_STATUSES,
+  approveStoryboardShotSchema,
+  dropStoryboardShotSchema,
+  estimateStoryboardCostCents,
+  generateStoryboardStillSchema,
+  updateVideoStorylineApprovalThresholdSchema,
+  type ApproveStoryboardShotInput,
+  type DropStoryboardShotInput,
+  type GenerateStoryboardStillInput,
+  type StoryboardCostEstimateResult,
+  type StoryboardCostEstimateShotInput,
+  type UpdateVideoStorylineApprovalThresholdInput,
+  type VideoShotStoryboardStatus,
+  type VideoStoryboardShotSummary,
+  type VideoStoryboardSummary,
+} from "./video-storyline-stills.js";
 
 export { DOCUMENTS_PLUGIN_KEY, DOCUMENTS_SETTINGS_KEY } from "./documents.js";
 

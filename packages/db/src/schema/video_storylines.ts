@@ -30,8 +30,13 @@ export const videoStorylines = pgTable(
     companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
     projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
     title: text("title").notNull(),
-    // draft -> estimated -> rendering <-> paused -> ready_to_stitch -> stitching -> done
+    // draft -> estimated -> rendering <-> paused -> ready_to_stitch -> stitching -> done | needs_attention
     //   any of draft/estimated/rendering/paused/ready_to_stitch/stitching -> failed | cancelled
+    // DUR-4318: "stitching" lands on "done" only when the post-stitch quality
+    // check (video-quality-check.ts) passes; a failed check lands on
+    // "needs_attention" instead, with qualityCheckIssues/errorMessage
+    // explaining what to look at -- the final file is still stored so it can
+    // be inspected, it just is not presented as a finished render.
     status: text("status").notNull().default("draft"),
     // Which video provider (and therefore continuity behavior) this storyline
     // renders with -- fixed per storyline, since mixing providers mid-story
@@ -63,6 +68,16 @@ export const videoStorylines = pgTable(
     // is not available on this host -- see video-storyline-stitch.ts.
     stitchBlockedReason: text("stitch_blocked_reason"),
     errorMessage: text("error_message"),
+    // DUR-4318: the post-stitch automatic quality check's findings -- empty
+    // array means either not yet checked (qualityCheckedAt null) or a clean
+    // pass. shotIndex/timeSeconds are best-effort (derived from the planned
+    // shot timeline, not re-probed per shot), null when not localizable to a
+    // single shot (e.g. a whole-file duration mismatch).
+    qualityCheckIssues: jsonb("quality_check_issues")
+      .$type<Array<{ code: string; message: string; shotIndex: number | null; timeSeconds: number | null }>>()
+      .notNull()
+      .default([]),
+    qualityCheckedAt: timestamp("quality_checked_at", { withTimezone: true }),
     // DUR-4196 round 2: the transition applied between consecutive shots
     // unless a shot sets its own videoShots.transitionIn, and the optional
     // music bed stitched under the whole film -- see video-ffmpeg.ts and
@@ -85,7 +100,7 @@ export const videoStorylines = pgTable(
     stitchQueueIdx: index("video_storylines_stitch_queue_idx").on(table.status, table.updatedAt),
     statusCheck: check(
       "video_storylines_status_check",
-      sql`${table.status} IN ('draft', 'estimated', 'rendering', 'paused', 'ready_to_stitch', 'stitching', 'done', 'failed', 'cancelled')`,
+      sql`${table.status} IN ('draft', 'estimated', 'rendering', 'paused', 'ready_to_stitch', 'stitching', 'done', 'needs_attention', 'failed', 'cancelled')`,
     ),
     providerCheck: check("video_storylines_provider_check", sql`${table.providerId} IN ('fal', 'sogni')`),
     budgetCapCheck: check("video_storylines_budget_cap_check", sql`${table.budgetCapCents} IS NULL OR ${table.budgetCapCents} >= 0`),
@@ -202,6 +217,33 @@ export const videoShots = pgTable(
       >()
       .notNull()
       .default([]),
+    // DUR-4317/DUR-4320: the storyboard-of-stills approval gate. A shot only
+    // ever reaches `beginShotRender` (the real, paid video-provider call)
+    // once this is 'approved' -- see video-storyline-render.ts's doc comment
+    // on beginShotRender for the exact enforcement point. 'dropped' removes
+    // the shot from the render queue entirely (it is skipped, never rendered,
+    // never counted toward cost) without deleting it. Deliberately a
+    // separate column from the existing preview* group above (DUR-4196's
+    // round-2 QA tool, which renders a real paid video clip and is untouched
+    // by this gate) and from `still*` below (a cheap storyboard still, not a
+    // video-clip-derived frame).
+    storyboardStatus: text("storyboard_status").notNull().default("pending"),
+    // Direct-storage pointer for the cheap storyboard still -- same
+    // reasoning as resultObjectKey/previewObjectKey above (never an
+    // `assets` row). Overwritten on every re-request, same as preview*;
+    // cleared back to null whenever an edit resets storyboardStatus to
+    // 'pending' (see updateShot in video-storylines.ts).
+    stillProvider: text("still_provider"),
+    stillObjectKey: text("still_object_key"),
+    stillContentType: text("still_content_type"),
+    stillByteSize: integer("still_byte_size"),
+    stillSha256: text("still_sha256"),
+    stillGeneratedAt: timestamp("still_generated_at", { withTimezone: true }),
+    // Shown before (estimated) and after (actual) generating this shot's
+    // still -- same before/after pairing resultByteSize's actualCostCents
+    // sibling already uses for the real render.
+    stillEstimatedCostCents: integer("still_estimated_cost_cents"),
+    stillActualCostCents: integer("still_actual_cost_cents"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -230,6 +272,11 @@ export const videoShots = pgTable(
       "video_shots_proposal_status_check",
       sql`${table.proposalStatus} IS NULL OR ${table.proposalStatus} IN ('pending', 'accepted', 'edited', 'rejected')`,
     ),
+    storyboardStatusCheck: check(
+      "video_shots_storyboard_status_check",
+      sql`${table.storyboardStatus} IN ('pending', 'approved', 'dropped')`,
+    ),
+    storylineStoryboardStatusIdx: index("video_shots_storyline_storyboard_status_idx").on(table.storylineId, table.storyboardStatus),
   }),
 );
 

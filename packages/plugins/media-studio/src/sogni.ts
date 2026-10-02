@@ -163,6 +163,13 @@ export type SogniTokenType = (typeof SOGNI_TOKEN_TYPES)[number];
  */
 export const SOGNI_STORAGE_HOST_SUFFIXES = [".s3-accelerate.amazonaws.com"] as const;
 
+/**
+ * Exact Sogni hosts that also serve finished pictures. From 2 Oct 2026 Sogni
+ * returns result addresses on media.sogni.ai (its own domain), which the
+ * suffix list above refused, so every Sogni picture failed. Exact match only.
+ */
+export const SOGNI_STORAGE_HOSTS = ["media.sogni.ai"] as const;
+
 const SOGNI_MODEL_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,99}$/i;
 const MAX_SEED = 4_294_967_295;
 const MAX_PICTURE_BYTES = 50 * 1024 * 1024;
@@ -277,7 +284,8 @@ export function assertSogniStorageUrl(raw: string): URL {
     !url.username &&
     !url.password &&
     (url.port === "" || url.port === "443") &&
-    SOGNI_STORAGE_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix) && host.length > suffix.length);
+    (SOGNI_STORAGE_HOSTS.some((exact) => host === exact) ||
+      SOGNI_STORAGE_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix) && host.length > suffix.length));
   if (!allowed) {
     throw new Error(
       `Sogni gave a picture address on ${url.protocol === "https:" ? host : `a non-https address (${host})`}, which is not Sogni's picture storage, so it was not used.`,

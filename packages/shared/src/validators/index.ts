@@ -624,6 +624,7 @@ export {
   featureLaunchRequestPayloadSchema,
   bookingRequestPayloadSchema,
   purchaseRequestPayloadSchema,
+  videoRenderRequestPayloadSchema,
   type CreateApproval,
   type ResolveApproval,
   type RequestApprovalRevision,
@@ -641,6 +642,7 @@ export {
   type FeatureLaunchRequestPayload,
   type BookingRequestPayload,
   type PurchaseRequestPayload,
+  type VideoRenderRequestPayload,
 } from "./approval.js";
 
 export {
