@@ -1020,6 +1020,15 @@ function NewConnectionForm({
       case "fiken":
         if (!companySlug.trim() || !apiToken.trim()) return null;
         return { kind, name: displayName, companySlug: companySlug.trim(), credential: { kind: "api_token", apiToken: apiToken.trim() } };
+      case "paperless_ngx":
+        if (!host.trim() || !Number.isInteger(portValue) || !apiToken.trim()) return null;
+        return {
+          kind,
+          name: displayName,
+          host: host.trim(),
+          port: portValue,
+          credential: { kind: "paperless_api_token", apiToken: apiToken.trim() },
+        };
       case "ftp_file":
       case "ftps_file":
       case "sftp_file": {
@@ -1195,6 +1204,49 @@ function NewConnectionForm({
           <Field id="data-new-api-token" label="API key from Fiken">
             <Input
               id="data-new-api-token"
+              type="password"
+              autoComplete="off"
+              value={apiToken}
+              onChange={(event) => setApiToken(event.target.value)}
+            />
+          </Field>
+        </>
+      )}
+
+      {kind === "paperless_ngx" && (
+        <>
+          <div className="flex flex-wrap gap-2">
+            <div className="min-w-[12rem] flex-1">
+              <Field id="data-paperless-host" label="Container's internal host">
+                <Input
+                  id="data-paperless-host"
+                  value={host}
+                  onChange={(event) => setHost(event.target.value)}
+                  placeholder="localhost"
+                  autoComplete="off"
+                />
+              </Field>
+            </div>
+            <div className="w-24">
+              <Field id="data-paperless-port" label="Port">
+                <Input
+                  id="data-paperless-port"
+                  type="number"
+                  min={1}
+                  max={65535}
+                  value={port}
+                  onChange={(event) => setPort(event.target.value)}
+                />
+              </Field>
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            This company's own paperless-ngx container, never a public address. A host owner or admin sets this up per
+            company.
+          </p>
+          <Field id="data-new-paperless-api-token" label="API token from paperless-ngx">
+            <Input
+              id="data-new-paperless-api-token"
               type="password"
               autoComplete="off"
               value={apiToken}

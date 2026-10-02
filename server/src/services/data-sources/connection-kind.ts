@@ -61,6 +61,7 @@ import type {
 import type { CatalogResult, DataLookupOutcome, SalesRequest, SalesResult } from "./contract.js";
 import type { FileServerOperations } from "./file-server/operations.js";
 import type { ShopifyGraphQLClient, ShopifyRawTransport } from "./shopify-client.js";
+import type { OutboundFetch } from "../safe-outbound-fetch.js";
 
 /** The limits one lookup runs under. Hitting either means a refusal, never a partial answer. */
 export interface DataSourceCallBudget {
@@ -151,8 +152,23 @@ export interface PendingReadContext extends DataSourceReadContextBase {
   kind: "woocommerce" | "fiken";
 }
 
+/**
+ * What the paperless-ngx Test (and, later, its documents adapter) gets:
+ * `fetch` is already pinned to this company's own container host:port and
+ * already carries the `Authorization: Token …` header, through
+ * createPinnedInternalFetch -- it can reach nothing else. No agent tool
+ * reads through this context yet (DUR-4302 is plumbing only); that is a
+ * separate, later slice.
+ */
+export interface PaperlessReadContext extends DataSourceReadContextBase {
+  kind: "paperless_ngx";
+  /** The container's own base address, e.g. "http://localhost:8123". Never a secret. */
+  baseUrl: string;
+  fetch: OutboundFetch;
+}
+
 /** Everything an adapter gets for one lookup, by kind. */
-export type DataSourceReadContext = ShopifyReadContext | FileServerReadContext | PendingReadContext;
+export type DataSourceReadContext = ShopifyReadContext | FileServerReadContext | PendingReadContext | PaperlessReadContext;
 
 /**
  * The credential as stored in the company secret, decoded. Only

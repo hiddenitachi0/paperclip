@@ -21,6 +21,7 @@ import {
   type DnsLookupAll,
   type OutboundFetch,
   type OutboundHostPolicy,
+  type PinnedInternalHostPolicy,
 } from "../safe-outbound-fetch.js";
 import { fileServerDataSource } from "./file-server-source.js";
 import type { FileServerTestOnlyDeps } from "./file-server/session.js";
@@ -32,6 +33,7 @@ import type {
   DataSourceReadContext,
   SalesAdapter,
 } from "./connection-kind.js";
+import { paperlessNgxDataSource } from "./paperless-source.js";
 import { shopifyDataSource } from "./shopify-source.js";
 
 /**
@@ -108,7 +110,7 @@ export interface DataSourceKindDefinition {
   /** Where the connection points, in words. Never a secret. */
   describeTarget(connection: Pick<DataSourceConnectionInfo, "shopDomain" | "config">): string;
   /** Which host this connection may reach; null for a kind without an HTTP transport. */
-  outboundPolicy(config: DataConnectionConfig): OutboundHostPolicy | null;
+  outboundPolicy(config: DataConnectionConfig): OutboundHostPolicy | PinnedInternalHostPolicy | null;
   /** From what the last Test observed: may the connection be switched on? */
   canActivate(observed: DataConnectionObservedSummary | null): { ok: boolean; problems: string[] };
   /** The per-kind transport for one lookup, carrying the key. Throws 422 for an unsupported kind. */
@@ -208,6 +210,7 @@ const REGISTRY: Record<DataConnectionKind, DataSourceKindDefinition> = {
   ftp_file: fileServerDataSource("ftp_file"),
   ftps_file: fileServerDataSource("ftps_file"),
   sftp_file: fileServerDataSource("sftp_file"),
+  paperless_ngx: paperlessNgxDataSource,
 };
 
 export function isDataSourceKind(kind: string): kind is DataConnectionKind {
