@@ -432,3 +432,36 @@ export const purchaseRequestPayloadSchema = z
   .strict();
 
 export type PurchaseRequestPayload = z.infer<typeof purchaseRequestPayloadSchema>;
+
+/**
+ * `request_board_approval` payload convention for the video-storyline
+ * render-cost threshold gate (DUR-4317/DUR-4320, backend half of the
+ * storyboard-of-stills approval gate). Filed by startRender in
+ * server/src/services/video-storyline-render.ts whenever a storyline's
+ * current video-render cost estimate exceeds the company's
+ * `videoStorylineApprovalThresholdCents` setting -- see
+ * video-storyline-settings.ts. This is a SEPARATE, additional gate layered
+ * on top of the always-on, mandatory per-shot storyboardStatus==='approved'
+ * check; it only fires for a storyline whose total render cost crosses the
+ * company's own configured spend threshold.
+ *
+ * Every field here is stamped server-side by startRender at filing time --
+ * never taken from the calling agent's own words -- same server-stamped
+ * trust boundary purchaseRequestPayloadSchema enforces above: a filer
+ * cannot under-state the estimate or claim its own threshold.
+ */
+export const videoRenderRequestPayloadSchema = z
+  .object({
+    kind: z.literal("video_render"),
+    storylineId: z.string().uuid(),
+    shotCount: z.number().int().nonnegative(),
+    /** The server's own estimateVideoStorylineCostCents total for every non-dropped shot, in cents. */
+    estimatedTotalCents: z.number().int().nonnegative(),
+    /** The company's videoStorylineApprovalThresholdCents setting at filing time. */
+    thresholdCents: z.number().int().nonnegative(),
+    title: z.string().min(1),
+    summary: multilineTextSchema.optional(),
+  })
+  .strict();
+
+export type VideoRenderRequestPayload = z.infer<typeof videoRenderRequestPayloadSchema>;

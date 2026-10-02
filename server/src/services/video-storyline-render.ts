@@ -8,6 +8,7 @@ import {
   VIDEO_RENDER_TICK_BATCH,
   VIDEO_SHOT_MIN_DURATION_SECONDS,
   estimateVideoStorylineCostCents,
+  videoRenderRequestPayloadSchema,
   type StartVideoStorylineRenderInput,
   type VideoStorylineProvider,
 } from "@paperclipai/shared";
@@ -18,8 +19,10 @@ import { logger } from "../middleware/logger.js";
 import { getStorageService } from "../storage/index.js";
 import { logActivity } from "./activity-log.js";
 import { pluginRegistryService } from "./plugin-registry.js";
+import { approvalService } from "./approvals.js";
 import { secretService } from "./secrets.js";
 import { extractLastFrameDataUri } from "./video-ffmpeg.js";
+import { loadApprovedStillDataUri } from "./video-storyline-still-frame.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
 import { videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
 import { executePinnedHttpRequest, validateAndResolveFetchUrl } from "./safe-outbound-fetch.js";
@@ -78,8 +81,8 @@ async function dataUriFromObject(companyId: string, provider: string, objectKey:
   return `data:${contentType};base64,${bytes.toString("base64")}`;
 }
 
-/** Reads a small set of already-uploaded reference pictures (assets.id) as data: URIs, oldest-first, bounded by MAX_REFERENCE_IMAGES so a storyline with many reference pictures does not balloon every render call. */
-async function loadReferenceImages(db: Db, companyId: string, assetIds: readonly string[]): Promise<string[]> {
+/** Reads a small set of already-uploaded reference pictures (assets.id) as data: URIs, oldest-first, bounded by MAX_REFERENCE_IMAGES so a storyline with many reference pictures does not balloon every render call. Exported for video-storyline-stills.ts's generateStill, which feeds a shot's own look references into its storyboard still the same way a real render would. */
+export async function loadReferenceImages(db: Db, companyId: string, assetIds: readonly string[]): Promise<string[]> {
   const ids = assetIds.slice(0, MAX_REFERENCE_IMAGES);
   if (ids.length === 0) return [];
   const rows = await db.select().from(assets).where(and(eq(assets.companyId, companyId), inArray(assets.id, ids)));
@@ -106,6 +109,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
   const settings = videoStorylineSettingsService(db);
   const registry = pluginRegistryService(db);
   const secrets = secretService(db);
+  const approvals = approvalService(db);
   const nowOf = () => deps.now?.() ?? new Date();
 
   async function resolveProviderApiKey(companyId: string, providerId: VideoStorylineProvider, actorId: string): Promise<string> {
@@ -127,11 +131,12 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     return storylines.recomputeEstimate(companyId, storylineId);
   }
 
+  /** Excludes 'dropped' shots -- dropped shots never render and are never counted toward "is this storyline finished?" (see DUR-4317/DUR-4320's storyboard gate). */
   async function nextPendingShot(storylineId: string) {
     const [row] = await db
       .select()
       .from(videoShots)
-      .where(and(eq(videoShots.storylineId, storylineId), ne(videoShots.status, "done")))
+      .where(and(eq(videoShots.storylineId, storylineId), ne(videoShots.status, "done"), ne(videoShots.storyboardStatus, "dropped")))
       .orderBy(asc(videoShots.orderIndex))
       .limit(1);
     return row ?? null;
@@ -146,11 +151,35 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     return rows.length > 0 ? rows[rows.length - 1]! : null;
   }
 
+  /**
+   * DUR-4317/DUR-4320: this is the "no video provider call before approval"
+   * enforcement point -- the storyboardStatus check below runs before
+   * resolveProviderApiKey/provider.start, i.e. before any real, paid
+   * video-provider call is made for this shot. Every render path
+   * (startRender's first shot, onShotDone's chain continuation,
+   * reRenderShot) funnels through this one function, so there is a single
+   * place this gate has to be enforced correctly. 'dropped' shots never
+   * reach here (callers filter them out of the render queue first); a
+   * 'pending' shot always does, since it has not been reviewed at all.
+   */
   async function beginShotRender(companyId: string, storyline: typeof videoStorylines.$inferSelect, shot: typeof videoShots.$inferSelect, actorId: string) {
+    if (shot.storyboardStatus !== "approved") {
+      throw unprocessable(
+        `Shot ${shot.orderIndex}'s storyboard still has not been approved yet. Generate and approve a still for it (or drop it) before rendering.`,
+      );
+    }
     const providerId = (shot.providerId ?? storyline.providerId) as VideoStorylineProvider;
     const model = shot.model ?? storyline.model;
     const apiKey = await resolveProviderApiKey(companyId, providerId, actorId);
     const provider = buildProvider(providerId, apiKey, model);
+
+    // DUR-4317/DUR-4320: an approved storyboard still wins over the ordinary
+    // last-frame continuity image -- the operator explicitly approved this
+    // still as what this shot should look like, so it takes the startImage
+    // slot the continuity frame would otherwise occupy. Falls back to
+    // continuity/reference pictures below only when the still could not be
+    // read back (see loadApprovedStillDataUri's doc comment).
+    const approvedStillImage = await loadApprovedStillDataUri(companyId, shot);
 
     let continuityImage: string | undefined;
     const previous = await closestPreviousDoneShot(storyline.id, shot.orderIndex);
@@ -164,8 +193,8 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     const referenceImages = await loadReferenceImages(db, companyId, referenceAssetIds);
     // See media-jobs-types.ts's MediaJobInput.referenceImages doc comment: neither provider confirms
     // combining a continuity frame with separate character pictures in one call, so we pick ONE image
-    // to actually drive continuity/likeness -- the continuity frame wins when we have one.
-    const startImage = continuityImage ?? referenceImages[0];
+    // to actually drive continuity/likeness -- the approved still wins, then the continuity frame.
+    const startImage = approvedStillImage ?? continuityImage ?? referenceImages[0];
 
     const input: MediaJobInput = {
       kind: "video",
@@ -214,8 +243,25 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     }
     const shots = await db.select().from(videoShots).where(eq(videoShots.storylineId, storylineId)).orderBy(asc(videoShots.orderIndex));
     if (shots.length === 0) throw unprocessable("Add at least one shot before starting a render.");
+    // DUR-4317/DUR-4320: dropped shots never render and never cost anything
+    // -- excluded from the cost estimate the same way they are excluded
+    // from the render queue (nextPendingShot).
+    const renderableShots = shots.filter((s) => s.storyboardStatus !== "dropped");
 
-    const estimateResult = estimateVideoStorylineCostCents(shots, storyline.providerId as VideoStorylineProvider);
+    // DUR-4317/DUR-4320: the mandatory storyboard gate -- every shot that
+    // still needs to render must already be approved. Checked here, upfront
+    // for the WHOLE storyline, rather than relying solely on
+    // beginShotRender's own per-shot check, so a render never starts (and
+    // the storyline never flips to "rendering") only to immediately hit an
+    // unapproved shot partway through the chain.
+    const unapproved = renderableShots.find((s) => s.status !== "done" && s.storyboardStatus !== "approved");
+    if (unapproved) {
+      throw unprocessable(
+        `Shot ${unapproved.orderIndex}'s storyboard still has not been approved yet. Approve every shot's still before starting the render (or drop shots you don't want to render).`,
+      );
+    }
+
+    const estimateResult = estimateVideoStorylineCostCents(renderableShots, storyline.providerId as VideoStorylineProvider);
     const effectiveBudgetCapCents = input.confirmBudgetCapCents ?? storyline.budgetCapCents;
     if (effectiveBudgetCapCents === null || effectiveBudgetCapCents === undefined) {
       throw badRequest("Set a budget cap before starting a render (or pass confirmBudgetCapCents to set one now).");
@@ -226,7 +272,37 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       );
     }
 
-    const pending = shots.find((s) => s.status !== "done");
+    // DUR-4317/DUR-4320: a second, opt-in gate on top of the mandatory
+    // per-shot approval above -- a company that has configured
+    // videoStorylineApprovalThresholdCents also needs a board sign-off on
+    // the whole storyline's render spend whenever it crosses that amount.
+    // Mirrors browser-service.ts's purchase-clearance gate: file once, then
+    // refuse until the board decides, never trusting the caller's own words
+    // for the stamped fields.
+    const thresholdCents = await settings.getApprovalThresholdCents(companyId);
+    if (thresholdCents !== null && estimateResult.estimatedTotalCents > thresholdCents) {
+      const approved = await approvals.findApprovedVideoRenderApproval(companyId, storylineId, estimateResult.estimatedTotalCents);
+      if (!approved) {
+        const open = await approvals.findOpenVideoRenderApproval(companyId, storylineId);
+        if (!open) {
+          const payload = videoRenderRequestPayloadSchema.parse({
+            kind: "video_render",
+            storylineId,
+            shotCount: estimateResult.shotCount,
+            estimatedTotalCents: estimateResult.estimatedTotalCents,
+            thresholdCents,
+            title: `Render "${storyline.title}"`,
+            summary: `Rendering this storyline is estimated at ${estimateResult.estimatedTotalCents} cents across ${estimateResult.shotCount} shots, over this company's ${thresholdCents}-cent approval threshold.`,
+          });
+          await approvals.create(companyId, { type: "request_board_approval", requestedByAgentId: actor.agentId, payload, status: "pending" });
+        }
+        throw unprocessable(
+          `This render's estimated cost (${estimateResult.estimatedTotalCents} cents) is over this company's ${thresholdCents}-cent approval threshold. Waiting on a board decision before it can start.`,
+        );
+      }
+    }
+
+    const pending = renderableShots.find((s) => s.status !== "done");
     if (!pending) {
       await db.update(videoStorylines).set({ status: "ready_to_stitch", updatedAt: nowOf() }).where(eq(videoStorylines.id, storylineId));
       await logActivity(db, { companyId, actorType: actor.actorType, actorId: actor.actorId, agentId: actor.agentId, action: "video_storyline.render_skipped_already_done", entityType: "video_storyline", entityId: storylineId, details: {} });
@@ -269,6 +345,12 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     }
     if (storyline.status === "stitching") {
       throw conflict("A stitch is currently running for this storyline. Wait for it to finish before re-rendering a shot.");
+    }
+    if (shot.storyboardStatus === "dropped") {
+      throw conflict("This shot has been dropped from the storyboard. Edit it to bring it back before re-rendering it.");
+    }
+    if (shot.storyboardStatus !== "approved") {
+      throw unprocessable(`Shot ${shot.orderIndex}'s storyboard still has not been approved yet. Approve it before re-rendering.`);
     }
     const refundCents = shot.actualCostCents ?? 0;
     const spentAfterRefund = Math.max(0, storyline.spentCents - refundCents);
@@ -564,6 +646,23 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     const next = await nextPendingShot(storyline.id);
     if (!next) {
       await db.update(videoStorylines).set({ spentCents, status: "ready_to_stitch", updatedAt: nowOf() }).where(eq(videoStorylines.id, storyline.id));
+      return;
+    }
+    // DUR-4317/DUR-4320: a shot can be edited (resetting it to 'pending')
+    // after the render chain already started on earlier shots -- pause here
+    // with a clear reason rather than calling beginShotRender and letting
+    // its own guard throw, which would leave the storyline stuck
+    // "rendering" forever (the tick's try/catch would just log and skip it).
+    if (next.storyboardStatus !== "approved") {
+      await db
+        .update(videoStorylines)
+        .set({
+          spentCents,
+          status: "paused",
+          errorMessage: `Shot ${next.orderIndex}'s storyboard still needs approval before rendering can continue. Approve it and start the render again.`,
+          updatedAt: nowOf(),
+        })
+        .where(eq(videoStorylines.id, storyline.id));
       return;
     }
     const nextEstimate = estimateVideoStorylineCostCents([{ durationSeconds: next.durationSeconds }], storyline.providerId as VideoStorylineProvider);

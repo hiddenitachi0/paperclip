@@ -1,5 +1,5 @@
 {
-  "id": "5068e13a-cfb5-451d-86a4-c3a447bd1e4c",
+  "id": "9544db8c-2776-4b6e-8777-ee07815bb48a",
   "prevId": "bb1ad3a4-d25b-4e96-ae29-0e7b5c183258",
   "version": "7",
   "dialect": "postgresql",
@@ -8233,13 +8233,7 @@
           "name": "agent_id",
           "type": "uuid",
           "primaryKey": false,
-          "notNull": false
-        },
-        "created_by_user_id": {
-          "name": "created_by_user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "issue_id": {
           "name": "issue_id",
@@ -25635,155 +25629,6 @@
       },
       "isRLSEnabled": false
     },
-    "public.media_studio_direct_creations": {
-      "name": "media_studio_direct_creations",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "company_id": {
-          "name": "company_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "created_by_user_id": {
-          "name": "created_by_user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "kind": {
-          "name": "kind",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "provider": {
-          "name": "provider",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "model": {
-          "name": "model",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "prompt": {
-          "name": "prompt",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "cost_cents": {
-          "name": "cost_cents",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "file_id": {
-          "name": "file_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "cost_event_id": {
-          "name": "cost_event_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "media_studio_direct_creations_company_user_created_idx": {
-          "name": "media_studio_direct_creations_company_user_created_idx",
-          "columns": [
-            {
-              "expression": "company_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_by_user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "media_studio_direct_creations_company_id_companies_id_fk": {
-          "name": "media_studio_direct_creations_company_id_companies_id_fk",
-          "tableFrom": "media_studio_direct_creations",
-          "tableTo": "companies",
-          "columnsFrom": [
-            "company_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "media_studio_direct_creations_file_id_issue_attachments_id_fk": {
-          "name": "media_studio_direct_creations_file_id_issue_attachments_id_fk",
-          "tableFrom": "media_studio_direct_creations",
-          "tableTo": "issue_attachments",
-          "columnsFrom": [
-            "file_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "media_studio_direct_creations_cost_event_id_cost_events_id_fk": {
-          "name": "media_studio_direct_creations_cost_event_id_cost_events_id_fk",
-          "tableFrom": "media_studio_direct_creations",
-          "tableTo": "cost_events",
-          "columnsFrom": [
-            "cost_event_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
     "public.morning_report_outbox": {
       "name": "morning_report_outbox",
       "schema": "",
@@ -35951,6 +35796,61 @@
           "primaryKey": false,
           "notNull": false
         },
+        "storyboard_status": {
+          "name": "storyboard_status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pending'"
+        },
+        "still_provider": {
+          "name": "still_provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "still_object_key": {
+          "name": "still_object_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "still_content_type": {
+          "name": "still_content_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "still_byte_size": {
+          "name": "still_byte_size",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "still_sha256": {
+          "name": "still_sha256",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "still_generated_at": {
+          "name": "still_generated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "still_estimated_cost_cents": {
+          "name": "still_estimated_cost_cents",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "still_actual_cost_cents": {
+          "name": "still_actual_cost_cents",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -36014,6 +35914,27 @@
           "columns": [
             {
               "expression": "scene_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "video_shots_storyline_storyboard_status_idx": {
+          "name": "video_shots_storyline_storyboard_status_idx",
+          "columns": [
+            {
+              "expression": "storyline_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "storyboard_status",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -36089,6 +36010,10 @@
         "video_shots_transition_in_check": {
           "name": "video_shots_transition_in_check",
           "value": "\"video_shots\".\"transition_in\" IS NULL OR \"video_shots\".\"transition_in\" IN ('cut', 'fade', 'dissolve')"
+        },
+        "video_shots_storyboard_status_check": {
+          "name": "video_shots_storyboard_status_check",
+          "value": "\"video_shots\".\"storyboard_status\" IN ('pending', 'approved', 'dropped')"
         }
       },
       "isRLSEnabled": false

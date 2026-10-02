@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentInstructionsRevisions, agents, approvalComments, approvals, personaPosts } from "@paperclipai/db";
 import { hireMonthlySpendingLimitCentsFromPayload, normalizeLaneAProviderRouting, parseAgentLimits } from "@paperclipai/shared";
@@ -363,6 +363,55 @@ export function approvalService(db: Db) {
             sql`${approvals.payload} ->> 'workspaceId' = ${workspaceId}`,
           ),
         );
+      return rows[0] ?? null;
+    },
+
+    /**
+     * DUR-4317/DUR-4320: the storyline's own currently-pending (or
+     * revision-requested) kind:"video_render" threshold card, if any --
+     * startRender checks this before filing a new one, same one-open-card-
+     * per-target dedup the hire/merge/deploy/feature-launch finders above
+     * already do.
+     */
+    findOpenVideoRenderApproval: async (companyId: string, storylineId: string) => {
+      const rows = await db
+        .select()
+        .from(approvals)
+        .where(
+          and(
+            eq(approvals.companyId, companyId),
+            eq(approvals.type, "request_board_approval"),
+            inArray(approvals.status, resolvableStatuses),
+            sql`${approvals.payload} ->> 'kind' = 'video_render'`,
+            sql`${approvals.payload} ->> 'storylineId' = ${storylineId}`,
+          ),
+        );
+      return rows[0] ?? null;
+    },
+
+    /**
+     * An approved kind:"video_render" card for this exact storyline AND
+     * estimate -- matched on the stamped estimatedTotalCents, not just the
+     * storylineId, so an approval filed against an older (smaller or
+     * larger) estimate can never silently clear a render whose current cost
+     * has since changed (shots added/removed/edited after the card was
+     * decided). A changed estimate requires a fresh approval.
+     */
+    findApprovedVideoRenderApproval: async (companyId: string, storylineId: string, estimatedTotalCents: number) => {
+      const rows = await db
+        .select()
+        .from(approvals)
+        .where(
+          and(
+            eq(approvals.companyId, companyId),
+            eq(approvals.type, "request_board_approval"),
+            eq(approvals.status, "approved"),
+            sql`${approvals.payload} ->> 'kind' = 'video_render'`,
+            sql`${approvals.payload} ->> 'storylineId' = ${storylineId}`,
+            sql`(${approvals.payload} ->> 'estimatedTotalCents')::int = ${estimatedTotalCents}`,
+          ),
+        )
+        .orderBy(desc(approvals.decidedAt));
       return rows[0] ?? null;
     },
 
