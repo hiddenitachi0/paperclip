@@ -888,6 +888,7 @@ describe.sequential("plugin tool and bridge authz", () => {
         runId: null,
         companyId: null,
         canManageCompany: false,
+        isInstanceAdmin: true,
       },
       renderEnvironment: null,
     });
@@ -926,6 +927,7 @@ describe.sequential("plugin tool and bridge authz", () => {
         runId: runA,
         companyId: companyA,
         canManageCompany: false,
+        isInstanceAdmin: false,
       },
       renderEnvironment: null,
     });
@@ -1017,6 +1019,7 @@ describe.sequential("plugin tool and bridge authz", () => {
         runId: runA,
         companyId: companyA,
         canManageCompany: false,
+        isInstanceAdmin: false,
       },
       renderEnvironment: null,
     });
@@ -1047,6 +1050,7 @@ describe.sequential("plugin tool and bridge authz", () => {
         runId: runA,
         companyId: companyA,
         canManageCompany: false,
+        isInstanceAdmin: false,
       },
       renderEnvironment: null,
     });
