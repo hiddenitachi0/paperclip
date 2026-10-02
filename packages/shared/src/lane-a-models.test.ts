@@ -86,6 +86,17 @@ describe("lane A provider catalogue", () => {
     expect(laneAProviderModelCostCents("local", "llama3.1", 1_000_000, 0)).toEqual({ costCents: 0, priced: true });
   });
 
+  // DUR-4353: this OpenRouter model id had no catalogue entry, so a quick
+  // agent pointed at it (a real production setup, 2 Oct 2026) recorded every
+  // call's cost as 0 — real spend read as free. Freeform acceptance (above)
+  // and a priced catalogue entry are independent; this pins that a free-form
+  // id Paperclip actually knows the price of is priced, not just accepted.
+  it("prices a known free-form OpenRouter model instead of recording its spend as 0", () => {
+    expect(
+      laneAProviderModelCostCents("openrouter", "mistralai/mistral-small-3.2-24b-instruct", 1_000_000, 1_000_000),
+    ).toEqual({ costCents: 28, priced: true }); // 7.5 + 20 cents, rounded to the nearest whole cent
+  });
+
   it("accepts a model only for the provider it belongs to; free-form only for OpenRouter and local", () => {
     expect(laneAModelIssueForProvider("anthropic", "claude-sonnet-5")).toBeNull();
     expect(laneAModelIssueForProvider(null, "claude-sonnet-5")).toBeNull();
