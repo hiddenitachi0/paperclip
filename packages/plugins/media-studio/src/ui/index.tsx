@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { PluginCompanySettingsPageProps, PluginDetailTabProps, PluginPageProps, PluginSidebarProps } from "@paperclipai/plugin-sdk/ui";
+import type { PluginCompanySettingsPageProps, PluginDetailTabProps, PluginHostContext, PluginPageProps, PluginSidebarProps } from "@paperclipai/plugin-sdk/ui";
 import { usePluginAction, useHostNavigation, PluginConfigForm } from "@paperclipai/plugin-sdk/ui";
 import { MediaStudioEditTab } from "./edit-tab.js";
 
@@ -2162,9 +2162,15 @@ const tabBtnInactive: React.CSSProperties = { ...tabBtn, color: "#495057" };
  * resize, adjust, add text, AI edits; DUR-4063) and Looks (saved styles,
  * model + LoRA presets, default and automatic looks).
  */
+function initialEditFileIdFromLocation(): string | null {
+  if (typeof window === "undefined") return null;
+  return new URLSearchParams(window.location.search).get("fileId");
+}
+
 export function MediaStudioPage({ context }: PluginPageProps) {
   const nav = useHostNavigation();
   const [tab, setTab] = useState<MediaStudioTabKey>(initialTabFromLocation);
+  const [editFileId, setEditFileId] = useState<string | null>(initialEditFileIdFromLocation);
   // Settings is for owners/admins only; everyone else never sees the tab, and a
   // link straight to it shows the Create tab instead.
   const checkSettingsAccess = usePluginAction(ACTION_SETTINGS_ACCESS);
@@ -2180,9 +2186,12 @@ export function MediaStudioPage({ context }: PluginPageProps) {
   const showSettings = canManageSettings === true;
   const activeTab: MediaStudioTabKey = tab === "settings" && canManageSettings === false ? "create" : tab;
 
-  const selectTab = (next: MediaStudioTabKey) => {
+  const selectTab = (next: MediaStudioTabKey, options?: { fileId?: string }) => {
     setTab(next);
-    nav.navigate(`/${MAIN_PAGE_ROUTE}?tab=${next}`, { replace: true });
+    const fileId = options?.fileId ?? null;
+    setEditFileId(fileId);
+    const query = fileId ? `?tab=${next}&fileId=${fileId}` : `?tab=${next}`;
+    nav.navigate(`/${MAIN_PAGE_ROUTE}${query}`, { replace: true });
   };
 
   return (
@@ -2213,11 +2222,11 @@ export function MediaStudioPage({ context }: PluginPageProps) {
         ) : null}
       </div>
       {activeTab === "create" ? (
-        <MediaStudioCreateTab />
+        <MediaStudioCreateTab context={context} onEditFile={(fileId) => selectTab("edit", { fileId })} />
       ) : activeTab === "settings" ? (
         showSettings ? <PluginConfigForm pluginId={PLUGIN_ID} /> : null
       ) : activeTab === "edit" ? (
-        <MediaStudioEditTab context={context} />
+        <MediaStudioEditTab context={context} initialFileId={editFileId} />
       ) : activeTab === "storylines" ? (
         <MediaStudioStorylinesPage context={context} />
       ) : (
@@ -2227,18 +2236,638 @@ export function MediaStudioPage({ context }: PluginPageProps) {
   );
 }
 
+// ─── Create tab (DUR-4330, frontend half of DUR-4329) ──────────────────────
+//
+// Make a picture, video, or audio clip directly from the board, without
+// asking an agent: write a prompt (optionally ask Claude to rewrite it
+// first), see the cost up front, make it, then save/use/download/edit the
+// result. Talks directly to the server's /media-studio/direct routes (plain
+// REST, backed by server/src/services/media-studio-direct.ts), the same
+// pattern the Storylines section below uses for /video-storylines.
+//
+// v1 ships Fal only (see MEDIA_STUDIO_DIRECT_PROVIDERS in
+// packages/shared/src/media-studio-direct.ts) and its request schemas are
+// `.strict()` with no reference-picture or size/aspect field yet, so this UI
+// does not offer those two controls -- they would silently 400. Picking a
+// look here only pre-fills the model field client-side; it is not sent to
+// the server. A follow-up is tracked for backend reference-picture support.
+
+const DIRECT_KINDS = ["picture", "video", "audio"] as const;
+type DirectKind = (typeof DIRECT_KINDS)[number];
+const DIRECT_KIND_LABELS: Record<DirectKind, string> = { picture: "Picture", video: "Video", audio: "Audio" };
+/** v1 ships Fal only; kept as a value (not a picker) so a second provider is a one-line change later. */
+const DIRECT_PROVIDER = "fal";
+const DIRECT_PROVIDER_LABEL = "Fal";
+const DIRECT_AUDIO_MODES = ["music", "speech"] as const;
+type DirectAudioMode = (typeof DIRECT_AUDIO_MODES)[number];
+const DIRECT_PROMPT_MAX_LENGTH = 2_000;
+const DIRECT_VIDEO_MIN_DURATION = 1;
+const DIRECT_VIDEO_MAX_DURATION = 10;
+const DIRECT_VIDEO_DEFAULT_DURATION = 5;
+const DIRECT_AUDIO_MIN_DURATION = 1;
+const DIRECT_AUDIO_MAX_DURATION = 30;
+const DIRECT_AUDIO_DEFAULT_DURATION = 8;
+const DIRECT_MAX_VARIANTS = 4;
+
+type DirectResult = {
+  fileId: string;
+  contentPath: string;
+  downloadPath: string;
+  contentType: string;
+  costCents: number;
+  provider: string;
+  model: string;
+};
+
+type DirectHistoryEntry = {
+  id: string;
+  kind: DirectKind | "rewrite_prompt";
+  provider: string;
+  model: string;
+  prompt: string | null;
+  costCents: number;
+  fileId: string | null;
+  contentPath: string | null;
+  createdAt: string;
+};
+
+/** Thrown by directFetchJson on a non-2xx response, carrying the server's machine-readable `details` (e.g. `{ reason: "company_budget", ... }`) alongside the human message. */
+class DirectRequestError extends Error {
+  details: Record<string, unknown> | null;
+  constructor(message: string, details: Record<string, unknown> | null) {
+    super(message);
+    this.details = details;
+  }
+}
+
+async function directFetchJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(path, {
+    credentials: "include",
+    headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
+    ...init,
+  });
+  const text = await res.text();
+  let body: unknown = null;
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = null;
+    }
+  }
+  if (!res.ok) {
+    const record = body && typeof body === "object" ? (body as Record<string, unknown>) : null;
+    const message = (record && typeof record.error === "string" ? record.error : text) || `Request failed: ${res.status}`;
+    const details = record && typeof record.details === "object" && record.details ? (record.details as Record<string, unknown>) : null;
+    throw new DirectRequestError(message, details);
+  }
+  return (res.status === 204 ? (undefined as T) : (body as T));
+}
+
+/** Plain-language text for the budget/cap/rate-limit rejections media-studio-direct.ts can return (see its reason values). Falls back to the server's own message for anything unrecognized. */
+function directErrorMessage(err: DirectRequestError): string {
+  const reason = err.details?.reason;
+  const cents = (key: string) => formatMoney(typeof err.details?.[key] === "number" ? (err.details![key] as number) : 0);
+  if (reason === "company_budget") {
+    return `Making this would go over the company's monthly budget (already spent ${cents("spentMonthlyCents")} of ${cents("budgetMonthlyCents")}). Ask an owner or admin to raise the budget, or try something smaller.`;
+  }
+  if (reason === "direct_create_cap") {
+    return `Making this would go over Media Studio's monthly limit for making things directly here (already spent ${cents("spentCents")} of ${cents("capCents")}).`;
+  }
+  if (reason === "daily_call_cap") {
+    return "Too many requests today. Try again tomorrow.";
+  }
+  if (reason === "cap_override_forbidden") {
+    return "Only a company owner or admin can go over that limit.";
+  }
+  return err.message;
+}
+
 /**
- * The Create tab: for now this points people at where picture-making already
- * happens (a task's Media Studio tab, or asking an agent). A standalone
- * "make a picture here" flow is future work, tracked separately.
+ * Mirrors useCompanyRole's rule (ui/src/hooks/useCompanyRole.ts) for this
+ * standalone plugin bundle, which cannot import that hook: the company
+ * owner, admins, and operators may spend here; a viewer may only look. This
+ * is UX only -- the server routes are the real gate (assertBoard +
+ * assertCompanyAccess, see media-studio-direct.ts).
  */
-function MediaStudioCreateTab() {
+function useDirectCreateAccess(context: PluginHostContext): { ready: boolean; canSpend: boolean; isAdmin: boolean } {
+  const [state, setState] = useState<{ ready: boolean; canSpend: boolean; isAdmin: boolean }>({
+    ready: false,
+    canSpend: false,
+    isAdmin: false,
+  });
+  const companyId = context.companyId;
+  const userId = context.userId;
+  useEffect(() => {
+    let cancelled = false;
+    if (!userId) {
+      // No sign-in on this Paperclip: the local board runs the whole box.
+      setState({ ready: true, canSpend: true, isAdmin: true });
+      return;
+    }
+    hostFetchJson<{ isInstanceAdmin?: boolean; memberships?: Array<{ companyId: string; membershipRole: string | null; status: string }> }>(
+      "/api/cli-auth/me",
+    )
+      .then((res) => {
+        if (cancelled) return;
+        const membership = companyId ? (res.memberships ?? []).find((m) => m.companyId === companyId && m.status === "active") : undefined;
+        const role = membership?.membershipRole ?? null;
+        const isAdmin = res.isInstanceAdmin === true || role === "owner" || role === "admin";
+        setState({ ready: true, canSpend: isAdmin || role === "operator", isAdmin });
+      })
+      .catch(() => {
+        if (!cancelled) setState({ ready: true, canSpend: false, isAdmin: false });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [companyId, userId]);
+  return state;
+}
+
+function DirectHistoryList({ history, error }: { history: DirectHistoryEntry[] | null; error: string | null }) {
   return (
-    <div style={card}>
-      <p style={{ fontSize: 13, margin: 0 }}>
-        To make a picture right now, open a task and use its Media Studio tab, or just ask an agent
-        (for example, "make me a picture of..."). A way to make pictures directly from this page is coming soon.
-      </p>
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ fontWeight: 600, fontSize: 13 }}>Your recent creations</div>
+      {error ? (
+        <div style={errorBox}>{error}</div>
+      ) : history === null ? (
+        <div style={{ opacity: 0.7, fontSize: 13 }}>Loading…</div>
+      ) : history.length === 0 ? (
+        <div style={{ opacity: 0.7, fontSize: 13 }}>Nothing made yet.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {history.map((entry) => (
+            <div key={entry.id} style={{ display: "flex", gap: 10, alignItems: "center", fontSize: 12, borderBottom: "1px solid rgba(128,128,128,0.15)", paddingBottom: 6 }}>
+              {entry.contentPath && entry.kind === "picture" ? (
+                <img src={entry.contentPath} alt="" style={thumb} />
+              ) : (
+                <div style={{ width: 72, height: 72, borderRadius: 6, background: "rgba(128,128,128,0.12)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "#868e96" }}>
+                  {entry.kind === "rewrite_prompt" ? "Rewrite" : DIRECT_KIND_LABELS[entry.kind as DirectKind] ?? entry.kind}
+                </div>
+              )}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{entry.prompt ?? "—"}</div>
+                <div style={{ color: "#868e96" }}>
+                  {formatMoney(entry.costCents)} · {new Date(entry.createdAt).toLocaleString()}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DirectCreatePanel(props: {
+  companyId: string;
+  kind: DirectKind;
+  looks: Look[];
+  canManageLooks: boolean;
+  isAdmin: boolean;
+  onEditFile: (fileId: string) => void;
+  onGenerated: () => void;
+}) {
+  const { companyId, kind, looks, canManageLooks, isAdmin, onEditFile, onGenerated } = props;
+  const saveLook = usePluginAction(ACTION_LOOKS_SAVE);
+
+  const [prompt, setPrompt] = useState("");
+  const [lookId, setLookId] = useState("");
+  const [model, setModel] = useState("");
+  const [durationSeconds, setDurationSeconds] = useState(kind === "video" ? DIRECT_VIDEO_DEFAULT_DURATION : DIRECT_AUDIO_DEFAULT_DURATION);
+  const [mode, setMode] = useState<DirectAudioMode>("music");
+  const [voice, setVoice] = useState("");
+  const [variants, setVariants] = useState(1);
+
+  const [estimateCents, setEstimateCents] = useState<number | null>(null);
+  const [estimateError, setEstimateError] = useState<string | null>(null);
+
+  const [rewriting, setRewriting] = useState(false);
+  const [rewriteSuggestion, setRewriteSuggestion] = useState<string | null>(null);
+  const [rewriteError, setRewriteError] = useState<string | null>(null);
+
+  const [phase, setPhase] = useState<"idle" | "generating" | "done" | "error">("idle");
+  const [results, setResults] = useState<DirectResult[]>([]);
+  const [error, setError] = useState<DirectRequestError | Error | null>(null);
+  const [overrideCents, setOverrideCents] = useState("");
+  const [lookTargetByFileId, setLookTargetByFileId] = useState<Record<string, string>>({});
+  const [savingLookRefFor, setSavingLookRefFor] = useState<string | null>(null);
+
+  // Picking a look only pre-fills the model field here (client-side
+  // convenience) -- the direct-create routes have no lookId/referenceFileIds
+  // field, so nothing about the look is sent to the server.
+  useEffect(() => {
+    if (!lookId) return;
+    const look = looks.find((l) => l.id === lookId);
+    if (look?.model) setModel(look.model);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lookId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setEstimateError(null);
+    const body: Record<string, unknown> = { kind, provider: DIRECT_PROVIDER };
+    if (kind !== "picture") body.durationSeconds = durationSeconds;
+    directFetchJson<{ estimatedCostCents: number }>(`/api/companies/${companyId}/media-studio/direct/estimate`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    })
+      .then((res) => {
+        if (!cancelled) setEstimateCents(res.estimatedCostCents);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setEstimateCents(null);
+          setEstimateError(e instanceof Error ? e.message : String(e));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [companyId, kind, durationSeconds]);
+
+  const onHelpWrite = async () => {
+    if (!prompt.trim()) {
+      setRewriteError("Write something first, then ask for help.");
+      return;
+    }
+    setRewriting(true);
+    setRewriteError(null);
+    try {
+      const res = await directFetchJson<{ rewritten: string }>(`/api/companies/${companyId}/media-studio/direct/rewrite-prompt`, {
+        method: "POST",
+        body: JSON.stringify({ prompt: prompt.trim(), kind }),
+      });
+      setRewriteSuggestion(res.rewritten);
+    } catch (e) {
+      setRewriteError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRewriting(false);
+    }
+  };
+
+  const buildBody = (overrideValue?: number) => {
+    const body: Record<string, unknown> = { prompt: prompt.trim(), provider: DIRECT_PROVIDER };
+    if (model.trim()) body.model = model.trim();
+    if (kind === "video" || kind === "audio") body.durationSeconds = durationSeconds;
+    if (kind === "audio") {
+      body.mode = mode;
+      if (voice.trim()) body.voice = voice.trim();
+    }
+    if (overrideValue !== undefined) body.confirmBudgetCapCents = overrideValue;
+    return body;
+  };
+
+  const onGenerate = async (overrideValue?: number) => {
+    if (!prompt.trim()) {
+      setError(new Error("Describe what to make first."));
+      return;
+    }
+    setPhase("generating");
+    setError(null);
+    let madeAny = false;
+    try {
+      for (let i = 0; i < variants; i += 1) {
+        const result = await directFetchJson<DirectResult>(`/api/companies/${companyId}/media-studio/direct/${kind}`, {
+          method: "POST",
+          body: JSON.stringify(buildBody(overrideValue)),
+        });
+        madeAny = true;
+        setResults((prev) => [...prev, result]);
+      }
+      setPhase("done");
+      setOverrideCents("");
+      onGenerated();
+    } catch (e) {
+      setPhase(madeAny ? "done" : "error");
+      setError(e instanceof Error ? e : new Error(String(e)));
+      if (madeAny) onGenerated();
+    }
+  };
+
+  const onUseAsLookReference = async (result: DirectResult) => {
+    const targetId = lookTargetByFileId[result.fileId];
+    const look = looks.find((l) => l.id === targetId);
+    if (!look) return;
+    setSavingLookRefFor(result.fileId);
+    try {
+      const draft = lookToDraft(look);
+      const nextRefs = draft.referenceFileIds.includes(result.fileId) ? draft.referenceFileIds : [...draft.referenceFileIds, result.fileId];
+      await saveLook({ ...draftToSaveParams(draft), referenceFileIds: nextRefs });
+    } catch (e) {
+      setError(e instanceof Error ? e : new Error(String(e)));
+    } finally {
+      setSavingLookRefFor(null);
+    }
+  };
+
+  const isCapError = error instanceof DirectRequestError && error.details?.reason === "direct_create_cap";
+  const totalCostCents = results.reduce((sum, r) => sum + r.costCents, 0);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={card}>
+        <label style={field}>
+          <span>What should it make?</span>
+          <textarea
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            maxLength={DIRECT_PROMPT_MAX_LENGTH}
+            rows={3}
+            placeholder={`Describe the ${kind} to make…`}
+            style={{ ...input, resize: "vertical", fontFamily: "inherit" }}
+          />
+        </label>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button type="button" style={ghostBtn} onClick={onHelpWrite} disabled={rewriting}>
+            {rewriting ? "Thinking…" : "Help me write this"}
+          </button>
+        </div>
+        {rewriteError ? <div style={errorBox}>{rewriteError}</div> : null}
+        {rewriteSuggestion ? (
+          <div style={{ ...card, background: "rgba(25,113,194,0.06)" }}>
+            <div style={{ fontSize: 12, color: "#868e96" }}>Suggested wording:</div>
+            <div style={{ fontSize: 13 }}>{rewriteSuggestion}</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                type="button"
+                style={secondaryBtn}
+                onClick={() => {
+                  setPrompt(rewriteSuggestion);
+                  setRewriteSuggestion(null);
+                }}
+              >
+                Use this
+              </button>
+              <button type="button" style={ghostBtn} onClick={() => setRewriteSuggestion(null)}>
+                Keep mine
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        <label style={field}>
+          <span>Look (optional)</span>
+          <select value={lookId} onChange={(e) => setLookId(e.target.value)} style={input}>
+            <option value="">None</option>
+            {looks.map((look) => (
+              <option key={look.id} value={look.id}>
+                {look.name}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+          <label style={field}>
+            <span>Service</span>
+            <select value={DIRECT_PROVIDER} disabled style={input}>
+              <option value={DIRECT_PROVIDER}>{DIRECT_PROVIDER_LABEL}</option>
+            </select>
+          </label>
+          <label style={field}>
+            <span>Model (optional)</span>
+            <input value={model} onChange={(e) => setModel(e.target.value)} placeholder="Leave empty to use the default" style={input} />
+          </label>
+          {kind === "video" || kind === "audio" ? (
+            <label style={field}>
+              <span>Length (seconds)</span>
+              <input
+                type="number"
+                min={kind === "video" ? DIRECT_VIDEO_MIN_DURATION : DIRECT_AUDIO_MIN_DURATION}
+                max={kind === "video" ? DIRECT_VIDEO_MAX_DURATION : DIRECT_AUDIO_MAX_DURATION}
+                value={durationSeconds}
+                onChange={(e) => setDurationSeconds(Number(e.target.value))}
+                style={input}
+              />
+            </label>
+          ) : null}
+          {kind === "audio" ? (
+            <>
+              <label style={field}>
+                <span>Kind of audio</span>
+                <select value={mode} onChange={(e) => setMode(e.target.value as DirectAudioMode)} style={input}>
+                  {DIRECT_AUDIO_MODES.map((m) => (
+                    <option key={m} value={m}>
+                      {m === "music" ? "Music" : "Speech"}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {mode === "speech" ? (
+                <label style={field}>
+                  <span>Voice (optional)</span>
+                  <input value={voice} onChange={(e) => setVoice(e.target.value)} placeholder="Leave empty to use the default" style={input} />
+                </label>
+              ) : null}
+            </>
+          ) : null}
+          <label style={field}>
+            <span>How many to make</span>
+            <select value={variants} onChange={(e) => setVariants(Number(e.target.value))} style={input}>
+              {Array.from({ length: DIRECT_MAX_VARIANTS }, (_, i) => i + 1).map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        <div style={{ fontSize: 13 }}>
+          {estimateError ? (
+            <span style={{ color: "#a61e4d" }}>Could not estimate the cost: {estimateError}</span>
+          ) : estimateCents === null ? (
+            "Estimating the cost…"
+          ) : (
+            <>
+              Expected cost: <strong>{formatMoney(estimateCents * variants)}</strong>
+              {variants > 1 ? ` (${formatMoney(estimateCents)} each × ${variants})` : ""}
+            </>
+          )}
+        </div>
+
+        <div>
+          <button type="button" style={primaryBtn} onClick={() => onGenerate()} disabled={phase === "generating"}>
+            {phase === "generating" ? "Making…" : `Make ${kind}`}
+          </button>
+        </div>
+
+        {error ? (
+          <div style={errorBox}>
+            {error instanceof DirectRequestError ? directErrorMessage(error) : error.message}
+            {isCapError && isAdmin ? (
+              <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center" }}>
+                <input
+                  type="number"
+                  min={0}
+                  placeholder="Override cap (cents)"
+                  value={overrideCents}
+                  onChange={(e) => setOverrideCents(e.target.value)}
+                  style={{ ...input, width: 160 }}
+                />
+                <button
+                  type="button"
+                  style={secondaryBtn}
+                  disabled={!overrideCents.trim()}
+                  onClick={() => onGenerate(Number(overrideCents))}
+                >
+                  Try again with this limit
+                </button>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+
+      {results.length > 0 ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ fontWeight: 600, fontSize: 13 }}>
+            Made {results.length} {results.length === 1 ? kind : `${kind}s`} · Total cost: {formatMoney(totalCostCents)}
+          </div>
+          {results.map((result, i) => (
+            <div key={`${result.fileId}-${i}`} style={card}>
+              {kind === "picture" ? (
+                <img src={result.contentPath} alt="Generated" style={{ maxWidth: 260, borderRadius: 8 }} />
+              ) : kind === "video" ? (
+                <video src={result.contentPath} controls style={{ maxWidth: 320, borderRadius: 8 }} />
+              ) : (
+                <audio src={result.contentPath} controls />
+              )}
+              <div style={{ fontSize: 12, color: "#868e96" }}>
+                Cost: {formatMoney(result.costCents)} · Saved to your company files
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                <a href={result.downloadPath} style={{ ...secondaryBtn, textDecoration: "none" }}>
+                  Download
+                </a>
+                {kind === "picture" ? (
+                  <button type="button" style={ghostBtn} onClick={() => onEditFile(result.fileId)}>
+                    Edit
+                  </button>
+                ) : null}
+                {kind === "picture" && canManageLooks && looks.length > 0 ? (
+                  <>
+                    <select
+                      aria-label="Use as a reference picture for a look"
+                      value={lookTargetByFileId[result.fileId] ?? ""}
+                      onChange={(e) => setLookTargetByFileId((prev) => ({ ...prev, [result.fileId]: e.target.value }))}
+                      style={input}
+                    >
+                      <option value="">Use as look reference…</option>
+                      {looks.map((look) => (
+                        <option key={look.id} value={look.id}>
+                          {look.name}
+                        </option>
+                      ))}
+                    </select>
+                    {lookTargetByFileId[result.fileId] ? (
+                      <button
+                        type="button"
+                        style={ghostBtn}
+                        disabled={savingLookRefFor === result.fileId}
+                        onClick={() => onUseAsLookReference(result)}
+                      >
+                        {savingLookRefFor === result.fileId ? "Saving…" : "Save"}
+                      </button>
+                    ) : null}
+                  </>
+                ) : null}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * The Create tab: make a picture, video, or audio clip directly from the
+ * board, without asking an agent (DUR-4330). Builds on DUR-4329's direct
+ * generation routes.
+ */
+function MediaStudioCreateTab({ context, onEditFile }: { context: PluginHostContext; onEditFile: (fileId: string) => void }) {
+  const companyId = context.companyId;
+  const listLooks = usePluginAction(ACTION_LOOKS_LIST);
+  const access = useDirectCreateAccess(context);
+
+  const [kind, setKind] = useState<DirectKind>("picture");
+  const [looks, setLooks] = useState<Look[]>([]);
+  const [canManageLooks, setCanManageLooks] = useState(false);
+  const [history, setHistory] = useState<DirectHistoryEntry[] | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    listLooks({})
+      .then((res) => {
+        if (cancelled) return;
+        const typed = res as LooksResponse;
+        setLooks(typed.looks ?? []);
+        setCanManageLooks(typed.canManage === true);
+      })
+      .catch(() => {
+        /* The create form still works with no looks; the picker just stays empty. */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [listLooks]);
+
+  const refreshHistory = useCallback(() => {
+    if (!companyId) return;
+    directFetchJson<DirectHistoryEntry[]>(`/api/companies/${companyId}/media-studio/direct/history?limit=20`)
+      .then((res) => setHistory(res))
+      .catch((e) => setHistoryError(e instanceof Error ? e.message : String(e)));
+  }, [companyId]);
+
+  useEffect(() => {
+    refreshHistory();
+  }, [refreshHistory]);
+
+  if (!companyId) {
+    return (
+      <div style={card}>
+        <p style={{ fontSize: 13, margin: 0 }}>Open Media Studio from inside a company to make pictures, video, or audio.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div role="tablist" aria-label="What to make" style={{ display: "flex", gap: 6 }}>
+        {DIRECT_KINDS.map((k) => (
+          <button key={k} type="button" role="tab" aria-selected={kind === k} style={kind === k ? tabBtnActive : tabBtnInactive} onClick={() => setKind(k)}>
+            {DIRECT_KIND_LABELS[k]}
+          </button>
+        ))}
+      </div>
+
+      {!access.ready ? (
+        <div style={{ opacity: 0.7, fontSize: 13 }}>Checking your access…</div>
+      ) : !access.canSpend ? (
+        <div style={card}>
+          <p style={{ fontSize: 13, margin: 0 }}>
+            You can look, but not make anything here. Only the company's owner, admins, and operators can make pictures, video,
+            or audio from this tab. Ask one of them, or ask an agent to make it for you instead.
+          </p>
+        </div>
+      ) : (
+        <DirectCreatePanel
+          key={kind}
+          companyId={companyId}
+          kind={kind}
+          looks={looks}
+          canManageLooks={canManageLooks}
+          isAdmin={access.isAdmin}
+          onEditFile={onEditFile}
+          onGenerated={refreshHistory}
+        />
+      )}
+
+      <DirectHistoryList history={history} error={historyError} />
     </div>
   );
 }
