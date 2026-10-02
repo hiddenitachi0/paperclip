@@ -109,6 +109,7 @@ export { heartbeatRuns } from "./heartbeat_runs.js";
 export { heartbeatRunEvents } from "./heartbeat_run_events.js";
 export { heartbeatRunWatchdogDecisions } from "./heartbeat_run_watchdog_decisions.js";
 export { costEvents } from "./cost_events.js";
+export { mediaStudioDirectCreations } from "./media_studio_direct_creations.js";
 export { laneAConversations } from "./lane_a_conversations.js";
 export {
   laneAMessages,

@@ -595,3 +595,15 @@ export const ProjectPicker = createSdkUiComponent<ProjectPickerProps>("ProjectPi
  * Renders Paperclip's native managed routines list for plugin settings pages.
  */
 export const ManagedRoutinesList = createSdkUiComponent<ManagedRoutinesListProps>("ManagedRoutinesList");
+
+/** Props for `PluginConfigForm`. */
+export interface PluginConfigFormProps {
+  /** The plugin's id or key; its saved settings are loaded and saved for you. */
+  pluginId: string;
+}
+
+/**
+ * Renders the host's own settings form for a plugin (the one on the Plugins
+ * settings page), so a plugin can show its settings inside its own page.
+ */
+export const PluginConfigForm = createSdkUiComponent<PluginConfigFormProps>("PluginConfigForm");
