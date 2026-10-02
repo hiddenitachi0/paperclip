@@ -1732,6 +1732,9 @@ const plugin = definePlugin({
       const callParams: Record<string, unknown> = { ...raw, fileId: "editor" };
       delete callParams.tool;
       delete callParams.imageDataUrl;
+      // The host adds companyId to every action call; the Sogni tool schema is
+      // strict and refuses unknown fields, so it must not reach prepareSogniCall.
+      delete callParams.companyId;
       const prepared = prepareSogniCall(def, callParams, { defaultModel });
       if ("error" in prepared) throw new Error(prepared.error);
 
