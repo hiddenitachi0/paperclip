@@ -75,6 +75,7 @@ export {
   AssigneePicker,
   ProjectPicker,
   ManagedRoutinesList,
+  PluginConfigForm,
 } from "./components.js";
 
 export type {
@@ -115,6 +116,7 @@ export type {
   ManagedRoutinesListItem,
   ManagedRoutinesListProject,
   ManagedRoutinesListProps,
+  PluginConfigFormProps,
 } from "./components.js";
 
 // Bridge error and host context types
