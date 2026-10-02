@@ -2173,6 +2173,8 @@ describe("IssueChatThread", () => {
         kind: "suggest_tasks",
       }),
       ["task-1"],
+      undefined,
+      undefined,
     );
 
     act(() => {
@@ -2237,6 +2239,8 @@ describe("IssueChatThread", () => {
         kind: "suggest_tasks",
       }),
       ["root"],
+      undefined,
+      undefined,
     );
 
     act(() => {
@@ -2288,6 +2292,7 @@ describe("IssueChatThread", () => {
         kind: "ask_user_questions",
       }),
       [{ questionId: "scope", optionIds: ["phase-1"] }],
+      undefined,
     );
 
     act(() => {
@@ -2352,6 +2357,7 @@ describe("IssueChatThread", () => {
         kind: "ask_user_questions",
       }),
       [{ questionId: "scope", optionIds: [], otherText: "Phase 1 plus docs" }],
+      undefined,
     );
 
     act(() => {
