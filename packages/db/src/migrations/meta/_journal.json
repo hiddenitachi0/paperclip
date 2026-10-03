@@ -1527,6 +1527,13 @@
       "when": 1791060424189,
       "tag": "0218_cost_events_cache_write",
       "breakpoints": true
+    },
+    {
+      "idx": 219,
+      "version": "7",
+      "when": 1791060691016,
+      "tag": "0219_company_cache_settings",
+      "breakpoints": true
     }
   ]
 }
