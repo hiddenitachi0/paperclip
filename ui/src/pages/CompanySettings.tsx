@@ -12,6 +12,7 @@ import { instanceSettingsApi } from "../api/instanceSettings";
 import { queryKeys } from "../lib/queryKeys";
 import { Button } from "@/components/ui/button";
 import { Link } from "@/lib/router";
+import { CacheSettingsSection } from "../components/CacheSettingsSection";
 import { Settings, CloudUpload, Download, Plug, Upload, Image } from "lucide-react";
 import { CompanyPatternIcon } from "../components/CompanyPatternIcon";
 import { isDefaultSkin, setDefaultSkin } from "../lib/company-branding";
@@ -378,6 +379,8 @@ export function CompanySettings() {
           />
         </div>
       </div>
+
+      <CacheSettingsSection companyId={selectedCompany.id} />
 
       {/* Import / Export */}
       <div className="space-y-4">
