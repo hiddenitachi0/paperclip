@@ -52,6 +52,7 @@ function completionResponse(text: string) {
 function recordingFetch(respond?: (body: Record<string, unknown>) => Response | null) {
   const bodies: Array<Record<string, unknown>> = [];
   const impl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.method === "GET") return new Response("{}"); // local model reachability check (#536)
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
     bodies.push(body);
     return respond?.(body) ?? completionResponse("Hei!");

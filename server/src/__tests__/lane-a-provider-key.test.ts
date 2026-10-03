@@ -315,6 +315,7 @@ describeEmbeddedPostgres("lane A provider key resolution (DUR-3997)", () => {
     process.env.ANTHROPIC_API_KEY = "sk-ant-instance-must-not-be-used";
     const calls: Array<{ url: string; headers: Record<string, string>; body: Record<string, unknown> }> = [];
     const providerFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "GET") return new Response("{}"); // local model reachability check (#536)
       calls.push({
         url: String(input),
         headers: (init?.headers as Record<string, string>) ?? {},
@@ -380,6 +381,7 @@ describeEmbeddedPostgres("lane A provider key resolution (DUR-3997)", () => {
     });
     const bodies: Array<Record<string, unknown>> = [];
     const providerFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "GET") return new Response("{}"); // local model reachability check (#536)
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       bodies.push(body);
       if (Array.isArray(body.tools) && body.tools.length > 0) {
@@ -433,6 +435,7 @@ describeEmbeddedPostgres("lane A provider key resolution (DUR-3997)", () => {
     });
     const bodies: Array<Record<string, unknown>> = [];
     const providerFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "GET") return new Response("{}"); // local model reachability check (#536)
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       bodies.push(body);
       if (Array.isArray(body.tools) && body.tools.length > 0) {
@@ -485,6 +488,7 @@ describeEmbeddedPostgres("lane A provider key resolution (DUR-3997)", () => {
     });
     const bodies: Array<Record<string, unknown>> = [];
     const providerFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "GET") return new Response("{}"); // local model reachability check (#536)
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       bodies.push(body);
       if (Object.hasOwn(body, "reasoning_effort")) {
@@ -527,6 +531,7 @@ describeEmbeddedPostgres("lane A provider key resolution (DUR-3997)", () => {
     });
     const bodies: Array<Record<string, unknown>> = [];
     const providerFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "GET") return new Response("{}"); // local model reachability check (#536)
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       bodies.push(body);
       if (Array.isArray(body.tools) && body.tools.length > 0) {
@@ -574,6 +579,7 @@ describeEmbeddedPostgres("lane A provider key resolution (DUR-3997)", () => {
     });
     const bodies: Array<Record<string, unknown>> = [];
     const providerFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "GET") return new Response("{}"); // local model reachability check (#536)
       bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
       return completionResponse("Hei!");
     }) as unknown as typeof fetch;
@@ -617,6 +623,7 @@ describeEmbeddedPostgres("lane A provider key resolution (DUR-3997)", () => {
     });
     const calls: Array<{ url: string; headers: Record<string, string>; body: Record<string, unknown> }> = [];
     const providerFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "GET") return new Response("{}"); // local model reachability check (#536)
       calls.push({
         url: String(input),
         headers: (init?.headers as Record<string, string>) ?? {},
