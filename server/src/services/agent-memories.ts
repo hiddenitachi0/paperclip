@@ -1,4 +1,4 @@
-import { and, count, desc, eq, inArray, isNull, type SQL } from "drizzle-orm";
+import { and, count, desc, eq, inArray, isNull, ne, type SQL } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentMemories, agents, authUsers, companyMemberships, personas } from "@paperclipai/db";
 import {
@@ -311,6 +311,49 @@ export function agentMemoryService(db: Db) {
       if (deleted.length === 0) throw notFound("That note was not found. It may already have been deleted.");
       await log(owner, actor, "agent_memory.deleted", { memoryId: existing.id, text: preview(existing.text) });
       return deleted[0]!;
+    },
+
+    /**
+     * DUR-4345: replace the owner's 'reaction' notes with `texts` (the reaction
+     * summariser rewrites them wholesale, so a removed reaction cannot linger).
+     * Notes of other sources are never touched. If the notebook would exceed
+     * the cap, the extra reaction notes are dropped rather than evicting
+     * anything a person wrote. Returns how many were written.
+     */
+    async replaceReactionNotes(companyId: string, agentId: string, texts: string[], actor: AgentMemoryActor): Promise<number> {
+      const owner = await resolveOwner(companyId, agentId);
+      const reactionOnly = and(ownerFilter(owner), eq(agentMemories.source, "reaction"))!;
+      const [{ value: others } = { value: 0 }] = await db
+        .select({ value: count() })
+        .from(agentMemories)
+        .where(and(ownerFilter(owner), ne(agentMemories.source, "reaction")));
+      const room = Math.max(0, AGENT_MEMORY_MAX_NOTES - Number(others));
+      const keep = texts.map((t) => checkAgentMemoryText(t)).slice(0, room);
+      const now = new Date();
+      const removed = await db.delete(agentMemories).where(reactionOnly).returning({ id: agentMemories.id });
+      if (keep.length > 0) {
+        await db.insert(agentMemories).values(
+          keep.map((text) => ({
+            companyId,
+            agentId: owner.agentId,
+            personaId: owner.personaId,
+            text,
+            source: "reaction" as const,
+            createdByUserId: null,
+            createdAt: now,
+            updatedAt: now,
+          })),
+        );
+      }
+      if (removed.length > 0 || keep.length > 0) {
+        await log(owner, actor, "agent_memory.added", {
+          source: "reaction",
+          replaced: removed.length,
+          written: keep.length,
+          texts: keep.map(preview),
+        });
+      }
+      return keep.length;
     },
 
     /** Delete every note of this agent's owner ("Clear all"). */

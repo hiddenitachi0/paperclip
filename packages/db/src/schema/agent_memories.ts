@@ -18,7 +18,8 @@ import { personas } from "./personas.js";
  * agent with a persona reads its persona's notes, otherwise its own.
  *
  * `source` is who wrote it: 'agent' (the quick agent's `remember` tool, on a
- * person's request) or 'user' (typed on the agent's page).
+ * person's request), 'user' (typed on the agent's page) or 'reaction' (written
+ * by the reaction summariser, DUR-4345; rewritten wholesale on each run).
  * `created_by_user_id` is the person who asked or typed it, when known.
  *
  * The 500-character limit is checked by the API and again here; the
@@ -41,7 +42,7 @@ export const agentMemories = pgTable(
   (table) => ({
     companyAgentIdx: index("agent_memories_company_agent_idx").on(table.companyId, table.agentId, table.createdAt),
     companyPersonaIdx: index("agent_memories_company_persona_idx").on(table.companyId, table.personaId, table.createdAt),
-    sourceCheck: check("agent_memories_source_check", sql`${table.source} IN ('agent', 'user')`),
+    sourceCheck: check("agent_memories_source_check", sql`${table.source} IN ('agent', 'user', 'reaction')`),
     textLengthCheck: check(
       "agent_memories_text_length_check",
       sql`char_length(${table.text}) BETWEEN 1 AND 500`,
