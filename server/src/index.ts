@@ -54,6 +54,7 @@ import {
   deployCarriedIssuesService,
   deployApprovalFeedbackService,
   mergePrAutomationService,
+  issueOverlapDetectorService,
   agentErrorAlertsService,
   untrackedWriteAlertsService,
   quietModeAlertsService,
@@ -1032,6 +1033,7 @@ export async function startServer(): Promise<StartedServer> {
     const deployCarriedIssues = deployCarriedIssuesService(schedulerDb as any);
     const deployApprovalFeedback = deployApprovalFeedbackService(schedulerDb as any);
     const mergePrAutomation = config.mergePrAutomationEnabled ? mergePrAutomationService(schedulerDb as any) : null;
+    const issueOverlapDetector = issueOverlapDetectorService(schedulerDb as any);
     const agentErrorAlerts = agentErrorAlertsService(schedulerDb as any);
     const marketWatchers = watcherService(schedulerDb as any);
     const morningReports = morningReportService(schedulerDb as any);
@@ -1374,6 +1376,30 @@ export async function startServer(): Promise<StartedServer> {
             }),
         );
       }
+
+      // DUR-4468: warn-only overlap detection between open tasks' workspaces
+      // (same file, same migration number, behind the base branch).
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.issueOverlapDetection, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: issueOverlapDetection",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:issueOverlapDetection",
+          },
+          async () => {
+            const companyRows = await schedulerDb.select({ id: companies.id }).from(companies);
+            for (const company of companyRows) {
+              const result = await issueOverlapDetector.runOverlapDetection(company.id);
+              if (result.opened > 0 || result.commentsPosted > 0) {
+                logger.info({ companyId: company.id, ...result }, "issue overlap detection found new overlaps");
+              }
+            }
+          },
+        ).catch((err) => {
+          logger.error({ err }, "issue overlap detection tick failed");
+        }),
+      );
 
       // DUR-128: an agent left sitting in "error" is invisible until someone
       // happens to look. Raise it as soon as it crosses the stall threshold

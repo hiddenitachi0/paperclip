@@ -166,6 +166,7 @@ import { evaluateFeatureLaunchDoneGate } from "../services/feature-launch-gate.j
 import { evaluateJobApprovalDoneGate } from "../services/job-approval-gate.js";
 import { evaluateBlockedNeedsAskGate } from "../services/blocked-needs-ask-gate.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
+import { issueOverlapDetectorService } from "../services/issue-overlap-detector.js";
 import { feedbackService } from "../services/feedback.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { readAcceptedPlanConfirmationTarget } from "../services/issues.js";
@@ -1336,6 +1337,7 @@ export function issueRoutes(
   const issueApprovalsSvc = issueApprovalService(db);
   const recoveryActionsSvc = issueRecoveryActionService(db);
   const executionWorkspacesSvc = executionWorkspaceServiceDirect(db);
+  const overlapsSvc = issueOverlapDetectorService(db);
   const workProductsSvc = workProductService(db, { rawDb });
   const documentsSvc = documentService(db, { rawDb });
   const documentAnnotationsSvc = documentAnnotationService(db, { rawDb });
@@ -3914,6 +3916,7 @@ export function issueRoutes(
       continuationSummary,
       currentExecutionWorkspace,
       activeRecoveryAction,
+      activeOverlapWarnings,
     ] =
       await Promise.all([
         resolveIssueProjectAndGoal(issue),
@@ -3928,6 +3931,7 @@ export function issueRoutes(
         documentsSvc.getIssueDocumentByKey(issue.id, ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY),
         currentExecutionWorkspacePromise,
         recoveryActionsSvc.getActiveForIssue(issue.companyId, issue.id),
+        overlapsSvc.listActiveWarningsForIssue(issue.companyId, issue.id),
       ]);
     const recoveryActionsByRelationIssue = await relationRecoveryActionMap(
       recoveryActionsSvc,
@@ -4034,7 +4038,28 @@ export function issueRoutes(
         : null,
       planReviewContext,
       currentExecutionWorkspace,
+      // DUR-4468: open overlaps another active task re-confirmed in the last 30 minutes.
+      // Titles are left out on purpose: the identifier is enough to go and look.
+      activeOverlapWarnings: activeOverlapWarnings.map((w) => ({
+        ...w,
+        otherIssue: {
+          id: w.otherIssue.id,
+          identifier: w.otherIssue.identifier,
+          status: w.otherIssue.status,
+          assigneeAgentId: w.otherIssue.assigneeAgentId,
+        },
+      })),
     });
+  });
+
+  router.get("/companies/:companyId/overlaps", companyScopeFromParam(rawDb, assertCompanyAccess), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    if (isTaskBridgeKeyActor(req)) {
+      res.status(403).json({ error: "Task bridge keys cannot use company-wide overlap APIs" });
+      return;
+    }
+    res.json(await overlapsSvc.listOpenOverlaps(companyId));
   });
 
   router.get("/issues/:id", scopeFromIssueParam(), async (req, res) => {
