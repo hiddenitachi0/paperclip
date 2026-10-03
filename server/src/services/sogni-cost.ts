@@ -1,4 +1,6 @@
 import type { Db } from "@paperclipai/db";
+import { and, eq } from "drizzle-orm";
+import { costEvents } from "@paperclipai/db";
 import { costService } from "./costs.js";
 import { logger } from "../middleware/logger.js";
 
@@ -66,7 +68,7 @@ export function sogniCreditsToMicroUsd(credits: number, creditPriceUsd: unknown)
 
 export type SogniCostOutcome =
   | { recorded: true; costMicroUsd: number }
-  | { recorded: false; reason: "no_credits_reported" | "credit_price_not_set" };
+  | { recorded: false; reason: "no_credits_reported" | "credit_price_not_set" | "already_recorded" };
 
 export async function recordSogniCost(
   db: Db,
@@ -78,7 +80,9 @@ export async function recordSogniCost(
     model: string;
     issueId?: string | null;
     heartbeatRunId?: string | null;
+    /** When set, at most one Sogni cost row per (companyId, billingCode) is written, so retries do not double-count. */
     billingCode?: string | null;
+    idempotent?: boolean;
   },
 ): Promise<SogniCostOutcome> {
   if (input.credits === null || !(input.credits > 0)) return { recorded: false, reason: "no_credits_reported" };
@@ -87,6 +91,14 @@ export async function recordSogniCost(
     // Never log keys or bodies; only the fact that pricing is missing.
     logger.warn({ companyId: input.companyId, model: input.model }, "Sogni spend not recorded: Sogni credit price is not set");
     return { recorded: false, reason: "credit_price_not_set" };
+  }
+  if (input.idempotent && input.billingCode) {
+    const existing = await db
+      .select({ id: costEvents.id })
+      .from(costEvents)
+      .where(and(eq(costEvents.companyId, input.companyId), eq(costEvents.provider, "sogni"), eq(costEvents.billingCode, input.billingCode)))
+      .limit(1);
+    if (existing.length > 0) return { recorded: false, reason: "already_recorded" };
   }
   await costService(db).createEvent(input.companyId, {
     agentId: input.agentId,

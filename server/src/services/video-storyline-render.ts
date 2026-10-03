@@ -650,7 +650,9 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
           credits: sogniCredits,
           creditPriceUsd: cfg[SOGNI_CREDIT_PRICE_CONFIG_KEY],
           model: shot.model ?? storyline.model ?? "sogni-video",
-          billingCode: "video_storyline_render",
+          // Per-shot key so a retried tick after a crash does not write a second row.
+          billingCode: `video_storyline_render:${shot.id}`,
+          idempotent: true,
         }).catch((err) => {
           logger.error({ err, shotId: shot.id }, "video-storyline-render: could not record Sogni actual cost");
         });
