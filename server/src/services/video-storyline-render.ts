@@ -16,6 +16,7 @@ import type { MediaJobHandle, MediaJobInput, MediaJobProvider, MediaPollOutcome 
 import { FalVideoProvider, SogniVideoProvider } from "./video-provider-clients.js";
 import { badRequest, conflict, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
+import { recordFalCostEvent } from "./fal-cost-events.js";
 import { getStorageService } from "../storage/index.js";
 import { logActivity } from "./activity-log.js";
 import { pluginRegistryService } from "./plugin-registry.js";
@@ -620,6 +621,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     shot: typeof videoShots.$inferSelect,
     jobId: string,
     result: { url?: string; dataUrl?: string; contentType: string; meta?: Record<string, unknown> },
+    fal: { apiKey: string; model: string } | null = null,
   ) {
     const { buffer, contentType } = await downloadResultBytes(result);
     const stored = await getStorageService().putFile({
@@ -630,7 +632,21 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       body: buffer,
     });
     const estimateForShot = estimateVideoStorylineCostCents([{ durationSeconds: shot.durationSeconds }], storyline.providerId as VideoStorylineProvider);
-    const actualCostCents = estimateForShot.estimatedTotalCents;
+    let actualCostCents = estimateForShot.estimatedTotalCents;
+    // DUR-4455: Fal video is priced per its published unit (usually seconds); Sogni has no Fal price and keeps the static estimate.
+    if (storyline.providerId === "fal" && fal) {
+      const recorded = await recordFalCostEvent(db, safeFetch, {
+        companyId,
+        apiKey: fal.apiKey,
+        agentId: storyline.createdByAgentId,
+        createdByUserId: storyline.createdByAgentId ? null : storyline.createdByUserId,
+        model: fal.model,
+        usage: { seconds: shot.durationSeconds },
+        estimateCents: estimateForShot.estimatedTotalCents,
+        billingCode: "video-storyline-shot",
+      });
+      if (recorded) actualCostCents = recorded.costCents;
+    }
 
     // DUR-4456: on top of the estimate-based budget tracking above (unchanged,
     // since Sogni has no exact USD price), write a real cost_events row when
@@ -761,7 +777,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
           failed += 1;
           continue;
         }
-        await onShotDone(job.companyId, storyline, shot, job.id, outcome.result);
+        await onShotDone(job.companyId, storyline, shot, job.id, outcome.result, { apiKey, model: job.model });
         advanced += 1;
       } catch (err) {
         logger.error({ err, jobId: job.id }, "video-storyline-render: tick could not advance a render job");
