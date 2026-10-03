@@ -17,6 +17,7 @@ import { FalVideoProvider, SogniVideoProvider } from "./video-provider-clients.j
 import { badRequest, conflict, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { recordFalCostEvent } from "./fal-cost-events.js";
+import { recordSogniCost, SOGNI_CREDIT_PRICE_CONFIG_KEY } from "./sogni-cost.js";
 import { getStorageService } from "../storage/index.js";
 import { logActivity } from "./activity-log.js";
 import { pluginRegistryService } from "./plugin-registry.js";
