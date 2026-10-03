@@ -371,13 +371,20 @@ export type LaneAThinkingMode = (typeof LANE_A_THINKING_MODES)[number];
  * model that was never a reasoning model) answers an unrecognised field with
  * a 400, which would turn "turn thinking off" into "the chat stopped
  * working". OpenRouter and a local OpenAI-compatible server (Ollama, LM
- * Studio, llama.cpp, vLLM) are the cases this setting exists for and are both
- * lenient (OpenRouter drops a parameter a model does not support; a local
+ * Studio, llama.cpp, vLLM) are the cases this setting exists for. A local
  * server is the operator's own and this is exactly the field the qwen3 case
- * needs). OpenAI's own reasoning models (o-series, gpt-5) already take this
- * field for their effort level, so "off" maps onto it too. Google's
- * OpenAI-compatible shim is not on this list: unlike OpenRouter it is not
- * known to tolerate an extra field, so nothing is sent there until that is
+ * needs. OpenRouter is NOT reliably lenient about it, despite earlier belief
+ * here: DUR-4391 (3 Oct) found DeepInfra's Mistral Small has no reasoning
+ * parameter at all and OpenRouter answered 404 "No endpoints found that can
+ * handle the requested parameters" rather than silently dropping it. This
+ * function still returns true for every OpenRouter model -- it is still an
+ * allow-list, just a wide one -- and the actual safety net is the call-site
+ * retry in lane-a.ts's completeRound()/callTransformModel(), which drops
+ * `reasoning_effort` (before temperature, and well before ever blaming tools)
+ * on exactly that error. OpenAI's own reasoning models (o-series, gpt-5)
+ * already take this field for their effort level, so "off" maps onto it too.
+ * Google's OpenAI-compatible shim is not on this list: unlike OpenRouter it is
+ * not known to tolerate an extra field, so nothing is sent there until that is
  * checked. Anthropic never reaches this function (extended thinking is a
  * different, opt-in wire shape it does not use); see laneAThinkingForCall.
  */
