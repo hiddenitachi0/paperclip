@@ -311,9 +311,10 @@ d("Media Studio Create tab direct generation (DUR-4329)", () => {
       expect(result.seed).toBe(42);
       expect(result.fileId).toBeTruthy();
       expect(result.contentPath).toBe(`/api/attachments/${result.fileId}/content`);
-      // Exactly one outbound call: the picture came back as a data URL, so
-      // there is no second fetch for the image bytes.
-      expect(mockedExecute).toHaveBeenCalledTimes(1);
+      // Two outbound calls: the generation (picture came back as a data URL,
+      // so no image-bytes fetch) plus Fal's pricing lookup, which here gets no
+      // answer and so falls back to the estimate (DUR-4455).
+      expect(mockedExecute).toHaveBeenCalledTimes(2);
 
       const [creationRow] = await db
         .select()
@@ -331,6 +332,62 @@ d("Media Studio Create tab direct generation (DUR-4329)", () => {
 
       const [companyRow] = await db.select().from(companies).where(eq(companies.id, companyId));
       expect(companyRow.spentMonthlyCents).toBe(MEDIA_STUDIO_DIRECT_PICTURE_COST_CENTS.fal);
+    });
+  });
+
+  describe("actual Fal cost (DUR-4455)", () => {
+    it("replaces the reservation estimate with the per-megapixel actual priced from Fal's published price", async () => {
+      const companyId = await seedCompany({ budgetMonthlyCents: 100_000 });
+      const secretId = await seedFalSecret(companyId);
+      await setMediaStudioConfig({ falKeySecretRef: secretId });
+
+      mockedExecute
+        .mockResolvedValueOnce(
+          fakeFalResponse({ images: [{ url: "data:image/jpeg;base64,Zm9vYmFy", content_type: "image/jpeg", width: 1024, height: 768 }], seed: 7 }),
+        )
+        .mockResolvedValueOnce(
+          fakeFalResponse({ prices: [{ endpoint_id: "fal-ai/flux/schnell", unit_price: 0.003, unit: "megapixels", currency: "USD" }] }),
+        );
+
+      const result = await mediaStudioDirectService(db).createPicture(
+        companyId,
+        { userId: "owner-user", isCompanyAdmin: true },
+        { prompt: "a friendly robot", provider: "fal" },
+      );
+
+      // 1024*768 = 0.786432 MP * $0.003 = $0.002359 -> 2359 micro-USD, 1 whole cent in the legacy column.
+      expect(result.costCents).toBe(1);
+      const [creationRow] = await db.select().from(mediaStudioDirectCreations).where(eq(mediaStudioDirectCreations.fileId, result.fileId));
+      const [event] = await db.select().from(costEvents).where(eq(costEvents.id, creationRow!.costEventId!));
+      expect(event.costMicroUsd).toBe(2359);
+      expect(event.costCents).toBe(1);
+      expect(event.costSource).toBe("estimate");
+      // Still exactly one cost event for this job: the estimate was replaced, not added to.
+      const events = await db.select().from(costEvents).where(eq(costEvents.companyId, companyId));
+      expect(events).toHaveLength(1);
+      const [companyRow] = await db.select().from(companies).where(eq(companies.id, companyId));
+      expect(companyRow.spentMonthlyCents).toBe(1);
+      // The Fal key never lands in a cost row.
+      expect(JSON.stringify(events)).not.toContain("fal-test");
+    });
+
+    it("keeps the estimate (cost_source estimate) when Fal's price cannot be fetched", async () => {
+      const companyId = await seedCompany({ budgetMonthlyCents: 100_000 });
+      const secretId = await seedFalSecret(companyId);
+      await setMediaStudioConfig({ falKeySecretRef: secretId });
+      mockedExecute
+        .mockResolvedValueOnce(fakeFalResponse({ images: [{ url: "data:image/jpeg;base64,Zm9vYmFy", content_type: "image/jpeg" }] }))
+        .mockResolvedValueOnce({ status: 500, statusText: "err", headers: {}, body: "", bodyBytes: Buffer.from("") });
+      const result = await mediaStudioDirectService(db).createPicture(
+        companyId,
+        { userId: "owner-user", isCompanyAdmin: true },
+        { prompt: "x", provider: "fal" },
+      );
+      const [creationRow] = await db.select().from(mediaStudioDirectCreations).where(eq(mediaStudioDirectCreations.fileId, result.fileId));
+      const [event] = await db.select().from(costEvents).where(eq(costEvents.id, creationRow!.costEventId!));
+      expect(event.costCents).toBe(MEDIA_STUDIO_DIRECT_PICTURE_COST_CENTS.fal);
+      expect(event.costMicroUsd).toBe(MEDIA_STUDIO_DIRECT_PICTURE_COST_CENTS.fal * 10_000);
+      expect(event.costSource).toBe("estimate");
     });
   });
 
@@ -357,8 +414,8 @@ d("Media Studio Create tab direct generation (DUR-4329)", () => {
       expect(result.fileId).toBeTruthy();
       expect(result.contentType).toBe("audio/mpeg");
       expect(result.contentPath).toBe(`/api/attachments/${result.fileId}/content`);
-      // Submit + status poll + result fetch + the audio-bytes fetch itself.
-      expect(mockedExecute).toHaveBeenCalledTimes(4);
+      // (+1 pricing lookup, DUR-4455) Submit + status poll + result fetch + the audio-bytes fetch itself.
+      expect(mockedExecute).toHaveBeenCalledTimes(5);
 
       const [creationRow] = await db
         .select()

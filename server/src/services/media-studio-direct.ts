@@ -22,6 +22,7 @@ import { computeCostCents } from "./lane-a.js";
 import { pluginRegistryService } from "./plugin-registry.js";
 import { secretService } from "./secrets.js";
 import { costService } from "./costs.js";
+import { falPricingClient, microUsdToCents, type FalUsage } from "./fal-pricing.js";
 import { issueService } from "./issues.js";
 import { executePinnedHttpRequest, validateAndResolveFetchUrl } from "./safe-outbound-fetch.js";
 import {
@@ -176,6 +177,35 @@ export function mediaStudioDirectService(
     return (config?.configJson ?? {}) as Record<string, unknown>;
   }
 
+  const falPricing = falPricingClient(safeFetch, () => nowOf().getTime());
+
+  async function refreshCompanyMonthlySpend(companyId: string): Promise<void> {
+    const { start, end } = currentUtcMonthWindow();
+    const [row] = await db
+      .select({ total: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::int` })
+      .from(costEvents)
+      .where(and(eq(costEvents.companyId, companyId), gte(costEvents.occurredAt, start), lt(costEvents.occurredAt, end)));
+    await db.update(companies).set({ spentMonthlyCents: Number(row?.total ?? 0), updatedAt: new Date() }).where(eq(companies.id, companyId));
+  }
+
+  /**
+   * DUR-4455: the actual cost of a finished Fal call, priced from Fal's
+   * published per-endpoint price. Falls back to the reservation estimate
+   * (cost_source "estimate") when Fal's price or unit is unavailable --
+   * "provider" is reserved for figures Fal's own billing confirms.
+   */
+  async function resolveActualFalCost(
+    companyId: string,
+    apiKey: string,
+    model: string,
+    usage: FalUsage,
+    estimateCents: number,
+  ): Promise<{ costCents: number; costMicroUsd: number; costSource: "provider" | "estimate" }> {
+    const priced = await falPricing.priceCall(apiKey, model, usage, companyId);
+    if (!priced) return { costCents: estimateCents, costMicroUsd: estimateCents * 10_000, costSource: "estimate" };
+    return { costCents: microUsdToCents(priced.costMicroUsd), costMicroUsd: priced.costMicroUsd, costSource: "estimate" };
+  }
+
   async function resolveFalApiKey(companyId: string, actorId: string): Promise<string> {
     const cfg = await getMediaStudioConfig();
     const ref = typeof cfg.falKeySecretRef === "string" ? cfg.falKeySecretRef.trim() : "";
@@ -302,6 +332,9 @@ export function mediaStudioDirectService(
           outputTokens: 0,
           cachedInputTokens: 0,
           costCents: estimateCents,
+          // DUR-4455: the reservation is only an estimate until finalize replaces it with the actual figure.
+          costMicroUsd: estimateCents * 10_000,
+          costSource: "estimate",
           occurredAt: nowOf(),
         })
         .returning();
@@ -341,9 +374,14 @@ export function mediaStudioDirectService(
     companyId: string,
     actor: MediaStudioDirectActor,
     costEventId: string,
-    params: { kind: MediaStudioDirectKind; provider: string; model: string; prompt: string | null; costCents: number; fileId: string },
+    params: { kind: MediaStudioDirectKind; provider: string; model: string; prompt: string | null; costCents: number; costMicroUsd: number; costSource: "provider" | "estimate"; fileId: string },
   ): Promise<void> {
-    await db.update(costEvents).set({ provider: params.provider, biller: params.provider, model: params.model }).where(eq(costEvents.id, costEventId));
+    // DUR-4455: the reservation held the estimate; now that the job finished, the event carries the actual figure.
+    await db
+      .update(costEvents)
+      .set({ provider: params.provider, biller: params.provider, model: params.model, costCents: params.costCents, costMicroUsd: params.costMicroUsd, costSource: params.costSource })
+      .where(eq(costEvents.id, costEventId));
+    await refreshCompanyMonthlySpend(companyId);
     await db.insert(mediaStudioDirectCreations).values({
       companyId,
       createdByUserId: actor.userId,
@@ -467,16 +505,23 @@ export function mediaStudioDirectService(
       const { contentBase64, contentType } = await pictureResultBytes(result);
       const file = await saveResultFile(companyId, actor, contentBase64, contentType, `picture-${result.provider}-${Date.now()}.${extensionFor(contentType)}`);
 
+      const actual = await resolveActualFalCost(
+        companyId,
+        apiKey,
+        result.model,
+        { images: result.usage.images, ...(result.usage.megapixels !== null ? { megapixels: result.usage.megapixels * result.usage.images } : {}) },
+        estimate.estimatedCostCents,
+      );
       await finalizeReservedCreation(companyId, actor, reservation.costEventId, {
         kind: "picture",
         provider: result.provider,
         model: result.model,
         prompt: input.prompt,
-        costCents: estimate.estimatedCostCents,
+        ...actual,
         fileId: file.id,
       });
 
-      return { ...attachmentResponse(file.id, file.contentType), costCents: estimate.estimatedCostCents, seed: result.seed, provider: result.provider, model: result.model };
+      return { ...attachmentResponse(file.id, file.contentType), costCents: actual.costCents, seed: result.seed, provider: result.provider, model: result.model };
     } catch (err) {
       await releaseReservation(companyId, reservation.costEventId);
       throw err;
@@ -498,16 +543,17 @@ export function mediaStudioDirectService(
       const { contentBase64, contentType } = await mediaResultBytes(result, "video/", "a video");
       const file = await saveResultFile(companyId, actor, contentBase64, contentType, `video-${handle.provider}-${Date.now()}.${extensionFor(contentType)}`);
 
+      const actual = await resolveActualFalCost(companyId, apiKey, handle.model, { seconds: input.durationSeconds }, estimate.estimatedCostCents);
       await finalizeReservedCreation(companyId, actor, reservation.costEventId, {
         kind: "video",
         provider: handle.provider,
         model: handle.model,
         prompt: input.prompt,
-        costCents: estimate.estimatedCostCents,
+        ...actual,
         fileId: file.id,
       });
 
-      return { ...attachmentResponse(file.id, file.contentType), costCents: estimate.estimatedCostCents, provider: handle.provider, model: handle.model };
+      return { ...attachmentResponse(file.id, file.contentType), costCents: actual.costCents, provider: handle.provider, model: handle.model };
     } catch (err) {
       await releaseReservation(companyId, reservation.costEventId);
       throw err;
@@ -529,16 +575,17 @@ export function mediaStudioDirectService(
       const { contentBase64, contentType } = await mediaResultBytes(result, "audio/", "audio");
       const file = await saveResultFile(companyId, actor, contentBase64, contentType, `audio-${handle.provider}-${Date.now()}.${extensionFor(contentType)}`);
 
+      const actual = await resolveActualFalCost(companyId, apiKey, handle.model, { seconds: input.durationSeconds }, estimate.estimatedCostCents);
       await finalizeReservedCreation(companyId, actor, reservation.costEventId, {
         kind: "audio",
         provider: handle.provider,
         model: handle.model,
         prompt: input.prompt,
-        costCents: estimate.estimatedCostCents,
+        ...actual,
         fileId: file.id,
       });
 
-      return { ...attachmentResponse(file.id, file.contentType), costCents: estimate.estimatedCostCents, provider: handle.provider, model: handle.model };
+      return { ...attachmentResponse(file.id, file.contentType), costCents: actual.costCents, provider: handle.provider, model: handle.model };
     } catch (err) {
       await releaseReservation(companyId, reservation.costEventId);
       throw err;
