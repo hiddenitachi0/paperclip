@@ -461,10 +461,19 @@ export function mediaStudioDirectService(
    * reconciliation adds the "provider" figure). Pricing unavailable keeps the
    * reserved estimate. Returns the cents to report.
    */
-  async function settleFalActualCost(costEventId: string, apiKey: string, model: string, usage: FalUsage, estimateCents: number): Promise<number> {
+  async function settleFalActualCost(companyId: string, costEventId: string, apiKey: string, model: string, usage: FalUsage, estimateCents: number): Promise<number> {
     const actual = await priceFalCall(safeFetch, apiKey, model, usage);
     if (!actual) return estimateCents;
-    await applyFalActualCost(db, costEventId, actual);
+    await withCompanyScope(db, companyId, async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`media_studio_direct_spend:${companyId}`}))`);
+      await applyFalActualCost(tx, costEventId, actual);
+      const { start, end } = currentUtcMonthWindow();
+      const [row] = await tx
+        .select({ total: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::int` })
+        .from(costEvents)
+        .where(and(eq(costEvents.companyId, companyId), gte(costEvents.occurredAt, start), lt(costEvents.occurredAt, end)));
+      await tx.update(companies).set({ spentMonthlyCents: Number(row?.total ?? 0), updatedAt: new Date() }).where(eq(companies.id, companyId));
+    });
     return actual.costCents;
   }
 
@@ -479,7 +488,7 @@ export function mediaStudioDirectService(
       const apiKey = await resolveFalApiKey(companyId, actor.userId);
       const provider = new FalDirectPictureProvider(apiKey, safeFetch);
       const result = await provider.generate({ prompt: input.prompt, model: input.model, seed: input.seed });
-      const costCents = await settleFalActualCost(reservation.costEventId, apiKey, result.model, { images: 1, width: result.width, height: result.height }, estimate.estimatedCostCents);
+      const costCents = await settleFalActualCost(companyId, reservation.costEventId, apiKey, result.model, { images: 1, width: result.width, height: result.height }, estimate.estimatedCostCents);
       const { contentBase64, contentType } = await pictureResultBytes(result);
       const file = await saveResultFile(companyId, actor, contentBase64, contentType, `picture-${result.provider}-${Date.now()}.${extensionFor(contentType)}`);
 
@@ -511,7 +520,7 @@ export function mediaStudioDirectService(
       const provider = new FalVideoProvider(apiKey, safeFetch);
       const handle = await provider.start({ kind: "video", prompt: input.prompt, model: input.model, durationSeconds: input.durationSeconds, seed: input.seed });
       const result = await pollUntilDone(provider, handle as MediaStudioDirectJobHandle, VIDEO_POLL_TIMEOUT_MS);
-      const costCents = await settleFalActualCost(reservation.costEventId, apiKey, handle.model, { seconds: input.durationSeconds }, estimate.estimatedCostCents);
+      const costCents = await settleFalActualCost(companyId, reservation.costEventId, apiKey, handle.model, { seconds: input.durationSeconds }, estimate.estimatedCostCents);
       const { contentBase64, contentType } = await mediaResultBytes(result, "video/", "a video");
       const file = await saveResultFile(companyId, actor, contentBase64, contentType, `video-${handle.provider}-${Date.now()}.${extensionFor(contentType)}`);
 
@@ -543,7 +552,7 @@ export function mediaStudioDirectService(
       const provider = new FalDirectAudioProvider(apiKey, safeFetch);
       const handle = await provider.start({ prompt: input.prompt, mode: input.mode, voice: input.voice, model: input.model, durationSeconds: input.durationSeconds });
       const result = await pollUntilDone(provider, handle, AUDIO_POLL_TIMEOUT_MS);
-      const costCents = await settleFalActualCost(reservation.costEventId, apiKey, handle.model, { seconds: input.durationSeconds }, estimate.estimatedCostCents);
+      const costCents = await settleFalActualCost(companyId, reservation.costEventId, apiKey, handle.model, { seconds: input.durationSeconds }, estimate.estimatedCostCents);
       const { contentBase64, contentType } = await mediaResultBytes(result, "audio/", "audio");
       const file = await saveResultFile(companyId, actor, contentBase64, contentType, `audio-${handle.provider}-${Date.now()}.${extensionFor(contentType)}`);
 
