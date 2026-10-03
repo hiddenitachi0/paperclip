@@ -615,7 +615,13 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     await db.update(videoStorylines).set({ status: "paused", errorMessage: `A shot failed: ${errorMessage}. Re-render it to continue.`, updatedAt: nowOf() }).where(eq(videoStorylines.id, storylineId));
   }
 
-  async function onShotDone(companyId: string, storyline: typeof videoStorylines.$inferSelect, shot: typeof videoShots.$inferSelect, jobId: string, result: { url?: string; dataUrl?: string; contentType: string }) {
+  async function onShotDone(
+    companyId: string,
+    storyline: typeof videoStorylines.$inferSelect,
+    shot: typeof videoShots.$inferSelect,
+    jobId: string,
+    result: { url?: string; dataUrl?: string; contentType: string; meta?: Record<string, unknown> },
+  ) {
     const { buffer, contentType } = await downloadResultBytes(result);
     const stored = await getStorageService().putFile({
       companyId,
@@ -626,6 +632,30 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     });
     const estimateForShot = estimateVideoStorylineCostCents([{ durationSeconds: shot.durationSeconds }], storyline.providerId as VideoStorylineProvider);
     const actualCostCents = estimateForShot.estimatedTotalCents;
+
+    // DUR-4456: on top of the estimate-based budget tracking above (unchanged,
+    // since Sogni has no exact USD price), write a real cost_events row when
+    // Sogni reported actual credits for this job -- tagged
+    // converted_from_credits, never silently recorded as 0 when the owner
+    // hasn't set a credit price yet.
+    if (storyline.providerId === "sogni") {
+      const sogniCredits = typeof result.meta?.sogniCredits === "number" ? result.meta.sogniCredits : null;
+      if (sogniCredits !== null) {
+        const plugin = await registry.getByKey(MEDIA_STUDIO_PLUGIN_KEY);
+        const config = plugin ? await registry.getConfig(plugin.id) : null;
+        const cfg = (config?.configJson ?? {}) as Record<string, unknown>;
+        await recordSogniCost(db, {
+          companyId,
+          agentId: storyline.createdByAgentId ?? null,
+          credits: sogniCredits,
+          creditPriceUsd: cfg[SOGNI_CREDIT_PRICE_CONFIG_KEY],
+          model: shot.model ?? storyline.model ?? "sogni-video",
+          billingCode: "video_storyline_render",
+        }).catch((err) => {
+          logger.error({ err, shotId: shot.id }, "video-storyline-render: could not record Sogni actual cost");
+        });
+      }
+    }
 
     await db
       .update(videoShots)

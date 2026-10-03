@@ -72,7 +72,7 @@ export async function recordSogniCost(
   db: Db,
   input: {
     companyId: string;
-    agentId: string;
+    agentId: string | null;
     credits: number | null;
     creditPriceUsd: unknown;
     model: string;
