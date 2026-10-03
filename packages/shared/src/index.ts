@@ -1225,6 +1225,17 @@ export {
 } from "./issue-references.js";
 
 export {
+  ISSUE_SIZE_LABELS,
+  computeIssueProgress,
+  formatEtaLabel,
+  issueSizeWeight,
+  type IssueProgress,
+  type IssueProgressChild,
+  type IssueProgressSnapshot,
+  type IssueSizeLabel,
+} from "./issue-progress.js";
+
+export {
   anchorSnapshotToSelector,
   createDocumentAnchorSelector,
   normalizeAnchorText,

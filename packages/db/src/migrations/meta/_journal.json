@@ -1520,6 +1520,13 @@
       "when": 1791007444072,
       "tag": "0217_agent_directory_entry_link",
       "breakpoints": true
+    },
+    {
+      "idx": 218,
+      "version": "7",
+      "when": 1791060781976,
+      "tag": "0218_issue_size_label",
+      "breakpoints": true
     }
   ]
 }
