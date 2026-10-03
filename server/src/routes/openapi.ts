@@ -165,6 +165,10 @@ import {
   saveInstanceServerAnthropicKeySchema,
   signOutEverywhereSchema,
   submitInstanceClaudeSignInCodeSchema,
+  // Model directory (DUR-4379)
+  createModelDirectoryEntrySchema,
+  updateModelDirectoryEntrySchema,
+  duplicateModelDirectoryEntrySchema,
 } from "@paperclipai/shared";
 
 type JsonSchema = Record<string, unknown>;
@@ -784,6 +788,15 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "GET /api/companies/{companyId}/dataset-sources",
   "PUT /api/companies/{companyId}/dataset-sources/{dataset}",
   "GET /api/companies/{companyId}/data-reads",
+  // DUR-4379: the company model directory. Owner/admin only (and the
+  // instance admin / local board pass) -- an agent must never read or edit
+  // a saved model setup, so it cannot re-point itself or another agent.
+  "GET /api/companies/{companyId}/model-directory",
+  "POST /api/companies/{companyId}/model-directory",
+  "GET /api/companies/{companyId}/model-directory/{entryId}",
+  "PATCH /api/companies/{companyId}/model-directory/{entryId}",
+  "DELETE /api/companies/{companyId}/model-directory/{entryId}",
+  "POST /api/companies/{companyId}/model-directory/{entryId}/duplicate",
 ]);
 
 const INSTANCE_ADMIN_OPERATIONS = new Set([
@@ -6006,6 +6019,81 @@ registerCurrentRoute({
   tags: ["secrets"],
   summary: "Import remote secrets",
   body: remoteSecretImportSchema,
+});
+
+// ─── DUR-4379: company model directory (saved model setups) ────────────────
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/model-directory",
+  tags: ["model-directory"],
+  summary: "List a company's saved model setups (owner/admin only; never returns a key)",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory",
+  tags: ["model-directory"],
+  summary: "Save a new model setup (owner/admin only; unknown fields such as apiKey are rejected)",
+  body: createModelDirectoryEntrySchema,
+  responses: {
+    201: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    409: r.conflict,
+    422: r.unprocessable,
+  },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/model-directory/{entryId}",
+  tags: ["model-directory"],
+  summary: "Get a saved model setup",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "patch",
+  path: "/api/companies/{companyId}/model-directory/{entryId}",
+  tags: ["model-directory"],
+  summary: "Update a saved model setup",
+  body: updateModelDirectoryEntrySchema,
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+    422: r.unprocessable,
+  },
+});
+
+registerCurrentRoute({
+  method: "delete",
+  path: "/api/companies/{companyId}/model-directory/{entryId}",
+  tags: ["model-directory"],
+  summary: "Delete a saved model setup (also removed from other entries' backup chains)",
+  responses: { 204: r.noContent, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/{entryId}/duplicate",
+  tags: ["model-directory"],
+  summary: "Duplicate a saved model setup",
+  body: duplicateModelDirectoryEntrySchema,
+  responses: {
+    201: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+  },
 });
 
 for (const route of [

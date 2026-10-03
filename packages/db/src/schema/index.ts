@@ -154,6 +154,7 @@ export { watchers, watcherPricePoints, watcherAlerts, watcherWebPageSnapshots } 
 export { morningReportOutbox } from "./morning_report.js";
 export { mailInboxes, mailInboxFilters, mailSecretaryItems } from "./mail_secretary.js";
 export { mailAccounts, mailMessages } from "./mail_accounts.js";
+export { modelDirectoryEntries } from "./model_directory_entries.js";
 export { paymentNotices } from "./payment_notices.js";
 export { companyPaymentSettings } from "./company_payment_settings.js";
 export { companyProductGrabberSettings, productGrabberStagedItems } from "./product_grabber.js";

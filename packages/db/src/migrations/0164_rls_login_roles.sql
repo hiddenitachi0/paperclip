@@ -287,6 +287,10 @@ DECLARE
     -- 0212_media_studio_direct_creations.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'media_studio_direct_creations',
+    -- DUR-4379. Created, granted on and policed in
+    -- 0216_model_directory_entries.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'model_directory_entries',
     -- DUR-4344. Created, granted on and policed in
     -- 0215_telegram_reaction_feedback.sql; listed here so the login-role
     -- lists match the schema
@@ -553,6 +557,10 @@ DECLARE
     -- 0212_media_studio_direct_creations.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'media_studio_direct_creations',
+    -- DUR-4379. Created, granted on and policed in
+    -- 0216_model_directory_entries.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'model_directory_entries',
     -- DUR-4344. Created, granted on and policed in
     -- 0215_telegram_reaction_feedback.sql; listed here so the login-role
     -- lists match the schema
