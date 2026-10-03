@@ -993,6 +993,11 @@ export type PluginMediaStudioDirectSpendSettlement =
   | { settled: true; costCents: number }
   | { settled: false };
 
+/** Result of `billing.recordAgentMediaCost` (DUR-4457): whether a cost event was written for an agent-made picture/video/audio. */
+export type PluginAgentMediaCostRecording =
+  | { recorded: true; costCents: number }
+  | { recorded: false; reason: string };
+
 /**
  * Result of `personas.reserveDailyGeneration` — whether one generation was
  * allowed (and, if so, atomically reserved) against the calling agent's
@@ -1777,6 +1782,24 @@ export interface WorkerToHostMethods {
       usage: { images?: number; megapixels?: number; seconds?: number; units?: number };
     },
     result: PluginMediaStudioDirectSpendSettlement,
+  ];
+  "billing.recordAgentMediaCost": [
+    params: {
+      companyId: string;
+      /** The invoking tool call's run id. Required and host-enforced: the host resolves the calling agent from this run, never from a plugin-supplied id. */
+      runId: string;
+      kind: "image" | "video" | "audio";
+      /** "fal" or "sogni"; any other provider (mock, a local ComfyUI) is free and records nothing. */
+      provider: string;
+      /** The model/endpoint actually used. The host prices it itself; the plugin never supplies an amount in money. */
+      model: string;
+      /** What the finished call consumed, so the host can price per-unit (Fal). */
+      usage?: { images?: number; megapixels?: number; seconds?: number; units?: number };
+      /** Credits Sogni reported as actually spent (Sogni only). */
+      credits?: number | null;
+      issueId?: string | null;
+    },
+    result: PluginAgentMediaCostRecording,
   ];
 
   // Personas

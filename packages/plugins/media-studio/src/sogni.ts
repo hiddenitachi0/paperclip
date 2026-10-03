@@ -322,6 +322,8 @@ export interface SogniToolPicture {
   workflowId: string;
   /** How many pictures Sogni sent back (only the first is kept). */
   artifactCount: number;
+  /** DUR-4457: credits Sogni reported as actually spent on this workflow, or null. */
+  credits: number | null;
 }
 
 /** Picture types Sogni's storage takes for an uploaded picture. */
@@ -591,7 +593,7 @@ export class SogniProvider implements GenerationProvider {
       deadline,
       this.timeoutMs,
     );
-    return { contentType: picture.contentType, contentBase64: picture.bytes.toString("base64"), workflowId, artifactCount };
+    return { contentType: picture.contentType, contentBase64: picture.bytes.toString("base64"), workflowId, artifactCount, credits: this.lastCredits };
   }
 
   /**

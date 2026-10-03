@@ -1029,6 +1029,30 @@ export function secretService(db: Db, rawDb: Db = db) {
   }
 
   /**
+   * DUR-4457: same shape again, for pricing a picture/video/audio an agent
+   * just made (the host reads Fal's published price with the company's Fal
+   * key). The actor is the agent whose run made it, so the secret's audit
+   * trail names it.
+   */
+  async function resolveSecretValueForMediaStudioAgentPricing(
+    companyId: string,
+    secretId: string,
+    context: { agentId: string },
+  ): Promise<string> {
+    if (!context.agentId?.trim()) {
+      throw forbidden("Agent media pricing requires an agent context for the audit trail");
+    }
+    return (await resolveSecretValueInternal(companyId, secretId, "latest", {
+      accessContext: {
+        consumerType: "system",
+        consumerId: `media_studio_agent_pricing:${secretId}`,
+        actorType: "agent",
+        actorId: context.agentId,
+      },
+    })).value;
+  }
+
+  /**
    * Resolve the company's GitHub token by the same secret-name convention as
    * managed workspace clones (see heartbeat.ts's resolveManagedCloneGitHubToken)
    * — first bound+resolvable secret named GITHUB_TOKEN/GH_TOKEN/PAPERCLIP_GITHUB_TOKEN
@@ -2295,6 +2319,7 @@ export function secretService(db: Db, rawDb: Db = db) {
     resolveSecretValueForBrowserFill,
     resolveSecretValueForVideoRender,
     resolveSecretValueForMediaStudioDirect,
+    resolveSecretValueForMediaStudioAgentPricing,
     resolveSecretValueForTest,
     resolveGitHubToken,
     resolveStockDataKey,

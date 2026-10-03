@@ -2371,6 +2371,11 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         requireCompanyId(companyId);
         return { settled: false };
       },
+      async recordAgentMediaCost(companyId) {
+        requireCapability(manifest, capabilitySet, "billing.media_studio_direct.reserve");
+        requireCompanyId(companyId);
+        return { recorded: false, reason: "test_harness" };
+      },
     },
     personas: {
       async reserveDailyGeneration(companyId, options) {

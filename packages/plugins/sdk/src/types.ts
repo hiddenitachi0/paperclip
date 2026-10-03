@@ -55,6 +55,7 @@ import type {
   PluginPersonaGenerationCapReservation,
   PluginMediaStudioDirectSpendReservation,
   PluginMediaStudioDirectSpendSettlement,
+  PluginAgentMediaCostRecording,
 } from "./protocol.js";
 
 // ---------------------------------------------------------------------------
@@ -1865,6 +1866,28 @@ export interface PluginBillingClient {
     companyId: string,
     input: { reservationId: string; endpointId: string; usage: { images?: number; megapixels?: number; seconds?: number; units?: number } },
   ): Promise<PluginMediaStudioDirectSpendSettlement>;
+
+  /**
+   * DUR-4457: record the cost of a picture/video/audio an AGENT just made
+   * through a tool, against that agent (its monthly budget) and Media
+   * Studio's shared cap. `runId` is the invoking tool call's run id; the
+   * host resolves the agent from it. The host prices the call itself
+   * (Fal published per-unit price, Sogni credits x the configured credit
+   * price). Providers that cost nothing (mock, local ComfyUI) record nothing.
+   * Never throws for a pricing problem -- check `recorded`.
+   */
+  recordAgentMediaCost(
+    companyId: string,
+    input: {
+      runId: string;
+      kind: "image" | "video" | "audio";
+      provider: string;
+      model: string;
+      usage?: { images?: number; megapixels?: number; seconds?: number; units?: number };
+      credits?: number | null;
+      issueId?: string | null;
+    },
+  ): Promise<PluginAgentMediaCostRecording>;
 }
 
 /**

@@ -1411,6 +1411,7 @@ const plugin = definePlugin({
 
         try {
           const result = await runGeneration(ctx, input);
+          await recordAgentMediaCost(ctx, runCtx, { kind: "image", provider: result.provider, model: result.model, usage: { images: 1 }, credits: sogniCreditsOf(result), issueId: issueId || null });
           const { contentBase64, contentType } = await toAttachmentBytes(ctx, result);
           const seed = typeof result.seed === "number" ? result.seed : null;
           const extension = contentType.split("/")[1]?.replace(/\+.*$/, "") ?? "bin";
@@ -2169,6 +2170,7 @@ function registerMediaJobTools(ctx: PluginContext): void {
           { kind: "video", prompt, model, startImage, seed, durationSeconds: durationSeconds ?? undefined, aspectRatio },
           issueId,
         );
+        await recordAgentMediaCost(ctx, runCtx, { kind: "video", provider: started.provider, model: started.model, usage: { seconds: durationSeconds ?? DEFAULT_AGENT_VIDEO_SECONDS }, issueId });
         return {
           content:
             `Started making the video with ${started.provider === "fal" ? "Fal.ai" : "Sogni"} (${started.model}). This takes a few minutes — ` +
@@ -2217,6 +2219,7 @@ function registerMediaJobTools(ctx: PluginContext): void {
           { kind: "audio", prompt, mode: rawMode, voice, model, seed, durationSeconds: durationSeconds ?? undefined },
           issueId,
         );
+        await recordAgentMediaCost(ctx, runCtx, { kind: "audio", provider: started.provider, model: started.model, usage: { seconds: durationSeconds ?? DEFAULT_AGENT_AUDIO_SECONDS }, issueId });
         return {
           content:
             `Started making the ${rawMode} with Fal.ai (${started.model}). This can take a while — ` +
@@ -2259,6 +2262,41 @@ function registerMediaJobTools(ctx: PluginContext): void {
 
 function sogniTokenType(cfg: Record<string, unknown>): SogniTokenType {
   return (SOGNI_TOKEN_TYPES as readonly string[]).includes(String(cfg.sogniTokenType)) ? (cfg.sogniTokenType as SogniTokenType) : "auto";
+}
+
+/**
+ * DUR-4457: record what an agent-made picture/video/audio cost, against the
+ * calling agent (the host resolves it from the run id). Called only after the
+ * provider call succeeded. Never throws: a cost-recording problem must not
+ * turn a paid, finished generation into a tool error.
+ */
+async function recordAgentMediaCost(
+  ctx: PluginContext,
+  runCtx: { companyId: string; runId: string },
+  input: { kind: "image" | "video" | "audio"; provider: string; model: string | null | undefined; usage?: { images?: number; megapixels?: number; seconds?: number }; credits?: number | null; issueId?: string | null },
+): Promise<void> {
+  try {
+    await ctx.billing.recordAgentMediaCost(runCtx.companyId, {
+      runId: runCtx.runId,
+      kind: input.kind,
+      provider: input.provider,
+      model: input.model ?? "unknown",
+      ...(input.usage ? { usage: input.usage } : {}),
+      ...(input.credits !== undefined ? { credits: input.credits } : {}),
+      ...(input.issueId ? { issueId: input.issueId } : {}),
+    });
+  } catch (err) {
+    ctx.logger.warn(`media-studio: could not record an agent ${input.kind}'s cost: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/** When the agent does not say how long: what the providers default to, so the recorded cost is priced for a typical clip. */
+const DEFAULT_AGENT_VIDEO_SECONDS = 5;
+const DEFAULT_AGENT_AUDIO_SECONDS = 8;
+
+function sogniCreditsOf(result: GenerationResult): number | null {
+  const credits = result.meta?.sogniCredits;
+  return typeof credits === "number" && credits > 0 ? credits : null;
 }
 
 function errorText(err: unknown): string {
@@ -2355,6 +2393,7 @@ ${text}`,
       pictures: [picture],
       safeContentFilter: true,
     });
+    await recordAgentMediaCost(ctx, runCtx, { kind: "image", provider: "sogni", model: def.sogniTool, credits: made.credits, issueId: prepared.issueId || null });
     const contentType = assertImageContentType(made.contentType);
     const extension = contentType.split("/")[1]?.replace(/\+.*$/, "") ?? "png";
     const stem = slug((file.originalFilename ?? "").replace(/\.[a-z0-9]+$/i, "")) || "picture";
@@ -2552,6 +2591,7 @@ export async function runQuickPicture(
     made = await withQuickTimeout(
       (async () => {
         const result = await runGeneration(ctx, input);
+        await recordAgentMediaCost(ctx, runCtx, { kind: "image", provider: result.provider, model: result.model, usage: { images: 1 }, credits: sogniCreditsOf(result), issueId: issueId || null });
         return { result, ...(await toAttachmentBytes(ctx, result)) };
       })(),
       QUICK_PICTURE_TIMEOUT_MS,
