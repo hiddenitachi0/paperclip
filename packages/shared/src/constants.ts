@@ -1242,6 +1242,7 @@ export const PLUGIN_CAPABILITIES = [
   "external.objects.refresh",
   // Personas
   "personas.generation_cap.enforce",
+  "personas.picture_feedback.read",
   // Plugin State
   "plugin.state.read",
   "plugin.state.write",

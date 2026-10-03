@@ -52,6 +52,8 @@ interface ChatSendOptions extends BaseClientOptions {
 
 interface ChatReactionOptions extends BaseClientOptions {
   event: string;
+  /** DUR-4345: the event is the answer to the one follow-up question about a disliked picture. */
+  followUpAnswer?: boolean;
 }
 
 interface ChatContinueOptions extends BaseClientOptions {
@@ -211,6 +213,7 @@ export function registerChatCommands(program: Command): void {
       )
       .requiredOption("-C, --company-id <id>", "Company ID")
       .requiredOption("--event <json>", "The reaction event as JSON")
+      .option("--follow-up-answer", "The event is the answer to the follow-up question about a disliked picture")
       .action(async (opts: ChatReactionOptions) => {
         try {
           const outcome = await runChatReaction(opts);
@@ -408,7 +411,9 @@ export async function runChatReaction(opts: ChatReactionOptions): Promise<ChatSe
   }
   try {
     const result = await ctx.api.post<Record<string, unknown>>(
-      apiPath`/api/companies/${ctx.companyId}/telegram-reactions`,
+      opts.followUpAnswer
+        ? apiPath`/api/companies/${ctx.companyId}/telegram-reactions/follow-up-answer`
+        : apiPath`/api/companies/${ctx.companyId}/telegram-reactions`,
       event,
     );
     return { ok: true, ...(result ?? {}) };
