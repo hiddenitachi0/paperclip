@@ -5,6 +5,7 @@ import { activityLog, agents, companies, costEvents, heartbeatRuns, issues, proj
 import { notFound, unprocessable } from "../errors.js";
 import { budgetService, type BudgetServiceHooks } from "./budgets.js";
 import { escalationGrantService } from "./escalation-grants.js";
+import { isCacheWarm } from "@paperclipai/shared";
 
 export interface CostDateRange {
   from?: Date;
@@ -313,6 +314,67 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         .where(and(...conditions))
         .groupBy(costEvents.agentId, agents.name, agents.status)
         .orderBy(desc(sumAsNumber(costEvents.costCents)));
+    },
+
+    // DUR-4470: per-agent prompt-cache state: warm/cold, context size (the
+    // first-call prompt of the latest run), last rewrite cost and this week's
+    // cache-write spend. Warmth uses the agent's lastHeartbeatAt vs. the
+    // lifetime implied by its latest cache-writing event.
+    cacheStatusByAgent: async (companyId: string, now = new Date()) => {
+      const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+      const agentRows = await db
+        .select({ id: agents.id, name: agents.name, lastHeartbeatAt: agents.lastHeartbeatAt })
+        .from(agents)
+        .where(eq(agents.companyId, companyId));
+      const weekRows = await db
+        .select({
+          agentId: costEvents.agentId,
+          rewritesThisWeekCents: sumAsNumber(costEvents.cacheWriteCostCents),
+        })
+        .from(costEvents)
+        .where(and(eq(costEvents.companyId, companyId), gte(costEvents.occurredAt, weekAgo)))
+        .groupBy(costEvents.agentId);
+      const lastWriteRows = await db
+        .selectDistinctOn([costEvents.agentId], {
+          agentId: costEvents.agentId,
+          cacheWriteCostCents: costEvents.cacheWriteCostCents,
+          cacheWriteInputTokens: costEvents.cacheWriteInputTokens,
+          cacheWrite1hInputTokens: costEvents.cacheWrite1hInputTokens,
+          heartbeatRunId: costEvents.heartbeatRunId,
+          occurredAt: costEvents.occurredAt,
+        })
+        .from(costEvents)
+        .where(and(eq(costEvents.companyId, companyId), sql`${costEvents.cacheWriteInputTokens} > 0`))
+        .orderBy(costEvents.agentId, desc(costEvents.occurredAt));
+      const weekByAgent = new Map(weekRows.map((r) => [r.agentId, Number(r.rewritesThisWeekCents)]));
+      const lastByAgent = new Map(lastWriteRows.map((r) => [r.agentId, r]));
+      const runIds = lastWriteRows.map((r) => r.heartbeatRunId).filter((id): id is string => !!id);
+      const contextByRun = new Map<string, number>();
+      if (runIds.length > 0) {
+        const runRows = await db
+          .select({ id: heartbeatRuns.id, usageJson: heartbeatRuns.usageJson })
+          .from(heartbeatRuns)
+          .where(and(eq(heartbeatRuns.companyId, companyId), sql`${heartbeatRuns.id} in (${sql.join(runIds.map((id) => sql`${id}`), sql`, `)})`));
+        for (const run of runRows) {
+          const tokens = (run.usageJson as Record<string, unknown> | null)?.firstCallPromptTokens;
+          if (typeof tokens === "number") contextByRun.set(run.id, tokens);
+        }
+      }
+      return agentRows.map((agent) => {
+        const last = lastByAgent.get(agent.id) ?? null;
+        return {
+          agentId: agent.id,
+          agentName: agent.name,
+          cacheWarm: isCacheWarm({
+            lastHeartbeatAt: agent.lastHeartbeatAt,
+            wroteOneHourCache: (last?.cacheWrite1hInputTokens ?? 0) > 0,
+          }, undefined, now),
+          contextTokens: last?.heartbeatRunId ? contextByRun.get(last.heartbeatRunId) ?? null : null,
+          lastRewriteCostCents: last ? Number(last.cacheWriteCostCents) : null,
+          lastRewriteAt: last ? last.occurredAt : null,
+          rewritesThisWeekCents: weekByAgent.get(agent.id) ?? 0,
+        };
+      });
     },
 
     byProvider: async (companyId: string, range?: CostDateRange) => {

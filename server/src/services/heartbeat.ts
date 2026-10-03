@@ -77,6 +77,7 @@ import type {
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber, appendWithByteCap, MAX_EXCERPT_BYTES } from "../adapters/utils.js";
 import { costService } from "./costs.js";
+import { computeCacheWriteCostCents, splitCacheWriteTokens } from "@paperclipai/shared";
 import { trackAgentFirstHeartbeat } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
 import { companySkillService } from "./company-skills.js";
@@ -11536,7 +11537,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const cachedInputTokens = usage?.cachedInputTokens ?? 0;
     const billingType = normalizeLedgerBillingType(result.billingType);
     const additionalCostCents = normalizeBilledCostCents(result.costUsd);
-    const hasTokenUsage = inputTokens > 0 || outputTokens > 0 || cachedInputTokens > 0;
+    const cacheWrite = splitCacheWriteTokens(
+      result.usage?.cacheCreationInputTokens,
+      result.usage?.cacheCreation1hInputTokens,
+    );
+    const hasTokenUsage =
+      inputTokens > 0 || outputTokens > 0 || cachedInputTokens > 0 || cacheWrite.total > 0;
     const provider = result.provider ?? "unknown";
     const biller = resolveLedgerBiller(result);
     const ledgerScope = await resolveLedgerScopeForRun(db, agent.companyId, run);
@@ -11571,6 +11577,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         inputTokens,
         cachedInputTokens,
         outputTokens,
+        cacheWriteInputTokens: cacheWrite.total,
+        cacheWrite1hInputTokens: cacheWrite.oneHour,
+        cacheWriteCostCents: computeCacheWriteCostCents(
+          result.model,
+          cacheWrite.total,
+          cacheWrite.oneHour,
+        ),
         costCents: additionalCostCents,
         occurredAt: new Date(),
       });

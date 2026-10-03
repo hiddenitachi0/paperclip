@@ -508,6 +508,63 @@ describeEmbeddedPostgres("cost and finance aggregate overflow handling", () => {
     expect(byAgentModelRow?.costCents).toBe(4_000_000_000);
   });
 
+  it("attributes cache writes separately from reads and reports per-agent cache status", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const runId = randomUUID();
+    const now = new Date("2026-10-03T12:00:00.000Z");
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Cache Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "claude_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+      lastHeartbeatAt: new Date("2026-10-03T11:57:00.000Z"),
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId,
+      status: "succeeded",
+      usageJson: { firstCallPromptTokens: 42_000 },
+    });
+    await costs.createEvent(companyId, {
+      agentId,
+      heartbeatRunId: runId,
+      provider: "anthropic",
+      model: "claude-sonnet-5",
+      inputTokens: 10,
+      cachedInputTokens: 500,
+      outputTokens: 20,
+      cacheWriteInputTokens: 1_000_000,
+      cacheWrite1hInputTokens: 0,
+      cacheWriteCostCents: 250,
+      costCents: 0,
+      occurredAt: new Date("2026-10-02T12:00:00.000Z"),
+    });
+
+    const [row] = await costs.cacheStatusByAgent(companyId, now);
+    expect(row?.cacheWarm).toBe(true);
+    expect(row?.contextTokens).toBe(42_000);
+    expect(row?.lastRewriteCostCents).toBe(250);
+    expect(row?.rewritesThisWeekCents).toBe(250);
+    const [agentRow] = await costs.byAgent(companyId);
+    expect(agentRow?.cachedInputTokens).toBe(500);
+
+    const cold = await costs.cacheStatusByAgent(companyId, new Date("2026-10-03T13:00:00.000Z"));
+    expect(cold[0]?.cacheWarm).toBe(false);
+  });
+
   it("aggregates issue costs across recursive descendants only", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
