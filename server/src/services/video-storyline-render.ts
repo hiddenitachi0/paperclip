@@ -21,6 +21,7 @@ import { logActivity } from "./activity-log.js";
 import { pluginRegistryService } from "./plugin-registry.js";
 import { approvalService } from "./approvals.js";
 import { secretService } from "./secrets.js";
+import { recordSogniCost, SOGNI_CREDIT_PRICE_CONFIG_KEY } from "./sogni-cost.js";
 import { extractLastFrameDataUri } from "./video-ffmpeg.js";
 import { loadApprovedStillDataUri } from "./video-storyline-still-frame.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";

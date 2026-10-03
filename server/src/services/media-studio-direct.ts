@@ -31,6 +31,7 @@ import {
   type MediaStudioDirectMediaResult,
   type MediaStudioDirectPictureResult,
 } from "./media-studio-direct-providers.js";
+import { applyFalActualCost, priceFalCall, type FalUsage } from "./fal-cost.js";
 import { FalVideoProvider } from "./video-provider-clients.js";
 
 /**
@@ -453,6 +454,20 @@ export function mediaStudioDirectService(
     return { fileId, contentPath, openPath: contentPath, downloadPath: `${contentPath}?download=1`, contentType };
   }
 
+  /**
+   * DUR-4455: once a job finished, replaces the reservation's estimate on its
+   * cost event with Fal's published per-unit price for the endpoint (cost_source
+   * "estimate": computed, not confirmed by Fal billing -- the daily
+   * reconciliation adds the "provider" figure). Pricing unavailable keeps the
+   * reserved estimate. Returns the cents to report.
+   */
+  async function settleFalActualCost(costEventId: string, apiKey: string, model: string, usage: FalUsage, estimateCents: number): Promise<number> {
+    const actual = await priceFalCall(safeFetch, apiKey, model, usage);
+    if (!actual) return estimateCents;
+    await applyFalActualCost(db, costEventId, actual);
+    return actual.costCents;
+  }
+
   async function createPicture(companyId: string, actor: MediaStudioDirectActor, input: CreateMediaStudioDirectPictureInput) {
     const estimate = estimateMediaStudioDirectCostCents({ kind: "picture", provider: input.provider });
     const reservation = await reserveSpend(companyId, actor, estimate.estimatedCostCents, input.confirmBudgetCapCents, {
@@ -464,6 +479,7 @@ export function mediaStudioDirectService(
       const apiKey = await resolveFalApiKey(companyId, actor.userId);
       const provider = new FalDirectPictureProvider(apiKey, safeFetch);
       const result = await provider.generate({ prompt: input.prompt, model: input.model, seed: input.seed });
+      const costCents = await settleFalActualCost(reservation.costEventId, apiKey, result.model, { images: 1, width: result.width, height: result.height }, estimate.estimatedCostCents);
       const { contentBase64, contentType } = await pictureResultBytes(result);
       const file = await saveResultFile(companyId, actor, contentBase64, contentType, `picture-${result.provider}-${Date.now()}.${extensionFor(contentType)}`);
 
@@ -472,11 +488,11 @@ export function mediaStudioDirectService(
         provider: result.provider,
         model: result.model,
         prompt: input.prompt,
-        costCents: estimate.estimatedCostCents,
+        costCents,
         fileId: file.id,
       });
 
-      return { ...attachmentResponse(file.id, file.contentType), costCents: estimate.estimatedCostCents, seed: result.seed, provider: result.provider, model: result.model };
+      return { ...attachmentResponse(file.id, file.contentType), costCents, seed: result.seed, provider: result.provider, model: result.model };
     } catch (err) {
       await releaseReservation(companyId, reservation.costEventId);
       throw err;
@@ -495,6 +511,7 @@ export function mediaStudioDirectService(
       const provider = new FalVideoProvider(apiKey, safeFetch);
       const handle = await provider.start({ kind: "video", prompt: input.prompt, model: input.model, durationSeconds: input.durationSeconds, seed: input.seed });
       const result = await pollUntilDone(provider, handle as MediaStudioDirectJobHandle, VIDEO_POLL_TIMEOUT_MS);
+      const costCents = await settleFalActualCost(reservation.costEventId, apiKey, handle.model, { seconds: input.durationSeconds }, estimate.estimatedCostCents);
       const { contentBase64, contentType } = await mediaResultBytes(result, "video/", "a video");
       const file = await saveResultFile(companyId, actor, contentBase64, contentType, `video-${handle.provider}-${Date.now()}.${extensionFor(contentType)}`);
 
@@ -503,11 +520,11 @@ export function mediaStudioDirectService(
         provider: handle.provider,
         model: handle.model,
         prompt: input.prompt,
-        costCents: estimate.estimatedCostCents,
+        costCents,
         fileId: file.id,
       });
 
-      return { ...attachmentResponse(file.id, file.contentType), costCents: estimate.estimatedCostCents, provider: handle.provider, model: handle.model };
+      return { ...attachmentResponse(file.id, file.contentType), costCents, provider: handle.provider, model: handle.model };
     } catch (err) {
       await releaseReservation(companyId, reservation.costEventId);
       throw err;
@@ -526,6 +543,7 @@ export function mediaStudioDirectService(
       const provider = new FalDirectAudioProvider(apiKey, safeFetch);
       const handle = await provider.start({ prompt: input.prompt, mode: input.mode, voice: input.voice, model: input.model, durationSeconds: input.durationSeconds });
       const result = await pollUntilDone(provider, handle, AUDIO_POLL_TIMEOUT_MS);
+      const costCents = await settleFalActualCost(reservation.costEventId, apiKey, handle.model, { seconds: input.durationSeconds }, estimate.estimatedCostCents);
       const { contentBase64, contentType } = await mediaResultBytes(result, "audio/", "audio");
       const file = await saveResultFile(companyId, actor, contentBase64, contentType, `audio-${handle.provider}-${Date.now()}.${extensionFor(contentType)}`);
 
@@ -534,11 +552,11 @@ export function mediaStudioDirectService(
         provider: handle.provider,
         model: handle.model,
         prompt: input.prompt,
-        costCents: estimate.estimatedCostCents,
+        costCents,
         fileId: file.id,
       });
 
-      return { ...attachmentResponse(file.id, file.contentType), costCents: estimate.estimatedCostCents, provider: handle.provider, model: handle.model };
+      return { ...attachmentResponse(file.id, file.contentType), costCents, provider: handle.provider, model: handle.model };
     } catch (err) {
       await releaseReservation(companyId, reservation.costEventId);
       throw err;
