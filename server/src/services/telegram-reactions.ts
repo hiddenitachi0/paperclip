@@ -1,8 +1,10 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, like } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
+  assets,
   companyReactionEmojiConfig,
+  issueAttachments,
   laneAConversations,
   laneAMessages,
   telegramMessageReactions,
@@ -107,6 +109,22 @@ export function telegramReactionService(db: Db) {
           ),
         );
       if (!message) throw unprocessable("That message is not part of this conversation.");
+    }
+
+    // A picture reference must be a file of this company, never another's.
+    if (input.action === "added" && input.picture) {
+      const [file] = await db
+        .select({ id: issueAttachments.id })
+        .from(issueAttachments)
+        .innerJoin(assets, eq(assets.id, issueAttachments.assetId))
+        .where(
+          and(
+            eq(issueAttachments.id, input.picture.fileId),
+            eq(issueAttachments.companyId, companyId),
+            like(assets.contentType, "image/%"),
+          ),
+        );
+      if (!file) throw unprocessable("That picture is not an image file of this company.");
     }
 
     const key = and(
