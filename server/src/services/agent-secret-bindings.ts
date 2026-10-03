@@ -90,17 +90,44 @@ function collectLaneASecretRefs(rawLaneA: unknown): Array<{
 }> {
   const laneA = asRecord(rawLaneA);
   if (!laneA) return [];
+  const refs: Array<{
+    secretId: string;
+    configPath: string;
+    versionSelector?: SecretVersionSelector;
+  }> = [];
+
   const parsed = envBindingSchema.safeParse(laneA.apiKey);
-  if (!parsed.success) return [];
-  const binding = parsed.data;
-  if (typeof binding !== "object" || binding === null || binding.type !== "secret_ref") return [];
-  return [
-    {
+  if (parsed.success) {
+    const binding = parsed.data;
+    if (typeof binding === "object" && binding !== null && binding.type === "secret_ref") {
+      refs.push({
+        secretId: binding.secretId,
+        configPath: LANE_A_API_KEY_CONFIG_PATH,
+        versionSelector: binding.version ?? "latest",
+      });
+    }
+  }
+
+  // DUR-4400: apiKeyByProvider (DUR-4378 follow-up) stashes each non-active
+  // provider's key under adapterConfig.laneA.apiKeyByProvider.<provider> so
+  // a provider switch never silently drops it. Without walking it here too,
+  // an agent could plant a secret_ref it was never granted straight into the
+  // stash -- invisible to this gate -- and have it promoted into the live,
+  // resolvable laneA.apiKey by the next ordinary provider switch anyone ran.
+  const byProvider = asRecord(laneA.apiKeyByProvider);
+  for (const [provider, rawBinding] of Object.entries(byProvider ?? {})) {
+    const providerParsed = envBindingSchema.safeParse(rawBinding);
+    if (!providerParsed.success) continue;
+    const binding = providerParsed.data;
+    if (typeof binding !== "object" || binding === null || binding.type !== "secret_ref") continue;
+    refs.push({
       secretId: binding.secretId,
-      configPath: LANE_A_API_KEY_CONFIG_PATH,
+      configPath: `laneA.apiKeyByProvider.${provider}`,
       versionSelector: binding.version ?? "latest",
-    },
-  ];
+    });
+  }
+
+  return refs;
 }
 
 // DUR-132: adapterConfig.mcpServers[*].env / .headers may carry secret_ref

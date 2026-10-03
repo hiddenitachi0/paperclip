@@ -39,6 +39,30 @@ const laneAProviderSlugSchema = z
     "A model host must be a short OpenRouter host name in lower case letters, digits, dots, dashes or underscores, for example deepinfra.",
   );
 
+/**
+ * DUR-3997 / DUR-4395 / DUR-4400: a single plain http(s) endpoint with no
+ * query string, fragment, or sign-in part — the rule a stored model host
+ * address must follow, whether it is the live `laneABaseUrl` column or one
+ * entry of `adapterConfig.laneA.baseUrlByProvider`. Shared so the stash
+ * cannot be used to smuggle in a value the live field itself would refuse.
+ */
+const laneABaseUrlValueSchema = z
+  .string()
+  .trim()
+  .max(LANE_A_BASE_URL_MAX_LENGTH)
+  .refine((raw) => {
+    try {
+      const url = new URL(raw);
+      if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+      // The server appends /chat/completions to this; a query string,
+      // fragment or sign-in part would ride along on every request.
+      if (url.search || url.hash || url.username || url.password) return false;
+      return true;
+    } catch {
+      return false;
+    }
+  }, "The model address must be a plain http(s) URL with no query string or sign-in part, for example https://models.example.com/v1.");
+
 const laneAProviderSlugListSchema = z
   .array(laneAProviderSlugSchema)
   .max(LANE_A_PROVIDER_ROUTING_MAX_ENTRIES, `List at most ${LANE_A_PROVIDER_ROUTING_MAX_ENTRIES} model hosts.`)
@@ -208,6 +232,30 @@ export function parseAgentLimits(value: unknown): AgentLimitsInput {
 export const laneAAdapterConfigSchema = z
   .object({
     apiKey: envBindingSecretRefSchema.nullable().optional(),
+    /**
+     * DUR-4378 follow-up (live incident, 2 Oct): adapterConfig.laneA.apiKey
+     * is one slot shared by every provider, so switching laneAProvider used
+     * to carry the previous provider's key forward (or drop it) instead of
+     * keeping each provider's own binding. server/src/routes/agents.ts
+     * stashes the outgoing provider's key here, keyed by provider, and
+     * restores the incoming provider's own key on every switch. This schema
+     * is `.strict()`, so it must list the field or any later PATCH that
+     * echoes adapterConfig.laneA back (e.g. a settings-form round trip) gets
+     * rejected with a 422 for an "unrecognized key".
+     */
+    apiKeyByProvider: z.record(z.enum(LANE_A_PROVIDERS), envBindingSecretRefSchema.nullable()).optional(),
+    /**
+     * DUR-4395: laneABaseUrl is a top-level agent column, not part of this
+     * blob, but it is just as provider-specific as apiKey -- openrouter and
+     * local both honor a stored custom base URL (resolveLaneABaseUrl).
+     * Without a per-provider stash here, switching providers restored the
+     * incoming provider's own apiKey (via apiKeyByProvider above) while
+     * leaving laneABaseUrl pointed at whatever host the previous provider
+     * had configured, sending the restored key as a bearer token to that
+     * stale host. server/src/routes/agents.ts stashes/restores
+     * laneABaseUrl here on every provider switch, same as apiKeyByProvider.
+     */
+    baseUrlByProvider: z.record(z.enum(LANE_A_PROVIDERS), laneABaseUrlValueSchema.nullable()).optional(),
     /**
      * "Can search the web": offers the quick agent web_search (with the
      * company's Brave key, Connections → Web search) and read_web_page. Off
@@ -546,24 +594,7 @@ const createAgentObjectSchema = z.object({
   laneAProvider: z.enum(LANE_A_PROVIDERS).nullable().optional(),
   // DUR-3997: OpenAI-compatible endpoint for OpenRouter / a local model.
   // Ignored for the fixed providers. http(s) only.
-  laneABaseUrl: z
-    .string()
-    .trim()
-    .max(LANE_A_BASE_URL_MAX_LENGTH)
-    .refine((raw) => {
-      try {
-        const url = new URL(raw);
-        if (url.protocol !== "http:" && url.protocol !== "https:") return false;
-        // The server appends /chat/completions to this; a query string,
-        // fragment or sign-in part would ride along on every request.
-        if (url.search || url.hash || url.username || url.password) return false;
-        return true;
-      } catch {
-        return false;
-      }
-    }, "The model address must be a plain http(s) URL with no query string or sign-in part, for example https://models.example.com/v1.")
-    .nullable()
-    .optional(),
+  laneABaseUrl: laneABaseUrlValueSchema.nullable().optional(),
   laneAMaxOutputTokens: z
     .number()
     .int()
