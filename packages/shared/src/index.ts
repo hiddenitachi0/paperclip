@@ -2773,3 +2773,16 @@ export {
   type MorningReportFacts,
   type AckMorningReportOutboxInput,
 } from "./morning-report.js";
+
+export {
+  MODEL_DIRECTORY_NAME_MAX_LENGTH,
+  MODEL_DIRECTORY_NOTE_MAX_LENGTH,
+  modelDirectoryEntryIssue,
+  createModelDirectoryEntrySchema,
+  updateModelDirectoryEntrySchema,
+  duplicateModelDirectoryEntrySchema,
+  type CreateModelDirectoryEntry,
+  type UpdateModelDirectoryEntry,
+  type DuplicateModelDirectoryEntry,
+  type ModelDirectoryEntry,
+} from "./validators/index.js";
