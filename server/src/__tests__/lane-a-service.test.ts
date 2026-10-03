@@ -37,6 +37,7 @@ import {
   LANE_A_MAX_TURNS_PER_CONVERSATION,
   laneAService,
   type LaneATargetAgent,
+  LANE_A_PICTURE_REPLAY_REMINDER,
 } from "../services/lane-a.ts";
 import { LANE_A_DEFAULT_MAX_OUTPUT_TOKENS, LANE_A_DEFAULT_MODEL } from "@paperclipai/shared";
 import { PLUGIN_TOOL_CALL_TIMEOUT_MS } from "../services/plugin-tool-registry.js";
@@ -656,7 +657,7 @@ describeEmbeddedPostgres("lane A service", () => {
     ]);
     // The replayed history carried the first picture's seed to the model.
     const replayed = JSON.stringify(mockCreate.mock.calls[2][0].messages);
-    expect(replayed).toContain(`[Picture made in this turn: file id ${pictureId}, seed 4242]`);
+    expect(replayed).toContain(`[Picture made in this turn: file id ${pictureId}, seed 4242. ${LANE_A_PICTURE_REPLAY_REMINDER}]`);
 
     // The stored transcript keeps the picture for the chat panel after a reload.
     const transcript = await svc.getConversation({
