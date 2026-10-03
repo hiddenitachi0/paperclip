@@ -387,6 +387,13 @@ const manifest: PaperclipPluginManifestV1 = {
         enum: ["auto", "spark", "sogni"],
         default: "auto",
       },
+      sogniCreditPriceUsd: {
+        type: "number",
+        title: "Sogni credit price (USD)",
+        description:
+          "What one Sogni credit cost you in US dollars (from what you actually paid). Used to turn the credits Sogni reports into dollars on the Costs page; those rows are marked as converted from credits, not exact. Leave empty and Sogni spend is not priced.",
+        minimum: 0,
+      },
       comfyUrl: {
         type: "string",
         title: "ComfyUI base URL",

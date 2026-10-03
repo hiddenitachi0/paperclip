@@ -297,6 +297,24 @@ export function assertSogniStorageUrl(raw: string): URL {
 /** How long a synchronous Sogni tool (tools/execute) may take, 429 waits included. */
 export const SOGNI_EXECUTE_TIMEOUT_MS = 60_000;
 
+/** Credits Sogni reports as actually spent on a finished workflow, or null (mirrors server/src/services/sogni-cost.ts; estimates are never read as actuals). */
+export function readSogniActualCredits(workflow: Json): number | null {
+  const positive = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : null);
+  const read = (node: Json | null): number | null => {
+    if (!node) return null;
+    for (const key of ["actualCapacityUnits", "actual_capacity_units", "actualCost", "actual_cost", "totalCost", "total_cost", "costCredits"]) {
+      const n = positive(node[key]);
+      if (n !== null) return n;
+    }
+    const nested = asRecord(node.cost);
+    return positive(node.cost) ?? (nested ? (positive(nested.actual) ?? positive(nested.total) ?? positive(nested.credits)) : null);
+  };
+  const top = read(workflow) ?? read(asRecord(workflow.usage));
+  if (top !== null) return top;
+  const costs = (Array.isArray(workflow.steps) ? workflow.steps : []).map((s) => read(asRecord(s))).filter((n): n is number => n !== null);
+  return costs.length > 0 ? costs.reduce((a, b) => a + b, 0) : null;
+}
+
 /** A picture one of Sogni's picture tools made. */
 export interface SogniToolPicture {
   contentType: string;
@@ -388,6 +406,8 @@ export class SogniProvider implements GenerationProvider {
   readonly name = "sogni";
   private readonly baseUrl: string;
   private readonly pollIntervalMs: number;
+  /** Actual credits of the most recent finished workflow (read right after runWorkflow). */
+  private lastCredits: number | null = null;
   private readonly timeoutMs: number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly now: () => number;
@@ -536,6 +556,7 @@ export class SogniProvider implements GenerationProvider {
       meta: {
         seed,
         workflowId,
+        ...(this.lastCredits !== null ? { sogniCredits: this.lastCredits } : {}),
         ...(seedNotUsed ? { seedNotUsed: true } : {}),
         ...(loras.length > 0 ? { loras: loras.map((lora) => lora.id) } : {}),
         ...(input.safeContentFilter === false ? { contentFilter: "off" } : {}),
@@ -640,6 +661,7 @@ export class SogniProvider implements GenerationProvider {
     if (typeof workflowId !== "string" || !workflowId) throw new Error("Sogni did not say which job it started, so the picture cannot be collected.");
 
     const workflow = await this.waitForWorkflow(workflowId, deadline, timeoutMs);
+    this.lastCredits = readSogniActualCredits(workflow);
     const firstStep = Array.isArray(workflow.steps) ? asRecord(workflow.steps[0]) : null;
     const artifacts = pictureArtifacts(workflow);
     const artifact = artifacts[0];
