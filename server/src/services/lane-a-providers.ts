@@ -245,12 +245,12 @@ export function resolveLaneABaseUrl(provider: unknown, baseUrl: string | null | 
 
 /**
  * DUR-4347: a local model's address (Ollama, LM Studio, a Tailscale box that
- * may be asleep) gets a much shorter connect timeout than the 120s every
- * other provider uses, specifically so a fallback loop in lane-a.ts moves on
- * to the next pool entry quickly instead of making the person wait two
- * minutes to find out the main model's box is off. Per-attempt, not global:
- * each call to createLaneAProviderClient/the fallback loop may still override
- * it via `timeoutMs`.
+ * may be asleep) is checked for reachability first, within this short limit,
+ * so a fallback loop in lane-a.ts moves on to the next pool entry quickly
+ * instead of making the person wait two minutes to find out the main model's
+ * box is off. It bounds only that check: the answer itself gets the normal
+ * limit, because a local model that is loading or writing a long reply
+ * routinely takes longer than a few seconds.
  */
 export const LANE_A_LOCAL_PROVIDER_TIMEOUT_MS = 5_000;
 
@@ -284,9 +284,8 @@ export function createLaneAProviderClient(input: CreateLaneAProviderClientInput)
     apiKey: input.apiKey ?? "",
     baseUrl,
     fetchImpl: input.fetch ?? globalThis.fetch,
-    timeoutMs:
-      input.timeoutMs ??
-      (input.provider === "local" ? LANE_A_LOCAL_PROVIDER_TIMEOUT_MS : DEFAULT_OPENAI_COMPATIBLE_TIMEOUT_MS),
+    timeoutMs: input.timeoutMs ?? DEFAULT_OPENAI_COMPATIBLE_TIMEOUT_MS,
+    reachabilityTimeoutMs: input.provider === "local" ? LANE_A_LOCAL_PROVIDER_TIMEOUT_MS : null,
   });
 }
 
@@ -640,12 +639,42 @@ function createOpenAiCompatibleLaneAClient(input: {
   baseUrl: string;
   fetchImpl: typeof fetch;
   timeoutMs: number;
+  /**
+   * When set (local models), a quick GET of the models list must get any
+   * HTTP answer within this many ms before the real call is made, so a box
+   * that is off fails fast while a slow answer still gets `timeoutMs`.
+   */
+  reachabilityTimeoutMs?: number | null;
 }): LaneAProviderClient {
   const endpoint = `${input.baseUrl.replace(/\/+$/, "")}/chat/completions`;
   const label = LANE_A_PROVIDER_CATALOGUE[input.provider].label;
   return {
     provider: input.provider,
     async complete(request) {
+      if (input.reachabilityTimeoutMs) {
+        const probe = new AbortController();
+        const probeTimer = setTimeout(() => probe.abort(), input.reachabilityTimeoutMs);
+        try {
+          const res = await input.fetchImpl(`${input.baseUrl.replace(/\/+$/, "")}/models`, {
+            method: "GET",
+            headers: input.apiKey ? { authorization: `Bearer ${input.apiKey}` } : {},
+            signal: probe.signal,
+            redirect: "error",
+          });
+          await res.body?.cancel().catch(() => undefined);
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          throw new LaneAProviderError({
+            kind: "network",
+            provider: input.provider,
+            message: probe.signal.aborted
+              ? `${label} did not answer within ${Math.round(input.reachabilityTimeoutMs / 1000)} seconds.`
+              : `Could not reach ${label}: ${scrubLaneASecrets(reason, input.apiKey)}`,
+          });
+        } finally {
+          clearTimeout(probeTimer);
+        }
+      }
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), input.timeoutMs);
       let response: Response;
