@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { BILLING_TYPES } from "../constants.js";
 
-export const COST_SOURCES = ["provider", "estimate", "static_table"] as const;
+export const COST_SOURCES = ["provider", "estimate", "catalogue", "static_table"] as const;
 
 export const createCostEventSchema = z.object({
   agentId: z.string().uuid(),

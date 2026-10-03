@@ -19,7 +19,7 @@ export interface CostEvent {
   costCents: number;
   /** exact cost in micro-USD (1 USD = 1,000,000); null on legacy cents-only rows */
   costMicroUsd: number | null;
-  /** "provider" | "estimate" | "static_table" */
+  /** "provider" | "estimate" | "catalogue" | "static_table" */
   costSource: string | null;
   occurredAt: Date;
   createdAt: Date;
