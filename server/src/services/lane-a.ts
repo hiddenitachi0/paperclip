@@ -1122,6 +1122,15 @@ const LANE_A_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0
  * one but with a blue sofa, same seed" would find no seed to reuse: only
  * the reply text is replayed, not the tool results.
  */
+/**
+ * Appended to the replayed picture note. Without it a small model reads its
+ * own earlier "Here's how I look…" turn as text that made a picture, and
+ * answers the next picture request with text only (3 Oct: qwen3 14b made the
+ * call 1 of 4 times with the bare note, 4 of 4 with this reminder).
+ */
+export const LANE_A_PICTURE_REPLAY_REMINDER =
+  "It was made by a picture tool call; writing about a picture never makes one, so every new picture needs a new tool call";
+
 /** Said instead when a reply claims a picture that no tool made this turn. */
 export const LANE_A_NO_PICTURE_MADE_NOTE = "(No picture was actually made in this reply. Ask again to get one.)";
 
@@ -1151,7 +1160,7 @@ export function withImageReplayNote(content: string, toolCalls: LaneAStoredToolC
   if (images.length === 0) return content;
   const lines = images.map(
     (image) =>
-      `[Picture made in this turn: file id ${image.fileId}${image.seed !== null && image.seed !== undefined ? `, seed ${image.seed}` : ""}]`,
+      `[Picture made in this turn: file id ${image.fileId}${image.seed !== null && image.seed !== undefined ? `, seed ${image.seed}` : ""}. ${LANE_A_PICTURE_REPLAY_REMINDER}]`,
   );
   return `${content}\n\n${lines.join("\n")}`;
 }

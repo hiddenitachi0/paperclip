@@ -23,3 +23,20 @@ describe("guardLaneAPictureClaims", () => {
     expect(guardLaneAPictureClaims("Just chatting, boss.", [])).toBe("Just chatting, boss.");
   });
 });
+
+describe("replayed picture note (3 Oct: models answered later picture requests with text only)", () => {
+  it("tells the model that a new picture needs a new tool call", async () => {
+    const { withImageReplayNote, LANE_A_PICTURE_REPLAY_REMINDER } = await import("../services/lane-a.ts");
+    const replayed = withImageReplayNote("Here's how I look 😏", [
+      { tool: "paperclip_media-studio__generate-image", image: { fileId: "f-1", seed: 7 } } as never,
+    ]);
+    expect(replayed).toContain("[Picture made in this turn: file id f-1, seed 7.");
+    expect(replayed).toContain(LANE_A_PICTURE_REPLAY_REMINDER);
+  });
+
+  it("still strips a copied note, reminder included, when no picture was made", async () => {
+    const { guardLaneAPictureClaims, LANE_A_NO_PICTURE_MADE_NOTE, LANE_A_PICTURE_REPLAY_REMINDER } = await import("../services/lane-a.ts");
+    const reply = `Here you go 😋 [Picture made in this turn: file id f-2, seed 1. ${LANE_A_PICTURE_REPLAY_REMINDER}]`;
+    expect(guardLaneAPictureClaims(reply, [])).toBe(`Here you go 😋\n\n${LANE_A_NO_PICTURE_MADE_NOTE}`);
+  });
+});
