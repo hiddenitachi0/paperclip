@@ -550,3 +550,83 @@ export function laneATransformWorstCaseDailyCents(input: {
  * would fall out of all three at once.
  */
 export const LANE_A_TRANSFORM_BILLING_CODE = "lane_a_transform";
+
+// ─── DUR-4347: quick-agent backup models, fallback chains & keyword routing ──
+//
+// A quick agent's "main" model (laneAProvider/laneAModel/laneABaseUrl/
+// laneATemperature) stays exactly as it was. These four fields add an
+// optional pool of up to 5 backups plus two ordered fallback chains (tried
+// when the main/current model does not answer, or when it refuses) and a set
+// of keyword-routing rules (phrases that pick a different starting model).
+// Every quick agent that existed before this has all four at their defaults
+// ([]), i.e. today's single-model behaviour, unchanged.
+
+/** At most this many backup models in one quick agent's pool. */
+export const LANE_A_BACKUP_MODELS_MAX = 5;
+/** At most this many phrases on one keyword-routing rule. */
+export const LANE_A_KEYWORD_ROUTE_PHRASES_MAX = 20;
+/** Longest a single keyword-routing phrase may be. */
+export const LANE_A_KEYWORD_ROUTE_PHRASE_MAX_LENGTH = 80;
+/**
+ * At most this many keyword-routing rules. Not stated in the acceptance
+ * criteria directly; bounded anyway so a jsonb column cannot be grown without
+ * limit. Generous next to the 5-entry pool every rule routes into.
+ */
+export const LANE_A_KEYWORD_ROUTES_MAX = 50;
+/** Longest a pool entry's or keyword-route's own `id` may be (nanoid-shaped). */
+export const LANE_A_BACKUP_ID_MAX_LENGTH = 64;
+
+/**
+ * One entry in a quick agent's backup-model pool. `id` is stable across edits
+ * (assigned once, e.g. nanoid) so chain-id arrays and keyword routes can keep
+ * referencing it after the operator reorders or edits other entries.
+ * Resolved through the same credential/settings path as the main model
+ * (resolveLaneASettings in server/src/services/lane-a.ts) -- a backup is
+ * never a second, looser set of rules, only a second set of coordinates.
+ */
+export interface LaneABackupModelConfig {
+  id: string;
+  provider: LaneAProvider;
+  model: string;
+  baseUrl?: string | null;
+  temperature?: number | null;
+}
+
+/**
+ * One keyword-routing rule: the first whole-word, case-insensitive match
+ * against any of `phrases` in the person's message picks `backupId` (a pool
+ * entry id) as the starting model for that turn, before either fallback chain
+ * is even built. Rules are tried in order; the first match wins.
+ */
+export interface LaneAKeywordRoute {
+  id: string;
+  phrases: string[];
+  backupId: string;
+}
+
+/**
+ * Why a backup-pool entry cannot be used, in plain words, or null when it can.
+ * Mirrors the main model's own provider/model fit check
+ * (laneAModelIssueForProvider) plus the one thing the main model only
+ * enforces at call time (assertLaneASettingsRunnable in lane-a.ts, a 503): a
+ * free-form provider (OpenRouter, local) needs a base URL, checked eagerly
+ * here because a backup pool entry is structured data the operator fills in
+ * once, not a per-call runtime fallback message.
+ */
+export function laneABackupModelEntryIssue(entry: {
+  provider: unknown;
+  model: unknown;
+  baseUrl?: string | null;
+}): string | null {
+  const modelIssue = laneAModelIssueForProvider(entry.provider, entry.model);
+  if (modelIssue) return modelIssue;
+  const provider = normalizeLaneAProvider(entry.provider);
+  const descriptor = LANE_A_PROVIDER_CATALOGUE[provider];
+  if (descriptor.baseUrlEditable && !descriptor.defaultBaseUrl) {
+    const baseUrl = typeof entry.baseUrl === "string" ? entry.baseUrl.trim() : "";
+    if (baseUrl.length === 0) {
+      return `Add an address for ${descriptor.label.toLowerCase()} (for example http://localhost:11434/v1).`;
+    }
+  }
+  return null;
+}

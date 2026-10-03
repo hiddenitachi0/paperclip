@@ -237,6 +237,46 @@ export const agents = pgTable(
     // Board-settable only, same guard posture as the rest of
     // QUICK_AGENT_FIELDS.
     laneAAssignedUserIds: jsonb("lane_a_assigned_user_ids").$type<string[]>().notNull().default([]),
+    // DUR-4347 (migration TBD): the backup-model pool for this quick agent's
+    // fallback chains — up to 5 entries, each a stable `id` (nanoid, stable
+    // across edits so chain/keyword-route references survive a reorder) plus
+    // its own provider/model/baseUrl/temperature, resolved through the same
+    // credential path as the main model (resolveLaneASettings in
+    // server/src/services/lane-a.ts). Board-settable only, same guard posture
+    // as the rest of QUICK_AGENT_FIELDS — an agent that could add its own
+    // backup models could route itself to a provider/key the operator never
+    // picked.
+    laneABackupModels: jsonb("lane_a_backup_models")
+      .$type<
+        {
+          id: string;
+          provider: string;
+          model: string;
+          baseUrl?: string | null;
+          temperature?: number | null;
+        }[]
+      >()
+      .notNull()
+      .default([]),
+    // Ordered pool ids tried, in order, after the starting model, when it does
+    // not answer (connection failure, timeout, 5xx, 429, model not loaded) --
+    // see resolveLaneARouting in server/src/services/lane-a.ts. Empty = no
+    // fallback, i.e. today's behaviour.
+    laneANoAnswerChainIds: jsonb("lane_a_no_answer_chain_ids").$type<string[]>().notNull().default([]),
+    // Ordered pool ids tried, in order, after a refusal (provider-flagged or
+    // text-pattern/classifier-detected) on the starting model or anywhere else
+    // in this chain. Never falls back to the no-answer chain. Empty = a
+    // refusal returns one plain error, i.e. today's behaviour.
+    laneARefusalChainIds: jsonb("lane_a_refusal_chain_ids").$type<string[]>().notNull().default([]),
+    // Ordered keyword-routing rules: the first whole-word, case-insensitive
+    // phrase match in the person's message picks the starting pool entry for
+    // that turn (recorded on the first attempt as `keyword:<ruleId>`), before
+    // the no-answer/refusal chains above are even built. Empty = always start
+    // at the main model, i.e. today's behaviour.
+    laneAKeywordRoutes: jsonb("lane_a_keyword_routes")
+      .$type<{ id: string; phrases: string[]; backupId: string }[]>()
+      .notNull()
+      .default([]),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

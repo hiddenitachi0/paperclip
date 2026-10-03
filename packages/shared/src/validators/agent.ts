@@ -23,6 +23,12 @@ import {
   laneAModelIssueForProvider,
 } from "../lane-a-models.js";
 import { envBindingSchema, envBindingSecretRefSchema, envConfigSchema } from "./secret.js";
+import {
+  laneABackupModelsSchema,
+  laneABackupRoutingIssues,
+  laneAChainIdsSchema,
+  laneAKeywordRoutesSchema,
+} from "./lane-a.js";
 import { BROWSER_ACCESS_LEVELS } from "../browser-access.js";
 import { LANE_A_TRUST_LEVELS } from "../lane-a-trust.js";
 import { trustAuthorizationPolicySchema, trustPresetSchema } from "./trust-policy.js";
@@ -140,6 +146,14 @@ export const QUICK_AGENT_FIELDS = [
   // audience has no ceiling at all.
   "laneATrustLevel",
   "laneAAssignedUserIds",
+  // DUR-4347: the backup-model pool, its two ordered fallback chains
+  // (no-answer / refusal) and keyword-routing rules. Board-only, same reason
+  // as the rest of this list: an agent that could add its own backup models
+  // could route itself to a provider/key the operator never picked.
+  "laneABackupModels",
+  "laneANoAnswerChainIds",
+  "laneARefusalChainIds",
+  "laneAKeywordRoutes",
 ] as const;
 export type QuickAgentField = (typeof QUICK_AGENT_FIELDS)[number];
 
@@ -485,6 +499,10 @@ function refineAgentModelEffort(
     runtimeConfig?: unknown;
     laneAProvider?: string | null;
     laneAModel?: string | null;
+    laneABackupModels?: unknown;
+    laneANoAnswerChainIds?: unknown;
+    laneARefusalChainIds?: unknown;
+    laneAKeywordRoutes?: unknown;
   },
   ctx: z.RefinementCtx,
 ) {
@@ -501,6 +519,18 @@ function refineAgentModelEffort(
   const laneAIssue = laneAProviderModelIssue(value);
   if (laneAIssue) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: laneAIssue, path: ["laneAModel"] });
+  }
+  // DUR-4347: a fallback-chain id or keyword-route backupId must reference an
+  // entry actually in this same patch's backup pool. Runs here (not on any
+  // one field's own schema) because the pool and its chains/routes are
+  // siblings on this same object.
+  for (const issue of laneABackupRoutingIssues({
+    laneABackupModels: value.laneABackupModels as never,
+    laneANoAnswerChainIds: value.laneANoAnswerChainIds as never,
+    laneARefusalChainIds: value.laneARefusalChainIds as never,
+    laneAKeywordRoutes: value.laneAKeywordRoutes as never,
+  })) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: issue.message, path: issue.path });
   }
   const runtimeConfig = value.runtimeConfig;
   const modelProfiles =
@@ -649,6 +679,15 @@ const createAgentObjectSchema = z.object({
     .array(z.string().trim().min(1).max(200))
     .max(LANE_A_ASSIGNED_USER_IDS_MAX_LENGTH)
     .optional(),
+  // DUR-4347 (QUICK_AGENT_FIELDS): the backup-model pool and its two ordered
+  // fallback chains, plus keyword-routing rules. Left out entirely => the
+  // column defaults ([]), i.e. today's single-model behaviour. Cross-field
+  // fit (chain/route ids must exist in the pool) is checked in
+  // refineAgentModelEffort below via laneABackupRoutingIssues.
+  laneABackupModels: laneABackupModelsSchema.optional(),
+  laneANoAnswerChainIds: laneAChainIdsSchema.optional(),
+  laneARefusalChainIds: laneAChainIdsSchema.optional(),
+  laneAKeywordRoutes: laneAKeywordRoutesSchema.optional(),
 });
 
 export const createAgentSchema = createAgentObjectSchema.superRefine(refineAgentModelEffort);

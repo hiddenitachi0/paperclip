@@ -20,6 +20,24 @@ export interface LaneAToolImage {
   issueId: string | null;
 }
 
+/**
+ * One model call the fallback loop made while answering a turn (DUR-4347).
+ * `rule` names why this entry was tried: `keyword:<ruleId>` (keyword routing
+ * picked it as the starting model), `no_answer_chain:<n>` / `refusal_chain:<n>`
+ * (its 0-based position in that chain), or `null` for a bare main-model
+ * attempt with no routing involved. Kept for the agent page / message-detail
+ * view only -- the reply text sent to the person is unchanged regardless of
+ * which attempt answered.
+ */
+export interface LaneAAttemptRecord {
+  provider: string;
+  model: string;
+  outcome: "answered" | "retryable_error" | "refusal" | "error";
+  durationMs: number;
+  costCents: number;
+  rule: string | null;
+}
+
 /** One tool call a quick agent made while answering a message, kept for the operator to see. */
 export interface LaneAStoredToolCall {
   tool: string;
@@ -56,6 +74,17 @@ export const laneAMessages = pgTable(
     role: text("role").$type<"user" | "assistant" | "recap">().notNull(),
     content: text("content").notNull(),
     toolCalls: jsonb("tool_calls").$type<LaneAStoredToolCall[]>(),
+    // DUR-4347: every model attempt the fallback loop made answering this
+    // turn (main + any backups tried), in order. Null/empty for every row
+    // written before this column existed, and for a turn that never entered
+    // the loop (e.g. a `recap` row). See LaneAAttemptRecord above.
+    attempts: jsonb("attempts").$type<LaneAAttemptRecord[]>(),
+    // Which chain (if any) produced the reply: "main" (no routing involved),
+    // "keyword" (a keyword rule picked the starting model and it answered),
+    // "no_answer_chain" or "refusal_chain" (a backup further down one of
+    // those chains answered). Null for a row written before this column
+    // existed, or for a `recap` row.
+    answeredBy: text("answered_by").$type<"main" | "keyword" | "no_answer_chain" | "refusal_chain">(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

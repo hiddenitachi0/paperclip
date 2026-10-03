@@ -388,6 +388,13 @@ describe.sequential("every quick-agent field is handled on the employment path",
     laneAAssignedUserIds: ["11111111-1111-4111-8111-111111111199"],
     // OpenRouter "model hosts".
     laneAProviderRouting: { only: ["deepinfra"], ignore: ["venice"] },
+    // DUR-4347: backup pool, fallback chains and keyword routes. Each field is
+    // posted on its own, so the chain/route samples are empty (an id would
+    // dangle without the pool).
+    laneABackupModels: [{ id: "backup-1", provider: "openai", model: "gpt-4.1-mini" }],
+    laneANoAnswerChainIds: [],
+    laneARefusalChainIds: [],
+    laneAKeywordRoutes: [],
     // DUR-4017: the daily briefing settings.
     morningReportSettings: {
       enabled: true,

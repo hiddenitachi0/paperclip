@@ -506,6 +506,17 @@ export function approvalService(db: Db) {
             // Cleaned on the way in: anything that is not a valid host list
             // reads as "no preference" (null), like a hire made before it existed.
             laneAProviderRouting: normalizeLaneAProviderRouting(payload.laneAProviderRouting),
+            // DUR-4347: backup pool, the two fallback chains and keyword routes
+            // the card carries, read back for the same reason. Anything that is
+            // not a list reads as "none configured" (undefined = column default, main model only).
+            laneABackupModels: Array.isArray(payload.laneABackupModels) ? payload.laneABackupModels : undefined,
+            laneANoAnswerChainIds: Array.isArray(payload.laneANoAnswerChainIds)
+              ? payload.laneANoAnswerChainIds
+              : undefined,
+            laneARefusalChainIds: Array.isArray(payload.laneARefusalChainIds)
+              ? payload.laneARefusalChainIds
+              : undefined,
+            laneAKeywordRoutes: Array.isArray(payload.laneAKeywordRoutes) ? payload.laneAKeywordRoutes : undefined,
             // DUR-4017: the daily briefing settings the card carries, read
             // back for the same reason. Anything not an object reads as
             // "never configured" (null), matching a hire made before this

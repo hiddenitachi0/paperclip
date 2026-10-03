@@ -18,6 +18,7 @@ import {
   laneAMessages,
   type LaneAStoredToolCall,
   type LaneAToolImage,
+  type LaneAAttemptRecord,
 } from "@paperclipai/db";
 import {
   LANE_A_API_KEY_CONFIG_PATH,
@@ -41,6 +42,8 @@ import {
   type ChatHandedOverTask,
   type LaneAProvider,
   type LaneAProviderRouting,
+  type LaneABackupModelConfig,
+  type LaneAKeywordRoute,
 } from "@paperclipai/shared";
 import { HttpError, conflict, forbidden, notFound, tooManyRequests, unprocessable } from "../errors.js";
 import {
@@ -54,6 +57,7 @@ import {
   type LaneATool,
   type LaneAToolResult,
 } from "./lane-a-providers.js";
+import { detectTextRefusalByPattern } from "./lane-a-refusal.js";
 import { costService } from "./costs.js";
 import { budgetService } from "./budgets.js";
 import { logger } from "../middleware/logger.js";
@@ -841,6 +845,217 @@ function assertLaneASettingsRunnable(settings: ReturnType<typeof resolveLaneASet
   return settings.model;
 }
 
+// ─── DUR-4347: backup-model routing & the fallback loop ──────────────────────
+
+/** One entry a fallback loop may attempt: the main model, or one pool backup. */
+export interface LaneARoutingPoolEntry {
+  /** `"main"` for the agent's own main-model fields; otherwise a backup's own `id`. */
+  id: string;
+  provider: string | null;
+  model: string | null;
+  baseUrl?: string | null;
+  temperature?: number | null;
+}
+
+export const LANE_A_MAIN_POOL_ID = "main";
+
+export interface LaneARoutingResult {
+  pool: Map<string, LaneARoutingPoolEntry>;
+  /** The pool id the turn starts at — `"main"` unless a keyword rule matched. */
+  start: string;
+  /** `keyword:<ruleId>` when a rule picked `start`; null when it's the plain main model. */
+  startRule: string | null;
+  /** `[start, ...laneANoAnswerChainIds]`, de-duplicated and filtered to ids that exist in the pool. */
+  noAnswerChain: string[];
+  /** `laneARefusalChainIds`, filtered to ids that exist in the pool. Never includes `start`. */
+  refusalChain: string[];
+}
+
+/**
+ * Whole-word, case-insensitive match of `phrase` anywhere in `text`. "Whole
+ * word" here means bounded by a non-word character or a string edge on both
+ * sides, which also works for a multi-word phrase ("talk to a human").
+ */
+export function laneAKeywordPhraseMatches(text: string, phrase: string): boolean {
+  const trimmed = phrase.trim();
+  if (!trimmed) return false;
+  const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+  const re = new RegExp(`(?:^|[^\\p{L}\\p{N}_])${escaped}(?:[^\\p{L}\\p{N}_]|$)`, "iu");
+  return re.test(text);
+}
+
+/**
+ * Resolves what a quick agent's fallback loop needs for ONE incoming turn:
+ * the pool (main + its backups), which entry the turn starts at (keyword
+ * routing, else main), and the two ordered chains built from it. Pure and
+ * synchronous on purpose — no DB/credential work happens here, so it is cheap
+ * to call before anything is spent, and easy to test without a database.
+ *
+ * Any backup/chain/keyword-route id that does not resolve to a real pool
+ * entry is silently skipped rather than thrown on: the jsonb columns this
+ * reads are not re-validated on every read, so a pool entry deleted after a
+ * chain/route was built against it must degrade gracefully, not break chat.
+ */
+export function resolveLaneARouting(
+  agent: {
+    laneAProvider?: string | null;
+    laneAModel?: string | null;
+    laneABaseUrl?: string | null;
+    laneATemperature?: number | null;
+    laneABackupModels?: LaneABackupModelConfig[] | null;
+    laneANoAnswerChainIds?: string[] | null;
+    laneARefusalChainIds?: string[] | null;
+    laneAKeywordRoutes?: LaneAKeywordRoute[] | null;
+  },
+  messageText: string,
+): LaneARoutingResult {
+  const pool = new Map<string, LaneARoutingPoolEntry>();
+  pool.set(LANE_A_MAIN_POOL_ID, {
+    id: LANE_A_MAIN_POOL_ID,
+    provider: agent.laneAProvider ?? null,
+    model: agent.laneAModel ?? null,
+    baseUrl: agent.laneABaseUrl ?? null,
+    temperature: agent.laneATemperature ?? null,
+  });
+  for (const backup of agent.laneABackupModels ?? []) {
+    pool.set(backup.id, {
+      id: backup.id,
+      provider: backup.provider,
+      model: backup.model,
+      baseUrl: backup.baseUrl ?? null,
+      temperature: backup.temperature ?? null,
+    });
+  }
+
+  let start = LANE_A_MAIN_POOL_ID;
+  let startRule: string | null = null;
+  for (const route of agent.laneAKeywordRoutes ?? []) {
+    if (!pool.has(route.backupId)) continue;
+    if (route.phrases.some((phrase) => laneAKeywordPhraseMatches(messageText, phrase))) {
+      start = route.backupId;
+      startRule = `keyword:${route.id}`;
+      break;
+    }
+  }
+
+  const seen = new Set<string>();
+  const noAnswerChain = [start, ...(agent.laneANoAnswerChainIds ?? [])].filter((id) => {
+    if (!pool.has(id) || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+  const refusalChain = (agent.laneARefusalChainIds ?? []).filter((id) => pool.has(id));
+
+  return { pool, start, startRule, noAnswerChain, refusalChain };
+}
+
+/** What one fallback-loop attempt came back with. */
+export type LaneAFallbackAttemptOutcome = "answered" | "refusal" | "retryable_error" | "fatal_error";
+
+export interface LaneAFallbackAttemptResult<T> {
+  outcome: LaneAFallbackAttemptOutcome;
+  /** Present when `outcome === "answered"`. */
+  value?: T;
+  /** Present when `outcome !== "answered"` — surfaced if this is the attempt that ends the loop. */
+  error?: unknown;
+}
+
+export type LaneAAnsweredBy = "main" | "keyword" | "no_answer_chain" | "refusal_chain";
+
+export type LaneAFallbackLoopResult<T> =
+  | { ok: true; value: T; poolId: string; answeredBy: LaneAAnsweredBy }
+  | { ok: false; error: unknown };
+
+/**
+ * The fallback loop itself, independent of what an "attempt" actually does —
+ * `attempt(poolId)` is the only thing that knows how to resolve settings,
+ * build a client and call the model. Kept generic and DB-free so the routing
+ * rules (this is the whole of acceptance items 5's "Loop:" paragraph) can be
+ * exercised in tests with a scripted `attempt` instead of a real provider.
+ *
+ * Rules, matching the ticket exactly:
+ *   - A `refusal` (anywhere, including on `start`) always jumps to the
+ *     refusal chain's first entry and never returns to the no-answer chain.
+ *   - Inside the refusal chain, a `retryable_error` OR another `refusal` both
+ *     advance to the refusal chain's next entry.
+ *   - A `fatal_error` (non-retryable, non-refusal) ends the loop immediately
+ *     with that error.
+ *   - Running out of entries in either chain ends the loop with the last
+ *     attempt's error.
+ */
+export async function runLaneAFallbackLoop<T>(params: {
+  noAnswerChain: string[];
+  refusalChain: string[];
+  attempt: (poolId: string) => Promise<LaneAFallbackAttemptResult<T>>;
+}): Promise<LaneAFallbackLoopResult<T>> {
+  const { noAnswerChain, refusalChain, attempt } = params;
+
+  for (let i = 0; i < noAnswerChain.length; i++) {
+    const result = await attempt(noAnswerChain[i]!);
+    if (result.outcome === "answered") {
+      return {
+        ok: true,
+        value: result.value as T,
+        poolId: noAnswerChain[i]!,
+        answeredBy: i === 0 ? "main" : "no_answer_chain",
+      };
+    }
+    if (result.outcome === "refusal") {
+      return runLaneARefusalChain({ refusalChain, attempt, carriedError: result.error });
+    }
+    if (result.outcome === "retryable_error") {
+      if (i === noAnswerChain.length - 1) return { ok: false, error: result.error };
+      continue;
+    }
+    // fatal_error
+    return { ok: false, error: result.error };
+  }
+  return { ok: false, error: new Error("lane A: fallback loop had no attempts to make") };
+}
+
+async function runLaneARefusalChain<T>(params: {
+  refusalChain: string[];
+  attempt: (poolId: string) => Promise<LaneAFallbackAttemptResult<T>>;
+  carriedError: unknown;
+}): Promise<LaneAFallbackLoopResult<T>> {
+  const { refusalChain, attempt } = params;
+  if (refusalChain.length === 0) return { ok: false, error: params.carriedError };
+
+  for (let i = 0; i < refusalChain.length; i++) {
+    const result = await attempt(refusalChain[i]!);
+    if (result.outcome === "answered") {
+      return { ok: true, value: result.value as T, poolId: refusalChain[i]!, answeredBy: "refusal_chain" };
+    }
+    if (result.outcome === "retryable_error" || result.outcome === "refusal") {
+      if (i === refusalChain.length - 1) return { ok: false, error: result.error };
+      continue;
+    }
+    // fatal_error
+    return { ok: false, error: result.error };
+  }
+  return { ok: false, error: params.carriedError };
+}
+
+/**
+ * A pool entry's settings, resolved the same way the main model's are
+ * (`resolveLaneASettings`): a backup is a second set of coordinates, never a
+ * second set of rules, so it is run through exactly the same provider-fit /
+ * default-filling logic by passing it through as if it were the agent's own
+ * main-model fields. `maxOutputTokens`, `dailyCallCap` and `providerRouting`'s
+ * gating always come from the real agent — a backup pool entry does not carry
+ * its own copies of those (ticket: "Tool allowlist stays sourced from the
+ * agent config regardless of which chain entry answered", same principle).
+ */
+export function resolveLaneAPoolEntrySettings(entry: LaneARoutingPoolEntry, agent: LaneATargetAgent) {
+  return resolveLaneASettings({
+    ...agent,
+    laneAProvider: entry.provider,
+    laneAModel: entry.model,
+    laneABaseUrl: entry.baseUrl ?? null,
+    laneATemperature: entry.temperature ?? null,
+  });
+}
+
 /** One action the quick agent took while answering — surfaced to the operator. */
 export type LaneAAction = LaneAStoredToolCall;
 
@@ -1487,6 +1702,33 @@ function providerErrorDetail(message: string): string {
   return message.endsWith(".") ? message : `${message}.`;
 }
 
+/**
+ * DUR-4347 (security): the agent's one bound key is for the main model's
+ * provider and host. A backup may reuse it only when both match; anything
+ * else gets no binding (instance key for Claude, none for a local server,
+ * otherwise a missing-key refusal that skips the backup), so the key is never
+ * sent to another vendor or an arbitrary base URL.
+ */
+export function backupMayUseMainBinding(
+  backup: { provider: LaneAProvider; baseUrl: string | null },
+  main: { provider: LaneAProvider; baseUrl: string | null },
+): boolean {
+  return backup.provider === main.provider && (backup.baseUrl ?? null) === (main.baseUrl ?? null);
+}
+
+/**
+ * DUR-4347: a failed model attempt, with what it had already cost and whether
+ * a tool had already run. Only thrown when `rawProviderErrors` is set.
+ */
+class LaneAAttemptFailure extends Error {
+  constructor(
+    readonly original: unknown,
+    readonly partial: { toolsRan: boolean; inputTokens: number; outputTokens: number },
+  ) {
+    super(original instanceof Error ? original.message : String(original));
+  }
+}
+
 export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
   const toolDeps: LaneAToolDeps = {
     ...createDbLaneAToolDeps(db, { businessData: options.businessData, webSearch: options.webSearch, documents: options.documents }),
@@ -1841,6 +2083,13 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         // DUR-4070: the trust-level ceiling every capability below now
         // checks first.
         laneATrustLevel: agents.laneATrustLevel,
+        // DUR-4347: the backup-model pool and its routing, read off the row
+        // for the same reason as the rest of this select — a caller must
+        // never be able to widen which models/providers a turn may reach.
+        laneABackupModels: agents.laneABackupModels,
+        laneANoAnswerChainIds: agents.laneANoAnswerChainIds,
+        laneARefusalChainIds: agents.laneARefusalChainIds,
+        laneAKeywordRoutes: agents.laneAKeywordRoutes,
       })
       .from(agents)
       .where(and(eq(agents.id, agentId), eq(agents.companyId, companyId)));
@@ -2005,6 +2254,16 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     offerReadWebPage?: boolean;
     /** DUR-4197: offer search_conversations this turn ("Can search past conversations" is on). */
     offerConversationSearch?: boolean;
+    /**
+     * DUR-4347: when true, a provider failure is rethrown exactly as caught
+     * (typically a `LaneAProviderError`, still carrying `retryable`/`refusal`)
+     * instead of being converted to an `HttpError` here. Set by the fallback
+     * loop in `sendMessage`, which needs the raw classification to decide
+     * whether to try the next pool entry; it does the one HTTP conversion
+     * itself, only on the attempt that ends the loop. Every other caller
+     * leaves this unset and gets exactly today's behaviour.
+     */
+    rawProviderErrors?: boolean;
   }): Promise<{
     text: string;
     inputTokens: number;
@@ -2400,6 +2659,16 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         response = retry;
       }
     } catch (err) {
+      if (params.rawProviderErrors) {
+        // DUR-4347: tokens already spent, and whether any tool already ran,
+        // must reach the fallback loop: a failed attempt's spend is recorded,
+        // and a turn that already acted is never replayed on another model.
+        throw new LaneAAttemptFailure(err, {
+          toolsRan: toolCallsUsed + addonToolCallsUsed > 0,
+          inputTokens,
+          outputTokens,
+        });
+      }
       throw providerErrorToHttp(err, "chat");
     }
 
@@ -2523,7 +2792,12 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       : null;
     // DUR-4000: the job's standing rules, read off the same row.
     const standingRules = parseAgentLimits(agentRow?.limits).notes ?? null;
-    const chatSettings = resolveLaneASettings({
+    // DUR-4347: the merged agent view the main model's settings AND the
+    // backup pool/chains/keyword-routes are all resolved against — the same
+    // merge (caller fields win, else the stored row, same as every other
+    // DUR-3997 field above) used for every pool entry's own
+    // resolveLaneAPoolEntrySettings call below.
+    const targetAgentForSettings = {
       ...params.targetAgent,
       laneAProvider: params.targetAgent.laneAProvider ?? agentRow?.laneAProvider ?? null,
       laneABaseUrl: params.targetAgent.laneABaseUrl ?? agentRow?.laneABaseUrl ?? null,
@@ -2531,7 +2805,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       laneATemperature: params.targetAgent.laneATemperature ?? agentRow?.laneATemperature ?? null,
       laneAThinking: params.targetAgent.laneAThinking ?? agentRow?.laneAThinking ?? null,
       laneAProviderRouting: params.targetAgent.laneAProviderRouting ?? agentRow?.laneAProviderRouting ?? null,
-    });
+    };
+    const chatSettings = resolveLaneASettings(targetAgentForSettings);
     const chatModel = assertLaneASettingsRunnable(chatSettings);
     const credential = await resolveLaneACredential({
       companyId: params.companyId,
@@ -2541,7 +2816,13 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       actor: params.actor,
       keyOptional: chatSettings.provider === "anthropic" && Boolean(options.createModelClient),
     });
-    const client = buildProviderClient({
+    // DUR-4347: the main model's own client, built eagerly (same timing as
+    // before DUR-4347) so a main-model refusal still happens before the MCP
+    // tool servers below are opened. A backup's client is resolved lazily,
+    // inside the fallback loop's own attempt() below, only once the turn has
+    // already committed to opening tools (so there is nothing left to leak
+    // by resolving a backup's credential a little later).
+    const mainClient = buildProviderClient({
       provider: chatSettings.provider,
       baseUrl: chatSettings.baseUrl,
       credential,
@@ -2672,12 +2953,34 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     // Never offered to a "limited"-trust agent, regardless of the switch.
     const conversationSearchOn = !trustLimited && readLaneAConversationSearchSwitch(agentRow?.adapterConfig);
 
+    // DUR-4347: the backup pool + its two ordered chains + keyword routing,
+    // resolved once, up front, from the SAME row the main model's own
+    // settings just came from (never from the caller). Keyword routing is
+    // matched against the person's own message, exactly as it will be
+    // matched again on every later turn in this conversation.
+    const routing = resolveLaneARouting(
+      {
+        ...targetAgentForSettings,
+        laneABackupModels: (agentRow?.laneABackupModels as LaneABackupModelConfig[] | null) ?? [],
+        laneANoAnswerChainIds: agentRow?.laneANoAnswerChainIds ?? [],
+        laneARefusalChainIds: agentRow?.laneARefusalChainIds ?? [],
+        laneAKeywordRoutes: (agentRow?.laneAKeywordRoutes as LaneAKeywordRoute[] | null) ?? [],
+      },
+      params.message,
+    );
+
     let text: string;
     let inputTokens: number;
     let outputTokens: number;
     let stopReason: string | null;
     let actions: LaneAAction[];
     let businessDataOutputs: BusinessDataTurnOutput[] = [];
+    const attemptRecords: LaneAAttemptRecord[] = [];
+    const attemptCostEvents: { provider: LaneAProvider; model: string; inputTokens: number; outputTokens: number; costCents: number }[] = [];
+    let turnFailed = false;
+    let refusalModeEntered = false;
+    let answeredByPoolId: string;
+    let answeredBy: LaneAAnsweredBy;
     try {
       const systemPrompt = buildSystemPrompt({
         agentName: params.targetAgent.name,
@@ -2698,36 +3001,204 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         conversationSearch: conversationSearchOn,
         earlierConversation,
       });
-      const result = await callModel({
-        systemPrompt,
-        history,
-        message: params.message,
-        toolset,
-        ctx,
-        client,
-        provider: chatSettings.provider,
-        model: chatModel,
-        maxOutputTokens: chatSettings.maxOutputTokens,
-        temperature: chatSettings.temperature,
-        reasoningEffort: chatSettings.reasoningEffort,
-        providerRouting: chatSettings.providerRouting,
-        offerBusinessData: businessDataPrompt?.available === true,
-        offerCompanyFiles: companyFilesPrompt !== undefined,
-        offerDocuments: documentsPrompt !== undefined,
-        offerMemory: memoryPrompt?.toolsOffered === true,
-        offerWebSearch: webPrompt.search,
-        offerReadWebPage: webPrompt.readPages,
-        offerConversationSearch: conversationSearchOn,
+
+      // DUR-4347: which configured chain (if any) this poolId is being tried
+      // from, right now — read BEFORE this attempt runs, since a refusal on
+      // THIS attempt only moves the loop into the refusal chain for the NEXT
+      // one. `routing.start`'s own attempt is "keyword:<ruleId>" (a keyword
+      // rule picked it) or null (a bare main attempt) regardless of which
+      // chain it is nominally the first entry of.
+      const ruleForAttempt = (poolId: string): string | null => {
+        if (refusalModeEntered) return `refusal_chain:${routing.refusalChain.indexOf(poolId)}`;
+        if (poolId === routing.start) return routing.startRule;
+        return `no_answer_chain:${routing.noAnswerChain.indexOf(poolId) - 1}`;
+      };
+
+      const attemptPoolEntry = async (
+        poolId: string,
+      ): Promise<
+        LaneAFallbackAttemptResult<{
+          text: string;
+          inputTokens: number;
+          outputTokens: number;
+          stopReason: string | null;
+          actions: LaneAAction[];
+          businessDataOutputs: BusinessDataTurnOutput[];
+          provider: LaneAProvider;
+          model: string;
+        }>
+      > => {
+        const entry = routing.pool.get(poolId);
+        const rule = ruleForAttempt(poolId);
+        const attemptStart = Date.now();
+        if (!entry) {
+          // Defensive only: resolveLaneARouting only ever puts ids it has
+          // already checked exist in the pool into these chains.
+          return { outcome: "retryable_error", error: new Error(`lane A: pool id "${poolId}" is not in the resolved pool`) };
+        }
+        let entrySettings: ReturnType<typeof resolveLaneASettings>;
+        let entryModel: string;
+        let entryClient: LaneAProviderClient;
+        if (poolId === LANE_A_MAIN_POOL_ID) {
+          entrySettings = chatSettings;
+          entryModel = chatModel;
+          entryClient = mainClient;
+        } else {
+          try {
+            entrySettings = resolveLaneAPoolEntrySettings(entry, targetAgentForSettings);
+            entryModel = assertLaneASettingsRunnable(entrySettings);
+            const backupCredential = await resolveLaneACredential({
+              companyId: params.companyId,
+              agentId: params.targetAgent.id,
+              provider: entrySettings.provider,
+              adapterConfig: backupMayUseMainBinding(entrySettings, chatSettings) ? agentRow?.adapterConfig : null,
+              actor: params.actor,
+              keyOptional: entrySettings.provider === "anthropic" && Boolean(options.createModelClient),
+            });
+            entryClient = buildProviderClient({ provider: entrySettings.provider, baseUrl: entrySettings.baseUrl, credential: backupCredential });
+          } catch (err) {
+            // A backup that cannot even be set up (bad model id, missing
+            // key) is skipped rather than ending the whole turn over it —
+            // the validators reject this at save time, so this is only
+            // reachable if a key/binding was removed after the fact.
+            attemptRecords.push({
+              provider: entry.provider ?? "unknown",
+              model: entry.model ?? "unknown",
+              outcome: "error",
+              durationMs: Date.now() - attemptStart,
+              costCents: 0,
+              rule,
+            });
+            return { outcome: "retryable_error", error: err };
+          }
+        }
+        try {
+          const result = await callModel({
+            systemPrompt,
+            history,
+            message: params.message,
+            toolset,
+            ctx,
+            client: entryClient,
+            provider: entrySettings.provider,
+            model: entryModel,
+            maxOutputTokens: entrySettings.maxOutputTokens,
+            temperature: entrySettings.temperature,
+            reasoningEffort: entrySettings.reasoningEffort,
+            providerRouting: entrySettings.providerRouting,
+            offerBusinessData: businessDataPrompt?.available === true,
+            offerCompanyFiles: companyFilesPrompt !== undefined,
+            offerDocuments: documentsPrompt !== undefined,
+            offerMemory: memoryPrompt?.toolsOffered === true,
+            offerWebSearch: webPrompt.search,
+            offerReadWebPage: webPrompt.readPages,
+            offerConversationSearch: conversationSearchOn,
+            rawProviderErrors: true,
+          });
+          const durationMs = Date.now() - attemptStart;
+          const costCents = computeCostCents(entrySettings.provider, entryModel, result.inputTokens, result.outputTokens);
+          attemptCostEvents.push({ provider: entrySettings.provider, model: entryModel, inputTokens: result.inputTokens, outputTokens: result.outputTokens, costCents });
+          // DUR-4347: a provider can refuse with a normal, successful
+          // completion whose TEXT is the refusal rather than an error — the
+          // refusal chain has to catch this case too.
+          // Only when there is a refusal chain to go to (otherwise the
+          // model's own words are the better answer than an error), and only
+          // when no tool ran: a reply after tool use is the agent reporting
+          // on its own actions ("sorry, I can't hand that to Bob"), not the
+          // model declining the request.
+          const textRefusal =
+            routing.refusalChain.length > 0 && result.actions.length === 0
+              ? detectTextRefusalByPattern(result.text)
+              : { isRefusal: false, rule: null };
+          if (textRefusal.isRefusal) {
+            refusalModeEntered = true;
+            attemptRecords.push({ provider: entrySettings.provider, model: entryModel, outcome: "refusal", durationMs, costCents, rule });
+            return { outcome: "refusal", error: new Error(`lane A: reply text was a refusal (${textRefusal.rule})`) };
+          }
+          attemptRecords.push({ provider: entrySettings.provider, model: entryModel, outcome: "answered", durationMs, costCents, rule });
+          return { outcome: "answered", value: { ...result, provider: entrySettings.provider, model: entryModel } };
+        } catch (caught) {
+          const durationMs = Date.now() - attemptStart;
+          const failure = caught instanceof LaneAAttemptFailure ? caught : null;
+          const err = failure ? failure.original : caught;
+          const failedCostCents = failure
+            ? computeCostCents(entrySettings.provider, entryModel, failure.partial.inputTokens, failure.partial.outputTokens)
+            : 0;
+          if (failure && (failure.partial.inputTokens > 0 || failure.partial.outputTokens > 0)) {
+            attemptCostEvents.push({
+              provider: entrySettings.provider,
+              model: entryModel,
+              inputTokens: failure.partial.inputTokens,
+              outputTokens: failure.partial.outputTokens,
+              costCents: failedCostCents,
+            });
+          }
+          // A tool already ran on this attempt: another model would run it
+          // again (a second picture, a second task), with a fresh tool
+          // budget. End the turn with the plain error instead.
+          const outcome = failure?.partial.toolsRan
+            ? "fatal_error"
+            : err instanceof LaneAProviderError
+              ? (err.refusal ? "refusal" : err.retryable ? "retryable_error" : "fatal_error")
+              : "fatal_error";
+          if (outcome === "refusal") refusalModeEntered = true;
+          attemptRecords.push({
+            provider: entrySettings.provider,
+            model: entryModel,
+            outcome: outcome === "refusal" ? "refusal" : outcome === "retryable_error" ? "retryable_error" : "error",
+            durationMs,
+            costCents: failedCostCents,
+            rule,
+          });
+          return { outcome, error: err };
+        }
+      };
+
+      const loopResult = await runLaneAFallbackLoop({
+        noAnswerChain: routing.noAnswerChain,
+        refusalChain: routing.refusalChain,
+        attempt: attemptPoolEntry,
       });
-      text = result.text;
-      businessDataOutputs = result.businessDataOutputs;
-      inputTokens = result.inputTokens;
-      outputTokens = result.outputTokens;
-      stopReason = result.stopReason;
-      actions = result.actions;
+      if (!loopResult.ok) {
+        const httpErr = providerErrorToHttp(loopResult.error, "chat");
+        throw httpErr instanceof HttpError ? httpErr : new HttpError(502, `Lane A model call failed: ${String((httpErr as Error)?.message ?? httpErr)}`, {});
+      }
+      text = loopResult.value.text;
+      businessDataOutputs = loopResult.value.businessDataOutputs;
+      inputTokens = loopResult.value.inputTokens;
+      outputTokens = loopResult.value.outputTokens;
+      stopReason = loopResult.value.stopReason;
+      actions = loopResult.value.actions;
+      answeredBy = loopResult.answeredBy === "main" && routing.startRule ? "keyword" : loopResult.answeredBy;
       text = guardLaneAPictureClaims(text, actions);
+    } catch (err) {
+      turnFailed = true;
+      throw err;
     } finally {
       await closeLaneATools(toolset);
+      // DUR-3997/DUR-4347: one cost event per attempt the fallback loop made,
+      // each stamped with that attempt's own provider/model — a failed or
+      // refused attempt still spent tokens, so this runs on the error path
+      // too (the daily cap was already asserted once for this turn).
+      try {
+        for (const event of attemptCostEvents) {
+          await costService(db).createEvent(params.companyId, {
+            agentId: params.targetAgent.id,
+            provider: event.provider,
+            biller: event.provider,
+            billingType: "metered_api",
+            model: event.model,
+            inputTokens: event.inputTokens,
+            outputTokens: event.outputTokens,
+            costCents: event.costCents,
+            occurredAt: new Date(),
+          });
+        }
+      } catch (flushErr) {
+        // Never mask the turn's own error with a ledger-write failure.
+        if (!turnFailed) throw flushErr;
+        logger.error({ err: flushErr }, "lane A: could not record cost events for a failed turn");
+      }
     }
 
     // DUR-3972: the number check when business data was read this turn; the
@@ -2787,22 +3258,9 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       }
     }
 
-    // DUR-3997: stamped with the provider that actually answered, never a
-    // hard-coded "anthropic", so a company's OpenAI spend reads as OpenAI.
-    await costService(db).createEvent(params.companyId, {
-      agentId: params.targetAgent.id,
-      provider: chatSettings.provider,
-      biller: chatSettings.provider,
-      billingType: "metered_api",
-      model: chatModel,
-      inputTokens,
-      outputTokens,
-      costCents: computeCostCents(chatSettings.provider, chatModel, inputTokens, outputTokens),
-      occurredAt: new Date(),
-    });
-
     // Persist the turn pair so the next message in this conversation
-    // remembers it. The assistant row also keeps the actions taken.
+    // remembers it. The assistant row also keeps the actions taken and,
+    // since DUR-4347, every attempt the fallback loop made answering it.
     const now = new Date();
     await db.insert(laneAMessages).values([
       {
@@ -2820,6 +3278,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         role: "assistant",
         content: text,
         toolCalls: actions.length > 0 ? actions : null,
+        attempts: attemptRecords.length > 0 ? attemptRecords : null,
+        answeredBy,
         createdAt: new Date(now.getTime() + 1),
       },
     ]);
@@ -3113,60 +3573,148 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       );
     }
 
-    // The key is resolved before the concurrency slot is taken: a missing key
-    // is a configuration refusal, not a call, and must not hold a slot.
-    const credential = await resolveLaneACredential({
-      companyId: params.companyId,
-      agentId: params.targetAgent.id,
-      provider: settings.provider,
-      adapterConfig: agentRow?.adapterConfig,
-      keyOptional: settings.provider === "anthropic" && Boolean(options.createModelClient),
-    });
-    const client = buildProviderClient({ provider: settings.provider, baseUrl: settings.baseUrl, credential });
+    // DUR-4347: the same pool/chains/keyword routing chat uses, matched
+    // against the text being transformed. The daily cap and budget above were
+    // asserted once for this call, however many attempts it takes.
+    const routing = resolveLaneARouting(
+      {
+        ...params.targetAgent,
+        laneAProvider: settings.provider,
+        laneAModel: settings.model,
+        laneABaseUrl: settings.baseUrl ?? null,
+        laneATemperature: settings.temperature ?? null,
+        laneABackupModels: (agentRow?.laneABackupModels as LaneABackupModelConfig[] | null) ?? [],
+        laneANoAnswerChainIds: agentRow?.laneANoAnswerChainIds ?? [],
+        laneARefusalChainIds: agentRow?.laneARefusalChainIds ?? [],
+        laneAKeywordRoutes: (agentRow?.laneAKeywordRoutes as LaneAKeywordRoute[] | null) ?? [],
+      },
+      params.input,
+    );
+    const targetAgentForSettings = {
+      ...params.targetAgent,
+      laneAProvider: params.targetAgent.laneAProvider ?? agentRow?.laneAProvider ?? null,
+      laneABaseUrl: params.targetAgent.laneABaseUrl ?? agentRow?.laneABaseUrl ?? null,
+      laneAModel: params.targetAgent.laneAModel ?? agentRow?.laneAModel ?? null,
+      laneATemperature: params.targetAgent.laneATemperature ?? agentRow?.laneATemperature ?? null,
+      laneAProviderRouting: params.targetAgent.laneAProviderRouting ?? agentRow?.laneAProviderRouting ?? null,
+    };
 
     // Only now, with both limits cleared, does anything cost money.
     const release = acquireTransformSlot(params.targetAgent.id);
-    let result: { text: string; inputTokens: number; outputTokens: number; stopReason: string | null };
+    type TransformAttempt = {
+      text: string;
+      inputTokens: number;
+      outputTokens: number;
+      stopReason: string | null;
+      provider: LaneAProvider;
+      model: string;
+      costCents: number;
+    };
+    const attemptCostEvents: { provider: LaneAProvider; model: string; inputTokens: number; outputTokens: number; costCents: number }[] = [];
+    let result: TransformAttempt;
+    let turnFailed = false;
     try {
-      result = await callTransformModel({
-        client,
-        systemPrompt: buildTransformSystemPrompt({
-          agentName: params.targetAgent.name,
-          instructions: params.targetAgent.laneAInstructions ?? null,
-          maxOutputChars: params.maxOutputChars,
-          task: params.task ?? null,
-        }),
-        message: buildTransformUserMessage({ input: params.input, variables: params.variables }),
-        model,
-        // Not settings.maxOutputTokens: a caller asking for a short answer
-        // must actually be billed for a short answer, not for the agent's
-        // full ceiling with the surplus thrown away afterwards.
-        maxOutputTokens: resolveTransformMaxTokens({
-          maxOutputTokens: settings.maxOutputTokens,
-          maxOutputChars: params.maxOutputChars,
-        }),
-        temperature: settings.temperature,
-        reasoningEffort: settings.reasoningEffort,
-        providerRouting: settings.providerRouting,
-        responseFormat: params.responseFormat,
+      const loopResult = await runLaneAFallbackLoop<TransformAttempt>({
+        noAnswerChain: routing.noAnswerChain,
+        refusalChain: routing.refusalChain,
+        attempt: async (poolId) => {
+          const entry = routing.pool.get(poolId);
+          if (!entry) return { outcome: "retryable_error", error: new Error(`lane A: pool id "${poolId}" is not in the resolved pool`) };
+          let entrySettings = settings;
+          let entryModel = model;
+          let entryClient: LaneAProviderClient;
+          try {
+            if (poolId !== LANE_A_MAIN_POOL_ID) {
+              entrySettings = resolveLaneAPoolEntrySettings(entry, targetAgentForSettings);
+              entryModel = assertLaneASettingsRunnable(entrySettings);
+            }
+            // The key is resolved before any call: a missing key is a
+            // configuration refusal, not a call.
+            const credential = await resolveLaneACredential({
+              companyId: params.companyId,
+              agentId: params.targetAgent.id,
+              provider: entrySettings.provider,
+              adapterConfig:
+                poolId === LANE_A_MAIN_POOL_ID || backupMayUseMainBinding(entrySettings, settings)
+                  ? agentRow?.adapterConfig
+                  : null,
+              keyOptional: entrySettings.provider === "anthropic" && Boolean(options.createModelClient),
+            });
+            entryClient = buildProviderClient({ provider: entrySettings.provider, baseUrl: entrySettings.baseUrl, credential });
+          } catch (err) {
+            // The main model's setup failure is the caller's to see; a backup
+            // that cannot be set up is just skipped.
+            if (poolId === LANE_A_MAIN_POOL_ID && routing.noAnswerChain.length === 1) throw err;
+            return { outcome: "retryable_error", error: err };
+          }
+          try {
+            const r = await callTransformModel({
+              client: entryClient,
+              systemPrompt: buildTransformSystemPrompt({
+                agentName: params.targetAgent.name,
+                instructions: params.targetAgent.laneAInstructions ?? null,
+                maxOutputChars: params.maxOutputChars,
+                task: params.task ?? null,
+              }),
+              message: buildTransformUserMessage({ input: params.input, variables: params.variables }),
+              model: entryModel,
+              // Not settings.maxOutputTokens: a caller asking for a short answer
+              // must actually be billed for a short answer, not for the agent's
+              // full ceiling with the surplus thrown away afterwards.
+              maxOutputTokens: resolveTransformMaxTokens({
+                maxOutputTokens: entrySettings.maxOutputTokens,
+                maxOutputChars: params.maxOutputChars,
+              }),
+              temperature: entrySettings.temperature,
+              reasoningEffort: entrySettings.reasoningEffort,
+              providerRouting: entrySettings.providerRouting,
+              responseFormat: params.responseFormat,
+              rawProviderErrors: true,
+            });
+            const costCents = computeCostCents(entrySettings.provider, entryModel, r.inputTokens, r.outputTokens);
+            attemptCostEvents.push({ provider: entrySettings.provider, model: entryModel, inputTokens: r.inputTokens, outputTokens: r.outputTokens, costCents });
+            const textRefusal = routing.refusalChain.length > 0 ? detectTextRefusalByPattern(r.text) : { isRefusal: false, rule: null };
+            if (textRefusal.isRefusal) {
+              return { outcome: "refusal", error: new Error(`lane A: reply text was a refusal (${textRefusal.rule})`) };
+            }
+            return { outcome: "answered", value: { ...r, provider: entrySettings.provider, model: entryModel, costCents } };
+          } catch (err) {
+            const outcome = err instanceof LaneAProviderError ? (err.refusal ? "refusal" : err.retryable ? "retryable_error" : "fatal_error") : "fatal_error";
+            return { outcome, error: err };
+          }
+        },
       });
+      if (!loopResult.ok) throw providerErrorToHttp(loopResult.error, "transform");
+      result = loopResult.value;
+    } catch (err) {
+      turnFailed = true;
+      throw err;
     } finally {
       release();
+      // One cost event per attempt, each stamped with its own provider/model;
+      // also on the error path (e.g. every attempt was a text refusal).
+      try {
+        for (const event of attemptCostEvents) {
+          await costService(db).createEvent(params.companyId, {
+            agentId: params.targetAgent.id,
+            provider: event.provider,
+            biller: event.provider,
+            billingType: "metered_api",
+            billingCode: LANE_A_TRANSFORM_BILLING_CODE,
+            model: event.model,
+            inputTokens: event.inputTokens,
+            outputTokens: event.outputTokens,
+            costCents: event.costCents,
+            occurredAt: new Date(),
+          });
+        }
+      } catch (flushErr) {
+        if (!turnFailed) throw flushErr;
+        logger.error({ err: flushErr }, "lane A: could not record cost events for a failed transform");
+      }
     }
 
-    const costCents = computeCostCents(settings.provider, model, result.inputTokens, result.outputTokens);
-    await costService(db).createEvent(params.companyId, {
-      agentId: params.targetAgent.id,
-      provider: settings.provider,
-      biller: settings.provider,
-      billingType: "metered_api",
-      billingCode: LANE_A_TRANSFORM_BILLING_CODE,
-      model,
-      inputTokens: result.inputTokens,
-      outputTokens: result.outputTokens,
-      costCents,
-      occurredAt: new Date(),
-    });
+    const costCents = attemptCostEvents.reduce((sum, e) => sum + e.costCents, 0);
 
     const text =
       typeof params.maxOutputChars === "number" && result.text.length > params.maxOutputChars
@@ -3175,8 +3723,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
 
     return {
       text,
-      model,
-      provider: settings.provider,
+      model: result.model,
+      provider: result.provider,
       inputTokens: result.inputTokens,
       outputTokens: result.outputTokens,
       costCents,
@@ -3204,6 +3752,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     providerRouting?: LaneAProviderRouting | null;
     /** DUR-4138: see LaneACompletionRequest.responseFormat. */
     responseFormat?: "json_object";
+    /** DUR-4347: see the identical option on `callModel` above. */
+    rawProviderErrors?: boolean;
   }) {
     try {
       let withTemperature = typeof params.temperature === "number";
@@ -3246,6 +3796,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         stopReason: response.stopReason,
       };
     } catch (err) {
+      if (params.rawProviderErrors) throw err;
       throw providerErrorToHttp(err, "transform");
     }
   }

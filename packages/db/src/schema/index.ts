@@ -111,7 +111,12 @@ export { heartbeatRunWatchdogDecisions } from "./heartbeat_run_watchdog_decision
 export { costEvents } from "./cost_events.js";
 export { mediaStudioDirectCreations } from "./media_studio_direct_creations.js";
 export { laneAConversations } from "./lane_a_conversations.js";
-export { laneAMessages, type LaneAStoredToolCall, type LaneAToolImage } from "./lane_a_messages.js";
+export {
+  laneAMessages,
+  type LaneAStoredToolCall,
+  type LaneAToolImage,
+  type LaneAAttemptRecord,
+} from "./lane_a_messages.js";
 export { financeEvents } from "./finance_events.js";
 export { approvals } from "./approvals.js";
 export { escalationGrants } from "./escalation_grants.js";
