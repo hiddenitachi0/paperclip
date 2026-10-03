@@ -22,6 +22,8 @@
   --color-destructive-foreground: var(--destructive-foreground);
   --color-border: var(--border);
   --color-input: var(--input);
+  --color-input-background: var(--input-background);
+  --color-code-background: var(--code-background);
   --color-ring: var(--ring);
   --color-chart-1: var(--chart-1);
   --color-chart-2: var(--chart-2);
@@ -45,38 +47,46 @@
 :root {
   color-scheme: light;
   --radius: 0;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
+  /* Light theme — cool-grey neutrals (hue 255, low chroma).
+     Surface ladder, darkest → lightest: sidebar < background < input-background /
+     muted < card = popover. Borders clear WCAG 1.4.11 (≥ 3:1) on card and page,
+     muted text clears 4.5:1 on card, page and muted bands, focus ring is a calm
+     blue. Verified by ui/src/theme-tokens.test.ts — keep that test green when
+     you retune anything here. */
+  --background: oklch(0.97 0.004 255);
+  --foreground: oklch(0.17 0.01 255);
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
+  --card-foreground: oklch(0.17 0.01 255);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.17 0.01 255);
+  --primary: oklch(0.21 0.01 255);
   --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.95 0.006 255);
+  --secondary-foreground: oklch(0.21 0.01 255);
+  --muted: oklch(0.95 0.006 255);
+  --muted-foreground: oklch(0.5 0.016 255);
+  --accent: oklch(0.935 0.008 255);
+  --accent-foreground: oklch(0.21 0.01 255);
   --destructive: oklch(0.577 0.245 27.325);
   --destructive-foreground: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
+  --border: oklch(0.62 0.014 255);
+  --input: oklch(0.58 0.016 255);
+  --input-background: oklch(0.96 0.005 255);
+  --code-background: oklch(0.945 0.005 255);
+  --ring: oklch(0.55 0.17 255);
+  --chart-1: oklch(0.55 0.2 264);
+  --chart-2: oklch(0.52 0.13 175);
+  --chart-3: oklch(0.6 0.16 60);
+  --chart-4: oklch(0.52 0.2 304);
+  --chart-5: oklch(0.56 0.21 20);
+  --sidebar: oklch(0.95 0.005 255);
+  --sidebar-foreground: oklch(0.17 0.01 255);
+  --sidebar-primary: oklch(0.21 0.01 255);
   --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --sidebar-accent: oklch(0.89 0.01 255);
+  --sidebar-accent-foreground: oklch(0.21 0.01 255);
+  --sidebar-border: oklch(0.62 0.014 255);
+  --sidebar-ring: oklch(0.55 0.17 255);
   --chip-match-title-bg: oklch(0.97 0.02 265);
   --chip-match-title-fg: oklch(0.4 0.13 265);
   --chip-match-title-border: oklch(0.85 0.05 265);
@@ -158,38 +168,46 @@
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.985 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.637 0.237 25.331);
+  /* Dark theme — a practical dark, not black. Cool-grey neutrals (hue 255).
+     Surface ladder, darkest → lightest: code-background < background < sidebar
+     < card < popover < input-background; muted / accent sit above card as the
+     band and hover fills. Borders clear 3:1 on card, page, sidebar and popover;
+     muted text clears 4.5:1 on every surface; the focus ring is a calm blue.
+     Verified by ui/src/theme-tokens.test.ts. */
+  --background: oklch(0.21 0.008 255);
+  --foreground: oklch(0.95 0.005 255);
+  --card: oklch(0.26 0.008 255);
+  --card-foreground: oklch(0.95 0.005 255);
+  --popover: oklch(0.29 0.009 255);
+  --popover-foreground: oklch(0.95 0.005 255);
+  --primary: oklch(0.93 0.005 255);
+  --primary-foreground: oklch(0.22 0.008 255);
+  --secondary: oklch(0.35 0.01 255);
+  --secondary-foreground: oklch(0.95 0.005 255);
+  --muted: oklch(0.32 0.009 255);
+  --muted-foreground: oklch(0.74 0.012 255);
+  --accent: oklch(0.35 0.01 255);
+  --accent-foreground: oklch(0.95 0.005 255);
+  --destructive: oklch(0.66 0.21 25);
   --destructive-foreground: oklch(0.985 0 0);
-  --border: oklch(0.269 0 0);
-  --input: oklch(0.269 0 0);
-  --ring: oklch(0.439 0 0);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.145 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --border: oklch(0.57 0.012 255);
+  --input: oklch(0.6 0.012 255);
+  --input-background: oklch(0.32 0.009 255);
+  --code-background: oklch(0.175 0.008 255);
+  --ring: oklch(0.72 0.14 255);
+  --chart-1: oklch(0.66 0.19 264);
+  --chart-2: oklch(0.74 0.16 162);
+  --chart-3: oklch(0.8 0.16 70);
+  --chart-4: oklch(0.72 0.2 304);
+  --chart-5: oklch(0.7 0.2 16);
+  --sidebar: oklch(0.235 0.008 255);
+  --sidebar-foreground: oklch(0.95 0.005 255);
+  --sidebar-primary: oklch(0.66 0.19 264);
   --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(0.269 0 0);
-  --sidebar-ring: oklch(0.439 0 0);
+  --sidebar-accent: oklch(0.32 0.009 255);
+  --sidebar-accent-foreground: oklch(0.95 0.005 255);
+  --sidebar-border: oklch(0.57 0.012 255);
+  --sidebar-ring: oklch(0.72 0.14 255);
   --chip-match-title-bg: oklch(0.27 0.04 265 / 0.5);
   --chip-match-title-fg: oklch(0.78 0.10 265);
   --chip-match-title-border: oklch(0.4 0.06 265);
@@ -313,16 +331,16 @@
 }
 
 .dark *::-webkit-scrollbar-track {
-  background: oklch(0.205 0 0);
+  background: var(--background);
 }
 
 .dark *::-webkit-scrollbar-thumb {
-  background: oklch(0.4 0 0);
+  background: oklch(0.45 0.01 255);
   border-radius: 4px;
 }
 
 .dark *::-webkit-scrollbar-thumb:hover {
-  background: oklch(0.5 0 0);
+  background: var(--border);
 }
 
 /* Auto-hide scrollbar: thin, stable gutter with the thumb visible only on hover */
@@ -359,16 +377,16 @@
 }
 /* Dark mode scrollbar on hover */
 .dark .scrollbar-auto-hide:hover {
-  scrollbar-color: oklch(0.4 0 0) transparent;
+  scrollbar-color: oklch(0.45 0.01 255) transparent;
 }
 .dark .scrollbar-auto-hide:hover::-webkit-scrollbar-track {
   background: transparent !important;
 }
 .dark .scrollbar-auto-hide:hover::-webkit-scrollbar-thumb {
-  background: oklch(0.4 0 0) !important;
+  background: oklch(0.45 0.01 255) !important;
 }
 .dark .scrollbar-auto-hide:hover::-webkit-scrollbar-thumb:hover {
-  background: oklch(0.5 0 0) !important;
+  background: var(--border) !important;
 }
 
 /* Typing indicator — three bouncing dots, used inside an agent chat bubble */
