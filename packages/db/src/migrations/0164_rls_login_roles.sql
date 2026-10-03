@@ -287,6 +287,10 @@ DECLARE
     -- 0212_media_studio_direct_creations.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'media_studio_direct_creations',
+    -- DUR-4379. Created, granted on and policed in
+    -- 0215_model_directory_entries.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'model_directory_entries',
     -- Morning report (migration 0183): the outbox row per day a report
     -- was generated. Created (and granted on) in 0183_morning_report.sql;
     -- listed here so the login-role lists match the schema, as for the
@@ -548,6 +552,10 @@ DECLARE
     -- 0212_media_studio_direct_creations.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'media_studio_direct_creations',
+    -- DUR-4379. Created, granted on and policed in
+    -- 0215_model_directory_entries.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'model_directory_entries',
     -- Morning report (migration 0183): the outbox row per day a report
     -- was generated. Created (and granted on) in 0183_morning_report.sql;
     -- listed here so the login-role lists match the schema, as for the

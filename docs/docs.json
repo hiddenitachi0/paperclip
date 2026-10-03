@@ -124,6 +124,7 @@
               "api/goals-and-projects",
               "api/costs",
               "api/secrets",
+              "api/model-directory",
               "api/activity",
               "api/dashboard"
             ]
