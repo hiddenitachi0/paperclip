@@ -234,6 +234,16 @@ export function costRoutes(
   );
 
   router.get(
+    "/companies/:companyId/costs/cache-status",
+    companyScopeFromParam(rawDb, assertCompanyAccess),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      if (!(await assertCompanyCostReadAllowed(req, res, companyId))) return;
+      res.json(await costs.cacheStatusByAgent(companyId));
+    },
+  );
+
+  router.get(
     "/companies/:companyId/costs/by-agent-model",
     companyScopeFromParam(rawDb, assertCompanyAccess),
     async (req, res) => {

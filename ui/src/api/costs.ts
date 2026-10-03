@@ -22,7 +22,19 @@ function dateParams(from?: string, to?: string): string {
   return qs ? `?${qs}` : "";
 }
 
+export interface AgentCacheStatus {
+  agentId: string;
+  agentName: string;
+  cacheWarm: boolean;
+  contextTokens: number | null;
+  lastRewriteCostCents: number | null;
+  lastRewriteAt: string | null;
+  rewritesThisWeekCents: number;
+}
+
 export const costsApi = {
+  cacheStatus: (companyId: string) =>
+    api.get<AgentCacheStatus[]>(`/companies/${companyId}/costs/cache-status`),
   summary: (companyId: string, from?: string, to?: string) =>
     api.get<CostSummary>(`/companies/${companyId}/costs/summary${dateParams(from, to)}`),
   byAgent: (companyId: string, from?: string, to?: string) =>
