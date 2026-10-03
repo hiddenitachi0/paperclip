@@ -29,6 +29,10 @@ describe("laneABackupModelsSchema", () => {
     expect(result.success).toBe(false);
   });
 
+  it('rejects the reserved id "main"', () => {
+    expect(laneABackupModelsSchema.safeParse([backup({ id: "main" })]).success).toBe(false);
+  });
+
   it("rejects a model that does not fit a fixed-catalogue provider", () => {
     const result = laneABackupModelsSchema.safeParse([backup({ provider: "anthropic", model: "not-a-real-claude-model" })]);
     expect(result.success).toBe(false);

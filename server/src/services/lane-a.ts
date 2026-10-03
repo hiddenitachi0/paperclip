@@ -1702,6 +1702,33 @@ function providerErrorDetail(message: string): string {
   return message.endsWith(".") ? message : `${message}.`;
 }
 
+/**
+ * DUR-4347 (security): the agent's one bound key is for the main model's
+ * provider and host. A backup may reuse it only when both match; anything
+ * else gets no binding (instance key for Claude, none for a local server,
+ * otherwise a missing-key refusal that skips the backup), so the key is never
+ * sent to another vendor or an arbitrary base URL.
+ */
+export function backupMayUseMainBinding(
+  backup: { provider: LaneAProvider; baseUrl: string | null },
+  main: { provider: LaneAProvider; baseUrl: string | null },
+): boolean {
+  return backup.provider === main.provider && (backup.baseUrl ?? null) === (main.baseUrl ?? null);
+}
+
+/**
+ * DUR-4347: a failed model attempt, with what it had already cost and whether
+ * a tool had already run. Only thrown when `rawProviderErrors` is set.
+ */
+class LaneAAttemptFailure extends Error {
+  constructor(
+    readonly original: unknown,
+    readonly partial: { toolsRan: boolean; inputTokens: number; outputTokens: number },
+  ) {
+    super(original instanceof Error ? original.message : String(original));
+  }
+}
+
 export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
   const toolDeps: LaneAToolDeps = {
     ...createDbLaneAToolDeps(db, { businessData: options.businessData, webSearch: options.webSearch, documents: options.documents }),
@@ -2622,7 +2649,16 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         response = retry;
       }
     } catch (err) {
-      if (params.rawProviderErrors) throw err;
+      if (params.rawProviderErrors) {
+        // DUR-4347: tokens already spent, and whether any tool already ran,
+        // must reach the fallback loop: a failed attempt's spend is recorded,
+        // and a turn that already acted is never replayed on another model.
+        throw new LaneAAttemptFailure(err, {
+          toolsRan: toolCallsUsed + addonToolCallsUsed > 0,
+          inputTokens,
+          outputTokens,
+        });
+      }
       throw providerErrorToHttp(err, "chat");
     }
 
@@ -3005,7 +3041,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
               companyId: params.companyId,
               agentId: params.targetAgent.id,
               provider: entrySettings.provider,
-              adapterConfig: agentRow?.adapterConfig,
+              adapterConfig: backupMayUseMainBinding(entrySettings, chatSettings) ? agentRow?.adapterConfig : null,
               actor: params.actor,
               keyOptional: entrySettings.provider === "anthropic" && Boolean(options.createModelClient),
             });
@@ -3073,9 +3109,30 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           }
           attemptRecords.push({ provider: entrySettings.provider, model: entryModel, outcome: "answered", durationMs, costCents, rule });
           return { outcome: "answered", value: { ...result, provider: entrySettings.provider, model: entryModel } };
-        } catch (err) {
+        } catch (caught) {
           const durationMs = Date.now() - attemptStart;
-          const outcome = err instanceof LaneAProviderError ? (err.refusal ? "refusal" : err.retryable ? "retryable_error" : "fatal_error") : "fatal_error";
+          const failure = caught instanceof LaneAAttemptFailure ? caught : null;
+          const err = failure ? failure.original : caught;
+          const failedCostCents = failure
+            ? computeCostCents(entrySettings.provider, entryModel, failure.partial.inputTokens, failure.partial.outputTokens)
+            : 0;
+          if (failure && (failure.partial.inputTokens > 0 || failure.partial.outputTokens > 0)) {
+            attemptCostEvents.push({
+              provider: entrySettings.provider,
+              model: entryModel,
+              inputTokens: failure.partial.inputTokens,
+              outputTokens: failure.partial.outputTokens,
+              costCents: failedCostCents,
+            });
+          }
+          // A tool already ran on this attempt: another model would run it
+          // again (a second picture, a second task), with a fresh tool
+          // budget. End the turn with the plain error instead.
+          const outcome = failure?.partial.toolsRan
+            ? "fatal_error"
+            : err instanceof LaneAProviderError
+              ? (err.refusal ? "refusal" : err.retryable ? "retryable_error" : "fatal_error")
+              : "fatal_error";
           if (outcome === "refusal") refusalModeEntered = true;
           // Rounds that completed before the failure still spent tokens.
           const failedCostCents = computeCostCents(entrySettings.provider, entryModel, usageSink.inputTokens, usageSink.outputTokens);
@@ -3574,7 +3631,10 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
               companyId: params.companyId,
               agentId: params.targetAgent.id,
               provider: entrySettings.provider,
-              adapterConfig: agentRow?.adapterConfig,
+              adapterConfig:
+                poolId === LANE_A_MAIN_POOL_ID || backupMayUseMainBinding(entrySettings, settings)
+                  ? agentRow?.adapterConfig
+                  : null,
               keyOptional: entrySettings.provider === "anthropic" && Boolean(options.createModelClient),
             });
             entryClient = buildProviderClient({ provider: entrySettings.provider, baseUrl: entrySettings.baseUrl, credential });
