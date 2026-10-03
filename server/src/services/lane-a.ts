@@ -2237,6 +2237,12 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
      * leaves this unset and gets exactly today's behaviour.
      */
     rawProviderErrors?: boolean;
+    /**
+     * DUR-4347: kept up to date with the tokens spent so far, so a turn that
+     * fails part-way (e.g. 503 on round 3 after two tool rounds) can still
+     * bill what the earlier rounds used.
+     */
+    usageSink?: { inputTokens: number; outputTokens: number };
   }): Promise<{
     text: string;
     inputTokens: number;
@@ -2350,6 +2356,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         forcedToolName = undefined;
         inputTokens += response.usage.inputTokens;
         outputTokens += response.usage.outputTokens;
+        if (params.usageSink) Object.assign(params.usageSink, { inputTokens, outputTokens });
 
         const toolUseBlocks = response.toolCalls;
         if (response.stop !== "tool_use" || toolUseBlocks.length === 0) {
@@ -2611,6 +2618,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         });
         inputTokens += retry.usage.inputTokens;
         outputTokens += retry.usage.outputTokens;
+        if (params.usageSink) Object.assign(params.usageSink, { inputTokens, outputTokens });
         response = retry;
       }
     } catch (err) {
@@ -2923,6 +2931,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     let businessDataOutputs: BusinessDataTurnOutput[] = [];
     const attemptRecords: LaneAAttemptRecord[] = [];
     const attemptCostEvents: { provider: LaneAProvider; model: string; inputTokens: number; outputTokens: number; costCents: number }[] = [];
+    let turnFailed = false;
     let refusalModeEntered = false;
     let answeredByPoolId: string;
     let answeredBy: LaneAAnsweredBy;
@@ -3017,8 +3026,10 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
             return { outcome: "retryable_error", error: err };
           }
         }
+        const usageSink = { inputTokens: 0, outputTokens: 0 };
         try {
           const result = await callModel({
+            usageSink,
             systemPrompt,
             history,
             message: params.message,
@@ -3066,12 +3077,17 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           const durationMs = Date.now() - attemptStart;
           const outcome = err instanceof LaneAProviderError ? (err.refusal ? "refusal" : err.retryable ? "retryable_error" : "fatal_error") : "fatal_error";
           if (outcome === "refusal") refusalModeEntered = true;
+          // Rounds that completed before the failure still spent tokens.
+          const failedCostCents = computeCostCents(entrySettings.provider, entryModel, usageSink.inputTokens, usageSink.outputTokens);
+          if (usageSink.inputTokens > 0 || usageSink.outputTokens > 0) {
+            attemptCostEvents.push({ provider: entrySettings.provider, model: entryModel, inputTokens: usageSink.inputTokens, outputTokens: usageSink.outputTokens, costCents: failedCostCents });
+          }
           attemptRecords.push({
             provider: entrySettings.provider,
             model: entryModel,
             outcome: outcome === "refusal" ? "refusal" : outcome === "retryable_error" ? "retryable_error" : "error",
             durationMs,
-            costCents: 0,
+            costCents: failedCostCents,
             rule,
           });
           return { outcome, error: err };
@@ -3095,8 +3111,34 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       actions = loopResult.value.actions;
       answeredBy = loopResult.answeredBy === "main" && routing.startRule ? "keyword" : loopResult.answeredBy;
       text = guardLaneAPictureClaims(text, actions);
+    } catch (err) {
+      turnFailed = true;
+      throw err;
     } finally {
       await closeLaneATools(toolset);
+      // DUR-3997/DUR-4347: one cost event per attempt the fallback loop made,
+      // each stamped with that attempt's own provider/model — a failed or
+      // refused attempt still spent tokens, so this runs on the error path
+      // too (the daily cap was already asserted once for this turn).
+      try {
+        for (const event of attemptCostEvents) {
+          await costService(db).createEvent(params.companyId, {
+            agentId: params.targetAgent.id,
+            provider: event.provider,
+            biller: event.provider,
+            billingType: "metered_api",
+            model: event.model,
+            inputTokens: event.inputTokens,
+            outputTokens: event.outputTokens,
+            costCents: event.costCents,
+            occurredAt: new Date(),
+          });
+        }
+      } catch (flushErr) {
+        // Never mask the turn's own error with a ledger-write failure.
+        if (!turnFailed) throw flushErr;
+        logger.error({ err: flushErr }, "lane A: could not record cost events for a failed turn");
+      }
     }
 
     // DUR-3972: the number check when business data was read this turn; the
@@ -3154,25 +3196,6 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       } catch {
         // The activity row must never break the turn; the reply is already safe.
       }
-    }
-
-    // DUR-3997/DUR-4347: one cost event per attempt the fallback loop made,
-    // each stamped with that attempt's own provider/model — a failed or
-    // refused attempt still spent tokens on whichever provider answered it,
-    // and the daily cap above was already asserted exactly once for this
-    // turn regardless of how many attempts it took to get an answer.
-    for (const event of attemptCostEvents) {
-      await costService(db).createEvent(params.companyId, {
-        agentId: params.targetAgent.id,
-        provider: event.provider,
-        biller: event.provider,
-        billingType: "metered_api",
-        model: event.model,
-        inputTokens: event.inputTokens,
-        outputTokens: event.outputTokens,
-        costCents: event.costCents,
-        occurredAt: new Date(),
-      });
     }
 
     // Persist the turn pair so the next message in this conversation
@@ -3529,6 +3552,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     };
     const attemptCostEvents: { provider: LaneAProvider; model: string; inputTokens: number; outputTokens: number; costCents: number }[] = [];
     let result: TransformAttempt;
+    let turnFailed = false;
     try {
       const loopResult = await runLaneAFallbackLoop<TransformAttempt>({
         noAnswerChain: routing.noAnswerChain,
@@ -3599,25 +3623,34 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       });
       if (!loopResult.ok) throw providerErrorToHttp(loopResult.error, "transform");
       result = loopResult.value;
+    } catch (err) {
+      turnFailed = true;
+      throw err;
     } finally {
       release();
+      // One cost event per attempt, each stamped with its own provider/model;
+      // also on the error path (e.g. every attempt was a text refusal).
+      try {
+        for (const event of attemptCostEvents) {
+          await costService(db).createEvent(params.companyId, {
+            agentId: params.targetAgent.id,
+            provider: event.provider,
+            biller: event.provider,
+            billingType: "metered_api",
+            billingCode: LANE_A_TRANSFORM_BILLING_CODE,
+            model: event.model,
+            inputTokens: event.inputTokens,
+            outputTokens: event.outputTokens,
+            costCents: event.costCents,
+            occurredAt: new Date(),
+          });
+        }
+      } catch (flushErr) {
+        if (!turnFailed) throw flushErr;
+        logger.error({ err: flushErr }, "lane A: could not record cost events for a failed transform");
+      }
     }
 
-    // One cost event per attempt, each stamped with its own provider/model.
-    for (const event of attemptCostEvents) {
-      await costService(db).createEvent(params.companyId, {
-        agentId: params.targetAgent.id,
-        provider: event.provider,
-        biller: event.provider,
-        billingType: "metered_api",
-        billingCode: LANE_A_TRANSFORM_BILLING_CODE,
-        model: event.model,
-        inputTokens: event.inputTokens,
-        outputTokens: event.outputTokens,
-        costCents: event.costCents,
-        occurredAt: new Date(),
-      });
-    }
     const costCents = attemptCostEvents.reduce((sum, e) => sum + e.costCents, 0);
 
     const text =

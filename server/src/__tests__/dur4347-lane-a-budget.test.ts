@@ -144,6 +144,45 @@ describeEmbeddedPostgres("lane A backup chain: budget (DUR-4347)", () => {
       laneAService(db).transform({ companyId, targetAgent: target, input: "z" }),
     ).rejects.toMatchObject({ status: 429, details: { reason: "daily_call_cap" } });
   });
+
+  it("bills the rounds a chat turn spent before it failed, when every model then fails", async () => {
+    const { companyId, target } = await seed(10);
+    const createIssueForAgent = vi.fn(async () => ({ id: "issue-1", identifier: "DUR-12", status: "todo" }));
+    modelStub.create
+      // main: one tool round, then 503 on round 2
+      .mockResolvedValueOnce({
+        content: [{ type: "tool_use", id: "call_1", name: "route_to_agent", input: { agent: "Bob", request: "Fix it" } }],
+        usage: { input_tokens: 100, output_tokens: 50 },
+        stop_reason: "tool_use",
+      })
+      .mockRejectedValue(overloaded());
+
+    await expect(
+      laneAService(db, { toolDeps: { createIssueForAgent } }).sendMessage({
+        companyId,
+        targetAgent: target,
+        requester: { userId: "user-1", agentId: null },
+        actor: { type: "board", userId: "user-1", companyIds: [companyId], source: "local_implicit" },
+        message: "Can you get someone to fix it?",
+      }),
+    ).rejects.toBeTruthy();
+
+    const events = await db.select().from(costEvents);
+    expect(events.reduce((n, e) => n + e.inputTokens, 0)).toBe(100);
+    expect(events.reduce((n, e) => n + e.outputTokens, 0)).toBe(50);
+  });
+
+  it("bills every attempt of a transform that ends in an error (all replies were refusals)", async () => {
+    const { companyId, target } = await seed(10);
+    await db.update(agents).set({ laneARefusalChainIds: ["b1"] }).where(eq(agents.id, target.id));
+    modelStub.create.mockResolvedValue(ok("I'm sorry, but I can't help with that request."));
+
+    await expect(laneAService(db).transform({ companyId, targetAgent: target, input: "x" })).rejects.toBeTruthy();
+
+    const events = await db.select().from(costEvents);
+    expect(events.length).toBeGreaterThanOrEqual(2);
+    expect(events.reduce((n, e) => n + e.inputTokens, 0)).toBe(events.length * 100);
+  });
 });
 
 describe("morning report inherits the fallback chain", () => {
