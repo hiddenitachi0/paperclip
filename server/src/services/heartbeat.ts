@@ -11649,8 +11649,22 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const rightReady = rightIssueId ? (rightReadiness?.isDependencyReady ?? true) : true;
       const leftIssue = leftIssueId ? issueById.get(leftIssueId) : null;
       const rightIssue = rightIssueId ? issueById.get(rightIssueId) : null;
-      const leftRank = leftIssueId ? (leftReady ? (leftIssue?.status === "in_progress" ? 0 : 1) : 3) : 2;
-      const rightRank = rightIssueId ? (rightReady ? (rightIssue?.status === "in_progress" ? 0 : 1) : 3) : 2;
+      // DUR-4308: a self_review_pass wake corrects an already-declined
+      // done/in_review PATCH on a run that just finished -- leaving it queued
+      // behind an ordinary ready heartbeat_timer wake for a different
+      // in_progress issue lets later unrelated runs retry the same PATCH
+      // first and pile on duplicate declines. Treat it as equally urgent as
+      // resuming in-progress work, not as ordinary ready-but-idle work.
+      const leftIsSelfReviewPass =
+        readNonEmptyString(parseObject(left.contextSnapshot).wakeReason) === SELF_REVIEW_PASS_REASON;
+      const rightIsSelfReviewPass =
+        readNonEmptyString(parseObject(right.contextSnapshot).wakeReason) === SELF_REVIEW_PASS_REASON;
+      const leftRank = leftIssueId
+        ? (leftReady ? (leftIssue?.status === "in_progress" || leftIsSelfReviewPass ? 0 : 1) : 3)
+        : 2;
+      const rightRank = rightIssueId
+        ? (rightReady ? (rightIssue?.status === "in_progress" || rightIsSelfReviewPass ? 0 : 1) : 3)
+        : 2;
       if (leftRank !== rightRank) return leftRank - rightRank;
       const leftPriorityRank = issueRunPriorityRank(leftIssue?.priority);
       const rightPriorityRank = issueRunPriorityRank(rightIssue?.priority);
