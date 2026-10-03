@@ -115,3 +115,88 @@ export interface ModelDirectoryEntry {
   createdAt: string;
   updatedAt: string;
 }
+
+// DUR-4418: ready-made starter setups. Local models are the ones in the
+// DUR-4357 Ollama runbook, reached over Tailscale (never "localhost", which
+// for Paperclip is the server itself). No key is part of a starter.
+
+export const MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS = "http://100.124.232.68:11434/v1";
+const LOCAL_NOTE = "Needs your PC switched on, with Ollama and Tailscale running.";
+
+export interface ModelDirectoryStarter {
+  /** Stable slug, used to pick which starters to add. */
+  id: string;
+  name: string;
+  provider: (typeof LANE_A_PROVIDERS)[number];
+  model: string;
+  baseUrl: string | null;
+  defaultThinking: (typeof LANE_A_THINKING_MODES)[number] | null;
+  note: string;
+}
+
+export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
+  {
+    id: "local-forgotten-safeword-12b",
+    name: "Local: Forgotten-Safeword 12B",
+    provider: "local",
+    model: "hf.co/mradermacher/Forgotten-Safeword-12B-v4.0-i1-GGUF:Q4_K_M",
+    baseUrl: MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS,
+    defaultThinking: null,
+    note: `${LOCAL_NOTE} Uncensored: use it for a separate persona, not for company work.`,
+  },
+  {
+    id: "local-satyr-4b",
+    name: "Local: Satyr 4B",
+    provider: "local",
+    model: "hf.co/PantheonUnbound/Satyr-V0.1-4B:Q8_0",
+    baseUrl: MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS,
+    defaultThinking: "off",
+    note: `${LOCAL_NOTE} A thinking model, so Thinking starts switched off. Uncensored.`,
+  },
+  {
+    id: "local-deepseek-r1-8b",
+    name: "Local: DeepSeek R1 8B",
+    provider: "local",
+    model: "deepseek-r1:8b",
+    baseUrl: MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS,
+    defaultThinking: null,
+    note: LOCAL_NOTE,
+  },
+  {
+    id: "local-llama-3-2",
+    name: "Local: Llama 3.2",
+    provider: "local",
+    model: "llama3.2",
+    baseUrl: MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS,
+    defaultThinking: null,
+    note: LOCAL_NOTE,
+  },
+  {
+    id: "openrouter-mistral-small-3-2",
+    name: "Mistral Small 3.2 (OpenRouter)",
+    provider: "openrouter",
+    model: "mistralai/mistral-small-3.2-24b-instruct",
+    baseUrl: null,
+    defaultThinking: null,
+    note: "A good cloud backup for local models. Needs an OpenRouter key on the agent.",
+  },
+];
+
+export const addModelDirectoryStartersSchema = z
+  .object({ starterIds: z.array(z.string().min(1)).max(MODEL_DIRECTORY_STARTERS.length).optional() })
+  .strict();
+export type AddModelDirectoryStarters = z.infer<typeof addModelDirectoryStartersSchema>;
+
+/** One starter as listed by the API: whether this company already has it. */
+export interface ModelDirectoryStarterStatus extends ModelDirectoryStarter {
+  alreadyAdded: boolean;
+}
+
+export interface ModelDirectoryImportResult {
+  /** Entries created by this run. */
+  created: ModelDirectoryEntry[];
+  /** How many agents now point at an entry (new or pre-existing identical one). */
+  agentsLinked: number;
+  /** Agents whose current setup could not be saved, with a plain-English reason. */
+  skipped: { agentId: string; agentName: string; reason: string }[];
+}

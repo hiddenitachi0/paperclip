@@ -131,12 +131,12 @@ d(`migration ${MIGRATION_TAG}`, () => {
     expect(n[0]?.n).toBe(2);
   });
 
-  it("is registered last in the journal", () => {
+  it("is registered in the journal, after the one before it", () => {
     const journal = JSON.parse(readFileSync(fileURLToPath(new URL("./migrations/meta/_journal.json", import.meta.url)), "utf8")) as {
       entries: Array<{ idx: number; when: number; tag: string }>;
     };
-    const last = journal.entries[journal.entries.length - 1]!;
-    expect(last.tag).toBe(MIGRATION_TAG);
-    expect(last.when).toBeGreaterThan(journal.entries[journal.entries.length - 2]!.when);
+    const at = journal.entries.findIndex((entry) => entry.tag === MIGRATION_TAG);
+    expect(at).toBeGreaterThan(0);
+    expect(journal.entries[at]!.when).toBeGreaterThan(journal.entries[at - 1]!.when);
   });
 });

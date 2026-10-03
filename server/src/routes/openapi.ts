@@ -166,6 +166,7 @@ import {
   signOutEverywhereSchema,
   submitInstanceClaudeSignInCodeSchema,
   // Model directory (DUR-4379)
+  addModelDirectoryStartersSchema,
   createModelDirectoryEntrySchema,
   updateModelDirectoryEntrySchema,
   duplicateModelDirectoryEntrySchema,
@@ -793,6 +794,9 @@ const BOARD_ONLY_OPERATIONS = new Set([
   // a saved model setup, so it cannot re-point itself or another agent.
   "GET /api/companies/{companyId}/model-directory",
   "POST /api/companies/{companyId}/model-directory",
+  "GET /api/companies/{companyId}/model-directory/starters",
+  "POST /api/companies/{companyId}/model-directory/starters",
+  "POST /api/companies/{companyId}/model-directory/import-agent-settings",
   "GET /api/companies/{companyId}/model-directory/{entryId}",
   "PATCH /api/companies/{companyId}/model-directory/{entryId}",
   "DELETE /api/companies/{companyId}/model-directory/{entryId}",
@@ -6045,6 +6049,31 @@ registerCurrentRoute({
     409: r.conflict,
     422: r.unprocessable,
   },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/model-directory/starters",
+  tags: ["model-directory"],
+  summary: "List the ready-made model setups (local Ollama models, Mistral Small 3.2 on OpenRouter) and whether each is already added",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/starters",
+  tags: ["model-directory"],
+  summary: "Add ready-made model setups (all, or the chosen starterIds); ones already added are skipped. No key is stored.",
+  body: addModelDirectoryStartersSchema,
+  responses: { 201: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 422: r.unprocessable },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/import-agent-settings",
+  tags: ["model-directory"],
+  summary: "Save each quick agent's current model setup (and backups) as de-duplicated directory entries and link the agent. Does not change what any agent does; safe to repeat.",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
 });
 
 registerCurrentRoute({

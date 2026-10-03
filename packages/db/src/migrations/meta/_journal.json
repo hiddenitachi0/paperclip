@@ -1513,6 +1513,13 @@
       "when": 1791002691575,
       "tag": "0216_model_directory_entries",
       "breakpoints": true
+    },
+    {
+      "idx": 217,
+      "version": "7",
+      "when": 1791007444072,
+      "tag": "0217_agent_directory_entry_link",
+      "breakpoints": true
     }
   ]
 }

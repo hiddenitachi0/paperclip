@@ -911,6 +911,13 @@ export {
 export {
   MODEL_DIRECTORY_NAME_MAX_LENGTH,
   MODEL_DIRECTORY_NOTE_MAX_LENGTH,
+  MODEL_DIRECTORY_STARTERS,
+  MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS,
+  addModelDirectoryStartersSchema,
+  type AddModelDirectoryStarters,
+  type ModelDirectoryStarter,
+  type ModelDirectoryStarterStatus,
+  type ModelDirectoryImportResult,
   modelDirectoryEntryIssue,
   createModelDirectoryEntrySchema,
   updateModelDirectoryEntrySchema,
