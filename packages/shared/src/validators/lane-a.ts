@@ -205,6 +205,13 @@ export const laneABackupModelsSchema = z
         });
       }
       seenIds.add(entry.id);
+      if (entry.id === "main") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Backup model id "main" is reserved for the main model.',
+          path: [index, "id"],
+        });
+      }
       const issue = laneABackupModelEntryIssue(entry);
       if (issue) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, message: issue, path: [index, "model"] });
