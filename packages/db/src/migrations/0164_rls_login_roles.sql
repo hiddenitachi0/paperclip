@@ -291,6 +291,11 @@ DECLARE
     -- 0216_model_directory_entries.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'model_directory_entries',
+    -- DUR-4344. Created, granted on and policed in
+    -- 0215_telegram_reaction_feedback.sql; listed here so the login-role
+    -- lists match the schema
+    'telegram_message_reactions',
+    'company_reaction_emoji_config',
     -- Morning report (migration 0183): the outbox row per day a report
     -- was generated. Created (and granted on) in 0183_morning_report.sql;
     -- listed here so the login-role lists match the schema, as for the
@@ -556,6 +561,11 @@ DECLARE
     -- 0216_model_directory_entries.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'model_directory_entries',
+    -- DUR-4344. Created, granted on and policed in
+    -- 0215_telegram_reaction_feedback.sql; listed here so the login-role
+    -- lists match the schema
+    'telegram_message_reactions',
+    'company_reaction_emoji_config',
     -- Morning report (migration 0183): the outbox row per day a report
     -- was generated. Created (and granted on) in 0183_morning_report.sql;
     -- listed here so the login-role lists match the schema, as for the

@@ -72,6 +72,8 @@ const HTTP_METHODS = new Set(["get", "put", "post", "delete", "options", "head",
 const explicitOpenApiCoverageExclusions = new Set([
   // Pipeline routes are experimental and not yet represented in the public OpenAPI document.
   "pipelines.ts",
+  // Telegram reaction feedback routes (DUR-4344) are bridge-internal plus a company emoji-meaning config; not yet in the public OpenAPI document.
+  "telegram-reactions.ts",
   // Agent role/job routes (DUR-114) are a new backend feature not yet in the public OpenAPI document.
   "agent-roles.ts",
   // MCP tool library routes (DUR-143) are a new backend feature not yet in the public OpenAPI document.

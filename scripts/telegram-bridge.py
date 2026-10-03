@@ -947,6 +947,97 @@ def set_conversation(state, token, chat_id, conversation_id):
         save_state(state)
 
 
+# ─── DUR-4344: emoji reactions as feedback ─────────────────────────────────────
+# Telegram only tells us "this person reacted to message N in this chat", so
+# every reply we send is remembered by (chat, message id) with what it was: the
+# agent, the conversation, our reply row and, for a picture, its file id. A
+# reaction to anything not in this table (a message we never sent, or one so old
+# it fell out) is ignored, silently.
+
+REACTION_TARGET_LIMIT = 2000
+
+
+def reaction_context_for(bot, result):
+    conversation = (result or {}).get("conversationId")
+    message = (result or {}).get("messageId")
+    return {
+        "agentId": bot["agentId"],
+        "conversationId": conversation if isinstance(conversation, str) and UUID_RE.match(conversation) else None,
+        "messageId": message if isinstance(message, str) and UUID_RE.match(message) else None,
+    }
+
+
+def remember_reaction_target(state, token, chat_id, message_id, context):
+    if not isinstance(message_id, int) or isinstance(message_id, bool) or not context:
+        return
+    with LOCK:
+        targets = _bot_entry(state, token).setdefault("reactionTargets", {})
+        targets.pop(f"{chat_id}:{message_id}", None)
+        targets[f"{chat_id}:{message_id}"] = context
+        while len(targets) > REACTION_TARGET_LIMIT:
+            targets.pop(next(iter(targets)))
+        save_state(state)
+
+
+def _reaction_emojis(reactions):
+    """The plain emoji in one of Telegram's reaction lists; custom/paid
+    reactions carry no emoji we can classify, so they are skipped."""
+    found = []
+    for r in reactions or []:
+        if isinstance(r, dict) and r.get("type") == "emoji" and isinstance(r.get("emoji"), str) and r["emoji"]:
+            found.append(r["emoji"])
+    return found
+
+
+def reaction_events(update, bot, target, allowed):
+    """Turn one Telegram `message_reaction` update into feedback events: one per
+    emoji added or removed (the update carries the person's old and new
+    reaction SETS, so a change is the difference between them).
+
+    Returns [] for anything to ignore: no known person (anonymous/channel
+    reaction), a person not on this bot's allowlist, or a message we did not
+    send (`target` is None)."""
+    user = update.get("user")
+    chat = update.get("chat") or {}
+    if not isinstance(user, dict) or user.get("id") is None or not target:
+        return []
+    if int(user["id"]) not in {int(a) for a in allowed}:
+        return []
+    old, new = _reaction_emojis(update.get("old_reaction")), _reaction_emojis(update.get("new_reaction"))
+    events = []
+    for emoji, action in [(e, "removed") for e in old if e not in new] + [(e, "added") for e in new if e not in old]:
+        event = {
+            "agentId": target["agentId"],
+            "telegramUserId": str(user["id"]),
+            "telegramChatId": str(chat.get("id")),
+            "telegramMessageId": update.get("message_id"),
+            "emoji": emoji,
+            "action": action,
+        }
+        if target.get("conversationId"):
+            event["conversationId"] = target["conversationId"]
+            if target.get("messageId"):
+                event["messageId"] = target["messageId"]
+        if target.get("picture"):
+            event["picture"] = target["picture"]
+        events.append(event)
+    return events
+
+
+def handle_reaction(state, bot, update):
+    token = bot["token"]
+    with LOCK:
+        target = (_bot_entry(state, token).get("reactionTargets") or {}).get(
+            f"{(update.get('chat') or {}).get('id')}:{update.get('message_id')}")
+    # Removals first, so swapping one emoji for another never briefly shows both.
+    for event in reaction_events(update, bot, target, allowed_users_for(bot)):
+        res = cli_env({"TT": json.dumps(event)}, "chat", "reaction", "-C", bot["companyId"], "--event", '"$TT"')
+        # 404 (nothing to remove) and 409 (already recorded) mean the server
+        # already agrees; anything else is worth a log line, never a message.
+        if isinstance(res, dict) and res.get("ok") is False and res.get("status") not in (404, 409):
+            print(f"reaction not recorded ({bot['name']}): {res.get('status')} {str(res.get('error'))[:200]}", flush=True)
+
+
 def remember_task(state, token, chat_id, task_ref, text, colleague=False):
     """Record that a task came from this chat, so its answer goes back there.
     `colleague` marks a task the bot's agent handed to someone else, so the
@@ -1012,8 +1103,12 @@ def send_plain(token, chat_id, text):
     """Send text written by an agent or a person. No parse mode, so nothing in
     it can format the message, hide a link behind other words, or make
     Telegram reject the message."""
+    sent_ids = []
     for part in split_for_telegram(text):
-        tg(token, "sendMessage", chat_id=chat_id, text=part, disable_web_page_preview=True)
+        res = tg(token, "sendMessage", chat_id=chat_id, text=part, disable_web_page_preview=True)
+        if isinstance(res, dict) and isinstance(res.get("message_id"), int):
+            sent_ids.append(res["message_id"])
+    return sent_ids
 
 
 def tg_upload(token, method, field, filename, content_type, data, http_timeout=60, **params):
@@ -1095,7 +1190,7 @@ def image_caption(image):
     return f"{where} Seed {image['seed']}." if image["seed"] is not None else where
 
 
-def send_reply_images(bot, chat_id, images):
+def send_reply_images(bot, chat_id, images, state=None, reaction_context=None):
     """Upload each picture into the chat. The bytes come from Paperclip through
     the CLI, with the bridge's own sign-in and the bot's own company; a picture
     that cannot be fetched or sent gets one plain line instead of silence."""
@@ -1127,6 +1222,9 @@ def send_reply_images(bot, chat_id, images):
                              chat_id=chat_id, caption=caption)
         if sent is None:
             send_plain(token, chat_id, "I made a picture but could not send it here. It is in Paperclip's Files.")
+        elif state is not None and reaction_context is not None and isinstance(sent, dict):
+            remember_reaction_target(state, token, chat_id, sent.get("message_id"),
+                                     dict(reaction_context, picture={"fileId": image["fileId"]}))
 
 
 def chat_send(bot, text, conversation_id=None, lane=None):
@@ -1223,10 +1321,12 @@ def ask_agent(state, bot, chat_id, text, force_task=False, came_by_voice=False):
         # add", which read as the agent dismissing the person.
         answer = str(result.get("response") or "").strip() or (
             "" if images else f"{agent_name}'s model gave no answer. Try asking again, or say it a different way.")
+        reaction_context = reaction_context_for(bot, result)
         if notes or answer:
-            send_plain(token, chat_id, "\n\n".join(notes + ([answer] if answer else [])))
+            for message_id in send_plain(token, chat_id, "\n\n".join(notes + ([answer] if answer else []))):
+                remember_reaction_target(state, token, chat_id, message_id, reaction_context)
         if images:
-            send_reply_images(bot, chat_id, images)
+            send_reply_images(bot, chat_id, images, state, reaction_context)
         spoken = str(result.get("response") or "").strip()
         if spoken and wants_voice_reply(bot, came_by_voice):
             send_voice_answer(bot, chat_id, spoken)
@@ -2060,6 +2160,13 @@ def _is_registered_thread(token):
         return BOT_THREADS.get(token) is threading.current_thread()
 
 
+# Telegram sends reactions only when asked. In a private chat that is all it
+# takes; in a group or supergroup the bot must also be an administrator there to
+# receive them (Bot API: "message_reaction ... bot must be an administrator in
+# the chat"). Private chats are the supported case.
+ALLOWED_UPDATES = ["message", "callback_query", "message_reaction"]
+
+
 def bot_thread(state, token):
     started = current_bot(token)
     if started:
@@ -2077,7 +2184,8 @@ def bot_thread(state, token):
             # message twice.
             return
         bs = bots_state(state, token)
-        updates = tg(token, "getUpdates", http_timeout=40, offset=bs["offset"] + 1, timeout=25) or []
+        updates = tg(token, "getUpdates", http_timeout=40, offset=bs["offset"] + 1, timeout=25,
+                     allowed_updates=ALLOWED_UPDATES) or []
         if updates and not _is_registered_thread(token):
             return
         handle_updates(state, token, bot, updates)
@@ -2107,6 +2215,8 @@ def handle_updates(state, token, bot, updates):
                 handle_callback(cq)
             elif "message" in u:
                 handle_message(state, bot, u["message"])
+            elif "message_reaction" in u:
+                handle_reaction(state, bot, u["message_reaction"])
         except Exception as e:
             print(f"update error ({bot['name']}): {e}", flush=True)
 

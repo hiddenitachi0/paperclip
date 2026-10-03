@@ -50,6 +50,10 @@ interface ChatSendOptions extends BaseClientOptions {
   lane?: string;
 }
 
+interface ChatReactionOptions extends BaseClientOptions {
+  event: string;
+}
+
 interface ChatContinueOptions extends BaseClientOptions {
   spec?: string;
 }
@@ -188,6 +192,28 @@ export function registerChatCommands(program: Command): void {
       .action(async (fileId: string, opts: BaseClientOptions) => {
         try {
           const outcome = await runChatMedia(fileId, opts);
+          if (!outcome.ok && !opts.json) {
+            throw new ApiRequestError(outcome.status, outcome.error);
+          }
+          printOutput(outcome, { json: opts.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+    { includeCompany: false },
+  );
+
+  addCommonClientOptions(
+    chat
+      .command("reaction")
+      .description(
+        "DUR-4344: record one Telegram emoji reaction (added or removed) on a message the bridge sent. The event is JSON (--event) and is validated by the server. With --json a refusal is printed as {ok:false,...} and exits 0.",
+      )
+      .requiredOption("-C, --company-id <id>", "Company ID")
+      .requiredOption("--event <json>", "The reaction event as JSON")
+      .action(async (opts: ChatReactionOptions) => {
+        try {
+          const outcome = await runChatReaction(opts);
           if (!outcome.ok && !opts.json) {
             throw new ApiRequestError(outcome.status, outcome.error);
           }
@@ -363,4 +389,33 @@ function refusalCode(err: ApiRequestError): string | null {
   if (typeof details?.code === "string") return details.code;
   if (typeof details?.reason === "string") return details.reason;
   return null;
+}
+
+/**
+ * DUR-4344: post one reaction event. The event is data, parsed here and sent
+ * as the request body; the company always comes from --company-id.
+ */
+export async function runChatReaction(opts: ChatReactionOptions): Promise<ChatSendOutcome> {
+  const ctx = resolveCommandContext(opts, { requireCompany: true });
+  let event: unknown;
+  try {
+    event = JSON.parse(opts.event);
+  } catch {
+    throw new Error("--event must be valid JSON");
+  }
+  if (!event || typeof event !== "object" || Array.isArray(event)) {
+    throw new Error("--event must be a JSON object");
+  }
+  try {
+    const result = await ctx.api.post<Record<string, unknown>>(
+      apiPath`/api/companies/${ctx.companyId}/telegram-reactions`,
+      event,
+    );
+    return { ok: true, ...(result ?? {}) };
+  } catch (err) {
+    if (err instanceof ApiRequestError) {
+      return { ok: false, status: err.status, code: refusalCode(err), error: err.message };
+    }
+    throw err;
+  }
 }

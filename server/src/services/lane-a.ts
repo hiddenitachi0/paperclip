@@ -3262,7 +3262,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     // remembers it. The assistant row also keeps the actions taken and,
     // since DUR-4347, every attempt the fallback loop made answering it.
     const now = new Date();
-    await db.insert(laneAMessages).values([
+    const insertedTurn = await db.insert(laneAMessages).values([
       {
         companyId: params.companyId,
         conversationId: conversation.id,
@@ -3282,7 +3282,9 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         answeredBy,
         createdAt: new Date(now.getTime() + 1),
       },
-    ]);
+    ]).returning({ id: laneAMessages.id, role: laneAMessages.role });
+    // DUR-4344: lets a Telegram reaction be tied back to the exact reply.
+    const assistantMessageId = insertedTurn.find((row) => row.role === "assistant")?.id ?? null;
 
     const [updated] = await db
       .update(laneAConversations)
@@ -3293,6 +3295,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     return {
       conversationId: updated!.id,
       response: text,
+      messageId: assistantMessageId,
       turnCount: updated!.turnCount,
       stopReason,
       actions,

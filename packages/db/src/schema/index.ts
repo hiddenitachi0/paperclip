@@ -144,6 +144,8 @@ export { pluginWebhookDeliveries } from "./plugin_webhooks.js";
 export { pluginLogs } from "./plugin_logs.js";
 export { untrackedWriteIncidents } from "./untracked_write_incidents.js";
 export { telegramBots } from "./telegram_bots.js";
+export { telegramMessageReactions } from "./telegram_message_reactions.js";
+export { companyReactionEmojiConfig } from "./company_reaction_emoji_config.js";
 export { companySpeechSettings, speechUsageEvents } from "./speech.js";
 export { dataConnections, dataDatasetSources, type DataConnectionObserved } from "./data_connections.js";
 export { dataReadEvents } from "./data_read_events.js";
