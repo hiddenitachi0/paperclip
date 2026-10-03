@@ -39,7 +39,9 @@ export function telegramReactionRoutes(db: Db) {
 
   router.post(
     "/companies/:companyId/telegram-reactions",
-    boardScope(),
+    companyScopeFromParam(db, (req, companyId) =>
+      assertCompanyOwnerAdminOrInstanceAdmin(req, companyId, "reaction feedback"),
+    ),
     validate(recordTelegramReactionSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
