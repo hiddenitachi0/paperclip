@@ -1393,6 +1393,20 @@ export {
   type UpdateTelegramBotAllowedUsersInput,
   type UpdateTelegramBotCompanyNoticesInput,
 } from "./validators/telegram-bot.js";
+export {
+  MAX_REACTION_EMOJI_PER_MEANING,
+  REACTION_EMOJI_DEFAULTS,
+  REACTION_EMOJI_MEANINGS,
+  TELEGRAM_CHAT_ID_PATTERN,
+  normalizeReactionEmoji,
+  reactionEmojiMeaning,
+  recordTelegramReactionSchema,
+  updateReactionEmojiConfigSchema,
+  type ReactionEmojiConfig,
+  type ReactionEmojiMeaning,
+  type RecordTelegramReactionInput,
+  type UpdateReactionEmojiConfigInput,
+} from "./validators/telegram-reaction.js";
 export type { SpeechSettings, SpeechSpeakResult, SpeechTranscribeResult } from "./types/speech.js";
 export {
   SPEECH_DEFAULT_DAILY_SPEAK_CHARACTERS,
