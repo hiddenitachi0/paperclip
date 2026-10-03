@@ -689,6 +689,36 @@ export function mediaStudioDirectService(
     }));
   }
 
+  /**
+   * DUR-4455: settles a paid Edit-tab Fal action's reservation to Fal's
+   * actual published per-unit price, the same way the Create tab settles
+   * its own Fal calls (resolveActualFalCost above). The plugin reports only
+   * which endpoint ran and what it consumed; the host -- never the plugin --
+   * resolves the company's own Fal key and prices the call. Pricing
+   * unavailable, or the reservation not belonging to this company and the
+   * Edit-tab billing lane, leaves the reservation's estimate standing --
+   * never an error, since the edit itself already succeeded.
+   */
+  async function settleSpend(
+    companyId: string,
+    reservationId: string,
+    endpointId: string,
+    usage: FalUsage,
+  ): Promise<{ settled: true; costCents: number } | { settled: false }> {
+    const [event] = await db
+      .select({ id: costEvents.id, billingCode: costEvents.billingCode, createdByUserId: costEvents.createdByUserId, costCents: costEvents.costCents })
+      .from(costEvents)
+      .where(and(eq(costEvents.id, reservationId), eq(costEvents.companyId, companyId)));
+    if (!event || event.billingCode !== MEDIA_STUDIO_DIRECT_BILLING_CODE || !event.createdByUserId) return { settled: false };
+    const apiKey = await resolveFalApiKey(companyId, event.createdByUserId);
+    const priced = await falPricing.priceCall(apiKey, endpointId, usage, companyId);
+    if (!priced) return { settled: false };
+    const costCents = microUsdToCents(priced.costMicroUsd);
+    await db.update(costEvents).set({ costCents, costMicroUsd: priced.costMicroUsd, costSource: "estimate" }).where(eq(costEvents.id, reservationId));
+    await refreshCompanyMonthlySpend(companyId);
+    return { settled: true, costCents };
+  }
+
   return {
     estimate: estimateMediaStudioDirectCostCents,
     createPicture,
@@ -709,5 +739,7 @@ export function mediaStudioDirectService(
     /** DUR-4441: the plugin host's billing capability reuses the Create tab's exact reservation logic for paid Edit-tab actions. */
     reserveSpend,
     releaseReservation,
+    /** DUR-4455: ditto for settling a finished Edit-tab Fal action to its actual cost. */
+    settleSpend,
   };
 }

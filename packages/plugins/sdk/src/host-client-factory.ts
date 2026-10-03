@@ -320,6 +320,9 @@ export interface HostServices {
     releaseMediaStudioDirectSpend(
       params: WorkerToHostMethods["billing.releaseMediaStudioDirectSpend"][0],
     ): Promise<WorkerToHostMethods["billing.releaseMediaStudioDirectSpend"][1]>;
+    settleMediaStudioDirectSpend(
+      params: WorkerToHostMethods["billing.settleMediaStudioDirectSpend"][0],
+    ): Promise<WorkerToHostMethods["billing.settleMediaStudioDirectSpend"][1]>;
   };
 
   /** Provides persona-scoped enforcement helpers (DUR-177 daily generation cap). */
@@ -532,6 +535,7 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   "personas.reserveDailyGeneration": "personas.generation_cap.enforce",
   "billing.reserveMediaStudioDirectSpend": "billing.media_studio_direct.reserve",
   "billing.releaseMediaStudioDirectSpend": "billing.media_studio_direct.reserve",
+  "billing.settleMediaStudioDirectSpend": "billing.media_studio_direct.reserve",
 };
 
 // ---------------------------------------------------------------------------
@@ -1019,6 +1023,10 @@ export function createHostClientHandlers(
     }),
     "billing.releaseMediaStudioDirectSpend": gated("billing.releaseMediaStudioDirectSpend", async (params) => {
       return services.billing.releaseMediaStudioDirectSpend(params);
+    }),
+
+    "billing.settleMediaStudioDirectSpend": gated("billing.settleMediaStudioDirectSpend", async (params) => {
+      return services.billing.settleMediaStudioDirectSpend(params);
     }),
 
     "personas.reserveDailyGeneration": gated("personas.reserveDailyGeneration", async (params) => {
