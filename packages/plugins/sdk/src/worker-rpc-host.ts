@@ -1264,6 +1264,12 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
           }
           return callHost("personas.reserveDailyGeneration", { companyId, runId: options.runId });
         },
+        async getPictureFeedbackRules(companyId: string, options: { runId: string }) {
+          if (!options?.runId) {
+            throw new Error("getPictureFeedbackRules requires options.runId (the invoking tool call's run id)");
+          }
+          return callHost("personas.getPictureFeedbackRules", { companyId, runId: options.runId });
+        },
       },
 
       files: {

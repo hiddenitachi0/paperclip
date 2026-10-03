@@ -155,6 +155,7 @@ export type {
   PluginPerformActionActorContext,
   PluginPerformActionContext,
   PluginPersonaGenerationCapReservation,
+  PluginPictureFeedbackRules,
   PluginCompanyFile,
   PluginCompanyFileContent,
   ExecuteToolParams,

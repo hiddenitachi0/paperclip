@@ -99,6 +99,7 @@ const OPERATION_CAPABILITIES: Record<string, readonly PluginCapability[]> = {
   "files.get": ["company.files.read"],
   "files.readContent": ["company.files.read"],
   "personas.reserveDailyGeneration": ["personas.generation_cap.enforce"],
+  "personas.getPictureFeedbackRules": ["personas.picture_feedback.read"],
   "activity.log": ["activity.log.write"],
   "metrics.write": ["metrics.write"],
   "telemetry.track": ["telemetry.track"],

@@ -110,6 +110,8 @@ import {
   SHEET_FIELDS,
   SHEET_FIELD_MAX,
   assemblePrompt,
+  normalizeFeedbackRules,
+  type PictureFeedbackRules,
   filledSheetLabels,
   isReferenceRole,
   normalizeRoles,
@@ -919,7 +921,7 @@ export async function prepareGeneration(
    * own message for this turn when the host provides it (quick-agent chats).
    * Neither ever comes from the tool input.
    */
-  options: { agentId?: string | null; requesterMessage?: string | null; now?: Date } = {},
+  options: { agentId?: string | null; requesterMessage?: string | null; now?: Date; runId?: string | null } = {},
 ): Promise<PreparedGeneration | { error: string }> {
   const input = toInput(params);
   if (!input.prompt) return { error: "prompt is required" };
@@ -1062,6 +1064,17 @@ export async function prepareGeneration(
     negativeAllowed = !prepared.editing && prepared.usesOwnModel && prepared.info?.negativePrompt != null;
   }
 
+  // DUR-4345: what this person's emoji reactions taught. Needs the run (the host
+  // resolves the person from it); any failure just means no extra rules.
+  let feedback: PictureFeedbackRules | null = null;
+  if (options.runId) {
+    try {
+      feedback = normalizeFeedbackRules(await ctx.personas.getPictureFeedbackRules?.(companyId, { runId: options.runId }));
+    } catch {
+      feedback = null;
+    }
+  }
+
   // The final prompt: the request, what each picture is for, the look's sheet and style words.
   const assembled = assemblePrompt({
     request: input.prompt,
@@ -1070,6 +1083,7 @@ export async function prepareGeneration(
     roles: referenceFileIds.length > 0 ? referenceRoles : [],
     service: chosen.service,
     avoidAsNegative: negativeAllowed,
+    feedback,
   });
   input.prompt = assembled.prompt;
   if (assembled.avoid) {
@@ -1388,6 +1402,7 @@ const plugin = definePlugin({
         // The person's message is the host's (quick-agent chats only); the input cannot supply it.
         const prepared = await prepareGeneration(ctx, runCtx.companyId, rawParams, {
           agentId: runCtx.agentId,
+          runId: runCtx.runId,
           requesterMessage: typeof runCtx.requesterMessage === "string" ? runCtx.requesterMessage : null,
         });
         if ("error" in prepared) return { error: prepared.error };

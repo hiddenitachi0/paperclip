@@ -53,6 +53,7 @@ import type {
   PluginCompanyFileContent,
   PluginPerformActionContext,
   PluginPersonaGenerationCapReservation,
+  PluginPictureFeedbackRules,
 } from "./protocol.js";
 
 // ---------------------------------------------------------------------------
@@ -1828,6 +1829,14 @@ export interface PluginPersonasClient {
     companyId: string,
     options: { runId: string },
   ): Promise<PluginPersonaGenerationCapReservation>;
+
+  /**
+   * DUR-4345: the "do more of / avoid" picture rules learned from the calling
+   * agent's person's emoji reactions. Requires `personas.picture_feedback.read`.
+   * Run-scoped like `reserveDailyGeneration`: the host resolves the agent from
+   * `options.runId`. Entries come from a fixed vocabulary, never free text.
+   */
+  getPictureFeedbackRules(companyId: string, options: { runId: string }): Promise<PluginPictureFeedbackRules>;
 }
 
 /**

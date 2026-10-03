@@ -2363,6 +2363,12 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         if (!options?.runId) throw new Error("reserveDailyGeneration requires options.runId");
         return { allowed: true, cap: null, usedToday: 0 };
       },
+      async getPictureFeedbackRules(companyId, options) {
+        requireCapability(manifest, capabilitySet, "personas.picture_feedback.read");
+        requireCompanyId(companyId);
+        if (!options?.runId) throw new Error("getPictureFeedbackRules requires options.runId");
+        return { doMore: [], avoid: [] };
+      },
     },
     files: {
       async createCompanyFile(input, companyId, options) {

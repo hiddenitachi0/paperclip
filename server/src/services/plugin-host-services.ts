@@ -41,6 +41,7 @@ import { heartbeatService } from "./heartbeat.js";
 import { budgetService } from "./budgets.js";
 import { issueApprovalService } from "./issue-approvals.js";
 import { agentDailyLimitService } from "./agent-daily-limits.js";
+import { reactionLearningService } from "./reaction-learning.js";
 import { findLaneAPluginRun, laneAPluginRunNamesIssue } from "./lane-a-plugin-runs.js";
 import { subscribeCompanyLiveEvents } from "./live-events.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -395,6 +396,7 @@ export function buildHostServices(
   const budgets = budgetService(db);
   const issueApprovals = issueApprovalService(db);
   const agentDailyLimits = agentDailyLimitService(db);
+  const reactionLearning = reactionLearningService(db);
   const scopedBus = eventBus.forPlugin(pluginKey);
 
   // Track active session event subscriptions for cleanup
@@ -2717,6 +2719,22 @@ export function buildHostServices(
         // method keeps its name and result shape so plugins built against
         // the SDK (media-studio) need no change.
         return agentDailyLimits.reserve(callingAgentId, "image_generation");
+      },
+
+      // DUR-4345: read-only, run-scoped like reserveDailyGeneration -- the
+      // agent is the run's own, never a plugin-supplied id, so a plugin cannot
+      // read another person's learned preferences.
+      async getPictureFeedbackRules(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        if (!params.runId) {
+          throw new Error("runId is required");
+        }
+        const callingAgentId = await callingAgentIdForRun(companyId, params.runId);
+        if (!callingAgentId) {
+          throw new Error("Run not found in this company");
+        }
+        return reactionLearning.pictureRules(companyId, callingAgentId);
       },
     },
 
