@@ -2264,12 +2264,6 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
      * leaves this unset and gets exactly today's behaviour.
      */
     rawProviderErrors?: boolean;
-    /**
-     * DUR-4347: kept up to date with the tokens spent so far, so a turn that
-     * fails part-way (e.g. 503 on round 3 after two tool rounds) can still
-     * bill what the earlier rounds used.
-     */
-    usageSink?: { inputTokens: number; outputTokens: number };
   }): Promise<{
     text: string;
     inputTokens: number;
@@ -2383,7 +2377,6 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         forcedToolName = undefined;
         inputTokens += response.usage.inputTokens;
         outputTokens += response.usage.outputTokens;
-        if (params.usageSink) Object.assign(params.usageSink, { inputTokens, outputTokens });
 
         const toolUseBlocks = response.toolCalls;
         if (response.stop !== "tool_use" || toolUseBlocks.length === 0) {
@@ -2645,7 +2638,6 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         });
         inputTokens += retry.usage.inputTokens;
         outputTokens += retry.usage.outputTokens;
-        if (params.usageSink) Object.assign(params.usageSink, { inputTokens, outputTokens });
         response = retry;
       }
     } catch (err) {
@@ -3062,10 +3054,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
             return { outcome: "retryable_error", error: err };
           }
         }
-        const usageSink = { inputTokens: 0, outputTokens: 0 };
         try {
           const result = await callModel({
-            usageSink,
             systemPrompt,
             history,
             message: params.message,
@@ -3134,11 +3124,6 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
               ? (err.refusal ? "refusal" : err.retryable ? "retryable_error" : "fatal_error")
               : "fatal_error";
           if (outcome === "refusal") refusalModeEntered = true;
-          // Rounds that completed before the failure still spent tokens.
-          const failedCostCents = computeCostCents(entrySettings.provider, entryModel, usageSink.inputTokens, usageSink.outputTokens);
-          if (usageSink.inputTokens > 0 || usageSink.outputTokens > 0) {
-            attemptCostEvents.push({ provider: entrySettings.provider, model: entryModel, inputTokens: usageSink.inputTokens, outputTokens: usageSink.outputTokens, costCents: failedCostCents });
-          }
           attemptRecords.push({
             provider: entrySettings.provider,
             model: entryModel,
