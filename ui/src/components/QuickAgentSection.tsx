@@ -37,6 +37,8 @@ import {
   type LaneAThinkingMode,
   type LaneATrustLevel,
   type LaneAProviderRouting,
+  type LaneABackupModelConfig,
+  type LaneAKeywordRoute,
 } from "@paperclipai/shared";
 import { AlertCircle, CheckCircle2, Circle, Loader2 } from "lucide-react";
 import { Link } from "@/lib/router";
@@ -70,6 +72,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleSwitch } from "@/components/ui/toggle-switch";
 import { SecretBindingPicker, type SecretBindingValue } from "./SecretBindingPicker";
+import { QuickAgentBackupModels } from "./QuickAgentBackupModels";
 
 /**
  * Quick agent settings: the on/off switch plus the instruction set the quick
@@ -123,6 +126,11 @@ export function QuickAgentSection({
     /** DUR-4070: company-member userIds this quick agent may chat with, besides the company's owner. */
     laneAAssignedUserIds?: string[] | null;
     laneAProviderRouting?: LaneAProviderRouting | null;
+    /** DUR-4347: up to five backup models, two try-next lists (by backup id) and keyword rules. */
+    laneABackupModels?: LaneABackupModelConfig[] | null;
+    laneANoAnswerChainIds?: string[] | null;
+    laneARefusalChainIds?: string[] | null;
+    laneAKeywordRoutes?: LaneAKeywordRoute[] | null;
   };
   companyId?: string;
 }) {
@@ -717,6 +725,18 @@ export function QuickAgentSection({
             model={agent.laneAModel ?? null}
             disabled={settingMutation.isPending}
             onSave={(next) => settingMutation.mutateAsync({ laneAThinking: next })}
+          />
+
+          <QuickAgentBackupModels
+            saved={{
+              backups: agent.laneABackupModels,
+              noAnswerChainIds: agent.laneANoAnswerChainIds,
+              refusalChainIds: agent.laneARefusalChainIds,
+              keywordRoutes: agent.laneAKeywordRoutes,
+            }}
+            main={{ provider, baseUrl: agent.laneABaseUrl ?? null, hasKey: Boolean(keyBinding) }}
+            saving={settingMutation.isPending}
+            onSave={(patch) => settingMutation.mutateAsync(patch)}
           />
 
           <NumberSetting
