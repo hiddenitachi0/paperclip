@@ -3,6 +3,7 @@ import type { Db } from "@paperclipai/db";
 import {
   agents,
   companyReactionEmojiConfig,
+  issueAttachments,
   laneAConversations,
   laneAMessages,
   telegramMessageReactions,
@@ -107,6 +108,15 @@ export function telegramReactionService(db: Db) {
           ),
         );
       if (!message) throw unprocessable("That message is not part of this conversation.");
+    }
+
+    // A picture reference must be a file of this company, never another's.
+    if (input.action === "added" && input.picture) {
+      const [file] = await db
+        .select({ id: issueAttachments.id })
+        .from(issueAttachments)
+        .where(and(eq(issueAttachments.id, input.picture.fileId), eq(issueAttachments.companyId, companyId)));
+      if (!file) throw unprocessable("That picture is not a file of this company.");
     }
 
     const key = and(

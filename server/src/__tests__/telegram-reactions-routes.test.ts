@@ -5,6 +5,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   activityLog,
   agents,
+  assets,
+  issueAttachments,
   companies,
   companyReactionEmojiConfig,
   createDb,
@@ -44,6 +46,8 @@ d("telegram reaction routes", () => {
     await db.delete(laneAMessages);
     await db.delete(laneAConversations);
     await db.delete(agents);
+    await db.delete(issueAttachments);
+    await db.delete(assets);
     await db.delete(companies);
   });
 
@@ -99,6 +103,16 @@ d("telegram reaction routes", () => {
     return a;
   }
 
+  async function seedPicture(companyId: string) {
+    const assetId = randomUUID();
+    await db.insert(assets).values({
+      id: assetId, companyId, provider: "local", objectKey: `k/${assetId}`, contentType: "image/png", byteSize: 1, sha256: "x",
+    });
+    const id = randomUUID();
+    await db.insert(issueAttachments).values({ id, companyId, assetId });
+    return id;
+  }
+
   const event = (s: Awaited<ReturnType<typeof seed>>, extra: Record<string, unknown> = {}) => ({
     agentId: s.agentId,
     telegramUserId: "42",
@@ -113,7 +127,7 @@ d("telegram reaction routes", () => {
 
   it("records a reaction with picture metadata and writes an activity row", async () => {
     const s = await seed();
-    const fileId = randomUUID();
+    const fileId = await seedPicture(s.companyId);
     const res = await request(app(admin))
       .post(`/api/companies/${s.companyId}/telegram-reactions`)
       .send(event(s, { picture: { fileId, prompt: "a blue sofa", look: "warm", provider: "x", model: "y" } }));
@@ -121,6 +135,18 @@ d("telegram reaction routes", () => {
     expect(res.body).toMatchObject({ emoji: "👍", active: true, pictureFileId: fileId, picturePrompt: "a blue sofa" });
     const activity = await db.select().from(activityLog);
     expect(activity.map((row) => row.action)).toContain("telegram_reaction.added");
+  });
+
+  it("refuses a plain member and a picture from another company", async () => {
+    const s = await seed();
+    const other = await seed();
+    const url = `/api/companies/${s.companyId}/telegram-reactions`;
+    expect((await request(app(member(s.companyId, "member"))).post(url).send(event(s))).status).toBe(403);
+    expect((await request(app(member(s.companyId, "admin"))).post(url).send(event(s))).status).toBe(201);
+    const foreign = await seedPicture(other.companyId);
+    const res = await request(app(admin)).post(url).send(event(s, { emoji: "🔥", picture: { fileId: foreign } }));
+    expect(res.status).toBe(422);
+    expect((await request(app(admin)).post(url).send(event(s, { emoji: "🔥", picture: { fileId: randomUUID() } }))).status).toBe(422);
   });
 
   it("removal voids the same row; re-adding revives it; no duplicate rows", async () => {
