@@ -430,3 +430,151 @@ describe("quick-agent provider switch preserves each provider's own base URL (DU
     expect(patch.laneABaseUrl).toBe("https://new-router.example/v1");
   });
 });
+
+// DUR-4400 (found during DUR-4397's re-review of this stash): apiKeyByProvider
+// and baseUrlByProvider live inside adapterConfig.laneA, which is otherwise
+// agent-writable (AGENT_SELF_UPDATE_ALLOWED_FIELDS). Before this fix, neither
+// the DUR-3980 "agent can't attach a secret_ref it wasn't given" gate nor any
+// board-only lane-A guard looked inside these two maps, so an agent could
+// plant a secret_ref it never held (or an attacker base URL) under a provider
+// key with a single self-PATCH; the next ordinary provider switch by anyone
+// -- agent or board -- would promote it straight into the live, resolvable
+// laneA.apiKey / laneABaseUrl. These tests prove the stash is now board-only.
+describe("quick-agent per-provider stash is board-only (DUR-4400)", () => {
+  const agentActor = { type: "agent", agentId, companyId, runId: "run-1", source: "agent_key" };
+  const ungrantedSecretRef = {
+    type: "secret_ref",
+    secretId: "66666666-6666-4666-8666-666666666666",
+    version: "latest" as const,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockAgentService.update.mockImplementation(async (id: string, patch: Record<string, unknown>) => ({
+      id,
+      companyId,
+      ...patch,
+    }));
+    mockAccessService.decide.mockResolvedValue({
+      allowed: true,
+      reason: "allow_test_grant",
+      explanation: "Allowed by test grant",
+    });
+    mockAccessService.hasPermission.mockResolvedValue(true);
+    mockAccessService.ensureMembership.mockResolvedValue(undefined);
+    mockCompanySkillService.listRuntimeSkillEntries.mockResolvedValue([]);
+    mockCompanySkillService.resolveRequestedSkillKeys.mockResolvedValue([]);
+    mockAgentInstructionsService.materializeManagedBundle.mockImplementation(async (agent: { adapterConfig: unknown }) => ({
+      adapterConfig: agent.adapterConfig,
+    }));
+    mockLogActivity.mockResolvedValue(undefined);
+  });
+
+  it("rejects an agent-authenticated caller planting a secret_ref it was never granted into apiKeyByProvider", async () => {
+    // Repro from DUR-4400: a self-PATCH that never touches laneAProvider (so
+    // the board-only QUICK_AGENT_FIELDS gate never fires) but reaches straight
+    // into the generically agent-writable adapterConfig.laneA.
+    mockAgentService.getById.mockResolvedValue(baseAgentWith({ apiKey: null }, "openrouter"));
+    const app = await createApp(agentActor);
+
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl)
+        .patch(`/api/agents/${agentId}`)
+        .send({
+          adapterConfig: {
+            laneA: {
+              apiKeyByProvider: { openrouter: ungrantedSecretRef },
+              baseUrlByProvider: { openrouter: "https://attacker.example/v1" },
+            },
+          },
+        }),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects an agent-authenticated caller setting only baseUrlByProvider to an attacker host", async () => {
+    mockAgentService.getById.mockResolvedValue(baseAgentWith({ apiKey: null }, "local"));
+    const app = await createApp(agentActor);
+
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl)
+        .patch(`/api/agents/${agentId}`)
+        .send({ adapterConfig: { laneA: { baseUrlByProvider: { local: "https://attacker.example/v1" } } } }),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects an agent-authenticated caller clearing an existing stash entry", async () => {
+    // Any change -- not just an addition -- is refused: this stash is
+    // board-write-only, the same shape as adapterConfig.laneA.mcpServers.
+    mockAgentService.getById.mockResolvedValue(
+      baseAgentWith({ apiKey: null, apiKeyByProvider: { openrouter: openrouterKeyRef } }, "local"),
+    );
+    const app = await createApp(agentActor);
+
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl)
+        .patch(`/api/agents/${agentId}`)
+        .send({ adapterConfig: { laneA: { apiKeyByProvider: {} } } }),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
+
+  it("still allows an agent to echo an unchanged stash back while editing an unrelated field", async () => {
+    // Regression guard for the fix itself: a settings-form round trip that
+    // reads laneA back and PATCHes it verbatim (unchanged map, keys possibly
+    // reordered) must not be mistaken for a mutation.
+    const laneAWithStash = {
+      apiKey: null,
+      apiKeyByProvider: { openrouter: openrouterKeyRef },
+      baseUrlByProvider: { openrouter: "https://my-router.example/v1" },
+    };
+    mockAgentService.getById.mockResolvedValue(baseAgentWith(laneAWithStash, "local"));
+    const app = await createApp(agentActor);
+
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl)
+        .patch(`/api/agents/${agentId}`)
+        .send({
+          adapterConfig: {
+            laneA: {
+              // Re-keyed in reverse order than how it was read back.
+              baseUrlByProvider: laneAWithStash.baseUrlByProvider,
+              apiKeyByProvider: laneAWithStash.apiKeyByProvider,
+              apiKey: null,
+            },
+          },
+        }),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockAgentService.update).toHaveBeenCalled();
+  });
+
+  it("still allows a board-authenticated caller to drive the stash directly via adapterConfig", async () => {
+    mockAgentService.getById.mockResolvedValue(baseAgentWith({ apiKey: null }, "openrouter"));
+    const boardActor = {
+      type: "board",
+      userId: "board-user",
+      companyIds: [companyId],
+      source: "local_implicit",
+      isInstanceAdmin: false,
+    };
+    const app = await createApp(boardActor);
+
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl)
+        .patch(`/api/agents/${agentId}`)
+        .send({ adapterConfig: { laneA: { apiKeyByProvider: { openrouter: openrouterKeyRef } } } }),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockAgentService.update).toHaveBeenCalled();
+  });
+});
