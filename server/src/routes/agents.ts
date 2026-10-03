@@ -2936,6 +2936,8 @@ export function agentRoutes(
           laneABaseUrl: agent.laneABaseUrl ?? null,
           // "Creativity" chosen at hire time, same reason.
           laneATemperature: agent.laneATemperature ?? null,
+          // "Thinking" chosen at hire time, same reason.
+          laneAThinking: agent.laneAThinking ?? null,
           // DUR-4070: the trust-level ceiling and assigned-people list chosen
           // at hire time, same reason as the rest of QUICK_AGENT_FIELDS.
           laneATrustLevel: agent.laneATrustLevel ?? null,

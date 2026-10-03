@@ -581,6 +581,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
       runId: stringOrNull(actorInput?.runId),
       companyId,
       canManageCompany: actorInput?.canManageCompany === true,
+      isInstanceAdmin: actorInput?.isInstanceAdmin === true,
     });
     return Object.freeze({ actor, companyId });
   }

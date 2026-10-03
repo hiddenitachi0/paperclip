@@ -60,6 +60,7 @@ export const MAX_REFERENCE_FILES = 4;
  * worker's registration, so the two cannot drift apart.
  */
 export const GENERATE_IMAGE_DESCRIPTION =
+  "Use this tool to show, make or draw a picture \"in\" or \"with\" a look (pass that name as look) — list-looks only lists names, it never makes a picture. " +
   "Make a picture from a text description. Without a task it is saved to the company's Files (not tied to any task) and shown in the chat; with issueId it is attached to that task instead. " +
   "When the person names a saved look (\"in our catalogue look\"), pass it as look. " +
   "When no look is named, an automatic look is used if one fits (an owner or admin can set looks by time of day and by keywords in the person's message), else your default look (if you have one); a look named in the request wins over both. The result says which look was used and why. " +
@@ -144,7 +145,9 @@ export const QUICK_PICTURE_PARAMETERS = {
 } as const;
 
 export const LIST_LOOKS_DESCRIPTION =
-  "List the company's saved picture looks (name, style, picture service, model name, LoRAs, and whether each has a fixed seed, reference pictures or the content filter off), which one is your default look (used when no look is named), and your automatic looks (which look is used at which times of day or for which keywords). Use it when the person asks which looks exist, or before using a look you are unsure of.";
+  "ONLY for when the person asks which looks exist, or before using a look you are unsure of. It lists names — it never shows, makes or draws a picture. " +
+  "To show, make or draw a picture \"in\" or \"with\" a look, use generate-image with that look instead. " +
+  "Lists the company's saved picture looks (name, style, picture service, model name, LoRAs, and whether each has a fixed seed, reference pictures or the content filter off), which one is your default look (used when no look is named), and your automatic looks (which look is used at which times of day or for which keywords).";
 
 // ─── Video and music/audio (DUR-4062) ────────────────────────────────────────
 //

@@ -110,6 +110,13 @@ export const agents = pgTable(
     // Null = send no temperature, i.e. the model host's own default, which is
     // what every quick agent did before this column existed.
     laneATemperature: real("lane_a_temperature"),
+    // DUR-4367: quick-agent "Thinking" ("on" | "off" | null). Null = "model
+    // default", i.e. what every quick agent did before this column existed.
+    // "off" asks the model to skip its reasoning pass (see
+    // laneAThinkingForCall in packages/shared) — the fix for a local
+    // reasoning model answering ~3x slower through Paperclip than the same
+    // message sent to it directly.
+    laneAThinking: text("lane_a_thinking"),
     // Migration 0189: quick-agent "model hosts" for OpenRouter — which hosts
     // (OpenRouter provider slugs such as "deepinfra") a call may only use,
     // should try first, or must never use. Validated by the API

@@ -1,6 +1,6 @@
 {
-  "id": "9424c5ee-0598-4a0a-9b07-aa6269cbc1f1",
-  "prevId": "a769347b-4707-4fbc-87b3-4ad17ed46463",
+  "id": "c58aa8f7-be74-4283-9a43-7cdc6efda7f9",
+  "prevId": "9544db8c-2776-4b6e-8777-ee07815bb48a",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -2116,6 +2116,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "lane_a_thinking": {
+          "name": "lane_a_thinking",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "lane_a_provider_routing": {
           "name": "lane_a_provider_routing",
           "type": "jsonb",
@@ -2250,34 +2256,6 @@
         },
         "lane_a_assigned_user_ids": {
           "name": "lane_a_assigned_user_ids",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'[]'::jsonb"
-        },
-        "lane_a_backup_models": {
-          "name": "lane_a_backup_models",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'[]'::jsonb"
-        },
-        "lane_a_no_answer_chain_ids": {
-          "name": "lane_a_no_answer_chain_ids",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'[]'::jsonb"
-        },
-        "lane_a_refusal_chain_ids": {
-          "name": "lane_a_refusal_chain_ids",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'[]'::jsonb"
-        },
-        "lane_a_keyword_routes": {
-          "name": "lane_a_keyword_routes",
           "type": "jsonb",
           "primaryKey": false,
           "notNull": true,
@@ -8261,7 +8239,13 @@
           "name": "agent_id",
           "type": "uuid",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
+        },
+        "created_by_user_id": {
+          "name": "created_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         },
         "issue_id": {
           "name": "issue_id",
@@ -24243,18 +24227,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "attempts": {
-          "name": "attempts",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "answered_by": {
-          "name": "answered_by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -25667,6 +25639,155 @@
           "value": "\"mail_secretary_items\".\"delegation_status\" IN ('none', 'practice_only', 'ready', 'acknowledged')"
         }
       },
+      "isRLSEnabled": false
+    },
+    "public.media_studio_direct_creations": {
+      "name": "media_studio_direct_creations",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_by_user_id": {
+          "name": "created_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "provider": {
+          "name": "provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "model": {
+          "name": "model",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "prompt": {
+          "name": "prompt",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "cost_cents": {
+          "name": "cost_cents",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "file_id": {
+          "name": "file_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "cost_event_id": {
+          "name": "cost_event_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "media_studio_direct_creations_company_user_created_idx": {
+          "name": "media_studio_direct_creations_company_user_created_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_by_user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "media_studio_direct_creations_company_id_companies_id_fk": {
+          "name": "media_studio_direct_creations_company_id_companies_id_fk",
+          "tableFrom": "media_studio_direct_creations",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "media_studio_direct_creations_file_id_issue_attachments_id_fk": {
+          "name": "media_studio_direct_creations_file_id_issue_attachments_id_fk",
+          "tableFrom": "media_studio_direct_creations",
+          "tableTo": "issue_attachments",
+          "columnsFrom": [
+            "file_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "media_studio_direct_creations_cost_event_id_cost_events_id_fk": {
+          "name": "media_studio_direct_creations_cost_event_id_cost_events_id_fk",
+          "tableFrom": "media_studio_direct_creations",
+          "tableTo": "cost_events",
+          "columnsFrom": [
+            "cost_event_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.morning_report_outbox": {

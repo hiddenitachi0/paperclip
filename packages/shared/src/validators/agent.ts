@@ -19,6 +19,7 @@ import {
   LANE_A_PROVIDERS,
   LANE_A_PROVIDER_ROUTING_MAX_ENTRIES,
   LANE_A_PROVIDER_SLUG_RE,
+  LANE_A_THINKING_MODES,
   laneAModelIssueForProvider,
 } from "../lane-a-models.js";
 import { envBindingSchema, envBindingSecretRefSchema, envConfigSchema } from "./secret.js";
@@ -101,6 +102,11 @@ export const QUICK_AGENT_FIELDS = [
   // temperature). Null = the model host's own default. Board-only like the
   // rest: it changes how the agent talks to people.
   "laneATemperature",
+  // DUR-4367: "on" | "off" | null ("model default"). Off asks the model to
+  // skip its reasoning pass where the provider supports it — the fix for a
+  // local reasoning model answering noticeably slower through a quick agent
+  // than the same message sent to it directly. Board-only like the rest.
+  "laneAThinking",
   // Which OpenRouter hosts the quick agent's model may (or may never) run on.
   // Null = OpenRouter picks. Board-only like the rest: it decides where the
   // company's prompts are sent.
@@ -612,6 +618,10 @@ const createAgentObjectSchema = z.object({
     .max(LANE_A_MAX_TEMPERATURE, `Creativity must be between ${LANE_A_MIN_TEMPERATURE} and ${LANE_A_MAX_TEMPERATURE}.`)
     .nullable()
     .optional(),
+  // "Thinking": "on" | "off" | null ("model default"). Off sends
+  // reasoning_effort: "none" (or the provider-native equivalent) where the
+  // provider/model is known to accept it; see laneAThinkingForCall.
+  laneAThinking: z.enum(LANE_A_THINKING_MODES).nullable().optional(),
   // Which OpenRouter hosts the model may (or may never) run on. Null = no
   // preference. Ignored at call time for every provider but OpenRouter.
   laneAProviderRouting: laneAProviderRoutingSchema.nullable().optional(),

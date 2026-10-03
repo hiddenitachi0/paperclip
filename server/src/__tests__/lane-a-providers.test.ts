@@ -323,6 +323,32 @@ describe("OpenAI-compatible provider client", () => {
     }
   });
 
+  it("buildOpenAiCompatibleBody sends reasoning_effort only when thinking is turned off (DUR-4367)", () => {
+    const base = { model: "m", system: "s", messages: [{ role: "user" as const, content: "u" }], maxTokens: 10 };
+    for (const provider of ["openai", "google", "openrouter", "local"] as const) {
+      expect(Object.hasOwn(buildOpenAiCompatibleBody(provider, base), "reasoning_effort")).toBe(false);
+      expect(Object.hasOwn(buildOpenAiCompatibleBody(provider, { ...base, reasoningEffort: null }), "reasoning_effort")).toBe(
+        false,
+      );
+      expect(buildOpenAiCompatibleBody(provider, { ...base, reasoningEffort: "none" }).reasoning_effort).toBe("none");
+    }
+  });
+
+  it("puts reasoning_effort on the wire for a local Ollama-style host (DUR-4367)", async () => {
+    const fetcher = fakeFetch(() =>
+      jsonResponse({ choices: [{ message: { role: "assistant", content: "Hi" }, finish_reason: "stop" }] }),
+    );
+    const client = createLaneAProviderClient({ provider: "local", baseUrl: "http://10.0.0.1:11434/v1", fetch: fetcher.impl });
+    await client.complete({
+      model: "huihui_ai/qwen3-abliterated:8b",
+      system: "s",
+      messages: [{ role: "user", content: "hi" }],
+      maxTokens: 64,
+      reasoningEffort: "none",
+    });
+    expect(fetcher.calls[0]!.body.reasoning_effort).toBe("none");
+  });
+
   it("puts the temperature on the wire for OpenRouter", async () => {
     const fetcher = fakeFetch(() =>
       jsonResponse({ choices: [{ message: { role: "assistant", content: "Hei!" }, finish_reason: "stop" }] }),
