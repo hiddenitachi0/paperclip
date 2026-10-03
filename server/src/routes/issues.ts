@@ -75,6 +75,7 @@ import {
 import { trackAgentTaskCompleted } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
 import type { StorageService } from "../storage/types.js";
+import { getOrCreateThumbnail, isThumbnailableContentType } from "../services/attachment-thumbnail.js";
 import { validate } from "../middleware/validate.js";
 import * as serviceIndex from "../services/index.js";
 import {
@@ -9734,6 +9735,33 @@ export function issueRoutes(
 
     res.setHeader("Content-Length", String(contentLength || object.contentLength || 0));
     object.stream.pipe(res);
+  });
+
+  router.get("/attachments/:attachmentId/thumbnail", scopeFromAttachmentParam(), async (req, res, next) => {
+    try {
+      const attachment = await svc.getAttachmentById(req.params.attachmentId as string);
+      if (!attachment) {
+        res.status(404).json({ error: "Attachment not found" });
+        return;
+      }
+      assertCompanyAccess(req, attachment.companyId);
+      if (!isThumbnailableContentType(attachment.contentType)) {
+        res.status(415).json({ error: "Attachment is not a raster image" });
+        return;
+      }
+      const thumb = await getOrCreateThumbnail(storage, attachment);
+      if (!thumb) {
+        res.status(413).json({ error: "Image too large to thumbnail" });
+        return;
+      }
+      res.setHeader("Content-Type", "image/webp");
+      res.setHeader("Cache-Control", "private, max-age=86400");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Content-Length", String(thumb.length));
+      res.end(thumb);
+    } catch (err) {
+      next(err);
+    }
   });
 
   router.delete("/attachments/:attachmentId", scopeFromAttachmentParam(), async (req, res) => {

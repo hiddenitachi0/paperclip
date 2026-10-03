@@ -450,7 +450,7 @@ export function mediaStudioDirectService(
 
   function attachmentResponse(fileId: string, contentType: string) {
     const contentPath = `/api/attachments/${fileId}/content`;
-    return { fileId, contentPath, openPath: contentPath, downloadPath: `${contentPath}?download=1`, contentType };
+    return { fileId, contentPath, openPath: contentPath, thumbnailPath: `/api/attachments/${fileId}/thumbnail`, downloadPath: `${contentPath}?download=1`, contentType };
   }
 
   async function createPicture(companyId: string, actor: MediaStudioDirectActor, input: CreateMediaStudioDirectPictureInput) {

@@ -43,6 +43,7 @@ export const companyArtifactSchema = z.object({
   contentType: z.string().nullable(),
   contentPath: z.string().nullable(),
   openPath: z.string().nullable(),
+  thumbnailPath: z.string().nullable().optional(),
   downloadPath: z.string().nullable(),
   byteSize: z.number().int().nullable(),
   originalFilename: z.string().nullable(),
