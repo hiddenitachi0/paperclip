@@ -1,7 +1,8 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, like } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
+  assets,
   companyReactionEmojiConfig,
   issueAttachments,
   laneAConversations,
@@ -115,8 +116,15 @@ export function telegramReactionService(db: Db) {
       const [file] = await db
         .select({ id: issueAttachments.id })
         .from(issueAttachments)
-        .where(and(eq(issueAttachments.id, input.picture.fileId), eq(issueAttachments.companyId, companyId)));
-      if (!file) throw unprocessable("That picture is not a file of this company.");
+        .innerJoin(assets, eq(assets.id, issueAttachments.assetId))
+        .where(
+          and(
+            eq(issueAttachments.id, input.picture.fileId),
+            eq(issueAttachments.companyId, companyId),
+            like(assets.contentType, "image/%"),
+          ),
+        );
+      if (!file) throw unprocessable("That picture is not an image file of this company.");
     }
 
     const key = and(

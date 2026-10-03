@@ -103,10 +103,10 @@ d("telegram reaction routes", () => {
     return a;
   }
 
-  async function seedPicture(companyId: string) {
+  async function seedPicture(companyId: string, contentType = "image/png") {
     const assetId = randomUUID();
     await db.insert(assets).values({
-      id: assetId, companyId, provider: "local", objectKey: `k/${assetId}`, contentType: "image/png", byteSize: 1, sha256: "x",
+      id: assetId, companyId, provider: "local", objectKey: `k/${assetId}`, contentType, byteSize: 1, sha256: "x",
     });
     const id = randomUUID();
     await db.insert(issueAttachments).values({ id, companyId, assetId });
@@ -147,6 +147,15 @@ d("telegram reaction routes", () => {
     const res = await request(app(admin)).post(url).send(event(s, { emoji: "🔥", picture: { fileId: foreign } }));
     expect(res.status).toBe(422);
     expect((await request(app(admin)).post(url).send(event(s, { emoji: "🔥", picture: { fileId: randomUUID() } }))).status).toBe(422);
+  });
+
+  it("refuses a file reference that is not an image", async () => {
+    const s = await seed();
+    const pdf = await seedPicture(s.companyId, "application/pdf");
+    const res = await request(app(admin))
+      .post(`/api/companies/${s.companyId}/telegram-reactions`)
+      .send(event(s, { picture: { fileId: pdf } }));
+    expect(res.status).toBe(422);
   });
 
   it("removal voids the same row; re-adding revives it; no duplicate rows", async () => {
