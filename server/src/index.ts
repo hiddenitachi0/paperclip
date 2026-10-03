@@ -75,6 +75,7 @@ import {
 import { schedulerLiveness } from "./services/scheduler-liveness.js";
 import { watcherService } from "./services/watchers.js";
 import { morningReportService } from "./services/morning-report.js";
+import { modelHealthService } from "./services/model-health.js";
 import { paymentCardService } from "./services/payment-cards.js";
 import { mailSecretaryService } from "./services/mail-secretary.js";
 import { mailAccountsService } from "./services/mail-accounts.js";
@@ -121,6 +122,9 @@ import type {
   InstanceDatabaseBackupRunResult,
   InstanceDatabaseBackupTrigger,
 } from "./routes/instance-database-backups.js";
+
+const LOCAL_MODEL_HEALTH_INTERVAL_MS = 3 * 60_000;
+let lastLocalModelHealthCheckAt = 0;
 
 type BetterAuthSessionUser = {
   id: string;
@@ -1445,6 +1449,27 @@ export async function startServer(): Promise<StartedServer> {
             logger.error({ err }, "morning-report tick failed");
           }),
       );
+
+      // DUR-4419: local-model health. Probes every local model an agent is
+      // using (Ollama /api/tags), at most every few minutes however often the
+      // scheduler ticks, and keeps the outage state the offline reminder and
+      // the agent-page banner read. Each probe is bounded to 5s.
+      if (Date.now() - lastLocalModelHealthCheckAt >= LOCAL_MODEL_HEALTH_INTERVAL_MS) {
+        lastLocalModelHealthCheckAt = Date.now();
+        void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.localModelHealth, () =>
+          runInCompanyScopeBypass(
+            bypassDb,
+            {
+              reason: "heartbeat scheduler tick: localModelHealth",
+              actorType: "scheduler",
+              route: "heartbeat-scheduler:localModelHealth",
+            },
+            () => modelHealthService(schedulerDb as any).checkInUse(),
+          ).catch((err) => {
+            logger.error({ err }, "local-model health check failed");
+          }),
+        );
+      }
 
       // Payment cards: sweep available/reserved cards whose expiresOn has
       // passed to expired (see services/payment-cards.ts). Ships behind the

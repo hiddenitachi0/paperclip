@@ -291,6 +291,10 @@ DECLARE
     -- 0216_model_directory_entries.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'model_directory_entries',
+    -- DUR-4419. Created, granted on and policed in
+    -- 0218_local_model_health.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'local_model_health',
     -- DUR-4344. Created, granted on and policed in
     -- 0215_telegram_reaction_feedback.sql; listed here so the login-role
     -- lists match the schema
@@ -561,6 +565,10 @@ DECLARE
     -- 0216_model_directory_entries.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'model_directory_entries',
+    -- DUR-4419. Created, granted on and policed in
+    -- 0218_local_model_health.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'local_model_health',
     -- DUR-4344. Created, granted on and policed in
     -- 0215_telegram_reaction_feedback.sql; listed here so the login-role
     -- lists match the schema
