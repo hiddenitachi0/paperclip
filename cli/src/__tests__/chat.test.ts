@@ -246,4 +246,28 @@ describe("chat commands", () => {
 
     expect(JSON.parse(printed.join("\n"))).toMatchObject({ ok: false, status: 413 });
   });
+
+  it("posts a Telegram reaction event to the company's reaction route, and prints a refusal as data", async () => {
+    const event = {
+      agentId: AGENT_ID,
+      telegramUserId: "42",
+      telegramChatId: "42",
+      telegramMessageId: 7,
+      emoji: "👍",
+      action: "added",
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ id: ISSUE_A, emoji: "👍" }, 201))
+      .mockResolvedValueOnce(jsonResponse({ error: "That reaction is already recorded" }, 409));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await run(["chat", "reaction", "-C", COMPANY_ID, "--event", JSON.stringify(event), "--json"]);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`http://localhost:3100/api/companies/${COMPANY_ID}/telegram-reactions`);
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual(event);
+    expect(JSON.parse(printed.pop()!)).toMatchObject({ ok: true, emoji: "👍" });
+
+    await run(["chat", "reaction", "-C", COMPANY_ID, "--event", JSON.stringify(event), "--json"]);
+    expect(JSON.parse(printed.pop()!)).toMatchObject({ ok: false, status: 409 });
+  });
 });

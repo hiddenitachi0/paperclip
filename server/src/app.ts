@@ -77,6 +77,7 @@ import { crossCompanyInstructionRoutes } from "./routes/cross-company-instructio
 import { instanceSecurityRoutes } from "./routes/instance-security.js";
 import { crossCompanyAccessLogRoutes } from "./routes/cross-company-access-log.js";
 import { telegramBotRoutes } from "./routes/telegram-bots.js";
+import { telegramReactionRoutes } from "./routes/telegram-reactions.js";
 import { SPEECH_TRANSCRIBE_API_PATH, SPEECH_TRANSCRIBE_JSON_BODY_LIMIT, speechRoutes } from "./routes/speech.js";
 import { dataConnectionRoutes } from "./routes/data-connections.js";
 import { documentsDownloadRoutes } from "./routes/documents-download.js";
@@ -374,6 +375,7 @@ export async function createApp(
   api.use(instanceClaudeAuthRoutes(db));
   api.use(instanceServerAnthropicKeyRoutes(db));
   api.use(telegramBotRoutes(db));
+  api.use(telegramReactionRoutes(db));
   api.use(speechRoutes(db));
   // DUR-3972 S1: business-data sources. Off until enableBusinessData is on.
   api.use(dataConnectionRoutes(db));
