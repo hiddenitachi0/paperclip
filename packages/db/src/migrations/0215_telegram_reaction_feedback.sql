@@ -40,3 +40,28 @@ ALTER TABLE "telegram_message_reactions" ADD CONSTRAINT "telegram_message_reacti
 CREATE INDEX "telegram_message_reactions_company_agent_idx" ON "telegram_message_reactions" USING btree ("company_id","agent_id","reacted_at");--> statement-breakpoint
 CREATE INDEX "telegram_message_reactions_conversation_idx" ON "telegram_message_reactions" USING btree ("conversation_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "telegram_message_reactions_unique_idx" ON "telegram_message_reactions" USING btree ("company_id","telegram_chat_id","telegram_message_id","telegram_user_id","emoji");
+
+--> statement-breakpoint
+-- Row-level security and grants, the same guarded shape prior tenant tables
+-- (e.g. 0198/0204/0208) use, so this table stays in line on a database
+-- where those roles exist. Company isolation does NOT rest on this: every
+-- query in the reaction routes filters on the caller's company.
+DO $$
+DECLARE
+  t text;
+BEGIN
+  FOREACH t IN ARRAY ARRAY['telegram_message_reactions','company_reaction_emoji_config'] LOOP
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'paperclip_app_scoped') THEN
+      EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I TO paperclip_app_scoped', t);
+      EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_policies WHERE tablename = t AND policyname = 'paperclip_company_scope'
+      ) THEN
+        EXECUTE format('CREATE POLICY paperclip_company_scope ON %I USING (company_id = NULLIF(current_setting(''app.current_company_id'', true), '''')::uuid OR pg_has_role(current_user, ''paperclip_app_bypass'', ''member'')) WITH CHECK (company_id = NULLIF(current_setting(''app.current_company_id'', true), '''')::uuid OR pg_has_role(current_user, ''paperclip_app_bypass'', ''member''))', t);
+      END IF;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'paperclip_app_bypass_login') THEN
+      EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I TO paperclip_app_bypass_login', t);
+    END IF;
+  END LOOP;
+END $$;
