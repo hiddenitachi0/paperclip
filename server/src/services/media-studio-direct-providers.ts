@@ -44,9 +44,6 @@ export interface MediaStudioDirectPictureResult {
   imageUrl?: string;
   imageDataUrl?: string;
   seed: number | null;
-  /** Pixel size Fal reported, for per-megapixel pricing (DUR-4455). */
-  width?: number;
-  height?: number;
 }
 
 export interface MediaStudioDirectMediaResult {
@@ -108,17 +105,11 @@ export class FalDirectPictureProvider {
       body: JSON.stringify(body),
     });
     if (!res.ok) throw new Error(`fal.ai ${model} failed (${res.status}): ${await res.text()}`);
-    const data = (await res.json()) as { images?: Array<{ url: string; content_type?: string; width?: number; height?: number }>; seed?: number };
+    const data = (await res.json()) as { images?: Array<{ url: string; content_type?: string }>; seed?: number };
     const image = data.images?.[0];
     if (!image?.url) throw new Error("fal.ai returned no image");
     const seed = typeof data.seed === "number" ? data.seed : (input.seed ?? null);
-    const base = {
-      provider: this.name,
-      model,
-      contentType: image.content_type ?? "image/jpeg",
-      seed,
-      ...(typeof image.width === "number" && typeof image.height === "number" ? { width: image.width, height: image.height } : {}),
-    };
+    const base = { provider: this.name, model, contentType: image.content_type ?? "image/jpeg", seed };
     if (/^data:/i.test(image.url)) return { ...base, imageDataUrl: image.url };
     if (!/^https:\/\//i.test(image.url)) throw new Error("fal.ai returned an image address that is not https");
     return { ...base, imageUrl: image.url };
