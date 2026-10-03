@@ -110,6 +110,8 @@ import {
   SHEET_FIELDS,
   SHEET_FIELD_MAX,
   assemblePrompt,
+  normalizeLearned,
+  type LearnedPreferences,
   filledSheetLabels,
   isReferenceRole,
   normalizeRoles,
@@ -436,6 +438,26 @@ function lookRulesScope(companyId: string) {
 
 export async function loadLookRules(ctx: PluginContext, companyId: string): Promise<Record<string, LookRuleSet>> {
   return normalizeRuleSets(await ctx.state.get(lookRulesScope(companyId)));
+}
+
+// ─── What the person's reactions say (DUR-4345) ──────────────────────────────
+// The server's reaction summariser writes { "persona:<id>" | "agent:<id>":
+// { doMore[], avoid[] } } here (company scope). Same owner as the automatic
+// looks. Read-only for the plugin; a missing or malformed value means none.
+
+const PICTURE_FEEDBACK_STATE_KEY = "pictureFeedback";
+
+export async function loadLearnedPreferences(ctx: PluginContext, companyId: string, agentId: string | null | undefined): Promise<LearnedPreferences | null> {
+  if (!agentId) return null;
+  try {
+    const raw = await ctx.state.get({ scopeKind: "company", scopeId: companyId, stateKey: PICTURE_FEEDBACK_STATE_KEY });
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const owner = await ruleOwnerForAgent(ctx, companyId, agentId);
+    return normalizeLearned((raw as Record<string, unknown>)[owner]);
+  } catch (err) {
+    ctx.logger.warn(`media-studio: could not read picture feedback: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
 }
 
 /** Whose rules this agent follows: its person's when it has one (in this company), else its own. */
@@ -1070,6 +1092,7 @@ export async function prepareGeneration(
     roles: referenceFileIds.length > 0 ? referenceRoles : [],
     service: chosen.service,
     avoidAsNegative: negativeAllowed,
+    learned: await loadLearnedPreferences(ctx, companyId, options.agentId),
   });
   input.prompt = assembled.prompt;
   if (assembled.avoid) {
@@ -2464,7 +2487,7 @@ export async function runQuickPicture(
   const size = quickPictureSize(shape, service);
   const input: GenerationInput = {
     // A named look's words only: its style words and character sheet (no pictures, so no roles).
-    prompt: look ? assemblePrompt({ request: prompt, style: look.style, sheet: look.sheet, roles: [], service }).prompt : prompt,
+    prompt: look ? assemblePrompt({ request: prompt, style: look.style, sheet: look.sheet, roles: [], service, learned: await loadLearnedPreferences(ctx, runCtx.companyId, runCtx.agentId) }).prompt : prompt,
     provider: service,
     model: quickModelFor(service),
     imageSize: size.imageSize,

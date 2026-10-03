@@ -35,6 +35,9 @@ export const telegramMessageReactions = pgTable(
     pictureLook: text("picture_look"),
     pictureProvider: text("picture_provider"),
     pictureModel: text("picture_model"),
+    /** DUR-4345: the one short "what should I change?" follow-up per picture, and the answer. */
+    followUpAskedAt: timestamp("follow_up_asked_at", { withTimezone: true }),
+    followUpAnswer: text("follow_up_answer"),
     reactedAt: timestamp("reacted_at", { withTimezone: true }).notNull().defaultNow(),
     removedAt: timestamp("removed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

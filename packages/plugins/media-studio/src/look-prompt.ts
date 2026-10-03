@@ -16,6 +16,8 @@
 //
 //   Art style: ... Lighting: ... Camera and framing: ...
 //
+//   Lean towards: ... Avoid: ...                      learned from the person's reactions (DUR-4345), when there are any
+//
 //   Keep out of the picture: ...                     unless the model takes "things to avoid" text
 //
 // The request wins: a sheet field (or a picture's role) about something the
@@ -288,6 +290,42 @@ export interface PromptInput {
   service: string;
   /** The model takes "things to avoid" text of its own: "Always avoid" goes there instead of into the prompt. */
   avoidAsNegative?: boolean;
+  /** DUR-4345: what this person's reactions to past pictures say to do more of / avoid. */
+  learned?: LearnedPreferences | null;
+}
+
+/** Short, fixed-vocabulary phrases from the reaction summariser; never a past prompt. */
+export interface LearnedPreferences {
+  doMore: string[];
+  avoid: string[];
+}
+
+export const LEARNED_MAX_ITEMS = 8;
+export const LEARNED_ITEM_MAX = 80;
+
+/** Keeps only short plain strings, so a bad state value can never inject a long text. */
+export function normalizeLearned(value: unknown): LearnedPreferences | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const clean = (list: unknown) =>
+    (Array.isArray(list) ? list : [])
+      .filter((item): item is string => typeof item === "string")
+      .map((item) => item.replace(/\s+/g, " ").trim())
+      .filter((item) => item.length > 0 && item.length <= LEARNED_ITEM_MAX)
+      .slice(0, LEARNED_MAX_ITEMS);
+  const doMore = clean(raw.doMore);
+  const avoid = clean(raw.avoid);
+  return doMore.length > 0 || avoid.length > 0 ? { doMore, avoid } : null;
+}
+
+/** The sentence(s) added to a prompt for what the person has shown they like and dislike. */
+export function learnedInstructions(learned: LearnedPreferences | null | undefined): string {
+  const l = normalizeLearned(learned);
+  if (!l) return "";
+  const parts: string[] = [];
+  if (l.doMore.length > 0) parts.push(`Lean towards: ${l.doMore.join("; ")}.`);
+  if (l.avoid.length > 0) parts.push(`Avoid: ${l.avoid.join("; ")}.`);
+  return parts.join(" ");
 }
 
 export interface AssembledPrompt {
@@ -332,6 +370,8 @@ export function assemblePrompt(input: PromptInput): AssembledPrompt {
   if (style) blocks.push(`Style: ${style}`);
   const styleFields = pick("style");
   if (styleFields.length > 0) blocks.push(styleFields.join(" "));
+  const learnedText = learnedInstructions(input.learned);
+  if (learnedText) blocks.push(learnedText);
   const avoidText = sheet.avoid?.trim() || null;
   let avoid: string | null = null;
   if (avoidText) {

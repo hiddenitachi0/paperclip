@@ -2,11 +2,13 @@ import { Router } from "express";
 import { z } from "zod";
 import type { Db } from "@paperclipai/db";
 import { recordTelegramReactionSchema, updateReactionEmojiConfigSchema } from "@paperclipai/shared";
+import { notFound } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
 import { assertBoard, assertCompanyAccess, assertCompanyOwnerAdminOrInstanceAdmin } from "./authz.js";
 import { logActivity } from "../services/index.js";
 import { telegramReactionService } from "../services/telegram-reactions.js";
+import { reactionLearningService } from "../services/reaction-learning.js";
 
 /**
  * DUR-4344: Telegram reaction feedback.
@@ -18,6 +20,8 @@ import { telegramReactionService } from "../services/telegram-reactions.js";
  * from assertCompanyAccess. Changing what an emoji means is a company-policy
  * decision and needs owner/admin.
  */
+const followUpAnswerSchema = z.object({ answer: z.string().trim().min(1).max(1000) }).strict();
+
 const listQuerySchema = z.object({
   agentId: z.string().uuid().optional(),
   includeRemoved: z.enum(["true", "false"]).optional(),
@@ -27,6 +31,7 @@ const listQuerySchema = z.object({
 export function telegramReactionRoutes(db: Db) {
   const router = Router();
   const svc = telegramReactionService(db);
+  const learning = reactionLearningService(db);
 
   const boardScope = () =>
     companyScopeFromParam(db, (req, companyId) => {
@@ -62,7 +67,35 @@ export function telegramReactionRoutes(db: Db) {
           hasPicture: Boolean(event.pictureFileId),
         },
       });
-      res.status(created ? 201 : 200).json(event);
+      // DUR-4345: learn from it (never fails the request), and say whether the bot
+      // should ask its one follow-up question about this picture.
+      await learning.maybeSummarize(companyId, event.agentId, req.body.action);
+      const followUpQuestion = req.body.action === "added" ? await learning.claimFollowUp(companyId, event).catch(() => null) : null;
+      res.status(created ? 201 : 200).json({ ...event, followUpQuestion });
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/telegram-reactions/:reactionId/follow-up-answer",
+    companyScopeFromParam(db, (req, companyId) =>
+      assertCompanyOwnerAdminOrInstanceAdmin(req, companyId, "reaction feedback"),
+    ),
+    validate(followUpAnswerSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const event = await learning.recordFollowUpAnswer(companyId, req.params.reactionId as string, req.body.answer);
+      if (!event) throw notFound("No active reaction to attach that answer to");
+      await logActivity(db, {
+        companyId,
+        actorType: "user",
+        actorId: actorId(req),
+        agentId: event.agentId,
+        action: "telegram_reaction.follow_up_answered",
+        entityType: "telegram_reaction",
+        entityId: event.id,
+        details: { emoji: event.emoji },
+      });
+      res.json(event);
     },
   );
 
