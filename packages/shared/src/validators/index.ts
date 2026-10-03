@@ -245,6 +245,11 @@ export {
   parseAgentLimits,
   type PersonaJobField,
   type AgentLimitsInput,
+  BROWSER_ACCESS_FIELDS,
+  AGENT_BROWSER_ACCESS_LEVELS,
+  browserAccessSchema,
+  type BrowserAccessField,
+  type AgentBrowserAccessLevel,
   agentRuntimeConfigSchema,
   agentInstructionsBundleModeSchema,
   updateAgentInstructionsBundleSchema,
@@ -279,9 +284,11 @@ export {
   type UpdateAgentPermissions,
   type McpServerConfig,
   LANE_A_INSTRUCTIONS_MAX_LENGTH,
+  LANE_A_ASSIGNED_USER_IDS_MAX_LENGTH,
   QUICK_AGENT_FIELDS,
   laneAProviderModelIssue,
   laneAAdapterConfigSchema,
+  laneAProviderRoutingSchema,
   type QuickAgentField,
 } from "./agent.js";
 
@@ -310,6 +317,25 @@ export {
 } from "./persona-account.js";
 
 export {
+  openBrowserSessionSchema,
+  browserNavigateSchema,
+  browserClickSchema,
+  browserTypeSchema,
+  browserSelectSchema,
+  browserCheckSchema,
+  browserPressKeySchema,
+  browserWaitSchema,
+  browserHandOverSchema,
+  browserRequestBookingSchema,
+  browserConfirmFinalStepSchema,
+  browserFillSiteLoginSchema,
+  browserRequestPurchaseSchema,
+  browserFillPaymentDetailsSchema,
+  browserWaitForOutcomeSchema,
+  browserReportOutcomeSchema,
+} from "./browser.js";
+
+export {
   mcpToolLibraryConnectionSchema,
   mcpToolLibraryEntryBodySchema,
   mcpToolLibraryEntryUpdateSchema,
@@ -319,6 +345,39 @@ export {
   type McpToolLibraryEntryUpdate,
   type AgentMcpToolSelection,
 } from "./mcp-tool-library.js";
+
+export {
+  API_TOOL_AUTH_KINDS,
+  API_TOOL_METHODS,
+  API_TOOL_INPUT_TYPES,
+  API_TOOL_MAX_ACTIONS,
+  API_TOOL_MAX_INPUTS_PER_ACTION,
+  API_TOOL_DEFAULT_DAILY_CAP,
+  API_TOOL_MAX_DAILY_CAP,
+  API_TOOL_ACTION_NAME_RE,
+  API_TOOL_INPUT_NAME_RE,
+  normalizeApiToolBaseUrl,
+  apiToolAuthSchema,
+  apiToolActionInputSchema,
+  apiToolActionSchema,
+  apiToolBodySchema,
+  apiToolUpdateSchema,
+  agentApiToolSelectionSchema,
+  apiToolImportOpenApiSchema,
+  runApiToolActionSchema,
+  apiToolActionInputJsonSchema,
+  type ApiToolAuthKind,
+  type ApiToolMethod,
+  type ApiToolInputType,
+  type ApiToolAuth,
+  type ApiToolActionInput,
+  type ApiToolAction,
+  type ApiToolBody,
+  type ApiToolUpdate,
+  type AgentApiToolSelection,
+  type ApiToolImportOpenApi,
+  type RunApiToolActionBody,
+} from "./api-tool.js";
 
 export {
   sendLaneAMessageSchema,
@@ -332,6 +391,17 @@ export {
   LANE_A_TRANSFORM_MAX_CONCURRENCY,
   LANE_A_TRANSFORM_MAX_TOTAL_CHARS,
   laneATransformPayloadChars,
+  laneABackupModelEntrySchema,
+  type LaneABackupModelEntryInput,
+  laneABackupModelsSchema,
+  type LaneABackupModels,
+  laneAChainIdsSchema,
+  type LaneAChainIds,
+  laneAKeywordRouteSchema,
+  type LaneAKeywordRouteInput,
+  laneAKeywordRoutesSchema,
+  type LaneAKeywordRoutes,
+  laneABackupRoutingIssues,
 } from "./lane-a.js";
 
 export {
@@ -351,6 +421,9 @@ export {
   projectExecutionWorkspacePolicySchema,
   projectWorkspaceRuntimeConfigSchema,
   deployPolicySchema,
+  deployTransportSchema,
+  deployPolicyModeSchema,
+  deployAskFirstActionSchema,
   type CreateProject,
   type UpdateProject,
   type CreateProjectWorkspace,
@@ -560,6 +633,9 @@ export {
   instructionsChangeRequestPayloadSchema,
   personaPublishRequestPayloadSchema,
   featureLaunchRequestPayloadSchema,
+  bookingRequestPayloadSchema,
+  purchaseRequestPayloadSchema,
+  videoRenderRequestPayloadSchema,
   type CreateApproval,
   type ResolveApproval,
   type RequestApprovalRevision,
@@ -575,6 +651,9 @@ export {
   type InstructionsChangeRequestPayload,
   type PersonaPublishRequestPayload,
   type FeatureLaunchRequestPayload,
+  type BookingRequestPayload,
+  type PurchaseRequestPayload,
+  type VideoRenderRequestPayload,
 } from "./approval.js";
 
 export {
@@ -598,7 +677,9 @@ export {
   rotateSecretSchema,
   secretBindingTargetSchema,
   updateSecretSchema,
+  bindDeploySftpCredentialSchema,
   type CreateSecretBinding,
+  type BindDeploySftpCredential,
   type CreateSecret,
   type CreateSecretProviderConfig,
   type UpdateSecretProviderConfig,
@@ -629,6 +710,22 @@ export {
   type RunRoutine,
   type RotateRoutineTriggerSecret,
 } from "./routine.js";
+
+export {
+  jobVariableSchema,
+  createJobSchema,
+  updateJobSchema,
+  setJobPositionsSchema,
+  createJobTriggerSchema,
+  updateJobTriggerSchema,
+  runJobSchema,
+  type CreateJob,
+  type UpdateJob,
+  type SetJobPositions,
+  type CreateJobTrigger,
+  type UpdateJobTrigger,
+  type RunJob,
+} from "./jobs.js";
 
 export {
   createCostEventSchema,
@@ -778,6 +875,31 @@ export {
   type UpdateTelegramBotAllowedUsersInput,
 } from "./telegram-bot.js";
 export {
+  SPEECH_DEFAULT_DAILY_SPEAK_CHARACTERS,
+  SPEECH_DEFAULT_DAILY_TRANSCRIBE_SECONDS,
+  SPEECH_DEFAULT_VOICE,
+  SPEECH_MAX_AUDIO_BYTES,
+  SPEECH_MAX_AUDIO_SECONDS,
+  SPEECH_MAX_SPOKEN_CHARACTERS,
+  SPEECH_USAGE_SOURCES,
+  SPEECH_VOICES,
+  SPEECH_VOICE_IDS,
+  TELEGRAM_VOICE_REPLY_MODES,
+  TELEGRAM_VOICE_REPLY_MODE_DEFAULT,
+  TELEGRAM_VOICE_REPLY_MODE_LABELS,
+  speechSpeakSchema,
+  speechTranscribeSchema,
+  updateSpeechSettingsSchema,
+  updateTelegramBotVoiceSchema,
+  type SpeechSpeakInput,
+  type SpeechTranscribeInput,
+  type SpeechUsageSource,
+  type SpeechVoice,
+  type TelegramVoiceReplyMode,
+  type UpdateSpeechSettingsInput,
+  type UpdateTelegramBotVoiceInput,
+} from "./speech.js";
+export {
   sendCrossCompanyInstructionSchema,
   crossCompanyInstructionRequestPayloadSchema,
   CROSS_COMPANY_INSTRUCTION_STATUSES,
@@ -785,3 +907,23 @@ export {
   type CrossCompanyInstructionRequestPayload,
   type CrossCompanyInstructionStatus,
 } from "./cross-company-instruction.js";
+
+export {
+  MODEL_DIRECTORY_NAME_MAX_LENGTH,
+  MODEL_DIRECTORY_NOTE_MAX_LENGTH,
+  MODEL_DIRECTORY_STARTERS,
+  MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS,
+  addModelDirectoryStartersSchema,
+  type AddModelDirectoryStarters,
+  type ModelDirectoryStarter,
+  type ModelDirectoryStarterStatus,
+  type ModelDirectoryImportResult,
+  modelDirectoryEntryIssue,
+  createModelDirectoryEntrySchema,
+  updateModelDirectoryEntrySchema,
+  duplicateModelDirectoryEntrySchema,
+  type CreateModelDirectoryEntry,
+  type UpdateModelDirectoryEntry,
+  type DuplicateModelDirectoryEntry,
+  type ModelDirectoryEntry,
+} from "./model-directory.js";

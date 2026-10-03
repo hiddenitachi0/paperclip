@@ -1,0 +1,41 @@
+{
+  "name": "@paperclipai/browser-worker",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "homepage": "https://github.com/paperclipai/paperclip",
+  "bugs": {
+    "url": "https://github.com/paperclipai/paperclip/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/paperclipai/paperclip",
+    "directory": "packages/browser-worker"
+  },
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p fixtures/tsconfig.json",
+    "test": "vitest run",
+    "worker": "tsx src/entrypoints/worker.ts",
+    "egress-proxy": "tsx src/entrypoints/egress-proxy.ts",
+    "fixtures": "tsx fixtures/server.ts"
+  },
+  "dependencies": {
+    "@paperclipai/adapter-utils": "workspace:*",
+    "express": "^5.1.0",
+    "playwright-core": "1.58.2"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.19.21",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.8"
+  }
+}

@@ -21,6 +21,16 @@ export type TelegramBotSummary = {
   uiBase: string | null;
   allowedTelegramUserIds: string[];
   enabled: boolean;
+  /**
+   * True for the one bot (at most one per company) that gets this company's
+   * approvals and questions when no agent's own bot, or its boss's, should —
+   * a card the board filed itself, for example.
+   */
+  receivesCompanyNotices: boolean;
+  /** When the bot reads its answer aloud: never, when the person sent a voice message, or always. */
+  voiceReplyMode: "never" | "when_voice" | "always";
+  /** The voice it reads with; null means the default voice. */
+  voice: string | null;
   lastCheckAt: string | null;
   lastCheckOk: boolean | null;
   lastCheckUsername: string | null;
@@ -49,6 +59,17 @@ export type TelegramBridgeBot = {
   companyId: string;
   uiBase: string | null;
   allowedUserIds: string[];
+  /**
+   * The rest is how the bridge picks the bot that gets the company's
+   * approvals and questions when no agent's own bot should: the marked bot,
+   * else the CEO's bot (`agentRole` "ceo"), else the oldest (`createdAt`).
+   */
+  receivesCompanyNotices: boolean;
+  createdAt: string;
+  agentRole: string | null;
+  /** Voice messages: when the bot reads its answer aloud, and with which voice (null = default). */
+  voiceReplyMode: "never" | "when_voice" | "always";
+  voice: string | null;
   token: string;
 };
 

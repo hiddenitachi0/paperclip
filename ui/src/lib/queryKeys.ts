@@ -6,8 +6,10 @@ export const queryKeys = {
     instructions: (id: string) => ["companies", id, "instructions"] as const,
     serviceTokens: (id: string) => ["companies", id, "service-tokens"] as const,
     telegramBots: (id: string) => ["companies", id, "telegram-bots"] as const,
+    speechSettings: (id: string) => ["companies", id, "speech-settings"] as const,
     dataConnections: (id: string) => ["companies", id, "data-connections"] as const,
     datasetSources: (id: string) => ["companies", id, "dataset-sources"] as const,
+    webSearch: (id: string) => ["companies", id, "web-search"] as const,
     dataReads: (id: string) => ["companies", id, "data-reads"] as const,
   },
   companySkills: {
@@ -53,6 +55,8 @@ export const queryKeys = {
   },
   issues: {
     list: (companyId: string) => ["issues", companyId] as const,
+    /** A chat's follow-up of a task it started: status, latest answer, result page. */
+    chatAnswer: (companyId: string, issueId: string) => ["issues", companyId, "chat-answer", issueId] as const,
     mentionPool: (companyId: string) => ["issues", companyId, "mention-pool"] as const,
     search: (companyId: string, q: string, projectId?: string, limit?: number) =>
       ["issues", companyId, "search", q, projectId ?? "__all-projects__", limit ?? "__no-limit__"] as const,
@@ -177,6 +181,12 @@ export const queryKeys = {
     detail: (id: string) => ["projects", "detail", id] as const,
     deployHistory: (companyId: string, projectId: string) =>
       ["projects", "deploy-history", companyId, projectId] as const,
+    deployHistoryList: (
+      companyId: string,
+      projectId: string,
+      filters: { status?: string; from?: string; to?: string },
+      page: { limit: number; offset: number },
+    ) => ["projects", "deploy-history-list", companyId, projectId, filters, page] as const,
   },
   externalObjects: {
     byIssue: (issueId: string) => ["external-objects", "by-issue", issueId] as const,
@@ -229,6 +239,10 @@ export const queryKeys = {
   interactions: {
     pendingForCompany: (companyId: string) => ["interactions", "pending", companyId] as const,
   },
+  morningReports: {
+    detail: (reportId: string) => ["morning-reports", "detail", reportId] as const,
+    listRecent: (agentId: string) => ["morning-reports", "list-recent", agentId] as const,
+  },
   stalledTasks: {
     forCompany: (companyId: string) => ["stalled-tasks", companyId] as const,
   },
@@ -272,6 +286,9 @@ export const queryKeys = {
   },
   cloudUpstreams: (companyId: string) => ["cloud-upstreams", companyId] as const,
   health: ["health"] as const,
+  paymentCards: {
+    list: (companyId: string) => ["payment-cards", companyId] as const,
+  },
   secrets: {
     list: (companyId: string) => ["secrets", companyId] as const,
     providers: (companyId: string) => ["secret-providers", companyId] as const,
@@ -282,6 +299,42 @@ export const queryKeys = {
   mcpTools: {
     list: (companyId: string) => ["mcp-tools", companyId] as const,
     forAgent: (agentId: string) => ["mcp-tools", "agent", agentId] as const,
+  },
+  // Quick-agent memory notebook (the persona's when the agent has one).
+  agentMemories: {
+    list: (agentId: string) => ["agent-memories", agentId] as const,
+  },
+  // Market-price watchers.
+  watchers: {
+    list: (companyId: string) => ["watchers", companyId] as const,
+  },
+  // Trading agent: paper-trading strategies.
+  trading: {
+    list: (companyId: string) => ["trading-strategies", companyId] as const,
+    dashboard: (companyId: string, strategyId: string) => ["trading-dashboard", companyId, strategyId] as const,
+    orders: (companyId: string, strategyId: string) => ["trading-orders", companyId, strategyId] as const,
+  },
+  // Product grabber: vendor site -> staging list -> human approval.
+  productGrabber: {
+    settings: (companyId: string) => ["product-grabber", "settings", companyId] as const,
+    stagedItems: (companyId: string, status?: string) =>
+      ["product-grabber", "staged-items", companyId, status ?? "all"] as const,
+  },
+  // Email: per-person mailbox -- inbox, compose, AI drafts only (human sends).
+  email: {
+    settings: (companyId: string) => ["email", "settings", companyId] as const,
+    accounts: (companyId: string) => ["email", "accounts", companyId] as const,
+    messages: (companyId: string, accountId: string, folder: string) =>
+      ["email", "messages", companyId, accountId, folder] as const,
+    search: (companyId: string, accountId: string, q: string, folder?: string) =>
+      ["email", "search", companyId, accountId, q, folder ?? "all"] as const,
+    message: (companyId: string, accountId: string, messageId: string) =>
+      ["email", "message", companyId, accountId, messageId] as const,
+  },
+  // DUR-4004: "API with a key" tools.
+  apiTools: {
+    list: (companyId: string) => ["api-tools", companyId] as const,
+    forAgent: (agentId: string) => ["api-tools", "agent", agentId] as const,
   },
   personas: {
     list: (companyId: string) => ["personas", companyId] as const,
@@ -295,6 +348,7 @@ export const queryKeys = {
       ["company-search", companyId, q, scope, limit, offset] as const,
   },
   dashboard: (companyId: string) => ["dashboard", companyId] as const,
+  dashboardPulse: (companyId: string) => ["dashboard", companyId, "pulse"] as const,
   userProfile: (companyId: string, userSlug: string) =>
     ["user-profile", companyId, userSlug] as const,
   sidebarBadges: (companyId: string) => ["sidebar-badges", companyId] as const,
@@ -337,6 +391,7 @@ export const queryKeys = {
   },
   plugins: {
     all: ["plugins"] as const,
+    agentToolGrants: (agentId: string) => ["plugins", "agent-tool-grants", agentId] as const,
     examples: ["plugins", "examples"] as const,
     detail: (pluginId: string) => ["plugins", pluginId] as const,
     health: (pluginId: string) => ["plugins", pluginId, "health"] as const,

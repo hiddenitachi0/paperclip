@@ -25,6 +25,7 @@ import type {
   PluginIssueAssigneeSummary,
   PluginIssueOrchestrationSummary,
   PluginExecutionWorkspaceMetadata,
+  WorkerHostCallContext,
 } from "@paperclipai/plugin-sdk";
 import type { CreateIssueThreadInteraction, InviteJoinType, IssueDocumentSummary, PermissionKey, PrincipalType } from "@paperclipai/shared";
 import { pluginOperationIssueOriginKind } from "@paperclipai/shared";
@@ -40,6 +41,7 @@ import { heartbeatService } from "./heartbeat.js";
 import { budgetService } from "./budgets.js";
 import { issueApprovalService } from "./issue-approvals.js";
 import { agentDailyLimitService } from "./agent-daily-limits.js";
+import { findLaneAPluginRun, laneAPluginRunNamesIssue } from "./lane-a-plugin-runs.js";
 import { subscribeCompanyLiveEvents } from "./live-events.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import path from "node:path";
@@ -279,6 +281,55 @@ if (_logFlushInterval.unref) _logFlushInterval.unref();
  * @param eventBus - The system-wide event bus for publishing plugin events.
  * @returns An object implementing the HostServices interface for the plugin SDK.
  */
+/** Largest file a plugin may read back through `ctx.files.readContent` (a reference picture, say). */
+const PLUGIN_FILE_READ_MAX_BYTES = 10 * 1024 * 1024;
+
+function isUuid(value: unknown): value is string {
+  return typeof value === "string" && UUID_PATTERN.test(value);
+}
+
+type CompanyFileRow = {
+  id: string;
+  companyId: string;
+  issueId: string | null;
+  contentType: string;
+  byteSize: number;
+  originalFilename: string | null;
+  createdByAgentId: string | null;
+  createdAt: Date;
+};
+
+function toPluginCompanyFile(file: CompanyFileRow) {
+  const contentPath = `/api/attachments/${file.id}/content`;
+  return {
+    id: file.id,
+    companyId: file.companyId,
+    issueId: file.issueId,
+    contentType: file.contentType,
+    byteSize: file.byteSize,
+    originalFilename: file.originalFilename,
+    createdByAgentId: file.createdByAgentId,
+    contentPath,
+    openPath: contentPath,
+    downloadPath: `${contentPath}?download=1`,
+    createdAt: file.createdAt,
+  };
+}
+
+async function streamToBuffer(stream: NodeJS.ReadableStream): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of stream as AsyncIterable<Buffer | string>) {
+    const buf = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+    total += buf.length;
+    if (total > PLUGIN_FILE_READ_MAX_BYTES) {
+      throw new Error("That file is too large to use here.");
+    }
+    chunks.push(buf);
+  }
+  return Buffer.concat(chunks);
+}
+
 /** Maximum time (ms) to keep a session event subscription alive before forcing cleanup. */
 const SESSION_EVENT_SUBSCRIPTION_TIMEOUT_MS = 30 * 60 * 1_000; // 30 minutes
 
@@ -492,6 +543,117 @@ export function buildHostServices(
     normalizePluginOriginKind(originKind);
   };
 
+  /**
+   * A quick agent's plugin tool run (lane-a-plugin-runs.ts) is not a
+   * heartbeat_runs row, so it can never be written into a column that points
+   * at that table (activity_log.run_id, issues.checkout_run_id, ...). Every
+   * such write goes through here: a heartbeat run id passes, a quick-agent
+   * run id becomes null. The run itself still resolves through
+   * findLaneAPluginRun wherever "which agent is calling" matters.
+   */
+  const heartbeatRunIdOrNull = (runId: string | null | undefined): string | null =>
+    runId && !findLaneAPluginRun(runId) ? runId : null;
+
+  /**
+   * The agent a tool call's run belongs to, in this company, or null. A
+   * heartbeat run resolves to its agent; a quick agent (Lane A) has no
+   * heartbeat run, and its plugin tool call runs under a short-lived id the
+   * host itself issued (lane-a-plugin-runs.ts), which resolves to the quick
+   * agent the same way. Never taken from a plugin-supplied agent id.
+   */
+  const callingAgentIdForRun = async (companyId: string, runId: string): Promise<string | null> => {
+    const run = await db
+      .select({ id: heartbeatRuns.id, agentId: heartbeatRuns.agentId, companyId: heartbeatRuns.companyId })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+    if (run) return run.companyId === companyId ? run.agentId : null;
+    const laneARun = findLaneAPluginRun(runId);
+    return laneARun && laneARun.companyId === companyId ? laneARun.agentId : null;
+  };
+
+  /**
+   * Whether `runId` currently holds a checkout-based claim on `issue`:
+   * either it IS the issue's live checkoutRunId, or it is a Lane-A
+   * quick-agent run assigned to the issue or naming it in the requester's
+   * message. Shared by createAttachment and createComment so the two
+   * enforcement paths cannot drift apart (DUR-4096).
+   */
+  const resolveIssueRunAccess = async (
+    issue: { id: string; identifier: string | null; assigneeAgentId?: string | null },
+    companyId: string,
+    runId: string,
+  ): Promise<"checkout" | "lane-a-allowed" | "lane-a-denied" | "none"> => {
+    const checkoutRow = await db
+      .select({ id: issuesTable.id, checkoutRunId: issuesTable.checkoutRunId })
+      .from(issuesTable)
+      .where(and(eq(issuesTable.id, issue.id), eq(issuesTable.companyId, companyId)))
+      .then((rows) => rows[0] ?? null);
+    if (checkoutRow && checkoutRow.checkoutRunId === runId) return "checkout";
+    const laneARun = findLaneAPluginRun(runId);
+    if (!laneARun || laneARun.companyId !== companyId) return "none";
+    const assignedToQuickAgent = issue.assigneeAgentId === laneARun.agentId;
+    return assignedToQuickAgent || laneAPluginRunNamesIssue(laneARun, issue) ? "lane-a-allowed" : "lane-a-denied";
+  };
+
+  /** Heartbeat run statuses that mean "still in flight" -- see isHeartbeatRunEnded. */
+  const ACTIVE_HEARTBEAT_RUN_STATUSES = new Set(["queued", "running", "scheduled_retry"]);
+
+  /**
+   * True only when `runId` is a heartbeat run in this company that has
+   * actually finished (any status other than queued/running/scheduled_retry).
+   * A Lane-A run, or an id that doesn't resolve to a heartbeat run at all,
+   * is never "ended" here -- it's simply not the case this check is for.
+   *
+   * Used to gate createComment's assignment-based delivery exception: that
+   * exception exists for background-job delivery whose *triggering* run has
+   * already ended, not as a general license for any currently-live run to
+   * reach a different issue just because its agent happens to be assigned
+   * there (DUR-4096 security-review follow-up -- see createComment).
+   */
+  const isHeartbeatRunEnded = async (companyId: string, runId: string): Promise<boolean> => {
+    const run = await db
+      .select({ status: heartbeatRuns.status })
+      .from(heartbeatRuns)
+      .where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, companyId)))
+      .then((rows) => rows[0] ?? null);
+    return run !== null && !ACTIVE_HEARTBEAT_RUN_STATUSES.has(run.status);
+  };
+
+  /**
+   * When this call happens inside a live, host-verified tool invocation
+   * (`executeTool`), `context.invocationScope.runId` is the run actually
+   * driving this call right now -- set by the host itself from
+   * `runContext.runId` after the route layer already checked it against
+   * `heartbeat_runs` (`validateToolRunContextScope`, server/src/routes/
+   * plugins.ts), never from anything the plugin process supplies on this
+   * RPC call. `params.runId` here is a plain plugin-supplied field with no
+   * such binding.
+   *
+   * If the host knows the real live run, a plugin-supplied `params.runId`
+   * naming a *different* run must be rejected outright: without this, a
+   * live invocation could "borrow" any other real, completed run belonging
+   * to the same agent (trivially discoverable -- every comment/attachment
+   * an agent has ever authored exposes its own `createdByRunId`) to satisfy
+   * an ended-run check the live call itself could never pass on its own
+   * merits (DUR-4096 security-review follow-up).
+   *
+   * Absent (background job / webhook / scheduler dispatch has no live tool
+   * invocation) -- there is nothing to bind against, so `params.runId` is
+   * left to the caller's own DB-backed validation (resolveIssueRunAccess /
+   * isHeartbeatRunEnded), which is what the legitimate background-job
+   * delivery case (media-studio's job poller) relies on.
+   */
+  const assertRunIdMatchesLiveInvocation = (
+    context: WorkerHostCallContext | undefined,
+    runId: string,
+  ): void => {
+    const liveRunId = context?.invocationScope?.runId;
+    if (liveRunId && liveRunId !== runId) {
+      throw new Error("runId must match the invoking run");
+    }
+  };
+
   const logPluginActivity = async (input: {
     companyId: string;
     action: string;
@@ -500,16 +662,27 @@ export function buildHostServices(
     details?: Record<string, unknown> | null;
     actor?: { actorAgentId?: string | null; actorUserId?: string | null; actorRunId?: string | null };
   }) => {
+    // A quick agent's run goes into the details (initiatingRunId, the quick
+    // agent, the chat it came from and who asked) instead of the FK column.
+    const actorRunId = input.actor?.actorRunId ?? null;
+    const laneARun = actorRunId ? findLaneAPluginRun(actorRunId) : null;
+    const details: Record<string, unknown> = pluginActivityDetails(input.details, input.actor);
+    if (laneARun) {
+      details.initiatingQuickAgentId = laneARun.agentId;
+      details.laneAConversationId = laneARun.conversationId;
+      details.requestedByUserId = laneARun.requestedByUserId;
+      details.requestedByAgentId = laneARun.requestedByAgentId;
+    }
     await logActivity(db, {
       companyId: input.companyId,
       actorType: "plugin",
       actorId: pluginId,
       agentId: input.actor?.actorAgentId ?? null,
-      runId: input.actor?.actorRunId ?? null,
+      runId: heartbeatRunIdOrNull(actorRunId),
       action: input.action,
       entityType: input.entityType,
       entityId: input.entityId,
-      details: pluginActivityDetails(input.details, input.actor),
+      details,
     });
   };
 
@@ -1031,7 +1204,16 @@ export function buildHostServices(
 
         try {
           const init = params.init as RequestInit | undefined;
-          return await executePinnedHttpRequest(target, init, controller.signal);
+          const response = await executePinnedHttpRequest(target, init, controller.signal);
+          // `bodyBase64` carries the exact bytes so a plugin can download a
+          // picture or any other binary file; `body` stays for text callers.
+          return {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers,
+            body: response.body,
+            bodyBase64: response.bodyBytes.toString("base64"),
+          };
         } finally {
           clearTimeout(timeout);
         }
@@ -1039,8 +1221,12 @@ export function buildHostServices(
     },
 
     secrets: {
-      async resolve(params) {
-        return secretsHandler.resolve(params);
+      // `context` carries the invocation scope the worker manager verified
+      // for the host->worker call this request is nested in. It must reach
+      // the handler: without it the handler has no company to check the
+      // secret against and fails closed for every call.
+      async resolve(params, context) {
+        return secretsHandler.resolve(params, context);
       },
     },
 
@@ -1476,10 +1662,12 @@ export function buildHostServices(
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
         requireInCompany("Issue", await issues.getById(params.issueId), companyId);
+        // A quick agent's run can never own or adopt a checkout lock (the
+        // lock column points at heartbeat_runs), so it is read as "no run".
         const ownership = await issues.assertCheckoutOwner(
           params.issueId,
           params.actorAgentId,
-          params.actorRunId,
+          heartbeatRunIdOrNull(params.actorRunId),
         );
         if (ownership.adoptedFromRunId) {
           await logPluginActivity({
@@ -1806,10 +1994,67 @@ export function buildHostServices(
         if (!inCompany(await issues.getById(params.issueId), companyId)) return [];
         return (await issues.listComments(params.issueId)) as IssueComment[];
       },
-      async createComment(params) {
+      async createComment(params, context) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
         const issue = requireInCompany("Issue", await issues.getById(params.issueId), companyId);
+
+        // DUR-4096: an attributed comment (authorAgentId set) is an
+        // impersonation-adjacent primitive -- it reads, in the issue
+        // thread, as if that agent said something -- so it gets the same
+        // host-enforced checkout/Lane-A boundary createAttachment already
+        // has (resolveIssueRunAccess), plus one narrower exception: a run
+        // that has already ENDED and resolves to the issue's *current*
+        // assignee may still comment despite never holding checkout, for
+        // background-job delivery whose triggering tool-call run (and its
+        // checkout) already ended (media-studio's job poller and similar --
+        // see DUR-4096). That "already ended" condition is load-bearing and
+        // host-enforced (isHeartbeatRunEnded), not just documented: without
+        // it, any of an agent's currently-live runs could reach a
+        // completely unrelated issue merely because that agent happens to
+        // be assigned there too -- a second security review of this same
+        // PR found that exact gap before merge. A *third* review then found
+        // that "ended" alone wasn't enough either: a live invocation could
+        // still name a different, real, already-ended run of its own agent
+        // (e.g. one it has seen via createdByRunId on its own past
+        // comments) to reach the assignment-based exception on an issue the
+        // live call itself has no relationship to. assertRunIdMatchesLiveInvocation
+        // closes that: whenever this call happens inside a live tool
+        // invocation, params.runId is host-verified to be that exact
+        // invocation's own run, not merely "some real run of this agent".
+        // An unattributed comment (no authorAgentId) can't be used to
+        // impersonate anyone, so it keeps
+        // the pre-DUR-4096 company-scope-only check, unchanged for callers
+        // like plugin-llm-wiki that post plugin-authored status comments
+        // with no agent attribution on issue ids their own code resolved,
+        // never from model/tool-call input.
+        if (params.authorAgentId) {
+          if (!params.runId) {
+            throw new Error("runId is required when authorAgentId is set");
+          }
+          assertRunIdMatchesLiveInvocation(context, params.runId);
+          const callingAgentId = await callingAgentIdForRun(companyId, params.runId);
+          if (!callingAgentId || callingAgentId !== params.authorAgentId) {
+            throw new Error("authorAgentId must match the invoking run's own agent");
+          }
+          const access = await resolveIssueRunAccess(issue, companyId, params.runId);
+          const assignedToCallingAgent = issue.assigneeAgentId === callingAgentId;
+          const deliveryAfterRunEnded =
+            assignedToCallingAgent &&
+            access === "none" &&
+            (await isHeartbeatRunEnded(companyId, params.runId));
+          if ((access === "none" || access === "lane-a-denied") && !deliveryAfterRunEnded) {
+            if (access === "lane-a-denied") {
+              const ref = issue.identifier ?? issue.id;
+              throw new Error(
+                `The task ${ref} was not named in the message, so the quick agent cannot comment on it. ` +
+                  `Name the task in your message (for example ${issue.identifier ?? "DUR-12"}), or assign the task to the quick agent.`,
+              );
+            }
+            throw new Error("Issue is not currently checked out by the invoking run, and is not assigned to the calling agent");
+          }
+        }
+
         const comment = (await issues.addComment(
           params.issueId,
           params.body,
@@ -1852,7 +2097,7 @@ export function buildHostServices(
         });
         return interaction as any;
       },
-      async createAttachment(params) {
+      async createAttachment(params, context) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
         const issue = requireInCompany("Issue", await issues.getById(params.issueId), companyId);
@@ -1861,16 +2106,32 @@ export function buildHostServices(
         // attach content to an issue it isn't currently running against, even
         // though it declares issue.attachments.create. Without this check the
         // only remaining boundary would be company scope, which every issue
-        // in the company passes.
+        // in the company passes. (resolveIssueRunAccess is shared with
+        // createComment's own checkout/Lane-A enforcement -- DUR-4096.)
         if (!params.runId) {
           throw new Error("runId is required");
         }
-        const checkoutRow = await db
-          .select({ id: issuesTable.id, checkoutRunId: issuesTable.checkoutRunId })
-          .from(issuesTable)
-          .where(and(eq(issuesTable.id, issue.id), eq(issuesTable.companyId, companyId)))
-          .then((rows) => rows[0] ?? null);
-        if (!checkoutRow || checkoutRow.checkoutRunId !== params.runId) {
+        // Same host-verified live-invocation binding as createComment
+        // (DUR-4096 security-review follow-up) -- kept here too so the two
+        // enforcement paths cannot drift apart on this point either.
+        assertRunIdMatchesLiveInvocation(context, params.runId);
+        const access = await resolveIssueRunAccess(issue, companyId, params.runId);
+        if (access === "lane-a-denied") {
+          // A quick agent (Lane A) has no checkout: it answers in chat. Its
+          // run is resolved by the host (lane-a-plugin-runs.ts, one id per
+          // tool call), never from a plugin-claimed id, and it may attach
+          // only to a task in its own company that is assigned to it, or
+          // that the PERSON named in this turn's message. The task id in the
+          // tool input comes from the model, and a file or a sales lookup
+          // the agent read this turn lands in the same context — so a task
+          // reference planted there is not enough.
+          const ref = issue.identifier ?? issue.id;
+          throw new Error(
+            `The task ${ref} was not named in the message, so the quick agent cannot attach to it. ` +
+              `Name the task in your message (for example ${issue.identifier ?? "DUR-12"}), or assign the task to the quick agent.`,
+          );
+        }
+        if (access === "none") {
           throw new Error("Issue is not currently checked out by the invoking run");
         }
 
@@ -2444,12 +2705,10 @@ export function buildHostServices(
         if (!params.runId) {
           throw new Error("runId is required");
         }
-        const run = await db
-          .select({ id: heartbeatRuns.id, agentId: heartbeatRuns.agentId, companyId: heartbeatRuns.companyId })
-          .from(heartbeatRuns)
-          .where(eq(heartbeatRuns.id, params.runId))
-          .then((rows) => rows[0] ?? null);
-        if (!run || run.companyId !== companyId) {
+        // The limit is still the agent's own, per agent, in
+        // agent_daily_counters, whichever kind of run it came from.
+        const callingAgentId = await callingAgentIdForRun(companyId, params.runId);
+        if (!callingAgentId) {
           throw new Error("Run not found in this company");
         }
 
@@ -2457,7 +2716,109 @@ export function buildHostServices(
         // .dailyImageGenerations), counted in agent_daily_counters. The
         // method keeps its name and result shape so plugins built against
         // the SDK (media-studio) need no change.
-        return agentDailyLimits.reserve(run.agentId, "image_generation");
+        return agentDailyLimits.reserve(callingAgentId, "image_generation");
+      },
+    },
+
+    files: {
+      async createCompanyFile(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+
+        // runId is required and host-enforced, like issues.createAttachment
+        // and personas.reserveDailyGeneration: the author is the agent the
+        // run belongs to in THIS company, never a plugin-supplied id, and a
+        // run from another company (or an unknown one) is refused.
+        if (!params.runId) {
+          throw new Error("runId is required");
+        }
+        const authorAgentId = await callingAgentIdForRun(companyId, params.runId);
+        if (!authorAgentId) {
+          throw new Error("Run not found in this company");
+        }
+
+        const contentType = normalizeContentType(params.contentType);
+        if (!isAllowedContentType(contentType)) {
+          throw new Error(`File type "${contentType}" is not allowed`);
+        }
+        let buffer: Buffer;
+        try {
+          buffer = Buffer.from(params.contentBase64, "base64");
+        } catch {
+          throw new Error("contentBase64 is not valid base64");
+        }
+        if (buffer.length <= 0) {
+          throw new Error("The file is empty");
+        }
+        const company = await companies.getById(companyId);
+        const maxBytes = normalizeIssueAttachmentMaxBytes(company?.attachmentMaxBytes);
+        if (buffer.length > maxBytes) {
+          throw new Error(`The file is larger than this company allows (${maxBytes} bytes)`);
+        }
+
+        const stored = await getStorage().putFile({
+          companyId,
+          namespace: "files",
+          originalFilename: params.filename ?? null,
+          contentType,
+          body: buffer,
+        });
+        const file = await issues.createCompanyFile({
+          companyId,
+          provider: stored.provider,
+          objectKey: stored.objectKey,
+          contentType: stored.contentType,
+          byteSize: stored.byteSize,
+          sha256: stored.sha256,
+          originalFilename: stored.originalFilename,
+          createdByAgentId: authorAgentId,
+        });
+
+        await logPluginActivity({
+          companyId,
+          action: "company.file.created",
+          entityType: "attachment",
+          entityId: file.id,
+          actor: { actorAgentId: authorAgentId, actorRunId: params.runId },
+          details: {
+            attachmentId: file.id,
+            contentType: file.contentType,
+            byteSize: file.byteSize,
+            originalFilename: file.originalFilename,
+          },
+        });
+
+        return toPluginCompanyFile(file);
+      },
+
+      async get(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        const file = isUuid(params.fileId) ? await issues.getAttachmentById(params.fileId) : null;
+        // A file in another company reads exactly like a missing one.
+        if (!file || file.companyId !== companyId) return null;
+        return toPluginCompanyFile(file);
+      },
+
+      async readContent(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        const file = isUuid(params.fileId) ? await issues.getAttachmentById(params.fileId) : null;
+        if (!file || file.companyId !== companyId) {
+          throw new Error("That file is not in this company's Files.");
+        }
+        // Pictures only, for now: the one use is a reference picture for
+        // Media Studio, and a plugin has no business reading a company's
+        // documents through this door.
+        if (!file.contentType.toLowerCase().startsWith("image/")) {
+          throw new Error("Only pictures can be read here, and that file is not a picture.");
+        }
+        if (file.byteSize > PLUGIN_FILE_READ_MAX_BYTES) {
+          throw new Error(`That file is too large to use here (over ${Math.floor(PLUGIN_FILE_READ_MAX_BYTES / (1024 * 1024))} MB).`);
+        }
+        const object = await getStorage().getObject(companyId, file.objectKey);
+        const body = await streamToBuffer(object.stream);
+        return { ...toPluginCompanyFile(file), contentBase64: body.toString("base64") } as any;
       },
     },
 

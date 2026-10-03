@@ -266,11 +266,22 @@ export type PluginRpcErrorCode =
 // ---------------------------------------------------------------------------
 
 /**
- * Company scope attached by the host to one top-level plugin invocation.
- * Absence of this metadata means the invocation is instance/global scoped.
+ * Company (and, when available, run) scope attached by the host to one
+ * top-level plugin invocation. Absence of this metadata means the
+ * invocation is instance/global scoped.
+ *
+ * `runId` is populated only for invocations dispatched from a live,
+ * server-verified tool call (`executeTool`, whose `runContext.runId` the
+ * route layer already validated against `heartbeat_runs` before dispatch --
+ * see `validateToolRunContextScope` in `server/src/routes/plugins.ts`). It
+ * is never derived from anything the plugin process itself supplies. A
+ * background job/webhook/scheduler dispatch has no live tool invocation, so
+ * this is absent there -- callers must not treat "no runId here" as "no
+ * run", only as "no host-verified live run for this call".
  */
 export interface PluginInvocationScope {
   companyId: string;
+  runId?: string | null;
 }
 
 /**
@@ -398,6 +409,21 @@ export interface PluginPerformActionActorContext {
   userId: string | null;
   /** Authenticated agent id when `type === "agent"`, otherwise null. */
   agentId: string | null;
+  /**
+   * True when the host checked that this board user may manage `companyId`:
+   * the local single-user board, an instance admin, or an active owner/admin
+   * membership in that company. Always false for agents and when no company
+   * is in scope. Decided by the host from the session, never from params.
+   */
+  canManageCompany?: boolean;
+  /**
+   * True when the host checked that this board user is an instance admin
+   * (or the local single-user board) -- the same rule as `assertInstanceAdmin`
+   * (routes/authz.ts). Always false for agents. Narrower than
+   * `canManageCompany`, which is also true for a company owner/admin who is
+   * not an instance admin.
+   */
+  isInstanceAdmin?: boolean;
   /** Authenticated heartbeat/run id when available. */
   runId: string | null;
   /** Company id authorized by the host bridge for this action, when applicable. */
@@ -924,6 +950,31 @@ export const HOST_TO_WORKER_OPTIONAL_METHODS: readonly HostToWorkerMethodName[] 
 ] as const;
 
 /**
+ * A company file as the plugin host returns it: the stored file behind the
+ * Files page (an `issue_attachments` row and its asset). `issueId` is null for
+ * a file that is not tied to a task (the Files page's "No task" group).
+ * `contentPath` is a same-origin Paperclip URL; it needs a signed-in session.
+ */
+export interface PluginCompanyFile {
+  id: string;
+  companyId: string;
+  issueId: string | null;
+  contentType: string;
+  byteSize: number;
+  originalFilename: string | null;
+  createdByAgentId: string | null;
+  contentPath: string;
+  openPath: string;
+  downloadPath: string;
+  createdAt: Date | string;
+}
+
+/** `files.readContent` result: the file plus its bytes, base64-encoded. */
+export interface PluginCompanyFileContent extends PluginCompanyFile {
+  contentBase64: string;
+}
+
+/**
  * Result of `personas.reserveDailyGeneration` — whether one generation was
  * allowed (and, if so, atomically reserved) against the calling agent's
  * persona daily cap.
@@ -1083,7 +1134,15 @@ export interface WorkerToHostMethods {
   // HTTP
   "http.fetch": [
     params: { url: string; init?: Record<string, unknown> },
-    result: { status: number; statusText: string; headers: Record<string, string>; body: string },
+    result: {
+      status: number;
+      statusText: string;
+      headers: Record<string, string>;
+      /** The body as UTF-8 text. */
+      body: string;
+      /** The exact body bytes, base64-encoded. Hosts that predate it omit it. */
+      bodyBase64?: string;
+    },
   ];
 
   // Secrets
@@ -1393,7 +1452,26 @@ export interface WorkerToHostMethods {
     result: IssueComment[],
   ];
   "issues.createComment": [
-    params: { issueId: string; body: string; companyId: string; authorAgentId?: string },
+    params: {
+      issueId: string;
+      body: string;
+      companyId: string;
+      authorAgentId?: string;
+      /**
+       * The invoking tool call's (or background job's) run id. Required and
+       * host-enforced whenever `authorAgentId` is set (DUR-4096): an
+       * attributed comment is an impersonation-adjacent primitive -- it
+       * reads, in the issue thread, as if that agent said something -- so
+       * the host verifies the run's access to `issueId` (checkout, or a
+       * narrower Lane-A carve-out, or the run resolving to the issue's
+       * current assignee) the same way `createAttachment` verifies runId
+       * before letting a plugin attach. Omit both `runId` and
+       * `authorAgentId` for an unattributed system/plugin comment on an
+       * issue id the plugin's own code resolved (never from model/tool-call
+       * input) -- that path is unchanged from before DUR-4096.
+       */
+      runId?: string | null;
+    },
     result: IssueComment,
   ];
   "issues.createAttachment": [
@@ -1626,6 +1704,31 @@ export interface WorkerToHostMethods {
       offset?: number;
     },
     result: PluginAuthorizationAuditEntry[],
+  ];
+
+  // Company files (not tied to a task)
+  "files.createCompanyFile": [
+    params: {
+      companyId: string;
+      contentBase64: string;
+      contentType: string;
+      filename?: string | null;
+      /**
+       * The invoking tool call's run id. Required and host-enforced: the host
+       * resolves the author agent from this run (never from a plugin-supplied
+       * agent id) and refuses a run that is not in `companyId`.
+       */
+      runId: string;
+    },
+    result: PluginCompanyFile,
+  ];
+  "files.get": [
+    params: { fileId: string; companyId: string },
+    result: PluginCompanyFile | null,
+  ];
+  "files.readContent": [
+    params: { fileId: string; companyId: string },
+    result: PluginCompanyFileContent,
   ];
 
   // Personas

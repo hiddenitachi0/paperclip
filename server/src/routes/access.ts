@@ -1248,6 +1248,11 @@ async function loadCompanyMemberRecords(
 type CompanyMemberRecord = Awaited<ReturnType<typeof loadCompanyMemberRecords>>[number];
 
 const humanRoleRank: Record<HumanCompanyMembershipRole, number> = {
+  // DUR-4094: ranks below viewer -- grantsForHumanRole("employee") is always
+  // [], so an employee actor never holds users:invite or member-management
+  // permissions in the first place, but this keeps the rank table exhaustive
+  // and correct if that ever changes.
+  employee: 0,
   viewer: 1,
   operator: 2,
   admin: 3,
@@ -1317,6 +1322,45 @@ async function assertCanManageCompanyMember(
   if (reason) throw forbidden(reason);
 }
 
+function filterMemberDataByRole(
+  members: CompanyMemberRecord[],
+  actorRole: HumanCompanyMembershipRole | null,
+): Array<Omit<CompanyMemberRecord, "grants"> | CompanyMemberRecord> {
+  return members.map((member) => {
+    if (actorRole === "owner") {
+      return member;
+    }
+    const { grants: _, ...filtered } = member;
+    return filtered;
+  });
+}
+
+// DUR-4100: invite creation previously only checked the `users:invite`
+// permission, which any admin holds -- with no check on the *level* being
+// granted. That let an Admin mint an invite carrying humanRole "owner",
+// self-escalating whoever accepted it above the inviter. A person may only
+// invite at or below their own company role; agents (who hold no human
+// company role) are capped at "admin" so an owner-level invite always
+// requires a genuine Owner actor.
+async function assertActorCanAssignInviteHumanRole(
+  req: Request,
+  access: ReturnType<typeof accessService>,
+  companyId: string,
+  targetHumanRole: HumanCompanyMembershipRole | null,
+) {
+  if (!targetHumanRole) return;
+  if (req.actor.type === "agent") {
+    if (humanRoleRank[targetHumanRole] > humanRoleRank.admin) {
+      throw forbidden("Only a company owner can create an owner-level invite.");
+    }
+    return;
+  }
+  const actorRole = await resolveActorHumanRole(req, access, companyId);
+  if (!actorRole || humanRoleRank[targetHumanRole] > humanRoleRank[actorRole]) {
+    throw forbidden("You can only create invites at or below your own company role.");
+  }
+}
+
 async function addCompanyMemberRemovalAccess(
   req: Request,
   db: Db,
@@ -1337,8 +1381,9 @@ async function addCompanyMemberRemovalAccess(
         .then((rows) => rows.map((row) => row.userId)),
     )
     : new Set<string>();
+  const filtered = filterMemberDataByRole(members, actorRole);
   return Promise.all(
-    members.map(async (member) => {
+    filtered.map(async (member) => {
       const reason = await getProtectedMemberReason(req, access, companyId, member, {
         actorRole,
         instanceAdminUserIds,
@@ -2061,6 +2106,10 @@ function mergeInviteDefaults(
       role: humanRole,
       grants: grantsForHumanRole(humanRole),
     };
+  } else {
+    // Nothing rank-checks a caller-supplied `human` field when humanRole is
+    // null, so it must never pass through unvalidated.
+    delete merged.human;
   }
   if (agentMessage) {
     merged.agentMessage = agentMessage;
@@ -3230,6 +3279,12 @@ export function accessRoutes(
       input.allowedJoinTypes === "agent"
         ? null
         : input.humanRole ?? "operator";
+    await assertActorCanAssignInviteHumanRole(
+      input.req,
+      access,
+      input.companyId,
+      effectiveHumanRole,
+    );
     const insertValues = {
       companyId: input.companyId,
       inviteType: "company_join" as const,
@@ -4777,7 +4832,7 @@ export function accessRoutes(
 
   router.get(
     "/companies/:companyId/members",
-    companyScopeFromParam(rawDb, (req, companyId) => assertCompanyPermission(req, companyId, "users:manage_permissions")),
+    companyScopeFromParam(rawDb, (req, companyId) => assertCompanyPermission(req, companyId, "users:invite")),
     async (req, res) => {
     const companyId = req.params.companyId as string;
     const [members, currentAccess] = await Promise.all([

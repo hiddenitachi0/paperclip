@@ -286,6 +286,32 @@ so `uv venv` / `uv pip install -r requirements.txt` / `uv sync` work in agent wo
 
 Additive; low rebase-conflict risk. Pin the uv image tag if reproducible builds become required.
 
+### Feature 12 — Watchers (cheap market-price checks that alert on Telegram)
+
+Scheduled price checks (crypto via CoinGecko with Binance as backup, US stocks via Finnhub,
+Oslo Børs closing prices via EODHD) evaluated in code — no AI per check. When a rule fires
+(percent change within a window, price level, or move since the last alert), outside its
+quiet time and under a daily ceiling, the watcher's quick agent words the facts (one Lane A
+transform call) and optionally makes a picture (Media Studio "Generate image", same add-on
+path as a chat turn). The alert waits in an outbox the host-side Telegram bridge polls and
+acknowledges; the server holds no bot tokens for this. Page: company sidebar → Watchers.
+
+| File | Change | Type |
+|---|---|---|
+| `packages/db/src/schema/watchers.ts`, `migrations/0181_watchers.sql` | `watchers`, `watcher_price_points`, `watcher_alerts` | **New files** |
+| `packages/db/src/migrations/0164_rls_login_roles.sql` | The three table names added to both arrays | Additive |
+| `packages/db/src/cross-company-audit.ts` | `heartbeat-scheduler:watchers` in the routine-bypass list | Additive 1-line |
+| `packages/shared/src/watchers.ts` | Sources, coins, rules, wording, validators, API types | **New file** |
+| `packages/shared/src/constants.ts` | `"watcher"` secret-binding target (the source key) | Additive 1-line |
+| `server/src/services/watcher-sources.ts`, `watcher-rules.ts`, `watchers.ts` | Sources, rule evaluation, tick/compose/outbox | **New files** |
+| `server/src/services/lane-a.ts` | `transform({ task })` (server-side only) and `makePicture()` | Surgical edit |
+| `server/src/services/scheduler-tick-single-flight.ts`, `server/src/index.ts` | New `watchers` single-flight chain | Additive |
+| `server/src/routes/watchers.ts`, `server/src/app.ts` | Routes (members read, owner/admin change, bridge outbox) | New file + 1-line mount |
+| `cli/src/commands/client/watcher.ts`, `cli/src/index.ts` | `watcher outbox`, `watcher outbox:ack` | New file + 1-line register |
+| `scripts/telegram-bridge.py` | `notify_watcher_alerts` pass | Surgical edit |
+| `ui/src/pages/Watchers.tsx`, `ui/src/components/WatcherFormDialog.tsx`, `ui/src/api/watchers.ts` | Page, plain-language rule builder | **New files** |
+| `ui/src/App.tsx`, `ui/src/components/Sidebar.tsx`, `ui/src/lib/company-routes.ts`, `ui/src/lib/queryKeys.ts` | Route, nav item, route root, query key | Additive 1-liners |
+
 ## Out-of-tree work (near-zero conflict risk)
 
 ### Feature 2 — Cowork/Claude Code → Paperclip importer
@@ -477,6 +503,29 @@ for one release: it is moved to the new name before the route's access check, va
 can fail, so the log line never sees it. Remove the alias (`acceptLegacyBodyField` in
 `server/src/routes/telegram-bots.ts` and `server/src/routes/access.ts`) in the release after the
 one that ships this.
+
+**Update (27 Sep, which bot gets the company's cards):** a card goes to the bot of the agent that
+asked for it, or the nearest boss with a bot. When nobody asked (a card the board filed itself, such
+as a deploy request) or nobody on the way up has a bot, the bridge used to pick the bot "closest to
+the top of the org chart" and, on a tie, the first one in its list. A newly connected assistant with
+no boss tied with the CEO, came first (bots from the app are listed before the file's), and received
+the company's deploy cards with a working Approve button. Now the operator chooses: **Company settings
+→ Connections → Telegram bots** has a switch per bot, "Sends this company's approvals and questions"
+(only one per company; turning one on turns the others off; owner or admin only). New column
+`telegram_bots.receives_company_notices` (migration 0178, at most one true per company). With none
+chosen, the bridge uses the CEO's bot (by agent role, app or file), else the oldest bot (file bots
+before app bots, app bots by when they were connected) — never list order. Questions, waiting tasks
+and stuck agents use the same rule. `telegram bridge-config` now also sends `receivesCompanyNotices`,
+`createdAt` and `agentRole` for each bot. The screen also warns when a bot has nobody of its own
+allowed to use it (the instance-wide list then applies).
+
+**The bridge is not restarted by a deploy.** `deploy-prod.sh` / the deploy runner rebuild and restart
+the Paperclip container and update the checkout on disk, but the bridge is a separate systemd service
+(`paperclip-telegram-bridge.service`, `python3 /root/paperclip/scripts/telegram-bridge.py`) that keeps
+running the old code until someone restarts it. After any deploy that changes
+`scripts/telegram-bridge.py`, run on the box as root: `systemctl restart paperclip-telegram-bridge`,
+then check `journalctl -u paperclip-telegram-bridge -n 50 --no-pager` for the line
+`company <id>: approvals and questions with no bot of their own go to <bot name> (<why>)`.
 
 _Roadmap item still open:_ Productize-a-project (item 7) — was blocked indefinitely on an
 external dependency (a productizable deliverable from another company's project) and was

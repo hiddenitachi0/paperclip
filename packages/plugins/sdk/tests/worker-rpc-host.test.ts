@@ -143,6 +143,8 @@ describe("worker performAction context", () => {
           agentId: null,
           runId: null,
           companyId: null,
+          canManageCompany: false,
+          isInstanceAdmin: false,
         },
         companyId: null,
       });
@@ -288,6 +290,88 @@ describe("worker invocation scope propagation", () => {
       await companyAExpectation;
 
       expect(nestedInvocationIds).toEqual(["invocation-b", "invocation-a"]);
+    } finally {
+      worker.stop();
+      hostReadline.close();
+      hostToWorker.destroy();
+      workerToHost.destroy();
+    }
+  });
+});
+
+describe("worker http.fetch keeps binary bodies exact", () => {
+  it("rebuilds a picture from the host's exact bytes, not from its text form", async () => {
+    const picture = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x80, 0x81, 0xfe, 0xff]);
+    const hostToWorker = new PassThrough();
+    const workerToHost = new PassThrough();
+    const hostReadline = createInterface({ input: workerToHost });
+    const pending = new Map<string, (response: JsonRpcResponse) => void>();
+    let nextRequestId = 1;
+
+    const plugin = definePlugin({
+      async setup(ctx) {
+        ctx.data.register("download", async () => {
+          const response = await ctx.http.fetch("https://pictures.example.com/p.jpg");
+          return { base64: Buffer.from(await response.arrayBuffer()).toString("base64") };
+        });
+      },
+    });
+    const worker = startWorkerRpcHost({ plugin, stdin: hostToWorker, stdout: workerToHost });
+
+    function callWorker(method: string, params: unknown) {
+      const id = `host-${nextRequestId++}`;
+      const result = new Promise<unknown>((resolve, reject) => {
+        pending.set(id, (response) => {
+          if ("error" in response && response.error) {
+            reject(new Error(response.error.message));
+            return;
+          }
+          resolve((response as { result?: unknown }).result);
+        });
+      });
+      hostToWorker.write(serializeMessage(createRequest(method, params, id)));
+      return result;
+    }
+
+    hostReadline.on("line", (line) => {
+      const message = parseMessage(line);
+      if (isJsonRpcResponse(message)) {
+        pending.get(String(message.id))?.(message);
+        pending.delete(String(message.id));
+        return;
+      }
+      if (!isJsonRpcRequest(message) || message.method !== "http.fetch") return;
+      hostToWorker.write(serializeMessage(createSuccessResponse(message.id, {
+        status: 200,
+        statusText: "OK",
+        headers: { "content-type": "image/jpeg" },
+        body: picture.toString("utf8"),
+        bodyBase64: picture.toString("base64"),
+      })));
+    });
+
+    try {
+      await callWorker("initialize", {
+        manifest: {
+          id: "paperclip.binary-test",
+          apiVersion: 1,
+          version: "1.0.0",
+          displayName: "Binary test",
+          description: "Binary test",
+          author: "Paperclip",
+          categories: ["automation"],
+          capabilities: ["http.outbound"],
+          entrypoints: { worker: "dist/worker.js" },
+        },
+        config: {},
+        instanceInfo: { instanceId: "test", hostVersion: "0.0.0" },
+        apiVersion: 1,
+      });
+
+      const result = (await callWorker("getData", { key: "download", companyId: "company-a", params: {} })) as {
+        base64: string;
+      };
+      expect(Buffer.from(result.base64, "base64").equals(picture)).toBe(true);
     } finally {
       worker.stop();
       hostReadline.close();

@@ -1,5 +1,5 @@
 import type { Request } from "express";
-import type { DelegateTokenScope, ServiceTokenScope } from "@paperclipai/shared";
+import type { DelegateTokenScope, LightEmployeeFeatureKey, ServiceTokenScope } from "@paperclipai/shared";
 import { forbidden, unauthorized } from "../errors.js";
 import type { accessService } from "../services/access.js";
 import { logger } from "../middleware/logger.js";
@@ -18,6 +18,34 @@ import { logger } from "../middleware/logger.js";
 // catalogues under /api/skills and /api/teams, for instance) only ever calls
 // `assertAuthenticated` — guarding the company helper alone left those
 // answering 200 to a token that never named them.
+// DUR-4094: the same default-deny shape as refuseServiceTokenWithoutOptIn
+// above, for the "Employee (light)" company role. A light employee is a
+// board actor, so it still needs the ordinary company-membership check that
+// runs around it in assertCompanyAccess — this only adds a second, narrower
+// gate on top: unless the route named a feature this employee has been
+// switched on for (via assertLightAllowed, which sets req.lightRouteOptIn),
+// it is refused, GET included. Instance admins and the local implicit board
+// bypass this the same way they bypass every other company check in this
+// file; an admin who is ALSO an employee elsewhere would be an operator
+// mistake to create, not something this gate needs to reason about.
+function refuseLightEmployeeWithoutOptIn(req: Request, companyId: string) {
+  if (req.actor.type !== "board" || req.actor.source === "local_implicit") return;
+  if (req.actor.isInstanceAdmin) return;
+  if (req.lightRouteOptIn === true) return;
+  const membership = Array.isArray(req.actor.memberships)
+    ? req.actor.memberships.find((item) => item.companyId === companyId)
+    : undefined;
+  if (!membership || membership.status !== "active" || membership.membershipRole !== "employee") return;
+  logger.warn({
+    event: "security.light_employee_route_denied",
+    actorUserId: req.actor.userId ?? null,
+    companyId,
+    method: req.method,
+    path: req.originalUrl ?? req.path,
+  }, "Refused an Employee (light) member on a route that has not been opted in for them");
+  throw forbidden("Employee (light) accounts can only use features an admin has turned on for them.");
+}
+
 function refuseServiceTokenWithoutOptIn(req: Request) {
   if (req.actor.type !== "service" || req.serviceRouteOptIn === true) return;
   logger.error({
@@ -185,6 +213,7 @@ export function assertCompanyAccess(req: Request, companyId: string) {
     if (!allowedCompanies.includes(companyId)) {
       throw forbidden("User does not have access to this company");
     }
+    refuseLightEmployeeWithoutOptIn(req, companyId);
     const method = typeof req.method === "string" ? req.method.toUpperCase() : "GET";
     const isSafeMethod = ["GET", "HEAD", "OPTIONS"].includes(method);
     if (!isSafeMethod && !req.actor.isInstanceAdmin && Array.isArray(req.actor.memberships)) {
@@ -197,6 +226,43 @@ export function assertCompanyAccess(req: Request, companyId: string) {
       }
     }
   }
+}
+
+/**
+ * DUR-4094: the opt-in half of the Employee (light) default-deny gate. A
+ * route that wants to accept a light employee calls this, naming the
+ * feature the admin must have switched on for that person
+ * (LIGHT_EMPLOYEE_FEATURE_KEYS), before doing anything else with the
+ * request. Call `assertCompanyAccess` first — this does not repeat the
+ * cross-company or membership checks, only the employee-specific one.
+ *
+ * For every actor that is not an active `employee` in this company, this is
+ * a no-op that just sets the opt-in marker: a service token, an agent, or a
+ * board user with any other role was never blocked by
+ * `refuseLightEmployeeWithoutOptIn` in the first place, so there is nothing
+ * additional to check for them here.
+ */
+export async function assertLightAllowed(
+  req: Request,
+  companyId: string,
+  feature: LightEmployeeFeatureKey,
+  access: ReturnType<typeof accessService>,
+): Promise<void> {
+  if (
+    req.actor.type === "board" &&
+    req.actor.source !== "local_implicit" &&
+    !req.actor.isInstanceAdmin
+  ) {
+    const membership = (req.actor.memberships ?? []).find((item) => item.companyId === companyId);
+    if (membership?.status === "active" && membership.membershipRole === "employee") {
+      const userId = req.actor.userId;
+      const allowed = Boolean(userId) && (await access.hasPermission(companyId, "user", userId!, feature));
+      if (!allowed) {
+        throw forbidden(`This account has not been given "${feature}" access yet. Ask an admin to turn it on.`);
+      }
+    }
+  }
+  req.lightRouteOptIn = true;
 }
 
 /**
@@ -221,6 +287,41 @@ export function assertCompanyOwnerOrInstanceAdmin(req: Request, companyId: strin
     const role = membership?.status === "active" ? membership.membershipRole : null;
     if (role !== "owner") {
       throw forbidden(`Only the company's owner or an administrator for the whole Paperclip instance can view and change ${what}.`);
+    }
+  }
+  assertCompanyAccess(req, companyId);
+}
+
+/**
+ * DUR-3997: changing a company's connections is for its owner and admins (the
+ * same rule the Connections page draws its buttons by, see
+ * ui/src/hooks/useCompanyRole.ts). Allowed: the local single-user board, an
+ * instance admin, and a board user whose ACTIVE membership in this company is
+ * owner or admin. Refused: agents, service and delegate tokens, operators and
+ * viewers -- with a plain sentence saying who can do it.
+ */
+/**
+ * Boolean form of the owner/admin/instance-admin check above, for call
+ * sites that need to branch on the answer rather than refuse the request
+ * outright (e.g. DUR-4329/DUR-4335: gating whether a board actor may
+ * override a shared, cross-company spend cap, on an otherwise-allowed
+ * operator-writable route). Never throws.
+ */
+export function isCompanyOwnerOrAdmin(req: Request, companyId: string): boolean {
+  if (req.actor.type !== "board" && req.actor.type !== "board_delegate") return false;
+  if (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin) return true;
+  const membership = (req.actor.memberships ?? []).find((item) => item.companyId === companyId);
+  const role = membership?.status === "active" ? membership.membershipRole : null;
+  return role === "owner" || role === "admin";
+}
+
+export function assertCompanyOwnerAdminOrInstanceAdmin(req: Request, companyId: string, what = "this") {
+  assertBoard(req);
+  if (req.actor.source !== "local_implicit" && !req.actor.isInstanceAdmin) {
+    const membership = (req.actor.memberships ?? []).find((item) => item.companyId === companyId);
+    const role = membership?.status === "active" ? membership.membershipRole : null;
+    if (role !== "owner" && role !== "admin") {
+      throw forbidden(`Only the company's owner or an admin can change ${what}.`);
     }
   }
   assertCompanyAccess(req, companyId);

@@ -9,6 +9,7 @@ const COMPANY_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
+  update: vi.fn(async () => null),
 }));
 
 const mockInteractionService = vi.hoisted(() => ({
@@ -706,6 +707,63 @@ describe.sequential("issue thread interaction routes", () => {
     );
   });
 
+  it("carries the accept note and not-confirmed option labels in the assignee wake payload (DUR-4310)", async () => {
+    mockInteractionService.acceptInteraction.mockResolvedValueOnce({
+      interaction: {
+        id: "interaction-checkbox-note",
+        companyId: COMPANY_ID,
+        issueId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        kind: "request_checkbox_confirmation",
+        status: "accepted",
+        continuationPolicy: "wake_assignee",
+        idempotencyKey: null,
+        sourceCommentId: null,
+        sourceRunId: "run-checkbox-note",
+        payload: {
+          version: 1,
+          prompt: "Which checks passed?",
+          options: [
+            { id: "file-a", label: "a.txt" },
+            { id: "file-b", label: "b.txt" },
+            { id: "file-c", label: "c.txt" },
+          ],
+        },
+        result: {
+          version: 1,
+          outcome: "accepted",
+          selectedOptionIds: ["file-a", "file-b"],
+          notConfirmedOptions: ["c.txt"],
+          note: "c.txt behaved correctly; the test for it was wrong, not the code.",
+          commentId: "22222222-2222-4222-8222-222222222222",
+        },
+        createdAt: "2026-04-20T12:00:00.000Z",
+        updatedAt: "2026-04-20T12:05:00.000Z",
+        resolvedAt: "2026-04-20T12:05:00.000Z",
+      },
+      createdIssues: [],
+    });
+    const app = await createApp();
+
+    const res = await request(app)
+      .post("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/interactions/interaction-checkbox-note/accept")
+      .send({ selectedOptionIds: ["file-a", "file-b"], note: "c.txt behaved correctly; the test for it was wrong, not the code." });
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      ASSIGNEE_AGENT_ID,
+      expect.objectContaining({
+        reason: "issue_commented",
+        payload: expect.objectContaining({
+          interactionId: "interaction-checkbox-note",
+          interactionKind: "request_checkbox_confirmation",
+          interactionStatus: "accepted",
+          note: "c.txt behaved correctly; the test for it was wrong, not the code.",
+          notConfirmedOptions: ["c.txt"],
+        }),
+      }),
+    );
+  });
+
   it("preserves accepted empty checkbox selections in assignee wake context", async () => {
     mockInteractionService.acceptInteraction.mockResolvedValueOnce({
       interaction: {
@@ -897,6 +955,110 @@ describe.sequential("issue thread interaction routes", () => {
         }),
       }),
     );
+  });
+
+  it("DUR-4144: clears the plan-first-on-Opus switch once its plan is accepted, preserving other overrides", async () => {
+    // Custom (non-Once) since scopeFromIssueParam() fetches the issue once
+    // via rawSvc before the handler fetches it again via svc -- both calls
+    // need to see the same assigneeAdapterOverrides.
+    mockIssueService.getById.mockResolvedValue(createIssue({
+      workMode: "standard",
+      assigneeAdapterOverrides: { planFirstOnOpus: true, useProjectWorkspace: true },
+    }));
+    mockInteractionService.acceptInteraction.mockResolvedValueOnce({
+      interaction: {
+        id: "interaction-plan-first",
+        companyId: COMPANY_ID,
+        issueId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        kind: "request_confirmation",
+        status: "accepted",
+        continuationPolicy: "wake_assignee_on_accept",
+        idempotencyKey: "confirmation:issue:plan:revision-plan-first",
+        sourceCommentId: null,
+        sourceRunId: "run-plan-first",
+        payload: {
+          version: 1,
+          prompt: "Approve this plan?",
+          target: {
+            type: "issue_document",
+            issueId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            documentId: "document-plan",
+            key: "plan",
+            revisionId: "revision-plan-first",
+            revisionNumber: 1,
+          },
+        },
+        result: { version: 1, outcome: "accepted" },
+        createdAt: "2026-04-20T12:00:00.000Z",
+        updatedAt: "2026-04-20T12:05:00.000Z",
+        resolvedAt: "2026-04-20T12:05:00.000Z",
+      },
+      createdIssues: [],
+    });
+    const app = await createApp();
+
+    const res = await request(app)
+      .post("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/interactions/interaction-plan-first/accept")
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(mockIssueService.update).toHaveBeenCalledWith("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", {
+      assigneeAdapterOverrides: { planFirstOnOpus: false, useProjectWorkspace: true },
+    });
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      ASSIGNEE_AGENT_ID,
+      expect.objectContaining({
+        contextSnapshot: expect.objectContaining({
+          forceFreshSession: true,
+          workspaceRefreshReason: "accepted_plan_confirmation",
+        }),
+      }),
+    );
+  });
+
+  it("does not touch assigneeAdapterOverrides when accepting a plan without the plan-first-on-Opus switch on", async () => {
+    mockIssueService.getById.mockResolvedValue(createIssue({
+      workMode: "standard",
+      assigneeAdapterOverrides: { modelProfile: "cheap" },
+    }));
+    mockInteractionService.acceptInteraction.mockResolvedValueOnce({
+      interaction: {
+        id: "interaction-no-switch",
+        companyId: COMPANY_ID,
+        issueId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        kind: "request_confirmation",
+        status: "accepted",
+        continuationPolicy: "wake_assignee_on_accept",
+        idempotencyKey: "confirmation:issue:plan:revision-no-switch",
+        sourceCommentId: null,
+        sourceRunId: "run-no-switch",
+        payload: {
+          version: 1,
+          prompt: "Approve this plan?",
+          target: {
+            type: "issue_document",
+            issueId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            documentId: "document-plan",
+            key: "plan",
+            revisionId: "revision-no-switch",
+            revisionNumber: 1,
+          },
+        },
+        result: { version: 1, outcome: "accepted" },
+        createdAt: "2026-04-20T12:00:00.000Z",
+        updatedAt: "2026-04-20T12:05:00.000Z",
+        resolvedAt: "2026-04-20T12:05:00.000Z",
+      },
+      createdIssues: [],
+    });
+    const app = await createApp();
+
+    const res = await request(app)
+      .post("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/interactions/interaction-no-switch/accept")
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 
   it("wakes the returned agent when accepting an agent-authored confirmation from a board review assignee", async () => {

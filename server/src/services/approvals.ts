@@ -1,7 +1,12 @@
-import { and, asc, eq, inArray, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentInstructionsRevisions, agents, approvalComments, approvals, personaPosts } from "@paperclipai/db";
-import { hireMonthlySpendingLimitCentsFromPayload, parseAgentLimits } from "@paperclipai/shared";
+import {
+  hireMonthlySpendingLimitCentsFromPayload,
+  LANE_A_THINKING_MODES,
+  normalizeLaneAProviderRouting,
+  parseAgentLimits,
+} from "@paperclipai/shared";
 import {
   instructionsChangeRequestPayloadSchema,
   modelBoostRequestPayloadSchema,
@@ -366,6 +371,55 @@ export function approvalService(db: Db) {
       return rows[0] ?? null;
     },
 
+    /**
+     * DUR-4317/DUR-4320: the storyline's own currently-pending (or
+     * revision-requested) kind:"video_render" threshold card, if any --
+     * startRender checks this before filing a new one, same one-open-card-
+     * per-target dedup the hire/merge/deploy/feature-launch finders above
+     * already do.
+     */
+    findOpenVideoRenderApproval: async (companyId: string, storylineId: string) => {
+      const rows = await db
+        .select()
+        .from(approvals)
+        .where(
+          and(
+            eq(approvals.companyId, companyId),
+            eq(approvals.type, "request_board_approval"),
+            inArray(approvals.status, resolvableStatuses),
+            sql`${approvals.payload} ->> 'kind' = 'video_render'`,
+            sql`${approvals.payload} ->> 'storylineId' = ${storylineId}`,
+          ),
+        );
+      return rows[0] ?? null;
+    },
+
+    /**
+     * An approved kind:"video_render" card for this exact storyline AND
+     * estimate -- matched on the stamped estimatedTotalCents, not just the
+     * storylineId, so an approval filed against an older (smaller or
+     * larger) estimate can never silently clear a render whose current cost
+     * has since changed (shots added/removed/edited after the card was
+     * decided). A changed estimate requires a fresh approval.
+     */
+    findApprovedVideoRenderApproval: async (companyId: string, storylineId: string, estimatedTotalCents: number) => {
+      const rows = await db
+        .select()
+        .from(approvals)
+        .where(
+          and(
+            eq(approvals.companyId, companyId),
+            eq(approvals.type, "request_board_approval"),
+            eq(approvals.status, "approved"),
+            sql`${approvals.payload} ->> 'kind' = 'video_render'`,
+            sql`${approvals.payload} ->> 'storylineId' = ${storylineId}`,
+            sql`(${approvals.payload} ->> 'estimatedTotalCents')::int = ${estimatedTotalCents}`,
+          ),
+        )
+        .orderBy(desc(approvals.decidedAt));
+      return rows[0] ?? null;
+    },
+
     create: (companyId: string, data: Omit<typeof approvals.$inferInsert, "companyId">) =>
       db
         .insert(approvals)
@@ -434,6 +488,43 @@ export function approvalService(db: Db) {
               typeof payload.laneATransformDailyCallCap === "number" ? payload.laneATransformDailyCallCap : null,
             laneAProvider: typeof payload.laneAProvider === "string" ? payload.laneAProvider : null,
             laneABaseUrl: typeof payload.laneABaseUrl === "string" ? payload.laneABaseUrl : null,
+            laneATemperature:
+              typeof payload.laneATemperature === "number" ? payload.laneATemperature : null,
+            laneAThinking: LANE_A_THINKING_MODES.includes(payload.laneAThinking as "on" | "off")
+              ? (payload.laneAThinking as "on" | "off")
+              : null,
+            // DUR-4070: the trust-level ceiling and assigned-people list the
+            // card carries, read back for the same reason. An unrecognized
+            // trust level reads as the column default ("full") via
+            // normalizeLaneATrustLevel inside the service; a malformed list
+            // reads as "the owner only".
+            laneATrustLevel:
+              typeof payload.laneATrustLevel === "string" ? payload.laneATrustLevel : undefined,
+            laneAAssignedUserIds: Array.isArray(payload.laneAAssignedUserIds)
+              ? payload.laneAAssignedUserIds.filter((id): id is string => typeof id === "string")
+              : [],
+            // Cleaned on the way in: anything that is not a valid host list
+            // reads as "no preference" (null), like a hire made before it existed.
+            laneAProviderRouting: normalizeLaneAProviderRouting(payload.laneAProviderRouting),
+            // DUR-4347: backup pool, the two fallback chains and keyword routes
+            // the card carries, read back for the same reason. Anything that is
+            // not a list reads as "none configured" (undefined = column default, main model only).
+            laneABackupModels: Array.isArray(payload.laneABackupModels) ? payload.laneABackupModels : undefined,
+            laneANoAnswerChainIds: Array.isArray(payload.laneANoAnswerChainIds)
+              ? payload.laneANoAnswerChainIds
+              : undefined,
+            laneARefusalChainIds: Array.isArray(payload.laneARefusalChainIds)
+              ? payload.laneARefusalChainIds
+              : undefined,
+            laneAKeywordRoutes: Array.isArray(payload.laneAKeywordRoutes) ? payload.laneAKeywordRoutes : undefined,
+            // DUR-4017: the daily briefing settings the card carries, read
+            // back for the same reason. Anything not an object reads as
+            // "never configured" (null), matching a hire made before this
+            // field existed.
+            morningReportSettings:
+              typeof payload.morningReportSettings === "object" && payload.morningReportSettings !== null
+                ? (payload.morningReportSettings as Record<string, unknown>)
+                : null,
             // DUR-4000: which person does this job and the job's limits box,
             // read back off the card for the same reason; the service still
             // refuses a persona from another company. A malformed limits

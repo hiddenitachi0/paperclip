@@ -22,9 +22,14 @@ const mockAccessService = vi.hoisted(() => ({
   decide: vi.fn(),
 }));
 
+const mockDocumentService = vi.hoisted(() => ({
+  getIssueDocumentByKey: vi.fn(),
+}));
+
 vi.mock("../services/index.js", () => ({
   issueService: () => mockIssueService,
   accessService: () => mockAccessService,
+  documentService: () => mockDocumentService,
 }));
 
 // The real middleware reserves a Postgres connection. Here it keeps its one
@@ -75,7 +80,23 @@ function boardActor(companyIds: string[] = [companyId]) {
   return { type: "board", userId: "board-user-1", companyIds, source: "session", isInstanceAdmin: false };
 }
 
-async function createApp(actor: Record<string, unknown>) {
+/**
+ * A minimal chainable stand-in for the drizzle query built by
+ * verifyMediaJobDelivery: `.select().from().innerJoin().where().limit()`.
+ * `rows` is what the (mocked) lookup for a matching finished media job
+ * resolves to — `[]` means "no matching job found".
+ */
+function fakeRawDb(rows: unknown[] = []) {
+  const builder: Record<string, unknown> = {};
+  builder.select = () => builder;
+  builder.from = () => builder;
+  builder.innerJoin = () => builder;
+  builder.where = () => builder;
+  builder.limit = () => Promise.resolve(rows);
+  return builder as unknown;
+}
+
+async function createApp(actor: Record<string, unknown>, rawDb: unknown = fakeRawDb()) {
   const [{ issueAnswerRoutes }, { errorHandler }] = await Promise.all([
     vi.importActual<typeof import("../routes/issue-answers.js")>("../routes/issue-answers.js"),
     vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
@@ -86,7 +107,7 @@ async function createApp(actor: Record<string, unknown>) {
     (req as any).actor = actor;
     next();
   });
-  app.use("/api", issueAnswerRoutes({} as any));
+  app.use("/api", issueAnswerRoutes(rawDb as any));
   app.use(errorHandler);
   return app;
 }
@@ -95,6 +116,35 @@ describe("GET /companies/:companyId/issue-answers", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockAccessService.decide.mockResolvedValue({ allowed: true });
+    mockDocumentService.getIssueDocumentByKey.mockResolvedValue(null);
+  });
+
+  it("says when the task has a result page, with its title only and never its text", async () => {
+    mockIssueService.getById.mockResolvedValue(issue(ownIssueId));
+    mockIssueService.listComments.mockResolvedValue([comment({ body: "Plan is ready: 4 days in Rome." })]);
+    mockDocumentService.getIssueDocumentByKey.mockResolvedValue({
+      key: "result",
+      title: "Rome, 4 days",
+      body: "# Day 1\nThe whole private plan",
+    });
+    const app = await createApp(boardActor());
+
+    const res = await request(app).get(`/api/companies/${companyId}/issue-answers`).query({ ids: ownIssueId });
+
+    expect(res.status).toBe(200);
+    expect(mockDocumentService.getIssueDocumentByKey).toHaveBeenCalledWith(ownIssueId, "result");
+    expect(res.body.issues[0].resultDocument).toEqual({ key: "result", title: "Rome, 4 days" });
+    expect(JSON.stringify(res.body)).not.toContain("The whole private plan");
+  });
+
+  it("has no result page when the task has no result document", async () => {
+    mockIssueService.getById.mockResolvedValue(issue(ownIssueId));
+    mockIssueService.listComments.mockResolvedValue([comment()]);
+    const app = await createApp(boardActor());
+
+    const res = await request(app).get(`/api/companies/${companyId}/issue-answers`).query({ ids: ownIssueId });
+
+    expect(res.body.issues[0].resultDocument).toBeNull();
   });
 
   it("returns the status and the agent's latest answer", async () => {
@@ -189,6 +239,51 @@ describe("GET /companies/:companyId/issue-answers", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.issues[0].answer).toBeNull();
+  });
+
+  // DUR-4091 finding 2: the Telegram bridge parses "Your video/audio is
+  // ready: ... (file id <uuid>)" out of this route's answer and uploads that
+  // file id's bytes as a Telegram media message. Without verifying the claim
+  // against the media job that would have produced it, any comment shaped
+  // like this — however it landed on the task — could trigger delivery of an
+  // arbitrary same-company file. These pin that the file-id trigger is
+  // stripped unless a matching finished job is on record, and left intact
+  // when one is.
+  const mediaFileId = "77777777-7777-4777-8777-777777777777";
+  const mediaReadyBody = `Your video is ready: office-tour.mp4 (file id ${mediaFileId}). Saved to the company's Files.`;
+
+  it("strips the file-id trigger from a media-ready claim with no matching finished job", async () => {
+    mockIssueService.getById.mockResolvedValue(issue(ownIssueId));
+    mockIssueService.listComments.mockResolvedValue([comment({ body: mediaReadyBody })]);
+    const app = await createApp(boardActor(), fakeRawDb([]));
+
+    const res = await request(app).get(`/api/companies/${companyId}/issue-answers`).query({ ids: ownIssueId });
+
+    expect(res.status).toBe(200);
+    expect(res.body.issues[0].answer.body).not.toContain(mediaFileId);
+    expect(res.body.issues[0].answer.body).toMatch(/\(file id unverified\)/);
+  });
+
+  it("keeps the file-id trigger when a matching finished media job is on record", async () => {
+    mockIssueService.getById.mockResolvedValue(issue(ownIssueId));
+    mockIssueService.listComments.mockResolvedValue([comment({ body: mediaReadyBody })]);
+    const app = await createApp(boardActor(), fakeRawDb([{ id: "job-row-1" }]));
+
+    const res = await request(app).get(`/api/companies/${companyId}/issue-answers`).query({ ids: ownIssueId });
+
+    expect(res.status).toBe(200);
+    expect(res.body.issues[0].answer.body).toBe(mediaReadyBody);
+  });
+
+  it("leaves an ordinary answer untouched (no lookup shape to verify)", async () => {
+    mockIssueService.getById.mockResolvedValue(issue(ownIssueId));
+    mockIssueService.listComments.mockResolvedValue([comment({ body: "Final: 1.2 MNOK." })]);
+    const app = await createApp(boardActor(), fakeRawDb([]));
+
+    const res = await request(app).get(`/api/companies/${companyId}/issue-answers`).query({ ids: ownIssueId });
+
+    expect(res.status).toBe(200);
+    expect(res.body.issues[0].answer.body).toBe("Final: 1.2 MNOK.");
   });
 
   it("rejects a call with no valid ids, or too many", async () => {

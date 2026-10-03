@@ -149,6 +149,113 @@ describe("route_to_agent", () => {
   });
 });
 
+describe("start_job", () => {
+  function depsWithJobs(overrides: Partial<LaneAToolDeps> = {}) {
+    return makeDeps({
+      startJob: {
+        listRunnable: vi.fn(async () => [
+          { id: "job-revise", title: "Revise contract" },
+          { id: "job-draft", title: "Draft new contract" },
+        ]),
+        run: vi.fn(async () => ({ issueId: "issue-9", identifier: "DUR-99", title: "Revise contract" })),
+      },
+      ...overrides,
+    });
+  }
+
+  it("starts the named job on the named colleague and reports the reference", async () => {
+    const deps = depsWithJobs();
+    const execute = createLaneABuiltinToolExecutor(deps);
+    const result = await execute("start_job", { colleague: "bob", job: "Revise contract", note: "the Acme NDA" }, ctx());
+    expect(result.ok).toBe(true);
+    expect(result.summary).toBe("Started job \"Revise contract\" on Bob as DUR-99.");
+    expect(result.task).toEqual({ issueId: "issue-9", identifier: "DUR-99", title: "Revise contract" });
+    expect(deps.canAssignTask).toHaveBeenCalledWith(expect.objectContaining({ companyId, assigneeAgentId: bobId }));
+    expect(deps.startJob!.listRunnable).toHaveBeenCalledWith(companyId, bobId);
+    expect(deps.startJob!.run).toHaveBeenCalledWith(
+      expect.objectContaining({ companyId, jobId: "job-revise", runAgentId: bobId, note: "the Acme NDA" }),
+    );
+  });
+
+  it("matches a job title case-insensitively and without a note", async () => {
+    const deps = depsWithJobs();
+    const execute = createLaneABuiltinToolExecutor(deps);
+    const result = await execute("start_job", { colleague: "Bob", job: "revise CONTRACT" }, ctx());
+    expect(result.ok).toBe(true);
+    expect(deps.startJob!.run).toHaveBeenCalledWith(expect.objectContaining({ jobId: "job-revise", note: null }));
+  });
+
+  it("refuses when the requester is another agent rather than a person", async () => {
+    const deps = depsWithJobs();
+    const execute = createLaneABuiltinToolExecutor(deps);
+    const result = await execute(
+      "start_job",
+      { colleague: "Bob", job: "Revise contract" },
+      ctx({ requester: { userId: null, agentId: finnId } }),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.content).toContain("Only a person can ask me");
+    expect(deps.startJob!.listRunnable).not.toHaveBeenCalled();
+  });
+
+  it("refuses when the person may not assign work to that colleague, without listing jobs", async () => {
+    const deps = depsWithJobs({
+      canAssignTask: vi.fn(async () => ({ allowed: false, explanation: "not a member" })),
+    });
+    const execute = createLaneABuiltinToolExecutor(deps);
+    const result = await execute("start_job", { colleague: "Bob", job: "Revise contract" }, ctx());
+    expect(result.ok).toBe(false);
+    expect(result.content).toContain("not allowed to hand work to Bob");
+    expect(deps.startJob!.listRunnable).not.toHaveBeenCalled();
+    expect(deps.startJob!.run).not.toHaveBeenCalled();
+  });
+
+  it("refuses when the colleague has no runnable jobs", async () => {
+    const deps = depsWithJobs({ startJob: { listRunnable: vi.fn(async () => []), run: vi.fn() } });
+    const execute = createLaneABuiltinToolExecutor(deps);
+    const result = await execute("start_job", { colleague: "Bob", job: "Revise contract" }, ctx());
+    expect(result.ok).toBe(false);
+    expect(result.content).toContain("has no one-press jobs set up");
+    expect(deps.startJob!.run).not.toHaveBeenCalled();
+  });
+
+  it("refuses and lists available titles when the job name does not match", async () => {
+    const deps = depsWithJobs();
+    const execute = createLaneABuiltinToolExecutor(deps);
+    const result = await execute("start_job", { colleague: "Bob", job: "Review the invoice" }, ctx());
+    expect(result.ok).toBe(false);
+    expect(result.content).toContain("is not one of Bob's one-press jobs");
+    expect(result.content).toContain("Revise contract");
+    expect(result.content).toContain("Draft new contract");
+    expect(deps.startJob!.run).not.toHaveBeenCalled();
+  });
+
+  it("asks for clarification when several job titles match", async () => {
+    const deps = depsWithJobs({
+      startJob: {
+        listRunnable: vi.fn(async () => [
+          { id: "job-revise", title: "Revise contract" },
+          { id: "job-revise-nda", title: "Revise contract (NDA)" },
+        ]),
+        run: vi.fn(),
+      },
+    });
+    const execute = createLaneABuiltinToolExecutor(deps);
+    const result = await execute("start_job", { colleague: "Bob", job: "contract" }, ctx());
+    expect(result.ok).toBe(false);
+    expect(result.content).toContain("Several of Bob's jobs match");
+    expect(deps.startJob!.run).not.toHaveBeenCalled();
+  });
+
+  it("falls back to route_to_agent's refusal when start_job is not wired", async () => {
+    const deps = makeDeps();
+    const execute = createLaneABuiltinToolExecutor(deps);
+    const result = await execute("start_job", { colleague: "Bob", job: "Revise contract" }, ctx());
+    expect(result.ok).toBe(false);
+    expect(result.content).toContain("Use route_to_agent instead");
+  });
+});
+
 describe("get_weather", () => {
   function jsonResponse(body: unknown, ok = true): Response {
     return { ok, status: ok ? 200 : 500, json: async () => body } as unknown as Response;
@@ -276,5 +383,129 @@ describe("resolveColleague with personas", () => {
     const bare = pool.map(({ displayName: _d, personaDisplayName: _p, ...rest }) => rest);
     expect(resolveColleague(bare, "Accountant", self).match?.id).toBe(pool[1]!.id);
     expect(resolveColleague(bare, "Maja", self).match).toBeNull();
+  });
+});
+
+describe("start_research_task", () => {
+  const brief = "Best price on a Moccamaster KBG Select, black, delivered in Norway.";
+
+  it("makes a task for the quick agent itself, with the brief first and the delivery rules after", async () => {
+    const deps = makeDeps({ researchSkillLink: vi.fn(async () => "[research-and-plan](skill://s1?s=research-and-plan)") });
+    const execute = createLaneABuiltinToolExecutor(deps);
+    const result = await execute("start_research_task", { kind: "price_hunt", brief, title: "Best price: Moccamaster" }, ctx());
+
+    expect(result.ok).toBe(true);
+    expect(deps.canAssignTask).toHaveBeenCalledWith(expect.objectContaining({ companyId, assigneeAgentId: quickAgentId }));
+    const created = vi.mocked(deps.createIssueForAgent).mock.calls[0]![0];
+    expect(created).toMatchObject({ companyId, assigneeAgentId: quickAgentId, title: "Best price: Moccamaster", source: "start_research_task" });
+    expect(created.description.startsWith(brief)).toBe(true);
+    expect(created.description).toContain("Follow the [research-and-plan](skill://s1?s=research-and-plan) skill.");
+    expect(created.description).toContain("a table of offers (shop, price including shipping, delivery time, return policy, link, checked at)");
+    expect(created.description).toContain("key `result`");
+    expect(created.description).toContain("#document-result");
+    expect(created.description).toContain("set the task to done");
+    expect(result.task).toEqual({ issueId: "issue-1", identifier: "DUR-12", title: "Best price: Moccamaster" });
+    expect(result.summary).toBe("Started research task DUR-12: Best price: Moccamaster.");
+    expect(result.content).toContain("Do not start the research here");
+  });
+
+  it("still makes the task without the skill (the description says what to deliver) and treats an odd kind as research", async () => {
+    const deps = makeDeps({ researchSkillLink: vi.fn(async () => { throw new Error("db down"); }) });
+    const execute = createLaneABuiltinToolExecutor(deps);
+    const result = await execute("start_research_task", { kind: "book_flights", brief: "Compare the three best robot vacuums under 5000 kr" }, ctx());
+
+    expect(result.ok).toBe(true);
+    const created = vi.mocked(deps.createIssueForAgent).mock.calls[0]![0];
+    expect(created.description).toContain("Follow the research-and-plan skill if you have it.");
+    expect(created.description).toContain("a short summary first");
+    expect(created.title).toBe("Compare the three best robot vacuums under 5000 kr");
+  });
+
+  it("needs a brief", async () => {
+    const deps = makeDeps();
+    const result = await createLaneABuiltinToolExecutor(deps)("start_research_task", { kind: "trip_plan" }, ctx());
+    expect(result.ok).toBe(false);
+    expect(result.task).toBeUndefined();
+    expect(deps.createIssueForAgent).not.toHaveBeenCalled();
+  });
+
+  it("only a person can start one", async () => {
+    const deps = makeDeps();
+    const result = await createLaneABuiltinToolExecutor(deps)(
+      "start_research_task",
+      { kind: "trip_plan", brief: "Weekend in Bergen" },
+      ctx({ requester: { userId: null, agentId: bobId } }),
+    );
+    expect(result.ok).toBe(false);
+    expect(deps.createIssueForAgent).not.toHaveBeenCalled();
+  });
+
+  it("refuses when the person may not give this agent tasks", async () => {
+    const deps = makeDeps({ canAssignTask: vi.fn(async () => ({ allowed: false, explanation: "no" })) });
+    const result = await createLaneABuiltinToolExecutor(deps)("start_research_task", { kind: "trip_plan", brief: "Weekend in Bergen" }, ctx());
+    expect(result.ok).toBe(false);
+    expect(result.content).toContain("no task was created");
+    expect(deps.createIssueForAgent).not.toHaveBeenCalled();
+  });
+
+  it("refuses when the quick agent itself cannot run tasks (paused)", async () => {
+    const deps = makeDeps();
+    const result = await createLaneABuiltinToolExecutor(deps)(
+      "start_research_task",
+      { kind: "trip_plan", brief: "Weekend in Bergen" },
+      ctx({ agent: { id: finnId, name: "Finn" } }),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.content).toContain("no task");
+    expect(deps.createIssueForAgent).not.toHaveBeenCalled();
+  });
+
+  it("route_to_agent also reports the task it made, so the chat can follow it", async () => {
+    const deps = makeDeps();
+    const result = await createLaneABuiltinToolExecutor(deps)("route_to_agent", { agent: "Bob", request: "Fix the login page" }, ctx());
+    expect(result.task).toEqual({ issueId: "issue-1", identifier: "DUR-12", title: "Fix the login page" });
+  });
+});
+
+describe("search_conversations", () => {
+  it("is on the allow-list with a schema that takes one required query string", () => {
+    expect(LANE_A_BUILTIN_TOOL_NAMES).toContain("search_conversations");
+    const def = buildLaneABuiltinToolDefinitions().find((tool) => tool.name === "search_conversations")!;
+    expect(def.input_schema).toMatchObject({ required: ["query"], additionalProperties: false });
+  });
+
+  it("refuses plainly where it is not wired", async () => {
+    const deps = makeDeps();
+    const result = await createLaneABuiltinToolExecutor(deps)("search_conversations", { query: "delivery address" }, ctx());
+    expect(result).toMatchObject({ ok: false, summary: "Conversation search is not available on this path." });
+  });
+
+  it("requires a query", async () => {
+    const deps = makeDeps({ searchConversations: vi.fn(async () => []) });
+    const result = await createLaneABuiltinToolExecutor(deps)("search_conversations", {}, ctx());
+    expect(result).toMatchObject({ ok: false, summary: "Searched conversations without a query." });
+    expect(deps.searchConversations).not.toHaveBeenCalled();
+  });
+
+  it("passes the query and ctx through, and says plainly when nothing was found", async () => {
+    const searchConversations = vi.fn(async () => []);
+    const deps = makeDeps({ searchConversations });
+    const result = await createLaneABuiltinToolExecutor(deps)("search_conversations", { query: "delivery address" }, ctx());
+    expect(searchConversations).toHaveBeenCalledWith("delivery address", expect.objectContaining({ companyId }));
+    expect(result).toMatchObject({ ok: true, summary: 'Searched past conversations for "delivery address": nothing found.' });
+    expect(result.content).toContain('No earlier conversation');
+  });
+
+  it("renders found hits with date and who said it", async () => {
+    const hits = [
+      { conversationId: "c1", createdAt: new Date("2026-09-20T10:00:00.000Z"), role: "user" as const, content: "The delivery address is 12 Main Street." },
+      { conversationId: "c1", createdAt: new Date("2026-09-20T10:00:05.000Z"), role: "assistant" as const, content: "Got it, 12 Main Street." },
+    ];
+    const deps = makeDeps({ searchConversations: vi.fn(async () => hits) });
+    const result = await createLaneABuiltinToolExecutor(deps)("search_conversations", { query: "delivery address" }, ctx());
+    expect(result.ok).toBe(true);
+    expect(result.content).toContain("- (2026-09-20, them) \"The delivery address is 12 Main Street.\"");
+    expect(result.content).toContain("- (2026-09-20, you) \"Got it, 12 Main Street.\"");
+    expect(result.summary).toBe('Searched past conversations for "delivery address": found 2.');
   });
 });

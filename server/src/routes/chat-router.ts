@@ -16,6 +16,8 @@ import {
   secretaryClassifierService,
 } from "../services/index.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
+import { buildResearchTaskDescription, inferResearchKind } from "../services/research-tasks.js";
+import { findResearchSkillLink } from "../services/research-skill-link.js";
 import type { LaneAServiceOptions } from "../services/lane-a.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
 
@@ -168,6 +170,17 @@ export function chatRouterRoutes(db: Db, options: { laneA?: LaneAServiceOptions 
           // agent row by the service, so it cannot be forgotten here.
           laneAProvider: targetAgent.laneAProvider ?? null,
           laneABaseUrl: targetAgent.laneABaseUrl ?? null,
+          // "Creativity" (sampling temperature); null = the model host's default.
+          laneATemperature: targetAgent.laneATemperature ?? null,
+          // DUR-4070: who besides the company owner may chat with this agent.
+          // Both the web chat box and the Telegram bridge's `chat send` go
+          // through this router (see its module docstring), so omitting this
+          // would silently read every assigned person here as "owner only" —
+          // refusing someone the operator explicitly assigned, on the exact
+          // two paths the ticket asks to cover.
+          laneAAssignedUserIds: (targetAgent.laneAAssignedUserIds as string[] | null) ?? [],
+          // OpenRouter "model hosts"; null = OpenRouter picks.
+          laneAProviderRouting: targetAgent.laneAProviderRouting ?? null,
         },
         requester,
         actor: req.actor,
@@ -204,10 +217,25 @@ export function chatRouterRoutes(db: Db, options: { laneA?: LaneAServiceOptions 
     });
     if (!decision.allowed) throw forbidden(decision.explanation);
 
+    // A research or planning request that goes straight to a task (long, or
+    // "/task" from Telegram) to a quick agent gets the same "how to do it and
+    // how to deliver it" notes a quick agent's own hand-over writes, worded
+    // as "if this is a research request" since the kind is only guessed.
+    const researchKind = targetAgent.laneAEnabled ? inferResearchKind(message) : null;
+    const description = researchKind
+      ? buildResearchTaskDescription({
+          kind: researchKind,
+          brief: message,
+          handedOverBy: null,
+          skillLink: await findResearchSkillLink(db, companyId),
+          guessed: true,
+        })
+      : message;
+
     const issue = await issues.create(companyId, {
       id: randomUUID(),
       title: buildLaneBTitle(message),
-      description: message,
+      description,
       assigneeAgentId: targetAgentId,
       status: "todo",
       priority: "medium",

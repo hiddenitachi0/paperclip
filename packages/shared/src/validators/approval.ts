@@ -6,6 +6,7 @@ import {
 } from "../constants.js";
 import { multilineTextSchema } from "./text.js";
 import { mcpServerConfigSchema } from "./agent.js";
+import { deployAskFirstActionSchema } from "./project.js";
 
 export const createApprovalSchema = z.object({
   type: z.enum(APPROVAL_TYPES),
@@ -156,6 +157,12 @@ export const deployRequestPayloadSchema = z
     // "nothing".
     resolvedCommit: z.string().trim().min(1).max(200).optional(),
     resolvedCommitSource: z.enum(["pinned", "branch_tip"]).optional(),
+    // DUR-4139: the project's deployPolicy.askFirstActions, stamped
+    // server-side at filing time (server/src/services/deploy-policy-enforcement.ts)
+    // so the card can say why it needs a decision. Never trusted from the
+    // filer, same rule as sourceBranch/deployBranch/changesSinceLive above --
+    // a card must not be able to claim its own "nothing here needs asking".
+    askFirstActions: z.array(deployAskFirstActionSchema).optional(),
   })
   .strict();
 
@@ -344,3 +351,117 @@ export const featureLaunchRequestPayloadSchema = z
   .strict();
 
 export type FeatureLaunchRequestPayload = z.infer<typeof featureLaunchRequestPayloadSchema>;
+
+/**
+ * `request_board_approval` payload convention for a booking clearance (DUR-4037,
+ * Maja browser step 4). Filip's ruling overrides the original design: EVERY
+ * booking needs this card, including a free one with no deposit -- there is no
+ * auto-clear path at all, so filing one of these is the only way
+ * `confirm_final_step` can ever be allowed to proceed past the browser
+ * worker's final-action refusal (see `evaluateFinalActionRisk` in
+ * `@paperclipai/adapter-utils/final-action-matcher`).
+ *
+ * Every field here is stamped server-side by `browser-service.ts`'s
+ * `requestBooking` at filing time, never trusted from the requesting agent's
+ * own words beyond the quoted `agentSummary` -- same trust boundary as
+ * `deployRequestPayloadSchema`'s `changesSinceLive` above: a filer must not be
+ * able to claim its own "this is a harmless free booking".
+ */
+export const bookingRequestPayloadSchema = z
+  .object({
+    kind: z.literal("booking"),
+    sessionId: z.string().uuid(),
+    agentId: z.string().uuid(),
+    /** The page's registrable domain at the moment of filing (tldts), never the raw URL an agent could pad with a lie. */
+    merchantDomain: z.string().trim().min(1).max(253),
+    /** The agent's own one-line account of what it is booking, always shown quoted, never as fact. */
+    agentSummary: multilineTextSchema.pipe(z.string().trim().min(1).max(1000)),
+    /** A same-company attachment id (GET /api/attachments/:id/content) for the pre-confirm screenshot, or null when one could not be taken. */
+    screenshotFileId: z.string().uuid().nullable(),
+    title: z.string().min(1),
+    summary: multilineTextSchema.optional(),
+    expiresAt: z.string().datetime(),
+  })
+  .strict();
+
+export type BookingRequestPayload = z.infer<typeof bookingRequestPayloadSchema>;
+
+/**
+ * `request_board_approval` payload convention for a purchase clearance
+ * (DUR-4046, Maja browser step 6). Filed whenever the purchase gate cannot
+ * auto-clear a purchase: at/above the 500 NOK threshold, a daily/weekly/
+ * per-merchant/anti-splitting cap would be breached, the total could not be
+ * parsed or its currency is ambiguous, several totals were found, or the
+ * page reads as a subscription/trial. `confirm_final_step` only proceeds
+ * once this specific approval is `approved`, same shape as
+ * `bookingRequestPayloadSchema` above.
+ *
+ * Every field here is stamped server-side by `browser-service.ts`'s
+ * `requestPurchase` at filing time -- never trusted from the requesting
+ * agent's own words beyond the quoted `agentSummary` -- so a filer cannot
+ * claim its own "this is a harmless small purchase". `cardLast4`/`cardLabel`
+ * identify which card would be spent without exposing the PAN/CVC (never
+ * present in this payload, only in the encrypted secret the card's
+ * `secretId` points at).
+ */
+export const purchaseRequestPayloadSchema = z
+  .object({
+    kind: z.literal("purchase"),
+    sessionId: z.string().uuid(),
+    agentId: z.string().uuid(),
+    clearanceId: z.string().uuid(),
+    cardId: z.string().uuid(),
+    cardLast4: z.string().trim().min(1).max(4),
+    cardLabel: z.string().trim().min(1).max(200),
+    /** The page's registrable domain at the moment of filing (tldts), never the raw URL an agent could pad with a lie. */
+    merchantDomain: z.string().trim().min(1).max(253),
+    /** The agent's own one-line account of what it is buying, always shown quoted, never as fact. */
+    agentSummary: multilineTextSchema.pipe(z.string().trim().min(1).max(1000)),
+    /** The server's own parsed total, or null when it could not be parsed (itself a reason this needed approval). */
+    detectedAmount: z.number().nonnegative().nullable(),
+    detectedCurrency: z.string().trim().max(10).nullable(),
+    amountNok: z.number().nonnegative().nullable(),
+    /** Why this could not auto-clear -- shown to Filip so he knows what to check. */
+    reasons: z.array(z.string().trim().min(1)).min(1),
+    /** A same-company attachment id (GET /api/attachments/:id/content) for the pre-confirm screenshot, or null when one could not be taken. */
+    screenshotFileId: z.string().uuid().nullable(),
+    title: z.string().min(1),
+    summary: multilineTextSchema.optional(),
+    expiresAt: z.string().datetime(),
+  })
+  .strict();
+
+export type PurchaseRequestPayload = z.infer<typeof purchaseRequestPayloadSchema>;
+
+/**
+ * `request_board_approval` payload convention for the video-storyline
+ * render-cost threshold gate (DUR-4317/DUR-4320, backend half of the
+ * storyboard-of-stills approval gate). Filed by startRender in
+ * server/src/services/video-storyline-render.ts whenever a storyline's
+ * current video-render cost estimate exceeds the company's
+ * `videoStorylineApprovalThresholdCents` setting -- see
+ * video-storyline-settings.ts. This is a SEPARATE, additional gate layered
+ * on top of the always-on, mandatory per-shot storyboardStatus==='approved'
+ * check; it only fires for a storyline whose total render cost crosses the
+ * company's own configured spend threshold.
+ *
+ * Every field here is stamped server-side by startRender at filing time --
+ * never taken from the calling agent's own words -- same server-stamped
+ * trust boundary purchaseRequestPayloadSchema enforces above: a filer
+ * cannot under-state the estimate or claim its own threshold.
+ */
+export const videoRenderRequestPayloadSchema = z
+  .object({
+    kind: z.literal("video_render"),
+    storylineId: z.string().uuid(),
+    shotCount: z.number().int().nonnegative(),
+    /** The server's own estimateVideoStorylineCostCents total for every non-dropped shot, in cents. */
+    estimatedTotalCents: z.number().int().nonnegative(),
+    /** The company's videoStorylineApprovalThresholdCents setting at filing time. */
+    thresholdCents: z.number().int().nonnegative(),
+    title: z.string().min(1),
+    summary: multilineTextSchema.optional(),
+  })
+  .strict();
+
+export type VideoRenderRequestPayload = z.infer<typeof videoRenderRequestPayloadSchema>;

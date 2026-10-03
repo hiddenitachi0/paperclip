@@ -9,6 +9,7 @@ import {
 } from "../api/agents";
 import { companySkillsApi } from "../api/companySkills";
 import { mcpToolLibraryApi, type AgentMcpToolListItem } from "../api/mcpToolLibrary";
+import { AgentApiToolsSection } from "../components/AgentApiToolsSection";
 import { budgetsApi } from "../api/budgets";
 import { heartbeatsApi } from "../api/heartbeats";
 import { instanceSettingsApi } from "../api/instanceSettings";
@@ -50,7 +51,10 @@ import { AgentActionButtons } from "../components/AgentActionButtons";
 import { BudgetPolicyCard } from "../components/BudgetPolicyCard";
 import { SorteringsreglerCard } from "../components/SorteringsreglerCard";
 import { QuickAgentSection } from "../components/QuickAgentSection";
+import { QuickAgentMemorySection } from "../components/QuickAgentMemorySection";
+import { MorningReportSection } from "../components/MorningReportSection";
 import { QuickAgentChatPanel } from "../components/QuickAgentChatPanel";
+import { AgentAddOnToolsSection } from "../components/AgentAddOnToolsSection";
 import { TrustPresetSection } from "../components/TrustPresetSection";
 import { FileTree, buildFileTree } from "../components/FileTree";
 import { ScrollToBottom } from "../components/ScrollToBottom";
@@ -85,7 +89,6 @@ import {
   HelpCircle,
   FolderOpen,
   AlertTriangle,
-  Plug,
   Package,
 } from "lucide-react";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
@@ -1619,6 +1622,10 @@ function AgentConfigurePage({
         hideInstructionsFile
       />
       <QuickAgentSection agent={agent} companyId={companyId} />
+      {agent.laneAEnabled && <QuickAgentMemorySection agentId={agent.id} />}
+      {agent.laneAEnabled && (
+        <MorningReportSection agent={agent} companyId={companyId} />
+      )}
       <div>
         <h3 className="text-sm font-medium mb-3">API Keys</h3>
         <KeysTab agentId={agentId} companyId={companyId} />
@@ -3160,7 +3167,6 @@ export function AgentToolsTab({
   companyId?: string;
 }) {
   const queryClient = useQueryClient();
-  const navigate = useNavigate();
   const [pendingToolId, setPendingToolId] = useState<string | null>(null);
 
   const { data: tools, isLoading, error } = useQuery({
@@ -3202,12 +3208,13 @@ export function AgentToolsTab({
       ) : error ? (
         <p className="text-sm text-destructive">Could not load tools.</p>
       ) : !tools || tools.length === 0 ? (
-        <EmptyState
-          icon={Plug}
-          message="No tools in the library yet. Add one in Tools, then come back here to give it to this agent."
-          action="Go to Tools"
-          onAction={() => navigate("/tools")}
-        />
+        <p className="text-sm text-muted-foreground" data-testid="library-tools-empty">
+          No tools in the library yet.{" "}
+          <Link to="/tools" className="underline underline-offset-2">
+            Add one in Tools
+          </Link>
+          , then come back here to give it to this agent. Tools from add-ons such as Media Studio are listed below.
+        </p>
       ) : (
         <ul className="divide-y divide-border border border-border rounded-lg">
           {tools.map((tool) => (
@@ -3232,6 +3239,12 @@ export function AgentToolsTab({
           {syncTools.error instanceof Error ? syncTools.error.message : "Failed to update tools"}
         </p>
       )}
+
+      {/* Tools that installed add-ons (plugins) bring; ticks write agents.plugin_tool_grants. */}
+      <AgentAddOnToolsSection agentId={agent.id} quickAgent={agent.laneAEnabled === true} />
+
+      {/* DUR-4004: "API with a key" tools, ticked on the same way. */}
+      <AgentApiToolsSection agentId={agent.id} companyId={companyId} />
     </div>
   );
 }

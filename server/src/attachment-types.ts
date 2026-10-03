@@ -36,6 +36,15 @@ export const DEFAULT_ALLOWED_TYPES: readonly string[] = [
   "video/webm",
   "video/quicktime",
   "video/x-m4v",
+  "audio/mpeg",
+  "audio/mp3",
+  "audio/wav",
+  "audio/x-wav",
+  "audio/ogg",
+  "audio/webm",
+  "audio/mp4",
+  "audio/aac",
+  "audio/flac",
 ];
 
 export const DEFAULT_ATTACHMENT_CONTENT_TYPE = "application/octet-stream";

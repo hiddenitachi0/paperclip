@@ -234,9 +234,15 @@ export interface HostServices {
     requestWakeups(params: WorkerToHostMethods["issues.requestWakeups"][0]): Promise<WorkerToHostMethods["issues.requestWakeups"][1]>;
     getOrchestrationSummary(params: WorkerToHostMethods["issues.summaries.getOrchestration"][0]): Promise<WorkerToHostMethods["issues.summaries.getOrchestration"][1]>;
     listComments(params: WorkerToHostMethods["issues.listComments"][0]): Promise<WorkerToHostMethods["issues.listComments"][1]>;
-    createComment(params: WorkerToHostMethods["issues.createComment"][0]): Promise<WorkerToHostMethods["issues.createComment"][1]>;
+    createComment(
+      params: WorkerToHostMethods["issues.createComment"][0],
+      context?: WorkerHostCallContext,
+    ): Promise<WorkerToHostMethods["issues.createComment"][1]>;
     createInteraction(params: WorkerToHostMethods["issues.createInteraction"][0]): Promise<WorkerToHostMethods["issues.createInteraction"][1]>;
-    createAttachment(params: WorkerToHostMethods["issues.createAttachment"][0]): Promise<WorkerToHostMethods["issues.createAttachment"][1]>;
+    createAttachment(
+      params: WorkerToHostMethods["issues.createAttachment"][0],
+      context?: WorkerHostCallContext,
+    ): Promise<WorkerToHostMethods["issues.createAttachment"][1]>;
   };
 
   /** Provides `issues.documents.list`, `issues.documents.get`, `issues.documents.upsert`, `issues.documents.delete`. */
@@ -295,6 +301,15 @@ export interface HostServices {
     previewAssignment(params: WorkerToHostMethods["authorization.policies.previewAssignment"][0]): Promise<WorkerToHostMethods["authorization.policies.previewAssignment"][1]>;
     explainAssignment(params: WorkerToHostMethods["authorization.policies.explainAssignment"][0]): Promise<WorkerToHostMethods["authorization.policies.explainAssignment"][1]>;
     searchAudit(params: WorkerToHostMethods["authorization.audit.search"][0]): Promise<WorkerToHostMethods["authorization.audit.search"][1]>;
+  };
+
+  /** Provides company files not tied to a task. */
+  files: {
+    createCompanyFile(
+      params: WorkerToHostMethods["files.createCompanyFile"][0],
+    ): Promise<WorkerToHostMethods["files.createCompanyFile"][1]>;
+    get(params: WorkerToHostMethods["files.get"][0]): Promise<WorkerToHostMethods["files.get"][1]>;
+    readContent(params: WorkerToHostMethods["files.readContent"][0]): Promise<WorkerToHostMethods["files.readContent"][1]>;
   };
 
   /** Provides persona-scoped enforcement helpers (DUR-177 daily generation cap). */
@@ -497,6 +512,11 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   "authorization.policies.previewAssignment": "authorization.policies.read",
   "authorization.policies.explainAssignment": "authorization.policies.read",
   "authorization.audit.search": "authorization.audit.read",
+
+  // Company files
+  "files.createCompanyFile": "company.files.create",
+  "files.get": "company.files.read",
+  "files.readContent": "company.files.read",
 
   // Personas
   "personas.reserveDailyGeneration": "personas.generation_cap.enforce",
@@ -848,14 +868,14 @@ export function createHostClientHandlers(
     "issues.listComments": gated("issues.listComments", async (params) => {
       return services.issues.listComments(params);
     }),
-    "issues.createComment": gated("issues.createComment", async (params) => {
-      return services.issues.createComment(params);
+    "issues.createComment": gated("issues.createComment", async (params, context) => {
+      return services.issues.createComment(params, context);
     }),
     "issues.createInteraction": gated("issues.createInteraction", async (params) => {
       return services.issues.createInteraction(params);
     }),
-    "issues.createAttachment": gated("issues.createAttachment", async (params) => {
-      return services.issues.createAttachment(params);
+    "issues.createAttachment": gated("issues.createAttachment", async (params, context) => {
+      return services.issues.createAttachment(params, context);
     }),
 
     // Issue Documents
@@ -970,6 +990,16 @@ export function createHostClientHandlers(
     }),
     "authorization.audit.search": gated("authorization.audit.search", async (params) => {
       return services.authorization.searchAudit(params);
+    }),
+
+    "files.createCompanyFile": gated("files.createCompanyFile", async (params) => {
+      return services.files.createCompanyFile(params);
+    }),
+    "files.get": gated("files.get", async (params) => {
+      return services.files.get(params);
+    }),
+    "files.readContent": gated("files.readContent", async (params) => {
+      return services.files.readContent(params);
     }),
 
     "personas.reserveDailyGeneration": gated("personas.reserveDailyGeneration", async (params) => {

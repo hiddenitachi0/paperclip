@@ -67,10 +67,20 @@ import {
   reconcileCodexLocalManagedHomesOnStartup,
   reconcilePersistedRuntimeServicesOnStartup,
   routineService,
+  jobService,
+  seedLegalAdvisorStarterPack,
   logScheduleChainBootstrapVerification,
   startSecretSurfaceScanner,
 } from "./services/index.js";
 import { schedulerLiveness } from "./services/scheduler-liveness.js";
+import { watcherService } from "./services/watchers.js";
+import { morningReportService } from "./services/morning-report.js";
+import { paymentCardService } from "./services/payment-cards.js";
+import { mailSecretaryService } from "./services/mail-secretary.js";
+import { mailAccountsService } from "./services/mail-accounts.js";
+import { videoStorylineRenderService } from "./services/video-storyline-render.js";
+import { tradingService } from "./services/trading.js";
+import { videoStorylineStitchService } from "./services/video-storyline-stitch.js";
 import { describeTickPhases } from "./services/scheduler-tick-phases.js";
 import {
   SCHEDULER_TICK_CHAIN,
@@ -663,6 +673,10 @@ export async function startServer(): Promise<StartedServer> {
   if (durStarterJobsSeeded.created.length > 0) {
     logger.info(durStarterJobsSeeded, "Seeded DUR starter jobs");
   }
+  const legalAdvisorStarterPackSeeded = await seedLegalAdvisorStarterPack(db as any);
+  if (legalAdvisorStarterPackSeeded.createdJobs.length > 0 || legalAdvisorStarterPackSeeded.createdPosition) {
+    logger.info(legalAdvisorStarterPackSeeded, "Seeded Legal Advisor Jobs starter pack");
+  }
   if (config.deploymentMode === "authenticated") {
     const {
       createBetterAuthHandler,
@@ -1013,11 +1027,20 @@ export async function startServer(): Promise<StartedServer> {
     // Same reason as above: routine-triggered runs dispatch through the
     // heartbeat service, so they must use the raw-db instance.
     const routines = routineService(schedulerDb as any, { pluginWorkerManager, heartbeat });
+    const jobs = jobService(schedulerDb as any, { pluginWorkerManager, heartbeat });
     const mergeDeployVisibility = mergeDeployVisibilityService(schedulerDb as any);
     const deployCarriedIssues = deployCarriedIssuesService(schedulerDb as any);
     const deployApprovalFeedback = deployApprovalFeedbackService(schedulerDb as any);
     const mergePrAutomation = config.mergePrAutomationEnabled ? mergePrAutomationService(schedulerDb as any) : null;
     const agentErrorAlerts = agentErrorAlertsService(schedulerDb as any);
+    const marketWatchers = watcherService(schedulerDb as any);
+    const morningReports = morningReportService(schedulerDb as any);
+    const paymentCards = paymentCardService(schedulerDb as any);
+    const mailSecretary = mailSecretaryService(schedulerDb as any, { fireEmailJobTriggers: jobs.fireEmailJobTriggers });
+    const mailAccounts = mailAccountsService(schedulerDb as any);
+    const videoStorylineRender = videoStorylineRenderService(schedulerDb as any);
+    const videoStorylineStitch = videoStorylineStitchService(schedulerDb as any);
+    const tradingAgent = tradingService(schedulerDb as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(schedulerDb as any);
     const quietModeAlerts = quietModeAlertsService(schedulerDb as any);
     const personaPublisherSweep = config.personaPublishingSweepEnabled
@@ -1115,6 +1138,15 @@ export async function startServer(): Promise<StartedServer> {
       const setupCleanup = await environmentCustomImages.cleanupExpiredSetupSessions();
       if (setupCleanup.timedOut > 0 || setupCleanup.failed > 0) {
         logger.warn({ ...setupCleanup }, "startup environment customImage setup cleanup changed sessions");
+      }
+
+      // DUR-4171: the trading agent's ground rule is "starts paused after
+      // restart" -- a running strategy must never resume unattended after a
+      // deploy or crash, so every strategy still marked "running" is paused
+      // here, once, before the tick timer below is ever armed.
+      const tradingReconciled = await tradingAgent.reconcileOnBoot();
+      if (tradingReconciled.pausedCount > 0) {
+        logger.warn({ ...tradingReconciled }, "startup trading-agent reconciliation paused running strategies");
       }
 
       // DUR-100: verify every active routine's declared schedule chains actually
@@ -1221,6 +1253,26 @@ export async function startServer(): Promise<StartedServer> {
           })
           .catch((err) => {
             logger.error({ err }, "routine scheduler tick failed");
+          }),
+      );
+
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.tickScheduledJobTriggers, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: tickScheduledJobTriggers",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:tickScheduledJobTriggers",
+          },
+          () => jobs.tickScheduledJobTriggers(new Date()),
+        )
+          .then((result) => {
+            if (result.enqueued > 0) {
+              logger.info({ ...result }, "job scheduler tick enqueued runs");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "job scheduler tick failed");
           }),
       );
 
@@ -1343,6 +1395,198 @@ export async function startServer(): Promise<StartedServer> {
           })
           .catch((err) => {
             logger.error({ err }, "agent-error alert tick failed");
+          }),
+      );
+
+      // Watchers: due market-price checks (no AI; see services/watchers.ts),
+      // and handing fired alerts to their quick agent to write. The writing
+      // itself is detached onto the pool, so a slow picture never holds this
+      // chain's connection.
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.watchers, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: watchers",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:watchers",
+          },
+          () => marketWatchers.tick(new Date()),
+        )
+          .then((result) => {
+            if (result.fired > 0 || result.expired > 0) {
+              logger.info({ ...result }, "watchers tick fired alerts");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "watchers tick failed");
+          }),
+      );
+
+      // Morning report: agents whose daily briefing time (in their own
+      // timezone) is now (see services/morning-report.ts). Composing is
+      // detached onto the pool the same way a watcher alert is, so a slow
+      // source fetch or model call never holds this chain's connection.
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.morningReport, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: morningReport",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:morningReport",
+          },
+          () => morningReports.tick(new Date()),
+        )
+          .then((result) => {
+            if (result.fired > 0 || result.expired > 0) {
+              logger.info({ ...result }, "morning-report tick fired reports");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "morning-report tick failed");
+          }),
+      );
+
+      // Payment cards: sweep available/reserved cards whose expiresOn has
+      // passed to expired (see services/payment-cards.ts). Ships behind the
+      // same off-switches as the rest of the feature; an instance with zero
+      // cards just no-ops every tick.
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.paymentCardExpiry, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: paymentCardExpiry",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:paymentCardExpiry",
+          },
+          () => paymentCards.runDailyExpiryTick(new Date()),
+        )
+          .then((result) => {
+            if (result.expired > 0) {
+              logger.info({ ...result }, "payment-card tick expired cards");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "payment-card tick failed");
+          }),
+      );
+
+      // Mail secretary: due inboxes (see services/mail-secretary.ts). Reads
+      // over IMAP read-only, applies ignore filters in code, classifies with
+      // one tool-less model call, and routes -- ignore, keep for Filip, or
+      // delegate a framed copy to whichever agent the inbox names. Refuses
+      // to run for an inbox whose agent is not dialed to laneATrustLevel
+      // "limited" (DUR-4070).
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.mailSecretary, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: mailSecretary",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:mailSecretary",
+          },
+          () => mailSecretary.tick(new Date()),
+        )
+          .then((result) => {
+            if (result.errors > 0 || result.fetched > 0) {
+              logger.info({ ...result }, "mail-secretary tick");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "mail-secretary tick failed");
+          }),
+      );
+
+      // Per-person mail accounts (DUR-4194): sync due accounts' inboxes over
+      // IMAP, read-only (see services/mail-account-imap-client.ts). Never
+      // sends -- sending only ever happens through the sendDraft route, a
+      // human action, never a scheduled tick.
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.mailAccountSync, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: mailAccountSync",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:mailAccountSync",
+          },
+          () => mailAccounts.tick(new Date()),
+        )
+          .then((result) => {
+            if (result.errors > 0 || result.fetched > 0) {
+              logger.info({ ...result }, "mail-account sync tick");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "mail-account sync tick failed");
+          }),
+      );
+
+      // Video storylines (DUR-4127): advance in-flight shot renders, then
+      // stitch storylines whose shots have all finished. Ships behind the
+      // per-company videoStorylinesEnabled flag (default off) -- see
+      // video-storyline-settings.ts -- but the ticks themselves always run;
+      // an instance with the flag off everywhere just finds nothing to do.
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.videoStorylineRender, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: videoStorylineRender",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:videoStorylineRender",
+          },
+          () => videoStorylineRender.tick(),
+        )
+          .then((result) => {
+            if (result.advanced > 0 || result.failed > 0) {
+              logger.info({ ...result }, "video-storyline-render tick");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "video-storyline-render tick failed");
+          }),
+      );
+
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.videoStorylineStitch, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: videoStorylineStitch",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:videoStorylineStitch",
+          },
+          () => videoStorylineStitch.tick(),
+        )
+          .then((result) => {
+            if (result.stitched > 0 || result.needsAttention > 0 || result.blocked > 0 || result.failed > 0) {
+              logger.info({ ...result }, "video-storyline-stitch tick");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "video-storyline-stitch tick failed");
+          }),
+      );
+
+      // DUR-4171: the trading agent's tick -- resolves any pending trade
+      // approval cards, then runs the deterministic rule engine and risk
+      // gate for every strategy whose checkEveryMinutes interval is due.
+      // Paper-trading only in this ticket; the code that trades is this
+      // tick, never an LLM.
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.tradingAgent, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: tradingAgent",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:tradingAgent",
+          },
+          () => tradingAgent.tick(new Date()),
+        )
+          .then((result) => {
+            if (result.filled > 0 || result.blocked > 0 || result.approvalRequested > 0 || result.halted > 0) {
+              logger.info({ ...result }, "trading-agent tick");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "trading-agent tick failed");
           }),
       );
 

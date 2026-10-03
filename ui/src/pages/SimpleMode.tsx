@@ -23,6 +23,7 @@ import {
   UNAVAILABLE_AGENT_STATUSES,
 } from "../lib/simple-mode";
 import { cn } from "../lib/utils";
+import { RESEARCH_RESULT_DOCUMENT_KEY } from "@paperclipai/shared";
 
 /**
  * Simple mode (DUR-212) — the front door for people who have never seen
@@ -155,6 +156,13 @@ export function SimpleMode() {
 
   const reply = useMemo(() => findLatestSimpleModeReply(comments), [comments]);
 
+  const { data: issueDocuments } = useQuery({
+    queryKey: queryKeys.issues.documents(issueId ?? ""),
+    queryFn: () => issuesApi.listDocuments(issueId!),
+    enabled: !!issueId && settled,
+  });
+  const hasResultPage = (issueDocuments ?? []).some((doc) => doc.key === RESEARCH_RESULT_DOCUMENT_KEY);
+
   useEffect(() => {
     if (settled && !notifiedRef.current) {
       notifiedRef.current = true;
@@ -194,7 +202,11 @@ export function SimpleMode() {
       setRecipientOverride(null);
       if (response.lane === "a") {
         setLaneAReply(response.result?.response ?? "Done.");
-        setIssueId(null);
+        // A quick answer that started a task (a research task, or a hand-over)
+        // is followed like real work: the page shows its reply ("I'm on it")
+        // while the task runs, then the task's answer and its result page.
+        const startedTask = response.result?.actions?.find((action) => action.ok && action.task)?.task ?? null;
+        setIssueId(startedTask?.issueId ?? null);
       } else {
         setLaneAReply(null);
         setIssueId(response.taskRef!.issueId);
@@ -301,11 +313,28 @@ export function SimpleMode() {
                 />
                 I'm working on this…
               </div>
-            ) : (
+            ) : null}
+            {working && laneAReply ? (
+              <p className="whitespace-pre-wrap text-base text-foreground">{laneAReply}</p>
+            ) : null}
+            {working ? null : (
               <div className="flex flex-col gap-3">
                 <p className="whitespace-pre-wrap text-base text-foreground">
-                  {laneAReply ?? (reply ? sanitizeSimpleModeText(reply.body) : "Done.")}
+                  {issueId
+                    ? (reply ? sanitizeSimpleModeText(reply.body) : "Done.")
+                    : (laneAReply ?? "Done.")}
                 </p>
+                {issue?.identifier && hasResultPage ? (
+                  <button
+                    type="button"
+                    className="self-start text-sm font-medium text-foreground underline underline-offset-2"
+                    onClick={() =>
+                      navigate(`/${companyPrefix}/issues/${issue.identifier}#document-${RESEARCH_RESULT_DOCUMENT_KEY}`)
+                    }
+                  >
+                    Open the result page
+                  </button>
+                ) : null}
                 {issue?.identifier ? (
                   <button
                     type="button"

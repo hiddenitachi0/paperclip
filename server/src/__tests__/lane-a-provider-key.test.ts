@@ -142,6 +142,8 @@ describeEmbeddedPostgres("lane A provider key resolution (DUR-3997)", () => {
       model?: string | null;
       baseUrl?: string | null;
       keySecretId?: string | null;
+      providerRouting?: { only?: string[]; order?: string[]; ignore?: string[]; allowFallbacks?: boolean } | null;
+      laneAThinking?: string | null;
     } = {},
   ) {
     const created = await agentService(db).create(companyId, {
@@ -163,6 +165,8 @@ describeEmbeddedPostgres("lane A provider key resolution (DUR-3997)", () => {
         laneAProvider: input.provider ?? null,
         laneAModel: input.model ?? null,
         laneABaseUrl: input.baseUrl ?? null,
+        laneAProviderRouting: input.providerRouting ?? null,
+        laneAThinking: input.laneAThinking ?? null,
       })
       .where(eq(agents.id, created.id));
     return {
@@ -311,6 +315,7 @@ describeEmbeddedPostgres("lane A provider key resolution (DUR-3997)", () => {
     process.env.ANTHROPIC_API_KEY = "sk-ant-instance-must-not-be-used";
     const calls: Array<{ url: string; headers: Record<string, string>; body: Record<string, unknown> }> = [];
     const providerFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "GET") return new Response("{}"); // local model reachability check (#536)
       calls.push({
         url: String(input),
         headers: (init?.headers as Record<string, string>) ?? {},
@@ -365,6 +370,248 @@ describeEmbeddedPostgres("lane A provider key resolution (DUR-3997)", () => {
     expect(child.stdout).toBe("absent");
   });
 
+  it("keeps chatting without tools when the model's host refuses tools, and remembers that", async () => {
+    // 27 Sep: Sao10K/L3-8B-Stheno-v3.2 via Hugging Face (Novita) answered 400
+    // "model features function calling not support" to every message.
+    const companyId = await seedCompany();
+    const target = await seedQuickAgent(companyId, {
+      provider: "local",
+      model: "Sao10K/L3-8B-Stheno-v3.2",
+      baseUrl: "https://router.huggingface.co/v1",
+    });
+    const bodies: Array<Record<string, unknown>> = [];
+    const providerFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "GET") return new Response("{}"); // local model reachability check (#536)
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      bodies.push(body);
+      if (Array.isArray(body.tools) && body.tools.length > 0) {
+        return new Response(
+          JSON.stringify({ code: 400, reason: "INVALID_REQUEST_BODY", message: "model features function calling not support", metadata: {} }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      }
+      return completionResponse("Hei! Bare prat i dag.");
+    }) as unknown as typeof fetch;
+    const lane = await import("../services/lane-a.ts");
+    lane.resetLaneAModelsRefusingTools();
+
+    const first = await lane.laneAService(db, { providerFetch }).sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "filip", agentId: null },
+      message: "hei",
+    });
+
+    expect(first.response).toBe("Hei! Bare prat i dag.");
+    expect(bodies).toHaveLength(2);
+    expect(Array.isArray(bodies[0]!.tools)).toBe(true);
+    expect(bodies[1]!.tools).toBeUndefined();
+    expect(JSON.stringify(bodies[1]!.messages)).toContain("Your current model cannot use tools");
+
+    const second = await lane.laneAService(db, { providerFetch }).sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "filip", agentId: null },
+      message: "og nå?",
+    });
+    expect(second.response).toBe("Hei! Bare prat i dag.");
+    // Remembered: the next message goes straight to the no-tools request.
+    expect(bodies).toHaveLength(3);
+    expect(bodies[2]!.tools).toBeUndefined();
+    lane.resetLaneAModelsRefusingTools();
+  });
+
+  it("sends the chosen OpenRouter hosts, read off the agent row, and says plainly when they don't support tools", async () => {
+    // 29 Sep: Mistral Small 3.2 24B pinned to one host. When that host
+    // cannot do tools, OpenRouter (require_parameters) finds no endpoint;
+    // the quick agent keeps chatting and is told the chosen hosts are why.
+    const companyId = await seedCompany();
+    const secret = await seedSecret(companyId, `sk-or-v1-${randomUUID()}`);
+    const target = await seedQuickAgent(companyId, {
+      provider: "openrouter",
+      model: "mistralai/mistral-small-3.2-24b-instruct",
+      keySecretId: secret.id,
+      providerRouting: { only: ["venice"] },
+    });
+    const bodies: Array<Record<string, unknown>> = [];
+    const providerFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "GET") return new Response("{}"); // local model reachability check (#536)
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      bodies.push(body);
+      if (Array.isArray(body.tools) && body.tools.length > 0) {
+        return new Response(
+          JSON.stringify({ error: { message: "No endpoints found that can handle the requested parameters.", code: 404 } }),
+          { status: 404, headers: { "content-type": "application/json" } },
+        );
+      }
+      return completionResponse("Hei! Jeg kan bare prate nå.");
+    }) as unknown as typeof fetch;
+    const lane = await import("../services/lane-a.ts");
+    lane.resetLaneAModelsRefusingTools();
+
+    // The caller passes no routing (as an older caller would): it is read off the row.
+    const reply = await lane.laneAService(db, { providerFetch }).sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "filip", agentId: null },
+      message: "lag et bilde",
+    });
+
+    expect(reply.response).toBe("Hei! Jeg kan bare prate nå.");
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]!.provider).toEqual({ require_parameters: true, only: ["venice"] });
+    expect(bodies[1]!.tools).toBeUndefined();
+    expect(bodies[1]!.provider).toEqual({ only: ["venice"] });
+    const system = JSON.stringify(bodies[1]!.messages);
+    expect(system).toContain("The model host chosen for you (venice) does not support tools");
+    expect(system).not.toContain("Your current model cannot use tools");
+
+    // Remembered for this host choice only: another host list tries tools again.
+    expect(lane.laneAModelRefusesTools(lane.laneAToolsRefusalKey("mistralai/mistral-small-3.2-24b-instruct", { only: ["venice"] }))).toBe(true);
+    expect(lane.laneAModelRefusesTools("mistralai/mistral-small-3.2-24b-instruct")).toBe(false);
+    lane.resetLaneAModelsRefusingTools();
+  });
+
+  it("DUR-4391: a non-reasoning OpenRouter model with Thinking off drops reasoning_effort on retry and keeps tools", async () => {
+    // 3 Oct regression: DeepInfra's Mistral Small has no reasoning parameter
+    // at all, so sending reasoning_effort "none" (because the allow-list said
+    // every OpenRouter model takes it) got a 404 "No endpoints found that can
+    // handle the requested parameters" -- which was then wrongly read as the
+    // host refusing tools, and tools were dropped and remembered for an hour.
+    const companyId = await seedCompany();
+    const secret = await seedSecret(companyId, `sk-or-v1-${randomUUID()}`);
+    const target = await seedQuickAgent(companyId, {
+      provider: "openrouter",
+      model: "mistralai/mistral-small-3.2-24b-instruct",
+      keySecretId: secret.id,
+      laneAThinking: "off",
+    });
+    const bodies: Array<Record<string, unknown>> = [];
+    const providerFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "GET") return new Response("{}"); // local model reachability check (#536)
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      bodies.push(body);
+      if (Object.hasOwn(body, "reasoning_effort")) {
+        return new Response(
+          JSON.stringify({ error: { message: "No endpoints found that can handle the requested parameters.", code: 404 } }),
+          { status: 404, headers: { "content-type": "application/json" } },
+        );
+      }
+      return completionResponse("Hei! Bare prat i dag.");
+    }) as unknown as typeof fetch;
+    const lane = await import("../services/lane-a.ts");
+    lane.resetLaneAModelsRefusingTools();
+
+    const reply = await lane.laneAService(db, { providerFetch }).sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "filip", agentId: null },
+      message: "hei",
+    });
+
+    expect(reply.response).toBe("Hei! Bare prat i dag.");
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]!.reasoning_effort).toBe("none");
+    expect(Array.isArray(bodies[0]!.tools)).toBe(true);
+    // Retried without reasoning_effort -- tools were never dropped.
+    expect(Object.hasOwn(bodies[1]!, "reasoning_effort")).toBe(false);
+    expect(Array.isArray(bodies[1]!.tools)).toBe(true);
+    expect(lane.laneAModelRefusesTools("mistralai/mistral-small-3.2-24b-instruct")).toBe(false);
+  });
+
+  it("DUR-4391: still falls back to no tools when the host refuses them even without reasoning_effort or temperature", async () => {
+    const companyId = await seedCompany();
+    const secret = await seedSecret(companyId, `sk-or-v1-${randomUUID()}`);
+    const target = await seedQuickAgent(companyId, {
+      provider: "openrouter",
+      model: "mistralai/mistral-small-3.2-24b-instruct",
+      keySecretId: secret.id,
+      laneAThinking: "off",
+      providerRouting: { only: ["venice"] },
+    });
+    const bodies: Array<Record<string, unknown>> = [];
+    const providerFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "GET") return new Response("{}"); // local model reachability check (#536)
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      bodies.push(body);
+      if (Array.isArray(body.tools) && body.tools.length > 0) {
+        return new Response(
+          JSON.stringify({ error: { message: "No endpoints found that can handle the requested parameters.", code: 404 } }),
+          { status: 404, headers: { "content-type": "application/json" } },
+        );
+      }
+      return completionResponse("Jeg kan bare prate nå.");
+    }) as unknown as typeof fetch;
+    const lane = await import("../services/lane-a.ts");
+    lane.resetLaneAModelsRefusingTools();
+
+    const reply = await lane.laneAService(db, { providerFetch }).sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "filip", agentId: null },
+      message: "lag et bilde",
+    });
+
+    expect(reply.response).toBe("Jeg kan bare prate nå.");
+    // reasoning_effort is dropped first (still fails, since tools are the
+    // real problem here), then tools themselves are finally dropped.
+    expect(bodies).toHaveLength(3);
+    expect(bodies[0]!.reasoning_effort).toBe("none");
+    expect(Array.isArray(bodies[0]!.tools)).toBe(true);
+    expect(Object.hasOwn(bodies[1]!, "reasoning_effort")).toBe(false);
+    expect(Array.isArray(bodies[1]!.tools)).toBe(true);
+    expect(Object.hasOwn(bodies[2]!, "reasoning_effort")).toBe(false);
+    expect(bodies[2]!.tools).toBeUndefined();
+    expect(
+      lane.laneAModelRefusesTools(lane.laneAToolsRefusalKey("mistralai/mistral-small-3.2-24b-instruct", { only: ["venice"] })),
+    ).toBe(true);
+    lane.resetLaneAModelsRefusingTools();
+  });
+
+  it("DUR-4391: an OpenRouter host that accepts reasoning_effort sends it in one call, tools and all", async () => {
+    const companyId = await seedCompany();
+    const secret = await seedSecret(companyId, `sk-or-v1-${randomUUID()}`);
+    const target = await seedQuickAgent(companyId, {
+      provider: "openrouter",
+      model: "deepseek/deepseek-r1",
+      keySecretId: secret.id,
+      laneAThinking: "off",
+    });
+    const bodies: Array<Record<string, unknown>> = [];
+    const providerFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "GET") return new Response("{}"); // local model reachability check (#536)
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return completionResponse("Hei!");
+    }) as unknown as typeof fetch;
+    const lane = await import("../services/lane-a.ts");
+    lane.resetLaneAModelsRefusingTools();
+
+    const reply = await lane.laneAService(db, { providerFetch }).sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "filip", agentId: null },
+      message: "hei",
+    });
+
+    expect(reply.response).toBe("Hei!");
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]!.reasoning_effort).toBe("none");
+    expect(Array.isArray(bodies[0]!.tools)).toBe(true);
+    expect(lane.laneAModelRefusesTools("deepseek/deepseek-r1")).toBe(false);
+  });
+
+  it("does not mistake other refusals for a tools problem", async () => {
+    const { isLaneAToolsUnsupportedError } = await import("../services/lane-a.ts");
+    const { LaneAProviderError } = await import("../services/lane-a-providers.ts");
+    const toolsRefused = (message: string, status = 400) =>
+      isLaneAToolsUnsupportedError(new LaneAProviderError({ kind: "upstream", provider: "local", status, message }));
+    expect(toolsRefused('Local model answered 400: {"message":"model features function calling not support"}')).toBe(true);
+    expect(toolsRefused("Local model answered 400: This model does not support tools.")).toBe(true);
+    expect(toolsRefused("Local model answered 404: No endpoints found that support tool use.", 404)).toBe(true);
+    expect(toolsRefused("Local model answered 400: The requested model 'DeepSeek-V3' does not exist.")).toBe(false);
+    expect(toolsRefused("Local model answered 503: overloaded, function calling not supported right now", 503)).toBe(false);
+  });
+
   it("runs a transform on OpenRouter with a free-form model, costed at 0 because no price is known", async () => {
     const companyId = await seedCompany();
     const boundValue = `sk-or-v1-${randomUUID()}`;
@@ -376,6 +623,7 @@ describeEmbeddedPostgres("lane A provider key resolution (DUR-3997)", () => {
     });
     const calls: Array<{ url: string; headers: Record<string, string>; body: Record<string, unknown> }> = [];
     const providerFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "GET") return new Response("{}"); // local model reachability check (#536)
       calls.push({
         url: String(input),
         headers: (init?.headers as Record<string, string>) ?? {},

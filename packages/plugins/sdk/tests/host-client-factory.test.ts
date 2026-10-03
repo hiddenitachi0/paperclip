@@ -124,6 +124,18 @@ describe("createHostClientHandlers invocation company scope", () => {
       { issueId: "issue-a", companyId: "company-a", contentBase64: "AA==", contentType: "image/png" },
       (services: HostServices) => vi.mocked(services.issues.createAttachment),
     ],
+    [
+      "files.createCompanyFile",
+      "company.files.create",
+      { companyId: "company-a", contentBase64: "AA==", contentType: "image/png", runId: "run-a" },
+      (services: HostServices) => vi.mocked(services.files.createCompanyFile),
+    ],
+    [
+      "files.readContent",
+      "company.files.read",
+      { companyId: "company-a", fileId: "file-a" },
+      (services: HostServices) => vi.mocked(services.files.readContent),
+    ],
   ] as const)(
     "rejects %s when the plugin lacks %s",
     async (method, capability, params, getDelegate) => {
@@ -139,6 +151,11 @@ describe("createHostClientHandlers invocation company scope", () => {
         },
         issues: {
           createAttachment: vi.fn(async () => ({ id: "attachment-a" })),
+        },
+        files: {
+          createCompanyFile: vi.fn(async () => ({ id: "file-a" })),
+          get: vi.fn(async () => null),
+          readContent: vi.fn(async () => ({ id: "file-a" })),
         },
       } as unknown as HostServices;
       const handlers = createHostClientHandlers({
@@ -218,9 +235,38 @@ describe("createHostClientHandlers invocation company scope", () => {
     });
 
     const params = { issueId: "issue-a", companyId: "company-a", contentBase64: "AA==", contentType: "image/png", runId: "run-a" };
+    const context = { invocationScope: { companyId: "company-a" } };
     await expect(
-      handlers["issues.createAttachment"](params, { invocationScope: { companyId: "company-a" } }),
+      handlers["issues.createAttachment"](params, context),
     ).resolves.toEqual({ id: "attachment-a" });
-    expect(createAttachment).toHaveBeenCalledWith(params);
+    expect(createAttachment).toHaveBeenCalledWith(params, context);
+  });
+  it("keeps company files to the current invocation company", async () => {
+    const createCompanyFile = vi.fn(async () => ({ id: "file-a" }));
+    const get = vi.fn(async () => null);
+    const services = { files: { createCompanyFile, get, readContent: vi.fn() } } as unknown as HostServices;
+    const handlers = createHostClientHandlers({
+      pluginId: "paperclip.test",
+      capabilities: ["company.files.create", "company.files.read"],
+      services,
+    });
+
+    await expect(
+      handlers["files.createCompanyFile"](
+        { companyId: "company-b", contentBase64: "AA==", contentType: "image/png", runId: "run-a" },
+        { invocationScope: { companyId: "company-a" } },
+      ),
+    ).rejects.toBeInstanceOf(InvocationScopeDeniedError);
+    await expect(
+      handlers["files.get"]({ companyId: "company-b", fileId: "file-a" }, { invocationScope: { companyId: "company-a" } }),
+    ).rejects.toBeInstanceOf(InvocationScopeDeniedError);
+    expect(createCompanyFile).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+
+    const params = { companyId: "company-a", contentBase64: "AA==", contentType: "image/png", runId: "run-a" };
+    await expect(
+      handlers["files.createCompanyFile"](params, { invocationScope: { companyId: "company-a" } }),
+    ).resolves.toEqual({ id: "file-a" });
+    expect(createCompanyFile).toHaveBeenCalledWith(params);
   });
 });

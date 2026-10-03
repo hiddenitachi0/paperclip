@@ -7,12 +7,18 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 export const DEPLOY_RUNNER_STATUS_PATH =
   process.env.PAPERCLIP_DEPLOY_RUNNER_STATUS_PATH?.trim() || "/paperclip/deploy-runner/status.jsonl";
 
-// The runner itself trims this file to ~500 lines after every write; a file
-// far larger than that means something is wrong with the trim step, so
-// refuse to load it into memory rather than risk an unbounded read.
-const MAX_STATUS_FILE_BYTES = 2 * 1024 * 1024;
+// The runner itself trims this file to ~STATUS_LOG_MAX_LINES lines (5000 as
+// of DUR-4162, was 500) after every write; a file far larger than that means
+// something is wrong with the trim step, so refuse to load it into memory
+// rather than risk an unbounded read.
+const MAX_STATUS_FILE_BYTES = 8 * 1024 * 1024;
 const DEFAULT_LIMIT = 50;
-const MAX_LIMIT = 500;
+// DUR-4162: raised from 500 so readProjectDeployHistory can resolve a
+// project's configured release retention (default 10, up to 50) even on a
+// box where other companies deploy often enough to crowd older lines out of
+// a smaller window. scripts/deploy-runner.sh trims the file itself to the
+// same STATUS_LOG_MAX_LINES cap -- keep the two in step.
+const MAX_LIMIT = 5000;
 
 export type DeployRunnerStatusEntry = {
   ts: string;

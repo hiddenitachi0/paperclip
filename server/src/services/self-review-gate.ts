@@ -2,9 +2,16 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import { promisify } from "node:util";
-import { and, desc, eq, inArray, isNotNull, like } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, like } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agentWakeupRequests, executionWorkspaces, heartbeatRuns, issueComments, projectWorkspaces } from "@paperclipai/db";
+import {
+  agentWakeupRequests,
+  executionWorkspaces,
+  heartbeatRuns,
+  issueComments,
+  projectWorkspaces,
+  workspaceOperations,
+} from "@paperclipai/db";
 import type { IssueExecutionPolicy } from "@paperclipai/shared";
 
 const execFileAsync = promisify(execFile);
@@ -218,13 +225,34 @@ async function resolveIssueGitWorkspace(
  * the shared repository. That question needs the checkout but no base ref, and a workspace
  * realized without one would otherwise be silently skipped -- reading as "checked, the
  * commit is fine" when nothing was checked at all.
+ *
+ * DUR-4031: execution_workspaces.sourceIssueId is set once, at the moment a workspace is
+ * first realized (see heartbeat.ts's executeRun -> executionWorkspacesSvc.create), and is
+ * never rewritten when a LATER issue's run reuses that same workspace row (the reuse path,
+ * executionWorkspacesSvc.update(reusableExistingExecutionWorkspace.id, {...}), deliberately
+ * does not touch sourceIssueId). For a `shared_workspace`-mode workspace -- created for one
+ * issue (typically a sprint/epic parent or an earlier sibling) and then reused by child/
+ * sibling issues via `inheritExecutionWorkspaceFromIssueId`/parent inheritance -- the primary
+ * lookup by `sourceIssueId = issue.id` above permanently misses for every issue except the
+ * original one, even while that issue's own runs are actively working in the shared
+ * checkout. That's what left DUR-4019 (a shared_workspace child of DUR-4015) stuck: the gate
+ * saw workspaceFullyUnresolvable and fell into the lenient "any completed pass counts"
+ * branch, which itself never matched because there was never a *readable diff* to review in
+ * the first place.
+ *
+ * The fix resolves via workspace_operations as a fallback -- that table's `issueId` column is
+ * written only by the server, from inside a run's own dispatch code (heartbeat.ts's
+ * executeRun -> workspaceOperationsSvc.createRecorder), never via any issue PATCH route, so
+ * it carries the same DUR-83 non-agent-writable guarantee as sourceIssueId while correctly
+ * reflecting which issue's own run most recently operated in a given (possibly shared)
+ * workspace, regardless of who originally created that workspace row.
  */
 export async function resolveIssueWorkspaceCheckout(
   db: Db,
   input: { companyId: string; issueId: string | null | undefined },
 ): Promise<{ workspacePath: string; baseRef: string | null } | null> {
   if (!input.issueId) return null;
-  const workspace = await db
+  const workspaceRow = await db
     .select({
       cwd: executionWorkspaces.cwd,
       providerRef: executionWorkspaces.providerRef,
@@ -236,6 +264,29 @@ export async function resolveIssueWorkspaceCheckout(
     .orderBy(desc(executionWorkspaces.lastUsedAt))
     .limit(1)
     .then((rows) => rows[0] ?? null);
+
+  const workspace =
+    workspaceRow ??
+    (await db
+      .select({
+        cwd: executionWorkspaces.cwd,
+        providerRef: executionWorkspaces.providerRef,
+        providerType: executionWorkspaces.providerType,
+        baseRef: executionWorkspaces.baseRef,
+      })
+      .from(workspaceOperations)
+      .innerJoin(
+        executionWorkspaces,
+        and(
+          eq(executionWorkspaces.id, workspaceOperations.executionWorkspaceId),
+          eq(executionWorkspaces.companyId, input.companyId),
+        ),
+      )
+      .where(and(eq(workspaceOperations.companyId, input.companyId), eq(workspaceOperations.issueId, input.issueId)))
+      .orderBy(desc(workspaceOperations.startedAt))
+      .limit(1)
+      .then((rows) => rows[0] ?? null));
+
   if (!workspace) return null;
   if (workspace.providerType !== "local_fs" && workspace.providerType !== "git_worktree") return null;
 
@@ -305,6 +356,31 @@ export async function getChangedDiffContentForIssueWorkspace(
   }
 }
 
+/**
+ * DUR-4319: resolves the issue's workspace to the commit its diff currently sits at, so a
+ * self-review notice can say exactly which commit it covers. Reuses
+ * resolveIssueWorkspaceCheckout (not resolveIssueGitWorkspace) since this only needs a
+ * readable working tree, not a base ref -- a workspace with no recorded baseRef still has a
+ * HEAD.
+ */
+export async function getCurrentHeadShaForIssueWorkspace(
+  db: Db,
+  input: { companyId: string; issueId: string | null | undefined },
+): Promise<string | null> {
+  const resolved = await resolveIssueWorkspaceCheckout(db, input);
+  if (!resolved) return null;
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", resolved.workspacePath, "rev-parse", "HEAD"], {
+      cwd: resolved.workspacePath,
+      maxBuffer: RISKY_SURFACE_GIT_MAX_BUFFER_BYTES,
+    });
+    const sha = stdout.trim();
+    return sha.length > 0 ? sha : null;
+  } catch {
+    return null;
+  }
+}
+
 function buildAdversarialSurfaceLines(categories: readonly RiskySurfaceCategory[]): string[] {
   const categoryLabels = categories.map((category) => RISKY_SURFACE_CATEGORY_LABELS[category]).join(", ");
   return [
@@ -323,6 +399,13 @@ export function buildSelfReviewPassInstruction(input: {
   alreadyHandedOff: boolean;
   riskySurfaceCategories?: readonly RiskySurfaceCategory[];
   requestedStatus?: string | null;
+  /**
+   * DUR-4319: the commit a prior self-review pass on this issue already covered, if any.
+   * When present, the agent is told to review only what changed since that commit rather
+   * than re-reviewing the whole diff from scratch on every push -- the cost problem this
+   * ticket exists to fix.
+   */
+  sinceCommitSha?: string | null;
 }) {
   const issueLabel = input.issueIdentifier ?? "this issue";
   const lines = [
@@ -333,6 +416,12 @@ export function buildSelfReviewPassInstruction(input: {
     "- Look for bugs, mistakes, or loose ends you may have missed the first time.",
     "- Fix anything real that you find. Do not invent extra scope beyond the task.",
   ];
+  if (input.sinceCommitSha) {
+    lines.push(
+      "",
+      `This issue already has a review on file covering commit \`${input.sinceCommitSha}\`. You only need to check what changed between that commit and the current HEAD (\`git diff ${input.sinceCommitSha}..HEAD\`) -- parts that haven't changed since then were already reviewed and don't need re-checking, unless the risky-surface questions below say otherwise.`,
+    );
+  }
   const riskySurfaceCategories = input.riskySurfaceCategories ?? [];
   if (riskySurfaceCategories.length > 0) {
     lines.push("", ...buildAdversarialSurfaceLines(riskySurfaceCategories));
@@ -414,7 +503,119 @@ export async function findExistingSelfReviewPassNoticeCommentForRun(
     .then((rows) => rows[0] ?? null);
 }
 
-const IDEMPOTENT_SELF_REVIEW_PASS_WAKE_STATUSES = ["queued", "deferred_issue_execution", "claimed", "completed"] as const;
+/**
+ * DUR-4319: marker prefix identifying the single, update-in-place self-review notice comment
+ * for an issue, so a new push can find and edit it instead of posting a fresh comment every
+ * time (the cost/noise problem this ticket exists to fix). Kept as a plain text prefix on the
+ * comment body -- rather than a new DB column or a repurposed `metadata` field (that column is
+ * a strict, UI-rendering-only shape, see issueCommentMetadataSchema) -- so this stays a small,
+ * self-contained change local to this file.
+ */
+export const SELF_REVIEW_PASS_SUMMARY_MARKER = "<!-- paperclip:self-review-pass-summary:v1 -->";
+
+const REVIEWED_COMMIT_LINE_PATTERN = /\*\*Reviewed commit:\*\* `([0-9a-f]{7,40})`/i;
+
+/** Pure text parse: pulls the commit sha a summary comment's body last recorded, if any. */
+export function extractReviewedCommitShaFromSummaryBody(body: string): string | null {
+  const match = body.match(REVIEWED_COMMIT_LINE_PATTERN);
+  return match ? match[1] : null;
+}
+
+/**
+ * Composes the full body of the single self-review summary comment. `headSha` is the commit
+ * this pass actually reviewed (null when the workspace diff couldn't be read this time);
+ * `previousReviewedSha` is whatever commit the PRIOR version of this same comment recorded.
+ * When both are known and differ, the previous verdict is explicitly marked superseded rather
+ * than silently overwritten, per this ticket's acceptance bar: a verdict must never look like
+ * it applies to a commit it didn't actually see.
+ */
+export function buildSelfReviewPassSummaryBody(input: {
+  headSha: string | null;
+  previousReviewedSha: string | null;
+  content: string;
+}): string {
+  const effectiveSha = input.headSha ?? input.previousReviewedSha ?? null;
+  const lines = [SELF_REVIEW_PASS_SUMMARY_MARKER];
+  lines.push(
+    effectiveSha
+      ? `**Reviewed commit:** \`${effectiveSha}\``
+      : "**Reviewed commit:** (unknown — this issue's workspace diff couldn't be read)",
+  );
+  if (input.headSha && input.previousReviewedSha && input.previousReviewedSha !== input.headSha) {
+    lines.push(`_Supersedes the previous review of commit \`${input.previousReviewedSha}\`._`);
+  }
+  lines.push("", input.content);
+  return lines.join("\n");
+}
+
+/**
+ * Looks up the single existing self-review summary comment for an issue, if any, by its
+ * marker prefix -- not by run id or exact body match, since the body is expected to change on
+ * every push. There should only ever be one live (non-deleted) row per issue; `limit(1)` with
+ * a `createdAt desc` order is a defensive tie-breaker, not a documented multi-row case.
+ */
+export async function findSelfReviewPassSummaryComment(
+  db: Db,
+  input: { companyId: string; issueId: string },
+): Promise<{ id: string; body: string } | null> {
+  return db
+    .select({ id: issueComments.id, body: issueComments.body })
+    .from(issueComments)
+    .where(
+      and(
+        eq(issueComments.companyId, input.companyId),
+        eq(issueComments.issueId, input.issueId),
+        eq(issueComments.authorType, "system"),
+        isNull(issueComments.deletedAt),
+        like(issueComments.body, `${SELF_REVIEW_PASS_SUMMARY_MARKER}%`),
+      ),
+    )
+    .orderBy(desc(issueComments.createdAt))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+}
+
+/**
+ * Edits the issue's single self-review notice comment in place on each new push instead of
+ * posting a fresh one -- the core of DUR-4319. Finds the existing summary comment (if any) by
+ * marker prefix, carries forward its previously-recorded reviewed commit so the new body can
+ * mark it superseded, and UPDATEs that same row rather than inserting a new one. Only inserts
+ * when no summary comment exists yet for this issue.
+ */
+export async function upsertSelfReviewPassNoticeComment(
+  db: Db,
+  input: { companyId: string; issueId: string; sourceRunId?: string | null; headSha: string | null; content: string },
+): Promise<void> {
+  const existing = await findSelfReviewPassSummaryComment(db, {
+    companyId: input.companyId,
+    issueId: input.issueId,
+  });
+  const previousReviewedSha = existing ? extractReviewedCommitShaFromSummaryBody(existing.body) : null;
+  const body = buildSelfReviewPassSummaryBody({
+    headSha: input.headSha,
+    previousReviewedSha,
+    content: input.content,
+  });
+
+  if (existing) {
+    await db
+      .update(issueComments)
+      .set({ body, updatedAt: new Date(), createdByRunId: input.sourceRunId ?? null })
+      .where(eq(issueComments.id, existing.id));
+    return;
+  }
+
+  await db.insert(issueComments).values({
+    companyId: input.companyId,
+    issueId: input.issueId,
+    authorType: "system",
+    body,
+    createdByRunId: input.sourceRunId ?? null,
+  });
+}
+
+const OUTSTANDING_SELF_REVIEW_PASS_WAKE_STATUSES = ["queued", "deferred_issue_execution", "claimed"] as const;
+const IDEMPOTENT_SELF_REVIEW_PASS_WAKE_STATUSES = [...OUTSTANDING_SELF_REVIEW_PASS_WAKE_STATUSES, "completed"] as const;
 
 export async function findExistingSelfReviewPassWake(
   db: Db,
@@ -524,6 +725,50 @@ export async function findCompletedSelfReviewPassForIssue(
 }
 
 /**
+ * DUR-4307: sibling to findCompletedSelfReviewPassForIssue that looks for a self-review pass
+ * that is already IN FLIGHT for this issue (queued/deferred/claimed — i.e. not yet terminal),
+ * regardless of which run originally scheduled it. Without this, findExistingSelfReviewPassWake
+ * only protects the exact (issueId, sourceRunId) pair that scheduled a given wake, so a
+ * DIFFERENT run retrying the same PATCH before that wake resolves misses both that check and
+ * findCompletedSelfReviewPassForIssue (which only matches `completed` wakes) and schedules its
+ * own, redundant pass. Observed on DUR-4302: two ordinary heartbeat_timer runs each piled on a
+ * fresh self-review-pass wake while the original pass from the first declined run was still
+ * outstanding, because neither existing check recognizes an outstanding (not-yet-completed)
+ * wake for the same issue+diff scheduled by someone else's run.
+ *
+ * Same null-fingerprint and matching semantics as findCompletedSelfReviewPassForIssue:
+ * `matchingDiffFingerprint: null` never matches (nothing can vouch for unreadable content),
+ * `undefined` falls back to "any outstanding pass for this issue counts" for callers with no
+ * diff to compare against (an unresolvable workspace).
+ */
+export async function findOutstandingSelfReviewPassForIssue(
+  db: Db,
+  input: { companyId: string; issueId: string; matchingDiffFingerprint?: string | null },
+) {
+  if (input.matchingDiffFingerprint === null) return null;
+
+  const rows = await db
+    .select({ id: agentWakeupRequests.id, payload: agentWakeupRequests.payload })
+    .from(agentWakeupRequests)
+    .where(
+      and(
+        eq(agentWakeupRequests.companyId, input.companyId),
+        eq(agentWakeupRequests.reason, SELF_REVIEW_PASS_REASON),
+        like(agentWakeupRequests.idempotencyKey, `${SELF_REVIEW_PASS_REASON}:${input.issueId}:%`),
+        inArray(agentWakeupRequests.status, [...OUTSTANDING_SELF_REVIEW_PASS_WAKE_STATUSES]),
+      ),
+    );
+  if (input.matchingDiffFingerprint === undefined) {
+    return rows[0] ?? null;
+  }
+  const fingerprint = input.matchingDiffFingerprint;
+  return (
+    rows.find((row) => (row.payload as { reviewedDiffFingerprint?: string } | null)?.reviewedDiffFingerprint === fingerprint) ??
+    null
+  );
+}
+
+/**
  * DUR-290: counts self-review-pass wakeups ever requested for this issue that were scheduled
  * for a diff that couldn't be fingerprinted at all -- unlike findCompletedSelfReviewPassForIssue
  * above, this deliberately does NOT filter to `status: "completed"`, because the failure mode
@@ -562,6 +807,42 @@ export async function countSelfReviewPassWakesForIssue(
     (row) => (row.payload as { reviewedDiffFingerprint?: string | null } | null)?.reviewedDiffFingerprint === null,
   ).length;
 }
+
+/**
+ * DUR-4288: counts EVERY self-review-pass wakeup ever requested for this issue, regardless of
+ * fingerprint (completed, pending, or null). Used to bound a distinct unbounded-loop shape from
+ * the one countSelfReviewPassWakesForIssue/MAX_SELF_REVIEW_PASSES_FOR_UNREADABLE_DIFF guards:
+ * a diff that reads successfully (non-null fingerprint) on every single attempt, but produces a
+ * DIFFERENT fingerprint each time, so findCompletedSelfReviewPassForIssue's exact-match lookup
+ * can never hit a `priorPass` -- not because the content is unreadable, but because something
+ * about what's actually being diffed keeps changing between evaluations (confirmed on DUR-4162:
+ * its execution workspace was a `shared_workspace`-mode checkout that other, unrelated issues
+ * kept reusing and re-checking-out between self-review-pass attempts, so each attempt silently
+ * diffed a different branch than the one before it). That shape has no cap today -- every
+ * attempt computes a real, non-null fingerprint, so neither the diffStructurallyUnreadable nor
+ * the workspaceFullyUnresolvable cap paths apply, and the loop runs forever. This is a coarser,
+ * last-resort safety net: once an issue has burned MAX_SELF_REVIEW_PASSES_FOR_SHIFTING_DIFF
+ * total attempts without ever landing a matching priorPass, stop trying to converge on its own
+ * and fail loud instead, the same way DUR-290 already does for the unreadable-diff shape.
+ */
+export async function countAllSelfReviewPassWakesForIssue(
+  db: Db,
+  input: { companyId: string; issueId: string },
+): Promise<number> {
+  const rows = await db
+    .select({ id: agentWakeupRequests.id })
+    .from(agentWakeupRequests)
+    .where(
+      and(
+        eq(agentWakeupRequests.companyId, input.companyId),
+        eq(agentWakeupRequests.reason, SELF_REVIEW_PASS_REASON),
+        like(agentWakeupRequests.idempotencyKey, `${SELF_REVIEW_PASS_REASON}:${input.issueId}:%`),
+      ),
+    );
+  return rows.length;
+}
+
+export const MAX_SELF_REVIEW_PASSES_FOR_SHIFTING_DIFF = 3;
 
 // DUR-293: mirrors heartbeat.ts's WakeupNotScheduledInfo. `wakeup` (heartbeat.wakeup /
 // enqueueWakeup) has many legitimate no-throw skip paths -- company inactive, heartbeat
@@ -692,6 +973,22 @@ export async function evaluateSelfReviewDoneGate(input: {
   // letting an unrelated older pass on this issue silently vouch for content it never saw.
   const workspaceFullyUnresolvable = changedFilePaths === null && diffContent === null;
 
+  // DUR-4319: resolved once per attempt so every comment posted below (the two cap messages
+  // and the ordinary instruction) can be upserted onto the issue's single self-review summary
+  // comment rather than inserted as a fresh one, and so the instruction can tell the agent
+  // which commit a prior pass already covered (if any).
+  const headSha = await getCurrentHeadShaForIssueWorkspace(input.db, {
+    companyId: input.issue.companyId,
+    issueId: input.issue.id,
+  });
+  const existingSummaryComment = await findSelfReviewPassSummaryComment(input.db, {
+    companyId: input.issue.companyId,
+    issueId: input.issue.id,
+  });
+  const previousReviewedSha = existingSummaryComment
+    ? extractReviewedCommitShaFromSummaryBody(existingSummaryComment.body)
+    : null;
+
   // DUR-245: this issue already used its one bounded extra pass under a different run, and
   // that pass reached a terminal state without landing the handoff (otherwise currentStatus
   // would already equal requestedStatus and we wouldn't be here). Scheduling yet another pass
@@ -707,6 +1004,21 @@ export async function evaluateSelfReviewDoneGate(input: {
   });
   if (priorPass) return null;
 
+  // DUR-4307: a self-review pass for this exact diff may already be in flight (scheduled by a
+  // DIFFERENT run than this one -- e.g. the originally-declined run's own corrective pass
+  // hasn't completed yet when an unrelated ordinary heartbeat_timer run retries the same PATCH
+  // in the meantime). findExistingSelfReviewPassWake above only catches the exact
+  // (issueId, sourceRunId) pair that scheduled a given wake, and priorPass above only matches a
+  // wake that already reached `completed` -- neither recognizes an outstanding wake scheduled by
+  // someone else's run. Without this check, every such retry schedules its own redundant pass,
+  // which is exactly the unbounded pile-up this gate is meant to prevent (see DUR-4302).
+  const outstandingPass = await findOutstandingSelfReviewPassForIssue(input.db, {
+    companyId: input.issue.companyId,
+    issueId: input.issue.id,
+    matchingDiffFingerprint: workspaceFullyUnresolvable ? undefined : reviewedDiffFingerprint,
+  });
+  if (outstandingPass) return { message: baseMessage };
+
   // DUR-290: `changedFilePaths !== null && diffContent === null` means a diff genuinely exists
   // (the workspace resolved and the cheaper path-only read succeeded) but couldn't be fully
   // read -- routinely the diff-content buffer permanently overflowing on a large
@@ -715,25 +1027,74 @@ export async function evaluateSelfReviewDoneGate(input: {
   // findCompletedSelfReviewPassForIssue), so left unchecked this would schedule a fresh pass on
   // every single attempt, forever, whenever a scheduled pass's own corrective run doesn't land
   // its handoff. Cap it instead of looping silently.
+  //
+  // DUR-4288: `workspaceFullyUnresolvable` (both reads null) ALSO always produces a null
+  // fingerprint, and hits the exact same unbounded-loop shape whenever it doesn't win the
+  // lenient priorPass match above (e.g. no self-review pass for this issue has ever reached
+  // `completed` -- the workspace resolution itself was flapping, not just its content, so
+  // nothing ever durably "finished" reviewing it). The original DUR-290 cap only covered the
+  // narrower `diffStructurallyUnreadable` shape; any case where `reviewedDiffFingerprint` is
+  // null is exactly the set of diffs that can never produce a matching priorPass on a future
+  // attempt, so cap on that directly rather than re-deriving each unreadable sub-shape.
   const diffStructurallyUnreadable = changedFilePaths !== null && diffContent === null;
-  if (diffStructurallyUnreadable) {
+  if (reviewedDiffFingerprint === null) {
     const priorPassCount = await countSelfReviewPassWakesForIssue(input.db, {
       companyId: input.issue.companyId,
       issueId: input.issue.id,
     });
     if (priorPassCount >= MAX_SELF_REVIEW_PASSES_FOR_UNREADABLE_DIFF) {
-      const capMessage =
-        "This task's diff is too large for me to fully read and review (it likely touches a " +
-        `large generated/vendored file), and ${priorPassCount} self-review pass(es) have already ` +
-        "been scheduled for it without resolving that. I'm not scheduling another one -- this " +
-        "needs an operator to look at it directly (e.g. split the diff, exclude the oversized " +
-        'file from review, or set this issue\'s execution policy to {"selfReview": false}).';
+      const capMessage = diffStructurallyUnreadable
+        ? "This task's diff is too large for me to fully read and review (it likely touches a " +
+          `large generated/vendored file), and ${priorPassCount} self-review pass(es) have already ` +
+          "been scheduled for it without resolving that. I'm not scheduling another one -- this " +
+          "needs an operator to look at it directly (e.g. split the diff, exclude the oversized " +
+          'file from review, or set this issue\'s execution policy to {"selfReview": false}).'
+        : "I can't reliably resolve this task's workspace to read a diff at all (it may be " +
+          `shared with/reused by other work), and ${priorPassCount} self-review pass(es) have ` +
+          "already been scheduled for it without resolving that. I'm not scheduling another one " +
+          "-- this needs an operator to look at it directly (e.g. re-check the status, or set " +
+          'this issue\'s execution policy to {"selfReview": false}).';
       try {
-        await postSelfReviewPassNoticeComment(input.db, {
+        await upsertSelfReviewPassNoticeComment(input.db, {
           companyId: input.issue.companyId,
           issueId: input.issue.id,
           sourceRunId,
-          body: capMessage,
+          headSha,
+          content: capMessage,
+        });
+      } catch {
+        // Best-effort — the blocking return below is what actually matters.
+      }
+      return { message: capMessage };
+    }
+  } else {
+    // DUR-4288: `reviewedDiffFingerprint` is non-null, meaning the diff read fully and cleanly
+    // on THIS attempt, yet `priorPass` above still missed -- either this is genuinely the
+    // issue's first attempt (count will be 0, cap won't trip), or earlier attempts already
+    // produced their own non-null fingerprints that never matched this one, which can only mean
+    // what's being diffed keeps changing between attempts (see
+    // countAllSelfReviewPassWakesForIssue above). Bound that the same way the null-fingerprint
+    // shape is bounded, just on total attempts rather than a specific unreadable signature.
+    const totalPassCount = await countAllSelfReviewPassWakesForIssue(input.db, {
+      companyId: input.issue.companyId,
+      issueId: input.issue.id,
+    });
+    if (totalPassCount >= MAX_SELF_REVIEW_PASSES_FOR_SHIFTING_DIFF) {
+      const capMessage =
+        `${totalPassCount} self-review pass(es) have already been scheduled for this task, each ` +
+        "time against a diff that read fine but didn't match any previous pass -- most likely " +
+        "because the diff being reviewed keeps changing between attempts (e.g. a shared/reused " +
+        "workspace checked out to different work each time), not because of anything in this " +
+        "task's own content. I'm not scheduling another one -- this needs an operator to look at " +
+        'it directly (e.g. confirm the work is actually complete, or set this issue\'s execution ' +
+        'policy to {"selfReview": false}).';
+      try {
+        await upsertSelfReviewPassNoticeComment(input.db, {
+          companyId: input.issue.companyId,
+          issueId: input.issue.id,
+          sourceRunId,
+          headSha,
+          content: capMessage,
         });
       } catch {
         // Best-effort — the blocking return below is what actually matters.
@@ -753,6 +1114,7 @@ export async function evaluateSelfReviewDoneGate(input: {
     alreadyHandedOff: false,
     riskySurfaceCategories,
     requestedStatus: input.requestedStatus,
+    sinceCommitSha: previousReviewedSha,
   });
 
   // DUR-293: input.wakeup resolving without throwing does NOT mean a corrective run was
@@ -856,12 +1218,15 @@ export async function evaluateSelfReviewDoneGate(input: {
 
   try {
     // Best-effort: the wakeup is already scheduled (and is what actually re-gates the
-    // transition), so a failure here shouldn't change the gate's outcome.
-    await postSelfReviewPassNoticeComment(input.db, {
+    // transition), so a failure here shouldn't change the gate's outcome. DUR-4319: upserts
+    // onto the issue's single self-review summary comment (stamped with the commit it
+    // covers) instead of posting a fresh comment on every push.
+    await upsertSelfReviewPassNoticeComment(input.db, {
       companyId: input.issue.companyId,
       issueId: input.issue.id,
       sourceRunId,
-      body: instruction,
+      headSha,
+      content: instruction,
     });
   } catch {
     // Ignore — see comment above.

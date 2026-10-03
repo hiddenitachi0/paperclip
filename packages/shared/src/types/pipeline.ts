@@ -40,6 +40,41 @@ export interface PipelineStageAutomation {
   latestRoutineRevisionNumber: number;
 }
 
+export interface PipelineStageApprovalState {
+  required: boolean;
+  approver: { kind: string | null; id: string | null } | null;
+  pendingCount: number;
+}
+
+export interface PipelineConnectedRoutineTrigger {
+  id: string;
+  kind: string;
+  label: string | null;
+  enabled: boolean;
+  cronExpression: string | null;
+  timezone: string | null;
+  nextRunAt: Date | string | null;
+  lastFiredAt: Date | string | null;
+  publicId: string | null;
+  customerInboxChannel: string | null;
+}
+
+export interface PipelineConnectedRoutine {
+  id: string;
+  title: string;
+  status: string;
+  assigneeAgentId: string | null;
+  stageKeys: string[];
+  triggers: PipelineConnectedRoutineTrigger[];
+}
+
+/**
+ * Placeholder for pipeline-level price watchers (packages/db/src/schema/watchers.ts).
+ * No pipeline/stage foreign key exists yet, so the detail route always returns
+ * an empty array -- see the "Questions for Filip" section on DUR-4202's PR.
+ */
+export type PipelineConnectedWatcher = never;
+
 export type PipelineCaseLivenessState = "terminal" | "live" | "waiting" | "blocked" | "attention";
 
 export interface PipelineCaseLiveness {

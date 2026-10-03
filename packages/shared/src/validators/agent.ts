@@ -11,19 +11,90 @@ import {
   LANE_A_BASE_URL_MAX_LENGTH,
   LANE_A_FREE_FORM_MODEL_MAX_LENGTH,
   LANE_A_MAX_MAX_OUTPUT_TOKENS,
+  LANE_A_MAX_TEMPERATURE,
   LANE_A_MAX_TRANSFORM_DAILY_CALL_CAP,
   LANE_A_MIN_MAX_OUTPUT_TOKENS,
+  LANE_A_MIN_TEMPERATURE,
   LANE_A_MIN_TRANSFORM_DAILY_CALL_CAP,
   LANE_A_PROVIDERS,
+  LANE_A_PROVIDER_ROUTING_MAX_ENTRIES,
+  LANE_A_PROVIDER_SLUG_RE,
+  LANE_A_THINKING_MODES,
   laneAModelIssueForProvider,
 } from "../lane-a-models.js";
 import { envBindingSchema, envBindingSecretRefSchema, envConfigSchema } from "./secret.js";
+import {
+  laneABackupModelsSchema,
+  laneABackupRoutingIssues,
+  laneAChainIdsSchema,
+  laneAKeywordRoutesSchema,
+} from "./lane-a.js";
+import { BROWSER_ACCESS_LEVELS } from "../browser-access.js";
+import { LANE_A_TRUST_LEVELS } from "../lane-a-trust.js";
 import { trustAuthorizationPolicySchema, trustPresetSchema } from "./trust-policy.js";
 import { agentDesiredSkillSelectionSchema } from "./adapter-skills.js";
 import { validateAdapterModelEffort } from "../model-effort.js";
+import { morningReportSettingsSchema } from "../morning-report.js";
+
+const laneAProviderSlugSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .regex(
+    LANE_A_PROVIDER_SLUG_RE,
+    "A model host must be a short OpenRouter host name in lower case letters, digits, dots, dashes or underscores, for example deepinfra.",
+  );
+
+/**
+ * DUR-3997 / DUR-4395 / DUR-4400: a single plain http(s) endpoint with no
+ * query string, fragment, or sign-in part — the rule a stored model host
+ * address must follow, whether it is the live `laneABaseUrl` column or one
+ * entry of `adapterConfig.laneA.baseUrlByProvider`. Shared so the stash
+ * cannot be used to smuggle in a value the live field itself would refuse.
+ */
+export const laneABaseUrlValueSchema = z
+  .string()
+  .trim()
+  .max(LANE_A_BASE_URL_MAX_LENGTH)
+  .refine((raw) => {
+    try {
+      const url = new URL(raw);
+      if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+      // The server appends /chat/completions to this; a query string,
+      // fragment or sign-in part would ride along on every request.
+      if (url.search || url.hash || url.username || url.password) return false;
+      return true;
+    } catch {
+      return false;
+    }
+  }, "The model address must be a plain http(s) URL with no query string or sign-in part, for example https://models.example.com/v1.");
+
+const laneAProviderSlugListSchema = z
+  .array(laneAProviderSlugSchema)
+  .max(LANE_A_PROVIDER_ROUTING_MAX_ENTRIES, `List at most ${LANE_A_PROVIDER_ROUTING_MAX_ENTRIES} model hosts.`)
+  .optional();
+
+/**
+ * Quick-agent "model hosts" (agents.lane_a_provider_routing): which OpenRouter
+ * hosts a quick agent's calls may only use (`only`), try first (`order`) or
+ * never use (`ignore`), and whether OpenRouter may fall back to others.
+ * Used only when the quick agent's provider is OpenRouter. Null = no
+ * preference (OpenRouter picks), exactly as before the setting existed.
+ */
+export const laneAProviderRoutingSchema = z
+  .object({
+    only: laneAProviderSlugListSchema,
+    order: laneAProviderSlugListSchema,
+    ignore: laneAProviderSlugListSchema,
+    allowFallbacks: z.boolean().optional(),
+  })
+  .strict();
 
 /** Upper bound for agents.laneAInstructions (roughly 2k tokens); it is prepended to every quick-agent call. */
 export const LANE_A_INSTRUCTIONS_MAX_LENGTH = 8000;
+
+/** Upper bound for agents.laneAAssignedUserIds -- generous for any real company roster, cheap to validate. */
+export const LANE_A_ASSIGNED_USER_IDS_MAX_LENGTH = 500;
 
 /**
  * The quick-agent ("Lane A") fields, named once. Several places have to agree
@@ -51,6 +122,38 @@ export const QUICK_AGENT_FIELDS = [
   // key, exactly as before.
   "laneAProvider",
   "laneABaseUrl",
+  // How playful and varied the quick agent's replies are (sampling
+  // temperature). Null = the model host's own default. Board-only like the
+  // rest: it changes how the agent talks to people.
+  "laneATemperature",
+  // DUR-4367: "on" | "off" | null ("model default"). Off asks the model to
+  // skip its reasoning pass where the provider supports it — the fix for a
+  // local reasoning model answering noticeably slower through a quick agent
+  // than the same message sent to it directly. Board-only like the rest.
+  "laneAThinking",
+  // Which OpenRouter hosts the quick agent's model may (or may never) run on.
+  // Null = OpenRouter picks. Board-only like the rest: it decides where the
+  // company's prompts are sent.
+  "laneAProviderRouting",
+  // DUR-4017: the daily briefing settings (on/off, delivery time, sources to
+  // pull). Board-only like the rest of this list — an agent cannot switch its
+  // own daily report on or change what it is told to fetch and say.
+  "morningReportSettings",
+  // DUR-4070: the trust-level ceiling (limited/standard/full) and the list
+  // of company-member userIds this quick agent may answer (plus the
+  // company's owner, always). Board-only for the same reason as the rest of
+  // this list: an agent that could widen its own tool rights or its own
+  // audience has no ceiling at all.
+  "laneATrustLevel",
+  "laneAAssignedUserIds",
+  // DUR-4347: the backup-model pool, its two ordered fallback chains
+  // (no-answer / refusal) and keyword-routing rules. Board-only, same reason
+  // as the rest of this list: an agent that could add its own backup models
+  // could route itself to a provider/key the operator never picked.
+  "laneABackupModels",
+  "laneANoAnswerChainIds",
+  "laneARefusalChainIds",
+  "laneAKeywordRoutes",
 ] as const;
 export type QuickAgentField = (typeof QUICK_AGENT_FIELDS)[number];
 
@@ -65,6 +168,30 @@ export type QuickAgentField = (typeof QUICK_AGENT_FIELDS)[number];
  */
 export const PERSONA_JOB_FIELDS = ["personaId", "limits"] as const;
 export type PersonaJobField = (typeof PERSONA_JOB_FIELDS)[number];
+
+/**
+ * DUR-4013 step 3: how far, if at all, this agent may drive the browser
+ * worker. Board-only on every write path (create, hire, PATCH) — an agent
+ * that could switch this on for itself would have no gate at all, since the
+ * server trusts the switch, not the model, to decide whether the browser
+ * tool is even offered (see heartbeat.ts's MCP-library injection point). The
+ * guard in server/src/routes/agents.ts reads this list the same way it reads
+ * PERSONA_JOB_FIELDS/QUICK_AGENT_FIELDS.
+ */
+export const BROWSER_ACCESS_FIELDS = ["browserAccess"] as const;
+export type BrowserAccessField = (typeof BROWSER_ACCESS_FIELDS)[number];
+
+/**
+ * "off" — no browser tool offered at all (default). "browse_and_forms" —
+ * navigate/read/click/type/fill forms, no final booking/purchase step (the
+ * only level step 3 wires up). "book_and_buy" — adds the gated
+ * request_booking/request_purchase/confirm_final_step tools; accepted here
+ * so the column and its validator do not need another migration when step
+ * 4/6 lands, but nothing serves those tools yet.
+ */
+export const AGENT_BROWSER_ACCESS_LEVELS = ["off", "browse_and_forms", "book_and_buy"] as const;
+export type AgentBrowserAccessLevel = (typeof AGENT_BROWSER_ACCESS_LEVELS)[number];
+export const browserAccessSchema = z.enum(AGENT_BROWSER_ACCESS_LEVELS);
 
 /** Upper bound for agents.limits.notes, the free-text standing rules an agent reads. */
 export const AGENT_LIMITS_NOTES_MAX_LENGTH = 4000;
@@ -119,6 +246,45 @@ export function parseAgentLimits(value: unknown): AgentLimitsInput {
 export const laneAAdapterConfigSchema = z
   .object({
     apiKey: envBindingSecretRefSchema.nullable().optional(),
+    /**
+     * DUR-4378 follow-up (live incident, 2 Oct): adapterConfig.laneA.apiKey
+     * is one slot shared by every provider, so switching laneAProvider used
+     * to carry the previous provider's key forward (or drop it) instead of
+     * keeping each provider's own binding. server/src/routes/agents.ts
+     * stashes the outgoing provider's key here, keyed by provider, and
+     * restores the incoming provider's own key on every switch. This schema
+     * is `.strict()`, so it must list the field or any later PATCH that
+     * echoes adapterConfig.laneA back (e.g. a settings-form round trip) gets
+     * rejected with a 422 for an "unrecognized key".
+     */
+    apiKeyByProvider: z.record(z.enum(LANE_A_PROVIDERS), envBindingSecretRefSchema.nullable()).optional(),
+    /**
+     * DUR-4395: laneABaseUrl is a top-level agent column, not part of this
+     * blob, but it is just as provider-specific as apiKey -- openrouter and
+     * local both honor a stored custom base URL (resolveLaneABaseUrl).
+     * Without a per-provider stash here, switching providers restored the
+     * incoming provider's own apiKey (via apiKeyByProvider above) while
+     * leaving laneABaseUrl pointed at whatever host the previous provider
+     * had configured, sending the restored key as a bearer token to that
+     * stale host. server/src/routes/agents.ts stashes/restores
+     * laneABaseUrl here on every provider switch, same as apiKeyByProvider.
+     */
+    baseUrlByProvider: z.record(z.enum(LANE_A_PROVIDERS), laneABaseUrlValueSchema.nullable()).optional(),
+    /**
+     * "Can search the web": offers the quick agent web_search (with the
+     * company's Brave key, Connections → Web search) and read_web_page. Off
+     * when absent. Board-only: an agent-authenticated caller cannot change it
+     * (server/src/routes/agents.ts), so an agent cannot give itself the web.
+     */
+    webSearch: z.boolean().optional(),
+    /**
+     * DUR-4019: how far a quick agent may go with the browser worker — off,
+     * can navigate/fill forms, or may also spend a saved payment card / site
+     * login. Off when absent. Board-only, same reason as webSearch above: an
+     * agent-authenticated caller cannot raise its own level
+     * (server/src/routes/agents.ts).
+     */
+    browserAccess: z.enum(BROWSER_ACCESS_LEVELS).optional(),
   })
   .strict();
 
@@ -238,10 +404,19 @@ const adapterConfigSchema = z.record(z.string(), z.unknown()).superRefine((value
   if (laneAValue !== undefined && laneAValue !== null) {
     const parsed = laneAAdapterConfigSchema.safeParse(laneAValue);
     if (!parsed.success) {
+      const webSearchValue =
+        typeof laneAValue === "object" && laneAValue !== null ? (laneAValue as { webSearch?: unknown }).webSearch : undefined;
+      const browserAccessValue =
+        typeof laneAValue === "object" && laneAValue !== null ? (laneAValue as { browserAccess?: unknown }).browserAccess : undefined;
+      let message = "The quick agent's key must be a saved secret picked from the company's secrets — a key cannot be typed in here.";
+      if (webSearchValue !== undefined && typeof webSearchValue !== "boolean") {
+        message = "The quick agent's \"Can search the web\" switch must be on or off (true or false).";
+      } else if (browserAccessValue !== undefined && !BROWSER_ACCESS_LEVELS.includes(browserAccessValue as never)) {
+        message = `The quick agent's "Browser access" setting must be one of: ${BROWSER_ACCESS_LEVELS.join(", ")}.`;
+      }
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message:
-          "The quick agent's key must be a saved secret picked from the company's secrets — a key cannot be typed in here.",
+        message,
         path: ["laneA"],
       });
     }
@@ -303,6 +478,7 @@ const agentModelProfileConfigSchema = z.object({
 export const agentRuntimeConfigSchema = z.object({
   modelProfiles: z.object({
     cheap: agentModelProfileConfigSchema.optional(),
+    planner: agentModelProfileConfigSchema.optional(),
   }).strict().optional(),
   // DUR-68: if this agent stops handling a customer-inbox task, tickTimers'
   // customer-inbox-handoff sweep reassigns it to reportsTo after this many
@@ -323,6 +499,10 @@ function refineAgentModelEffort(
     runtimeConfig?: unknown;
     laneAProvider?: string | null;
     laneAModel?: string | null;
+    laneABackupModels?: unknown;
+    laneANoAnswerChainIds?: unknown;
+    laneARefusalChainIds?: unknown;
+    laneAKeywordRoutes?: unknown;
   },
   ctx: z.RefinementCtx,
 ) {
@@ -339,6 +519,18 @@ function refineAgentModelEffort(
   const laneAIssue = laneAProviderModelIssue(value);
   if (laneAIssue) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: laneAIssue, path: ["laneAModel"] });
+  }
+  // DUR-4347: a fallback-chain id or keyword-route backupId must reference an
+  // entry actually in this same patch's backup pool. Runs here (not on any
+  // one field's own schema) because the pool and its chains/routes are
+  // siblings on this same object.
+  for (const issue of laneABackupRoutingIssues({
+    laneABackupModels: value.laneABackupModels as never,
+    laneANoAnswerChainIds: value.laneANoAnswerChainIds as never,
+    laneARefusalChainIds: value.laneARefusalChainIds as never,
+    laneAKeywordRoutes: value.laneAKeywordRoutes as never,
+  })) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: issue.message, path: issue.path });
   }
   const runtimeConfig = value.runtimeConfig;
   const modelProfiles =
@@ -359,7 +551,7 @@ function refineAgentModelEffort(
     if (profileError) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: `${profileKey === "cheap" ? "Cheap model" : profileKey} profile: ${profileError}`,
+        message: `${profileKey === "cheap" ? "Cheap model" : profileKey === "planner" ? "Planner model" : profileKey} profile: ${profileError}`,
         path: ["runtimeConfig", "modelProfiles", profileKey, "adapterConfig"],
       });
     }
@@ -432,24 +624,7 @@ const createAgentObjectSchema = z.object({
   laneAProvider: z.enum(LANE_A_PROVIDERS).nullable().optional(),
   // DUR-3997: OpenAI-compatible endpoint for OpenRouter / a local model.
   // Ignored for the fixed providers. http(s) only.
-  laneABaseUrl: z
-    .string()
-    .trim()
-    .max(LANE_A_BASE_URL_MAX_LENGTH)
-    .refine((raw) => {
-      try {
-        const url = new URL(raw);
-        if (url.protocol !== "http:" && url.protocol !== "https:") return false;
-        // The server appends /chat/completions to this; a query string,
-        // fragment or sign-in part would ride along on every request.
-        if (url.search || url.hash || url.username || url.password) return false;
-        return true;
-      } catch {
-        return false;
-      }
-    }, "The model address must be a plain http(s) URL with no query string or sign-in part, for example https://models.example.com/v1.")
-    .nullable()
-    .optional(),
+  laneABaseUrl: laneABaseUrlValueSchema.nullable().optional(),
   laneAMaxOutputTokens: z
     .number()
     .int()
@@ -464,12 +639,55 @@ const createAgentObjectSchema = z.object({
     .max(LANE_A_MAX_TRANSFORM_DAILY_CALL_CAP)
     .nullable()
     .optional(),
+  // "Creativity": sampling temperature sent on every quick-agent model call.
+  // Null = send none (the model host's default). Claude calls are clamped to
+  // 1 at call time; see laneATemperatureForCall (and not sent at all to a model that refuses one).
+  laneATemperature: z
+    .number()
+    .finite()
+    .min(LANE_A_MIN_TEMPERATURE, `Creativity must be between ${LANE_A_MIN_TEMPERATURE} and ${LANE_A_MAX_TEMPERATURE}.`)
+    .max(LANE_A_MAX_TEMPERATURE, `Creativity must be between ${LANE_A_MIN_TEMPERATURE} and ${LANE_A_MAX_TEMPERATURE}.`)
+    .nullable()
+    .optional(),
+  // "Thinking": "on" | "off" | null ("model default"). Off sends
+  // reasoning_effort: "none" (or the provider-native equivalent) where the
+  // provider/model is known to accept it; see laneAThinkingForCall.
+  laneAThinking: z.enum(LANE_A_THINKING_MODES).nullable().optional(),
+  // Which OpenRouter hosts the model may (or may never) run on. Null = no
+  // preference. Ignored at call time for every provider but OpenRouter.
+  laneAProviderRouting: laneAProviderRoutingSchema.nullable().optional(),
   // DUR-4000 (PERSONA_JOB_FIELDS): which person does this job, and the
   // job's own limits. Board-only on create, hire and PATCH — enforced in
   // server/src/routes/agents.ts (assertNoAgentPersonaJobFieldMutation), not
   // here. The persona must belong to the same company; the service checks.
   personaId: z.string().uuid().nullable().optional(),
   limits: agentLimitsSchema.optional(),
+  // DUR-4017 (QUICK_AGENT_FIELDS): the daily briefing settings. Board-only on
+  // create, hire and PATCH — enforced in server/src/routes/agents.ts the same
+  // way the rest of this list is. Null/absent = never configured.
+  morningReportSettings: morningReportSettingsSchema.nullable().optional(),
+  // DUR-4013 (BROWSER_ACCESS_FIELDS): board-only on create, hire and PATCH —
+  // enforced in server/src/routes/agents.ts (assertNoAgentBrowserAccessFieldMutation).
+  browserAccess: browserAccessSchema.optional(),
+  // DUR-4070 (QUICK_AGENT_FIELDS): the trust-level ceiling. Left out entirely
+  // => the column default ("full"), i.e. exactly today's behaviour.
+  laneATrustLevel: z.enum(LANE_A_TRUST_LEVELS).optional(),
+  // DUR-4070 (QUICK_AGENT_FIELDS): company-member userIds this quick agent
+  // may answer, besides the company's owner. Left out entirely => the column
+  // default ([]), i.e. "the owner only".
+  laneAAssignedUserIds: z
+    .array(z.string().trim().min(1).max(200))
+    .max(LANE_A_ASSIGNED_USER_IDS_MAX_LENGTH)
+    .optional(),
+  // DUR-4347 (QUICK_AGENT_FIELDS): the backup-model pool and its two ordered
+  // fallback chains, plus keyword-routing rules. Left out entirely => the
+  // column defaults ([]), i.e. today's single-model behaviour. Cross-field
+  // fit (chain/route ids must exist in the pool) is checked in
+  // refineAgentModelEffort below via laneABackupRoutingIssues.
+  laneABackupModels: laneABackupModelsSchema.optional(),
+  laneANoAnswerChainIds: laneAChainIdsSchema.optional(),
+  laneARefusalChainIds: laneAChainIdsSchema.optional(),
+  laneAKeywordRoutes: laneAKeywordRoutesSchema.optional(),
 });
 
 export const createAgentSchema = createAgentObjectSchema.superRefine(refineAgentModelEffort);

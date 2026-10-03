@@ -25,6 +25,7 @@ BRIDGE_PATH = os.environ.get("TELEGRAM_BRIDGE_UNDER_TEST") or os.path.join(HERE,
 spec = importlib.util.spec_from_file_location("telegram_bridge_chat", BRIDGE_PATH)
 bridge = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bridge)
+BRIDGE_WAIT = bridge.wait_for_paperclip
 
 OPERATOR = 111111
 OPERATOR2 = 222222
@@ -87,8 +88,11 @@ class BridgeChatTestCase(unittest.TestCase):
             mock.patch.object(bridge, "cli", return_value=None),
             mock.patch.object(bridge, "cli_env", return_value=None),
             mock.patch.object(bridge, "save_state"),
+            mock.patch.object(bridge, "paperclip_ready", return_value=True),
+            mock.patch.object(bridge, "container_started_at", return_value="2026-09-27T12:00:00Z"),
+            mock.patch.object(bridge, "wait_for_paperclip", return_value=True),
         ]
-        self.tg, self.cli, self.cli_env, _ = [p.start() for p in self.patches]
+        self.tg, self.cli, self.cli_env, _, self.ready, self.started_at, self.wait = [p.start() for p in self.patches]
 
     def tearDown(self):
         for p in self.patches:
@@ -192,6 +196,48 @@ class QuickAnswerTests(BridgeChatTestCase):
         self.assertIn("handed this over as a task", reply)
         self.assertIn("DUR-5", reply)
 
+    def test_a_quick_answer_setup_mistake_is_explained_and_not_turned_into_a_task(self):
+        # 27 Sep: model "DeepSeek-V3" (missing "deepseek-ai/") was refused by
+        # Hugging Face, and the message quietly became a full Claude task.
+        self.cli_env.return_value = refused(
+            422, "LANE_A_SETUP_REFUSED",
+            "Local model refused this quick agent's request: The requested model 'DeepSeek-V3' does not exist. "
+            "Check the model name and the address in this agent's quick answer settings.")
+
+        bridge.handle_message(self.state, BOT, message(OPERATOR, "time for some more testing"))
+
+        self.assertEqual(self.cli_env.call_count, 1)
+        self.assertEqual(self.tasks(), {})
+        reply = self.texts(OPERATOR)[-1]
+        self.assertIn("set up wrong", reply)
+        self.assertIn("no task was made", reply)
+        self.assertIn("'DeepSeek-V3' does not exist", reply)
+
+    def test_a_refused_key_is_explained_and_not_turned_into_a_task(self):
+        self.cli_env.return_value = refused(503, "LANE_A_KEY_REFUSED", "Local model refused this quick agent's key.")
+
+        bridge.handle_message(self.state, BOT, message(OPERATOR, "hello"))
+
+        self.assertEqual(self.cli_env.call_count, 1)
+        self.assertIn("set up wrong", self.texts(OPERATOR)[-1])
+
+    def test_a_missing_model_is_explained_and_not_turned_into_a_task(self):
+        # DUR-4353: switching a quick agent's provider in the settings page
+        # clears its model (the old one doesn't fit the new provider), and
+        # every message after that quietly became a full Claude task instead
+        # of telling the operator the model was never picked.
+        self.cli_env.return_value = refused(
+            503, "LANE_A_MODEL_MISSING", "This quick agent has no model picked for OpenRouter.")
+
+        bridge.handle_message(self.state, BOT, message(OPERATOR, "what's the weather in Oslo?"))
+
+        self.assertEqual(self.cli_env.call_count, 1)
+        self.assertEqual(self.tasks(), {})
+        reply = self.texts(OPERATOR)[-1]
+        self.assertIn("set up wrong", reply)
+        self.assertIn("no task was made", reply)
+        self.assertIn("no model picked for OpenRouter", reply)
+
     def test_any_other_refusal_is_reported_and_not_retried(self):
         self.cli_env.return_value = refused(404, None, "Agent not found")
 
@@ -209,6 +255,20 @@ class QuickAnswerTests(BridgeChatTestCase):
         sent = self.sends(OPERATOR)
         self.assertEqual([s["text"] for s in sent], [tricky])
         self.assertNotIn("parse_mode", sent[0])
+
+    def test_dur_4371_an_empty_quick_answer_with_no_pictures_says_the_model_gave_no_answer(self):
+        # DUR-4371: the server now retries and falls back on its own, so this
+        # bridge-side wording is only a belt-and-suspenders fallback for a
+        # response shape the server missed. It must never read as the agent
+        # dismissing the person (the old "had nothing to add" wording did).
+        self.cli_env.return_value = quick(CONV1, "")
+
+        bridge.handle_message(self.state, BOT, message(OPERATOR, "show me in looks of maja night"))
+
+        text = self.texts(OPERATOR)[-1]
+        self.assertNotIn("had nothing to add", text)
+        self.assertIn("gave no answer", text)
+        self.assertIn("CEO", text)
 
     def test_a_long_quick_answer_is_split_into_messages_telegram_accepts(self):
         self.cli_env.return_value = quick(CONV1, "A long line of the answer 😀.\n" * 1000)
@@ -443,6 +503,11 @@ class SharedContractTests(unittest.TestCase):
         for code in bridge.CONVERSATION_ENDED_CODES:
             self.assertIn(f'"{code}"', src)
 
+    def test_the_setup_error_codes_the_bridge_reacts_to_still_exist_on_the_server(self):
+        src = self.read("server", "src", "services", "lane-a.ts")
+        for code in bridge.QUICK_SETUP_ERROR_CODES:
+            self.assertIn(f'"{code}"', src)
+
     def test_the_cli_commands_and_options_the_bridge_uses_exist(self):
         src = self.read("cli", "src", "commands", "client", "chat.ts")
         for needle in ('.command("send")', '.command("answers")', '"-C, --company-id <id>"',
@@ -460,6 +525,73 @@ class SharedContractTests(unittest.TestCase):
         statuses = set(re.findall(r'"([a-z_]+)"', block))
         for status in bridge.ANSWER_FINISHED_STATUSES + bridge.ANSWER_WAITING_STATUSES:
             self.assertIn(status, statuses)
+
+
+class PaperclipRestartTests(BridgeChatTestCase):
+    """27 Sep: a message sent while Paperclip restarted for a deploy failed at
+    once with "I didn't hear back from Paperclip"."""
+
+    def test_a_message_during_a_restart_waits_for_paperclip_then_is_answered(self):
+        self.ready.return_value = False
+        self.cli_env.return_value = quick(CONV1, "Here you go.")
+
+        bridge.handle_message(self.state, BOT, message(OPERATOR, "make a picture of a beach"))
+
+        self.wait.assert_called_once()
+        self.assertEqual(len(self.cli_env.call_args_list), 1)
+        texts = self.texts(OPERATOR)
+        self.assertIn("Paperclip is restarting", texts[0])
+        self.assertEqual(texts[-1], "Here you go.")
+
+    def test_when_paperclip_does_not_come_back_the_message_is_not_sent(self):
+        self.ready.return_value = False
+        self.wait.return_value = False
+
+        bridge.handle_message(self.state, BOT, message(OPERATOR, "make a picture of a beach"))
+
+        self.cli_env.assert_not_called()
+        self.assertIn("still not back", self.texts(OPERATOR)[-1])
+        self.assertIn("did not get your message", self.texts(OPERATOR)[-1])
+
+    def test_a_restart_during_the_answer_is_named_and_nothing_is_resent(self):
+        self.started_at.side_effect = ["2026-09-27T12:00:00Z", "2026-09-27T12:47:07Z"]
+        self.cli_env.return_value = None
+
+        bridge.handle_message(self.state, BOT, message(OPERATOR, "make a picture of a beach"))
+
+        self.assertEqual(len(self.cli_env.call_args_list), 1)
+        self.assertIn("Paperclip restarted while", self.texts(OPERATOR)[-1])
+
+    def test_no_answer_without_a_restart_keeps_the_careful_message(self):
+        self.cli_env.return_value = None
+
+        bridge.handle_message(self.state, BOT, message(OPERATOR, "how many agents are working?"))
+
+        self.assertIn("I didn't hear back from Paperclip", self.texts(OPERATOR)[-1])
+
+    def test_wait_for_paperclip_polls_until_ready(self):
+        clock = [0.0]
+        sleeps = []
+
+        def fake_sleep(seconds):
+            sleeps.append(seconds)
+            clock[0] += seconds
+
+        self.ready.side_effect = [False, False, True]
+        mock.patch.object(bridge, "RESTART_WAIT_SECONDS", 150).start()
+        self.addCleanup(mock.patch.stopall)
+        self.assertTrue(BRIDGE_WAIT(sleep=fake_sleep, now=lambda: clock[0]))
+        self.assertEqual(len(sleeps), 3)
+
+    def test_wait_for_paperclip_gives_up_at_the_deadline(self):
+        clock = [0.0]
+
+        def fake_sleep(seconds):
+            clock[0] += seconds
+
+        self.ready.return_value = False
+        self.assertFalse(BRIDGE_WAIT(sleep=fake_sleep, now=lambda: clock[0]))
+        self.assertGreaterEqual(clock[0], bridge.RESTART_WAIT_SECONDS)
 
 
 if __name__ == "__main__":

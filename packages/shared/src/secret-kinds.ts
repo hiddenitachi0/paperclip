@@ -27,12 +27,14 @@ export type SecretKindProvider =
   | "github"
   | "shopify"
   | "fiken"
+  | "paperless_ngx"
   | "telegram"
   | "slack"
+  | "brave"
   | "other";
 
 /** How the Secrets screens group kinds. */
-export type SecretKindCategory = "ai_provider" | "data_source" | "vcs" | "messaging" | "other";
+export type SecretKindCategory = "ai_provider" | "data_source" | "vcs" | "messaging" | "payments" | "other";
 
 export interface SecretKindDescriptor {
   /** Stored in company_secrets.kind. Stable; never rename. */
@@ -72,8 +74,15 @@ export const SECRET_KIND_IDS = [
   "github_token",
   "shopify_admin_token",
   "fiken_api_token",
+  "paperless_ngx_api_token",
   "telegram_bot_token",
   "slack_bot_token",
+  "brave_search_api_key",
+  "sftp_password",
+  "sftp_private_key",
+  "payment_card_single_use",
+  "site_login",
+  "mail_imap_password",
   "other",
 ] as const;
 
@@ -85,6 +94,7 @@ export const SECRET_KIND_CATEGORY_LABELS: Record<SecretKindCategory, string> = {
   data_source: "Data sources",
   vcs: "Code hosting",
   messaging: "Messaging",
+  payments: "Payments and logins",
   other: "Other",
 };
 
@@ -94,6 +104,7 @@ export const SECRET_KIND_CATEGORY_ORDER: readonly SecretKindCategory[] = [
   "data_source",
   "vcs",
   "messaging",
+  "payments",
   "other",
 ];
 
@@ -186,6 +197,14 @@ export const SECRET_KINDS: readonly SecretKindDescriptor[] = [
     testable: false,
   },
   {
+    id: "paperless_ngx_api_token",
+    label: "paperless-ngx API token",
+    description: "Token for this company's own paperless-ngx container, used by the Documents data source.",
+    provider: "paperless_ngx",
+    category: "data_source",
+    testable: false,
+  },
+  {
     id: "telegram_bot_token",
     label: "Telegram bot token",
     description: "Token from BotFather for a Telegram bot that talks to one agent.",
@@ -202,6 +221,59 @@ export const SECRET_KINDS: readonly SecretKindDescriptor[] = [
     category: "messaging",
     valuePattern: /^xox[abp]-[A-Za-z0-9-]{10,}$/,
     envKey: "SLACK_BOT_TOKEN",
+    testable: false,
+  },
+  {
+    id: "brave_search_api_key",
+    label: "Brave Search API key",
+    description:
+      "Key from api-dashboard.search.brave.com. Lets quick agents that may search the web look things up " +
+      "(picked under Connections → Web search).",
+    provider: "brave",
+    category: "data_source",
+    // No envKey: the key is only ever read from the company secret picked on
+    // Connections -> Web search, and migration 0171's backfill (already applied)
+    // lists every kind that has one.
+    testable: false,
+  },
+  {
+    id: "sftp_password",
+    label: "SFTP password",
+    description: "Password for an SFTP deploy target (DUR-4068), bound to the one agent allowed to deploy over SFTP.",
+    provider: "other",
+    category: "other",
+    testable: false,
+  },
+  {
+    id: "sftp_private_key",
+    label: "SFTP private key",
+    description: "SSH private key for an SFTP deploy target (DUR-4068), preferred over a password where the host supports it.",
+    provider: "other",
+    category: "other",
+    testable: false,
+  },
+  {
+    id: "payment_card_single_use",
+    label: "Payment card (single-use)",
+    description: "A card an agent may spend from, one purchase at a time, via the browser worker.",
+    provider: "other",
+    category: "payments",
+    testable: false,
+  },
+  {
+    id: "site_login",
+    label: "Website login",
+    description: "A saved username and password an agent may sign in with, via the browser worker.",
+    provider: "other",
+    category: "payments",
+    testable: false,
+  },
+  {
+    id: "mail_imap_password",
+    label: "Email inbox password (IMAP)",
+    description: "An account or app password for reading an email inbox read-only, used by the mail secretary duty.",
+    provider: "other",
+    category: "data_source",
     testable: false,
   },
   {
@@ -264,6 +336,21 @@ export function secretKindEnvKeyPairs(): ReadonlyArray<readonly [string, SecretK
 
 export function isTestableSecretKind(id: string | null | undefined): boolean {
   return getSecretKind(id)?.testable ?? false;
+}
+
+/**
+ * Kinds whose raw value must never be bound into an agent's environment,
+ * adapter config field, or MCP/tool config, and must never be resolved by
+ * any generic runtime-resolution path -- only a dedicated, audited reader
+ * (paymentCardService.resolveForFill for payment_card_single_use, and the
+ * equivalent for site_login) may ever see the value. Checked by kind, not by
+ * binding row, so a differently-named row can never slip past the rule.
+ */
+export const SECRET_KINDS_NEVER_BINDABLE: readonly SecretKind[] = ["payment_card_single_use", "site_login"];
+
+export function isSecretKindBindable(id: string | null | undefined): boolean {
+  if (!id) return true;
+  return !SECRET_KINDS_NEVER_BINDABLE.includes(id as SecretKind);
 }
 
 /** Kinds grouped for a dropdown, in display order, empty categories left out. */

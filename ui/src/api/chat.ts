@@ -14,11 +14,34 @@ export interface ChatClassification {
 
 export interface ChatSendMessageResult {
   lane: "a" | "b";
-  result: { conversationId: string; response: string; turnCount: number; stopReason: string | null } | null;
+  result: {
+    conversationId: string;
+    response: string;
+    turnCount: number;
+    stopReason: string | null;
+    /** What the quick agent did; a started task carries `task`. */
+    actions?: Array<{ tool: string; summary: string; ok: boolean; task?: { issueId: string; identifier: string | null; title: string } }>;
+  } | null;
   taskRef: { issueId: string; identifier: string; status: string } | null;
 }
 
+/** One task's status and the agent's latest answer (GET /companies/:id/issue-answers). */
+export interface ChatTaskAnswer {
+  id: string;
+  companyId: string;
+  identifier: string | null;
+  title: string;
+  status: string;
+  answer: { commentId: string; authorAgentId: string | null; body: string; createdAt: string } | null;
+  /** The task's result page (issue document "result"), when it has one. */
+  resultDocument: { key: string; title: string | null } | null;
+}
+
 export const chatApi = {
+  answers: (companyId: string, issueIds: string[]) =>
+    api.get<{ issues: ChatTaskAnswer[] }>(
+      `/companies/${companyId}/issue-answers?ids=${encodeURIComponent(issueIds.join(","))}`,
+    ),
   classify: (companyId: string, message: string) =>
     api.post<ChatClassification>("/chat/classify", { companyId, message }),
   sendMessage: (

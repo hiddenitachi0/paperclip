@@ -126,7 +126,20 @@ export const LANE_A_PROVIDER_CATALOGUE: Record<LaneAProvider, LaneAProviderDescr
     defaultModel: null,
     defaultBaseUrl: "https://openrouter.ai/api/v1",
     baseUrlEditable: true,
-    models: {},
+    // DUR-4353: freeForm providers accept any model id typed in (see
+    // laneAModelIssueForProvider below), but an id with no entry here prices
+    // at 0 (laneAModelPricing), so a company's real OpenRouter spend reads as
+    // free. Priced here are the ids Paperclip has actually been pointed at in
+    // production; add more as they come up. Price is OpenRouter's lowest-cost
+    // host for the model (2 Oct 2026: DeepInfra fp8), since that is the host
+    // OpenRouter picks by default with no "model hosts" restriction set.
+    models: {
+      "mistralai/mistral-small-3.2-24b-instruct": {
+        label: "Mistral Small 3.2 24B",
+        inputUsdPerMillion: 0.075,
+        outputUsdPerMillion: 0.2,
+      },
+    },
   },
   local: {
     label: "Local model",
@@ -275,6 +288,214 @@ export const LANE_A_MIN_TRANSFORM_DAILY_CALL_CAP = 1;
 export const LANE_A_MAX_TRANSFORM_DAILY_CALL_CAP = 100_000;
 
 /**
+ * "Creativity" (sampling temperature) per quick agent. Null = send nothing and
+ * let the model host use its own default, which is what every quick agent did
+ * before this setting existed. Some hosts' defaults (e.g. Mistral Small on
+ * OpenRouter) make a playful chat persona flat and dry; this is the dial.
+ *
+ * 0-1.5 is the range the operator may store. OpenAI-compatible hosts accept up
+ * to 2, but past ~1.5 most models drift into nonsense, so the store stops
+ * there. Claude only accepts 0-1, so a Claude call is clamped to 1 instead of
+ * refused.
+ */
+export const LANE_A_MIN_TEMPERATURE = 0;
+export const LANE_A_MAX_TEMPERATURE = 1.5;
+export const LANE_A_ANTHROPIC_MAX_TEMPERATURE = 1;
+
+/** The named steps the quick-agent card offers. Plain words for the operator. */
+export const LANE_A_TEMPERATURE_PRESETS = [
+  { value: 0.2, label: "Precise" },
+  { value: 0.6, label: "Balanced" },
+  { value: 0.9, label: "Lively" },
+  { value: 1.2, label: "Very lively" },
+] as const;
+
+/**
+ * Claude models that still take a temperature. Claude Sonnet 5 and Opus 5
+ * (and every newer Claude) removed sampling parameters: sending one is a 400,
+ * which would turn "make it livelier" into "the chat stopped working". So
+ * Claude is an allow-list, not a deny-list: a Claude model added later is
+ * assumed to refuse until someone checks.
+ */
+const LANE_A_ANTHROPIC_TEMPERATURE_MODELS: ReadonlySet<string> = new Set(["claude-haiku-4-5"]);
+
+/**
+ * Whether this provider/model is known to accept a temperature. False means
+ * the model decides for itself and the setting is not sent. OpenAI's
+ * reasoning models (o-series, gpt-5) refuse anything but their default.
+ * OpenRouter, Google and local servers accept it (OpenRouter drops a
+ * parameter a model does not support); the call path still retries once
+ * without it if a host refuses.
+ */
+export function laneAModelAcceptsTemperature(provider: unknown, model: unknown): boolean {
+  const key = normalizeLaneAProvider(provider);
+  const resolved = resolveLaneAModelForProvider(key, model);
+  if (key === "anthropic") return resolved !== null && LANE_A_ANTHROPIC_TEMPERATURE_MODELS.has(resolved);
+  if (key === "openai") return resolved === null || !/^(o\d|gpt-5)/i.test(resolved);
+  return true;
+}
+
+/**
+ * The temperature one call is actually made with, or null to send none.
+ * Anything that is not a finite number in range is treated as "not set"
+ * rather than forwarded (a bad value must never break a chat), and so is a
+ * model known not to accept one. A Claude call is clamped to Claude's 0-1.
+ */
+export function laneATemperatureForCall(provider: unknown, model: unknown, temperature: unknown): number | null {
+  if (typeof temperature !== "number" || !Number.isFinite(temperature)) return null;
+  if (temperature < LANE_A_MIN_TEMPERATURE || temperature > LANE_A_MAX_TEMPERATURE) return null;
+  if (!laneAModelAcceptsTemperature(provider, model)) return null;
+  if (normalizeLaneAProvider(provider) === "anthropic") {
+    return Math.min(temperature, LANE_A_ANTHROPIC_MAX_TEMPERATURE);
+  }
+  return temperature;
+}
+
+/**
+ * DUR-4367: quick-agent "Thinking" (on / off / model default). Off asks the
+ * model to skip its reasoning pass — for a local reasoning model (Ollama's
+ * huihui_ai/qwen3-abliterated, for example) that is most of the latency: the
+ * same one-line message measured 4.6s with thinking on and 0.3s with it off.
+ * "model default" (null, the default for every quick agent that existed
+ * before this setting) sends nothing and leaves the model's own behaviour
+ * alone, exactly as before this setting existed. "on" is also a no-op on the
+ * wire today: every model this reaches already thinks by default when it is
+ * able to, so there is nothing additional to ask for yet.
+ */
+export const LANE_A_THINKING_MODES = ["on", "off"] as const;
+export type LaneAThinkingMode = (typeof LANE_A_THINKING_MODES)[number];
+
+/**
+ * Models known to accept an OpenAI-style `reasoning_effort` field. This is an
+ * allow-list, not a deny-list, on purpose: a strict host (plain OpenAI, for a
+ * model that was never a reasoning model) answers an unrecognised field with
+ * a 400, which would turn "turn thinking off" into "the chat stopped
+ * working". OpenRouter and a local OpenAI-compatible server (Ollama, LM
+ * Studio, llama.cpp, vLLM) are the cases this setting exists for. A local
+ * server is the operator's own and this is exactly the field the qwen3 case
+ * needs. OpenRouter is NOT reliably lenient about it, despite earlier belief
+ * here: DUR-4391 (3 Oct) found DeepInfra's Mistral Small has no reasoning
+ * parameter at all and OpenRouter answered 404 "No endpoints found that can
+ * handle the requested parameters" rather than silently dropping it. This
+ * function still returns true for every OpenRouter model -- it is still an
+ * allow-list, just a wide one -- and the actual safety net is the call-site
+ * retry in lane-a.ts's completeRound()/callTransformModel(), which drops
+ * `reasoning_effort` (before temperature, and well before ever blaming tools)
+ * on exactly that error. OpenAI's own reasoning models (o-series, gpt-5)
+ * already take this field for their effort level, so "off" maps onto it too.
+ * Google's OpenAI-compatible shim is not on this list: unlike OpenRouter it is
+ * not known to tolerate an extra field, so nothing is sent there until that is
+ * checked. Anthropic never reaches this function (extended thinking is a
+ * different, opt-in wire shape it does not use); see laneAThinkingForCall.
+ */
+export function laneAModelAcceptsReasoningEffort(provider: unknown, model: unknown): boolean {
+  const key = normalizeLaneAProvider(provider);
+  if (key === "openrouter" || key === "local") return true;
+  if (key === "openai") {
+    const resolved = resolveLaneAModelForProvider(key, model);
+    return resolved !== null && /^(o\d|gpt-5)/i.test(resolved);
+  }
+  return false;
+}
+
+/**
+ * The `reasoning_effort` value to send for this provider/model, or null to
+ * send none. Only "off" ever sends anything: "model default" (null/absent)
+ * and "on" both leave the model's own behaviour alone, and a model not known
+ * to accept the field gets nothing regardless of the setting (a bad value
+ * must never break a chat).
+ */
+export function laneAThinkingForCall(provider: unknown, model: unknown, thinking: unknown): "none" | null {
+  if (thinking !== "off") return null;
+  if (!laneAModelAcceptsReasoningEffort(provider, model)) return null;
+  return "none";
+}
+
+/**
+ * Quick-agent "model hosts" (OpenRouter only). OpenRouter can serve the same
+ * model from several hosts ("providers" in its API, e.g. deepinfra, venice),
+ * and not every host supports tools. The operator can pin the hosts a quick
+ * agent's calls may use, the order to try them in, and hosts never to use.
+ * Stored on agents.lane_a_provider_routing; null = OpenRouter picks, as before.
+ */
+export interface LaneAProviderRouting {
+  /** Use only these hosts. */
+  only?: string[];
+  /** Try these hosts first, in this order. */
+  order?: string[];
+  /** Never use these hosts. */
+  ignore?: string[];
+  /** Whether OpenRouter may fall back to other hosts when the listed ones fail. */
+  allowFallbacks?: boolean;
+}
+
+/** An OpenRouter host slug, lower case: "deepinfra", "mistral", "together", "novita". */
+export const LANE_A_PROVIDER_SLUG_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+/** At most this many hosts in any one list. */
+export const LANE_A_PROVIDER_ROUTING_MAX_ENTRIES = 10;
+
+const LANE_A_PROVIDER_ROUTING_LISTS = ["only", "order", "ignore"] as const;
+
+function cleanSlugList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out: string[] = [];
+  for (const raw of value) {
+    if (typeof raw !== "string") continue;
+    const slug = raw.trim().toLowerCase();
+    if (!LANE_A_PROVIDER_SLUG_RE.test(slug) || out.includes(slug)) continue;
+    out.push(slug);
+    if (out.length >= LANE_A_PROVIDER_ROUTING_MAX_ENTRIES) break;
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+/**
+ * The stored routing, cleaned, or null when there is nothing to send.
+ * Defensive on purpose: the column is jsonb, and a bad stored value must
+ * never break a chat, so anything malformed is dropped rather than forwarded.
+ */
+export function normalizeLaneAProviderRouting(value: unknown): LaneAProviderRouting | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const out: LaneAProviderRouting = {};
+  for (const key of LANE_A_PROVIDER_ROUTING_LISTS) {
+    const list = cleanSlugList(record[key]);
+    if (list) out[key] = list;
+  }
+  if (typeof record.allowFallbacks === "boolean") out.allowFallbacks = record.allowFallbacks;
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/**
+ * The routing one call is actually made with: OpenRouter only (every other
+ * provider has one host, so there is nothing to choose), null otherwise.
+ */
+export function laneAProviderRoutingForCall(provider: unknown, routing: unknown): LaneAProviderRouting | null {
+  if (normalizeLaneAProvider(provider) !== "openrouter") return null;
+  return normalizeLaneAProviderRouting(routing);
+}
+
+/**
+ * Split what an operator typed into a host field ("deepinfra, Mistral") into
+ * slugs. `invalid` lists the entries that are not a host name, so the form
+ * can say which one it did not understand instead of silently dropping it.
+ */
+export function parseLaneAProviderSlugList(text: string): { slugs: string[]; invalid: string[] } {
+  const slugs: string[] = [];
+  const invalid: string[] = [];
+  for (const part of text.split(/[,\s]+/)) {
+    const slug = part.trim().toLowerCase();
+    if (slug.length === 0) continue;
+    if (!LANE_A_PROVIDER_SLUG_RE.test(slug)) {
+      invalid.push(part.trim());
+      continue;
+    }
+    if (!slugs.includes(slug)) slugs.push(slug);
+  }
+  return { slugs, invalid };
+}
+
+/**
  * What a day of transform calls could cost this quick agent if every call ran
  * at the limit, in whole US cents.
  *
@@ -329,3 +550,91 @@ export function laneATransformWorstCaseDailyCents(input: {
  * would fall out of all three at once.
  */
 export const LANE_A_TRANSFORM_BILLING_CODE = "lane_a_transform";
+
+// ─── DUR-4347: quick-agent backup models, fallback chains & keyword routing ──
+//
+// A quick agent's "main" model (laneAProvider/laneAModel/laneABaseUrl/
+// laneATemperature) stays exactly as it was. These four fields add an
+// optional pool of up to 5 backups plus two ordered fallback chains (tried
+// when the main/current model does not answer, or when it refuses) and a set
+// of keyword-routing rules (phrases that pick a different starting model).
+// Every quick agent that existed before this has all four at their defaults
+// ([]), i.e. today's single-model behaviour, unchanged.
+
+/** At most this many backup models in one quick agent's pool. */
+export const LANE_A_BACKUP_MODELS_MAX = 5;
+/** At most this many phrases on one keyword-routing rule. */
+export const LANE_A_KEYWORD_ROUTE_PHRASES_MAX = 20;
+/** Longest a single keyword-routing phrase may be. */
+export const LANE_A_KEYWORD_ROUTE_PHRASE_MAX_LENGTH = 80;
+/**
+ * At most this many keyword-routing rules. Not stated in the acceptance
+ * criteria directly; bounded anyway so a jsonb column cannot be grown without
+ * limit. Generous next to the 5-entry pool every rule routes into.
+ */
+export const LANE_A_KEYWORD_ROUTES_MAX = 50;
+/** Longest a pool entry's or keyword-route's own `id` may be (nanoid-shaped). */
+export const LANE_A_BACKUP_ID_MAX_LENGTH = 64;
+
+/**
+ * One entry in a quick agent's backup-model pool. `id` is stable across edits
+ * (assigned once, e.g. nanoid) so chain-id arrays and keyword routes can keep
+ * referencing it after the operator reorders or edits other entries.
+ * Resolved through the same credential/settings path as the main model
+ * (resolveLaneASettings in server/src/services/lane-a.ts) -- a backup is
+ * never a second, looser set of rules, only a second set of coordinates.
+ */
+export interface LaneABackupModelConfig {
+  id: string;
+  provider: LaneAProvider;
+  model: string;
+  baseUrl?: string | null;
+  temperature?: number | null;
+  /**
+   * DUR-4418: when set, the id of a company model-directory entry this backup
+   * points at. At call time the entry's provider/model/address/creativity win
+   * over the inline fields above (which stay as the last-known copy so an
+   * entry deleted later degrades to the saved coordinates, not to a broken
+   * backup).
+   */
+  directoryEntryId?: string | null;
+}
+
+/**
+ * One keyword-routing rule: the first whole-word, case-insensitive match
+ * against any of `phrases` in the person's message picks `backupId` (a pool
+ * entry id) as the starting model for that turn, before either fallback chain
+ * is even built. Rules are tried in order; the first match wins.
+ */
+export interface LaneAKeywordRoute {
+  id: string;
+  phrases: string[];
+  backupId: string;
+}
+
+/**
+ * Why a backup-pool entry cannot be used, in plain words, or null when it can.
+ * Mirrors the main model's own provider/model fit check
+ * (laneAModelIssueForProvider) plus the one thing the main model only
+ * enforces at call time (assertLaneASettingsRunnable in lane-a.ts, a 503): a
+ * free-form provider (OpenRouter, local) needs a base URL, checked eagerly
+ * here because a backup pool entry is structured data the operator fills in
+ * once, not a per-call runtime fallback message.
+ */
+export function laneABackupModelEntryIssue(entry: {
+  provider: unknown;
+  model: unknown;
+  baseUrl?: string | null;
+}): string | null {
+  const modelIssue = laneAModelIssueForProvider(entry.provider, entry.model);
+  if (modelIssue) return modelIssue;
+  const provider = normalizeLaneAProvider(entry.provider);
+  const descriptor = LANE_A_PROVIDER_CATALOGUE[provider];
+  if (descriptor.baseUrlEditable && !descriptor.defaultBaseUrl) {
+    const baseUrl = typeof entry.baseUrl === "string" ? entry.baseUrl.trim() : "";
+    if (baseUrl.length === 0) {
+      return `Add an address for ${descriptor.label.toLowerCase()} (for example http://localhost:11434/v1).`;
+    }
+  }
+  return null;
+}

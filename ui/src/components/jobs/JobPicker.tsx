@@ -5,7 +5,7 @@ import { cn } from "../../lib/utils";
 import type { Job } from "../../api/jobs";
 
 /**
- * Picker over a company's jobs. Only ever shows `name`/`description` —
+ * Picker over a company's positions. Only ever shows `name`/`description` —
  * never the server-derived slug/key (DUR-114/DUR-115 hard rule).
  */
 export function JobPicker({
@@ -13,7 +13,7 @@ export function JobPicker({
   value,
   onChange,
   disabled,
-  placeholder = "No job",
+  placeholder = "No position",
 }: {
   jobs: Job[];
   value: string | null;
@@ -50,11 +50,11 @@ export function JobPicker({
             setOpen(false);
           }}
         >
-          No job
+          No position
         </button>
         {jobs.length === 0 ? (
           <p className="px-2 py-1.5 text-xs text-muted-foreground">
-            No jobs set up for this company yet.
+            No positions set up for this company yet.
           </p>
         ) : (
           jobs.map((job) => (

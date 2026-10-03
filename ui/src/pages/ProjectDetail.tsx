@@ -86,6 +86,8 @@ function OverviewContent({
     description: string | null;
     status: string;
     targetDate: string | null;
+    productionUrl?: string | null;
+    hostingTarget?: string | null;
     deployPolicy?: ProjectDeployPolicy | null;
   };
   companyId: string | null | undefined;
@@ -119,6 +121,27 @@ function OverviewContent({
           <div>
             <span className="text-muted-foreground">Target Date</span>
             <p>{project.targetDate}</p>
+          </div>
+        )}
+        {project.productionUrl && (
+          <div>
+            <span className="text-muted-foreground">Production URL</span>
+            <p>
+              <a
+                href={project.productionUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="text-primary hover:underline break-all"
+              >
+                {project.productionUrl}
+              </a>
+            </p>
+          </div>
+        )}
+        {project.hostingTarget && (
+          <div>
+            <span className="text-muted-foreground">Hosting Target</span>
+            <p>{project.hostingTarget}</p>
           </div>
         )}
       </div>

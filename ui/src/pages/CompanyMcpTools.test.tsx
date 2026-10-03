@@ -18,6 +18,8 @@ const COMPANY = "11111111-1111-4111-8111-111111111111";
 const mockSecretsApi = vi.hoisted(() => ({ list: vi.fn(), create: vi.fn(), test: vi.fn() }));
 const mockMcpApi = vi.hoisted(() => ({ list: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn() }));
 const mockOAuthApi = vi.hoisted(() => ({ start: vi.fn(), status: vi.fn() }));
+// DUR-4004: the page also lists "API with a key" tools.
+const mockApiToolsApi = vi.hoisted(() => ({ list: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn(), test: vi.fn(), importOpenApi: vi.fn() }));
 const mockUseCompanyRole = vi.hoisted(() => vi.fn());
 const mockPushToast = vi.hoisted(() => vi.fn());
 
@@ -32,6 +34,7 @@ vi.mock("../context/ToastContext", () => ({
 vi.mock("../hooks/useCompanyRole", () => ({ useCompanyRole: mockUseCompanyRole }));
 vi.mock("../api/secrets", () => ({ secretsApi: mockSecretsApi }));
 vi.mock("../api/mcpToolLibrary", () => ({ mcpToolLibraryApi: mockMcpApi, mcpOAuthApi: mockOAuthApi }));
+vi.mock("../api/apiTools", () => ({ apiToolsApi: mockApiToolsApi }));
 // Radix Select cannot open in jsdom; the kind dropdown is covered by its own
 // component and by SecretBindingPicker.test.tsx.
 vi.mock("../components/SecretKindSelect", () => ({
@@ -74,6 +77,7 @@ describe("CompanyMcpTools credential rows", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     mockMcpApi.list.mockResolvedValue([]);
+    mockApiToolsApi.list.mockResolvedValue([]);
     mockSecretsApi.list.mockResolvedValue([]);
     mockUseCompanyRole.mockReturnValue(role(true));
   });
@@ -115,23 +119,85 @@ describe("CompanyMcpTools credential rows", () => {
     return Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"]'));
   }
 
-  /** Open "Add tool" and add one credential row; returns that row. */
+  /** Open "Add tool", pick "MCP server (URL)" in the kind chooser (DUR-4004), and add one credential row; returns that row. */
   async function openToolWithOneRow(): Promise<HTMLElement> {
     await act(async () => {
       buttonByText("Add tool", container).click();
     });
     await flush();
-    const [toolDialog] = dialogs();
-    expect(toolDialog, "tool dialog").toBeDefined();
-    expect(toolDialog.textContent).toContain("Headers (optional)");
+    const [chooser] = dialogs();
+    expect(chooser, "kind chooser").toBeDefined();
+    const urlChoice = Array.from(chooser.querySelectorAll("button")).find((element) => element.textContent?.includes("MCP server (URL)"));
+    expect(urlChoice, "MCP server (URL) choice").toBeDefined();
     await act(async () => {
-      buttonByText("Add", toolDialog).click();
+      urlChoice!.click();
     });
     await flush();
-    const row = toolDialog.querySelector<HTMLElement>('[data-testid="credential-row"]');
+    const toolDialog = dialogs().find((dialog) => dialog.textContent?.includes("Headers (optional)"));
+    expect(toolDialog, "tool dialog").toBeDefined();
+    expect(toolDialog!.textContent).toContain("Add MCP server (URL)");
+    await act(async () => {
+      buttonByText("Add", toolDialog!).click();
+    });
+    await flush();
+    const row = toolDialog!.querySelector<HTMLElement>('[data-testid="credential-row"]');
     expect(row, "credential row").not.toBeNull();
     return row!;
   }
+
+  it("offers three kinds under Add tool, and API with a key opens its own form (DUR-4004)", async () => {
+    await render();
+    await act(async () => {
+      buttonByText("Add tool", container).click();
+    });
+    await flush();
+    const [chooser] = dialogs();
+    const labels = Array.from(chooser.querySelectorAll('[data-testid="tool-kind-chooser"] button')).map(
+      (element) => element.querySelector("span > span")?.textContent?.trim(),
+    );
+    expect(labels).toEqual(["MCP server (URL)", "MCP server (command)", "API with a key"]);
+    const apiChoice = Array.from(chooser.querySelectorAll("button")).find((element) => element.textContent?.includes("API with a key"));
+    await act(async () => {
+      apiChoice!.click();
+    });
+    await flush();
+    const form = dialogs().find((dialog) => dialog.textContent?.includes("Add API with a key"));
+    expect(form, "API tool form").toBeDefined();
+    expect(form!.querySelector("#api-tool-base-url")).not.toBeNull();
+    expect(form!.textContent).toContain("How the key is sent");
+    expect(form!.textContent).not.toContain("Headers (optional)");
+  });
+
+  it("lists an API tool with its kind, action count, daily limit and last test line", async () => {
+    mockApiToolsApi.list.mockResolvedValue([
+      {
+        id: "a1",
+        companyId: COMPANY,
+        name: "Fal.ai",
+        key: "fal-ai",
+        description: "Makes images",
+        baseUrl: "https://fal.run",
+        auth: { kind: "header", name: "Authorization", prefix: "Key ", secretId: "s1" },
+        actions: [{ name: "make_image", method: "POST", path: "/fal-ai/flux/dev", description: "", inputs: [] }],
+        openapiUrl: null,
+        dailyCap: 300,
+        status: "active",
+        lastTestAt: "2026-09-27T10:00:00.000Z",
+        lastTestOk: true,
+        lastTestMessage: "fal.run answered 200. The key was accepted.",
+        createdAt: "2026-09-27T10:00:00.000Z",
+        updatedAt: "2026-09-27T10:00:00.000Z",
+      },
+    ]);
+    await render();
+    const row = container.querySelector('[data-testid="api-tool-row"]');
+    expect(row).not.toBeNull();
+    expect(row!.textContent).toContain("Fal.ai");
+    expect(row!.textContent).toContain("API with a key");
+    expect(row!.textContent).toContain("1 action");
+    expect(row!.textContent).toContain("300 calls a day");
+    expect(row!.textContent).toContain("Last test passed: fal.run answered 200. The key was accepted.");
+  });
 
   it("offers Add new secret… inline on a row when the company has no secrets yet", async () => {
     await render();

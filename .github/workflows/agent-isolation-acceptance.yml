@@ -102,6 +102,31 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 9.15.4
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      # pr.yml's policy job regenerates pnpm-lock.yaml in-memory for its own
+      # downstream jobs (see "Validate dependency resolution when manifests
+      # change" there) but that artifact isn't available to this separate
+      # workflow. Without this, any PR that adds a brand-new workspace
+      # package fails here on `pnpm install --frozen-lockfile` inside the
+      # Docker build, even though the package.json is legitimate and the
+      # lockfile bot (.github/workflows/refresh-lockfile.yml) would fix it
+      # right after merge. Regenerate it locally (uncommitted, this runner
+      # only) so the Docker build sees a lockfile that matches the manifests
+      # it's about to build against.
+      - name: Regenerate lockfile for this checkout (not committed)
+        run: pnpm install --lockfile-only --ignore-scripts --no-frozen-lockfile
+
       - name: Run agent isolation acceptance test
         env:
           ISOLATION_ENFORCED_STAGES: ${{ inputs.enforced_stages || '0 1 2' }}

@@ -1,10 +1,12 @@
 import { Router } from "express";
 import type { Db } from "@paperclipai/db";
-import { createRequestScopedDb } from "@paperclipai/db";
+import { createRequestScopedDb, pluginEntities, plugins } from "@paperclipai/db";
+import { and, eq, sql } from "drizzle-orm";
 import { badRequest } from "../errors.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
 import { redactKnownLeakedSecretPatterns, redactSensitiveText } from "../redaction.js";
-import { accessService, issueService } from "../services/index.js";
+import { RESEARCH_RESULT_DOCUMENT_KEY } from "@paperclipai/shared";
+import { accessService, documentService, issueService } from "../services/index.js";
 import { assertCompanyAccess } from "./authz.js";
 
 /**
@@ -26,6 +28,10 @@ import { assertCompanyAccess } from "./authz.js";
  *
  * The answer text goes out through the same secret redaction the server uses
  * for run logs, because it is about to leave Paperclip for a chat app.
+ *
+ * `resultDocument` says whether the task has a result page (the issue
+ * document RESEARCH_RESULT_DOCUMENT_KEY a research task delivers), so the chat
+ * can link straight to it. Only its key and title go out, never its body.
  */
 
 export const ISSUE_ANSWERS_MAX_IDS = 50;
@@ -59,6 +65,63 @@ export function pickLatestAgentAnswer<T extends AnswerCandidate>(comments: T[] |
   return replies[0] ?? null;
 }
 
+/**
+ * DUR-4091 finding 2: `scripts/telegram-bridge.py`'s MEDIA_JOB_ANSWER_RE
+ * trusts any comment shaped like "Your video is ready: ... (file id <uuid>)"
+ * as proof of a real Media Studio delivery and uploads that file id's bytes
+ * to Telegram — with no check that the id actually names a finished job's
+ * own result. A comment merely shaped like this (however it got onto the
+ * issue) could make the bridge fetch and send an arbitrary same-company
+ * file. This is the one place every such comment passes through before it
+ * reaches the bridge (`chat answers` / GET issue-answers), so it is where
+ * the claim is verified against the job record that would have produced it
+ * (packages/plugins/media-studio/src/media-jobs.ts's deliverResult) —
+ * matching plugin, company, entity type, "done" status, result file id and
+ * issue id. A claim that does not match a real job has its file-id trigger
+ * stripped so the bridge relays it as plain text instead of fetching media.
+ */
+const MEDIA_JOB_READY_RE =
+  /^(Your (?:video|audio) is ready: .*\(file id )([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(\).*)$/is;
+const MEDIA_STUDIO_PLUGIN_KEY = "paperclip.media-studio";
+const MEDIA_JOB_ENTITY_TYPE = "media-generation-job";
+
+async function verifyMediaJobDelivery(
+  rawDb: Db,
+  companyId: string,
+  issueId: string,
+  fileId: string,
+): Promise<boolean> {
+  const [row] = await rawDb
+    .select({ id: pluginEntities.id })
+    .from(pluginEntities)
+    .innerJoin(plugins, eq(pluginEntities.pluginId, plugins.id))
+    .where(
+      and(
+        eq(plugins.pluginKey, MEDIA_STUDIO_PLUGIN_KEY),
+        eq(pluginEntities.companyId, companyId),
+        eq(pluginEntities.entityType, MEDIA_JOB_ENTITY_TYPE),
+        eq(pluginEntities.status, "done"),
+        sql`${pluginEntities.data} ->> 'resultFileId' = ${fileId}`,
+        sql`${pluginEntities.data} ->> 'issueId' = ${issueId}`,
+      ),
+    )
+    .limit(1);
+  return row != null;
+}
+
+/**
+ * Neutralize an unverified media-ready claim so the bridge cannot parse a
+ * file id out of it, while still relaying the rest of the message as text.
+ */
+async function sanitizeMediaJobAnswerBody(rawDb: Db, companyId: string, issueId: string, body: string): Promise<string> {
+  const match = MEDIA_JOB_READY_RE.exec(body);
+  if (!match) return body;
+  const [, prefix, fileId, suffix] = match;
+  const verified = await verifyMediaJobDelivery(rawDb, companyId, issueId, fileId!);
+  if (verified) return body;
+  return `${prefix}unverified${suffix}`;
+}
+
 /** Secret redaction for text that is about to leave Paperclip. */
 export function redactAnswerText(text: string): string {
   return redactKnownLeakedSecretPatterns(redactSensitiveText(text));
@@ -87,6 +150,7 @@ export function issueAnswerRoutes(rawDb: Db) {
   const db = createRequestScopedDb(rawDb);
   const issues = issueService(db, { rawDb });
   const access = accessService(db);
+  const documents = documentService(db);
 
   router.get(
     "/companies/:companyId/issue-answers",
@@ -128,6 +192,10 @@ export function issueAnswerRoutes(rawDb: Db) {
           limit: ISSUE_ANSWER_SCAN_COMMENT_LIMIT,
         });
         const answer = pickLatestAgentAnswer(comments);
+        const resultDoc = await documents.getIssueDocumentByKey(issue.id, RESEARCH_RESULT_DOCUMENT_KEY);
+        const answerBody = answer
+          ? await sanitizeMediaJobAnswerBody(rawDb, issue.companyId, issue.id, redactAnswerText(answer.body))
+          : null;
         results.push({
           id: issue.id,
           companyId: issue.companyId,
@@ -138,9 +206,12 @@ export function issueAnswerRoutes(rawDb: Db) {
             ? {
                 commentId: answer.id,
                 authorAgentId: answer.authorAgentId ?? null,
-                body: redactAnswerText(answer.body),
+                body: answerBody!,
                 createdAt: answer.createdAt,
               }
+            : null,
+          resultDocument: resultDoc
+            ? { key: RESEARCH_RESULT_DOCUMENT_KEY, title: redactAnswerText(resultDoc.title ?? "") || null }
             : null,
         });
       }

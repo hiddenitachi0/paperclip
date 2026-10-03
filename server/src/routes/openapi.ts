@@ -9,6 +9,7 @@ import {
   updateAgentPermissionsSchema,
   updateAgentInstructionsPathSchema,
   updateAgentInstructionsBundleSchema,
+  bindDeploySftpCredentialSchema,
   upsertAgentInstructionsFileSchema,
   createAgentKeySchema,
   wakeAgentSchema,
@@ -59,6 +60,8 @@ import {
   createTelegramBotSchema,
   rotateTelegramBotTokenSchema,
   updateTelegramBotAllowedUsersSchema,
+  updateTelegramBotCompanyNoticesSchema,
+  updateTelegramBotVoiceSchema,
   // Secret
   createSecretSchema,
   updateSecretSchema,
@@ -162,6 +165,11 @@ import {
   saveInstanceServerAnthropicKeySchema,
   signOutEverywhereSchema,
   submitInstanceClaudeSignInCodeSchema,
+  // Model directory (DUR-4379)
+  addModelDirectoryStartersSchema,
+  createModelDirectoryEntrySchema,
+  updateModelDirectoryEntrySchema,
+  duplicateModelDirectoryEntrySchema,
 } from "@paperclipai/shared";
 
 type JsonSchema = Record<string, unknown>;
@@ -764,6 +772,8 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "POST /api/companies/{companyId}/telegram-bots/{botId}/token",
   "POST /api/companies/{companyId}/telegram-bots/{botId}/test",
   "PUT /api/companies/{companyId}/telegram-bots/{botId}/allowed-users",
+  "PUT /api/companies/{companyId}/telegram-bots/{botId}/company-notices",
+  "PUT /api/companies/{companyId}/telegram-bots/{botId}/voice",
   "DELETE /api/companies/{companyId}/telegram-bots/{botId}",
   // DUR-3972: business-data connections. Operator work only -- one of them
   // stores a shop key, and all of them decide what company data agents may
@@ -779,6 +789,18 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "GET /api/companies/{companyId}/dataset-sources",
   "PUT /api/companies/{companyId}/dataset-sources/{dataset}",
   "GET /api/companies/{companyId}/data-reads",
+  // DUR-4379: the company model directory. Owner/admin only (and the
+  // instance admin / local board pass) -- an agent must never read or edit
+  // a saved model setup, so it cannot re-point itself or another agent.
+  "GET /api/companies/{companyId}/model-directory",
+  "POST /api/companies/{companyId}/model-directory",
+  "GET /api/companies/{companyId}/model-directory/starters",
+  "POST /api/companies/{companyId}/model-directory/starters",
+  "POST /api/companies/{companyId}/model-directory/import-agent-settings",
+  "GET /api/companies/{companyId}/model-directory/{entryId}",
+  "PATCH /api/companies/{companyId}/model-directory/{entryId}",
+  "DELETE /api/companies/{companyId}/model-directory/{entryId}",
+  "POST /api/companies/{companyId}/model-directory/{entryId}/duplicate",
 ]);
 
 const INSTANCE_ADMIN_OPERATIONS = new Set([
@@ -850,6 +872,7 @@ const CREATED_OPERATIONS = new Set([
   "POST /api/issues/{id}/interactions",
   "POST /api/issues/{id}/comments",
   "POST /api/companies/{companyId}/issues/{issueId}/attachments",
+  "POST /api/companies/{companyId}/files",
   "POST /api/companies/{companyId}/projects",
   "POST /api/projects/{id}/workspaces",
   "POST /api/companies/{companyId}/routines",
@@ -1533,6 +1556,36 @@ registry.registerPath({
     body: jsonBody(updateAgentInstructionsPathSchema),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/agents/{id}/deploy-sftp-credential",
+  tags: ["agents"],
+  summary: "Bind a secret as this agent's SFTP deploy credential (board only)",
+  request: {
+    params: z.object({ id: z.string() }),
+    body: jsonBody(bindDeploySftpCredentialSchema),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "delete",
+  path: "/api/agents/{id}/deploy-sftp-credential",
+  tags: ["agents"],
+  summary: "Unbind this agent's SFTP deploy credential (board only)",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/agents/{agentId}/deploy-sftp-credential",
+  tags: ["agents"],
+  summary: "Resolve an agent's SFTP deploy credential for the on-box deploy runner (instance admin only)",
+  request: { params: z.object({ companyId: z.string(), agentId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
 });
 
 registry.registerPath({
@@ -2947,6 +3000,18 @@ registry.registerPath({
 
 registry.registerPath({
   method: "get",
+  path: "/api/companies/{companyId}/deploy-runner/status/stream",
+  tags: ["deploy-runner"],
+  summary: "Server-Sent Events tail of the deploy runner's activity feed for a company",
+  request: {
+    params: z.object({ companyId: z.string() }),
+    query: z.object({ approvalId: z.string().optional() }),
+  },
+  responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "get",
   path: "/api/companies/{companyId}/projects/{projectId}/deploy-history",
   tags: ["deploy-runner"],
   summary: "The current and previously live versions of a project, per the deploy runner's log",
@@ -2961,6 +3026,15 @@ registry.registerPath({
   path: "/api/companies/{companyId}/dashboard",
   tags: ["dashboard"],
   summary: "Get dashboard data",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/dashboard/pulse",
+  tags: ["dashboard"],
+  summary: "Get the Paperclip pulse status panel data (approvals, executions, budget, deploys)",
   request: { params: z.object({ companyId: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized },
 });
@@ -3245,6 +3319,8 @@ for (const route of [
   ["post", "/api/companies/{companyId}/telegram-bots/{botId}/token", "Replace a connected bot's token with a new one from BotFather", rotateTelegramBotTokenSchema],
   ["post", "/api/companies/{companyId}/telegram-bots/{botId}/test", "Ask Telegram whether this bot is reachable, and report its username", undefined],
   ["put", "/api/companies/{companyId}/telegram-bots/{botId}/allowed-users", "Set which Telegram users may use this bot", updateTelegramBotAllowedUsersSchema],
+  ["put", "/api/companies/{companyId}/telegram-bots/{botId}/company-notices", "Choose whether this bot gets the company's approvals and questions (turning one on turns the others off)", updateTelegramBotCompanyNoticesSchema],
+  ["put", "/api/companies/{companyId}/telegram-bots/{botId}/voice", "Choose when this bot reads its answers aloud, and with which voice", updateTelegramBotVoiceSchema],
   ["delete", "/api/companies/{companyId}/telegram-bots/{botId}", "Disconnect a Telegram bot and delete its saved token", undefined],
   ["get", "/api/instance/telegram-bridge-config", "Every enabled Telegram bot on this instance, without tokens, for the host-side bridge", undefined],
   ["get", "/api/companies/{companyId}/telegram-bots/{botId}/bridge-token", "Resolve one bot's token for the host-side bridge (instance admin only)", undefined],
@@ -3555,6 +3631,8 @@ registerCurrentRoute({
         turnCount: z.number(),
         expired: z.boolean(),
         turnCapReached: z.boolean(),
+        /** A continued conversation's one-line recap of what it carries on from; null otherwise. */
+        continuedFrom: z.string().nullable(),
         messages: z.array(
           z.object({
             id: z.string(),
@@ -3566,6 +3644,48 @@ registerCurrentRoute({
         ),
       }),
     ),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+  },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/lane-a/{agentId}/continue",
+  tags: ["agents"],
+  summary:
+    "Start a new quick-agent conversation that carries the relevant part of the caller's own recent chat with this agent (board users only)",
+  body: z.object({ companyId: z.string().uuid(), spec: z.string().max(200).optional() }),
+  responses: {
+    200: r.ok(
+      z.object({
+        conversationId: z.string(),
+        mode: z.enum(["last", "time", "topic"]),
+        recap: z.string(),
+        matchedMessages: z.number(),
+        consideredMessages: z.number(),
+        fromConversations: z.number(),
+        window: z.object({ from: z.string(), to: z.string(), label: z.string() }).nullable(),
+      }),
+    ),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    422: r.unprocessable,
+  },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/lane-a/{agentId}/looks",
+  tags: ["agents"],
+  summary: "List Media Studio's saved looks through the quick agent's ticked \"List saved looks\" tool (board users only, no model call)",
+  query: z.object({ companyId: z.string().uuid() }),
+  responses: {
+    200: r.ok(z.object({ available: z.boolean(), text: z.string() })),
     400: r.badRequest,
     401: r.unauthorized,
     403: r.forbidden,
@@ -3685,6 +3805,10 @@ registry.registerPath({
                 createdAt: z.string(),
               })
               .nullable(),
+            resultDocument: z
+              .object({ key: z.string(), title: z.string().nullable() })
+              .nullable()
+              .describe("The task's result page (issue document 'result'), when it has one"),
           }),
         ),
       }),
@@ -4309,6 +4433,15 @@ registry.registerPath({
   tags: ["assets"],
   summary: "Upload an attachment to an issue",
   request: { params: z.object({ companyId: z.string(), issueId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/companies/{companyId}/files",
+  tags: ["assets"],
+  summary: "Upload a company file that is not tied to an issue (for example a picture saved from the Media Studio editor)",
+  request: { params: z.object({ companyId: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized },
 });
 
@@ -5890,6 +6023,106 @@ registerCurrentRoute({
   tags: ["secrets"],
   summary: "Import remote secrets",
   body: remoteSecretImportSchema,
+});
+
+// ─── DUR-4379: company model directory (saved model setups) ────────────────
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/model-directory",
+  tags: ["model-directory"],
+  summary: "List a company's saved model setups (owner/admin only; never returns a key)",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory",
+  tags: ["model-directory"],
+  summary: "Save a new model setup (owner/admin only; unknown fields such as apiKey are rejected)",
+  body: createModelDirectoryEntrySchema,
+  responses: {
+    201: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    409: r.conflict,
+    422: r.unprocessable,
+  },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/model-directory/starters",
+  tags: ["model-directory"],
+  summary: "List the ready-made model setups (local Ollama models, Mistral Small 3.2 on OpenRouter) and whether each is already added",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/starters",
+  tags: ["model-directory"],
+  summary: "Add ready-made model setups (all, or the chosen starterIds); ones already added are skipped. No key is stored.",
+  body: addModelDirectoryStartersSchema,
+  responses: { 201: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 422: r.unprocessable },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/import-agent-settings",
+  tags: ["model-directory"],
+  summary: "Save each quick agent's current model setup (and backups) as de-duplicated directory entries and link the agent. Does not change what any agent does; safe to repeat.",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/model-directory/{entryId}",
+  tags: ["model-directory"],
+  summary: "Get a saved model setup",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "patch",
+  path: "/api/companies/{companyId}/model-directory/{entryId}",
+  tags: ["model-directory"],
+  summary: "Update a saved model setup",
+  body: updateModelDirectoryEntrySchema,
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+    422: r.unprocessable,
+  },
+});
+
+registerCurrentRoute({
+  method: "delete",
+  path: "/api/companies/{companyId}/model-directory/{entryId}",
+  tags: ["model-directory"],
+  summary: "Delete a saved model setup (also removed from other entries' backup chains)",
+  responses: { 204: r.noContent, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/{entryId}/duplicate",
+  tags: ["model-directory"],
+  summary: "Duplicate a saved model setup",
+  body: duplicateModelDirectoryEntrySchema,
+  responses: {
+    201: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+  },
 });
 
 for (const route of [

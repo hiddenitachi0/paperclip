@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.sogni.ai/creative-agent/2026-07-18.1/tools/upscale_image.schema.json",
+  "title": "upscale_image arguments",
+  "schemaVersion": "2026-07-18.1",
+  "description": "Enlarge an existing image with NVIDIA RTX Video Super Resolution while preserving its content, identity, composition, and colors. This is deterministic reconstruction, not a generative edit: it takes no prompt and must not be used for restoration, sharpening requests that imply repainting, object changes, style changes, or creative enhancement. Use it when the user asks to upscale, enlarge, increase resolution, prepare for print, or produce a 2K/4K/6K/8K/16K copy without changing the image.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "sourceImageIndex": {
+      "type": "number",
+      "description": "Source image to upscale. Non-negative values select a prior generated result by 0-based index. Negative values select uploads: -1 is the first uploaded image, -2 the second, and so on. If omitted, use the latest generated image, falling back to the first upload."
+    },
+    "scale": {
+      "type": "number",
+      "enum": [
+        2,
+        3,
+        4
+      ],
+      "description": "Edge scale multiplier. Use 2 by default. Ignored when targetLongestEdge is supplied. If that scale would leave either aligned output edge below 512px, the tool reports the minimum valid target instead of stretching the image."
+    },
+    "targetLongestEdge": {
+      "type": "number",
+      "minimum": 512,
+      "maximum": 15360,
+      "description": "Optional requested pixel length for the output longest edge, from 512 through 15360. Use 3840 for 4K UHD, 7680 for 8K, or 15360 for the 16K maximum. The other edge is calculated automatically so the source aspect ratio is preserved; both 8px-aligned output edges must be at least 512px."
+    }
+  },
+  "required": []
+}

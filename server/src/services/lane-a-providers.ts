@@ -28,7 +28,9 @@ import Anthropic from "@anthropic-ai/sdk";
 import {
   LANE_A_PROVIDER_CATALOGUE,
   normalizeLaneAProvider,
+  normalizeLaneAProviderRouting,
   type LaneAProvider,
+  type LaneAProviderRouting,
 } from "@paperclipai/shared";
 
 /** A tool the model may call, provider-neutral (JSON-schema input). */
@@ -63,6 +65,45 @@ export interface LaneACompletionRequest {
   messages: LaneAChatMessage[];
   tools?: LaneATool[];
   maxTokens: number;
+  /**
+   * Sampling temperature ("creativity"). Absent/null = send none, so the
+   * model host's default applies. The caller has already dropped it for a
+   * model known to refuse one and clamped it for Claude
+   * (laneATemperatureForCall in @paperclipai/shared).
+   */
+  temperature?: number | null;
+  /**
+   * DUR-4367: `reasoning_effort` ("none" to skip the model's reasoning pass),
+   * already resolved for this provider/model by laneAThinkingForCall
+   * (@paperclipai/shared) — the caller has already dropped it for a model/
+   * provider not known to accept the field. Absent/null = send nothing, i.e.
+   * the model's own default behaviour. Ignored by the Anthropic client
+   * (extended thinking is a different, opt-in wire shape it does not use).
+   */
+  reasoningEffort?: "none" | null;
+  /**
+   * OpenRouter only: which hosts the model may run on (the operator's "model
+   * hosts" setting). Absent/null = OpenRouter picks. Ignored for every other
+   * provider.
+   */
+  providerRouting?: LaneAProviderRouting | null;
+  /**
+   * DUR-4138: asks an OpenAI-compatible host for strict JSON output
+   * (`response_format: { type: "json_object" }`) — only meaningful for a
+   * caller whose system prompt already demands one JSON object (transform()
+   * calls with no tools). Ignored by the Anthropic client (no equivalent in
+   * this SDK path) and by a host/model that does not support it — the caller
+   * must still parse defensively.
+   */
+  responseFormat?: "json_object";
+  /**
+   * DUR-4355: force the model to call exactly this tool, for the one
+   * corrective retry after it claimed a tool-only action without calling
+   * one. Requires `tools` to include a tool of this name. Ignored by a
+   * provider/host with no equivalent (the model answers as it otherwise
+   * would, and the caller's own fallback still applies).
+   */
+  toolChoice?: { name: string };
 }
 
 export type LaneAStop = "end_turn" | "tool_use" | "max_tokens" | "other";
@@ -87,21 +128,89 @@ export type LaneAModelClient = Pick<Anthropic, "messages">;
 export type LaneAProviderErrorKind = "auth" | "rate_limit" | "upstream" | "network";
 
 /**
+ * DUR-4347: text that marks an upstream error body as the provider's OWN
+ * content-policy/moderation rejection, as opposed to an ordinary 4xx (a bad
+ * model id, a malformed request). Matched case-insensitively against the
+ * (already-scrubbed) error message. Deliberately broad: a false negative
+ * here just means a refusal is treated as a plain error (one message, no
+ * chain advance) instead of being routed to the refusal chain, which is the
+ * safe direction to be wrong in.
+ */
+const LANE_A_REFUSAL_ERROR_PATTERN =
+  /content[_ -]?polic|content[_ -]?filter|content[_ -]?management|moderation|safety system|flagged as potentially violating/i;
+
+/**
+ * DUR-4347: text that marks an upstream 4xx as "the model itself is not
+ * reachable" (a local box with nothing loaded, a typo'd id) rather than a
+ * malformed request -- retryable with a different pool entry even though the
+ * status code alone would normally say "our fault, don't retry".
+ */
+const LANE_A_MODEL_UNAVAILABLE_PATTERN = /model[^.]*(not loaded|not found|does not exist|is not available|unknown)/i;
+
+/**
+ * DUR-4347: whether a classified provider error is worth trying a different
+ * pool entry for. Connection failures, timeouts, rate limiting and 5xx are
+ * always retryable; a bad key is not (a different model on the SAME
+ * provider+key would fail identically, and the ticket's own list of
+ * retryable cases omits auth); an ordinary 4xx (bad request, unknown
+ * parameter) is not retryable UNLESS its text says the model itself could not
+ * be reached, which is exactly the "local box has nothing loaded" case a
+ * fallback chain exists for.
+ */
+function classifyLaneARetryable(kind: LaneAProviderErrorKind, status: number | null, message: string): boolean {
+  if (kind === "network" || kind === "rate_limit") return true;
+  if (kind === "auth") return false;
+  // kind === "upstream"
+  if (status !== null && status >= 500) return true;
+  return LANE_A_MODEL_UNAVAILABLE_PATTERN.test(message);
+}
+
+/**
+ * DUR-4347: whether a classified provider error IS the provider refusing to
+ * answer on content-policy/moderation grounds (as opposed to any other
+ * upstream failure). Only ever true for an "upstream" error whose text
+ * matches the refusal pattern -- a network failure or a bad key is never a
+ * refusal.
+ */
+function classifyLaneARefusal(kind: LaneAProviderErrorKind, message: string): boolean {
+  return kind === "upstream" && LANE_A_REFUSAL_ERROR_PATTERN.test(message);
+}
+
+/**
  * A provider call that failed, classified so lane-a.ts can turn it into the
  * right HTTP answer (503 for a bad key, 429 for upstream rate limiting, 502
- * otherwise). `message` is already scrubbed.
+ * otherwise) AND, since DUR-4347, so the fallback loop can decide whether to
+ * try the next pool entry (`retryable`) and whether to jump straight to the
+ * refusal chain (`refusal`). `message` is already scrubbed. Both flags default
+ * to a classification derived from `kind`/`status`/`message`; a throw site
+ * that already knows better (e.g. a dedicated "model not found" check) may
+ * pass an explicit value instead.
  */
 export class LaneAProviderError extends Error {
   readonly kind: LaneAProviderErrorKind;
   readonly provider: LaneAProvider;
   readonly status: number | null;
+  readonly retryable: boolean;
+  readonly refusal: boolean;
 
-  constructor(input: { kind: LaneAProviderErrorKind; provider: LaneAProvider; message: string; status?: number | null }) {
+  constructor(input: {
+    kind: LaneAProviderErrorKind;
+    provider: LaneAProvider;
+    message: string;
+    status?: number | null;
+    retryable?: boolean;
+    refusal?: boolean;
+  }) {
     super(input.message);
     this.name = "LaneAProviderError";
     this.kind = input.kind;
     this.provider = input.provider;
     this.status = input.status ?? null;
+    this.refusal = input.refusal ?? classifyLaneARefusal(input.kind, input.message);
+    // A refusal is never also "retryable" in the no-answer sense: it always
+    // routes to the refusal chain instead (lane-a.ts's loop), never to the
+    // next no-answer entry.
+    this.retryable = this.refusal ? false : (input.retryable ?? classifyLaneARetryable(input.kind, this.status, input.message));
   }
 }
 
@@ -134,6 +243,17 @@ export function resolveLaneABaseUrl(provider: unknown, baseUrl: string | null | 
   return custom ?? descriptor.defaultBaseUrl;
 }
 
+/**
+ * DUR-4347: a local model's address (Ollama, LM Studio, a Tailscale box that
+ * may be asleep) is checked for reachability first, within this short limit,
+ * so a fallback loop in lane-a.ts moves on to the next pool entry quickly
+ * instead of making the person wait two minutes to find out the main model's
+ * box is off. It bounds only that check: the answer itself gets the normal
+ * limit, because a local model that is loading or writing a long reply
+ * routinely takes longer than a few seconds.
+ */
+export const LANE_A_LOCAL_PROVIDER_TIMEOUT_MS = 5_000;
+
 export interface CreateLaneAProviderClientInput {
   provider: LaneAProvider;
   /** Null only when `anthropicClient` is injected (tests). */
@@ -165,6 +285,7 @@ export function createLaneAProviderClient(input: CreateLaneAProviderClientInput)
     baseUrl,
     fetchImpl: input.fetch ?? globalThis.fetch,
     timeoutMs: input.timeoutMs ?? DEFAULT_OPENAI_COMPATIBLE_TIMEOUT_MS,
+    reachabilityTimeoutMs: input.provider === "local" ? LANE_A_LOCAL_PROVIDER_TIMEOUT_MS : null,
   });
 }
 
@@ -252,9 +373,17 @@ function createAnthropicLaneAClient(client: LaneAModelClient, apiKey: string | n
         const response = await client.messages.create({
           model: request.model,
           max_tokens: request.maxTokens,
+          // Claude takes 0-1; clamped again here so a caller that skipped
+          // laneATemperatureForCall still cannot send a value Claude refuses.
+          ...(typeof request.temperature === "number" && Number.isFinite(request.temperature)
+            ? { temperature: Math.min(1, Math.max(0, request.temperature)) }
+            : {}),
           system: request.system,
           messages: toAnthropicMessages(request.messages),
           ...(request.tools && request.tools.length > 0 ? { tools: request.tools.map(toAnthropicTool) } : {}),
+          ...(request.toolChoice && request.tools?.some((tool) => tool.name === request.toolChoice!.name)
+            ? { tool_choice: { type: "tool", name: request.toolChoice.name } }
+            : {}),
         });
         return fromAnthropicMessage(response as Anthropic.Message);
       } catch (err) {
@@ -353,12 +482,53 @@ export function buildOpenAiCompatibleBody(provider: LaneAProvider, request: Lane
   };
   if (request.tools && request.tools.length > 0) {
     body.tools = request.tools.map(toOpenAiTool);
+    // OpenRouter may otherwise route to a host that silently ignores `tools`
+    // ("ignore unknown parameters"), and the model then answers without ever
+    // calling one (27 Sep: Mistral Small said a saved look did not exist
+    // without looking). Require a host that supports every parameter; if none
+    // does, OpenRouter says so and the quick agent retries without tools.
+    if (provider === "openrouter") body.provider = { require_parameters: true };
+    // DUR-4355: force the one corrective retry onto a specific tool, when the
+    // caller asked for it and that tool was actually offered this call.
+    if (request.toolChoice && request.tools.some((tool) => tool.name === request.toolChoice!.name)) {
+      body.tool_choice = { type: "function", function: { name: request.toolChoice.name } };
+    }
+  }
+  // The operator's "model hosts" setting (OpenRouter only): merged into the
+  // same `provider` object, in OpenRouter's own field names. Without it
+  // OpenRouter may pick a host that does not support tools (29 Sep: Mistral
+  // Small 3.2 24B wanted on DeepInfra, sent to Venice).
+  if (provider === "openrouter") {
+    const routing = normalizeLaneAProviderRouting(request.providerRouting);
+    if (routing) {
+      const preferences: Record<string, unknown> = {};
+      if (routing.only) preferences.only = routing.only;
+      if (routing.order) preferences.order = routing.order;
+      if (routing.ignore) preferences.ignore = routing.ignore;
+      if (typeof routing.allowFallbacks === "boolean") preferences.allow_fallbacks = routing.allowFallbacks;
+      body.provider = { ...((body.provider as Record<string, unknown> | undefined) ?? {}), ...preferences };
+    }
   }
   // OpenAI's reasoning models refuse `max_tokens` and want
   // `max_completion_tokens`; every other OpenAI-compatible server (OpenRouter,
   // Google's shim, Ollama, LM Studio, llama.cpp, vLLM) speaks `max_tokens`.
   if (provider === "openai") body.max_completion_tokens = request.maxTokens;
   else body.max_tokens = request.maxTokens;
+  // Only when the operator chose a creativity setting: with no key at all
+  // the host's own default applies, exactly as before the setting existed.
+  if (typeof request.temperature === "number" && Number.isFinite(request.temperature)) {
+    body.temperature = request.temperature;
+  }
+  // DUR-4367: "Thinking" off. The caller (laneAThinkingForCall) has already
+  // dropped this for a provider/model not known to accept the field, so it
+  // is sent as-is here.
+  if (request.reasoningEffort) {
+    body.reasoning_effort = request.reasoningEffort;
+  }
+  // DUR-4138: JSON mode, asked for, never assumed honored — the caller still
+  // extracts/validates defensively (a host or model that ignores this
+  // parameter answers exactly as it did before).
+  if (request.responseFormat === "json_object") body.response_format = { type: "json_object" };
   return body;
 }
 
@@ -469,12 +639,42 @@ function createOpenAiCompatibleLaneAClient(input: {
   baseUrl: string;
   fetchImpl: typeof fetch;
   timeoutMs: number;
+  /**
+   * When set (local models), a quick GET of the models list must get any
+   * HTTP answer within this many ms before the real call is made, so a box
+   * that is off fails fast while a slow answer still gets `timeoutMs`.
+   */
+  reachabilityTimeoutMs?: number | null;
 }): LaneAProviderClient {
   const endpoint = `${input.baseUrl.replace(/\/+$/, "")}/chat/completions`;
   const label = LANE_A_PROVIDER_CATALOGUE[input.provider].label;
   return {
     provider: input.provider,
     async complete(request) {
+      if (input.reachabilityTimeoutMs) {
+        const probe = new AbortController();
+        const probeTimer = setTimeout(() => probe.abort(), input.reachabilityTimeoutMs);
+        try {
+          const res = await input.fetchImpl(`${input.baseUrl.replace(/\/+$/, "")}/models`, {
+            method: "GET",
+            headers: input.apiKey ? { authorization: `Bearer ${input.apiKey}` } : {},
+            signal: probe.signal,
+            redirect: "error",
+          });
+          await res.body?.cancel().catch(() => undefined);
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          throw new LaneAProviderError({
+            kind: "network",
+            provider: input.provider,
+            message: probe.signal.aborted
+              ? `${label} did not answer within ${Math.round(input.reachabilityTimeoutMs / 1000)} seconds.`
+              : `Could not reach ${label}: ${scrubLaneASecrets(reason, input.apiKey)}`,
+          });
+        } finally {
+          clearTimeout(probeTimer);
+        }
+      }
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), input.timeoutMs);
       let response: Response;

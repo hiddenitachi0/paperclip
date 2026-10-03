@@ -134,9 +134,17 @@ DECLARE
     'agent_daily_counters',
     'agent_instructions_revisions',
     'agent_memberships',
+    -- Quick-agent memory notebook. Created (and granted on) in
+    -- 0180_agent_memories.sql; listed here so the login-role lists match the
+    -- schema, as for the tables above.
+    'agent_memories',
     'agent_runtime_state',
     'agent_task_sessions',
     'agent_wakeup_requests',
+    -- DUR-4197. Created, granted on and policed in
+    -- 0204_agent_work_summaries.sql; listed here so the login-role lists
+    -- match the schema, as for the tables above.
+    'agent_work_summaries',
     'agents',
     'approval_comments',
     'approvals',
@@ -150,10 +158,25 @@ DECLARE
     'cloud_upstream_runs',
     'companies',
     'company_agent_roles',
+    -- DUR-4142. Created, granted on and policed in
+    -- 0207_company_job_settings.sql; listed here so the login-role lists
+    -- match the schema, as for the tables above.
+    'company_job_settings',
     'company_logos',
     'company_mcp_oauth_connections',
+    -- DUR-4004. Created (and granted on) in 0177_company_api_tools.sql; listed
+    -- here so the login-role lists match the schema, as for the tables above.
+    'company_api_tool_calls',
+    'company_api_tools',
     'company_mcp_tools',
     'company_memberships',
+    -- DUR-4037. Created (and granted on) in 0187_payment_notices_and_settings.sql;
+    -- listed here so the login-role lists match the schema, as for the tables above.
+    'company_payment_settings',
+    -- DUR-4187 product grabber. Created (and granted on) in
+    -- 0198_product_grabber_staging.sql; company-scoped, listed here so the
+    -- login-role lists match the schema.
+    'company_product_grabber_settings',
     'company_secret_bindings',
     'company_secret_provider_configs',
     'company_secret_versions',
@@ -168,8 +191,20 @@ DECLARE
     'company_skill_stars',
     'company_skill_versions',
     'company_skills',
+    -- Voice messages. Created (and granted on) in
+    -- 0182_speech_voice_messages.sql; listed here so the login-role lists
+    -- match the schema, as for the tables above.
+    'company_speech_settings',
     'company_user_sidebar_preferences',
     'cost_events',
+    -- CRM. Created (and granted on) in 0199_crm_base.sql; listed here so the
+    -- login-role lists match the schema, as for the tables above.
+    'crm_activities',
+    'crm_contact_org_roles',
+    'crm_contacts',
+    'crm_external_refs',
+    'crm_facts',
+    'crm_organizations',
     'cross_company_access_log',
     'cross_company_instructions',
     'customer_inbox_conversations',
@@ -185,6 +220,9 @@ DECLARE
     'document_annotation_threads',
     'document_revisions',
     'documents',
+    -- DUR-4277 email on/off per company. Created (and granted on) in
+    -- 0205_email_company_settings.sql; company-scoped, so it is in both lists.
+    'email_company_settings',
     'environment_custom_image_setup_sessions',
     'environment_custom_image_templates',
     'environment_leases',
@@ -231,6 +269,44 @@ DECLARE
     'labels',
     'lane_a_conversations',
     'lane_a_messages',
+    -- Per-person mail accounts (DUR-4194). Created (and granted on) in
+    -- 0203_mail_accounts.sql; listed here so the login-role lists match the
+    -- schema, as for the tables above.
+    'mail_accounts',
+    -- Mail secretary (DUR-4093). Created (and granted on) in
+    -- 0195_mail_secretary.sql; listed here so the login-role lists match the
+    -- schema, as for the tables above.
+    'mail_inbox_filters',
+    'mail_inboxes',
+    -- Per-person mail accounts (DUR-4194). Created (and granted on) in
+    -- 0203_mail_accounts.sql; listed here so the login-role lists match the
+    -- schema, as for the tables above.
+    'mail_messages',
+    'mail_secretary_items',
+    -- DUR-4329. Created, granted on and policed in
+    -- 0212_media_studio_direct_creations.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'media_studio_direct_creations',
+    -- DUR-4379. Created, granted on and policed in
+    -- 0216_model_directory_entries.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'model_directory_entries',
+    -- DUR-4344. Created, granted on and policed in
+    -- 0215_telegram_reaction_feedback.sql; listed here so the login-role
+    -- lists match the schema
+    'telegram_message_reactions',
+    'company_reaction_emoji_config',
+    -- Morning report (migration 0183): the outbox row per day a report
+    -- was generated. Created (and granted on) in 0183_morning_report.sql;
+    -- listed here so the login-role lists match the schema, as for the
+    -- tables above.
+    'morning_report_outbox',
+    -- DUR-4040. Created (and granted on) in 0186_payment_cards.sql; listed
+    -- here so the login-role lists match the schema, as for the tables above.
+    'payment_cards',
+    -- DUR-4037. Created (and granted on) in 0187_payment_notices_and_settings.sql;
+    -- listed here so the login-role lists match the schema, as for the tables above.
+    'payment_notices',
     'persona_account_publish_counters',
     'persona_accounts',
     'persona_generation_counters',
@@ -260,6 +336,14 @@ DECLARE
     'plugin_webhook_deliveries',
     'plugins',
     'principal_permission_grants',
+    -- DUR-4094 emergency-access audit trail. Created (and granted on) in
+    -- 0194_private_access_events.sql; listed here so the login-role lists
+    -- match the schema, as for the tables above. Company-scoped, so it is
+    -- in both lists.
+    'private_access_events',
+    -- DUR-4187 product grabber, created in 0198_product_grabber_staging.sql;
+    -- company-scoped, so it belongs in this list too.
+    'product_grabber_staged_items',
     'project_goals',
     'project_memberships',
     'project_workspaces',
@@ -271,18 +355,62 @@ DECLARE
     'routines',
     'secret_access_events',
     'session',
+    -- Voice messages. Created (and granted on) in
+    -- 0182_speech_voice_messages.sql; listed here so the login-role lists
+    -- match the schema, as for the tables above.
+    'speech_usage_events',
     -- DUR-3978 slice 2. The real DDL, grant and policy for this table live in
     -- 0166_telegram_bots.sql; the name is listed here for the same reason
     -- company_service_tokens is, above.
     'telegram_bots',
+    -- DUR-4157 2FA. Created (and granted on) in 0206_totp_2fa.sql;
+    -- user-scoped (no company_id), so it is in this list only, not in the
+    -- company-scoped one below.
+    'totp_session_tokens',
+    -- DUR-4153/DUR-4171 trading agent (paper-trading only). Created (and
+    -- granted on) in 0197_trading_agent.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'trading_daily_stats',
+    'trading_fifo_lots',
+    'trading_ledger_entries',
+    'trading_orders',
+    'trading_strategies',
     -- DUR-3994 Stage 2. Created (and granted on) in
     -- 0169_trusted_code_fingerprints.sql; instance-wide (no company_id), so it
     -- is in this list only, not in the company-scoped one below.
     'trusted_code_fingerprints',
     'untracked_write_incidents',
     'user',
+    'user_recovery_codes',
     'user_sidebar_preferences',
+    'user_totp_secrets',
     'verification',
+    -- Watchers. Created (and granted on) in 0181_watchers.sql; listed here so
+    -- the login-role lists match the schema, as for the tables above.
+    'watcher_alerts',
+    'watcher_price_points',
+    'watcher_web_page_snapshots',
+    'watchers',
+    -- DUR-4127 video storylines. Created (and granted on) in
+    -- 0196_video_storylines.sql; listed here so the login-role lists match
+    -- the schema, as for the tables above.
+    'video_scenes',
+    'video_shot_render_jobs',
+    'video_shots',
+    'video_storylines',
+    -- DUR-4196 director AI. Created (and granted on) in 0200_video_storyline_director_and_transitions.sql.
+    'video_storyline_director_runs',
+    -- DUR-4327 whole-storyline director conversation. Created (and granted
+    -- on) in 0211_video_storyline_director_conversation.sql.
+    'video_storyline_director_conversations',
+    'video_storyline_director_messages',
+    -- DUR-4182 Positions/Jobs. Created (and granted on) in 0201_jobs.sql;
+    -- listed here so the login-role lists match the schema, as for the
+    -- tables above.
+    'job_positions',
+    'job_runs',
+    'job_triggers',
+    'jobs',
     'workspace_operations',
     'workspace_runtime_services'
   ];
@@ -299,9 +427,17 @@ DECLARE
     'agent_daily_counters',
     'agent_instructions_revisions',
     'agent_memberships',
+    -- Quick-agent memory notebook. Created (and granted on) in
+    -- 0180_agent_memories.sql; listed here so the login-role lists match the
+    -- schema, as for the tables above.
+    'agent_memories',
     'agent_runtime_state',
     'agent_task_sessions',
     'agent_wakeup_requests',
+    -- DUR-4197. Created, granted on and policed in
+    -- 0204_agent_work_summaries.sql; listed here so the login-role lists
+    -- match the schema, as for the tables above.
+    'agent_work_summaries',
     'agents',
     'approval_comments',
     'approvals',
@@ -311,10 +447,25 @@ DECLARE
     'cloud_upstream_connections',
     'cloud_upstream_runs',
     'company_agent_roles',
+    -- DUR-4142. Created, granted on and policed in
+    -- 0207_company_job_settings.sql; listed here so the login-role lists
+    -- match the schema, as for the tables above.
+    'company_job_settings',
     'company_logos',
     'company_mcp_oauth_connections',
+    -- DUR-4004. Created (and granted on) in 0177_company_api_tools.sql; listed
+    -- here so the login-role lists match the schema, as for the tables above.
+    'company_api_tool_calls',
+    'company_api_tools',
     'company_mcp_tools',
     'company_memberships',
+    -- DUR-4037. Created (and granted on) in 0187_payment_notices_and_settings.sql;
+    -- listed here so the login-role lists match the schema, as for the tables above.
+    'company_payment_settings',
+    -- DUR-4187 product grabber. Created (and granted on) in
+    -- 0198_product_grabber_staging.sql; company-scoped, listed here so the
+    -- login-role lists match the schema.
+    'company_product_grabber_settings',
     'company_secret_bindings',
     'company_secret_provider_configs',
     'company_secrets',
@@ -323,8 +474,20 @@ DECLARE
     'company_skill_stars',
     'company_skill_versions',
     'company_skills',
+    -- Voice messages. Created (and granted on) in
+    -- 0182_speech_voice_messages.sql; listed here so the login-role lists
+    -- match the schema, as for the tables above.
+    'company_speech_settings',
     'company_user_sidebar_preferences',
     'cost_events',
+    -- CRM. Created (and granted on) in 0199_crm_base.sql; listed here so the
+    -- login-role lists match the schema, as for the tables above.
+    'crm_activities',
+    'crm_contact_org_roles',
+    'crm_contacts',
+    'crm_external_refs',
+    'crm_facts',
+    'crm_organizations',
     'customer_inbox_conversations',
     'customer_inbox_deliveries',
     -- DUR-3972 slice S1, created in 0168_data_connections.sql; company-scoped,
@@ -337,6 +500,9 @@ DECLARE
     'document_annotation_threads',
     'document_revisions',
     'documents',
+    -- DUR-4277 email on/off per company. Created (and granted on) in
+    -- 0205_email_company_settings.sql; company-scoped, so it is in both lists.
+    'email_company_settings',
     'environment_leases',
     'escalation_grants',
     'execution_workspaces',
@@ -373,6 +539,44 @@ DECLARE
     'labels',
     'lane_a_conversations',
     'lane_a_messages',
+    -- Per-person mail accounts (DUR-4194). Created (and granted on) in
+    -- 0203_mail_accounts.sql; listed here so the login-role lists match the
+    -- schema, as for the tables above.
+    'mail_accounts',
+    -- Mail secretary (DUR-4093). Created (and granted on) in
+    -- 0195_mail_secretary.sql; listed here so the login-role lists match the
+    -- schema, as for the tables above.
+    'mail_inbox_filters',
+    'mail_inboxes',
+    -- Per-person mail accounts (DUR-4194). Created (and granted on) in
+    -- 0203_mail_accounts.sql; listed here so the login-role lists match the
+    -- schema, as for the tables above.
+    'mail_messages',
+    'mail_secretary_items',
+    -- DUR-4329. Created, granted on and policed in
+    -- 0212_media_studio_direct_creations.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'media_studio_direct_creations',
+    -- DUR-4379. Created, granted on and policed in
+    -- 0216_model_directory_entries.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'model_directory_entries',
+    -- DUR-4344. Created, granted on and policed in
+    -- 0215_telegram_reaction_feedback.sql; listed here so the login-role
+    -- lists match the schema
+    'telegram_message_reactions',
+    'company_reaction_emoji_config',
+    -- Morning report (migration 0183): the outbox row per day a report
+    -- was generated. Created (and granted on) in 0183_morning_report.sql;
+    -- listed here so the login-role lists match the schema, as for the
+    -- tables above.
+    'morning_report_outbox',
+    -- DUR-4040. Created (and granted on) in 0186_payment_cards.sql; listed
+    -- here so the login-role lists match the schema, as for the tables above.
+    'payment_cards',
+    -- DUR-4037. Created (and granted on) in 0187_payment_notices_and_settings.sql;
+    -- listed here so the login-role lists match the schema, as for the tables above.
+    'payment_notices',
     'persona_account_publish_counters',
     'persona_accounts',
     'persona_generation_counters',
@@ -394,6 +598,14 @@ DECLARE
     'plugin_managed_resources',
     'plugin_webhook_deliveries',
     'principal_permission_grants',
+    -- DUR-4094 emergency-access audit trail. Created (and granted on) in
+    -- 0194_private_access_events.sql; listed here so the login-role lists
+    -- match the schema, as for the tables above. Company-scoped, so it is
+    -- in both lists.
+    'private_access_events',
+    -- DUR-4187 product grabber, created in 0198_product_grabber_staging.sql;
+    -- company-scoped, so it belongs in this list too.
+    'product_grabber_staged_items',
     'project_goals',
     'project_memberships',
     'project_workspaces',
@@ -404,10 +616,49 @@ DECLARE
     'routine_triggers',
     'routines',
     'secret_access_events',
+    -- Voice messages. Created (and granted on) in
+    -- 0182_speech_voice_messages.sql; listed here so the login-role lists
+    -- match the schema, as for the tables above.
+    'speech_usage_events',
     -- DUR-3978 slice 2, created in 0166_telegram_bots.sql; company-scoped, so
     -- it belongs in this list too.
     'telegram_bots',
+    -- DUR-4153/DUR-4171 trading agent (paper-trading only), created in
+    -- 0197_trading_agent.sql; company-scoped, so it belongs in this list too.
+    'trading_daily_stats',
+    'trading_fifo_lots',
+    'trading_ledger_entries',
+    'trading_orders',
+    'trading_strategies',
     'untracked_write_incidents',
+    -- Watchers. Created (and granted on) in 0181_watchers.sql; listed here so
+    -- the login-role lists match the schema, as for the tables above.
+    'watcher_alerts',
+    'watcher_price_points',
+    'watcher_web_page_snapshots',
+    'watchers',
+    -- DUR-4127 video storylines. Created (and granted on) in
+    -- 0196_video_storylines.sql; listed here so the login-role lists match
+    -- the schema, as for the tables above. Company-scoped, so it is in both
+    -- lists.
+    'video_scenes',
+    'video_shot_render_jobs',
+    'video_shots',
+    'video_storylines',
+    -- DUR-4196 director AI. Created (and granted on) in 0200_video_storyline_director_and_transitions.sql. Company-scoped, so it is in both lists.
+    'video_storyline_director_runs',
+    -- DUR-4327 whole-storyline director conversation. Created (and granted
+    -- on) in 0211_video_storyline_director_conversation.sql. Company-scoped,
+    -- so it is in both lists.
+    'video_storyline_director_conversations',
+    'video_storyline_director_messages',
+    -- DUR-4182 Positions/Jobs. Created (and granted on) in 0201_jobs.sql;
+    -- listed here so the login-role lists match the schema, as for the
+    -- tables above. Company-scoped, so it is in both lists.
+    'job_positions',
+    'job_runs',
+    'job_triggers',
+    'jobs',
     'workspace_operations',
     'workspace_runtime_services'
   ];

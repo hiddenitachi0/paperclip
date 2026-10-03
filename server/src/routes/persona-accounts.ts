@@ -14,6 +14,7 @@ import {
   updatePersonaAccountSchema,
   connectPersonaAccountCredentialSchema,
   enqueuePersonaPostSchema,
+  setPersonaAccountScheduleSchema,
   updatePersonaPublishingCompanySettingsSchema,
 } from "@paperclipai/shared/validators/persona-account";
 import { validate } from "../middleware/validate.js";
@@ -232,12 +233,39 @@ export function personaAccountRoutes(rawDb: Db) {
     res.json(post);
   });
 
-  // Manual/system trigger for one publish attempt. Item 4's routine-driven
-  // schedule is not wired yet (see the PR description) -- this is the
-  // interim way to actually run attemptPublish's safety gates end to end
-  // (ops testing, and a stand-in for the scheduler until that lands).
+  // Manual/system trigger for one publish attempt. The operator-set schedule
+  // (item 4) is what makes the persona WRITE a new post on a cadence --
+  // handled below via /schedule -- but a queued/approved post is drained
+  // automatically every heartbeat tick regardless (personaPublisherSweep).
+  // This route stays as ops tooling: forcing one specific post through the
+  // gates right now, without waiting for the next tick.
   router.post("/persona-posts/:postId/attempt-publish", scopeFromPostIdParam("postId"), async (req, res) => {
     res.json(await publisher.attemptPublish(req.params.postId as string));
+  });
+
+  // Item 4: the operator's posting cadence for this account, wired through
+  // routines/routine_triggers. Board-only, same as account setup -- this is
+  // an operator decision (who writes, how often), not something the persona
+  // chooses for itself.
+  router.post(
+    "/persona-accounts/:accountId/schedule",
+    scopeFromAccountIdParam("accountId"),
+    validate(setPersonaAccountScheduleSchema),
+    async (req, res) => {
+      const account = await accounts.setSchedule(req.params.accountId as string, req.body, {
+        agentId: req.actor.type === "agent" ? req.actor.agentId : null,
+        userId: req.actor.type === "board" ? req.actor.userId ?? "board" : null,
+      });
+      res.json(account);
+    },
+  );
+
+  router.delete("/persona-accounts/:accountId/schedule", scopeFromAccountIdParam("accountId"), async (req, res) => {
+    const account = await accounts.clearSchedule(req.params.accountId as string, {
+      agentId: req.actor.type === "agent" ? req.actor.agentId : null,
+      userId: req.actor.type === "board" ? req.actor.userId ?? "board" : null,
+    });
+    res.json(account);
   });
 
   router.get(

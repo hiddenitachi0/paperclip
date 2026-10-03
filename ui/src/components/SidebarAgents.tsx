@@ -10,6 +10,7 @@ import {
   PlayCircle,
   Plus,
   Users,
+  UserRound,
   AlertTriangle,
 } from "lucide-react";
 import { useCompany } from "../context/CompanyContext";
@@ -35,6 +36,7 @@ import {
 import { AgentAvatar } from "./AgentAvatar";
 import { BudgetSidebarMarker } from "./BudgetSidebarMarker";
 import { SidebarSection, type SidebarSectionRadioChoice } from "./SidebarSection";
+import { SidebarNavItem } from "./SidebarNavItem";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -462,6 +464,7 @@ export function SidebarAgents({ streamlined = false }: { streamlined?: boolean }
         onRadioValueChange: persistSortMode,
       }}
     >
+      <SidebarNavItem to="/personas" label="Personas" icon={UserRound} />
       {displayedAgents.map((agent: Agent) => {
         const runCount = liveCountByAgent.get(agent.id) ?? 0;
         return (

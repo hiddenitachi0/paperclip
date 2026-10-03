@@ -106,6 +106,12 @@ export const createSecretBindingSchema = secretBindingTargetSchema.extend({
 
 export type CreateSecretBinding = z.infer<typeof createSecretBindingSchema>;
 
+/** DUR-4068: bind an operator-chosen secret as one agent's SFTP deploy credential. */
+export const bindDeploySftpCredentialSchema = z.object({
+  secretId: z.string().uuid(),
+});
+export type BindDeploySftpCredential = z.infer<typeof bindDeploySftpCredentialSchema>;
+
 const safeShortText = z.string().trim().min(1).max(160);
 const optionalSafeShortText = safeShortText.optional().nullable();
 

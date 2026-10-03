@@ -132,6 +132,7 @@ import {
 export const SCHEDULER_TICK_CHAINS = [
   "tickTimers",
   "tickScheduledTriggers",
+  "tickScheduledJobTriggers",
   "mergeDeployVisibility",
   "deployApprovalFeedback",
   "deployCarriedIssues",
@@ -147,6 +148,14 @@ export const SCHEDULER_TICK_CHAINS = [
   "organizationCheckups",
   "adminAuthCheck",
   "claudeAuthCheck",
+  "watchers",
+  "morningReport",
+  "paymentCardExpiry",
+  "mailSecretary",
+  "mailAccountSync",
+  "videoStorylineRender",
+  "videoStorylineStitch",
+  "tradingAgent",
 ] as const;
 
 export type SchedulerTickChain = (typeof SCHEDULER_TICK_CHAINS)[number];
@@ -180,7 +189,8 @@ export const TICK_PHASE_TIMED_CHAINS: ReadonlySet<SchedulerTickChain> = new Set<
  */
 export const SCHEDULER_TICK_CHAIN_LABELS: Record<SchedulerTickChain, string> = {
   tickTimers: "waking agents on their timers",
-  tickScheduledTriggers: "starting scheduled jobs",
+  tickScheduledTriggers: "starting scheduled routines",
+  tickScheduledJobTriggers: "starting scheduled position jobs",
   mergeDeployVisibility: "following merges and deploys",
   deployApprovalFeedback: "following up on deploy approvals",
   deployCarriedIssues: "checking which tasks a deploy carried",
@@ -196,6 +206,14 @@ export const SCHEDULER_TICK_CHAIN_LABELS: Record<SchedulerTickChain, string> = {
   organizationCheckups: "checking company setups",
   adminAuthCheck: "checking the admin sign-in",
   claudeAuthCheck: "checking the Claude sign-in",
+  watchers: "checking market watchers",
+  morningReport: "sending morning reports",
+  paymentCardExpiry: "expiring old payment cards",
+  mailSecretary: "checking mail inboxes",
+  mailAccountSync: "syncing personal mail accounts",
+  videoStorylineRender: "rendering video storyline shots",
+  videoStorylineStitch: "stitching finished video storylines",
+  tradingAgent: "checking the trading agent",
 };
 
 /** At most one skip line per chain per minute, however often it skips. */

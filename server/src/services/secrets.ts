@@ -35,8 +35,10 @@ import {
   createSecretProviderConfigSchema,
   DEDICATED_SECRET_BINDING_TARGET_TYPES,
   deriveProjectUrlKey,
+  EODHD_SECRET_NAMES,
   envBindingSchema,
   GITHUB_TOKEN_SECRET_NAMES,
+  isSecretKindBindable,
   isUuidLike,
   normalizeAgentUrlKey,
   secretProviderConfigPayloadSchema,
@@ -84,6 +86,9 @@ const DEDICATED_TARGET_LABELS: Record<(typeof DEDICATED_SECRET_BINDING_TARGET_TY
   data_connection: "a data connection (Data sources)",
   telegram_bot: "a Telegram bot",
   persona_account: "a persona account",
+  site_login: "a site login",
+  deploy_sftp_credential: "a project's SFTP deploy credential",
+  mail_account: "a mail account's IMAP/SMTP credential",
 };
 
 /**
@@ -304,6 +309,14 @@ type SecretConsumerContext = {
 type SecretResolutionOptions = {
   bindingContext?: SecretConsumerContext;
   accessContext?: SecretConsumerContext;
+  /**
+   * Set only by resolveSecretValueForBrowserFill, the one intended reader of
+   * payment_card_single_use/site_login secret values. Every other resolution
+   * path (env, MCP, export, plugin, test, ephemeral) leaves this unset and is
+   * refused by kind, defence-in-depth against a binding row that should never
+   * have been created for one of these kinds in the first place.
+   */
+  allowProtectedSecretKind?: boolean;
 };
 
 export type RuntimeSecretManifestEntry = {
@@ -564,6 +577,15 @@ export function secretService(db: Db, rawDb: Db = db) {
     });
   }
 
+  // DUR-4044: every caller of this function is validating a secret ahead of
+  // creating/replacing a company_secret_bindings row or persisting it into an
+  // adapter/env/MCP config field (createBinding, syncSecretRefsForTarget,
+  // syncEnvBindingsForTarget, normalizeEnvConfig, normalizeSchemaSecretField
+  // ForPersistence). A payment_card_single_use or site_login secret must
+  // never be reachable through any of those paths -- only
+  // paymentCardService.resolveForFill (via resolveSecretValueForBrowserFill)
+  // may ever see the value -- so the refusal belongs here, by kind, once, not
+  // repeated (and possibly forgotten) at each call site.
   async function assertSecretInCompany(
     companyId: string,
     secretId: string,
@@ -573,6 +595,11 @@ export function secretService(db: Db, rawDb: Db = db) {
     if (!secret) throw notFound("Secret not found");
     if (secret.status === "deleted") throw notFound("Secret not found");
     if (secret.companyId !== companyId) throw unprocessable("Secret must belong to same company");
+    if (!isSecretKindBindable(secret.kind)) {
+      throw forbidden(
+        `Secrets of kind "${secret.kind}" can only be read through their dedicated resolver and can never be bound to an agent, environment, or config`,
+      );
+    }
     return secret;
   }
 
@@ -716,6 +743,16 @@ export function secretService(db: Db, rawDb: Db = db) {
     const secret = await getById(secretId);
     if (!secret) throw notFound("Secret not found");
     if (secret.companyId !== companyId) throw unprocessable("Secret must belong to same company");
+    // DUR-4044: defence in depth. Binding creation already refuses these
+    // kinds (assertSecretInCompany), but a stale/pre-existing binding row (or
+    // any future resolution path that forgets to check) must not be able to
+    // hand out a payment_card_single_use/site_login value either -- only
+    // resolveSecretValueForBrowserFill sets allowProtectedSecretKind.
+    if (!options?.allowProtectedSecretKind && !isSecretKindBindable(secret.kind)) {
+      throw forbidden(
+        `Secrets of kind "${secret.kind}" can only be resolved through their dedicated reader`,
+      );
+    }
     const resolvedVersion = version === "latest" ? secret.latestVersion : version;
     const providerId = secret.provider as SecretProvider;
     const configPath = accessContext?.configPath ?? null;
@@ -899,6 +936,99 @@ export function secretService(db: Db, rawDb: Db = db) {
   }
 
   /**
+   * DUR-4040 (Maja browser step 5): resolve a `payment_card_single_use` (or
+   * `site_login`) secret's VALUE for `paymentCardService.resolveForFill`, the
+   * only caller. Like the plugin path this asserts no `company_secret_bindings`
+   * row -- a payment card points at its secret directly via
+   * `payment_cards.secret_id`, there is no binding UI for it -- but still
+   * records an access event via resolveSecretValueInternal, so every fill
+   * shows up in the secret's own audit trail (its "who accessed this and
+   * when" list) as well as the card's own. Requires an agent actor context;
+   * paymentCardService is responsible for everything else the design asks
+   * for before calling this (a live clearance, the card reserved for that
+   * clearance, the kill switch off) -- this function only ever resolves the
+   * bytes, it does not re-derive any of those checks.
+   */
+  async function resolveSecretValueForBrowserFill(
+    companyId: string,
+    secretId: string,
+    context: { actorId: string; issueId?: string | null; heartbeatRunId?: string | null },
+  ): Promise<string> {
+    if (!context.actorId?.trim()) {
+      throw forbidden("Payment card fill requires an agent actor context");
+    }
+    return (await resolveSecretValueInternal(companyId, secretId, "latest", {
+      accessContext: {
+        consumerType: "system",
+        consumerId: `payment_card_fill:${secretId}`,
+        actorType: "agent",
+        actorId: context.actorId,
+        issueId: context.issueId ?? null,
+        heartbeatRunId: context.heartbeatRunId ?? null,
+      },
+      allowProtectedSecretKind: true,
+    })).value;
+  }
+
+  /**
+   * DUR-4127: resolve a Fal/Sogni API key for the video-storyline render
+   * scheduler tick (video-storyline-render.ts), the only caller. This is a
+   * server-side scheduler tick, not a plugin ctx call, so it is NOT subject
+   * to (and must never be routed through) createPluginSecretsHandler's
+   * executeTool-invocation-scope gate -- that gate exists specifically
+   * because a background job/webhook/scheduler tick has no invocation scope
+   * a plugin worker could forge (see plugin-secrets-handler.ts's own doc
+   * comment). This function is the trusted-server equivalent, same tier as
+   * resolveGitHubToken below: no per-consumer binding is asserted (the
+   * media-studio plugin's instance-wide config has no binding UI for
+   * falKeySecretRef/sogniKeySecretRef either), but the company-match check
+   * inside resolveSecretValueInternal still makes cross-company leakage
+   * impossible, and every resolution still lands in the secret's own audit
+   * trail via the access event below.
+   */
+  async function resolveSecretValueForVideoRender(
+    companyId: string,
+    secretId: string,
+    context: { actorId: string },
+  ): Promise<string> {
+    if (!context.actorId?.trim()) {
+      throw forbidden("Video storyline rendering requires an actor context for the audit trail");
+    }
+    return (await resolveSecretValueInternal(companyId, secretId, "latest", {
+      accessContext: {
+        consumerType: "system",
+        consumerId: `video_storyline_render:${secretId}`,
+        actorType: "system",
+        actorId: context.actorId,
+      },
+    })).value;
+  }
+
+  /**
+   * DUR-4329: same shape as resolveSecretValueForVideoRender above, for
+   * Media Studio's Create tab direct generation -- a board user, not an
+   * agent or a run, so the audit trail's actorId is the board user's own id
+   * rather than an agent/run id.
+   */
+  async function resolveSecretValueForMediaStudioDirect(
+    companyId: string,
+    secretId: string,
+    context: { actorId: string },
+  ): Promise<string> {
+    if (!context.actorId?.trim()) {
+      throw forbidden("Media Studio direct generation requires an actor context for the audit trail");
+    }
+    return (await resolveSecretValueInternal(companyId, secretId, "latest", {
+      accessContext: {
+        consumerType: "system",
+        consumerId: `media_studio_direct:${secretId}`,
+        actorType: "user",
+        actorId: context.actorId,
+      },
+    })).value;
+  }
+
+  /**
    * Resolve the company's GitHub token by the same secret-name convention as
    * managed workspace clones (see heartbeat.ts's resolveManagedCloneGitHubToken)
    * — first bound+resolvable secret named GITHUB_TOKEN/GH_TOKEN/PAPERCLIP_GITHUB_TOKEN
@@ -933,6 +1063,25 @@ export function secretService(db: Db, rawDb: Db = db) {
       if (!secret) continue;
       const value = await resolveSecretValueInternal(companyId, secret.id, "latest", {
         accessContext: context ?? { consumerType: "system", consumerId: "deploy-runner" },
+      }).catch(() => null);
+      const trimmed = value?.value?.trim();
+      if (trimmed) return trimmed;
+    }
+    return null;
+  }
+
+  /**
+   * Resolve the company's EODHD key by the same by-name convention as
+   * resolveGitHubToken — the first bound+resolvable secret named
+   * EODHD/EODHD_API_KEY/"EODHD key" wins. Lets the morning report price
+   * section fetch DNB.OL directly, with no watcher required (DUR-4059).
+   */
+  async function resolveStockDataKey(companyId: string, context?: SecretConsumerContext): Promise<string | null> {
+    for (const secretName of EODHD_SECRET_NAMES) {
+      const secret = await getByName(companyId, secretName).catch(() => null);
+      if (!secret) continue;
+      const value = await resolveSecretValueInternal(companyId, secret.id, "latest", {
+        accessContext: context ?? { consumerType: "system", consumerId: "morning-report" },
       }).catch(() => null);
       const trimmed = value?.value?.trim();
       if (trimmed) return trimmed;
@@ -1417,6 +1566,18 @@ export function secretService(db: Db, rawDb: Db = db) {
           status: row.status,
         });
       }
+    }
+
+    // The company's web-search key (Connections → Web search): one per company.
+    for (const targetId of collectTargetIds(bindings, "web_search")) {
+      if (targetId !== companyId) continue;
+      setTarget({
+        type: "web_search",
+        id: targetId,
+        label: "Web search for quick agents (Connections)",
+        href: "/company/settings/connections",
+        status: null,
+      });
     }
 
     return targetMap;
@@ -2131,8 +2292,12 @@ export function secretService(db: Db, rawDb: Db = db) {
     resolveSecretValueForEphemeralAccess,
     resolveSecretValueForExport,
     resolveSecretValueForPlugin,
+    resolveSecretValueForBrowserFill,
+    resolveSecretValueForVideoRender,
+    resolveSecretValueForMediaStudioDirect,
     resolveSecretValueForTest,
     resolveGitHubToken,
+    resolveStockDataKey,
 
     create: async (
       companyId: string,

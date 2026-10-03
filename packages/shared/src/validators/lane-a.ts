@@ -1,4 +1,17 @@
 import { z } from "zod";
+import {
+  LANE_A_BACKUP_MODELS_MAX,
+  LANE_A_BACKUP_ID_MAX_LENGTH,
+  LANE_A_BASE_URL_MAX_LENGTH,
+  LANE_A_FREE_FORM_MODEL_MAX_LENGTH,
+  LANE_A_KEYWORD_ROUTES_MAX,
+  LANE_A_KEYWORD_ROUTE_PHRASES_MAX,
+  LANE_A_KEYWORD_ROUTE_PHRASE_MAX_LENGTH,
+  LANE_A_MAX_TEMPERATURE,
+  LANE_A_MIN_TEMPERATURE,
+  LANE_A_PROVIDERS,
+  laneABackupModelEntryIssue,
+} from "../lane-a-models.js";
 
 // DUR-217: POST /api/lane-a/:agentId/messages body. Lane A is a direct
 // model-call text primitive — companyId scopes the request the same way
@@ -123,3 +136,205 @@ export const laneATransformSchema = z.object({
 });
 
 export type LaneATransform = z.infer<typeof laneATransformSchema>;
+
+// ─── DUR-4347: backup-model pool, fallback chains & keyword routing ─────────
+
+function isHttpUrl(raw: string): boolean {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+    // Same shape check as the main model's laneABaseUrl (validators/agent.ts):
+    // the server appends /chat/completions, so a query string, fragment or
+    // sign-in part would ride along on every request.
+    if (url.search || url.hash || url.username || url.password) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const laneABackupIdSchema = z.string().trim().min(1).max(LANE_A_BACKUP_ID_MAX_LENGTH);
+
+/**
+ * One backup-pool entry. Mirrors the main model's own fields (provider,
+ * model, baseUrl, temperature) plus a stable `id`. Field shapes match the
+ * main model's create/update schema (validators/agent.ts); cross-field fit
+ * (provider/model, free-form-provider-needs-baseUrl) is checked in
+ * `laneABackupModelEntryIssue` below via `.superRefine`.
+ */
+export const laneABackupModelEntrySchema = z
+  .object({
+    id: laneABackupIdSchema,
+    provider: z.enum(LANE_A_PROVIDERS),
+    model: z.string().trim().min(1).max(LANE_A_FREE_FORM_MODEL_MAX_LENGTH),
+    baseUrl: z
+      .string()
+      .trim()
+      .max(LANE_A_BASE_URL_MAX_LENGTH)
+      .refine(isHttpUrl, "The model address must be a plain http(s) URL with no query string or sign-in part.")
+      .nullable()
+      .optional(),
+    temperature: z
+      .number()
+      .finite()
+      .min(LANE_A_MIN_TEMPERATURE, `Creativity must be between ${LANE_A_MIN_TEMPERATURE} and ${LANE_A_MAX_TEMPERATURE}.`)
+      .max(LANE_A_MAX_TEMPERATURE, `Creativity must be between ${LANE_A_MIN_TEMPERATURE} and ${LANE_A_MAX_TEMPERATURE}.`)
+      .nullable()
+      .optional(),
+    // DUR-4418: points this backup at a company model-directory entry. That
+    // the entry belongs to the same company is checked server-side on write.
+    directoryEntryId: z.string().uuid().nullable().optional(),
+  })
+  .strict();
+
+export type LaneABackupModelEntryInput = z.infer<typeof laneABackupModelEntrySchema>;
+
+/**
+ * The whole backup-model pool: at most 5 entries, each a unique `id`, each
+ * fitting its own provider (same rule as the main model) and carrying a base
+ * URL when its provider needs one (laneABackupModelEntryIssue).
+ */
+export const laneABackupModelsSchema = z
+  .array(laneABackupModelEntrySchema)
+  .max(LANE_A_BACKUP_MODELS_MAX, `List at most ${LANE_A_BACKUP_MODELS_MAX} backup models.`)
+  .superRefine((entries, ctx) => {
+    const seenIds = new Set<string>();
+    entries.forEach((entry, index) => {
+      if (seenIds.has(entry.id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Backup model id "${entry.id}" is used more than once.`,
+          path: [index, "id"],
+        });
+      }
+      seenIds.add(entry.id);
+      if (entry.id === "main") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Backup model id "main" is reserved for the main model.',
+          path: [index, "id"],
+        });
+      }
+      const issue = laneABackupModelEntryIssue(entry);
+      if (issue) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: issue, path: [index, "model"] });
+      }
+    });
+  });
+
+export type LaneABackupModels = z.infer<typeof laneABackupModelsSchema>;
+
+/**
+ * One fallback chain: an ordered list of backup-pool ids, no duplicates.
+ * Whether every id actually exists in the pool is a cross-field check (the
+ * pool and the chain are sibling fields on the same agent-settings patch) —
+ * see `laneABackupRoutingIssues` below, run from validators/agent.ts.
+ */
+export const laneAChainIdsSchema = z
+  .array(laneABackupIdSchema)
+  .max(LANE_A_BACKUP_MODELS_MAX)
+  .superRefine((ids, ctx) => {
+    const seen = new Set<string>();
+    ids.forEach((id, index) => {
+      if (seen.has(id)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `"${id}" appears more than once in this chain.`, path: [index] });
+      }
+      seen.add(id);
+    });
+  });
+
+export type LaneAChainIds = z.infer<typeof laneAChainIdsSchema>;
+
+const laneAKeywordPhraseSchema = z.string().trim().min(1).max(LANE_A_KEYWORD_ROUTE_PHRASE_MAX_LENGTH);
+
+/**
+ * One keyword-routing rule: a non-empty, deduplicated list of phrases and the
+ * pool entry (`backupId`) they route to. Whether `backupId` actually exists
+ * in the pool is checked alongside the chains in `laneABackupRoutingIssues`.
+ */
+export const laneAKeywordRouteSchema = z
+  .object({
+    id: laneABackupIdSchema,
+    phrases: z
+      .array(laneAKeywordPhraseSchema)
+      .min(1, "A keyword rule needs at least one phrase.")
+      .max(LANE_A_KEYWORD_ROUTE_PHRASES_MAX, `List at most ${LANE_A_KEYWORD_ROUTE_PHRASES_MAX} phrases per rule.`)
+      .superRefine((phrases, ctx) => {
+        const seen = new Set<string>();
+        phrases.forEach((phrase, index) => {
+          const key = phrase.toLowerCase();
+          if (seen.has(key)) {
+            ctx.addIssue({ code: z.ZodIssueCode.custom, message: `"${phrase}" is listed more than once.`, path: [index] });
+          }
+          seen.add(key);
+        });
+      }),
+    backupId: laneABackupIdSchema,
+  })
+  .strict();
+
+export type LaneAKeywordRouteInput = z.infer<typeof laneAKeywordRouteSchema>;
+
+export const laneAKeywordRoutesSchema = z
+  .array(laneAKeywordRouteSchema)
+  .max(LANE_A_KEYWORD_ROUTES_MAX, `List at most ${LANE_A_KEYWORD_ROUTES_MAX} keyword rules.`)
+  .superRefine((routes, ctx) => {
+    const seen = new Set<string>();
+    routes.forEach((route, index) => {
+      if (seen.has(route.id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Keyword rule id "${route.id}" is used more than once.`,
+          path: [index, "id"],
+        });
+      }
+      seen.add(route.id);
+    });
+  });
+
+export type LaneAKeywordRoutes = z.infer<typeof laneAKeywordRoutesSchema>;
+
+/**
+ * Cross-field checks that need the pool alongside the chains/routes — the
+ * four fields are siblings on the same agent-settings patch (createAgentSchema
+ * /updateAgentSchema in validators/agent.ts), so this runs from that object's
+ * `.superRefine`, not from any one field's own schema. Returns plain issues
+ * (path + message) for the caller to `ctx.addIssue`.
+ */
+export function laneABackupRoutingIssues(input: {
+  laneABackupModels?: LaneABackupModelEntryInput[] | null;
+  laneANoAnswerChainIds?: LaneAChainIds | null;
+  laneARefusalChainIds?: LaneAChainIds | null;
+  laneAKeywordRoutes?: LaneAKeywordRouteInput[] | null;
+}): Array<{ path: (string | number)[]; message: string }> {
+  const issues: Array<{ path: (string | number)[]; message: string }> = [];
+  const pool = input.laneABackupModels;
+  // Nothing to cross-check against a pool when it was not part of this patch;
+  // a chain/route id is only meaningful once the pool is also known, and an
+  // agent-settings PATCH always sends all four together (see
+  // server/src/routes/agents.ts) so this is reached with the real pool in
+  // practice.
+  const poolIds = new Set((pool ?? []).map((entry) => entry.id));
+  const checkChain = (ids: LaneAChainIds | null | undefined, field: string) => {
+    if (!ids || pool === undefined) return;
+    ids.forEach((id, index) => {
+      if (!poolIds.has(id)) {
+        issues.push({ path: [field, index], message: `"${id}" is not one of this quick agent's backup models.` });
+      }
+    });
+  };
+  checkChain(input.laneANoAnswerChainIds, "laneANoAnswerChainIds");
+  checkChain(input.laneARefusalChainIds, "laneARefusalChainIds");
+  const routes = input.laneAKeywordRoutes;
+  if (routes && pool !== undefined) {
+    routes.forEach((route, index) => {
+      if (!poolIds.has(route.backupId)) {
+        issues.push({
+          path: ["laneAKeywordRoutes", index, "backupId"],
+          message: `"${route.backupId}" is not one of this quick agent's backup models.`,
+        });
+      }
+    });
+  }
+  return issues;
+}

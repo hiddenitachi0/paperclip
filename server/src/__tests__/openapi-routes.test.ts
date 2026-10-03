@@ -46,6 +46,7 @@ const apiPrefixes: Record<string, string> = {
   "issue-tree-control.ts": "/api",
   "lane-a.ts": "/api",
   "llms.ts": "/api",
+  "model-directory.ts": "/api",
   "openapi.ts": "/api",
   "plugin-ui-static.ts": "/api",
   "plugins.ts": "/api",
@@ -71,10 +72,22 @@ const HTTP_METHODS = new Set(["get", "put", "post", "delete", "options", "head",
 const explicitOpenApiCoverageExclusions = new Set([
   // Pipeline routes are experimental and not yet represented in the public OpenAPI document.
   "pipelines.ts",
+  // Telegram reaction feedback routes (DUR-4344) are bridge-internal plus a company emoji-meaning config; not yet in the public OpenAPI document.
+  "telegram-reactions.ts",
   // Agent role/job routes (DUR-114) are a new backend feature not yet in the public OpenAPI document.
   "agent-roles.ts",
   // MCP tool library routes (DUR-143) are a new backend feature not yet in the public OpenAPI document.
   "mcp-tool-library.ts",
+  // "API with a key" tool routes (DUR-4004) sit next to the MCP tool library and are not yet in the public OpenAPI document.
+  "api-tools.ts",
+  // Web search for quick agents (Connections → Web search) sits next to the API tools and is not yet in the public OpenAPI document.
+  "web-search.ts",
+  // Quick-agent memory notebook routes sit next to the agent's quick-agent settings and are not yet in the public OpenAPI document.
+  "agent-memories.ts",
+  // Voice message routes (speech-to-text, text-to-speech, the speech settings) are board-only and not yet in the public OpenAPI document.
+  "speech.ts",
+  // Watcher routes (market-price checks and the Telegram outbox) are board-only and not yet in the public OpenAPI document.
+  "watchers.ts",
   // Persona routes (DUR-133) are board-only and not yet in the public OpenAPI document.
   "personas.ts",
   // Persona publishing routes (DUR-134) are board/instance-admin-only and not yet in the public OpenAPI document.
@@ -85,6 +98,42 @@ const explicitOpenApiCoverageExclusions = new Set([
   "goal-adoption.ts",
   // MCP OAuth "Connect & sign in" routes (DUR-3909) are a new backend feature not yet in the public OpenAPI document.
   "mcp-oauth.ts",
+  // Browser worker routes (DUR-4013 step 3) are agent-only, switched off by default, and not yet in the public OpenAPI document.
+  "browser.ts",
+  // Morning report routes (DUR-4017) are a new backend feature not yet in the public OpenAPI document.
+  "morning-report.ts",
+  // Trading agent routes (DUR-4171) are board-only paper-trading controls and not yet in the public OpenAPI document.
+  "trading.ts",
+  // Product grabber routes (DUR-4187) are a new backend feature not yet in the public OpenAPI document.
+  "product-grabber.ts",
+  // Mail secretary routes (DUR-4093) are board-only inbox/filter configuration and not yet in the public OpenAPI document.
+  "mail-secretary.ts",
+  // Per-person mail accounts (DUR-4194) are a new backend feature not yet in the public OpenAPI document.
+  "mail-accounts.ts",
+  // Company email on/off setting (DUR-4277) is a new board-only setting not yet in the public OpenAPI document.
+  "email-settings.ts",
+  // Company Jobs on/off switch (DUR-4142) is a new board-only setting not yet in the public OpenAPI document.
+  "job-settings.ts",
+  // Payment notice routes (DUR-4037, the booking gate's Telegram outbox) are board-only, switched off by default, and not yet in the public OpenAPI document.
+  "payment-notices.ts",
+  // Payment card routes (DUR-4040) are board-only, switched off by default, and not yet in the public OpenAPI document.
+  "payment-cards.ts",
+  // Private-workspace emergency-access routes (DUR-4094) are owner/admin-only and not yet in the public OpenAPI document.
+  "private-access.ts",
+  // Video storyline routes (DUR-4127) are a new backend feature, off by default, and not yet in the public OpenAPI document.
+  "video-storylines.ts",
+  // CRM routes (DUR-4150/DUR-4191/DUR-4192) are a new backend feature not yet in the public OpenAPI document.
+  "crm.ts",
+  // Agent work-history search routes (DUR-4197) sit next to the quick-agent memory notebook and are not yet in the public OpenAPI document.
+  "agent-work-summaries.ts",
+  // Positions/Jobs routes (DUR-4182) are a new backend feature not yet in the public OpenAPI document.
+  "jobs.ts",
+  // Paperless-ngx document download proxy (DUR-4303) is a short-lived,
+  // unauthenticated capability link handed out by get_document, not a
+  // conventional REST route, and is not yet in the public OpenAPI document.
+  "documents-download.ts",
+  // Media Studio Create tab direct-generation routes (DUR-4329) are board-only and not yet in the public OpenAPI document.
+  "media-studio-direct.ts",
 ]);
 
 function createApp() {

@@ -17,12 +17,14 @@ import {
   issues,
   projectWorkspaces,
   projects,
+  workspaceOperations,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "../__tests__/helpers/embedded-postgres.js";
 import {
+  MAX_SELF_REVIEW_PASSES_FOR_SHIFTING_DIFF,
   MAX_SELF_REVIEW_PASSES_FOR_UNREADABLE_DIFF,
   RISKY_SURFACE_CATEGORY_LABELS,
   SELF_REVIEW_PASS_CONTEXT_KEY,
@@ -35,15 +37,20 @@ import {
   detectRiskySurfaceFromDiff,
   detectRiskySurfaceFromDiffContent,
   evaluateSelfReviewDoneGate,
+  extractReviewedCommitShaFromSummaryBody,
   MISSING_RUN_ID_GATE_MESSAGE,
   findCompletedSelfReviewPassForIssue,
   findExistingSelfReviewPassNoticeCommentForRun,
+  findOutstandingSelfReviewPassForIssue,
+  findSelfReviewPassSummaryComment,
   getChangedDiffContentForIssueWorkspace,
   getChangedFilePathsForIssueWorkspace,
+  getCurrentHeadShaForIssueWorkspace,
   isSelfReviewPassContext,
   isSelfReviewPassRun,
   issueExecutionPolicyOptsOutOfSelfReview,
   postSelfReviewPassNoticeComment,
+  upsertSelfReviewPassNoticeComment,
   type SelfReviewGateWakeup,
   type SelfReviewGateWakeupNotScheduledInfo,
 } from "./self-review-gate.js";
@@ -339,6 +346,7 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
   afterEach(async () => {
     await db.delete(issueComments);
     await db.delete(agentWakeupRequests);
+    await db.delete(workspaceOperations);
     await db.delete(heartbeatRuns);
     await db.delete(issues);
     await db.delete(executionWorkspaces);
@@ -787,6 +795,124 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
     expect(comments).toHaveLength(0);
   });
 
+  it("DUR-4307: does not pile on a second self-review pass when a DIFFERENT run's pass for this issue is already outstanding (not yet completed)", async () => {
+    const { companyId, agentId, projectId, issueId } = await seedCodeIssueFixture();
+
+    // Simulate the first declined run already having a self-review pass scheduled, still
+    // sitting in `queued` -- its own corrective run hasn't dispatched or completed yet.
+    const firstSourceRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: firstSourceRunId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      status: "completed",
+    });
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "automation",
+      triggerDetail: "system",
+      reason: SELF_REVIEW_PASS_REASON,
+      payload: {},
+      status: "queued",
+      idempotencyKey: buildSelfReviewPassIdempotencyKey({ issueId, sourceRunId: firstSourceRunId }),
+      requestedByActorType: "system",
+      requestedByActorId: "issue_self_review_gate",
+    });
+
+    // A second, unrelated ordinary run (a ordinary heartbeat_timer retry, per DUR-4302) now
+    // attempts the same PATCH before that first pass has resolved either way.
+    const secondRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: secondRunId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      status: "running",
+    });
+    const { wakeup, calls } = makeRecordingWakeup(db, companyId);
+
+    const result = await evaluateSelfReviewDoneGate({
+      db,
+      wakeup,
+      issue: {
+        id: issueId,
+        identifier: `T-1`,
+        companyId,
+        projectId,
+        executionPolicy: null,
+      },
+      actor: { actorType: "agent", agentId, runId: secondRunId },
+      requestedStatus: "done",
+      currentStatus: "in_progress",
+    });
+
+    // Still blocked (the task genuinely isn't through its one bounded pass yet)...
+    expect(result).not.toBeNull();
+    // ...but no NEW wake was scheduled, and no new comment was posted -- the existing
+    // outstanding wake already covers this attempt.
+    expect(calls).toHaveLength(0);
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments).toHaveLength(0);
+
+    const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId));
+    expect(wakes).toHaveLength(1);
+  });
+
+  it("DUR-4307: once the outstanding pass completes, a later run is let through via the ordinary priorPass path (not re-blocked)", async () => {
+    const { companyId, agentId, projectId, issueId } = await seedCodeIssueFixture();
+
+    const firstSourceRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: firstSourceRunId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      status: "completed",
+    });
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "automation",
+      triggerDetail: "system",
+      reason: SELF_REVIEW_PASS_REASON,
+      payload: {},
+      status: "completed",
+      idempotencyKey: buildSelfReviewPassIdempotencyKey({ issueId, sourceRunId: firstSourceRunId }),
+      requestedByActorType: "system",
+      requestedByActorId: "issue_self_review_gate",
+    });
+
+    const laterRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: laterRunId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      status: "running",
+    });
+    const { wakeup, calls } = makeRecordingWakeup(db, companyId);
+
+    const result = await evaluateSelfReviewDoneGate({
+      db,
+      wakeup,
+      issue: {
+        id: issueId,
+        identifier: `T-1`,
+        companyId,
+        projectId,
+        executionPolicy: null,
+      },
+      actor: { actorType: "agent", agentId, runId: laterRunId },
+      requestedStatus: "done",
+      currentStatus: "in_progress",
+    });
+
+    expect(result).toBeNull();
+    expect(calls).toHaveLength(0);
+  });
+
   it("findCompletedSelfReviewPassForIssue only matches a terminal completed wake for this exact issue", async () => {
     const { companyId, agentId, issueId } = await seedCodeIssueFixture();
     const otherIssueId = randomUUID();
@@ -853,6 +979,78 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
     expect(
       await findCompletedSelfReviewPassForIssue(db, { companyId, issueId, matchingDiffFingerprint: null }),
     ).toBeNull();
+  });
+
+  it("DUR-4307: findOutstandingSelfReviewPassForIssue matches queued/deferred/claimed but not completed or a different issue", async () => {
+    const { companyId, agentId, issueId } = await seedCodeIssueFixture();
+    const otherIssueId = randomUUID();
+
+    expect(await findOutstandingSelfReviewPassForIssue(db, { companyId, issueId })).toBeNull();
+
+    // A completed wake must NOT count as outstanding -- that's priorPass's job.
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "automation",
+      reason: SELF_REVIEW_PASS_REASON,
+      payload: {},
+      status: "completed",
+      idempotencyKey: buildSelfReviewPassIdempotencyKey({ issueId, sourceRunId: randomUUID() }),
+    });
+    expect(await findOutstandingSelfReviewPassForIssue(db, { companyId, issueId })).toBeNull();
+
+    // A queued wake for a DIFFERENT issue must not count either.
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "automation",
+      reason: SELF_REVIEW_PASS_REASON,
+      payload: {},
+      status: "queued",
+      idempotencyKey: buildSelfReviewPassIdempotencyKey({ issueId: otherIssueId, sourceRunId: randomUUID() }),
+    });
+    expect(await findOutstandingSelfReviewPassForIssue(db, { companyId, issueId })).toBeNull();
+
+    // A queued wake for THIS issue counts as outstanding.
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "automation",
+      reason: SELF_REVIEW_PASS_REASON,
+      payload: {},
+      status: "queued",
+      idempotencyKey: buildSelfReviewPassIdempotencyKey({ issueId, sourceRunId: randomUUID() }),
+    });
+    expect(await findOutstandingSelfReviewPassForIssue(db, { companyId, issueId })).not.toBeNull();
+  });
+
+  it("DUR-4307: findOutstandingSelfReviewPassForIssue respects matchingDiffFingerprint the same way findCompletedSelfReviewPassForIssue does", async () => {
+    const { companyId, agentId, issueId } = await seedCodeIssueFixture();
+
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "automation",
+      reason: SELF_REVIEW_PASS_REASON,
+      payload: { reviewedDiffFingerprint: "fingerprint-a" },
+      status: "queued",
+      idempotencyKey: buildSelfReviewPassIdempotencyKey({ issueId, sourceRunId: randomUUID() }),
+    });
+
+    // Matching fingerprint -> found.
+    expect(
+      await findOutstandingSelfReviewPassForIssue(db, { companyId, issueId, matchingDiffFingerprint: "fingerprint-a" }),
+    ).not.toBeNull();
+    // Different fingerprint -> not found (a new/different diff still gets its own pass).
+    expect(
+      await findOutstandingSelfReviewPassForIssue(db, { companyId, issueId, matchingDiffFingerprint: "fingerprint-b" }),
+    ).toBeNull();
+    // null fingerprint never matches.
+    expect(
+      await findOutstandingSelfReviewPassForIssue(db, { companyId, issueId, matchingDiffFingerprint: null }),
+    ).toBeNull();
+    // undefined -- lenient, matches any outstanding pass regardless of fingerprint.
+    expect(await findOutstandingSelfReviewPassForIssue(db, { companyId, issueId })).not.toBeNull();
   });
 
   describe("DUR-3992: agent with no trusted run id", () => {
@@ -1532,6 +1730,393 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
       expect(result).not.toBeNull();
       expect(result?.message).not.toMatch(/operator/i);
       expect(calls).toHaveLength(1);
+    });
+
+    it("DUR-4288: caps a diff that reads fine every time but never matches a prior pass (e.g. a shared workspace reused by other work between attempts), instead of looping forever", async () => {
+      const { companyId, projectId, agentId, issueId, repoRoot } = await seedIssueWithWorkspace({
+        changedFilePath: "server/src/services/deploy-history.ts",
+      });
+
+      // Each "attempt" below simulates a separate, later heartbeat run re-evaluating the gate
+      // after the issue's shared workspace has been reused and re-checked-out for unrelated
+      // work in between -- the diff reads fully and cleanly every time (non-null fingerprint),
+      // but it's a DIFFERENT diff every time, so it can never match a completed prior pass.
+      for (let attempt = 0; attempt < MAX_SELF_REVIEW_PASSES_FOR_SHIFTING_DIFF; attempt++) {
+        await runGit(repoRoot, ["checkout", "main"]);
+        await fs.writeFile(
+          path.join(repoRoot, `unrelated-work-${attempt}.txt`),
+          `other issue's work, attempt ${attempt}\n`,
+          "utf8",
+        );
+        await runGit(repoRoot, ["add", `unrelated-work-${attempt}.txt`]);
+        await runGit(repoRoot, ["commit", "-m", `Unrelated work from a different issue, attempt ${attempt}`]);
+
+        const runId = randomUUID();
+        await db.insert(heartbeatRuns).values({
+          id: runId,
+          companyId,
+          agentId,
+          invocationSource: "assignment",
+          status: "running",
+        });
+        const { wakeup, calls } = makeRecordingWakeup(db, companyId);
+
+        const result = await evaluateSelfReviewDoneGate({
+          db,
+          wakeup,
+          issue: { id: issueId, identifier: "T-1", companyId, projectId, executionPolicy: null },
+          actor: { actorType: "agent", agentId, runId },
+          requestedStatus: "done",
+          currentStatus: "in_progress",
+        });
+
+        // Still bounded within the cap: each of these schedules its own fresh pass, same as
+        // today, since this attempt count hasn't yet hit the cap.
+        expect(result).not.toBeNull();
+        expect(result?.message).not.toMatch(/operator/i);
+        expect(calls).toHaveLength(1);
+      }
+
+      // One more attempt, on yet another different diff -- the cap has now been reached, so
+      // this must decline loudly with an operator-facing message instead of scheduling a 7th
+      // pass that would never converge either.
+      await runGit(repoRoot, ["checkout", "main"]);
+      await fs.writeFile(path.join(repoRoot, "unrelated-work-final.txt"), "yet another attempt\n", "utf8");
+      await runGit(repoRoot, ["add", "unrelated-work-final.txt"]);
+      await runGit(repoRoot, ["commit", "-m", "Unrelated work from a different issue, final attempt"]);
+
+      const finalRunId = randomUUID();
+      await db.insert(heartbeatRuns).values({
+        id: finalRunId,
+        companyId,
+        agentId,
+        invocationSource: "assignment",
+        status: "running",
+      });
+      const { wakeup: finalWakeup, calls: finalCalls } = makeRecordingWakeup(db, companyId);
+
+      const finalResult = await evaluateSelfReviewDoneGate({
+        db,
+        wakeup: finalWakeup,
+        issue: { id: issueId, identifier: "T-1", companyId, projectId, executionPolicy: null },
+        actor: { actorType: "agent", agentId, runId: finalRunId },
+        requestedStatus: "done",
+        currentStatus: "in_progress",
+      });
+
+      expect(finalResult).not.toBeNull();
+      expect(finalResult?.message).toMatch(/operator/i);
+      expect(finalCalls).toHaveLength(0);
+    });
+  });
+
+  describe("DUR-4031: shared_workspace issue with no own execution_workspaces row", () => {
+    // Reproduces the reported bug: a `shared_workspace`-mode workspace whose
+    // execution_workspaces.sourceIssueId points at the PARENT issue that originally
+    // realized it (e.g. a sprint parent), while a DIFFERENT child issue's own runs
+    // actually did their work in that same shared checkout. The primary
+    // sourceIssueId = issue.id lookup permanently misses for the child, and only the
+    // workspace_operations fallback (keyed on the issue whose run actually operated
+    // there, written server-side and not agent-writable) can find it.
+    async function seedSharedWorkspaceChildIssue(input: { changedFilePath: string; content?: string }) {
+      const parentFixture = await seedCodeIssueFixture();
+      const { companyId, projectId, agentId } = parentFixture;
+      const parentIssueId = parentFixture.issueId;
+
+      const childIssueId = randomUUID();
+      const childRunId = randomUUID();
+      await db.insert(issues).values({
+        id: childIssueId,
+        companyId,
+        projectId,
+        parentId: parentIssueId,
+        title: "Child sharing the parent's workspace",
+        status: "in_progress",
+        priority: "medium",
+        assigneeAgentId: agentId,
+        issueNumber: 2,
+        identifier: "T-2",
+      });
+      await db.insert(heartbeatRuns).values({
+        id: childRunId,
+        companyId,
+        agentId,
+        invocationSource: "assignment",
+        status: "running",
+      });
+
+      const repoRoot = await createTempRepoWithChange(input.changedFilePath, input.content);
+      const executionWorkspaceId = randomUUID();
+      await db.insert(executionWorkspaces).values({
+        id: executionWorkspaceId,
+        companyId,
+        projectId,
+        mode: "shared_workspace",
+        strategyType: "project_primary",
+        name: "shared sprint workspace",
+        status: "active",
+        providerType: "local_fs",
+        cwd: repoRoot,
+        baseRef: "base",
+        // The workspace row's sourceIssueId still names the PARENT (whoever's run first
+        // realized it) -- never rewritten when the child's run later reuses it.
+        sourceIssueId: parentIssueId,
+      });
+      // Written server-side by the child's own run dispatch (workspaceOperationsSvc), never
+      // via any issue PATCH route -- this is the trustworthy signal the fallback relies on.
+      await db.insert(workspaceOperations).values({
+        companyId,
+        executionWorkspaceId,
+        heartbeatRunId: childRunId,
+        issueId: childIssueId,
+        phase: "workspace_provision",
+        status: "succeeded",
+      });
+
+      return { companyId, agentId, projectId, parentIssueId, childIssueId, childRunId, executionWorkspaceId, repoRoot };
+    }
+
+    it("resolves the shared workspace for the child issue via workspace_operations, not sourceIssueId", async () => {
+      const { companyId, childIssueId } = await seedSharedWorkspaceChildIssue({
+        changedFilePath: "server/src/services/authorization.ts",
+      });
+
+      const changedFiles = await getChangedFilePathsForIssueWorkspace(db, { companyId, issueId: childIssueId });
+      expect(changedFiles).toEqual(["server/src/services/authorization.ts"]);
+
+      const diffContent = await getChangedDiffContentForIssueWorkspace(db, { companyId, issueId: childIssueId });
+      expect(diffContent).toContain("authorization.ts");
+    });
+
+    it("still detects a risky surface for the child's own diff instead of falling into the unresolvable-workspace lenient path", async () => {
+      const { companyId, projectId, agentId, childIssueId, childRunId } = await seedSharedWorkspaceChildIssue({
+        changedFilePath: "server/src/services/authorization.ts",
+      });
+      const { wakeup, calls } = makeRecordingWakeup(db, companyId);
+
+      const result = await evaluateSelfReviewDoneGate({
+        db,
+        wakeup,
+        issue: { id: childIssueId, identifier: "T-2", companyId, projectId, executionPolicy: null },
+        actor: { actorType: "agent", agentId, runId: childRunId },
+        requestedStatus: "done",
+        currentStatus: "in_progress",
+      });
+
+      // A real diff was read and found risky -- proves the gate did NOT degrade to
+      // workspaceFullyUnresolvable's lenient "any completed pass counts" branch, which
+      // never runs risky-surface detection at all.
+      expect(result?.message).toContain("authorization or permissions");
+      expect(calls).toHaveLength(1);
+
+      const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, childIssueId));
+      expect(comments).toHaveLength(1);
+      expect(comments[0]?.body).toContain("risky surface");
+    });
+
+    it("a completed self-review pass on the child's exact diff lets a later attempt through, closing the retry loop", async () => {
+      const { companyId, projectId, agentId, childIssueId, childRunId } = await seedSharedWorkspaceChildIssue({
+        changedFilePath: "ui/src/components/WidgetCard.tsx",
+      });
+
+      const fingerprint = computeReviewedDiffFingerprint(
+        await getChangedFilePathsForIssueWorkspace(db, { companyId, issueId: childIssueId }),
+        await getChangedDiffContentForIssueWorkspace(db, { companyId, issueId: childIssueId }),
+      );
+      expect(fingerprint).not.toBeNull();
+
+      const priorSourceRunId = randomUUID();
+      await db.insert(heartbeatRuns).values({
+        id: priorSourceRunId,
+        companyId,
+        agentId,
+        invocationSource: "assignment",
+        status: "completed",
+      });
+      await db.insert(agentWakeupRequests).values({
+        companyId,
+        agentId,
+        source: "automation",
+        triggerDetail: "system",
+        reason: SELF_REVIEW_PASS_REASON,
+        payload: { reviewedDiffFingerprint: fingerprint },
+        status: "completed",
+        idempotencyKey: buildSelfReviewPassIdempotencyKey({ issueId: childIssueId, sourceRunId: priorSourceRunId }),
+        requestedByActorType: "system",
+        requestedByActorId: "issue_self_review_gate",
+      });
+
+      const { wakeup, calls } = makeRecordingWakeup(db, companyId);
+      const result = await evaluateSelfReviewDoneGate({
+        db,
+        wakeup,
+        issue: { id: childIssueId, identifier: "T-2", companyId, projectId, executionPolicy: null },
+        actor: { actorType: "agent", agentId, runId: childRunId },
+        requestedStatus: "done",
+        currentStatus: "in_progress",
+      });
+
+      expect(result).toBeNull();
+      expect(calls).toHaveLength(0);
+    });
+  });
+
+  describe("DUR-4319: extractReviewedCommitShaFromSummaryBody", () => {
+    it("extracts the reviewed commit sha from a summary body", () => {
+      const sha = extractReviewedCommitShaFromSummaryBody(
+        "<!-- paperclip:self-review-pass-summary:v1 -->\n**Reviewed commit:** `abc1234`\n\nSome instruction text.",
+      );
+      expect(sha).toBe("abc1234");
+    });
+
+    it("returns null when the body has no reviewed-commit line", () => {
+      expect(extractReviewedCommitShaFromSummaryBody("Some ordinary comment body.")).toBeNull();
+    });
+  });
+
+  describe("DUR-4319: upsertSelfReviewPassNoticeComment / findSelfReviewPassSummaryComment", () => {
+    it("inserts a single summary comment on first use, stamped with the reviewed commit", async () => {
+      const { companyId, issueId, runId } = await seedCodeIssueFixture();
+
+      await upsertSelfReviewPassNoticeComment(db, {
+        companyId,
+        issueId,
+        sourceRunId: runId,
+        headSha: "aaa1111",
+        content: "First review content.",
+      });
+
+      const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+      expect(comments).toHaveLength(1);
+      expect(comments[0]?.body).toContain("**Reviewed commit:** `aaa1111`");
+      expect(comments[0]?.body).toContain("First review content.");
+      expect(comments[0]?.authorType).toBe("system");
+
+      const found = await findSelfReviewPassSummaryComment(db, { companyId, issueId });
+      expect(found?.id).toBe(comments[0]?.id);
+    });
+
+    it("edits the same comment in place on a later push, marking the prior commit superseded instead of posting a new one", async () => {
+      const { companyId, agentId, issueId, runId } = await seedCodeIssueFixture();
+
+      await upsertSelfReviewPassNoticeComment(db, {
+        companyId,
+        issueId,
+        sourceRunId: runId,
+        headSha: "aaa1111",
+        content: "First review content.",
+      });
+      const afterFirst = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+      const firstCommentId = afterFirst[0]?.id;
+
+      const secondRunId = randomUUID();
+      await db.insert(heartbeatRuns).values({
+        id: secondRunId,
+        companyId,
+        agentId,
+        invocationSource: "assignment",
+        status: "running",
+      });
+      await upsertSelfReviewPassNoticeComment(db, {
+        companyId,
+        issueId,
+        sourceRunId: secondRunId,
+        headSha: "bbb2222",
+        content: "Second review content.",
+      });
+
+      const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+      // Still exactly one comment -- edited in place, not appended.
+      expect(comments).toHaveLength(1);
+      expect(comments[0]?.id).toBe(firstCommentId);
+      expect(comments[0]?.body).toContain("**Reviewed commit:** `bbb2222`");
+      expect(comments[0]?.body).toContain("Second review content.");
+      expect(comments[0]?.body).toContain("Supersedes the previous review of commit `aaa1111`");
+      // The old content was replaced, not retained verbatim alongside the new verdict.
+      expect(comments[0]?.body).not.toContain("First review content.");
+      expect(comments[0]?.createdByRunId).toBe(secondRunId);
+    });
+  });
+
+  describe("DUR-4319: evaluateSelfReviewDoneGate upserts one summary comment per issue across pushes", () => {
+    async function seedIssueWithWorkspace(input: { changedFilePath: string; content?: string }) {
+      const { companyId, agentId, projectId, issueId, runId } = await seedCodeIssueFixture();
+      const repoRoot = await createTempRepoWithChange(input.changedFilePath, input.content);
+      const executionWorkspaceId = randomUUID();
+      await db.insert(executionWorkspaces).values({
+        id: executionWorkspaceId,
+        companyId,
+        projectId,
+        mode: "shared_workspace",
+        strategyType: "project_primary",
+        name: "test workspace",
+        status: "active",
+        providerType: "local_fs",
+        cwd: repoRoot,
+        baseRef: "base",
+        sourceIssueId: issueId,
+      });
+      await db.update(issues).set({ executionWorkspaceId }).where(eq(issues.id, issueId));
+      return { companyId, agentId, projectId, issueId, runId, executionWorkspaceId, repoRoot };
+    }
+
+    it("DUR-4319 acceptance: repeated pushes leave one up-to-date comment showing the current reviewed commit, never silently applying an old verdict to a newer commit", async () => {
+      const { companyId, projectId, agentId, issueId, repoRoot } = await seedIssueWithWorkspace({
+        changedFilePath: "ui/src/components/WidgetCard.tsx",
+      });
+      await runGit(repoRoot, ["config", "user.name", "Paperclip Test"]);
+
+      // DUR-4288's unrelated total-attempts cap (MAX_SELF_REVIEW_PASSES_FOR_SHIFTING_DIFF)
+      // bounds how many genuinely-different diffs on one issue get their own pass, regardless
+      // of this ticket's change, so this stays under that cap to isolate what DUR-4319 is
+      // actually testing: upsert-in-place, not the unrelated runaway-loop safety valve.
+      const pushCount = MAX_SELF_REVIEW_PASSES_FOR_SHIFTING_DIFF;
+      const headShas: string[] = [];
+      for (let push = 0; push < pushCount; push++) {
+        if (push > 0) {
+          const filePath = path.join(repoRoot, `ui/src/components/WidgetCard${push}.tsx`);
+          await fs.writeFile(filePath, `// push ${push}\n`, "utf8");
+          await runGit(repoRoot, ["add", "."]);
+          await runGit(repoRoot, ["commit", "-m", `Push ${push}`]);
+        }
+        const { stdout } = await execFileAsync("git", ["-C", repoRoot, "rev-parse", "HEAD"]);
+        headShas.push(stdout.trim());
+
+        const runId = randomUUID();
+        await db.insert(heartbeatRuns).values({
+          id: runId,
+          companyId,
+          agentId,
+          invocationSource: "assignment",
+          status: "running",
+        });
+        const { wakeup } = makeRecordingWakeup(db, companyId);
+
+        await evaluateSelfReviewDoneGate({
+          db,
+          wakeup,
+          issue: { id: issueId, identifier: "T-1", companyId, projectId, executionPolicy: null },
+          actor: { actorType: "agent", agentId, runId },
+          requestedStatus: "done",
+          currentStatus: "in_progress",
+        });
+      }
+
+      const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+      // Exactly one review comment survives every push.
+      expect(comments).toHaveLength(1);
+      const finalBody = comments[0]?.body ?? "";
+      const lastSha = headShas[pushCount - 1];
+      const priorSha = headShas[pushCount - 2];
+      expect(finalBody).toContain(`**Reviewed commit:** \`${lastSha}\``);
+      // The verdict covering an earlier, now-superseded commit never silently reads as still
+      // covering it -- it's marked superseded, and that exact "reviewed commit" line for the
+      // prior sha is gone from the current body.
+      expect(finalBody).not.toContain(`**Reviewed commit:** \`${priorSha}\``);
+      expect(finalBody).toContain(`Supersedes the previous review of commit \`${priorSha}\``);
+      // The instruction for this last pass told the agent to only check what changed since
+      // the previously-reviewed commit, not to re-review the whole diff from scratch.
+      expect(finalBody).toContain(`already has a review on file covering commit \`${priorSha}\``);
     });
   });
 

@@ -1,20 +1,27 @@
 import { Router, type Request } from "express";
 import { eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { createRequestScopedDb, telegramBots, withCompanyScope } from "@paperclipai/db";
+import { agents, createRequestScopedDb, telegramBots, withCompanyScope } from "@paperclipai/db";
 import {
   createTelegramBotSchema,
   rotateTelegramBotTokenSchema,
   updateTelegramBotAllowedUsersSchema,
+  updateTelegramBotCompanyNoticesSchema,
+  updateTelegramBotVoiceSchema,
 } from "@paperclipai/shared";
 import type { TelegramBridgeBot } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { acceptLegacyBodyField } from "../middleware/legacy-body-field.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
-import { assertBoard, assertCompanyAccess, assertInstanceAdmin } from "./authz.js";
+import {
+  assertBoard,
+  assertCompanyAccess,
+  assertCompanyOwnerAdminOrInstanceAdmin,
+  assertInstanceAdmin,
+} from "./authz.js";
 import { logActivity } from "../services/index.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
-import { telegramBotService } from "../services/telegram-bots.js";
+import { normalizeVoiceReplyMode, telegramBotService } from "../services/telegram-bots.js";
 
 /**
  * DUR-3978 slice 2: connecting a Telegram bot from company settings.
@@ -22,7 +29,8 @@ import { telegramBotService } from "../services/telegram-bots.js";
  * Two families of route, with deliberately different gates:
  *
  *  (a) the company routes — list, connect, test, rotate, allow/deny a person,
- *      remove. Board actor + company access, exactly like the secrets routes
+ *      choose the bot for company notices, remove. Board actor + company
+ *      access (owner/admin for the notices choice), like the secrets routes
  *      next door. An agent is refused by assertBoard; another company's bot
  *      is invisible because every query is company-scoped AND filtered on
  *      companyId. None of these ever returns the token.
@@ -171,6 +179,64 @@ export function telegramBotRoutes(rawDb: Db, deps: { fetchImpl?: typeof fetch } 
     },
   );
 
+  /**
+   * Choose the bot that gets this company's approvals and questions when no
+   * agent's own bot, or its boss's, should — a card the board filed itself,
+   * for example. Turning one on turns every other bot in the company off.
+   *
+   * Owner or admin only: the bot chosen here receives Approve buttons that
+   * act with board rights, so this is stricter than the other bot settings.
+   */
+  router.put(
+    "/companies/:companyId/telegram-bots/:botId/company-notices",
+    companyScopeFromParam(rawDb, (req, companyId) => {
+      assertCompanyOwnerAdminOrInstanceAdmin(req, companyId, "which bot gets the company's approvals and questions");
+    }),
+    validate(updateTelegramBotCompanyNoticesSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const updated = await svc.setReceivesCompanyNotices(
+        companyId,
+        req.params.botId as string,
+        req.body.receivesCompanyNotices,
+      );
+      await logActivity(db, {
+        companyId,
+        actorType: "user",
+        actorId: actorUserId(req),
+        action: "telegram_bot.company_notices_changed",
+        entityType: "telegram_bot",
+        entityId: updated.id,
+        details: { name: updated.name, receivesCompanyNotices: updated.receivesCompanyNotices },
+      });
+      res.json(updated);
+    },
+  );
+
+  /**
+   * Voice messages: "Reply with voice" (never / when I sent a voice message /
+   * always) and the voice the answers are read with.
+   */
+  router.put(
+    "/companies/:companyId/telegram-bots/:botId/voice",
+    boardScope(),
+    validate(updateTelegramBotVoiceSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const updated = await svc.setVoice(companyId, req.params.botId as string, req.body);
+      await logActivity(db, {
+        companyId,
+        actorType: "user",
+        actorId: actorUserId(req),
+        action: "telegram_bot.voice_changed",
+        entityType: "telegram_bot",
+        entityId: updated.id,
+        details: { name: updated.name, voiceReplyMode: updated.voiceReplyMode, voice: updated.voice },
+      });
+      res.json(updated);
+    },
+  );
+
   router.delete("/companies/:companyId/telegram-bots/:botId", boardScope(), async (req, res) => {
     const companyId = req.params.companyId as string;
     const botId = req.params.botId as string;
@@ -207,9 +273,14 @@ export function telegramBotRoutes(rawDb: Db, deps: { fetchImpl?: typeof fetch } 
       // Read through the handle withCompanyScope hands out, not through the
       // request-scoped proxy: this route has no companyId of its own, so there
       // is no request scope for the proxy to resolve against.
-      const rows = await withCompanyScope(rawDb, companyId, async (tx) =>
-        tx.select().from(telegramBots).where(eq(telegramBots.companyId, companyId)),
-      );
+      const { rows, roles } = await withCompanyScope(rawDb, companyId, async (tx) => {
+        const botRows = await tx.select().from(telegramBots).where(eq(telegramBots.companyId, companyId));
+        const agentRows = await tx
+          .select({ id: agents.id, role: agents.role })
+          .from(agents)
+          .where(eq(agents.companyId, companyId));
+        return { rows: botRows, roles: new Map(agentRows.map((agent) => [agent.id, agent.role])) };
+      });
       for (const row of rows) {
         if (!row.enabled) continue;
         bots.push({
@@ -219,6 +290,14 @@ export function telegramBotRoutes(rawDb: Db, deps: { fetchImpl?: typeof fetch } 
           companyId: row.companyId,
           uiBase: row.uiBase,
           allowedUserIds: row.allowedTelegramUserIds ?? [],
+          // What the bridge needs to pick the bot that gets the company's
+          // approvals and questions when no agent's own bot should.
+          receivesCompanyNotices: row.receivesCompanyNotices,
+          createdAt: row.createdAt.toISOString(),
+          agentRole: roles.get(row.agentId) ?? null,
+          // Voice messages: when the bridge reads an answer aloud, and how.
+          voiceReplyMode: normalizeVoiceReplyMode(row.voiceReplyMode),
+          voice: row.voice ?? null,
         });
       }
     }

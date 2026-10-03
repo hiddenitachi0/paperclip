@@ -27,8 +27,10 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { AddIntegrationTokenDialog } from "../components/AddIntegrationTokenDialog";
 import { DataSourcesSection } from "../components/DataSourcesSection";
+import { PaymentsAndLoginsSection } from "../components/PaymentsAndLoginsSection";
 import { ServiceTokensSection } from "../components/ServiceTokensSection";
 import { TelegramBotsSection } from "../components/TelegramBotsSection";
+import { WebSearchSection } from "../components/WebSearchSection";
 
 /**
  * DUR-3997 slice 4: Connections, the front door over everything a company is
@@ -356,6 +358,22 @@ export function CompanyConnections() {
             </CardHeader>
           </Card>
         )}
+      </div>
+
+      {/* Web search for quick agents */}
+      <div className="space-y-4" data-testid="connections-web-search-section">
+        <SectionHeading>Web search</SectionHeading>
+        <WebSearchSection companyId={selectedCompanyId} readOnly={!canManage} />
+      </div>
+
+      {/* Payment cards and website logins for the browser worker */}
+      <div className="space-y-4" data-testid="connections-payments">
+        <SectionHeading>Payments and logins</SectionHeading>
+        <p className="text-xs text-muted-foreground">
+          What an agent may use with the browser to pay for something or sign in on your behalf. An agent only gets
+          access to these if its "Browser access" setting allows booking and buying.
+        </p>
+        <PaymentsAndLoginsSection companyId={selectedCompanyId} readOnly={!canManage} />
       </div>
 
       {/* Messaging */}

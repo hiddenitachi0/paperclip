@@ -1,7 +1,8 @@
 import { redactCommandText } from "@paperclipai/adapter-utils";
+import { isLuhnValid } from "@paperclipai/adapter-utils/payment-detection";
 
 const SECRET_FIELD_NAME_PATTERN =
-  String.raw`[A-Za-z0-9_-]*(?:api[-_]?key|access[-_]?token|auth(?:_?token)?|token|authorization|bearer|secret|passwd|password|credential|jwt|private[-_]?key|cookie|connectionstring)[A-Za-z0-9_-]*`;
+  String.raw`[A-Za-z0-9_-]*(?:api[-_]?key|access[-_]?token|auth(?:_?token)?|token|authorization|bearer|secret|passwd|password|credential|jwt|private[-_]?key|cookie|connectionstring|card[-_]?number|card[-_]?cvc|cvc|cvv)[A-Za-z0-9_-]*`;
 
 // Exported so callers outside this module (e.g. the DUR-132 mcpServers
 // credential-shaped-literal-value advisory in server/src/routes/agents.ts)
@@ -205,13 +206,37 @@ export const SECRET_LEAK_PATTERNS: readonly SecretLeakPattern[] = [
   },
 ];
 
+// DUR-4040: a card-shaped digit run (13-19 digits, Luhn-valid) redacted by
+// VALUE, not by field name -- unlike SECRET_LEAK_PATTERNS above this has no
+// fixed prefix to anchor on, so it is the one line of defense for a PAN that
+// leaks somewhere with no "cardNumber"-shaped key nearby (a run transcript
+// quoting a page's own text, a stray HTTP response body). Reuses the exact
+// Luhn check `browser_type`'s payment-detection refusal already relies on
+// (packages/adapter-utils/src/payment-detection.ts) instead of a second copy
+// that could drift out of sync with what that gate considers a card number.
+// Same "card-number-shaped" token pattern as findLuhnValidRuns in
+// payment-detection.ts (digits with optional single spaces/dashes between
+// groups), kept in sync deliberately -- that module only returns the
+// digits-only matches (it just needs to know whether any exist), which is not
+// enough to replace the ORIGINAL spaced/dashed substring in place here.
+const CARD_NUMBER_TOKEN_RE = /\d(?:[\s-]?\d){11,18}/g;
+
+export function redactCardNumbers(input: string): string {
+  if (!input) return input;
+  return input.replace(CARD_NUMBER_TOKEN_RE, (match) => {
+    const digitsOnly = match.replace(/[\s-]/g, "");
+    if (digitsOnly.length < 13 || digitsOnly.length > 19) return match;
+    return isLuhnValid(digitsOnly) ? "[REDACTED:card_number]" : match;
+  });
+}
+
 export function redactKnownLeakedSecretPatterns(input: string): string {
   if (!input) return input;
   let output = input;
   for (const pattern of SECRET_LEAK_PATTERNS) {
     output = output.replace(pattern.regex, `[REDACTED:${pattern.name}]`);
   }
-  return output;
+  return redactCardNumbers(output);
 }
 
 // Exported (DUR-372) so callers with their own JSON-shaped value to scrub --

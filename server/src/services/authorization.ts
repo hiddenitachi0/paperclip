@@ -1215,7 +1215,10 @@ export function authorizationService(db: Db) {
       // Cross-company access stays denied.
       if (input.actor.source === "cloud_tenant" && input.actor.userId) {
         const membership = await getActiveMembership(companyId, "user", input.actor.userId);
-        if (membership) {
+        // DUR-4094: same blocked-by-default rule as every other path above --
+        // an Employee (light) gets none of this implicit cloud-tenant
+        // visibility either.
+        if (membership && membership.membershipRole !== "employee") {
           if (
             input.action === "agent:read" ||
             input.action === "company_scope:read" ||
@@ -1260,7 +1263,15 @@ export function authorizationService(db: Db) {
         const policyDeny = await denyForAssignmentPolicyIfNeeded(policyEffect);
         if (policyDeny) return policyDeny;
         const membership = await getActiveMembership(companyId, "user", input.actor.userId);
-        if (policyEffect.kind === "none" && membership && membership.membershipRole !== "viewer") {
+        // DUR-4094: an Employee (light) never gets the implicit company-wide
+        // grant a viewer keeps here -- assertLightAllowed on the assignment
+        // route is the only path in for them, same as every other action.
+        if (
+          policyEffect.kind === "none" &&
+          membership &&
+          membership.membershipRole !== "viewer" &&
+          membership.membershipRole !== "employee"
+        ) {
           return allow({
             action: input.action,
             reason: "allow_simple_company_member",
@@ -1282,6 +1293,21 @@ export function authorizationService(db: Db) {
           // read-only visibility actions but not the privileged ones.
           const requiresNonViewer =
             input.action === "runtime:manage" || input.action === "secrets:read";
+          // DUR-4094: this is the "blocked by default" half of the
+          // Employee (light) role for actions that reach `decide()` directly
+          // (rather than through assertCompanyAccess's route-level gate,
+          // which a board actor's issue/agent/project reads bypass by going
+          // straight to a permission decision). No implicit visibility for
+          // this role, ever -- only an explicit feature grant checked by
+          // assertLightAllowed on the route can open a door for them.
+          if (membership && membership.membershipRole === "employee") {
+            return deny({
+              action: input.action,
+              reason: "deny_missing_grant",
+              explanation:
+                "Employee (light) accounts have no company-wide visibility; access comes only from features an admin turned on.",
+            });
+          }
           if (membership && (!requiresNonViewer || membership.membershipRole !== "viewer")) {
             return allow({
               action: input.action,

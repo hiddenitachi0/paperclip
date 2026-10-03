@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from "express";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import path from "node:path";
 import type { Db } from "@paperclipai/db";
-import { agents as agentsTable, assets as assetsTable, companies, heartbeatRuns, issues as issuesTable, projects as projectsTable, createRequestScopedDb } from "@paperclipai/db";
+import { agents as agentsTable, assets as assetsTable, companies, modelDirectoryEntries, heartbeatRuns, issues as issuesTable, projects as projectsTable, createRequestScopedDb } from "@paperclipai/db";
 import { and, desc, eq, inArray, not, sql } from "drizzle-orm";
 import {
   agentSkillSyncSchema,
@@ -33,8 +33,14 @@ import {
   DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
   QUICK_AGENT_FIELDS,
   PERSONA_JOB_FIELDS,
+  BROWSER_ACCESS_FIELDS,
   parseAgentLimits,
   laneAProviderModelIssue,
+  laneABackupRoutingIssues,
+  normalizeLaneAProvider,
+  readLaneAWebSearchSwitch,
+  readLaneABrowserAccess,
+  browserAccessLevelRank,
 } from "@paperclipai/shared";
 import {
   resolvePaperclipInstanceRootForAdapter,
@@ -94,6 +100,8 @@ import type {
 } from "@paperclipai/adapter-utils";
 import { skillVersionSelectionMap } from "../services/runtime-skill-selections.js";
 import { secretService } from "../services/secrets.js";
+import { deploySftpCredentialService } from "../services/deploy-sftp-credential.js";
+import { bindDeploySftpCredentialSchema } from "@paperclipai/shared";
 import {
   detectAdapterModel,
   findActiveServerAdapter,
@@ -225,6 +233,7 @@ export function agentRoutes(
   });
   const issueApprovalsSvc = issueApprovalService(db);
   const secretsSvc = secretService(db, rawDb);
+  const deploySftpCredentials = deploySftpCredentialService(db);
   const instructions = agentInstructionsService();
   const companySkills = companySkillService(db, rawDb);
   const workspaceOperations = workspaceOperationService(db);
@@ -1613,6 +1622,89 @@ export function agentRoutes(
     throw forbidden(`Agent-authenticated callers cannot modify quick-agent settings (${QUICK_AGENT_FIELDS.join(", ")})`);
   }
 
+  // "Can search the web" (adapterConfig.laneA.webSearch) is board-only too:
+  // it spends the company's Brave credit and lets the quick agent read the
+  // open web. adapterConfig is otherwise agent-writable, so every write path
+  // (create, hire, PATCH, config rollback) compares the switch it would store
+  // with the one already stored and refuses an agent that would turn it on.
+  function assertNoAgentWebSearchSwitchOn(req: Request, requestedAdapterConfig: unknown, existingAdapterConfig: unknown) {
+    if (req.actor.type !== "agent") return;
+    if (!readLaneAWebSearchSwitch(requestedAdapterConfig) || readLaneAWebSearchSwitch(existingAdapterConfig)) return;
+    throw forbidden(
+      'Agent-authenticated callers cannot switch on "Can search the web" (adapterConfig.laneA.webSearch). Only board-authenticated callers can.',
+    );
+  }
+
+  // DUR-4019: "Browser access" (adapterConfig.laneA.browserAccess) is a
+  // three-level dial, not a switch — off < browse_and_forms < book_and_buy —
+  // but the same board-only rule applies: an agent-authenticated caller may
+  // never raise it above what is already stored, on any write path.
+  function assertNoAgentBrowserAccessRaise(req: Request, requestedAdapterConfig: unknown, existingAdapterConfig: unknown) {
+    if (req.actor.type !== "agent") return;
+    const requested = readLaneABrowserAccess(requestedAdapterConfig);
+    const existing = readLaneABrowserAccess(existingAdapterConfig);
+    if (browserAccessLevelRank(requested) <= browserAccessLevelRank(existing)) return;
+    throw forbidden(
+      'Agent-authenticated callers cannot raise their own "Browser access" setting (adapterConfig.laneA.browserAccess). Only board-authenticated callers can.',
+    );
+  }
+
+  // DUR-4400: adapterConfig.laneA.apiKeyByProvider / .baseUrlByProvider are
+  // the per-provider stash the board-only provider-switch PATCH below uses
+  // so a switch never silently drops a provider's key or base URL (DUR-4378
+  // follow-up, DUR-4395). Those two keys live inside the generic laneA
+  // object, which assertNoAgentAdapterConfigMutation does not block, so an
+  // agent-authenticated caller could otherwise plant a secret_ref it was
+  // never granted (or an attacker-controlled base URL) under a provider key
+  // here; the next ordinary provider switch by anyone would promote it
+  // straight into the live, resolvable laneA.apiKey / laneABaseUrl. Only the
+  // board-driven switch may write either map; an agent may echo back an
+  // unchanged stash (e.g. a settings-form round trip of unrelated fields)
+  // but not add, remove, or change an entry.
+  function readLaneAProviderStash(adapterConfig: unknown): {
+    apiKeyByProvider: Record<string, unknown>;
+    baseUrlByProvider: Record<string, unknown>;
+  } {
+    const laneA = asRecord(asRecord(adapterConfig)?.laneA);
+    return {
+      apiKeyByProvider: asRecord(laneA?.apiKeyByProvider) ?? {},
+      baseUrlByProvider: asRecord(laneA?.baseUrlByProvider) ?? {},
+    };
+  }
+
+  // Order-independent so an agent echoing an unchanged stash back with its
+  // keys reconstructed in a different order (e.g. a settings-form round
+  // trip of unrelated fields) is not mistaken for a real modification.
+  function canonicalJson(value: unknown): string {
+    if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+    if (typeof value === "object" && value !== null) {
+      const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b));
+      return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(",")}}`;
+    }
+    return JSON.stringify(value);
+  }
+
+  function assertNoAgentLaneAProviderStashMutation(
+    req: Request,
+    requestedAdapterConfig: unknown,
+    existingAdapterConfig: unknown,
+  ) {
+    if (req.actor.type !== "agent") return;
+    const requested = readLaneAProviderStash(requestedAdapterConfig);
+    const existingStash = readLaneAProviderStash(existingAdapterConfig);
+    if (
+      canonicalJson(requested.apiKeyByProvider) === canonicalJson(existingStash.apiKeyByProvider) &&
+      canonicalJson(requested.baseUrlByProvider) === canonicalJson(existingStash.baseUrlByProvider)
+    ) {
+      return;
+    }
+    throw forbidden(
+      "Agent-authenticated callers cannot modify the saved per-provider key/base-URL stash " +
+        "(adapterConfig.laneA.apiKeyByProvider, adapterConfig.laneA.baseUrlByProvider). Only a board-authenticated " +
+        "provider switch can.",
+    );
+  }
+
   // DUR-4000: which person does this job (personaId) and the job's own limits
   // box are board-only on every write path, same shape as the quick-agent
   // guard above. An agent that could pick its own persona could speak as
@@ -1626,6 +1718,21 @@ export function agentRoutes(
     if (req.actor.type !== "agent" || !patchTouchesPersonaJobFields(patchData)) return;
     throw forbidden(
       `Agent-authenticated callers cannot set a persona or limits on an agent (${PERSONA_JOB_FIELDS.join(", ")}). Only board-authenticated callers can.`,
+    );
+  }
+
+  // DUR-4013 step 3: whether (and how far) an agent may drive the browser
+  // worker is board-only on every write path, same shape as the persona/job
+  // guard above — the server trusts this switch, not the model, so an agent
+  // that could flip it for itself would have no gate at all.
+  function patchTouchesBrowserAccessFields(patchData: Record<string, unknown>) {
+    return BROWSER_ACCESS_FIELDS.some((key) => hasOwn(patchData, key));
+  }
+
+  function assertNoAgentBrowserAccessFieldMutation(req: Request, patchData: Record<string, unknown>) {
+    if (req.actor.type !== "agent" || !patchTouchesBrowserAccessFields(patchData)) return;
+    throw forbidden(
+      `Agent-authenticated callers cannot set browser access on an agent (${BROWSER_ACCESS_FIELDS.join(", ")}). Only board-authenticated callers can.`,
     );
   }
 
@@ -2642,6 +2749,9 @@ export function agentRoutes(
     }
     const targetSnapshot = asRecord(targetRevision.afterConfig) ?? {};
     assertAgentSelfUpdateRollbackAllowed(req, existing, targetSnapshot);
+    assertNoAgentWebSearchSwitchOn(req, targetSnapshot.adapterConfig, existing.adapterConfig);
+    assertNoAgentBrowserAccessRaise(req, targetSnapshot.adapterConfig, existing.adapterConfig);
+    assertNoAgentLaneAProviderStashMutation(req, targetSnapshot.adapterConfig, existing.adapterConfig);
 
     const actor = getActorInfo(req);
     const updated = await svc.rollbackConfigRevision(id, revisionId, {
@@ -2759,8 +2869,13 @@ export function agentRoutes(
     // otherwise an agent-authenticated hire could hand itself the direct
     // model-call lane that a human is supposed to switch on.
     assertNoAgentLaneAFlagMutation(req, req.body as Record<string, unknown>);
+    assertNoAgentWebSearchSwitchOn(req, (req.body as Record<string, unknown>).adapterConfig, null);
+    assertNoAgentBrowserAccessRaise(req, (req.body as Record<string, unknown>).adapterConfig, null);
+    assertNoAgentLaneAProviderStashMutation(req, (req.body as Record<string, unknown>).adapterConfig, null);
     // DUR-4000: same for the persona link and the limits box.
     assertNoAgentPersonaJobFieldMutation(req, req.body as Record<string, unknown>);
+    // DUR-4013: same for the browser-access switch.
+    assertNoAgentBrowserAccessFieldMutation(req, req.body as Record<string, unknown>);
     const hiredAgentId = randomUUID();
     const requestedAdapterConfig = applyCodexLocalKeyIsolation(
       companyId,
@@ -2878,6 +2993,26 @@ export function agentRoutes(
           // binding inside adapterConfig (already on the card above).
           laneAProvider: agent.laneAProvider ?? null,
           laneABaseUrl: agent.laneABaseUrl ?? null,
+          // "Creativity" chosen at hire time, same reason.
+          laneATemperature: agent.laneATemperature ?? null,
+          // "Thinking" chosen at hire time, same reason.
+          laneAThinking: agent.laneAThinking ?? null,
+          // DUR-4070: the trust-level ceiling and assigned-people list chosen
+          // at hire time, same reason as the rest of QUICK_AGENT_FIELDS.
+          laneATrustLevel: agent.laneATrustLevel ?? null,
+          laneAAssignedUserIds: agent.laneAAssignedUserIds ?? [],
+          // OpenRouter "model hosts" chosen at hire time, same reason.
+          laneAProviderRouting: agent.laneAProviderRouting ?? null,
+          // DUR-4347: backup pool, fallback chains and keyword routes chosen at
+          // hire time, same reason as the rest of QUICK_AGENT_FIELDS.
+          laneABackupModels: agent.laneABackupModels ?? [],
+          laneANoAnswerChainIds: agent.laneANoAnswerChainIds ?? [],
+          laneARefusalChainIds: agent.laneARefusalChainIds ?? [],
+          laneAKeywordRoutes: agent.laneAKeywordRoutes ?? [],
+          // DUR-4017: the daily briefing settings chosen at hire time, same
+          // reason — the card is what the board reads, and the legacy branch
+          // in approvals.ts rebuilds the agent from it.
+          morningReportSettings: agent.morningReportSettings ?? null,
           // DUR-4000: which person does this job and the job's limits box,
           // for the same reason — the card is what the board reads, and the
           // legacy branch in approvals.ts rebuilds the agent from it. The
@@ -3017,8 +3152,13 @@ export function agentRoutes(
     // the quick-agent choice is board-only on every write path and should not
     // depend on that one earlier check staying where it is.
     assertNoAgentLaneAFlagMutation(req, req.body as Record<string, unknown>);
+    assertNoAgentWebSearchSwitchOn(req, (req.body as Record<string, unknown>).adapterConfig, null);
+    assertNoAgentBrowserAccessRaise(req, (req.body as Record<string, unknown>).adapterConfig, null);
+    assertNoAgentLaneAProviderStashMutation(req, (req.body as Record<string, unknown>).adapterConfig, null);
     // DUR-4000: same for the persona link and the limits box.
     assertNoAgentPersonaJobFieldMutation(req, req.body as Record<string, unknown>);
+    // DUR-4013: same for the browser-access switch.
+    assertNoAgentBrowserAccessFieldMutation(req, req.body as Record<string, unknown>);
     const agentId = randomUUID();
     const requestedAdapterConfig = applyCodexLocalKeyIsolation(
       companyId,
@@ -3277,6 +3417,74 @@ export function agentRoutes(
     });
   });
 
+  // DUR-4068: bind the operator-supplied secret to this agent's SFTP deploy
+  // credential slot. Board-only, same as everything else that touches which
+  // secret backs a credential — distinct from the instance-admin-only resolve
+  // route below, which is the ONLY path that ever reads the value back out.
+  router.post(
+    "/agents/:id/deploy-sftp-credential",
+    scopeFromAgentParam(),
+    validate(bindDeploySftpCredentialSchema),
+    async (req, res) => {
+      assertBoard(req);
+      const id = req.params.id as string;
+      const existing = await svc.getById(id);
+      if (!existing) {
+        res.status(404).json({ error: "Agent not found" });
+        return;
+      }
+      await deploySftpCredentials.bindCredential(existing.companyId, existing.id, req.body.secretId);
+      await logActivity(db, {
+        companyId: existing.companyId,
+        actorType: "user",
+        actorId: req.actor.type === "board" ? (req.actor.userId ?? "board") : "board",
+        action: "agent.deploy_sftp_credential_bound",
+        entityType: "agent",
+        entityId: existing.id,
+      });
+      res.status(204).end();
+    },
+  );
+
+  router.delete("/agents/:id/deploy-sftp-credential", scopeFromAgentParam(), async (req, res) => {
+    assertBoard(req);
+    const id = req.params.id as string;
+    const existing = await svc.getById(id);
+    if (!existing) {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+    await deploySftpCredentials.unbindCredential(existing.companyId, existing.id);
+    await logActivity(db, {
+      companyId: existing.companyId,
+      actorType: "user",
+      actorId: req.actor.type === "board" ? (req.actor.userId ?? "board") : "board",
+      action: "agent.deploy_sftp_credential_unbound",
+      entityType: "agent",
+      entityId: existing.id,
+    });
+    res.status(204).end();
+  });
+
+  // DUR-4068: the narrowly-scoped SFTP credential endpoint, modelled on
+  // deploy-github-token (secrets.ts) and the persona-account publish-token
+  // route. Instance-admin-only -- the agent this credential is bound to never
+  // calls this itself; only the on-box deploy runner does.
+  router.get(
+    "/companies/:companyId/agents/:agentId/deploy-sftp-credential",
+    companyScopeFromParam(rawDb, (req) => assertInstanceAdmin(req)),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const agentId = req.params.agentId as string;
+      const actorId = req.actor.type === "board" ? (req.actor.userId ?? "board") : "board";
+      const credential = await deploySftpCredentials.resolveCredential(companyId, agentId, {
+        actorType: "user",
+        actorId,
+      });
+      res.json(credential ?? { kind: null, value: null });
+    },
+  );
+
   router.get("/agents/:id/instructions-bundle", scopeFromAgentParam(), async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
@@ -3482,6 +3690,8 @@ export function agentRoutes(
     // DUR-4000: personaId / limits are board-only; an agent cannot pick its
     // own persona or raise its own limits, even on its own record.
     assertNoAgentPersonaJobFieldMutation(req, patchData);
+    // DUR-4013: same for the browser-access switch, even on its own record.
+    assertNoAgentBrowserAccessFieldMutation(req, patchData);
     if (patchTouchesLaneAFields(patchData)) {
       await assertCanManageLaneAFlag(req, existing);
       // DUR-3997: the model must fit the provider. A patch may carry one
@@ -3499,6 +3709,102 @@ export function agentRoutes(
       if (laneAIssue) {
         res.status(422).json({ error: laneAIssue });
         return;
+      }
+      // DUR-4347: a fallback-chain id or keyword-route backupId must exist in
+      // the pool. A patch may touch only one of the four fields, so each is
+      // checked against the stored value of whichever it leaves out — same
+      // merge pattern as the provider/model check just above.
+      const routingIssues = laneABackupRoutingIssues({
+        laneABackupModels: hasOwn(patchData, "laneABackupModels")
+          ? (patchData.laneABackupModels as never)
+          : (existing.laneABackupModels as never),
+        laneANoAnswerChainIds: hasOwn(patchData, "laneANoAnswerChainIds")
+          ? (patchData.laneANoAnswerChainIds as never)
+          : (existing.laneANoAnswerChainIds as never),
+        laneARefusalChainIds: hasOwn(patchData, "laneARefusalChainIds")
+          ? (patchData.laneARefusalChainIds as never)
+          : (existing.laneARefusalChainIds as never),
+        laneAKeywordRoutes: hasOwn(patchData, "laneAKeywordRoutes")
+          ? (patchData.laneAKeywordRoutes as never)
+          : (existing.laneAKeywordRoutes as never),
+      });
+      if (routingIssues.length > 0) {
+        res.status(422).json({ error: routingIssues[0]!.message });
+        return;
+      }
+      // DUR-4418: a backup that points at a model-directory entry must point
+      // at one of THIS company's entries.
+      if (hasOwn(patchData, "laneABackupModels")) {
+        const directoryIds = ((patchData.laneABackupModels as { directoryEntryId?: string | null }[] | null) ?? [])
+          .map((b) => b.directoryEntryId)
+          .filter((id): id is string => typeof id === "string");
+        if (directoryIds.length > 0) {
+          const found = await db
+            .select({ id: modelDirectoryEntries.id })
+            .from(modelDirectoryEntries)
+            .where(and(eq(modelDirectoryEntries.companyId, existing.companyId), inArray(modelDirectoryEntries.id, directoryIds)));
+          if (found.length !== new Set(directoryIds).size) {
+            res.status(422).json({ error: "A backup model is not one of this company's saved model setups." });
+            return;
+          }
+        }
+      }
+      // DUR-4378 follow-up (live incident, 2 Oct): adapterConfig.laneA.apiKey
+      // is one shared slot reused across every provider. A bare provider
+      // switch with no adapterConfig in the same PATCH used to leave that
+      // slot exactly as it was, so switching OpenRouter -> local -> back to
+      // OpenRouter answered with "no OpenRouter key" because the slot still
+      // held whatever local's (empty) key was. Until each saved model in the
+      // directory has its own key, stash the outgoing provider's key under
+      // apiKeyByProvider and restore the incoming provider's own key (or
+      // null, if it never had one) on every switch, so no provider's key is
+      // ever silently dropped by picking a different one.
+      if (hasOwn(patchData, "laneAProvider")) {
+        const oldProvider = normalizeLaneAProvider(existing.laneAProvider);
+        const newProvider = normalizeLaneAProvider(patchData.laneAProvider as string | null);
+        if (newProvider !== oldProvider) {
+          const existingAdapterConfig = asRecord(existing.adapterConfig) ?? {};
+          const existingLaneA = asRecord(existingAdapterConfig.laneA) ?? {};
+          const existingByProvider = asRecord(existingLaneA.apiKeyByProvider) ?? {};
+          const nextByProvider: Record<string, unknown> = {
+            ...existingByProvider,
+            [oldProvider]: existingLaneA.apiKey ?? null,
+          };
+          // DUR-4395: laneABaseUrl is a separate top-level column (not part
+          // of adapterConfig.laneA), so it was never covered by the
+          // apiKeyByProvider stash above. openrouter and local both honor a
+          // stored custom base URL (resolveLaneABaseUrl), so leaving it
+          // untouched across a switch meant a restored apiKey for the
+          // incoming provider could be sent as a bearer token to whatever
+          // host the outgoing provider had configured. Stash/restore it the
+          // same way, keyed by provider, inside the same adapterConfig blob.
+          const existingBaseUrlByProvider = asRecord(existingLaneA.baseUrlByProvider) ?? {};
+          const nextBaseUrlByProvider: Record<string, unknown> = {
+            ...existingBaseUrlByProvider,
+            [oldProvider]: existing.laneABaseUrl ?? null,
+          };
+          const requestedAdapterConfigForSwitch = hasOwn(patchData, "adapterConfig")
+            ? (asRecord(patchData.adapterConfig) ?? {})
+            : {};
+          const requestedLaneAForSwitch = asRecord(requestedAdapterConfigForSwitch.laneA) ?? {};
+          patchData.adapterConfig = {
+            ...existingAdapterConfig,
+            ...requestedAdapterConfigForSwitch,
+            laneA: {
+              ...existingLaneA,
+              apiKey: nextByProvider[newProvider] ?? null,
+              apiKeyByProvider: nextByProvider,
+              baseUrlByProvider: nextBaseUrlByProvider,
+              ...requestedLaneAForSwitch,
+            },
+          };
+          // Only auto-restore laneABaseUrl when this same PATCH does not
+          // already set it explicitly -- an operator picking a new provider
+          // and typing its base URL in one request must win.
+          if (!hasOwn(patchData, "laneABaseUrl")) {
+            patchData.laneABaseUrl = (nextBaseUrlByProvider[newProvider] as string | null | undefined) ?? null;
+          }
+        }
       }
     }
     const replaceAdapterConfig = patchData.replaceAdapterConfig === true;
@@ -3595,6 +3901,9 @@ export function agentRoutes(
         secretCreator: patchSecretCreator,
       });
       patchData.adapterConfig = syncInstructionsBundleConfigFromFilePath(existing, normalizedEffectiveAdapterConfig);
+      assertNoAgentWebSearchSwitchOn(req, patchData.adapterConfig, existing.adapterConfig);
+      assertNoAgentBrowserAccessRaise(req, patchData.adapterConfig, existing.adapterConfig);
+      assertNoAgentLaneAProviderStashMutation(req, patchData.adapterConfig, existing.adapterConfig);
     }
     if (requestedRuntimeConfig) {
       const baseAdapterConfig = asRecord(patchData.adapterConfig) ?? asRecord(existing.adapterConfig) ?? {};

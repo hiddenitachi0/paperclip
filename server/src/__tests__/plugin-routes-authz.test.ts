@@ -340,6 +340,75 @@ describe.sequential("plugin install and upgrade authz", () => {
     expect(mockRegistry.upsertConfig).not.toHaveBeenCalled();
   }, 20_000);
 
+  // The save path follows the same allow-list as secret resolution
+  // (SECRET_REF_ENABLED_PLUGIN_KEYS): Media Studio may store a reference to
+  // a saved key, every other add-on is still refused.
+  function secretRowsDb(rows: Array<{ id: string; status: string }>) {
+    // The first select is the key check; any later read in the route (the
+    // activity fan-out, for example) sees no rows.
+    let served = false;
+    const empty = () => {
+      const result: Promise<never[]> & { where?: unknown; limit?: unknown } = Promise.resolve([]);
+      result.where = vi.fn(() => empty());
+      result.limit = vi.fn(() => Promise.resolve([]));
+      return result;
+    };
+    return {
+      select: vi.fn(() => ({
+        from: vi.fn(() => {
+          if (served) return empty();
+          served = true;
+          return { where: vi.fn(() => Promise.resolve(rows)) };
+        }),
+      })),
+    };
+  }
+
+  function mediaStudioPlugin() {
+    mockRegistry.getById.mockResolvedValue({
+      id: pluginId,
+      pluginKey: "paperclip.media-studio",
+      version: "1.0.0",
+      status: "ready",
+    });
+    mockRegistry.upsertConfig.mockResolvedValue({ pluginId, configJson: {} });
+  }
+
+  it("lets an instance admin save Media Studio's key reference when the saved key exists", async () => {
+    mediaStudioPlugin();
+    const secretId = "77777777-7777-4777-8777-777777777777";
+    const { app } = await createApp(
+      { type: "board", userId: "admin-1", source: "session", isInstanceAdmin: true, companyIds: [companyA] },
+      {},
+      { db: secretRowsDb([{ id: secretId, status: "active" }]) },
+    );
+
+    const res = await request(app)
+      .post(`/api/plugins/${pluginId}/config`)
+      .send({ configJson: { provider: "fal", falKeySecretRef: secretId } });
+
+    expect(res.status).toBe(200);
+    expect(mockRegistry.upsertConfig).toHaveBeenCalledTimes(1);
+  }, 20_000);
+
+  it("refuses Media Studio's key reference when the saved key is gone or switched off", async () => {
+    mediaStudioPlugin();
+    const secretId = "77777777-7777-4777-8777-777777777777";
+    const { app } = await createApp(
+      { type: "board", userId: "admin-1", source: "session", isInstanceAdmin: true, companyIds: [companyA] },
+      {},
+      { db: secretRowsDb([{ id: secretId, status: "disabled" }]) },
+    );
+
+    const res = await request(app)
+      .post(`/api/plugins/${pluginId}/config`)
+      .send({ configJson: { provider: "fal", falKeySecretRef: secretId } });
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toMatch(/no longer exists or is switched off/);
+    expect(mockRegistry.upsertConfig).not.toHaveBeenCalled();
+  }, 20_000);
+
   it("allows instance admins to upgrade plugins", async () => {
     const pluginId = "11111111-1111-4111-8111-111111111111";
     mockRegistry.getById.mockResolvedValue({
@@ -632,6 +701,50 @@ describe.sequential("plugin tool and bridge authz", () => {
     );
   });
 
+  it("drops run-context fields only the host may set (the person's message), for an agent and for the board", async () => {
+    for (const actor of [agentActor(), boardActor()]) {
+      const executeTool = vi.fn().mockResolvedValue({ content: "ok" });
+      const { app } = await createApp(actor, {}, {
+        db: createSelectQueueDb([
+          [{ companyId: companyA, pluginToolGrants: [], laneAEnabled: false }],
+          [{ companyId: companyA, agentId: agentA }],
+          [{ companyId: companyA }],
+        ]),
+        toolDeps: {
+          toolDispatcher: {
+            listToolsForAgent: vi.fn(),
+            getTool: vi.fn(() => ({ name: "paperclip.example:search" })),
+            executeTool,
+          },
+        },
+      });
+
+      const res = await request(app)
+        .post("/api/plugins/tools/execute")
+        .send({
+          tool: "paperclip.example:search",
+          parameters: { q: "test" },
+          runContext: {
+            agentId: agentA,
+            runId: runA,
+            companyId: companyA,
+            projectId: projectA,
+            requesterMessage: "use the work look",
+            anythingElse: true,
+          },
+        });
+
+      expect(res.status, actor.type).toBe(200);
+      expect(executeTool).toHaveBeenCalledTimes(1);
+      expect(executeTool.mock.calls[0]![2]).toStrictEqual({
+        agentId: agentA,
+        runId: runA,
+        companyId: companyA,
+        projectId: projectA,
+      });
+    }
+  });
+
   it("rejects tool execution when the target company has disabled the tool's plugin (DUR-195)", async () => {
     const executeTool = vi.fn();
     mockRegistry.getCompanySettings.mockResolvedValue({ enabled: false });
@@ -774,6 +887,8 @@ describe.sequential("plugin tool and bridge authz", () => {
         agentId: null,
         runId: null,
         companyId: null,
+        canManageCompany: false,
+        isInstanceAdmin: true,
       },
       renderEnvironment: null,
     });
@@ -811,6 +926,8 @@ describe.sequential("plugin tool and bridge authz", () => {
         agentId: null,
         runId: runA,
         companyId: companyA,
+        canManageCompany: false,
+        isInstanceAdmin: false,
       },
       renderEnvironment: null,
     });
@@ -837,6 +954,36 @@ describe.sequential("plugin tool and bridge authz", () => {
         companyId: companyA,
       }),
     }));
+  });
+
+  it("tells the plugin whether the board user may manage the company (owner/admin, instance admin), never from params", async () => {
+    readyPlugin();
+    const cases: Array<{ actor: Record<string, unknown>; expected: boolean }> = [
+      { actor: { memberships: [{ companyId: companyA, status: "active", membershipRole: "owner" }] }, expected: true },
+      { actor: { memberships: [{ companyId: companyA, status: "active", membershipRole: "admin" }] }, expected: true },
+      { actor: { memberships: [{ companyId: companyA, status: "active", membershipRole: "operator" }] }, expected: false },
+      // Owner of ANOTHER company, operator here: not a manager here.
+      {
+        actor: {
+          companyIds: [companyA, companyB],
+          memberships: [
+            { companyId: companyA, status: "active", membershipRole: "operator" },
+            { companyId: companyB, status: "active", membershipRole: "owner" },
+          ],
+        },
+        expected: false,
+      },
+      { actor: { isInstanceAdmin: true }, expected: true },
+    ];
+    for (const { actor, expected } of cases) {
+      const call = vi.fn().mockResolvedValue({ ok: true });
+      const { app } = await createApp(boardActor(actor), {}, { bridgeDeps: { workerManager: { call } } });
+      const res = await request(app)
+        .post(`/api/plugins/${pluginId}/actions/looks.save`)
+        .send({ companyId: companyA, params: { canManageCompany: true } });
+      expect(res.status).toBe(200);
+      expect(call.mock.calls[0]?.[2]?.actorContext?.canManageCompany).toBe(expected);
+    }
   });
 
   it("allows agent-scoped plugin actions with authenticated actor context", async () => {
@@ -871,6 +1018,8 @@ describe.sequential("plugin tool and bridge authz", () => {
         agentId: agentA,
         runId: runA,
         companyId: companyA,
+        canManageCompany: false,
+        isInstanceAdmin: false,
       },
       renderEnvironment: null,
     });
@@ -900,6 +1049,8 @@ describe.sequential("plugin tool and bridge authz", () => {
         agentId: agentA,
         runId: runA,
         companyId: companyA,
+        canManageCompany: false,
+        isInstanceAdmin: false,
       },
       renderEnvironment: null,
     });
@@ -1249,6 +1400,119 @@ describe.sequential("plugin tool and bridge authz", () => {
     expect(res.status).toBe(403);
     expect(executeTool).not.toHaveBeenCalled();
   });
+
+  it("rejects a live agent JWT naming a different, real run of its own as runContext.runId (DUR-4096 round 3)", async () => {
+    // Round-3 finding: `runContext.runId` is caller-supplied in the POST body
+    // and, pre-fix, was never checked against the run the caller is actually
+    // authenticated as (`req.actor.runId`, baked into the signed JWT at mint
+    // time). A live run could therefore name a different, real (possibly
+    // already-ended) run of its own agent and have it trusted downstream as
+    // "the live run" -- exactly the spoof this test reproduces at the route
+    // layer instead of by constructing invocationScope directly.
+    const staleOwnRun = "99999999-9999-4999-8999-999999999999";
+    const executeTool = vi.fn();
+    const { app } = await createApp(
+      agentActor({ runId: runA }),
+      {},
+      {
+        db: createSelectQueueDb([]),
+        toolDeps: {
+          toolDispatcher: {
+            listToolsForAgent: vi.fn(),
+            getTool: vi.fn(() => ({ name: "paperclip.example:search", pluginDbId: pluginId })),
+            executeTool,
+          },
+        },
+      },
+    );
+
+    const res = await request(app)
+      .post("/api/plugins/tools/execute")
+      .send({
+        tool: "paperclip.example:search",
+        parameters: {},
+        runContext: { agentId: agentA, runId: staleOwnRun, companyId: companyA, projectId: projectA },
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/runContext\.runId.*does not match the authenticated run/);
+    expect(executeTool).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unbound agent API key naming a real but ended run of its own as runContext.runId (DUR-4096 round 4)", async () => {
+    // Round-4 finding: the round-3 anchor only fires when `actor.runId` is
+    // populated. A long-lived agent API key call with no run bound to it
+    // (no `x-paperclip-run-id` header, or one naming an ended run --
+    // `resolveAgentKeyRunId` returns undefined either way) has `actor.runId`
+    // undefined, skipping that anchor and letting `runContext.runId` be
+    // trusted again purely for naming a real run of the right agent/company
+    // -- including one long since completed.
+    const endedOwnRun = "99999999-9999-4999-8999-999999999999";
+    const executeTool = vi.fn();
+    const { app } = await createApp(
+      agentActor({ runId: undefined, source: "agent_key" }),
+      {},
+      {
+        db: createSelectQueueDb([
+          [{ companyId: companyA }],
+          [{ companyId: companyA, agentId: agentA, status: "completed" }],
+        ]),
+        toolDeps: {
+          toolDispatcher: {
+            listToolsForAgent: vi.fn(),
+            getTool: vi.fn(() => ({ name: "paperclip.example:search", pluginDbId: pluginId })),
+            executeTool,
+          },
+        },
+      },
+    );
+
+    const res = await request(app)
+      .post("/api/plugins/tools/execute")
+      .send({
+        tool: "paperclip.example:search",
+        parameters: {},
+        runContext: { agentId: agentA, runId: endedOwnRun, companyId: companyA, projectId: projectA },
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/runContext\.runId.*does not name a currently active run/);
+    expect(executeTool).not.toHaveBeenCalled();
+  });
+
+  it("allows an unbound agent API key naming its own currently active run as runContext.runId (DUR-4096 round 4)", async () => {
+    const activeOwnRun = "88888888-8888-4888-8888-888888888899";
+    const executeTool = vi.fn().mockResolvedValue({ content: "ok" });
+    const { app } = await createApp(
+      agentActor({ runId: undefined, source: "agent_key" }),
+      {},
+      {
+        db: createSelectQueueDb([
+          [{ companyId: companyA }],
+          [{ companyId: companyA, agentId: agentA, status: "running" }],
+          [{ companyId: companyA }],
+        ]),
+        toolDeps: {
+          toolDispatcher: {
+            listToolsForAgent: vi.fn(),
+            getTool: vi.fn(() => ({ name: "paperclip.example:search", pluginDbId: pluginId })),
+            executeTool,
+          },
+        },
+      },
+    );
+
+    const res = await request(app)
+      .post("/api/plugins/tools/execute")
+      .send({
+        tool: "paperclip.example:search",
+        parameters: {},
+        runContext: { agentId: agentA, runId: activeOwnRun, companyId: companyA, projectId: projectA },
+      });
+
+    expect(res.status).toBe(200);
+    expect(executeTool).toHaveBeenCalled();
+  });
 });
 
 describe("DUR-189 plugin tool grants", () => {
@@ -1342,6 +1606,36 @@ describe("DUR-189 plugin tool grants", () => {
 
     expect(res.status).toBe(200);
     expect(executeTool).toHaveBeenCalled();
+  });
+
+  it("refuses tool execution for a full agent whose lane_a_trust_level is 'limited', even with empty grants (DUR-4098)", async () => {
+    const executeTool = vi.fn().mockResolvedValue({ content: "ok" });
+    const { app } = await createApp(agentActor(), {}, {
+      db: createSelectQueueDb([
+        [{ companyId: companyA, pluginToolGrants: [], laneAEnabled: false, laneATrustLevel: "limited" }],
+        [{ companyId: companyA, agentId: agentA }],
+        [{ companyId: companyA }],
+      ]),
+      toolDeps: {
+        toolDispatcher: {
+          listToolsForAgent: vi.fn(),
+          getTool: vi.fn(() => ({ name: "paperclip.example:search" })),
+          executeTool,
+        },
+      },
+    });
+
+    const res = await request(app)
+      .post("/api/plugins/tools/execute")
+      .send({
+        tool: "paperclip.example:search",
+        parameters: {},
+        runContext: { agentId: agentA, runId: runA, companyId: companyA, projectId: projectA },
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("Limited");
+    expect(executeTool).not.toHaveBeenCalled();
   });
 
   it("rejects an agent actor trying to sync its own plugin-tool grants (board-only)", async () => {

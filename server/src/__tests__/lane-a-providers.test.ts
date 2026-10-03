@@ -38,6 +38,10 @@ function fakeFetch(responder: (url: string, init: RequestInit) => Response | Pro
   const calls: Array<{ url: string; init: RequestInit; body: Record<string, unknown> }> = [];
   const impl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    // A local model's reachability check (GET .../models) runs before the
+    // real call; it is answered here but not recorded, so calls[0] stays the
+    // model call these tests inspect.
+    if ((init?.method ?? "POST") === "GET" && url.endsWith("/models")) return new Response("{}");
     const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
     calls.push({ url, init: init ?? {}, body });
     return responder(url, init ?? {});
@@ -272,6 +276,35 @@ describe("OpenAI-compatible provider client", () => {
     expect(() => createLaneAProviderClient({ provider: "openai", apiKey: null })).toThrow(/No key/);
   });
 
+  it("buildOpenAiCompatibleBody makes OpenRouter use a host that really supports the tools", () => {
+    const tool = { name: "list_looks", description: "List looks", inputSchema: { type: "object", properties: {} } };
+    const withTools = buildOpenAiCompatibleBody("openrouter", {
+      model: "mistralai/mistral-small-3.2-24b-instruct",
+      system: "s",
+      messages: [{ role: "user", content: "which looks do we have?" }],
+      maxTokens: 10,
+      tools: [tool] as never,
+    });
+    expect(withTools.provider).toEqual({ require_parameters: true });
+
+    const noTools = buildOpenAiCompatibleBody("openrouter", {
+      model: "mistralai/mistral-small-3.2-24b-instruct",
+      system: "s",
+      messages: [{ role: "user", content: "hi" }],
+      maxTokens: 10,
+    });
+    expect(Object.hasOwn(noTools, "provider")).toBe(false);
+
+    const otherHost = buildOpenAiCompatibleBody("local", {
+      model: "llama3.1",
+      system: "s",
+      messages: [{ role: "user", content: "u" }],
+      maxTokens: 10,
+      tools: [tool] as never,
+    });
+    expect(Object.hasOwn(otherHost, "provider")).toBe(false);
+  });
+
   it("buildOpenAiCompatibleBody leaves tools out entirely when there are none", () => {
     const body = buildOpenAiCompatibleBody("local", {
       model: "llama3.1",
@@ -281,6 +314,148 @@ describe("OpenAI-compatible provider client", () => {
     });
     expect(Object.hasOwn(body, "tools")).toBe(false);
     expect(body.max_tokens).toBe(10);
+  });
+
+  it("buildOpenAiCompatibleBody sends temperature only when a creativity setting is chosen", () => {
+    const base = { model: "m", system: "s", messages: [{ role: "user" as const, content: "u" }], maxTokens: 10 };
+    for (const provider of ["openai", "google", "openrouter", "local"] as const) {
+      expect(Object.hasOwn(buildOpenAiCompatibleBody(provider, base), "temperature")).toBe(false);
+      expect(Object.hasOwn(buildOpenAiCompatibleBody(provider, { ...base, temperature: null }), "temperature")).toBe(false);
+      expect(buildOpenAiCompatibleBody(provider, { ...base, temperature: 0.9 }).temperature).toBe(0.9);
+      // 0 is a real choice ("as predictable as possible"), not "unset".
+      expect(buildOpenAiCompatibleBody(provider, { ...base, temperature: 0 }).temperature).toBe(0);
+    }
+  });
+
+  it("buildOpenAiCompatibleBody sends reasoning_effort only when thinking is turned off (DUR-4367)", () => {
+    const base = { model: "m", system: "s", messages: [{ role: "user" as const, content: "u" }], maxTokens: 10 };
+    for (const provider of ["openai", "google", "openrouter", "local"] as const) {
+      expect(Object.hasOwn(buildOpenAiCompatibleBody(provider, base), "reasoning_effort")).toBe(false);
+      expect(Object.hasOwn(buildOpenAiCompatibleBody(provider, { ...base, reasoningEffort: null }), "reasoning_effort")).toBe(
+        false,
+      );
+      expect(buildOpenAiCompatibleBody(provider, { ...base, reasoningEffort: "none" }).reasoning_effort).toBe("none");
+    }
+  });
+
+  it("puts reasoning_effort on the wire for a local Ollama-style host (DUR-4367)", async () => {
+    const fetcher = fakeFetch(() =>
+      jsonResponse({ choices: [{ message: { role: "assistant", content: "Hi" }, finish_reason: "stop" }] }),
+    );
+    const client = createLaneAProviderClient({ provider: "local", baseUrl: "http://10.0.0.1:11434/v1", fetch: fetcher.impl });
+    await client.complete({
+      model: "huihui_ai/qwen3-abliterated:8b",
+      system: "s",
+      messages: [{ role: "user", content: "hi" }],
+      maxTokens: 64,
+      reasoningEffort: "none",
+    });
+    expect(fetcher.calls[0]!.body.reasoning_effort).toBe("none");
+  });
+
+  it("puts the temperature on the wire for OpenRouter", async () => {
+    const fetcher = fakeFetch(() =>
+      jsonResponse({ choices: [{ message: { role: "assistant", content: "Hei!" }, finish_reason: "stop" }] }),
+    );
+    const client = createLaneAProviderClient({ provider: "openrouter", apiKey: KEY, fetch: fetcher.impl });
+    await client.complete({
+      model: "mistralai/mistral-small-3.2-24b-instruct",
+      system: "s",
+      messages: [{ role: "user", content: "hi" }],
+      maxTokens: 64,
+      temperature: 1.2,
+    });
+    expect(fetcher.calls[0]!.body.temperature).toBe(1.2);
+  });
+
+  it("on OpenRouter with tools, sends both the temperature and require_parameters", () => {
+    const body = buildOpenAiCompatibleBody("openrouter", {
+      model: "mistralai/mistral-small-3.2-24b-instruct",
+      system: "s",
+      messages: [{ role: "user", content: "u" }],
+      tools: [WEATHER_TOOL],
+      maxTokens: 10,
+      temperature: 0.9,
+    });
+    expect(body.temperature).toBe(0.9);
+    expect(body.provider).toEqual({ require_parameters: true });
+  });
+
+  // 29 Sep: Mistral Small 3.2 24B was wanted on DeepInfra, but OpenRouter
+  // picked Venice, which does not do tools. The operator's "model hosts"
+  // setting is merged into OpenRouter's `provider` object in its own names.
+  it("on OpenRouter, merges the model-hosts setting into `provider` next to require_parameters", () => {
+    const body = buildOpenAiCompatibleBody("openrouter", {
+      model: "mistralai/mistral-small-3.2-24b-instruct",
+      system: "s",
+      messages: [{ role: "user", content: "u" }],
+      tools: [WEATHER_TOOL],
+      maxTokens: 10,
+      providerRouting: { only: ["deepinfra"], order: ["deepinfra", "mistral"], ignore: ["venice"], allowFallbacks: false },
+    });
+    expect(body.provider).toEqual({
+      require_parameters: true,
+      only: ["deepinfra"],
+      order: ["deepinfra", "mistral"],
+      ignore: ["venice"],
+      allow_fallbacks: false,
+    });
+  });
+
+  it("on OpenRouter without tools, still sends the host choice but not require_parameters", () => {
+    const body = buildOpenAiCompatibleBody("openrouter", {
+      model: "mistralai/mistral-small-3.2-24b-instruct",
+      system: "s",
+      messages: [{ role: "user", content: "u" }],
+      maxTokens: 10,
+      providerRouting: { ignore: ["venice"] },
+    });
+    expect(body.provider).toEqual({ ignore: ["venice"] });
+  });
+
+  it("no host choice (null, empty, or malformed) sends exactly what was sent before", () => {
+    const base = {
+      model: "mistralai/mistral-small-3.2-24b-instruct",
+      system: "s",
+      messages: [{ role: "user" as const, content: "u" }],
+      maxTokens: 10,
+    };
+    for (const providerRouting of [undefined, null, {}, { only: [] }, { only: ["Not a host!"] }, "deepinfra"] as never[]) {
+      expect(buildOpenAiCompatibleBody("openrouter", { ...base, providerRouting }).provider).toBeUndefined();
+      expect(
+        buildOpenAiCompatibleBody("openrouter", { ...base, tools: [WEATHER_TOOL], providerRouting }).provider,
+      ).toEqual({ require_parameters: true });
+    }
+  });
+
+  it("ignores the host choice for every provider but OpenRouter", () => {
+    for (const provider of ["openai", "google", "local"] as const) {
+      const body = buildOpenAiCompatibleBody(provider, {
+        model: "m",
+        system: "s",
+        messages: [{ role: "user", content: "u" }],
+        tools: [WEATHER_TOOL],
+        maxTokens: 10,
+        providerRouting: { only: ["deepinfra"], allowFallbacks: false },
+      });
+      expect(Object.hasOwn(body, "provider"), provider).toBe(false);
+    }
+  });
+
+  it("puts the host choice on the wire for OpenRouter", async () => {
+    const fetcher = fakeFetch(() =>
+      jsonResponse({ choices: [{ message: { role: "assistant", content: "Hei!" }, finish_reason: "stop" }] }),
+    );
+    const client = createLaneAProviderClient({ provider: "openrouter", apiKey: KEY, fetch: fetcher.impl });
+    await client.complete({
+      model: "mistralai/mistral-small-3.2-24b-instruct",
+      system: "s",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [WEATHER_TOOL],
+      maxTokens: 64,
+      providerRouting: { only: ["deepinfra"] },
+    });
+    expect(fetcher.calls[0]!.body.provider).toEqual({ require_parameters: true, only: ["deepinfra"] });
   });
 });
 
@@ -317,6 +492,22 @@ describe("Anthropic provider client", () => {
       stop: "end_turn",
       stopReason: "end_turn",
     });
+  });
+
+  it("sends a temperature to Claude only when set, clamped to Claude's 0-1 range", async () => {
+    const answer = { content: [{ type: "text", text: "Hei!" }], usage: { input_tokens: 1, output_tokens: 1 }, stop_reason: "end_turn" };
+    const { client, create } = fakeAnthropic([answer, answer, answer]);
+    const provider = createLaneAProviderClient({ provider: "anthropic", apiKey: null, anthropicClient: client });
+    const base = { model: "claude-haiku-4-5", system: "s", messages: [{ role: "user" as const, content: "hi" }], maxTokens: 64 };
+
+    await provider.complete(base);
+    await provider.complete({ ...base, temperature: 0.6 });
+    await provider.complete({ ...base, temperature: 1.4 });
+
+    const sent = create.mock.calls.map((call) => (call as unknown[])[0] as Record<string, unknown>);
+    expect(Object.hasOwn(sent[0]!, "temperature")).toBe(false);
+    expect(sent[1]!.temperature).toBe(0.6);
+    expect(sent[2]!.temperature).toBe(1);
   });
 
   it("translates tool_use blocks into tool calls and tool results back into tool_result blocks", () => {

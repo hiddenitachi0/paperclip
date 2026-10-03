@@ -90,6 +90,7 @@ import {
   HEARTBEAT_RUN_SAFE_RESULT_JSON_MAX_BYTES,
   mergeHeartbeatRunResultJson,
 } from "./heartbeat-run-summary.js";
+import { saveAgentWorkSummary } from "./agent-work-summaries.js";
 import {
   RUN_SILENT_ERROR_CODE,
   RUN_TOO_LONG_ERROR_CODE,
@@ -182,6 +183,8 @@ import {
   type ClaudeCredentialSource,
 } from "./claude-credential-source.js";
 import { resolveAgentMcpToolLibraryServers } from "./mcp-tool-library.js";
+import { resolveBrowserMcpServerEntry } from "./browser-mcp-entry.js";
+import { buildApiToolsAnnouncement } from "./api-tools-agent-prompt.js";
 import {
   evaluateExecutionAllowlist,
   isExecutionForcedToKubernetes,
@@ -207,13 +210,15 @@ import {
   buildSelfReviewPassInstruction,
   detectRiskySurfaceFromDiff,
   detectRiskySurfaceFromDiffContent,
-  findExistingSelfReviewPassNoticeCommentForRun,
+  extractReviewedCommitShaFromSummaryBody,
+  findSelfReviewPassSummaryComment,
   getChangedDiffContentForIssueWorkspace,
   getChangedFilePathsForIssueWorkspace,
+  getCurrentHeadShaForIssueWorkspace,
   issueExecutionPolicyOptsOutOfSelfReview,
   issueProjectHasGitWorkspace,
   isSelfReviewPassRun,
-  postSelfReviewPassNoticeComment,
+  upsertSelfReviewPassNoticeComment,
   SELF_REVIEW_PASS_REASON,
 } from "./self-review-gate.js";
 import {
@@ -2044,6 +2049,8 @@ interface ParsedIssueAssigneeAdapterOverrides {
   modelProfile: ModelProfileKey | null;
   adapterConfig: Record<string, unknown> | null;
   useProjectWorkspace: boolean | null;
+  /** DUR-4144: "Plan first on Opus, then build on Sonnet" New Task switch. */
+  planFirstOnOpus: boolean;
 }
 
 type ModelProfileRequestSource = "issue_override" | "wake_context";
@@ -2776,7 +2783,7 @@ export function resolveRuntimeSessionParamsForWorkspace(input: {
   };
 }
 
-function parseIssueAssigneeAdapterOverrides(
+export function parseIssueAssigneeAdapterOverrides(
   raw: unknown,
 ): ParsedIssueAssigneeAdapterOverrides | null {
   const parsed = parseObject(raw);
@@ -2790,12 +2797,30 @@ function parseIssueAssigneeAdapterOverrides(
     typeof parsed.useProjectWorkspace === "boolean"
       ? parsed.useProjectWorkspace
       : null;
-  if (!modelProfile && !adapterConfig && useProjectWorkspace === null) return null;
+  const planFirstOnOpus = parsed.planFirstOnOpus === true;
+  if (!modelProfile && !adapterConfig && useProjectWorkspace === null && !planFirstOnOpus) return null;
   return {
     modelProfile,
     adapterConfig,
     useProjectWorkspace,
+    planFirstOnOpus,
   };
+}
+
+/**
+ * DUR-4144: "Plan first on Opus, then build on Sonnet" forces the "planner"
+ * model profile for every run up to and including the one that writes the
+ * plan document. The switch is self-consuming -- the interaction-accept
+ * route (server/src/routes/issues.ts) clears `planFirstOnOpus` the moment the
+ * plan confirmation is accepted -- so once that happens this simply falls
+ * through to whatever modelProfile the issue/agent would otherwise use.
+ */
+export function resolveEffectiveIssueModelProfile(
+  overrides: Pick<ParsedIssueAssigneeAdapterOverrides, "modelProfile" | "planFirstOnOpus"> | null,
+): ModelProfileKey | null {
+  if (!overrides) return null;
+  if (overrides.planFirstOnOpus) return "planner";
+  return overrides.modelProfile ?? null;
 }
 
 /**
@@ -7680,9 +7705,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             // a risky change that lands via this path would only ever get the confirmatory
             // prompt. DUR-91: also checks the diff content (not just changed file paths), so a
             // risky change in a generically-named file gets caught here too.
-            const [changedFilePaths, diffContent] = await Promise.all([
+            const [changedFilePaths, diffContent, headSha, existingSummaryComment] = await Promise.all([
               getChangedFilePathsForIssueWorkspace(db, { companyId: issue.companyId, issueId: issue.id }),
               getChangedDiffContentForIssueWorkspace(db, { companyId: issue.companyId, issueId: issue.id }),
+              getCurrentHeadShaForIssueWorkspace(db, { companyId: issue.companyId, issueId: issue.id }),
+              findSelfReviewPassSummaryComment(db, { companyId: issue.companyId, issueId: issue.id }),
             ]);
             const riskySurfaceCategories = [
               ...new Set([
@@ -7690,25 +7717,24 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                 ...(diffContent ? detectRiskySurfaceFromDiffContent(diffContent) : []),
               ]),
             ];
+            const previousReviewedSha = existingSummaryComment
+              ? extractReviewedCommitShaFromSummaryBody(existingSummaryComment.body)
+              : null;
             const noticeBody = buildSelfReviewPassInstruction({
               issueIdentifier: issue.identifier,
               alreadyHandedOff: true,
               riskySurfaceCategories,
+              sinceCommitSha: previousReviewedSha,
             });
-            const existingNotice = await findExistingSelfReviewPassNoticeCommentForRun(db, {
+            // DUR-4319: upserts onto the issue's single self-review summary comment instead
+            // of posting a fresh one per run/push.
+            await upsertSelfReviewPassNoticeComment(db, {
               companyId: issue.companyId,
               issueId: issue.id,
               sourceRunId: run.id,
-              body: noticeBody,
+              headSha,
+              content: noticeBody,
             });
-            if (!existingNotice) {
-              await postSelfReviewPassNoticeComment(db, {
-                companyId: issue.companyId,
-                issueId: issue.id,
-                sourceRunId: run.id,
-                body: noticeBody,
-              });
-            }
           } catch {
             // Ignore — the bounded retry itself is already scheduled and is what actually
             // enforces the self-review pass.
@@ -11623,8 +11649,22 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const rightReady = rightIssueId ? (rightReadiness?.isDependencyReady ?? true) : true;
       const leftIssue = leftIssueId ? issueById.get(leftIssueId) : null;
       const rightIssue = rightIssueId ? issueById.get(rightIssueId) : null;
-      const leftRank = leftIssueId ? (leftReady ? (leftIssue?.status === "in_progress" ? 0 : 1) : 3) : 2;
-      const rightRank = rightIssueId ? (rightReady ? (rightIssue?.status === "in_progress" ? 0 : 1) : 3) : 2;
+      // DUR-4308: a self_review_pass wake corrects an already-declined
+      // done/in_review PATCH on a run that just finished -- leaving it queued
+      // behind an ordinary ready heartbeat_timer wake for a different
+      // in_progress issue lets later unrelated runs retry the same PATCH
+      // first and pile on duplicate declines. Treat it as equally urgent as
+      // resuming in-progress work, not as ordinary ready-but-idle work.
+      const leftIsSelfReviewPass =
+        readNonEmptyString(parseObject(left.contextSnapshot).wakeReason) === SELF_REVIEW_PASS_REASON;
+      const rightIsSelfReviewPass =
+        readNonEmptyString(parseObject(right.contextSnapshot).wakeReason) === SELF_REVIEW_PASS_REASON;
+      const leftRank = leftIssueId
+        ? (leftReady ? (leftIssue?.status === "in_progress" || leftIsSelfReviewPass ? 0 : 1) : 3)
+        : 2;
+      const rightRank = rightIssueId
+        ? (rightReady ? (rightIssue?.status === "in_progress" || rightIsSelfReviewPass ? 0 : 1) : 3)
+        : 2;
       if (leftRank !== rightRank) return leftRank - rightRank;
       const leftPriorityRank = issueRunPriorityRank(leftIssue?.priority);
       const rightPriorityRank = issueRunPriorityRank(rightIssue?.priority);
@@ -12132,7 +12172,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const modelProfileApplication = resolveModelProfileApplication({
       adapterModelProfiles,
       agentRuntimeConfig: agent.runtimeConfig,
-      issueModelProfile: issueAssigneeOverrides?.modelProfile ?? null,
+      issueModelProfile: resolveEffectiveIssueModelProfile(issueAssigneeOverrides),
       contextSnapshot: context,
       profileResolutionFallbackReason,
     });
@@ -12188,8 +12228,26 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         (agent.mcpToolIds as string[] | null) ?? [],
         existingNames,
       );
-      if (grantedToolServers.length > 0) {
-        mergedConfig.mcpServers = [...existingMcpServers, ...grantedToolServers];
+      // DUR-4013 step 3: the board-only browser switch, same fold-in shape.
+      // Checked against `existingNames` too, so an agent's own explicit
+      // "paperclip-browser" entry always wins over the built-in one.
+      const browserEntry =
+        !existingNames.has("paperclip-browser") ? resolveBrowserMcpServerEntry(agent) : null;
+      const additions = [...grantedToolServers, ...(browserEntry ? [browserEntry] : [])];
+      if (additions.length > 0) {
+        mergedConfig.mcpServers = [...existingMcpServers, ...additions];
+      }
+    }
+    // DUR-4004: an "API with a key" tool has no MCP surface, so the agent is
+    // told about its ticked-on API tools in a prompt section instead (the
+    // adapter renders context.paperclipApiToolsMarkdown) and calls an action
+    // over HTTP with its run token; the key never leaves the server.
+    {
+      const apiToolsMarkdown = await buildApiToolsAnnouncement(db, agent.companyId, agent.id).catch(() => "");
+      if (apiToolsMarkdown) {
+        context.paperclipApiToolsMarkdown = apiToolsMarkdown;
+      } else {
+        delete context.paperclipApiToolsMarkdown;
       }
     }
     const configSnapshot = buildExecutionWorkspaceConfigSnapshot(mergedConfig, selectedEnvironmentId);
@@ -13780,6 +13838,22 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         });
         const livenessRun = finalizedRun;
         await refreshContinuationSummaryForRun(livenessRun, agent);
+        if (outcome === "succeeded") {
+          try {
+            const workSummaryText = await buildDetectedSuccessfulRunProgressSummary(livenessRun);
+            if (workSummaryText) {
+              await saveAgentWorkSummary(db, {
+                companyId: livenessRun.companyId,
+                agentId: agent.id,
+                issueId: issueId ?? null,
+                runId: livenessRun.id,
+                summary: workSummaryText,
+              });
+            }
+          } catch (err) {
+            logger.warn({ err, runId: livenessRun.id }, "failed to save agent work summary");
+          }
+        }
         const skipRunIssueComment = parseObject(livenessRun.contextSnapshot).skipIssueComment === true;
         if (issueId && outcome === "succeeded" && !skipRunIssueComment) {
           try {

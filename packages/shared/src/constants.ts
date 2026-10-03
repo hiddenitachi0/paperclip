@@ -86,7 +86,12 @@ export const AGENT_ROLE_LABELS: Record<AgentRole, string> = {
 export const AGENT_DEFAULT_MAX_CONCURRENT_RUNS = 20;
 export const WORKSPACE_BRANCH_ROUTINE_VARIABLE = "workspaceBranch";
 
-export const MODEL_PROFILE_KEYS = ["cheap"] as const;
+// DUR-4144: "planner" is the plan-on-a-stronger-model lane, used for the
+// first run of a "plan first on Opus, then build on Sonnet" job before the
+// plan is accepted. Only claude_local ships a profile definition for it today
+// (see packages/adapters/claude-local/src/index.ts); other adapters simply
+// fall back to the agent's normal model until they add one.
+export const MODEL_PROFILE_KEYS = ["cheap", "planner"] as const;
 export type ModelProfileKey = (typeof MODEL_PROFILE_KEYS)[number];
 
 export const AGENT_ICON_NAMES = [
@@ -281,6 +286,11 @@ export const TASK_WATCHDOG_PRODUCT_BUG_ORIGIN_KIND = "task_watchdog_product_bug"
 export const ISSUE_ORIGIN_KINDS = [
   "manual",
   "routine_execution",
+  // DUR-4182: a task created by a Job "run" (one-press action attached to a
+  // Position). Looked up by job-approval-gate.ts to find the originating job
+  // and decide whether the job's requiresApproval flag gates this issue's
+  // done transition.
+  "job_execution",
   "stale_active_run_evaluation",
   "harness_liveness_escalation",
   "issue_productivity_review",
@@ -578,6 +588,26 @@ export type RoutineTriggerSigningMode = (typeof ROUTINE_TRIGGER_SIGNING_MODES)[n
 export const ROUTINE_VARIABLE_TYPES = ["text", "textarea", "number", "boolean", "select", "date"] as const;
 export type RoutineVariableType = (typeof ROUTINE_VARIABLE_TYPES)[number];
 
+// DUR-4182: Position Jobs — one-press job definitions attached to one or more
+// positions (company_agent_roles). Deliberately a separate set of enums from
+// the ROUTINE_* ones above rather than widening those: jobs are not assigned
+// to a single agent the way a routine is, and widening the routine enums to
+// fit jobs would touch every existing routine call site for no benefit.
+export const JOB_VARIABLE_TYPES = ["text", "textarea", "number", "boolean", "select", "date", "file_upload"] as const;
+export type JobVariableType = (typeof JOB_VARIABLE_TYPES)[number];
+
+// "quick_agent" maps to a cheap/fast model profile for lightweight jobs (e.g.
+// a persona like Maja firing a job on a colleague); "full_agent" runs the
+// assignee's normal configured model/effort unless the job overrides it.
+export const JOB_RUN_MODES = ["quick_agent", "full_agent"] as const;
+export type JobRunMode = (typeof JOB_RUN_MODES)[number];
+
+export const JOB_TRIGGER_KINDS = ["manual", "schedule", "webhook", "api", "email"] as const;
+export type JobTriggerKind = (typeof JOB_TRIGGER_KINDS)[number];
+
+export const JOB_STATUSES = ["active", "archived"] as const;
+export type JobStatus = (typeof JOB_STATUSES)[number];
+
 // DUR-68: a webhook trigger with a non-null customerInboxChannel is owned by
 // the generic customer-inbox door (POST /api/customer-inbox/:publicId)
 // rather than the old generic fire route. "Any source that can push a
@@ -706,6 +736,9 @@ export const SECRET_BINDING_TARGET_TYPES = [
   "project",
   "environment",
   "routine",
+  // DUR-4182: webhook auth secret for a job_triggers row, same shape as
+  // "routine" above (routineWebhookSecretConfigPath-style config path).
+  "job",
   "plugin",
   "issue",
   "run",
@@ -723,6 +756,62 @@ export const SECRET_BINDING_TARGET_TYPES = [
   // key). Never resolved by any agent -- only by the server-side
   // data-connections service, which makes every outbound call itself.
   "data_connection",
+  // DUR-4004: the key of an "API with a key" tool (company_api_tools row,
+  // config_path 'auth'). Never resolved by any agent -- only by the
+  // server-side api-tools service, which makes every outbound call itself.
+  // Deliberately NOT a dedicated target: one provider key may be shared by
+  // several tools (and by an MCP server) if the operator wants that.
+  "api_tool",
+  // Voice messages: the OpenAI key a company's speech-to-text and
+  // text-to-speech calls are made with (target_id = the company id,
+  // config_path 'openai_api_key'). Never resolved by any agent -- only by the
+  // server-side speech service, which makes every outbound call itself.
+  // Deliberately NOT a dedicated target: the same OpenAI key may also be a
+  // quick agent's key.
+  "speech",
+  // Watchers: the key of a market-price source (a Finnhub key for a US-stock
+  // watcher; watchers row, config_path 'source_key'). Never resolved by any
+  // agent -- only by the server-side watcher service, which makes every price
+  // request itself. Not dedicated: one Finnhub key serves every stock watcher.
+  "watcher",
+  // The company's web-search key for quick agents (a Brave Search API key),
+  // target_id = the company id, config_path WEB_SEARCH_KEY_CONFIG_PATH. The
+  // binding row IS the operator's pick (Connections → Web search). Never
+  // resolved by any agent -- only by the server-side web_search tool, which
+  // makes the call itself. Not dedicated, like api_tool.
+  "web_search",
+  // DUR-4037: a `site_login` secret (domain/username/password), bound to the
+  // one agent Filip lets sign in with it (target_id = the agent id). Never
+  // resolved by that agent directly -- only by the server-side browser
+  // service, which fills the login fields itself on the matching registrable
+  // domain inside a live browser session. Dedicated (see
+  // DEDICATED_SECRET_BINDING_TARGET_TYPES below): a login saved for one agent
+  // cannot also be attached to another agent or connection.
+  "site_login",
+  // DUR-4068: the SFTP credential for a website project's production deploy
+  // target, bound to the one agent (a project's configured requestingAgentId,
+  // typically the Website Developer boss) that may deploy it (target_id =
+  // the agent id). Never resolved by that agent directly -- only by the
+  // instance-admin-only deploy-sftp-credential route the on-box deploy
+  // runner calls, modelled on deploy-github-token. Dedicated (see
+  // DEDICATED_SECRET_BINDING_TARGET_TYPES below) and deliberately its own
+  // target type rather than "agent": the generic agent adapterConfig sync
+  // (agent-secret-bindings.ts) replaces ALL of an agent's "agent" bindings on
+  // every adapterConfig save, which would silently delete this credential the
+  // next time someone edited that agent's config.
+  "deploy_sftp_credential",
+  // DUR-4093: the IMAP password for a mail_inboxes row (config_path
+  // 'imap_password'). Never resolved by any agent -- only by the
+  // server-side mail secretary service, which makes every IMAP connection
+  // itself, read-only. Not dedicated, like watcher: the same mailbox
+  // password may back more than one inbox config if an operator wants that.
+  "mail_inbox",
+  // DUR-4194: the IMAP and SMTP passwords for a mail_accounts row
+  // (config_path 'imap_password' / 'smtp_password'). Unlike mail_inbox,
+  // dedicated (see DEDICATED_SECRET_BINDING_TARGET_TYPES below): a per-person
+  // mailbox's credential is that person's alone, never shared across two
+  // mail accounts the way one watcher's price-check key might be.
+  "mail_account",
 ] as const;
 export type SecretBindingTargetType = (typeof SECRET_BINDING_TARGET_TYPES)[number];
 
@@ -734,6 +823,9 @@ export const DEDICATED_SECRET_BINDING_TARGET_TYPES = [
   "data_connection",
   "telegram_bot",
   "persona_account",
+  "site_login",
+  "deploy_sftp_credential",
+  "mail_account",
 ] as const satisfies readonly SecretBindingTargetType[];
 
 // DUR-134: platforms a persona_accounts row can target. Fanvue only for now
@@ -962,6 +1054,12 @@ export const HUMAN_COMPANY_MEMBERSHIP_ROLES = [
   "admin",
   "operator",
   "viewer",
+  // DUR-4094: blocked-by-default on the server -- see
+  // server/src/routes/authz.ts refuseLightEmployeeWithoutOptIn. Every page
+  // and action is refused for this role unless a route has explicitly opted
+  // in with assertLightAllowed, the same default-deny shape DUR-3977 uses
+  // for company service tokens.
+  "employee",
 ] as const;
 export type HumanCompanyMembershipRole = (typeof HUMAN_COMPANY_MEMBERSHIP_ROLES)[number];
 
@@ -970,6 +1068,7 @@ export const HUMAN_COMPANY_MEMBERSHIP_ROLE_LABELS: Record<HumanCompanyMembership
   admin: "Admin",
   operator: "Operator",
   viewer: "Viewer",
+  employee: "Employee (light)",
 };
 
 export const INSTANCE_USER_ROLES = ["instance_admin"] as const;
@@ -1005,8 +1104,22 @@ export const PERMISSION_KEYS = [
   // DEPLOY_APPROVAL_KEYS in server/src/services/agent-roles.ts).
   "deploys:request",
   "merges:request",
+  // DUR-4094: what an admin has switched on for one "Employee (light)"
+  // member. Stored as ordinary principal_permission_grants rows
+  // (principalType "user"), checked by assertLightAllowed -- never implies
+  // any of the management rights above, and non-employee roles ignore them.
+  "feature:pa_chat",
+  "feature:media_studio",
+  "feature:own_files",
 ] as const;
 export type PermissionKey = (typeof PERMISSION_KEYS)[number];
+
+export const LIGHT_EMPLOYEE_FEATURE_KEYS = [
+  "feature:pa_chat",
+  "feature:media_studio",
+  "feature:own_files",
+] as const;
+export type LightEmployeeFeatureKey = (typeof LIGHT_EMPLOYEE_FEATURE_KEYS)[number];
 
 // ---------------------------------------------------------------------------
 // Plugin System — see doc/plugins/PLUGIN_SPEC.md for the full specification
@@ -1100,6 +1213,9 @@ export const PLUGIN_CAPABILITIES = [
   "issue.interactions.create",
   "issue.documents.write",
   "issue.attachments.create",
+  // Company files not tied to a task (the Files page's "No task" group).
+  "company.files.create",
+  "company.files.read",
   "projects.managed",
   "routines.managed",
   "skills.managed",

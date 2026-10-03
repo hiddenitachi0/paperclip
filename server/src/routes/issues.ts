@@ -163,6 +163,7 @@ import { evaluateDeployCompletionDoneGate } from "../services/deploy-completion-
 import { evaluateDoneGateCritic } from "../services/done-gate-critic.js";
 import { evaluateOriginCommitDoneGate } from "../services/origin-commit-gate.js";
 import { evaluateFeatureLaunchDoneGate } from "../services/feature-launch-gate.js";
+import { evaluateJobApprovalDoneGate } from "../services/job-approval-gate.js";
 import { evaluateBlockedNeedsAskGate } from "../services/blocked-needs-ask-gate.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
 import { feedbackService } from "../services/feedback.js";
@@ -477,8 +478,17 @@ function readConfirmationResultForWake(result: unknown) {
   return {
     outcome: readNonEmptyString(parsed.outcome),
     reason: readNonEmptyString(parsed.reason) ?? readNonEmptyString(parsed.rejectionReason),
+    note: readNonEmptyString(parsed.note) ?? readNonEmptyString(parsed.summaryMarkdown),
     commentId: readNonEmptyString(parsed.commentId),
   };
+}
+
+function readNotConfirmedOptionsForWake(result: unknown): string[] | null {
+  const parsed = readObject(result);
+  const labels = Array.isArray(parsed.notConfirmedOptions)
+    ? parsed.notConfirmedOptions.filter((value): value is string => typeof value === "string" && value.length > 0)
+    : [];
+  return labels.length > 0 ? labels : null;
 }
 
 function hasIssueWorkspaceAuditChange(previous: Record<string, unknown>) {
@@ -1034,6 +1044,8 @@ function queueResolvedInteractionContinuationWakeup(input: {
   const planTarget = readPlanConfirmationTargetForIssue(input.interaction.payload, input.issue.id);
   const interactionResult = readConfirmationResultForWake(input.interaction.result);
   const checkboxSelection = readCheckboxSelectionForWake(input.interaction);
+  const resolutionNote = interactionResult?.note ?? null;
+  const notConfirmedOptions = readNotConfirmedOptionsForWake(input.interaction.result);
   const planReviewInteraction =
     planTarget && input.interaction.kind === "request_confirmation"
       ? {
@@ -1058,6 +1070,8 @@ function queueResolvedInteractionContinuationWakeup(input: {
       sourceRunId: input.interaction.sourceRunId ?? null,
       ...(planReviewInteraction ? { planReviewInteraction } : {}),
       ...(checkboxSelection ? { checkboxSelection } : {}),
+      ...(resolutionNote ? { note: resolutionNote } : {}),
+      ...(notConfirmedOptions ? { notConfirmedOptions } : {}),
       mutation: "interaction",
     },
     requestedByActorType: input.actor.actorType,
@@ -1072,6 +1086,8 @@ function queueResolvedInteractionContinuationWakeup(input: {
       sourceRunId: input.interaction.sourceRunId ?? null,
       ...(planReviewInteraction ? { planReviewInteraction } : {}),
       ...(checkboxSelection ? { checkboxSelection } : {}),
+      ...(resolutionNote ? { note: resolutionNote } : {}),
+      ...(notConfirmedOptions ? { notConfirmedOptions } : {}),
       wakeReason: "issue_commented",
       source: input.source,
       ...(forceFreshSession ? { forceFreshSession: true } : {}),
@@ -6577,6 +6593,24 @@ export function issueRoutes(
       return;
     }
     const originCommitWarning = originCommitGateResult?.warningOnly ? originCommitGateResult.message : null;
+    // DUR-4182: composes with the gates above -- a Job's own `requiresApproval`
+    // flag, checked only for issues a job run created (originKind "job_execution").
+    const jobApprovalGateResult = await evaluateJobApprovalDoneGate({
+      db,
+      issue: {
+        id: existing.id,
+        companyId: existing.companyId,
+        originKind: existing.originKind,
+        originId: existing.originId,
+      },
+      actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
+      requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
+      currentStatus: existing.status,
+    });
+    if (jobApprovalGateResult) {
+      res.status(409).json({ error: jobApprovalGateResult.message });
+      return;
+    }
     // DUR-313: composes with the gates above -- this asks a narrower question again,
     // "did the operator explicitly sign off on THIS being a finished, user-facing
     // launch", independent of whether the work itself is done or already deployed.
@@ -8262,6 +8296,35 @@ export function issueRoutes(
         interaction.status === "accepted" &&
         acceptedPlanTarget?.issueId === issue.id &&
         acceptedPlanTarget.key === "plan";
+
+      // DUR-4144: "Plan first on Opus, then build on Sonnet" is a one-shot
+      // switch -- clear it the moment its plan is accepted so the fresh
+      // session that follows (forceFreshSession below) builds on the agent's
+      // normal model instead of planning again on every future run.
+      const planFirstOverrides = issue.assigneeAdapterOverrides as Record<string, unknown> | null;
+      if (acceptedPlanConfirmation && planFirstOverrides?.planFirstOnOpus === true) {
+        await svc.update(issue.id, {
+          assigneeAdapterOverrides: { ...planFirstOverrides, planFirstOnOpus: false },
+        });
+        await logActivity(db, {
+          companyId: issue.companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          action: "issue.updated",
+          entityType: "issue",
+          entityId: issue.id,
+          details: {
+            identifier: issue.identifier,
+            source: "plan_first_on_opus_cleared",
+            interactionId: interaction.id,
+            assigneeAdapterOverrides: { ...planFirstOverrides, planFirstOnOpus: false },
+            _previous: { assigneeAdapterOverrides: planFirstOverrides },
+          },
+        });
+      }
+
       queueResolvedInteractionContinuationWakeup({
         heartbeat: rawHeartbeat,
         issue: continuationWakeIssue,
@@ -9527,6 +9590,86 @@ export function issueRoutes(
     });
 
     res.status(201).json(withContentPath(attachment));
+  });
+
+  // A company file with no task, uploaded directly by a board user (not an
+  // agent run). DUR-4063: Media Studio's picture editor saves an edited
+  // picture as a brand-new file here (never overwriting the one it started
+  // from) when the picture being edited did not come from a task's Files tab
+  // -- see POST /companies/:companyId/issues/:issueId/attachments above for
+  // the task-scoped case. Board access is full-control operator context
+  // (AGENTS.md §8), same company-access check as every other company route.
+  router.post("/companies/:companyId/files", companyScopeFromParam(rawDb, assertCompanyAccess), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+
+    const company = await companiesSvc.getById(companyId);
+    const attachmentMaxBytes = normalizeIssueAttachmentMaxBytes(company?.attachmentMaxBytes);
+
+    try {
+      await runSingleFileUpload(req, res, attachmentMaxBytes);
+    } catch (err) {
+      if (err instanceof multer.MulterError) {
+        if (err.code === "LIMIT_FILE_SIZE") {
+          res.status(422).json({ error: `File exceeds ${attachmentMaxBytes} bytes` });
+          return;
+        }
+        res.status(400).json({ error: err.message });
+        return;
+      }
+      throw err;
+    }
+
+    const file = (req as Request & { file?: { mimetype: string; buffer: Buffer; originalname: string } }).file;
+    if (!file) {
+      res.status(400).json({ error: "Missing file field 'file'" });
+      return;
+    }
+    const contentType = normalizeContentType(file.mimetype);
+    if (file.buffer.length <= 0) {
+      res.status(422).json({ error: "File is empty" });
+      return;
+    }
+
+    const actor = getActorInfo(req);
+    const stored = await storage.putFile({
+      companyId,
+      namespace: "company-files",
+      originalFilename: file.originalname || null,
+      contentType,
+      body: file.buffer,
+    });
+
+    const created = await svc.createCompanyFile({
+      companyId,
+      provider: stored.provider,
+      objectKey: stored.objectKey,
+      contentType: stored.contentType,
+      byteSize: stored.byteSize,
+      sha256: stored.sha256,
+      originalFilename: stored.originalFilename,
+      createdByAgentId: actor.agentId,
+      createdByUserId: actor.actorType === "user" ? actor.actorId : null,
+    });
+
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "company_file.created",
+      entityType: "company_file",
+      entityId: created.id,
+      details: {
+        attachmentId: created.id,
+        originalFilename: created.originalFilename,
+        contentType: created.contentType,
+        byteSize: created.byteSize,
+      },
+    });
+
+    res.status(201).json(withContentPath(created));
   });
 
   router.get("/attachments/:attachmentId/content", scopeFromAttachmentParam(), async (req, res, next) => {

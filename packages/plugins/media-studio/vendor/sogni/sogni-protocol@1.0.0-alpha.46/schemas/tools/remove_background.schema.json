@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.sogni.ai/creative-agent/2026-07-18.1/tools/remove_background.schema.json",
+  "title": "remove_background arguments",
+  "schemaVersion": "2026-07-18.1",
+  "description": "Remove an image background with BiRefNet while preserving the original foreground. Returns a transparent PNG cutout by default, or a soft foreground mask. Uses the original source image without generative repainting; takes no prompt.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "sourceImageIndex": {
+      "type": "integer",
+      "description": "Original source image: negative indices select uploads (-1 is the first), non-negative indices select generated images. Omit to use the latest image."
+    },
+    "source_image_url": {
+      "type": "string",
+      "description": "REST alternative to sourceImageIndex: retrievable source image URL."
+    },
+    "applyMask": {
+      "type": "boolean",
+      "description": "True (default) returns a transparent cutout; false returns the soft mask."
+    }
+  },
+  "required": []
+}

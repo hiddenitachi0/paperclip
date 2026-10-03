@@ -1,0 +1,1102 @@
+{
+ "status": "success",
+ "data": {
+  "catalogVersion": "de8d63bbf216bbe9980ca8ddc1402ba4fa30f62f91371cf862a1b5b0c26936aa",
+  "updatedAt": "2026-09-27T16:33:39.098Z",
+  "count": 12,
+  "models": [
+   {
+    "id": "birefnet_image_background_removal_fp16",
+    "name": "BiRefNet Background Removal",
+    "sid": 506,
+    "mediaType": "image",
+    "tierId": "birefnet_image_background_removal_fp16",
+    "availableNetworks": [
+     "fast"
+    ],
+    "workerCounts": {
+     "fast": 26
+    },
+    "tags": [],
+    "attribution": null,
+    "parameters": {
+     "type": "image",
+     "outputMedia": "image",
+     "requiresStartingImage": true,
+     "defaultSize": 1024,
+     "width": {
+      "min": 1024,
+      "max": 1024,
+      "step": 1,
+      "default": 1024
+     },
+     "height": {
+      "min": 1024,
+      "max": 1024,
+      "step": 1,
+      "default": 1024
+     },
+     "steps": {
+      "min": 1,
+      "max": 1,
+      "default": 1
+     },
+     "comfyScheduler": {
+      "allowed": [],
+      "default": ""
+     },
+     "id": "birefnet_image_background_removal_fp16",
+     "secPerStep": "86.3",
+     "secPerPreview": "0",
+     "secForCN": "0",
+     "costPerBaseRenderInUSD": "0.005",
+     "costPerBaseRenderInSogni": "8.912655971479500866",
+     "isFull": true
+    }
+   },
+   {
+    "id": "chroma1-hd_fp8_scaled",
+    "name": "Chroma1-HD",
+    "sid": 456,
+    "mediaType": "image",
+    "tierId": "t83_flx_o_1024",
+    "availableNetworks": [
+     "fast"
+    ],
+    "workerCounts": {
+     "fast": 81
+    },
+    "tags": [
+     "new",
+     "standard",
+     "uncensored"
+    ],
+    "attribution": {
+     "creator": "Lodestone Rock",
+     "creatorUrl": "https://huggingface.co/lodestones",
+     "source": "Hugging Face @ lodestones",
+     "sourceUrl": "https://huggingface.co/lodestones/Chroma1-HD",
+     "license": "Apache 2.0",
+     "licenseUrl": "https://huggingface.co/lodestones/Chroma1-HD"
+    },
+    "parameters": {
+     "promptTokenizer": "t5xxl",
+     "maxPromptTokens": 4096,
+     "nickname": "Chroma1-HD",
+     "type": "image",
+     "defaultSize": 1024,
+     "steps": {
+      "min": 20,
+      "max": 50,
+      "default": 26
+     },
+     "guidance": {
+      "min": 1,
+      "max": 8,
+      "decimals": 1,
+      "default": 3.8
+     },
+     "negativePrompt": {
+      "default": "low quality, worst quality, low resolution, blurry, out of focus, unfinished, poorly composed, distorted, deformed, disfigured, incorrect anatomy, watermark, signature, jpeg artifacts, compression artifacts, oversharpened, excessive noise"
+     },
+     "scheduler": {
+      "allowed": [
+       "Euler",
+       "Euler a",
+       "DPM++ 2M",
+       "DPM++ 2M SDE",
+       "DPM++ SDE"
+      ],
+      "default": "Euler"
+     },
+     "timeStepSpacing": {
+      "allowed": [
+       "Simple",
+       "Karras",
+       "Linear",
+       "SGM Uniform",
+       "Beta",
+       "Beta Sampling",
+       "Normal",
+       "DDIM",
+       "KL Optimal"
+      ],
+      "default": "Beta Sampling"
+     },
+     "comfySampler": {
+      "allowed": [
+       "euler",
+       "er_sde",
+       "euler_ancestral",
+       "dpmpp_2m",
+       "dpmpp_2m_sde",
+       "dpmpp_sde"
+      ],
+      "default": "euler"
+     },
+     "comfyScheduler": {
+      "allowed": [
+       "simple",
+       "karras",
+       "normal",
+       "sgm_uniform",
+       "beta",
+       "beta_sampling",
+       "ddim_uniform",
+       "kl_optimal"
+      ],
+      "default": "beta_sampling"
+     },
+     "id": "t83_flx_o_1024",
+     "secPerStep": "9.423076923076923076",
+     "secPerPreview": "0",
+     "secForCN": "0",
+     "costPerBaseRenderInUSD": "0.014194669756662804",
+     "costPerBaseRenderInSogni": "25.302441633980043015",
+     "isFull": true
+    }
+   },
+   {
+    "id": "coreml-sogniXLturbo_alpha1_ad",
+    "name": "SDXL-Turbo - 🅂 Sogni.XLT 𝛂1",
+    "sid": 325,
+    "mediaType": "image",
+    "tierId": "t31_xlt_o_1024",
+    "availableNetworks": [
+     "fast",
+     "relaxed"
+    ],
+    "workerCounts": {
+     "fast": 6,
+     "relaxed": 8
+    },
+    "tags": [
+     "community",
+     "standard"
+    ],
+    "attribution": null,
+    "parameters": {
+     "promptTokenizer": "clip",
+     "maxPromptTokens": 750,
+     "maxPromptTokensRelaxed": 77,
+     "steps": {
+      "min": 2,
+      "max": 12,
+      "default": 4
+     },
+     "guidance": {
+      "min": 0.1,
+      "max": 5,
+      "decimals": 3,
+      "default": 1
+     },
+     "scheduler": {
+      "allowed": [
+       "Euler",
+       "Euler a",
+       "DPM++ 2M",
+       "DPM++ 2M SDE",
+       "DPM++ SDE",
+       "LCM (Latent Consistency Model)",
+       "DPM Solver Multistep (DPM-Solver++)",
+       "PNDM (Pseudo-linear multi-step)"
+      ],
+      "default": "DPM Solver Multistep (DPM-Solver++)"
+     },
+     "timeStepSpacing": {
+      "allowed": [
+       "Simple",
+       "Karras",
+       "Linear",
+       "SGM Uniform",
+       "Beta",
+       "Normal",
+       "DDIM",
+       "KL Optimal",
+       "Leading"
+      ],
+      "default": "Karras"
+     },
+     "id": "t31_xlt_o_1024",
+     "secPerStep": "2.425",
+     "secPerPreview": "1.125",
+     "secForCN": "140.3",
+     "costPerBaseRenderInUSD": "0.00056199304750869",
+     "costPerBaseRenderInSogni": "1.001770138161658845",
+     "isFull": true
+    }
+   },
+   {
+    "id": "dark_beast_krea2_fp8",
+    "name": "Dark Beast KREA 2 黑兽",
+    "sid": 458,
+    "mediaType": "image",
+    "tierId": "dark_beast_krea2_fp8",
+    "availableNetworks": [
+     "fast",
+     "relaxed"
+    ],
+    "workerCounts": {
+     "fast": 141,
+     "relaxed": 5
+    },
+    "tags": [
+     "new",
+     "spicy",
+     "standard",
+     "uncensored"
+    ],
+    "attribution": {
+     "creator": "AiMetatron",
+     "creatorUrl": "https://civitai.red/user/AiMetatron",
+     "source": "Civitai @ AiMetatron",
+     "sourceUrl": "https://civitai.red/models/2242173?modelVersionId=3173268",
+     "license": "Civitai terms",
+     "licenseUrl": "https://civitai.red/models/2242173?modelVersionId=3173268",
+     "sources": [
+      {
+       "label": "Dark Beast Krea 2 fine-tune",
+       "source": "Civitai @ AiMetatron",
+       "sourceUrl": "https://civitai.red/models/2242173?modelVersionId=3173268",
+       "license": "Civitai terms",
+       "licenseUrl": "https://civitai.red/models/2242173?modelVersionId=3173268"
+      },
+      {
+       "label": "Krea 2 base",
+       "source": "Hugging Face @ krea",
+       "sourceUrl": "https://huggingface.co/krea/Krea-2-Raw",
+       "license": "Krea 2 Community License",
+       "licenseUrl": "https://krea.ai/krea-2-licensing"
+      }
+     ]
+    },
+    "parameters": {
+     "type": "image",
+     "defaultSize": 1024,
+     "width": {
+      "min": 512,
+      "max": 2048,
+      "step": 16,
+      "default": 1024
+     },
+     "height": {
+      "min": 512,
+      "max": 2048,
+      "step": 16,
+      "default": 1024
+     },
+     "steps": {
+      "min": 8,
+      "max": 20,
+      "default": 16
+     },
+     "guidance": {
+      "min": 1,
+      "max": 1,
+      "decimals": 1,
+      "default": 1
+     },
+     "comfySampler": {
+      "allowed": [
+       "euler",
+       "er_sde",
+       "res_multistep",
+       "dpmpp_2m",
+       "dpmpp_2m_sde",
+       "euler_ancestral",
+       "uni_pc",
+       "ddim",
+       "lcm"
+      ],
+      "default": "euler"
+     },
+     "comfyScheduler": {
+      "allowed": [
+       "simple",
+       "normal",
+       "sgm_uniform",
+       "beta"
+      ],
+      "default": "simple"
+     },
+     "vae": {
+      "allowed": [
+       "krea2RealVae_v10.safetensors",
+       "qwen_image_vae.safetensors",
+       "wan_2.1_vae.safetensors"
+      ],
+      "default": "krea2RealVae_v10.safetensors",
+      "labels": {
+       "krea2RealVae_v10.safetensors": "Krea 2 Real VAE",
+       "qwen_image_vae.safetensors": "Qwen Image VAE",
+       "wan_2.1_vae.safetensors": "WAN 2.1 VAE"
+      },
+      "descriptions": {
+       "krea2RealVae_v10.safetensors": "Optimized for realism-forward sharpness, skin texture, and high-frequency detail.",
+       "qwen_image_vae.safetensors": "Optimized for a softer Qwen Image-style decode with gentler texture and a more analog finish.",
+       "wan_2.1_vae.safetensors": "Optimized for balanced Krea 2 output with clean edges, stable color, and moderate detail."
+      }
+     },
+     "id": "dark_beast_krea2_fp8",
+     "secPerStep": "31.6875",
+     "secPerPreview": "0",
+     "secForCN": "0",
+     "costPerBaseRenderInUSD": "0.029374275782155273",
+     "costPerBaseRenderInSogni": "52.360562891542374729",
+     "isFull": true
+    }
+   },
+   {
+    "id": "dark_beast_z_image_turbo_v9_bf16",
+    "name": "Dark Beast Z-Image Turbo v9",
+    "sid": 460,
+    "mediaType": "image",
+    "tierId": "dark_beast_z_image_turbo_v9_bf16",
+    "availableNetworks": [
+     "fast"
+    ],
+    "workerCounts": {
+     "fast": 85
+    },
+    "tags": [
+     "fast",
+     "new",
+     "spicy",
+     "standard",
+     "uncensored"
+    ],
+    "attribution": {
+     "creator": "AiMetatron",
+     "creatorUrl": "https://civitai.red/user/AiMetatron",
+     "source": "Civitai @ AiMetatron",
+     "sourceUrl": "https://civitai.red/models/2242173?modelVersionId=2788849",
+     "license": "Civitai terms",
+     "licenseUrl": "https://civitai.red/models/2242173?modelVersionId=2788849",
+     "sources": [
+      {
+       "label": "Dark Beast Z-Image v9 fine-tune",
+       "source": "Civitai @ AiMetatron",
+       "sourceUrl": "https://civitai.red/models/2242173?modelVersionId=2788849",
+       "license": "Civitai terms",
+       "licenseUrl": "https://civitai.red/models/2242173?modelVersionId=2788849"
+      },
+      {
+       "label": "Z-Image Turbo base",
+       "source": "Hugging Face @ Tongyi-MAI",
+       "sourceUrl": "https://huggingface.co/Tongyi-MAI/Z-Image-Turbo",
+       "license": "Apache 2.0",
+       "licenseUrl": "https://huggingface.co/Tongyi-MAI/Z-Image-Turbo"
+      }
+     ]
+    },
+    "parameters": {
+     "type": "image",
+     "defaultSize": 1024,
+     "width": {
+      "min": 512,
+      "max": 2048,
+      "step": 16,
+      "default": 1024
+     },
+     "height": {
+      "min": 512,
+      "max": 2048,
+      "step": 16,
+      "default": 1024
+     },
+     "steps": {
+      "min": 4,
+      "max": 12,
+      "default": 8
+     },
+     "guidance": {
+      "min": 1,
+      "max": 1,
+      "decimals": 1,
+      "default": 1
+     },
+     "comfySampler": {
+      "allowed": [
+       "euler",
+       "er_sde",
+       "res_multistep",
+       "dpmpp_2m",
+       "dpmpp_2m_sde",
+       "euler_ancestral",
+       "ddim",
+       "uni_pc",
+       "lcm"
+      ],
+      "default": "euler"
+     },
+     "comfyScheduler": {
+      "allowed": [
+       "simple",
+       "normal",
+       "sgm_uniform",
+       "beta"
+      ],
+      "default": "simple"
+     },
+     "id": "dark_beast_z_image_turbo_v9_bf16",
+     "secPerStep": "17.25",
+     "secPerPreview": "0",
+     "secForCN": "0",
+     "costPerBaseRenderInUSD": "0.007995365005793743",
+     "costPerBaseRenderInSogni": "14.251987532609167086",
+     "isFull": true
+    }
+   },
+   {
+    "id": "gpt-image-2",
+    "name": "GPT Image 2",
+    "sid": 448,
+    "mediaType": "image",
+    "tierId": "gpt-image-2",
+    "availableNetworks": [
+     "fast"
+    ],
+    "workerCounts": {
+     "fast": 9
+    },
+    "tags": [
+     "premium"
+    ],
+    "attribution": {
+     "creator": "OpenAI",
+     "creatorUrl": "https://openai.com",
+     "source": "OpenAI API",
+     "sourceUrl": "https://developers.openai.com/api/docs/models/gpt-image-2"
+    },
+    "parameters": {
+     "maxPromptLength": 32000,
+     "type": "image",
+     "isExternalAPI": true,
+     "vendor": "openai",
+     "premiumOnly": true,
+     "vendorModelId": "gpt-image-2",
+     "defaultSize": 1024,
+     "aliases": [
+      "gpt-image",
+      "gptimage2",
+      "gpt_image_2",
+      "gpt-image-2-standard"
+     ],
+     "sizes": [
+      "1024x1024",
+      "1024x1536",
+      "1536x1536",
+      "1792x1024",
+      "1024x1792",
+      "1536x1152",
+      "1152x1536",
+      "1536x1024",
+      "2048x2048",
+      "2048x1152",
+      "2560x1440",
+      "1440x2560",
+      "3840x2160",
+      "2160x3840"
+     ],
+     "sizeConstraints": {
+      "maxEdge": 3840,
+      "multiple": 16,
+      "maxAspectRatio": 3,
+      "minPixels": 655360,
+      "maxPixels": 8294400
+     },
+     "qualities": [
+      "low",
+      "medium",
+      "high"
+     ],
+     "backgrounds": [
+      "opaque",
+      "auto"
+     ],
+     "steps": {
+      "min": 1,
+      "max": 1,
+      "default": 1
+     },
+     "guidance": {
+      "min": 1,
+      "max": 1,
+      "default": 1,
+      "decimals": 0
+     },
+     "id": "gpt-image-2",
+     "secPerStep": "0",
+     "secPerPreview": "0",
+     "secForCN": "0",
+     "costPerBaseRenderInUSD": "0.003476245654692931",
+     "costPerBaseRenderInSogni": "6.19651631852572482",
+     "isFull": true
+    }
+   },
+   {
+    "id": "krea2_identity_edit_v1_2",
+    "name": "Krea 2 Identity Edit",
+    "sid": 461,
+    "mediaType": "image",
+    "tierId": "krea2_identity_edit_v1_2",
+    "availableNetworks": [
+     "fast",
+     "relaxed"
+    ],
+    "workerCounts": {
+     "fast": 125,
+     "relaxed": 5
+    },
+    "tags": [
+     "new",
+     "standard",
+     "uncensored"
+    ],
+    "attribution": {
+     "creator": "conradlocke",
+     "creatorUrl": "https://civitai.com/user/conrad_locke",
+     "source": "Hugging Face @ conradlocke",
+     "sourceUrl": "https://huggingface.co/conradlocke/krea2-identity-edit",
+     "license": "Krea 2 Community License",
+     "licenseUrl": "https://krea.ai/krea-2-licensing",
+     "sources": [
+      {
+       "label": "Krea 2 Identity Edit LoRA",
+       "source": "Civitai @ conrad_locke",
+       "sourceUrl": "https://civitai.com/models/2761113?modelVersionId=3139172",
+       "license": "Krea 2 Community License",
+       "licenseUrl": "https://krea.ai/krea-2-licensing"
+      },
+      {
+       "label": "Krea 2 Turbo base",
+       "source": "Hugging Face @ krea",
+       "sourceUrl": "https://huggingface.co/krea/Krea-2-Turbo",
+       "license": "Krea 2 Community License",
+       "licenseUrl": "https://krea.ai/krea-2-licensing"
+      }
+     ]
+    },
+    "parameters": {
+     "type": "image",
+     "requiresContextImage": true,
+     "defaultSize": 1024,
+     "width": {
+      "min": 512,
+      "max": 2048,
+      "step": 16,
+      "default": 1024
+     },
+     "height": {
+      "min": 512,
+      "max": 2048,
+      "step": 16,
+      "default": 1024
+     },
+     "steps": {
+      "min": 8,
+      "max": 12,
+      "default": 10
+     },
+     "guidance": {
+      "min": 1,
+      "max": 1,
+      "decimals": 1,
+      "default": 1
+     },
+     "groundingPx": {
+      "min": 384,
+      "max": 1536,
+      "step": 64,
+      "default": 768
+     },
+     "refBoost": {
+      "min": 0,
+      "max": 12,
+      "decimals": 1,
+      "default": 4
+     },
+     "refBoostA": {
+      "min": 0,
+      "max": 12,
+      "decimals": 1,
+      "default": 1
+     },
+     "comfySampler": {
+      "allowed": [
+       "euler",
+       "er_sde",
+       "res_multistep",
+       "dpmpp_2m",
+       "dpmpp_2m_sde"
+      ],
+      "default": "euler"
+     },
+     "comfyScheduler": {
+      "allowed": [
+       "simple",
+       "normal",
+       "sgm_uniform",
+       "beta"
+      ],
+      "default": "simple"
+     },
+     "vae": {
+      "allowed": [
+       "wan_2.1_vae.safetensors",
+       "qwen_image_vae.safetensors",
+       "krea2RealVae_v10.safetensors"
+      ],
+      "default": "wan_2.1_vae.safetensors",
+      "labels": {
+       "wan_2.1_vae.safetensors": "WAN 2.1 VAE",
+       "qwen_image_vae.safetensors": "Qwen Image VAE",
+       "krea2RealVae_v10.safetensors": "Krea 2 Real VAE"
+      },
+      "descriptions": {
+       "wan_2.1_vae.safetensors": "Optimized for balanced Krea 2 output with clean edges, stable color, and moderate detail.",
+       "qwen_image_vae.safetensors": "Optimized for a softer Qwen Image-style decode with gentler texture and a more analog finish.",
+       "krea2RealVae_v10.safetensors": "Optimized for realism-forward sharpness, skin texture, and high-frequency detail."
+      }
+     },
+     "id": "krea2_identity_edit_v1_2",
+     "secPerStep": "56",
+     "secPerPreview": "0",
+     "secForCN": "0",
+     "costPerBaseRenderInUSD": "0.032444959443800696",
+     "costPerBaseRenderInSogni": "57.83415230624009832",
+     "isFull": true
+    }
+   },
+   {
+    "id": "krea2_turbo_fp8_scaled",
+    "name": "Krea 2 Turbo",
+    "sid": 455,
+    "mediaType": "image",
+    "tierId": "krea2_turbo_fp8_scaled",
+    "availableNetworks": [
+     "fast",
+     "relaxed"
+    ],
+    "workerCounts": {
+     "fast": 124,
+     "relaxed": 5
+    },
+    "tags": [
+     "fast",
+     "standard"
+    ],
+    "attribution": {
+     "creator": "Krea",
+     "creatorUrl": "https://huggingface.co/krea",
+     "source": "Hugging Face @ krea",
+     "sourceUrl": "https://huggingface.co/krea/Krea-2-Turbo",
+     "license": "Krea 2 Community License",
+     "licenseUrl": "https://krea.ai/krea-2-licensing"
+    },
+    "parameters": {
+     "type": "image",
+     "defaultSize": 1024,
+     "width": {
+      "min": 512,
+      "max": 2048,
+      "step": 16,
+      "default": 1024
+     },
+     "height": {
+      "min": 512,
+      "max": 2048,
+      "step": 16,
+      "default": 1024
+     },
+     "steps": {
+      "min": 4,
+      "max": 12,
+      "default": 8
+     },
+     "guidance": {
+      "min": 1,
+      "max": 1,
+      "decimals": 1,
+      "default": 1
+     },
+     "comfySampler": {
+      "allowed": [
+       "euler",
+       "er_sde",
+       "res_multistep",
+       "dpmpp_2m",
+       "dpmpp_2m_sde",
+       "euler_ancestral",
+       "uni_pc",
+       "ddim",
+       "lcm"
+      ],
+      "default": "euler"
+     },
+     "comfyScheduler": {
+      "allowed": [
+       "simple",
+       "normal",
+       "sgm_uniform",
+       "beta"
+      ],
+      "default": "simple"
+     },
+     "vae": {
+      "allowed": [
+       "wan_2.1_vae.safetensors",
+       "qwen_image_vae.safetensors",
+       "krea2RealVae_v10.safetensors"
+      ],
+      "default": "wan_2.1_vae.safetensors",
+      "labels": {
+       "wan_2.1_vae.safetensors": "WAN 2.1 VAE",
+       "qwen_image_vae.safetensors": "Qwen Image VAE",
+       "krea2RealVae_v10.safetensors": "Krea 2 Real VAE"
+      },
+      "descriptions": {
+       "wan_2.1_vae.safetensors": "Optimized for balanced Krea 2 output with clean edges, stable color, and moderate detail.",
+       "qwen_image_vae.safetensors": "Optimized for a softer Qwen Image-style decode with gentler texture and a more analog finish.",
+       "krea2RealVae_v10.safetensors": "Optimized for realism-forward sharpness, skin texture, and high-frequency detail."
+      }
+     },
+     "id": "krea2_turbo_fp8_scaled",
+     "secPerStep": "26.25",
+     "secPerPreview": "0",
+     "secForCN": "0",
+     "costPerBaseRenderInUSD": "0.012166859791425261",
+     "costPerBaseRenderInSogni": "21.68780711484003687",
+     "isFull": true
+    }
+   },
+   {
+    "id": "qwen_image_edit_2511_fp8_lightning",
+    "name": "Qwen Image Edit 2511 Lightning",
+    "sid": 409,
+    "mediaType": "image",
+    "tierId": "qwen_image_edit_2511_fp8_lightning",
+    "availableNetworks": [
+     "fast",
+     "relaxed"
+    ],
+    "workerCounts": {
+     "fast": 106,
+     "relaxed": 5
+    },
+    "tags": [
+     "fast",
+     "popular",
+     "standard"
+    ],
+    "attribution": {
+     "creator": "Alibaba (Qwen)",
+     "creatorUrl": "https://huggingface.co/Qwen",
+     "source": "Hugging Face @ Qwen",
+     "sourceUrl": "https://huggingface.co/Qwen/Qwen-Image-Edit-2511",
+     "license": "Apache 2.0",
+     "licenseUrl": "https://huggingface.co/Qwen/Qwen-Image-Edit-2511",
+     "sources": [
+      {
+       "label": "Base model",
+       "source": "Hugging Face @ Qwen",
+       "sourceUrl": "https://huggingface.co/Qwen/Qwen-Image-Edit-2511",
+       "license": "Apache 2.0",
+       "licenseUrl": "https://huggingface.co/Qwen/Qwen-Image-Edit-2511"
+      },
+      {
+       "label": "Lightning 4-step LoRA",
+       "source": "Hugging Face @ lightx2v",
+       "sourceUrl": "https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning",
+       "license": "Apache 2.0",
+       "licenseUrl": "https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning"
+      }
+     ]
+    },
+    "parameters": {
+     "type": "image",
+     "requiresContextImage": true,
+     "defaultSize": 1024,
+     "steps": {
+      "min": 4,
+      "max": 8,
+      "default": 4
+     },
+     "guidance": {
+      "min": 0.6,
+      "max": 1.6,
+      "decimals": 1,
+      "default": 1
+     },
+     "comfySampler": {
+      "allowed": [
+       "euler",
+       "euler_ancestral",
+       "dpmpp_2m",
+       "dpmpp_2m_sde",
+       "ddim",
+       "uni_pc",
+       "res_multistep",
+       "er_sde"
+      ],
+      "default": "euler"
+     },
+     "comfyScheduler": {
+      "allowed": [
+       "simple",
+       "normal",
+       "sgm_uniform",
+       "beta"
+      ],
+      "default": "simple"
+     },
+     "id": "qwen_image_edit_2511_fp8_lightning",
+     "secPerStep": "44.75",
+     "secPerPreview": "0",
+     "secForCN": "0",
+     "costPerBaseRenderInUSD": "0.010370799536500579",
+     "costPerBaseRenderInSogni": "18.486273683601745713",
+     "isFull": true
+    }
+   },
+   {
+    "id": "z_image_turbo_4bit",
+    "name": "Z-Image Turbo [MLX 4bit]",
+    "sid": 542,
+    "mediaType": "image",
+    "tierId": "z_image_turbo_4bit",
+    "availableNetworks": [],
+    "workerCounts": {},
+    "tags": [],
+    "attribution": null,
+    "parameters": {
+     "type": "image",
+     "defaultSize": 1024,
+     "width": {
+      "min": 512,
+      "max": 2048,
+      "step": 16,
+      "default": 1024
+     },
+     "height": {
+      "min": 512,
+      "max": 2048,
+      "step": 16,
+      "default": 1024
+     },
+     "steps": {
+      "min": 4,
+      "max": 12,
+      "default": 8
+     },
+     "guidance": {
+      "min": 1,
+      "max": 1,
+      "decimals": 1,
+      "default": 1
+     },
+     "comfySampler": {
+      "allowed": [
+       "res_multistep",
+       "euler",
+       "euler_ancestral",
+       "dpmpp_2m",
+       "dpmpp_2m_sde",
+       "ddim",
+       "uni_pc",
+       "lcm"
+      ],
+      "default": "res_multistep"
+     },
+     "comfyScheduler": {
+      "allowed": [
+       "simple",
+       "normal",
+       "sgm_uniform",
+       "beta"
+      ],
+      "default": "simple"
+     },
+     "id": "z_image_turbo_4bit",
+     "secPerStep": "17.25",
+     "secPerPreview": "0",
+     "secForCN": "0",
+     "costPerBaseRenderInUSD": "0.007995365005793743",
+     "costPerBaseRenderInSogni": "14.251987532609167086",
+     "isFull": true
+    }
+   },
+   {
+    "id": "z_image_turbo_bf16",
+    "name": "Z-Image Turbo",
+    "sid": 404,
+    "mediaType": "image",
+    "tierId": "z_image_turbo_bf16",
+    "availableNetworks": [
+     "fast"
+    ],
+    "workerCounts": {
+     "fast": 90
+    },
+    "tags": [
+     "fast",
+     "free-tier",
+     "popular",
+     "standard",
+     "uncensored"
+    ],
+    "attribution": {
+     "creator": "Tongyi Lab (Alibaba)",
+     "creatorUrl": "https://huggingface.co/Tongyi-MAI",
+     "source": "Hugging Face @ Tongyi-MAI",
+     "sourceUrl": "https://huggingface.co/Tongyi-MAI/Z-Image-Turbo",
+     "license": "Apache 2.0",
+     "licenseUrl": "https://huggingface.co/Tongyi-MAI/Z-Image-Turbo"
+    },
+    "parameters": {
+     "type": "image",
+     "defaultSize": 1024,
+     "width": {
+      "min": 512,
+      "max": 2048,
+      "step": 16,
+      "default": 1024
+     },
+     "height": {
+      "min": 512,
+      "max": 2048,
+      "step": 16,
+      "default": 1024
+     },
+     "steps": {
+      "min": 4,
+      "max": 12,
+      "default": 8
+     },
+     "guidance": {
+      "min": 1,
+      "max": 1,
+      "decimals": 1,
+      "default": 1
+     },
+     "comfySampler": {
+      "allowed": [
+       "res_multistep",
+       "euler",
+       "euler_ancestral",
+       "dpmpp_2m",
+       "dpmpp_2m_sde",
+       "ddim",
+       "uni_pc",
+       "lcm"
+      ],
+      "default": "res_multistep"
+     },
+     "comfyScheduler": {
+      "allowed": [
+       "simple",
+       "normal",
+       "sgm_uniform",
+       "beta"
+      ],
+      "default": "simple"
+     },
+     "id": "z_image_turbo_bf16",
+     "secPerStep": "17.25",
+     "secPerPreview": "0",
+     "secForCN": "0",
+     "costPerBaseRenderInUSD": "0.007995365005793743",
+     "costPerBaseRenderInSogni": "14.251987532609167086",
+     "isFull": true
+    }
+   },
+   {
+    "id": "qwen_image_2512_fp8_lightning",
+    "name": "Qwen Image 2512 Lightning",
+    "sid": 415,
+    "mediaType": "image",
+    "tierId": "qwen_image_2512_fp8_lightning",
+    "availableNetworks": [
+     "fast",
+     "relaxed"
+    ],
+    "workerCounts": {
+     "fast": 99,
+     "relaxed": 5
+    },
+    "tags": [
+     "fast",
+     "standard"
+    ],
+    "attribution": {
+     "creator": "Alibaba (Qwen)",
+     "creatorUrl": "https://huggingface.co/Qwen",
+     "source": "Hugging Face @ Qwen",
+     "sourceUrl": "https://huggingface.co/Qwen/Qwen-Image-2512",
+     "license": "Apache 2.0",
+     "licenseUrl": "https://huggingface.co/Qwen/Qwen-Image-2512",
+     "sources": [
+      {
+       "label": "Base model",
+       "source": "Hugging Face @ Qwen",
+       "sourceUrl": "https://huggingface.co/Qwen/Qwen-Image-2512",
+       "license": "Apache 2.0",
+       "licenseUrl": "https://huggingface.co/Qwen/Qwen-Image-2512"
+      },
+      {
+       "label": "Lightning 4-step LoRA",
+       "source": "Hugging Face @ lightx2v",
+       "sourceUrl": "https://huggingface.co/lightx2v/Qwen-Image-2512-Lightning",
+       "license": "Apache 2.0",
+       "licenseUrl": "https://huggingface.co/lightx2v/Qwen-Image-2512-Lightning"
+      }
+     ]
+    },
+    "parameters": {
+     "type": "image",
+     "defaultSize": 1024,
+     "steps": {
+      "min": 4,
+      "max": 8,
+      "default": 4
+     },
+     "guidance": {
+      "min": 0.6,
+      "max": 1.6,
+      "decimals": 1,
+      "default": 1
+     },
+     "comfySampler": {
+      "allowed": [
+       "euler",
+       "euler_ancestral",
+       "dpmpp_2m",
+       "dpmpp_2m_sde",
+       "ddim",
+       "uni_pc",
+       "res_multistep",
+       "er_sde"
+      ],
+      "default": "euler"
+     },
+     "comfyScheduler": {
+      "allowed": [
+       "simple",
+       "normal",
+       "sgm_uniform",
+       "beta"
+      ],
+      "default": "simple"
+     },
+     "id": "qwen_image_2512_fp8_lightning",
+     "secPerStep": "44.75",
+     "secPerPreview": "0",
+     "secForCN": "0",
+     "costPerBaseRenderInUSD": "0.010370799536500579",
+     "costPerBaseRenderInSogni": "18.486273683601745713",
+     "isFull": true
+    }
+   }
+  ]
+ }
+}

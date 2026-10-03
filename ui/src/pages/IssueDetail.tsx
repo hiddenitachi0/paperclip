@@ -2344,11 +2344,13 @@ export function IssueDetail() {
       interaction,
       selectedClientKeys,
       selectedOptionIds,
+      note,
     }: {
       interaction: ActionableIssueThreadInteraction;
       selectedClientKeys?: string[];
       selectedOptionIds?: string[];
-    }) => issuesApi.acceptInteraction(issueId!, interaction.id, { selectedClientKeys, selectedOptionIds }),
+      note?: string;
+    }) => issuesApi.acceptInteraction(issueId!, interaction.id, { selectedClientKeys, selectedOptionIds, note }),
     onSuccess: (interaction) => {
       upsertInteractionInCache(interaction);
       if (interaction.kind === "suggest_tasks" && resolvedCompanyId && issue?.id) {
@@ -2405,10 +2407,12 @@ export function IssueDetail() {
     mutationFn: ({
       interaction,
       answers,
+      summaryMarkdown,
     }: {
       interaction: IssueThreadInteraction;
       answers: AskUserQuestionsAnswer[];
-    }) => issuesApi.respondToInteraction(issueId!, interaction.id, { answers }),
+      summaryMarkdown?: string;
+    }) => issuesApi.respondToInteraction(issueId!, interaction.id, { answers, summaryMarkdown }),
     onSuccess: (interaction) => {
       upsertInteractionInCache(interaction);
       invalidateIssueDetail();
@@ -3397,8 +3401,9 @@ export function IssueDetail() {
     interaction: ActionableIssueThreadInteraction,
     selectedClientKeys?: string[],
     selectedOptionIds?: string[],
+    note?: string,
   ) => {
-    await acceptInteraction.mutateAsync({ interaction, selectedClientKeys, selectedOptionIds });
+    await acceptInteraction.mutateAsync({ interaction, selectedClientKeys, selectedOptionIds, note });
   }, [acceptInteraction]);
   const handleRejectInteraction = useCallback(async (interaction: ActionableIssueThreadInteraction, reason?: string) => {
     await rejectInteraction.mutateAsync({ interaction, reason });
@@ -3406,8 +3411,9 @@ export function IssueDetail() {
   const handleSubmitInteractionAnswers = useCallback(async (
     interaction: IssueThreadInteraction,
     answers: AskUserQuestionsAnswer[],
+    summaryMarkdown?: string,
   ) => {
-    await answerInteraction.mutateAsync({ interaction, answers });
+    await answerInteraction.mutateAsync({ interaction, answers, summaryMarkdown });
   }, [answerInteraction]);
   const handleCancelInteraction = useCallback(async (interaction: AskUserQuestionsInteraction) => {
     await cancelInteraction.mutateAsync({ interaction });
@@ -3781,7 +3787,7 @@ export function IssueDetail() {
 
           {issue.originKind === "routine_execution" && issue.originId && (
             <Link
-              to={`/routines/${issue.originId}`}
+              to={`/jobs/${issue.originId}`}
               className="inline-flex items-center gap-1 rounded-full bg-violet-500/10 border border-violet-500/30 px-2 py-0.5 text-[10px] font-medium text-violet-600 dark:text-violet-400 shrink-0 hover:bg-violet-500/20 transition-colors"
               title={`Routine execution from routine ${issue.originId}`}
             >

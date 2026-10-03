@@ -100,20 +100,20 @@ vi.mock("detect-port", () => ({
   default: detectPortMock,
 }));
 
-vi.mock("@paperclipai/db", () => ({
-  createDb: createDbMock,
-  ensurePostgresDatabase: vi.fn(),
-  getPostgresDataDirectory: vi.fn(),
-  inspectMigrations: vi.fn(async () => ({ status: "upToDate" })),
-  applyPendingMigrations: vi.fn(),
-  reconcilePendingMigrationHistory: vi.fn(async () => ({ repairedMigrations: [] })),
-  formatDatabaseBackupResult: vi.fn(() => "ok"),
-  runDatabaseBackup: vi.fn(),
-  authUsers: {},
-  companies: {},
-  companyMemberships: {},
-  instanceUserRoles: {},
-}));
+vi.mock("@paperclipai/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@paperclipai/db")>();
+  return {
+    ...actual,
+    createDb: createDbMock,
+    ensurePostgresDatabase: vi.fn(),
+    getPostgresDataDirectory: vi.fn(),
+    inspectMigrations: vi.fn(async () => ({ status: "upToDate" })),
+    applyPendingMigrations: vi.fn(),
+    reconcilePendingMigrationHistory: vi.fn(async () => ({ repairedMigrations: [] })),
+    formatDatabaseBackupResult: vi.fn(() => "ok"),
+    runDatabaseBackup: vi.fn(),
+  };
+});
 
 vi.mock("../app.js", () => ({
   createApp: createAppMock,
@@ -145,6 +145,7 @@ vi.mock("../services/index.js", () => ({
     agentMergeRequestGrantsInserted: 0,
   })),
   seedDurStarterJobs: vi.fn(async () => ({ created: [] })),
+  seedLegalAdvisorStarterPack: vi.fn(async () => ({ createdJobs: [], createdPosition: false })),
   feedbackService: feedbackServiceFactoryMock,
   bootstrapExecutionPolicyFromEnv: vi.fn(async () => null),
   heartbeatService: vi.fn(() => ({
@@ -189,6 +190,10 @@ vi.mock("../services/index.js", () => ({
 
 vi.mock("../storage/index.js", () => ({
   createStorageServiceFromConfig: vi.fn(() => ({ id: "storage-service" })),
+}));
+
+vi.mock("../services/watchers.js", () => ({
+  watcherService: vi.fn(() => ({ tick: vi.fn(async () => ({ checked: 0, fired: 0 })) })),
 }));
 
 vi.mock("../services/feedback-share-client.js", () => ({

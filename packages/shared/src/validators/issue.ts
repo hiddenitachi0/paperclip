@@ -134,6 +134,11 @@ export const issueAssigneeAdapterOverridesSchema = z
     modelProfile: z.enum(MODEL_PROFILE_KEYS).optional(),
     adapterConfig: z.record(z.string(), z.unknown()).optional(),
     useProjectWorkspace: z.boolean().optional(),
+    // DUR-4144: New Task switch "Plan first on Opus, then build on Sonnet".
+    // The first run uses the "planner" model profile and writes the `plan`
+    // document; once the plan is accepted the server clears this flag so the
+    // following fresh-session run falls back to the normal/cheap model.
+    planFirstOnOpus: z.boolean().optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -692,6 +697,8 @@ export const suggestTasksResultSchema = z.object({
   createdTasks: z.array(suggestTasksResultCreatedTaskSchema).max(50).optional(),
   skippedClientKeys: z.array(z.string().trim().min(1).max(120)).max(50).optional(),
   rejectionReason: z.string().trim().max(4000).nullable().optional(),
+  note: z.string().trim().max(4000).nullable().optional(),
+  commentId: z.string().uuid().nullable().optional(),
 });
 
 export const askUserQuestionsQuestionOptionSchema = z.object({
@@ -956,12 +963,16 @@ export const requestConfirmationResultSchema = z.object({
     "auto_resolved",
   ]),
   reason: z.string().trim().max(4000).nullable().optional(),
+  note: z.string().trim().max(4000).nullable().optional(),
   commentId: z.string().uuid().nullable().optional(),
   staleTarget: requestConfirmationTargetSchema.nullable().optional(),
 });
 
 export const requestCheckboxConfirmationResultSchema = requestConfirmationResultSchema.extend({
   selectedOptionIds: z.array(z.string().trim().min(1).max(120))
+    .max(REQUEST_CHECKBOX_CONFIRMATION_OPTION_LIMIT)
+    .optional(),
+  notConfirmedOptions: z.array(z.string().trim().min(1).max(120))
     .max(REQUEST_CHECKBOX_CONFIRMATION_OPTION_LIMIT)
     .optional(),
 }).superRefine((value, ctx) => {
@@ -1072,6 +1083,7 @@ export const acceptIssueThreadInteractionSchema = z.object({
   selectedOptionIds: z.array(z.string().trim().min(1).max(120))
     .max(REQUEST_CHECKBOX_CONFIRMATION_OPTION_LIMIT)
     .optional(),
+  note: z.string().trim().max(4000).nullable().optional(),
 }).superRefine((value, ctx) => {
   const seenClientKeys = new Set<string>();
   for (const [index, clientKey] of (value.selectedClientKeys ?? []).entries()) {

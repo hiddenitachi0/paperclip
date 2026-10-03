@@ -563,8 +563,16 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
             init: Object.keys(serializedInit).length > 0 ? serializedInit : undefined,
           });
 
-          // Reconstruct a Response-like object from the serialized result
-          return new Response(result.body, {
+          // Reconstruct a Response-like object from the serialized result.
+          // Prefer the exact bytes: rebuilding from the UTF-8 text corrupts
+          // pictures and other binary downloads.
+          const nullBodyStatus = [101, 103, 204, 205, 304].includes(result.status);
+          const responseBody = nullBodyStatus
+            ? null
+            : typeof result.bodyBase64 === "string"
+              ? new Uint8Array(Buffer.from(result.bodyBase64, "base64"))
+              : result.body;
+          return new Response(responseBody, {
             status: result.status,
             statusText: result.statusText,
             headers: result.headers,
@@ -858,8 +866,29 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
           return callHost("issues.listComments", { issueId, companyId });
         },
 
-        async createComment(issueId: string, body: string, companyId: string, options?: { authorAgentId?: string }) {
-          return callHost("issues.createComment", { issueId, body, companyId, authorAgentId: options?.authorAgentId });
+        async createComment(
+          issueId: string,
+          body: string,
+          companyId: string,
+          options?: { authorAgentId?: string; runId?: string | null },
+        ) {
+          // DUR-4096: attributing a comment to an agent without proving that
+          // agent's (or its run's) access to the issue is exactly the
+          // impersonation-adjacent gap this ticket closed -- the host
+          // rejects an attributed call with no runId, but failing fast here
+          // gives plugin authors a clearer error than a round trip.
+          if (options?.authorAgentId && !options?.runId) {
+            throw new Error(
+              "createComment requires options.runId when options.authorAgentId is set (the invoking tool call's or background job's run id)",
+            );
+          }
+          return callHost("issues.createComment", {
+            issueId,
+            body,
+            companyId,
+            authorAgentId: options?.authorAgentId,
+            runId: options?.runId ?? null,
+          });
         },
 
         async createAttachment(
@@ -1234,6 +1263,31 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
             throw new Error("reserveDailyGeneration requires options.runId (the invoking tool call's run id)");
           }
           return callHost("personas.reserveDailyGeneration", { companyId, runId: options.runId });
+        },
+      },
+
+      files: {
+        async createCompanyFile(
+          input: { contentBase64: string; contentType: string; filename?: string | null },
+          companyId: string,
+          options: { runId: string },
+        ) {
+          if (!options?.runId) {
+            throw new Error("createCompanyFile requires options.runId (the invoking tool call's run id)");
+          }
+          return callHost("files.createCompanyFile", {
+            companyId,
+            contentBase64: input.contentBase64,
+            contentType: input.contentType,
+            filename: input.filename,
+            runId: options.runId,
+          });
+        },
+        async get(fileId: string, companyId: string) {
+          return callHost("files.get", { fileId, companyId });
+        },
+        async readContent(fileId: string, companyId: string) {
+          return callHost("files.readContent", { fileId, companyId });
         },
       },
 
@@ -1624,6 +1678,9 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
       agentId: stringOrNull(rawActor?.agentId),
       runId: stringOrNull(rawActor?.runId),
       companyId: stringOrNull(rawActor?.companyId),
+      // Only a literal `true` from the host counts; anything else is "no".
+      canManageCompany: rawActor?.canManageCompany === true,
+      isInstanceAdmin: rawActor?.isInstanceAdmin === true,
     });
     return Object.freeze({
       actor,

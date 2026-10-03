@@ -698,6 +698,173 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     }
   }, 40_000);
 
+  it("dispatches a queued self_review_pass wake ahead of an earlier-queued ordinary heartbeat_timer wake (DUR-4308)", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const occupyingIssueId = randomUUID();
+    const timerIssueId = randomUUID();
+    const selfReviewIssueId = randomUUID();
+    let finishOccupyingRun!: () => void;
+    const occupyingRunFinished = new Promise<void>((resolve) => {
+      finishOccupyingRun = resolve;
+    });
+
+    mockAdapterExecute.mockImplementationOnce(async () => {
+      await occupyingRunFinished;
+      return {
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        errorMessage: null,
+        summary: "Occupying run completed.",
+        provider: "test",
+        model: "test-model",
+      };
+    });
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "CodexCoder",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {
+        heartbeat: {
+          enabled: true,
+          wakeOnDemand: true,
+          maxConcurrentRuns: 1,
+          skipTimerWhenNoActionableWork: false,
+        },
+      },
+      permissions: {},
+    });
+    await db.insert(issues).values([
+      {
+        id: occupyingIssueId,
+        companyId,
+        title: "Occupying work",
+        status: "in_progress",
+        priority: "high",
+        assigneeAgentId: agentId,
+      },
+      {
+        id: timerIssueId,
+        companyId,
+        title: "Unrelated ready work, queued first",
+        status: "todo",
+        priority: "high",
+        assigneeAgentId: agentId,
+      },
+      {
+        id: selfReviewIssueId,
+        companyId,
+        title: "Awaiting its self-review pass, queued second",
+        status: "in_review",
+        priority: "high",
+        assigneeAgentId: agentId,
+      },
+    ]);
+
+    try {
+      const occupyingWake = await heartbeat.wakeup(agentId, {
+        source: "assignment",
+        triggerDetail: "system",
+        reason: "issue_assigned",
+        payload: { issueId: occupyingIssueId },
+        contextSnapshot: { issueId: occupyingIssueId, wakeReason: "issue_assigned" },
+      });
+      expect(occupyingWake).not.toBeNull();
+
+      const occupyingRunStarted = await waitForCondition(async () => {
+        const run = await db
+          .select({ status: heartbeatRuns.status })
+          .from(heartbeatRuns)
+          .where(eq(heartbeatRuns.id, occupyingWake!.id))
+          .then((rows) => rows[0] ?? null);
+        return run?.status === "running";
+      });
+      expect(occupyingRunStarted).toBe(true);
+      const occupyingAdapterStarted = await waitForCondition(
+        async () => mockAdapterExecute.mock.calls.length === 1,
+        30_000,
+      );
+      expect(occupyingAdapterStarted).toBe(true);
+
+      // Queued first (by createdAt): an ordinary heartbeat_timer wake for a
+      // different, unblocked todo issue.
+      const timerWake = await heartbeat.wakeup(agentId, {
+        source: "timer",
+        triggerDetail: "system",
+        reason: "heartbeat_timer",
+        payload: { issueId: timerIssueId },
+        contextSnapshot: { issueId: timerIssueId, wakeReason: "heartbeat_timer" },
+      });
+      expect(timerWake).not.toBeNull();
+
+      // Queued second: a self_review_pass wake correcting a just-declined
+      // done/in_review PATCH on a different issue.
+      const selfReviewWake = await heartbeat.wakeup(agentId, {
+        source: "self_review",
+        triggerDetail: "system",
+        reason: "self_review_pass",
+        payload: { issueId: selfReviewIssueId },
+        contextSnapshot: { issueId: selfReviewIssueId, wakeReason: "self_review_pass" },
+      });
+      expect(selfReviewWake).not.toBeNull();
+
+      const bothQueued = await waitForCondition(async () => {
+        const rows = await db
+          .select({ id: heartbeatRuns.id, status: heartbeatRuns.status })
+          .from(heartbeatRuns)
+          .where(sql`${heartbeatRuns.id} in (${timerWake!.id}, ${selfReviewWake!.id})`);
+        return rows.length === 2 && rows.every((row) => row.status === "queued");
+      });
+      expect(bothQueued).toBe(true);
+
+      finishOccupyingRun();
+
+      const occupyingRunSucceeded = await waitForCondition(async () => {
+        const run = await db
+          .select({ status: heartbeatRuns.status })
+          .from(heartbeatRuns)
+          .where(eq(heartbeatRuns.id, occupyingWake!.id))
+          .then((rows) => rows[0] ?? null);
+        return run?.status === "succeeded";
+      });
+      expect(occupyingRunSucceeded).toBe(true);
+
+      // Despite being queued after the ordinary timer wake, the
+      // self_review_pass wake must be the one claimed into the single
+      // available slot -- not FIFO by createdAt alone.
+      const selfReviewClaimedFirst = await waitForCondition(async () => {
+        const run = await db
+          .select({ status: heartbeatRuns.status })
+          .from(heartbeatRuns)
+          .where(eq(heartbeatRuns.id, selfReviewWake!.id))
+          .then((rows) => rows[0] ?? null);
+        return run?.status === "running" || run?.status === "succeeded";
+      });
+      expect(selfReviewClaimedFirst).toBe(true);
+
+      const timerStillQueued = await db
+        .select({ status: heartbeatRuns.status })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, timerWake!.id))
+        .then((rows) => rows[0] ?? null);
+      expect(timerStillQueued?.status).toBe("queued");
+    } finally {
+      finishOccupyingRun();
+    }
+  }, 40_000);
+
   it("cancels stale queued runs when issue blockers are still unresolved", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();

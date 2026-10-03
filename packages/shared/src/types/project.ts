@@ -1,6 +1,7 @@
 import type { BudgetWindowKind, PauseReason, ProjectStatus } from "../constants.js";
 import type {
   ProjectDeployPolicy,
+  ProjectDeployTransport,
   ProjectExecutionWorkspacePolicy,
   ProjectWorkspaceRuntimeConfig,
   WorkspaceRuntimeService,
@@ -126,11 +127,22 @@ export interface Project {
   targetDate: string | null;
   color: string | null;
   icon: string | null;
+  /** The live URL, purely descriptive — not used for any deploy logic. */
+  productionUrl: string | null;
+  /** Free-text label of where the project is hosted, e.g. "VPS via deploy-runner", "Vercel". */
+  hostingTarget: string | null;
   env: AgentEnvConfig | null;
   pauseReason: PauseReason | null;
   pausedAt: Date | null;
   executionWorkspacePolicy: ProjectExecutionWorkspacePolicy | null;
   deployPolicy: ProjectDeployPolicy | null;
+  /**
+   * Which upload mechanism the deploy runner uses for this project's
+   * production target. `git_push` (default) is today's behavior, unchanged.
+   * `sftp` uploads deployPolicy.sftpAllowlist to deployPolicy.sftpHost using
+   * an agent-level Secrets credential (DUR-4068).
+   */
+  deployTransport: ProjectDeployTransport;
   codebase: ProjectCodebase;
   workspaces: ProjectWorkspace[];
   primaryWorkspace: ProjectWorkspace | null;

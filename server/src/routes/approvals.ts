@@ -51,6 +51,7 @@ import {
   describeUnsupportedDeployLikeApproval,
   resolveProjectDeployWorkspaceId,
 } from "../services/deploy-workspace.js";
+import { evaluateDeployPolicyForProject } from "../services/deploy-policy-enforcement.js";
 import {
   GITHUB_COMPARE_FILE_LIMIT,
   describeDeployCardPartialCommitId,
@@ -65,7 +66,7 @@ import {
   resolveLiveDeployCommit,
   summarizeChangedPaths,
 } from "../services/deploy-change-guard.js";
-import { DEPLOY_SUCCESS_MARKER } from "../services/deploy-completion-gate.js";
+import { isCompletedDeployOutcome } from "../services/deploy-completion-gate.js";
 import { readDeployRunnerStatus, type DeployRunnerStatusEntry } from "../services/deploy-runner-status.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { redactEventPayload } from "../redaction.js";
@@ -1091,7 +1092,7 @@ function findDuplicateApprovedDeploy(
             "you really need a second one.",
       };
     }
-    if (entry.body.includes(DEPLOY_SUCCESS_MARKER) || entry.outcome === "carried") {
+    if (isCompletedDeployOutcome(entry)) {
       return {
         id: candidate.id,
         message:
@@ -1861,6 +1862,14 @@ export function approvalRoutes(
       // deploys the top of the branch, not the change that was reviewed.
       assertAgentDeployCardPinsAFullCommitId(req, parsedDeployPayload);
       await assertDeployRequestProjectExists(db, companyId, parsedDeployPayload);
+      // DUR-4139: the project's board-set deploy mode/ask-first list, enforced
+      // before anything else touches this request -- see
+      // deploy-policy-enforcement.ts for what each mode does and does not do.
+      const deployPolicyDecision = await evaluateDeployPolicyForProject(db, parsedDeployPayload.projectId);
+      if (!deployPolicyDecision.allowed) {
+        res.status(422).json({ error: deployPolicyDecision.refusalReason });
+        return;
+      }
       // DUR-3926: stamp the project's real deploy workspace over whatever the
       // filer supplied -- the runner silently refuses any other workspace.
       const deployWorkspaceId = await resolveProjectDeployWorkspaceId(db, parsedDeployPayload.projectId);
@@ -1896,6 +1905,8 @@ export function approvalRoutes(
         changesSinceLive: changesSinceLive ?? undefined,
         resolvedCommit: targetCommit.resolvedCommit,
         resolvedCommitSource: targetCommit.resolvedCommitSource,
+        askFirstActions:
+          deployPolicyDecision.askFirstActions.length > 0 ? deployPolicyDecision.askFirstActions : undefined,
       });
     }
     if (isMergePrRequestApproval(approvalInput.type, approvalInput.payload)) {
@@ -2572,6 +2583,14 @@ export function approvalRoutes(
       // after a rejection, and it was one of the paths the unusable cards used.
       assertAgentDeployCardPinsAFullCommitId(req, parsedDeployPayload);
       await assertDeployRequestProjectExists(db, existing.companyId, parsedDeployPayload);
+      // DUR-4139: same policy enforcement as a freshly filed card -- the
+      // project's deploy policy may have changed to preview_only since this
+      // card was first filed.
+      const resubmitDeployPolicyDecision = await evaluateDeployPolicyForProject(db, parsedDeployPayload.projectId);
+      if (!resubmitDeployPolicyDecision.allowed) {
+        res.status(422).json({ error: resubmitDeployPolicyDecision.refusalReason });
+        return;
+      }
       // DUR-3926: same deploy-workspace stamp as the filing path above.
       const deployWorkspaceId = await resolveProjectDeployWorkspaceId(db, parsedDeployPayload.projectId);
       const deployPayload = deployWorkspaceId
@@ -2594,6 +2613,10 @@ export function approvalRoutes(
         changesSinceLive: changesSinceLive ?? undefined,
         resolvedCommit: targetCommit.resolvedCommit,
         resolvedCommitSource: targetCommit.resolvedCommitSource,
+        askFirstActions:
+          resubmitDeployPolicyDecision.askFirstActions.length > 0
+            ? resubmitDeployPolicyDecision.askFirstActions
+            : undefined,
       });
     }
     let normalizedPayload = req.body.payload

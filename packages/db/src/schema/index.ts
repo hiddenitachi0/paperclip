@@ -1,7 +1,15 @@
 export { companies } from "./companies.js";
 export { companyLogos } from "./company_logos.js";
 export { crossCompanyAccessLog } from "./cross_company_access_log.js";
-export { authUsers, authSessions, authAccounts, authVerifications } from "./auth.js";
+export {
+  authUsers,
+  authSessions,
+  authAccounts,
+  authVerifications,
+  userTotpSecrets,
+  userRecoveryCodes,
+  totpSessionTokens,
+} from "./auth.js";
 export { instanceSettings } from "./instance_settings.js";
 export { instanceClaudeAuth } from "./instance_claude_auth.js";
 export { instanceServerAnthropicKey } from "./instance_server_anthropic_key.js";
@@ -17,9 +25,13 @@ export { personaPosts } from "./persona_posts.js";
 export { personaAccountPublishCounters } from "./persona_account_publish_counters.js";
 export { personaPublishingCompanySettings } from "./persona_publishing_company_settings.js";
 export { companyMcpTools } from "./company_mcp_tools.js";
+export { companyApiTools } from "./company_api_tools.js";
+export { companyApiToolCalls } from "./company_api_tool_calls.js";
 export { companyMcpOAuthConnections } from "./company_mcp_oauth_connections.js";
 export { agents } from "./agents.js";
 export { agentDailyCounters } from "./agent_daily_counters.js";
+export { agentMemories } from "./agent_memories.js";
+export { agentWorkSummaries } from "./agent_work_summaries.js";
 export { agentMemberships } from "./agent_memberships.js";
 export { boardApiKeys } from "./board_api_keys.js";
 export { boardDelegateTokens } from "./board_delegate_tokens.js";
@@ -58,6 +70,8 @@ export { externalObjects } from "./external_objects.js";
 export { externalObjectMentions } from "./external_object_mentions.js";
 export { issueRelations } from "./issue_relations.js";
 export { routines, routineRevisions, routineTriggers, routineRuns } from "./routines.js";
+export { jobs, jobPositions, jobTriggers, jobRuns } from "./jobs.js";
+export { companyJobSettings } from "./company_job_settings.js";
 export { pipelines, pipelineStages, pipelineTransitions } from "./pipelines.js";
 export {
   pipelineCases,
@@ -95,8 +109,14 @@ export { heartbeatRuns } from "./heartbeat_runs.js";
 export { heartbeatRunEvents } from "./heartbeat_run_events.js";
 export { heartbeatRunWatchdogDecisions } from "./heartbeat_run_watchdog_decisions.js";
 export { costEvents } from "./cost_events.js";
+export { mediaStudioDirectCreations } from "./media_studio_direct_creations.js";
 export { laneAConversations } from "./lane_a_conversations.js";
-export { laneAMessages, type LaneAStoredToolCall } from "./lane_a_messages.js";
+export {
+  laneAMessages,
+  type LaneAStoredToolCall,
+  type LaneAToolImage,
+  type LaneAAttemptRecord,
+} from "./lane_a_messages.js";
 export { financeEvents } from "./finance_events.js";
 export { approvals } from "./approvals.js";
 export { escalationGrants } from "./escalation_grants.js";
@@ -110,6 +130,7 @@ export { companyServiceTokens } from "./company_service_tokens.js";
 export { companySecretVersions } from "./company_secret_versions.js";
 export { companySecretBindings } from "./company_secret_bindings.js";
 export { secretAccessEvents } from "./secret_access_events.js";
+export { privateAccessEvents } from "./private_access_events.js";
 export { companySkills, companySkillVersions, companySkillStars, companySkillComments } from "./company_skills.js";
 export { plugins } from "./plugins.js";
 export { pluginConfig } from "./plugin_config.js";
@@ -123,6 +144,29 @@ export { pluginWebhookDeliveries } from "./plugin_webhooks.js";
 export { pluginLogs } from "./plugin_logs.js";
 export { untrackedWriteIncidents } from "./untracked_write_incidents.js";
 export { telegramBots } from "./telegram_bots.js";
+export { telegramMessageReactions } from "./telegram_message_reactions.js";
+export { companyReactionEmojiConfig } from "./company_reaction_emoji_config.js";
+export { companySpeechSettings, speechUsageEvents } from "./speech.js";
 export { dataConnections, dataDatasetSources, type DataConnectionObserved } from "./data_connections.js";
 export { dataReadEvents } from "./data_read_events.js";
 export { trustedCodeFingerprints } from "./trusted_code_fingerprints.js";
+export { watchers, watcherPricePoints, watcherAlerts, watcherWebPageSnapshots } from "./watchers.js";
+export { morningReportOutbox } from "./morning_report.js";
+export { mailInboxes, mailInboxFilters, mailSecretaryItems } from "./mail_secretary.js";
+export { mailAccounts, mailMessages } from "./mail_accounts.js";
+export { modelDirectoryEntries } from "./model_directory_entries.js";
+export { paymentNotices } from "./payment_notices.js";
+export { companyPaymentSettings } from "./company_payment_settings.js";
+export { companyProductGrabberSettings, productGrabberStagedItems } from "./product_grabber.js";
+export { emailCompanySettings } from "./email_company_settings.js";
+export { paymentCards } from "./payment_cards.js";
+export { videoStorylines, videoScenes, videoShots, videoShotRenderJobs, videoStorylineDirectorRuns } from "./video_storylines.js";
+export { videoStorylineDirectorConversations } from "./video_storyline_director_conversations.js";
+export { videoStorylineDirectorMessages } from "./video_storyline_director_messages.js";
+export { tradingStrategies, tradingOrders, tradingFifoLots, tradingLedgerEntries, tradingDailyStats } from "./trading.js";
+export { crmOrganizations } from "./crm_organizations.js";
+export { crmContacts } from "./crm_contacts.js";
+export { crmContactOrgRoles } from "./crm_contact_org_roles.js";
+export { crmActivities } from "./crm_activities.js";
+export { crmFacts } from "./crm_facts.js";
+export { crmExternalRefs } from "./crm_external_refs.js";

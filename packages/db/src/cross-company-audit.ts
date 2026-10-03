@@ -55,6 +55,7 @@ export const ROUTINE_SCHEDULER_BYPASS_ACTOR_TYPE = "scheduler";
 export const ROUTINE_SCHEDULER_BYPASS_ROUTES = [
   "heartbeat-scheduler:tickTimers",
   "heartbeat-scheduler:tickScheduledTriggers",
+  "heartbeat-scheduler:tickScheduledJobTriggers",
   "heartbeat-scheduler:mergeDeployVisibility",
   "heartbeat-scheduler:deployApprovalFeedback",
   "heartbeat-scheduler:deployCarriedIssues",
@@ -70,6 +71,14 @@ export const ROUTINE_SCHEDULER_BYPASS_ROUTES = [
   "heartbeat-scheduler:organizationCheckups",
   "heartbeat-scheduler:adminAuthCheck",
   "heartbeat-scheduler:claudeAuthCheck",
+  "heartbeat-scheduler:watchers",
+  "heartbeat-scheduler:morningReport",
+  "heartbeat-scheduler:mailSecretary",
+  "heartbeat-scheduler:mailAccountSync",
+  "heartbeat-scheduler:paymentCardExpiry",
+  "heartbeat-scheduler:videoStorylineRender",
+  "heartbeat-scheduler:videoStorylineStitch",
+  "heartbeat-scheduler:tradingAgent",
 ] as const;
 
 export type RoutineSchedulerBypassRoute = (typeof ROUTINE_SCHEDULER_BYPASS_ROUTES)[number];

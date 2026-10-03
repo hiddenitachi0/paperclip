@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  BROWSER_ACCESS_LEVELS,
   LANE_A_DEFAULT_MAX_OUTPUT_TOKENS,
   LANE_A_DEFAULT_TRANSFORM_DAILY_CALL_CAP,
   LANE_A_INSTRUCTIONS_MAX_LENGTH,
@@ -10,23 +11,47 @@ import {
   LANE_A_MIN_TRANSFORM_DAILY_CALL_CAP,
   LANE_A_PROVIDERS,
   LANE_A_PROVIDER_CATALOGUE,
+  LANE_A_PROVIDER_ROUTING_MAX_ENTRIES,
+  LANE_A_ANTHROPIC_MAX_TEMPERATURE,
+  LANE_A_TEMPERATURE_PRESETS,
+  LANE_A_THINKING_MODES,
   LANE_A_TRANSFORM_MAX_TOTAL_CHARS,
+  LANE_A_TRUST_LEVELS,
+  LANE_A_TRUST_LEVEL_LABELS,
+  laneAModelAcceptsReasoningEffort,
+  laneAModelAcceptsTemperature,
   laneAModelsForProvider,
   laneATransformWorstCaseDailyCents,
   normalizeLaneAProvider,
+  normalizeLaneATrustLevel,
+  normalizeLaneAProviderRouting,
+  parseLaneAProviderSlugList,
   formatAgentDisplayName,
+  readLaneABrowserAccess,
+  readLaneAWebSearchSwitch,
+  WEB_SEARCH_FREE_CREDIT_TEXT,
+  WEB_SEARCH_PRICE_TEXT,
+  type BrowserAccessLevel,
   type CompanySecret,
   type LaneAProvider,
+  type LaneAThinkingMode,
+  type LaneATrustLevel,
+  type LaneAProviderRouting,
+  type LaneABackupModelConfig,
+  type LaneAKeywordRoute,
 } from "@paperclipai/shared";
 import { AlertCircle, CheckCircle2, Circle, Loader2 } from "lucide-react";
 import { Link } from "@/lib/router";
+import { accessApi } from "../api/access";
 import { agentsApi } from "../api/agents";
 import { budgetsApi } from "../api/budgets";
 import { dataConnectionsApi } from "../api/dataConnections";
 import { instanceServerAnthropicKeyApi } from "../api/instanceServerAnthropicKey";
 import { instanceSettingsApi } from "../api/instanceSettings";
 import { mcpToolLibraryApi } from "../api/mcpToolLibrary";
+import { pluginsApi } from "../api/plugins";
 import { secretsApi } from "../api/secrets";
+import { webSearchApi } from "../api/webSearch";
 import { ApiError } from "../api/client";
 import { queryKeys } from "../lib/queryKeys";
 import { agentRouteRef } from "../lib/utils";
@@ -47,6 +72,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleSwitch } from "@/components/ui/toggle-switch";
 import { SecretBindingPicker, type SecretBindingValue } from "./SecretBindingPicker";
+import { QuickAgentBackupModels } from "./QuickAgentBackupModels";
 
 /**
  * Quick agent settings: the on/off switch plus the instruction set the quick
@@ -65,6 +91,14 @@ import { SecretBindingPicker, type SecretBindingValue } from "./SecretBindingPic
  * allowed. Everything is computed from endpoints the page already calls; no
  * new server route.
  */
+
+/** Plain-language labels for the "Browser access" dial (DUR-4020). */
+const BROWSER_ACCESS_LABELS: Record<BrowserAccessLevel, string> = {
+  off: "Off",
+  browse_and_forms: "Can browse and fill forms",
+  book_and_buy: "Can browse, book, and pay",
+};
+
 export function QuickAgentSection({
   agent,
   companyId,
@@ -84,6 +118,19 @@ export function QuickAgentSection({
     laneATransformDailyCallCap?: number | null;
     laneAProvider?: string | null;
     laneABaseUrl?: string | null;
+    laneATemperature?: number | null;
+    /** DUR-4367: "on" | "off" | null ("model default"). */
+    laneAThinking?: string | null;
+    /** DUR-4070: the trust-level ceiling (limited/standard/full). Null/absent reads as "full". */
+    laneATrustLevel?: string | null;
+    /** DUR-4070: company-member userIds this quick agent may chat with, besides the company's owner. */
+    laneAAssignedUserIds?: string[] | null;
+    laneAProviderRouting?: LaneAProviderRouting | null;
+    /** DUR-4347: up to five backup models, two try-next lists (by backup id) and keyword rules. */
+    laneABackupModels?: LaneABackupModelConfig[] | null;
+    laneANoAnswerChainIds?: string[] | null;
+    laneARefusalChainIds?: string[] | null;
+    laneAKeywordRoutes?: LaneAKeywordRoute[] | null;
   };
   companyId?: string;
 }) {
@@ -180,13 +227,52 @@ export function QuickAgentSection({
         ? "no key (fine for most local servers)"
         : "no key yet — pick one below";
 
+  // adapterConfig is merged one level deep on the server, so laneA is always
+  // sent whole: saving the key keeps the web switch, and the other way round.
+  const currentLaneA = useMemo(() => {
+    const laneA = agent.adapterConfig?.laneA;
+    return typeof laneA === "object" && laneA !== null ? (laneA as Record<string, unknown>) : {};
+  }, [agent.adapterConfig]);
   const saveKeyBinding = (next: SecretBindingValue | null) =>
     settingMutation.mutate({
       adapterConfig: {
         laneA: {
+          ...currentLaneA,
           apiKey: next ? { type: "secret_ref", secretId: next.secretId, version: next.version ?? "latest" } : null,
         },
       },
+    });
+
+  // "Can search the web": off unless switched on here.
+  const webSearchOn = readLaneAWebSearchSwitch(agent.adapterConfig);
+  const webSearchQuery = useQuery({
+    queryKey: queryKeys.companies.webSearch(effectiveCompanyId),
+    queryFn: () => webSearchApi.get(effectiveCompanyId),
+    enabled: Boolean(effectiveCompanyId),
+    retry: false,
+  });
+  const saveWebSearch = (next: boolean) =>
+    settingMutation.mutate({ adapterConfig: { laneA: { ...currentLaneA, webSearch: next } } });
+
+  // "Browser access": off unless raised here. Board-only, same as webSearch.
+  const browserAccess = readLaneABrowserAccess(agent.adapterConfig);
+  const saveBrowserAccess = (next: BrowserAccessLevel) =>
+    settingMutation.mutate({ adapterConfig: { laneA: { ...currentLaneA, browserAccess: next } } });
+
+  // ─── DUR-4070: trust level + who may chat with this quick agent ────────
+  const trustLevel = normalizeLaneATrustLevel(agent.laneATrustLevel);
+  const saveTrustLevel = (next: LaneATrustLevel) => settingMutation.mutate({ laneATrustLevel: next });
+  const assignedUserIds = agent.laneAAssignedUserIds ?? [];
+  const membersQuery = useQuery({
+    queryKey: queryKeys.access.companyMembers(effectiveCompanyId),
+    queryFn: () => accessApi.listMembers(effectiveCompanyId),
+    enabled: Boolean(effectiveCompanyId),
+  });
+  const toggleAssignedUser = (userId: string, next: boolean) =>
+    settingMutation.mutate({
+      laneAAssignedUserIds: next
+        ? [...assignedUserIds, userId]
+        : assignedUserIds.filter((id) => id !== userId),
     });
 
   // ─── DUR-3997 slice 4: readiness ────────────────────────────────────────
@@ -203,6 +289,13 @@ export function QuickAgentSection({
   const agentToolsQuery = useQuery({
     queryKey: queryKeys.mcpTools.forAgent(agent.id),
     queryFn: () => mcpToolLibraryApi.listForAgent(agent.id),
+  });
+  // Add-on (plugin) tools ticked for this agent. A failure here must not hide
+  // the Tools-library count, so it only ever adds to the line.
+  const addOnToolsQuery = useQuery({
+    queryKey: queryKeys.plugins.agentToolGrants(agent.id),
+    queryFn: () => pluginsApi.agentToolGrants(agent.id),
+    retry: false,
   });
   const experimentalQuery = useQuery({
     queryKey: queryKeys.instance.experimentalSettings,
@@ -236,8 +329,13 @@ export function QuickAgentSection({
           : undefined,
       baseUrl: agent.laneABaseUrl ?? null,
     });
+    const addOnSettled = addOnToolsQuery.data !== undefined || addOnToolsQuery.isError;
+    const addOnAvailable = new Set((addOnToolsQuery.data?.availableTools ?? []).map((tool) => tool.name));
     const tools = toolsLine({
-      enabledCount: agentToolsQuery.data ? agentToolsQuery.data.filter((tool) => tool.enabled).length : undefined,
+      enabledCount:
+        agentToolsQuery.data && addOnSettled ? agentToolsQuery.data.filter((tool) => tool.enabled).length : undefined,
+      // Only ticks that still point at an installed, switched-on add-on tool count.
+      addOnCount: (addOnToolsQuery.data?.grantedToolNames ?? []).filter((name) => addOnAvailable.has(name)).length,
       failed: agentToolsQuery.isError,
       toolsTabPath: `/agents/${agentRouteRef(agent)}/tools`,
     });
@@ -268,6 +366,8 @@ export function QuickAgentSection({
     agent,
     agentToolsQuery.data,
     agentToolsQuery.isError,
+    addOnToolsQuery.data,
+    addOnToolsQuery.isError,
     experimentalQuery.isPending,
     businessDataEnabled,
     datasetSourcesQuery.isPending,
@@ -292,8 +392,8 @@ export function QuickAgentSection({
             <p className="text-xs text-muted-foreground">{displayName}</p>
             <CardDescription>
               A quick agent answers you directly in chat instead of running as a full agent in its own workspace.
-              It remembers the conversation and can do three things: hand work to a colleague, look up the weather,
-              and read a task summary. Good for a secretary or a weather helper. Only you can switch this on.
+              It remembers the conversation, keeps notes you ask it to remember (you can read and edit them here
+              once it is on), and can hand work to a colleague, look up the weather, tell the time anywhere and read a task summary. Switch on "Can search the web" below to let it look up live facts. Good for a secretary or a weather helper. Only you can switch this on.
             </CardDescription>
           </div>
           <ToggleSwitch
@@ -410,8 +510,138 @@ export function QuickAgentSection({
               value={agent.laneABaseUrl ?? null}
               placeholder={providerDescriptor.defaultBaseUrl ?? "http://localhost:11434/v1"}
               disabled={settingMutation.isPending}
-              onSave={(next) => settingMutation.mutate({ laneABaseUrl: next })}
+              onSave={(next) => settingMutation.mutateAsync({ laneABaseUrl: next })}
             />
+          )}
+        </div>
+
+        {/* Web search: off by default, per quick agent. */}
+        <div className="space-y-2 border-t pt-4" data-testid="quick-agent-web-search">
+          <div className="flex items-start justify-between gap-4">
+            <div className="space-y-1.5">
+              <p className="text-sm font-medium">Can search the web</p>
+              <p className="text-xs text-muted-foreground">
+                Lets this quick agent search the web with the company's Brave Search key and read the pages it finds
+                or that you link, so it can answer things like today's football scores or a price. It tells you which
+                site an answer came from. Every quick agent can always tell the time anywhere. Brave charges{" "}
+                {WEB_SEARCH_PRICE_TEXT} and gives {WEB_SEARCH_FREE_CREDIT_TEXT}; Paperclip stops at{" "}
+                {webSearchQuery.data?.dailyCap ?? 100} searches a day for the whole company.
+              </p>
+            </div>
+            <ToggleSwitch
+              checked={webSearchOn}
+              onCheckedChange={(next) => saveWebSearch(next)}
+              disabled={settingMutation.isPending}
+              aria-label="Can search the web"
+            />
+          </div>
+          {webSearchOn && webSearchQuery.data && webSearchQuery.data.keyStatus !== "ok" && (
+            <p className="text-xs text-amber-600 dark:text-amber-400" data-testid="quick-agent-web-search-no-key">
+              The company has no usable Brave Search key yet, so this quick agent can only read pages you link, not
+              search.{" "}
+              <Link to="/company/settings/connections" className="underline">
+                Pick a key under Connections → Web search
+              </Link>
+              .
+            </p>
+          )}
+          {webSearchQuery.data && (
+            <p className="text-xs text-muted-foreground">
+              Searches today (whole company): {webSearchQuery.data.usedToday} of {webSearchQuery.data.dailyCap}.
+            </p>
+          )}
+        </div>
+
+        {/* Browser access: off by default, applies to full runs only. DUR-4020. */}
+        <div className="space-y-2 border-t pt-4" data-testid="quick-agent-browser-access">
+          <div className="space-y-1.5">
+            <p className="text-sm font-medium">Browser access</p>
+            <p className="text-xs text-muted-foreground">
+              Lets this agent open a real browser to look at web pages and fill in forms for you. "Can browse,
+              book, and pay" also lets it use a payment card or website login you've saved under Connections to
+              finish a booking or a purchase — it never sees a card number or password itself, only Paperclip
+              does. This only applies when the agent does a full run — a quick agent never gets browser access,
+              even with this switched on. Off by default. Only you can change this.
+            </p>
+          </div>
+          <select
+            className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
+            data-testid="quick-agent-browser-access-select"
+            value={browserAccess}
+            disabled={settingMutation.isPending}
+            onChange={(event) => saveBrowserAccess(event.target.value as BrowserAccessLevel)}
+          >
+            {BROWSER_ACCESS_LEVELS.map((level) => (
+              <option key={level} value={level}>
+                {BROWSER_ACCESS_LABELS[level]}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* DUR-4070: the trust-level ceiling. */}
+        <div className="space-y-2 border-t pt-4" data-testid="quick-agent-trust-level">
+          <div className="space-y-1.5">
+            <p className="text-sm font-medium">Trust level</p>
+            <p className="text-xs text-muted-foreground">
+              One dial for add-on tools, business data, company files, web search, browser access, and its
+              memory notebook. Limited switches all of those off, no matter what is ticked elsewhere on this
+              agent. Only you can change this.
+            </p>
+          </div>
+          <select
+            className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
+            data-testid="quick-agent-trust-level-select"
+            value={trustLevel}
+            disabled={settingMutation.isPending}
+            onChange={(event) => saveTrustLevel(event.target.value as LaneATrustLevel)}
+          >
+            {LANE_A_TRUST_LEVELS.map((level) => (
+              <option key={level} value={level}>
+                {LANE_A_TRUST_LEVEL_LABELS[level]}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* DUR-4070: who may chat with this quick agent at all. */}
+        <div className="space-y-2 border-t pt-4" data-testid="quick-agent-assigned-people">
+          <div className="space-y-1.5">
+            <p className="text-sm font-medium">Who can chat with {displayName}</p>
+            <p className="text-xs text-muted-foreground">
+              The company's owner can always chat with {displayName}. Tick anyone else who should be able to.
+              Everyone not ticked gets a plain "not assigned" reply instead of an answer — in the chat box and
+              on Telegram alike. Only you can change this.
+            </p>
+          </div>
+          {membersQuery.isPending ? (
+            <p className="text-xs text-muted-foreground">Loading the member list…</p>
+          ) : membersQuery.isError ? (
+            <p className="text-xs text-destructive">Could not load the member list.</p>
+          ) : (
+            <ul className="space-y-1.5" data-testid="quick-agent-assigned-people-list">
+              {(membersQuery.data?.members ?? [])
+                .filter((member) => member.status === "active")
+                .map((member) => {
+                  const isOwner = member.membershipRole === "owner";
+                  const checked = isOwner || assignedUserIds.includes(member.principalId);
+                  const label = member.user?.name || member.user?.email || member.principalId;
+                  return (
+                    <li key={member.id} className="flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={isOwner || settingMutation.isPending}
+                        onChange={(event) => toggleAssignedUser(member.principalId, event.target.checked)}
+                      />
+                      <span>
+                        {label}
+                        {isOwner && <span className="text-xs text-muted-foreground"> (owner, always allowed)</span>}
+                      </span>
+                    </li>
+                  );
+                })}
+            </ul>
           )}
         </div>
 
@@ -427,18 +657,26 @@ export function QuickAgentSection({
           </div>
 
           {providerDescriptor.freeForm ? (
-            <TextSetting
-              label="Model"
-              hint={
-                provider === "openrouter"
-                  ? "The OpenRouter model id, for example openai/gpt-4.1-mini or meta-llama/llama-3.3-70b-instruct. Paperclip has no price list for OpenRouter, so its cost is recorded as 0."
-                  : "The model name your local server exposes, for example llama3.1 or qwen2.5:7b. Local models cost nothing."
-              }
-              value={agent.laneAModel ?? null}
-              placeholder={provider === "openrouter" ? "openai/gpt-4.1-mini" : "llama3.1"}
-              disabled={settingMutation.isPending}
-              onSave={(next) => settingMutation.mutate({ laneAModel: next })}
-            />
+            <>
+              {!agent.laneAModel && (
+                <p className="text-xs text-amber-600 dark:text-amber-400" data-testid="quick-agent-model-missing-notice">
+                  Pick a model for {providerDescriptor.label} — quick answers won't work until one is set, and a
+                  message to this agent will be turned into a task instead.
+                </p>
+              )}
+              <TextSetting
+                label="Model"
+                hint={
+                  provider === "openrouter"
+                    ? "The OpenRouter model id, for example openai/gpt-4.1-mini or meta-llama/llama-3.3-70b-instruct. Paperclip has a price for some OpenRouter models; others are recorded as costing 0 until priced."
+                    : "The model name your local server exposes, for example llama3.1 or qwen2.5:7b. Local models cost nothing."
+                }
+                value={agent.laneAModel ?? null}
+                placeholder={provider === "openrouter" ? "openai/gpt-4.1-mini" : "llama3.1"}
+                disabled={settingMutation.isPending}
+                onSave={(next) => settingMutation.mutateAsync({ laneAModel: next })}
+              />
+            </>
           ) : (
             <label className="block space-y-1">
               <span className="text-xs text-muted-foreground">Model</span>
@@ -464,6 +702,42 @@ export function QuickAgentSection({
               </select>
             </label>
           )}
+
+          {provider === "openrouter" && (
+            <ModelHostsSetting
+              value={agent.laneAProviderRouting ?? null}
+              disabled={settingMutation.isPending}
+              onSave={(next) => settingMutation.mutateAsync({ laneAProviderRouting: next })}
+            />
+          )}
+
+          <CreativitySetting
+            value={agent.laneATemperature ?? null}
+            provider={provider}
+            model={agent.laneAModel ?? null}
+            disabled={settingMutation.isPending}
+            onSave={(next) => settingMutation.mutateAsync({ laneATemperature: next })}
+          />
+
+          <ThinkingSetting
+            value={(agent.laneAThinking as LaneAThinkingMode | null) ?? null}
+            provider={provider}
+            model={agent.laneAModel ?? null}
+            disabled={settingMutation.isPending}
+            onSave={(next) => settingMutation.mutateAsync({ laneAThinking: next })}
+          />
+
+          <QuickAgentBackupModels
+            saved={{
+              backups: agent.laneABackupModels,
+              noAnswerChainIds: agent.laneANoAnswerChainIds,
+              refusalChainIds: agent.laneARefusalChainIds,
+              keywordRoutes: agent.laneAKeywordRoutes,
+            }}
+            main={{ provider, baseUrl: agent.laneABaseUrl ?? null, hasKey: Boolean(keyBinding) }}
+            saving={settingMutation.isPending}
+            onSave={(patch) => settingMutation.mutateAsync(patch)}
+          />
 
           <NumberSetting
             label="Longest answer (tokens)"
@@ -579,7 +853,18 @@ function rankSecretForProvider(provider: LaneAProvider): (secret: CompanySecret)
   };
 }
 
-/** A free-text value that may also be blank, meaning "use the default". */
+/**
+ * A free-text value that may also be blank, meaning "use the default".
+ *
+ * DUR-4353: this field used to save only on an explicit click of "Save", so
+ * a typed model id or model address was silently lost the moment the person
+ * clicked elsewhere, switched provider, or left the page — nothing told them
+ * the draft was never sent. It now also saves on blur and on Enter, warns
+ * before leaving the page with an unsaved draft, and shows a small
+ * saving/saved/unsaved indicator next to the label so a failed save (shown
+ * right here, not only in the card's own error line) is never mistaken for
+ * a successful one.
+ */
 function TextSetting({
   label,
   hint,
@@ -593,38 +878,350 @@ function TextSetting({
   value: string | null;
   placeholder?: string;
   disabled?: boolean;
-  onSave: (next: string | null) => void;
+  onSave: (next: string | null) => Promise<unknown>;
 }) {
   const [draft, setDraft] = useState<string | null>(null);
+  const [status, setStatus] = useState<"saving" | "saved" | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
   const shown = draft ?? (value ?? "");
   const dirty = draft !== null && draft !== (value ?? "");
 
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
+
+  const save = async () => {
+    if (!dirty || status === "saving") return;
+    const trimmed = shown.trim();
+    const next = trimmed === "" ? null : trimmed;
+    setStatus("saving");
+    setProblem(null);
+    try {
+      await onSave(next);
+      setDraft(null);
+      setStatus("saved");
+    } catch (err) {
+      setStatus(null);
+      setProblem(err instanceof ApiError ? err.message : "Could not save this setting.");
+    }
+  };
+
   return (
     <label className="block space-y-1">
-      <span className="text-xs text-muted-foreground">{label}</span>
+      <span className="flex items-center gap-2 text-xs text-muted-foreground">
+        {label}
+        {status === "saving" && <span data-testid="text-setting-status">Saving…</span>}
+        {status === "saved" && (
+          <span className="text-emerald-600 dark:text-emerald-400" data-testid="text-setting-status">
+            Saved
+          </span>
+        )}
+        {status === null && dirty && (
+          <span className="text-amber-600 dark:text-amber-400" data-testid="text-setting-status">
+            Unsaved
+          </span>
+        )}
+      </span>
       <div className="flex items-center gap-2">
         <Input
           type="text"
           value={shown}
           placeholder={placeholder}
           disabled={disabled}
-          onChange={(event) => setDraft(event.target.value)}
-        />
-        <Button
-          size="sm"
-          variant="secondary"
-          disabled={!dirty || disabled}
-          onClick={() => {
-            const trimmed = shown.trim();
-            onSave(trimmed === "" ? null : trimmed);
-            setDraft(null);
+          onChange={(event) => {
+            setDraft(event.target.value);
+            setStatus(null);
           }}
-        >
+          onBlur={() => void save()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              void save();
+            }
+          }}
+        />
+        <Button size="sm" variant="secondary" disabled={!dirty || disabled} onClick={() => void save()}>
           Save
         </Button>
       </div>
       <span className="block text-xs text-muted-foreground">{hint}</span>
+      {problem && <span className="block text-xs text-destructive">{problem}</span>}
     </label>
+  );
+}
+
+/**
+ * "Creativity": the sampling temperature every model call of this quick agent
+ * is made with. Saves as soon as it is changed (there is no Save button to
+ * forget) and says so next to the control. Empty = the model's own default,
+ * i.e. nothing is sent.
+ */
+function CreativitySetting({
+  value,
+  provider,
+  model,
+  disabled,
+  onSave,
+}: {
+  value: number | null;
+  provider: LaneAProvider;
+  model: string | null;
+  disabled?: boolean;
+  onSave: (next: number | null) => Promise<unknown>;
+}) {
+  const [status, setStatus] = useState<"saving" | "saved" | null>(null);
+  const isPreset = value === null || LANE_A_TEMPERATURE_PRESETS.some((preset) => preset.value === value);
+  const acceptsTemperature = laneAModelAcceptsTemperature(provider, model);
+
+  const change = async (raw: string) => {
+    const next = raw === "" ? null : Number(raw);
+    setStatus("saving");
+    try {
+      await onSave(next);
+      setStatus("saved");
+    } catch {
+      // The card already shows why it could not be saved.
+      setStatus(null);
+    }
+  };
+
+  return (
+    <label className="block space-y-1">
+      <span className="flex items-center gap-2 text-xs text-muted-foreground">
+        Creativity
+        {status === "saving" && <span data-testid="creativity-status">Saving…</span>}
+        {status === "saved" && (
+          <span className="text-emerald-600 dark:text-emerald-400" data-testid="creativity-status">
+            Saved
+          </span>
+        )}
+      </span>
+      <select
+        className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
+        value={value === null ? "" : String(value)}
+        disabled={disabled}
+        data-testid="creativity-select"
+        onChange={(event) => void change(event.target.value)}
+      >
+        <option value="">Model default</option>
+        {LANE_A_TEMPERATURE_PRESETS.map((preset) => (
+          <option key={preset.value} value={String(preset.value)}>
+            {preset.label} ({preset.value})
+          </option>
+        ))}
+        {!isPreset && <option value={String(value)}>Custom ({value})</option>}
+      </select>
+      <span className="block text-xs text-muted-foreground">
+        Higher makes replies more playful and varied; lower makes them more predictable. Work agents usually stay
+        precise.
+      </span>
+      {!acceptsTemperature && value !== null && (
+        <span className="block text-xs text-muted-foreground" data-testid="creativity-not-used">
+          The model picked above decides this for itself, so this setting is not used with it. Claude Haiku, OpenAI
+          GPT-4.1, Google, OpenRouter and local models follow it.
+        </span>
+      )}
+      {acceptsTemperature && provider === "anthropic" && value !== null && value > LANE_A_ANTHROPIC_MAX_TEMPERATURE && (
+        <span className="block text-xs text-muted-foreground" data-testid="creativity-capped">
+          Claude goes no higher than {LANE_A_ANTHROPIC_MAX_TEMPERATURE}, so this works like {LANE_A_ANTHROPIC_MAX_TEMPERATURE} here.
+        </span>
+      )}
+    </label>
+  );
+}
+
+// DUR-4367: "Thinking" (on / off / model default). Off asks the model to
+// skip its reasoning pass, which is most of the latency for a local
+// reasoning model — the fix for Telegram answers taking ~3x as long as the
+// same message sent directly to the model.
+function ThinkingSetting({
+  value,
+  provider,
+  model,
+  disabled,
+  onSave,
+}: {
+  value: LaneAThinkingMode | null;
+  provider: LaneAProvider;
+  model: string | null;
+  disabled?: boolean;
+  onSave: (next: LaneAThinkingMode | null) => Promise<unknown>;
+}) {
+  const [status, setStatus] = useState<"saving" | "saved" | null>(null);
+  const acceptsOff = laneAModelAcceptsReasoningEffort(provider, model);
+
+  const change = async (raw: string) => {
+    const next = raw === "" ? null : (raw as LaneAThinkingMode);
+    setStatus("saving");
+    try {
+      await onSave(next);
+      setStatus("saved");
+    } catch {
+      // The card already shows why it could not be saved.
+      setStatus(null);
+    }
+  };
+
+  return (
+    <label className="block space-y-1">
+      <span className="flex items-center gap-2 text-xs text-muted-foreground">
+        Thinking
+        {status === "saving" && <span data-testid="thinking-status">Saving…</span>}
+        {status === "saved" && (
+          <span className="text-emerald-600 dark:text-emerald-400" data-testid="thinking-status">
+            Saved
+          </span>
+        )}
+      </span>
+      <select
+        className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
+        value={value ?? ""}
+        disabled={disabled}
+        data-testid="thinking-select"
+        onChange={(event) => void change(event.target.value)}
+      >
+        <option value="">Model default</option>
+        {LANE_A_THINKING_MODES.map((mode) => (
+          <option key={mode} value={mode}>
+            {mode === "off" ? "Off" : "On"}
+          </option>
+        ))}
+      </select>
+      <span className="block text-xs text-muted-foreground">
+        Off skips the model's reasoning pass, which is usually most of the wait for a local reasoning model — on
+        gives it room to think first. Work agents that answer in Telegram or chat usually want it off.
+      </span>
+      {!acceptsOff && value === "off" && (
+        <span className="block text-xs text-muted-foreground" data-testid="thinking-not-used">
+          The model picked above does not take this setting, so it decides for itself.
+        </span>
+      )}
+    </label>
+  );
+}
+
+/**
+ * "Model hosts" (OpenRouter only): OpenRouter can send the same model to
+ * different hosts, and some of them don't support tools. The operator lists
+ * the hosts to use only, and/or the ones never to use. Both empty = no
+ * preference (null), i.e. OpenRouter picks, as before. Any other routing
+ * fields already stored (a try-first order, the fallback switch) are kept.
+ */
+function ModelHostsSetting({
+  value,
+  disabled,
+  onSave,
+}: {
+  value: LaneAProviderRouting | null;
+  disabled?: boolean;
+  onSave: (next: LaneAProviderRouting | null) => Promise<unknown>;
+}) {
+  const saved = normalizeLaneAProviderRouting(value);
+  const savedOnly = (saved?.only ?? []).join(", ");
+  const savedIgnore = (saved?.ignore ?? []).join(", ");
+  const [onlyDraft, setOnlyDraft] = useState<string | null>(null);
+  const [ignoreDraft, setIgnoreDraft] = useState<string | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+  const only = onlyDraft ?? savedOnly;
+  const ignore = ignoreDraft ?? savedIgnore;
+  const dirty =
+    (onlyDraft !== null && onlyDraft !== savedOnly) || (ignoreDraft !== null && ignoreDraft !== savedIgnore);
+
+  const save = async () => {
+    const parsedOnly = parseLaneAProviderSlugList(only);
+    const parsedIgnore = parseLaneAProviderSlugList(ignore);
+    const invalid = [...parsedOnly.invalid, ...parsedIgnore.invalid];
+    if (invalid.length > 0) {
+      setProblem(
+        `"${invalid[0]}" is not a host name. Use the short names OpenRouter shows, like deepinfra or mistral, separated by commas.`,
+      );
+      return;
+    }
+    if (
+      parsedOnly.slugs.length > LANE_A_PROVIDER_ROUTING_MAX_ENTRIES ||
+      parsedIgnore.slugs.length > LANE_A_PROVIDER_ROUTING_MAX_ENTRIES
+    ) {
+      setProblem(`List at most ${LANE_A_PROVIDER_ROUTING_MAX_ENTRIES} hosts in each field.`);
+      return;
+    }
+    setProblem(null);
+    const { only: _oldOnly, ignore: _oldIgnore, ...kept } = saved ?? {};
+    const next: LaneAProviderRouting = {
+      ...kept,
+      ...(parsedOnly.slugs.length > 0 ? { only: parsedOnly.slugs } : {}),
+      ...(parsedIgnore.slugs.length > 0 ? { ignore: parsedIgnore.slugs } : {}),
+    };
+    try {
+      await onSave(normalizeLaneAProviderRouting(next));
+      setOnlyDraft(null);
+      setIgnoreDraft(null);
+    } catch (err) {
+      // DUR-4353: this used to rely on the card's own error line, far above
+      // this field, to say why the save failed — easy to miss, which is how
+      // a rejected save could look just like a silently-dropped one. Show it
+      // here, next to the fields it is actually about, and keep what was
+      // typed so the operator does not have to retype it.
+      setProblem(err instanceof ApiError ? err.message : "Could not save the model hosts.");
+    }
+  };
+
+  return (
+    <div className="space-y-2" data-testid="quick-agent-model-hosts">
+      <div className="space-y-1">
+        <p className="text-xs font-medium">Model hosts</p>
+        <p className="text-xs text-muted-foreground">
+          OpenRouter can send the same model to different hosts. Some hosts don't support tools. List the hosts you
+          want (for example deepinfra) to stop it picking one that doesn't.
+        </p>
+      </div>
+      <label className="block space-y-1">
+        <span className="text-xs text-muted-foreground">Use only these hosts</span>
+        <Input
+          type="text"
+          value={only}
+          placeholder="deepinfra"
+          disabled={disabled}
+          data-testid="model-hosts-only"
+          onChange={(event) => setOnlyDraft(event.target.value)}
+        />
+      </label>
+      <label className="block space-y-1">
+        <span className="text-xs text-muted-foreground">Never use these hosts</span>
+        <Input
+          type="text"
+          value={ignore}
+          placeholder="venice"
+          disabled={disabled}
+          data-testid="model-hosts-ignore"
+          onChange={(event) => setIgnoreDraft(event.target.value)}
+        />
+      </label>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          size="sm"
+          variant="secondary"
+          disabled={!dirty || disabled}
+          data-testid="model-hosts-save"
+          onClick={() => void save()}
+        >
+          Save
+        </Button>
+        <span className="text-xs text-muted-foreground">
+          Separate hosts with commas. Leave both empty to let OpenRouter pick.
+        </span>
+      </div>
+      {problem && (
+        <p className="text-xs text-destructive" data-testid="model-hosts-problem">
+          {problem}
+        </p>
+      )}
+    </div>
   );
 }
 

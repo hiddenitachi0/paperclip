@@ -11,14 +11,37 @@ approvals/tasks still live in Paperclip and the web UI.
 - Outbound: a pending approval is routed to the requesting agent's bot (or the
   nearest boss's bot up `reportsTo`, within the same company), with Approve/Reject
   buttons. Credential requests link to the dashboard form instead (a button can't
-  carry a secret value).
+  carry a secret value). When nobody asked (a card the board filed itself) or
+  nobody on the way up has a bot, it goes to the company's notice bot — see
+  company_notice_bot for how that one is chosen.
+- Outbound, morning reports: a quick agent's daily report waits in Paperclip's
+  morning-report outbox and is sent through the agent's own bot once, then
+  acknowledged (like a watcher alert). DUR-4059 direction change: ONE message
+  — the weather picture Media Studio made (if any) with a short plain-text
+  caption (today's weather, the top headline, one price move) and the
+  briefing-page link once that page is live; no picture made, or a report
+  from before this change, sends the same content as plain text instead. When
+  the report carries a Lane A conversationId, the chat is pointed at it
+  afterwards so a reply like "tell me more about number 3" continues the same
+  history the report is part of.
+- Outbound, market watchers: an alert a watcher's quick agent wrote (a price
+  move, maybe with a picture) waits in Paperclip's watcher outbox; it is sent
+  through that agent's bot (or its boss's) and acknowledged, once.
 - Inbound (per bot): Approve/Reject taps resolve the approval. A text message
   goes through the same chat router the web chat uses (DUR-3978): a quick
   question is answered in the same chat when that bot's agent has quick answers
   switched on, and the chat keeps one conversation so follow-ups have context
-  (`/new` starts over). Anything else becomes a task for that bot's agent in
+  (`/new` starts over; `/cont [time or topic]` starts a new one that carries on
+  from the earlier chat, since a conversation ends after 30 quiet minutes;
+  `/memory` and `/looks` list the agent's notes and saved looks). A picture the quick answer made (Media Studio) is
+  uploaded into the chat as a photo: the bridge fetches its bytes from
+  Paperclip (`chat image`), so Telegram never gets a Paperclip address.
+  Anything else becomes a task for that bot's agent in
   that bot's company, and the agent's answer is posted back into the chat the
-  task came from once it is done or waiting.
+  task came from once it is done or waiting. A task a quick answer started (a
+  hand-over to a colleague, or a research task the agent took on itself) is
+  followed the same way, and a task with a result page (its "result"
+  document) is linked straight to that page.
 
 Config (DUR-3978 slice 2): the bots come from Paperclip itself — the operator
 connects them in company settings, and this service reads them through the
@@ -39,9 +62,11 @@ import os
 import re
 import subprocess
 import threading
+import base64
 import time
 import urllib.parse
 import urllib.request
+import uuid
 from collections import defaultdict
 
 DEFAULT_COMPANY_ID = os.environ.get("PAPERCLIP_COMPANY_ID", "7600f03c-c836-4326-8d48-c801813c3a87")
@@ -52,6 +77,7 @@ UI_HOST = os.environ.get("PAPERCLIP_UI_HOST", "https://paperclip-prod.tailc4d456
 CONFIG_FILE = os.environ.get("TELEGRAM_AGENTS_FILE", "/root/paperclip/.telegram-agents.json")
 STATE_FILE = os.environ.get("TELEGRAM_STATE_FILE", "/root/paperclip/.telegram-state.json")
 CLI = "cd /app && node cli/node_modules/tsx/dist/cli.mjs cli/src/index.ts"
+CHAT_SEND_TIMEOUT_SECONDS = 200
 ARGS = f"--api-base {API_BASE} --data-dir {DATA_DIR} --json"
 
 # DUR-3978: two-way chat.
@@ -67,12 +93,73 @@ CONVERSATION_ENDED_CODES = ("LANE_A_CONVERSATION_EXPIRED", "LANE_A_TURN_CAP_REAC
 # as a task instead, which is what every message did before, so this is never
 # worse than before (fail-open to the old behaviour, not to silence).
 QUICK_UNAVAILABLE_STATUSES = (429, 502, 503, 504)
+# The quick-answer model is set up wrong (wrong model name or address, a key
+# the service refuses, no key, no model picked at all): handing the message
+# over as a full task would only hide the mistake and cost a Claude run, so
+# say what is wrong instead. DUR-4353: LANE_A_MODEL_MISSING was absent here,
+# so switching a quick agent's provider (which clears its model) silently fell
+# through to QUICK_UNAVAILABLE_STATUSES below and became a full task on every
+# message, with nothing telling the operator the model was never picked.
+QUICK_SETUP_ERROR_CODES = (
+    "LANE_A_SETUP_REFUSED",
+    "LANE_A_KEY_REFUSED",
+    "LANE_A_KEY_MISSING",
+    "LANE_A_KEY_UNRESOLVED",
+    "LANE_A_MODEL_MISSING",
+)
+# /cont: refusals meaning "nothing to continue from" (server/src/services/
+# lane-a-continue.ts); the server's own sentence is passed on as it is.
+CONTINUE_NOTHING_CODES = ("LANE_A_CONTINUE_NOTHING_FOUND", "LANE_A_CONTINUE_NO_MATCH")
+CONTINUE_SPEC_MAX_CHARS = 200  # the server's limit
+CONTINUE_RECAP_MAX_CHARS = 300
+MEMORY_NOTES_SHOWN = 15
+MEMORY_NOTE_MAX_CHARS = 200
+LOOKS_MAX_CHARS = 3000
 ANSWER_FINISHED_STATUSES = ("done", "cancelled")
 ANSWER_WAITING_STATUSES = ("in_review", "blocked")
 # A task that has not finished after this long stops being watched.
 TASK_ANSWER_MAX_AGE_SECONDS = 30 * 24 * 3600
 TASK_ANSWERS_PER_CALL = 50  # the server's limit per call
+# Pictures a quick answer carried (Media Studio's "Generate image"): at most
+# this many are sent per answer, each as an upload of the bytes the bridge
+# fetched from Paperclip (the Paperclip address is private, so Telegram never
+# gets it). Telegram's photo limit is 10 MB; bigger ones and SVGs go as files.
+QUICK_ANSWER_MAX_IMAGES = 4
+TG_PHOTO_MAX_BYTES = 10 * 1024 * 1024
+TG_PHOTO_TYPES = ("image/jpeg", "image/png", "image/webp", "image/gif")
+# DUR-4062: Media Studio's generate-video/generate-audio finish as a
+# background job (they can take minutes), so their file never rides along
+# with the immediate quick-answer the way a picture does — it lands later as
+# a comment on the task (media-jobs.ts's deliverResult), picked up here by
+# notify_task_answers the same way any other task answer is. Telegram's own
+# Bot API upload limit for a video/audio/document is 50 MB.
+TG_VIDEO_MAX_BYTES = 50 * 1024 * 1024
+TG_AUDIO_MAX_BYTES = 50 * 1024 * 1024
+# Matches media-jobs.ts's own wording ("Your video is ready: <filename>
+# (file id <uuid>)."). Kept in one place so a wording change there is one edit here.
+MEDIA_JOB_ANSWER_RE = re.compile(
+    r"Your (video|audio) is ready: \S.*\(file id ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\)",
+    re.I,
+)
+# A research task delivers its result page as the issue document with this key
+# (RESEARCH_RESULT_DOCUMENT_KEY in packages/shared/src/research-tasks.ts; a test
+# pins that they match). The chat links straight to it.
+RESULT_DOCUMENT_KEY = "result"
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+
+# Voice messages: a voice message (or an audio file) from an allowed person is
+# downloaded, turned into text by Paperclip (`speech transcribe`), echoed back
+# ("You said: …"), and then handled exactly like a typed message. The answer
+# can also be read aloud (`speech speak`), per bot: never, when the person
+# sent a voice message (the default), or always.
+VOICE_MAX_SECONDS = 5 * 60
+VOICE_MAX_BYTES = 20 * 1024 * 1024  # also Telegram's limit for a bot download
+VOICE_ECHO_MAX = 300
+VOICE_REPLY_MODES = ("never", "when_voice", "always")
+VOICE_NAME_RE = re.compile(r"^[a-z]{2,20}$")
+SPEECH_TIMEOUT_SECONDS = 150
+# The server reads at most 1,500 characters aloud; no need to send it more.
+SPOKEN_TEXT_SEND_MAX = 6000
 
 LOCK = threading.Lock()
 
@@ -124,6 +211,15 @@ def fetch_bots_from_api():
             "companyId": b.get("companyId") or DEFAULT_COMPANY_ID,
             "uiBase": b.get("uiBase") or UI_HOST,
             "allowedUserIds": _normalized_user_ids(b.get("allowedUserIds")),
+            # How company_notice_bot picks the company's notice bot.
+            "receivesCompanyNotices": b.get("receivesCompanyNotices") is True,
+            "createdAt": b.get("createdAt") if isinstance(b.get("createdAt"), str) else None,
+            "agentRole": b.get("agentRole") if isinstance(b.get("agentRole"), str) else None,
+            # Voice messages: this bot's id in Paperclip (for the usage log),
+            # when it reads answers aloud, and with which voice.
+            "botId": b.get("id") if isinstance(b.get("id"), str) and UUID_RE.match(b.get("id")) else None,
+            "voiceReplyMode": b.get("voiceReplyMode") if b.get("voiceReplyMode") in VOICE_REPLY_MODES else "when_voice",
+            "voice": b.get("voice") if isinstance(b.get("voice"), str) and VOICE_NAME_RE.match(b.get("voice")) else None,
             "source": "paperclip",
         })
     return bots
@@ -149,7 +245,7 @@ def load_file_bots():
         print(f"telegram-bridge: could not read the bot file ({type(e).__name__})", flush=True)
         return []
     bots = []
-    for b in raw if isinstance(raw, list) else []:
+    for index, b in enumerate(raw if isinstance(raw, list) else []):
         token = str(b.get("token") or "").strip()
         if not token or not b.get("agentId"):
             continue
@@ -162,6 +258,10 @@ def load_file_bots():
             # The file has never carried a per-bot allowlist; those bots keep
             # using the instance-wide list, exactly as before.
             "allowedUserIds": set(),
+            # A file bot cannot be marked as the company's notice bot, and it
+            # counts as older than any bot connected in the app; among file
+            # bots, the one listed first is the oldest.
+            "fileIndex": index,
             "source": "file",
         })
     return bots
@@ -179,9 +279,23 @@ def merge_bots(api_bots, file_bots):
     return api_bots + [b for b in file_bots if (b["companyId"], b["agentId"]) not in known]
 
 
+# The last answer Paperclip gave about its bots. When Paperclip does not answer
+# (restarting for a deploy), the bridge keeps serving these instead of
+# dropping them: dropping and re-adding a bot while its old thread was still
+# waiting on Telegram left two threads for one bot, and every message was
+# answered twice (27 Sep).
+LAST_API_BOTS = None
+
+
 def load_bots():
     """Every bot that should be running right now."""
-    return merge_bots(fetch_bots_from_api(), load_file_bots())
+    global LAST_API_BOTS
+    api_bots = fetch_bots_from_api()
+    if api_bots is None:
+        api_bots = LAST_API_BOTS
+    else:
+        LAST_API_BOTS = api_bots
+    return merge_bots(api_bots, load_file_bots())
 
 
 def allowed_users_for(bot):
@@ -223,6 +337,37 @@ def tg(token, method, http_timeout=20, **params):
         return None
 
 
+class TypingIndicator:
+    """Keeps Telegram's "typing..." shown in a chat for as long as a slow
+    reply is being worked on (DUR-4367). Telegram clears the indicator after
+    about 5 seconds, so it is re-sent on a background thread every ~4s until
+    the `with` block exits (the reply is ready to send, or the attempt gave
+    up)."""
+    INTERVAL_SECONDS = 4
+
+    def __init__(self, token, chat_id, action="typing"):
+        self.token = token
+        self.chat_id = chat_id
+        self.action = action
+        self._stop = threading.Event()
+        self._thread = None
+
+    def _loop(self):
+        while not self._stop.wait(self.INTERVAL_SECONDS):
+            tg(self.token, "sendChatAction", chat_id=self.chat_id, action=self.action)
+
+    def __enter__(self):
+        tg(self.token, "sendChatAction", chat_id=self.chat_id, action=self.action)
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc_info):
+        self._stop.set()
+        self._thread.join(timeout=1)
+        return False
+
+
 def cli(*parts):
     try:
         out = subprocess.check_output(
@@ -234,26 +379,86 @@ def cli(*parts):
         return None
 
 
-def cli_env(env, *parts):
+def cli_env(env, *parts, timeout=90):
     args = ["docker", "exec"]
     for k, v in env.items():
         args += ["-e", f"{k}={v}"]
     args += [CONTAINER, "sh", "-lc", f"{CLI} {' '.join(parts)} {ARGS}"]
     try:
-        return json.loads(subprocess.check_output(args, stderr=subprocess.DEVNULL, timeout=90).decode())
+        return json.loads(subprocess.check_output(args, stderr=subprocess.DEVNULL, timeout=timeout).decode())
     except Exception as e:
         print(f"cli_env error ({parts[0] if parts else '?'}): {e}", flush=True)
         return None
 
 
+def cli_stdin(data, *parts, timeout=90):
+    """A CLI call that gets `data` on standard input (`docker exec -i`). Used
+    for a voice recording, which is far too big for the command line or an
+    environment variable, and must never appear in a process list."""
+    args = ["docker", "exec", "-i", CONTAINER, "sh", "-lc", f"{CLI} {' '.join(parts)} {ARGS}"]
+    try:
+        out = subprocess.run(args, input=data, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             timeout=timeout, check=True).stdout
+        return json.loads(out.decode())
+    except Exception as e:
+        print(f"cli_stdin error ({parts[0] if parts else '?'}): {type(e).__name__}", flush=True)
+        return None
+
+
+# Paperclip restarts on every deploy (about a minute). A message that arrives
+# then used to fail at once with "I didn't hear back from Paperclip". Now the
+# bridge checks Paperclip is up BEFORE sending, waits for it if it is
+# restarting, and after a failure says plainly when a restart was the cause.
+# It never re-sends on its own after sending, because Paperclip may already
+# have acted on the message.
+HEALTH_URL = os.environ.get("PAPERCLIP_HEALTH_URL", "http://127.0.0.1:3100/api/health")
+RESTART_WAIT_SECONDS = int(os.environ.get("PAPERCLIP_RESTART_WAIT_SECONDS", "150"))
+RESTART_POLL_SECONDS = 5
+
+
+def container_started_at():
+    """When the Paperclip container last started, or None if it is not running."""
+    try:
+        out = subprocess.check_output(
+            ["docker", "inspect", "-f", "{{.State.Running}} {{.State.StartedAt}}", CONTAINER],
+            stderr=subprocess.DEVNULL, timeout=10).decode().split()
+    except Exception:
+        return None
+    if len(out) != 2 or out[0] != "true":
+        return None
+    return out[1]
+
+
+def paperclip_ready():
+    """True when the container runs and Paperclip answers its health check."""
+    if container_started_at() is None:
+        return False
+    try:
+        with urllib.request.urlopen(HEALTH_URL, timeout=5) as r:
+            return r.status == 200 and json.load(r).get("status") == "ok"
+    except Exception:
+        return False
+
+
+def wait_for_paperclip(sleep=time.sleep, now=time.monotonic):
+    """Wait up to RESTART_WAIT_SECONDS for Paperclip to come back. True if it did."""
+    deadline = now() + RESTART_WAIT_SECONDS
+    while now() < deadline:
+        sleep(RESTART_POLL_SECONDS)
+        if paperclip_ready():
+            return True
+    return False
+
+
 def fetch_org(company_id):
-    """Return (reports_to, names) maps from a company's live org."""
+    """Return (reports_to, names, roles) maps from a company's live org."""
     data = cli("agent", "list", "-C", company_id) or []
-    reports_to, names = {}, {}
+    reports_to, names, roles = {}, {}, {}
     for a in data:
         reports_to[a["id"]] = a.get("reportsTo")
         names[a["id"]] = a.get("name")
-    return reports_to, names
+        roles[a["id"]] = a.get("role")
+    return reports_to, names, roles
 
 
 def resolve_bot(agent_id, bots_by_agent, reports_to, default_bot):
@@ -264,17 +469,71 @@ def resolve_bot(agent_id, bots_by_agent, reports_to, default_bot):
         if cur in bots_by_agent:
             return bots_by_agent[cur], cur != agent_id
         cur = reports_to.get(cur)
-    return default_bot, True  # fallback: everyone reaches the company's top bot
+    return default_bot, True  # fallback: the company's notice bot
 
 
-def _org_depth(agent_id, reports_to):
-    """Distance from agent to the org root (used to pick a company's top bot)."""
-    d, cur, seen = 0, agent_id, set()
-    while cur and cur not in seen and reports_to.get(cur):
-        seen.add(cur)
-        cur = reports_to.get(cur)
-        d += 1
-    return d
+def _bot_age_key(bot):
+    """Oldest first: every file bot before any app bot (the file is where bots
+    lived before the app had them), file bots in the order the file lists them,
+    app bots by when they were connected (one without a date after those with
+    one). The agent id settles any remaining tie, so the answer never depends
+    on the order the bots happen to arrive in."""
+    if bot.get("source") == "file":
+        return (0, 0, "", bot.get("fileIndex", 0), str(bot.get("agentId")))
+    created = bot.get("createdAt") or ""
+    return (1, 0 if created else 1, created, 0, str(bot.get("agentId")))
+
+
+def _bot_agent_role(bot, roles):
+    role = bot.get("agentRole") or (roles or {}).get(bot.get("agentId"))
+    return str(role).strip().lower() if role else None
+
+
+def company_notice_bot(cbots, roles=None):
+    """The bot that gets a company's approvals, questions and waiting/stalled
+    notices when no agent's own bot (or its boss's) should: a card the board
+    filed itself, or an agent with no bot anywhere above it.
+
+    1. the bot the operator marked in the app ("Sends this company's approvals
+       and questions");
+    2. else the bot whose agent is the CEO (app or file);
+    3. else the oldest bot (see _bot_age_key).
+
+    Never "the first bot in the list": on 27 Sep a newly connected assistant
+    with no boss tied with the CEO for "closest to the top of the org", came
+    first in the list, and started receiving the company's deploy cards.
+    """
+    return choose_company_notice_bot(cbots, roles)[0]
+
+
+def choose_company_notice_bot(cbots, roles=None):
+    """company_notice_bot, plus a few plain words on why it was chosen."""
+    if not cbots:
+        return None, None
+    marked = [b for b in cbots if b.get("source") == "paperclip" and b.get("receivesCompanyNotices") is True]
+    if marked:
+        return min(marked, key=_bot_age_key), "chosen in Paperclip"
+    ceo = [b for b in cbots if _bot_agent_role(b, roles) == "ceo"]
+    if ceo:
+        return min(ceo, key=_bot_age_key), "the CEO's bot"
+    return min(cbots, key=_bot_age_key), "the oldest bot; none is chosen in Paperclip and no CEO has a bot"
+
+
+# The last notice bot logged per company, so the log says it once at start and
+# again only when it changes — the line to look for after a restart.
+LAST_NOTICE_BOT = {}
+
+
+def log_company_notice_bot(company_id, cbots, roles):
+    bot, why = choose_company_notice_bot(cbots, roles)
+    if bot is None:
+        return
+    key = (bot.get("agentId"), why)
+    if LAST_NOTICE_BOT.get(company_id) == key:
+        return
+    LAST_NOTICE_BOT[company_id] = key
+    print(f"telegram-bridge: company {str(company_id)[:8]}: approvals and questions with no bot of their own "
+          f"go to {bot.get('name')} ({why})", flush=True)
 
 
 def approval_title(a):
@@ -337,10 +596,11 @@ def notify_approvals(state, bots):
         if data is None:
             continue
         items = data if isinstance(data, list) else data.get("approvals", [])
-        reports_to, names = fetch_org(company_id)
+        reports_to, names, roles = fetch_org(company_id)
         bots_by_agent = {b["agentId"]: b for b in cbots}
-        # The company's "top bot" (closest to the org root) is the escalation sink.
-        default_bot = min(cbots, key=lambda b: _org_depth(b["agentId"], reports_to))
+        # Where a card goes when no agent's own bot (or its boss's) should.
+        default_bot = company_notice_bot(cbots, roles)
+        log_company_notice_bot(company_id, cbots, roles)
         for a in items:
             if a.get("status") not in ("pending", "revision_requested"):
                 continue
@@ -387,6 +647,11 @@ def notify_approvals(state, bots):
                     # text — retry once as plain text so the alert still lands.
                     params.pop("parse_mode", None)
                     res = tg(bot["token"], "sendMessage", **params)
+                if res is None and "reply_markup" in params:
+                    # Last resort: the buttons themselves can be what Telegram
+                    # refuses; the "Open in Paperclip" link still works.
+                    params.pop("reply_markup", None)
+                    res = tg(bot["token"], "sendMessage", **params)
                 if res is not None:
                     sent = True
             # Only suppress future re-notification once it has actually been
@@ -417,9 +682,9 @@ def notify_waiting(state, bots):
         if data is None:
             continue
         items = data if isinstance(data, list) else data.get("issues", [])
-        reports_to, names = fetch_org(company_id)
+        reports_to, names, roles = fetch_org(company_id)
         bots_by_agent = {b["agentId"]: b for b in cbots}
-        default_bot = min(cbots, key=lambda b: _org_depth(b["agentId"], reports_to))
+        default_bot = company_notice_bot(cbots, roles)
         for it in items:
             iid = it.get("id")
             status = it.get("status")
@@ -472,9 +737,9 @@ def notify_stalled_agents(state, bots):
         data = cli("agent", "list", "-C", company_id)
         if data is None:
             continue
-        reports_to, names = fetch_org(company_id)
+        reports_to, names, roles = fetch_org(company_id)
         bots_by_agent = {b["agentId"]: b for b in cbots}
-        default_bot = min(cbots, key=lambda b: _org_depth(b["agentId"], reports_to))
+        default_bot = company_notice_bot(cbots, roles)
         for a in data:
             if a.get("status") != "error" or not a.get("errorAlertedAt"):
                 continue
@@ -537,9 +802,9 @@ def notify_interactions(state, bots):
         if data is None:
             continue
         items = data if isinstance(data, list) else data.get("interactions", [])
-        reports_to, names = fetch_org(company_id)
+        reports_to, names, roles = fetch_org(company_id)
         bots_by_agent = {b["agentId"]: b for b in cbots}
-        default_bot = min(cbots, key=lambda b: _org_depth(b["agentId"], reports_to))
+        default_bot = company_notice_bot(cbots, roles)
         for it in items:
             iid = it.get("id")
             issue_id = it.get("issueId")
@@ -565,10 +830,19 @@ def notify_interactions(state, bots):
                 it.get("kind") == "request_confirmation"
                 and (it.get("payload") or {}).get("rejectRequiresReason") is not True
             )
-            kb = None if not supports_inline_decision else {"inline_keyboard": [[
-                {"text": "✅ Approve", "callback_data": f"iaccept:{issue_id}:{iid}"},
-                {"text": "❌ Decline", "callback_data": f"ireject:{issue_id}:{iid}"},
-            ]]}
+            # Telegram refuses a whole message whose button data is over 64
+            # bytes ("iaccept:<issue uuid>:<interaction uuid>" was 81, so
+            # every plain confirmation failed and was retried every poll).
+            # Carry the short issue reference (e.g. DUR-4310) instead.
+            kb = None
+            if supports_inline_decision:
+                accept_data = f"ia:{issue_ref}:{iid}"
+                reject_data = f"ir:{issue_ref}:{iid}"
+                if max(len(accept_data.encode()), len(reject_data.encode())) <= CALLBACK_DATA_MAX_BYTES:
+                    kb = {"inline_keyboard": [[
+                        {"text": "✅ Approve", "callback_data": accept_data},
+                        {"text": "❌ Decline", "callback_data": reject_data},
+                    ]]}
             sent = False
             for chat in deliverable_chats(state, bot["token"], allowed_users_for(bot)):
                 params = dict(chat_id=chat, text=text, parse_mode="Markdown", disable_web_page_preview=True)
@@ -577,6 +851,12 @@ def notify_interactions(state, bots):
                 res = tg(bot["token"], "sendMessage", **params)
                 if res is None:
                     params.pop("parse_mode", None)
+                    res = tg(bot["token"], "sendMessage", **params)
+                if res is None and "reply_markup" in params:
+                    # Last resort: the buttons themselves can be what Telegram
+                    # refuses. The "Open in Paperclip" link still lets the
+                    # person act, so deliver the message without them.
+                    params.pop("reply_markup", None)
                     res = tg(bot["token"], "sendMessage", **params)
                 if res is not None:
                     sent = True
@@ -667,16 +947,112 @@ def set_conversation(state, token, chat_id, conversation_id):
         save_state(state)
 
 
-def remember_task(state, token, chat_id, task_ref, text):
-    """Record that a task came from this chat, so its answer goes back there."""
+# ─── DUR-4344: emoji reactions as feedback ─────────────────────────────────────
+# Telegram only tells us "this person reacted to message N in this chat", so
+# every reply we send is remembered by (chat, message id) with what it was: the
+# agent, the conversation, our reply row and, for a picture, its file id. A
+# reaction to anything not in this table (a message we never sent, or one so old
+# it fell out) is ignored, silently.
+
+REACTION_TARGET_LIMIT = 2000
+
+
+def reaction_context_for(bot, result):
+    conversation = (result or {}).get("conversationId")
+    message = (result or {}).get("messageId")
+    return {
+        "agentId": bot["agentId"],
+        "conversationId": conversation if isinstance(conversation, str) and UUID_RE.match(conversation) else None,
+        "messageId": message if isinstance(message, str) and UUID_RE.match(message) else None,
+    }
+
+
+def remember_reaction_target(state, token, chat_id, message_id, context):
+    if not isinstance(message_id, int) or isinstance(message_id, bool) or not context:
+        return
+    with LOCK:
+        targets = _bot_entry(state, token).setdefault("reactionTargets", {})
+        targets.pop(f"{chat_id}:{message_id}", None)
+        targets[f"{chat_id}:{message_id}"] = context
+        while len(targets) > REACTION_TARGET_LIMIT:
+            targets.pop(next(iter(targets)))
+        save_state(state)
+
+
+def _reaction_emojis(reactions):
+    """The plain emoji in one of Telegram's reaction lists; custom/paid
+    reactions carry no emoji we can classify, so they are skipped."""
+    found = []
+    for r in reactions or []:
+        if isinstance(r, dict) and r.get("type") == "emoji" and isinstance(r.get("emoji"), str) and r["emoji"]:
+            found.append(r["emoji"])
+    return found
+
+
+def reaction_events(update, bot, target, allowed):
+    """Turn one Telegram `message_reaction` update into feedback events: one per
+    emoji added or removed (the update carries the person's old and new
+    reaction SETS, so a change is the difference between them).
+
+    Returns [] for anything to ignore: no known person (anonymous/channel
+    reaction), a person not on this bot's allowlist, or a message we did not
+    send (`target` is None)."""
+    user = update.get("user")
+    chat = update.get("chat") or {}
+    if not isinstance(user, dict) or user.get("id") is None or not target:
+        return []
+    if int(user["id"]) not in {int(a) for a in allowed}:
+        return []
+    old, new = _reaction_emojis(update.get("old_reaction")), _reaction_emojis(update.get("new_reaction"))
+    events = []
+    for emoji, action in [(e, "removed") for e in old if e not in new] + [(e, "added") for e in new if e not in old]:
+        event = {
+            "agentId": target["agentId"],
+            "telegramUserId": str(user["id"]),
+            "telegramChatId": str(chat.get("id")),
+            "telegramMessageId": update.get("message_id"),
+            "emoji": emoji,
+            "action": action,
+        }
+        if target.get("conversationId"):
+            event["conversationId"] = target["conversationId"]
+            if target.get("messageId"):
+                event["messageId"] = target["messageId"]
+        if target.get("picture"):
+            event["picture"] = target["picture"]
+        events.append(event)
+    return events
+
+
+def handle_reaction(state, bot, update):
+    token = bot["token"]
+    with LOCK:
+        target = (_bot_entry(state, token).get("reactionTargets") or {}).get(
+            f"{(update.get('chat') or {}).get('id')}:{update.get('message_id')}")
+    # Removals first, so swapping one emoji for another never briefly shows both.
+    for event in reaction_events(update, bot, target, allowed_users_for(bot)):
+        res = cli_env({"TT": json.dumps(event)}, "chat", "reaction", "-C", bot["companyId"], "--event", '"$TT"')
+        # 404 (nothing to remove) and 409 (already recorded) mean the server
+        # already agrees; anything else is worth a log line, never a message.
+        if isinstance(res, dict) and res.get("ok") is False and res.get("status") not in (404, 409):
+            print(f"reaction not recorded ({bot['name']}): {res.get('status')} {str(res.get('error'))[:200]}", flush=True)
+
+
+def remember_task(state, token, chat_id, task_ref, text, colleague=False):
+    """Record that a task came from this chat, so its answer goes back there.
+    `colleague` marks a task the bot's agent handed to someone else, so the
+    answer does not say the bot's agent finished it."""
     with LOCK:
         tasks = _bot_entry(state, token).setdefault("tasks", {})
-        tasks[task_ref["issueId"]] = {
+        entry = {
             "chat": chat_id,
             "identifier": task_ref.get("identifier") or "",
             "title": first_line(text)[:200],
             "at": time.time(),
         }
+        if colleague:
+            entry["colleague"] = True
+        tasks[task_ref["issueId"]] = entry
         save_state(state)
 
 
@@ -727,8 +1103,128 @@ def send_plain(token, chat_id, text):
     """Send text written by an agent or a person. No parse mode, so nothing in
     it can format the message, hide a link behind other words, or make
     Telegram reject the message."""
+    sent_ids = []
     for part in split_for_telegram(text):
-        tg(token, "sendMessage", chat_id=chat_id, text=part, disable_web_page_preview=True)
+        res = tg(token, "sendMessage", chat_id=chat_id, text=part, disable_web_page_preview=True)
+        if isinstance(res, dict) and isinstance(res.get("message_id"), int):
+            sent_ids.append(res["message_id"])
+    return sent_ids
+
+
+def tg_upload(token, method, field, filename, content_type, data, http_timeout=60, **params):
+    """A Telegram call that uploads one file (multipart/form-data), e.g.
+    sendPhoto. Same result shape as tg(): the result, or None on failure."""
+    boundary = "paperclip-" + uuid.uuid4().hex
+    body = bytearray()
+    for key, value in params.items():
+        if value is None:
+            continue
+        body += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n"
+                 f"{value}\r\n").encode()
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", filename) or "picture"
+    body += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{field}\"; filename=\"{safe_name}\"\r\n"
+             f"Content-Type: {content_type}\r\n\r\n").encode()
+    body += data
+    body += f"\r\n--{boundary}--\r\n".encode()
+    request = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/{method}", data=bytes(body),
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    try:
+        with urllib.request.urlopen(request, timeout=http_timeout) as r:
+            return json.load(r).get("result")
+    except Exception as e:
+        print(f"tg {method} error: {e}", flush=True)
+        return None
+
+
+def reply_images(result):
+    """The pictures a quick answer carried, from its actions: file id, type and
+    seed. Only well-formed file ids; the server already checked each one is a
+    picture in this bot's company."""
+    images = []
+    for action in (result or {}).get("actions") or []:
+        image = action.get("image") if isinstance(action, dict) else None
+        if not isinstance(image, dict):
+            continue
+        file_id = image.get("fileId")
+        if not isinstance(file_id, str) or not UUID_RE.match(file_id):
+            continue
+        if any(i["fileId"] == file_id for i in images):
+            continue
+        seed = image.get("seed")
+        images.append({
+            "fileId": file_id,
+            "seed": seed if isinstance(seed, int) and not isinstance(seed, bool) else None,
+            "hasTask": bool(image.get("issueId")),
+        })
+    return images[:QUICK_ANSWER_MAX_IMAGES]
+
+
+def handed_over_tasks(result):
+    """The tasks a quick answer started (a hand-over to a colleague, or a research
+    task the agent took on itself), from its actions: only well-formed task ids,
+    each once. Their answers are posted back into this chat like /task ones."""
+    tasks = []
+    for action in (result or {}).get("actions") or []:
+        task = action.get("task") if isinstance(action, dict) and action.get("ok") is not False else None
+        if not isinstance(task, dict):
+            continue
+        issue_id = task.get("issueId")
+        if not isinstance(issue_id, str) or not UUID_RE.match(issue_id):
+            continue
+        if any(t["issueId"] == issue_id for t in tasks):
+            continue
+        identifier = task.get("identifier")
+        title = task.get("title")
+        tasks.append({
+            "issueId": issue_id,
+            "identifier": identifier if isinstance(identifier, str) else "",
+            "title": title if isinstance(title, str) else "",
+            "colleague": action.get("tool") in ("route_to_agent", "start_job"),
+        })
+    return tasks
+
+
+def image_caption(image):
+    where = "Attached to its task in Paperclip." if image["hasTask"] else "Saved in Paperclip's Files."
+    return f"{where} Seed {image['seed']}." if image["seed"] is not None else where
+
+
+def send_reply_images(bot, chat_id, images, state=None, reaction_context=None):
+    """Upload each picture into the chat. The bytes come from Paperclip through
+    the CLI, with the bridge's own sign-in and the bot's own company; a picture
+    that cannot be fetched or sent gets one plain line instead of silence."""
+    token = bot["token"]
+    for image in images:
+        data = cli("chat", "image", image["fileId"], "-C", bot["companyId"])
+        payload = None
+        content_type = ""
+        if isinstance(data, dict) and data.get("ok") is True and isinstance(data.get("contentBase64"), str):
+            try:
+                payload = base64.b64decode(data["contentBase64"], validate=True)
+            except Exception:
+                payload = None
+            content_type = str(data.get("contentType") or "").lower()
+        if not payload or not content_type.startswith("image/"):
+            send_plain(token, chat_id, "I made a picture but could not send it here. It is in Paperclip's Files.")
+            continue
+        extension = content_type.split("/", 1)[1].split("+", 1)[0] or "img"
+        filename = f"picture-{image['fileId'][:8]}.{extension}"
+        caption = image_caption(image)
+        sent = None
+        if content_type in TG_PHOTO_TYPES and len(payload) <= TG_PHOTO_MAX_BYTES:
+            sent = tg_upload(token, "sendPhoto", "photo", filename, content_type, payload,
+                             chat_id=chat_id, caption=caption)
+        if sent is None:
+            # Not a type Telegram shows as a photo (an SVG), too big, or the
+            # photo upload was refused: send it as a file instead.
+            sent = tg_upload(token, "sendDocument", "document", filename, content_type, payload,
+                             chat_id=chat_id, caption=caption)
+        if sent is None:
+            send_plain(token, chat_id, "I made a picture but could not send it here. It is in Paperclip's Files.")
+        elif state is not None and reaction_context is not None and isinstance(sent, dict):
+            remember_reaction_target(state, token, chat_id, sent.get("message_id"),
+                                     dict(reaction_context, picture={"fileId": image["fileId"]}))
 
 
 def chat_send(bot, text, conversation_id=None, lane=None):
@@ -740,28 +1236,62 @@ def chat_send(bot, text, conversation_id=None, lane=None):
         parts += ["--conversation-id", conversation_id]
     if lane in ("a", "b"):
         parts += ["--lane", lane]
-    return cli_env({"TT": text}, *parts)
+    # A quick answer can include making a picture, which may take up to about
+    # two minutes, so wait longer than for other commands.
+    return cli_env({"TT": text}, *parts, timeout=CHAT_SEND_TIMEOUT_SECONDS)
 
 
 def _refused(res):
     return isinstance(res, dict) and res.get("ok") is False
 
 
-def ask_agent(state, bot, chat_id, text, force_task=False):
-    """Send a chat message to the bot's agent and reply in the same chat."""
+def ask_agent(state, bot, chat_id, text, force_task=False, came_by_voice=False):
+    """Send a chat message to the bot's agent and reply in the same chat.
+
+    `came_by_voice` is True when `text` is what a voice message said; the
+    message is otherwise handled exactly like a typed one. It only decides
+    whether the answer is also read aloud (see wants_voice_reply)."""
     token, agent_name = bot["token"], bot["name"]
-    tg(token, "sendChatAction", chat_id=chat_id, action="typing")
     conversation_id = None if force_task else get_conversation(state, token, chat_id)
     notes = []
-    res = chat_send(bot, text, conversation_id, "b" if force_task else None)
-    if _refused(res) and conversation_id and res.get("code") in CONVERSATION_ENDED_CODES:
-        set_conversation(state, token, chat_id, None)
-        notes.append("(The earlier conversation had ended, so this starts a fresh one.)")
-        res = chat_send(bot, text)
-    if _refused(res) and not force_task and res.get("status") in QUICK_UNAVAILABLE_STATUSES:
-        notes.append("Quick answers aren't available right now, so I've handed this over as a task.")
-        res = chat_send(bot, text, lane="b")
+    # DUR-4367: "typing..." is shown the moment the message is received and
+    # kept visible (re-sent every ~4s) for as long as this takes, including a
+    # Paperclip-restart wait and any retry, so the person sees she is
+    # answering rather than wondering if the message arrived at all.
+    with TypingIndicator(token, chat_id):
+        if not paperclip_ready():
+            send_plain(token, chat_id, (
+                f"Paperclip is restarting. I'll pass this on to {agent_name} as soon as it's back, "
+                "usually within a minute."))
+            if not wait_for_paperclip():
+                send_plain(token, chat_id, (
+                    f"Paperclip is still not back, so {agent_name} did not get your message. "
+                    "Please send it again in a few minutes."))
+                return
+        started_before = container_started_at()
+        res = chat_send(bot, text, conversation_id, "b" if force_task else None)
+        if _refused(res) and conversation_id and res.get("code") in CONVERSATION_ENDED_CODES:
+            set_conversation(state, token, chat_id, None)
+            notes.append("(The earlier conversation had ended, so this starts a fresh one.)")
+            res = chat_send(bot, text)
+        if _refused(res) and not force_task and res.get("code") in QUICK_SETUP_ERROR_CODES:
+            reason = str(res.get("error") or "").strip()[:400]
+            send_plain(token, chat_id, (
+                f"{agent_name}'s quick answers are set up wrong, so nothing was sent and no task was made. "
+                + (f"{reason} " if reason else "")
+                + f"Fix it on {agent_name}'s page in Paperclip, then send your message again."))
+            return
+        if _refused(res) and not force_task and res.get("status") in QUICK_UNAVAILABLE_STATUSES:
+            notes.append("Quick answers aren't available right now, so I've handed this over as a task.")
+            res = chat_send(bot, text, lane="b")
 
+    if res is None and started_before is not None and container_started_at() != started_before:
+        # Paperclip restarted while it was answering: the answer is lost, and
+        # it may have started on the request, so ask rather than re-send.
+        send_plain(token, chat_id, (
+            f"Paperclip restarted while {agent_name} was working on that, so the answer was lost. "
+            "Please send it again. If it asked for a task or a picture, check Paperclip first so it isn't done twice."))
+        return
     if res is None:
         # The command may have timed out after the server acted, so do not
         # claim that nothing happened.
@@ -780,8 +1310,26 @@ def ask_agent(state, bot, chat_id, text, force_task=False):
         conversation = result.get("conversationId")
         if isinstance(conversation, str) and UUID_RE.match(conversation):
             set_conversation(state, token, chat_id, conversation)
-        answer = str(result.get("response") or "").strip() or f"{agent_name} had nothing to add."
-        send_plain(token, chat_id, "\n\n".join(notes + [answer]))
+        images = reply_images(result)
+        # Durable first: a task the answer started is recorded before the reply
+        # goes out, so its result comes back to this chat even after a restart.
+        for started in handed_over_tasks(result):
+            remember_task(state, token, chat_id, started, started["title"] or text, colleague=started["colleague"])
+        # DUR-4371: Lane A now always returns a non-empty answer after a tool
+        # call, so this only fires on an edge case the server missed (e.g. an
+        # older response shape). Say so plainly instead of "had nothing to
+        # add", which read as the agent dismissing the person.
+        answer = str(result.get("response") or "").strip() or (
+            "" if images else f"{agent_name}'s model gave no answer. Try asking again, or say it a different way.")
+        reaction_context = reaction_context_for(bot, result)
+        if notes or answer:
+            for message_id in send_plain(token, chat_id, "\n\n".join(notes + ([answer] if answer else []))):
+                remember_reaction_target(state, token, chat_id, message_id, reaction_context)
+        if images:
+            send_reply_images(bot, chat_id, images, state, reaction_context)
+        spoken = str(result.get("response") or "").strip()
+        if spoken and wants_voice_reply(bot, came_by_voice):
+            send_voice_answer(bot, chat_id, spoken)
         return
     task_ref = res.get("taskRef") if isinstance(res, dict) else None
     if lane == "b" and isinstance(task_ref, dict) and isinstance(task_ref.get("issueId"), str) \
@@ -799,30 +1347,324 @@ def ask_agent(state, bot, chat_id, text, force_task=False):
         "Check Paperclip before sending it again."))
 
 
+# ─── Voice messages ────────────────────────────────────────────────────────────
+
+def wants_voice_reply(bot, came_by_voice):
+    """Whether this bot reads its answer aloud this time."""
+    mode = bot.get("voiceReplyMode") if bot.get("voiceReplyMode") in VOICE_REPLY_MODES else "when_voice"
+    return mode == "always" or (mode == "when_voice" and came_by_voice)
+
+
+def download_telegram_file(token, file_id):
+    """The bytes of a file someone sent the bot, or (None, reason).
+
+    Reads at most VOICE_MAX_BYTES + 1 bytes, so an oversized file is refused
+    without being held in memory. The download address carries the bot token,
+    so no error message is printed with it."""
+    if not isinstance(file_id, str) or not file_id:
+        return None, "missing"
+    info = tg(token, "getFile", file_id=file_id)
+    path = info.get("file_path") if isinstance(info, dict) else None
+    if not isinstance(path, str) or not path:
+        return None, "missing"
+    size = info.get("file_size")
+    if isinstance(size, int) and size > VOICE_MAX_BYTES:
+        return None, "too_large"
+    url = f"https://api.telegram.org/file/bot{token}/{urllib.parse.quote(path)}"
+    try:
+        with urllib.request.urlopen(url, timeout=60) as r:
+            data = r.read(VOICE_MAX_BYTES + 1)
+    except Exception as e:
+        print(f"telegram-bridge: could not download a voice message ({type(e).__name__})", flush=True)
+        return None, "failed"
+    if len(data) > VOICE_MAX_BYTES:
+        return None, "too_large"
+    return data, path
+
+
+def _safe_audio_filename(path):
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(path or ""))[:80]
+    return name if re.search(r"\.[A-Za-z0-9]{2,5}$", name) else "voice.ogg"
+
+
+def transcribe_voice(bot, data, filename, duration):
+    """Paperclip turns the recording into text, on the bot's own company. The
+    recording goes as base64 on standard input, never on the command line."""
+    parts = ["speech", "transcribe", "-C", bot["companyId"], "--stdin", "--source", "telegram",
+             "--filename", _safe_audio_filename(filename)]
+    if isinstance(duration, (int, float)) and not isinstance(duration, bool) and duration >= 0:
+        parts += ["--duration", str(int(duration))]
+    if bot.get("botId") and UUID_RE.match(bot["botId"]):
+        parts += ["--telegram-bot-id", bot["botId"]]
+    return cli_stdin(base64.b64encode(data), *parts, timeout=SPEECH_TIMEOUT_SECONDS)
+
+
+def handle_voice_message(state, bot, chat_id, m):
+    """A voice message: listen, say what was heard, then handle it exactly like
+    a typed message. Nothing in what was said is treated as a command (`/task`,
+    `/new`, …): the words only ever reach the agent as a message."""
+    token, agent_name = bot["token"], bot["name"]
+    media = m.get("voice") if isinstance(m.get("voice"), dict) else m.get("audio")
+    duration = media.get("duration")
+    size = media.get("file_size")
+    if isinstance(duration, (int, float)) and duration > VOICE_MAX_SECONDS:
+        send_plain(token, chat_id, "That voice message is longer than 5 minutes. Please send a shorter one, or type it.")
+        return
+    if isinstance(size, int) and size > VOICE_MAX_BYTES:
+        send_plain(token, chat_id, "That recording is larger than 20 MB. Please send a shorter one, or type it.")
+        return
+    # DUR-4367: typing shown immediately and kept alive while the recording is
+    # downloaded and transcribed, same as a typed message.
+    with TypingIndicator(token, chat_id):
+        if not paperclip_ready():
+            send_plain(token, chat_id, (
+                "Paperclip is restarting. I'll listen to your voice message as soon as it's back, usually within a minute."))
+            if not wait_for_paperclip():
+                send_plain(token, chat_id, (
+                    f"Paperclip is still not back, so {agent_name} did not get your voice message. "
+                    "Please send it again in a few minutes."))
+                return
+        data, path_or_reason = download_telegram_file(token, media.get("file_id"))
+        if data is None:
+            if path_or_reason == "too_large":
+                send_plain(token, chat_id, "That recording is larger than 20 MB. Please send a shorter one, or type it.")
+            else:
+                send_plain(token, chat_id, "I couldn't get that voice message from Telegram. Please send it again.")
+            return
+        res = transcribe_voice(bot, data, path_or_reason, duration)
+        if res is None:
+            send_plain(token, chat_id, (
+                "I didn't hear back from Paperclip, so I couldn't listen to that voice message. Please send it again."))
+            return
+        if _refused(res):
+            reason = str(res.get("error") or "").strip()[:300]
+            send_plain(token, chat_id, "I couldn't listen to that voice message." + (f" {reason}" if reason else ""))
+            return
+        transcript = str(res.get("text") or "").strip()
+        if not transcript:
+            send_plain(token, chat_id, "I couldn't hear any words in that voice message. Please try again, or type it.")
+            return
+    send_plain(token, chat_id, f"🎙️ You said: {tg_truncate(transcript, VOICE_ECHO_MAX)}")
+    ask_agent(state, bot, chat_id, transcript, came_by_voice=True)
+
+
+def send_voice_answer(bot, chat_id, text):
+    """Read the answer aloud: Paperclip makes the recording (only the text; no
+    links or file ids, and at most about 1,500 characters, ending with "the
+    rest is in the text"), and it goes into the chat as a voice message, or as
+    an audio file when it is not Ogg Opus or a voice message is refused."""
+    token = bot["token"]
+    tg(token, "sendChatAction", chat_id=chat_id, action="record_voice")
+    parts = ["speech", "speak", "-C", bot["companyId"], "--text", '"$TT"', "--source", "telegram"]
+    voice = bot.get("voice")
+    if isinstance(voice, str) and VOICE_NAME_RE.match(voice):
+        parts += ["--voice", voice]
+    if bot.get("botId") and UUID_RE.match(bot["botId"]):
+        parts += ["--telegram-bot-id", bot["botId"]]
+    res = cli_env({"TT": text[:SPOKEN_TEXT_SEND_MAX]}, *parts, timeout=SPEECH_TIMEOUT_SECONDS)
+    if res is None:
+        send_plain(token, chat_id, "(I couldn't read the answer aloud this time.)")
+        return
+    if _refused(res):
+        reason = str(res.get("error") or "").strip()[:300]
+        send_plain(token, chat_id, "(I couldn't read the answer aloud." + (f" {reason})" if reason else ")"))
+        return
+    try:
+        audio = base64.b64decode(str(res.get("audioBase64") or ""), validate=True)
+    except Exception:
+        audio = b""
+    if not audio:
+        send_plain(token, chat_id, "(I couldn't read the answer aloud this time.)")
+        return
+    sent = None
+    if res.get("oggOpus") is True:
+        sent = tg_upload(token, "sendVoice", "voice", "answer.ogg", "audio/ogg", audio, chat_id=chat_id)
+    if sent is None:
+        content_type = str(res.get("contentType") or "audio/mpeg").lower()
+        extension = {"audio/ogg": "ogg", "audio/mpeg": "mp3"}.get(content_type, "audio")
+        sent = tg_upload(token, "sendAudio", "audio", f"answer.{extension}", content_type, audio,
+                         chat_id=chat_id, title="Answer")
+    if sent is None:
+        send_plain(token, chat_id, "(I couldn't send the spoken answer here.)")
+
+
+def continue_conversation(state, bot, chat_id, spec):
+    """/cont [what]: start a new quick-answer conversation that carries on from
+    the earlier one. The words travel only as data in an environment variable;
+    the agent and the company are the bot's own. The new conversation is
+    stored for this chat, so the next message continues it."""
+    token, agent_name = bot["token"], bot["name"]
+    spec = (spec or "").strip()[:CONTINUE_SPEC_MAX_CHARS]
+    if not paperclip_ready():
+        send_plain(token, chat_id, "Paperclip is restarting. Try /cont again in a minute.")
+        return
+    tg(token, "sendChatAction", chat_id=chat_id, action="typing")
+    parts = ["chat", "continue", bot["agentId"], "-C", bot["companyId"]]
+    env = {}
+    if spec:
+        parts += ["--spec", '"$CS"']
+        env["CS"] = spec
+    res = cli_env(env, *parts, timeout=CHAT_SEND_TIMEOUT_SECONDS)
+    if res is None:
+        send_plain(token, chat_id, (
+            f"I didn't hear back from Paperclip, so I couldn't pick up the earlier conversation with {agent_name}. "
+            "Try /cont again in a minute."))
+        return
+    if _refused(res):
+        reason = str(res.get("error") or "").strip()[:400]
+        if res.get("code") in CONTINUE_NOTHING_CODES and reason:
+            send_plain(token, chat_id, f"🔁 {reason}")
+        elif res.get("status") == 403 and "not enabled" in reason:
+            send_plain(token, chat_id, (
+                f"{agent_name} doesn't have quick answers switched on, so there's no conversation to continue."))
+        else:
+            send_plain(token, chat_id, f"Couldn't continue the earlier conversation with {agent_name}."
+                       + (f" Paperclip said: {reason}" if reason else ""))
+        return
+    conversation = res.get("conversationId") if isinstance(res, dict) else None
+    if not (isinstance(conversation, str) and UUID_RE.match(conversation)):
+        send_plain(token, chat_id, f"Something went wrong picking up the earlier conversation with {agent_name}.")
+        return
+    set_conversation(state, token, chat_id, conversation)
+    recap = tg_truncate(" ".join(str(res.get("recap") or "").split()), CONTINUE_RECAP_MAX_CHARS)
+    send_plain(token, chat_id, (
+        f"🔁 Continuing from: {recap or 'your earlier conversation'}\n\n"
+        f"Just carry on: your next message goes to {agent_name} with that in mind."))
+
+
+def show_memory(bot, chat_id):
+    """/memory: what the agent was asked to remember, newest first, short."""
+    token, agent_name = bot["token"], bot["name"]
+    res = cli("chat", "memory", bot["agentId"], "-C", bot["companyId"])
+    if res is None:
+        send_plain(token, chat_id, "I didn't hear back from Paperclip. Try /memory again in a minute.")
+        return
+    if _refused(res):
+        reason = str(res.get("error") or "").strip()[:300]
+        send_plain(token, chat_id, f"Couldn't read {agent_name}'s memory." + (f" Paperclip said: {reason}" if reason else ""))
+        return
+    notes = [n for n in (res.get("notes") or []) if isinstance(n, dict) and str(n.get("text") or "").strip()]
+    if not notes:
+        send_plain(token, chat_id, f"🧠 {agent_name} hasn't been asked to remember anything yet. "
+                   "Say \"remember that …\" in a message to add a note.")
+        return
+    lines = [f"🧠 What {agent_name} remembers ({len(notes)}):"]
+    for n in notes[:MEMORY_NOTES_SHOWN]:
+        lines.append("• " + tg_truncate(" ".join(str(n["text"]).split()), MEMORY_NOTE_MAX_CHARS))
+    if len(notes) > MEMORY_NOTES_SHOWN:
+        lines.append(f"…and {len(notes) - MEMORY_NOTES_SHOWN} older ones. See them all on {agent_name}'s page in Paperclip.")
+    send_plain(token, chat_id, "\n".join(lines))
+
+
+def show_looks(bot, chat_id):
+    """/looks: Media Studio's saved looks, through the agent's own ticked tool."""
+    token, agent_name = bot["token"], bot["name"]
+    res = cli("chat", "looks", bot["agentId"], "-C", bot["companyId"])
+    if res is None:
+        send_plain(token, chat_id, "I didn't hear back from Paperclip. Try /looks again in a minute.")
+        return
+    if _refused(res):
+        reason = str(res.get("error") or "").strip()[:300]
+        send_plain(token, chat_id, f"Couldn't list the looks." + (f" Paperclip said: {reason}" if reason else ""))
+        return
+    text = str(res.get("text") or "").strip()
+    if not res.get("available"):
+        send_plain(token, chat_id, text or f"{agent_name} can't list saved looks: the \"List saved looks\" tool isn't ticked for it.")
+        return
+    send_plain(token, chat_id, "🎨 " + tg_truncate(text or "No saved looks yet.", LOOKS_MAX_CHARS))
+
+
+HELP_TEXT = (
+    "*Connected — you're talking to {name}.*\n"
+    "I'll send approvals here; tap ✅/❌ to act.\n\n"
+    "• Any message → {name} answers here. A quick question gets a quick answer "
+    "when quick answers are switched on for {name}; anything bigger becomes a task, "
+    "and its answer comes back here when it's done\n"
+    "• A voice message → {name} hears it and answers the same way; the answer can be read "
+    "aloud too (Company settings → Connections → Telegram)\n"
+    "• `/task <text>` → always make it a task\n"
+    "• `/new` → start a fresh conversation\n"
+    "• `/cont` → carry on from the last conversation (a conversation ends after 30 quiet minutes)\n"
+    "• `/cont last 45 minutes`, `/cont this morning`, `/cont yesterday` → carry on from that time\n"
+    "• `/cont our meeting today` → carry on from just the messages about that\n"
+    "• `/memory` → what {name} was asked to remember\n"
+    "• `/looks` → the saved picture looks\n"
+    "• `/project <name>` → a project\n"
+    "• `/status` → what's happening now\n"
+    "• `/trading` → list trading strategies and their status\n"
+    "• `/pause` → kill switch: pause every running trading strategy\n"
+    "• `/resume <strategy id>` → resume one paused/halted strategy\n"
+    "• `/help` → this list")
+
+
 def format_task_answer(bot, item, entry, answer):
     """The message that carries a task's answer back into its chat."""
     ident = item.get("identifier") or entry.get("identifier") or "The task"
     title = (item.get("title") or entry.get("title") or "").strip()[:200]
     status = item.get("status")
     link = f"{bot['uiBase']}/issues/{item.get('identifier') or item.get('id')}"
+    has_result_page = isinstance(item.get("resultDocument"), dict)
+    if has_result_page:
+        link += f"#document-{RESULT_DOCUMENT_KEY}"
     if status == "done":
-        head = f"✅ {bot['name']} finished {ident}"
+        head = f"✅ {ident} is finished" if entry.get("colleague") else f"✅ {bot['name']} finished {ident}"
     elif status == "cancelled":
         head = f"✖️ {ident} was cancelled"
     else:
         head = f"⏸ {ident} is waiting and may need you"
     if title:
         head += f" — {title}"
-    footer = f"\n\nOpen the task: {link}"
+    footer = f"\n\nOpen the result page: {link}" if has_result_page else f"\n\nOpen the task: {link}"
     if not answer:
         return f"{head}\nNo written answer.{footer}"
     body = str(answer.get("body") or "").strip()
     room = TG_TEXT_LIMIT - tg_len(head) - tg_len(footer) - 2
     if tg_len(body) > room:
-        footer = f"\n\nThis answer is too long for Telegram. Read all of it here: {link}"
+        footer = (f"\n\nThis answer is too long for Telegram. Read all of it here: {link}" if not has_result_page
+                  else f"\n\nThis answer is too long for Telegram. Read all of it and the result page here: {link}")
         room = TG_TEXT_LIMIT - tg_len(head) - tg_len(footer) - 2
         body = tg_truncate(body, room)
     return f"{head}\n\n{body}{footer}"
+
+
+def fetch_media(bot, file_id):
+    """(bytes, content type) of a Media Studio video or audio file in the
+    bot's company, or None. Same shape as fetch_picture, but through `chat
+    media` (not limited to pictures, and with video's larger byte limit)."""
+    data = cli("chat", "media", file_id, "-C", bot["companyId"])
+    if not (isinstance(data, dict) and data.get("ok") is True and isinstance(data.get("contentBase64"), str)):
+        return None
+    try:
+        payload = base64.b64decode(data["contentBase64"], validate=True)
+    except Exception:
+        return None
+    content_type = str(data.get("contentType") or "").lower()
+    if not payload or not (content_type.startswith("video/") or content_type.startswith("audio/")):
+        return None
+    return payload, content_type
+
+
+def send_task_answer(bot, chat_id, text, answer):
+    """Send one task answer into its chat: a video/audio message when the
+    answer is a media job's "your <kind> is ready" comment (MEDIA_JOB_ANSWER_RE)
+    and the file fetches within Telegram's size limit, otherwise plain text
+    exactly as before. True when Telegram accepted it."""
+    token = bot["token"]
+    match = MEDIA_JOB_ANSWER_RE.search(str((answer or {}).get("body") or ""))
+    if match:
+        kind, file_id = match.group(1).lower(), match.group(2).lower()
+        media = fetch_media(bot, file_id)
+        if media is not None:
+            payload, content_type = media
+            max_bytes = TG_VIDEO_MAX_BYTES if kind == "video" else TG_AUDIO_MAX_BYTES
+            if len(payload) <= max_bytes:
+                extension = content_type.split("/", 1)[1].split("+", 1)[0] or kind
+                method, field = ("sendVideo", "video") if kind == "video" else ("sendAudio", "audio")
+                caption = tg_truncate(text, TG_CAPTION_LIMIT)
+                if tg_upload(token, method, field, f"{kind}.{extension}", content_type, payload,
+                             chat_id=chat_id, caption=caption) is not None:
+                    return True
+    return tg(token, "sendMessage", chat_id=chat_id, text=text, disable_web_page_preview=True) is not None
 
 
 def notify_task_answers(state, bots):
@@ -867,12 +1709,14 @@ def notify_task_answers(state, bots):
             comment_id = (answer or {}).get("commentId")
             is_new = bool(comment_id) and comment_id != entry.get("postedCommentId")
             text = None
+            media_answer = None
             if is_new:
                 text = format_task_answer(bot, it, entry, answer)
+                media_answer = answer
             elif is_finished and not entry.get("postedCommentId"):
                 text = format_task_answer(bot, it, entry, None)
             if text is not None:
-                if tg(token, "sendMessage", chat_id=chat, text=text, disable_web_page_preview=True) is None:
+                if not send_task_answer(bot, chat, text, media_answer):
                     continue  # not delivered; try again next pass
                 if is_new:
                     posted[iid] = comment_id
@@ -890,6 +1734,283 @@ def notify_task_answers(state, bots):
             save_state(state)
 
 
+# ─── Market watchers ──────────────────────────────────────────────────────────
+#
+# A watcher is a cheap scheduled price check in Paperclip (Bitcoin up 5% in
+# 24 hours, and so on). When its rule fires, the watcher's quick agent writes
+# the alert (and maybe makes a picture) and Paperclip puts it in an outbox.
+# This pass sends each alert through the agent's own bot (or the nearest
+# boss's, like a card) and then acknowledges it, so Paperclip never holds a
+# bot token for this and never sends anything itself.
+#
+# Sent once: an alert is remembered in the state file the moment Telegram took
+# it, before the acknowledgement; if the acknowledgement is lost, the next
+# pass only acknowledges it again. An alert nobody could receive (no started
+# chat) stays in the outbox, and Paperclip retires it after a day.
+
+WATCHER_ALERTS_REMEMBERED = 500
+TG_CAPTION_LIMIT = 1024
+
+
+def send_text_checked(token, chat_id, text):
+    """send_plain, but says whether every part got through."""
+    ok = True
+    for part in split_for_telegram(text):
+        if tg(token, "sendMessage", chat_id=chat_id, text=part, disable_web_page_preview=True) is None:
+            ok = False
+    return ok
+
+
+def fetch_picture(bot, file_id):
+    """(bytes, content type) of a picture in the bot's company, or None."""
+    data = cli("chat", "image", file_id, "-C", bot["companyId"])
+    if not (isinstance(data, dict) and data.get("ok") is True and isinstance(data.get("contentBase64"), str)):
+        return None
+    try:
+        payload = base64.b64decode(data["contentBase64"], validate=True)
+    except Exception:
+        return None
+    content_type = str(data.get("contentType") or "").lower()
+    if not payload or not content_type.startswith("image/"):
+        return None
+    return payload, content_type
+
+
+def send_watcher_alert(bot, chat_id, text, picture, file_id):
+    """One alert into one chat: the picture with the text as its caption when
+    it fits, otherwise the text and then the picture. True when the text got
+    through (a picture that fails never blocks the alert itself)."""
+    token = bot["token"]
+    if picture is not None:
+        payload, content_type = picture
+        extension = content_type.split("/", 1)[1].split("+", 1)[0] or "img"
+        filename = f"alert-{file_id[:8]}.{extension}"
+        as_photo = content_type in TG_PHOTO_TYPES and len(payload) <= TG_PHOTO_MAX_BYTES
+        if as_photo and tg_len(text) <= TG_CAPTION_LIMIT:
+            if tg_upload(token, "sendPhoto", "photo", filename, content_type, payload,
+                         chat_id=chat_id, caption=text) is not None:
+                return True
+        if not send_text_checked(token, chat_id, text):
+            return False
+        sent = None
+        if as_photo:
+            sent = tg_upload(token, "sendPhoto", "photo", filename, content_type, payload, chat_id=chat_id)
+        if sent is None:
+            tg_upload(token, "sendDocument", "document", filename, content_type, payload, chat_id=chat_id)
+        return True
+    return send_text_checked(token, chat_id, text)
+
+
+def ack_watcher_alert(company_id, alert_id, outcome="delivered"):
+    return cli("watcher", "outbox:ack", alert_id, "-C", company_id, "--outcome", outcome) is not None
+
+
+def notify_watcher_alerts(state, bots):
+    """Send every alert waiting in each company's watcher outbox, once."""
+    by_company = defaultdict(list)
+    for b in bots:
+        by_company[b["companyId"]].append(b)
+    with LOCK:
+        remembered = list(state.get("sent_watcher_alerts", []))
+    sent_before = set(remembered)
+    for company_id, cbots in by_company.items():
+        data = cli("watcher", "outbox", "-C", company_id)
+        items = data.get("alerts") if isinstance(data, dict) else None
+        if not isinstance(items, list) or not items:
+            continue
+        reports_to, names, roles = fetch_org(company_id)
+        bots_by_agent = {b["agentId"]: b for b in cbots}
+        default_bot = company_notice_bot(cbots, roles)
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            alert_id = it.get("id")
+            if not isinstance(alert_id, str) or not UUID_RE.match(alert_id):
+                continue
+            if it.get("companyId") not in (None, company_id):
+                continue
+            if alert_id in sent_before:
+                # Telegram already has it; only the acknowledgement was lost.
+                ack_watcher_alert(company_id, alert_id)
+                continue
+            agent_id = it.get("agentId")
+            bot, escalated = resolve_bot(agent_id, bots_by_agent, reports_to, default_bot)
+            if bot is None:
+                continue
+            chats = deliverable_chats(state, bot["token"], allowed_users_for(bot))
+            if not chats:
+                continue  # nobody has started this bot yet: try again next pass
+            text = str(it.get("text") or "").strip()
+            if not text:
+                continue
+            if escalated and agent_id:
+                text += f"\n(on behalf of {names.get(agent_id, 'a teammate')})"
+            file_id = it.get("imageFileId")
+            picture = None
+            if isinstance(file_id, str) and UUID_RE.match(file_id):
+                picture = fetch_picture(bot, file_id)
+                if picture is None:
+                    text += "\n(There was a picture too, but it could not be sent here. It is in Paperclip's Files.)"
+            delivered = False
+            for chat in chats:
+                if send_watcher_alert(bot, chat, text, picture, file_id or ""):
+                    delivered = True
+            if not delivered:
+                continue  # Telegram refused; the next pass tries again
+            sent_before.add(alert_id)
+            remembered.append(alert_id)
+            with LOCK:
+                state["sent_watcher_alerts"] = remembered[-WATCHER_ALERTS_REMEMBERED:]
+                save_state(state)
+            ack_watcher_alert(company_id, alert_id)
+
+
+
+# ─── Morning reports ──────────────────────────────────────────────────────────
+#
+# A quick agent with a morning report writes it at its set time, and Paperclip
+# puts it in the morning-report outbox. This pass sends each report through
+# the agent's own bot (or the nearest boss's), the same way as a watcher
+# alert: remembered the moment Telegram took it, then acknowledged, so a lost
+# acknowledgement never sends it twice. A report nobody could receive stays in
+# the outbox, and Paperclip retires it after a day.
+
+MORNING_REPORTS_REMEMBERED = 200
+
+
+def ack_morning_report(company_id, report_id, outcome="delivered"):
+    return cli("morning-report", "outbox:ack", report_id, "-C", company_id, "--outcome", outcome) is not None
+
+
+def morning_report_page_url(bot, agent_id, report_id):
+    """The full briefing page's URL for one report (frontend route, DUR-4075)."""
+    return f"{bot['uiBase']}/agents/{agent_id}/morning-reports/{report_id}"
+
+
+def morning_report_teaser_text(bot, agent_id, report_id, facts):
+    """The plain-text teaser (DUR-4059 direction change: ONE Telegram message, no long text, no
+    HTML): facts['teaser'] — already at most a few short lines, built entirely in code on the
+    backend, never by a model — plus the briefing-page link, appended only when
+    facts['briefingPageLive'] says the page actually exists yet (DUR-4075). Sent with no
+    parse_mode, so even a stray '<' or '>' in a headline title (or, in principle, in
+    model-written text) is shown literally rather than parsed as markup."""
+    teaser = str(facts.get("teaser") or "").strip()
+    if facts.get("briefingPageLive") and agent_id:
+        link = f"Full briefing: {morning_report_page_url(bot, agent_id, report_id)}"
+        return f"{teaser}\n\n{link}" if teaser else link
+    return teaser
+
+
+def send_report_image(bot, chat_id, image, picture_cache):
+    """One report picture (Maja dressed for today's weather, or the mood picture) into one chat, as
+    a photo with its caption. `picture_cache` is a plain dict the caller keeps for one report's whole
+    delivery, so the same fileId is fetched once even with several chats or images. Best-effort: a
+    picture that cannot be fetched or sent never affects the report's own delivery/ack (DUR-4059,
+    same rule as send_watcher_alert)."""
+    if not isinstance(image, dict):
+        return False
+    file_id = image.get("fileId")
+    if not isinstance(file_id, str) or not UUID_RE.match(file_id):
+        return False
+    if file_id not in picture_cache:
+        picture_cache[file_id] = fetch_picture(bot, file_id)
+    picture = picture_cache[file_id]
+    if picture is None:
+        return False
+    payload, content_type = picture
+    if content_type not in TG_PHOTO_TYPES or len(payload) > TG_PHOTO_MAX_BYTES:
+        return False
+    extension = content_type.split("/", 1)[1].split("+", 1)[0] or "img"
+    filename = f"report-{file_id[:8]}.{extension}"
+    caption = str(image.get("caption") or "")[:TG_CAPTION_LIMIT]
+    return tg_upload(bot["token"], "sendPhoto", "photo", filename, content_type, payload,
+                      chat_id=chat_id, caption=caption) is not None
+
+
+def notify_morning_reports(state, bots):
+    """Send every report waiting in each company's morning-report outbox, once. DUR-4059 direction
+    change: a report with structured facts is now ONE Telegram message — the "dressed for the
+    weather" picture (if Media Studio made one) with a short plain-text caption (facts['teaser']:
+    today's weather, the top headline, one price move) and the briefing-page link, only once that
+    page is live (facts['briefingPageLive']). No long text, no HTML, no per-section messages: every
+    other detail (all headlines/hobby/sport/prices with sources, the mood picture) lives on the
+    full briefing page instead. When Media Studio made no weather picture, the same caption is sent
+    as a plain text message instead — the report is never lost for want of a picture. A report
+    written before DUR-4059 (facts is null) is just the written text, exactly as before. When the
+    report carries a Lane A conversationId, later replies in that chat are pointed at it, so "tell
+    me more about number 3" continues the same history the report is part of."""
+    by_company = defaultdict(list)
+    for b in bots:
+        by_company[b["companyId"]].append(b)
+    with LOCK:
+        remembered = list(state.get("sent_morning_reports", []))
+    sent_before = set(remembered)
+    for company_id, cbots in by_company.items():
+        data = cli("morning-report", "outbox", "-C", company_id)
+        items = data.get("reports") if isinstance(data, dict) else None
+        if not isinstance(items, list) or not items:
+            continue
+        reports_to, names, roles = fetch_org(company_id)
+        bots_by_agent = {b["agentId"]: b for b in cbots}
+        default_bot = company_notice_bot(cbots, roles)
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            report_id = it.get("id")
+            if not isinstance(report_id, str) or not UUID_RE.match(report_id):
+                continue
+            if it.get("companyId") not in (None, company_id):
+                continue
+            if report_id in sent_before:
+                # Telegram already has it; only the acknowledgement was lost.
+                ack_morning_report(company_id, report_id)
+                continue
+            agent_id = it.get("agentId")
+            bot, escalated = resolve_bot(agent_id, bots_by_agent, reports_to, default_bot)
+            if bot is None:
+                continue
+            chats = deliverable_chats(state, bot["token"], allowed_users_for(bot))
+            if not chats:
+                continue  # nobody has started this bot yet: try again next pass
+            facts = it.get("facts") if isinstance(it.get("facts"), dict) else None
+            on_behalf_of = f"\n(on behalf of {names.get(agent_id, 'a teammate')})" if escalated and agent_id else ""
+            if facts:
+                message = morning_report_teaser_text(bot, agent_id, report_id, facts) + on_behalf_of
+                images = facts.get("images") if isinstance(facts.get("images"), list) else []
+                weather_image = next((im for im in images if isinstance(im, dict) and im.get("kind") == "weather"), None)
+            else:
+                message = str(it.get("text") or "").strip() + on_behalf_of
+                weather_image = None
+            if not message.strip():
+                continue
+            conversation_id = it.get("conversationId")
+            conversation_id = conversation_id if isinstance(conversation_id, str) and UUID_RE.match(conversation_id) else None
+            picture_cache = {}
+            delivered = False
+            for chat in chats:
+                # DUR-4059: exactly one message per chat — the weather picture with the
+                # teaser as its caption, or (no picture made, or this is a pre-DUR-4059
+                # report) the same content as a plain text message.
+                sent_as_photo = weather_image is not None and send_report_image(
+                    bot, chat, {**weather_image, "caption": message}, picture_cache
+                )
+                if not sent_as_photo and not send_text_checked(bot["token"], chat, message):
+                    continue
+                delivered = True
+                if conversation_id:
+                    set_conversation(state, bot["token"], chat, conversation_id)
+            if not delivered:
+                continue  # Telegram refused; the next pass tries again
+            sent_before.add(report_id)
+            remembered.append(report_id)
+            with LOCK:
+                state["sent_morning_reports"] = remembered[-MORNING_REPORTS_REMEMBERED:]
+                save_state(state)
+            ack_morning_report(company_id, report_id)
+
+# Telegram limit for an inline button's callback_data.
+CALLBACK_DATA_MAX_BYTES = 64
+
 def handle_callback(cq):
     data = cq.get("data", "")
     action, _, rest = data.partition(":")
@@ -903,13 +2024,16 @@ def handle_callback(cq):
     if action in ("approve", "reject") and rest:
         ok = cli("approval", "approve" if action == "approve" else "reject", rest) is not None
         label = "Approved ✅" if action == "approve" else "Rejected ❌"
-    elif action in ("iaccept", "ireject") and rest.count(":") == 1:
-        issue_id, _, interaction_id = rest.partition(":")
+    elif action in ("iaccept", "ireject", "ia", "ir") and rest.count(":") == 1:
+        # "ia"/"ir" carry the issue reference (DUR-4310); "iaccept"/"ireject"
+        # are the old long form, still accepted for messages already sent.
+        issue_ref, _, interaction_id = rest.partition(":")
+        accept = action in ("iaccept", "ia")
         ok = cli(
-            "issue", "interaction:accept" if action == "iaccept" else "interaction:reject",
-            issue_id, interaction_id,
+            "issue", "interaction:accept" if accept else "interaction:reject",
+            issue_ref, interaction_id,
         ) is not None
-        label = "Approved ✅" if action == "iaccept" else "Declined ❌"
+        label = "Approved ✅" if accept else "Declined ❌"
     else:
         tg(tgtoken, "answerCallbackQuery", callback_query_id=cq.get("id"))
         return
@@ -933,20 +2057,26 @@ def handle_message(state, bot, m):
         print(f"telegram-bridge: ignored a message to {bot['name']} from a Telegram user or chat that is not allowed", flush=True)
         return
     register_chat(state, bot["token"], chat_id)
+    if isinstance(m.get("voice"), dict) or isinstance(m.get("audio"), dict):
+        handle_voice_message(state, bot, chat_id, m)
+        return
     token, agent_id, agent_name = bot["token"], bot["agentId"], bot["name"]
     company_id = bot["companyId"]
     low = text.lower()
     if low in ("/start", "/help"):
-        tg(token, "sendMessage", chat_id=chat_id, parse_mode="Markdown", text=(
-            f"*Connected — you're talking to {agent_name}.*\n"
-            "I'll send approvals here; tap ✅/❌ to act.\n\n"
-            f"• Any message → {agent_name} answers here. A quick question gets a quick answer "
-            f"when quick answers are switched on for {agent_name}; anything bigger becomes a task, "
-            "and its answer comes back here when it's done\n"
-            "• `/task <text>` → always make it a task\n"
-            "• `/new` → start a fresh conversation\n"
-            "• `/project <name>` → a project\n"
-            "• `/status` → what's happening now"))
+        tg(token, "sendMessage", chat_id=chat_id, parse_mode="Markdown",
+           text=HELP_TEXT.format(name=agent_name))
+        return
+    command = low.split(maxsplit=1)[0] if low else ""
+    if command in ("/cont", "/continue"):
+        words = text.split(maxsplit=1)
+        continue_conversation(state, bot, chat_id, words[1] if len(words) > 1 else "")
+        return
+    if low == "/memory":
+        show_memory(bot, chat_id)
+        return
+    if low == "/looks":
+        show_looks(bot, chat_id)
         return
     if low == "/new":
         set_conversation(state, token, chat_id, None)
@@ -960,6 +2090,47 @@ def handle_message(state, bot, m):
         for r in runs[:6]:
             lines.append(f"• {r.get('agentName')} — {r.get('status')}")
         tg(token, "sendMessage", chat_id=chat_id, text="\n".join(lines), parse_mode="Markdown")
+        return
+    if low == "/trading":
+        rows = cli("trading", "list", "-C", company_id) or []
+        if not rows:
+            send_plain(token, chat_id, "No trading strategies configured yet.")
+            return
+        lines = ["*Trading strategies:*"]
+        for r in rows:
+            reason = f" ({r.get('pauseReason')})" if r.get("pauseReason") else ""
+            lines.append(f"• `{r.get('id')}` {r.get('name')} ({r.get('asset')}) — {r.get('status')}{reason}")
+        tg(token, "sendMessage", chat_id=chat_id, text="\n".join(lines), parse_mode="Markdown")
+        return
+    if low == "/pause":
+        # Kill switch: no strategy id needed on purpose, so it works even when
+        # the operator can't recall one under pressure -- stops everything.
+        paused = cli("trading", "pause-all", "-C", company_id)
+        if paused is None:
+            send_plain(token, chat_id, "Couldn't reach the trading agent — nothing was paused.")
+            return
+        if not paused:
+            send_plain(token, chat_id, "Nothing was running — no strategy to pause.")
+            return
+        names = ", ".join(r.get("name") or r.get("id") for r in paused)
+        send_plain(token, chat_id, f"⏸ Paused: {names}")
+        return
+    if command == "/resume":
+        # Resuming (unlike pausing) always names a strategy: a strategy the
+        # risk gate halted needs a deliberate look before it trades again.
+        words = text.split(maxsplit=1)
+        strategy_id = words[1].strip() if len(words) > 1 else ""
+        if not strategy_id:
+            send_plain(token, chat_id, "Usage: `/resume <strategy id>` — see `/trading` for ids.")
+            return
+        # strategy_id is user-supplied free text from Telegram; pass it through
+        # an env var + quoted "$SID" reference (same pattern as /project below),
+        # never interpolated straight into the shell command string.
+        updated = cli_env({"SID": strategy_id}, "trading", "status", '"$SID"', "-C", company_id, "--status", "running")
+        if updated is None:
+            send_plain(token, chat_id, "Couldn't resume that strategy — check the id with /trading.")
+            return
+        send_plain(token, chat_id, f"▶️ Resumed {updated.get('name') or strategy_id}.")
         return
     if low.startswith("/project "):
         name = text[len("/project "):].strip()
@@ -983,6 +2154,19 @@ def current_bot(token):
         return CURRENT_BOTS.get(token)
 
 
+def _is_registered_thread(token):
+    """True when the running thread is the one refresh_bots registered for this bot."""
+    with LOCK:
+        return BOT_THREADS.get(token) is threading.current_thread()
+
+
+# Telegram sends reactions only when asked. In a private chat that is all it
+# takes; in a group or supergroup the bot must also be an administrator there to
+# receive them (Bot API: "message_reaction ... bot must be an administrator in
+# the chat"). Private chats are the supported case.
+ALLOWED_UPDATES = ["message", "callback_query", "message_reaction"]
+
+
 def bot_thread(state, token):
     started = current_bot(token)
     if started:
@@ -995,23 +2179,46 @@ def bot_thread(state, token):
         if bot is None:
             print("telegram-bridge: a bot is no longer configured and has stopped answering", flush=True)
             return
+        if not _is_registered_thread(token):
+            # A newer thread serves this bot now; two would answer every
+            # message twice.
+            return
         bs = bots_state(state, token)
-        updates = tg(token, "getUpdates", http_timeout=40, offset=bs["offset"] + 1, timeout=25) or []
-        for u in updates:
-            with LOCK:
-                bs2 = state["bots"].setdefault(token, {"offset": 0, "chats": []})
-                bs2["offset"] = max(bs2["offset"], u.get("update_id", 0))
-                save_state(state)
-            try:
-                if "callback_query" in u:
-                    cq = u["callback_query"]
-                    cq["_token"] = token
-                    cq["_allowed"] = allowed_users_for(bot)
-                    handle_callback(cq)
-                elif "message" in u:
-                    handle_message(state, bot, u["message"])
-            except Exception as e:
-                print(f"update error ({bot['name']}): {e}", flush=True)
+        updates = tg(token, "getUpdates", http_timeout=40, offset=bs["offset"] + 1, timeout=25,
+                     allowed_updates=ALLOWED_UPDATES) or []
+        if updates and not _is_registered_thread(token):
+            return
+        handle_updates(state, token, bot, updates)
+
+
+def handle_updates(state, token, bot, updates):
+    """Handle one batch of Telegram updates for a bot, each at most once.
+
+    The offset is advanced under the lock before an update is handled, and an
+    update at or below the saved offset is skipped, so even two threads that
+    fetched the same batch cannot both answer it.
+    """
+    for u in updates:
+        update_id = u.get("update_id", 0)
+        with LOCK:
+            bs2 = state["bots"].setdefault(token, {"offset": 0, "chats": []})
+            if update_id <= bs2["offset"]:
+                # Already handled (by this or another thread): never twice.
+                continue
+            bs2["offset"] = update_id
+            save_state(state)
+        try:
+            if "callback_query" in u:
+                cq = u["callback_query"]
+                cq["_token"] = token
+                cq["_allowed"] = allowed_users_for(bot)
+                handle_callback(cq)
+            elif "message" in u:
+                handle_message(state, bot, u["message"])
+            elif "message_reaction" in u:
+                handle_reaction(state, bot, u["message_reaction"])
+        except Exception as e:
+            print(f"update error ({bot['name']}): {e}", flush=True)
 
 
 def refresh_bots(state):
@@ -1031,11 +2238,13 @@ def refresh_bots(state):
         if token not in tokens:
             BOT_THREADS.pop(token, None)
     for b in bots:
-        thread = BOT_THREADS.get(b["token"])
-        if thread is None or not thread.is_alive():
+        with LOCK:
+            thread = BOT_THREADS.get(b["token"])
+            if thread is not None and thread.is_alive():
+                continue
             thread = threading.Thread(target=bot_thread, args=(state, b["token"]), daemon=True)
             BOT_THREADS[b["token"]] = thread
-            thread.start()
+        thread.start()
     return bots
 
 
@@ -1081,6 +2290,14 @@ def main():
             notify_stalled_agents(state, bots)
         except Exception as e:
             print(f"stalled-agent-notify error: {e}", flush=True)
+        try:
+            notify_watcher_alerts(state, bots)
+        except Exception as e:
+            print(f"watcher-alert-notify error: {e}", flush=True)
+        try:
+            notify_morning_reports(state, bots)
+        except Exception as e:
+            print(f"morning-report-notify error: {e}", flush=True)
         time.sleep(12)
 
 

@@ -9,10 +9,12 @@ import {
   SquarePen,
   Network,
   Briefcase,
+  IdCard,
   Boxes,
   Plug,
-  Repeat,
+  Eye,
   GitBranch,
+  GitFork,
   Package,
   Settings,
   FolderOpen,
@@ -21,10 +23,12 @@ import {
   Pin,
   MessagesSquare,
   RadioTower,
-  UserRound,
   Sparkles,
   ScrollText,
+  ShoppingCart,
   TrendingUp,
+  CandlestickChart,
+  Mail,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { NavLink } from "@/lib/router";
@@ -37,6 +41,8 @@ import { useCompany } from "../context/CompanyContext";
 import { useSidebar } from "../context/SidebarContext";
 import { heartbeatsApi } from "../api/heartbeats";
 import { instanceSettingsApi } from "../api/instanceSettings";
+import { productGrabberApi } from "../api/productGrabber";
+import { emailSettingsApi } from "../api/emailSettings";
 import { queryKeys } from "../lib/queryKeys";
 import { useInboxBadge } from "../hooks/useInboxBadge";
 import { Button } from "@/components/ui/button";
@@ -65,6 +71,18 @@ export function Sidebar() {
   const liveRunCount = liveRuns?.length ?? 0;
   const showWorkspacesLink = experimentalSettings?.enableIsolatedWorkspaces === true;
   const showPipelines = experimentalSettings?.enablePipelines === true;
+  const { data: productGrabberSettings } = useQuery({
+    queryKey: selectedCompanyId ? queryKeys.productGrabber.settings(selectedCompanyId) : ["product-grabber", "__none__"],
+    queryFn: () => productGrabberApi.getSettings(selectedCompanyId!),
+    enabled: Boolean(selectedCompanyId),
+  });
+  const showProductGrabber = productGrabberSettings?.enabled === true;
+  const { data: emailSettings } = useQuery({
+    queryKey: selectedCompanyId ? queryKeys.email.settings(selectedCompanyId) : ["email", "__none__"],
+    queryFn: () => emailSettingsApi.getSettings(selectedCompanyId!),
+    enabled: Boolean(selectedCompanyId),
+  });
+  const showEmail = emailSettings?.enabled === true;
   // IA flag: branch the sidebar nav presentation. Default ON =
   // streamlined (top-level Projects link). Users can opt out in experiments to
   // get classic (per-project collapsible, no Projects nav link). Issue/Task
@@ -184,7 +202,14 @@ export function Sidebar() {
 
         <SidebarSection label="Work">
           <SidebarNavItem to="/issues" label="Tasks" icon={CircleDot} />
-          <SidebarNavItem to="/routines" label="Routines" icon={Repeat} />
+          <SidebarNavItem to="/jobs" label="Jobs" icon={Briefcase} />
+          <SidebarNavItem to="/workflow-map" label="Workflow Map" icon={GitFork} />
+          <SidebarNavItem to="/watchers" label="Watchers" icon={Eye} />
+          <SidebarNavItem to="/trading" label="Trading" icon={CandlestickChart} />
+          {showEmail ? <SidebarNavItem to="/email" label="Email" icon={Mail} /> : null}
+          {showProductGrabber ? (
+            <SidebarNavItem to="/product-grabber" label="Product grabber" icon={ShoppingCart} />
+          ) : null}
           {showPipelines ? (
             <SidebarNavItem to="/pipelines" label="Pipelines" icon={GitBranch} />
           ) : null}
@@ -192,7 +217,6 @@ export function Sidebar() {
           <SidebarNavItem to="/files" label="Files" icon={Package} />
           <SidebarNavItem to="/skills" label="Skills" icon={Boxes} />
           <SidebarNavItem to="/tools" label="Tools" icon={Plug} />
-          <SidebarNavItem to="/personas" label="Personas" icon={UserRound} />
           {showWorkspacesLink ? (
             <SidebarNavItem to="/workspaces" label="Workspaces" icon={GitBranch} />
           ) : null}
@@ -221,7 +245,7 @@ export function Sidebar() {
 
         <SidebarSection label="Company">
           <SidebarNavItem to="/org" label="Org" icon={Network} />
-          <SidebarNavItem to="/jobs" label="Jobs" icon={Briefcase} />
+          <SidebarNavItem to="/positions" label="Positions" icon={IdCard} />
           <SidebarNavItem to="/costs" label="Costs" icon={DollarSign} />
           <SidebarNavItem to="/goal-adoption" label="Goal Adoption" icon={TrendingUp} />
           <SidebarNavItem to="/changelog" label="Changelog" icon={ScrollText} />

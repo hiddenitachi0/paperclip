@@ -25,11 +25,12 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Router } from "express";
 import type { Request, Response } from "express";
-import { and, desc, eq, gte } from "drizzle-orm";
+import { and, desc, eq, gte, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
   companies,
+  companySecrets,
   heartbeatRuns,
   pluginLogs,
   pluginWebhookDeliveries,
@@ -64,6 +65,7 @@ import type { PluginJobStore } from "../services/plugin-job-store.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import type { PluginStreamBus } from "../services/plugin-stream-bus.js";
 import type { PluginToolDispatcher } from "../services/plugin-tool-dispatcher.js";
+import { pluginToolExecutionService } from "../services/plugin-tool-execution.js";
 import type { PluginPerformActionActorContext, ToolRunContext } from "@paperclipai/plugin-sdk";
 import { JsonRpcCallError, PLUGIN_RPC_ERROR_CODES } from "@paperclipai/plugin-sdk";
 import {
@@ -86,6 +88,7 @@ import {
 import {
   extractSecretRefPathsFromConfig,
   PLUGIN_SECRET_REFS_DISABLED_MESSAGE,
+  SECRET_REF_ENABLED_PLUGIN_KEYS,
 } from "../services/plugin-secrets-handler.js";
 import { badRequest, forbidden, notFound, unauthorized, unprocessable } from "../errors.js";
 
@@ -541,6 +544,10 @@ export function pluginRoutes(
   });
   const issuesSvc = issueService(db);
   const agentsSvc = agentService(db);
+  // The one plugin-tool execute path, shared with the quick-agent chat
+  // (services/lane-a.ts): tool lookup, per-company enable flag, grant check,
+  // then the worker. This route only adds the HTTP-side run-context checks.
+  const toolExecution = toolDeps ? pluginToolExecutionService(db, toolDeps.toolDispatcher) : null;
 
   function matchScopedApiRoute(route: PluginApiRouteDeclaration, method: string, requestPath: string) {
     if (route.method !== method) return null;
@@ -736,6 +743,22 @@ export function pluginRoutes(
     return companyId;
   }
 
+  /**
+   * Whether this board user may manage the company's settings: the local
+   * single-user board, an instance admin, or an ACTIVE owner/admin
+   * membership in this company -- the same rule as
+   * assertCompanyOwnerAdminOrInstanceAdmin (routes/authz.ts), without the
+   * throw. Handed to the plugin so it can keep company settings (Media
+   * Studio's saved looks) to the people who manage the company.
+   */
+  function boardUserCanManageCompany(req: Request, companyId: string): boolean {
+    if (req.actor.type !== "board") return false;
+    if (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin) return true;
+    const membership = (req.actor.memberships ?? []).find((item) => item.companyId === companyId);
+    const role = membership?.status === "active" ? membership.membershipRole : null;
+    return role === "owner" || role === "admin";
+  }
+
   function performActionActorContext(req: Request, companyId: string | undefined): PluginPerformActionActorContext {
     const scopedCompanyId = companyId ?? null;
     if (req.actor.type === "agent") {
@@ -745,6 +768,8 @@ export function pluginRoutes(
         agentId: req.actor.agentId ?? null,
         runId: req.actor.runId ?? null,
         companyId: scopedCompanyId,
+        canManageCompany: false,
+        isInstanceAdmin: false,
       };
     }
     if (req.actor.type === "board") {
@@ -754,6 +779,8 @@ export function pluginRoutes(
         agentId: null,
         runId: req.actor.runId ?? null,
         companyId: scopedCompanyId,
+        canManageCompany: scopedCompanyId ? boardUserCanManageCompany(req, scopedCompanyId) : false,
+        isInstanceAdmin: req.actor.source === "local_implicit" || req.actor.isInstanceAdmin === true,
       };
     }
     // DUR-3977: everything else is refused, explicitly.
@@ -783,15 +810,35 @@ export function pluginRoutes(
     error: string | null;
     // DUR-189: piggybacked off the same agent-row select this function
     // already does for the companyId check, so adding grant enforcement
-    // doesn't cost an extra DB round trip. Absent/empty means unrestricted.
+    // doesn't cost an extra DB round trip. Absent/empty means unrestricted
+    // for a full agent; the shared execute service reads lane_a_enabled off
+    // the same row to decide (services/plugin-tool-execution.ts).
     pluginToolGrants: string[];
+    laneAEnabled: boolean;
+    // DUR-4098: without this, a full agent whose lane_a_trust_level is
+    // "limited" never gets refused on this route — isLaneATrustLimited()
+    // in the shared execute service normalizes a missing value to "full".
+    laneATrustLevel: string | null;
   }
+
+  // DUR-4096 (round 4): mirrors `AGENT_KEY_ACTIVE_RUN_STATUSES` in
+  // middleware/auth.ts -- the statuses `resolveAgentKeyRunId` itself treats
+  // as "this run is really live right now" when deciding whether to trust
+  // the `x-paperclip-run-id` header. Kept as its own local copy rather than
+  // an import, matching this file's existing pattern of local
+  // ACTIVE_RUN_STATUSES-shaped constants elsewhere in the codebase.
+  const ANCHOR_ACTIVE_RUN_STATUSES = new Set(["queued", "running"]);
 
   async function validateToolRunContextScope(
     runContext: ToolRunContext,
     actor: Request["actor"],
   ): Promise<ToolRunContextScopeResult> {
-    const noGrants: ToolRunContextScopeResult = { error: null, pluginToolGrants: [] };
+    const noGrants: ToolRunContextScopeResult = {
+      error: null,
+      pluginToolGrants: [],
+      laneAEnabled: false,
+      laneATrustLevel: null,
+    };
 
     // DUR-174: an agent-authenticated caller must be the same agent named in
     // runContext.agentId, so two agents (e.g. two personas) in one company
@@ -803,8 +850,33 @@ export function pluginRoutes(
       return { ...noGrants, error: '"runContext.agentId" does not match the authenticated agent' };
     }
 
+    // DUR-4096 (round 3): `runContext.runId` is caller-supplied in the POST
+    // body -- nothing upstream of this function verifies it names the run
+    // actually issuing the request. `actor.runId` is the one anchor the
+    // caller cannot pick: for an agent JWT it is baked into the signed token
+    // at mint time (auth.ts ignores any differing header), and for a
+    // long-lived agent API key it is independently confirmed by
+    // `resolveAgentKeyRunId` to be one of this agent's own *currently
+    // active* runs. Without this, a live run could name a different, real
+    // (possibly already-ended) run of its own agent as `runContext.runId`,
+    // which `deriveInvocationScope`/`assertRunIdMatchesLiveInvocation`
+    // downstream would then trust as "the live run" -- defeating the
+    // checkout/Lane-A enforcement `createComment`/`createAttachment` rely on
+    // that value for. When `actor.runId` is absent (e.g. an agent API key
+    // call with no run bound to it at all) there is no live run to anchor
+    // against, so this check is skipped rather than invented; those calls
+    // already carried no run-liveness guarantee before this fix.
+    if (actor.type === "agent" && actor.runId && actor.runId !== runContext.runId) {
+      return { ...noGrants, error: '"runContext.runId" does not match the authenticated run' };
+    }
+
     const [agent] = await db
-      .select({ companyId: agents.companyId, pluginToolGrants: agents.pluginToolGrants })
+      .select({
+        companyId: agents.companyId,
+        pluginToolGrants: agents.pluginToolGrants,
+        laneAEnabled: agents.laneAEnabled,
+        laneATrustLevel: agents.laneATrustLevel,
+      })
       .from(agents)
       .where(eq(agents.id, runContext.agentId))
       .limit(1);
@@ -812,17 +884,47 @@ export function pluginRoutes(
       return { ...noGrants, error: '"runContext.agentId" does not belong to "runContext.companyId"' };
     }
     const pluginToolGrants = (agent.pluginToolGrants as string[] | null) ?? [];
+    const laneAEnabled = agent.laneAEnabled === true;
+    const laneATrustLevel = agent.laneATrustLevel ?? null;
 
     const [run] = await db
-      .select({ companyId: heartbeatRuns.companyId, agentId: heartbeatRuns.agentId })
+      .select({ companyId: heartbeatRuns.companyId, agentId: heartbeatRuns.agentId, status: heartbeatRuns.status })
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runContext.runId))
       .limit(1);
     if (!run || run.companyId !== runContext.companyId) {
-      return { error: '"runContext.runId" does not belong to "runContext.companyId"', pluginToolGrants };
+      return {
+        error: '"runContext.runId" does not belong to "runContext.companyId"',
+        pluginToolGrants,
+        laneAEnabled,
+        laneATrustLevel,
+      };
     }
     if (run.agentId !== runContext.agentId) {
-      return { error: '"runContext.runId" does not belong to "runContext.agentId"', pluginToolGrants };
+      return {
+        error: '"runContext.runId" does not belong to "runContext.agentId"',
+        pluginToolGrants,
+        laneAEnabled,
+        laneATrustLevel,
+      };
+    }
+
+    // DUR-4096 (round 4): the round-3 anchor above only fires when
+    // `actor.runId` is populated -- an agent API key call with no run bound
+    // to it (no `x-paperclip-run-id` header, or one naming a run
+    // `resolveAgentKeyRunId` rejected, including a real but *ended* run of
+    // the same agent) leaves `actor.runId` undefined and skips that anchor
+    // entirely. Pre-round-4, that made `runContext.runId` trusted again
+    // purely for naming a real run of the right agent/company -- including
+    // one long since completed -- reopening the exact "borrow any of my
+    // own past runs to fake liveness" spoof round 3 closed for the JWT
+    // path (security review, DUR-4096 round 4). An API-key caller with no
+    // bound active run has no basis to assert any specific runId is live,
+    // so independently require the named run to still be in flight --
+    // mirroring the liveness gate `resolveAgentKeyRunId` already applies to
+    // the header, applied here to the body field instead.
+    if (actor.type === "agent" && !actor.runId && !ANCHOR_ACTIVE_RUN_STATUSES.has(run.status)) {
+      return { error: '"runContext.runId" does not name a currently active run', pluginToolGrants, laneAEnabled, laneATrustLevel };
     }
 
     const [project] = await db
@@ -831,35 +933,31 @@ export function pluginRoutes(
       .where(eq(projects.id, runContext.projectId))
       .limit(1);
     if (!project || project.companyId !== runContext.companyId) {
-      return { error: '"runContext.projectId" does not belong to "runContext.companyId"', pluginToolGrants };
+      return {
+        error: '"runContext.projectId" does not belong to "runContext.companyId"',
+        pluginToolGrants,
+        laneAEnabled,
+        laneATrustLevel,
+      };
     }
 
-    return { error: null, pluginToolGrants };
+    return { error: null, pluginToolGrants, laneAEnabled, laneATrustLevel };
   }
 
-  // DUR-189: an empty/absent grants list means unrestricted — this matches
-  // every agent's behavior before agents.pluginToolGrants existed (there was
-  // no per-agent scoping at all), so treating "no grants set" as "no
-  // restriction" is not a regression. A non-empty list narrows the agent to
-  // exactly those namespaced tool names. Board/human callers get an empty
-  // grants list from validateToolRunContextScope (agent-only lookup skipped
-  // isn't relevant here — board callers aren't restricted by this check at
-  // the route layer, see the actor.type guard at the call site).
-  function checkPluginToolGrant(pluginToolGrants: string[], namespacedToolName: string): string | null {
-    if (pluginToolGrants.length > 0 && !pluginToolGrants.includes(namespacedToolName)) {
-      return `Agent is not granted the "${namespacedToolName}" plugin tool`;
-    }
-    return null;
-  }
+  // DUR-189: for a full agent an empty/absent grants list means unrestricted
+  // (`empty_means_all` in services/plugin-tool-execution.ts) — this matches
+  // every agent's behavior before agents.pluginToolGrants existed. A quick
+  // agent (lane_a_enabled) reads the same column as `ticked_only`; the
+  // service decides from the row, so this route and lane-a.ts cannot differ.
 
   /**
    * DUR-195: a company can disable a plugin for itself via
    * `plugin_company_settings.enabled` while the plugin stays `ready`
-   * instance-wide. Absence of a settings row means the plugin has never been
-   * toggled for that company and defaults to enabled (matches the column's
-   * `DEFAULT true` and `upsertCompanySettings`' own default).
+   * instance-wide. Absence of a settings row means enabled. Lives in the
+   * shared execution service; this is the route's handle on it.
    */
   async function isPluginEnabledForCompany(pluginDbId: string, companyId: string): Promise<boolean> {
+    if (toolExecution) return toolExecution.isPluginEnabledForCompany(pluginDbId, companyId);
     const settings = await registry.getCompanySettings(pluginDbId, companyId);
     return settings ? settings.enabled : true;
   }
@@ -1061,7 +1159,7 @@ export function pluginRoutes(
   router.post("/plugins/tools/execute", async (req, res) => {
     assertBoardOrAgent(req);
 
-    if (!toolDeps) {
+    if (!toolDeps || !toolExecution) {
       res.status(501).json({ error: "Plugin tool dispatch is not enabled" });
       return;
     }
@@ -1072,7 +1170,20 @@ export function pluginRoutes(
       return;
     }
 
-    const { tool, parameters, runContext } = body;
+    const { tool, parameters } = body;
+    // Only the four fields a caller may state are taken from the body; every
+    // other field of the run context (for example `requesterMessage`, which
+    // only the host fills in for a quick agent's chat turn) is dropped here so
+    // an agent cannot hand a plugin words the person never wrote.
+    const runContext: ToolRunContext | undefined =
+      body.runContext && typeof body.runContext === "object"
+        ? {
+            agentId: body.runContext.agentId,
+            runId: body.runContext.runId,
+            companyId: body.runContext.companyId,
+            projectId: body.runContext.projectId,
+          }
+        : undefined;
 
     // Validate required fields
     if (!tool || typeof tool !== "string") {
@@ -1099,58 +1210,38 @@ export function pluginRoutes(
       return;
     }
 
-    // Verify the tool exists
-    const registeredTool = toolDeps.toolDispatcher.getTool(tool);
-    if (!registeredTool) {
-      res.status(404).json({ error: `Tool "${tool}" not found` });
+    // Tool lookup (404), per-company enable flag (403), grant check (403) and
+    // the worker call (502 when the worker is down, 500 otherwise) — the same
+    // steps in the same order as before, now in the shared service so a quick
+    // agent's call cannot drift from this route.
+    const outcome = await toolExecution.execute({
+      tool,
+      parameters,
+      runContext,
+      agent: {
+        laneAEnabled: scope.laneAEnabled,
+        pluginToolGrants: scope.pluginToolGrants,
+        laneATrustLevel: scope.laneATrustLevel,
+      },
+    });
+    if (!outcome.ok) {
+      res.status(outcome.status).json({ error: outcome.error });
       return;
     }
-
-    // DUR-195: the target company may have disabled this tool's plugin
-    // (`plugin_company_settings.enabled = false`) even though the plugin is
-    // `ready` instance-wide. Enforce that gate here, not just at listing.
-    const pluginEnabled = await isPluginEnabledForCompany(registeredTool.pluginDbId, runContext.companyId);
-    if (!pluginEnabled) {
-      res.status(403).json({
-        error: `Plugin "${registeredTool.pluginId}" is disabled for this company`,
-      });
-      return;
-    }
-
-    const grantError = checkPluginToolGrant(scope.pluginToolGrants, tool);
-    if (grantError) {
-      res.status(403).json({ error: grantError });
-      return;
-    }
-
-    try {
-      const result = await toolDeps.toolDispatcher.executeTool(
-        tool,
-        parameters ?? {},
-        runContext,
-      );
-      res.json(result);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-
-      // Distinguish between "worker not running" (502) and other errors (500)
-      if (message.includes("not running") || message.includes("worker")) {
-        res.status(502).json({ error: message });
-      } else {
-        res.status(500).json({ error: message });
-      }
-    }
+    res.json(outcome.result);
   });
 
   /**
    * GET /api/agents/:agentId/plugin-tool-grants
    *
    * DUR-189: read this agent's plugin-tool allow-list (namespaced tool
-   * names) plus the full catalog of currently registered plugin tools, each
-   * flagged with whether this agent is granted it today. An empty
-   * `grantedToolNames` means unrestricted (every registered tool), matching
-   * the enforcement semantics in POST /plugins/tools/execute. Board-only —
-   * same posture as GET /agents/:agentId/mcp-tools.
+   * names) plus the catalog of plugin tools the agent's company can tick for
+   * it: every registered tool whose plugin is `ready` and switched on for
+   * that company, each with its plugin's name for the screen. An empty
+   * `grantedToolNames` means unrestricted for a FULL agent (`unrestricted`),
+   * matching POST /plugins/tools/execute; a quick agent only ever gets the
+   * ticked ones (services/lane-a.ts). Board-only — same posture as
+   * GET /agents/:agentId/mcp-tools.
    */
   router.get("/agents/:agentId/plugin-tool-grants", async (req, res) => {
     assertBoard(req);
@@ -1165,11 +1256,11 @@ export function pluginRoutes(
     }
     await assertCompanyAccess(req, agent.companyId);
     const grantedToolNames = (agent.pluginToolGrants as string[] | null) ?? [];
-    const allTools = toolDeps ? toolDeps.toolDispatcher.listToolsForAgent() : [];
+    const availableTools = toolExecution ? await toolExecution.listToolsForCompany(agent.companyId) : [];
     res.json({
       grantedToolNames,
       unrestricted: grantedToolNames.length === 0,
-      availableTools: allTools,
+      availableTools,
     });
   });
 
@@ -2420,8 +2511,31 @@ export function pluginRoutes(
     try {
       const secretRefsByPath = extractSecretRefPathsFromConfig(body.configJson, schema);
       if (secretRefsByPath.size > 0) {
-        res.status(422).json({ error: PLUGIN_SECRET_REFS_DISABLED_MESSAGE });
-        return;
+        // Resolving a saved key is already allowed for the add-ons on
+        // SECRET_REF_ENABLED_PLUGIN_KEYS (plugin-secrets-handler.ts, where the
+        // secret's own company must match the calling agent's company at use
+        // time). Saving the reference has to follow the same list, or the
+        // add-on is allowed to use a key nobody can point it at. Every other
+        // add-on keeps the fail-closed refusal.
+        if (!SECRET_REF_ENABLED_PLUGIN_KEYS.has(plugin.pluginKey)) {
+          res.status(422).json({ error: PLUGIN_SECRET_REFS_DISABLED_MESSAGE });
+          return;
+        }
+        const refIds = [...secretRefsByPath.keys()];
+        const found = refIds.length > 0
+          ? await db
+              .select({ id: companySecrets.id, status: companySecrets.status })
+              .from(companySecrets)
+              .where(inArray(companySecrets.id, refIds))
+          : [];
+        const activeIds = new Set(found.filter((row) => row.status === "active").map((row) => row.id));
+        const missing = refIds.filter((id) => !activeIds.has(id));
+        if (missing.length > 0) {
+          res.status(422).json({
+            error: "One of the saved keys picked here no longer exists or is switched off. Pick the key again in the list.",
+          });
+          return;
+        }
       }
 
       const result = await registry.upsertConfig(plugin.id, {

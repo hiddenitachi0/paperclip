@@ -71,6 +71,19 @@ const SENSITIVE_KEYS = new Set<string>([
   // A field called `value` is very rarely something an operator needs to
   // read back from an error log.
   "value",
+  // Voice messages: a recording travels as `audioBase64`. A person's voice
+  // does not belong in a log line (and 27 MB of base64 would swamp it).
+  "audiobase64",
+  // DUR-4040: the "Add card" form (DUR-4020) submits the full PAN and CVC as
+  // `cardNumber`/`cvc` (see AddPaymentCardDialog.tsx), plus the legacy
+  // `cardCvc` name this ticket's own description used. A 400/409 on that form
+  // (duplicate name, validation failure) must not write any of these to
+  // server.log.
+  "cardnumber",
+  "card_number",
+  "cvc",
+  "cardcvc",
+  "card_cvc",
 ]);
 
 const MAX_DEPTH = 6;

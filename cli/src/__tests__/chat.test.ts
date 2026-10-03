@@ -151,4 +151,123 @@ describe("chat commands", () => {
     expect(url.searchParams.get("ids")).toBe(`${ISSUE_A},${ISSUE_B}`);
     expect(JSON.parse(printed.join("\n"))).toEqual({ issues: [] });
   });
+  it("fetches a picture's bytes as base64 for the bridge", async () => {
+    const bytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]);
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(bytes, { status: 200, headers: { "Content-Type": "image/jpeg" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await run(["chat", "image", ISSUE_A, "-C", COMPANY_ID, "--json"]);
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`http://localhost:3100/api/attachments/${ISSUE_A}/content`);
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({ authorization: "Bearer board-token" });
+    expect(JSON.parse(printed.join("\n"))).toEqual({
+      ok: true,
+      fileId: ISSUE_A,
+      contentType: "image/jpeg",
+      byteSize: bytes.length,
+      contentBase64: bytes.toString("base64"),
+    });
+  });
+
+  it("refuses a file that is not a picture", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response("<html></html>", { status: 200, headers: { "Content-Type": "text/html" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await run(["chat", "image", ISSUE_A, "-C", COMPANY_ID, "--json"]);
+
+    expect(JSON.parse(printed.join("\n"))).toMatchObject({ ok: false, status: 415 });
+  });
+
+  it("fetches a Media Studio video's bytes as base64 for the bridge (DUR-4062)", async () => {
+    const bytes = Buffer.from([0, 0, 0, 24, 102, 116, 121, 112]);
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(bytes, { status: 200, headers: { "Content-Type": "video/mp4" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await run(["chat", "media", ISSUE_A, "-C", COMPANY_ID, "--json"]);
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`http://localhost:3100/api/attachments/${ISSUE_A}/content`);
+    expect(JSON.parse(printed.join("\n"))).toEqual({
+      ok: true,
+      fileId: ISSUE_A,
+      contentType: "video/mp4",
+      byteSize: bytes.length,
+      contentBase64: bytes.toString("base64"),
+    });
+  });
+
+  it("fetches a Media Studio audio file the same way", async () => {
+    const bytes = Buffer.from([0x49, 0x44, 0x33]);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response(bytes, { status: 200, headers: { "Content-Type": "audio/mpeg" } })),
+    );
+
+    await run(["chat", "media", ISSUE_A, "-C", COMPANY_ID, "--json"]);
+
+    expect(JSON.parse(printed.join("\n"))).toMatchObject({ ok: true, contentType: "audio/mpeg" });
+  });
+
+  it("still lets 'chat media' fetch a picture (it is not image-only like 'chat image')", async () => {
+    const bytes = Buffer.from([0xff, 0xd8, 0xff]);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response(bytes, { status: 200, headers: { "Content-Type": "image/jpeg" } })),
+    );
+
+    await run(["chat", "media", ISSUE_A, "-C", COMPANY_ID, "--json"]);
+
+    expect(JSON.parse(printed.join("\n"))).toMatchObject({ ok: true, contentType: "image/jpeg" });
+  });
+
+  it("refuses a 'chat media' file that is neither a picture, a video nor audio", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response("<html></html>", { status: 200, headers: { "Content-Type": "text/html" } })),
+    );
+
+    await run(["chat", "media", ISSUE_A, "-C", COMPANY_ID, "--json"]);
+
+    expect(JSON.parse(printed.join("\n"))).toMatchObject({ ok: false, status: 415 });
+  });
+
+  it("refuses a 'chat media' file over the 50MB Telegram upload limit", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(new Uint8Array(51 * 1024 * 1024), { status: 200, headers: { "Content-Type": "video/mp4" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await run(["chat", "media", ISSUE_A, "-C", COMPANY_ID, "--json"]);
+
+    expect(JSON.parse(printed.join("\n"))).toMatchObject({ ok: false, status: 413 });
+  });
+
+  it("posts a Telegram reaction event to the company's reaction route, and prints a refusal as data", async () => {
+    const event = {
+      agentId: AGENT_ID,
+      telegramUserId: "42",
+      telegramChatId: "42",
+      telegramMessageId: 7,
+      emoji: "👍",
+      action: "added",
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ id: ISSUE_A, emoji: "👍" }, 201))
+      .mockResolvedValueOnce(jsonResponse({ error: "That reaction is already recorded" }, 409));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await run(["chat", "reaction", "-C", COMPANY_ID, "--event", JSON.stringify(event), "--json"]);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`http://localhost:3100/api/companies/${COMPANY_ID}/telegram-reactions`);
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual(event);
+    expect(JSON.parse(printed.pop()!)).toMatchObject({ ok: true, emoji: "👍" });
+
+    await run(["chat", "reaction", "-C", COMPANY_ID, "--event", JSON.stringify(event), "--json"]);
+    expect(JSON.parse(printed.pop()!)).toMatchObject({ ok: false, status: 409 });
+  });
 });

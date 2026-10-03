@@ -20,6 +20,26 @@ import { agentRoleRoutes } from "./routes/agent-roles.js";
 import { personaRoutes } from "./routes/personas.js";
 import { personaAccountRoutes } from "./routes/persona-accounts.js";
 import { mcpToolLibraryRoutes } from "./routes/mcp-tool-library.js";
+import { apiToolRoutes } from "./routes/api-tools.js";
+import { webSearchRoutes } from "./routes/web-search.js";
+import { agentMemoryRoutes } from "./routes/agent-memories.js";
+import { agentWorkSummaryRoutes } from "./routes/agent-work-summaries.js";
+import { jobSettingsRoutes } from "./routes/job-settings.js";
+import { positionsJobsPathAliasMiddleware } from "./routes/positions-jobs-aliases.js";
+import { privateAccessRoutes } from "./routes/private-access.js";
+import { browserRoutes } from "./routes/browser.js";
+import { paymentNoticesRoutes } from "./routes/payment-notices.js";
+import { paymentCardRoutes } from "./routes/payment-cards.js";
+import { watcherRoutes } from "./routes/watchers.js";
+import { productGrabberRoutes } from "./routes/product-grabber.js";
+import { morningReportRoutes } from "./routes/morning-report.js";
+import { mailSecretaryRoutes } from "./routes/mail-secretary.js";
+import { mailAccountsRoutes } from "./routes/mail-accounts.js";
+import { modelDirectoryRoutes } from "./routes/model-directory.js";
+import { emailSettingsRoutes } from "./routes/email-settings.js";
+import { videoStorylineRoutes } from "./routes/video-storylines.js";
+import { mediaStudioDirectRoutes } from "./routes/media-studio-direct.js";
+import { tradingRoutes } from "./routes/trading.js";
 import { mcpOAuthRoutes } from "./routes/mcp-oauth.js";
 import { projectRoutes } from "./routes/projects.js";
 import { issueRoutes } from "./routes/issues.js";
@@ -27,11 +47,13 @@ import { issueTreeControlRoutes } from "./routes/issue-tree-control.js";
 import { changeLogRoutes } from "./routes/change-log.js";
 import { fileResourceRoutes } from "./routes/file-resources.js";
 import { routineRoutes } from "./routes/routines.js";
+import { jobRoutes } from "./routes/jobs.js";
 import { customerInboxRoutes } from "./routes/customer-inbox.js";
 import { pipelineRoutes } from "./routes/pipelines.js";
 import { environmentRoutes } from "./routes/environments.js";
 import { executionWorkspaceRoutes } from "./routes/execution-workspaces.js";
 import { goalRoutes } from "./routes/goals.js";
+import { crmRoutes } from "./routes/crm.js";
 import { boardChatRoutes } from "./routes/board-chat.js";
 import { laneARoutes } from "./routes/lane-a.js";
 import { chatRouterRoutes } from "./routes/chat-router.js";
@@ -56,7 +78,10 @@ import { crossCompanyInstructionRoutes } from "./routes/cross-company-instructio
 import { instanceSecurityRoutes } from "./routes/instance-security.js";
 import { crossCompanyAccessLogRoutes } from "./routes/cross-company-access-log.js";
 import { telegramBotRoutes } from "./routes/telegram-bots.js";
+import { telegramReactionRoutes } from "./routes/telegram-reactions.js";
+import { SPEECH_TRANSCRIBE_API_PATH, SPEECH_TRANSCRIBE_JSON_BODY_LIMIT, speechRoutes } from "./routes/speech.js";
 import { dataConnectionRoutes } from "./routes/data-connections.js";
+import { documentsDownloadRoutes } from "./routes/documents-download.js";
 import { openApiRoutes } from "./routes/openapi.js";
 import {
   instanceDatabaseBackupRoutes,
@@ -82,7 +107,7 @@ import { DEFAULT_LOCAL_PLUGIN_DIR, pluginLoader } from "./services/plugin-loader
 import { createPluginWorkerManager, type PluginWorkerManager } from "./services/plugin-worker-manager.js";
 import { createPluginJobScheduler } from "./services/plugin-job-scheduler.js";
 import { pluginJobStore } from "./services/plugin-job-store.js";
-import { createPluginToolDispatcher } from "./services/plugin-tool-dispatcher.js";
+import { createPluginToolDispatcher, setPluginToolDispatcher } from "./services/plugin-tool-dispatcher.js";
 import { pluginLifecycleManager } from "./services/plugin-lifecycle.js";
 import { createPluginJobCoordinator } from "./services/plugin-job-coordinator.js";
 import { buildHostServices, flushPluginLogBuffer } from "./services/plugin-host-services.js";
@@ -210,6 +235,12 @@ export async function createApp(
     limit: PORTABLE_JSON_BODY_LIMIT,
     verify: captureRawBody,
   }));
+  // Voice messages: a recording of up to 20 MB arrives as base64 in JSON,
+  // which is larger than the default limit. Only this one route gets more.
+  app.use(SPEECH_TRANSCRIBE_API_PATH, express.json({
+    limit: SPEECH_TRANSCRIBE_JSON_BODY_LIMIT,
+    verify: captureRawBody,
+  }));
   app.use(express.json({
     limit: DEFAULT_JSON_BODY_LIMIT,
     verify: captureRawBody,
@@ -260,6 +291,10 @@ export async function createApp(
 
   const api = Router();
   api.use(boardMutationGuard());
+  // DUR-4142: /positions is a path alias for /agent-roles (today's "Jobs"
+  // page renamed) -- must run before any route matching below. Does not
+  // touch /jobs, which is now a separate, real feature with its own routes.
+  api.use(positionsJobsPathAliasMiddleware());
   api.use(
     "/health",
     healthRoutes(db, {
@@ -279,6 +314,24 @@ export async function createApp(
   api.use(personaRoutes(db));
   api.use(personaAccountRoutes(db));
   api.use(mcpToolLibraryRoutes(db));
+  api.use(apiToolRoutes(db));
+  api.use(webSearchRoutes(db));
+  api.use(agentMemoryRoutes(db));
+  api.use(agentWorkSummaryRoutes(db));
+  api.use(jobSettingsRoutes(db));
+  api.use(browserRoutes(db));
+  api.use(paymentNoticesRoutes(db));
+  api.use(paymentCardRoutes(db));
+  api.use(watcherRoutes(db));
+  api.use(productGrabberRoutes(db));
+  api.use(morningReportRoutes(db));
+  api.use(mailSecretaryRoutes(db));
+  api.use(mailAccountsRoutes(db));
+  api.use(modelDirectoryRoutes(db));
+  api.use(emailSettingsRoutes(db));
+  api.use(videoStorylineRoutes(db));
+  api.use(mediaStudioDirectRoutes(db));
+  api.use(tradingRoutes(db));
   api.use(mcpOAuthRoutes(db));
   api.use(assetRoutes(db, opts.storageService));
   api.use(projectRoutes(db));
@@ -290,14 +343,17 @@ export async function createApp(
   api.use(changeLogRoutes(db));
   api.use(fileResourceRoutes(db));
   api.use(routineRoutes(db, { pluginWorkerManager: workerManager }));
+  api.use(jobRoutes(db));
   api.use(customerInboxRoutes(db));
   api.use(pipelineRoutes(db));
   api.use(environmentRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(executionWorkspaceRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(previewEnvironmentRoutes(db, { service: previewEnvironments }));
   api.use(goalRoutes(db));
+  api.use(crmRoutes(db));
   api.use(boardChatRoutes(db, { deploymentMode: opts.deploymentMode }));
   api.use(laneARoutes(db));
+  api.use(privateAccessRoutes(db));
   api.use(chatRouterRoutes(db));
   api.use(issueAnswerRoutes(db));
   api.use(approvalRoutes(db, {
@@ -321,8 +377,11 @@ export async function createApp(
   api.use(instanceClaudeAuthRoutes(db));
   api.use(instanceServerAnthropicKeyRoutes(db));
   api.use(telegramBotRoutes(db));
+  api.use(telegramReactionRoutes(db));
+  api.use(speechRoutes(db));
   // DUR-3972 S1: business-data sources. Off until enableBusinessData is on.
   api.use(dataConnectionRoutes(db));
+  api.use(documentsDownloadRoutes(db));
   api.use(instanceSecurityRoutes(db, { checkIntervalMinutes: opts.adminAuthCheckIntervalMinutes ?? 0 }));
   api.use(crossCompanyAccessLogRoutes(db));
   if (opts.databaseBackupService) {
@@ -343,6 +402,9 @@ export async function createApp(
     lifecycleManager: lifecycle,
     db,
   });
+  // Quick agents (routes/lane-a.ts, wired above) offer add-on tools from this
+  // same dispatcher, read at call time.
+  setPluginToolDispatcher(toolDispatcher);
   const jobCoordinator = createPluginJobCoordinator({
     db,
     lifecycle,

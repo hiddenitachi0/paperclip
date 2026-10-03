@@ -1765,6 +1765,11 @@ function PipelineBoard({ pipelineId }: { pipelineId: string }) {
             </Link>
           </Button>
           <Button variant="outline" size="icon" asChild>
+            <Link to={`/pipelines/${pipelineId}/canvas`} aria-label="Edit on canvas" title="Edit on canvas">
+              <GitBranch className="h-4 w-4" />
+            </Link>
+          </Button>
+          <Button variant="outline" size="icon" asChild>
             <Link to={`/pipelines/${pipelineId}/settings`} aria-label="Pipeline settings" title="Pipeline settings">
               <Settings className="h-4 w-4" />
             </Link>
@@ -2428,9 +2433,10 @@ export function PipelineItemDetailView({ pipelineId, caseId }: { pipelineId: str
     interaction: PipelineConversationActionableInteraction,
     selectedClientKeys?: string[],
     selectedOptionIds?: string[],
+    note?: string,
   ) => {
     if (!conversationIssueId) return;
-    await issuesApi.acceptInteraction(conversationIssueId, interaction.id, { selectedClientKeys, selectedOptionIds });
+    await issuesApi.acceptInteraction(conversationIssueId, interaction.id, { selectedClientKeys, selectedOptionIds, note });
     await invalidateConversation();
   }, [conversationIssueId, invalidateConversation]);
 
@@ -2446,9 +2452,10 @@ export function PipelineItemDetailView({ pipelineId, caseId }: { pipelineId: str
   const handleSubmitConversationInteractionAnswers = useCallback(async (
     interaction: IssueThreadInteraction,
     answers: AskUserQuestionsAnswer[],
+    summaryMarkdown?: string,
   ) => {
     if (!conversationIssueId) return;
-    await issuesApi.respondToInteraction(conversationIssueId, interaction.id, { answers });
+    await issuesApi.respondToInteraction(conversationIssueId, interaction.id, { answers, summaryMarkdown });
     await invalidateConversation();
   }, [conversationIssueId, invalidateConversation]);
 
@@ -3015,7 +3022,7 @@ export function PipelineItemDetailView({ pipelineId, caseId }: { pipelineId: str
                     {retryPlan.data.routine ? (
                       <>
                         <Link
-                          to={`/routines/${retryPlan.data.routine.id}`}
+                          to={`/jobs/${retryPlan.data.routine.id}`}
                           className="font-medium underline-offset-2 hover:underline"
                         >
                           {retryPlan.data.routine.title}

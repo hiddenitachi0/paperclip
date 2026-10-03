@@ -3,7 +3,17 @@ import type { IncomingMessage, RequestOptions as HttpRequestOptions } from "node
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
+import { isNonPublicAddress, isPrivateIP } from "@paperclipai/adapter-utils/public-address";
 import { FIKEN_API_HOST, normalizeStoreUrlInput } from "@paperclipai/shared";
+
+/**
+ * DUR-4013: `isPrivateIP` and `isNonPublicAddress` moved to
+ * packages/adapter-utils/src/public-address.ts so the browser egress proxy
+ * can share the exact same address rule without depending on the server
+ * package. Re-exported here by reference (not redefined) so every existing
+ * caller of this module keeps working unchanged.
+ */
+export { isNonPublicAddress, isPrivateIP };
 
 /**
  * Outbound HTTP calls the server makes on someone else's behalf.
@@ -37,74 +47,6 @@ const ALLOWED_PROTOCOLS = new Set(["http:", "https:"]);
 
 /** The plugin fetch body cap, unchanged. */
 export const PLUGIN_MAX_RESPONSE_BODY_BYTES = 200 * 1024 * 1024; // 200 MB
-
-/**
- * Check if an IP address is in a private/reserved range (RFC 1918, loopback,
- * link-local, etc.) that plugins should never be able to reach.
- *
- * Handles IPv4-mapped IPv6 addresses (e.g. ::ffff:127.0.0.1) which Node's
- * dns.lookup may return depending on OS configuration.
- */
-export function isPrivateIP(ip: string): boolean {
-  const lower = ip.toLowerCase();
-
-  // Unwrap IPv4-mapped IPv6 addresses (::ffff:x.x.x.x) and re-check as IPv4
-  const v4MappedMatch = lower.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
-  if (v4MappedMatch && v4MappedMatch[1]) return isPrivateIP(v4MappedMatch[1]);
-
-  // IPv4 patterns
-  if (ip.startsWith("10.")) return true;
-  if (ip.startsWith("172.")) {
-    const second = parseInt(ip.split(".")[1]!, 10);
-    if (second >= 16 && second <= 31) return true;
-  }
-  if (ip.startsWith("192.168.")) return true;
-  if (ip.startsWith("127.")) return true;                   // loopback
-  if (ip.startsWith("169.254.")) return true;               // link-local
-  if (ip === "0.0.0.0") return true;
-
-  // IPv6 patterns
-  if (lower === "::1") return true;                          // loopback
-  if (lower.startsWith("fc") || lower.startsWith("fd")) return true; // ULA
-  if (lower.startsWith("fe80")) return true;                 // link-local
-  if (lower === "::") return true;
-
-  return false;
-}
-
-/**
- * The stricter address rule for business-data sources: anything that is not
- * an ordinary public unicast address is refused. On top of isPrivateIP this
- * refuses 0.0.0.0/8, carrier-grade NAT 100.64.0.0/10 (Tailscale addresses
- * live here, so a tailnet host can never be reached this way), 192.0.0.0/24,
- * the benchmarking range 198.18.0.0/15, multicast and reserved space, IPv6
- * multicast, NAT64 and any IPv4-mapped form of those.
- */
-export function isNonPublicAddress(ip: string): boolean {
-  if (isPrivateIP(ip)) return true;
-  const lower = ip.toLowerCase();
-  const mapped = lower.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
-  if (mapped && mapped[1]) return isNonPublicAddress(mapped[1]);
-
-  if (isIP(ip) === 4) {
-    const [a, b, c] = ip.split(".").map((part) => Number.parseInt(part, 10)) as [number, number, number, number];
-    if (a === 0) return true;
-    if (a === 100 && b >= 64 && b <= 127) return true;
-    if (a === 192 && b === 0 && c === 0) return true;
-    if (a === 198 && (b === 18 || b === 19)) return true;
-    if (a >= 224) return true; // multicast, reserved, broadcast
-    return false;
-  }
-  if (isIP(ip) === 6) {
-    if (lower.startsWith("ff")) return true; // multicast
-    if (lower.startsWith("64:ff9b:")) return true; // NAT64
-    if (lower.startsWith("::ffff:")) return true; // any other mapped form
-    if (lower.startsWith("2001:db8:")) return true; // documentation
-    return false;
-  }
-  // Not an IP literal at all: never treat as safe.
-  return true;
-}
 
 /**
  * Validate a URL for plugin fetch: protocol whitelist + private IP blocking.
@@ -272,7 +214,10 @@ export interface PinnedHttpResponse {
   status: number;
   statusText: string;
   headers: Record<string, string>;
+  /** The body decoded as UTF-8 text. Damages binary content such as pictures. */
   body: string;
+  /** The body exactly as received. Use this for anything that is not text. */
+  bodyBytes: Buffer;
 }
 
 /**
@@ -328,6 +273,7 @@ export async function executePinnedHttpRequest(
     response.on("error", reject);
   });
 
+  const bodyBytes = Buffer.concat(chunks);
   const headers: Record<string, string> = {};
   for (const [key, value] of Object.entries(response.headers)) {
     if (Array.isArray(value)) {
@@ -341,7 +287,8 @@ export async function executePinnedHttpRequest(
     status: response.statusCode ?? 500,
     statusText: response.statusMessage ?? "",
     headers,
-    body: Buffer.concat(chunks).toString("utf8"),
+    body: bodyBytes.toString("utf8"),
+    bodyBytes,
   };
 }
 
@@ -365,6 +312,13 @@ export interface OutboundHostPolicy {
   /** Per request, including DNS. */
   timeoutMs: number;
   maxResponseBytes: number;
+  /**
+   * How many redirects to follow, and only to the SAME host over https (each
+   * hop is checked again from the top: host rule, DNS, address rule). A
+   * redirect to any other host is refused. Absent or 0: every 3xx is refused,
+   * which is what the business-data sources rely on.
+   */
+  maxSameHostRedirects?: number;
 }
 
 const DATA_SOURCE_REQUEST_TIMEOUT_MS = 10_000;
@@ -385,6 +339,36 @@ export const FIKEN_OUTBOUND_POLICY: OutboundHostPolicy = {
   hostPattern: new RegExp(`^${FIKEN_API_HOST.replace(/\./g, "\\.")}$`),
   timeoutMs: DATA_SOURCE_REQUEST_TIMEOUT_MS,
   maxResponseBytes: DATA_SOURCE_MAX_RESPONSE_BYTES,
+};
+
+/**
+ * Quick agents' web_search: Brave's one API host, nothing else. The key goes
+ * in a header, so it never appears in a URL, a log line or an error.
+ */
+export const BRAVE_SEARCH_OUTBOUND_POLICY: OutboundHostPolicy = {
+  sourceKind: "Brave Search",
+  protocols: ["https:"],
+  hostPattern: /^api\.search\.brave\.com$/,
+  timeoutMs: 8_000,
+  maxResponseBytes: 1024 * 1024,
+};
+
+/**
+ * Quick agents' read_web_page: any ordinary public web host. The name must be
+ * a dotted DNS name with an alphabetic top-level label -- so never an IP
+ * literal, never "localhost" -- and not one of the private-network suffixes
+ * below. Every resolved address must still be public (checked per request,
+ * like every policy here), so a public-looking name that points inside is
+ * refused too. Redirects are followed only on the same host.
+ */
+export const PUBLIC_WEB_PAGE_OUTBOUND_POLICY: OutboundHostPolicy = {
+  sourceKind: "web pages",
+  protocols: ["https:"],
+  hostPattern:
+    /^(?=.{4,253}$)(?!.*\.(?:local|localhost|internal|intranet|lan|home|corp|arpa|test|invalid|example)$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/,
+  timeoutMs: 10_000,
+  maxResponseBytes: 3 * 1024 * 1024,
+  maxSameHostRedirects: 3,
 };
 
 function escapeRegExp(value: string): string {
@@ -415,6 +399,143 @@ export function createWooCommerceOutboundPolicy(storeUrl: string): OutboundHostP
   };
 }
 
+/**
+ * paperless-ngx (DUR-4302): each company's container lives on the host's
+ * internal network, never publicly reachable, one port per company -- the
+ * mirror image of every policy above, which requires https and a *public*
+ * address. This policy pins to the exact host and port recorded on that
+ * company's own connection row (set only by a board owner/admin or a host
+ * step, never by an agent or a tool call) and the fetch built from it
+ * (createPinnedInternalFetch) refuses:
+ *   - any other host or port than the one pinned,
+ *   - any redirect at all (none are ever followed, even same-host),
+ *   - any resolved address that is NOT private/internal -- so a DNS answer
+ *     that later points the pinned name at a public address is refused at
+ *     request time, not followed.
+ * Nothing here reaches the public internet; it is the one transport allowed
+ * to reach an internal address at all, and only this one, pinned, host:port.
+ */
+export interface PinnedInternalHostPolicy {
+  sourceKind: "paperless_ngx";
+  protocol: "http:" | "https:";
+  host: string;
+  port: number;
+  timeoutMs: number;
+  maxResponseBytes: number;
+}
+
+/** Built from the host/port on that company's own `paperless_ngx` connection row. Never from input at request time. */
+export function createPaperlessNgxOutboundPolicy(host: string, port: number): PinnedInternalHostPolicy {
+  return {
+    sourceKind: "paperless_ngx",
+    protocol: "http:",
+    host: host.toLowerCase(),
+    port,
+    timeoutMs: DATA_SOURCE_REQUEST_TIMEOUT_MS,
+    maxResponseBytes: DATA_SOURCE_MAX_RESPONSE_BYTES,
+  };
+}
+
+/**
+ * A fetch that can reach only the single pinned host:port in `policy`, and
+ * only at a private/internal address. The opposite address rule from
+ * createSafeOutboundFetch on purpose: this transport's whole point is to
+ * reach a container that is never publicly reachable, so a resolved address
+ * that turns out to be public is refused, not trusted.
+ */
+export function createPinnedInternalFetch(
+  policy: PinnedInternalHostPolicy,
+  deps: SafeOutboundFetchDeps = {},
+): OutboundFetch {
+  const guarded = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    if (typeof input !== "string" && !(input instanceof URL)) {
+      throw new SafeOutboundFetchError("invalid_url", "The address is not valid.");
+    }
+    const url = input.toString();
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new SafeOutboundFetchError("invalid_url", "The address is not valid.");
+    }
+    if (parsed.protocol !== policy.protocol) {
+      throw new SafeOutboundFetchError(
+        "protocol_not_allowed",
+        `Only ${policy.protocol.replace(/:$/, "")} is allowed for paperless-ngx.`,
+      );
+    }
+    if (parsed.username || parsed.password) {
+      throw new SafeOutboundFetchError("credentials_in_url", "The address cannot contain a username or password.");
+    }
+    const host = parsed.hostname.toLowerCase();
+    const defaultPort = policy.protocol === "https:" ? 443 : 80;
+    const port = parsed.port ? Number(parsed.port) : defaultPort;
+    if (host !== policy.host || port !== policy.port) {
+      throw new SafeOutboundFetchError(
+        "host_not_allowed",
+        "This address does not match the paperless-ngx container configured for this company.",
+      );
+    }
+
+    const signal = init?.signal
+      ? AbortSignal.any([AbortSignal.timeout(policy.timeoutMs), init.signal])
+      : AbortSignal.timeout(policy.timeoutMs);
+    let target: ValidatedFetchTarget;
+    try {
+      target = await validateAndResolveFetchUrl(parsed.toString(), {
+        lookup: deps.lookup,
+        // Inverted from every public-facing policy: every resolved address
+        // must be private/internal, or the request is refused.
+        isBlockedAddress: (ip) => !isNonPublicAddress(ip),
+        requireAllPublic: true,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      if (message.startsWith("All resolved IPs") || message.includes("must be public")) {
+        throw new SafeOutboundFetchError(
+          "address_not_internal",
+          `${host} resolved to a public address and will not be contacted.`,
+        );
+      }
+      throw new SafeOutboundFetchError("dns_failed", `Could not find the address ${host}.`);
+    }
+
+    let response: PinnedHttpResponse;
+    try {
+      response = await executePinnedHttpRequest(target, { method: init?.method, headers: init?.headers, body: init?.body }, signal, {
+        maxResponseBytes: policy.maxResponseBytes,
+        testOnlyDial: deps.testOnlyDial,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      if (message.startsWith("Response body exceeded")) {
+        throw new SafeOutboundFetchError("response_too_large", `The response from ${host} was too large.`);
+      }
+      if (signal.aborted) {
+        throw new SafeOutboundFetchError("timeout", `${host} did not respond within ${Math.round(policy.timeoutMs / 1000)} seconds.`);
+      }
+      throw new SafeOutboundFetchError("network_error", `Could not reach ${host}.`);
+    }
+
+    // No redirect is ever followed, same host or not: the only valid
+    // destination is the one pinned host:port.
+    if (response.status >= 300 && response.status < 400) {
+      throw new SafeOutboundFetchError(
+        "redirect_refused",
+        `${host} tried to redirect the request to another address. That is not allowed.`,
+      );
+    }
+
+    const bodyAllowed = response.status !== 204 && response.status !== 205 && response.status >= 200;
+    return new Response(bodyAllowed ? new Uint8Array(response.bodyBytes) : null, {
+      status: response.status < 200 || response.status > 599 ? 502 : response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
+  };
+  return ((input: RequestInfo | URL, init?: RequestInit) => guarded(input, init)) as OutboundFetch;
+}
+
 export type SafeOutboundRefusalCode =
   | "invalid_url"
   | "protocol_not_allowed"
@@ -422,6 +543,7 @@ export type SafeOutboundRefusalCode =
   | "credentials_in_url"
   | "port_not_allowed"
   | "address_not_public"
+  | "address_not_internal"
   | "dns_failed"
   | "redirect_refused"
   | "response_too_large"
@@ -473,7 +595,7 @@ export function createSafeOutboundFetch(
   policy: OutboundHostPolicy,
   deps: SafeOutboundFetchDeps = {},
 ): OutboundFetch {
-  const guarded = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+  const guarded = async (input: RequestInfo | URL, init?: RequestInit, redirectsFollowed = 0): Promise<Response> => {
     if (typeof input !== "string" && !(input instanceof URL)) {
       // A Request object carries its own headers/body/redirect mode; refuse it
       // rather than half-honour it.
@@ -544,6 +666,24 @@ export function createSafeOutboundFetch(
     }
 
     if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.location;
+      const maxRedirects = policy.maxSameHostRedirects ?? 0;
+      if (location && redirectsFollowed < maxRedirects) {
+        let next: URL | null = null;
+        try {
+          next = new URL(location, parsed);
+        } catch {
+          next = null;
+        }
+        // Same host, https, no credentials: follow it through every check
+        // again. Anything else is the classic bounce to somewhere not allowed.
+        if (next && next.protocol === "https:" && next.hostname.toLowerCase() === host) {
+          const method = (init?.method ?? "GET").toUpperCase();
+          if (method === "GET" || method === "HEAD") {
+            return guarded(next.toString(), { ...init, method }, redirectsFollowed + 1);
+          }
+        }
+      }
       throw new SafeOutboundFetchError(
         "redirect_refused",
         `${host} tried to redirect the request to another address. That is not allowed.`,
@@ -551,11 +691,11 @@ export function createSafeOutboundFetch(
     }
 
     const bodyAllowed = response.status !== 204 && response.status !== 205 && response.status >= 200;
-    return new Response(bodyAllowed ? response.body : null, {
+    return new Response(bodyAllowed ? new Uint8Array(response.bodyBytes) : null, {
       status: response.status < 200 || response.status > 599 ? 502 : response.status,
       statusText: response.statusText,
       headers: response.headers,
     });
   };
-  return guarded as OutboundFetch;
+  return ((input: RequestInfo | URL, init?: RequestInit) => guarded(input, init)) as OutboundFetch;
 }

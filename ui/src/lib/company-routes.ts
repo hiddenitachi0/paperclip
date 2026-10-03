@@ -26,6 +26,7 @@ const BOARD_ROUTE_ROOTS = new Set([
   "skills",
   "tools",
   "jobs",
+  "positions",
   "teams-catalog",
   "org",
   "agents",
@@ -34,6 +35,10 @@ const BOARD_ROUTE_ROOTS = new Set([
   "execution-workspaces",
   "issues",
   "routines",
+  "workflow-map",
+  "watchers",
+  "trading",
+  "product-grabber",
   "goals",
   "files",
   "artifacts",
@@ -43,11 +48,13 @@ const BOARD_ROUTE_ROOTS = new Set([
   "usage",
   "activity",
   "inbox",
+  "email",
   "board-chat",
   "u",
   "design-guide",
   "search",
   "settings",
+  "media-studio",
 ]);
 
 const GLOBAL_ROUTE_ROOTS = new Set(["auth", "invite", "board-claim", "cli-auth", "docs", "instance"]);

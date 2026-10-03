@@ -3,8 +3,21 @@ import {
   LANE_A_MODELS,
   LANE_A_MODEL_CATALOGUE,
   LANE_A_PROVIDERS,
+  LANE_A_MAX_TEMPERATURE,
+  LANE_A_MIN_TEMPERATURE,
   LANE_A_PROVIDER_CATALOGUE,
+  LANE_A_PROVIDER_ROUTING_MAX_ENTRIES,
+  LANE_A_PROVIDER_SLUG_RE,
+  LANE_A_TEMPERATURE_PRESETS,
   isLaneAModelForProvider,
+  laneAProviderRoutingForCall,
+  normalizeLaneAProviderRouting,
+  parseLaneAProviderSlugList,
+  laneAModelAcceptsTemperature,
+  laneATemperatureForCall,
+  LANE_A_THINKING_MODES,
+  laneAModelAcceptsReasoningEffort,
+  laneAThinkingForCall,
   laneAModelCostCents,
   laneAModelIssueForProvider,
   laneAProviderModelCostCents,
@@ -12,7 +25,7 @@ import {
   normalizeLaneAProvider,
   resolveLaneAModelForProvider,
 } from "./lane-a-models.js";
-import { QUICK_AGENT_FIELDS, createAgentSchema, laneAProviderModelIssue } from "./validators/agent.js";
+import { QUICK_AGENT_FIELDS, createAgentSchema, laneAProviderModelIssue, updateAgentSchema } from "./validators/agent.js";
 
 // DUR-3997: the per-provider catalogue. The Claude entries and prices must be
 // what they were before this change (every existing quick agent has a null
@@ -74,6 +87,17 @@ describe("lane A provider catalogue", () => {
     });
     // A local model is free by definition: priced, at 0.
     expect(laneAProviderModelCostCents("local", "llama3.1", 1_000_000, 0)).toEqual({ costCents: 0, priced: true });
+  });
+
+  // DUR-4353: this OpenRouter model id had no catalogue entry, so a quick
+  // agent pointed at it (a real production setup, 2 Oct 2026) recorded every
+  // call's cost as 0 — real spend read as free. Freeform acceptance (above)
+  // and a priced catalogue entry are independent; this pins that a free-form
+  // id Paperclip actually knows the price of is priced, not just accepted.
+  it("prices a known free-form OpenRouter model instead of recording its spend as 0", () => {
+    expect(
+      laneAProviderModelCostCents("openrouter", "mistralai/mistral-small-3.2-24b-instruct", 1_000_000, 1_000_000),
+    ).toEqual({ costCents: 28, priced: true }); // 7.5 + 20 cents, rounded to the nearest whole cent
   });
 
   it("accepts a model only for the provider it belongs to; free-form only for OpenRouter and local", () => {
@@ -162,5 +186,193 @@ describe("quick-agent validators (DUR-3997)", () => {
       createAgentSchema.safeParse({ ...base, adapterConfig: { laneA: { apiKey: { type: "plain", value: "x" } } } })
         .success,
     ).toBe(false);
+  });
+});
+
+describe("quick-agent creativity (sampling temperature)", () => {
+  const base = { name: "Front desk", adapterType: "claude_local" as const };
+
+  it("is a board-only quick-agent field", () => {
+    expect(QUICK_AGENT_FIELDS).toContain("laneATemperature");
+  });
+
+  it("accepts 0-1.5 and null (model default) on create and on PATCH", () => {
+    for (const value of [0, 0.2, 0.6, 0.9, 1.2, 1.5, null]) {
+      expect(createAgentSchema.safeParse({ ...base, laneATemperature: value }).success, String(value)).toBe(true);
+      expect(updateAgentSchema.safeParse({ laneATemperature: value }).success, String(value)).toBe(true);
+    }
+    // Left out entirely: nothing is changed.
+    expect(updateAgentSchema.parse({})).not.toHaveProperty("laneATemperature");
+  });
+
+  it("refuses anything outside 0-1.5, and anything that is not a number", () => {
+    for (const value of [-0.1, 1.51, 2, Number.POSITIVE_INFINITY, Number.NaN, "0.9", true]) {
+      expect(createAgentSchema.safeParse({ ...base, laneATemperature: value }).success, String(value)).toBe(false);
+      expect(updateAgentSchema.safeParse({ laneATemperature: value }).success, String(value)).toBe(false);
+    }
+    const tooHigh = updateAgentSchema.safeParse({ laneATemperature: 2 });
+    expect(tooHigh.success).toBe(false);
+    expect(JSON.stringify(tooHigh.error?.issues)).toContain("Creativity must be between 0 and 1.5.");
+  });
+
+  it("offers four plain-language steps, all inside the stored range", () => {
+    expect(LANE_A_TEMPERATURE_PRESETS.map((p) => p.label)).toEqual(["Precise", "Balanced", "Lively", "Very lively"]);
+    for (const preset of LANE_A_TEMPERATURE_PRESETS) {
+      expect(preset.value).toBeGreaterThanOrEqual(LANE_A_MIN_TEMPERATURE);
+      expect(preset.value).toBeLessThanOrEqual(LANE_A_MAX_TEMPERATURE);
+    }
+  });
+
+  it("knows which models take a temperature: Claude Haiku yes, Sonnet 5 / Opus 5 no, OpenAI reasoning models no", () => {
+    expect(laneAModelAcceptsTemperature("anthropic", "claude-haiku-4-5")).toBe(true);
+    // Null provider/model = Claude on the default model (Sonnet 5).
+    expect(laneAModelAcceptsTemperature(null, null)).toBe(false);
+    expect(laneAModelAcceptsTemperature("anthropic", "claude-sonnet-5")).toBe(false);
+    expect(laneAModelAcceptsTemperature("anthropic", "claude-opus-5")).toBe(false);
+    expect(laneAModelAcceptsTemperature("openai", "gpt-4.1-mini")).toBe(true);
+    expect(laneAModelAcceptsTemperature("openai", "o4-mini")).toBe(false);
+    expect(laneAModelAcceptsTemperature("google", "gemini-2.5-flash")).toBe(true);
+    expect(laneAModelAcceptsTemperature("openrouter", "mistralai/mistral-small-3.2-24b-instruct")).toBe(true);
+    expect(laneAModelAcceptsTemperature("local", "llama3.1")).toBe(true);
+  });
+
+  it("resolves the value a call is made with: clamped for Claude, dropped where refused or invalid", () => {
+    expect(laneATemperatureForCall("openrouter", "mistralai/mistral-small-3.2-24b-instruct", 1.2)).toBe(1.2);
+    expect(laneATemperatureForCall("openrouter", "x/y", null)).toBeNull();
+    expect(laneATemperatureForCall("openrouter", "x/y", undefined)).toBeNull();
+    expect(laneATemperatureForCall("openrouter", "x/y", 0)).toBe(0);
+    expect(laneATemperatureForCall("anthropic", "claude-haiku-4-5", 1.2)).toBe(1);
+    expect(laneATemperatureForCall("anthropic", "claude-haiku-4-5", 0.6)).toBe(0.6);
+    expect(laneATemperatureForCall("anthropic", "claude-sonnet-5", 0.6)).toBeNull();
+    expect(laneATemperatureForCall("openai", "o4-mini", 0.6)).toBeNull();
+    // A value that somehow got past validation is never forwarded.
+    expect(laneATemperatureForCall("local", "llama3.1", 3)).toBeNull();
+    expect(laneATemperatureForCall("local", "llama3.1", -1)).toBeNull();
+    expect(laneATemperatureForCall("local", "llama3.1", Number.NaN)).toBeNull();
+  });
+});
+
+describe("quick-agent thinking (DUR-4367)", () => {
+  const base = { name: "Front desk", adapterType: "claude_local" as const };
+
+  it("is a board-only quick-agent field", () => {
+    expect(QUICK_AGENT_FIELDS).toContain("laneAThinking");
+  });
+
+  it("accepts on/off/null (model default) on create and on PATCH", () => {
+    for (const value of [...LANE_A_THINKING_MODES, null]) {
+      expect(createAgentSchema.safeParse({ ...base, laneAThinking: value }).success, String(value)).toBe(true);
+      expect(updateAgentSchema.safeParse({ laneAThinking: value }).success, String(value)).toBe(true);
+    }
+    // Left out entirely: nothing is changed.
+    expect(updateAgentSchema.parse({})).not.toHaveProperty("laneAThinking");
+  });
+
+  it("refuses anything that is not on/off/null", () => {
+    for (const value of ["maybe", "ON", 1, true, ""]) {
+      expect(createAgentSchema.safeParse({ ...base, laneAThinking: value }).success, String(value)).toBe(false);
+      expect(updateAgentSchema.safeParse({ laneAThinking: value }).success, String(value)).toBe(false);
+    }
+  });
+
+  it("knows which providers/models accept reasoning_effort: OpenRouter and local yes, OpenAI reasoning models yes, everything else no", () => {
+    expect(laneAModelAcceptsReasoningEffort("openrouter", "x/y")).toBe(true);
+    expect(laneAModelAcceptsReasoningEffort("local", "llama3.1")).toBe(true);
+    expect(laneAModelAcceptsReasoningEffort("openai", "o4-mini")).toBe(true);
+    // Plain OpenAI chat models are not reasoning models and refuse an unknown field.
+    expect(laneAModelAcceptsReasoningEffort("openai", "gpt-4.1-mini")).toBe(false);
+    expect(laneAModelAcceptsReasoningEffort("google", "gemini-2.5-flash")).toBe(false);
+    expect(laneAModelAcceptsReasoningEffort("anthropic", "claude-haiku-4-5")).toBe(false);
+    // Null provider/model = Claude on the default model (Sonnet 5).
+    expect(laneAModelAcceptsReasoningEffort(null, null)).toBe(false);
+  });
+
+  it("resolves the value a call is made with: only 'off' ever sends anything, and only where accepted", () => {
+    expect(laneAThinkingForCall("openrouter", "x/y", "off")).toBe("none");
+    expect(laneAThinkingForCall("local", "llama3.1", "off")).toBe("none");
+    expect(laneAThinkingForCall("openai", "o4-mini", "off")).toBe("none");
+    // "on" and "model default" (null/undefined) never send anything, regardless of provider.
+    expect(laneAThinkingForCall("openrouter", "x/y", "on")).toBeNull();
+    expect(laneAThinkingForCall("openrouter", "x/y", null)).toBeNull();
+    expect(laneAThinkingForCall("openrouter", "x/y", undefined)).toBeNull();
+    // "off" on a provider/model not known to accept the field sends nothing.
+    expect(laneAThinkingForCall("google", "gemini-2.5-flash", "off")).toBeNull();
+    expect(laneAThinkingForCall("anthropic", "claude-haiku-4-5", "off")).toBeNull();
+    expect(laneAThinkingForCall("openai", "gpt-4.1-mini", "off")).toBeNull();
+    // A value that somehow got past validation is never forwarded.
+    expect(laneAThinkingForCall("openrouter", "x/y", "nonsense")).toBeNull();
+  });
+});
+
+describe("quick-agent model hosts (OpenRouter provider routing)", () => {
+  const base = { name: "Front desk", adapterType: "claude_local" as const };
+
+  it("is a board-only quick-agent field", () => {
+    expect(QUICK_AGENT_FIELDS).toContain("laneAProviderRouting");
+  });
+
+  it("accepts host lists, the fallback switch and null on create and on PATCH, lower-casing the hosts", () => {
+    const routing = { only: [" DeepInfra "], order: ["deepinfra", "mistral"], ignore: ["venice"], allowFallbacks: false };
+    expect(createAgentSchema.parse({ ...base, laneAProviderRouting: routing }).laneAProviderRouting).toEqual({
+      only: ["deepinfra"],
+      order: ["deepinfra", "mistral"],
+      ignore: ["venice"],
+      allowFallbacks: false,
+    });
+    expect(updateAgentSchema.parse({ laneAProviderRouting: { only: ["deepinfra"] } }).laneAProviderRouting).toEqual({
+      only: ["deepinfra"],
+    });
+    expect(updateAgentSchema.safeParse({ laneAProviderRouting: null }).success).toBe(true);
+    expect(updateAgentSchema.parse({})).not.toHaveProperty("laneAProviderRouting");
+  });
+
+  it("refuses hosts that are not a slug, too many hosts, and unknown keys", () => {
+    for (const value of [
+      { only: ["deep infra"] },
+      { only: ["-deepinfra"] },
+      { only: [""] },
+      { only: ["a".repeat(65)] },
+      { ignore: Array.from({ length: LANE_A_PROVIDER_ROUTING_MAX_ENTRIES + 1 }, (_, i) => `host${i}`) },
+      { only: "deepinfra" },
+      { allowFallbacks: "no" },
+      { sort: "price" },
+      ["deepinfra"],
+    ]) {
+      expect(updateAgentSchema.safeParse({ laneAProviderRouting: value }).success, JSON.stringify(value)).toBe(false);
+    }
+  });
+
+  it("cleans a stored value defensively: bad entries dropped, duplicates removed, nothing left = null", () => {
+    expect(normalizeLaneAProviderRouting(null)).toBeNull();
+    expect(normalizeLaneAProviderRouting({})).toBeNull();
+    expect(normalizeLaneAProviderRouting({ only: [] })).toBeNull();
+    expect(normalizeLaneAProviderRouting("deepinfra")).toBeNull();
+    expect(
+      normalizeLaneAProviderRouting({
+        only: ["DeepInfra", "deepinfra", "not a host", 7],
+        ignore: ["venice"],
+        allowFallbacks: true,
+      }),
+    ).toEqual({ only: ["deepinfra"], ignore: ["venice"], allowFallbacks: true });
+    expect(LANE_A_PROVIDER_SLUG_RE.test("deepinfra")).toBe(true);
+    expect(LANE_A_PROVIDER_SLUG_RE.test("DeepInfra")).toBe(false);
+  });
+
+  it("applies only to OpenRouter", () => {
+    const routing = { only: ["deepinfra"] };
+    expect(laneAProviderRoutingForCall("openrouter", routing)).toEqual(routing);
+    for (const provider of [null, "anthropic", "openai", "google", "local"]) {
+      expect(laneAProviderRoutingForCall(provider, routing), String(provider)).toBeNull();
+    }
+  });
+
+  it("splits what an operator typed into hosts, and names what it did not understand", () => {
+    expect(parseLaneAProviderSlugList("DeepInfra, mistral,,  venice")).toEqual({
+      slugs: ["deepinfra", "mistral", "venice"],
+      invalid: [],
+    });
+    expect(parseLaneAProviderSlugList("")).toEqual({ slugs: [], invalid: [] });
+    expect(parseLaneAProviderSlugList("deepinfra, deepinfra")).toEqual({ slugs: ["deepinfra"], invalid: [] });
+    expect(parseLaneAProviderSlugList("deepinfra, Infra!")).toEqual({ slugs: ["deepinfra"], invalid: ["Infra!"] });
   });
 });

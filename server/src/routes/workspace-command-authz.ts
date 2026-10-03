@@ -71,6 +71,20 @@ export function collectProjectExecutionWorkspaceCommandPaths(policy: unknown): s
  * starts a preview copy and the one that deploys. They are host commands like
  * any other, so an agent key must not be able to set or change them from a
  * project write.
+ *
+ * DUR-4106: the SFTP transport fields carry the same (arguably higher) risk
+ * as those commands — the box authenticates to `sftpHost`/`sftpUsername` with
+ * whichever real credential is bound to `requestingAgentId`, so an agent key
+ * that could set any of these could redirect that credential to a host it
+ * chooses and have it exfiltrated on the runner's next tick. Same board-only
+ * bar as the credential bind/unbind routes themselves.
+ *
+ * DUR-4139: `mode` and `askFirstActions` decide whether a deploy needs a
+ * request_board_approval card at all (see deploy-policy-enforcement.ts) --
+ * an agent key that could set either of these on its own project could
+ * switch itself to `auto_after_review` and clear the ask-first list in the
+ * same write that requests the deploy, defeating the whole point of the
+ * policy. Same board-only bar as the fields above.
  */
 export function collectDeployPolicyCommandPaths(deployPolicy: unknown): string[] {
   if (!isRecord(deployPolicy)) return [];
@@ -81,7 +95,42 @@ export function collectDeployPolicyCommandPaths(deployPolicy: unknown): string[]
   if (hasOwn(deployPolicy, "deployCommand")) {
     paths.push("deployPolicy.deployCommand");
   }
+  if (hasOwn(deployPolicy, "requestingAgentId")) {
+    paths.push("deployPolicy.requestingAgentId");
+  }
+  if (hasOwn(deployPolicy, "sftpHost")) {
+    paths.push("deployPolicy.sftpHost");
+  }
+  if (hasOwn(deployPolicy, "sftpPort")) {
+    paths.push("deployPolicy.sftpPort");
+  }
+  if (hasOwn(deployPolicy, "sftpUsername")) {
+    paths.push("deployPolicy.sftpUsername");
+  }
+  if (hasOwn(deployPolicy, "sftpRemotePath")) {
+    paths.push("deployPolicy.sftpRemotePath");
+  }
+  if (hasOwn(deployPolicy, "sftpAllowlist")) {
+    paths.push("deployPolicy.sftpAllowlist");
+  }
+  if (hasOwn(deployPolicy, "mode")) {
+    paths.push("deployPolicy.mode");
+  }
+  if (hasOwn(deployPolicy, "askFirstActions")) {
+    paths.push("deployPolicy.askFirstActions");
+  }
   return paths;
+}
+
+/**
+ * DUR-4106: `deployTransport` lives on the project record itself, not inside
+ * `deployPolicy`, but deciding "sftp" is exactly as host-trusted as any of
+ * the deployPolicy fields above -- it is what makes the runner call
+ * upload_via_sftp with a real bound credential instead of running a recipe.
+ */
+export function collectProjectDeployTransportCommandPaths(body: unknown): string[] {
+  if (!isRecord(body)) return [];
+  return hasOwn(body, "deployTransport") ? ["deployTransport"] : [];
 }
 
 export function collectProjectWorkspaceCommandPaths(

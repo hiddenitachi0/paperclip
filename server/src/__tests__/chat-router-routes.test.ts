@@ -46,6 +46,10 @@ vi.mock("../services/index.js", () => ({
   secretaryClassifierService: () => mockSecretaryClassifierService,
 }));
 
+const mockFindResearchSkillLink = vi.hoisted(() => vi.fn(async () => "[research-and-plan](skill://skill-1?s=research-and-plan)"));
+
+vi.mock("../services/research-skill-link.js", () => ({ findResearchSkillLink: mockFindResearchSkillLink }));
+
 function makeAgent(overrides: Partial<{ id: string; companyId: string; name: string; laneAEnabled: boolean }> = {}) {
   return {
     id: targetAgentId,
@@ -166,6 +170,42 @@ describe("chat router routes", () => {
       targetAgentId,
       expect.objectContaining({ payload: expect.objectContaining({ issueId: "issue-1" }) }),
     );
+  });
+
+  it("gives a research request that goes straight to a quick agent's task the research notes, brief first", async () => {
+    mockAgentService.getById.mockResolvedValue(makeAgent({ laneAEnabled: true }));
+    mockIssueService.create.mockResolvedValue({ id: "issue-9", identifier: "PAP-50", status: "todo", assigneeAgentId: targetAgentId });
+    const app = await createApp(boardActor());
+    const message = "Research the best price on a Moccamaster KBG Select delivered in Norway";
+
+    const res = await request(app).post(`/api/chat/${targetAgentId}/messages`).send({ companyId, message, laneHint: "b" });
+
+    expect(res.status).toBe(201);
+    const created = mockIssueService.create.mock.calls[0]![1] as { description: string; title: string };
+    expect(created.title).toBe(message);
+    expect(created.description.startsWith(`${message}\n\n---`)).toBe(true);
+    expect(created.description).toContain("**If this is a research or planning request**");
+    expect(created.description).toContain("[research-and-plan](skill://skill-1?s=research-and-plan)");
+    expect(created.description).toContain("key `result`");
+    expect(mockFindResearchSkillLink).toHaveBeenCalledWith(expect.anything(), companyId);
+  });
+
+  it("leaves other tasks, and tasks for agents without quick answers, exactly as written", async () => {
+    mockIssueService.create.mockResolvedValue({ id: "issue-8", identifier: "PAP-49", status: "todo", assigneeAgentId: targetAgentId });
+    const app = await createApp(boardActor());
+
+    mockAgentService.getById.mockResolvedValue(makeAgent({ laneAEnabled: true }));
+    await request(app).post(`/api/chat/${targetAgentId}/messages`).send({ companyId, message: "please fix the broken build" });
+    mockAgentService.getById.mockResolvedValue(makeAgent({ laneAEnabled: false }));
+    await request(app)
+      .post(`/api/chat/${targetAgentId}/messages`)
+      .send({ companyId, message: "Research the best price on a Moccamaster", laneHint: "b" });
+
+    expect(mockIssueService.create.mock.calls.map((call) => (call[1] as { description: string }).description)).toEqual([
+      "please fix the broken build",
+      "Research the best price on a Moccamaster",
+    ]);
+    expect(mockFindResearchSkillLink).not.toHaveBeenCalled();
   });
 
   it("routes a short message with a work keyword to Lane B", async () => {
@@ -376,7 +416,7 @@ describe("POST /chat/classify", () => {
   // on which endpoint the UI happened to call.
   it("passes the per-agent model and output ceiling into Lane A", async () => {
     mockAgentService.getById.mockResolvedValue(
-      makeAgent({ laneAModel: "claude-haiku-4-5", laneAMaxOutputTokens: 400 } as never),
+      makeAgent({ laneAModel: "claude-haiku-4-5", laneAMaxOutputTokens: 400, laneATemperature: 0.9, laneAProviderRouting: { only: ["deepinfra"] } } as never),
     );
     mockLaneAService.sendMessage.mockResolvedValue({
       conversationId: "conv-1",
@@ -393,6 +433,49 @@ describe("POST /chat/classify", () => {
     expect(mockLaneAService.sendMessage.mock.calls[0][0].targetAgent).toMatchObject({
       laneAModel: "claude-haiku-4-5",
       laneAMaxOutputTokens: 400,
+      laneATemperature: 0.9,
+      laneAProviderRouting: { only: ["deepinfra"] },
+    });
+  });
+
+  // DUR-4070: this router (not routes/lane-a.ts) is what both the web chat
+  // box and the Telegram bridge's `chat send` actually call (see this file's
+  // module docstring). Forgetting to read laneAAssignedUserIds off the row
+  // here would make every one of this agent's assigned people read as "owner
+  // only" on both of those paths, even though the operator assigned them.
+  it("passes this agent's assigned people into Lane A", async () => {
+    mockAgentService.getById.mockResolvedValue(
+      makeAgent({ laneAAssignedUserIds: ["employee-1", "employee-2"] } as never),
+    );
+    mockLaneAService.sendMessage.mockResolvedValue({
+      conversationId: "conv-1",
+      response: "Hi!",
+      turnCount: 1,
+      stopReason: "end_turn",
+    });
+    const app = await createApp(boardActor());
+
+    await request(app).post(`/api/chat/${targetAgentId}/messages`).send({ companyId, message: "hi" });
+
+    expect(mockLaneAService.sendMessage.mock.calls[0][0].targetAgent).toMatchObject({
+      laneAAssignedUserIds: ["employee-1", "employee-2"],
+    });
+  });
+
+  it("defaults to no assigned people (owner only) when the agent row has none", async () => {
+    mockAgentService.getById.mockResolvedValue(makeAgent());
+    mockLaneAService.sendMessage.mockResolvedValue({
+      conversationId: "conv-1",
+      response: "Hi!",
+      turnCount: 1,
+      stopReason: "end_turn",
+    });
+    const app = await createApp(boardActor());
+
+    await request(app).post(`/api/chat/${targetAgentId}/messages`).send({ companyId, message: "hi" });
+
+    expect(mockLaneAService.sendMessage.mock.calls[0][0].targetAgent).toMatchObject({
+      laneAAssignedUserIds: [],
     });
   });
 });

@@ -158,6 +158,40 @@ describeEmbeddedPostgres("agent service secret binding sync", () => {
     expect(await bindingsFor()).toHaveLength(0);
   });
 
+  // DUR-4406: the per-provider stash is a second place a secret_ref can sit,
+  // so it must be bound (and unbound) exactly like laneA.apiKey.
+  it("binds laneA.apiKeyByProvider.<provider> refs and unbinds them when removed", async () => {
+    const companyId = await seedCompany();
+    const secret = await secretService(db).create(companyId, {
+      name: `or-${randomUUID()}`,
+      provider: "local_encrypted",
+      value: "sk-or-123",
+    });
+    const created = await agentService(db).create(companyId, {
+      name: "Stash",
+      role: "engineer",
+      status: "active",
+      adapterType: "claude_local",
+      adapterConfig: {
+        laneA: { apiKeyByProvider: { openrouter: { type: "secret_ref", secretId: secret.id, version: "latest" } } },
+      },
+      runtimeConfig: {},
+      spentMonthlyCents: 0,
+      lastHeartbeatAt: null,
+    });
+    const bindingsFor = () =>
+      db.select().from(companySecretBindings).where(and(
+        eq(companySecretBindings.companyId, companyId),
+        eq(companySecretBindings.targetType, "agent"),
+        eq(companySecretBindings.targetId, created.id),
+      ));
+    expect(await bindingsFor()).toMatchObject([
+      { secretId: secret.id, configPath: "laneA.apiKeyByProvider.openrouter", versionSelector: "latest" },
+    ]);
+    await agentService(db).update(created.id, { adapterConfig: { laneA: { apiKeyByProvider: {} } } });
+    expect(await bindingsFor()).toHaveLength(0);
+  });
+
   it("converts Hermes gateway apiKey strings into persisted secret refs", async () => {
     const companyId = await seedCompany();
     const literalApiKey = `hermes-key-${randomUUID()}`;

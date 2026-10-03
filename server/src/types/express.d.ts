@@ -74,6 +74,18 @@ declare global {
        * about the route, not about the credential.
        */
       serviceRouteOptIn?: true;
+      /**
+       * DUR-4094 default-deny marker for the "Employee (light)" company
+       * role, the same shape as `serviceRouteOptIn` above. Set by
+       * `assertLightAllowed` (and only there) once it has confirmed the
+       * signed-in board user's role in this company is not `employee`, or
+       * that it is and the admin has switched the named feature on for
+       * them. `assertCompanyAccess` refuses a board actor whose active
+       * membership role is `employee` when this is absent, so every one of
+       * the ~300 existing `assertCompanyAccess` call sites stays closed to
+       * light employees with no route-by-route audit required.
+       */
+      lightRouteOptIn?: true;
     }
   }
 }

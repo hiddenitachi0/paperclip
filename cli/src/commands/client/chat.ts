@@ -17,8 +17,24 @@ import {
  *                 straight back, real work becomes a task.
  *   chat answers  the agent's latest answer for tasks started from a chat
  *                 (GET /api/companies/:companyId/issue-answers).
+ *   chat image    the bytes of a picture a quick agent's reply carried
+ *                 (GET /api/attachments/:id/content), base64 in JSON, so the
+ *                 bridge can upload it to Telegram without handing Telegram
+ *                 a private Paperclip address.
+ *   chat media    DUR-4062: the same, but for a Media Studio video or audio
+ *                 file (image/*, video/* or audio/* — not JUST a picture),
+ *                 up to a larger byte limit (video files are bigger).
  *
- * Both take the company as an explicit --company-id. The bridge passes the
+ *   chat continue start a new quick-agent conversation that carries the relevant
+ *                 part of this person's recent chat with the agent
+ *                 (POST /api/lane-a/:agentId/continue); Telegram `/cont`.
+ *   chat memory   the agent's memory notebook (GET /api/agents/:agentId/memories);
+ *                 Telegram `/memory`.
+ *   chat looks    Media Studio's saved looks through the agent's ticked "List
+ *                 saved looks" tool (GET /api/lane-a/:agentId/looks); Telegram
+ *                 `/looks`.
+ *
+ * All take the company as an explicit --company-id. The bridge passes the
  * company from its bot config, never from message text.
  *
  * `chat send --json` prints an outcome object in every case the server
@@ -32,6 +48,14 @@ interface ChatSendOptions extends BaseClientOptions {
   message: string;
   conversationId?: string;
   lane?: string;
+}
+
+interface ChatReactionOptions extends BaseClientOptions {
+  event: string;
+}
+
+interface ChatContinueOptions extends BaseClientOptions {
+  spec?: string;
 }
 
 export type ChatSendOutcome =
@@ -68,6 +92,141 @@ export function registerChatCommands(program: Command): void {
 
   addCommonClientOptions(
     chat
+      .command("continue")
+      .description(
+        "Start a new quick-answer conversation that carries on from your earlier chat with the agent: nothing for the last conversation, a time (\"last 45 minutes\", \"this morning\") or a topic (\"our meeting today\"). With --json a refusal is printed as {ok:false,...} and exits 0.",
+      )
+      .argument("<agentId>", "Agent ID")
+      .requiredOption("-C, --company-id <id>", "Company ID")
+      .option("--spec <text>", "What to continue: a time or a topic; leave out for the last conversation")
+      .action(async (agentId: string, opts: ChatContinueOptions) => {
+        try {
+          const outcome = await runChatContinue(agentId, opts);
+          if (!outcome.ok && !opts.json) {
+            throw new ApiRequestError(outcome.status, outcome.error);
+          }
+          printOutput(outcome, { json: opts.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+    { includeCompany: false },
+  );
+
+  addCommonClientOptions(
+    chat
+      .command("memory")
+      .description(
+        "The agent's memory notebook: the notes it was asked to remember, newest first. With --json a refusal is printed as {ok:false,...} and exits 0.",
+      )
+      .argument("<agentId>", "Agent ID")
+      .requiredOption("-C, --company-id <id>", "Company ID")
+      .action(async (agentId: string, opts: BaseClientOptions) => {
+        try {
+          const outcome = await runChatGet(apiPath`/api/agents/${agentId}/memories`, opts);
+          if (!outcome.ok && !opts.json) {
+            throw new ApiRequestError(outcome.status, outcome.error);
+          }
+          printOutput(outcome, { json: opts.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+    { includeCompany: false },
+  );
+
+  addCommonClientOptions(
+    chat
+      .command("looks")
+      .description(
+        "Media Studio's saved looks, through the agent's ticked \"List saved looks\" tool (no model call). With --json a refusal is printed as {ok:false,...} and exits 0.",
+      )
+      .argument("<agentId>", "Agent ID")
+      .requiredOption("-C, --company-id <id>", "Company ID")
+      .action(async (agentId: string, opts: BaseClientOptions) => {
+        try {
+          const ctx = resolveCommandContext(opts, { requireCompany: true });
+          const query = new URLSearchParams({ companyId: ctx.companyId! });
+          const outcome = await runChatGet(`${apiPath`/api/lane-a/${agentId}/looks`}?${query.toString()}`, opts);
+          if (!outcome.ok && !opts.json) {
+            throw new ApiRequestError(outcome.status, outcome.error);
+          }
+          printOutput(outcome, { json: opts.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+    { includeCompany: false },
+  );
+
+  addCommonClientOptions(
+    chat
+      .command("image")
+      .description(
+        "The bytes of a picture a quick agent's reply carried, as base64 in JSON (pictures only). With --json a refusal is printed as {ok:false,...} and exits 0.",
+      )
+      .argument("<fileId>", "The picture's file id (from the reply's actions)")
+      .requiredOption("-C, --company-id <id>", "Company ID")
+      .action(async (fileId: string, opts: BaseClientOptions) => {
+        try {
+          const outcome = await runChatImage(fileId, opts);
+          if (!outcome.ok && !opts.json) {
+            throw new ApiRequestError(outcome.status, outcome.error);
+          }
+          printOutput(outcome, { json: opts.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+    { includeCompany: false },
+  );
+
+  addCommonClientOptions(
+    chat
+      .command("media")
+      .description(
+        "The bytes of a Media Studio video or audio (or picture) file, as base64 in JSON. With --json a refusal is printed as {ok:false,...} and exits 0.",
+      )
+      .argument("<fileId>", "The file's id (a company file or issue attachment)")
+      .requiredOption("-C, --company-id <id>", "Company ID")
+      .action(async (fileId: string, opts: BaseClientOptions) => {
+        try {
+          const outcome = await runChatMedia(fileId, opts);
+          if (!outcome.ok && !opts.json) {
+            throw new ApiRequestError(outcome.status, outcome.error);
+          }
+          printOutput(outcome, { json: opts.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+    { includeCompany: false },
+  );
+
+  addCommonClientOptions(
+    chat
+      .command("reaction")
+      .description(
+        "DUR-4344: record one Telegram emoji reaction (added or removed) on a message the bridge sent. The event is JSON (--event) and is validated by the server. With --json a refusal is printed as {ok:false,...} and exits 0.",
+      )
+      .requiredOption("-C, --company-id <id>", "Company ID")
+      .requiredOption("--event <json>", "The reaction event as JSON")
+      .action(async (opts: ChatReactionOptions) => {
+        try {
+          const outcome = await runChatReaction(opts);
+          if (!outcome.ok && !opts.json) {
+            throw new ApiRequestError(outcome.status, outcome.error);
+          }
+          printOutput(outcome, { json: opts.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+    { includeCompany: false },
+  );
+
+  addCommonClientOptions(
+    chat
       .command("answers")
       .description("Status and the agent's latest answer for tasks in one company (at most 50 ids)")
       .argument("<issueIds...>", "Task IDs")
@@ -88,6 +247,82 @@ export function registerChatCommands(program: Command): void {
       }),
     { includeCompany: false },
   );
+}
+
+/** Telegram's own upload limit for a document; a picture over this is not fetched. */
+export const CHAT_IMAGE_MAX_BYTES = 20 * 1024 * 1024;
+
+const FILE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export type ChatImageOutcome =
+  | { ok: true; fileId: string; contentType: string; byteSize: number; contentBase64: string }
+  | { ok: false; status: number; error: string };
+
+/**
+ * One picture's bytes. Only pictures (image/*), only up to
+ * CHAT_IMAGE_MAX_BYTES, and only what this CLI's own sign-in may read (the
+ * server checks company access on every request).
+ */
+export async function runChatImage(fileId: string, opts: BaseClientOptions): Promise<ChatImageOutcome> {
+  const ctx = resolveCommandContext(opts, { requireCompany: true });
+  if (!FILE_ID_PATTERN.test(fileId)) return { ok: false, status: 400, error: "That is not a file id." };
+  try {
+    const result = await ctx.api.getBytes(apiPath`/api/attachments/${fileId}/content`, { ignoreNotFound: true });
+    if (!result) return { ok: false, status: 404, error: "That picture was not found." };
+    const contentType = (result.contentType ?? "").split(";")[0]!.trim().toLowerCase();
+    if (!contentType.startsWith("image/")) return { ok: false, status: 415, error: "That file is not a picture." };
+    if (result.bytes.length > CHAT_IMAGE_MAX_BYTES) {
+      return { ok: false, status: 413, error: "That picture is too large to send." };
+    }
+    return {
+      ok: true,
+      fileId,
+      contentType,
+      byteSize: result.bytes.length,
+      contentBase64: result.bytes.toString("base64"),
+    };
+  } catch (err) {
+    if (err instanceof ApiRequestError) return { ok: false, status: err.status, error: err.message };
+    throw err;
+  }
+}
+
+/** Telegram's own upload limit for a video, audio file or document over the Bot API. */
+export const CHAT_MEDIA_MAX_BYTES = 50 * 1024 * 1024;
+
+export type ChatMediaOutcome =
+  | { ok: true; fileId: string; contentType: string; byteSize: number; contentBase64: string }
+  | { ok: false; status: number; error: string };
+
+/**
+ * DUR-4062: one Media Studio file's bytes — a picture, a video or an
+ * audio/music file. Same shape and access rules as `chat image`, but not
+ * limited to image/* content types, and with video's larger byte limit.
+ */
+export async function runChatMedia(fileId: string, opts: BaseClientOptions): Promise<ChatMediaOutcome> {
+  const ctx = resolveCommandContext(opts, { requireCompany: true });
+  if (!FILE_ID_PATTERN.test(fileId)) return { ok: false, status: 400, error: "That is not a file id." };
+  try {
+    const result = await ctx.api.getBytes(apiPath`/api/attachments/${fileId}/content`, { ignoreNotFound: true });
+    if (!result) return { ok: false, status: 404, error: "That file was not found." };
+    const contentType = (result.contentType ?? "").split(";")[0]!.trim().toLowerCase();
+    if (!/^(image|video|audio)\//.test(contentType)) {
+      return { ok: false, status: 415, error: "That file is not a picture, video or audio file." };
+    }
+    if (result.bytes.length > CHAT_MEDIA_MAX_BYTES) {
+      return { ok: false, status: 413, error: "That file is too large to send." };
+    }
+    return {
+      ok: true,
+      fileId,
+      contentType,
+      byteSize: result.bytes.length,
+      contentBase64: result.bytes.toString("base64"),
+    };
+  } catch (err) {
+    if (err instanceof ApiRequestError) return { ok: false, status: err.status, error: err.message };
+    throw err;
+  }
 }
 
 export async function runChatSend(agentId: string, opts: ChatSendOptions): Promise<ChatSendOutcome> {
@@ -113,6 +348,40 @@ export async function runChatSend(agentId: string, opts: ChatSendOptions): Promi
   }
 }
 
+/**
+ * Continue an earlier conversation. The spec is sent as data in the body; the
+ * company always comes from --company-id.
+ */
+export async function runChatContinue(agentId: string, opts: ChatContinueOptions): Promise<ChatSendOutcome> {
+  const ctx = resolveCommandContext(opts, { requireCompany: true });
+  const body: Record<string, unknown> = { companyId: ctx.companyId };
+  const spec = opts.spec?.trim();
+  if (spec) body.spec = spec;
+  try {
+    const result = await ctx.api.post<Record<string, unknown>>(apiPath`/api/lane-a/${agentId}/continue`, body);
+    return { ok: true, ...(result ?? {}) };
+  } catch (err) {
+    if (err instanceof ApiRequestError) {
+      return { ok: false, status: err.status, code: refusalCode(err), error: err.message };
+    }
+    throw err;
+  }
+}
+
+/** A GET whose refusal is data for the caller, like `chat send`. */
+async function runChatGet(path: string, opts: BaseClientOptions): Promise<ChatSendOutcome> {
+  const ctx = resolveCommandContext(opts, { requireCompany: true });
+  try {
+    const result = await ctx.api.get<Record<string, unknown>>(path);
+    return { ok: true, ...(result ?? {}) };
+  } catch (err) {
+    if (err instanceof ApiRequestError) {
+      return { ok: false, status: err.status, code: refusalCode(err), error: err.message };
+    }
+    throw err;
+  }
+}
+
 function refusalCode(err: ApiRequestError): string | null {
   const body = err.body && typeof err.body === "object" ? (err.body as Record<string, unknown>) : null;
   if (typeof body?.code === "string") return body.code;
@@ -120,4 +389,33 @@ function refusalCode(err: ApiRequestError): string | null {
   if (typeof details?.code === "string") return details.code;
   if (typeof details?.reason === "string") return details.reason;
   return null;
+}
+
+/**
+ * DUR-4344: post one reaction event. The event is data, parsed here and sent
+ * as the request body; the company always comes from --company-id.
+ */
+export async function runChatReaction(opts: ChatReactionOptions): Promise<ChatSendOutcome> {
+  const ctx = resolveCommandContext(opts, { requireCompany: true });
+  let event: unknown;
+  try {
+    event = JSON.parse(opts.event);
+  } catch {
+    throw new Error("--event must be valid JSON");
+  }
+  if (!event || typeof event !== "object" || Array.isArray(event)) {
+    throw new Error("--event must be a JSON object");
+  }
+  try {
+    const result = await ctx.api.post<Record<string, unknown>>(
+      apiPath`/api/companies/${ctx.companyId}/telegram-reactions`,
+      event,
+    );
+    return { ok: true, ...(result ?? {}) };
+  } catch (err) {
+    if (err instanceof ApiRequestError) {
+      return { ok: false, status: err.status, code: refusalCode(err), error: err.message };
+    }
+    throw err;
+  }
 }

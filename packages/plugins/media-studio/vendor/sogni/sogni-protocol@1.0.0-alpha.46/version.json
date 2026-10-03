@@ -1,0 +1,4 @@
+{
+  "protocolVersion": "7.5.0",
+  "description": "Sogni protocol artifact version. SDKs may refuse to operate against a protocolVersion they were not built for. Bump the major when removing or renaming any schema / enum / manifest field; bump the minor when adding new optional fields or new tools; bump the patch for description / prose changes only."
+}
