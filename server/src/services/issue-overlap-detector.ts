@@ -172,17 +172,23 @@ function issueLink(ref: OverlapIssueRef) {
   return prefix ? `[${label}](/${prefix}/issues/${label})` : label;
 }
 
+/** Strips characters that could break out of a markdown code span (backticks, newlines). */
+function sanitizeDetailKey(detailKey: string): string {
+  return detailKey.replace(/[`\r\n]/g, "");
+}
+
 function describeRow(row: OverlapCandidate, freeMigration: string) {
+  const detailKey = sanitizeDetailKey(row.detailKey);
   switch (row.kind) {
     case "file":
-      return `both change \`${row.detailKey}\``;
+      return `both change \`${detailKey}\``;
     case "migration_number":
-      return `both add migration \`${row.detailKey}\` (next free number: \`${freeMigration}\`)`;
+      return `both add migration \`${detailKey}\` (next free number: \`${freeMigration}\`)`;
     case "journal_json":
       return "both edit `packages/db/src/migrations/meta/_journal.json`, so one will conflict after the other merges";
     case "stale_behind": {
       const commit = typeof row.detail.mergedCommit === "string" ? ` (${row.detail.mergedCommit})` : "";
-      return `\`${row.detailKey}\` already changed on the base branch${commit} since this branch started`;
+      return `\`${detailKey}\` already changed on the base branch${commit} since this branch started`;
     }
   }
 }
