@@ -83,3 +83,27 @@ describe("laneAAdapterConfigSchema", () => {
     expect(laneAAdapterConfigSchema.parse({})).toEqual({});
   });
 });
+
+// DUR-4378 follow-up: apiKeyByProvider (server/src/routes/agents.ts stashes
+// each provider's key here across a laneAProvider switch) must be declared
+// on this .strict() schema, or the very next PATCH that echoes
+// adapterConfig.laneA back (e.g. a settings-form round trip) is rejected
+// with a 422 for an "unrecognized key".
+describe("laneAAdapterConfigSchema apiKeyByProvider", () => {
+  const ref = { type: "secret_ref" as const, secretId: "44444444-4444-4444-8444-444444444444", version: "latest" as const };
+
+  it("round-trips a map of provider -> key ref (or null)", () => {
+    const value = { apiKeyByProvider: { openrouter: ref, local: null } };
+    expect(laneAAdapterConfigSchema.parse(value)).toEqual(value);
+  });
+
+  it("refuses literal strings and unknown providers in the stash (DUR-4406)", () => {
+    expect(laneAAdapterConfigSchema.safeParse({ apiKeyByProvider: { openrouter: "sk-literal" } }).success).toBe(false);
+    expect(laneAAdapterConfigSchema.safeParse({ apiKeyByProvider: { evil: ref } }).success).toBe(false);
+    expect(laneAAdapterConfigSchema.safeParse({ apiKeyByProvider: { openrouter: { type: "plain", value: "x" } } }).success).toBe(false);
+  });
+
+  it("leaves apiKeyByProvider out entirely when absent", () => {
+    expect(laneAAdapterConfigSchema.parse({})).toEqual({});
+  });
+});
