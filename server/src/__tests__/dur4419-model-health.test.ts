@@ -99,6 +99,14 @@ d("model health", () => {
     expect(results.filter(Boolean)).toHaveLength(1);
   });
 
+  it("fires once even when whole failed turns (record + claim) race on a fresh outage", async () => {
+    const health = modelHealthService(db);
+    const turn = () => health.noteLocalAttempt({ companyId: co, baseUrl: ADDR, model: "race2:1b", outcome: "unreachable" });
+    const results = await Promise.all([1, 2, 3, 4, 5, 6].map(() => turn()));
+    expect(results.filter((r) => r.notify)).toHaveLength(1);
+    expect((await turn()).notify).toBe(false);
+  });
+
   it("evening warning needs an hour of outage and goes once per outage", async () => {
     let now = new Date("2026-10-03T18:00:00Z");
     const health = modelHealthService(db, { now: () => now });

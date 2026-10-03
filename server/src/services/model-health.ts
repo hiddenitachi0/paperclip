@@ -97,21 +97,29 @@ export function modelHealthService(db: Db, deps: ModelHealthDeps = {}) {
   async function record(companyId: string, rawBaseUrl: string, model: string, status: Exclude<ModelHealthStatus, "not_checked">): Promise<Row> {
     const baseUrl = normalizeLocalModelAddress(rawBaseUrl);
     const now = nowOf();
-    const existing = await getRow(companyId, baseUrl, model);
     const down = status !== "ready";
-    const values = {
-      status,
-      lastCheckedAt: now,
-      updatedAt: now,
-      lastReachableAt: status === "ready" || status === "model_missing" ? now : existing?.lastReachableAt ?? null,
-      outageStartedAt: down ? existing?.outageStartedAt ?? now : null,
-      outageNotifiedAt: down ? existing?.outageNotifiedAt ?? null : null,
-      eveningWarnedAt: down ? existing?.eveningWarnedAt ?? null : null,
-    };
+    const reachable = status === "ready" || status === "model_missing";
+    const base = { status, lastCheckedAt: now, updatedAt: now };
+    // Outage columns are preserved/cleared in SQL (never from a stale JS read) so a
+    // concurrent claimOutageNotice() cannot be clobbered by a racing record().
     const [row] = await db
       .insert(localModelHealth)
-      .values({ companyId, baseUrl, model, ...values })
-      .onConflictDoUpdate({ target: [localModelHealth.companyId, localModelHealth.baseUrl, localModelHealth.model], set: values })
+      .values({
+        companyId, baseUrl, model, ...base,
+        lastReachableAt: reachable ? now : null,
+        outageStartedAt: down ? now : null,
+        outageNotifiedAt: null,
+        eveningWarnedAt: null,
+      })
+      .onConflictDoUpdate({
+        target: [localModelHealth.companyId, localModelHealth.baseUrl, localModelHealth.model],
+        set: {
+          ...base,
+          ...(reachable ? { lastReachableAt: now } : {}),
+          outageStartedAt: down ? sql`coalesce(${localModelHealth.outageStartedAt}, ${now.toISOString()}::timestamptz)` : null,
+          ...(down ? {} : { outageNotifiedAt: null, eveningWarnedAt: null }),
+        },
+      })
       .returning();
     return row!;
   }
