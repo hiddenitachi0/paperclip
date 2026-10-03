@@ -4,7 +4,7 @@ import express from "express";
 import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
-import { createDb, companies, plugins, videoStorylines } from "@paperclipai/db";
+import { createDb, companies, plugins, videoShots, videoStorylines } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import type { VideoStorylineActor } from "../services/video-storylines.ts";
@@ -133,5 +133,61 @@ d("GET /companies/:companyId/video-storylines/:storylineId/final/content", () =>
     expect(res.headers["content-disposition"]).toContain('filename="My Film.mp4"');
     expect(Buffer.compare(res.body as Buffer, body)).toBe(0);
     expect(mockGetObject).toHaveBeenCalledWith(companyId, "video-storylines/fake-key.mp4");
+  });
+
+  describe("GET .../shots/:shotId/still/content (DUR-4425)", () => {
+    async function seedShot() {
+      const companyId = await seedEnabledCompany();
+      const svc = videoStorylineService(db);
+      const storyline = await svc.createStoryline(
+        companyId,
+        { title: "T", projectId: null, providerId: "fal", model: null, budgetCapCents: null, characterReferenceAssetIds: [] },
+        ACTOR,
+      );
+      const scene = await svc.createScene(companyId, storyline.id, { title: "", notes: null, orderIndex: 0 }, ACTOR);
+      const shot = await svc.createShot(
+        companyId,
+        storyline.id,
+        { sceneId: scene.id, orderIndex: 0, prompt: "A shot", cameraNotes: null, durationSeconds: 5, lookReferenceAssetIds: [], transitionIn: null },
+        ACTOR,
+      );
+      return { companyId, storylineId: storyline.id, shotId: shot.id };
+    }
+    const url = (c: string, st: string, sh: string) => `/api/companies/${c}/video-storylines/${st}/shots/${sh}/still/content`;
+
+    it("404s when the shot has no still yet", async () => {
+      mockGetObject.mockClear();
+      const { companyId, storylineId, shotId } = await seedShot();
+      const res = await request(app).get(url(companyId, storylineId, shotId));
+      expect(res.status).toBe(404);
+      expect(mockGetObject).not.toHaveBeenCalled();
+    });
+
+    it("streams the still with its stored content type", async () => {
+      const { companyId, storylineId, shotId } = await seedShot();
+      const body = Buffer.from("fake jpeg bytes");
+      await db
+        .update(videoShots)
+        .set({ stillProvider: "local_disk", stillObjectKey: "stills/k.jpg", stillContentType: "image/jpeg", stillByteSize: body.byteLength })
+        .where(eq(videoShots.id, shotId));
+      mockGetObject.mockResolvedValueOnce({ stream: Readable.from(body), contentType: "application/octet-stream", contentLength: body.byteLength });
+
+      const res = await request(app).get(url(companyId, storylineId, shotId));
+      expect(res.status).toBe(200);
+      expect(res.headers["content-type"]).toBe("image/jpeg");
+      expect(Buffer.compare(res.body as Buffer, body)).toBe(0);
+      expect(mockGetObject).toHaveBeenCalledWith(companyId, "stills/k.jpg");
+    });
+
+    it("404s for another company's shot without reading storage", async () => {
+      const { companyId, storylineId, shotId } = await seedShot();
+      await db.update(videoShots).set({ stillObjectKey: "stills/k.jpg", stillContentType: "image/jpeg" }).where(eq(videoShots.id, shotId));
+      const other = await seedEnabledCompany();
+      mockGetObject.mockClear();
+      const res = await request(app).get(url(other, storylineId, shotId));
+      expect(res.status).toBe(404);
+      expect(mockGetObject).not.toHaveBeenCalled();
+      expect(companyId).not.toBe(other);
+    });
   });
 });
