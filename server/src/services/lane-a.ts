@@ -63,6 +63,7 @@ import { budgetService } from "./budgets.js";
 import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
 import { resolveAgentMcpToolLibraryServers } from "./mcp-tool-library.js";
+import { resolveBackupModelsThroughDirectory } from "./model-directory.js";
 import {
   buildLaneAActionClaimFallbackLine,
   buildLaneAActionClaimRetryNote,
@@ -2961,7 +2962,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     const routing = resolveLaneARouting(
       {
         ...targetAgentForSettings,
-        laneABackupModels: (agentRow?.laneABackupModels as LaneABackupModelConfig[] | null) ?? [],
+        laneABackupModels: await resolveBackupModelsThroughDirectory(db, params.companyId, (agentRow?.laneABackupModels as LaneABackupModelConfig[] | null) ?? []),
         laneANoAnswerChainIds: agentRow?.laneANoAnswerChainIds ?? [],
         laneARefusalChainIds: agentRow?.laneARefusalChainIds ?? [],
         laneAKeywordRoutes: (agentRow?.laneAKeywordRoutes as LaneAKeywordRoute[] | null) ?? [],
@@ -3586,7 +3587,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         laneAModel: settings.model,
         laneABaseUrl: settings.baseUrl ?? null,
         laneATemperature: settings.temperature ?? null,
-        laneABackupModels: (agentRow?.laneABackupModels as LaneABackupModelConfig[] | null) ?? [],
+        laneABackupModels: await resolveBackupModelsThroughDirectory(db, params.companyId, (agentRow?.laneABackupModels as LaneABackupModelConfig[] | null) ?? []),
         laneANoAnswerChainIds: agentRow?.laneANoAnswerChainIds ?? [],
         laneARefusalChainIds: agentRow?.laneARefusalChainIds ?? [],
         laneAKeywordRoutes: (agentRow?.laneAKeywordRoutes as LaneAKeywordRoute[] | null) ?? [],

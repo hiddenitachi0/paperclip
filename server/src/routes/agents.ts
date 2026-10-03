@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from "express";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import path from "node:path";
 import type { Db } from "@paperclipai/db";
-import { agents as agentsTable, assets as assetsTable, companies, heartbeatRuns, issues as issuesTable, projects as projectsTable, createRequestScopedDb } from "@paperclipai/db";
+import { agents as agentsTable, assets as assetsTable, companies, modelDirectoryEntries, heartbeatRuns, issues as issuesTable, projects as projectsTable, createRequestScopedDb } from "@paperclipai/db";
 import { and, desc, eq, inArray, not, sql } from "drizzle-orm";
 import {
   agentSkillSyncSchema,
@@ -3731,6 +3731,23 @@ export function agentRoutes(
       if (routingIssues.length > 0) {
         res.status(422).json({ error: routingIssues[0]!.message });
         return;
+      }
+      // DUR-4418: a backup that points at a model-directory entry must point
+      // at one of THIS company's entries.
+      if (hasOwn(patchData, "laneABackupModels")) {
+        const directoryIds = ((patchData.laneABackupModels as { directoryEntryId?: string | null }[] | null) ?? [])
+          .map((b) => b.directoryEntryId)
+          .filter((id): id is string => typeof id === "string");
+        if (directoryIds.length > 0) {
+          const found = await db
+            .select({ id: modelDirectoryEntries.id })
+            .from(modelDirectoryEntries)
+            .where(and(eq(modelDirectoryEntries.companyId, existing.companyId), inArray(modelDirectoryEntries.id, directoryIds)));
+          if (found.length !== new Set(directoryIds).size) {
+            res.status(422).json({ error: "A backup model is not one of this company's saved model setups." });
+            return;
+          }
+        }
       }
       // DUR-4378 follow-up (live incident, 2 Oct): adapterConfig.laneA.apiKey
       // is one shared slot reused across every provider. A bare provider

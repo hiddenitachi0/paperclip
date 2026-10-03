@@ -590,6 +590,14 @@ export interface LaneABackupModelConfig {
   model: string;
   baseUrl?: string | null;
   temperature?: number | null;
+  /**
+   * DUR-4418: when set, the id of a company model-directory entry this backup
+   * points at. At call time the entry's provider/model/address/creativity win
+   * over the inline fields above (which stay as the last-known copy so an
+   * entry deleted later degrades to the saved coordinates, not to a broken
+   * backup).
+   */
+  directoryEntryId?: string | null;
 }
 
 /**

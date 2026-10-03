@@ -15,6 +15,7 @@ import {
 import { companies } from "./companies.js";
 import { environments } from "./environments.js";
 import { companyAgentRoles } from "./company_agent_roles.js";
+import { modelDirectoryEntries } from "./model_directory_entries.js";
 
 export const agents = pgTable(
   "agents",
@@ -277,6 +278,13 @@ export const agents = pgTable(
       .$type<{ id: string; phrases: string[]; backupId: string }[]>()
       .notNull()
       .default([]),
+    // DUR-4418: the model-directory entry this quick agent's main model was
+    // saved as (migration 0217). Null = a setup that was never saved to the
+    // directory. The lane_a_provider/model/... columns above stay the live,
+    // authoritative copy, so linking an agent changes nothing it does; this is
+    // only the pointer the UI shows ("running on <entry name>"). Deleting the
+    // entry just unlinks the agent (ON DELETE SET NULL).
+    laneADirectoryEntryId: uuid("lane_a_directory_entry_id").references(() => modelDirectoryEntries.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

@@ -2,6 +2,7 @@ import { Router, type Request } from "express";
 import type { Db } from "@paperclipai/db";
 import { createRequestScopedDb } from "@paperclipai/db";
 import {
+  addModelDirectoryStartersSchema,
   createModelDirectoryEntrySchema,
   duplicateModelDirectoryEntrySchema,
   updateModelDirectoryEntrySchema,
@@ -72,6 +73,24 @@ export function modelDirectoryRoutes(rawDb: Db) {
     const created = await svc.create(companyId, req.body, actorUser(req));
     await audit(req, companyId, "model_directory_entry.created", created);
     res.status(201).json(created);
+  });
+
+  router.get("/companies/:companyId/model-directory/starters", scope(), async (req, res) => {
+    res.json(await svc.listStarters(req.params.companyId as string));
+  });
+
+  router.post("/companies/:companyId/model-directory/starters", scope(), validate(addModelDirectoryStartersSchema), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const created = await svc.addStarters(companyId, (req.body as { starterIds?: string[] }).starterIds, actorUser(req));
+    for (const entry of created) await audit(req, companyId, "model_directory_entry.created", entry, { source: "starter" });
+    res.status(201).json(created);
+  });
+
+  router.post("/companies/:companyId/model-directory/import-agent-settings", scope(), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const result = await svc.importAgentSettings(companyId, actorUser(req));
+    for (const entry of result.created) await audit(req, companyId, "model_directory_entry.created", entry, { source: "agent_settings_import" });
+    res.json(result);
   });
 
   router.get("/companies/:companyId/model-directory/:entryId", scope(), async (req, res) => {
