@@ -97,6 +97,12 @@ describe("laneAAdapterConfigSchema apiKeyByProvider", () => {
     expect(laneAAdapterConfigSchema.parse(value)).toEqual(value);
   });
 
+  it("refuses literal strings and unknown providers in the stash (DUR-4406)", () => {
+    expect(laneAAdapterConfigSchema.safeParse({ apiKeyByProvider: { openrouter: "sk-literal" } }).success).toBe(false);
+    expect(laneAAdapterConfigSchema.safeParse({ apiKeyByProvider: { evil: ref } }).success).toBe(false);
+    expect(laneAAdapterConfigSchema.safeParse({ apiKeyByProvider: { openrouter: { type: "plain", value: "x" } } }).success).toBe(false);
+  });
+
   it("leaves apiKeyByProvider out entirely when absent", () => {
     expect(laneAAdapterConfigSchema.parse({})).toEqual({});
   });
