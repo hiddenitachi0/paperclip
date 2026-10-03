@@ -3663,6 +3663,19 @@ export function agentRoutes(
             ...existingByProvider,
             [oldProvider]: existingLaneA.apiKey ?? null,
           };
+          // DUR-4395: laneABaseUrl is a separate top-level column (not part
+          // of adapterConfig.laneA), so it was never covered by the
+          // apiKeyByProvider stash above. openrouter and local both honor a
+          // stored custom base URL (resolveLaneABaseUrl), so leaving it
+          // untouched across a switch meant a restored apiKey for the
+          // incoming provider could be sent as a bearer token to whatever
+          // host the outgoing provider had configured. Stash/restore it the
+          // same way, keyed by provider, inside the same adapterConfig blob.
+          const existingBaseUrlByProvider = asRecord(existingLaneA.baseUrlByProvider) ?? {};
+          const nextBaseUrlByProvider: Record<string, unknown> = {
+            ...existingBaseUrlByProvider,
+            [oldProvider]: existing.laneABaseUrl ?? null,
+          };
           const requestedAdapterConfigForSwitch = hasOwn(patchData, "adapterConfig")
             ? (asRecord(patchData.adapterConfig) ?? {})
             : {};
@@ -3674,9 +3687,16 @@ export function agentRoutes(
               ...existingLaneA,
               apiKey: nextByProvider[newProvider] ?? null,
               apiKeyByProvider: nextByProvider,
+              baseUrlByProvider: nextBaseUrlByProvider,
               ...requestedLaneAForSwitch,
             },
           };
+          // Only auto-restore laneABaseUrl when this same PATCH does not
+          // already set it explicitly -- an operator picking a new provider
+          // and typing its base URL in one request must win.
+          if (!hasOwn(patchData, "laneABaseUrl")) {
+            patchData.laneABaseUrl = (nextBaseUrlByProvider[newProvider] as string | null | undefined) ?? null;
+          }
         }
       }
     }

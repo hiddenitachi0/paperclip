@@ -38,7 +38,11 @@ const openrouterKeyRef = {
   version: "latest" as const,
 };
 
-function baseAgentWith(laneA: Record<string, unknown>, laneAProvider: string | null) {
+function baseAgentWith(
+  laneA: Record<string, unknown>,
+  laneAProvider: string | null,
+  laneABaseUrl: string | null = null,
+) {
   return {
     id: agentId,
     companyId,
@@ -64,7 +68,7 @@ function baseAgentWith(laneA: Record<string, unknown>, laneAProvider: string | n
     laneAEnabled: true,
     laneAProvider,
     laneAModel: null,
-    laneABaseUrl: null,
+    laneABaseUrl,
     createdAt: new Date("2026-03-19T00:00:00.000Z"),
     updatedAt: new Date("2026-03-19T00:00:00.000Z"),
   };
@@ -317,5 +321,112 @@ describe("quick-agent provider switch preserves each provider's own key (DUR-437
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     const [, patch] = mockAgentService.update.mock.calls[0]!;
     expect(Object.prototype.hasOwnProperty.call(patch, "adapterConfig")).toBe(false);
+  });
+});
+
+describe("quick-agent provider switch preserves each provider's own base URL (DUR-4395)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockAgentService.update.mockImplementation(async (id: string, patch: Record<string, unknown>) => ({
+      id,
+      companyId,
+      ...patch,
+    }));
+    mockAccessService.decide.mockResolvedValue({
+      allowed: true,
+      reason: "allow_test_grant",
+      explanation: "Allowed by test grant",
+    });
+    mockAccessService.hasPermission.mockResolvedValue(true);
+    mockAccessService.ensureMembership.mockResolvedValue(undefined);
+    mockCompanySkillService.listRuntimeSkillEntries.mockResolvedValue([]);
+    mockCompanySkillService.resolveRequestedSkillKeys.mockResolvedValue([]);
+    mockAgentInstructionsService.materializeManagedBundle.mockImplementation(async (agent: { adapterConfig: unknown }) => ({
+      adapterConfig: agent.adapterConfig,
+    }));
+    mockLogActivity.mockResolvedValue(undefined);
+  });
+
+  it("does not leak a restored key to a stale custom base URL left by another provider", async () => {
+    // Repro from DUR-4395: an agent on openrouter with key K bound switches to
+    // local with an attacker-controlled base URL (K gets stashed), then
+    // switches back to openrouter with no laneABaseUrl in that second patch.
+    // Before this fix, K came back into laneA.apiKey while laneABaseUrl was
+    // still the attacker's host, so the very next call sent K there as a
+    // bearer token.
+    mockAgentService.getById.mockResolvedValue(
+      baseAgentWith({ apiKey: openrouterKeyRef }, "openrouter", null),
+    );
+    const app = await createApp(boardActor);
+
+    const switchToLocal = await requestApp(app, (baseUrl) =>
+      request(baseUrl)
+        .patch(`/api/agents/${agentId}`)
+        .send({ laneAProvider: "local", laneAModel: null, laneABaseUrl: "http://attacker.example/v1" }),
+    );
+    expect(switchToLocal.status, JSON.stringify(switchToLocal.body)).toBe(200);
+    const [, firstPatch] = mockAgentService.update.mock.calls[0]!;
+    const firstLaneA = (firstPatch.adapterConfig as { laneA: Record<string, unknown> }).laneA;
+    expect(firstLaneA.baseUrlByProvider).toMatchObject({ openrouter: null });
+
+    // Second PATCH resumes from the persisted state after the first switch.
+    mockAgentService.getById.mockResolvedValue(
+      baseAgentWith(
+        { apiKey: null, apiKeyByProvider: { openrouter: openrouterKeyRef }, baseUrlByProvider: { openrouter: null } },
+        "local",
+        "http://attacker.example/v1",
+      ),
+    );
+
+    const switchBack = await requestApp(app, (baseUrl) =>
+      request(baseUrl).patch(`/api/agents/${agentId}`).send({ laneAProvider: "openrouter", laneAModel: null }),
+    );
+    expect(switchBack.status, JSON.stringify(switchBack.body)).toBe(200);
+    const [, secondPatch] = mockAgentService.update.mock.calls[1]!;
+    const secondLaneA = (secondPatch.adapterConfig as { laneA: Record<string, unknown> }).laneA;
+    expect(secondLaneA.apiKey).toMatchObject(openrouterKeyRef);
+    // The attacker's host must not survive the switch back: openrouter never
+    // had a custom base URL of its own, so it must be restored to null.
+    expect(secondPatch.laneABaseUrl).toBeNull();
+  });
+
+  it("restores a provider's own previously-set base URL when switching back to it", async () => {
+    mockAgentService.getById.mockResolvedValue(
+      baseAgentWith(
+        { apiKey: null, baseUrlByProvider: { openrouter: "https://my-router.example/v1" } },
+        "local",
+        null,
+      ),
+    );
+    const app = await createApp(boardActor);
+
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl).patch(`/api/agents/${agentId}`).send({ laneAProvider: "openrouter", laneAModel: null }),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const [, patch] = mockAgentService.update.mock.calls[0]!;
+    expect(patch.laneABaseUrl).toBe("https://my-router.example/v1");
+  });
+
+  it("an explicit laneABaseUrl in the same switch request wins over the restored one", async () => {
+    mockAgentService.getById.mockResolvedValue(
+      baseAgentWith(
+        { apiKey: null, baseUrlByProvider: { openrouter: "https://my-router.example/v1" } },
+        "local",
+        null,
+      ),
+    );
+    const app = await createApp(boardActor);
+
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl)
+        .patch(`/api/agents/${agentId}`)
+        .send({ laneAProvider: "openrouter", laneAModel: null, laneABaseUrl: "https://new-router.example/v1" }),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const [, patch] = mockAgentService.update.mock.calls[0]!;
+    expect(patch.laneABaseUrl).toBe("https://new-router.example/v1");
   });
 });

@@ -215,6 +215,18 @@ export const laneAAdapterConfigSchema = z
      */
     apiKeyByProvider: z.record(z.string(), envBindingSecretRefSchema.nullable()).optional(),
     /**
+     * DUR-4395: laneABaseUrl is a top-level agent column, not part of this
+     * blob, but it is just as provider-specific as apiKey -- openrouter and
+     * local both honor a stored custom base URL (resolveLaneABaseUrl).
+     * Without a per-provider stash here, switching providers restored the
+     * incoming provider's own apiKey (via apiKeyByProvider above) while
+     * leaving laneABaseUrl pointed at whatever host the previous provider
+     * had configured, sending the restored key as a bearer token to that
+     * stale host. server/src/routes/agents.ts stashes/restores
+     * laneABaseUrl here on every provider switch, same as apiKeyByProvider.
+     */
+    baseUrlByProvider: z.record(z.string(), z.string().nullable()).optional(),
+    /**
      * "Can search the web": offers the quick agent web_search (with the
      * company's Brave key, Connections → Web search) and read_web_page. Off
      * when absent. Board-only: an agent-authenticated caller cannot change it
