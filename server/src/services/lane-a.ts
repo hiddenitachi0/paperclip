@@ -2050,6 +2050,11 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     // A host that refuses the creativity setting still gets an answer: the
     // call is repeated once without it, and the rest of the turn goes without.
     let temperatureOff = typeof params.temperature !== "number";
+    // DUR-4391: same idea for `reasoning_effort` -- a host that has no
+    // endpoint for it (e.g. DeepInfra's Mistral Small, which has no reasoning
+    // parameter at all) still gets an answer: dropped first, before
+    // temperature, and well before tools are ever blamed.
+    let reasoningEffortOff = params.reasoningEffort == null;
     // DUR-4355: set just before the one corrective retry's completeRound()
     // call, cleared right after -- forces that single call onto the tool
     // matching the claim the model just made and did not back up.
@@ -2064,16 +2069,28 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           ...(withTools ? { tools } : {}),
           ...(withTools && forcedToolName ? { toolChoice: { name: forcedToolName } } : {}),
           ...(temperatureOff ? {} : { temperature: params.temperature }),
-          ...(params.reasoningEffort ? { reasoningEffort: params.reasoningEffort } : {}),
+          ...(reasoningEffortOff ? {} : { reasoningEffort: params.reasoningEffort }),
           ...(providerRouting ? { providerRouting } : {}),
         });
-      const request = async (withTools: boolean) => {
+      // DUR-4391: a "no endpoint for the requested parameters" style error
+      // can mean reasoning_effort, temperature, or (only once both of those
+      // are already off) tools. Drop reasoning_effort first, then
+      // temperature, retrying after each -- never jump straight to blaming
+      // tools while an unusual sampling parameter is still on the wire.
+      const request = async (withTools: boolean): Promise<Awaited<ReturnType<LaneAProviderClient["complete"]>>> => {
         try {
           return await send(withTools);
         } catch (err) {
-          if (temperatureOff || !isLaneATemperatureUnsupportedError(err)) throw err;
-          temperatureOff = true;
-          return send(withTools);
+          if (!isLaneATemperatureUnsupportedError(err)) throw err;
+          if (!reasoningEffortOff) {
+            reasoningEffortOff = true;
+            return request(withTools);
+          }
+          if (!temperatureOff) {
+            temperatureOff = true;
+            return request(withTools);
+          }
+          throw err;
         }
       };
       if (toolsOff) return request(false);
@@ -2081,7 +2098,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         return await request(true);
       } catch (err) {
         const toolsRefused =
-          isLaneAToolsUnsupportedError(err) || (temperatureOff && isLaneAOpenRouterNoHostForParametersError(err));
+          isLaneAToolsUnsupportedError(err) ||
+          (temperatureOff && reasoningEffortOff && isLaneAOpenRouterNoHostForParametersError(err));
         if (!toolsRefused) throw err;
         // Say why, once per refusal: without this the only trace of a model
         // host dropping the tools is an agent that suddenly "can't" use them.
@@ -3188,26 +3206,39 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     responseFormat?: "json_object";
   }) {
     try {
-      const send = (withTemperature: boolean) =>
+      let withTemperature = typeof params.temperature === "number";
+      // DUR-4391: same as chat -- a host with no endpoint for reasoning_effort
+      // (e.g. a non-reasoning model) still answers once it is dropped, tried
+      // before temperature.
+      let withReasoningEffort = params.reasoningEffort != null;
+      const send = () =>
         params.client.complete({
           model: params.model,
           maxTokens: params.maxOutputTokens,
           system: params.systemPrompt,
           messages: [{ role: "user", content: params.message }],
           ...(withTemperature ? { temperature: params.temperature } : {}),
-          ...(params.reasoningEffort ? { reasoningEffort: params.reasoningEffort } : {}),
+          ...(withReasoningEffort ? { reasoningEffort: params.reasoningEffort } : {}),
           ...(params.providerRouting ? { providerRouting: params.providerRouting } : {}),
           ...(params.responseFormat ? { responseFormat: params.responseFormat } : {}),
         });
-      const withTemperature = typeof params.temperature === "number";
-      let response: Awaited<ReturnType<typeof send>>;
-      try {
-        response = await send(withTemperature);
-      } catch (err) {
-        // Same as chat: a host that refuses the setting still answers.
-        if (!withTemperature || !isLaneATemperatureUnsupportedError(err)) throw err;
-        response = await send(false);
-      }
+      const request = async (): Promise<Awaited<ReturnType<typeof send>>> => {
+        try {
+          return await send();
+        } catch (err) {
+          if (!isLaneATemperatureUnsupportedError(err)) throw err;
+          if (withReasoningEffort) {
+            withReasoningEffort = false;
+            return request();
+          }
+          if (withTemperature) {
+            withTemperature = false;
+            return request();
+          }
+          throw err;
+        }
+      };
+      const response = await request();
       return {
         text: response.text.trim(),
         inputTokens: response.usage.inputTokens,
