@@ -110,6 +110,11 @@ describe("Media Studio Edit tab (DUR-4063)", () => {
       restore: vi.fn(),
       strokeRect: vi.fn(),
       setLineDash: vi.fn(),
+      beginPath: vi.fn(),
+      moveTo: vi.fn(),
+      lineTo: vi.fn(),
+      stroke: vi.fn(),
+      putImageData: vi.fn(),
       fillText: vi.fn(),
       set filter(_v: string) {},
       set strokeStyle(_v: string) {},
@@ -129,6 +134,14 @@ describe("Media Studio Edit tab (DUR-4063)", () => {
       expect(container.textContent).toContain("Remove background");
       expect(container.textContent).toContain("Upscale");
       expect(container.textContent).not.toContain("Make variations");
+
+      // Select-an-area tools show; replace/remove need a Fal key, which this
+      // setup doesn't have, so only the explanation is offered.
+      expect(container.textContent).toContain("Change one part of the picture");
+      expect(container.textContent).toContain("Clear selection");
+      expect(container.textContent).toContain("Find it");
+      expect(container.textContent).not.toContain("Replace selected area");
+      expect(container.textContent).toContain("Ask an admin to add a Fal.ai key");
     } finally {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (globalThis as any).Image = OriginalImage;
