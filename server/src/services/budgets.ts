@@ -27,6 +27,7 @@ import type {
 import { notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
+import { sumCostCents } from "./cost-sql.js";
 
 type ScopeRecord = {
   companyId: string;
@@ -238,7 +239,7 @@ async function computeObservedAmount(
   const amountExpr =
     policy.metric === "total_tokens"
       ? sql<number>`coalesce(sum(${costEvents.inputTokens} + ${costEvents.cachedInputTokens} + ${costEvents.outputTokens}), 0)::double precision`
-      : sql<number>`coalesce(sum(${costEvents.costCents}), 0)::double precision`;
+      : sumCostCents();
 
   const [row] = await db
     .select({ total: amountExpr })

@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { BILLING_TYPES } from "../constants.js";
 
+export const COST_SOURCES = ["provider", "estimate", "static_table"] as const;
+
 export const createCostEventSchema = z.object({
   agentId: z.string().uuid(),
   issueId: z.string().uuid().optional().nullable(),
@@ -16,6 +18,8 @@ export const createCostEventSchema = z.object({
   cachedInputTokens: z.number().int().nonnegative().optional().default(0),
   outputTokens: z.number().int().nonnegative().optional().default(0),
   costCents: z.number().int().nonnegative(),
+  costMicroUsd: z.number().int().nonnegative().optional().nullable(),
+  costSource: z.enum(COST_SOURCES).optional().nullable(),
   occurredAt: z.string().datetime(),
 }).transform((value) => ({
   ...value,

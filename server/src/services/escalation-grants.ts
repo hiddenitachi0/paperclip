@@ -10,6 +10,7 @@ import {
 } from "@paperclipai/shared";
 import { conflict, forbidden, notFound } from "../errors.js";
 import { issueService } from "./issues.js";
+import { sumCostCents } from "./cost-sql.js";
 import { readBossReview, type BossCandidate } from "./model-boost-boss-review.js";
 
 export { buildBossReviewStamp, readBossReview, type BossCandidate } from "./model-boost-boss-review.js";
@@ -57,7 +58,7 @@ export function escalationGrantService(db: Db) {
 
   async function computeSpendCents(issueId: string): Promise<number> {
     const [row] = await db
-      .select({ total: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::double precision` })
+      .select({ total: sumCostCents() })
       .from(costEvents)
       .where(eq(costEvents.issueId, issueId));
     return Number(row?.total ?? 0);

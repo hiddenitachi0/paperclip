@@ -508,6 +508,60 @@ describeEmbeddedPostgres("cost and finance aggregate overflow handling", () => {
     expect(byAgentModelRow?.costCents).toBe(4_000_000_000);
   });
 
+  it("sums micro-USD so many sub-cent calls add up, and mixes with cents-only rows", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Micro Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    const base = {
+      companyId,
+      agentId,
+      provider: "openrouter",
+      biller: "openrouter",
+      billingType: "metered_api" as const,
+      model: "tiny-model",
+      occurredAt: new Date("2026-04-10T00:00:00.000Z"),
+    };
+    // 500 calls of $0.00002 each (0 whole cents) = $0.01 = 1 cent exactly.
+    await db.insert(costEvents).values(
+      Array.from({ length: 500 }, () => ({
+        ...base,
+        costCents: 0,
+        costMicroUsd: 20,
+        costSource: "provider",
+      })),
+    );
+    // Legacy cents-only row: 3 cents = 30,000 micro-USD.
+    await db.insert(costEvents).values({ ...base, costCents: 3 });
+
+    const range = {
+      from: new Date("2026-04-01T00:00:00.000Z"),
+      to: new Date("2026-04-15T23:59:59.999Z"),
+    };
+    const [row] = await costs.byAgent(companyId, range);
+    expect(row?.costMicroUsd).toBe(10_000 + 30_000);
+    expect(row?.costCents).toBeCloseTo(4, 6);
+
+    const summary = await costs.summary(companyId, range);
+    expect(summary.spendMicroUsd).toBe(40_000);
+    expect(summary.spendCents).toBeCloseTo(4, 6);
+  });
+
   it("aggregates issue costs across recursive descendants only", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -639,6 +693,7 @@ describeEmbeddedPostgres("cost and finance aggregate overflow handling", () => {
       issueCount: 3,
       includeDescendants: true,
       costCents: 600,
+      costMicroUsd: 6_000_000,
       inputTokens: 60,
       cachedInputTokens: 6,
       outputTokens: 12,
