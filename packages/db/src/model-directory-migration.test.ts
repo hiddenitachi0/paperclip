@@ -8,7 +8,7 @@ import { createDb } from "./client.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./test-embedded-postgres.js";
 
 /**
- * DUR-4379: migration 0215_model_directory_entries creates the company-scoped
+ * DUR-4379: migration 0216_model_directory_entries creates the company-scoped
  * table, grants and polices it like every other tenant table (a connection
  * scoped to company A never sees or writes company B's rows), refuses a bad
  * thinking default and a duplicate name within one company, and is safe to run
@@ -18,7 +18,7 @@ import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } fro
 const support = await getEmbeddedPostgresTestSupport();
 const d = support.supported ? describe : describe.skip;
 
-const MIGRATION_TAG = "0215_model_directory_entries";
+const MIGRATION_TAG = "0216_model_directory_entries";
 const MIGRATION_PATH = fileURLToPath(new URL(`./migrations/${MIGRATION_TAG}.sql`, import.meta.url));
 
 type Row = Record<string, unknown>;
@@ -31,7 +31,7 @@ d(`migration ${MIGRATION_TAG}`, () => {
   const companyB = randomUUID();
 
   beforeAll(async () => {
-    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-db-0215-model-directory-");
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-db-0216-model-directory-");
     connectionString = tempDb.connectionString;
     db = createDb(connectionString);
     await db.execute(sql`INSERT INTO companies (id, name, issue_prefix) VALUES (${companyA}, 'A', 'MDA'), (${companyB}, 'B', 'MDB')`);
