@@ -95,7 +95,7 @@ export async function fetchFalUnitPrice(fetchImpl: FetchImpl, apiKey: string, en
       const row = body.prices?.find((p) => p.endpoint_id === endpointId) ?? body.prices?.[0];
       if (row && typeof row.unit_price === "number" && typeof row.unit === "string") price = { unit: row.unit, unitPrice: row.unit_price };
     } else {
-    
+      logger.warn({ endpointId, status: res.status }, "Fal pricing lookup failed");
     }
   } catch {
     logger.warn({ endpointId }, "Fal pricing lookup failed");
@@ -117,14 +117,13 @@ export interface FalActualCost {
 export async function priceFalCall(fetchImpl: FetchImpl, apiKey: string, endpointId: string, usage: FalUsage): Promise<FalActualCost | null> {
   const price = await fetchFalUnitPrice(fetchImpl, apiKey, endpointId);
   if (!price) return null;
-
   const micro = computeFalCostMicroUsd(price, usage);
   if (micro === null) return null;
   return { costCents: microToCents(micro), costMicroUsd: micro, costSource: FAL_PRICING_COST_SOURCE };
 }
 
 /** Replaces a reservation's estimate on its cost event with the actual figure. */
-export async function applyFalActualCost(db: Pick<Db, "update">, costEventId: string, actual: FalActualCost): Promise<void> {
+export async function applyFalActualCost(db: Db, costEventId: string, actual: FalActualCost): Promise<void> {
   await db
     .update(costEvents)
     .set({ costCents: actual.costCents, costMicroUsd: actual.costMicroUsd, costSource: actual.costSource })

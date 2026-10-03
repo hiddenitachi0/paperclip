@@ -298,10 +298,8 @@ d("Media Studio Create tab direct generation (DUR-4329)", () => {
       await setMediaStudioConfig({ falKeySecretRef: secretId });
 
       mockedExecute.mockResolvedValueOnce(
-        fakeFalResponse({ images: [{ url: "data:image/jpeg;base64,Zm9vYmFy", content_type: "image/jpeg", width: 1024, height: 768 }], seed: 42 }),
+        fakeFalResponse({ images: [{ url: "data:image/jpeg;base64,Zm9vYmFy", content_type: "image/jpeg" }], seed: 42 }),
       );
-      // DUR-4455: then Fal's published price for the endpoint ($0.02 per megapixel).
-      mockedExecute.mockResolvedValueOnce(fakeFalResponse({ prices: [{ endpoint_id: "fal-ai/flux/schnell", unit_price: 0.02, unit: "megapixels", currency: "USD" }] }));
 
       const result = await mediaStudioDirectService(db).createPicture(
         companyId,
@@ -309,14 +307,13 @@ d("Media Studio Create tab direct generation (DUR-4329)", () => {
         { prompt: "a friendly robot", provider: "fal" },
       );
 
-      // 1024x768 = 0.786432 MP x $0.02 = 15,729 micro-USD = 2 cents.
-      expect(result.costCents).toBe(2);
+      expect(result.costCents).toBe(MEDIA_STUDIO_DIRECT_PICTURE_COST_CENTS.fal);
       expect(result.seed).toBe(42);
       expect(result.fileId).toBeTruthy();
       expect(result.contentPath).toBe(`/api/attachments/${result.fileId}/content`);
-      // Generation + the pricing lookup; the picture came back as a data URL,
-      // so there is no fetch for the image bytes.
-      expect(mockedExecute).toHaveBeenCalledTimes(2);
+      // Exactly one outbound call: the picture came back as a data URL, so
+      // there is no second fetch for the image bytes.
+      expect(mockedExecute).toHaveBeenCalledTimes(1);
 
       const [creationRow] = await db
         .select()
@@ -325,17 +322,15 @@ d("Media Studio Create tab direct generation (DUR-4329)", () => {
       expect(creationRow).toBeTruthy();
       expect(creationRow!.kind).toBe("picture");
       expect(creationRow!.createdByUserId).toBe("owner-user");
-      expect(creationRow!.costCents).toBe(2);
+      expect(creationRow!.costCents).toBe(MEDIA_STUDIO_DIRECT_PICTURE_COST_CENTS.fal);
 
       const [costEventRow] = await db.select().from(costEvents).where(eq(costEvents.id, creationRow!.costEventId!));
       expect(costEventRow.agentId).toBeNull();
       expect(costEventRow.createdByUserId).toBe("owner-user");
-      expect(costEventRow.costCents).toBe(2);
-      expect(costEventRow.costMicroUsd).toBe(15_729);
-      expect(costEventRow.costSource).toBe("estimate");
+      expect(costEventRow.costCents).toBe(MEDIA_STUDIO_DIRECT_PICTURE_COST_CENTS.fal);
 
       const [companyRow] = await db.select().from(companies).where(eq(companies.id, companyId));
-      expect(companyRow.spentMonthlyCents).toBe(2);
+      expect(companyRow.spentMonthlyCents).toBe(MEDIA_STUDIO_DIRECT_PICTURE_COST_CENTS.fal);
     });
   });
 
@@ -349,7 +344,6 @@ d("Media Studio Create tab direct generation (DUR-4329)", () => {
         .mockResolvedValueOnce(fakeFalResponse({ request_id: "req-1" }))
         .mockResolvedValueOnce(fakeFalResponse({ status: "COMPLETED" }))
         .mockResolvedValueOnce(fakeFalResponse({ audio: { url: "https://fal.media/files/audio.mp3", content_type: "audio/mpeg" } }))
-        .mockResolvedValueOnce(fakeFalResponse({ prices: [{ endpoint_id: "cassetteai/music-generator", unit_price: 0.01, unit: "second", currency: "USD" }] }))
         .mockResolvedValueOnce(fakeBinaryResponse("audio/mpeg", Buffer.from("fake-audio-bytes")));
 
       const result = await mediaStudioDirectService(db).createAudio(
@@ -358,14 +352,13 @@ d("Media Studio Create tab direct generation (DUR-4329)", () => {
         { prompt: "a short upbeat jingle", provider: "fal", mode: "music", durationSeconds: 3 },
       );
 
-      // 3s x $0.01/s = 30,000 micro-USD = 3 cents (replaces the 45-cent estimate).
-      const expectedCostCents = 3;
+      const expectedCostCents = Math.ceil(3 * MEDIA_STUDIO_DIRECT_AUDIO_COST_CENTS_PER_SECOND.fal);
       expect(result.costCents).toBe(expectedCostCents);
       expect(result.fileId).toBeTruthy();
       expect(result.contentType).toBe("audio/mpeg");
       expect(result.contentPath).toBe(`/api/attachments/${result.fileId}/content`);
-      // Submit + status poll + result fetch + pricing lookup + the audio-bytes fetch.
-      expect(mockedExecute).toHaveBeenCalledTimes(5);
+      // Submit + status poll + result fetch + the audio-bytes fetch itself.
+      expect(mockedExecute).toHaveBeenCalledTimes(4);
 
       const [creationRow] = await db
         .select()
