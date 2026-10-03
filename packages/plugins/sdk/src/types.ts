@@ -54,6 +54,7 @@ import type {
   PluginPerformActionContext,
   PluginPersonaGenerationCapReservation,
   PluginMediaStudioDirectSpendReservation,
+  PluginMediaStudioDirectSpendSettlement,
 } from "./protocol.js";
 
 // ---------------------------------------------------------------------------
@@ -1853,6 +1854,17 @@ export interface PluginBillingClient {
   ): Promise<PluginMediaStudioDirectSpendReservation>;
   /** Give back a reservation whose paid call failed. */
   releaseMediaStudioDirectSpend(companyId: string, reservationId: string): Promise<void>;
+  /**
+   * Replace a paid edit's reservation estimate with Fal's actual per-unit
+   * price for the endpoint used (DUR-4455). The host prices it itself from
+   * Fal's published pricing; the plugin only reports which endpoint ran and
+   * what it consumed. `settled: false` (pricing unavailable) leaves the
+   * reservation's estimate standing.
+   */
+  settleMediaStudioDirectSpend(
+    companyId: string,
+    input: { reservationId: string; endpointId: string; usage: { images?: number; width?: number; height?: number; seconds?: number } },
+  ): Promise<PluginMediaStudioDirectSpendSettlement>;
 }
 
 /**

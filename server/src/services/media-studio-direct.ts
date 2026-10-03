@@ -649,6 +649,43 @@ export function mediaStudioDirectService(
     return { rewritten: text, model: REWRITE_MODEL, costCents };
   }
 
+  /**
+   * DUR-4455: settles a paid Edit-tab Fal action's reservation to Fal's
+   * actual published per-unit price, the same way the Create tab's own Fal
+   * calls settle (settleFalActualCost above). The plugin reports only which
+   * endpoint ran and what it consumed; the host (never the plugin) resolves
+   * the company's own Fal key and prices the call. Pricing unavailable
+   * leaves the reservation's estimate standing -- never an error, since the
+   * edit itself already succeeded.
+   */
+  async function settleSpend(
+    companyId: string,
+    reservationId: string,
+    endpointId: string,
+    usage: FalUsage,
+  ): Promise<{ settled: true; costCents: number } | { settled: false }> {
+    const [event] = await db
+      .select({ id: costEvents.id, billingCode: costEvents.billingCode, createdByUserId: costEvents.createdByUserId })
+      .from(costEvents)
+      .where(and(eq(costEvents.id, reservationId), eq(costEvents.companyId, companyId)));
+    // MEDIA_STUDIO_EDIT_BILLING_CODE is literally MEDIA_STUDIO_DIRECT_BILLING_CODE (see shared's media-studio-direct.ts) -- same billing code, Edit tab and Create tab share one reservation lane.
+    if (!event || event.billingCode !== MEDIA_STUDIO_DIRECT_BILLING_CODE || !event.createdByUserId) return { settled: false };
+    const apiKey = await resolveFalApiKey(companyId, event.createdByUserId);
+    const actual = await priceFalCall(safeFetch, apiKey, endpointId, usage);
+    if (!actual) return { settled: false };
+    await withCompanyScope(db, companyId, async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`media_studio_direct_spend:${companyId}`}))`);
+      await applyFalActualCost(tx, reservationId, actual);
+      const { start, end } = currentUtcMonthWindow();
+      const [row] = await tx
+        .select({ total: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::int` })
+        .from(costEvents)
+        .where(and(eq(costEvents.companyId, companyId), gte(costEvents.occurredAt, start), lt(costEvents.occurredAt, end)));
+      await tx.update(companies).set({ spentMonthlyCents: Number(row?.total ?? 0), updatedAt: new Date() }).where(eq(companies.id, companyId));
+    });
+    return { settled: true, costCents: actual.costCents };
+  }
+
   async function history(companyId: string, actor: MediaStudioDirectActor, limit = 50): Promise<MediaStudioDirectHistoryEntry[]> {
     const rows = await db
       .select()
@@ -689,5 +726,7 @@ export function mediaStudioDirectService(
     /** DUR-4441: the plugin host's billing capability reuses the Create tab's exact reservation logic for paid Edit-tab actions. */
     reserveSpend,
     releaseReservation,
+    /** DUR-4455: ditto for settling a finished Fal edit to its actual cost. */
+    settleSpend,
   };
 }
