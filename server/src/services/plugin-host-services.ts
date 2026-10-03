@@ -28,7 +28,9 @@ import type {
   WorkerHostCallContext,
 } from "@paperclipai/plugin-sdk";
 import type { CreateIssueThreadInteraction, InviteJoinType, IssueDocumentSummary, PermissionKey, PrincipalType } from "@paperclipai/shared";
-import { pluginOperationIssueOriginKind } from "@paperclipai/shared";
+import { MEDIA_STUDIO_DIRECT_BILLING_CODE, MEDIA_STUDIO_EDIT_ACTIONS, MEDIA_STUDIO_EDIT_BILLING_CODE, estimateMediaStudioEditCostCents, pluginOperationIssueOriginKind, type MediaStudioEditAction } from "@paperclipai/shared";
+import { HttpError } from "../errors.js";
+import { mediaStudioDirectService } from "./media-studio-direct.js";
 import { companyService } from "./companies.js";
 import { agentService } from "./agents.js";
 import { projectService } from "./projects.js";
@@ -395,6 +397,7 @@ export function buildHostServices(
   const budgets = budgetService(db);
   const issueApprovals = issueApprovalService(db);
   const agentDailyLimits = agentDailyLimitService(db);
+  const mediaStudioDirect = mediaStudioDirectService(db);
   const scopedBus = eventBus.forPlugin(pluginKey);
 
   // Track active session event subscriptions for cleanup
@@ -2688,6 +2691,58 @@ export function buildHostServices(
             ? sanitizeRecord(row.details)
             : row.details ?? null,
         }));
+      },
+    },
+
+    billing: {
+      async reserveMediaStudioDirectSpend(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        if (!params.userId) throw new Error("userId is required");
+        const action = (MEDIA_STUDIO_EDIT_ACTIONS as readonly string[]).includes(params.action) ? (params.action as MediaStudioEditAction) : null;
+        if (!action) throw new Error("Unknown edit action");
+        if (params.confirmBudgetCapCents != null && !(Number.isInteger(params.confirmBudgetCapCents) && params.confirmBudgetCapCents >= 0)) {
+          throw new Error("confirmBudgetCapCents must be a non-negative integer");
+        }
+        const provider = action === "variation" || action === "prompt-edit" || action === "inpaint" ? "fal" : "sogni";
+        // Admin status is decided here from real instance/company roles for
+        // this user id -- never from anything the worker says about itself.
+        // Anyone who is not an active member of this company (and not an
+        // instance admin) is refused outright.
+        const isInstanceAdminUser = await access.isInstanceAdmin(params.userId);
+        const membership = await access.getMembership(companyId, "user", params.userId);
+        const role = membership?.status === "active" ? membership.membershipRole : null;
+        if (!isInstanceAdminUser && !role) {
+          return { allowed: false as const, message: "You don't have access to this company, so this edit can't be charged to it.", reason: "not_a_member" };
+        }
+        const isCompanyAdmin = isInstanceAdminUser || role === "owner" || role === "admin";
+        try {
+          const { costEventId } = await mediaStudioDirect.reserveSpend(
+            companyId,
+            { userId: params.userId, isCompanyAdmin },
+            estimateMediaStudioEditCostCents(action),
+            params.confirmBudgetCapCents,
+            { provider, model: `edit:${action}`, billingCode: MEDIA_STUDIO_EDIT_BILLING_CODE },
+          );
+          return { allowed: true as const, reservationId: costEventId };
+        } catch (err) {
+          if (err instanceof HttpError && (err.status === 403 || err.status === 422)) {
+            const reason = (err.details as { reason?: unknown } | undefined)?.reason;
+            return { allowed: false as const, message: err.message, reason: typeof reason === "string" ? reason : null };
+          }
+          throw err;
+        }
+      },
+      async releaseMediaStudioDirectSpend(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        // Only a media-studio direct cost event of this company may be released.
+        const [event] = await db
+          .select({ id: costEvents.id })
+          .from(costEvents)
+          .where(and(eq(costEvents.id, params.reservationId), eq(costEvents.companyId, companyId), eq(costEvents.billingCode, MEDIA_STUDIO_DIRECT_BILLING_CODE)));
+        if (!event) return;
+        await mediaStudioDirect.releaseReservation(companyId, params.reservationId);
       },
     },
 
