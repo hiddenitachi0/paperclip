@@ -984,16 +984,6 @@ export type PluginMediaStudioDirectSpendReservation =
   | { allowed: false; message: string; reason: string | null };
 
 /**
- * Result of `billing.settleMediaStudioDirectSpend` (DUR-4455): the paid
- * edit's reservation estimate, replaced with Fal's published per-unit price
- * for the endpoint actually used. `settled: false` when pricing could not
- * be fetched -- the reservation's estimate cost is left standing.
- */
-export type PluginMediaStudioDirectSpendSettlement =
-  | { settled: true; costCents: number }
-  | { settled: false };
-
-/**
  * Result of `personas.reserveDailyGeneration` — whether one generation was
  * allowed (and, if so, atomically reserved) against the calling agent's
  * persona daily cap.
@@ -1766,17 +1756,6 @@ export interface WorkerToHostMethods {
   "billing.releaseMediaStudioDirectSpend": [
     params: { companyId: string; reservationId: string },
     result: void,
-  ];
-  "billing.settleMediaStudioDirectSpend": [
-    params: {
-      companyId: string;
-      reservationId: string;
-      /** The Fal model id actually used, e.g. "fal-ai/flux-pro/kontext/multi". The host prices this exact endpoint, never a plugin-supplied number. */
-      endpointId: string;
-      /** What the finished call consumed, so the host can price per-unit. */
-      usage: { images?: number; width?: number; height?: number; seconds?: number };
-    },
-    result: PluginMediaStudioDirectSpendSettlement,
   ];
 
   // Personas

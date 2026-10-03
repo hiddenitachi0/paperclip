@@ -22,7 +22,6 @@ import { errorHandler } from "../middleware/error-handler.js";
 import { mediaStudioDirectRoutes } from "../routes/media-studio-direct.js";
 import { pluginRegistryService } from "../services/plugin-registry.js";
 import { secretService } from "../services/secrets.js";
-import { clearFalPriceCache } from "../services/fal-cost.js";
 
 /**
  * DUR-4329: Media Studio's Create tab direct generation -- a board
@@ -116,7 +115,6 @@ d("Media Studio Create tab direct generation (DUR-4329)", () => {
 
   beforeEach(() => {
     mockedExecute.mockReset();
-    clearFalPriceCache();
   });
 
   async function seedCompany(overrides: { budgetMonthlyCents?: number } = {}) {
@@ -338,78 +336,6 @@ d("Media Studio Create tab direct generation (DUR-4329)", () => {
 
       const [companyRow] = await db.select().from(companies).where(eq(companies.id, companyId));
       expect(companyRow.spentMonthlyCents).toBe(2);
-    });
-  });
-
-  describe("settleSpend (DUR-4455: Edit-tab Fal actions settle to the actual price)", () => {
-    it("replaces a reservation's estimate with Fal's published price and recomputes company spend", async () => {
-      const companyId = await seedCompany({ budgetMonthlyCents: 100_000 });
-      const secretId = await seedFalSecret(companyId);
-      await setMediaStudioConfig({ falKeySecretRef: secretId });
-
-      const direct = mediaStudioDirectService(db);
-      const { costEventId } = await direct.reserveSpend(
-        companyId,
-        { userId: "owner-user", isCompanyAdmin: true },
-        MEDIA_STUDIO_DIRECT_PICTURE_COST_CENTS.fal,
-        undefined,
-        { provider: "fal", model: "edit:inpaint", billingCode: MEDIA_STUDIO_DIRECT_BILLING_CODE },
-      );
-
-      mockedExecute.mockResolvedValueOnce(
-        fakeFalResponse({ prices: [{ endpoint_id: "fal-ai/flux-pro/v1/fill", unit_price: 0.05, unit: "image", currency: "USD" }] }),
-      );
-      const outcome = await direct.settleSpend(companyId, costEventId, "fal-ai/flux-pro/v1/fill", { images: 1 });
-      expect(outcome).toEqual({ settled: true, costCents: 5 });
-
-      const [row] = await db.select().from(costEvents).where(eq(costEvents.id, costEventId));
-      expect(row.costCents).toBe(5);
-      expect(row.costMicroUsd).toBe(50_000);
-      expect(row.costSource).toBe("estimate");
-
-      const [companyRow] = await db.select().from(companies).where(eq(companies.id, companyId));
-      expect(companyRow.spentMonthlyCents).toBe(5);
-    });
-
-    it("leaves the reservation's estimate standing when pricing is unavailable", async () => {
-      const companyId = await seedCompany({ budgetMonthlyCents: 100_000 });
-      const secretId = await seedFalSecret(companyId);
-      await setMediaStudioConfig({ falKeySecretRef: secretId });
-
-      const direct = mediaStudioDirectService(db);
-      const { costEventId } = await direct.reserveSpend(
-        companyId,
-        { userId: "owner-user", isCompanyAdmin: true },
-        MEDIA_STUDIO_DIRECT_PICTURE_COST_CENTS.fal,
-        undefined,
-        { provider: "fal", model: "edit:inpaint", billingCode: MEDIA_STUDIO_DIRECT_BILLING_CODE },
-      );
-      mockedExecute.mockResolvedValueOnce({ status: 403, statusText: "Forbidden", headers: {}, body: "", bodyBytes: Buffer.from("") });
-
-      const outcome = await direct.settleSpend(companyId, costEventId, "fal-ai/flux-pro/v1/fill", { images: 1 });
-      expect(outcome).toEqual({ settled: false });
-
-      const [row] = await db.select().from(costEvents).where(eq(costEvents.id, costEventId));
-      expect(row.costCents).toBe(MEDIA_STUDIO_DIRECT_PICTURE_COST_CENTS.fal);
-    });
-
-    it("refuses to settle a reservation belonging to a different company", async () => {
-      const companyId = await seedCompany({ budgetMonthlyCents: 100_000 });
-      const otherCompanyId = await seedCompany({ budgetMonthlyCents: 100_000 });
-      const secretId = await seedFalSecret(companyId);
-      await setMediaStudioConfig({ falKeySecretRef: secretId });
-
-      const direct = mediaStudioDirectService(db);
-      const { costEventId } = await direct.reserveSpend(
-        companyId,
-        { userId: "owner-user", isCompanyAdmin: true },
-        MEDIA_STUDIO_DIRECT_PICTURE_COST_CENTS.fal,
-        undefined,
-        { provider: "fal", model: "edit:inpaint", billingCode: MEDIA_STUDIO_DIRECT_BILLING_CODE },
-      );
-      const outcome = await direct.settleSpend(otherCompanyId, costEventId, "fal-ai/flux-pro/v1/fill", { images: 1 });
-      expect(outcome).toEqual({ settled: false });
-      expect(mockedExecute).not.toHaveBeenCalled();
     });
   });
 

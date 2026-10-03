@@ -1,6 +1,5 @@
 import { definePlugin, runWorker, type PluginContext, type ToolResult } from "@paperclipai/plugin-sdk";
 import {
-  FAL_FILL_MODEL,
   FAL_REFERENCE_MODEL,
   FalProvider,
   MAX_SEED,
@@ -1786,7 +1785,7 @@ const plugin = definePlugin({
       action: string,
       context: { companyId: string | null; actor: { userId: string | null } },
       raw: Record<string, unknown>,
-      run: (reservationId: string) => Promise<T>,
+      run: () => Promise<T>,
     ): Promise<T> => {
       const companyId = context.companyId;
       const userId = context.actor.userId;
@@ -1799,7 +1798,7 @@ const plugin = definePlugin({
       });
       if (!reservation.allowed) throw new Error(reservation.message);
       try {
-        return await run(reservation.reservationId);
+        return await run();
       } catch (err) {
         try {
           await ctx.billing.releaseMediaStudioDirectSpend(companyId, reservation.reservationId);
@@ -1807,24 +1806,6 @@ const plugin = definePlugin({
           ctx.logger.warn(`media-studio: could not give back an edit's reserved spend: ${errorText(releaseErr)}`);
         }
         throw err;
-      }
-    };
-
-    // DUR-4455: once a Fal edit action finished, replace its reservation
-    // estimate with Fal's published per-unit price for the endpoint used.
-    // Never throws -- settlement failing (or pricing being unavailable)
-    // just leaves the reservation's estimate standing; the edit itself
-    // already succeeded and must not be undone by a pricing lookup.
-    const settleFalEditSpend = async (
-      companyId: string,
-      reservationId: string,
-      endpointId: string,
-      usage: { images?: number; width?: number; height?: number; seconds?: number },
-    ): Promise<void> => {
-      try {
-        await ctx.billing.settleMediaStudioDirectSpend(companyId, { reservationId, endpointId, usage });
-      } catch (err) {
-        ctx.logger.warn(`media-studio: could not settle an edit's actual Fal cost: ${errorText(err)}`);
       }
     };
 
@@ -1919,11 +1900,10 @@ const plugin = definePlugin({
       }
       const providerConfig: ProviderConfig = { provider: "fal", falKey, falModel: FAL_REFERENCE_MODEL };
       const impl = selectProvider(providerConfig, (url, init) => ctx.http.fetch(url, init));
-      return withEditSpend("variation", context, raw, async (reservationId) => {
+      return withEditSpend("variation", context, raw, async () => {
         try {
           const result = await impl.generate({ prompt, referenceImages: [imageDataUrl] });
           const { contentBase64, contentType } = await toAttachmentBytes(ctx, result);
-          await settleFalEditSpend(context.companyId as string, reservationId, result.model ?? FAL_REFERENCE_MODEL, { images: 1 });
           return { imageDataUrl: `data:${contentType};base64,${contentBase64}`, contentType, provider: "fal" };
         } catch (err) {
           throw new Error(errorText(err));
@@ -2036,7 +2016,7 @@ const plugin = definePlugin({
       } catch (err) {
         throw new Error(`The Fal.ai API key picked in Media Studio's settings could not be read: ${errorText(err)}`);
       }
-      return withEditSpend("inpaint", context, raw, async (reservationId) => {
+      return withEditSpend("inpaint", context, raw, async () => {
         try {
           const provider = new FalProvider(falKey, (url, init) => ctx.http.fetch(url, init));
           const result = await provider.fillImage({ image: imageDataUrl, mask: maskDataUrl, prompt });
@@ -2046,7 +2026,6 @@ const plugin = definePlugin({
             edited: Buffer.from(editedBase64, "base64"),
             mask: bytesFromDataUrl(maskDataUrl, "The mask"),
           });
-          await settleFalEditSpend(context.companyId as string, reservationId, result.model ?? FAL_FILL_MODEL, { images: 1 });
           return { imageDataUrl: `data:image/png;base64,${composited.toString("base64")}`, contentType: "image/png", provider: "fal" };
         } catch (err) {
           throw new Error(errorText(err));

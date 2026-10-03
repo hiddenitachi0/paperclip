@@ -2744,17 +2744,6 @@ export function buildHostServices(
         if (!event) return;
         await mediaStudioDirect.releaseReservation(companyId, params.reservationId);
       },
-      async settleMediaStudioDirectSpend(params) {
-        const companyId = ensureCompanyId(params.companyId);
-        await ensurePluginAvailableForCompany(companyId);
-        // Only a media-studio direct cost event of this company may be settled.
-        const [event] = await db
-          .select({ id: costEvents.id })
-          .from(costEvents)
-          .where(and(eq(costEvents.id, params.reservationId), eq(costEvents.companyId, companyId), eq(costEvents.billingCode, MEDIA_STUDIO_DIRECT_BILLING_CODE)));
-        if (!event) return { settled: false as const };
-        return mediaStudioDirect.settleSpend(companyId, params.reservationId, params.endpointId, params.usage);
-      },
     },
 
     personas: {
