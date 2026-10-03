@@ -144,6 +144,7 @@ describe("worker performAction context", () => {
           runId: null,
           companyId: null,
           canManageCompany: false,
+          isInstanceAdmin: false,
         },
         companyId: null,
       });

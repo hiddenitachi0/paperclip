@@ -1217,8 +1217,12 @@ def ask_agent(state, bot, chat_id, text, force_task=False, came_by_voice=False):
         # goes out, so its result comes back to this chat even after a restart.
         for started in handed_over_tasks(result):
             remember_task(state, token, chat_id, started, started["title"] or text, colleague=started["colleague"])
+        # DUR-4371: Lane A now always returns a non-empty answer after a tool
+        # call, so this only fires on an edge case the server missed (e.g. an
+        # older response shape). Say so plainly instead of "had nothing to
+        # add", which read as the agent dismissing the person.
         answer = str(result.get("response") or "").strip() or (
-            "" if images else f"{agent_name} had nothing to add.")
+            "" if images else f"{agent_name}'s model gave no answer. Try asking again, or say it a different way.")
         if notes or answer:
             send_plain(token, chat_id, "\n\n".join(notes + ([answer] if answer else [])))
         if images:

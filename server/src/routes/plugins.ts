@@ -769,6 +769,7 @@ export function pluginRoutes(
         runId: req.actor.runId ?? null,
         companyId: scopedCompanyId,
         canManageCompany: false,
+        isInstanceAdmin: false,
       };
     }
     if (req.actor.type === "board") {
@@ -779,6 +780,7 @@ export function pluginRoutes(
         runId: req.actor.runId ?? null,
         companyId: scopedCompanyId,
         canManageCompany: scopedCompanyId ? boardUserCanManageCompany(req, scopedCompanyId) : false,
+        isInstanceAdmin: req.actor.source === "local_implicit" || req.actor.isInstanceAdmin === true,
       };
     }
     // DUR-3977: everything else is refused, explicitly.
