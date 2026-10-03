@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { cacheSettingsApi, type CacheSettings } from "../api/cacheSettings";
@@ -21,12 +21,17 @@ export function CacheSettingsSection({ companyId }: { companyId: string }) {
   });
   const [thresholdK, setThresholdK] = useState(String(DEFAULT_THRESHOLD_K));
   const [lifetime, setLifetime] = useState("");
+  // Sync the editable fields from the server once per company, not on every
+  // settings refresh — an unrelated toggle's save (which also updates
+  // `settings`) would otherwise wipe out an unsaved threshold/lifetime edit.
+  const syncedCompanyId = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!settings) return;
+    if (!settings || syncedCompanyId.current === companyId) return;
+    syncedCompanyId.current = companyId;
     setThresholdK(String(Math.round(settings.handoffTokenThreshold / 1000)));
     setLifetime(settings.cacheLifetimeMinutes == null ? "" : String(settings.cacheLifetimeMinutes));
-  }, [settings]);
+  }, [settings, companyId]);
 
   const mutation = useMutation({
     mutationFn: (patch: Partial<Omit<CacheSettings, "companyId">>) => cacheSettingsApi.update(companyId, patch),
