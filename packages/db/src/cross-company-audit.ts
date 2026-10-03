@@ -79,6 +79,7 @@ export const ROUTINE_SCHEDULER_BYPASS_ROUTES = [
   "heartbeat-scheduler:videoStorylineRender",
   "heartbeat-scheduler:videoStorylineStitch",
   "heartbeat-scheduler:tradingAgent",
+  "heartbeat-scheduler:localModelHealth",
 ] as const;
 
 export type RoutineSchedulerBypassRoute = (typeof ROUTINE_SCHEDULER_BYPASS_ROUTES)[number];
