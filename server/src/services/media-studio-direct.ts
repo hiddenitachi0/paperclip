@@ -659,5 +659,8 @@ export function mediaStudioDirectService(
      */
     reserveSpendForTest: reserveSpend,
     releaseReservationForTest: releaseReservation,
+    /** DUR-4441: the plugin host's billing capability reuses the Create tab's exact reservation logic for paid Edit-tab actions. */
+    reserveSpend,
+    releaseReservation,
   };
 }
