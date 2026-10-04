@@ -1545,8 +1545,15 @@
     {
       "idx": 221,
       "version": "7",
-      "when": 1791118854589,
-      "tag": "0221_issue_size_label",
+      "when": 1791139532530,
+      "tag": "0221_worktree_cleanup_retention_days",
+      "breakpoints": true
+    },
+    {
+      "idx": 222,
+      "version": "7",
+      "when": 1791139532531,
+      "tag": "0222_issue_size_label",
       "breakpoints": true
     }
   ]

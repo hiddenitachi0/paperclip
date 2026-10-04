@@ -32,10 +32,15 @@ function migrationGuardKeys(): string[] {
   return [...match[1].matchAll(/'([A-Z0-9_]+)'/g)].map((entry) => entry[1]);
 }
 
+// Env keys for kinds added after 0171 shipped. The migration is immutable, so
+// these are intentionally absent from its backfill; new rows get their kind
+// from the dialog/route instead.
+const POST_0171_ENV_KEYS = new Set(["HF_TOKEN"]);
+
 describe("0171_company_secret_kind backfill", () => {
   it("maps exactly the env-key names the shared taxonomy knows, to the same kinds", () => {
     const fromSql = new Map(migrationPairs());
-    const fromShared = new Map(secretKindEnvKeyPairs());
+    const fromShared = new Map(secretKindEnvKeyPairs().filter(([envKey]) => !POST_0171_ENV_KEYS.has(envKey)));
     expect([...fromSql.keys()].sort()).toEqual([...fromShared.keys()].sort());
     for (const [envKey, kind] of fromShared) {
       expect(fromSql.get(envKey), envKey).toBe(kind);
