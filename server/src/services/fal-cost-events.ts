@@ -9,6 +9,11 @@ import { logger } from "../middleware/logger.js";
 import { costService } from "./costs.js";
 import { falPricingClient, fetchFalUsageSummary, microUsdToCents, type FalFetchImpl, type FalUsage } from "./fal-pricing.js";
 
+/** Casts a drizzle transaction handle to Db so services written against Db (e.g. costService) can run inside it. */
+function asTxDb(tx: unknown): Db {
+  return tx as Db;
+}
+
 export async function recordFalCostEvent(
   db: Db,
   fetchImpl: FalFetchImpl,
@@ -59,9 +64,15 @@ const RECONCILIATION_TOLERANCE_MICRO_USD = 10_000;
  * "skipped"). Idempotent per (company, day): re-running replaces the
  * previous adjustment row.
  *  - within tolerance: that day's Fal rows are marked cost_source "provider".
- *  - otherwise: one adjustment row (billing_code fal-reconciliation, may be
- *    negative) brings the day's total to Fal's billed figure, cost_source
- *    "provider". The adjustment carries no key, model "reconciliation".
+ *  - Fal billed more than recorded (beyond tolerance): one adjustment row
+ *    (billing_code fal-reconciliation, cost_source "provider") brings the
+ *    day's total up to Fal's billed figure, written through costService so
+ *    spentMonthlyCents and budget caps are re-evaluated immediately.
+ *  - Fal billed less than recorded (beyond tolerance): never auto-decreases
+ *    tracked spend -- an empty/incomplete usage response must not be able to
+ *    zero out a day's real cost and silently lift a budget cap. No
+ *    adjustment row is written; the mismatch is still returned so the daily
+ *    job can still alert the owner through the soft-incident path.
  */
 export async function reconcileFalDay(
   db: Db,
@@ -89,19 +100,23 @@ export async function reconcileFalDay(
         .where(and(eq(costEvents.companyId, params.companyId), eq(costEvents.provider, "fal"), gte(costEvents.occurredAt, start), lt(costEvents.occurredAt, end)));
       return { status: "confirmed" as const, billedMicroUsd: usage.totalMicroUsd, recordedMicroUsd, deltaMicroUsd };
     }
-    await tx.insert(costEvents).values({
-      companyId: params.companyId,
-      agentId: null,
-      provider: "fal",
-      biller: "fal",
-      billingType: "metered_api",
-      billingCode: dayCode,
-      model: "reconciliation",
-      costCents: Math.round(deltaMicroUsd / 10_000),
-      costMicroUsd: deltaMicroUsd,
-      costSource: "provider",
-      occurredAt: new Date(end.getTime() - 1),
-    });
+    if (deltaMicroUsd > 0) {
+      // Only ever top up recorded spend to match Fal's billed figure. A
+      // negative delta (Fal billed less, e.g. an empty usage page) is never
+      // written as a cost row -- see reconcileFalDay's doc comment.
+      await costService(asTxDb(tx)).createEvent(params.companyId, {
+        agentId: null,
+        provider: "fal",
+        biller: "fal",
+        billingType: "metered_api",
+        billingCode: dayCode,
+        model: "reconciliation",
+        costCents: Math.round(deltaMicroUsd / 10_000),
+        costMicroUsd: deltaMicroUsd,
+        costSource: "provider",
+        occurredAt: new Date(end.getTime() - 1),
+      });
+    }
     return { status: "adjusted" as const, billedMicroUsd: usage.totalMicroUsd, recordedMicroUsd, deltaMicroUsd };
   });
 }

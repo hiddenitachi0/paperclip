@@ -77,4 +77,21 @@ d("Fal cost events (DUR-4455)", () => {
     expect(rows).toHaveLength(2);
     expect(rows.find((r) => r.model === "reconciliation")?.costMicroUsd).toBe(150_000);
   });
+
+  it("never auto-decreases tracked spend when Fal reports less than recorded (DUR-4493)", async () => {
+    const companyId = await seedCompany();
+    const day = new Date("2026-09-16T12:00:00Z");
+    // Real recorded spend for the day.
+    await db.insert(costEvents).values({ companyId, provider: "fal", biller: "fal", model: "m", costCents: 500, costMicroUsd: 5_000_000, costSource: "estimate", occurredAt: day });
+    const emptyUsage = vi.fn(async () => json({ summary: [], has_more: false }));
+
+    const result = await reconcileFalDay(db, emptyUsage, { companyId, adminKey: "k", day });
+    // The mismatch is still reported (for the soft-incident alert path)...
+    expect(result).toMatchObject({ status: "adjusted", billedMicroUsd: 0, recordedMicroUsd: 5_000_000, deltaMicroUsd: -5_000_000 });
+
+    // ...but no cost_events row is written that would zero out the day's real spend.
+    const rows = await db.select().from(costEvents).where(eq(costEvents.companyId, companyId));
+    expect(rows).toHaveLength(1);
+    expect(rows.find((r) => r.model === "reconciliation")).toBeUndefined();
+  });
 });
