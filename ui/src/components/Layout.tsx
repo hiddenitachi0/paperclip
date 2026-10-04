@@ -23,6 +23,8 @@ import { SecondarySidebar } from "./SecondarySidebar";
 import { SidebarAccountMenu } from "./SidebarAccountMenu";
 import { useDialogActions } from "../context/DialogContext";
 import { GeneralSettingsProvider } from "../context/GeneralSettingsContext";
+import { PresentationModeProvider } from "../context/PresentationModeContext";
+import { PresentationModeBadge } from "./PresentationModeBadge";
 import { usePanel } from "../context/PanelContext";
 import { useCompany } from "../context/CompanyContext";
 import { useApplyCompanyBranding } from "../hooks/useApplyCompanyBranding";
@@ -509,6 +511,8 @@ export function Layout() {
 
   return (
     <GeneralSettingsProvider value={{ keyboardShortcutsEnabled, factCheckCardStrictAllowlist }}>
+      <PresentationModeProvider>
+      <PresentationModeBadge />
       <div
       className={cn(
         "bg-background text-foreground pt-[env(safe-area-inset-top)]",
@@ -632,6 +636,7 @@ export function Layout() {
       <KeyboardShortcutsCheatsheet open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
       <ToastViewport />
       </div>
+      </PresentationModeProvider>
     </GeneralSettingsProvider>
   );
 }

@@ -84,6 +84,7 @@ describe("CompanySettingsNav", () => {
     expect(getCompanySettingsTab("/company/settings/instance/access")).toBe("instance-access");
     expect(getCompanySettingsTab("/company/settings/instance/heartbeats")).toBe("instance-heartbeats");
     expect(getCompanySettingsTab("/company/settings/instance/experimental")).toBe("instance-experimental");
+    expect(getCompanySettingsTab("/company/settings/instance/presentation-mode")).toBe("instance-presentation-mode");
     expect(getCompanySettingsTab("/PAP/company/settings/instance/plugins/example")).toBe("instance-plugins");
     expect(getCompanySettingsTab("/company/settings/instance/adapters")).toBe("instance-adapters");
   });
@@ -113,6 +114,7 @@ describe("CompanySettingsNav", () => {
           { value: "instance-access", label: "Instance access" },
           { value: "instance-heartbeats", label: "Instance heartbeats" },
           { value: "instance-experimental", label: "Instance experimental" },
+          { value: "instance-presentation-mode", label: "Presentation mode" },
           { value: "instance-plugins", label: "Instance plugins" },
           { value: "instance-adapters", label: "Instance adapters" },
         ],
