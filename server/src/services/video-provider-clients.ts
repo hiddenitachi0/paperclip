@@ -19,6 +19,8 @@
 // Kept deliberately identical in behavior to the plugin's copy; see that
 // package for the fuller design commentary (Sogni's shape is an unconfirmed
 // upstream assumption -- see the DUR-4127 PR's "Questions for Filip").
+import { readSogniWorkflowCredits } from "./sogni-cost.js";
+
 
 export type FetchImpl = (url: string, init?: RequestInit) => Promise<Response>;
 
@@ -326,7 +328,10 @@ export class SogniVideoProvider implements MediaJobProvider {
       result: {
         contentType: typeof artifact.contentType === "string" ? artifact.contentType : "video/mp4",
         url: String(artifact.url),
-        meta: { workflowId: handle.externalId },
+        meta: {
+          workflowId: handle.externalId,
+          ...(readSogniWorkflowCredits(workflow) !== null ? { sogniCredits: readSogniWorkflowCredits(workflow) } : {}),
+        },
       },
     };
   }

@@ -4,6 +4,7 @@ import { agents, approvals, budgetPolicies, companies, costEvents, heartbeatRuns
 import type { DashboardPulse } from "@paperclipai/shared";
 import { notFound } from "../errors.js";
 import { budgetService } from "./budgets.js";
+import { sumCostCents } from "./cost-sql.js";
 import { readDeployRunnerStatus, type DeployRunnerStatusEntry } from "./deploy-runner-status.js";
 import { isCompletedDeployOutcome } from "./deploy-completion-gate.js";
 
@@ -110,7 +111,7 @@ export function dashboardService(db: Db, deps: DashboardServiceDeps = {}) {
       const runActivityStart = new Date(`${runActivityDays[0]}T00:00:00.000Z`);
       const [{ monthSpend }] = await db
         .select({
-          monthSpend: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::double precision`,
+          monthSpend: sumCostCents(),
         })
         .from(costEvents)
         .where(
@@ -332,7 +333,7 @@ export function dashboardService(db: Db, deps: DashboardServiceDeps = {}) {
 
       const [{ todaySpend }] = await db
         .select({
-          todaySpend: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::double precision`,
+          todaySpend: sumCostCents(),
         })
         .from(costEvents)
         .where(and(eq(costEvents.companyId, companyId), gte(costEvents.occurredAt, dayStart)));
