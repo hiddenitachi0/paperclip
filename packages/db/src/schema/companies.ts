@@ -32,6 +32,10 @@ export const companies = pgTable(
     // zero visible behavior change until an operator turns it on.
     paymentsEnabled: boolean("payments_enabled").notNull().default(false),
     brandColor: text("brand_color"),
+    // DUR-4497: days a task must have been done/cancelled before the daily
+    // worktree-cleanup job may remove its agent worktree. NULL = use the
+    // server default (7).
+    worktreeCleanupRetentionDays: integer("worktree_cleanup_retention_days"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

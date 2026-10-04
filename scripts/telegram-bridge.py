@@ -1929,6 +1929,66 @@ def notify_watcher_alerts(state, bots):
 
 
 
+# ─── Disk warnings (DUR-4499) ─────────────────────────────────────────────────
+#
+# The instance disk report comes from `disk-health` (read-only). One message
+# when usage first crosses 80% and another at 90%; nothing more until it falls
+# back under 80%, so a full disk does not spam the chat.
+
+DISK_LEVEL_RANK = {"ok": 0, "warn": 1, "critical": 2}
+
+
+def disk_alert_text(report):
+    level = report.get("level")
+    pct = round(float(report.get("usedPercent") or 0))
+    free_gb = (report.get("freeBytes") or 0) / 1e9
+    head = f"Disk is {pct}% full ({free_gb:.1f} GB free)."
+    top = [f for f in (report.get("folders") or []) if isinstance(f, dict) and f.get("bytes")][:3]
+    if top:
+        head += " Biggest: " + ", ".join(f"{f.get('label')} {f['bytes'] / 1e9:.1f} GB" for f in top) + "."
+    if level == "critical":
+        return "Disk almost full. " + head + " Free space now."
+    return "Disk is filling up. " + head
+
+
+def notify_disk_health(state, bots):
+    """Warn on Telegram when the data volume crosses 80% / 90%, once per level."""
+    report = cli("disk-health")
+    if not isinstance(report, dict):
+        return
+    level = report.get("level")
+    if level not in DISK_LEVEL_RANK:
+        return
+    with LOCK:
+        notified = state.get("disk_alert_level", "ok")
+    if DISK_LEVEL_RANK[level] <= DISK_LEVEL_RANK.get(notified, 0):
+        if level != notified:  # fell back: re-arm
+            with LOCK:
+                state["disk_alert_level"] = level
+                save_state(state)
+        return
+    by_company = defaultdict(list)
+    for b in bots:
+        by_company[b["companyId"]].append(b)
+    for company_id, cbots in by_company.items():
+        bot = company_notice_bot(cbots)
+        if bot is None:
+            continue
+        chats = deliverable_chats(state, bot["token"], allowed_users_for(bot))
+        if not chats:
+            continue
+        text = disk_alert_text(report)
+        delivered = False
+        for chat in chats:
+            if send_text_checked(bot["token"], chat, text):
+                delivered = True
+        if delivered:
+            with LOCK:
+                state["disk_alert_level"] = level
+                save_state(state)
+            return
+
+
 # ─── Morning reports ──────────────────────────────────────────────────────────
 #
 # A quick agent with a morning report writes it at its set time, and Paperclip
@@ -2362,6 +2422,12 @@ def main():
             notify_morning_reports(state, bots)
         except Exception as e:
             print(f"morning-report-notify error: {e}", flush=True)
+        try:
+            if time.time() - state.get("disk_checked_at", 0) > 600:
+                state["disk_checked_at"] = time.time()
+                notify_disk_health(state, bots)
+        except Exception as e:
+            print(f"disk-health-notify error: {e}", flush=True)
         time.sleep(12)
 
 

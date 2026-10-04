@@ -21,6 +21,7 @@ function makeCompany(id: string, issuePrefix: string): Company {
     feedbackDataSharingConsentByUserId: null,
     feedbackDataSharingTermsVersion: null,
     brandColor: null,
+    worktreeCleanupRetentionDays: null,
     logoAssetId: null,
     logoUrl: null,
     createdAt: new Date(),
