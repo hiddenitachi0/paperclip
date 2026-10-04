@@ -8,6 +8,7 @@
  *               Claude key is tested with, services/server-anthropic-key.ts)
  *   openai      GET https://api.openai.com/v1/models with the bearer
  *   openrouter  GET https://openrouter.ai/api/v1/models with the bearer
+ *   huggingface GET https://router.huggingface.co/v1/models with the bearer
  *   google      GET https://generativelanguage.googleapis.com/v1beta/models
  *   local       GET <baseUrl>/v1/models, with a bearer when the stored value
  *               also carries a key ("http://host:11434 my-key")
@@ -21,6 +22,7 @@
  */
 import Anthropic from "@anthropic-ai/sdk";
 import type { SecretKind } from "@paperclipai/shared";
+import { validateHuggingFaceToken } from "./huggingface-catalogue.js";
 import { isNonPublicAddress, validateAndResolveFetchUrl, type DnsLookupAll } from "./safe-outbound-fetch.js";
 import {
   SERVER_ANTHROPIC_KEY_TEST_MODEL,
@@ -96,6 +98,8 @@ function providerName(kind: SecretKind): string {
       return "OpenRouter";
     case "google_api_key":
       return "Google";
+    case "huggingface_api_key":
+      return "Hugging Face";
     case "local_model_endpoint":
       return "the model server";
     default:
@@ -247,6 +251,15 @@ export async function probeSecretKind(
             fetchImpl,
           });
           break;
+        case "huggingface_api_key": {
+          // DUR-4447: the same check the save path runs, so the Test button
+          // and "reject before saving" can never disagree.
+          const verdict = await validateHuggingFaceToken(trimmed, { fetchImpl });
+          result = verdict.ok
+            ? { ok: true, message: "Hugging Face answered. This token works." }
+            : { ok: false, message: verdict.message };
+          break;
+        }
         case "google_api_key":
           // Google takes the key as a header, never in the URL, so it cannot
           // end up in anyone's access log.

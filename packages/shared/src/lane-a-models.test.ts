@@ -49,7 +49,7 @@ describe("lane A provider catalogue", () => {
   });
 
   it("has every provider, each with a plain label", () => {
-    expect(LANE_A_PROVIDERS).toEqual(["anthropic", "openai", "google", "openrouter", "local"]);
+    expect(LANE_A_PROVIDERS).toEqual(["anthropic", "openai", "google", "openrouter", "huggingface", "local"]);
     for (const provider of LANE_A_PROVIDERS) {
       expect(LANE_A_PROVIDER_CATALOGUE[provider].label.length).toBeGreaterThan(0);
     }
@@ -277,6 +277,8 @@ describe("quick-agent thinking (DUR-4367)", () => {
 
   it("knows which providers/models accept reasoning_effort: OpenRouter and local yes, OpenAI reasoning models yes, everything else no", () => {
     expect(laneAModelAcceptsReasoningEffort("openrouter", "x/y")).toBe(true);
+    // DUR-4447: Hugging Face hosts are not known to take it, so nothing is sent.
+    expect(laneAModelAcceptsReasoningEffort("huggingface", "Qwen/Qwen3-14B:fastest")).toBe(false);
     expect(laneAModelAcceptsReasoningEffort("local", "llama3.1")).toBe(true);
     expect(laneAModelAcceptsReasoningEffort("openai", "o4-mini")).toBe(true);
     // Plain OpenAI chat models are not reasoning models and refuse an unknown field.

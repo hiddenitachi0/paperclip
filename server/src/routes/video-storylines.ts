@@ -362,6 +362,38 @@ export function videoStorylineRoutes(rawDb: Db) {
     },
   );
 
+  /**
+   * DUR-4425: streams a shot's storyboard still so the approval screen can
+   * show it before approval. The object key comes only from the stored shot
+   * row (never the request); the shot must belong to this company's storyline.
+   */
+  router.get(
+    "/companies/:companyId/video-storylines/:storylineId/shots/:shotId/still/content",
+    ...gatedScope(),
+    async (req, res, next) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      const shotId = req.params.shotId as string;
+      const shot = await storylines.getShotRow(companyId, storylineId, shotId);
+      if (!shot.stillObjectKey) {
+        throw notFound("This shot has no still picture yet.");
+      }
+
+      const storage = getStorageService();
+      const object = await storage.getObject(companyId, shot.stillObjectKey);
+      res.setHeader("Content-Type", shot.stillContentType || object.contentType || "image/png");
+      res.setHeader("Content-Length", String(shot.stillByteSize || object.contentLength || 0));
+      res.setHeader("Cache-Control", "private, max-age=60");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Content-Disposition", "inline");
+
+      object.stream.on("error", (err) => {
+        next(err);
+      });
+      object.stream.pipe(res);
+    },
+  );
+
   // ─── Scenes ──────────────────────────────────────────────────────────
 
   router.get("/companies/:companyId/video-storylines/:storylineId/scenes", ...gatedScope(), async (req, res) => {

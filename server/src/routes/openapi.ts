@@ -3661,6 +3661,23 @@ registerCurrentRoute({
 });
 
 registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/lane-a/huggingface/models",
+  tags: ["agents"],
+  summary:
+    "List the Hugging Face models (with per-provider price, tool support and latency) the company's stored token can reach (board users only)",
+  query: z.object({ toolsOnly: z.enum(["true", "false"]).optional(), liveOnly: z.enum(["true", "false"]).optional() }),
+  responses: {
+    200: r.ok(z.object({ models: z.array(z.record(z.string(), z.unknown())) })),
+    401: r.unauthorized,
+    403: r.forbidden,
+    409: r.conflict,
+    422: r.unprocessable,
+    503: { description: "Hugging Face unreachable", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+registerCurrentRoute({
   method: "post",
   path: "/api/lane-a/{agentId}/continue",
   tags: ["agents"],
@@ -5395,6 +5412,14 @@ registry.registerPath({
   path: "/api/instance/database-backups",
   tags: ["instance"],
   summary: "Trigger a database backup",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/instance/database-backups/stats",
+  tags: ["instance"],
+  summary: "Get database backup storage stats (tier counts and disk usage)",
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
 });
 

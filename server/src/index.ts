@@ -29,6 +29,7 @@ import {
   prepareEmbeddedPostgresNativeRuntime,
   reconcilePendingMigrationHistory,
   formatDatabaseBackupResult,
+  computeBackupStorageStats,
   runDatabaseBackup,
   authUsers,
   companies,
@@ -111,6 +112,7 @@ import {
 import { initTelemetry, getTelemetryClient } from "./telemetry.js";
 import { waitForInFlightRunsToDrain } from "./shutdown-drain.js";
 import { startHeartbeatRunRetention } from "./services/heartbeat-run-retention.js";
+import { startWorktreeCleanup } from "./services/worktree-cleanup.js";
 import { startCrossCompanyAccessLogRetention } from "./services/cross-company-access-log-retention.js";
 import { conflict } from "./errors.js";
 import {
@@ -823,7 +825,16 @@ export async function startServer(): Promise<StartedServer> {
     serverPort: listenPort,
     storageService,
     feedbackExportService: feedback,
+    databaseBackupDir: config.databaseBackupDir,
     databaseBackupService: {
+      getStorageStats: async (override) => {
+        const retention = override ?? (await backupSettingsSvc.getGeneral()).backupRetention;
+        return {
+          ...computeBackupStorageStats(config.databaseBackupDir, retention, "paperclip"),
+          backupDir: config.databaseBackupDir,
+          retention,
+        };
+      },
       runManualBackup: async () => {
         const result = await runServerDatabaseBackup("manual");
         if (!result) {
@@ -2061,6 +2072,14 @@ export async function startServer(): Promise<StartedServer> {
     );
   }
 
+  // DUR-4497: daily removal of finished-task agent worktrees (fail-closed;
+  // see worktree-cleanup.ts). On by default; PAPERCLIP_WORKTREE_CLEANUP_ENABLED=false
+  // is the kill switch.
+  if (process.env.PAPERCLIP_WORKTREE_CLEANUP_ENABLED !== "false") {
+    logger.info("Finished-task worktree cleanup enabled");
+    startWorktreeCleanup(db);
+  }
+
   // DUR-386: bound cross_company_access_log the same way. Bypass-scoped
   // forever for the same reason as the sweep above -- one batched DELETE
   // across every company's audit rows, with no company_id predicate (the
@@ -2078,6 +2097,21 @@ export async function startServer(): Promise<StartedServer> {
       config.crossCompanyAccessLogRetentionIntervalMinutes * 60 * 1000,
       config.crossCompanyAccessLogRetentionDays,
     );
+  }
+
+  // DUR-4498: bound data/run-logs on disk. Daily sweep, default 30 days;
+  // PAPERCLIP_RUN_LOG_RETENTION_DAYS overrides, 0 disables.
+  {
+    const envDays = process.env.PAPERCLIP_RUN_LOG_RETENTION_DAYS;
+    const runLogRetentionDays =
+      envDays !== undefined && envDays.trim() !== "" && Number.isFinite(Number(envDays))
+        ? Number(envDays)
+        : 30;
+    if (runLogRetentionDays > 0) {
+      logger.info({ retentionDays: runLogRetentionDays }, "Run log retention sweep enabled");
+      const { startRunLogRetention } = await import("./services/run-log-retention.js");
+      startRunLogRetention(24 * 60 * 60 * 1000, runLogRetentionDays);
+    }
   }
 
   // Wait for external adapters to finish loading before accepting requests.
