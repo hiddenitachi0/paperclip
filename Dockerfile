@@ -179,12 +179,13 @@ RUN chown root:root /usr/local/lib/paperclip/node-module-guard.cjs \
   && chmod 0644 /usr/local/lib/paperclip/node-module-guard.cjs
 
 # uv: Python package/venv manager for agent workspaces that build Python apps
-# (e.g. the Nordstrand Django dashboard). The base image ships python3 but no
-# pip/ensurepip, so `uv venv` / `uv pip install -r requirements.txt` / `uv sync`
-# are how agents bootstrap a runnable Python checkout in their worktree. Copied
-# from the official static uv image (no pip needed). Pin a version tag here if
-# reproducible builds become a requirement.
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+# (e.g. the Nordstrand Django dashboard) and for the report-script runner
+# (DUR-4072), which builds a pinned venv per approved script lockfile with
+# `uv sync --frozen` and needs a reproducible uv build itself. Copied from the
+# official static uv image (no pip needed). Pinned (not :latest) so the tool
+# that builds reproducible script venvs is itself reproducible; bump this tag
+# deliberately, not on every image rebuild.
+COPY --from=ghcr.io/astral-sh/uv:0.12.19 /uv /uvx /usr/local/bin/
 
 # DUR-3994 Stage 1: the server's key-name list for the root-run hand-over,
 # root-owned and outside /app (changes only when the list does).

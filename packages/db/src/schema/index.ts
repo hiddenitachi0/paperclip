@@ -171,3 +171,17 @@ export { crmActivities } from "./crm_activities.js";
 export { crmFacts } from "./crm_facts.js";
 export { crmExternalRefs } from "./crm_external_refs.js";
 export { costReconciliationRuns, sogniBalanceSnapshots } from "./cost_reconciliation.js";
+export { reportScripts } from "./report_scripts.js";
+export {
+  reportScriptVersions,
+  REPORT_SCRIPT_VERSION_STATUS_VALUES,
+  type ReportScriptVersionStatus,
+} from "./report_script_versions.js";
+export { reportFixtures } from "./report_fixtures.js";
+export {
+  reportScriptRuns,
+  REPORT_SCRIPT_RUN_TRIGGER_VALUES,
+  type ReportScriptRunTrigger,
+  REPORT_SCRIPT_RUN_STATUS_VALUES,
+  type ReportScriptRunStatus,
+} from "./report_script_runs.js";
