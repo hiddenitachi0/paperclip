@@ -23,6 +23,7 @@ export type SecretKindProvider =
   | "openai"
   | "google"
   | "openrouter"
+  | "huggingface"
   | "local"
   | "github"
   | "shopify"
@@ -70,6 +71,7 @@ export const SECRET_KIND_IDS = [
   "openai_api_key",
   "google_api_key",
   "openrouter_api_key",
+  "huggingface_api_key",
   "local_model_endpoint",
   "github_token",
   "shopify_admin_token",
@@ -156,6 +158,16 @@ export const SECRET_KINDS: readonly SecretKindDescriptor[] = [
     category: "ai_provider",
     valuePattern: /^sk-or-[A-Za-z0-9_-]{20,}$/,
     envKey: "OPENROUTER_API_KEY",
+    testable: true,
+  },
+  {
+    id: "huggingface_api_key",
+    label: "Hugging Face token",
+    description: "Access token from huggingface.co/settings/tokens, for models served through Inference Providers.",
+    provider: "huggingface",
+    category: "ai_provider",
+    valuePattern: /^hf_[A-Za-z0-9]{20,}$/,
+    envKey: "HF_TOKEN",
     testable: true,
   },
   {

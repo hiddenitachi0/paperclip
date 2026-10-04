@@ -25,6 +25,7 @@
  * key value and of anything that looks like a key before it leaves here.
  */
 import Anthropic from "@anthropic-ai/sdk";
+import { warmHuggingFaceCatalogue } from "./huggingface-catalogue.js";
 import {
   LANE_A_PROVIDER_CATALOGUE,
   normalizeLaneAProvider,
@@ -675,6 +676,9 @@ function createOpenAiCompatibleLaneAClient(input: {
           clearTimeout(probeTimer);
         }
       }
+      // DUR-4447: Hugging Face bills at the live catalogue price; prime that
+      // cache with this call's own token (best effort) so the cost row is real.
+      if (input.provider === "huggingface") await warmHuggingFaceCatalogue(input.apiKey);
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), input.timeoutMs);
       let response: Response;
