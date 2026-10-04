@@ -258,6 +258,10 @@ DECLARE
     'issue_execution_decisions',
     'issue_inbox_archives',
     'issue_labels',
+    -- DUR-4468. Created, granted on and policed in 0224_issue_overlaps.sql;
+    -- listed here so the login-role lists match the schema, as for the
+    -- tables above.
+    'issue_overlaps',
     'issue_plan_decompositions',
     'issue_read_states',
     'issue_recovery_actions',
@@ -540,6 +544,10 @@ DECLARE
     'issue_execution_decisions',
     'issue_inbox_archives',
     'issue_labels',
+    -- DUR-4468. Created, granted on and policed in 0224_issue_overlaps.sql;
+    -- listed here so the login-role lists match the schema, as for the
+    -- tables above.
+    'issue_overlaps',
     'issue_plan_decompositions',
     'issue_read_states',
     'issue_recovery_actions',
