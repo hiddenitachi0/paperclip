@@ -569,6 +569,21 @@ describe("issue attachment routes", () => {
     expect(storage.putObjectAt).toHaveBeenCalledTimes(1);
   });
 
+  it("deletes the cached thumbnail along with the attachment", async () => {
+    const storage = createStorageService();
+    const attachment = makeAttachment("image/png", "big.png");
+    mockIssueService.getAttachmentById.mockResolvedValue(attachment);
+    mockIssueService.removeAttachment = vi.fn().mockResolvedValue(attachment);
+    (storage.deleteObject as any).mockResolvedValue(undefined);
+
+    const app = await createApp(storage);
+    const res = await request(app).delete("/api/attachments/attachment-1");
+
+    expect(res.status).toBe(200);
+    expect(storage.deleteObject).toHaveBeenCalledWith(attachment.companyId, attachment.objectKey);
+    expect(storage.deleteObject).toHaveBeenCalledWith(attachment.companyId, `${attachment.objectKey}.thumb256.webp`);
+  });
+
   it("rejects cross-company thumbnail reads like /content", async () => {
     const storage = createStorageService();
     mockIssueService.getAttachmentById.mockResolvedValue(makeAttachment("image/png", "big.png"));
