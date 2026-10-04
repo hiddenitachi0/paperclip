@@ -38,6 +38,8 @@ export const ACTIVE_OVERLAP_WINDOW_MS = 30 * 60 * 1000;
 const MIGRATIONS_DIR = "packages/db/src/migrations/";
 const JOURNAL_PATH = `${MIGRATIONS_DIR}meta/_journal.json`;
 const MIGRATION_FILE_RE = /^packages\/db\/src\/migrations\/(\d{4})_[^/]+\.sql$/;
+/** A re-opened overlap does not warn again within this long of its last warning. */
+export const OVERLAP_REWARN_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_BASE_REF = "origin/custom";
 
 const execFileAsync = promisify(execFile);
@@ -177,6 +179,16 @@ function sanitizeDetailKey(detailKey: string): string {
   return detailKey.replace(/[`\r\n]/g, "");
 }
 
+/** Neutralises agent-influenced free text (commit subjects): no markdown, links, mentions or newlines. */
+export function sanitizeInlineText(text: string, maxLength = 120): string {
+  return text
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/[`*_~\[\]()<>#@!|\\]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+}
+
 function describeRow(row: OverlapCandidate, freeMigration: string) {
   const detailKey = sanitizeDetailKey(row.detailKey);
   switch (row.kind) {
@@ -187,7 +199,8 @@ function describeRow(row: OverlapCandidate, freeMigration: string) {
     case "journal_json":
       return "both edit `packages/db/src/migrations/meta/_journal.json`, so one will conflict after the other merges";
     case "stale_behind": {
-      const commit = typeof row.detail.mergedCommit === "string" ? ` (${row.detail.mergedCommit})` : "";
+      const subject = typeof row.detail.mergedCommit === "string" ? sanitizeInlineText(row.detail.mergedCommit) : "";
+      const commit = subject ? ` (${subject})` : "";
       return `\`${detailKey}\` already changed on the base branch${commit} since this branch started`;
     }
   }
@@ -229,10 +242,12 @@ export function buildWarningComment(input: {
   return lines.join("\n");
 }
 
-async function runGit(cwd: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], {
+export async function runGit(cwd: string, args: string[]): Promise<string> {
+  // The checkout is agent-writable: neutralise its hooks, fsmonitor and any system/global config.
+  const safeArgs = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-C", cwd, ...args];
+  const { stdout } = await execFileAsync("git", safeArgs, {
     cwd,
-    env: serverChildProcessEnv(),
+    env: serverChildProcessEnv({ GIT_CONFIG_NOSYSTEM: "1" }),
     maxBuffer: 16 * 1024 * 1024,
   });
   return stdout;
@@ -303,7 +318,17 @@ async function defaultSnapshotWorkspace(ws: { id: string; cwd: string; baseRef: 
   }
 }
 
-const PR_URL_RE = /github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/;
+const PR_URL_RE = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:[/?#].*)?$/;
+const REPO_URL_RE = /^(?:https:\/\/github\.com\/|git@github\.com:)([^/]+)\/([^/]+?)(?:\.git)?\/?$/;
+
+/** Only trust a work-product PR URL that points at the issue's own workspace repo. */
+export function matchOwnRepoPrUrl(prUrl: string | null, repoUrl: string | null) {
+  const pr = prUrl ? PR_URL_RE.exec(prUrl.trim()) : null;
+  const repo = repoUrl ? REPO_URL_RE.exec(repoUrl.trim()) : null;
+  if (!pr || !repo) return null;
+  if (pr[1]!.toLowerCase() !== repo[1]!.toLowerCase() || pr[2]!.toLowerCase() !== repo[2]!.toLowerCase()) return null;
+  return { owner: repo[1]!, name: repo[2]!, prNumber: Number(pr[3]) };
+}
 
 function defaultGetPrProgress(db: Db, fetchImpl: FetchLike) {
   const secretsSvc = secretService(db);
@@ -323,14 +348,20 @@ function defaultGetPrProgress(db: Db, fetchImpl: FetchLike) {
           ? "changes_requested"
           : "none";
     const merged = product.status === "merged";
-    const m = product.url ? PR_URL_RE.exec(product.url) : null;
+    const ws = await db
+      .select({ repoUrl: executionWorkspaces.repoUrl })
+      .from(issues)
+      .innerJoin(executionWorkspaces, eq(issues.executionWorkspaceId, executionWorkspaces.id))
+      .where(and(eq(issues.id, issueId), eq(issues.companyId, companyId)))
+      .then((rows) => rows[0] ?? null);
+    const m = matchOwnRepoPrUrl(product.url, ws?.repoUrl ?? null);
     if (!m || merged) return { ci: "unknown", review, merged };
     try {
       const token = await secretsSvc
         .resolveGitHubToken(companyId, { consumerType: "system", consumerId: "issue-overlap-detector" })
         .catch(() => null);
       const deps = { fetchImpl, token };
-      const ref = { owner: m[1]!, name: m[2]!, prNumber: Number(m[3]) };
+      const ref = m;
       const facts = await fetchPullRequestFacts(ref, deps);
       const ci = facts?.headSha ? await fetchCiStatus(ref, facts.headSha, deps) : "unknown";
       return { ci, review, merged };
@@ -514,10 +545,12 @@ export function issueOverlapDetectorService(
       } else if (row.status === "open") {
         await db.update(issueOverlaps).set({ lastSeenAt: now, detail: cand.detail, updatedAt: now }).where(eq(issueOverlaps.id, row.id));
       } else {
-        // A resolved overlap that is back is a new fact: it may warn again.
+        // A resolved overlap that is back may warn again, but not within the cool-down of its last
+        // warning (an agent editing and reverting a shared file must not stream comments).
+        const coolingDown = row.warnedAt && now.getTime() - row.warnedAt.getTime() < OVERLAP_REWARN_COOLDOWN_MS;
         await db
           .update(issueOverlaps)
-          .set({ status: "open", resolvedAt: null, warnedAt: null, firstDetectedAt: now, lastSeenAt: now, detail: cand.detail, updatedAt: now })
+          .set({ status: "open", resolvedAt: null, warnedAt: coolingDown ? row.warnedAt : null, firstDetectedAt: now, lastSeenAt: now, detail: cand.detail, updatedAt: now })
           .where(eq(issueOverlaps.id, row.id));
         opened += 1;
       }
