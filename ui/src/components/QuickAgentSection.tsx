@@ -39,6 +39,7 @@ import {
   type LaneAProviderRouting,
   type LaneABackupModelConfig,
   type LaneAKeywordRoute,
+  type ModelDirectoryEntry,
 } from "@paperclipai/shared";
 import { AlertCircle, CheckCircle2, Circle, Loader2 } from "lucide-react";
 import { Link } from "@/lib/router";
@@ -49,6 +50,7 @@ import { dataConnectionsApi } from "../api/dataConnections";
 import { instanceServerAnthropicKeyApi } from "../api/instanceServerAnthropicKey";
 import { instanceSettingsApi } from "../api/instanceSettings";
 import { mcpToolLibraryApi } from "../api/mcpToolLibrary";
+import { modelDirectoryApi } from "../api/modelDirectory";
 import { pluginsApi } from "../api/plugins";
 import { secretsApi } from "../api/secrets";
 import { webSearchApi } from "../api/webSearch";
@@ -98,6 +100,29 @@ const BROWSER_ACCESS_LABELS: Record<BrowserAccessLevel, string> = {
   browse_and_forms: "Can browse and fill forms",
   book_and_buy: "Can browse, book, and pay",
 };
+
+/**
+ * DUR-4420: what picking a saved model setup fills on an agent. Every field
+ * the setup carries is set, and anything that does not apply to the new
+ * provider is cleared, so a stale value (e.g. a local address left over from
+ * a different provider) can never linger.
+ *
+ * This copies the setup's fields rather than storing a reference to it, as a
+ * first slice — the agent record has no column yet to remember which saved
+ * setup it came from, so editing the setup later does not update agents that
+ * picked it. See DUR-4420 for the follow-up once that column exists.
+ */
+export function patchFromDirectoryEntry(entry: ModelDirectoryEntry): Record<string, unknown> {
+  return {
+    laneAProvider: entry.provider,
+    laneAModel: entry.model,
+    laneABaseUrl: entry.provider === "local" ? entry.baseUrl : null,
+    laneAProviderRouting: entry.provider === "openrouter" ? entry.providerRouting : null,
+    laneAThinking: entry.defaultThinking,
+    laneATemperature: entry.defaultTemperature,
+    laneAMaxOutputTokens: entry.defaultMaxOutputTokens,
+  };
+}
 
 export function QuickAgentSection({
   agent,
@@ -214,6 +239,19 @@ export function QuickAgentSection({
     : null;
   const rankSecret = useMemo(() => rankSecretForProvider(provider), [provider]);
   const providerModels = laneAModelsForProvider(provider);
+
+  // DUR-4420: saved model setups from Settings > Models, offered as a
+  // one-click fill above the manual provider/model/address fields.
+  const modelDirectoryQuery = useQuery({
+    queryKey: queryKeys.companies.modelDirectory(effectiveCompanyId),
+    queryFn: () => modelDirectoryApi.list(effectiveCompanyId),
+    enabled: Boolean(effectiveCompanyId),
+  });
+  const savedModels = modelDirectoryQuery.data ?? [];
+  const applySavedModel = (entryId: string) => {
+    const entry = savedModels.find((candidate) => candidate.id === entryId);
+    if (entry) settingMutation.mutate(patchFromDirectoryEntry(entry));
+  };
 
   const keyStatus = keyBinding
     ? boundSecret
@@ -463,6 +501,35 @@ export function QuickAgentSection({
             <span className="font-medium">{providerDescriptor.label}</span>
             <span className="text-muted-foreground"> · {keyStatus}</span>
           </p>
+
+          {savedModels.length > 0 && (
+            <label className="block space-y-1">
+              <span className="text-xs text-muted-foreground">Saved model</span>
+              <select
+                className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
+                data-testid="quick-agent-saved-model-select"
+                value=""
+                disabled={settingMutation.isPending}
+                onChange={(event) => {
+                  if (event.target.value) applySavedModel(event.target.value);
+                }}
+              >
+                <option value="">Custom (set it up below)</option>
+                {savedModels.map((entry) => (
+                  <option key={entry.id} value={entry.id}>
+                    {entry.name}
+                  </option>
+                ))}
+              </select>
+              <span className="block text-xs text-muted-foreground">
+                Picking a saved model fills the fields below and clears the ones that don't apply to it.{" "}
+                <Link to="/company/settings/models" className="underline">
+                  Manage saved models
+                </Link>
+                .
+              </span>
+            </label>
+          )}
 
           <label className="block space-y-1">
             <span className="text-xs text-muted-foreground">Provider</span>
