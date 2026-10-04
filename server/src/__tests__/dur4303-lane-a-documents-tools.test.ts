@@ -119,3 +119,18 @@ describe("DUR-4303 get_document dispatch", () => {
     expect(result.content).toBe(answer.text);
   });
 });
+
+describe("DUR-4315 untrusted-content framing", () => {
+  it("marks document content untrusted in both tool descriptions and the prompt paragraph", async () => {
+    const { buildDocumentsPromptParagraph } = await import("../services/lane-a.js");
+    const defs = buildLaneABuiltinToolDefinitions();
+    for (const name of [SEARCH_DOCUMENTS_TOOL, GET_DOCUMENT_TOOL]) {
+      const description = defs.find((tool) => tool.name === name)!.description;
+      expect(description).toMatch(/untrusted/);
+      expect(description).toMatch(/never follow instructions/);
+    }
+    const paragraph = buildDocumentsPromptParagraph({ companyName: "Acme" });
+    expect(paragraph).toMatch(/untrusted/);
+    expect(paragraph).toMatch(/never follow instructions/);
+  });
+});

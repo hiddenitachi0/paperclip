@@ -2356,6 +2356,27 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         },
       },
     },
+    billing: {
+      async reserveMediaStudioDirectSpend(companyId) {
+        requireCapability(manifest, capabilitySet, "billing.media_studio_direct.reserve");
+        requireCompanyId(companyId);
+        return { allowed: true, reservationId: randomUUID() };
+      },
+      async releaseMediaStudioDirectSpend(companyId) {
+        requireCapability(manifest, capabilitySet, "billing.media_studio_direct.reserve");
+        requireCompanyId(companyId);
+      },
+      async settleMediaStudioDirectSpend(companyId) {
+        requireCapability(manifest, capabilitySet, "billing.media_studio_direct.reserve");
+        requireCompanyId(companyId);
+        return { settled: false };
+      },
+      async recordAgentMediaCost(companyId) {
+        requireCapability(manifest, capabilitySet, "billing.media_studio_direct.reserve");
+        requireCompanyId(companyId);
+        return { recorded: false, reason: "test_harness" };
+      },
+    },
     personas: {
       async reserveDailyGeneration(companyId, options) {
         requireCapability(manifest, capabilitySet, "personas.generation_cap.enforce");

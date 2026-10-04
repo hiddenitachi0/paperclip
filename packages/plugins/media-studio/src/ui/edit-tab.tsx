@@ -23,6 +23,29 @@ const ACTION_EDIT_FAL = "edit.fal";
 const ACTION_EDIT_SEGMENT = "edit.segment";
 const ACTION_EDIT_INPAINT = "edit.inpaint";
 
+const DEFAULT_SKIP_CONFIRM_UNDER_CENTS = 10;
+
+function formatCents(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`;
+}
+
+/** Plain-words text for a refused paid edit; anything unrecognised is shown as the server worded it. */
+export function plainEditError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  const details = (err as { details?: { reason?: string } } | null)?.details;
+  const reason = details?.reason ?? (/direct_create_cap/.test(message) ? "direct_create_cap" : /company_budget/.test(message) ? "company_budget" : /cap_override_forbidden/.test(message) ? "cap_override_forbidden" : "");
+  if (reason === "company_budget") {
+    return "This edit would go over the company's monthly budget. Ask an owner or admin to raise the budget, or try again next month.";
+  }
+  if (reason === "direct_create_cap") {
+    return "This edit would go over Media Studio's monthly spending limit. Ask an owner or admin to raise the limit.";
+  }
+  if (reason === "cap_override_forbidden") {
+    return "Only a company owner or admin can go over that limit.";
+  }
+  return message;
+}
+
 const MAKE_VARIATION_PROMPT = "Make a creative variation of this picture, keeping the same subject and composition.";
 
 function hostFetchJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -163,6 +186,22 @@ export function MediaStudioEditTab({ context, initialFileId }: { context: Plugin
   const editInpaint = usePluginAction(ACTION_EDIT_INPAINT);
   const getCapabilities = usePluginAction(ACTION_EDIT_CAPABILITIES);
 
+  // Price of one paid edit, from the same estimate the Create tab uses.
+  const [editCostCents, setEditCostCents] = useState<number | null>(null);
+  const [sessionCostCents, setSessionCostCents] = useState(0);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const prefKey = `media-studio:edit-skip-confirm-cents:${context.userId ?? "local"}`;
+  const [skipUnderCents, setSkipUnderCentsState] = useState<number>(() => {
+    try {
+      const raw = window.localStorage.getItem(prefKey);
+      const n = raw === null ? NaN : Number(raw);
+      return Number.isFinite(n) && n >= 0 ? n : DEFAULT_SKIP_CONFIRM_UNDER_CENTS;
+    } catch {
+      return DEFAULT_SKIP_CONFIRM_UNDER_CENTS;
+    }
+  });
+  const [pendingPaid, setPendingPaid] = useState<{ label: string; run: () => void } | null>(null);
+
   const [capabilities, setCapabilities] = useState<{ sogni: boolean; fal: boolean } | null>(null);
   const [pickerItems, setPickerItems] = useState<PickerItem[] | null>(null);
   const [pickerError, setPickerError] = useState<string | null>(null);
@@ -238,6 +277,63 @@ export function MediaStudioEditTab({ context, initialFileId }: { context: Plugin
     };
   }, [pickerOpen, context.companyId, pickerItems]);
 
+  useEffect(() => {
+    let cancelled = false;
+    if (!context.companyId) return;
+    hostFetchJson<{ estimatedCostCents?: number }>(`/api/companies/${context.companyId}/media-studio/direct/estimate`, {
+      method: "POST",
+      body: JSON.stringify({ kind: "picture", provider: "fal" }),
+    })
+      .then((res) => {
+        if (!cancelled && typeof res?.estimatedCostCents === "number") setEditCostCents(res.estimatedCostCents);
+      })
+      .catch(() => {
+        if (!cancelled) setEditCostCents(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [context.companyId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!context.userId) {
+      setIsAdmin(true);
+      return;
+    }
+    hostFetchJson<{ isInstanceAdmin?: boolean; memberships?: Array<{ companyId: string; membershipRole: string | null; status: string }> }>("/api/cli-auth/me")
+      .then((res) => {
+        if (cancelled) return;
+        const role = (res.memberships ?? []).find((m) => m.companyId === context.companyId && m.status === "active")?.membershipRole ?? null;
+        setIsAdmin(res.isInstanceAdmin === true || role === "owner" || role === "admin");
+      })
+      .catch(() => {
+        if (!cancelled) setIsAdmin(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [context.companyId, context.userId]);
+
+  const setSkipUnderCents = (cents: number) => {
+    setSkipUnderCentsState(cents);
+    try {
+      window.localStorage.setItem(prefKey, String(cents));
+    } catch {
+      // Not remembered across visits if the browser blocks storage.
+    }
+  };
+
+  /** Runs a paid edit, asking first when its price is above the person's "don't ask" amount. */
+  const confirmPaid = (label: string, run: () => void) => {
+    if (editCostCents !== null && editCostCents >= skipUnderCents) {
+      setPendingPaid({ label, run });
+      return;
+    }
+    run();
+  };
+  const priceTag = editCostCents !== null ? ` (≈ ${formatCents(editCostCents)})` : "";
+
   const loadImage = useCallback((src: string, label: string, options: { keepText?: boolean } = {}) => {
     setError(null);
     setSavedPath(null);
@@ -255,6 +351,7 @@ export function MediaStudioEditTab({ context, initialFileId }: { context: Plugin
       if (!options.keepText) {
         setTextLayers([]);
         setHistory([]);
+        setSessionCostCents(0);
       }
       setTargetW(el.naturalWidth);
       setTargetH(el.naturalHeight);
@@ -625,8 +722,9 @@ export function MediaStudioEditTab({ context, initialFileId }: { context: Plugin
     try {
       const result = (await editSogni({ tool, imageDataUrl, ...extra })) as { imageDataUrl: string };
       applyAiResult(result.imageDataUrl, imageDataUrl);
+      if (editCostCents !== null) setSessionCostCents((c) => c + editCostCents);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(plainEditError(err));
     } finally {
       setBusy(null);
     }
@@ -655,8 +753,9 @@ export function MediaStudioEditTab({ context, initialFileId }: { context: Plugin
       mergeBrightPixels(mask, sctx.getImageData(0, 0, mask.width, mask.height).data);
       if (!hasSelection(mask)) setError("Could not find that in the picture. Try different words, or paint the area yourself.");
       setMaskVersion((v) => v + 1);
+      if (editCostCents !== null) setSessionCostCents((c) => c + editCostCents);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(plainEditError(err));
     } finally {
       setBusy(null);
     }
@@ -679,8 +778,9 @@ export function MediaStudioEditTab({ context, initialFileId }: { context: Plugin
       })) as { imageDataUrl: string };
       applyAiResult(result.imageDataUrl, imageDataUrl);
       setSelectTool(null);
+      if (editCostCents !== null) setSessionCostCents((c) => c + editCostCents);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(plainEditError(err));
     } finally {
       setBusy(null);
     }
@@ -695,8 +795,9 @@ export function MediaStudioEditTab({ context, initialFileId }: { context: Plugin
     try {
       const result = (await editFal({ imageDataUrl, prompt })) as { imageDataUrl: string };
       applyAiResult(result.imageDataUrl, imageDataUrl);
+      if (editCostCents !== null) setSessionCostCents((c) => c + editCostCents);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(plainEditError(err));
     } finally {
       setBusy(null);
     }
@@ -705,6 +806,54 @@ export function MediaStudioEditTab({ context, initialFileId }: { context: Plugin
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       {error ? <div style={errorBox}>{error}</div> : null}
+      {pendingPaid ? (
+        <div role="dialog" aria-label="Confirm paid edit" style={{ ...card, borderColor: "#1971c2" }}>
+          <p style={sectionTitle}>This edit costs money</p>
+          <p style={{ fontSize: 13, margin: 0 }}>
+            {pendingPaid.label} will cost about {formatCents(editCostCents ?? 0)}. It is charged to your account. Go ahead?
+          </p>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              type="button"
+              style={primaryBtn}
+              onClick={() => {
+                const run = pendingPaid.run;
+                setPendingPaid(null);
+                run();
+              }}
+            >
+              Yes, do it ({formatCents(editCostCents ?? 0)})
+            </button>
+            <button type="button" style={ghostBtn} onClick={() => setPendingPaid(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {img ? (
+        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", fontSize: 12, color: "#495057" }}>
+          <span>This session: {formatCents(sessionCostCents)}</span>
+          {isAdmin ? (
+            <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              Don't ask again for edits under $
+              <input
+                type="number"
+                min={0}
+                step={0.01}
+                aria-label="Don't ask again for edits under (dollars)"
+                style={{ ...input, width: 70, padding: 4 }}
+                value={(skipUnderCents / 100).toString()}
+                onChange={(e) => {
+                  const dollars = Number(e.target.value);
+                  if (Number.isFinite(dollars) && dollars >= 0) setSkipUnderCents(Math.round(dollars * 100));
+                }}
+              />
+            </label>
+          ) : (
+            <span>Edits under {formatCents(skipUnderCents)} won't ask first.</span>
+          )}
+        </div>
+      ) : null}
       {savedPath ? (
         <div style={okBox}>
           Saved as a new file (the original is unchanged).{" "}
@@ -960,9 +1109,9 @@ export function MediaStudioEditTab({ context, initialFileId }: { context: Plugin
                       type="button"
                       style={busy || !objectText.trim() ? disabledBtn : secondaryBtn}
                       disabled={!!busy || !objectText.trim()}
-                      onClick={runSelectObject}
+                      onClick={() => confirmPaid("Find it", runSelectObject)}
                     >
-                      {busy === "segment" ? "Looking…" : "Find it"}
+                      {busy === "segment" ? "Looking…" : `Find it${priceTag}`}
                     </button>
                   </div>
                 </div>
@@ -978,17 +1127,17 @@ export function MediaStudioEditTab({ context, initialFileId }: { context: Plugin
                       type="button"
                       style={busy || !selectionReady || !replacePrompt.trim() ? disabledBtn : primaryBtn}
                       disabled={!!busy || !selectionReady || !replacePrompt.trim()}
-                      onClick={() => runInpaint("replace")}
+                      onClick={() => confirmPaid("Replace the selected area", () => runInpaint("replace"))}
                     >
-                      {busy === "inpaint-replace" ? "Working…" : "Replace selected area"}
+                      {busy === "inpaint-replace" ? "Working…" : `Replace selected area${priceTag}`}
                     </button>
                     <button
                       type="button"
                       style={busy || !selectionReady ? disabledBtn : secondaryBtn}
                       disabled={!!busy || !selectionReady}
-                      onClick={() => runInpaint("remove")}
+                      onClick={() => confirmPaid("Remove the selected object", () => runInpaint("remove"))}
                     >
-                      {busy === "inpaint-remove" ? "Working…" : "Remove selected object"}
+                      {busy === "inpaint-remove" ? "Working…" : `Remove selected object${priceTag}`}
                     </button>
                   </div>
                   <p style={{ fontSize: 11, color: "#868e96", margin: 0 }}>
@@ -1018,11 +1167,11 @@ export function MediaStudioEditTab({ context, initialFileId }: { context: Plugin
               ) : null}
               {capabilities?.sogni ? (
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  <button type="button" style={busy ? disabledBtn : secondaryBtn} disabled={!!busy} onClick={() => runSogniEdit("sogni-remove-background", {}, "bg")}>
-                    {busy === "bg" ? "Working…" : "Remove background"}
+                  <button type="button" style={busy ? disabledBtn : secondaryBtn} disabled={!!busy} onClick={() => confirmPaid("Remove the background", () => runSogniEdit("sogni-remove-background", {}, "bg"))}>
+                    {busy === "bg" ? "Working…" : `Remove background${priceTag}`}
                   </button>
-                  <button type="button" style={busy ? disabledBtn : secondaryBtn} disabled={!!busy} onClick={() => runSogniEdit("sogni-upscale-image", { scale: 2 }, "upscale")}>
-                    {busy === "upscale" ? "Working…" : "Upscale"}
+                  <button type="button" style={busy ? disabledBtn : secondaryBtn} disabled={!!busy} onClick={() => confirmPaid("Upscale the picture", () => runSogniEdit("sogni-upscale-image", { scale: 2 }, "upscale"))}>
+                    {busy === "upscale" ? "Working…" : `Upscale${priceTag}`}
                   </button>
                 </div>
               ) : null}
@@ -1038,23 +1187,23 @@ export function MediaStudioEditTab({ context, initialFileId }: { context: Plugin
                     type="button"
                     style={busy || !aiPrompt.trim() ? disabledBtn : secondaryBtn}
                     disabled={!!busy || !aiPrompt.trim()}
-                    onClick={() => runSogniEdit("sogni-restore-photo", { prompt: aiPrompt.trim() }, "inpaint")}
+                    onClick={() => confirmPaid("Restore / clean up the picture", () => runSogniEdit("sogni-restore-photo", { prompt: aiPrompt.trim() }, "inpaint"))}
                   >
-                    {busy === "inpaint" ? "Working…" : "Restore / clean up (whole picture)"}
+                    {busy === "inpaint" ? "Working…" : `Restore / clean up (whole picture)${priceTag}`}
                   </button>
                 ) : null}
                 {capabilities?.fal ? (
                   <>
-                    <button type="button" style={busy ? disabledBtn : secondaryBtn} disabled={!!busy} onClick={() => runFalEdit(MAKE_VARIATION_PROMPT, "variation")}>
-                      {busy === "variation" ? "Working…" : "Make variations"}
+                    <button type="button" style={busy ? disabledBtn : secondaryBtn} disabled={!!busy} onClick={() => confirmPaid("Make variations", () => runFalEdit(MAKE_VARIATION_PROMPT, "variation"))}>
+                      {busy === "variation" ? "Working…" : `Make variations${priceTag}`}
                     </button>
                     <button
                       type="button"
                       style={busy || !aiPrompt.trim() ? disabledBtn : secondaryBtn}
                       disabled={!!busy || !aiPrompt.trim()}
-                      onClick={() => runFalEdit(aiPrompt.trim(), "prompt-edit")}
+                      onClick={() => confirmPaid("Edit with a prompt", () => runFalEdit(aiPrompt.trim(), "prompt-edit"))}
                     >
-                      {busy === "prompt-edit" ? "Working…" : "Edit with a prompt"}
+                      {busy === "prompt-edit" ? "Working…" : `Edit with a prompt${priceTag}`}
                     </button>
                   </>
                 ) : null}
