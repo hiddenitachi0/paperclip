@@ -116,6 +116,13 @@ export const KNOWN_INTEGRATION_ENV_KEYS: readonly IntegrationKeyDescriptor[] = [
     kind: "openrouter_api_key",
   },
   {
+    key: "HF_TOKEN",
+    label: "Hugging Face token",
+    description: "Access token for Hugging Face Inference Providers.",
+    category: "llm",
+    kind: "huggingface_api_key",
+  },
+  {
     key: "GEMINI_API_KEY",
     label: "Google Gemini API key",
     description: "API key for Google Gemini models.",

@@ -1097,6 +1097,33 @@ export function secretService(db: Db, rawDb: Db = db) {
     })).value;
   }
 
+  /**
+   * DUR-4447: the company's newest active Hugging Face token, by kind. Used
+   * only by the model-list route; the audit row names the consumer. Null when
+   * the company has none (or it cannot be read).
+   */
+  async function resolveHuggingFaceToken(companyId: string, context?: SecretConsumerContext): Promise<string | null> {
+    const rows = await db
+      .select()
+      .from(companySecrets)
+      .where(
+        and(
+          eq(companySecrets.companyId, companyId),
+          eq(companySecrets.kind, "huggingface_api_key"),
+          eq(companySecrets.status, "active"),
+        ),
+      )
+      .orderBy(desc(companySecrets.createdAt))
+      .limit(1);
+    const secret = rows[0];
+    if (!secret) return null;
+    const value = await resolveSecretValueInternal(companyId, secret.id, "latest", {
+      accessContext: context ?? { consumerType: "system", consumerId: "huggingface-model-list" },
+    }).catch(() => null);
+    const trimmed = value?.value?.trim();
+    return trimmed ? trimmed : null;
+  }
+
   async function resolveGitHubToken(companyId: string, context?: SecretConsumerContext): Promise<string | null> {
     for (const secretName of GITHUB_TOKEN_SECRET_NAMES) {
       const secret = await getByName(companyId, secretName).catch(() => null);
@@ -2339,6 +2366,7 @@ export function secretService(db: Db, rawDb: Db = db) {
     resolveSecretValueForCostReconciliation,
     resolveSecretValueForTest,
     resolveGitHubToken,
+    resolveHuggingFaceToken,
     resolveStockDataKey,
 
     create: async (
