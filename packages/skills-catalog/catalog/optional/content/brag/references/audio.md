@@ -1,3 +1,11 @@
+> **PAPERCLIP POLICY — NO BUNDLED MUSIC.** This skill ships **no music files**
+> (`assets/music/` does not exist) and agents must never copy, fetch, or
+> download music from the skill or from the internet. Use only (a) a track
+> generated in Media Studio for this job, or (b) a track the user explicitly
+> provides with a stated licence. Otherwise render without music (`--no-music`
+> behaviour). Ignore every instruction below that tells you to copy a bundled
+> `.mp3`, use the "Available tracks" table, or read bundled cue presets.
+
 # Audio reference
 
 All SFX are CC0 (Kenney.nl, public domain). Music and SFX should be used by default unless the user passes `--no-music`, `--no-sfx`, the required assets are missing, or the plan explicitly chooses silence as the strongest creative move.
@@ -37,14 +45,7 @@ All paths below are relative to `<skill-dir>`, this skill's own directory (see "
 
 SFX live under `<skill-dir>/assets/sfx/{casino,impact,interface,ui}/`, and the individual keypress set under `<skill-dir>/assets/sfx/keyboard/`.
 
-Music lives at `<skill-dir>/assets/music/`.
-
-Bundled music cue presets live beside the music:
-
-```text
-<skill-dir>/assets/music/cues/<track-stem>.music-cues.md
-<skill-dir>/assets/music/cues/<track-stem>.music-cues.json
-```
+No music is bundled with this skill (see policy banner above).
 
 SFX analysis lives beside the SFX library:
 
@@ -63,14 +64,14 @@ mkdir -p <output-dir>/composition/assets/music
 # Copy only the files you plan to use (not the entire library)
 cp <skill-dir>/assets/sfx/interface/bong_001.ogg <output-dir>/composition/assets/sfx/interface/
 cp <skill-dir>/assets/sfx/impact/impactBell_heavy_000.ogg <output-dir>/composition/assets/sfx/impact/
-cp <skill-dir>/assets/music/happy-beats-business-moves-vol-1-by-ende-dot-app.mp3 <output-dir>/composition/assets/music/
+# Music: only a Media Studio-generated or explicitly licensed track, copied here by you. Never from the skill or the internet.
 ```
 
 Then in the composition HTML, paths are **relative to the `composition/` directory**:
 ```
 assets/sfx/interface/bong_001.ogg
 assets/sfx/impact/impactBell_heavy_000.ogg
-assets/music/happy-beats-business-moves-vol-1-by-ende-dot-app.mp3
+assets/music/<approved-track>.mp3
 ```
 
 Never use absolute paths (starting with `/Users/...`) — they will silently fail in the renderer.
@@ -214,9 +215,9 @@ Scene 2 — Reveal — 3s
 
 ## Music
 
-### Available tracks
+### Available tracks (NOT AVAILABLE in Paperclip — do not use)
 
-All tracks are "Happy Beats / Business Moves" by ende.app. Upbeat, clean, corporate-adjacent. Good across multiple tones.
+The upstream skill listed these ende.app tracks; they are not vendored and must not be fetched. Upbeat, clean, corporate-adjacent. Good across multiple tones.
 
 | Filename | Duration | Character | Best for |
 |---|---|---|---|
@@ -233,7 +234,7 @@ For `deadpan` tone: prefer vol-12 at very low volume (0.12-0.18). Skip music onl
 After copying files (see Asset paths above), reference them with relative paths from `composition/`:
 
 ```html
-<audio id="bg-music" data-start="0" data-duration="[total]" data-track-index="10" data-volume="0.35" src="assets/music/happy-beats-business-moves-vol-1-by-ende-dot-app.mp3"></audio>
+<audio id="bg-music" data-start="0" data-duration="[total]" data-track-index="10" data-volume="0.35" src="assets/music/<approved-track>.mp3"></audio>
 ```
 
 Volume: 0.3-0.4 for normal music beds. Use 0.12-0.22 for deadpan or very restrained parody. Never above 0.5. SFX at 0.55-0.85, with softer values for polished/deadpan.
@@ -244,12 +245,7 @@ If the music file doesn't exist, skip it and notify the user after rendering.
 
 Beat sync needs a cue source. Three are available — use the richest one the environment supports. Beat sync now works on **any** track, not just bundled ones. The two any-track methods (2 and 3) have orthogonal requirements — option 2 needs Python, option 3 needs a recent Hyperframes — so when one is unavailable the other usually covers it.
 
-1. **Bundled track → precomputed preset (richest, instant, no deps).** The bundled tracks ship with cue metadata. Read the matching markdown summary, and pass the JSON path in `composition-brief.md`:
-
-```text
-<skill-dir>/assets/music/cues/<track-stem>.music-cues.md
-<skill-dir>/assets/music/cues/<track-stem>.music-cues.json
-```
+1. **Bundled presets — unavailable in Paperclip** (no bundled music, so no precomputed cues).
 
 2. **Any track → extended analysis (richest for custom tracks; needs Python, any Hyperframes version).** For a custom track — or to refresh a bundled one — run `analyze_music_cues.py` on the audio file. It produces the same rich cue JSON/Markdown for any track. Run it via `uv`, which auto-provisions the deps (`librosa`, `numpy`, `scipy`, `soundfile`) from `<skill-dir>/scripts/pyproject.toml` — no manual `pip install` needed:
 
