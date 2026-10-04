@@ -1029,6 +1029,46 @@ export function secretService(db: Db, rawDb: Db = db) {
   }
 
   /**
+   * DUR-4462: the scheduled daily Fal/Sogni billing reconciliation reads the
+   * configured provider key with no human or agent in the loop. The audit
+   * trail names the system consumer, scoped to the one secret.
+   */
+  async function resolveSecretValueForCostReconciliation(companyId: string, secretId: string): Promise<string> {
+    return (await resolveSecretValueInternal(companyId, secretId, "latest", {
+      accessContext: {
+        consumerType: "system",
+        consumerId: `cost_reconciliation:${secretId}`,
+        actorType: "system",
+        actorId: "cost_reconciliation",
+      },
+    })).value;
+  }
+
+  /**
+   * DUR-4457: same shape again, for pricing a picture/video/audio an agent
+   * just made (the host reads Fal's published price with the company's Fal
+   * key). The actor is the agent whose run made it, so the secret's audit
+   * trail names it.
+   */
+  async function resolveSecretValueForMediaStudioAgentPricing(
+    companyId: string,
+    secretId: string,
+    context: { agentId: string },
+  ): Promise<string> {
+    if (!context.agentId?.trim()) {
+      throw forbidden("Agent media pricing requires an agent context for the audit trail");
+    }
+    return (await resolveSecretValueInternal(companyId, secretId, "latest", {
+      accessContext: {
+        consumerType: "system",
+        consumerId: `media_studio_agent_pricing:${secretId}`,
+        actorType: "agent",
+        actorId: context.agentId,
+      },
+    })).value;
+  }
+
+  /**
    * Resolve the company's GitHub token by the same secret-name convention as
    * managed workspace clones (see heartbeat.ts's resolveManagedCloneGitHubToken)
    * — first bound+resolvable secret named GITHUB_TOKEN/GH_TOKEN/PAPERCLIP_GITHUB_TOKEN
@@ -1055,6 +1095,33 @@ export function secretService(db: Db, rawDb: Db = db) {
         actorId: actor.userId,
       },
     })).value;
+  }
+
+  /**
+   * DUR-4447: the company's newest active Hugging Face token, by kind. Used
+   * only by the model-list route; the audit row names the consumer. Null when
+   * the company has none (or it cannot be read).
+   */
+  async function resolveHuggingFaceToken(companyId: string, context?: SecretConsumerContext): Promise<string | null> {
+    const rows = await db
+      .select()
+      .from(companySecrets)
+      .where(
+        and(
+          eq(companySecrets.companyId, companyId),
+          eq(companySecrets.kind, "huggingface_api_key"),
+          eq(companySecrets.status, "active"),
+        ),
+      )
+      .orderBy(desc(companySecrets.createdAt))
+      .limit(1);
+    const secret = rows[0];
+    if (!secret) return null;
+    const value = await resolveSecretValueInternal(companyId, secret.id, "latest", {
+      accessContext: context ?? { consumerType: "system", consumerId: "huggingface-model-list" },
+    }).catch(() => null);
+    const trimmed = value?.value?.trim();
+    return trimmed ? trimmed : null;
   }
 
   async function resolveGitHubToken(companyId: string, context?: SecretConsumerContext): Promise<string | null> {
@@ -2295,8 +2362,11 @@ export function secretService(db: Db, rawDb: Db = db) {
     resolveSecretValueForBrowserFill,
     resolveSecretValueForVideoRender,
     resolveSecretValueForMediaStudioDirect,
+    resolveSecretValueForMediaStudioAgentPricing,
+    resolveSecretValueForCostReconciliation,
     resolveSecretValueForTest,
     resolveGitHubToken,
+    resolveHuggingFaceToken,
     resolveStockDataKey,
 
     create: async (

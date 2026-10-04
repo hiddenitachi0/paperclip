@@ -81,6 +81,20 @@ export function estimateMediaStudioDirectCostCents(input: MediaStudioDirectEstim
   return { kind, provider, estimatedCostCents: Math.ceil(durationSeconds * perSecondCents) };
 }
 
+/**
+ * DUR-4441: the paid Edit-tab actions. The Edit tab shows ONE price for
+ * every paid button -- the Create tab's picture estimate -- so the server
+ * charges exactly that, from the same function, and the two can never
+ * drift. If a per-action price ever differs, change it here, in one place.
+ */
+export const MEDIA_STUDIO_EDIT_ACTIONS = ["segment", "inpaint", "remove-background", "upscale", "restore", "variation", "prompt-edit"] as const;
+export type MediaStudioEditAction = (typeof MEDIA_STUDIO_EDIT_ACTIONS)[number];
+export const MEDIA_STUDIO_EDIT_BILLING_CODE = MEDIA_STUDIO_DIRECT_BILLING_CODE;
+
+export function estimateMediaStudioEditCostCents(_action: MediaStudioEditAction, provider: MediaStudioDirectProvider = "fal"): number {
+  return estimateMediaStudioDirectCostCents({ kind: "picture", provider }).estimatedCostCents;
+}
+
 // ─── Validators ──────────────────────────────────────────────────────────
 
 const promptField = z.string().trim().min(1, "Describe what to make.").max(MEDIA_STUDIO_DIRECT_PROMPT_MAX_LENGTH);

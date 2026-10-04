@@ -36,6 +36,15 @@ export const upsertBudgetPolicySchema = z.object({
       path: ["scopeType"],
     });
   }
+  // DUR-4462: a mismatch alert is about the company's provider accounts, not
+  // an agent or project, so any other scope could only ever observe zero.
+  if (value.metric === "cost_reconciliation_mismatch_cents" && value.scopeType !== "company") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "cost_reconciliation_mismatch_cents alerts apply to the whole company (scope 'company').",
+      path: ["scopeType"],
+    });
+  }
 });
 
 export type UpsertBudgetPolicy = z.infer<typeof upsertBudgetPolicySchema>;

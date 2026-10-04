@@ -25,6 +25,7 @@
  * key value and of anything that looks like a key before it leaves here.
  */
 import Anthropic from "@anthropic-ai/sdk";
+import { cachedHuggingFacePricing, warmHuggingFaceCatalogue } from "./huggingface-catalogue.js";
 import {
   LANE_A_PROVIDER_CATALOGUE,
   normalizeLaneAProvider,
@@ -111,7 +112,12 @@ export type LaneAStop = "end_turn" | "tool_use" | "max_tokens" | "other";
 export interface LaneACompletion {
   text: string;
   toolCalls: LaneAToolCall[];
-  usage: { inputTokens: number; outputTokens: number };
+  /**
+   * `costUsd` is the provider's OWN billed cost for the call (OpenRouter's
+   * `usage.cost`, in USD), or null/absent when the provider did not say.
+   * Zero is a real answer (a free model) and is kept as 0.
+   */
+  usage: { inputTokens: number; outputTokens: number; costUsd?: number | null };
   stop: LaneAStop;
   /** The provider's own stop reason, kept for the `stopReason` field the routes already return. */
   stopReason: string | null;
@@ -565,8 +571,27 @@ function parseToolArguments(raw: unknown): Record<string, unknown> | null {
   }
 }
 
+function finiteNonNegative(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+/**
+ * OpenRouter bills in credits (= USD) and includes `usage.cost` by default.
+ * `cost_details.upstream_inference_cost` is the host's charge on a BYOK call,
+ * used only when `cost` itself is absent. null = not reported.
+ */
+export function openRouterUsageCostUsd(usage: Record<string, unknown>): number | null {
+  const cost = finiteNonNegative(usage.cost);
+  if (cost !== null) return cost;
+  const details = usage.cost_details;
+  if (details && typeof details === "object") {
+    return finiteNonNegative((details as Record<string, unknown>).upstream_inference_cost);
+  }
+  return null;
+}
+
 /** Translate one /chat/completions response body. Exported for tests. */
-export function fromOpenAiCompletion(payload: unknown): LaneACompletion {
+export function fromOpenAiCompletion(payload: unknown, provider?: LaneAProvider): LaneACompletion {
   const record = (payload && typeof payload === "object" ? payload : {}) as Record<string, unknown>;
   const choices = Array.isArray(record.choices) ? record.choices : [];
   const first = (choices[0] && typeof choices[0] === "object" ? choices[0] : {}) as Record<string, unknown>;
@@ -598,6 +623,9 @@ export function fromOpenAiCompletion(payload: unknown): LaneACompletion {
     usage: {
       inputTokens: typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : 0,
       outputTokens: typeof usage.completion_tokens === "number" ? usage.completion_tokens : 0,
+      // DUR-4454: only OpenRouter reports a billed cost; another host's
+      // `usage.cost` (if any) is not trusted as USD.
+      ...(provider === "openrouter" ? { costUsd: openRouterUsageCostUsd(usage) } : {}),
     },
     stop,
     stopReason: finishReason,
@@ -673,6 +701,26 @@ function createOpenAiCompatibleLaneAClient(input: {
           });
         } finally {
           clearTimeout(probeTimer);
+        }
+      }
+      // DUR-4447: Hugging Face bills at the live catalogue price; prime that
+      // cache with this call's own token (best effort) so the cost row is real.
+      //
+      // DUR-4494: a model/host the catalogue cannot price must not run at all
+      // -- recording it at 0 would mean real spend at HF while the company's
+      // budget cap sees nothing, for as long as the cache stays cold or the
+      // operator's chosen host never publishes a price. Fail closed here,
+      // before the metered call is made, rather than warn-and-bill-0 after.
+      if (input.provider === "huggingface") {
+        await warmHuggingFaceCatalogue(input.apiKey);
+        if (!cachedHuggingFacePricing(request.model)) {
+          throw new LaneAProviderError({
+            kind: "upstream",
+            provider: input.provider,
+            message: `${label} has no published price for "${request.model}" right now. Pick a model/host Hugging Face currently prices, or try again once its catalogue is reachable.`,
+            retryable: false,
+            refusal: false,
+          });
         }
       }
       const controller = new AbortController();
@@ -756,7 +804,7 @@ function createOpenAiCompatibleLaneAClient(input: {
           status: response.status,
         });
       }
-      return fromOpenAiCompletion(payload);
+      return fromOpenAiCompletion(payload, input.provider);
     },
   };
 }

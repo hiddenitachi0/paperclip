@@ -509,7 +509,7 @@ export type {
   JobVariable,
   JobVariableDefaultValue,
 } from "./jobs.js";
-export type { CostEvent, CostSummary, IssueCostSummary, CostByAgent, CostByProviderModel, CostByBiller, CostByAgentModel, CostWindowSpendRow, CostByProject } from "./cost.js";
+export type { CostEvent, CostSummary, IssueCostSummary, CostByAgent, CostByProviderModel, CostByBiller, CostByAgentModel, CostWindowSpendRow, CostByProject, CostBySourceRow, CostReconciliationRow, CostSourceBreakdown } from "./cost.js";
 export type { GoalAdoptionSnapshot, GoalAdoptionTrendPoint } from "./goal-adoption.js";
 export type { FinanceEvent, FinanceSummary, FinanceByBiller, FinanceByKind } from "./finance.js";
 export type {

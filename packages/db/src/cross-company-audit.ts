@@ -78,6 +78,7 @@ export const ROUTINE_SCHEDULER_BYPASS_ROUTES = [
   "heartbeat-scheduler:paymentCardExpiry",
   "heartbeat-scheduler:videoStorylineRender",
   "heartbeat-scheduler:videoStorylineStitch",
+  "heartbeat-scheduler:costReconciliation",
   "heartbeat-scheduler:tradingAgent",
 ] as const;
 
