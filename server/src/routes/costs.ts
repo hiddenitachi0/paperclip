@@ -222,6 +222,21 @@ export function costRoutes(
   );
 
   router.get(
+    "/companies/:companyId/costs/by-source",
+    companyScopeFromParam(rawDb, assertCompanyAccess),
+    async (req, res) => {
+    const companyId = req.params.companyId as string;
+    if (!(await assertCompanyCostReadAllowed(req, res, companyId))) return;
+    const range = parseCostDateRange(req.query);
+    const [sources, reconciliation] = await Promise.all([
+      costs.bySource(companyId, range),
+      costs.reconciliation(companyId, range),
+    ]);
+    res.json({ sources, reconciliation });
+    },
+  );
+
+  router.get(
     "/companies/:companyId/costs/by-agent",
     companyScopeFromParam(rawDb, assertCompanyAccess),
     async (req, res) => {

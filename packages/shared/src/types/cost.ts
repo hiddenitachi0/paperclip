@@ -138,3 +138,25 @@ export interface CostByProject {
   cachedInputTokens: number;
   outputTokens: number;
 }
+
+/** one provider's spend for one cost_source (provider / catalogue / static_table / estimate / ...) */
+export interface CostBySourceRow {
+  provider: string;
+  costSource: string;
+  costMicroUsd: number;
+  eventCount: number;
+}
+
+/** tracked-in-Paperclip vs. what the provider's own account says */
+export interface CostReconciliationRow {
+  provider: string;
+  checked: boolean;
+  trackedMicroUsd: number;
+  providerSaysMicroUsd: number;
+  differenceMicroUsd: number;
+}
+
+export interface CostSourceBreakdown {
+  sources: CostBySourceRow[];
+  reconciliation: CostReconciliationRow[];
+}

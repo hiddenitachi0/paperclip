@@ -4,8 +4,10 @@ import type { Db } from "@paperclipai/db";
 import { activityLog, agents, companies, costEvents, heartbeatRuns, issues, projects } from "@paperclipai/db";
 import { notFound, unprocessable } from "../errors.js";
 import { budgetService, type BudgetServiceHooks } from "./budgets.js";
-import { sumCostCents, sumMicroUsd } from "./cost-sql.js";
+import { effectiveMicroUsdExpr, sumCostCents, sumMicroUsd } from "./cost-sql.js";
 import { escalationGrantService } from "./escalation-grants.js";
+
+const FAL_RECONCILIATION_CODE_PREFIX = "fal-reconciliation";
 
 export interface CostDateRange {
   from?: Date;
@@ -353,6 +355,58 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         .where(and(...conditions))
         .groupBy(costEvents.provider, costEvents.biller, costEvents.billingType, costEvents.model)
         .orderBy(desc(sumCostCents()));
+    },
+
+    /**
+     * Per-provider spend split by how trustworthy the figure is. Rows with no
+     * cost_source (older rows) count as "estimate".
+     */
+    bySource: async (companyId: string, range?: CostDateRange) => {
+      const conditions: ReturnType<typeof eq>[] = [eq(costEvents.companyId, companyId)];
+      if (range?.from) conditions.push(gte(costEvents.occurredAt, range.from));
+      if (range?.to) conditions.push(lte(costEvents.occurredAt, range.to));
+      return db
+        .select({
+          provider: costEvents.provider,
+          costSource: sql<string>`coalesce(${costEvents.costSource}, 'estimate')`,
+          costMicroUsd: sumMicroUsd(),
+          eventCount: sql<number>`count(*)::int`,
+        })
+        .from(costEvents)
+        .where(and(...conditions))
+        .groupBy(costEvents.provider, sql`coalesce(${costEvents.costSource}, 'estimate')`)
+        .orderBy(desc(sumMicroUsd()));
+    },
+
+    /**
+     * "Paperclip tracked vs. provider says" for Fal: the daily Fal check leaves
+     * a correction row per mismatching day, so the provider's own figure is
+     * tracked spend plus those corrections.
+     */
+    reconciliation: async (companyId: string, range?: CostDateRange) => {
+      const conditions: ReturnType<typeof eq>[] = [eq(costEvents.companyId, companyId), eq(costEvents.provider, "fal")];
+      if (range?.from) conditions.push(gte(costEvents.occurredAt, range.from));
+      if (range?.to) conditions.push(lte(costEvents.occurredAt, range.to));
+      const isCorrection = sql`${costEvents.billingCode} like ${FAL_RECONCILIATION_CODE_PREFIX + ":%"}`;
+      const [row] = await db
+        .select({
+          trackedMicroUsd: sql<number>`coalesce(sum(case when ${isCorrection} then 0 else ${effectiveMicroUsdExpr} end), 0)::double precision`,
+          correctionMicroUsd: sql<number>`coalesce(sum(case when ${isCorrection} then ${effectiveMicroUsdExpr} else 0 end), 0)::double precision`,
+          checkedCount: sql<number>`count(*) filter (where ${isCorrection} or ${costEvents.costSource} = 'provider')::int`,
+        })
+        .from(costEvents)
+        .where(and(...conditions));
+      const tracked = Number(row?.trackedMicroUsd ?? 0);
+      const correction = Number(row?.correctionMicroUsd ?? 0);
+      return [
+        {
+          provider: "fal",
+          checked: Number(row?.checkedCount ?? 0) > 0,
+          trackedMicroUsd: tracked,
+          providerSaysMicroUsd: tracked + correction,
+          differenceMicroUsd: correction,
+        },
+      ];
     },
 
     byBiller: async (companyId: string, range?: CostDateRange) => {
