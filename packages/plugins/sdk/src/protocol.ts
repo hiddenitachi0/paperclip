@@ -975,6 +975,15 @@ export interface PluginCompanyFileContent extends PluginCompanyFile {
 }
 
 /**
+ * Result of `billing.reserveMediaStudioDirectSpend`. A refusal is a normal
+ * result (not a thrown error) so the plain-language `message` reaches the
+ * person intact.
+ */
+export type PluginMediaStudioDirectSpendReservation =
+  | { allowed: true; reservationId: string }
+  | { allowed: false; message: string; reason: string | null };
+
+/**
  * Result of `personas.reserveDailyGeneration` — whether one generation was
  * allowed (and, if so, atomically reserved) against the calling agent's
  * persona daily cap.
@@ -1740,6 +1749,24 @@ export interface WorkerToHostMethods {
   "files.readContent": [
     params: { fileId: string; companyId: string },
     result: PluginCompanyFileContent,
+  ];
+
+  // Billing
+  "billing.reserveMediaStudioDirectSpend": [
+    params: {
+      companyId: string;
+      /** The board user making the edit. The host re-derives company-admin status from this id against real memberships; a plugin-reported admin flag is never accepted. */
+      userId: string;
+      /** Which paid edit this is. The host prices it itself (shared cost table); the plugin never supplies an amount. */
+      action: string;
+      /** Admin-only one-call override of the shared Media Studio cap (never of the company budget). */
+      confirmBudgetCapCents?: number;
+    },
+    result: PluginMediaStudioDirectSpendReservation,
+  ];
+  "billing.releaseMediaStudioDirectSpend": [
+    params: { companyId: string; reservationId: string },
+    result: void,
   ];
 
   // Personas

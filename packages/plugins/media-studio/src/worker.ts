@@ -1790,6 +1790,40 @@ const plugin = definePlugin({
       return { sogni: sogniRef.length > 0, fal: falRef.length > 0 };
     });
 
+    // DUR-4441: every paid Edit-tab action reserves spend through the host
+    // before the provider is called -- the same company-budget and shared-cap
+    // checks (and admin-only override) the Create tab applies. The host
+    // prices the edit and decides whether this person is a company admin;
+    // nothing here is trusted for either. A refusal is plain language and the
+    // provider is never reached; a provider failure gives the reservation back.
+    const withEditSpend = async <T,>(
+      action: string,
+      context: { companyId: string | null; actor: { userId: string | null } },
+      raw: Record<string, unknown>,
+      run: () => Promise<T>,
+    ): Promise<T> => {
+      const companyId = context.companyId;
+      const userId = context.actor.userId;
+      if (!companyId || !userId) throw new Error("Open this page from inside a company.");
+      const override = raw.confirmBudgetCapCents;
+      const reservation = await ctx.billing.reserveMediaStudioDirectSpend(companyId, {
+        userId,
+        action,
+        ...(typeof override === "number" && Number.isInteger(override) && override >= 0 ? { confirmBudgetCapCents: override } : {}),
+      });
+      if (!reservation.allowed) throw new Error(reservation.message);
+      try {
+        return await run();
+      } catch (err) {
+        try {
+          await ctx.billing.releaseMediaStudioDirectSpend(companyId, reservation.reservationId);
+        } catch (releaseErr) {
+          ctx.logger.warn(`media-studio: could not give back an edit's reserved spend: ${errorText(releaseErr)}`);
+        }
+        throw err;
+      }
+    };
+
     // Run one Sogni picture tool (restore/upscale/remove background) on a
     // picture the person is editing. This is deliberately its own path, not
     // runSogniTool: it takes the picture's bytes straight from the browser
@@ -1812,6 +1846,7 @@ const plugin = definePlugin({
       const callParams: Record<string, unknown> = { ...raw, fileId: "editor" };
       delete callParams.tool;
       delete callParams.imageDataUrl;
+      delete callParams.confirmBudgetCapCents;
       // The host bridge splices its own authorized companyId (and, for some
       // calls, renderEnvironment) onto every action's params; neither is a
       // Sogni argument, so they must not reach prepareSogniCall's strict
@@ -1838,18 +1873,21 @@ const plugin = definePlugin({
         defaultModel,
         tokenType: sogniTokenType(cfg),
       });
-      try {
-        const made = await sogni.runPictureTool({
-          toolName: def.sogniTool,
-          arguments: prepared.arguments,
-          pictures: [imageDataUrl],
-          safeContentFilter: true,
-        });
-        const contentType = assertImageContentType(made.contentType);
-        return { imageDataUrl: `data:${contentType};base64,${made.contentBase64}`, contentType, provider: "sogni" };
-      } catch (err) {
-        throw new Error(errorText(err));
-      }
+      const sogniAction = toolName === "sogni-remove-background" ? "remove-background" : toolName === "sogni-upscale-image" ? "upscale" : "restore";
+      return withEditSpend(sogniAction, context, raw, async () => {
+        try {
+          const made = await sogni.runPictureTool({
+            toolName: def.sogniTool,
+            arguments: prepared.arguments,
+            pictures: [imageDataUrl],
+            safeContentFilter: true,
+          });
+          const contentType = assertImageContentType(made.contentType);
+          return { imageDataUrl: `data:${contentType};base64,${made.contentBase64}`, contentType, provider: "sogni" };
+        } catch (err) {
+          throw new Error(errorText(err));
+        }
+      });
     });
 
     // "Make a variation" / "Edit with a prompt": Fal's Kontext model takes
@@ -1877,13 +1915,15 @@ const plugin = definePlugin({
       }
       const providerConfig: ProviderConfig = { provider: "fal", falKey, falModel: FAL_REFERENCE_MODEL };
       const impl = selectProvider(providerConfig, (url, init) => ctx.http.fetch(url, init));
-      try {
-        const result = await impl.generate({ prompt, referenceImages: [imageDataUrl] });
-        const { contentBase64, contentType } = await toAttachmentBytes(ctx, result);
-        return { imageDataUrl: `data:${contentType};base64,${contentBase64}`, contentType, provider: "fal" };
-      } catch (err) {
-        throw new Error(errorText(err));
-      }
+      return withEditSpend("variation", context, raw, async () => {
+        try {
+          const result = await impl.generate({ prompt, referenceImages: [imageDataUrl] });
+          const { contentBase64, contentType } = await toAttachmentBytes(ctx, result);
+          return { imageDataUrl: `data:${contentType};base64,${contentBase64}`, contentType, provider: "fal" };
+        } catch (err) {
+          throw new Error(errorText(err));
+        }
+      });
     });
 
     // "Select an object": DUR-4331's helper for the Edit tab's selection
@@ -1908,6 +1948,7 @@ const plugin = definePlugin({
       const defaultModel = textOrNull(cfg.sogniModel) ?? SOGNI_DEFAULT_MODEL;
       const callParams: Record<string, unknown> = { ...raw, fileId: "editor", applyMask: false };
       delete callParams.imageDataUrl;
+      delete callParams.confirmBudgetCapCents;
       // See edit.sogni's identical guard above: the host-injected companyId
       // (and renderEnvironment) are not Sogni arguments.
       delete callParams.companyId;
@@ -1932,18 +1973,20 @@ const plugin = definePlugin({
         defaultModel,
         tokenType: sogniTokenType(cfg),
       });
-      try {
-        const made = await sogni.runPictureTool({
-          toolName: def.sogniTool,
-          arguments: prepared.arguments,
-          pictures: [imageDataUrl],
-          safeContentFilter: true,
-        });
-        const contentType = assertImageContentType(made.contentType);
-        return { imageDataUrl: `data:${contentType};base64,${made.contentBase64}`, contentType, provider: "sogni" };
-      } catch (err) {
-        throw new Error(errorText(err));
-      }
+      return withEditSpend("segment", context, raw, async () => {
+        try {
+          const made = await sogni.runPictureTool({
+            toolName: def.sogniTool,
+            arguments: prepared.arguments,
+            pictures: [imageDataUrl],
+            safeContentFilter: true,
+          });
+          const contentType = assertImageContentType(made.contentType);
+          return { imageDataUrl: `data:${contentType};base64,${made.contentBase64}`, contentType, provider: "sogni" };
+        } catch (err) {
+          throw new Error(errorText(err));
+        }
+      });
     });
 
     // "Replace selected area" / "Remove selected object": Fal's Fill model
@@ -1988,19 +2031,21 @@ const plugin = definePlugin({
       } catch (err) {
         throw new Error(`The Fal.ai API key picked in Media Studio's settings could not be read: ${errorText(err)}`);
       }
-      try {
-        const provider = new FalProvider(falKey, (url, init) => ctx.http.fetch(url, init));
-        const result = await provider.fillImage({ image: imageDataUrl, mask: maskDataUrl, prompt });
-        const { contentBase64: editedBase64 } = await toAttachmentBytes(ctx, result);
-        const composited = await compositeMaskedEdit({
-          original: bytesFromDataUrl(imageDataUrl, "The picture"),
-          edited: Buffer.from(editedBase64, "base64"),
-          mask: bytesFromDataUrl(maskDataUrl, "The mask"),
-        });
-        return { imageDataUrl: `data:image/png;base64,${composited.toString("base64")}`, contentType: "image/png", provider: "fal" };
-      } catch (err) {
-        throw new Error(errorText(err));
-      }
+      return withEditSpend("inpaint", context, raw, async () => {
+        try {
+          const provider = new FalProvider(falKey, (url, init) => ctx.http.fetch(url, init));
+          const result = await provider.fillImage({ image: imageDataUrl, mask: maskDataUrl, prompt });
+          const { contentBase64: editedBase64 } = await toAttachmentBytes(ctx, result);
+          const composited = await compositeMaskedEdit({
+            original: bytesFromDataUrl(imageDataUrl, "The picture"),
+            edited: Buffer.from(editedBase64, "base64"),
+            mask: bytesFromDataUrl(maskDataUrl, "The mask"),
+          });
+          return { imageDataUrl: `data:image/png;base64,${composited.toString("base64")}`, contentType: "image/png", provider: "fal" };
+        } catch (err) {
+          throw new Error(errorText(err));
+        }
+      });
     });
 
     // Sogni's picture tools and its prompt tool, one agent tool each (ticked

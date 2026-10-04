@@ -250,6 +250,8 @@ const manifest: PaperclipPluginManifestV1 = {
     "personas.generation_cap.enforce",
     // DUR-4345: read the person's learned "do more of / avoid" picture rules for this run's agent.
     "personas.picture_feedback.read",
+    // DUR-4441: paid Edit-tab actions reserve against the same spend caps as the Create tab.
+    "billing.media_studio_direct.reserve",
     // DUR-4062: the video/audio background job poll, and telling a task its video/audio is ready.
     "jobs.schedule",
     "issue.comments.create",

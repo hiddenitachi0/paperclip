@@ -54,6 +54,7 @@ import type {
   PluginPerformActionContext,
   PluginPersonaGenerationCapReservation,
   PluginPictureFeedbackRules,
+  PluginMediaStudioDirectSpendReservation,
 } from "./protocol.js";
 
 // ---------------------------------------------------------------------------
@@ -1840,6 +1841,30 @@ export interface PluginPersonasClient {
 }
 
 /**
+ * `ctx.billing` — reserve spend against the same company budget and shared
+ * Media Studio cap the Create tab uses (DUR-4441). Requires
+ * `billing.media_studio_direct.reserve`.
+ *
+ * The host decides whether the person may override the shared cap by
+ * checking `userId` against real company membership; the plugin cannot
+ * assert admin status.
+ */
+export interface PluginBillingClient {
+  /** Reserve (and record) spend before a paid call. A refusal is `{ allowed: false, message }`, not an exception. */
+  reserveMediaStudioDirectSpend(
+    companyId: string,
+    input: {
+      userId: string;
+      /** The paid edit: "segment" | "inpaint" | "remove-background" | "upscale" | "restore" | "variation" | "prompt-edit". The host sets the price. */
+      action: string;
+      confirmBudgetCapCents?: number;
+    },
+  ): Promise<PluginMediaStudioDirectSpendReservation>;
+  /** Give back a reservation whose paid call failed. */
+  releaseMediaStudioDirectSpend(companyId: string, reservationId: string): Promise<void>;
+}
+
+/**
  * `ctx.files` — company files that are not tied to a task (they show in the
  * Files page's "No task" group), and read access to a company's files by id.
  *
@@ -2024,6 +2049,9 @@ export interface PluginContext {
 
   /** Persona-scoped enforcement helpers. Requires `personas.generation_cap.enforce`. */
   personas: PluginPersonasClient;
+
+  /** Spend reservation against the company budget and shared Media Studio cap. Requires `billing.media_studio_direct.reserve`. */
+  billing: PluginBillingClient;
 
   /** Company files not tied to a task. Requires `company.files.create` / `company.files.read`. */
   files: PluginFilesClient;

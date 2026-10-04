@@ -1243,6 +1243,8 @@ export const PLUGIN_CAPABILITIES = [
   // Personas
   "personas.generation_cap.enforce",
   "personas.picture_feedback.read",
+  // Billing
+  "billing.media_studio_direct.reserve",
   // Plugin State
   "plugin.state.read",
   "plugin.state.write",

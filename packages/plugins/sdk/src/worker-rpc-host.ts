@@ -1257,6 +1257,15 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
         },
       },
 
+      billing: {
+        async reserveMediaStudioDirectSpend(companyId, input) {
+          return callHost("billing.reserveMediaStudioDirectSpend", { companyId, ...input });
+        },
+        async releaseMediaStudioDirectSpend(companyId, reservationId) {
+          await callHost("billing.releaseMediaStudioDirectSpend", { companyId, reservationId });
+        },
+      },
+
       personas: {
         async reserveDailyGeneration(companyId: string, options: { runId: string }) {
           if (!options?.runId) {
