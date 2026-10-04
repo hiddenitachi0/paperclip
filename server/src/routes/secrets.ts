@@ -16,12 +16,31 @@ import { assertBoard, assertCompanyAccess, assertInstanceAdmin } from "./authz.j
 import { logActivity, secretService } from "../services/index.js";
 import { getConfiguredSecretProvider } from "../secrets/configured-provider.js";
 import { companyScope, companyScopeFromParam } from "../middleware/company-scope.js";
-import { notFound, unprocessable } from "../errors.js";
+import { HttpError, notFound, unprocessable } from "../errors.js";
+import { validateHuggingFaceToken, type HuggingFaceFetch } from "../services/huggingface-catalogue.js";
 import { and, eq } from "drizzle-orm";
 import { companySecretBindings } from "@paperclipai/db";
 import { secretTestService, type SecretTestService } from "../services/secret-tests.js";
 
-export function secretRoutes(rawDb: Db, deps: { secretTests?: SecretTestService } = {}) {
+/**
+ * DUR-4447: a Hugging Face token is checked against the router BEFORE it is
+ * stored, so a mistyped token is never saved. Refused = 422 with a plain
+ * sentence; Hugging Face unreachable = a distinct 503 so the page can say "try
+ * again" instead of "wrong token". The message never contains the token.
+ */
+async function assertHuggingFaceTokenAccepted(value: string | null | undefined, fetchImpl?: HuggingFaceFetch) {
+  const verdict = await validateHuggingFaceToken(value ?? "", fetchImpl ? { fetchImpl } : {});
+  if (verdict.ok) return;
+  if (verdict.reason === "unreachable") {
+    throw new HttpError(503, verdict.message, { code: "huggingface_unreachable" });
+  }
+  throw unprocessable(verdict.message, { code: "huggingface_token_rejected" });
+}
+
+export function secretRoutes(
+  rawDb: Db,
+  deps: { secretTests?: SecretTestService; huggingFaceFetch?: HuggingFaceFetch } = {},
+) {
   const router = Router();
   // DUR-348 (DUR-277 Wave 2): this file's own request-scoped instance; the
   // raw `rawDb` stays unwrapped for the pre-scope lookups the (b)-category
@@ -342,6 +361,10 @@ export function secretRoutes(rawDb: Db, deps: { secretTests?: SecretTestService 
     async (req, res) => {
     const companyId = req.params.companyId as string;
 
+    if (req.body.kind === "huggingface_api_key") {
+      await assertHuggingFaceTokenAccepted(req.body.value, deps.huggingFaceFetch);
+    }
+
     const created = await svc.create(
       companyId,
       {
@@ -537,6 +560,10 @@ export function secretRoutes(rawDb: Db, deps: { secretTests?: SecretTestService 
     }
 
     await assertNotDataConnectionKey(existing.companyId, existing.id);
+
+    if (existing.kind === "huggingface_api_key" && req.body.value) {
+      await assertHuggingFaceTokenAccepted(req.body.value, deps.huggingFaceFetch);
+    }
 
     const rotated = await svc.rotate(
       id,

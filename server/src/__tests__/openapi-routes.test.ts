@@ -134,6 +134,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "documents-download.ts",
   // Media Studio Create tab direct-generation routes (DUR-4329) are board-only and not yet in the public OpenAPI document.
   "media-studio-direct.ts",
+  // Instance disk-health report (DUR-4499) is an instance-admin-only read-only route and not yet in the public OpenAPI document.
+  "instance-disk-health.ts",
 ]);
 
 function createApp() {
