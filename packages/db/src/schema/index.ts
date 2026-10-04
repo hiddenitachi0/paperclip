@@ -171,3 +171,4 @@ export { crmActivities } from "./crm_activities.js";
 export { crmFacts } from "./crm_facts.js";
 export { crmExternalRefs } from "./crm_external_refs.js";
 export { costReconciliationRuns, sogniBalanceSnapshots } from "./cost_reconciliation.js";
+export { bragJobs, bragScenes } from "./brag_jobs.js";

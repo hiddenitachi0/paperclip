@@ -1548,6 +1548,13 @@
       "when": 1791139532530,
       "tag": "0221_worktree_cleanup_retention_days",
       "breakpoints": true
+    },
+    {
+      "idx": 222,
+      "version": "7",
+      "when": 1791148654501,
+      "tag": "0222_brag_jobs",
+      "breakpoints": true
     }
   ]
 }
