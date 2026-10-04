@@ -29,6 +29,7 @@ import {
   prepareEmbeddedPostgresNativeRuntime,
   reconcilePendingMigrationHistory,
   formatDatabaseBackupResult,
+  computeBackupStorageStats,
   runDatabaseBackup,
   authUsers,
   companies,
@@ -820,6 +821,14 @@ export async function startServer(): Promise<StartedServer> {
     storageService,
     feedbackExportService: feedback,
     databaseBackupService: {
+      getStorageStats: async (override) => {
+        const retention = override ?? (await backupSettingsSvc.getGeneral()).backupRetention;
+        return {
+          ...computeBackupStorageStats(config.databaseBackupDir, retention, "paperclip"),
+          backupDir: config.databaseBackupDir,
+          retention,
+        };
+      },
       runManualBackup: async () => {
         const result = await runServerDatabaseBackup("manual");
         if (!result) {
