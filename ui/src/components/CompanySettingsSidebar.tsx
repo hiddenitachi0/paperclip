@@ -10,6 +10,7 @@ import {
   MonitorCog,
   Plug,
   Puzzle,
+  Radio,
   Settings,
   Shield,
   SlidersHorizontal,
@@ -186,6 +187,11 @@ export function CompanySettingsSidebar() {
             to={`${INSTANCE_SETTINGS_PATH_PREFIX}/experimental`}
             label="Experimental"
             icon={FlaskConical}
+          />
+          <SidebarNavItem
+            to={`${INSTANCE_SETTINGS_PATH_PREFIX}/presentation-mode`}
+            label="Presentation mode"
+            icon={Radio}
           />
           <SidebarNavItem
             to={`${INSTANCE_SETTINGS_PATH_PREFIX}/plugins`}

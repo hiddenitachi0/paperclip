@@ -42,6 +42,15 @@ vi.mock("../context/ThemeContext", () => ({
   }),
 }));
 
+const mockTogglePresentationMode = vi.hoisted(() => vi.fn());
+
+vi.mock("../context/PresentationModeContext", () => ({
+  usePresentationMode: () => ({
+    enabled: false,
+    toggle: mockTogglePresentationMode,
+  }),
+}));
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
