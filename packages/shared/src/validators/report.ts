@@ -97,3 +97,46 @@ export const runReportScriptFixtureSchema = z.object({
   fixtureId: z.string().uuid(),
 });
 export type RunReportScriptFixtureInput = z.infer<typeof runReportScriptFixtureSchema>;
+
+// DUR-4072 PR2: report templates and runs.
+export const REPORT_TEMPLATE_KEY_MAX_LENGTH = 100;
+export const REPORT_TEMPLATE_NAME_MAX_LENGTH = 200;
+export const REPORT_TEMPLATE_INSTRUCTIONS_MAX_LENGTH = 20_000;
+
+const reportTemplateKeySchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(REPORT_TEMPLATE_KEY_MAX_LENGTH)
+  .regex(/^[a-z0-9][a-z0-9_-]*$/, "Use lowercase letters, numbers, - and _ only.");
+
+export const createReportTemplateSchema = z.object({
+  key: reportTemplateKeySchema,
+  name: z.string().trim().min(1).max(REPORT_TEMPLATE_NAME_MAX_LENGTH),
+  instructions: z.string().trim().min(1).max(REPORT_TEMPLATE_INSTRUCTIONS_MAX_LENGTH),
+  layout: z.record(z.string(), z.unknown()).default({}),
+  dataConnectionId: z.string().uuid().nullable().optional(),
+  scriptVersionId: z.string().uuid(),
+});
+export type CreateReportTemplateInput = z.infer<typeof createReportTemplateSchema>;
+
+export const updateReportTemplateSchema = z.object({
+  name: z.string().trim().min(1).max(REPORT_TEMPLATE_NAME_MAX_LENGTH).optional(),
+  instructions: z.string().trim().min(1).max(REPORT_TEMPLATE_INSTRUCTIONS_MAX_LENGTH).optional(),
+  layout: z.record(z.string(), z.unknown()).optional(),
+  dataConnectionId: z.string().uuid().nullable().optional(),
+  scriptVersionId: z.string().uuid().optional(),
+  isActive: z.boolean().optional(),
+});
+export type UpdateReportTemplateInput = z.infer<typeof updateReportTemplateSchema>;
+
+export const createReportRunSchema = z.object({
+  templateId: z.string().uuid(),
+});
+export type CreateReportRunInput = z.infer<typeof createReportRunSchema>;
+
+export const REPORT_RUN_COMMENTARY_MAX_LENGTH = 50_000;
+export const draftReportRunCommentarySchema = z.object({
+  commentaryText: z.string().trim().min(1).max(REPORT_RUN_COMMENTARY_MAX_LENGTH),
+});
+export type DraftReportRunCommentaryInput = z.infer<typeof draftReportRunCommentarySchema>;

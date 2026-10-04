@@ -91,3 +91,56 @@ export interface ReportScriptRun {
   finishedAt: string | null;
   createdAt: string;
 }
+
+/**
+ * DUR-4072 PR2: report templates and report runs. A run is an ordinary
+ * task: fetch data -> run the template's pinned, approved script -> numbers
+ * JSON -> agent commentary (checked against the numbers, never calculated)
+ * -> a report document with revisions. See validators/report.ts for input
+ * shapes and packages/db/src/schema/report_templates.ts /
+ * report_runs.ts for storage.
+ */
+
+export const REPORT_RUN_STATUSES = [
+  "fetching_data",
+  "calculating",
+  "drafting_commentary",
+  "needs_revision",
+  "ready",
+  "failed",
+] as const;
+export type ReportRunStatus = (typeof REPORT_RUN_STATUSES)[number];
+
+export interface ReportTemplate {
+  id: string;
+  companyId: string;
+  key: string;
+  name: string;
+  instructions: string;
+  layout: Record<string, unknown>;
+  dataConnectionId: string | null;
+  scriptVersionId: string;
+  isActive: boolean;
+  createdByAgentId: string | null;
+  createdByUserId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReportRun {
+  id: string;
+  companyId: string;
+  templateId: string;
+  status: ReportRunStatus;
+  fetchedData: unknown;
+  scriptRunId: string | null;
+  numbers: unknown;
+  commentaryText: string | null;
+  ungroundedNumbers: string[];
+  documentId: string | null;
+  error: string | null;
+  requestedByAgentId: string | null;
+  requestedByUserId: string | null;
+  createdAt: string;
+  finishedAt: string | null;
+}

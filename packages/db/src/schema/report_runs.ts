@@ -38,7 +38,7 @@ export const reportRuns = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
     templateId: uuid("template_id").notNull().references(() => reportTemplates.id, { onDelete: "cascade" }),
-    status: text("status").notNull().default("fetching_data"),
+    status: text("status").$type<ReportRunStatus>().notNull().default("fetching_data"),
     /** The data the script's input was built from -- stored for audit, same as PR1's run ledger stores script input/output. */
     fetchedData: jsonb("fetched_data").$type<unknown>(),
     scriptRunId: uuid("script_run_id").references(() => reportScriptRuns.id, { onDelete: "set null" }),

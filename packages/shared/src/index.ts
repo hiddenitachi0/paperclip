@@ -1539,11 +1539,15 @@ export type {
   ReportFixtureDiff,
   ReportFixtureCheckResult,
   ReportScriptRun,
+  ReportRunStatus,
+  ReportTemplate,
+  ReportRun,
 } from "./types/report.js";
 export {
   REPORT_SCRIPT_VERSION_STATUSES,
   REPORT_SCRIPT_RUN_TRIGGERS,
   REPORT_SCRIPT_RUN_STATUSES,
+  REPORT_RUN_STATUSES,
 } from "./types/report.js";
 export {
   REPORT_SCRIPT_KEY_MAX_LENGTH,
@@ -1562,6 +1566,18 @@ export {
   type ApproveReportScriptVersionInput,
   type CreateReportFixtureInput,
   type RunReportScriptFixtureInput,
+  REPORT_TEMPLATE_KEY_MAX_LENGTH,
+  REPORT_TEMPLATE_NAME_MAX_LENGTH,
+  REPORT_TEMPLATE_INSTRUCTIONS_MAX_LENGTH,
+  REPORT_RUN_COMMENTARY_MAX_LENGTH,
+  createReportTemplateSchema,
+  updateReportTemplateSchema,
+  createReportRunSchema,
+  draftReportRunCommentarySchema,
+  type CreateReportTemplateInput,
+  type UpdateReportTemplateInput,
+  type CreateReportRunInput,
+  type DraftReportRunCommentaryInput,
 } from "./validators/report.js";
 export {
   CRM_ACTIVITY_TYPES,

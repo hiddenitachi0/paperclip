@@ -362,6 +362,54 @@ export function reportScriptsService(db: Db, deps: ReportScriptsServiceDeps = {}
     return toRunSummary(row!);
   }
 
+  /**
+   * DUR-4072 PR2: runs an **approved** version against a report run's
+   * fetched data. Refuses anything else -- a report's numbers may never
+   * come from a draft or retired script, no matter who asks. Always
+   * records a report_script_runs row (trigger 'report_run'), the same
+   * append-only ledger a fixture test writes to.
+   */
+  async function runForReport(
+    companyId: string,
+    versionId: string,
+    input: unknown,
+    actor: { agentId?: string; userId?: string; runId?: string },
+  ): Promise<ReportScriptRun> {
+    const version = await getVersion(companyId, versionId);
+    if (version.status !== "approved") {
+      throw unprocessable("Only an approved script version can be run for a report.");
+    }
+    const inputJson = JSON.stringify(input ?? null);
+    const outcome = await runner.run(
+      { sha256: version.sha256, files: version.files, entrypoint: version.entrypoint, lockfile: version.lockfile },
+      input,
+    );
+    const [row] = await db
+      .insert(reportScriptRuns)
+      .values({
+        companyId,
+        scriptVersionId: versionId,
+        fixtureId: null,
+        trigger: "report_run",
+        input,
+        inputSha256: sha256Hex(inputJson),
+        output: outcome.status === "succeeded" ? outcome.output : null,
+        outputSha256: outcome.status === "succeeded" ? outcome.outputSha256 : null,
+        scriptSha256: version.sha256,
+        runtimeFingerprint: outcome.runtimeFingerprint,
+        status: outcome.status,
+        durationMs: outcome.durationMs,
+        error: outcome.status === "succeeded" ? null : outcome.error,
+        fixtureResult: null,
+        requestedByAgentId: actor.agentId ?? null,
+        requestedByUserId: actor.userId ?? null,
+        requestedByRunId: actor.runId ?? null,
+        finishedAt: new Date(),
+      })
+      .returning();
+    return toRunSummary(row!);
+  }
+
   async function allFixturesPass(companyId: string, versionId: string, fixtures: Array<typeof reportFixtures.$inferSelect>): Promise<boolean> {
     if (fixtures.length === 0) return false;
     for (const fixture of fixtures) {
@@ -420,6 +468,7 @@ export function reportScriptsService(db: Db, deps: ReportScriptsServiceDeps = {}
     createFixture,
     listFixtures,
     runFixture,
+    runForReport,
     listRuns,
     approveVersion,
   };
