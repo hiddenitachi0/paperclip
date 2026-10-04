@@ -33,6 +33,8 @@ export interface ImageGenerationResult {
   imageUrl?: string;
   /** Inline bytes as a data: URL, when the provider answers that way instead. */
   imageDataUrl?: string;
+  /** DUR-4455: the picture's size in megapixels when Fal reported it, for per-megapixel pricing. */
+  megapixels?: number;
 }
 
 export interface ImageGenerationProvider {
@@ -92,10 +94,11 @@ export class FalImageProvider implements ImageGenerationProvider {
       body: JSON.stringify(body),
     });
     if (!res.ok) throw new Error(`fal.ai ${model} failed (${res.status}): ${await res.text()}`);
-    const data = (await res.json()) as { images?: Array<{ url: string; content_type?: string }> };
+    const data = (await res.json()) as { images?: Array<{ url: string; content_type?: string; width?: number; height?: number }> };
     const image = data.images?.[0];
     if (!image?.url) throw new Error("fal.ai returned no image");
-    const base = { provider: this.name, model, contentType: image.content_type ?? "image/jpeg" };
+    const megapixels = typeof image.width === "number" && typeof image.height === "number" ? (image.width * image.height) / 1_000_000 : undefined;
+    const base = { provider: this.name, model, contentType: image.content_type ?? "image/jpeg", ...(megapixels !== undefined ? { megapixels } : {}) };
     if (/^data:/i.test(image.url)) return { ...base, imageDataUrl: image.url };
     if (!/^https:\/\//i.test(image.url)) throw new Error("fal.ai returned an image address that is not https");
     return { ...base, imageUrl: image.url };
