@@ -4472,6 +4472,15 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: "get",
+  path: "/api/attachments/{attachmentId}/thumbnail",
+  tags: ["assets"],
+  summary: "Download a cached 256px thumbnail of an attachment, generated on first request",
+  request: { params: z.object({ attachmentId: z.string() }) },
+  responses: { 200: { description: "Thumbnail image content" }, 401: r.unauthorized, 404: r.notFound },
+});
+
+registry.registerPath({
   method: "delete",
   path: "/api/attachments/{attachmentId}",
   tags: ["assets"],
