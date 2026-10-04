@@ -1,5 +1,5 @@
 {
-  "id": "8bfb5985-ec8a-46fa-bdb1-86410fce7b5c",
+  "id": "c9b7b3b2-3401-4fe1-8054-04e5108c73d4",
   "prevId": "d7ef1c51-0d92-4ada-9a5d-72f4fde20b89",
   "version": "7",
   "dialect": "postgresql",
@@ -8440,6 +8440,18 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": true
+        },
+        "cost_micro_usd": {
+          "name": "cost_micro_usd",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "cost_source": {
+          "name": "cost_source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         },
         "occurred_at": {
           "name": "occurred_at",
@@ -21883,12 +21895,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "'medium'"
-        },
-        "size_label": {
-          "name": "size_label",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
         },
         "assignee_agent_id": {
           "name": "assignee_agent_id",
