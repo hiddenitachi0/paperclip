@@ -17,6 +17,10 @@ export interface CostEvent {
   cachedInputTokens: number;
   outputTokens: number;
   costCents: number;
+  /** exact cost in micro-USD (1 USD = 1,000,000); null on legacy cents-only rows */
+  costMicroUsd: number | null;
+  /** "provider" | "estimate" | "catalogue" | "static_table" */
+  costSource: string | null;
   occurredAt: Date;
   createdAt: Date;
 }
@@ -24,6 +28,7 @@ export interface CostEvent {
 export interface CostSummary {
   companyId: string;
   spendCents: number;
+  spendMicroUsd: number;
   budgetCents: number;
   utilizationPercent: number;
 }
@@ -33,6 +38,7 @@ export interface IssueCostSummary {
   issueCount: number;
   includeDescendants: boolean;
   costCents: number;
+  costMicroUsd: number;
   inputTokens: number;
   cachedInputTokens: number;
   outputTokens: number;
@@ -48,6 +54,7 @@ export interface CostByAgent {
   agentName: string | null;
   agentStatus: string | null;
   costCents: number;
+  costMicroUsd: number;
   inputTokens: number;
   cachedInputTokens: number;
   outputTokens: number;
@@ -64,6 +71,7 @@ export interface CostByProviderModel {
   billingType: BillingType;
   model: string;
   costCents: number;
+  costMicroUsd: number;
   inputTokens: number;
   cachedInputTokens: number;
   outputTokens: number;
@@ -77,6 +85,7 @@ export interface CostByProviderModel {
 export interface CostByBiller {
   biller: string;
   costCents: number;
+  costMicroUsd: number;
   inputTokens: number;
   cachedInputTokens: number;
   outputTokens: number;
@@ -98,6 +107,7 @@ export interface CostByAgentModel {
   billingType: BillingType;
   model: string;
   costCents: number;
+  costMicroUsd: number;
   inputTokens: number;
   cachedInputTokens: number;
   outputTokens: number;
@@ -112,6 +122,7 @@ export interface CostWindowSpendRow {
   /** rolling window duration in hours */
   windowHours: number;
   costCents: number;
+  costMicroUsd: number;
   inputTokens: number;
   cachedInputTokens: number;
   outputTokens: number;
@@ -122,7 +133,30 @@ export interface CostByProject {
   projectId: string | null;
   projectName: string | null;
   costCents: number;
+  costMicroUsd: number;
   inputTokens: number;
   cachedInputTokens: number;
   outputTokens: number;
+}
+
+/** one provider's spend for one cost_source (provider / catalogue / static_table / estimate / ...) */
+export interface CostBySourceRow {
+  provider: string;
+  costSource: string;
+  costMicroUsd: number;
+  eventCount: number;
+}
+
+/** tracked-in-Paperclip vs. what the provider's own account says */
+export interface CostReconciliationRow {
+  provider: string;
+  checked: boolean;
+  trackedMicroUsd: number;
+  providerSaysMicroUsd: number;
+  differenceMicroUsd: number;
+}
+
+export interface CostSourceBreakdown {
+  sources: CostBySourceRow[];
+  reconciliation: CostReconciliationRow[];
 }

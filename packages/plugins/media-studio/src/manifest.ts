@@ -359,6 +359,14 @@ const manifest: PaperclipPluginManifestV1 = {
         format: "secret-ref",
         default: "",
       },
+      falAdminKeySecretRef: {
+        type: "string",
+        title: "Fal.ai ADMIN key (secret ref)",
+        description:
+          "Optional. A separate Fal key with ADMIN scope, used only for the daily check of recorded Fal spend against Fal's own billing (never for generating). Leave empty and that daily check is skipped.",
+        format: "secret-ref",
+        default: "",
+      },
       falModel: {
         type: "string",
         title: "Fal.ai model",
@@ -386,6 +394,13 @@ const manifest: PaperclipPluginManifestV1 = {
           "Which Sogni balance pays: auto (Spark first, then SOGNI; the usual choice), spark, or sogni. An active Sogni Unlimited plan is used first either way.",
         enum: ["auto", "spark", "sogni"],
         default: "auto",
+      },
+      sogniCreditPriceUsd: {
+        type: "number",
+        title: "Sogni credit price (USD)",
+        description:
+          "What one Sogni credit cost you in US dollars (from what you actually paid). Used to turn the credits Sogni reports into dollars on the Costs page; those rows are marked as converted from credits, not exact. Leave empty and Sogni spend is not priced.",
+        minimum: 0,
       },
       comfyUrl: {
         type: "string",

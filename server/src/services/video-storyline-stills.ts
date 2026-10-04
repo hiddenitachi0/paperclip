@@ -17,6 +17,7 @@ import { pluginRegistryService } from "./plugin-registry.js";
 import { executePinnedHttpRequest, validateAndResolveFetchUrl } from "./safe-outbound-fetch.js";
 import { secretService } from "./secrets.js";
 import { loadReferenceImages } from "./video-storyline-render.js";
+import { recordFalCostEvent } from "./fal-cost-events.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
 import { videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
 
@@ -84,7 +85,7 @@ export function videoStorylineStillsService(db: Db) {
   const registry = pluginRegistryService(db);
   const secrets = secretService(db);
 
-  async function resolveImageProvider(companyId: string, providerId: VideoStorylineProvider, actorId: string): Promise<ImageGenerationProvider> {
+  async function resolveImageProvider(companyId: string, providerId: VideoStorylineProvider, actorId: string): Promise<{ provider: ImageGenerationProvider; apiKey: string }> {
     if (providerId !== "fal") {
       throw unprocessable(
         "Storyboard stills currently only support the Fal provider. Switch this storyline's provider to Fal to generate stills (Sogni video rendering is unaffected).",
@@ -97,7 +98,7 @@ export function videoStorylineStillsService(db: Db) {
     const ref = typeof cfg.falKeySecretRef === "string" ? cfg.falKeySecretRef.trim() : "";
     if (!ref) throw unprocessable("No Fal.ai API key is configured in Media Studio settings yet.");
     const apiKey = await secrets.resolveSecretValueForVideoRender(companyId, ref, { actorId });
-    return new FalImageProvider(apiKey, safeImageFetch);
+    return { provider: new FalImageProvider(apiKey, safeImageFetch), apiKey };
   }
 
   async function generateStill(companyId: string, storylineId: string, shotId: string, actor: VideoStorylineActor): Promise<VideoStoryboardShotSummary> {
@@ -110,7 +111,7 @@ export function videoStorylineStillsService(db: Db) {
 
     const providerId = (shot.providerId ?? storyline.providerId) as VideoStorylineProvider;
     const estimate = estimateStoryboardCostCents([{ storyboardStatus: shot.storyboardStatus as VideoShotStoryboardStatus }], providerId);
-    const provider = await resolveImageProvider(companyId, providerId, actor.agentId ?? actor.actorId);
+    const { provider, apiKey } = await resolveImageProvider(companyId, providerId, actor.agentId ?? actor.actorId);
 
     const referenceAssetIds = [...shot.lookReferenceAssetIds, ...storyline.characterReferenceAssetIds];
     const referenceImages = await loadReferenceImages(db, companyId, referenceAssetIds);
@@ -125,6 +126,18 @@ export function videoStorylineStillsService(db: Db) {
       throw unprocessable(`Still generation failed: ${err instanceof Error ? err.message : String(err)}`);
     }
     const { buffer, contentType } = await downloadImageBytes(imageResult);
+
+    // DUR-4455: the still is a paid Fal call -- record its actual cost as a cost event (agent-made pictures were uncounted before).
+    await recordFalCostEvent(db, safeImageFetch, {
+      companyId,
+      apiKey,
+      agentId: actor.agentId,
+      createdByUserId: actor.agentId ? null : actor.actorId,
+      model: imageResult.model,
+      usage: { images: 1, ...(imageResult.megapixels != null ? { megapixels: imageResult.megapixels } : {}) },
+      estimateCents: estimate.estimatedTotalCents,
+      billingCode: "video-storyline-still",
+    });
 
     const stored = await getStorageService().putFile({
       companyId,
