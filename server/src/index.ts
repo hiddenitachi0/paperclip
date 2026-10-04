@@ -29,6 +29,7 @@ import {
   prepareEmbeddedPostgresNativeRuntime,
   reconcilePendingMigrationHistory,
   formatDatabaseBackupResult,
+  computeBackupStorageStats,
   runDatabaseBackup,
   authUsers,
   companies,
@@ -822,7 +823,16 @@ export async function startServer(): Promise<StartedServer> {
     serverPort: listenPort,
     storageService,
     feedbackExportService: feedback,
+    databaseBackupDir: config.databaseBackupDir,
     databaseBackupService: {
+      getStorageStats: async (override) => {
+        const retention = override ?? (await backupSettingsSvc.getGeneral()).backupRetention;
+        return {
+          ...computeBackupStorageStats(config.databaseBackupDir, retention, "paperclip"),
+          backupDir: config.databaseBackupDir,
+          retention,
+        };
+      },
       runManualBackup: async () => {
         const result = await runServerDatabaseBackup("manual");
         if (!result) {
@@ -2052,6 +2062,21 @@ export async function startServer(): Promise<StartedServer> {
       config.crossCompanyAccessLogRetentionIntervalMinutes * 60 * 1000,
       config.crossCompanyAccessLogRetentionDays,
     );
+  }
+
+  // DUR-4498: bound data/run-logs on disk. Daily sweep, default 30 days;
+  // PAPERCLIP_RUN_LOG_RETENTION_DAYS overrides, 0 disables.
+  {
+    const envDays = process.env.PAPERCLIP_RUN_LOG_RETENTION_DAYS;
+    const runLogRetentionDays =
+      envDays !== undefined && envDays.trim() !== "" && Number.isFinite(Number(envDays))
+        ? Number(envDays)
+        : 30;
+    if (runLogRetentionDays > 0) {
+      logger.info({ retentionDays: runLogRetentionDays }, "Run log retention sweep enabled");
+      const { startRunLogRetention } = await import("./services/run-log-retention.js");
+      startRunLogRetention(24 * 60 * 60 * 1000, runLogRetentionDays);
+    }
   }
 
   // Wait for external adapters to finish loading before accepting requests.
