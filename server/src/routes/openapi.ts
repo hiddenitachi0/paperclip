@@ -2829,7 +2829,7 @@ registry.registerPath({
 // ─── Costs ───────────────────────────────────────────────────────────────────
 
 const costSummaryPaths = [
-  "summary", "by-agent", "by-agent-model", "by-provider",
+  "summary", "by-agent", "by-agent-model", "by-provider", "by-source",
   "by-biller", "by-project", "finance-summary", "finance-by-biller",
   "finance-by-kind", "finance-events", "window-spend", "quota-windows",
 ] as const;
@@ -3648,6 +3648,23 @@ registerCurrentRoute({
     401: r.unauthorized,
     403: r.forbidden,
     404: r.notFound,
+  },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/lane-a/huggingface/models",
+  tags: ["agents"],
+  summary:
+    "List the Hugging Face models (with per-provider price, tool support and latency) the company's stored token can reach (board users only)",
+  query: z.object({ toolsOnly: z.enum(["true", "false"]).optional(), liveOnly: z.enum(["true", "false"]).optional() }),
+  responses: {
+    200: r.ok(z.object({ models: z.array(z.record(z.string(), z.unknown())) })),
+    401: r.unauthorized,
+    403: r.forbidden,
+    409: r.conflict,
+    422: r.unprocessable,
+    503: { description: "Hugging Face unreachable", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 

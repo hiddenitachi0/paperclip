@@ -32,6 +32,7 @@ import {
 } from "@paperclipai/db";
 import { notFound, unprocessable } from "../errors.js";
 import { environmentService } from "./environments.js";
+import { sumCostCents } from "./cost-sql.js";
 import { heartbeatService } from "./heartbeat.js";
 import { logActivity } from "./activity-log.js";
 
@@ -174,7 +175,7 @@ export function companyService(db: Db, rawDb: Db = db) {
     const rows = await database
         .select({
           companyId: costEvents.companyId,
-          spentMonthlyCents: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::double precision`,
+          spentMonthlyCents: sumCostCents(),
         })
       .from(costEvents)
       .where(
