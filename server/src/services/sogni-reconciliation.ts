@@ -34,7 +34,9 @@ export async function fetchSogniBalance(fetchImpl: SogniFetch, apiKey: string, n
 }
 
 export type SogniReconciliation =
-  | { status: "skipped"; reason: "no_balance" | "no_previous_snapshot" | "credit_price_not_set" }
+  | { status: "skipped"; reason: "no_balance" | "credit_price_not_set" }
+  /** First ever look: nothing to compare against yet, but the caller should store `next` as the baseline. */
+  | { status: "skipped"; reason: "no_previous_snapshot"; next: SogniBalanceSnapshot }
   | { status: "confirmed" | "mismatch"; balanceDropCredits: number; recordedCredits: number; deltaCredits: number; next: SogniBalanceSnapshot };
 
 /** Tolerance: 1% of the larger side, but never below 0.5 credit (rounding of per-render credits). */
@@ -50,7 +52,7 @@ export async function reconcileSogniBalance(
   if (!(params.creditPriceUsd > 0)) return { status: "skipped", reason: "credit_price_not_set" };
   const current = await fetchSogniBalance(fetchImpl, params.apiKey, params.now);
   if (!current) return { status: "skipped", reason: "no_balance" };
-  if (!params.previous) return { status: "skipped", reason: "no_previous_snapshot" };
+  if (!params.previous) return { status: "skipped", reason: "no_previous_snapshot", next: current };
 
   const [row] = await db
     .select({ total: sumMicroUsd() })

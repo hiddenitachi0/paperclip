@@ -359,6 +359,14 @@ const manifest: PaperclipPluginManifestV1 = {
         format: "secret-ref",
         default: "",
       },
+      falAdminKeySecretRef: {
+        type: "string",
+        title: "Fal.ai ADMIN key (secret ref)",
+        description:
+          "Optional. A separate Fal key with ADMIN scope, used only for the daily check of recorded Fal spend against Fal's own billing (never for generating). Leave empty and that daily check is skipped.",
+        format: "secret-ref",
+        default: "",
+      },
       falModel: {
         type: "string",
         title: "Fal.ai model",

@@ -7,6 +7,7 @@ import {
   budgetPolicies,
   companies,
   costEvents,
+  costReconciliationRuns,
   projects,
   withCompanyScope,
 } from "@paperclipai/db";
@@ -213,6 +214,23 @@ async function computeObservedAmount(
   // asserts this function actually observes each one, so adding a metric in
   // @paperclipai/shared and not here fails a test instead of silently
   // returning 0 (i.e. a budget that never triggers).
+  if (policy.metric === "cost_reconciliation_mismatch_cents") {
+    // DUR-4462: the largest Fal/Sogni day mismatch the daily reconciliation
+    // recorded inside the window. Not spend; see BUDGET_METRICS.
+    const { start, end } = resolveWindow(policy.windowKind as BudgetWindowKind);
+    const [row] = await db
+      .select({ worst: sql<number>`coalesce(max(${costReconciliationRuns.mismatchCents}), 0)::double precision` })
+      .from(costReconciliationRuns)
+      .where(
+        and(
+          eq(costReconciliationRuns.companyId, policy.companyId),
+          ...(policy.windowKind === "lifetime"
+            ? []
+            : [gte(costReconciliationRuns.createdAt, start), lt(costReconciliationRuns.createdAt, end)]),
+        ),
+      );
+    return Number(row?.worst ?? 0);
+  }
   if (
     policy.metric !== "billed_cents" &&
     policy.metric !== "total_tokens" &&
@@ -896,6 +914,33 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
         pausedProjectCount: policies.filter((policy) => policy.scopeType === "project" && policy.paused).length,
         pendingApprovalCount: activeIncidents.filter((incident) => incident.approvalStatus === "pending").length,
       };
+    },
+
+    /**
+     * DUR-4462: owner notice for a Fal/Sogni billing mismatch. Same soft
+     * incident path as a budget warning (notifyEnabled and warnPercent
+     * apply; nothing is ever paused or stopped for this metric).
+     */
+    evaluateReconciliationMismatch: async (companyId: string) => {
+      const policies = await db
+        .select()
+        .from(budgetPolicies)
+        .where(
+          and(
+            eq(budgetPolicies.companyId, companyId),
+            eq(budgetPolicies.scopeType, "company"),
+            eq(budgetPolicies.scopeId, companyId),
+            eq(budgetPolicies.metric, "cost_reconciliation_mismatch_cents"),
+            eq(budgetPolicies.isActive, true),
+          ),
+        );
+      for (const policy of policies) {
+        if (policy.amount <= 0 || !policy.notifyEnabled) continue;
+        const observedAmount = await computeObservedAmount(db, policy);
+        if (observedAmount >= Math.ceil((policy.amount * policy.warnPercent) / 100)) {
+          await fileSoftIncident(policy, observedAmount, { recordActivity: true });
+        }
+      }
     },
 
     evaluateCostEvent: async (event: typeof costEvents.$inferSelect) => {

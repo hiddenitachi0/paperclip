@@ -1029,6 +1029,22 @@ export function secretService(db: Db, rawDb: Db = db) {
   }
 
   /**
+   * DUR-4462: the scheduled daily Fal/Sogni billing reconciliation reads the
+   * configured provider key with no human or agent in the loop. The audit
+   * trail names the system consumer, scoped to the one secret.
+   */
+  async function resolveSecretValueForCostReconciliation(companyId: string, secretId: string): Promise<string> {
+    return (await resolveSecretValueInternal(companyId, secretId, "latest", {
+      accessContext: {
+        consumerType: "system",
+        consumerId: `cost_reconciliation:${secretId}`,
+        actorType: "system",
+        actorId: "cost_reconciliation",
+      },
+    })).value;
+  }
+
+  /**
    * DUR-4457: same shape again, for pricing a picture/video/audio an agent
    * just made (the host reads Fal's published price with the company's Fal
    * key). The actor is the agent whose run made it, so the secret's audit
@@ -2320,6 +2336,7 @@ export function secretService(db: Db, rawDb: Db = db) {
     resolveSecretValueForVideoRender,
     resolveSecretValueForMediaStudioDirect,
     resolveSecretValueForMediaStudioAgentPricing,
+    resolveSecretValueForCostReconciliation,
     resolveSecretValueForTest,
     resolveGitHubToken,
     resolveStockDataKey,
