@@ -13,7 +13,7 @@ import {
   MEDIA_STUDIO_DIRECT_PICTURE_COST_CENTS,
   MEDIA_STUDIO_DIRECT_REWRITE_BILLING_CODE,
 } from "@paperclipai/shared";
-import { companies, costEvents, createDb, mediaStudioDirectCreations, plugins } from "@paperclipai/db";
+import { agents, companies, costEvents, createDb, mediaStudioDirectCreations, plugins } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -311,9 +311,10 @@ d("Media Studio Create tab direct generation (DUR-4329)", () => {
       expect(result.seed).toBe(42);
       expect(result.fileId).toBeTruthy();
       expect(result.contentPath).toBe(`/api/attachments/${result.fileId}/content`);
-      // Exactly one outbound call: the picture came back as a data URL, so
-      // there is no second fetch for the image bytes.
-      expect(mockedExecute).toHaveBeenCalledTimes(1);
+      // Two outbound calls: the generation (picture came back as a data URL,
+      // so no image-bytes fetch) plus Fal's pricing lookup, which here gets no
+      // answer and so falls back to the estimate (DUR-4455).
+      expect(mockedExecute).toHaveBeenCalledTimes(2);
 
       const [creationRow] = await db
         .select()
@@ -331,6 +332,210 @@ d("Media Studio Create tab direct generation (DUR-4329)", () => {
 
       const [companyRow] = await db.select().from(companies).where(eq(companies.id, companyId));
       expect(companyRow.spentMonthlyCents).toBe(MEDIA_STUDIO_DIRECT_PICTURE_COST_CENTS.fal);
+    });
+  });
+
+  describe("actual Fal cost (DUR-4455)", () => {
+    it("replaces the reservation estimate with the per-megapixel actual priced from Fal's published price", async () => {
+      const companyId = await seedCompany({ budgetMonthlyCents: 100_000 });
+      const secretId = await seedFalSecret(companyId);
+      await setMediaStudioConfig({ falKeySecretRef: secretId });
+
+      mockedExecute
+        .mockResolvedValueOnce(
+          fakeFalResponse({ images: [{ url: "data:image/jpeg;base64,Zm9vYmFy", content_type: "image/jpeg", width: 1024, height: 768 }], seed: 7 }),
+        )
+        .mockResolvedValueOnce(
+          fakeFalResponse({ prices: [{ endpoint_id: "fal-ai/flux/schnell", unit_price: 0.003, unit: "megapixels", currency: "USD" }] }),
+        );
+
+      const result = await mediaStudioDirectService(db).createPicture(
+        companyId,
+        { userId: "owner-user", isCompanyAdmin: true },
+        { prompt: "a friendly robot", provider: "fal" },
+      );
+
+      // 1024*768 = 0.786432 MP * $0.003 = $0.002359 -> 2359 micro-USD, 1 whole cent in the legacy column.
+      expect(result.costCents).toBe(1);
+      const [creationRow] = await db.select().from(mediaStudioDirectCreations).where(eq(mediaStudioDirectCreations.fileId, result.fileId));
+      const [event] = await db.select().from(costEvents).where(eq(costEvents.id, creationRow!.costEventId!));
+      expect(event.costMicroUsd).toBe(2359);
+      expect(event.costCents).toBe(1);
+      expect(event.costSource).toBe("estimate");
+      // Still exactly one cost event for this job: the estimate was replaced, not added to.
+      const events = await db.select().from(costEvents).where(eq(costEvents.companyId, companyId));
+      expect(events).toHaveLength(1);
+      const [companyRow] = await db.select().from(companies).where(eq(companies.id, companyId));
+      expect(companyRow.spentMonthlyCents).toBe(1);
+      // The Fal key never lands in a cost row.
+      expect(JSON.stringify(events)).not.toContain("fal-test");
+    });
+
+    it("keeps the estimate (cost_source estimate) when Fal's price cannot be fetched", async () => {
+      const companyId = await seedCompany({ budgetMonthlyCents: 100_000 });
+      const secretId = await seedFalSecret(companyId);
+      await setMediaStudioConfig({ falKeySecretRef: secretId });
+      mockedExecute
+        .mockResolvedValueOnce(fakeFalResponse({ images: [{ url: "data:image/jpeg;base64,Zm9vYmFy", content_type: "image/jpeg" }] }))
+        .mockResolvedValueOnce({ status: 500, statusText: "err", headers: {}, body: "", bodyBytes: Buffer.from("") });
+      const result = await mediaStudioDirectService(db).createPicture(
+        companyId,
+        { userId: "owner-user", isCompanyAdmin: true },
+        { prompt: "x", provider: "fal" },
+      );
+      const [creationRow] = await db.select().from(mediaStudioDirectCreations).where(eq(mediaStudioDirectCreations.fileId, result.fileId));
+      const [event] = await db.select().from(costEvents).where(eq(costEvents.id, creationRow!.costEventId!));
+      expect(event.costCents).toBe(MEDIA_STUDIO_DIRECT_PICTURE_COST_CENTS.fal);
+      expect(event.costMicroUsd).toBe(MEDIA_STUDIO_DIRECT_PICTURE_COST_CENTS.fal * 10_000);
+      expect(event.costSource).toBe("estimate");
+    });
+  });
+
+  describe("settleSpend (DUR-4455: Edit-tab Fal actions settle to the actual price, the same way Create tab's own Fal calls do)", () => {
+    it("replaces a reservation's estimate with Fal's published price and recomputes company spend", async () => {
+      const companyId = await seedCompany({ budgetMonthlyCents: 100_000 });
+      const secretId = await seedFalSecret(companyId);
+      await setMediaStudioConfig({ falKeySecretRef: secretId });
+
+      const direct = mediaStudioDirectService(db);
+      const { costEventId } = await direct.reserveSpend(
+        companyId,
+        { userId: "owner-user", isCompanyAdmin: true },
+        MEDIA_STUDIO_DIRECT_PICTURE_COST_CENTS.fal,
+        undefined,
+        { provider: "fal", model: "edit:inpaint", billingCode: MEDIA_STUDIO_DIRECT_BILLING_CODE },
+      );
+
+      mockedExecute.mockResolvedValueOnce(
+        fakeFalResponse({ prices: [{ endpoint_id: "fal-ai/flux-pro/v1/fill", unit_price: 0.05, unit: "images", currency: "USD" }] }),
+      );
+      const outcome = await direct.settleSpend(companyId, costEventId, "fal-ai/flux-pro/v1/fill", { images: 1 });
+      expect(outcome).toEqual({ settled: true, costCents: 5 });
+
+      const [row] = await db.select().from(costEvents).where(eq(costEvents.id, costEventId));
+      expect(row.costCents).toBe(5);
+      expect(row.costMicroUsd).toBe(50_000);
+      expect(row.costSource).toBe("estimate");
+
+      const [companyRow] = await db.select().from(companies).where(eq(companies.id, companyId));
+      expect(companyRow.spentMonthlyCents).toBe(5);
+    });
+
+    it("leaves the reservation's estimate standing when pricing is unavailable", async () => {
+      const companyId = await seedCompany({ budgetMonthlyCents: 100_000 });
+      const secretId = await seedFalSecret(companyId);
+      await setMediaStudioConfig({ falKeySecretRef: secretId });
+
+      const direct = mediaStudioDirectService(db);
+      const { costEventId } = await direct.reserveSpend(
+        companyId,
+        { userId: "owner-user", isCompanyAdmin: true },
+        MEDIA_STUDIO_DIRECT_PICTURE_COST_CENTS.fal,
+        undefined,
+        { provider: "fal", model: "edit:inpaint", billingCode: MEDIA_STUDIO_DIRECT_BILLING_CODE },
+      );
+      mockedExecute.mockResolvedValueOnce({ status: 403, statusText: "Forbidden", headers: {}, body: "", bodyBytes: Buffer.from("") });
+
+      const outcome = await direct.settleSpend(companyId, costEventId, "fal-ai/flux-pro/v1/fill", { images: 1 });
+      expect(outcome).toEqual({ settled: false });
+
+      const [row] = await db.select().from(costEvents).where(eq(costEvents.id, costEventId));
+      expect(row.costCents).toBe(MEDIA_STUDIO_DIRECT_PICTURE_COST_CENTS.fal);
+    });
+
+    it("refuses to settle a reservation belonging to a different company", async () => {
+      const companyId = await seedCompany({ budgetMonthlyCents: 100_000 });
+      const otherCompanyId = await seedCompany({ budgetMonthlyCents: 100_000 });
+      const secretId = await seedFalSecret(companyId);
+      await setMediaStudioConfig({ falKeySecretRef: secretId });
+
+      const direct = mediaStudioDirectService(db);
+      const { costEventId } = await direct.reserveSpend(
+        companyId,
+        { userId: "owner-user", isCompanyAdmin: true },
+        MEDIA_STUDIO_DIRECT_PICTURE_COST_CENTS.fal,
+        undefined,
+        { provider: "fal", model: "edit:inpaint", billingCode: MEDIA_STUDIO_DIRECT_BILLING_CODE },
+      );
+      const outcome = await direct.settleSpend(otherCompanyId, costEventId, "fal-ai/flux-pro/v1/fill", { images: 1 });
+      expect(outcome).toEqual({ settled: false });
+      expect(mockedExecute).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("recordAgentMediaCost (DUR-4457: agent-made media is counted)", () => {
+    async function seedAgent(companyId: string) {
+      const agentId = randomUUID();
+      await db.insert(agents).values({ id: agentId, companyId, name: "Maja", role: "general", adapterType: "process", adapterConfig: {} });
+      return agentId;
+    }
+
+    it("records an agent-made Fal picture at Fal's price, against the agent's budget, the company and the shared Media Studio cap", async () => {
+      const companyId = await seedCompany({ budgetMonthlyCents: 100_000 });
+      const agentId = await seedAgent(companyId);
+      await seedFalSecret(companyId);
+      mockedExecute.mockResolvedValueOnce(
+        fakeFalResponse({ prices: [{ endpoint_id: "fal-ai/flux/schnell", unit_price: 0.04, unit: "images", currency: "USD" }] }),
+      );
+
+      const out = await mediaStudioDirectService(db).recordAgentMediaCost(companyId, {
+        agentId,
+        kind: "image",
+        provider: "fal",
+        model: "fal-ai/flux/schnell",
+        usage: { images: 1 },
+      });
+      expect(out).toEqual({ recorded: true, costCents: 4 });
+
+      const events = await db.select().from(costEvents).where(eq(costEvents.agentId, agentId));
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ provider: "fal", model: "fal-ai/flux/schnell", costCents: 4, costMicroUsd: 40_000, billingCode: MEDIA_STUDIO_DIRECT_BILLING_CODE });
+      const [agentRow] = await db.select().from(agents).where(eq(agents.id, agentId));
+      expect(agentRow.spentMonthlyCents).toBe(4);
+      const [companyRow] = await db.select().from(companies).where(eq(companies.id, companyId));
+      expect(companyRow.spentMonthlyCents).toBe(4);
+      expect(JSON.stringify(events)).not.toContain("fal-test");
+
+      // It counts toward the shared Media Studio cap, exactly like a Create-tab picture.
+      await setMediaStudioConfig({ directCreateMonthlyCapCents: 3 });
+      await expect(
+        mediaStudioDirectService(db).createPicture(companyId, { userId: "owner-user", isCompanyAdmin: true }, { prompt: "a cat", provider: "fal" }),
+      ).rejects.toMatchObject({ status: 422, details: { reason: "direct_create_cap" } });
+    });
+
+    it("falls back to the estimate when Fal's price is unavailable, never to zero", async () => {
+      const companyId = await seedCompany({ budgetMonthlyCents: 100_000 });
+      const agentId = await seedAgent(companyId);
+      await seedFalSecret(companyId);
+      mockedExecute.mockRejectedValue(new Error("fal down"));
+      const out = await mediaStudioDirectService(db).recordAgentMediaCost(companyId, { agentId, kind: "video", provider: "fal", model: "fal-ai/kling-video", usage: { seconds: 5 } });
+      expect(out.recorded).toBe(true);
+      const [event] = await db.select().from(costEvents).where(eq(costEvents.agentId, agentId));
+      expect(event.costCents).toBeGreaterThan(0);
+      expect(event.costSource).toBe("estimate");
+      mockedExecute.mockReset();
+    });
+
+    it("converts Sogni credits with the configured credit price, and records nothing for a free provider", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent(companyId);
+      await setMediaStudioConfig({ sogniCreditPriceUsd: 0.01 });
+      const direct = mediaStudioDirectService(db);
+      expect(await direct.recordAgentMediaCost(companyId, { agentId, kind: "image", provider: "sogni", model: "z-turbo", credits: 10 })).toEqual({ recorded: true, costCents: 10 });
+      expect(await direct.recordAgentMediaCost(companyId, { agentId, kind: "image", provider: "mock", model: "mock" })).toEqual({ recorded: false, reason: "free_provider" });
+      const events = await db.select().from(costEvents).where(eq(costEvents.agentId, agentId));
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ provider: "sogni", billingCode: MEDIA_STUDIO_DIRECT_BILLING_CODE, costSource: "converted_from_credits" });
+    });
+
+    it("rejects an agent from another company", async () => {
+      const companyId = await seedCompany();
+      const otherCompanyId = await seedCompany();
+      const otherAgentId = await seedAgent(otherCompanyId);
+      await setMediaStudioConfig({ sogniCreditPriceUsd: 0.01 });
+      await expect(
+        mediaStudioDirectService(db).recordAgentMediaCost(companyId, { agentId: otherAgentId, kind: "image", provider: "sogni", model: "m", credits: 1 }),
+      ).rejects.toThrow();
     });
   });
 
@@ -357,8 +562,8 @@ d("Media Studio Create tab direct generation (DUR-4329)", () => {
       expect(result.fileId).toBeTruthy();
       expect(result.contentType).toBe("audio/mpeg");
       expect(result.contentPath).toBe(`/api/attachments/${result.fileId}/content`);
-      // Submit + status poll + result fetch + the audio-bytes fetch itself.
-      expect(mockedExecute).toHaveBeenCalledTimes(4);
+      // (+1 pricing lookup, DUR-4455) Submit + status poll + result fetch + the audio-bytes fetch itself.
+      expect(mockedExecute).toHaveBeenCalledTimes(5);
 
       const [creationRow] = await db
         .select()

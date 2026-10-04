@@ -13,6 +13,7 @@ import type {
 import { ArrowDownLeft, ArrowUpRight, ChevronDown, ChevronRight, Coins, DollarSign, ReceiptText } from "lucide-react";
 import { budgetsApi } from "../api/budgets";
 import { costsApi } from "../api/costs";
+import { CostSourceCard } from "../components/CostSourceCard";
 import { BillerSpendCard } from "../components/BillerSpendCard";
 import { BudgetIncidentCard } from "../components/BudgetIncidentCard";
 import { BudgetPolicyCard } from "../components/BudgetPolicyCard";
@@ -20,6 +21,7 @@ import { EmptyState } from "../components/EmptyState";
 import { FinanceBillerCard } from "../components/FinanceBillerCard";
 import { FinanceKindCard } from "../components/FinanceKindCard";
 import { FinanceTimelineCard } from "../components/FinanceTimelineCard";
+import { HiddenInPresentationMode } from "../components/HiddenInPresentationMode";
 import { Identity } from "../components/Identity";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { PageTabBar } from "../components/PageTabBar";
@@ -289,6 +291,13 @@ export function Costs() {
     }
     return map;
   }, [spendData?.byAgentModel]);
+
+  const { data: sourceData } = useQuery({
+    queryKey: ["costs-by-source", companyId, from || undefined, to || undefined],
+    queryFn: () => costsApi.bySource(companyId, from || undefined, to || undefined),
+    enabled: !!selectedCompanyId && customReady && mainTab === "providers",
+    staleTime: 10_000,
+  });
 
   const { data: providerData } = useQuery({
     queryKey: queryKeys.usageByProvider(companyId, from || undefined, to || undefined),
@@ -619,42 +628,44 @@ export function Costs() {
             </div>
           ) : null}
 
-          <div className="grid gap-3 lg:grid-cols-4">
-            <MetricTile
-              label="Inference spend"
-              value={formatCents(spendData?.summary.spendCents ?? 0)}
-              subtitle={`${formatTokens(inferenceTokenTotal)} tokens across request-scoped events`}
-              icon={DollarSign}
-            />
-            <MetricTile
-              label="Budget"
-              value={activeBudgetIncidents.length > 0 ? String(activeBudgetIncidents.length) : (
-                spendData?.summary.budgetCents && spendData.summary.budgetCents > 0
-                  ? `${spendData.summary.utilizationPercent}%`
-                  : "Open"
-              )}
-              subtitle={
-                activeBudgetIncidents.length > 0
-                  ? `${budgetData?.pausedAgentCount ?? 0} agents paused · ${budgetData?.pausedProjectCount ?? 0} projects paused`
-                  : spendData?.summary.budgetCents && spendData.summary.budgetCents > 0
-                    ? `${formatCents(spendData.summary.spendCents)} of ${formatCents(spendData.summary.budgetCents)}`
-                    : "No monthly cap configured"
-              }
-              icon={Coins}
-            />
-            <MetricTile
-              label="Finance net"
-              value={formatCents(financeData?.summary.netCents ?? 0)}
-              subtitle={`${formatCents(financeData?.summary.debitCents ?? 0)} debits · ${formatCents(financeData?.summary.creditCents ?? 0)} credits`}
-              icon={ReceiptText}
-            />
-            <MetricTile
-              label="Finance events"
-              value={String(financeData?.summary.eventCount ?? 0)}
-              subtitle={`${formatCents(financeData?.summary.estimatedDebitCents ?? 0)} estimated in range`}
-              icon={ArrowUpRight}
-            />
-          </div>
+          <HiddenInPresentationMode label="Cost and finance summary">
+            <div className="grid gap-3 lg:grid-cols-4">
+              <MetricTile
+                label="Inference spend"
+                value={formatCents(spendData?.summary.spendCents ?? 0)}
+                subtitle={`${formatTokens(inferenceTokenTotal)} tokens across request-scoped events`}
+                icon={DollarSign}
+              />
+              <MetricTile
+                label="Budget"
+                value={activeBudgetIncidents.length > 0 ? String(activeBudgetIncidents.length) : (
+                  spendData?.summary.budgetCents && spendData.summary.budgetCents > 0
+                    ? `${spendData.summary.utilizationPercent}%`
+                    : "Open"
+                )}
+                subtitle={
+                  activeBudgetIncidents.length > 0
+                    ? `${budgetData?.pausedAgentCount ?? 0} agents paused · ${budgetData?.pausedProjectCount ?? 0} projects paused`
+                    : spendData?.summary.budgetCents && spendData.summary.budgetCents > 0
+                      ? `${formatCents(spendData.summary.spendCents)} of ${formatCents(spendData.summary.budgetCents)}`
+                      : "No monthly cap configured"
+                }
+                icon={Coins}
+              />
+              <MetricTile
+                label="Finance net"
+                value={formatCents(financeData?.summary.netCents ?? 0)}
+                subtitle={`${formatCents(financeData?.summary.debitCents ?? 0)} debits · ${formatCents(financeData?.summary.creditCents ?? 0)} credits`}
+                icon={ReceiptText}
+              />
+              <MetricTile
+                label="Finance events"
+                value={String(financeData?.summary.eventCount ?? 0)}
+                subtitle={`${formatCents(financeData?.summary.estimatedDebitCents ?? 0)} estimated in range`}
+                icon={ArrowUpRight}
+              />
+            </div>
+          </HiddenInPresentationMode>
       </div>
 
       <Tabs value={mainTab} onValueChange={(value) => setMainTab(value as typeof mainTab)}>
@@ -694,6 +705,7 @@ export function Costs() {
                 </div>
               ) : null}
 
+              <HiddenInPresentationMode label="Inference and finance ledgers" className="xl:col-span-2">
               <div className="grid gap-4 xl:grid-cols-[1.3fr,1fr]">
                 <Card>
                   <CardHeader className="px-5 pt-5 pb-2">
@@ -752,6 +764,7 @@ export function Costs() {
                   eventCount={financeData?.summary.eventCount ?? 0}
                 />
               </div>
+              </HiddenInPresentationMode>
 
               <div className="grid gap-4 xl:grid-cols-[1.25fr,0.95fr]">
                 <Card>
@@ -995,6 +1008,7 @@ export function Costs() {
             <p className="text-sm text-muted-foreground">Select a start and end date to load data.</p>
           ) : (
             <>
+              <CostSourceCard data={sourceData} />
               <Tabs value={effectiveProvider} onValueChange={setActiveProvider}>
                 <PageTabBar items={providerTabItems} value={effectiveProvider} />
 

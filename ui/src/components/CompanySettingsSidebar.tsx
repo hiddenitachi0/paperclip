@@ -10,6 +10,7 @@ import {
   MonitorCog,
   Plug,
   Puzzle,
+  Radio,
   Settings,
   Shield,
   SlidersHorizontal,
@@ -133,6 +134,7 @@ export function CompanySettingsSidebar() {
               />
             ))}
           <SidebarNavItem to="/company/settings/connections" label="Connections" icon={Plug} end />
+          <SidebarNavItem to="/company/settings/models" label="Models" icon={Cpu} end />
           <SidebarNavItem to="/company/settings/secrets" label="Secrets" icon={KeyRound} end />
         </div>
         <div className="mt-5 px-3 pb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
@@ -185,6 +187,11 @@ export function CompanySettingsSidebar() {
             to={`${INSTANCE_SETTINGS_PATH_PREFIX}/experimental`}
             label="Experimental"
             icon={FlaskConical}
+          />
+          <SidebarNavItem
+            to={`${INSTANCE_SETTINGS_PATH_PREFIX}/presentation-mode`}
+            label="Presentation mode"
+            icon={Radio}
           />
           <SidebarNavItem
             to={`${INSTANCE_SETTINGS_PATH_PREFIX}/plugins`}

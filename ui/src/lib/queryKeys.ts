@@ -9,6 +9,8 @@ export const queryKeys = {
     speechSettings: (id: string) => ["companies", id, "speech-settings"] as const,
     dataConnections: (id: string) => ["companies", id, "data-connections"] as const,
     datasetSources: (id: string) => ["companies", id, "dataset-sources"] as const,
+    modelDirectory: (id: string) => ["companies", id, "model-directory"] as const,
+    modelStarters: (id: string) => ["companies", id, "model-directory", "starters"] as const,
     webSearch: (id: string) => ["companies", id, "web-search"] as const,
     dataReads: (id: string) => ["companies", id, "data-reads"] as const,
   },

@@ -165,6 +165,11 @@ import {
   saveInstanceServerAnthropicKeySchema,
   signOutEverywhereSchema,
   submitInstanceClaudeSignInCodeSchema,
+  // Model directory (DUR-4379)
+  addModelDirectoryStartersSchema,
+  createModelDirectoryEntrySchema,
+  updateModelDirectoryEntrySchema,
+  duplicateModelDirectoryEntrySchema,
 } from "@paperclipai/shared";
 
 type JsonSchema = Record<string, unknown>;
@@ -784,6 +789,18 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "GET /api/companies/{companyId}/dataset-sources",
   "PUT /api/companies/{companyId}/dataset-sources/{dataset}",
   "GET /api/companies/{companyId}/data-reads",
+  // DUR-4379: the company model directory. Owner/admin only (and the
+  // instance admin / local board pass) -- an agent must never read or edit
+  // a saved model setup, so it cannot re-point itself or another agent.
+  "GET /api/companies/{companyId}/model-directory",
+  "POST /api/companies/{companyId}/model-directory",
+  "GET /api/companies/{companyId}/model-directory/starters",
+  "POST /api/companies/{companyId}/model-directory/starters",
+  "POST /api/companies/{companyId}/model-directory/import-agent-settings",
+  "GET /api/companies/{companyId}/model-directory/{entryId}",
+  "PATCH /api/companies/{companyId}/model-directory/{entryId}",
+  "DELETE /api/companies/{companyId}/model-directory/{entryId}",
+  "POST /api/companies/{companyId}/model-directory/{entryId}/duplicate",
 ]);
 
 const INSTANCE_ADMIN_OPERATIONS = new Set([
@@ -2812,7 +2829,7 @@ registry.registerPath({
 // ─── Costs ───────────────────────────────────────────────────────────────────
 
 const costSummaryPaths = [
-  "summary", "by-agent", "by-agent-model", "by-provider",
+  "summary", "by-agent", "by-agent-model", "by-provider", "by-source",
   "by-biller", "by-project", "finance-summary", "finance-by-biller",
   "finance-by-kind", "finance-events", "window-spend", "quota-windows",
 ] as const;
@@ -3631,6 +3648,23 @@ registerCurrentRoute({
     401: r.unauthorized,
     403: r.forbidden,
     404: r.notFound,
+  },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/lane-a/huggingface/models",
+  tags: ["agents"],
+  summary:
+    "List the Hugging Face models (with per-provider price, tool support and latency) the company's stored token can reach (board users only)",
+  query: z.object({ toolsOnly: z.enum(["true", "false"]).optional(), liveOnly: z.enum(["true", "false"]).optional() }),
+  responses: {
+    200: r.ok(z.object({ models: z.array(z.record(z.string(), z.unknown())) })),
+    401: r.unauthorized,
+    403: r.forbidden,
+    409: r.conflict,
+    422: r.unprocessable,
+    503: { description: "Hugging Face unreachable", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 
@@ -5372,6 +5406,14 @@ registry.registerPath({
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
 });
 
+registry.registerPath({
+  method: "get",
+  path: "/api/instance/database-backups/stats",
+  tags: ["instance"],
+  summary: "Get database backup storage stats (tier counts and disk usage)",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
 // ─── LLM text endpoints ───────────────────────────────────────────────────────
 
 registry.registerPath({
@@ -6006,6 +6048,106 @@ registerCurrentRoute({
   tags: ["secrets"],
   summary: "Import remote secrets",
   body: remoteSecretImportSchema,
+});
+
+// ─── DUR-4379: company model directory (saved model setups) ────────────────
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/model-directory",
+  tags: ["model-directory"],
+  summary: "List a company's saved model setups (owner/admin only; never returns a key)",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory",
+  tags: ["model-directory"],
+  summary: "Save a new model setup (owner/admin only; unknown fields such as apiKey are rejected)",
+  body: createModelDirectoryEntrySchema,
+  responses: {
+    201: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    409: r.conflict,
+    422: r.unprocessable,
+  },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/model-directory/starters",
+  tags: ["model-directory"],
+  summary: "List the ready-made model setups (local Ollama models, Mistral Small 3.2 on OpenRouter) and whether each is already added",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/starters",
+  tags: ["model-directory"],
+  summary: "Add ready-made model setups (all, or the chosen starterIds); ones already added are skipped. No key is stored.",
+  body: addModelDirectoryStartersSchema,
+  responses: { 201: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 422: r.unprocessable },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/import-agent-settings",
+  tags: ["model-directory"],
+  summary: "Save each quick agent's current model setup (and backups) as de-duplicated directory entries and link the agent. Does not change what any agent does; safe to repeat.",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/model-directory/{entryId}",
+  tags: ["model-directory"],
+  summary: "Get a saved model setup",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "patch",
+  path: "/api/companies/{companyId}/model-directory/{entryId}",
+  tags: ["model-directory"],
+  summary: "Update a saved model setup",
+  body: updateModelDirectoryEntrySchema,
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+    422: r.unprocessable,
+  },
+});
+
+registerCurrentRoute({
+  method: "delete",
+  path: "/api/companies/{companyId}/model-directory/{entryId}",
+  tags: ["model-directory"],
+  summary: "Delete a saved model setup (also removed from other entries' backup chains)",
+  responses: { 204: r.noContent, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/{entryId}/duplicate",
+  tags: ["model-directory"],
+  summary: "Duplicate a saved model setup",
+  body: duplicateModelDirectoryEntrySchema,
+  responses: {
+    201: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+  },
 });
 
 for (const route of [

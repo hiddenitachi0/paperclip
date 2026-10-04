@@ -312,6 +312,22 @@ export interface HostServices {
     readContent(params: WorkerToHostMethods["files.readContent"][0]): Promise<WorkerToHostMethods["files.readContent"][1]>;
   };
 
+  /** Media Studio spend reservation (DUR-4441). */
+  billing: {
+    reserveMediaStudioDirectSpend(
+      params: WorkerToHostMethods["billing.reserveMediaStudioDirectSpend"][0],
+    ): Promise<WorkerToHostMethods["billing.reserveMediaStudioDirectSpend"][1]>;
+    releaseMediaStudioDirectSpend(
+      params: WorkerToHostMethods["billing.releaseMediaStudioDirectSpend"][0],
+    ): Promise<WorkerToHostMethods["billing.releaseMediaStudioDirectSpend"][1]>;
+    settleMediaStudioDirectSpend(
+      params: WorkerToHostMethods["billing.settleMediaStudioDirectSpend"][0],
+    ): Promise<WorkerToHostMethods["billing.settleMediaStudioDirectSpend"][1]>;
+    recordAgentMediaCost(
+      params: WorkerToHostMethods["billing.recordAgentMediaCost"][0],
+    ): Promise<WorkerToHostMethods["billing.recordAgentMediaCost"][1]>;
+  };
+
   /** Provides persona-scoped enforcement helpers (DUR-177 daily generation cap). */
   personas: {
     reserveDailyGeneration(
@@ -520,6 +536,10 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
 
   // Personas
   "personas.reserveDailyGeneration": "personas.generation_cap.enforce",
+  "billing.reserveMediaStudioDirectSpend": "billing.media_studio_direct.reserve",
+  "billing.releaseMediaStudioDirectSpend": "billing.media_studio_direct.reserve",
+  "billing.settleMediaStudioDirectSpend": "billing.media_studio_direct.reserve",
+  "billing.recordAgentMediaCost": "billing.media_studio_direct.reserve",
 };
 
 // ---------------------------------------------------------------------------
@@ -1000,6 +1020,20 @@ export function createHostClientHandlers(
     }),
     "files.readContent": gated("files.readContent", async (params) => {
       return services.files.readContent(params);
+    }),
+
+    "billing.reserveMediaStudioDirectSpend": gated("billing.reserveMediaStudioDirectSpend", async (params) => {
+      return services.billing.reserveMediaStudioDirectSpend(params);
+    }),
+    "billing.releaseMediaStudioDirectSpend": gated("billing.releaseMediaStudioDirectSpend", async (params) => {
+      return services.billing.releaseMediaStudioDirectSpend(params);
+    }),
+
+    "billing.settleMediaStudioDirectSpend": gated("billing.settleMediaStudioDirectSpend", async (params) => {
+      return services.billing.settleMediaStudioDirectSpend(params);
+    }),
+    "billing.recordAgentMediaCost": gated("billing.recordAgentMediaCost", async (params) => {
+      return services.billing.recordAgentMediaCost(params);
     }),
 
     "personas.reserveDailyGeneration": gated("personas.reserveDailyGeneration", async (params) => {

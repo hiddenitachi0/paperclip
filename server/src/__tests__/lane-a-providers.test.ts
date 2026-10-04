@@ -38,6 +38,10 @@ function fakeFetch(responder: (url: string, init: RequestInit) => Response | Pro
   const calls: Array<{ url: string; init: RequestInit; body: Record<string, unknown> }> = [];
   const impl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    // A local model's reachability check (GET .../models) runs before the
+    // real call; it is answered here but not recorded, so calls[0] stays the
+    // model call these tests inspect.
+    if ((init?.method ?? "POST") === "GET" && url.endsWith("/models")) return new Response("{}");
     const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
     calls.push({ url, init: init ?? {}, body });
     return responder(url, init ?? {});

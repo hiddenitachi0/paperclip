@@ -46,6 +46,7 @@ const apiPrefixes: Record<string, string> = {
   "issue-tree-control.ts": "/api",
   "lane-a.ts": "/api",
   "llms.ts": "/api",
+  "model-directory.ts": "/api",
   "openapi.ts": "/api",
   "plugin-ui-static.ts": "/api",
   "plugins.ts": "/api",
@@ -71,6 +72,8 @@ const HTTP_METHODS = new Set(["get", "put", "post", "delete", "options", "head",
 const explicitOpenApiCoverageExclusions = new Set([
   // Pipeline routes are experimental and not yet represented in the public OpenAPI document.
   "pipelines.ts",
+  // Telegram reaction feedback routes (DUR-4344) are bridge-internal plus a company emoji-meaning config; not yet in the public OpenAPI document.
+  "telegram-reactions.ts",
   // Agent role/job routes (DUR-114) are a new backend feature not yet in the public OpenAPI document.
   "agent-roles.ts",
   // MCP tool library routes (DUR-143) are a new backend feature not yet in the public OpenAPI document.
@@ -131,6 +134,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "documents-download.ts",
   // Media Studio Create tab direct-generation routes (DUR-4329) are board-only and not yet in the public OpenAPI document.
   "media-studio-direct.ts",
+  // Instance disk-health report (DUR-4499) is an instance-admin-only read-only route and not yet in the public OpenAPI document.
+  "instance-disk-health.ts",
 ]);
 
 function createApp() {

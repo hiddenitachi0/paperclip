@@ -1,12 +1,50 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PluginHostContext } from "@paperclipai/plugin-sdk/ui";
 import { usePluginAction } from "@paperclipai/plugin-sdk/ui";
+import {
+  clearMask,
+  createMask,
+  fillPolygon,
+  fillRect,
+  hasSelection,
+  invertMask,
+  maskToBlackWhiteRgba,
+  maskToOverlayRgba,
+  mergeBrightPixels,
+  strokeLine,
+  type Mask,
+} from "./mask-ops.js";
 
 // Standalone ES module (see index.tsx's note): bare specifiers only outside
 // this ui/ folder. Keep these action keys in sync with manifest.ts.
 const ACTION_EDIT_CAPABILITIES = "edit.capabilities";
 const ACTION_EDIT_SOGNI = "edit.sogni";
 const ACTION_EDIT_FAL = "edit.fal";
+const ACTION_EDIT_SEGMENT = "edit.segment";
+const ACTION_EDIT_INPAINT = "edit.inpaint";
+
+const DEFAULT_SKIP_CONFIRM_UNDER_CENTS = 10;
+
+function formatCents(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`;
+}
+
+/** Plain-words text for a refused paid edit; anything unrecognised is shown as the server worded it. */
+export function plainEditError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  const details = (err as { details?: { reason?: string } } | null)?.details;
+  const reason = details?.reason ?? (/direct_create_cap/.test(message) ? "direct_create_cap" : /company_budget/.test(message) ? "company_budget" : /cap_override_forbidden/.test(message) ? "cap_override_forbidden" : "");
+  if (reason === "company_budget") {
+    return "This edit would go over the company's monthly budget. Ask an owner or admin to raise the budget, or try again next month.";
+  }
+  if (reason === "direct_create_cap") {
+    return "This edit would go over Media Studio's monthly spending limit. Ask an owner or admin to raise the limit.";
+  }
+  if (reason === "cap_override_forbidden") {
+    return "Only a company owner or admin can go over that limit.";
+  }
+  return message;
+}
 
 const MAKE_VARIATION_PROMPT = "Make a creative variation of this picture, keeping the same subject and composition.";
 
@@ -58,6 +96,15 @@ type Adjustments = {
   contrast: number;
   saturation: number;
 };
+
+type SelectTool = "brush" | "eraser" | "rect" | "lasso";
+
+const SELECT_TOOL_LABELS: Array<{ id: SelectTool; label: string }> = [
+  { id: "brush", label: "Paint" },
+  { id: "eraser", label: "Erase" },
+  { id: "rect", label: "Box" },
+  { id: "lasso", label: "Draw around" },
+];
 
 const DEFAULT_ADJUSTMENTS: Adjustments = { rotationDeg: 0, brightness: 100, contrast: 100, saturation: 100 };
 
@@ -135,7 +182,25 @@ function renderComposite(params: {
 export function MediaStudioEditTab({ context, initialFileId }: { context: PluginHostContext; initialFileId?: string | null }) {
   const editSogni = usePluginAction(ACTION_EDIT_SOGNI);
   const editFal = usePluginAction(ACTION_EDIT_FAL);
+  const editSegment = usePluginAction(ACTION_EDIT_SEGMENT);
+  const editInpaint = usePluginAction(ACTION_EDIT_INPAINT);
   const getCapabilities = usePluginAction(ACTION_EDIT_CAPABILITIES);
+
+  // Price of one paid edit, from the same estimate the Create tab uses.
+  const [editCostCents, setEditCostCents] = useState<number | null>(null);
+  const [sessionCostCents, setSessionCostCents] = useState(0);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const prefKey = `media-studio:edit-skip-confirm-cents:${context.userId ?? "local"}`;
+  const [skipUnderCents, setSkipUnderCentsState] = useState<number>(() => {
+    try {
+      const raw = window.localStorage.getItem(prefKey);
+      const n = raw === null ? NaN : Number(raw);
+      return Number.isFinite(n) && n >= 0 ? n : DEFAULT_SKIP_CONFIRM_UNDER_CENTS;
+    } catch {
+      return DEFAULT_SKIP_CONFIRM_UNDER_CENTS;
+    }
+  });
+  const [pendingPaid, setPendingPaid] = useState<{ label: string; run: () => void } | null>(null);
 
   const [capabilities, setCapabilities] = useState<{ sogni: boolean; fal: boolean } | null>(null);
   const [pickerItems, setPickerItems] = useState<PickerItem[] | null>(null);
@@ -159,8 +224,18 @@ export function MediaStudioEditTab({ context, initialFileId }: { context: Plugin
   const [error, setError] = useState<string | null>(null);
   const [savedPath, setSavedPath] = useState<string | null>(null);
   const [aiPrompt, setAiPrompt] = useState("");
+  const [selectTool, setSelectTool] = useState<SelectTool | null>(null);
+  const [brushSize, setBrushSize] = useState(24);
+  const [objectText, setObjectText] = useState("");
+  const [replacePrompt, setReplacePrompt] = useState("");
+  /** Bumped whenever the selection changes so the overlay and buttons redraw. */
+  const [maskVersion, setMaskVersion] = useState(0);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const overlayRef = useRef<HTMLCanvasElement>(null);
+  const maskRef = useRef<Mask>(createMask(1, 1));
+  const selectDragRef = useRef<{ x: number; y: number; points: Array<{ x: number; y: number }> } | null>(null);
+  const [selectDraft, setSelectDraft] = useState<{ kind: "rect" | "lasso"; points: Array<{ x: number; y: number }> } | null>(null);
   const dragRef = useRef<{ startX: number; startY: number } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -202,6 +277,63 @@ export function MediaStudioEditTab({ context, initialFileId }: { context: Plugin
     };
   }, [pickerOpen, context.companyId, pickerItems]);
 
+  useEffect(() => {
+    let cancelled = false;
+    if (!context.companyId) return;
+    hostFetchJson<{ estimatedCostCents?: number }>(`/api/companies/${context.companyId}/media-studio/direct/estimate`, {
+      method: "POST",
+      body: JSON.stringify({ kind: "picture", provider: "fal" }),
+    })
+      .then((res) => {
+        if (!cancelled && typeof res?.estimatedCostCents === "number") setEditCostCents(res.estimatedCostCents);
+      })
+      .catch(() => {
+        if (!cancelled) setEditCostCents(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [context.companyId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!context.userId) {
+      setIsAdmin(true);
+      return;
+    }
+    hostFetchJson<{ isInstanceAdmin?: boolean; memberships?: Array<{ companyId: string; membershipRole: string | null; status: string }> }>("/api/cli-auth/me")
+      .then((res) => {
+        if (cancelled) return;
+        const role = (res.memberships ?? []).find((m) => m.companyId === context.companyId && m.status === "active")?.membershipRole ?? null;
+        setIsAdmin(res.isInstanceAdmin === true || role === "owner" || role === "admin");
+      })
+      .catch(() => {
+        if (!cancelled) setIsAdmin(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [context.companyId, context.userId]);
+
+  const setSkipUnderCents = (cents: number) => {
+    setSkipUnderCentsState(cents);
+    try {
+      window.localStorage.setItem(prefKey, String(cents));
+    } catch {
+      // Not remembered across visits if the browser blocks storage.
+    }
+  };
+
+  /** Runs a paid edit, asking first when its price is above the person's "don't ask" amount. */
+  const confirmPaid = (label: string, run: () => void) => {
+    if (editCostCents !== null && editCostCents >= skipUnderCents) {
+      setPendingPaid({ label, run });
+      return;
+    }
+    run();
+  };
+  const priceTag = editCostCents !== null ? ` (≈ ${formatCents(editCostCents)})` : "";
+
   const loadImage = useCallback((src: string, label: string, options: { keepText?: boolean } = {}) => {
     setError(null);
     setSavedPath(null);
@@ -219,6 +351,7 @@ export function MediaStudioEditTab({ context, initialFileId }: { context: Plugin
       if (!options.keepText) {
         setTextLayers([]);
         setHistory([]);
+        setSessionCostCents(0);
       }
       setTargetW(el.naturalWidth);
       setTargetH(el.naturalHeight);
@@ -288,6 +421,121 @@ export function MediaStudioEditTab({ context, initialFileId }: { context: Plugin
       ctx.restore();
     }
   }, [img, previewCanvasSize, adjustments, cropPct, cropMode, cropDraft, textLayers]);
+
+  // The selection lives at preview size, so any change to that size (rotate,
+  // crop, a new picture, or an edit result) starts with nothing selected.
+  useEffect(() => {
+    maskRef.current = createMask(previewCanvasSize.width, previewCanvasSize.height);
+    setSelectDraft(null);
+    setMaskVersion((v) => v + 1);
+  }, [previewCanvasSize.width, previewCanvasSize.height, img]);
+
+  // Draw the selection as a see-through coloured layer above the picture.
+  useEffect(() => {
+    const overlay = overlayRef.current;
+    if (!overlay || !overlay.getContext("2d")) return;
+    const mask = maskRef.current;
+    overlay.width = mask.width;
+    overlay.height = mask.height;
+    const ctx = overlay.getContext("2d")!;
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+    if (typeof ImageData === "undefined") return;
+    ctx.putImageData(new ImageData(maskToOverlayRgba(mask) as Uint8ClampedArray<ArrayBuffer>, mask.width, mask.height), 0, 0);
+    if (selectDraft && selectDraft.points.length > 1) {
+      ctx.save();
+      ctx.strokeStyle = "#e03131";
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      if (selectDraft.kind === "rect") {
+        const [a, b] = [selectDraft.points[0], selectDraft.points[selectDraft.points.length - 1]];
+        ctx.strokeRect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.abs(b.x - a.x), Math.abs(b.y - a.y));
+      } else {
+        ctx.beginPath();
+        selectDraft.points.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }, [maskVersion, selectDraft, previewCanvasSize.width, previewCanvasSize.height]);
+
+  const maskPointFromEvent = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const overlay = overlayRef.current;
+    const mask = maskRef.current;
+    if (!overlay) return { x: 0, y: 0 };
+    const rect = overlay.getBoundingClientRect();
+    return {
+      x: ((e.clientX - rect.left) / Math.max(1, rect.width)) * mask.width,
+      y: ((e.clientY - rect.top) / Math.max(1, rect.height)) * mask.height,
+    };
+  };
+
+  const onSelectDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!selectTool) return;
+    const p = maskPointFromEvent(e);
+    selectDragRef.current = { x: p.x, y: p.y, points: [p] };
+    if (selectTool === "brush" || selectTool === "eraser") {
+      strokeLine(maskRef.current, p.x, p.y, p.x, p.y, brushSize / 2, selectTool === "brush" ? 1 : 0);
+      setMaskVersion((v) => v + 1);
+    } else {
+      setSelectDraft({ kind: selectTool === "rect" ? "rect" : "lasso", points: [p] });
+    }
+  };
+  const onSelectMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const drag = selectDragRef.current;
+    if (!selectTool || !drag) return;
+    const p = maskPointFromEvent(e);
+    if (selectTool === "brush" || selectTool === "eraser") {
+      const last = drag.points[drag.points.length - 1];
+      strokeLine(maskRef.current, last.x, last.y, p.x, p.y, brushSize / 2, selectTool === "brush" ? 1 : 0);
+      drag.points = [p];
+      setMaskVersion((v) => v + 1);
+    } else if (selectTool === "rect") {
+      drag.points = [drag.points[0], p];
+      setSelectDraft({ kind: "rect", points: drag.points });
+    } else {
+      drag.points = [...drag.points, p];
+      setSelectDraft({ kind: "lasso", points: drag.points });
+    }
+  };
+  const onSelectUp = () => {
+    const drag = selectDragRef.current;
+    selectDragRef.current = null;
+    if (!selectTool || !drag) return;
+    if (selectTool === "rect" && drag.points.length > 1) {
+      const [a, b] = [drag.points[0], drag.points[drag.points.length - 1]];
+      fillRect(maskRef.current, a.x, a.y, b.x, b.y);
+    } else if (selectTool === "lasso") {
+      fillPolygon(maskRef.current, drag.points);
+    }
+    setSelectDraft(null);
+    setMaskVersion((v) => v + 1);
+  };
+
+  const clearSelection = () => {
+    clearMask(maskRef.current);
+    setMaskVersion((v) => v + 1);
+  };
+  const invertSelection = () => {
+    invertMask(maskRef.current);
+    setMaskVersion((v) => v + 1);
+  };
+  const selectionReady = useMemo(() => hasSelection(maskRef.current), [maskVersion]);
+
+  /** The selection as a black-and-white picture the same size as the picture sent for editing. */
+  const maskDataUrl = (outW: number, outH: number): string => {
+    const mask = maskRef.current;
+    const small = document.createElement("canvas");
+    small.width = mask.width;
+    small.height = mask.height;
+    small.getContext("2d")!.putImageData(new ImageData(maskToBlackWhiteRgba(mask) as Uint8ClampedArray<ArrayBuffer>, mask.width, mask.height), 0, 0);
+    const big = document.createElement("canvas");
+    big.width = Math.max(1, Math.round(outW));
+    big.height = Math.max(1, Math.round(outH));
+    const bctx = big.getContext("2d")!;
+    bctx.imageSmoothingEnabled = false;
+    bctx.drawImage(small, 0, 0, big.width, big.height);
+    return big.toDataURL("image/png");
+  };
 
   const rotate = (deltaDeg: number) => {
     setAdjustments((prev) => ({ ...prev, rotationDeg: (((prev.rotationDeg + deltaDeg) % 360) + 360) % 360 }));
@@ -474,8 +722,65 @@ export function MediaStudioEditTab({ context, initialFileId }: { context: Plugin
     try {
       const result = (await editSogni({ tool, imageDataUrl, ...extra })) as { imageDataUrl: string };
       applyAiResult(result.imageDataUrl, imageDataUrl);
+      if (editCostCents !== null) setSessionCostCents((c) => c + editCostCents);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(plainEditError(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const runSelectObject = async () => {
+    const imageDataUrl = currentImageDataUrl();
+    const text = objectText.trim();
+    if (!imageDataUrl || !text) return;
+    setBusy("segment");
+    setError(null);
+    try {
+      const result = (await editSegment({ imageDataUrl, text })) as { imageDataUrl: string };
+      const found = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const el = new Image();
+        el.onload = () => resolve(el);
+        el.onerror = () => reject(new Error("Could not read the selection that came back."));
+        el.src = result.imageDataUrl;
+      });
+      const mask = maskRef.current;
+      const scratch = document.createElement("canvas");
+      scratch.width = mask.width;
+      scratch.height = mask.height;
+      const sctx = scratch.getContext("2d")!;
+      sctx.drawImage(found, 0, 0, mask.width, mask.height);
+      mergeBrightPixels(mask, sctx.getImageData(0, 0, mask.width, mask.height).data);
+      if (!hasSelection(mask)) setError("Could not find that in the picture. Try different words, or paint the area yourself.");
+      setMaskVersion((v) => v + 1);
+      if (editCostCents !== null) setSessionCostCents((c) => c + editCostCents);
+    } catch (err) {
+      setError(plainEditError(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const runInpaint = async (mode: "replace" | "remove") => {
+    const imageDataUrl = currentImageDataUrl();
+    if (!imageDataUrl || !hasSelection(maskRef.current)) return;
+    const prompt = replacePrompt.trim();
+    if (mode === "replace" && !prompt) return;
+    setBusy(`inpaint-${mode}`);
+    setError(null);
+    setSavedPath(null);
+    try {
+      const result = (await editInpaint({
+        imageDataUrl,
+        maskDataUrl: maskDataUrl(targetW || img!.naturalWidth, targetH || img!.naturalHeight),
+        mode,
+        ...(mode === "replace" ? { prompt } : {}),
+      })) as { imageDataUrl: string };
+      applyAiResult(result.imageDataUrl, imageDataUrl);
+      setSelectTool(null);
+      if (editCostCents !== null) setSessionCostCents((c) => c + editCostCents);
+    } catch (err) {
+      setError(plainEditError(err));
     } finally {
       setBusy(null);
     }
@@ -490,8 +795,9 @@ export function MediaStudioEditTab({ context, initialFileId }: { context: Plugin
     try {
       const result = (await editFal({ imageDataUrl, prompt })) as { imageDataUrl: string };
       applyAiResult(result.imageDataUrl, imageDataUrl);
+      if (editCostCents !== null) setSessionCostCents((c) => c + editCostCents);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(plainEditError(err));
     } finally {
       setBusy(null);
     }
@@ -500,6 +806,54 @@ export function MediaStudioEditTab({ context, initialFileId }: { context: Plugin
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       {error ? <div style={errorBox}>{error}</div> : null}
+      {pendingPaid ? (
+        <div role="dialog" aria-label="Confirm paid edit" style={{ ...card, borderColor: "#1971c2" }}>
+          <p style={sectionTitle}>This edit costs money</p>
+          <p style={{ fontSize: 13, margin: 0 }}>
+            {pendingPaid.label} will cost about {formatCents(editCostCents ?? 0)}. It is charged to your account. Go ahead?
+          </p>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              type="button"
+              style={primaryBtn}
+              onClick={() => {
+                const run = pendingPaid.run;
+                setPendingPaid(null);
+                run();
+              }}
+            >
+              Yes, do it ({formatCents(editCostCents ?? 0)})
+            </button>
+            <button type="button" style={ghostBtn} onClick={() => setPendingPaid(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {img ? (
+        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", fontSize: 12, color: "#495057" }}>
+          <span>This session: {formatCents(sessionCostCents)}</span>
+          {isAdmin ? (
+            <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              Don't ask again for edits under $
+              <input
+                type="number"
+                min={0}
+                step={0.01}
+                aria-label="Don't ask again for edits under (dollars)"
+                style={{ ...input, width: 70, padding: 4 }}
+                value={(skipUnderCents / 100).toString()}
+                onChange={(e) => {
+                  const dollars = Number(e.target.value);
+                  if (Number.isFinite(dollars) && dollars >= 0) setSkipUnderCents(Math.round(dollars * 100));
+                }}
+              />
+            </label>
+          ) : (
+            <span>Edits under {formatCents(skipUnderCents)} won't ask first.</span>
+          )}
+        </div>
+      ) : null}
       {savedPath ? (
         <div style={okBox}>
           Saved as a new file (the original is unchanged).{" "}
@@ -558,14 +912,34 @@ export function MediaStudioEditTab({ context, initialFileId }: { context: Plugin
       {img && !pickerOpen ? (
         <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <canvas
-              ref={canvasRef}
-              style={{ border: "1px solid rgba(128,128,128,0.35)", borderRadius: 8, cursor: cropMode ? "crosshair" : "default", maxWidth: "100%" }}
-              onMouseDown={onCanvasMouseDown}
-              onMouseMove={onCanvasMouseMove}
-              onMouseUp={onCanvasMouseUp}
-              onMouseLeave={onCanvasMouseUp}
-            />
+            <div style={{ position: "relative", display: "inline-block", maxWidth: "100%", lineHeight: 0 }}>
+              <canvas
+                ref={canvasRef}
+                style={{ border: "1px solid rgba(128,128,128,0.35)", borderRadius: 8, cursor: cropMode ? "crosshair" : "default", maxWidth: "100%" }}
+                onMouseDown={onCanvasMouseDown}
+                onMouseMove={onCanvasMouseMove}
+                onMouseUp={onCanvasMouseUp}
+                onMouseLeave={onCanvasMouseUp}
+              />
+              <canvas
+                ref={overlayRef}
+                aria-label="Selected area"
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  width: "100%",
+                  height: "100%",
+                  borderRadius: 8,
+                  pointerEvents: selectTool && !cropMode ? "auto" : "none",
+                  cursor: selectTool ? "crosshair" : "default",
+                }}
+                onMouseDown={onSelectDown}
+                onMouseMove={onSelectMove}
+                onMouseUp={onSelectUp}
+                onMouseLeave={onSelectUp}
+              />
+            </div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               <button type="button" style={ghostBtn} onClick={() => setPickerOpen(true)}>
                 Open a different picture
@@ -691,6 +1065,93 @@ export function MediaStudioEditTab({ context, initialFileId }: { context: Plugin
             </div>
 
             <div style={card}>
+              <p style={sectionTitle}>Change one part of the picture</p>
+              <p style={{ fontSize: 12, color: "#868e96", margin: 0 }}>
+                First mark the part you want to change (it shows in red), then replace it or remove it. Everything outside the red area stays exactly as it is.
+              </p>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {SELECT_TOOL_LABELS.map((tool) => (
+                  <button
+                    key={tool.id}
+                    type="button"
+                    aria-pressed={selectTool === tool.id}
+                    style={selectTool === tool.id ? primaryBtn : secondaryBtn}
+                    onClick={() => {
+                      setSelectTool(selectTool === tool.id ? null : tool.id);
+                      setCropMode(false);
+                      setCropDraft(null);
+                    }}
+                  >
+                    {tool.label}
+                  </button>
+                ))}
+              </div>
+              {selectTool === "brush" || selectTool === "eraser" ? (
+                <div style={field}>
+                  <label style={{ fontSize: 12 }}>Brush size ({brushSize})</label>
+                  <input type="range" min={4} max={120} value={brushSize} onChange={(e) => setBrushSize(Number(e.target.value))} />
+                </div>
+              ) : null}
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button type="button" style={selectionReady ? ghostBtn : disabledBtn} disabled={!selectionReady} onClick={clearSelection}>
+                  Clear selection
+                </button>
+                <button type="button" style={ghostBtn} onClick={invertSelection}>
+                  Select everything else
+                </button>
+              </div>
+              {capabilities?.sogni ? (
+                <div style={field}>
+                  <label style={{ fontSize: 12 }}>Or let the computer find it for you</label>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <input style={{ ...input, flex: 1 }} value={objectText} onChange={(e) => setObjectText(e.target.value)} placeholder="e.g. the red sofa" />
+                    <button
+                      type="button"
+                      style={busy || !objectText.trim() ? disabledBtn : secondaryBtn}
+                      disabled={!!busy || !objectText.trim()}
+                      onClick={() => confirmPaid("Find it", runSelectObject)}
+                    >
+                      {busy === "segment" ? "Looking…" : `Find it${priceTag}`}
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+              {capabilities?.fal ? (
+                <>
+                  <div style={field}>
+                    <label style={{ fontSize: 12 }}>What should go in the red area?</label>
+                    <input style={input} value={replacePrompt} onChange={(e) => setReplacePrompt(e.target.value)} placeholder="e.g. a green armchair" />
+                  </div>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <button
+                      type="button"
+                      style={busy || !selectionReady || !replacePrompt.trim() ? disabledBtn : primaryBtn}
+                      disabled={!!busy || !selectionReady || !replacePrompt.trim()}
+                      onClick={() => confirmPaid("Replace the selected area", () => runInpaint("replace"))}
+                    >
+                      {busy === "inpaint-replace" ? "Working…" : `Replace selected area${priceTag}`}
+                    </button>
+                    <button
+                      type="button"
+                      style={busy || !selectionReady ? disabledBtn : secondaryBtn}
+                      disabled={!!busy || !selectionReady}
+                      onClick={() => confirmPaid("Remove the selected object", () => runInpaint("remove"))}
+                    >
+                      {busy === "inpaint-remove" ? "Working…" : `Remove selected object${priceTag}`}
+                    </button>
+                  </div>
+                  <p style={{ fontSize: 11, color: "#868e96", margin: 0 }}>
+                    Each replace or remove uses your Fal.ai account and may cost a small amount. You can undo it with "Undo last AI edit".
+                  </p>
+                </>
+              ) : (
+                <p style={{ fontSize: 12, color: "#868e96", margin: 0 }}>
+                  Ask an admin to add a Fal.ai key in Media Studio settings to replace or remove the marked area.
+                </p>
+              )}
+            </div>
+
+            <div style={card}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
                 <p style={sectionTitle}>AI edits</p>
                 {history.length > 0 ? (
@@ -706,11 +1167,11 @@ export function MediaStudioEditTab({ context, initialFileId }: { context: Plugin
               ) : null}
               {capabilities?.sogni ? (
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  <button type="button" style={busy ? disabledBtn : secondaryBtn} disabled={!!busy} onClick={() => runSogniEdit("sogni-remove-background", {}, "bg")}>
-                    {busy === "bg" ? "Working…" : "Remove background"}
+                  <button type="button" style={busy ? disabledBtn : secondaryBtn} disabled={!!busy} onClick={() => confirmPaid("Remove the background", () => runSogniEdit("sogni-remove-background", {}, "bg"))}>
+                    {busy === "bg" ? "Working…" : `Remove background${priceTag}`}
                   </button>
-                  <button type="button" style={busy ? disabledBtn : secondaryBtn} disabled={!!busy} onClick={() => runSogniEdit("sogni-upscale-image", { scale: 2 }, "upscale")}>
-                    {busy === "upscale" ? "Working…" : "Upscale"}
+                  <button type="button" style={busy ? disabledBtn : secondaryBtn} disabled={!!busy} onClick={() => confirmPaid("Upscale the picture", () => runSogniEdit("sogni-upscale-image", { scale: 2 }, "upscale"))}>
+                    {busy === "upscale" ? "Working…" : `Upscale${priceTag}`}
                   </button>
                 </div>
               ) : null}
@@ -726,23 +1187,23 @@ export function MediaStudioEditTab({ context, initialFileId }: { context: Plugin
                     type="button"
                     style={busy || !aiPrompt.trim() ? disabledBtn : secondaryBtn}
                     disabled={!!busy || !aiPrompt.trim()}
-                    onClick={() => runSogniEdit("sogni-restore-photo", { prompt: aiPrompt.trim() }, "inpaint")}
+                    onClick={() => confirmPaid("Restore / clean up the picture", () => runSogniEdit("sogni-restore-photo", { prompt: aiPrompt.trim() }, "inpaint"))}
                   >
-                    {busy === "inpaint" ? "Working…" : "Restore / clean up (whole picture)"}
+                    {busy === "inpaint" ? "Working…" : `Restore / clean up (whole picture)${priceTag}`}
                   </button>
                 ) : null}
                 {capabilities?.fal ? (
                   <>
-                    <button type="button" style={busy ? disabledBtn : secondaryBtn} disabled={!!busy} onClick={() => runFalEdit(MAKE_VARIATION_PROMPT, "variation")}>
-                      {busy === "variation" ? "Working…" : "Make variations"}
+                    <button type="button" style={busy ? disabledBtn : secondaryBtn} disabled={!!busy} onClick={() => confirmPaid("Make variations", () => runFalEdit(MAKE_VARIATION_PROMPT, "variation"))}>
+                      {busy === "variation" ? "Working…" : `Make variations${priceTag}`}
                     </button>
                     <button
                       type="button"
                       style={busy || !aiPrompt.trim() ? disabledBtn : secondaryBtn}
                       disabled={!!busy || !aiPrompt.trim()}
-                      onClick={() => runFalEdit(aiPrompt.trim(), "prompt-edit")}
+                      onClick={() => confirmPaid("Edit with a prompt", () => runFalEdit(aiPrompt.trim(), "prompt-edit"))}
                     >
-                      {busy === "prompt-edit" ? "Working…" : "Edit with a prompt"}
+                      {busy === "prompt-edit" ? "Working…" : `Edit with a prompt${priceTag}`}
                     </button>
                   </>
                 ) : null}

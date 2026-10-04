@@ -1,5 +1,5 @@
-import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
-import { basename, resolve } from "node:path";
+import { createReadStream, createWriteStream, existsSync, mkdirSync, lstatSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { basename, dirname, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { spawn } from "node:child_process";
 import { open as openFile } from "node:fs/promises";
@@ -123,75 +123,161 @@ function monthKey(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 }
 
+export const BACKUP_FULL_RESOLUTION_HOURS = 48;
+
+export type BackupFileEntry = { name: string; fullPath: string; mtimeMs: number; sizeBytes: number };
+
+function dayKey(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
 /**
- * Tiered backup pruning:
- * - Daily tier: keep ALL backups from the last `dailyDays` days
- * - Weekly tier: keep the NEWEST backup per calendar week for `weeklyWeeks` weeks
- * - Monthly tier: keep the NEWEST backup per calendar month for `monthlyMonths` months
- * - Everything else is deleted
+ * Pure tier selection. Returns the subset of `entries` that must be deleted.
+ *
+ * - Last 48h: keep every backup
+ * - Back to `dailyDays` ago: keep the NEWEST backup per calendar day
+ * - Back to `weeklyWeeks` ago: keep the NEWEST backup per ISO week
+ * - Back to `monthlyMonths` ago: keep the NEWEST backup per calendar month
+ * - Everything older, and everything not selected above, is deleted
+ *
+ * A bucket (day/week/month) already represented by a backup kept in a newer
+ * tier is not represented twice. Cutoffs are forced monotonic so a short
+ * daily window can never shrink the 48h tier.
  */
-function pruneOldBackups(backupDir: string, retention: BackupRetentionPolicy, filenamePrefix: string): number {
-  if (!existsSync(backupDir)) return 0;
+export function selectBackupsToDelete<T extends { mtimeMs: number }>(
+  entries: T[],
+  retention: BackupRetentionPolicy,
+  nowMs: number = Date.now(),
+): T[] {
+  const dayMs = 24 * 60 * 60 * 1000;
+  const fullCutoff = nowMs - BACKUP_FULL_RESOLUTION_HOURS * 60 * 60 * 1000;
+  const dailyCutoff = Math.min(fullCutoff, nowMs - Math.max(1, retention.dailyDays) * dayMs);
+  const weeklyCutoff = Math.min(dailyCutoff, nowMs - Math.max(1, retention.weeklyWeeks) * 7 * dayMs);
+  const monthlyDate = new Date(nowMs);
+  monthlyDate.setMonth(monthlyDate.getMonth() - Math.max(1, retention.monthlyMonths));
+  const monthlyCutoff = Math.min(weeklyCutoff, monthlyDate.getTime());
 
-  const now = Date.now();
-  const dailyCutoff = now - Math.max(1, retention.dailyDays) * 24 * 60 * 60 * 1000;
-  const weeklyCutoff = now - Math.max(1, retention.weeklyWeeks) * 7 * 24 * 60 * 60 * 1000;
-  const monthlyCutoff = now - Math.max(1, retention.monthlyMonths) * 30 * 24 * 60 * 60 * 1000;
+  const sorted = [...entries].sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const days = new Set<string>();
+  const weeks = new Set<string>();
+  const months = new Set<string>();
+  const toDelete: T[] = [];
 
-  type BackupEntry = { name: string; fullPath: string; mtimeMs: number };
-  const entries: BackupEntry[] = [];
+  const claim = (set: Set<string>, key: string): boolean => {
+    if (set.has(key)) return false;
+    set.add(key);
+    return true;
+  };
 
-  for (const name of readdirSync(backupDir)) {
-    if (!name.startsWith(`${filenamePrefix}-`)) continue;
-    if (!name.endsWith(".sql") && !name.endsWith(".sql.gz")) continue;
-    const fullPath = resolve(backupDir, name);
-    const stat = statSync(fullPath);
-    entries.push({ name, fullPath, mtimeMs: stat.mtimeMs });
-  }
-
-  // Sort newest first so the first entry per week/month bucket is the one we keep
-  entries.sort((a, b) => b.mtimeMs - a.mtimeMs);
-
-  const keepWeekBuckets = new Set<string>();
-  const keepMonthBuckets = new Set<string>();
-  const toDelete: string[] = [];
-
-  for (const entry of entries) {
-    // Daily tier — keep everything within dailyDays
-    if (entry.mtimeMs >= dailyCutoff) continue;
-
+  for (const entry of sorted) {
     const date = new Date(entry.mtimeMs);
+    const day = dayKey(date);
     const week = isoWeekKey(date);
     const month = monthKey(date);
 
-    // Weekly tier — keep newest per calendar week
+    if (entry.mtimeMs > nowMs || entry.mtimeMs >= fullCutoff) {
+      // Full-resolution tier: keep all, and let them represent their buckets.
+      days.add(day);
+      weeks.add(week);
+      months.add(month);
+      continue;
+    }
+    if (entry.mtimeMs >= dailyCutoff) {
+      const keep = claim(days, day);
+      if (keep) {
+        weeks.add(week);
+        months.add(month);
+      } else toDelete.push(entry);
+      continue;
+    }
     if (entry.mtimeMs >= weeklyCutoff) {
-      if (keepWeekBuckets.has(week)) {
-        toDelete.push(entry.fullPath);
-      } else {
-        keepWeekBuckets.add(week);
-      }
+      const keep = claim(weeks, week);
+      if (keep) months.add(month);
+      else toDelete.push(entry);
       continue;
     }
-
-    // Monthly tier — keep newest per calendar month
     if (entry.mtimeMs >= monthlyCutoff) {
-      if (keepMonthBuckets.has(month)) {
-        toDelete.push(entry.fullPath);
-      } else {
-        keepMonthBuckets.add(month);
-      }
+      if (!claim(months, month)) toDelete.push(entry);
       continue;
     }
-
-    // Beyond all retention tiers — delete
-    toDelete.push(entry.fullPath);
+    toDelete.push(entry);
   }
+  return toDelete;
+}
 
-  for (const filePath of toDelete) {
-    unlinkSync(filePath);
+/**
+ * Lists regular backup files directly inside `backupDir` (no recursion, symlinks
+ * ignored) so nothing outside the configured directory can ever be considered.
+ */
+export function listBackupFiles(backupDir: string, filenamePrefix: string): BackupFileEntry[] {
+  if (!existsSync(backupDir)) return [];
+  const root = resolve(backupDir);
+  const entries: BackupFileEntry[] = [];
+  for (const name of readdirSync(root)) {
+    if (!name.startsWith(`${filenamePrefix}-`)) continue;
+    if (!name.endsWith(".sql") && !name.endsWith(".sql.gz")) continue;
+    if (name !== basename(name)) continue;
+    const fullPath = resolve(root, name);
+    if (dirname(fullPath) !== root) continue;
+    let stat;
+    try {
+      stat = lstatSync(fullPath);
+    } catch {
+      continue;
+    }
+    if (!stat.isFile()) continue;
+    entries.push({ name, fullPath, mtimeMs: stat.mtimeMs, sizeBytes: stat.size });
   }
+  return entries;
+}
 
+export type BackupStorageStats = {
+  fileCount: number;
+  totalBytes: number;
+  /** Projection of what a prune with `retention` would leave behind right now. */
+  retainedFileCount: number;
+  retainedBytes: number;
+  /** Steady-state projection: tier slots filled at the average observed file size. */
+  expectedSteadyStateFiles: number;
+  expectedSteadyStateBytes: number;
+};
+
+export function expectedBackupFileCount(retention: BackupRetentionPolicy, backupsPerDay = 24): number {
+  const full = BACKUP_FULL_RESOLUTION_HOURS / 24 * backupsPerDay;
+  const daily = Math.max(0, Math.max(1, retention.dailyDays) - BACKUP_FULL_RESOLUTION_HOURS / 24);
+  const weekly = Math.max(0, Math.max(1, retention.weeklyWeeks) - Math.ceil(Math.max(1, retention.dailyDays) / 7));
+  const monthly = Math.max(0, Math.max(1, retention.monthlyMonths) - Math.ceil(Math.max(1, retention.weeklyWeeks) / 4));
+  return full + daily + weekly + monthly;
+}
+
+export function computeBackupStorageStats(
+  backupDir: string,
+  retention: BackupRetentionPolicy,
+  filenamePrefix = "paperclip",
+  nowMs: number = Date.now(),
+): BackupStorageStats {
+  const entries = listBackupFiles(backupDir, filenamePrefix);
+  const totalBytes = entries.reduce((sum, e) => sum + e.sizeBytes, 0);
+  const doomed = new Set(selectBackupsToDelete(entries, retention, nowMs));
+  const kept = entries.filter((e) => !doomed.has(e));
+  const retainedBytes = kept.reduce((sum, e) => sum + e.sizeBytes, 0);
+  const avg = entries.length > 0 ? totalBytes / entries.length : 0;
+  const expectedFiles = expectedBackupFileCount(retention);
+  return {
+    fileCount: entries.length,
+    totalBytes,
+    retainedFileCount: kept.length,
+    retainedBytes,
+    expectedSteadyStateFiles: expectedFiles,
+    expectedSteadyStateBytes: Math.round(expectedFiles * avg),
+  };
+}
+
+function pruneOldBackups(backupDir: string, retention: BackupRetentionPolicy, filenamePrefix: string): number {
+  const toDelete = selectBackupsToDelete(listBackupFiles(backupDir, filenamePrefix), retention);
+  for (const entry of toDelete) {
+    unlinkSync(entry.fullPath);
+  }
   return toDelete.length;
 }
 

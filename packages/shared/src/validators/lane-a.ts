@@ -181,6 +181,9 @@ export const laneABackupModelEntrySchema = z
       .max(LANE_A_MAX_TEMPERATURE, `Creativity must be between ${LANE_A_MIN_TEMPERATURE} and ${LANE_A_MAX_TEMPERATURE}.`)
       .nullable()
       .optional(),
+    // DUR-4418: points this backup at a company model-directory entry. That
+    // the entry belongs to the same company is checked server-side on write.
+    directoryEntryId: z.string().uuid().nullable().optional(),
   })
   .strict();
 

@@ -48,6 +48,7 @@ import { Inbox } from "./pages/Inbox";
 import { BoardChat } from "./pages/BoardChat";
 import { CompanySettings } from "./pages/CompanySettings";
 import { CompanyConnections } from "./pages/CompanyConnections";
+import { CompanyModels } from "./pages/CompanyModels";
 import { CompanyEnvironments } from "./pages/CompanyEnvironments";
 import { CloudUpstream } from "./pages/CloudUpstream";
 import { CloudUpstreamUxLab } from "./pages/CloudUpstreamUxLab";
@@ -71,6 +72,7 @@ import { InstanceCrossCompanyAccess } from "./pages/InstanceCrossCompanyAccess";
 import { InstanceAccess } from "./pages/InstanceAccess";
 import { InstanceSettings } from "./pages/InstanceSettings";
 import { InstanceExperimentalSettings } from "./pages/InstanceExperimentalSettings";
+import { PresentationModeSettings } from "./pages/PresentationModeSettings";
 import { ProfileSettings } from "./pages/ProfileSettings";
 import { PluginManager } from "./pages/PluginManager";
 import { PluginSettingsRoute } from "./pages/PluginSettingsRoute";
@@ -117,6 +119,7 @@ function boardRoutes() {
       <Route path="company/export/*" element={<CompanyExport />} />
       <Route path="company/import" element={<CompanyImport />} />
       <Route path="company/settings/connections" element={<CompanyConnections />} />
+      <Route path="company/settings/models" element={<CompanyModels />} />
       <Route path="company/settings/secrets" element={<Secrets />} />
       <Route path="company/settings/instance" element={<Navigate to="general" replace />} />
       <Route path="company/settings/instance/profile" element={<ProfileSettings />} />
@@ -128,6 +131,7 @@ function boardRoutes() {
       <Route path="company/settings/instance/access" element={<InstanceAccess />} />
       <Route path="company/settings/instance/heartbeats" element={<InstanceSettings />} />
       <Route path="company/settings/instance/experimental" element={<InstanceExperimentalSettings />} />
+      <Route path="company/settings/instance/presentation-mode" element={<PresentationModeSettings />} />
       <Route path="company/settings/instance/plugins" element={<PluginManager />} />
       <Route path="company/settings/instance/plugins/:pluginId" element={<PluginSettingsRoute />} />
       <Route path="company/settings/instance/adapters" element={<AdapterManager />} />

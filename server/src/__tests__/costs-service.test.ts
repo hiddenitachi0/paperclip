@@ -271,6 +271,122 @@ describe("cost routes", () => {
     });
   });
 
+  it("strips a self-reporting agent's claimed costSource so it can't tag its own figure as provider-verified (DUR-4452)", async () => {
+    const agentId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    mockCostService.createEvent.mockResolvedValueOnce({
+      id: "event-1",
+      companyId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      agentId,
+      costCents: 1,
+      costSource: null,
+    });
+    const app = await createAppWithActor({
+      type: "agent",
+      agentId,
+      companyId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      runId: "run-1",
+    });
+
+    const res = await request(app)
+      .post("/api/companies/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/cost-events")
+      .send({
+        agentId,
+        provider: "fal",
+        model: "self-reported",
+        costCents: 1,
+        costSource: "provider",
+        occurredAt: "2026-01-01T00:00:00.000Z",
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockCostService.createEvent).toHaveBeenCalledWith(
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      expect.objectContaining({ costSource: null }),
+    );
+  });
+
+  it("rejects an agent self-reporting a reconciliation billingCode to forge checked/correction status (DUR-4503)", async () => {
+    const agentId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const app = await createAppWithActor({
+      type: "agent",
+      agentId,
+      companyId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      runId: "run-1",
+    });
+
+    const res = await request(app)
+      .post("/api/companies/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/cost-events")
+      .send({
+        agentId,
+        provider: "fal",
+        model: "self-reported",
+        costCents: 0,
+        billingCode: "fal-reconciliation:forged",
+        occurredAt: "2026-01-01T00:00:00.000Z",
+      });
+
+    expect(res.status).toBe(403);
+    expect(mockCostService.createEvent).not.toHaveBeenCalled();
+  });
+
+  it("keeps a board-reported billingCode with the reconciliation prefix as-is", async () => {
+    const agentId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    mockCostService.createEvent.mockResolvedValueOnce({
+      id: "event-3",
+      companyId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      agentId,
+      costCents: 0,
+      billingCode: "fal-reconciliation:real",
+    });
+    const app = await createApp();
+
+    const res = await request(app)
+      .post("/api/companies/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/cost-events")
+      .send({
+        agentId,
+        provider: "fal",
+        model: "reconciliation",
+        costCents: 0,
+        billingCode: "fal-reconciliation:real",
+        occurredAt: "2026-01-01T00:00:00.000Z",
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockCostService.createEvent).toHaveBeenCalledWith(
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      expect.objectContaining({ billingCode: "fal-reconciliation:real" }),
+    );
+  });
+
+  it("keeps a board-reported costSource as-is", async () => {
+    const agentId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    mockCostService.createEvent.mockResolvedValueOnce({
+      id: "event-2",
+      companyId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      agentId,
+      costCents: 1,
+      costSource: "provider",
+    });
+    const app = await createApp();
+
+    const res = await request(app)
+      .post("/api/companies/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/cost-events")
+      .send({
+        agentId,
+        provider: "fal",
+        model: "manual-adjustment",
+        costCents: 1,
+        costSource: "provider",
+        occurredAt: "2026-01-01T00:00:00.000Z",
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockCostService.createEvent).toHaveBeenCalledWith(
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      expect.objectContaining({ costSource: "provider" }),
+    );
+  });
+
   it("returns 400 for invalid finance event list limits", async () => {
     const { parseCostLimit } = await loadCostParsers();
     expect(() => parseCostLimit({ limit: "0" })).toThrow(/invalid 'limit'/i);
@@ -508,6 +624,60 @@ describeEmbeddedPostgres("cost and finance aggregate overflow handling", () => {
     expect(byAgentModelRow?.costCents).toBe(4_000_000_000);
   });
 
+  it("sums micro-USD so many sub-cent calls add up, and mixes with cents-only rows", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Micro Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    const base = {
+      companyId,
+      agentId,
+      provider: "openrouter",
+      biller: "openrouter",
+      billingType: "metered_api" as const,
+      model: "tiny-model",
+      occurredAt: new Date("2026-04-10T00:00:00.000Z"),
+    };
+    // 500 calls of $0.00002 each (0 whole cents) = $0.01 = 1 cent exactly.
+    await db.insert(costEvents).values(
+      Array.from({ length: 500 }, () => ({
+        ...base,
+        costCents: 0,
+        costMicroUsd: 20,
+        costSource: "provider",
+      })),
+    );
+    // Legacy cents-only row: 3 cents = 30,000 micro-USD.
+    await db.insert(costEvents).values({ ...base, costCents: 3 });
+
+    const range = {
+      from: new Date("2026-04-01T00:00:00.000Z"),
+      to: new Date("2026-04-15T23:59:59.999Z"),
+    };
+    const [row] = await costs.byAgent(companyId, range);
+    expect(row?.costMicroUsd).toBe(10_000 + 30_000);
+    expect(row?.costCents).toBeCloseTo(4, 6);
+
+    const summary = await costs.summary(companyId, range);
+    expect(summary.spendMicroUsd).toBe(40_000);
+    expect(summary.spendCents).toBeCloseTo(4, 6);
+  });
+
   it("aggregates issue costs across recursive descendants only", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -639,6 +809,7 @@ describeEmbeddedPostgres("cost and finance aggregate overflow handling", () => {
       issueCount: 3,
       includeDescendants: true,
       costCents: 600,
+      costMicroUsd: 6_000_000,
       inputTokens: 60,
       cachedInputTokens: 6,
       outputTokens: 12,
