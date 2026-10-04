@@ -232,10 +232,14 @@ function priced(p: HuggingFaceProviderEntry): p is HuggingFaceProviderEntry & Hu
  *   - explicit host: that host's price;
  *   - :cheapest: the lowest input+output price among live hosts;
  *   - :fastest: the live host with the highest throughput (else lowest first-token latency);
- *   - :preferred / no suffix: the first live host in the router's own order,
- *     which is the account preference order HF routes by.
+ *   - :preferred / no suffix: HF actually routes by the account's own
+ *     preference order, which this catalogue cannot see, and that order can
+ *     land on a host pricier than the router's first-listed one. So this
+ *     prices to the most expensive *priced* live host instead of the first —
+ *     a conservative ceiling that never under-bills — rather than guessing
+ *     at the account's real order.
  * Unknown model/host, or a host with no published price, is null: the caller
- * records 0 and warns, never a made-up number.
+ * must not record 0 for a model it cannot price truthfully (DUR-4494).
  */
 export function huggingFacePricingForModelId(
   models: HuggingFaceModelEntry[],
@@ -257,7 +261,7 @@ export function huggingFacePricingForModelId(
       chosen = [...live].sort((a, b) => (a.firstTokenLatencyMs ?? Infinity) - (b.firstTokenLatencyMs ?? Infinity))[0];
     }
   } else if (policy === null || policy === "preferred") {
-    chosen = live[0];
+    chosen = live.filter(priced).sort((a, b) => b.inputUsdPerMillion! + b.outputUsdPerMillion! - (a.inputUsdPerMillion! + a.outputUsdPerMillion!))[0];
   } else {
     chosen = entry.providers.find((p) => p.provider.toLowerCase() === policy);
   }

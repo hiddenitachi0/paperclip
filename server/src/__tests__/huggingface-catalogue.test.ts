@@ -11,7 +11,7 @@ import {
 } from "../services/huggingface-catalogue.js";
 import { computeCostCents } from "../services/lane-a.js";
 import { probeSecretKind } from "../services/secret-kind-probes.js";
-import { buildOpenAiCompatibleBody } from "../services/lane-a-providers.js";
+import { buildOpenAiCompatibleBody, createLaneAProviderClient } from "../services/lane-a-providers.js";
 
 const BODY = {
   object: "list",
@@ -115,7 +115,10 @@ describe("pricing and cost", () => {
     expect(huggingFacePricingForModelId(models, "Qwen/Qwen3-14B:novita")).toEqual({ inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.4 });
     expect(huggingFacePricingForModelId(models, "Qwen/Qwen3-14B:cheapest")).toEqual({ inputUsdPerMillion: 0.06, outputUsdPerMillion: 0.24 });
     expect(huggingFacePricingForModelId(models, "Qwen/Qwen3-14B:fastest")).toEqual({ inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.4 });
-    expect(huggingFacePricingForModelId(models, "Qwen/Qwen3-14B:preferred")).toEqual({ inputUsdPerMillion: 0.06, outputUsdPerMillion: 0.24 });
+    // :preferred / no suffix cannot see HF's own account preference order, so it
+    // prices to the most expensive *priced* live host (a ceiling), not the first.
+    expect(huggingFacePricingForModelId(models, "Qwen/Qwen3-14B:preferred")).toEqual({ inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.4 });
+    expect(huggingFacePricingForModelId(models, "Qwen/Qwen3-14B")).toEqual({ inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.4 });
     expect(huggingFacePricingForModelId(models, "Qwen/Qwen3-14B:nobody")).toBeNull();
     expect(huggingFacePricingForModelId(models, "unknown/model")).toBeNull();
   });
@@ -124,6 +127,41 @@ describe("pricing and cost", () => {
     // 10M in * $0.06 + 5M out * $0.24 = $1.80 = 180 cents
     expect(computeCostCents("huggingface", "Qwen/Qwen3-14B:deepinfra", 10_000_000, 5_000_000)).toBe(180);
     expect(computeCostCents("huggingface", "unknown/model", 10_000_000, 5_000_000)).toBe(0);
+  });
+});
+
+describe("DUR-4494: unpriced calls are refused, not billed at 0", () => {
+  it("refuses the call outright when the catalogue cannot price the chosen model/host", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).endsWith("/models")) return new Response(JSON.stringify(BODY), { status: 200 });
+      return new Response(JSON.stringify({ choices: [{ message: { content: "hi" } }] }), { status: 200 });
+    });
+    const client = createLaneAProviderClient({
+      provider: "huggingface",
+      apiKey: TOKEN,
+      baseUrl: "https://router.huggingface.co/v1",
+      fetch: fetchImpl as unknown as typeof fetch,
+    });
+    await expect(
+      client.complete({ model: "Qwen/Qwen3-14B:nobody", system: "s", messages: [], maxTokens: 10 }),
+    ).rejects.toMatchObject({ name: "LaneAProviderError", kind: "upstream", retryable: false });
+    // Never reached the metered /chat/completions call.
+    expect(fetchImpl.mock.calls.some(([i]) => !String(i).endsWith("/models"))).toBe(false);
+  });
+
+  it("makes the call once the catalogue prices the chosen model/host", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).endsWith("/models")) return new Response(JSON.stringify(BODY), { status: 200 });
+      return new Response(JSON.stringify({ choices: [{ message: { content: "hi" } }] }), { status: 200 });
+    });
+    const client = createLaneAProviderClient({
+      provider: "huggingface",
+      apiKey: TOKEN,
+      baseUrl: "https://router.huggingface.co/v1",
+      fetch: fetchImpl as unknown as typeof fetch,
+    });
+    await client.complete({ model: "Qwen/Qwen3-14B:deepinfra", system: "s", messages: [], maxTokens: 10 });
+    expect(fetchImpl.mock.calls.some(([i]) => !String(i).endsWith("/models"))).toBe(true);
   });
 });
 

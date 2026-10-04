@@ -25,7 +25,7 @@
  * key value and of anything that looks like a key before it leaves here.
  */
 import Anthropic from "@anthropic-ai/sdk";
-import { warmHuggingFaceCatalogue } from "./huggingface-catalogue.js";
+import { cachedHuggingFacePricing, warmHuggingFaceCatalogue } from "./huggingface-catalogue.js";
 import {
   LANE_A_PROVIDER_CATALOGUE,
   normalizeLaneAProvider,
@@ -678,7 +678,24 @@ function createOpenAiCompatibleLaneAClient(input: {
       }
       // DUR-4447: Hugging Face bills at the live catalogue price; prime that
       // cache with this call's own token (best effort) so the cost row is real.
-      if (input.provider === "huggingface") await warmHuggingFaceCatalogue(input.apiKey);
+      //
+      // DUR-4494: a model/host the catalogue cannot price must not run at all
+      // -- recording it at 0 would mean real spend at HF while the company's
+      // budget cap sees nothing, for as long as the cache stays cold or the
+      // operator's chosen host never publishes a price. Fail closed here,
+      // before the metered call is made, rather than warn-and-bill-0 after.
+      if (input.provider === "huggingface") {
+        await warmHuggingFaceCatalogue(input.apiKey);
+        if (!cachedHuggingFacePricing(request.model)) {
+          throw new LaneAProviderError({
+            kind: "upstream",
+            provider: input.provider,
+            message: `${label} has no published price for "${request.model}" right now. Pick a model/host Hugging Face currently prices, or try again once its catalogue is reachable.`,
+            retryable: false,
+            refusal: false,
+          });
+        }
+      }
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), input.timeoutMs);
       let response: Response;
