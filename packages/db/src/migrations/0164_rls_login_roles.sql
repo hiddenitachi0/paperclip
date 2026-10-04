@@ -197,6 +197,10 @@ DECLARE
     'company_speech_settings',
     'company_user_sidebar_preferences',
     'cost_events',
+    -- DUR-4462/DUR-4458 daily Fal/Sogni reconciliation. Created, granted on
+    -- and policed in 0219_cost_reconciliation.sql; listed here so the
+    -- login-role lists match the schema, as for the tables above.
+    'cost_reconciliation_runs',
     -- CRM. Created (and granted on) in 0199_crm_base.sql; listed here so the
     -- login-role lists match the schema, as for the tables above.
     'crm_activities',
@@ -254,7 +258,7 @@ DECLARE
     'issue_execution_decisions',
     'issue_inbox_archives',
     'issue_labels',
-    -- DUR-4468. Created, granted on and policed in 0218_issue_overlaps.sql;
+    -- DUR-4468. Created, granted on and policed in 0221_issue_overlaps.sql;
     -- listed here so the login-role lists match the schema, as for the
     -- tables above.
     'issue_overlaps',
@@ -359,6 +363,10 @@ DECLARE
     'routines',
     'secret_access_events',
     'session',
+    -- DUR-4462 Sogni balance reconciliation snapshots. Created, granted on
+    -- and policed in 0219_cost_reconciliation.sql; company-scoped (company_id
+    -- is its primary key), so it is in both lists.
+    'sogni_balance_snapshots',
     -- Voice messages. Created (and granted on) in
     -- 0182_speech_voice_messages.sql; listed here so the login-role lists
     -- match the schema, as for the tables above.
@@ -484,6 +492,10 @@ DECLARE
     'company_speech_settings',
     'company_user_sidebar_preferences',
     'cost_events',
+    -- DUR-4462/DUR-4458 daily Fal/Sogni reconciliation. Created, granted on
+    -- and policed in 0219_cost_reconciliation.sql; listed here so the
+    -- login-role lists match the schema, as for the tables above.
+    'cost_reconciliation_runs',
     -- CRM. Created (and granted on) in 0199_crm_base.sql; listed here so the
     -- login-role lists match the schema, as for the tables above.
     'crm_activities',
@@ -528,7 +540,7 @@ DECLARE
     'issue_execution_decisions',
     'issue_inbox_archives',
     'issue_labels',
-    -- DUR-4468. Created, granted on and policed in 0218_issue_overlaps.sql;
+    -- DUR-4468. Created, granted on and policed in 0221_issue_overlaps.sql;
     -- listed here so the login-role lists match the schema, as for the
     -- tables above.
     'issue_overlaps',
@@ -624,6 +636,10 @@ DECLARE
     'routine_triggers',
     'routines',
     'secret_access_events',
+    -- DUR-4462 Sogni balance reconciliation snapshots. Created, granted on
+    -- and policed in 0219_cost_reconciliation.sql; company-scoped (company_id
+    -- is its primary key), so it is in both lists.
+    'sogni_balance_snapshots',
     -- Voice messages. Created (and granted on) in
     -- 0182_speech_voice_messages.sql; listed here so the login-role lists
     -- match the schema, as for the tables above.

@@ -171,3 +171,4 @@ export { crmActivities } from "./crm_activities.js";
 export { crmFacts } from "./crm_facts.js";
 export { crmExternalRefs } from "./crm_external_refs.js";
 export { issueOverlaps } from "./issue_overlaps.js";
+export { costReconciliationRuns, sogniBalanceSnapshots } from "./cost_reconciliation.js";
