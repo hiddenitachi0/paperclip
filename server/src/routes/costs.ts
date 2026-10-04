@@ -22,6 +22,7 @@ import {
   logActivity,
 } from "../services/index.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
+import { FAL_RECONCILIATION_CODE_PREFIX } from "../services/costs.js";
 import { fetchAllQuotaWindows } from "../services/quota-windows.js";
 import { badRequest, notFound } from "../errors.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
@@ -129,6 +130,19 @@ export function costRoutes(
 
     if (req.actor.type === "agent" && req.actor.agentId !== req.body.agentId) {
       res.status(403).json({ error: "Agent can only report its own costs" });
+      return;
+    }
+
+    // DUR-4503: billingCode prefixed "fal-reconciliation:" marks a row as a
+    // server-side reconciliation correction (excluded from tracked spend and
+    // counted as "checked against provider"). Only the reconciliation job may
+    // claim that -- an agent self-reporting a cost must not be able to forge it.
+    if (
+      req.actor.type === "agent" &&
+      typeof req.body.billingCode === "string" &&
+      req.body.billingCode.startsWith(`${FAL_RECONCILIATION_CODE_PREFIX}:`)
+    ) {
+      res.status(403).json({ error: "Agent cannot report a reconciliation billing code" });
       return;
     }
 

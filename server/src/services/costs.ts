@@ -7,7 +7,7 @@ import { budgetService, type BudgetServiceHooks } from "./budgets.js";
 import { effectiveMicroUsdExpr, sumCostCents, sumMicroUsd } from "./cost-sql.js";
 import { escalationGrantService } from "./escalation-grants.js";
 
-const FAL_RECONCILIATION_CODE_PREFIX = "fal-reconciliation";
+export const FAL_RECONCILIATION_CODE_PREFIX = "fal-reconciliation";
 
 export interface CostDateRange {
   from?: Date;

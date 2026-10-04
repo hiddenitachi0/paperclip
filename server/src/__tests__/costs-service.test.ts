@@ -305,6 +305,59 @@ describe("cost routes", () => {
     );
   });
 
+  it("rejects an agent self-reporting a reconciliation billingCode to forge checked/correction status (DUR-4503)", async () => {
+    const agentId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const app = await createAppWithActor({
+      type: "agent",
+      agentId,
+      companyId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      runId: "run-1",
+    });
+
+    const res = await request(app)
+      .post("/api/companies/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/cost-events")
+      .send({
+        agentId,
+        provider: "fal",
+        model: "self-reported",
+        costCents: 0,
+        billingCode: "fal-reconciliation:forged",
+        occurredAt: "2026-01-01T00:00:00.000Z",
+      });
+
+    expect(res.status).toBe(403);
+    expect(mockCostService.createEvent).not.toHaveBeenCalled();
+  });
+
+  it("keeps a board-reported billingCode with the reconciliation prefix as-is", async () => {
+    const agentId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    mockCostService.createEvent.mockResolvedValueOnce({
+      id: "event-3",
+      companyId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      agentId,
+      costCents: 0,
+      billingCode: "fal-reconciliation:real",
+    });
+    const app = await createApp();
+
+    const res = await request(app)
+      .post("/api/companies/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/cost-events")
+      .send({
+        agentId,
+        provider: "fal",
+        model: "reconciliation",
+        costCents: 0,
+        billingCode: "fal-reconciliation:real",
+        occurredAt: "2026-01-01T00:00:00.000Z",
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockCostService.createEvent).toHaveBeenCalledWith(
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      expect.objectContaining({ billingCode: "fal-reconciliation:real" }),
+    );
+  });
+
   it("keeps a board-reported costSource as-is", async () => {
     const agentId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     mockCostService.createEvent.mockResolvedValueOnce({
