@@ -20,7 +20,7 @@
  * are list prices in US dollars per million tokens.
  */
 
-export const LANE_A_PROVIDERS = ["anthropic", "openai", "google", "openrouter", "local"] as const;
+export const LANE_A_PROVIDERS = ["anthropic", "openai", "google", "openrouter", "huggingface", "local"] as const;
 export type LaneAProvider = (typeof LANE_A_PROVIDERS)[number];
 
 /** What a quick agent uses when the operator has not picked a provider (= today's behaviour). */
@@ -141,6 +141,21 @@ export const LANE_A_PROVIDER_CATALOGUE: Record<LaneAProvider, LaneAProviderDescr
       },
     },
   },
+  huggingface: {
+    label: "Hugging Face",
+    // The model id carries a provider/policy suffix the picker builds
+    // (buildHuggingFaceModelId), so it is typed/assembled, not a fixed list.
+    freeForm: true,
+    // The operator must pick: there is no sensible default across ~100 hosts.
+    defaultModel: null,
+    // Fixed: Inference Providers is one router. Not operator-editable, so a
+    // pasted token can never be sent to another host by editing the address.
+    defaultBaseUrl: "https://router.huggingface.co/v1",
+    baseUrlEditable: false,
+    // Pricing comes from the live /v1/models catalogue (server
+    // huggingface-catalogue.ts), per model AND per provider, not a static map.
+    models: {},
+  },
   local: {
     label: "Local model",
     freeForm: true,
@@ -225,6 +240,14 @@ export const LANE_A_DEFAULT_MODEL: LaneAModel = "claude-sonnet-5";
 
 export function isLaneAModel(value: unknown): value is LaneAModel {
   return typeof value === "string" && Object.hasOwn(LANE_A_MODEL_CATALOGUE, value);
+}
+
+export function laneACostCentsAtPricing(
+  pricing: Pick<LaneAModelPricing, "inputUsdPerMillion" | "outputUsdPerMillion">,
+  inputTokens: number,
+  outputTokens: number,
+): number {
+  return costCentsAt({ label: "", ...pricing }, inputTokens, outputTokens);
 }
 
 function costCentsAt(pricing: LaneAModelPricing, inputTokens: number, outputTokens: number): number {
@@ -383,6 +406,9 @@ export type LaneAThinkingMode = (typeof LANE_A_THINKING_MODES)[number];
  * `reasoning_effort` (before temperature, and well before ever blaming tools)
  * on exactly that error. OpenAI's own reasoning models (o-series, gpt-5)
  * already take this field for their effort level, so "off" maps onto it too.
+ * Hugging Face is deliberately NOT on this list either (DUR-4447): its
+ * router fronts many hosts and the per-host support for reasoning_effort is
+ * not in the catalogue, so nothing is sent until a model/host is known to take it.
  * Google's OpenAI-compatible shim is not on this list: unlike OpenRouter it is
  * not known to tolerate an extra field, so nothing is sent there until that is
  * checked. Anthropic never reaches this function (extended thinking is a
@@ -637,4 +663,28 @@ export function laneABackupModelEntryIssue(entry: {
     }
   }
   return null;
+}
+
+export const HUGGINGFACE_ROUTER_BASE_URL = "https://router.huggingface.co/v1";
+export const HUGGINGFACE_POLICY_SUFFIXES = ["cheapest", "fastest", "preferred"] as const;
+export type HuggingFacePolicySuffix = (typeof HUGGINGFACE_POLICY_SUFFIXES)[number];
+
+/**
+ * The model id sent to Hugging Face Inference Providers from a picker choice.
+ * `selection` is a specific provider ("deepinfra") or a routing policy
+ * ("cheapest" | "fastest" | "preferred"); empty/null means plain model id
+ * (HF then routes with the account's own provider preference). A suffix the
+ * model id already carries is replaced, never doubled.
+ * ("Qwen/Qwen3-14B", "deepinfra") -> "Qwen/Qwen3-14B:deepinfra".
+ */
+export function buildHuggingFaceModelId(model: string, selection?: string | null): string {
+  const base = model.trim().replace(/:[^/:]*$/, "");
+  const suffix = (selection ?? "").trim().replace(/^:/, "").toLowerCase();
+  return suffix.length > 0 ? `${base}:${suffix}` : base;
+}
+
+/** Splits "Qwen/Qwen3-14B:deepinfra" into the model and its provider/policy suffix (null when none). */
+export function splitHuggingFaceModelId(id: string): { model: string; suffix: string | null } {
+  const match = /^(.*[^:]):([^/:]+)$/.exec(id.trim());
+  return match ? { model: match[1]!, suffix: match[2]! } : { model: id.trim(), suffix: null };
 }

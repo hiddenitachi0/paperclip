@@ -31,6 +31,7 @@ describe("secret kinds taxonomy", () => {
     expect(testable).toEqual([
       "anthropic_api_key",
       "google_api_key",
+      "huggingface_api_key",
       "local_model_endpoint",
       "openai_api_key",
       "openrouter_api_key",

@@ -31,6 +31,7 @@ import {
   laneAProviderLabel,
   localModelOfflineNotice,
   laneAProviderModelCostCents,
+  laneACostCentsAtPricing,
   normalizeLaneAProvider,
   resolveLaneAModelForProvider,
   laneATemperatureForCall,
@@ -60,6 +61,7 @@ import {
 } from "./lane-a-providers.js";
 import { detectTextRefusalByPattern } from "./lane-a-refusal.js";
 import { costService } from "./costs.js";
+import { cachedHuggingFacePricing } from "./huggingface-catalogue.js";
 import { budgetService } from "./budgets.js";
 import { logger } from "../middleware/logger.js";
 import { openRouterCataloguePrice } from "./lane-a-openrouter-catalogue.js";
@@ -206,13 +208,24 @@ const LANE_A_MAX_OUTPUT_TOKENS = LANE_A_DEFAULT_MAX_OUTPUT_TOKENS;
 // the budget the operator relies on.
 const unpricedModelsWarned = new Set<string>();
 
+function huggingFaceCost(model: string, inputTokens: number, outputTokens: number): { costCents: number; priced: boolean } {
+  const pricing = cachedHuggingFacePricing(model);
+  if (!pricing) return { costCents: 0, priced: false };
+  return { costCents: laneACostCentsAtPricing(pricing, inputTokens, outputTokens), priced: true };
+}
+
 export function computeCostCents(
   provider: LaneAProvider,
   model: string,
   inputTokens: number,
   outputTokens: number,
 ): number {
-  const priced = laneAProviderModelCostCents(provider, model, inputTokens, outputTokens);
+  // DUR-4447: Hugging Face has no static price list; it bills at the live
+  // catalogue price cached by huggingface-catalogue.ts (warmed on the call path).
+  const priced =
+    provider === "huggingface"
+      ? huggingFaceCost(model, inputTokens, outputTokens)
+      : laneAProviderModelCostCents(provider, model, inputTokens, outputTokens);
   if (!priced.priced) {
     const key = `${provider}:${model}`;
     if (!unpricedModelsWarned.has(key)) {
