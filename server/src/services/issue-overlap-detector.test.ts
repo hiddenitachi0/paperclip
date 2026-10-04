@@ -1,4 +1,8 @@
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -16,8 +20,12 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "../__tests__/helpers/embedded-postgres.js";
 import {
+  buildWarningComment,
   computeOverlaps,
   issueOverlapDetectorService,
+  matchOwnRepoPrUrl,
+  runGit,
+  sanitizeInlineText,
   nextFreeMigrationNumber,
   suggestOrder,
   type PrProgress,
@@ -89,6 +97,45 @@ describe("computeOverlaps", () => {
     const a = snap("a", { "server/a.ts": "M" });
     const b = { ...snap("b", { "server/a.ts": "M" }), workspaceId: a.workspaceId };
     expect(computeOverlaps([a, b])).toEqual([]);
+  });
+});
+
+describe("overlap hardening", () => {
+  it("strips markdown, links, mentions and newlines from a stale_behind commit subject", () => {
+    const subject = "abc1234 [click](http://evil) @everyone `x`\n# **pwn**";
+    const body = buildWarningComment({
+      other: null,
+      rows: [{ issueAId: "a", issueBId: "a", kind: "stale_behind", detailKey: "f.ts", detail: { file: "f.ts", mergedCommit: subject } }],
+      order: "none",
+      freeMigration: "0001",
+    });
+    const line = body.split("\n").find((l) => l.includes("already changed"))!;
+    expect(line).not.toMatch(/[\[\]@*#<>]|\(http/);
+    expect(line).toContain("clickhttp://evil");
+    expect(sanitizeInlineText("x".repeat(500))).toHaveLength(120);
+  });
+
+  it("anchors PR urls to the workspace's own repo", () => {
+    const repo = "https://github.com/acme/fork.git";
+    expect(matchOwnRepoPrUrl("https://github.com/acme/fork/pull/12", repo)).toEqual({ owner: "acme", name: "fork", prNumber: 12 });
+    expect(matchOwnRepoPrUrl("https://github.com/evil/fork/pull/12", repo)).toBeNull();
+    expect(matchOwnRepoPrUrl("https://evil.com/?u=github.com/acme/fork/pull/12", repo)).toBeNull();
+    expect(matchOwnRepoPrUrl("https://github.com/acme/fork/pull/12", null)).toBeNull();
+  });
+
+  it("runGit does not execute a checkout's fsmonitor or hooksPath config", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "overlap-git-"));
+    try {
+      const marker = path.join(dir, "pwned");
+      const hook = path.join(dir, "hook.sh");
+      fs.writeFileSync(hook, `#!/bin/sh\ntouch ${marker}\n`, { mode: 0o755 });
+      execFileSync("git", ["init", "-q", dir]);
+      execFileSync("git", ["-C", dir, "config", "core.fsmonitor", hook]);
+      await runGit(dir, ["status", "--porcelain"]);
+      expect(fs.existsSync(marker)).toBe(false);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -275,6 +322,32 @@ describeEmbeddedPostgres("issueOverlapDetectorService (DB-backed)", () => {
     expect((await db.select().from(issueOverlaps))[0]).toMatchObject({ status: "resolved" });
 
     state.set("/tmp/ws2", shape({ "server/shared.ts": "M" }));
+    await svc.runOverlapDetection(companyId);
+    expect(await commentsOn(a.id)).toHaveLength(1);
+  });
+
+  it("re-warns a re-opened overlap only after the 6h cool-down", async () => {
+    const { companyId, issueWithWorkspace } = await seed();
+    const a = await issueWithWorkspace(1);
+    await issueWithWorkspace(2);
+    const clock = { value: new Date("2026-01-01T00:00:00Z") };
+    const hit = shape({ "server/shared.ts": "M" });
+    const state = new Map<string, any>([["/tmp/ws1", hit], ["/tmp/ws2", hit]]);
+    const svc = makeService(state, {}, clock);
+    await svc.runOverlapDetection(companyId);
+    for (const step of [1, 2]) {
+      clock.value = new Date(clock.value.getTime() + step * 60_000);
+      state.set("/tmp/ws2", shape({ "server/other.ts": "M" }));
+      await svc.runOverlapDetection(companyId);
+      state.set("/tmp/ws2", hit);
+      await svc.runOverlapDetection(companyId);
+    }
+    expect(await commentsOn(a.id)).toHaveLength(1);
+
+    clock.value = new Date(clock.value.getTime() + 7 * 60 * 60_000);
+    state.set("/tmp/ws2", shape({ "server/other.ts": "M" }));
+    await svc.runOverlapDetection(companyId);
+    state.set("/tmp/ws2", hit);
     await svc.runOverlapDetection(companyId);
     expect(await commentsOn(a.id)).toHaveLength(2);
   });
