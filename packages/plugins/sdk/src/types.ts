@@ -54,6 +54,8 @@ import type {
   PluginPerformActionContext,
   PluginPersonaGenerationCapReservation,
   PluginMediaStudioDirectSpendReservation,
+  PluginMediaStudioDirectSpendSettlement,
+  PluginAgentMediaCostRecording,
 } from "./protocol.js";
 
 // ---------------------------------------------------------------------------
@@ -1853,6 +1855,39 @@ export interface PluginBillingClient {
   ): Promise<PluginMediaStudioDirectSpendReservation>;
   /** Give back a reservation whose paid call failed. */
   releaseMediaStudioDirectSpend(companyId: string, reservationId: string): Promise<void>;
+  /**
+   * Replace a paid edit's reservation estimate with Fal's actual per-unit
+   * price for the endpoint used (DUR-4455). The host prices it itself from
+   * Fal's published pricing; the plugin only reports which endpoint ran and
+   * what it consumed. `settled: false` (pricing unavailable) leaves the
+   * reservation's estimate standing.
+   */
+  settleMediaStudioDirectSpend(
+    companyId: string,
+    input: { reservationId: string; endpointId: string; usage: { images?: number; megapixels?: number; seconds?: number; units?: number } },
+  ): Promise<PluginMediaStudioDirectSpendSettlement>;
+
+  /**
+   * DUR-4457: record the cost of a picture/video/audio an AGENT just made
+   * through a tool, against that agent (its monthly budget) and Media
+   * Studio's shared cap. `runId` is the invoking tool call's run id; the
+   * host resolves the agent from it. The host prices the call itself
+   * (Fal published per-unit price, Sogni credits x the configured credit
+   * price). Providers that cost nothing (mock, local ComfyUI) record nothing.
+   * Never throws for a pricing problem -- check `recorded`.
+   */
+  recordAgentMediaCost(
+    companyId: string,
+    input: {
+      runId: string;
+      kind: "image" | "video" | "audio";
+      provider: string;
+      model: string;
+      usage?: { images?: number; megapixels?: number; seconds?: number; units?: number };
+      credits?: number | null;
+      issueId?: string | null;
+    },
+  ): Promise<PluginAgentMediaCostRecording>;
 }
 
 /**

@@ -112,7 +112,12 @@ export type LaneAStop = "end_turn" | "tool_use" | "max_tokens" | "other";
 export interface LaneACompletion {
   text: string;
   toolCalls: LaneAToolCall[];
-  usage: { inputTokens: number; outputTokens: number };
+  /**
+   * `costUsd` is the provider's OWN billed cost for the call (OpenRouter's
+   * `usage.cost`, in USD), or null/absent when the provider did not say.
+   * Zero is a real answer (a free model) and is kept as 0.
+   */
+  usage: { inputTokens: number; outputTokens: number; costUsd?: number | null };
   stop: LaneAStop;
   /** The provider's own stop reason, kept for the `stopReason` field the routes already return. */
   stopReason: string | null;
@@ -566,8 +571,27 @@ function parseToolArguments(raw: unknown): Record<string, unknown> | null {
   }
 }
 
+function finiteNonNegative(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+/**
+ * OpenRouter bills in credits (= USD) and includes `usage.cost` by default.
+ * `cost_details.upstream_inference_cost` is the host's charge on a BYOK call,
+ * used only when `cost` itself is absent. null = not reported.
+ */
+export function openRouterUsageCostUsd(usage: Record<string, unknown>): number | null {
+  const cost = finiteNonNegative(usage.cost);
+  if (cost !== null) return cost;
+  const details = usage.cost_details;
+  if (details && typeof details === "object") {
+    return finiteNonNegative((details as Record<string, unknown>).upstream_inference_cost);
+  }
+  return null;
+}
+
 /** Translate one /chat/completions response body. Exported for tests. */
-export function fromOpenAiCompletion(payload: unknown): LaneACompletion {
+export function fromOpenAiCompletion(payload: unknown, provider?: LaneAProvider): LaneACompletion {
   const record = (payload && typeof payload === "object" ? payload : {}) as Record<string, unknown>;
   const choices = Array.isArray(record.choices) ? record.choices : [];
   const first = (choices[0] && typeof choices[0] === "object" ? choices[0] : {}) as Record<string, unknown>;
@@ -599,6 +623,9 @@ export function fromOpenAiCompletion(payload: unknown): LaneACompletion {
     usage: {
       inputTokens: typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : 0,
       outputTokens: typeof usage.completion_tokens === "number" ? usage.completion_tokens : 0,
+      // DUR-4454: only OpenRouter reports a billed cost; another host's
+      // `usage.cost` (if any) is not trusted as USD.
+      ...(provider === "openrouter" ? { costUsd: openRouterUsageCostUsd(usage) } : {}),
     },
     stop,
     stopReason: finishReason,
@@ -777,7 +804,7 @@ function createOpenAiCompatibleLaneAClient(input: {
           status: response.status,
         });
       }
-      return fromOpenAiCompletion(payload);
+      return fromOpenAiCompletion(payload, input.provider);
     },
   };
 }
