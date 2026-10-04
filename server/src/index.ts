@@ -2019,6 +2019,21 @@ export async function startServer(): Promise<StartedServer> {
     );
   }
 
+  // DUR-4498: bound data/run-logs on disk. Daily sweep, default 30 days;
+  // PAPERCLIP_RUN_LOG_RETENTION_DAYS overrides, 0 disables.
+  {
+    const envDays = process.env.PAPERCLIP_RUN_LOG_RETENTION_DAYS;
+    const runLogRetentionDays =
+      envDays !== undefined && envDays.trim() !== "" && Number.isFinite(Number(envDays))
+        ? Number(envDays)
+        : 30;
+    if (runLogRetentionDays > 0) {
+      logger.info({ retentionDays: runLogRetentionDays }, "Run log retention sweep enabled");
+      const { startRunLogRetention } = await import("./services/run-log-retention.js");
+      startRunLogRetention(24 * 60 * 60 * 1000, runLogRetentionDays);
+    }
+  }
+
   // Wait for external adapters to finish loading before accepting requests.
   // Without this, adapter type validation (assertKnownAdapterType) would
   // reject valid external adapter types during the startup loading window.
