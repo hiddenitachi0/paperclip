@@ -25,6 +25,9 @@ import { notFound } from "../errors.js";
 
 export const MODEL_HEALTH_PROBE_TIMEOUT_MS = 5_000;
 export const MODEL_TEST_TIMEOUT_MS = 60_000;
+/** Response-size caps: a host at the configured address is not trusted to send a bounded body. */
+export const MODEL_TAGS_MAX_BYTES = 1_048_576;
+export const MODEL_TEST_MAX_BYTES = 65_536;
 /** How long the PC must have been unreachable before the evening warning goes out. */
 export const MODEL_OUTAGE_WARN_AFTER_MS = 60 * 60_000;
 /** One evening warning per outage, and never twice within this window. */
@@ -50,6 +53,30 @@ function modelListed(wanted: string, listed: string[]): boolean {
   return listed.some((name) => norm(name) === target);
 }
 
+class BodyTooLargeError extends Error {}
+
+const isRedirect = (res: Response) => res.status >= 300 && res.status < 400;
+
+/** Reads at most maxBytes of the body; cancels the stream and throws if there is more. */
+async function readCappedText(res: Response, maxBytes: number): Promise<string> {
+  if (!res.body) return "";
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let text = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      throw new BodyTooLargeError();
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  return text + decoder.decode();
+}
+
 export type ProbeResult = { status: ModelHealthStatus; detail: string | null };
 
 export async function probeLocalModel(
@@ -60,14 +87,15 @@ export async function probeLocalModel(
 ): Promise<ProbeResult> {
   let res: Response;
   try {
-    res = await fetchImpl(`${ollamaRoot(baseUrl)}/api/tags`, { signal: AbortSignal.timeout(timeoutMs) });
+    res = await fetchImpl(`${ollamaRoot(baseUrl)}/api/tags`, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
   } catch (err) {
     return { status: "unreachable", detail: err instanceof Error ? err.message : String(err) };
   }
+  if (isRedirect(res)) return { status: "unreachable", detail: "The address tried to redirect elsewhere, which is not followed." };
   if (!res.ok) return { status: "unreachable", detail: `The address answered with HTTP ${res.status}.` };
   let body: unknown;
   try {
-    body = await res.json();
+    body = JSON.parse(await readCappedText(res, MODEL_TAGS_MAX_BYTES));
   } catch {
     return { status: "unreachable", detail: "The address answered, but not like Ollama." };
   }
@@ -75,6 +103,78 @@ export async function probeLocalModel(
   if (!Array.isArray(models)) return { status: "unreachable", detail: "The address answered, but not like Ollama." };
   const names = models.flatMap((m) => [m.name, m.model]).filter((n): n is string => typeof n === "string");
   return modelListed(model, names) ? { status: "ready", detail: null } : { status: "model_missing", detail: null };
+}
+
+export async function runModelTest(fetchImpl: FetchLike, baseUrl: string, model: string, thinking: ModelTestRun["thinking"]): Promise<ModelTestRun> {
+  const started = Date.now();
+  let firstWordMs: number | null = null;
+  try {
+    const body: Record<string, unknown> = {
+      model,
+      stream: true,
+      max_tokens: 200,
+      messages: [{ role: "user", content: MODEL_TEST_PROMPT }],
+    };
+    if (thinking === "off") body.reasoning_effort = "none";
+    const res = await fetchImpl(`${baseUrl.trim().replace(/\/+$/, "")}/chat/completions`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(MODEL_TEST_TIMEOUT_MS),
+    });
+    if (isRedirect(res)) {
+      return { thinking, ok: false, answer: null, firstWordMs: null, totalMs: Date.now() - started, error: "The address tried to redirect elsewhere, which is not followed." };
+    }
+    if (!res.ok || !res.body) {
+      return { thinking, ok: false, answer: null, firstWordMs: null, totalMs: Date.now() - started, error: `The model answered with an error (HTTP ${res.status}).` };
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let answer = "";
+    let totalBytes = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > MODEL_TEST_MAX_BYTES) {
+        await reader.cancel().catch(() => {});
+        return { thinking, ok: false, answer: null, firstWordMs, totalMs: Date.now() - started, error: "The model's answer was too long, so it was cut off." };
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const data = line.startsWith("data:") ? line.slice(5).trim() : "";
+        if (!data || data === "[DONE]") continue;
+        try {
+          const delta = (JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }> }).choices?.[0]?.delta?.content;
+          if (typeof delta === "string" && delta.length > 0) {
+            if (firstWordMs === null) firstWordMs = Date.now() - started;
+            answer += delta;
+          }
+        } catch {
+          // A partial or non-JSON line: ignore it, the next one carries on.
+        }
+      }
+    }
+    const totalMs = Date.now() - started;
+    if (answer.trim().length === 0) {
+      return { thinking, ok: false, answer: null, firstWordMs: null, totalMs, error: "The model answered, but with no words." };
+    }
+    return { thinking, ok: true, answer: answer.trim(), firstWordMs, totalMs, error: null };
+  } catch (err) {
+    const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+    return {
+      thinking,
+      ok: false,
+      answer: null,
+      firstWordMs,
+      totalMs: Date.now() - started,
+      error: timedOut ? "The model took too long to answer." : "Couldn't reach the model. Is your PC on, and is Ollama running?",
+    };
+  }
 }
 
 export function modelHealthService(db: Db, deps: ModelHealthDeps = {}) {
@@ -264,67 +364,7 @@ export function modelHealthService(db: Db, deps: ModelHealthDeps = {}) {
 
   // ─── Test button ───────────────────────────────────────────────────────
 
-  async function oneTestRun(baseUrl: string, model: string, thinking: ModelTestRun["thinking"]): Promise<ModelTestRun> {
-    const started = Date.now();
-    let firstWordMs: number | null = null;
-    try {
-      const body: Record<string, unknown> = {
-        model,
-        stream: true,
-        max_tokens: 200,
-        messages: [{ role: "user", content: MODEL_TEST_PROMPT }],
-      };
-      if (thinking === "off") body.reasoning_effort = "none";
-      const res = await fetchImpl(`${baseUrl.trim().replace(/\/+$/, "")}/chat/completions`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(MODEL_TEST_TIMEOUT_MS),
-      });
-      if (!res.ok || !res.body) {
-        return { thinking, ok: false, answer: null, firstWordMs: null, totalMs: Date.now() - started, error: `The model answered with an error (HTTP ${res.status}).` };
-      }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let answer = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          const data = line.startsWith("data:") ? line.slice(5).trim() : "";
-          if (!data || data === "[DONE]") continue;
-          try {
-            const delta = (JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }> }).choices?.[0]?.delta?.content;
-            if (typeof delta === "string" && delta.length > 0) {
-              if (firstWordMs === null) firstWordMs = Date.now() - started;
-              answer += delta;
-            }
-          } catch {
-            // A partial or non-JSON line: ignore it, the next one carries on.
-          }
-        }
-      }
-      const totalMs = Date.now() - started;
-      if (answer.trim().length === 0) {
-        return { thinking, ok: false, answer: null, firstWordMs: null, totalMs, error: "The model answered, but with no words." };
-      }
-      return { thinking, ok: true, answer: answer.trim(), firstWordMs, totalMs, error: null };
-    } catch (err) {
-      const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
-      return {
-        thinking,
-        ok: false,
-        answer: null,
-        firstWordMs,
-        totalMs: Date.now() - started,
-        error: timedOut ? "The model took too long to answer." : "Couldn't reach the model. Is your PC on, and is Ollama running?",
-      };
-    }
-  }
+  const oneTestRun = (baseUrl: string, model: string, thinking: ModelTestRun["thinking"]) => runModelTest(fetchImpl, baseUrl, model, thinking);
 
   /**
    * The Test button. A setup that cannot be run at all gets a plain-English
