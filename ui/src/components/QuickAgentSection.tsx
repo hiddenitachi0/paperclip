@@ -906,6 +906,7 @@ const PROVIDER_NAME_HINTS: Record<LaneAProvider, string[]> = {
   openai: ["openai", "chatgpt", "gpt"],
   google: ["google", "gemini"],
   openrouter: ["openrouter"],
+  huggingface: ["huggingface", "hugging_face", "hf"],
   local: ["local", "ollama", "lmstudio", "lm_studio", "llama", "vllm"],
 };
 
