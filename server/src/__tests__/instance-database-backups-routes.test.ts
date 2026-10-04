@@ -37,6 +37,16 @@ function createBackupService(overrides: Partial<InstanceDatabaseBackupService> =
       finishedAt: "2026-04-16T20:00:01.000Z",
       durationMs: 1000,
     }),
+    getStorageStats: vi.fn().mockResolvedValue({
+      fileCount: 3,
+      totalBytes: 3000,
+      retainedFileCount: 2,
+      retainedBytes: 2000,
+      expectedSteadyStateFiles: 60,
+      expectedSteadyStateBytes: 60000,
+      backupDir: "/tmp",
+      retention: { dailyDays: 7, weeklyWeeks: 4, monthlyMonths: 1 },
+    }),
     ...overrides,
   };
 }
@@ -145,5 +155,26 @@ describe("instance database backup routes", () => {
 
     expect(res.status).toBe(409);
     expect(res.body).toEqual({ error: "Database backup already in progress" });
+  });
+
+  it("serves storage stats to instance admins and forwards a validated retention override", async () => {
+    const service = createBackupService();
+    const app = createApp({ type: "board", userId: "a", source: "session", isInstanceAdmin: true }, service);
+    const res = await request(app).get("/api/instance/database-backups/stats?dailyDays=14&weeklyWeeks=2&monthlyMonths=3");
+    expect(res.status).toBe(200);
+    expect(service.getStorageStats).toHaveBeenCalledWith({ dailyDays: 14, weeklyWeeks: 2, monthlyMonths: 3 });
+    const plain = await request(app).get("/api/instance/database-backups/stats");
+    expect(plain.status).toBe(200);
+    expect(service.getStorageStats).toHaveBeenLastCalledWith(undefined);
+  });
+
+  it("rejects malformed or partial retention overrides and non-admins on stats", async () => {
+    const service = createBackupService();
+    const admin = createApp({ type: "board", userId: "a", source: "session", isInstanceAdmin: true }, service);
+    expect((await request(admin).get("/api/instance/database-backups/stats?dailyDays=14")).status).toBe(400);
+    expect((await request(admin).get("/api/instance/database-backups/stats?dailyDays=-1&weeklyWeeks=2&monthlyMonths=3")).status).toBe(400);
+    const user = createApp({ type: "board", userId: "u", source: "session", isInstanceAdmin: false }, service);
+    expect((await request(user).get("/api/instance/database-backups/stats")).status).toBe(403);
+    expect(service.getStorageStats).not.toHaveBeenCalled();
   });
 });

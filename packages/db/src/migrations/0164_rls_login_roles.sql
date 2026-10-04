@@ -296,7 +296,7 @@ DECLARE
     -- lists match the schema, as for the tables above.
     'model_directory_entries',
     -- DUR-4419. Created, granted on and policed in
-    -- 0221_local_model_health.sql; listed here so the login-role
+    -- 0222_local_model_health.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'local_model_health',
     -- DUR-4344. Created, granted on and policed in
@@ -578,7 +578,7 @@ DECLARE
     -- lists match the schema, as for the tables above.
     'model_directory_entries',
     -- DUR-4419. Created, granted on and policed in
-    -- 0221_local_model_health.sql; listed here so the login-role
+    -- 0222_local_model_health.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'local_model_health',
     -- DUR-4344. Created, granted on and policed in

@@ -1545,8 +1545,15 @@
     {
       "idx": 221,
       "version": "7",
-      "when": 1791118854590,
-      "tag": "0221_local_model_health",
+      "when": 1791139532530,
+      "tag": "0221_worktree_cleanup_retention_days",
+      "breakpoints": true
+    },
+    {
+      "idx": 222,
+      "version": "7",
+      "when": 1791139532532,
+      "tag": "0222_local_model_health",
       "breakpoints": true
     }
   ]
