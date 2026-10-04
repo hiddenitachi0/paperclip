@@ -1,3 +1,6 @@
+import { instanceDiskHealthRoutes } from "./routes/instance-disk-health.js";
+import { createDiskHealthService } from "./services/disk-health.js";
+import { resolveDefaultBackupDir } from "./home-paths.js";
 import express, { Router, type Request as ExpressRequest } from "express";
 import path from "node:path";
 import fs from "node:fs";
@@ -35,6 +38,7 @@ import { productGrabberRoutes } from "./routes/product-grabber.js";
 import { morningReportRoutes } from "./routes/morning-report.js";
 import { mailSecretaryRoutes } from "./routes/mail-secretary.js";
 import { mailAccountsRoutes } from "./routes/mail-accounts.js";
+import { modelDirectoryRoutes } from "./routes/model-directory.js";
 import { emailSettingsRoutes } from "./routes/email-settings.js";
 import { videoStorylineRoutes } from "./routes/video-storylines.js";
 import { mediaStudioDirectRoutes } from "./routes/media-studio-direct.js";
@@ -77,6 +81,7 @@ import { crossCompanyInstructionRoutes } from "./routes/cross-company-instructio
 import { instanceSecurityRoutes } from "./routes/instance-security.js";
 import { crossCompanyAccessLogRoutes } from "./routes/cross-company-access-log.js";
 import { telegramBotRoutes } from "./routes/telegram-bots.js";
+import { telegramReactionRoutes } from "./routes/telegram-reactions.js";
 import { SPEECH_TRANSCRIBE_API_PATH, SPEECH_TRANSCRIBE_JSON_BODY_LIMIT, speechRoutes } from "./routes/speech.js";
 import { dataConnectionRoutes } from "./routes/data-connections.js";
 import { documentsDownloadRoutes } from "./routes/documents-download.js";
@@ -195,6 +200,7 @@ export async function createApp(
       }): Promise<unknown>;
     };
     databaseBackupService?: InstanceDatabaseBackupService;
+    databaseBackupDir?: string;
     deploymentMode: DeploymentMode;
     deploymentExposure: DeploymentExposure;
     allowedHostnames: string[];
@@ -325,6 +331,7 @@ export async function createApp(
   api.use(morningReportRoutes(db));
   api.use(mailSecretaryRoutes(db));
   api.use(mailAccountsRoutes(db));
+  api.use(modelDirectoryRoutes(db));
   api.use(emailSettingsRoutes(db));
   api.use(videoStorylineRoutes(db));
   api.use(mediaStudioDirectRoutes(db));
@@ -374,6 +381,7 @@ export async function createApp(
   api.use(instanceClaudeAuthRoutes(db));
   api.use(instanceServerAnthropicKeyRoutes(db));
   api.use(telegramBotRoutes(db));
+  api.use(telegramReactionRoutes(db));
   api.use(speechRoutes(db));
   // DUR-3972 S1: business-data sources. Off until enableBusinessData is on.
   api.use(dataConnectionRoutes(db));
@@ -383,6 +391,7 @@ export async function createApp(
   if (opts.databaseBackupService) {
     api.use(instanceDatabaseBackupRoutes(opts.databaseBackupService));
   }
+  api.use(instanceDiskHealthRoutes(createDiskHealthService({ backupDir: opts.databaseBackupDir ?? resolveDefaultBackupDir() })));
   const pluginRegistry = pluginRegistryService(db);
   const eventBus = createPluginEventBus();
   setPluginEventBus(eventBus);

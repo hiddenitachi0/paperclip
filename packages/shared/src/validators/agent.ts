@@ -52,7 +52,7 @@ const laneAProviderSlugSchema = z
  * entry of `adapterConfig.laneA.baseUrlByProvider`. Shared so the stash
  * cannot be used to smuggle in a value the live field itself would refuse.
  */
-const laneABaseUrlValueSchema = z
+export const laneABaseUrlValueSchema = z
   .string()
   .trim()
   .max(LANE_A_BASE_URL_MAX_LENGTH)

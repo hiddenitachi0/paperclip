@@ -197,6 +197,10 @@ DECLARE
     'company_speech_settings',
     'company_user_sidebar_preferences',
     'cost_events',
+    -- DUR-4462/DUR-4458 daily Fal/Sogni reconciliation. Created, granted on
+    -- and policed in 0219_cost_reconciliation.sql; listed here so the
+    -- login-role lists match the schema, as for the tables above.
+    'cost_reconciliation_runs',
     -- CRM. Created (and granted on) in 0199_crm_base.sql; listed here so the
     -- login-role lists match the schema, as for the tables above.
     'crm_activities',
@@ -287,6 +291,15 @@ DECLARE
     -- 0212_media_studio_direct_creations.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'media_studio_direct_creations',
+    -- DUR-4379. Created, granted on and policed in
+    -- 0216_model_directory_entries.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'model_directory_entries',
+    -- DUR-4344. Created, granted on and policed in
+    -- 0215_telegram_reaction_feedback.sql; listed here so the login-role
+    -- lists match the schema
+    'telegram_message_reactions',
+    'company_reaction_emoji_config',
     -- Morning report (migration 0183): the outbox row per day a report
     -- was generated. Created (and granted on) in 0183_morning_report.sql;
     -- listed here so the login-role lists match the schema, as for the
@@ -346,6 +359,10 @@ DECLARE
     'routines',
     'secret_access_events',
     'session',
+    -- DUR-4462 Sogni balance reconciliation snapshots. Created, granted on
+    -- and policed in 0219_cost_reconciliation.sql; company-scoped (company_id
+    -- is its primary key), so it is in both lists.
+    'sogni_balance_snapshots',
     -- Voice messages. Created (and granted on) in
     -- 0182_speech_voice_messages.sql; listed here so the login-role lists
     -- match the schema, as for the tables above.
@@ -471,6 +488,10 @@ DECLARE
     'company_speech_settings',
     'company_user_sidebar_preferences',
     'cost_events',
+    -- DUR-4462/DUR-4458 daily Fal/Sogni reconciliation. Created, granted on
+    -- and policed in 0219_cost_reconciliation.sql; listed here so the
+    -- login-role lists match the schema, as for the tables above.
+    'cost_reconciliation_runs',
     -- CRM. Created (and granted on) in 0199_crm_base.sql; listed here so the
     -- login-role lists match the schema, as for the tables above.
     'crm_activities',
@@ -548,6 +569,15 @@ DECLARE
     -- 0212_media_studio_direct_creations.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'media_studio_direct_creations',
+    -- DUR-4379. Created, granted on and policed in
+    -- 0216_model_directory_entries.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'model_directory_entries',
+    -- DUR-4344. Created, granted on and policed in
+    -- 0215_telegram_reaction_feedback.sql; listed here so the login-role
+    -- lists match the schema
+    'telegram_message_reactions',
+    'company_reaction_emoji_config',
     -- Morning report (migration 0183): the outbox row per day a report
     -- was generated. Created (and granted on) in 0183_morning_report.sql;
     -- listed here so the login-role lists match the schema, as for the
@@ -598,6 +628,10 @@ DECLARE
     'routine_triggers',
     'routines',
     'secret_access_events',
+    -- DUR-4462 Sogni balance reconciliation snapshots. Created, granted on
+    -- and policed in 0219_cost_reconciliation.sql; company-scoped (company_id
+    -- is its primary key), so it is in both lists.
+    'sogni_balance_snapshots',
     -- Voice messages. Created (and granted on) in
     -- 0182_speech_voice_messages.sql; listed here so the login-role lists
     -- match the schema, as for the tables above.
