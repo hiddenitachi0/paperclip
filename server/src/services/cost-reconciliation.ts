@@ -58,10 +58,18 @@ async function alreadyRan(db: Db, companyId: string, provider: string, day: stri
   return Boolean(row);
 }
 
-async function recordRun(db: Db, companyId: string, provider: string, day: string, status: string, mismatchCents: number) {
+async function recordRun(
+  db: Db,
+  companyId: string,
+  provider: string,
+  day: string,
+  status: string,
+  mismatchCents: number,
+  signed?: { mismatchMicroUsd: number; trackedMicroUsd: number },
+) {
   await db
     .insert(costReconciliationRuns)
-    .values({ companyId, provider, day, status, mismatchCents })
+    .values({ companyId, provider, day, status, mismatchCents, ...signed })
     .onConflictDoNothing();
 }
 
@@ -117,7 +125,10 @@ export async function runDailyCostReconciliation(db: Db, deps: CostReconciliatio
               await recordRun(db, companyId, "sogni", today, "baseline", 0);
               outcome.sogni = "baseline";
             } else {
-              await recordRun(db, companyId, "sogni", today, r.status, Math.round(Math.abs(r.deltaCredits) * creditPriceUsd * 100));
+              await recordRun(db, companyId, "sogni", today, r.status, Math.round(Math.abs(r.deltaCredits) * creditPriceUsd * 100), {
+                mismatchMicroUsd: r.deltaCredits * creditPriceUsd * 1_000_000,
+                trackedMicroUsd: r.recordedCredits * creditPriceUsd * 1_000_000,
+              });
               outcome.sogni = "reconciled";
             }
           }

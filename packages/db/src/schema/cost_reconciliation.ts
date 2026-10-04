@@ -13,6 +13,11 @@ import { companies } from "./companies.js";
  * Rollback: DROP TABLE "cost_reconciliation_runs", "sogni_balance_snapshots".
  * Nothing references them; the next daily run simply starts over (Sogni loses
  * its baseline and takes a new one).
+ *
+ * DUR-4458: mismatch_micro_usd/tracked_micro_usd (added in 0220) let the Costs
+ * page show Sogni's "tracked vs. provider says" check the same way Fal's is
+ * shown, without re-deriving it from cost_events. Rollback: drop the two
+ * columns; the owner-notice threshold (mismatch_cents) is unaffected.
  */
 export const costReconciliationRuns = pgTable(
   "cost_reconciliation_runs",
@@ -23,6 +28,10 @@ export const costReconciliationRuns = pgTable(
     day: text("day").notNull(),
     status: text("status").notNull(),
     mismatchCents: integer("mismatch_cents").notNull().default(0),
+    /** Signed mismatch (provider minus tracked) in micro-USD. Null when the run had nothing to compare (e.g. Sogni baseline). */
+    mismatchMicroUsd: doublePrecision("mismatch_micro_usd"),
+    /** What Paperclip had tracked for the period this run checked, in micro-USD. Null alongside mismatchMicroUsd. */
+    trackedMicroUsd: doublePrecision("tracked_micro_usd"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

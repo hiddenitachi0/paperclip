@@ -1,7 +1,7 @@
 import { and, desc, eq, gte, isNotNull, isNull, lt, lte, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "@paperclipai/db";
-import { activityLog, agents, companies, costEvents, heartbeatRuns, issues, projects } from "@paperclipai/db";
+import { activityLog, agents, companies, costEvents, costReconciliationRuns, heartbeatRuns, issues, projects } from "@paperclipai/db";
 import { notFound, unprocessable } from "../errors.js";
 import { budgetService, type BudgetServiceHooks } from "./budgets.js";
 import { effectiveMicroUsdExpr, sumCostCents, sumMicroUsd } from "./cost-sql.js";
@@ -398,6 +398,25 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         .where(and(...conditions));
       const tracked = Number(row?.trackedMicroUsd ?? 0);
       const correction = Number(row?.correctionMicroUsd ?? 0);
+
+      // Sogni has no cost_events correction row (a balance drop can't be
+      // attributed to a specific render), so its check is read off the daily
+      // reconciliation job's own run log instead.
+      const sogniConditions = [eq(costReconciliationRuns.companyId, companyId), eq(costReconciliationRuns.provider, "sogni")];
+      if (range?.from) sogniConditions.push(gte(costReconciliationRuns.createdAt, range.from));
+      if (range?.to) sogniConditions.push(lte(costReconciliationRuns.createdAt, range.to));
+      const [sogniRun] = await db
+        .select({
+          mismatchMicroUsd: costReconciliationRuns.mismatchMicroUsd,
+          trackedMicroUsd: costReconciliationRuns.trackedMicroUsd,
+        })
+        .from(costReconciliationRuns)
+        .where(and(...sogniConditions, sql`${costReconciliationRuns.status} in ('confirmed', 'mismatch')`))
+        .orderBy(desc(costReconciliationRuns.createdAt))
+        .limit(1);
+      const sogniTracked = sogniRun?.trackedMicroUsd ?? 0;
+      const sogniMismatch = sogniRun?.mismatchMicroUsd ?? 0;
+
       return [
         {
           provider: "fal",
@@ -405,6 +424,13 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
           trackedMicroUsd: tracked,
           providerSaysMicroUsd: tracked + correction,
           differenceMicroUsd: correction,
+        },
+        {
+          provider: "sogni",
+          checked: Boolean(sogniRun),
+          trackedMicroUsd: sogniTracked,
+          providerSaysMicroUsd: sogniTracked + sogniMismatch,
+          differenceMicroUsd: sogniMismatch,
         },
       ];
     },

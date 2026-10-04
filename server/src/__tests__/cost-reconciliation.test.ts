@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { budgetIncidents, budgetPolicies, companies, companySecrets, costEvents, costReconciliationRuns, createDb, sogniBalanceSnapshots } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { budgetService } from "../services/budgets.js";
+import { costService } from "../services/costs.js";
 import { runDailyCostReconciliation } from "../services/cost-reconciliation.js";
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -80,6 +81,10 @@ d("daily cost reconciliation (DUR-4462)", () => {
     expect(o1).toMatchObject({ fal: "reconciled", sogni: "reconciled" });
     expect(await db.select().from(budgetIncidents).where(eq(budgetIncidents.companyId, companyId))).toHaveLength(0);
     expect(quiet.resolveSecret).toHaveBeenCalledTimes(2);
+    // DUR-4458: the run row carries signed amounts so the Costs page can show
+    // "we tracked $X; Sogni says $Y" without re-deriving it from cost_events.
+    const [sogniRun] = await db.select().from(costReconciliationRuns).where(and(eq(costReconciliationRuns.companyId, companyId), eq(costReconciliationRuns.provider, "sogni")));
+    expect(sogniRun).toMatchObject({ status: "mismatch", trackedMicroUsd: 0, mismatchMicroUsd: 30_000 });
 
     // Re-run the same day: nothing is called again.
     const second = run(config, usage(5), balance("0"));
@@ -98,5 +103,14 @@ d("daily cost reconciliation (DUR-4462)", () => {
     // The policy summary observes the same figure (what the budgets page shows).
     const summary = await budgetService(db).upsertPolicy(companyId, { scopeType: "company", scopeId: companyId, metric: "cost_reconciliation_mismatch_cents", windowKind: "calendar_month_utc", amount: 1000, warnPercent: 80, hardStopEnabled: false, notifyEnabled: true, isActive: true }, null);
     expect(summary.observedAmount).toBe(90);
+
+    // DUR-4458: the Costs page reads both providers' checks off this run log.
+    // The Sogni balance held steady on day two (97 -> 97), so the latest run
+    // confirms with no mismatch -- day one's 30_000 micro-USD mismatch is history.
+    const checks = await costService(db).reconciliation(companyId);
+    expect(checks).toEqual([
+      expect.objectContaining({ provider: "fal", checked: true }),
+      expect.objectContaining({ provider: "sogni", checked: true, trackedMicroUsd: 0, differenceMicroUsd: 0, providerSaysMicroUsd: 0 }),
+    ]);
   });
 });

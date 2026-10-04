@@ -50,4 +50,17 @@ describe("CostSourceCard", () => {
     const el = render({ sources: [], reconciliation: [{ provider: "fal", checked: false, trackedMicroUsd: 0, providerSaysMicroUsd: 0, differenceMicroUsd: 0 }] });
     expect(el.textContent).toContain("Not checked yet");
   });
+
+  it("shows the Sogni balance check alongside Fal's", () => {
+    const el = render({
+      sources: [],
+      reconciliation: [
+        { provider: "fal", checked: true, trackedMicroUsd: 1_000_000, providerSaysMicroUsd: 1_000_000, differenceMicroUsd: 0 },
+        { provider: "sogni", checked: true, trackedMicroUsd: 0, providerSaysMicroUsd: 30_000, differenceMicroUsd: 30_000 },
+      ],
+    });
+    expect(el.querySelector('[data-testid="cost-check-fal"]')!.textContent).toContain("Matches");
+    const sogni = el.querySelector('[data-testid="cost-check-sogni"]')!;
+    expect(sogni.textContent).toContain("Differs by $0.03");
+  });
 });
