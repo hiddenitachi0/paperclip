@@ -1264,6 +1264,12 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
         async releaseMediaStudioDirectSpend(companyId, reservationId) {
           await callHost("billing.releaseMediaStudioDirectSpend", { companyId, reservationId });
         },
+        async settleMediaStudioDirectSpend(companyId, input) {
+          return callHost("billing.settleMediaStudioDirectSpend", { companyId, ...input });
+        },
+        async recordAgentMediaCost(companyId, input) {
+          return callHost("billing.recordAgentMediaCost", { companyId, ...input });
+        },
       },
 
       personas: {

@@ -1,5 +1,5 @@
 {
-  "id": "f699cb6d-226e-4f7b-b674-5ad7fbb8d130",
+  "id": "c9b7b3b2-3401-4fe1-8054-04e5108c73d4",
   "prevId": "d7ef1c51-0d92-4ada-9a5d-72f4fde20b89",
   "version": "7",
   "dialect": "postgresql",
@@ -998,18 +998,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "category": {
-          "name": "category",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "terms": {
-          "name": "terms",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -1128,7 +1116,7 @@
       "checkConstraints": {
         "agent_memories_source_check": {
           "name": "agent_memories_source_check",
-          "value": "\"agent_memories\".\"source\" IN ('agent', 'user', 'reaction')"
+          "value": "\"agent_memories\".\"source\" IN ('agent', 'user')"
         },
         "agent_memories_text_length_check": {
           "name": "agent_memories_text_length_check",
@@ -8452,6 +8440,18 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": true
+        },
+        "cost_micro_usd": {
+          "name": "cost_micro_usd",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "cost_source": {
+          "name": "cost_source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         },
         "occurred_at": {
           "name": "occurred_at",
@@ -34739,24 +34739,6 @@
         "picture_model": {
           "name": "picture_model",
           "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "follow_up_asked_at": {
-          "name": "follow_up_asked_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "follow_up_answer": {
-          "name": "follow_up_answer",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "follow_up_answered_at": {
-          "name": "follow_up_answered_at",
-          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },

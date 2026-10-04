@@ -2746,6 +2746,41 @@ export function buildHostServices(
         if (!event) return;
         await mediaStudioDirect.releaseReservation(companyId, params.reservationId);
       },
+      async settleMediaStudioDirectSpend(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        // Only a media-studio direct cost event of this company may be settled.
+        const [event] = await db
+          .select({ id: costEvents.id })
+          .from(costEvents)
+          .where(and(eq(costEvents.id, params.reservationId), eq(costEvents.companyId, companyId), eq(costEvents.billingCode, MEDIA_STUDIO_DIRECT_BILLING_CODE)));
+        if (!event) return { settled: false as const };
+        return mediaStudioDirect.settleSpend(companyId, params.reservationId, params.endpointId, params.usage);
+      },
+      async recordAgentMediaCost(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        // DUR-4457: runId is required and host-enforced; the agent is the
+        // run's own (resolved here, never plugin-supplied), so a plugin
+        // cannot bill another agent's budget.
+        if (!params.runId) throw new Error("runId is required");
+        const callingAgentId = await callingAgentIdForRun(companyId, params.runId);
+        if (!callingAgentId) throw new Error("Run not found in this company");
+        if (!["image", "video", "audio"].includes(params.kind)) throw new Error("Unknown media kind");
+        const usage = params.usage ?? {};
+        for (const value of [usage.images, usage.megapixels, usage.seconds, usage.units, params.credits ?? undefined]) {
+          if (value !== undefined && !(typeof value === "number" && Number.isFinite(value) && value >= 0)) throw new Error("usage values must be non-negative numbers");
+        }
+        return mediaStudioDirect.recordAgentMediaCost(companyId, {
+          agentId: callingAgentId,
+          kind: params.kind,
+          provider: params.provider,
+          model: params.model,
+          usage,
+          credits: params.credits ?? null,
+          issueId: params.issueId ?? null,
+        });
+      },
     },
 
     personas: {

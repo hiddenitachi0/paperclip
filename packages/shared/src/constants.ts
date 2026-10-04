@@ -933,7 +933,13 @@ export type BudgetScopeType = (typeof BUDGET_SCOPE_TYPES)[number];
 // handled by computeObservedAmount in server/src/services/budgets.ts;
 // server/src/__tests__/budgets-transform-metric.test.ts reads this array and
 // asserts exactly that, so a new metric cannot be added in one place only.
-export const BUDGET_METRICS = ["billed_cents", "total_tokens", "lane_a_transform_cents"] as const;
+/**
+ * DUR-4462: `cost_reconciliation_mismatch_cents` is not spend. Its observed
+ * amount is the largest Fal/Sogni day mismatch (in cents) the daily
+ * reconciliation recorded in the window; `amount` is the owner's alert
+ * threshold and `warnPercent` works as for any budget. Company scope only.
+ */
+export const BUDGET_METRICS = ["billed_cents", "total_tokens", "lane_a_transform_cents", "cost_reconciliation_mismatch_cents"] as const;
 export type BudgetMetric = (typeof BUDGET_METRICS)[number];
 
 /**
@@ -945,7 +951,7 @@ export type BudgetMetric = (typeof BUDGET_METRICS)[number];
  * the operator gets the same card — and the transform endpoint refuses with a
  * 429 until the budget is raised.
  */
-export const BUDGET_METRICS_WITHOUT_SCOPE_PAUSE = ["lane_a_transform_cents"] as const;
+export const BUDGET_METRICS_WITHOUT_SCOPE_PAUSE = ["lane_a_transform_cents", "cost_reconciliation_mismatch_cents"] as const;
 export type BudgetMetricWithoutScopePause = (typeof BUDGET_METRICS_WITHOUT_SCOPE_PAUSE)[number];
 
 export function budgetMetricPausesScope(metric: string): boolean {
