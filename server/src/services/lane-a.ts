@@ -29,6 +29,7 @@ import {
   LANE_A_TRANSFORM_MAX_CONCURRENCY,
   envBindingSchema,
   laneAProviderLabel,
+  localModelOfflineNotice,
   laneAProviderModelCostCents,
   laneACostCentsAtPricing,
   normalizeLaneAProvider,
@@ -67,6 +68,7 @@ import { openRouterCataloguePrice } from "./lane-a-openrouter-catalogue.js";
 import { logActivity } from "./activity-log.js";
 import { resolveAgentMcpToolLibraryServers } from "./mcp-tool-library.js";
 import { resolveBackupModelsThroughDirectory } from "./model-directory.js";
+import { classifyLocalFailure, modelHealthService } from "./model-health.js";
 import {
   buildLaneAActionClaimFallbackLine,
   buildLaneAActionClaimRetryNote,
@@ -3064,6 +3066,11 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     const attemptCostEvents: LaneAAttemptCostEvent[] = [];
     let turnFailed = false;
     let refusalModeEntered = false;
+    // DUR-4419: how the main model's own attempt ended, for the local-model
+    // health state and the once-per-outage offline reminder.
+    let mainAttemptAnswered = false;
+    let mainAttemptError: unknown = null;
+    let offlineNotice: string | null = null;
     let answeredByPoolId: string;
     let answeredBy: LaneAAnsweredBy;
     try {
@@ -3202,6 +3209,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
             return { outcome: "refusal", error: new Error(`lane A: reply text was a refusal (${textRefusal.rule})`) };
           }
           attemptRecords.push({ provider: entrySettings.provider, model: entryModel, outcome: "answered", durationMs, costCents, rule });
+          if (poolId === LANE_A_MAIN_POOL_ID) mainAttemptAnswered = true;
           return { outcome: "answered", value: { ...result, provider: entrySettings.provider, model: entryModel } };
         } catch (caught) {
           const durationMs = Date.now() - attemptStart;
@@ -3242,6 +3250,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
             costCents: failedCostCents,
             rule,
           });
+          if (poolId === LANE_A_MAIN_POOL_ID) mainAttemptError = err;
           return { outcome, error: err };
         }
       };
@@ -3251,6 +3260,35 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         refusalChain: routing.refusalChain,
         attempt: attemptPoolEntry,
       });
+      // DUR-4419: a local main model that answered clears any outage; one that
+      // could not be reached tells the person ONCE per outage (the notice
+      // rides the same reply path the person is already reading, chat or
+      // Telegram) and every later failed message in that outage stays quiet.
+      if (chatSettings.provider === "local" && chatSettings.baseUrl && (mainAttemptAnswered || mainAttemptError)) {
+        try {
+          const failure = mainAttemptAnswered ? null : classifyLocalFailure(mainAttemptError);
+          if (mainAttemptAnswered || failure) {
+            const { notify } = await modelHealthService(db).noteLocalAttempt({
+              companyId: params.companyId,
+              baseUrl: chatSettings.baseUrl,
+              model: chatModel,
+              outcome: failure ?? "ok",
+            });
+            if (notify) {
+              offlineNotice = localModelOfflineNotice({
+                agentName: personaIdentity?.displayName?.trim() || params.targetAgent.name,
+                backupModel: loopResult.ok ? loopResult.value.model : null,
+              });
+            }
+          }
+        } catch (healthErr) {
+          // Health bookkeeping must never break a chat turn.
+          logger.warn({ err: healthErr }, "lane A: could not record local model health");
+        }
+      }
+      if (!loopResult.ok && offlineNotice) {
+        throw new HttpError(503, offlineNotice, {});
+      }
       if (!loopResult.ok) {
         const httpErr = providerErrorToHttp(loopResult.error, "chat");
         throw httpErr instanceof HttpError ? httpErr : new HttpError(502, `Lane A model call failed: ${String((httpErr as Error)?.message ?? httpErr)}`, {});
@@ -3388,7 +3426,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
 
     return {
       conversationId: updated!.id,
-      response: text,
+      response: offlineNotice ? `${offlineNotice}\n\n${text}` : text,
       messageId: assistantMessageId,
       turnCount: updated!.turnCount,
       stopReason,
