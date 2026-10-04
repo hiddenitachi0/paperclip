@@ -22,6 +22,7 @@ import {
   logActivity,
 } from "../services/index.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
+import { FAL_RECONCILIATION_CODE_PREFIX } from "../services/costs.js";
 import { fetchAllQuotaWindows } from "../services/quota-windows.js";
 import { badRequest, notFound } from "../errors.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
@@ -132,8 +133,28 @@ export function costRoutes(
       return;
     }
 
+    // DUR-4503: billingCode prefixed "fal-reconciliation:" marks a row as a
+    // server-side reconciliation correction (excluded from tracked spend and
+    // counted as "checked against provider"). Only the reconciliation job may
+    // claim that -- an agent self-reporting a cost must not be able to forge it.
+    if (
+      req.actor.type === "agent" &&
+      typeof req.body.billingCode === "string" &&
+      req.body.billingCode.startsWith(`${FAL_RECONCILIATION_CODE_PREFIX}:`)
+    ) {
+      res.status(403).json({ error: "Agent cannot report a reconciliation billing code" });
+      return;
+    }
+
+    // DUR-4452: an agent self-reporting its own cost figure must never be able to
+    // tag it "provider" (or any other verified source) -- only server-side
+    // pricing/reconciliation code earns that label. Self-reports are always an
+    // estimate regardless of what the request body claims.
+    const costSource = req.actor.type === "agent" ? null : req.body.costSource;
+
     const event = await costs.createEvent(companyId, {
       ...req.body,
+      costSource,
       occurredAt: new Date(req.body.occurredAt),
     });
 
@@ -218,6 +239,21 @@ export function costRoutes(
     const excludeRoot = req.query.excludeRoot === "true" || req.query.excludeRoot === "1";
     const summary = await costs.issueTreeSummary(issue.companyId, issue.id, { excludeRoot });
     res.json(summary);
+    },
+  );
+
+  router.get(
+    "/companies/:companyId/costs/by-source",
+    companyScopeFromParam(rawDb, assertCompanyAccess),
+    async (req, res) => {
+    const companyId = req.params.companyId as string;
+    if (!(await assertCompanyCostReadAllowed(req, res, companyId))) return;
+    const range = parseCostDateRange(req.query);
+    const [sources, reconciliation] = await Promise.all([
+      costs.bySource(companyId, range),
+      costs.reconciliation(companyId, range),
+    ]);
+    res.json({ sources, reconciliation });
     },
   );
 

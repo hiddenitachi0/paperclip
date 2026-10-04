@@ -1,10 +1,13 @@
 import { and, desc, eq, gte, isNotNull, isNull, lt, lte, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "@paperclipai/db";
-import { activityLog, agents, companies, costEvents, heartbeatRuns, issues, projects } from "@paperclipai/db";
+import { activityLog, agents, companies, costEvents, costReconciliationRuns, heartbeatRuns, issues, projects } from "@paperclipai/db";
 import { notFound, unprocessable } from "../errors.js";
 import { budgetService, type BudgetServiceHooks } from "./budgets.js";
+import { effectiveMicroUsdExpr, sumCostCents, sumMicroUsd } from "./cost-sql.js";
 import { escalationGrantService } from "./escalation-grants.js";
+
+export const FAL_RECONCILIATION_CODE_PREFIX = "fal-reconciliation";
 
 export interface CostDateRange {
   from?: Date;
@@ -14,7 +17,7 @@ export interface CostDateRange {
 const METERED_BILLING_TYPE = "metered_api";
 const SUBSCRIPTION_BILLING_TYPES = ["subscription_included", "subscription_overage"] as const;
 
-function sumAsNumber(column: typeof costEvents.costCents | typeof costEvents.inputTokens | typeof costEvents.cachedInputTokens | typeof costEvents.outputTokens) {
+function sumAsNumber(column: typeof costEvents.inputTokens | typeof costEvents.cachedInputTokens | typeof costEvents.outputTokens) {
   return sql<number>`coalesce(sum(${column}), 0)::double precision`;
 }
 
@@ -42,11 +45,12 @@ async function getMonthlySpendTotal(
   }
   const [row] = await db
     .select({
-      total: sumAsNumber(costEvents.costCents),
+      total: sumCostCents(),
     })
     .from(costEvents)
     .where(and(...conditions));
-  return Number(row?.total ?? 0);
+  // agents/companies.spentMonthlyCents are integer columns; keep them whole cents.
+  return Math.round(Number(row?.total ?? 0));
 }
 
 export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
@@ -127,9 +131,10 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
       if (range?.from) conditions.push(gte(costEvents.occurredAt, range.from));
       if (range?.to) conditions.push(lte(costEvents.occurredAt, range.to));
 
-      const [{ total }] = await db
+      const [{ total, totalMicroUsd }] = await db
         .select({
-          total: sumAsNumber(costEvents.costCents),
+          total: sumCostCents(),
+          totalMicroUsd: sumMicroUsd(),
         })
         .from(costEvents)
         .where(and(...conditions));
@@ -143,6 +148,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
       return {
         companyId,
         spendCents,
+        spendMicroUsd: Number(totalMicroUsd),
         budgetCents: company.budgetMonthlyCents,
         utilizationPercent: Number(utilization.toFixed(2)),
       };
@@ -242,7 +248,8 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         db
           .select({
             issueCount: sql<number>`count(distinct ${issues.id})::int`,
-            costCents: sumAsNumber(costEvents.costCents),
+            costCents: sumCostCents(),
+            costMicroUsd: sumMicroUsd(),
             inputTokens: sumAsNumber(costEvents.inputTokens),
             cachedInputTokens: sumAsNumber(costEvents.cachedInputTokens),
             outputTokens: sumAsNumber(costEvents.outputTokens),
@@ -275,6 +282,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         issueCount: Number(costRow?.issueCount ?? 0),
         includeDescendants: true,
         costCents: Number(costRow?.costCents ?? 0),
+        costMicroUsd: Number(costRow?.costMicroUsd ?? 0),
         inputTokens: Number(costRow?.inputTokens ?? 0),
         cachedInputTokens: Number(costRow?.cachedInputTokens ?? 0),
         outputTokens: Number(costRow?.outputTokens ?? 0),
@@ -293,7 +301,8 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
           agentId: costEvents.agentId,
           agentName: agents.name,
           agentStatus: agents.status,
-          costCents: sumAsNumber(costEvents.costCents),
+          costCents: sumCostCents(),
+          costMicroUsd: sumMicroUsd(),
           inputTokens: sumAsNumber(costEvents.inputTokens),
           cachedInputTokens: sumAsNumber(costEvents.cachedInputTokens),
           outputTokens: sumAsNumber(costEvents.outputTokens),
@@ -312,7 +321,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         .leftJoin(agents, eq(costEvents.agentId, agents.id))
         .where(and(...conditions))
         .groupBy(costEvents.agentId, agents.name, agents.status)
-        .orderBy(desc(sumAsNumber(costEvents.costCents)));
+        .orderBy(desc(sumCostCents()));
     },
 
     byProvider: async (companyId: string, range?: CostDateRange) => {
@@ -326,7 +335,8 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
           biller: costEvents.biller,
           billingType: costEvents.billingType,
           model: costEvents.model,
-          costCents: sumAsNumber(costEvents.costCents),
+          costCents: sumCostCents(),
+          costMicroUsd: sumMicroUsd(),
           inputTokens: sumAsNumber(costEvents.inputTokens),
           cachedInputTokens: sumAsNumber(costEvents.cachedInputTokens),
           outputTokens: sumAsNumber(costEvents.outputTokens),
@@ -344,7 +354,85 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         .from(costEvents)
         .where(and(...conditions))
         .groupBy(costEvents.provider, costEvents.biller, costEvents.billingType, costEvents.model)
-        .orderBy(desc(sumAsNumber(costEvents.costCents)));
+        .orderBy(desc(sumCostCents()));
+    },
+
+    /**
+     * Per-provider spend split by how trustworthy the figure is. Rows with no
+     * cost_source (older rows) count as "estimate".
+     */
+    bySource: async (companyId: string, range?: CostDateRange) => {
+      const conditions: ReturnType<typeof eq>[] = [eq(costEvents.companyId, companyId)];
+      if (range?.from) conditions.push(gte(costEvents.occurredAt, range.from));
+      if (range?.to) conditions.push(lte(costEvents.occurredAt, range.to));
+      return db
+        .select({
+          provider: costEvents.provider,
+          costSource: sql<string>`coalesce(${costEvents.costSource}, 'estimate')`,
+          costMicroUsd: sumMicroUsd(),
+          eventCount: sql<number>`count(*)::int`,
+        })
+        .from(costEvents)
+        .where(and(...conditions))
+        .groupBy(costEvents.provider, sql`coalesce(${costEvents.costSource}, 'estimate')`)
+        .orderBy(desc(sumMicroUsd()));
+    },
+
+    /**
+     * "Paperclip tracked vs. provider says" for Fal: the daily Fal check leaves
+     * a correction row per mismatching day, so the provider's own figure is
+     * tracked spend plus those corrections.
+     */
+    reconciliation: async (companyId: string, range?: CostDateRange) => {
+      const conditions: ReturnType<typeof eq>[] = [eq(costEvents.companyId, companyId), eq(costEvents.provider, "fal")];
+      if (range?.from) conditions.push(gte(costEvents.occurredAt, range.from));
+      if (range?.to) conditions.push(lte(costEvents.occurredAt, range.to));
+      const isCorrection = sql`${costEvents.billingCode} like ${FAL_RECONCILIATION_CODE_PREFIX + ":%"}`;
+      const [row] = await db
+        .select({
+          trackedMicroUsd: sql<number>`coalesce(sum(case when ${isCorrection} then 0 else ${effectiveMicroUsdExpr} end), 0)::double precision`,
+          correctionMicroUsd: sql<number>`coalesce(sum(case when ${isCorrection} then ${effectiveMicroUsdExpr} else 0 end), 0)::double precision`,
+          checkedCount: sql<number>`count(*) filter (where ${isCorrection} or ${costEvents.costSource} = 'provider')::int`,
+        })
+        .from(costEvents)
+        .where(and(...conditions));
+      const tracked = Number(row?.trackedMicroUsd ?? 0);
+      const correction = Number(row?.correctionMicroUsd ?? 0);
+
+      // Sogni has no cost_events correction row (a balance drop can't be
+      // attributed to a specific render), so its check is read off the daily
+      // reconciliation job's own run log instead.
+      const sogniConditions = [eq(costReconciliationRuns.companyId, companyId), eq(costReconciliationRuns.provider, "sogni")];
+      if (range?.from) sogniConditions.push(gte(costReconciliationRuns.createdAt, range.from));
+      if (range?.to) sogniConditions.push(lte(costReconciliationRuns.createdAt, range.to));
+      const [sogniRun] = await db
+        .select({
+          mismatchMicroUsd: costReconciliationRuns.mismatchMicroUsd,
+          trackedMicroUsd: costReconciliationRuns.trackedMicroUsd,
+        })
+        .from(costReconciliationRuns)
+        .where(and(...sogniConditions, sql`${costReconciliationRuns.status} in ('confirmed', 'mismatch')`))
+        .orderBy(desc(costReconciliationRuns.createdAt))
+        .limit(1);
+      const sogniTracked = sogniRun?.trackedMicroUsd ?? 0;
+      const sogniMismatch = sogniRun?.mismatchMicroUsd ?? 0;
+
+      return [
+        {
+          provider: "fal",
+          checked: Number(row?.checkedCount ?? 0) > 0,
+          trackedMicroUsd: tracked,
+          providerSaysMicroUsd: tracked + correction,
+          differenceMicroUsd: correction,
+        },
+        {
+          provider: "sogni",
+          checked: Boolean(sogniRun),
+          trackedMicroUsd: sogniTracked,
+          providerSaysMicroUsd: sogniTracked + sogniMismatch,
+          differenceMicroUsd: sogniMismatch,
+        },
+      ];
     },
 
     byBiller: async (companyId: string, range?: CostDateRange) => {
@@ -355,7 +443,8 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
       return db
         .select({
           biller: costEvents.biller,
-          costCents: sumAsNumber(costEvents.costCents),
+          costCents: sumCostCents(),
+          costMicroUsd: sumMicroUsd(),
           inputTokens: sumAsNumber(costEvents.inputTokens),
           cachedInputTokens: sumAsNumber(costEvents.cachedInputTokens),
           outputTokens: sumAsNumber(costEvents.outputTokens),
@@ -375,7 +464,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         .from(costEvents)
         .where(and(...conditions))
         .groupBy(costEvents.biller)
-        .orderBy(desc(sumAsNumber(costEvents.costCents)));
+        .orderBy(desc(sumCostCents()));
     },
 
     /**
@@ -397,7 +486,8 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
             .select({
               provider: costEvents.provider,
               biller: sql<string>`case when count(distinct ${costEvents.biller}) = 1 then min(${costEvents.biller}) else 'mixed' end`,
-              costCents: sumAsNumber(costEvents.costCents),
+              costCents: sumCostCents(),
+            costMicroUsd: sumMicroUsd(),
               inputTokens: sumAsNumber(costEvents.inputTokens),
               cachedInputTokens: sumAsNumber(costEvents.cachedInputTokens),
               outputTokens: sumAsNumber(costEvents.outputTokens),
@@ -410,7 +500,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
               ),
             )
             .groupBy(costEvents.provider)
-            .orderBy(desc(sumAsNumber(costEvents.costCents)));
+            .orderBy(desc(sumCostCents()));
 
           return rows.map((row) => ({
             provider: row.provider,
@@ -418,6 +508,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
             window: label as string,
             windowHours: hours,
             costCents: row.costCents,
+            costMicroUsd: row.costMicroUsd,
             inputTokens: row.inputTokens,
             cachedInputTokens: row.cachedInputTokens,
             outputTokens: row.outputTokens,
@@ -445,7 +536,8 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
           biller: costEvents.biller,
           billingType: costEvents.billingType,
           model: costEvents.model,
-          costCents: sumAsNumber(costEvents.costCents),
+          costCents: sumCostCents(),
+          costMicroUsd: sumMicroUsd(),
           inputTokens: sumAsNumber(costEvents.inputTokens),
           cachedInputTokens: sumAsNumber(costEvents.cachedInputTokens),
           outputTokens: sumAsNumber(costEvents.outputTokens),
@@ -495,13 +587,14 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
       if (range?.from) conditions.push(gte(costEvents.occurredAt, range.from));
       if (range?.to) conditions.push(lte(costEvents.occurredAt, range.to));
 
-      const costCentsExpr = sumAsNumber(costEvents.costCents);
+      const costCentsExpr = sumCostCents();
 
       return db
         .select({
           projectId: effectiveProjectId,
           projectName: projects.name,
           costCents: costCentsExpr,
+          costMicroUsd: sumMicroUsd(),
           inputTokens: sumAsNumber(costEvents.inputTokens),
           cachedInputTokens: sumAsNumber(costEvents.cachedInputTokens),
           outputTokens: sumAsNumber(costEvents.outputTokens),

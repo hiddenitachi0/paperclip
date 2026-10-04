@@ -452,8 +452,8 @@ export function FeedCard({
   // approval to learn why.
   const decisionNote = readActivityDecisionNote(event.action, details);
 
-  const mutedTextBase = isMuted ? "text-muted-foreground/70" : "text-[#959596]";
-  const mutedTextHover = isMuted ? "" : "group-hover:text-white";
+  const mutedTextBase = isMuted ? "text-muted-foreground/70" : "text-muted-foreground";
+  const mutedTextHover = isMuted ? "" : "group-hover:text-foreground";
 
   const card = (
     <div

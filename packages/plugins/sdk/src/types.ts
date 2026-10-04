@@ -53,6 +53,9 @@ import type {
   PluginCompanyFileContent,
   PluginPerformActionContext,
   PluginPersonaGenerationCapReservation,
+  PluginMediaStudioDirectSpendReservation,
+  PluginMediaStudioDirectSpendSettlement,
+  PluginAgentMediaCostRecording,
 } from "./protocol.js";
 
 // ---------------------------------------------------------------------------
@@ -1831,6 +1834,63 @@ export interface PluginPersonasClient {
 }
 
 /**
+ * `ctx.billing` — reserve spend against the same company budget and shared
+ * Media Studio cap the Create tab uses (DUR-4441). Requires
+ * `billing.media_studio_direct.reserve`.
+ *
+ * The host decides whether the person may override the shared cap by
+ * checking `userId` against real company membership; the plugin cannot
+ * assert admin status.
+ */
+export interface PluginBillingClient {
+  /** Reserve (and record) spend before a paid call. A refusal is `{ allowed: false, message }`, not an exception. */
+  reserveMediaStudioDirectSpend(
+    companyId: string,
+    input: {
+      userId: string;
+      /** The paid edit: "segment" | "inpaint" | "remove-background" | "upscale" | "restore" | "variation" | "prompt-edit". The host sets the price. */
+      action: string;
+      confirmBudgetCapCents?: number;
+    },
+  ): Promise<PluginMediaStudioDirectSpendReservation>;
+  /** Give back a reservation whose paid call failed. */
+  releaseMediaStudioDirectSpend(companyId: string, reservationId: string): Promise<void>;
+  /**
+   * Replace a paid edit's reservation estimate with Fal's actual per-unit
+   * price for the endpoint used (DUR-4455). The host prices it itself from
+   * Fal's published pricing; the plugin only reports which endpoint ran and
+   * what it consumed. `settled: false` (pricing unavailable) leaves the
+   * reservation's estimate standing.
+   */
+  settleMediaStudioDirectSpend(
+    companyId: string,
+    input: { reservationId: string; endpointId: string; usage: { images?: number; megapixels?: number; seconds?: number; units?: number } },
+  ): Promise<PluginMediaStudioDirectSpendSettlement>;
+
+  /**
+   * DUR-4457: record the cost of a picture/video/audio an AGENT just made
+   * through a tool, against that agent (its monthly budget) and Media
+   * Studio's shared cap. `runId` is the invoking tool call's run id; the
+   * host resolves the agent from it. The host prices the call itself
+   * (Fal published per-unit price, Sogni credits x the configured credit
+   * price). Providers that cost nothing (mock, local ComfyUI) record nothing.
+   * Never throws for a pricing problem -- check `recorded`.
+   */
+  recordAgentMediaCost(
+    companyId: string,
+    input: {
+      runId: string;
+      kind: "image" | "video" | "audio";
+      provider: string;
+      model: string;
+      usage?: { images?: number; megapixels?: number; seconds?: number; units?: number };
+      credits?: number | null;
+      issueId?: string | null;
+    },
+  ): Promise<PluginAgentMediaCostRecording>;
+}
+
+/**
  * `ctx.files` — company files that are not tied to a task (they show in the
  * Files page's "No task" group), and read access to a company's files by id.
  *
@@ -2015,6 +2075,9 @@ export interface PluginContext {
 
   /** Persona-scoped enforcement helpers. Requires `personas.generation_cap.enforce`. */
   personas: PluginPersonasClient;
+
+  /** Spend reservation against the company budget and shared Media Studio cap. Requires `billing.media_studio_direct.reserve`. */
+  billing: PluginBillingClient;
 
   /** Company files not tied to a task. Requires `company.files.create` / `company.files.read`. */
   files: PluginFilesClient;

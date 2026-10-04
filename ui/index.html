@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="theme-color" content="#18181b" />
+    <meta name="theme-color" content="#16191c" />
     <meta name="apple-mobile-web-app-title" content="Paperclip" />
     <title>Paperclip</title>
     <!-- PAPERCLIP_RUNTIME_BRANDING_START -->
@@ -18,16 +18,21 @@
     <link rel="manifest" href="/site.webmanifest" />
     <script>
       (() => {
+        // Runs before the app paints so the first frame already carries the
+        // right theme. Mirrors ThemeContext.tsx: a stored "light" / "dark" is
+        // explicit; "system" (or nothing stored — the default for a new
+        // browser) follows the OS prefers-color-scheme setting. Keep the two
+        // colours in sync with --background in src/index.css.
         const key = "paperclip.theme";
-        const darkThemeColor = "#18181b";
-        const lightThemeColor = "#ffffff";
+        const darkThemeColor = "#16191c";
+        const lightThemeColor = "#f3f5f8";
         try {
           const stored = window.localStorage.getItem(key);
           const prefersDark =
             typeof window.matchMedia === "function" &&
             window.matchMedia("(prefers-color-scheme: dark)").matches;
-          const fallback = prefersDark ? "dark" : "light";
-          const theme = stored === "light" || stored === "dark" ? stored : fallback;
+          const systemTheme = prefersDark ? "dark" : "light";
+          const theme = stored === "light" || stored === "dark" ? stored : systemTheme;
           const isDark = theme === "dark";
           document.documentElement.classList.toggle("dark", isDark);
           document.documentElement.style.colorScheme = isDark ? "dark" : "light";

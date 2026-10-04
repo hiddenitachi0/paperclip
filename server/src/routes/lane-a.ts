@@ -4,7 +4,14 @@ import type { Db } from "@paperclipai/db";
 import { laneATransformSchema, sendLaneAMessageSchema } from "@paperclipai/shared";
 import { badRequest, unauthorized } from "../errors.js";
 import { validate } from "../middleware/validate.js";
-import { agentService, laneAService } from "../services/index.js";
+import { agentService, laneAService, secretService } from "../services/index.js";
+import {
+  HuggingFaceError,
+  filterHuggingFaceModels,
+  getHuggingFaceCatalogue,
+  type HuggingFaceFetch,
+} from "../services/huggingface-catalogue.js";
+import { HttpError } from "../errors.js";
 import type { LaneAServiceOptions } from "../services/lane-a.js";
 import { LANE_A_CONTINUE_SPEC_MAX_LENGTH } from "../services/lane-a-continue.js";
 import { redactKnownLeakedSecretPatterns, redactSensitiveText } from "../redaction.js";
@@ -52,7 +59,7 @@ function resolveTransformCompanyId(req: Parameters<typeof getActorInfo>[0]): str
   return parsed.data.companyId;
 }
 
-export function laneARoutes(db: Db, options: { laneA?: LaneAServiceOptions } = {}) {
+export function laneARoutes(db: Db, options: { laneA?: LaneAServiceOptions; huggingFaceFetch?: HuggingFaceFetch } = {}) {
   const router = Router();
   const agents = agentService(db);
   const laneA = laneAService(db, options.laneA);
@@ -63,6 +70,44 @@ export function laneARoutes(db: Db, options: { laneA?: LaneAServiceOptions } = {
       ? { userId: null, agentId: actor.agentId }
       : { userId: actor.actorId, agentId: null };
   }
+
+  /**
+   * DUR-4447: the Hugging Face model list for the picker. Board-only and
+   * company-scoped: it is fetched with the company's own stored token (never
+   * returned, never logged) and cached in-process for about an hour. Shape per
+   * model: providers[] of {provider, status, supportsTools,
+   * supportsStructuredOutput, contextLength, inputUsdPerMillion,
+   * outputUsdPerMillion, firstTokenLatencyMs, throughput}. ?toolsOnly=true
+   * keeps only tool-capable hosts; ?liveOnly=true only live ones.
+   */
+  router.get("/companies/:companyId/lane-a/huggingface/models", async (req, res) => {
+    assertBoard(req);
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const token = await secretService(db).resolveHuggingFaceToken(companyId, {
+      consumerType: "system",
+      consumerId: "huggingface-model-list",
+    });
+    if (!token) {
+      throw new HttpError(409, "Add a Hugging Face token under Connections first.", { code: "huggingface_token_missing" });
+    }
+    try {
+      const models = await getHuggingFaceCatalogue(token, options.huggingFaceFetch ? { fetchImpl: options.huggingFaceFetch } : {});
+      res.json({
+        models: filterHuggingFaceModels(models, {
+          toolsOnly: req.query.toolsOnly === "true",
+          liveOnly: req.query.liveOnly === "true",
+        }),
+      });
+    } catch (err) {
+      if (err instanceof HuggingFaceError) {
+        throw new HttpError(err.reason === "rejected" ? 422 : 503, err.message, {
+          code: err.reason === "rejected" ? "huggingface_token_rejected" : "huggingface_unreachable",
+        });
+      }
+      throw err;
+    }
+  });
 
   router.post("/lane-a/:agentId/messages", validate(sendLaneAMessageSchema), async (req, res) => {
     const targetAgentId = req.params.agentId as string;

@@ -39,6 +39,7 @@ import {
   type AgentSecretBindingActor,
 } from "./agent-secret-bindings.js";
 import { collectMcpToolLibrarySecretRefs } from "./mcp-tool-library.js";
+import { sumCostCents } from "./cost-sql.js";
 import { normalizeAgentPermissions } from "./agent-permissions.js";
 import { REDACTED_EVENT_VALUE, sanitizeRecord } from "../redaction.js";
 import { secretService } from "./secrets.js";
@@ -348,7 +349,7 @@ export function agentService(db: Db, options: AgentServiceOptions = {}) {
     const rows = await db
       .select({
         agentId: costEvents.agentId,
-        spentMonthlyCents: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::double precision`,
+        spentMonthlyCents: sumCostCents(),
       })
       .from(costEvents)
       .where(
