@@ -308,6 +308,12 @@ DECLARE
     -- DUR-4040. Created (and granted on) in 0186_payment_cards.sql; listed
     -- here so the login-role lists match the schema, as for the tables above.
     'payment_cards',
+    -- DUR-4072. Created, granted on and policed in 0222_report_scripts.sql;
+    -- listed here so the login-role lists match the schema.
+    'report_fixtures',
+    'report_script_runs',
+    'report_script_versions',
+    'report_scripts',
     -- DUR-4037. Created (and granted on) in 0187_payment_notices_and_settings.sql;
     -- listed here so the login-role lists match the schema, as for the tables above.
     'payment_notices',
@@ -586,6 +592,12 @@ DECLARE
     -- DUR-4040. Created (and granted on) in 0186_payment_cards.sql; listed
     -- here so the login-role lists match the schema, as for the tables above.
     'payment_cards',
+    -- DUR-4072. Created, granted on and policed in 0222_report_scripts.sql;
+    -- listed here so the login-role lists match the schema.
+    'report_fixtures',
+    'report_script_runs',
+    'report_script_versions',
+    'report_scripts',
     -- DUR-4037. Created (and granted on) in 0187_payment_notices_and_settings.sql;
     -- listed here so the login-role lists match the schema, as for the tables above.
     'payment_notices',

@@ -339,7 +339,7 @@ export function reportScriptsService(db: Db, deps: ReportScriptsServiceDeps = {}
         status,
         durationMs: outcome.durationMs,
         error,
-        fixtureResult,
+        fixtureResult: fixtureResult as unknown as Record<string, unknown> | null,
         requestedByAgentId: actor.agentId ?? null,
         requestedByUserId: actor.userId ?? null,
         requestedByRunId: actor.runId ?? null,
