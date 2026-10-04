@@ -111,6 +111,7 @@ import {
 import { initTelemetry, getTelemetryClient } from "./telemetry.js";
 import { waitForInFlightRunsToDrain } from "./shutdown-drain.js";
 import { startHeartbeatRunRetention } from "./services/heartbeat-run-retention.js";
+import { startWorktreeCleanup } from "./services/worktree-cleanup.js";
 import { startCrossCompanyAccessLogRetention } from "./services/cross-company-access-log-retention.js";
 import { conflict } from "./errors.js";
 import {
@@ -2043,6 +2044,14 @@ export async function startServer(): Promise<StartedServer> {
       config.heartbeatRunRetentionIntervalMinutes * 60 * 1000,
       config.heartbeatRunRetentionDays,
     );
+  }
+
+  // DUR-4497: daily removal of finished-task agent worktrees (fail-closed;
+  // see worktree-cleanup.ts). On by default; PAPERCLIP_WORKTREE_CLEANUP_ENABLED=false
+  // is the kill switch.
+  if (process.env.PAPERCLIP_WORKTREE_CLEANUP_ENABLED !== "false") {
+    logger.info("Finished-task worktree cleanup enabled");
+    startWorktreeCleanup(db);
   }
 
   // DUR-386: bound cross_company_access_log the same way. Bypass-scoped

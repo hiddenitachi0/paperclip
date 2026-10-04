@@ -145,6 +145,7 @@ export function companyService(db: Db, rawDb: Db = db) {
     feedbackDataSharingConsentByUserId: companies.feedbackDataSharingConsentByUserId,
     feedbackDataSharingTermsVersion: companies.feedbackDataSharingTermsVersion,
     brandColor: companies.brandColor,
+    worktreeCleanupRetentionDays: companies.worktreeCleanupRetentionDays,
     logoAssetId: companyLogos.assetId,
     createdAt: companies.createdAt,
     updatedAt: companies.updatedAt,
