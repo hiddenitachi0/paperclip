@@ -84,6 +84,7 @@ import { telegramBotRoutes } from "./routes/telegram-bots.js";
 import { telegramReactionRoutes } from "./routes/telegram-reactions.js";
 import { SPEECH_TRANSCRIBE_API_PATH, SPEECH_TRANSCRIBE_JSON_BODY_LIMIT, speechRoutes } from "./routes/speech.js";
 import { dataConnectionRoutes } from "./routes/data-connections.js";
+import { reportScriptRoutes } from "./routes/report-scripts.js";
 import { documentsDownloadRoutes } from "./routes/documents-download.js";
 import { openApiRoutes } from "./routes/openapi.js";
 import {
@@ -385,6 +386,7 @@ export async function createApp(
   api.use(speechRoutes(db));
   // DUR-3972 S1: business-data sources. Off until enableBusinessData is on.
   api.use(dataConnectionRoutes(db));
+  api.use(reportScriptRoutes(db));
   api.use(documentsDownloadRoutes(db));
   api.use(instanceSecurityRoutes(db, { checkIntervalMinutes: opts.adminAuthCheckIntervalMinutes ?? 0 }));
   api.use(crossCompanyAccessLogRoutes(db));
