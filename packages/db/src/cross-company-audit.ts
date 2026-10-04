@@ -67,6 +67,7 @@ export const ROUTINE_SCHEDULER_BYPASS_ROUTES = [
   "heartbeat-scheduler:issueThreadInteractionsAbandonment",
   "heartbeat-scheduler:modelBoostBossReviewTimeouts",
   "heartbeat-scheduler:environmentCustomImagesCleanup",
+  "heartbeat-scheduler:issueOverlapDetection",
   "heartbeat-scheduler:periodicRecoveryPipeline",
   "heartbeat-scheduler:organizationCheckups",
   "heartbeat-scheduler:adminAuthCheck",
