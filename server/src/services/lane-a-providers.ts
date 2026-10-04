@@ -111,7 +111,12 @@ export type LaneAStop = "end_turn" | "tool_use" | "max_tokens" | "other";
 export interface LaneACompletion {
   text: string;
   toolCalls: LaneAToolCall[];
-  usage: { inputTokens: number; outputTokens: number };
+  /**
+   * `costUsd` is the provider's OWN billed cost for the call (OpenRouter's
+   * `usage.cost`, in USD), or null/absent when the provider did not say.
+   * Zero is a real answer (a free model) and is kept as 0.
+   */
+  usage: { inputTokens: number; outputTokens: number; costUsd?: number | null };
   stop: LaneAStop;
   /** The provider's own stop reason, kept for the `stopReason` field the routes already return. */
   stopReason: string | null;
@@ -245,12 +250,12 @@ export function resolveLaneABaseUrl(provider: unknown, baseUrl: string | null | 
 
 /**
  * DUR-4347: a local model's address (Ollama, LM Studio, a Tailscale box that
- * may be asleep) gets a much shorter connect timeout than the 120s every
- * other provider uses, specifically so a fallback loop in lane-a.ts moves on
- * to the next pool entry quickly instead of making the person wait two
- * minutes to find out the main model's box is off. Per-attempt, not global:
- * each call to createLaneAProviderClient/the fallback loop may still override
- * it via `timeoutMs`.
+ * may be asleep) is checked for reachability first, within this short limit,
+ * so a fallback loop in lane-a.ts moves on to the next pool entry quickly
+ * instead of making the person wait two minutes to find out the main model's
+ * box is off. It bounds only that check: the answer itself gets the normal
+ * limit, because a local model that is loading or writing a long reply
+ * routinely takes longer than a few seconds.
  */
 export const LANE_A_LOCAL_PROVIDER_TIMEOUT_MS = 5_000;
 
@@ -284,9 +289,8 @@ export function createLaneAProviderClient(input: CreateLaneAProviderClientInput)
     apiKey: input.apiKey ?? "",
     baseUrl,
     fetchImpl: input.fetch ?? globalThis.fetch,
-    timeoutMs:
-      input.timeoutMs ??
-      (input.provider === "local" ? LANE_A_LOCAL_PROVIDER_TIMEOUT_MS : DEFAULT_OPENAI_COMPATIBLE_TIMEOUT_MS),
+    timeoutMs: input.timeoutMs ?? DEFAULT_OPENAI_COMPATIBLE_TIMEOUT_MS,
+    reachabilityTimeoutMs: input.provider === "local" ? LANE_A_LOCAL_PROVIDER_TIMEOUT_MS : null,
   });
 }
 
@@ -566,8 +570,27 @@ function parseToolArguments(raw: unknown): Record<string, unknown> | null {
   }
 }
 
+function finiteNonNegative(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+/**
+ * OpenRouter bills in credits (= USD) and includes `usage.cost` by default.
+ * `cost_details.upstream_inference_cost` is the host's charge on a BYOK call,
+ * used only when `cost` itself is absent. null = not reported.
+ */
+export function openRouterUsageCostUsd(usage: Record<string, unknown>): number | null {
+  const cost = finiteNonNegative(usage.cost);
+  if (cost !== null) return cost;
+  const details = usage.cost_details;
+  if (details && typeof details === "object") {
+    return finiteNonNegative((details as Record<string, unknown>).upstream_inference_cost);
+  }
+  return null;
+}
+
 /** Translate one /chat/completions response body. Exported for tests. */
-export function fromOpenAiCompletion(payload: unknown): LaneACompletion {
+export function fromOpenAiCompletion(payload: unknown, provider?: LaneAProvider): LaneACompletion {
   const record = (payload && typeof payload === "object" ? payload : {}) as Record<string, unknown>;
   const choices = Array.isArray(record.choices) ? record.choices : [];
   const first = (choices[0] && typeof choices[0] === "object" ? choices[0] : {}) as Record<string, unknown>;
@@ -599,6 +622,9 @@ export function fromOpenAiCompletion(payload: unknown): LaneACompletion {
     usage: {
       inputTokens: typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : 0,
       outputTokens: typeof usage.completion_tokens === "number" ? usage.completion_tokens : 0,
+      // DUR-4454: only OpenRouter reports a billed cost; another host's
+      // `usage.cost` (if any) is not trusted as USD.
+      ...(provider === "openrouter" ? { costUsd: openRouterUsageCostUsd(usage) } : {}),
     },
     stop,
     stopReason: finishReason,
@@ -640,12 +666,42 @@ function createOpenAiCompatibleLaneAClient(input: {
   baseUrl: string;
   fetchImpl: typeof fetch;
   timeoutMs: number;
+  /**
+   * When set (local models), a quick GET of the models list must get any
+   * HTTP answer within this many ms before the real call is made, so a box
+   * that is off fails fast while a slow answer still gets `timeoutMs`.
+   */
+  reachabilityTimeoutMs?: number | null;
 }): LaneAProviderClient {
   const endpoint = `${input.baseUrl.replace(/\/+$/, "")}/chat/completions`;
   const label = LANE_A_PROVIDER_CATALOGUE[input.provider].label;
   return {
     provider: input.provider,
     async complete(request) {
+      if (input.reachabilityTimeoutMs) {
+        const probe = new AbortController();
+        const probeTimer = setTimeout(() => probe.abort(), input.reachabilityTimeoutMs);
+        try {
+          const res = await input.fetchImpl(`${input.baseUrl.replace(/\/+$/, "")}/models`, {
+            method: "GET",
+            headers: input.apiKey ? { authorization: `Bearer ${input.apiKey}` } : {},
+            signal: probe.signal,
+            redirect: "error",
+          });
+          await res.body?.cancel().catch(() => undefined);
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          throw new LaneAProviderError({
+            kind: "network",
+            provider: input.provider,
+            message: probe.signal.aborted
+              ? `${label} did not answer within ${Math.round(input.reachabilityTimeoutMs / 1000)} seconds.`
+              : `Could not reach ${label}: ${scrubLaneASecrets(reason, input.apiKey)}`,
+          });
+        } finally {
+          clearTimeout(probeTimer);
+        }
+      }
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), input.timeoutMs);
       let response: Response;
@@ -727,7 +783,7 @@ function createOpenAiCompatibleLaneAClient(input: {
           status: response.status,
         });
       }
-      return fromOpenAiCompletion(payload);
+      return fromOpenAiCompletion(payload, input.provider);
     },
   };
 }

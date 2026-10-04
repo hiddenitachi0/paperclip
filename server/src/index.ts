@@ -83,6 +83,9 @@ import { videoStorylineRenderService } from "./services/video-storyline-render.j
 import { tradingService } from "./services/trading.js";
 import { videoStorylineStitchService } from "./services/video-storyline-stitch.js";
 import { describeTickPhases } from "./services/scheduler-tick-phases.js";
+import { runDailyCostReconciliation } from "./services/cost-reconciliation.js";
+import { pluginRegistryService } from "./services/plugin-registry.js";
+import { secretService as costReconciliationSecretService } from "./services/secrets.js";
 import {
   SCHEDULER_TICK_CHAIN,
   schedulerTickSingleFlight,
@@ -1896,6 +1899,47 @@ export async function startServer(): Promise<StartedServer> {
     // settled and the first report does not describe a restart in progress.
     setTimeout(tickWeeklyCheckup, 2 * 60 * 1000).unref?.();
     setInterval(tickWeeklyCheckup, config.weeklyCheckupTickMinutes * 60 * 1000);
+
+    // DUR-4462: daily Fal + Sogni billing reconciliation. Hourly tick; the
+    // job itself is once-per-day per company (run rows) and skips cleanly
+    // without an admin key / credit price. Bypass scope like the check-up
+    // above: it resolves the instance-wide Media Studio config, then touches
+    // only the company that owns each configured secret.
+    const costReconciliationRegistry = pluginRegistryService(schedulerDb as any);
+    const costReconciliationSecrets = costReconciliationSecretService(schedulerDb as any);
+    const tickCostReconciliation = () => {
+      if (heartbeatDrainState?.isDraining) return;
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.costReconciliation, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: daily Fal/Sogni cost reconciliation",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:costReconciliation",
+          },
+          () =>
+            runDailyCostReconciliation(schedulerDb as any, {
+              getConfig: async () => {
+                const plugin = await costReconciliationRegistry.getByKey("paperclip.media-studio");
+                if (!plugin) return {};
+                return ((await costReconciliationRegistry.getConfig(plugin.id))?.configJson ?? {}) as Record<string, unknown>;
+              },
+              resolveSecret: (companyId, secretId) => costReconciliationSecrets.resolveSecretValueForCostReconciliation(companyId, secretId),
+              falFetch: (url, init) => fetch(url, init),
+              sogniFetch: (url, init) => fetch(url, init),
+            }),
+        )
+          .then((results) => {
+            const reconciled = results.filter((r) => r.fal === "reconciled" || r.sogni === "reconciled" || r.sogni === "baseline");
+            if (reconciled.length > 0) logger.info({ reconciled: reconciled.length }, "daily cost reconciliation ran");
+          })
+          .catch((err) => {
+            logger.error({ err }, "daily cost reconciliation tick failed");
+          }),
+      );
+    };
+    setTimeout(tickCostReconciliation, 5 * 60 * 1000).unref?.();
+    setInterval(tickCostReconciliation, 60 * 60 * 1000);
 
     // Admin auth hardening: periodically compare the live instance-admin
     // set (plus each admin's email and password fingerprint) against the

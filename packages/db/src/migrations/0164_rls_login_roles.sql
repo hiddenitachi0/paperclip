@@ -197,6 +197,10 @@ DECLARE
     'company_speech_settings',
     'company_user_sidebar_preferences',
     'cost_events',
+    -- DUR-4462/DUR-4458 daily Fal/Sogni reconciliation. Created, granted on
+    -- and policed in 0219_cost_reconciliation.sql; listed here so the
+    -- login-role lists match the schema, as for the tables above.
+    'cost_reconciliation_runs',
     -- CRM. Created (and granted on) in 0199_crm_base.sql; listed here so the
     -- login-role lists match the schema, as for the tables above.
     'crm_activities',
@@ -292,7 +296,7 @@ DECLARE
     -- lists match the schema, as for the tables above.
     'model_directory_entries',
     -- DUR-4419. Created, granted on and policed in
-    -- 0218_local_model_health.sql; listed here so the login-role
+    -- 0221_local_model_health.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'local_model_health',
     -- DUR-4344. Created, granted on and policed in
@@ -359,6 +363,10 @@ DECLARE
     'routines',
     'secret_access_events',
     'session',
+    -- DUR-4462 Sogni balance reconciliation snapshots. Created, granted on
+    -- and policed in 0219_cost_reconciliation.sql; company-scoped (company_id
+    -- is its primary key), so it is in both lists.
+    'sogni_balance_snapshots',
     -- Voice messages. Created (and granted on) in
     -- 0182_speech_voice_messages.sql; listed here so the login-role lists
     -- match the schema, as for the tables above.
@@ -484,6 +492,10 @@ DECLARE
     'company_speech_settings',
     'company_user_sidebar_preferences',
     'cost_events',
+    -- DUR-4462/DUR-4458 daily Fal/Sogni reconciliation. Created, granted on
+    -- and policed in 0219_cost_reconciliation.sql; listed here so the
+    -- login-role lists match the schema, as for the tables above.
+    'cost_reconciliation_runs',
     -- CRM. Created (and granted on) in 0199_crm_base.sql; listed here so the
     -- login-role lists match the schema, as for the tables above.
     'crm_activities',
@@ -566,7 +578,7 @@ DECLARE
     -- lists match the schema, as for the tables above.
     'model_directory_entries',
     -- DUR-4419. Created, granted on and policed in
-    -- 0218_local_model_health.sql; listed here so the login-role
+    -- 0221_local_model_health.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'local_model_health',
     -- DUR-4344. Created, granted on and policed in
@@ -624,6 +636,10 @@ DECLARE
     'routine_triggers',
     'routines',
     'secret_access_events',
+    -- DUR-4462 Sogni balance reconciliation snapshots. Created, granted on
+    -- and policed in 0219_cost_reconciliation.sql; company-scoped (company_id
+    -- is its primary key), so it is in both lists.
+    'sogni_balance_snapshots',
     -- Voice messages. Created (and granted on) in
     -- 0182_speech_voice_messages.sql; listed here so the login-role lists
     -- match the schema, as for the tables above.
