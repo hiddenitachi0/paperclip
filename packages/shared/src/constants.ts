@@ -1242,6 +1242,8 @@ export const PLUGIN_CAPABILITIES = [
   "external.objects.refresh",
   // Personas
   "personas.generation_cap.enforce",
+  // Billing
+  "billing.media_studio_direct.reserve",
   // Plugin State
   "plugin.state.read",
   "plugin.state.write",
