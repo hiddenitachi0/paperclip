@@ -89,6 +89,7 @@ vi.mock("../context/CompanyContext", () => ({
       name: "Paperclip",
       description: null,
       brandColor: null,
+      worktreeCleanupRetentionDays: null,
       logoUrl: null,
       issuePrefix: "PAP",
     },
@@ -146,6 +147,7 @@ describe("CompanyEnvironments", () => {
       name: "Paperclip",
       description: null,
       brandColor: null,
+      worktreeCleanupRetentionDays: null,
       logoUrl: null,
       issuePrefix: "PAP",
     });
