@@ -72,6 +72,7 @@ import { InstanceCrossCompanyAccess } from "./pages/InstanceCrossCompanyAccess";
 import { InstanceAccess } from "./pages/InstanceAccess";
 import { InstanceSettings } from "./pages/InstanceSettings";
 import { InstanceExperimentalSettings } from "./pages/InstanceExperimentalSettings";
+import { PresentationModeSettings } from "./pages/PresentationModeSettings";
 import { ProfileSettings } from "./pages/ProfileSettings";
 import { PluginManager } from "./pages/PluginManager";
 import { PluginSettingsRoute } from "./pages/PluginSettingsRoute";
@@ -130,6 +131,7 @@ function boardRoutes() {
       <Route path="company/settings/instance/access" element={<InstanceAccess />} />
       <Route path="company/settings/instance/heartbeats" element={<InstanceSettings />} />
       <Route path="company/settings/instance/experimental" element={<InstanceExperimentalSettings />} />
+      <Route path="company/settings/instance/presentation-mode" element={<PresentationModeSettings />} />
       <Route path="company/settings/instance/plugins" element={<PluginManager />} />
       <Route path="company/settings/instance/plugins/:pluginId" element={<PluginSettingsRoute />} />
       <Route path="company/settings/instance/adapters" element={<AdapterManager />} />

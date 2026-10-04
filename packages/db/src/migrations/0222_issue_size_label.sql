@@ -1,0 +1,1 @@
+ALTER TABLE "issues" ADD COLUMN "size_label" text;
