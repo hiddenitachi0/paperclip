@@ -36,6 +36,8 @@ vi.mock("../context/SidebarContext", () => ({
 vi.mock("../context/ThemeContext", () => ({
   useTheme: () => ({
     theme: "dark",
+    preference: "dark",
+    setTheme: mockToggleTheme,
     toggleTheme: mockToggleTheme,
   }),
 }));
@@ -128,11 +130,11 @@ describe("SidebarAccountMenu", () => {
     expect(feedbackAnchor).not.toBeNull();
     expect(feedbackAnchor?.getAttribute("target")).toBe("_blank");
 
-    // Feedback appears after Documentation and before the theme toggle
+    // Feedback appears after Documentation and before the Appearance picker
     const menuText = document.body.querySelector('[data-slot="popover-content"]')?.textContent ?? "";
     const docsPos = menuText.indexOf("Documentation");
     const feedbackPos = menuText.indexOf("Feedback");
-    const themePos = menuText.indexOf("Switch to");
+    const themePos = menuText.indexOf("Appearance");
     expect(docsPos).toBeLessThan(feedbackPos);
     expect(feedbackPos).toBeLessThan(themePos);
 

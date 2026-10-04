@@ -86,14 +86,14 @@ export function BudgetPolicyCard({
     </div>
   ) : (
     <div className="grid gap-3 sm:grid-cols-2">
-      <div className="rounded-xl border border-border/70 bg-black/[0.18] px-4 py-3">
+      <div className="rounded-xl border border-border/70 bg-background/60 px-4 py-3">
         <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Observed</div>
         <div className="mt-2 text-xl font-semibold tabular-nums">{formatCents(summary.observedAmount)}</div>
         <div className="mt-1 text-xs text-muted-foreground">
           {summary.amount > 0 ? `${summary.utilizationPercent}% of limit` : "No cap configured"}
         </div>
       </div>
-      <div className="rounded-xl border border-border/70 bg-black/[0.18] px-4 py-3">
+      <div className="rounded-xl border border-border/70 bg-background/60 px-4 py-3">
         <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Budget</div>
         <div className="mt-2 text-xl font-semibold tabular-nums">
           {summary.amount > 0 ? formatCents(summary.amount) : "Disabled"}

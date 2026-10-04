@@ -13,6 +13,8 @@ const attachmentMaxBytesSchema = z
   .min(1)
   .max(MAX_COMPANY_ATTACHMENT_MAX_BYTES);
 
+const worktreeCleanupRetentionDaysSchema = z.number().int().min(1).max(365).nullable();
+
 export const createCompanySchema = z.object({
   name: z.string().min(1),
   description: z.string().optional().nullable(),
@@ -42,6 +44,8 @@ export const updateCompanySchema = createCompanySchema
     brandColor: brandColorSchema,
     logoAssetId: logoAssetIdSchema,
     attachmentMaxBytes: attachmentMaxBytesSchema.optional(),
+    // DUR-4497: null resets to the server default (7 days).
+    worktreeCleanupRetentionDays: worktreeCleanupRetentionDaysSchema.optional(),
   });
 
 export type UpdateCompany = z.infer<typeof updateCompanySchema>;
