@@ -150,7 +150,7 @@ function createLocalFileRunLogStore(basePath: string): RunLogStore {
 let cachedStore: RunLogStore | null = null;
 
 export function resolveRunLogBasePath() {
-  return process.env.RUN_LOG_BASE_PATH ?? path.resolve(resolvePaperclipInstanceRoot(), "data", "run-logs");
+  return process.env.RUN_LOG_BASE_PATH?.trim() || path.resolve(resolvePaperclipInstanceRoot(), "data", "run-logs");
 }
 
 export function getRunLogStore() {

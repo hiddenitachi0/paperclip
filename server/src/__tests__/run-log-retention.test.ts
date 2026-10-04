@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { pruneRunLogs } from "../services/run-log-retention.js";
+import { resolveRunLogBasePath } from "../services/run-log-store.js";
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -70,5 +71,32 @@ describe("pruneRunLogs (DUR-4498)", () => {
     const old = await write("old.ndjson", 99);
     await pruneRunLogs(base, 0);
     expect(await exists(old)).toBe(true);
+  });
+
+  it("refuses to run against an empty or relative base dir (DUR-4502 finding 1)", async () => {
+    const res = await pruneRunLogs("", 30);
+    expect(res).toEqual({ filesDeleted: 0, bytesFreed: 0, dirsRemoved: 0 });
+    const res2 = await pruneRunLogs("relative/path", 30);
+    expect(res2).toEqual({ filesDeleted: 0, bytesFreed: 0, dirsRemoved: 0 });
+  });
+
+  it("refuses to run against the filesystem root or process.cwd()", async () => {
+    const resRoot = await pruneRunLogs(path.parse(process.cwd()).root, 30);
+    expect(resRoot).toEqual({ filesDeleted: 0, bytesFreed: 0, dirsRemoved: 0 });
+    const resCwd = await pruneRunLogs(process.cwd(), 30);
+    expect(resCwd).toEqual({ filesDeleted: 0, bytesFreed: 0, dirsRemoved: 0 });
+  });
+
+  it("resolveRunLogBasePath treats a blank RUN_LOG_BASE_PATH as unset", () => {
+    const prev = process.env.RUN_LOG_BASE_PATH;
+    try {
+      process.env.RUN_LOG_BASE_PATH = "";
+      expect(resolveRunLogBasePath()).not.toBe("");
+      process.env.RUN_LOG_BASE_PATH = "   ";
+      expect(resolveRunLogBasePath()).not.toBe("   ");
+    } finally {
+      if (prev === undefined) delete process.env.RUN_LOG_BASE_PATH;
+      else process.env.RUN_LOG_BASE_PATH = prev;
+    }
   });
 });

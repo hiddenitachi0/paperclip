@@ -21,6 +21,10 @@ export interface PruneRunLogsResult {
  * never unlinked or entered), only regular files are deleted, and every path
  * is re-checked to be strictly inside the resolved base dir before removal.
  * A missing or empty base dir is a no-op, so repeated runs are idempotent.
+ *
+ * Refuses to run against a dangerous root (empty/`/`/`process.cwd()`/relative):
+ * a blank or misconfigured base path must never widen the sweep beyond the
+ * intended run-logs directory.
  */
 export async function pruneRunLogs(
   baseDir: string = resolveRunLogBasePath(),
@@ -29,8 +33,16 @@ export async function pruneRunLogs(
 ): Promise<PruneRunLogsResult> {
   const result: PruneRunLogsResult = { filesDeleted: 0, bytesFreed: 0, dirsRemoved: 0 };
   if (!Number.isFinite(retentionDays) || retentionDays <= 0) return result;
+  if (!baseDir || !path.isAbsolute(baseDir)) {
+    logger.warn({ baseDir }, "Run log retention refused: base dir is empty or not absolute");
+    return result;
+  }
 
   const root = path.resolve(baseDir);
+  if (root === path.parse(root).root || root === process.cwd()) {
+    logger.warn({ root }, "Run log retention refused: base dir resolves to filesystem root or cwd");
+    return result;
+  }
   const rootPrefix = root + path.sep;
   const cutoff = now - retentionDays * DAY_MS;
 
