@@ -271,6 +271,69 @@ describe("cost routes", () => {
     });
   });
 
+  it("strips a self-reporting agent's claimed costSource so it can't tag its own figure as provider-verified (DUR-4452)", async () => {
+    const agentId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    mockCostService.createEvent.mockResolvedValueOnce({
+      id: "event-1",
+      companyId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      agentId,
+      costCents: 1,
+      costSource: null,
+    });
+    const app = await createAppWithActor({
+      type: "agent",
+      agentId,
+      companyId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      runId: "run-1",
+    });
+
+    const res = await request(app)
+      .post("/api/companies/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/cost-events")
+      .send({
+        agentId,
+        provider: "fal",
+        model: "self-reported",
+        costCents: 1,
+        costSource: "provider",
+        occurredAt: "2026-01-01T00:00:00.000Z",
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockCostService.createEvent).toHaveBeenCalledWith(
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      expect.objectContaining({ costSource: null }),
+    );
+  });
+
+  it("keeps a board-reported costSource as-is", async () => {
+    const agentId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    mockCostService.createEvent.mockResolvedValueOnce({
+      id: "event-2",
+      companyId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      agentId,
+      costCents: 1,
+      costSource: "provider",
+    });
+    const app = await createApp();
+
+    const res = await request(app)
+      .post("/api/companies/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/cost-events")
+      .send({
+        agentId,
+        provider: "fal",
+        model: "manual-adjustment",
+        costCents: 1,
+        costSource: "provider",
+        occurredAt: "2026-01-01T00:00:00.000Z",
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockCostService.createEvent).toHaveBeenCalledWith(
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      expect.objectContaining({ costSource: "provider" }),
+    );
+  });
+
   it("returns 400 for invalid finance event list limits", async () => {
     const { parseCostLimit } = await loadCostParsers();
     expect(() => parseCostLimit({ limit: "0" })).toThrow(/invalid 'limit'/i);

@@ -132,8 +132,15 @@ export function costRoutes(
       return;
     }
 
+    // DUR-4452: an agent self-reporting its own cost figure must never be able to
+    // tag it "provider" (or any other verified source) -- only server-side
+    // pricing/reconciliation code earns that label. Self-reports are always an
+    // estimate regardless of what the request body claims.
+    const costSource = req.actor.type === "agent" ? null : req.body.costSource;
+
     const event = await costs.createEvent(companyId, {
       ...req.body,
+      costSource,
       occurredAt: new Date(req.body.occurredAt),
     });
 
