@@ -192,6 +192,12 @@ function attachmentContentPath(attachmentId: string) {
   return `/api/attachments/${attachmentId}/content`;
 }
 
+function attachmentThumbnailPath(attachmentId: string, contentType: string | null) {
+  return contentType?.toLowerCase().startsWith("image/") && !contentType.toLowerCase().includes("svg")
+    ? `/api/attachments/${attachmentId}/thumbnail`
+    : null;
+}
+
 async function readTextAttachmentPreview(
   storage: StorageService | undefined,
   input: { companyId: string; objectKey: string; byteSize: number },
@@ -783,6 +789,7 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
             contentType,
             contentPath: attachmentMetadata?.contentPath ?? null,
             openPath: attachmentMetadata?.openPath ?? (typeof row.metadata?.openPath === "string" ? row.metadata.openPath : null),
+            thumbnailPath: attachmentMetadata ? attachmentThumbnailPath(attachmentMetadata.attachmentId, contentType) : null,
             downloadPath: attachmentMetadata?.downloadPath ?? null,
             byteSize: attachmentMetadata?.byteSize ?? null,
             originalFilename: attachmentMetadata?.originalFilename ?? null,
@@ -914,6 +921,7 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
             contentType: row.contentType,
             contentPath,
             openPath: contentPath,
+            thumbnailPath: attachmentThumbnailPath(row.attachmentId, row.contentType),
             downloadPath: `${contentPath}?download=1`,
             byteSize: row.byteSize,
             originalFilename: row.originalFilename,

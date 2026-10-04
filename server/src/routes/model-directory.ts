@@ -12,6 +12,7 @@ import { validate } from "../middleware/validate.js";
 import { companyScope } from "../middleware/company-scope.js";
 import { logActivity } from "../services/activity-log.js";
 import { modelDirectoryService } from "../services/model-directory.js";
+import { modelHealthService } from "../services/model-health.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 
 /**
@@ -38,6 +39,7 @@ export function modelDirectoryRoutes(rawDb: Db) {
   const router = Router();
   const db = createRequestScopedDb(rawDb);
   const svc = modelDirectoryService(db);
+  const health = modelHealthService(db);
 
   const scope = () =>
     companyScope(rawDb, (req) => {
@@ -90,6 +92,30 @@ export function modelDirectoryRoutes(rawDb: Db) {
     const companyId = req.params.companyId as string;
     const result = await svc.importAgentSettings(companyId, actorUser(req));
     for (const entry of result.created) await audit(req, companyId, "model_directory_entry.created", entry, { source: "agent_settings_import" });
+    res.json(result);
+  });
+
+  // DUR-4419: stored health of every entry, plus the agents on a local model
+  // (the agent-page banner reads `agents[].showBanner`). Reads only.
+  router.get("/companies/:companyId/model-directory/health", scope(), async (req, res) => {
+    res.json(await health.overview(req.params.companyId as string));
+  });
+
+  router.post("/companies/:companyId/model-directory/:entryId/check", scope(), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const entryId = req.params.entryId as string;
+    const result = await health.checkEntry(companyId, entryId);
+    const entry = await svc.get(companyId, entryId);
+    await audit(req, companyId, "model_directory_entry.checked", entry, { status: result.status });
+    res.json(result);
+  });
+
+  router.post("/companies/:companyId/model-directory/:entryId/test", scope(), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const entryId = req.params.entryId as string;
+    const result = await health.testEntry(companyId, entryId);
+    const entry = await svc.get(companyId, entryId);
+    await audit(req, companyId, "model_directory_entry.tested", entry, { ran: result.ran, ok: result.runs.map((r) => r.ok) });
     res.json(result);
   });
 

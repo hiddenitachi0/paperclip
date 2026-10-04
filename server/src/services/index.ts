@@ -89,6 +89,7 @@ export { mergeDeployVisibilityService, MERGE_DEPLOY_VISIBILITY_DELAY_MS } from "
 export { deployCarriedIssuesService } from "./deploy-carried-issues.js";
 export { deployApprovalFeedbackService, DEPLOY_APPROVAL_FEEDBACK_DELAY_MS } from "./deploy-approval-feedback.js";
 export { mergePrAutomationService } from "./merge-pr-automation.js";
+export { issueOverlapDetectorService } from "./issue-overlap-detector.js";
 export { agentErrorAlertsService, DEFAULT_AGENT_ERROR_STALL_THRESHOLD_MS } from "./agent-error-alerts.js";
 export { untrackedWriteAlertsService } from "./untracked-write-alerts.js";
 export {
