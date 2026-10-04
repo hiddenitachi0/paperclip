@@ -33,6 +33,7 @@ const mockServerKeyApi = vi.hoisted(() => ({ get: vi.fn() }));
 const mockInstanceSettingsApi = vi.hoisted(() => ({ getExperimental: vi.fn() }));
 const mockPushToast = vi.hoisted(() => vi.fn());
 const mockUseCompanyRole = vi.hoisted(() => vi.fn());
+const mockModelDirectoryApi = vi.hoisted(() => ({ list: vi.fn() }));
 
 vi.mock("@/lib/router", () => ({
   Link: ({ children, to, ...rest }: { children: React.ReactNode; to: string; className?: string }) => (
@@ -57,6 +58,7 @@ vi.mock("./SecretBindingPicker", () => ({
   SecretBindingPicker: () => <div>key picker</div>,
 }));
 vi.mock("../hooks/useCompanyRole", () => ({ useCompanyRole: mockUseCompanyRole }));
+vi.mock("../api/modelDirectory", () => ({ modelDirectoryApi: mockModelDirectoryApi }));
 
 function roleInfo(isInstanceAdmin: boolean) {
   return { role: "owner", isInstanceAdmin, localBoard: false, canManageConnections: true, isLoading: false };
@@ -142,6 +144,7 @@ describe("QuickAgentSection model field", () => {
     mockDataApi.listDatasetSources.mockResolvedValue([]);
     mockUseCompanyRole.mockReturnValue(roleInfo(false));
     mockAgentsApi.update.mockResolvedValue({});
+    mockModelDirectoryApi.list.mockResolvedValue([]);
   });
 
   afterEach(() => {
