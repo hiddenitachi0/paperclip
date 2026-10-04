@@ -820,6 +820,7 @@ export async function startServer(): Promise<StartedServer> {
     serverPort: listenPort,
     storageService,
     feedbackExportService: feedback,
+    databaseBackupDir: config.databaseBackupDir,
     databaseBackupService: {
       getStorageStats: async (override) => {
         const retention = override ?? (await backupSettingsSvc.getGeneral()).backupRetention;
