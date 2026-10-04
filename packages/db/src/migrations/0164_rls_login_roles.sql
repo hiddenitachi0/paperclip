@@ -152,7 +152,7 @@ DECLARE
     'board_api_keys',
     'board_delegate_tokens',
     -- DUR-4519 (Brag video phase 1). Created, granted on and policed in
-    -- 0222_brag_jobs.sql; listed here so the login-role lists match the
+    -- 0226_brag_jobs.sql; listed here so the login-role lists match the
     -- schema, as for the tables above.
     'brag_jobs',
     'brag_scenes',
@@ -456,7 +456,7 @@ DECLARE
     'approvals',
     'assets',
     -- DUR-4519 (Brag video phase 1). Created, granted on and policed in
-    -- 0222_brag_jobs.sql; listed here so the login-role lists match the
+    -- 0226_brag_jobs.sql; listed here so the login-role lists match the
     -- schema, as for the tables above.
     'brag_jobs',
     'brag_scenes',

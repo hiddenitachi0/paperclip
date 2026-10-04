@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { PluginCompanySettingsPageProps, PluginDetailTabProps, PluginHostContext, PluginPageProps, PluginSidebarProps } from "@paperclipai/plugin-sdk/ui";
 import { usePluginAction, useHostNavigation, PluginConfigForm } from "@paperclipai/plugin-sdk/ui";
 import { MediaStudioEditTab } from "./edit-tab.js";
+import { AdvancedFeaturesToggle, AiDirectorSection } from "./director-panel.js";
 
 // The plugin UI is served as a standalone ES module, so it must not import from
 // sibling plugin files (only bare specifiers resolve). Keep these in sync with
@@ -2942,6 +2943,13 @@ interface VideoShotSummary {
   attempt: number;
   errorMessage: string | null;
   createdAt: string;
+  transitionIn?: "cut" | "fade" | "dissolve" | null;
+  proposedPrompt?: string | null;
+  proposedCameraNotes?: string | null;
+  proposedDurationSeconds?: number | null;
+  proposedTransitionIn?: "cut" | "fade" | "dissolve" | null;
+  proposalStatus?: string | null;
+  promptHistory?: Array<{ prompt: string }>;
 }
 
 interface VideoStorylineShotProgress {
@@ -3102,6 +3110,34 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
   useEffect(() => {
     void loadSettings();
   }, [loadSettings]);
+
+  const [advancedEnabled, setAdvancedEnabled] = useState<boolean | null>(null);
+  const [advancedError, setAdvancedError] = useState<string | null>(null);
+  const [advancedBusy, setAdvancedBusy] = useState(false);
+
+  useEffect(() => {
+    if (!companyId) return;
+    hostFetchJson<{ enabled: boolean }>(`/api/companies/${companyId}/video-storylines/settings/advanced`)
+      .then((res) => setAdvancedEnabled(res.enabled))
+      .catch((e) => setAdvancedError(e instanceof Error ? e.message : String(e)));
+  }, [companyId]);
+
+  const toggleAdvanced = async (next: boolean) => {
+    if (!companyId) return;
+    setAdvancedBusy(true);
+    setAdvancedError(null);
+    try {
+      const res = await hostFetchJson<{ enabled: boolean }>(`/api/companies/${companyId}/video-storylines/settings/advanced`, {
+        method: "PATCH",
+        body: JSON.stringify({ enabled: next }),
+      });
+      setAdvancedEnabled(res.enabled);
+    } catch (e) {
+      setAdvancedError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAdvancedBusy(false);
+    }
+  };
 
   useEffect(() => {
     listLooks({})
@@ -3419,6 +3455,9 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
           </label>
         </div>
         {settingsError && <div style={errorBox}>{settingsError}</div>}
+        {enabled && (
+          <AdvancedFeaturesToggle enabled={advancedEnabled} busy={advancedBusy} error={advancedError} onChange={(v) => void toggleAdvanced(v)} />
+        )}
       </div>
 
       {!enabled ? (
@@ -3525,6 +3564,18 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                     </p>
                   )}
                 </div>
+
+                {advancedEnabled && companyId && (
+                  <AiDirectorSection
+                    companyId={companyId}
+                    storylineId={selected.id}
+                    scenes={scenes}
+                    shots={shots}
+                    editable={EDITABLE_STORYLINE_STATUSES.has(selected.status)}
+                    fetchJson={hostFetchJson}
+                    onShotsChanged={loadDetail}
+                  />
+                )}
 
                 {progress && (
                   <div style={card}>
