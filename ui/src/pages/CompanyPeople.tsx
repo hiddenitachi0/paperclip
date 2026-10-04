@@ -440,7 +440,7 @@ export function CompanyPeople() {
         <div className="space-y-1">
           <div className="flex items-center gap-2">
             <ShieldCheck className="h-4 w-4 text-muted-foreground" />
-            <h2 className="text-base font-semibold">Members</h2>
+            <h2 className="section-title">Members</h2>
           </div>
           <p className="max-w-3xl text-sm text-muted-foreground">
             Manage human company memberships and status here.
@@ -448,10 +448,9 @@ export function CompanyPeople() {
         </div>
 
         {access?.canApproveJoinRequests && pendingHumanJoinRequests.length > 0 ? (
-          <div className="space-y-3 rounded-xl border border-border px-4 py-4">
-            <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="space-y-3 rounded-xl section-box px-4 py-4">            <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
-                <h3 className="text-sm font-semibold">Pending human joins</h3>
+                <h3 className="section-title">Pending human joins</h3>
                 <p className="text-sm text-muted-foreground">
                   Review pending join requests before they become active company members.
                 </p>
@@ -491,7 +490,7 @@ export function CompanyPeople() {
           </div>
         ) : null}
 
-        <div className="overflow-hidden rounded-xl border border-border">
+        <div className="overflow-hidden rounded-xl section-box">
           <div className="grid grid-cols-[minmax(0,1.5fr)_120px_120px_180px] gap-3 border-b border-border px-4 py-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">
             <div>User account</div>
             <div>Role</div>
@@ -552,12 +551,12 @@ export function CompanyPeople() {
 
       <section className="space-y-4">
         <div className="space-y-1">
-          <h2 className="text-base font-semibold">Roles</h2>
+          <h2 className="section-title">Roles</h2>
           <p className="max-w-3xl text-sm text-muted-foreground">
             What each role can do. This is the same list used when you invite someone.
           </p>
         </div>
-        <div className="rounded-xl border border-border">
+        <div className="rounded-xl section-box">
           {roleOptions.map((option, index) => (
             <div
               key={option.value}
@@ -571,10 +570,10 @@ export function CompanyPeople() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border">
+      <section className="rounded-xl section-box">
         <div className="flex flex-wrap items-center justify-between gap-4 px-5 py-4">
           <div className="space-y-1">
-            <h2 className="text-sm font-semibold">Invite history</h2>
+            <h2 className="section-title">Invite history</h2>
             <p className="text-sm text-muted-foreground">
               Review invite status, audience, inviter, and any linked join request.
             </p>
@@ -684,7 +683,7 @@ export function CompanyPeople() {
           <div className="space-y-5">
             <fieldset className="space-y-3">
               <legend className="text-sm font-medium">Choose a role</legend>
-              <div className="rounded-xl border border-border">
+              <div className="rounded-xl section-box">
                 {roleOptions.map((option, index) => {
                   const checked = humanRole === option.value;
                   return (
@@ -987,7 +986,7 @@ function PendingJoinRequestCard({
   onReject: () => void;
 }) {
   return (
-    <div className="rounded-xl border border-border px-4 py-4">
+    <div className="rounded-xl section-box px-4 py-4">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="space-y-2">
           <div>

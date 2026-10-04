@@ -250,7 +250,7 @@ export function PluginManager() {
       <section className="space-y-3">
         <div className="flex items-center gap-2">
           <FlaskConical className="h-5 w-5 text-muted-foreground" />
-          <h2 className="text-base font-semibold">Available Plugins</h2>
+          <h2 className="section-title">Available Plugins</h2>
           <Badge variant="outline">Bundled</Badge>
         </div>
 
@@ -353,7 +353,7 @@ export function PluginManager() {
       <section className="space-y-3">
         <div className="flex items-center gap-2">
           <Puzzle className="h-5 w-5 text-muted-foreground" />
-          <h2 className="text-base font-semibold">Installed Plugins</h2>
+          <h2 className="section-title">Installed Plugins</h2>
         </div>
 
         {!installedPlugins.length ? (

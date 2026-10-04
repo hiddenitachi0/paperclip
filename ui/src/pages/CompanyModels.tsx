@@ -444,7 +444,7 @@ export function CompanyModels() {
 
       {canManage && missingStarters.length > 0 && (
         <div className="space-y-2" data-testid="models-starters">
-          <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Ready-made models</div>
+          <div className="section-title">Ready-made models</div>
           <p className="text-xs text-muted-foreground">
             Models we already know work well. Adding one just saves it to the list above.
           </p>
