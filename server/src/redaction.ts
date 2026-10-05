@@ -239,13 +239,46 @@ function uuidRanges(input: string): Array<[number, number]> {
   return ranges;
 }
 
+// CARD_NUMBER_TOKEN_RE caps at 19 digits, so a genuinely longer digit run
+// (e.g. a UUID's 12-char final group, all-numeric) gets a match that falls
+// a character or two short of where the digits actually stop. That short-of-
+// the-real-end match must not be mistaken for a true "the UUID's own letter
+// starts here" boundary -- otherwise a card number smuggled into a UUID's
+// trailing groups bypasses redaction simply because the token regex itself
+// truncated the match early (DUR-4535).
+function cardRunContinues(input: string, pos: number, limit: number): boolean {
+  if (pos >= limit) return false;
+  if (/\d/.test(input[pos])) return true;
+  return (
+    (input[pos] === "-" || input[pos] === " ") &&
+    pos + 1 < limit &&
+    /\d/.test(input[pos + 1])
+  );
+}
+
 export function redactCardNumbers(input: string): string {
   if (!input) return input;
   const skipRanges = uuidRanges(input);
   return input.replace(CARD_NUMBER_TOKEN_RE, (match, offset: number) => {
     const matchEnd = offset + match.length;
-    const overlapsUuid = skipRanges.some(([start, end]) => offset < end && matchEnd > start);
-    if (overlapsUuid) return match;
+    // DUR-4535: a match that starts or ends exactly on a UUID span's own
+    // boundary (or merely stops short of it because our own 19-digit cap cut
+    // it off, see cardRunContinues) is exactly the shape a real card number
+    // smuggled through by dressing it up as a UUID would take (e.g.
+    // "41111111-1111-1111-aaaa-...", where the PAN occupies the UUID's
+    // leading groups verbatim). A digit run that is only *incidentally*
+    // inside a genuine UUID (the original DUR-4534 bug) sits strictly inside
+    // the UUID's span instead, bounded on both sides by the UUID's own
+    // hex-letter/dash characters. Only treat the match as UUID noise -- not a
+    // real card number -- when it is bounded by a genuine letter/dash
+    // boundary on both sides, not the span's own outer edge.
+    const protectedByUuid = skipRanges.some(
+      ([start, end]) =>
+        offset > start &&
+        matchEnd < end &&
+        !cardRunContinues(input, matchEnd, end),
+    );
+    if (protectedByUuid) return match;
     const digitsOnly = match.replace(/[\s-]/g, "");
     if (digitsOnly.length < 13 || digitsOnly.length > 19) return match;
     return isLuhnValid(digitsOnly) ? "[REDACTED:card_number]" : match;

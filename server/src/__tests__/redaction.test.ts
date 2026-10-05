@@ -301,6 +301,41 @@ describe("redactCardNumbers", () => {
     expect(redactCardNumbers(input)).toBe(input);
   });
 
+  it("DUR-4535: does not let a real card number dressed up as a UUID bypass redaction", () => {
+    // The Visa test PAN 4111111111111111 laid out across the UUID's first
+    // three dash groups, with the remaining groups padded as hex so the
+    // whole token still matches the UUID shape. This must still be caught --
+    // the card match starts at the UUID span's own start, so it is not
+    // "incidental UUID noise" the way DUR-4534's fix is meant to protect.
+    const input = "card: 41111111-1111-1111-aaaa-aaaaaaaaaaaa";
+    expect(redactCardNumbers(input)).toBe(
+      "card: [REDACTED:card_number]-aaaa-aaaaaaaaaaaa",
+    );
+  });
+
+  it("DUR-4535: does not let a card number smuggled at the end of a UUID bypass redaction", () => {
+    // Same trick, mirrored: the PAN occupies the UUID's trailing groups and
+    // the match ends exactly at the UUID span's own end.
+    const input = "card: aaaaaaaa-aaaa-aaaa-4111-111111111111";
+    expect(redactCardNumbers(input)).toBe(
+      "card: aaaaaaaa-aaaa-aaaa-[REDACTED:card_number]",
+    );
+  });
+
+  it("DUR-4535: does not let a card number truncated by the 19-digit cap keep its UUID cover", () => {
+    // The digit run here is 20 digits long -- one over CARD_NUMBER_TOKEN_RE's
+    // 19-digit cap -- so the match itself falls one digit short of the
+    // UUID's own end. That is an artifact of our own token regex, not a
+    // genuine letter/dash boundary, so it must not be treated as "safely
+    // embedded in the UUID" either. (First 19 digits, "1111111111111111113",
+    // are themselves a valid Luhn check digit sequence; the trailing "4" is
+    // just padding to make the full run 20 digits.)
+    const input = "card: aaaaaaaa-aaaa-1111-1111-111111111134";
+    expect(redactCardNumbers(input)).toBe(
+      "card: aaaaaaaa-aaaa-[REDACTED:card_number]4",
+    );
+  });
+
   it("is folded into redactKnownLeakedSecretPatterns, the run-output redaction path", () => {
     const result = redactKnownLeakedSecretPatterns(
       `browser_type filled the field with ${CANARY_CARD_NUMBER}`,
