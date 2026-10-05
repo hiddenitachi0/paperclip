@@ -94,11 +94,11 @@ The brief is the boundary: if a detail belongs to product positioning, copy, ton
 
 ## Audio asset preparation
 
-Read [audio.md](audio.md). Copy the planned music into `<output-dir>/composition/assets/music/` before building the composition.
+Read [audio.md](audio.md). Music is optional and never comes from this skill: only a Media Studio-generated track or a user-provided, explicitly licensed track may be copied into `<output-dir>/composition/assets/music/`; never fetch music from the internet. With no approved track, build without music.
 
 ```bash
 mkdir -p <output-dir>/composition/assets/music
-cp <skill-dir>/assets/music/<track>.mp3 <output-dir>/composition/assets/music/
+cp <approved-track>.mp3 <output-dir>/composition/assets/music/   # Media Studio-generated or explicitly licensed only
 ```
 
 `<skill-dir>` is this skill's own directory (see "Skill directory" in `SKILL.md`).
