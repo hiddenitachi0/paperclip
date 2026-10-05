@@ -296,9 +296,32 @@ describe("redactCardNumbers", () => {
     expect(redactCardNumbers(input)).toBe(input);
   });
 
-  it("DUR-4534: does not mangle a UUID whose dash-separated digit run happens to be Luhn-valid", () => {
+  it("DUR-4536: no longer tries to detect UUID shape at all -- a Luhn-valid run inside a UUID-looking string is always redacted", () => {
+    // Earlier versions of this function tried to tell apart "incidental
+    // UUID digit coincidence" from "a card number dressed up as a UUID" by
+    // the shape of the surrounding characters. Every such heuristic was
+    // defeatable (DUR-4535, DUR-4536), because the string is fully
+    // attacker-controlled. redactCardNumbers no longer makes that
+    // distinction at all -- it always redacts. The original DUR-4534
+    // complaint (genuine server-generated UUIDs getting corrupted) is now
+    // fixed at the call site, not here -- see the
+    // redactKnownLeakedSecretPatternsDeep tests below for the exact-path
+    // allowlist that protects known-safe fields instead.
     const input = "issueId: c10d6206-1c57-4904-9223-982c6cf4b18b";
-    expect(redactCardNumbers(input)).toBe(input);
+    expect(redactCardNumbers(input)).toBe(
+      "issueId: c10d6206-1c[REDACTED:card_number]c6cf4b18b",
+    );
+  });
+
+  it("DUR-4536: redacts a card number padded with hex letters on both sides to fit a UUID's interior groups", () => {
+    // DUR-4536's finding against the previous (now-removed) boundary
+    // heuristic: a PAN placed in the middle groups of a UUID shape, with
+    // hex letters on both sides so neither edge of the match touches the
+    // UUID span's outer edge, used to pass through unredacted.
+    const input = "aaaaaaaa-4111-1111-1111-1111aaaaaaaa";
+    expect(redactCardNumbers(input)).toBe(
+      "aaaaaaaa-[REDACTED:card_number]aaaaaaaa",
+    );
   });
 
   it("DUR-4535: does not let a real card number dressed up as a UUID bypass redaction", () => {
@@ -395,6 +418,50 @@ describe("redactKnownLeakedSecretPatternsDeep", () => {
   it("leaves non-string primitives and clean values untouched", () => {
     const input = { count: 3, ok: true, nested: { safe: "no secret here" } };
     expect(redactKnownLeakedSecretPatternsDeep(input)).toEqual(input);
+  });
+
+  it("DUR-4534/4536: preserves a genuine UUID at the known workspaceValidation id paths", () => {
+    const input = {
+      workspaceValidation: {
+        reason: "missing_project_id",
+        issueId: "c10d6206-1c57-4904-9223-982c6cf4b18b",
+        issueProjectId: "aaaaaaaa-4111-1111-1111-1111aaaaaaaa",
+        unrelatedNote: "plain text",
+      },
+    };
+    expect(redactKnownLeakedSecretPatternsDeep(input)).toEqual(input);
+  });
+
+  it("DUR-4536: still redacts a card-shaped value at a path NOT on the known-id allowlist, even if it is UUID-shaped", () => {
+    // The allowlist is by exact field path, not by "looks like a UUID" --
+    // a value under an unrecognized key still gets the full scrub, so
+    // smuggling a PAN into some other field of workspaceValidation (or
+    // anywhere else in resultJson) does not get a free pass just because
+    // the string happens to be UUID-shaped.
+    const input = {
+      workspaceValidation: {
+        reason: "missing_project_id",
+        attackerControlledNote: "aaaaaaaa-4111-1111-1111-1111aaaaaaaa",
+      },
+    };
+    const result = redactKnownLeakedSecretPatternsDeep(input) as {
+      workspaceValidation: { attackerControlledNote: string };
+    };
+    expect(result.workspaceValidation.attackerControlledNote).toBe(
+      "aaaaaaaa-[REDACTED:card_number]aaaaaaaa",
+    );
+  });
+
+  it("DUR-4536: a malformed value at a known id path (not actually a UUID) still gets scrubbed", () => {
+    const input = {
+      workspaceValidation: {
+        issueId: `prefix ${CANARY_CARD_NUMBER} suffix`,
+      },
+    };
+    const result = redactKnownLeakedSecretPatternsDeep(input) as {
+      workspaceValidation: { issueId: string };
+    };
+    expect(result.workspaceValidation.issueId).not.toContain(CANARY_CARD_NUMBER);
   });
 });
 

@@ -221,64 +221,27 @@ export const SECRET_LEAK_PATTERNS: readonly SecretLeakPattern[] = [
 // enough to replace the ORIGINAL spaced/dashed substring in place here.
 const CARD_NUMBER_TOKEN_RE = /\d(?:[\s-]?\d){11,18}/g;
 
-// DUR-4534: a canonical UUID (e.g. an issueId) has digit-heavy segments
-// separated by single dashes -- "57-4904-9223-98" inside
-// "c10d6206-1c57-4904-9223-982c6cf4b18b" satisfies CARD_NUMBER_TOKEN_RE and
-// is Luhn-valid purely by coincidence often enough to corrupt real UUIDs in
-// resultJson/heartbeat_runs rows, not just log display. Mask out any
-// RFC-4122-shaped UUID before scanning so its digit runs are never
-// considered card-number candidates.
-const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
-
-function uuidRanges(input: string): Array<[number, number]> {
-  const ranges: Array<[number, number]> = [];
-  for (const match of input.matchAll(UUID_RE)) {
-    const start = match.index ?? 0;
-    ranges.push([start, start + match[0].length]);
-  }
-  return ranges;
-}
-
-// CARD_NUMBER_TOKEN_RE caps at 19 digits, so a genuinely longer digit run
-// (e.g. a UUID's 12-char final group, all-numeric) gets a match that falls
-// a character or two short of where the digits actually stop. That short-of-
-// the-real-end match must not be mistaken for a true "the UUID's own letter
-// starts here" boundary -- otherwise a card number smuggled into a UUID's
-// trailing groups bypasses redaction simply because the token regex itself
-// truncated the match early (DUR-4535).
-function cardRunContinues(input: string, pos: number, limit: number): boolean {
-  if (pos >= limit) return false;
-  if (/\d/.test(input[pos])) return true;
-  return (
-    (input[pos] === "-" || input[pos] === " ") &&
-    pos + 1 < limit &&
-    /\d/.test(input[pos + 1])
-  );
-}
-
+// DUR-4534/DUR-4535/DUR-4536: an earlier version of this function tried to
+// tell a genuinely-incidental UUID digit coincidence apart from a card
+// number smuggled by dressing it up as a UUID, using heuristics about which
+// characters bound the matched digit run (span-interior vs span-edge,
+// truncated-by-the-19-digit-cap vs not). Every version of that heuristic was
+// defeated by a new input shape, because the string is attacker-controlled
+// end to end -- there is no character-shape rule that distinguishes "a real
+// random UUID whose digits coincidentally look like a card number" from "a
+// crafted UUID-shaped string built around a real card number", since both
+// are, by construction, indistinguishable sequences of hex digits and
+// dashes. So this function no longer tries: it always redacts a Luhn-valid
+// card-shaped digit run, even when it sits inside something that looks like
+// a UUID. The real fix for the original DUR-4534 complaint (genuine
+// server-generated UUIDs getting corrupted) lives at the call site instead:
+// redactKnownLeakedSecretPatternsDeep skips this scrub for a short,
+// hardcoded allowlist of exact field paths that are known to hold
+// DB-generated UUIDs the agent/attacker never controls the content of (see
+// ID_PATHS_SKIP_CARD_REDACTION below) -- not for anything shaped like a UUID.
 export function redactCardNumbers(input: string): string {
   if (!input) return input;
-  const skipRanges = uuidRanges(input);
-  return input.replace(CARD_NUMBER_TOKEN_RE, (match, offset: number) => {
-    const matchEnd = offset + match.length;
-    // DUR-4535: a match that starts or ends exactly on a UUID span's own
-    // boundary (or merely stops short of it because our own 19-digit cap cut
-    // it off, see cardRunContinues) is exactly the shape a real card number
-    // smuggled through by dressing it up as a UUID would take (e.g.
-    // "41111111-1111-1111-aaaa-...", where the PAN occupies the UUID's
-    // leading groups verbatim). A digit run that is only *incidentally*
-    // inside a genuine UUID (the original DUR-4534 bug) sits strictly inside
-    // the UUID's span instead, bounded on both sides by the UUID's own
-    // hex-letter/dash characters. Only treat the match as UUID noise -- not a
-    // real card number -- when it is bounded by a genuine letter/dash
-    // boundary on both sides, not the span's own outer edge.
-    const protectedByUuid = skipRanges.some(
-      ([start, end]) =>
-        offset > start &&
-        matchEnd < end &&
-        !cardRunContinues(input, matchEnd, end),
-    );
-    if (protectedByUuid) return match;
+  return input.replace(CARD_NUMBER_TOKEN_RE, (match) => {
     const digitsOnly = match.replace(/[\s-]/g, "");
     if (digitsOnly.length < 13 || digitsOnly.length > 19) return match;
     return isLuhnValid(digitsOnly) ? "[REDACTED:card_number]" : match;
@@ -294,21 +257,66 @@ export function redactKnownLeakedSecretPatterns(input: string): string {
   return redactCardNumbers(output);
 }
 
+const UUID_WHOLE_STRING_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// DUR-4534/4536: the original bug report was that a server-generated UUID
+// (e.g. an issueId) can, by Luhn coincidence, read as a card number and get
+// mangled by redactCardNumbers before it reaches resultJson. Rather than try
+// to detect "this is a genuine UUID" from the string's shape (every such
+// heuristic turned out to be defeatable -- see the comment on
+// redactCardNumbers), this instead names the *exact* field paths, by dotted
+// key path from the root of resultJson.workspaceValidation, that the
+// orchestration code in heartbeat.ts's assertGitSensitiveAdapterWorkspaceValid
+// / assertWorkspaceHasPushCapability / inherited-workspace-reuse-failure
+// construction sites populate from DB rows (issue.id, resolvedWorkspace.*,
+// executionWorkspace.*, persistedExecutionWorkspace.*) -- never from agent-
+// or attacker-supplied free text. Only values at these paths, and only when
+// the value is actually a well-formed UUID (not just "contains one"), skip
+// the card-number scrub; every other field, including everything else under
+// workspaceValidation, still gets the full scrub.
+const ID_PATHS_SKIP_CARD_REDACTION = new Set([
+  "workspaceValidation.issueId",
+  "workspaceValidation.issueProjectId",
+  "workspaceValidation.issueProjectWorkspaceId",
+  "workspaceValidation.resolvedProjectId",
+  "workspaceValidation.resolvedProjectWorkspaceId",
+  "workspaceValidation.executionWorkspaceProjectId",
+  "workspaceValidation.executionWorkspaceProjectWorkspaceId",
+  "workspaceValidation.persistedExecutionWorkspaceId",
+  "workspaceValidation.persistedProjectId",
+  "workspaceValidation.persistedProjectWorkspaceId",
+]);
+
+function redactDeep(value: unknown, path: string): unknown {
+  if (typeof value === "string") {
+    if (ID_PATHS_SKIP_CARD_REDACTION.has(path) && UUID_WHOLE_STRING_RE.test(value)) {
+      // Still run the non-card secret patterns (API keys, tokens, etc.) --
+      // only the card-number scrub is skipped for this known-safe path.
+      let output = value;
+      for (const pattern of SECRET_LEAK_PATTERNS) {
+        output = output.replace(pattern.regex, `[REDACTED:${pattern.name}]`);
+      }
+      return output;
+    }
+    return redactKnownLeakedSecretPatterns(value);
+  }
+  if (Array.isArray(value)) return value.map((entry) => redactDeep(entry, path));
+  if (isPlainObject(value)) {
+    const out: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value)) {
+      out[key] = redactDeep(entry, path ? `${path}.${key}` : key);
+    }
+    return out;
+  }
+  return value;
+}
+
 // Exported (DUR-372) so callers with their own JSON-shaped value to scrub --
 // e.g. workspace_operations.metadata in workspace-operations.ts -- can reuse
 // the identical deep-walk instead of only having access to the
 // heartbeat_runs-shaped redactHeartbeatRunPatchSecrets below.
 export function redactKnownLeakedSecretPatternsDeep(value: unknown): unknown {
-  if (typeof value === "string") return redactKnownLeakedSecretPatterns(value);
-  if (Array.isArray(value)) return value.map(redactKnownLeakedSecretPatternsDeep);
-  if (isPlainObject(value)) {
-    const out: Record<string, unknown> = {};
-    for (const [key, entry] of Object.entries(value)) {
-      out[key] = redactKnownLeakedSecretPatternsDeep(entry);
-    }
-    return out;
-  }
-  return value;
+  return redactDeep(value, "");
 }
 
 // Write-time gate for heartbeat_runs: applied to the patch object right
