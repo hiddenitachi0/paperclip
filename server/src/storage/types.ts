@@ -63,4 +63,6 @@ export interface StorageService {
   getObject(companyId: string, objectKey: string, options?: Pick<GetObjectInput, "range">): Promise<GetObjectResult>;
   headObject(companyId: string, objectKey: string): Promise<HeadObjectResult>;
   deleteObject(companyId: string, objectKey: string): Promise<void>;
+  /** Writes a derived object (e.g. a thumbnail) at a caller-chosen key inside the company prefix. */
+  putObjectAt?(companyId: string, objectKey: string, body: Buffer, contentType: string): Promise<void>;
 }
