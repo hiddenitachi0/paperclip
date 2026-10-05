@@ -13,6 +13,7 @@ import {
   Boxes,
   Plug,
   Eye,
+  Layers,
   GitBranch,
   GitFork,
   Package,
@@ -205,6 +206,7 @@ export function Sidebar() {
           <SidebarNavItem to="/jobs" label="Jobs" icon={Briefcase} />
           <SidebarNavItem to="/workflow-map" label="Workflow Map" icon={GitFork} />
           <SidebarNavItem to="/watchers" label="Watchers" icon={Eye} />
+          <SidebarNavItem to="/overlaps" label="Overlaps" icon={Layers} />
           <SidebarNavItem to="/trading" label="Trading" icon={CandlestickChart} />
           {showEmail ? <SidebarNavItem to="/email" label="Email" icon={Mail} /> : null}
           {showProductGrabber ? (
