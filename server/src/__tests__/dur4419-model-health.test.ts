@@ -5,7 +5,7 @@ import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } fro
 import { modelDirectoryService } from "../services/model-directory.ts";
 import { classifyLocalFailure, modelHealthService } from "../services/model-health.ts";
 import { LaneAProviderError } from "../services/lane-a-providers.ts";
-import { localModelOfflineNotice } from "@paperclipai/shared";
+import { MODEL_DIRECTORY_STARTERS, localModelOfflineNotice } from "@paperclipai/shared";
 
 /** DUR-4419: health states, once-per-outage reminder, Test button, on a real Postgres. */
 
@@ -79,6 +79,18 @@ d("model health", () => {
     const health = modelHealthService(db, { fetchImpl: tagsFetch(net) });
     const e = await modelDirectoryService(db).create(co, { name: "Claude", provider: "anthropic", model: "claude-sonnet-5" }, { userId: "u" });
     expect(await health.checkEntry(co, e.id)).toMatchObject({ applicable: false, status: "not_checked" });
+  });
+
+  it("reviewer handles every Hugging Face starter like other hosted entries: no probe, no call, plain reason", async () => {
+    let calls = 0;
+    const health = modelHealthService(db, { fetchImpl: (async () => { calls += 1; return new Response("{}"); }) as typeof fetch });
+    const dir = modelDirectoryService(db);
+    for (const s of MODEL_DIRECTORY_STARTERS.filter((x) => x.provider === "huggingface")) {
+      const e = await dir.create(co, { name: s.name, provider: s.provider, model: s.model, baseUrl: s.baseUrl }, { userId: "u" });
+      expect(await health.checkEntry(co, e.id)).toMatchObject({ applicable: false, status: "not_checked" });
+      expect(await health.testEntry(co, e.id)).toMatchObject({ ran: false, reason: expect.stringContaining("needs a key") });
+    }
+    expect(calls).toBe(0);
   });
 
   it("tells the person once per outage, not per message, and again after a fresh outage", async () => {
