@@ -259,23 +259,34 @@ export function redactKnownLeakedSecretPatterns(input: string): string {
 
 const UUID_WHOLE_STRING_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// DUR-4534/4536/4538: the original bug report was that a server-generated
-// UUID (e.g. an issueId) can, by Luhn coincidence, read as a card number and
-// get mangled by redactCardNumbers before it reaches resultJson. Rather than
-// try to detect "this is a genuine UUID" from the string's shape (every such
-// heuristic turned out to be defeatable -- see the comment on
-// redactCardNumbers), this instead names the *exact* field paths, by dotted
-// key path from the root of resultJson, that known call sites in
-// heartbeat.ts populate straight from DB rows or a board-only-gated request
-// -- never from agent- or attacker-supplied free text. Only values at these
-// paths, and only when the value is actually a well-formed UUID (not just
-// "contains one"), skip the card-number scrub; every other field still gets
-// the full scrub.
+// DUR-4534/4536/4538/4540-SR2: the original bug report was that a
+// server-generated UUID (e.g. an issueId) can, by Luhn coincidence, read as a
+// card number and get mangled by redactCardNumbers before it reaches
+// resultJson. An exact dotted-path allowlist (checked below) replaced the
+// defeatable character-shape heuristic, but the DUR-4540 security re-review
+// found that path alone is not a trust signal: server/src/services/
+// heartbeat.ts spreads `parseObject(adapterResult.resultJson)` -- parsed
+// from agent/adapter-controlled output -- directly into the object this
+// function walks, so an agent can forge e.g.
+// `{"workspaceValidation":{"issueId":"<uuid-shaped-PAN>"}}` in its own result
+// JSON and land on an allowlisted path with nobody having checked where that
+// path's *content* actually came from. The same applies to any other caller
+// of the exported, no-allowlist `redactKnownLeakedSecretPatternsDeep` below
+// if it is ever handed attacker-shaped JSON with a colliding key layout.
 //
-// `interruptedIssueId` (DUR-4538) is cancelRunInternal's operator-interrupt
-// resultJson field (see operatorInterruptCancelOptions in routes/issues.ts):
-// it is the real issue.id, and that code path is gated on
-// `req.actor.type === "board"`, so it can never carry agent/attacker text.
+// Fix: the ID_PATHS allowlist is no longer reachable from the general
+// `redactKnownLeakedSecretPatternsDeep` export (data-read-audit.ts,
+// workspace-operations.ts, and any future caller of that export always get
+// the full, unconditional scrub -- no exemption, no matter what shape the
+// caller's JSON has). It is only consulted via the `useIdAllowlist` flag
+// that `redactHeartbeatRunPatchSecrets` passes -- and only *after* that
+// function has stripped the two keys the one reachable attacker surface
+// (the adapterResult.resultJson spread) could use to forge a path collision
+// (`workspaceValidation`, `interruptedIssueId`). With both of those keys
+// guaranteed absent from attacker-controlled input by the time the
+// allowlist runs, a path match can only originate from the trusted
+// heartbeat.ts/operatorInterruptCancelOptions construction sites that
+// populate these fields from DB rows or a board-only-gated request.
 const ID_PATHS_SKIP_CARD_REDACTION = new Set([
   "workspaceValidation.issueId",
   "workspaceValidation.issueProjectId",
@@ -290,9 +301,32 @@ const ID_PATHS_SKIP_CARD_REDACTION = new Set([
   "interruptedIssueId",
 ]);
 
-function redactDeep(value: unknown, path: string): unknown {
+// The top-level keys the ID allowlist above protects that are reachable
+// through attacker/agent-controlled input (see the comment above):
+// `workspaceValidation` and `interruptedIssueId`, both via the
+// adapterResult.resultJson spread in heartbeat.ts (an agent's own result
+// JSON can declare either key at the top level). That call site -- and only
+// that call site -- strips these keys from the agent-controlled object it is
+// about to spread, using this helper, *before* merging in whatever the
+// server itself wants to set for this run. This function is NOT called
+// generically on every resultJson here, because the legitimate
+// workspaceValidation object (the one this allowlist exists to protect,
+// e.g. the original DUR-4534 case) also flows through this same patch shape
+// on the workspace-validation-failure path, and unconditionally stripping
+// the key there would silently delete the real data this allowlist is
+// supposed to preserve.
+export function stripAgentControlledIdAllowlistKeys(value: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (key === "workspaceValidation" || key === "interruptedIssueId") continue;
+    out[key] = entry;
+  }
+  return out;
+}
+
+function redactDeep(value: unknown, path: string, useIdAllowlist: boolean): unknown {
   if (typeof value === "string") {
-    if (ID_PATHS_SKIP_CARD_REDACTION.has(path) && UUID_WHOLE_STRING_RE.test(value)) {
+    if (useIdAllowlist && ID_PATHS_SKIP_CARD_REDACTION.has(path) && UUID_WHOLE_STRING_RE.test(value)) {
       // Still run the non-card secret patterns (API keys, tokens, etc.) --
       // only the card-number scrub is skipped for this known-safe path.
       let output = value;
@@ -303,11 +337,11 @@ function redactDeep(value: unknown, path: string): unknown {
     }
     return redactKnownLeakedSecretPatterns(value);
   }
-  if (Array.isArray(value)) return value.map((entry) => redactDeep(entry, path));
+  if (Array.isArray(value)) return value.map((entry) => redactDeep(entry, path, useIdAllowlist));
   if (isPlainObject(value)) {
     const out: Record<string, unknown> = {};
     for (const [key, entry] of Object.entries(value)) {
-      out[key] = redactDeep(entry, path ? `${path}.${key}` : key);
+      out[key] = redactDeep(entry, path ? `${path}.${key}` : key, useIdAllowlist);
     }
     return out;
   }
@@ -317,9 +351,12 @@ function redactDeep(value: unknown, path: string): unknown {
 // Exported (DUR-372) so callers with their own JSON-shaped value to scrub --
 // e.g. workspace_operations.metadata in workspace-operations.ts -- can reuse
 // the identical deep-walk instead of only having access to the
-// heartbeat_runs-shaped redactHeartbeatRunPatchSecrets below.
+// heartbeat_runs-shaped redactHeartbeatRunPatchSecrets below. Deliberately
+// has NO id-path allowlist (see DUR-4540 comment above): every caller of
+// this export gets the unconditional card scrub, because this function has
+// no way to know whether its caller's JSON shape is attacker-influenced.
 export function redactKnownLeakedSecretPatternsDeep(value: unknown): unknown {
-  return redactDeep(value, "");
+  return redactDeep(value, "", false);
 }
 
 // Write-time gate for heartbeat_runs: applied to the patch object right
@@ -338,7 +375,14 @@ export function redactHeartbeatRunPatchSecrets<T extends Record<string, unknown>
     next.stderrExcerpt = redactKnownLeakedSecretPatterns(next.stderrExcerpt);
   }
   if (isPlainObject(next.resultJson)) {
-    next.resultJson = redactKnownLeakedSecretPatternsDeep(next.resultJson);
+    // The id-path allowlist below is only safe to apply here because the one
+    // reachable attacker surface for this patch shape -- the
+    // adapterResult.resultJson spread in heartbeat.ts -- has already had its
+    // `workspaceValidation` key stripped via stripAgentControlledIdAllowlistKeys
+    // before this function is ever called (see DUR-4540 comment above
+    // ID_PATHS_SKIP_CARD_REDACTION). Any `workspaceValidation` that does
+    // reach this point was built by the server itself.
+    next.resultJson = redactDeep(next.resultJson, "", true);
   }
   return next as T;
 }
