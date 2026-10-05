@@ -1,9 +1,9 @@
 import { execFile } from "node:child_process";
 import { serverChildProcessEnv } from "./runtime-env.js";
 import { promisify } from "node:util";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull, ne } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { issueComments } from "@paperclipai/db";
+import { issueComments, issues, workspaceOperations } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
 import { resolveIssueWorkspaceCheckout } from "./self-review-gate.js";
 
@@ -234,4 +234,106 @@ async function checkNamedCommits(input: {
     commits: namedCommits,
     message: `This task was marked done naming ${formatCommitList(namedCommits)}, which this project's working copy has never seen. That is normal when the change lives in another repository, but if it was meant to be this project's work, check it actually reached the shared repository before trusting this as finished.`,
   };
+}
+
+// Same reasoning as GIT_TIMEOUT_MS above: walking HEAD/reflog is O(a handful of refs), not
+// O(history), and a wedged git here must not hold up a run's whole wake-up.
+const UNPUSHED_HEAD_CANDIDATE_LIMIT = 20;
+
+/**
+ * Candidate shas worth checking for "is this unpushed": the checkout's current HEAD, plus
+ * its most recent reflog entries. Reflog matters because the run reading this may be waking
+ * into a checkout exactly as a prior run left it -- the commit at risk is whatever HEAD
+ * pointed at a moment ago, which reflog remembers even across a branch switch.
+ */
+async function collectRecentCheckoutCandidates(workspacePath: string): Promise<string[]> {
+  const candidates: string[] = [];
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", workspacePath, "rev-parse", "HEAD"], {
+      cwd: workspacePath,
+      timeout: GIT_TIMEOUT_MS,
+      env: serverChildProcessEnv(),
+    });
+    const head = stdout.trim();
+    if (head) candidates.push(head);
+  } catch {
+    // No HEAD (empty repo, detached in a way rev-parse rejects) -- nothing to check here.
+  }
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      ["-C", workspacePath, "reflog", "--format=%H", "-n", String(UNPUSHED_HEAD_CANDIDATE_LIMIT)],
+      { cwd: workspacePath, timeout: GIT_TIMEOUT_MS, env: serverChildProcessEnv() },
+    );
+    for (const line of stdout.split("\n")) {
+      const sha = line.trim();
+      if (sha && !candidates.includes(sha)) candidates.push(sha);
+    }
+  } catch {
+    // Reflog can be empty or disabled -- HEAD alone, checked above, still covers the common case.
+  }
+  return candidates;
+}
+
+/**
+ * DUR-3987 item 1: the project_primary/shared_workspace checkout for issue X can still be
+ * sitting on a commit from issue Y's run when issue X's run wakes up and takes its first
+ * git action -- same root cause as buildWorkspaceLockAdoptionWarning (same-issue lock
+ * reclaim), but that check never fires here because it's the same checkout being handed to
+ * a genuinely different issue, not a same-issue lock takeover. There is no server chokepoint
+ * on an agent's own raw git commands, so this can only warn at wake time, before that first
+ * command, naming what's at risk -- never block it.
+ */
+export async function buildCrossIssueSharedCheckoutWarning(input: {
+  workspacePath: string;
+  previousIssueIdentifier: string | null;
+}): Promise<string | null> {
+  const candidates = await collectRecentCheckoutCandidates(input.workspacePath);
+  if (candidates.length === 0) return null;
+
+  const states = await Promise.all(
+    candidates.map((sha) => classifyCommitAgainstCheckout(input.workspacePath, sha)),
+  );
+  const localOnly = candidates.filter((_, index) => states[index] === "local_only");
+  if (localOnly.length === 0) return null;
+
+  const whoever = input.previousIssueIdentifier ? `issue ${input.previousIssueIdentifier}'s` : "a different issue's";
+  return (
+    `This is a shared checkout reused across issues in this project, and it is currently carrying ${formatCommitList(localOnly)} -- ` +
+    `a commit that exists only in this working copy, not in the shared repository. It looks like it was left by ${whoever} run, ` +
+    "not this one. A destructive git command here (`git reset --hard`, `git checkout -f`, `git clean -f`, switching branches) would " +
+    "make it unreachable except via `git reflog`, until the next `git gc` prunes it. Before running one, check `git log`/`git status` " +
+    "against this sha and push it (or confirm it already reached the shared repository under a different sha) if it looks like real " +
+    "unfinished work rather than scratch state."
+  );
+}
+
+/**
+ * Which issue's own run most recently operated in this execution workspace, other than the
+ * one about to run now. Reuses workspace_operations the same way resolveIssueWorkspaceCheckout
+ * does (see that function's doc comment) -- that table's issueId is server-written only, from
+ * inside a run's own dispatch code, so it reflects real usage regardless of who originally
+ * created the workspace row.
+ */
+export async function findLastDifferentIssueTouchingWorkspace(
+  db: Db,
+  input: { companyId: string; executionWorkspaceId: string; excludeIssueId: string },
+): Promise<{ id: string; identifier: string | null } | null> {
+  return db
+    .select({ id: issues.id, identifier: issues.identifier })
+    .from(workspaceOperations)
+    .innerJoin(
+      issues,
+      and(eq(issues.id, workspaceOperations.issueId), eq(issues.companyId, input.companyId)),
+    )
+    .where(
+      and(
+        eq(workspaceOperations.companyId, input.companyId),
+        eq(workspaceOperations.executionWorkspaceId, input.executionWorkspaceId),
+        ne(workspaceOperations.issueId, input.excludeIssueId),
+      ),
+    )
+    .orderBy(desc(workspaceOperations.startedAt))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
 }

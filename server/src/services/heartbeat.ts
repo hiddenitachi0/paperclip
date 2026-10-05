@@ -312,6 +312,10 @@ import { skillVersionSelectionMap } from "./runtime-skill-selections.js";
 import { environmentRunOrchestrator } from "./environment-run-orchestrator.js";
 import { isUnsafeSessionWorkspaceCwd } from "./session-workspace-cwd.js";
 import {
+  buildCrossIssueSharedCheckoutWarning,
+  findLastDifferentIssueTouchingWorkspace,
+} from "./origin-commit-gate.js";
+import {
   clearHeartbeatRunRuntimeStatus,
   getHeartbeatRunRuntimeStatus,
   MAX_HEARTBEAT_RUN_RUNTIME_ASSISTANT_SNIPPET_CHARS,
@@ -11743,6 +11747,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       ? await issuesSvc.listDependencyReadiness(agent.companyId, [issueId]).then((rows) => rows.get(issueId) ?? null)
       : null;
     let workspaceLockAdoptionWarning: string | null = null;
+    let crossIssueSharedCheckoutWarning: string | null = null;
     if (
       issueId &&
       issueContext &&
@@ -12740,6 +12745,31 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         })
         .where(eq(heartbeatRuns.id, run.id));
     }
+    // DUR-3987 item 1 / DUR-4549: a project_primary/shared_workspace checkout can still be
+    // sitting on another issue's unpushed commit the moment this run takes it over. The
+    // same-issue lock-adoption warning above never fires for that shape (it's a genuinely
+    // different issue, not a reclaimed lock from a terminal run of this same issue), so this
+    // runs as its sibling check. Best-effort: never let it block or fail the run itself.
+    if (issueId && persistedExecutionWorkspace?.mode === "shared_workspace") {
+      try {
+        const previousIssue = await findLastDifferentIssueTouchingWorkspace(db, {
+          companyId: agent.companyId,
+          executionWorkspaceId: persistedExecutionWorkspace.id,
+          excludeIssueId: issueId,
+        });
+        if (previousIssue) {
+          crossIssueSharedCheckoutWarning = await buildCrossIssueSharedCheckoutWarning({
+            workspacePath: executionWorkspace.cwd,
+            previousIssueIdentifier: previousIssue.identifier,
+          });
+        }
+      } catch (err) {
+        logger.warn(
+          { err, runId: run.id, issueId, executionWorkspaceId: persistedExecutionWorkspace.id },
+          "cross-issue shared-checkout check could not run; letting the run through (DUR-3987/DUR-4549)",
+        );
+      }
+    }
     const acquiredEnvironment = await envOrchestrator.acquireForRun({
       companyId: agent.companyId,
       selectedEnvironmentId,
@@ -12843,6 +12873,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       ...resolvedWorkspace.warnings,
       ...executionWorkspace.warnings,
       ...(workspaceLockAdoptionWarning ? [workspaceLockAdoptionWarning] : []),
+      ...(crossIssueSharedCheckoutWarning ? [crossIssueSharedCheckoutWarning] : []),
       ...(runtimeSessionResolution.warning ? [runtimeSessionResolution.warning] : []),
       ...(requestedShouldReuseExisting && workspaceConfigFreshness.reasons.length > 0
         ? [

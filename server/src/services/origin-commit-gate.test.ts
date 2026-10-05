@@ -16,15 +16,18 @@ import {
   issues,
   projectWorkspaces,
   projects,
+  workspaceOperations,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "../__tests__/helpers/embedded-postgres.js";
 import {
+  buildCrossIssueSharedCheckoutWarning,
   classifyCommitAgainstCheckout,
   evaluateOriginCommitDoneGate,
   extractNamedCommits,
+  findLastDifferentIssueTouchingWorkspace,
 } from "./origin-commit-gate.js";
 
 const execFileAsync = promisify(execFile);
@@ -91,6 +94,7 @@ describeEmbeddedPostgres("origin-commit-gate against a real checkout", () => {
 
   afterEach(async () => {
     await db.delete(issueComments);
+    await db.delete(workspaceOperations);
     await db.delete(heartbeatRuns);
     await db.delete(issues);
     await db.delete(executionWorkspaces);
@@ -189,9 +193,11 @@ describeEmbeddedPostgres("origin-commit-gate against a real checkout", () => {
       identifier: `${issuePrefix}-1`,
     });
 
+    let executionWorkspaceId: string | null = null;
     if (input.workspacePath) {
+      executionWorkspaceId = randomUUID();
       await db.insert(executionWorkspaces).values({
-        id: randomUUID(),
+        id: executionWorkspaceId,
         companyId,
         projectId,
         mode: "shared_workspace",
@@ -206,7 +212,38 @@ describeEmbeddedPostgres("origin-commit-gate against a real checkout", () => {
       });
     }
 
-    return { companyId, agentId, projectId, issueId };
+    return { companyId, agentId, projectId, issueId, executionWorkspaceId };
+  }
+
+  /** A second issue in the same company/project, for the cross-issue shared-checkout tests. */
+  async function seedSiblingIssue(seeded: { companyId: string; agentId: string; projectId: string }) {
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId: seeded.companyId,
+      projectId: seeded.projectId,
+      title: "A different issue in the same project",
+      status: "in_progress",
+      priority: "high",
+      assigneeAgentId: seeded.agentId,
+      issueNumber: 2,
+      identifier: "SIB-2",
+    });
+    return issueId;
+  }
+
+  async function recordWorkspaceOperation(input: {
+    companyId: string;
+    executionWorkspaceId: string;
+    issueId: string;
+  }) {
+    await db.insert(workspaceOperations).values({
+      companyId: input.companyId,
+      executionWorkspaceId: input.executionWorkspaceId,
+      issueId: input.issueId,
+      phase: "setup",
+      status: "succeeded",
+    });
   }
 
   function agentDone(seeded: { companyId: string; agentId: string; issueId: string }, note: string | null) {
@@ -427,5 +464,92 @@ describeEmbeddedPostgres("origin-commit-gate against a real checkout", () => {
     // The issue stays open, so the work is still recoverable from the reflog.
     const issue = await db.select().from(issues).where(eq(issues.id, seeded.issueId)).then((rows) => rows[0]!);
     expect(issue.status).toBe("in_progress");
+  });
+
+  describe("findLastDifferentIssueTouchingWorkspace", () => {
+    it("finds the sibling issue that most recently operated in this shared checkout", async () => {
+      const { clonePath } = await createCloneWithOrigin();
+      const seeded = await seedIssue({ workspacePath: clonePath });
+      const siblingIssueId = await seedSiblingIssue(seeded);
+      await recordWorkspaceOperation({
+        companyId: seeded.companyId,
+        executionWorkspaceId: seeded.executionWorkspaceId!,
+        issueId: siblingIssueId,
+      });
+
+      const found = await findLastDifferentIssueTouchingWorkspace(db, {
+        companyId: seeded.companyId,
+        executionWorkspaceId: seeded.executionWorkspaceId!,
+        excludeIssueId: seeded.issueId,
+      });
+
+      expect(found?.id).toBe(siblingIssueId);
+      expect(found?.identifier).toBe("SIB-2");
+    });
+
+    it("returns null when no other issue has recorded an operation against this workspace", async () => {
+      const { clonePath } = await createCloneWithOrigin();
+      const seeded = await seedIssue({ workspacePath: clonePath });
+      await recordWorkspaceOperation({
+        companyId: seeded.companyId,
+        executionWorkspaceId: seeded.executionWorkspaceId!,
+        issueId: seeded.issueId,
+      });
+
+      const found = await findLastDifferentIssueTouchingWorkspace(db, {
+        companyId: seeded.companyId,
+        executionWorkspaceId: seeded.executionWorkspaceId!,
+        excludeIssueId: seeded.issueId,
+      });
+
+      expect(found).toBeNull();
+    });
+  });
+
+  describe("buildCrossIssueSharedCheckoutWarning", () => {
+    it("warns naming the sha when the checkout's current HEAD is unpushed — the DUR-3987 handoff shape", async () => {
+      const { clonePath } = await createCloneWithOrigin();
+      await commitInClone(clonePath, "pushed work");
+      await runGit(clonePath, ["push", "origin", "main"]);
+      const unpushed = await commitInClone(clonePath, "left by the prior issue's run, never pushed");
+
+      const warning = await buildCrossIssueSharedCheckoutWarning({
+        workspacePath: clonePath,
+        previousIssueIdentifier: "SIB-2",
+      });
+
+      expect(warning).not.toBeNull();
+      expect(warning).toContain(unpushed.slice(0, 12));
+      expect(warning).toContain("SIB-2");
+      expect(warning).toContain("shared repository");
+    });
+
+    it("says nothing when HEAD and recent reflog entries are all already on the remote", async () => {
+      const { clonePath } = await createCloneWithOrigin();
+      await commitInClone(clonePath, "pushed work");
+      await runGit(clonePath, ["push", "origin", "main"]);
+
+      const warning = await buildCrossIssueSharedCheckoutWarning({
+        workspacePath: clonePath,
+        previousIssueIdentifier: "SIB-2",
+      });
+
+      expect(warning).toBeNull();
+    });
+
+    it("still warns on the exact 15 Sep shape even after a reset moved HEAD away — reflog remembers it", async () => {
+      const { clonePath } = await createCloneWithOrigin();
+      const orphaned = await commitInClone(clonePath, "about to be reset away");
+      await runGit(clonePath, ["reset", "--hard", "origin/main"]);
+
+      const warning = await buildCrossIssueSharedCheckoutWarning({
+        workspacePath: clonePath,
+        previousIssueIdentifier: null,
+      });
+
+      expect(warning).not.toBeNull();
+      expect(warning).toContain(orphaned.slice(0, 12));
+      expect(warning).toContain("a different issue's");
+    });
   });
 });
