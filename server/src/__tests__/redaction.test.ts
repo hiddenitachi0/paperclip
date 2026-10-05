@@ -463,6 +463,25 @@ describe("redactKnownLeakedSecretPatternsDeep", () => {
     };
     expect(result.workspaceValidation.issueId).not.toContain(CANARY_CARD_NUMBER);
   });
+
+  // DUR-4538: cancelRunInternal's operator-interrupt resultJson
+  // (operatorInterruptCancelOptions in routes/issues.ts) writes the real
+  // issue.id to a root-level `interruptedIssueId` field, not under
+  // `workspaceValidation` -- it needs its own allowlist entry.
+  it("DUR-4538: preserves a genuine UUID at the root-level interruptedIssueId path used by operator-interrupt cancellation", () => {
+    const input = {
+      operatorInterrupted: true,
+      interruptionSource: "issue_comment_interrupt",
+      interruptedIssueId: "c10d6206-1c57-4904-9223-982c6cf4b18b",
+    };
+    expect(redactKnownLeakedSecretPatternsDeep(input)).toEqual(input);
+  });
+
+  it("DUR-4538: still redacts a card-shaped value smuggled under a field that merely resembles interruptedIssueId", () => {
+    const input = { otherInterruptedIssueId: "aaaaaaaa-4111-1111-1111-1111aaaaaaaa" };
+    const result = redactKnownLeakedSecretPatternsDeep(input) as { otherInterruptedIssueId: string };
+    expect(result.otherInterruptedIssueId).toBe("aaaaaaaa-[REDACTED:card_number]aaaaaaaa");
+  });
 });
 
 describe("redactHeartbeatRunPatchSecrets", () => {

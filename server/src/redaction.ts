@@ -259,21 +259,23 @@ export function redactKnownLeakedSecretPatterns(input: string): string {
 
 const UUID_WHOLE_STRING_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// DUR-4534/4536: the original bug report was that a server-generated UUID
-// (e.g. an issueId) can, by Luhn coincidence, read as a card number and get
-// mangled by redactCardNumbers before it reaches resultJson. Rather than try
-// to detect "this is a genuine UUID" from the string's shape (every such
+// DUR-4534/4536/4538: the original bug report was that a server-generated
+// UUID (e.g. an issueId) can, by Luhn coincidence, read as a card number and
+// get mangled by redactCardNumbers before it reaches resultJson. Rather than
+// try to detect "this is a genuine UUID" from the string's shape (every such
 // heuristic turned out to be defeatable -- see the comment on
 // redactCardNumbers), this instead names the *exact* field paths, by dotted
-// key path from the root of resultJson.workspaceValidation, that the
-// orchestration code in heartbeat.ts's assertGitSensitiveAdapterWorkspaceValid
-// / assertWorkspaceHasPushCapability / inherited-workspace-reuse-failure
-// construction sites populate from DB rows (issue.id, resolvedWorkspace.*,
-// executionWorkspace.*, persistedExecutionWorkspace.*) -- never from agent-
-// or attacker-supplied free text. Only values at these paths, and only when
-// the value is actually a well-formed UUID (not just "contains one"), skip
-// the card-number scrub; every other field, including everything else under
-// workspaceValidation, still gets the full scrub.
+// key path from the root of resultJson, that known call sites in
+// heartbeat.ts populate straight from DB rows or a board-only-gated request
+// -- never from agent- or attacker-supplied free text. Only values at these
+// paths, and only when the value is actually a well-formed UUID (not just
+// "contains one"), skip the card-number scrub; every other field still gets
+// the full scrub.
+//
+// `interruptedIssueId` (DUR-4538) is cancelRunInternal's operator-interrupt
+// resultJson field (see operatorInterruptCancelOptions in routes/issues.ts):
+// it is the real issue.id, and that code path is gated on
+// `req.actor.type === "board"`, so it can never carry agent/attacker text.
 const ID_PATHS_SKIP_CARD_REDACTION = new Set([
   "workspaceValidation.issueId",
   "workspaceValidation.issueProjectId",
@@ -285,6 +287,7 @@ const ID_PATHS_SKIP_CARD_REDACTION = new Set([
   "workspaceValidation.persistedExecutionWorkspaceId",
   "workspaceValidation.persistedProjectId",
   "workspaceValidation.persistedProjectWorkspaceId",
+  "interruptedIssueId",
 ]);
 
 function redactDeep(value: unknown, path: string): unknown {
