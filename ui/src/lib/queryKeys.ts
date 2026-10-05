@@ -306,6 +306,10 @@ export const queryKeys = {
   agentMemories: {
     list: (agentId: string) => ["agent-memories", agentId] as const,
   },
+  // Overlapping work between open tasks.
+  overlaps: {
+    list: (companyId: string) => ["overlaps", companyId] as const,
+  },
   // Market-price watchers.
   watchers: {
     list: (companyId: string) => ["watchers", companyId] as const,
