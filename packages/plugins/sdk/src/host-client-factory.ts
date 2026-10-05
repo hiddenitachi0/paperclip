@@ -333,6 +333,9 @@ export interface HostServices {
     reserveDailyGeneration(
       params: WorkerToHostMethods["personas.reserveDailyGeneration"][0],
     ): Promise<WorkerToHostMethods["personas.reserveDailyGeneration"][1]>;
+    getPictureFeedbackRules(
+      params: WorkerToHostMethods["personas.getPictureFeedbackRules"][0],
+    ): Promise<WorkerToHostMethods["personas.getPictureFeedbackRules"][1]>;
   };
 }
 
@@ -536,6 +539,7 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
 
   // Personas
   "personas.reserveDailyGeneration": "personas.generation_cap.enforce",
+  "personas.getPictureFeedbackRules": "personas.picture_feedback.read",
   "billing.reserveMediaStudioDirectSpend": "billing.media_studio_direct.reserve",
   "billing.releaseMediaStudioDirectSpend": "billing.media_studio_direct.reserve",
   "billing.settleMediaStudioDirectSpend": "billing.media_studio_direct.reserve",
@@ -1038,6 +1042,9 @@ export function createHostClientHandlers(
 
     "personas.reserveDailyGeneration": gated("personas.reserveDailyGeneration", async (params) => {
       return services.personas.reserveDailyGeneration(params);
+    }),
+    "personas.getPictureFeedbackRules": gated("personas.getPictureFeedbackRules", async (params) => {
+      return services.personas.getPictureFeedbackRules(params);
     }),
   };
 }
