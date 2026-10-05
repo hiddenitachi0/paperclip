@@ -92,6 +92,7 @@ import { IssueMonitorActivityCard } from "../components/IssueMonitorActivityCard
 import { GoalConditionLoopCard } from "../components/GoalConditionLoopCard";
 import { IssueScheduledRetryCard } from "../components/IssueScheduledRetryCard";
 import { IssueProperties } from "../components/IssueProperties";
+import { IssueProgressBar, readIssueProgress } from "../components/IssueProgressBar";
 import { PauseAffectsSummaryView } from "../components/interrupt-handoff/InterruptHandoffViews";
 import { computePauseAffectsSummary } from "../lib/interrupt-handoff";
 import { useIssueExternalObjects } from "../hooks/useIssueExternalObjects";
@@ -4077,6 +4078,8 @@ export function IssueDetail() {
           as="h2"
           className="text-xl font-bold"
         />
+
+        <IssueProgressBar progress={readIssueProgress(issue)} />
 
         <InlineEditor
           value={issue.description ?? ""}
