@@ -100,7 +100,7 @@ export function secretsForProvider(secrets: CompanySecret[], provider: SecretKin
 }
 
 function SectionHeading({ children }: { children: React.ReactNode }) {
-  return <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">{children}</div>;
+  return <div className="section-title">{children}</div>;
 }
 
 function LastTest({ secret }: { secret: CompanySecret }) {
@@ -386,7 +386,7 @@ export function CompanyConnections() {
       {/* All secrets + Tools */}
       <div className="space-y-4" data-testid="connections-all-secrets">
         <SectionHeading>All secrets</SectionHeading>
-        <div className="space-y-3 rounded-md border border-border px-4 py-4">
+        <div className="space-y-3 rounded-md section-box px-4 py-4">
           <div className="flex items-center justify-between gap-3">
             <div className="space-y-0.5">
               <p className="text-sm font-medium">
