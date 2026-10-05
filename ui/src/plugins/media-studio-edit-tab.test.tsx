@@ -79,6 +79,60 @@ describe("Media Studio Edit tab (DUR-4063)", () => {
     expect(container.textContent).toContain("No pictures yet.");
   });
 
+  it("shows small thumbnails in the picture picker and opens the full picture on click", async () => {
+    fetchMock.mockImplementation(async (path: string) => {
+      if (typeof path === "string" && path.includes("/artifacts")) {
+        return new Response(
+          JSON.stringify({
+            artifacts: [
+              {
+                id: "a1",
+                title: "Beach",
+                contentType: "image/png",
+                openPath: "/api/attachments/att-1/content",
+                thumbnailPath: "/api/attachments/att-1/thumbnail",
+                originalFilename: "beach.png",
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({}), { status: 200 });
+    });
+    const loaded: string[] = [];
+    const OriginalImage = globalThis.Image;
+    class StubImage {
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      naturalWidth = 100;
+      naturalHeight = 100;
+      crossOrigin: string | null = null;
+      set src(value: string) {
+        loaded.push(value);
+      }
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).Image = StubImage;
+    try {
+      root = createRoot(container);
+      root.render(<MediaStudioPage context={{ companyId: COMPANY } as never} />);
+      await flush();
+
+      const tile = container.querySelector('img[alt="Beach"]') as HTMLImageElement;
+      expect(tile.getAttribute("src")).toBe("/api/attachments/att-1/thumbnail");
+      expect(tile.getAttribute("loading")).toBe("lazy");
+
+      tile.click();
+      await flush();
+      expect(loaded).toContain("/api/attachments/att-1/content");
+      expect(loaded).not.toContain("/api/attachments/att-1/thumbnail");
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (globalThis as any).Image = OriginalImage;
+    }
+  });
+
   it("only shows AI-edit buttons for services with a configured key", async () => {
     root = createRoot(container);
     root.render(<MediaStudioPage context={{ companyId: COMPANY } as never} />);

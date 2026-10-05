@@ -242,6 +242,7 @@ export function StoryboardPanel(props: {
               <div style={{ aspectRatio: "16 / 9", borderRadius: 6, background: "rgba(128,128,128,0.12)", overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center" }}>
                 {hasPicture ? (
                   <img
+                    loading="lazy"
                     alt={`Picture for shot ${shot.orderIndex + 1}`}
                     src={`${base}/shots/${shot.id}/still/content${shot.stillGeneratedAt ? `?v=${encodeURIComponent(shot.stillGeneratedAt)}` : ""}`}
                     style={{ width: "100%", height: "100%", objectFit: "cover" }}

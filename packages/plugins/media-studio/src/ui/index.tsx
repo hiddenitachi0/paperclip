@@ -418,6 +418,10 @@ function fileContentPath(fileId: string) {
   return `/api/attachments/${fileId}/content`;
 }
 
+function thumbnailPathFor(contentPath: string): string {
+  return contentPath.replace(/\/content$/, "/thumbnail");
+}
+
 export type LookDraft = {
   id: string | null;
   name: string;
@@ -1756,7 +1760,7 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                   {look.referenceFileIds.map((id, i) => (
                     <figure key={id} style={{ margin: 0, display: "flex", flexDirection: "column", gap: 2, alignItems: "center" }}>
-                      <img src={fileContentPath(id)} alt="Reference picture" style={thumb} />
+                      <img src={thumbnailPathFor(fileContentPath(id))} loading="lazy" alt="Reference picture" style={thumb} />
                       <figcaption style={{ fontSize: 11, opacity: 0.7 }}>{roleLabel(look.referenceRoles?.[i])}</figcaption>
                     </figure>
                   ))}
@@ -1997,7 +2001,7 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
                 {draft.referenceFileIds.map((id, i) => (
                   <div key={id} style={{ display: "flex", flexDirection: "column", gap: 4, width: 120 }}>
                     <span style={{ fontSize: 11, opacity: 0.7 }}>Picture {i + 1}</span>
-                    <img src={fileContentPath(id)} alt={`Reference picture ${i + 1}`} style={thumb} />
+                    <img src={thumbnailPathFor(fileContentPath(id))} loading="lazy" alt={`Reference picture ${i + 1}`} style={thumb} />
                     <select
                       aria-label={`What picture ${i + 1} is for`}
                       value={draftRoles(draft)[i]}
@@ -2034,7 +2038,7 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
                       onClick={() => toggleRef(img.fileId, refLimit)}
                       style={{ padding: 0, border: picked ? "3px solid #1971c2" : "3px solid transparent", borderRadius: 8, background: "none", cursor: "pointer" }}
                     >
-                      <img src={img.src} alt={img.title} style={thumb} />
+                      <img src={thumbnailPathFor(img.src)} loading="lazy" alt={img.title} style={thumb} />
                     </button>
                   );
                 })}
@@ -2404,7 +2408,7 @@ function DirectHistoryList({ history, error }: { history: DirectHistoryEntry[] |
           {history.map((entry) => (
             <div key={entry.id} style={{ display: "flex", gap: 10, alignItems: "center", fontSize: 12, borderBottom: "1px solid rgba(128,128,128,0.15)", paddingBottom: 6 }}>
               {entry.contentPath && entry.kind === "picture" ? (
-                <img src={entry.contentPath} alt="" style={thumb} />
+                <img src={ATTACHMENT_PATH.test(entry.contentPath) ? thumbnailPathFor(entry.contentPath) : entry.contentPath} loading="lazy" alt="" style={thumb} />
               ) : (
                 <div style={{ width: 72, height: 72, borderRadius: 6, background: "rgba(128,128,128,0.12)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "#868e96" }}>
                   {entry.kind === "rewrite_prompt" ? "Rewrite" : DIRECT_KIND_LABELS[entry.kind as DirectKind] ?? entry.kind}
