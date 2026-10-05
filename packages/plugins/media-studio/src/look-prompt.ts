@@ -18,6 +18,9 @@
 //
 //   Keep out of the picture: ...                     unless the model takes "things to avoid" text
 //
+//   Do more of: ...  /  Avoid, unless the request asks for it: ...
+//                                                    what this person's emoji reactions taught (DUR-4345)
+//
 // The request wins: a sheet field (or a picture's role) about something the
 // request itself describes, such as a different outfit or place, is left out
 // (for a picture: the prompt says to take that from the request instead), and
@@ -276,6 +279,37 @@ export function roleInstructions(roles: ReferenceRole[], wording: RoleWording, r
 
 export const CHARACTER_INTRO = "Character (the same in every picture; where the request above says otherwise, follow the request)";
 
+/** Picture rules learned from a person's emoji reactions: short labels from the host's fixed vocabulary. */
+export interface PictureFeedbackRules {
+  doMore: string[];
+  avoid: string[];
+}
+
+const FEEDBACK_TERMS_MAX = 8;
+const FEEDBACK_TERM_MAX_LENGTH = 40;
+
+/**
+ * Whatever the host sends is data: keep only short single-line labels, a few
+ * of them, once each. An old prompt can never ride in through here.
+ */
+export function normalizeFeedbackRules(value: unknown): PictureFeedbackRules {
+  const raw = value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+  const clean = (list: unknown): string[] => {
+    if (!Array.isArray(list)) return [];
+    const out: string[] = [];
+    for (const item of list) {
+      if (typeof item !== "string") continue;
+      const term = item.trim();
+      if (!term || term.length > FEEDBACK_TERM_MAX_LENGTH || /[\r\n]/.test(term) || out.includes(term)) continue;
+      out.push(term);
+      if (out.length >= FEEDBACK_TERMS_MAX) break;
+    }
+    return out;
+  };
+  const avoid = clean(raw.avoid);
+  return { doMore: clean(raw.doMore).filter((term) => !avoid.includes(term)), avoid };
+}
+
 export interface PromptInput {
   /** What the agent or person asked for. */
   request: string;
@@ -288,6 +322,8 @@ export interface PromptInput {
   service: string;
   /** The model takes "things to avoid" text of its own: "Always avoid" goes there instead of into the prompt. */
   avoidAsNegative?: boolean;
+  /** What this person's reactions taught: more of this, less of that. Comes from the host, never from the request. */
+  feedback?: PictureFeedbackRules | null;
 }
 
 export interface AssembledPrompt {
@@ -332,6 +368,11 @@ export function assemblePrompt(input: PromptInput): AssembledPrompt {
   if (style) blocks.push(`Style: ${style}`);
   const styleFields = pick("style");
   if (styleFields.length > 0) blocks.push(styleFields.join(" "));
+  const feedback = normalizeFeedbackRules(input.feedback);
+  if (feedback.doMore.length > 0) blocks.push(`Do more of: ${feedback.doMore.join(", ")}.`);
+  // The request wins here too, so the avoid list says so in words; the model's
+  // own "things to avoid" field (below) cannot, so it only gets the sheet's.
+  if (feedback.avoid.length > 0) blocks.push(`Avoid, unless the request above asks for it: ${feedback.avoid.join(", ")}.`);
   const avoidText = sheet.avoid?.trim() || null;
   let avoid: string | null = null;
   if (avoidText) {

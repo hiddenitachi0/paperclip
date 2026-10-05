@@ -99,6 +99,7 @@ const OPERATION_CAPABILITIES: Record<string, readonly PluginCapability[]> = {
   "files.get": ["company.files.read"],
   "files.readContent": ["company.files.read"],
   "personas.reserveDailyGeneration": ["personas.generation_cap.enforce"],
+  "personas.getPictureFeedbackRules": ["personas.picture_feedback.read"],
   "billing.reserveMediaStudioDirectSpend": ["billing.media_studio_direct.reserve"],
   "billing.releaseMediaStudioDirectSpend": ["billing.media_studio_direct.reserve"],
   "billing.settleMediaStudioDirectSpend": ["billing.media_studio_direct.reserve"],

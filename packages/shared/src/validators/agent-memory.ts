@@ -10,7 +10,7 @@ export const AGENT_MEMORY_MAX_LENGTH = 500;
 /** Most notes one owner (a persona, or an agent without one) can hold. */
 export const AGENT_MEMORY_MAX_NOTES = 100;
 
-export const AGENT_MEMORY_SOURCES = ["agent", "user"] as const;
+export const AGENT_MEMORY_SOURCES = ["agent", "user", "reaction"] as const;
 export type AgentMemorySource = (typeof AGENT_MEMORY_SOURCES)[number];
 
 /** Collapses runs of whitespace and trims, so "  a \n b " is saved as "a b". */

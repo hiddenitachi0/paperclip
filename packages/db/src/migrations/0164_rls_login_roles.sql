@@ -151,6 +151,11 @@ DECLARE
     'assets',
     'board_api_keys',
     'board_delegate_tokens',
+    -- DUR-4519 (Brag video phase 1). Created, granted on and policed in
+    -- 0226_brag_jobs.sql; listed here so the login-role lists match the
+    -- schema, as for the tables above.
+    'brag_jobs',
+    'brag_scenes',
     'budget_incidents',
     'budget_policies',
     'cli_auth_challenges',
@@ -258,6 +263,10 @@ DECLARE
     'issue_execution_decisions',
     'issue_inbox_archives',
     'issue_labels',
+    -- DUR-4468. Created, granted on and policed in 0224_issue_overlaps.sql;
+    -- listed here so the login-role lists match the schema, as for the
+    -- tables above.
+    'issue_overlaps',
     'issue_plan_decompositions',
     'issue_read_states',
     'issue_recovery_actions',
@@ -295,6 +304,10 @@ DECLARE
     -- 0216_model_directory_entries.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'model_directory_entries',
+    -- DUR-4419. Created, granted on and policed in
+    -- 0223_local_model_health.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'local_model_health',
     -- DUR-4344. Created, granted on and policed in
     -- 0215_telegram_reaction_feedback.sql; listed here so the login-role
     -- lists match the schema
@@ -450,6 +463,11 @@ DECLARE
     'approval_comments',
     'approvals',
     'assets',
+    -- DUR-4519 (Brag video phase 1). Created, granted on and policed in
+    -- 0226_brag_jobs.sql; listed here so the login-role lists match the
+    -- schema, as for the tables above.
+    'brag_jobs',
+    'brag_scenes',
     'budget_incidents',
     'budget_policies',
     'cloud_upstream_connections',
@@ -536,6 +554,10 @@ DECLARE
     'issue_execution_decisions',
     'issue_inbox_archives',
     'issue_labels',
+    -- DUR-4468. Created, granted on and policed in 0224_issue_overlaps.sql;
+    -- listed here so the login-role lists match the schema, as for the
+    -- tables above.
+    'issue_overlaps',
     'issue_plan_decompositions',
     'issue_read_states',
     'issue_recovery_actions',
@@ -573,6 +595,10 @@ DECLARE
     -- 0216_model_directory_entries.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'model_directory_entries',
+    -- DUR-4419. Created, granted on and policed in
+    -- 0223_local_model_health.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'local_model_health',
     -- DUR-4344. Created, granted on and policed in
     -- 0215_telegram_reaction_feedback.sql; listed here so the login-role
     -- lists match the schema
