@@ -183,6 +183,8 @@ export const queryKeys = {
     detail: (id: string) => ["projects", "detail", id] as const,
     deployHistory: (companyId: string, projectId: string) =>
       ["projects", "deploy-history", companyId, projectId] as const,
+    bragJobs: (companyId: string, projectId: string) =>
+      ["projects", "brag-jobs", companyId, projectId] as const,
     deployHistoryList: (
       companyId: string,
       projectId: string,

@@ -30,6 +30,7 @@ import { IssuesList } from "../components/IssuesList";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { PageTabBar } from "../components/PageTabBar";
 import { ProjectWorkspacesContent } from "../components/ProjectWorkspacesContent";
+import { BragVideoSection } from "../components/BragVideoSection";
 import { ProjectDeployHistoryCard } from "../components/ProjectDeployHistoryCard";
 import { MembershipAction } from "../components/MembershipAction";
 import { buildProjectWorkspaceSummaries } from "../lib/project-workspaces-tab";
@@ -99,6 +100,7 @@ function OverviewContent({
       {companyId ? (
         <ProjectDeployHistoryCard companyId={companyId} projectId={project.id} deployPolicy={project.deployPolicy} />
       ) : null}
+      {companyId ? <BragVideoSection companyId={companyId} projectId={project.id} /> : null}
       <InlineEditor
         value={project.description ?? ""}
         onSave={(description) => onUpdate({ description })}
