@@ -448,7 +448,8 @@ export function CompanyPeople() {
         </div>
 
         {access?.canApproveJoinRequests && pendingHumanJoinRequests.length > 0 ? (
-          <div className="space-y-3 rounded-xl section-box px-4 py-4">            <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="space-y-3 rounded-xl section-box px-4 py-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <h3 className="section-title">Pending human joins</h3>
                 <p className="text-sm text-muted-foreground">
