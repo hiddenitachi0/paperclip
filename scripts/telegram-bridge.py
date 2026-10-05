@@ -1036,6 +1036,69 @@ def handle_reaction(state, bot, update):
         # already agrees; anything else is worth a log line, never a message.
         if isinstance(res, dict) and res.get("ok") is False and res.get("status") not in (404, 409):
             print(f"reaction not recorded ({bot['name']}): {res.get('status')} {str(res.get('error'))[:200]}", flush=True)
+            continue
+        send_reaction_follow_up(state, bot, update, event, res)
+
+
+# DUR-4345: a disliked picture gets at most ONE short follow-up question. The
+# server decides (it answers a "negative" reaction with `followUp.text` the
+# first time only, however often the picture is reacted to again); the bridge
+# just sends it as a reply to the picture and remembers which message it was,
+# so that a Telegram reply to THAT message is taken as the answer. Nothing
+# else the person types is ever treated as an answer.
+REACTION_FOLLOW_UP_LIMIT = 200
+REACTION_FOLLOW_UP_TTL = 3 * 24 * 3600
+
+
+def send_reaction_follow_up(state, bot, update, event, res):
+    follow_up = res.get("followUp") if isinstance(res, dict) and res.get("ok") is not False else None
+    text = follow_up.get("text") if isinstance(follow_up, dict) else None
+    if event.get("action") != "added" or not isinstance(text, str) or not text.strip():
+        return
+    chat_id = (update.get("chat") or {}).get("id")
+    sent = tg(bot["token"], "sendMessage", chat_id=chat_id, text=text,
+              reply_to_message_id=update.get("message_id"), disable_web_page_preview=True)
+    question_id = sent.get("message_id") if isinstance(sent, dict) else None
+    if not isinstance(question_id, int):
+        return
+    with LOCK:
+        pending = _bot_entry(state, bot["token"]).setdefault("reactionFollowUps", {})
+        pending[f"{chat_id}:{question_id}"] = {
+            "agentId": event["agentId"],
+            "telegramUserId": event["telegramUserId"],
+            "telegramChatId": event["telegramChatId"],
+            "telegramMessageId": event["telegramMessageId"],
+            "at": time.time(),
+        }
+        while len(pending) > REACTION_FOLLOW_UP_LIMIT:
+            pending.pop(next(iter(pending)))
+        save_state(state)
+
+
+def take_follow_up_answer(state, bot, m, text):
+    """If this message is a reply to a follow-up question we asked, store it as
+    the answer (once). The message is still handled as a normal one afterwards."""
+    replied = m.get("reply_to_message")
+    chat_id = (m.get("chat") or {}).get("id")
+    if not isinstance(replied, dict) or not text or chat_id is None:
+        return
+    key = f"{chat_id}:{replied.get('message_id')}"
+    with LOCK:
+        pending = _bot_entry(state, bot["token"]).setdefault("reactionFollowUps", {})
+        entry = pending.get(key)
+        if not entry or time.time() - entry.get("at", 0) > REACTION_FOLLOW_UP_TTL:
+            pending.pop(key, None)
+            return
+        if str((m.get("from") or {}).get("id")) != entry["telegramUserId"]:
+            return
+        pending.pop(key, None)
+        save_state(state)
+    payload = {k: entry[k] for k in ("agentId", "telegramUserId", "telegramChatId", "telegramMessageId")}
+    payload["answer"] = text[:300]
+    res = cli_env({"TT": json.dumps(payload)}, "chat", "reaction", "-C", bot["companyId"],
+                  "--follow-up-answer", "--event", '"$TT"')
+    if isinstance(res, dict) and res.get("ok") is False and res.get("status") != 404:
+        print(f"follow-up answer not recorded ({bot['name']}): {res.get('status')} {str(res.get('error'))[:200]}", flush=True)
 
 
 def remember_task(state, token, chat_id, task_ref, text, colleague=False):
@@ -1866,6 +1929,66 @@ def notify_watcher_alerts(state, bots):
 
 
 
+# ─── Disk warnings (DUR-4499) ─────────────────────────────────────────────────
+#
+# The instance disk report comes from `disk-health` (read-only). One message
+# when usage first crosses 80% and another at 90%; nothing more until it falls
+# back under 80%, so a full disk does not spam the chat.
+
+DISK_LEVEL_RANK = {"ok": 0, "warn": 1, "critical": 2}
+
+
+def disk_alert_text(report):
+    level = report.get("level")
+    pct = round(float(report.get("usedPercent") or 0))
+    free_gb = (report.get("freeBytes") or 0) / 1e9
+    head = f"Disk is {pct}% full ({free_gb:.1f} GB free)."
+    top = [f for f in (report.get("folders") or []) if isinstance(f, dict) and f.get("bytes")][:3]
+    if top:
+        head += " Biggest: " + ", ".join(f"{f.get('label')} {f['bytes'] / 1e9:.1f} GB" for f in top) + "."
+    if level == "critical":
+        return "Disk almost full. " + head + " Free space now."
+    return "Disk is filling up. " + head
+
+
+def notify_disk_health(state, bots):
+    """Warn on Telegram when the data volume crosses 80% / 90%, once per level."""
+    report = cli("disk-health")
+    if not isinstance(report, dict):
+        return
+    level = report.get("level")
+    if level not in DISK_LEVEL_RANK:
+        return
+    with LOCK:
+        notified = state.get("disk_alert_level", "ok")
+    if DISK_LEVEL_RANK[level] <= DISK_LEVEL_RANK.get(notified, 0):
+        if level != notified:  # fell back: re-arm
+            with LOCK:
+                state["disk_alert_level"] = level
+                save_state(state)
+        return
+    by_company = defaultdict(list)
+    for b in bots:
+        by_company[b["companyId"]].append(b)
+    for company_id, cbots in by_company.items():
+        bot = company_notice_bot(cbots)
+        if bot is None:
+            continue
+        chats = deliverable_chats(state, bot["token"], allowed_users_for(bot))
+        if not chats:
+            continue
+        text = disk_alert_text(report)
+        delivered = False
+        for chat in chats:
+            if send_text_checked(bot["token"], chat, text):
+                delivered = True
+        if delivered:
+            with LOCK:
+                state["disk_alert_level"] = level
+                save_state(state)
+            return
+
+
 # ─── Morning reports ──────────────────────────────────────────────────────────
 #
 # A quick agent with a morning report writes it at its set time, and Paperclip
@@ -2057,6 +2180,7 @@ def handle_message(state, bot, m):
         print(f"telegram-bridge: ignored a message to {bot['name']} from a Telegram user or chat that is not allowed", flush=True)
         return
     register_chat(state, bot["token"], chat_id)
+    take_follow_up_answer(state, bot, m, text)
     if isinstance(m.get("voice"), dict) or isinstance(m.get("audio"), dict):
         handle_voice_message(state, bot, chat_id, m)
         return
@@ -2298,6 +2422,12 @@ def main():
             notify_morning_reports(state, bots)
         except Exception as e:
             print(f"morning-report-notify error: {e}", flush=True)
+        try:
+            if time.time() - state.get("disk_checked_at", 0) > 600:
+                state["disk_checked_at"] = time.time()
+                notify_disk_health(state, bots)
+        except Exception as e:
+            print(f"disk-health-notify error: {e}", flush=True)
         time.sleep(12)
 
 

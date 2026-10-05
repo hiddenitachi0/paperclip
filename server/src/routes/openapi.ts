@@ -797,7 +797,10 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "GET /api/companies/{companyId}/model-directory/starters",
   "POST /api/companies/{companyId}/model-directory/starters",
   "POST /api/companies/{companyId}/model-directory/import-agent-settings",
+  "GET /api/companies/{companyId}/model-directory/health",
   "GET /api/companies/{companyId}/model-directory/{entryId}",
+  "POST /api/companies/{companyId}/model-directory/{entryId}/check",
+  "POST /api/companies/{companyId}/model-directory/{entryId}/test",
   "PATCH /api/companies/{companyId}/model-directory/{entryId}",
   "DELETE /api/companies/{companyId}/model-directory/{entryId}",
   "POST /api/companies/{companyId}/model-directory/{entryId}/duplicate",
@@ -1371,6 +1374,15 @@ registry.registerPath({
   summary: "List company feedback traces",
   request: { params: z.object({ companyId: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/overlaps",
+  tags: ["companies"],
+  summary: "List open overlaps between issues in a company",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
 });
 
 registry.registerPath({
@@ -2829,7 +2841,7 @@ registry.registerPath({
 // ─── Costs ───────────────────────────────────────────────────────────────────
 
 const costSummaryPaths = [
-  "summary", "by-agent", "by-agent-model", "by-provider",
+  "summary", "by-agent", "by-agent-model", "by-provider", "by-source",
   "by-biller", "by-project", "finance-summary", "finance-by-biller",
   "finance-by-kind", "finance-events", "window-spend", "quota-windows",
 ] as const;
@@ -3652,6 +3664,23 @@ registerCurrentRoute({
 });
 
 registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/lane-a/huggingface/models",
+  tags: ["agents"],
+  summary:
+    "List the Hugging Face models (with per-provider price, tool support and latency) the company's stored token can reach (board users only)",
+  query: z.object({ toolsOnly: z.enum(["true", "false"]).optional(), liveOnly: z.enum(["true", "false"]).optional() }),
+  responses: {
+    200: r.ok(z.object({ models: z.array(z.record(z.string(), z.unknown())) })),
+    401: r.unauthorized,
+    403: r.forbidden,
+    409: r.conflict,
+    422: r.unprocessable,
+    503: { description: "Hugging Face unreachable", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+registerCurrentRoute({
   method: "post",
   path: "/api/lane-a/{agentId}/continue",
   tags: ["agents"],
@@ -4452,6 +4481,15 @@ registry.registerPath({
   summary: "Download attachment content",
   request: { params: z.object({ attachmentId: z.string() }) },
   responses: { 200: { description: "File content" }, 401: r.unauthorized, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/attachments/{attachmentId}/thumbnail",
+  tags: ["assets"],
+  summary: "Download a cached 256px thumbnail of an attachment, generated on first request",
+  request: { params: z.object({ attachmentId: z.string() }) },
+  responses: { 200: { description: "Thumbnail image content" }, 401: r.unauthorized, 404: r.notFound },
 });
 
 registry.registerPath({
@@ -5389,6 +5427,14 @@ registry.registerPath({
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
 });
 
+registry.registerPath({
+  method: "get",
+  path: "/api/instance/database-backups/stats",
+  tags: ["instance"],
+  summary: "Get database backup storage stats (tier counts and disk usage)",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
 // ─── LLM text endpoints ───────────────────────────────────────────────────────
 
 registry.registerPath({
@@ -6074,6 +6120,30 @@ registerCurrentRoute({
   tags: ["model-directory"],
   summary: "Save each quick agent's current model setup (and backups) as de-duplicated directory entries and link the agent. Does not change what any agent does; safe to repeat.",
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/model-directory/health",
+  tags: ["model-directory"],
+  summary: "Stored health of each saved local model plus the agents using one (an agent with showBanner true gets the \"can't reach your PC\" banner). Reads only; messages are plain English.",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/{entryId}/check",
+  tags: ["model-directory"],
+  summary: "Check button: is the local address reachable and is the model present (Ollama /api/tags)? Stores and returns Ready / Can't reach your PC / model missing.",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/{entryId}/test",
+  tags: ["model-directory"],
+  summary: "Test button: sends \"Say hi in five words\" and returns the answer, time to first word and total time (thinking on and off when supported). A setup that cannot run returns a plain-English reason and makes no call.",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
 });
 
 registerCurrentRoute({

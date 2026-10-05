@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { and, desc, eq, gte, lt, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { companies, costEvents, mediaStudioDirectCreations, withCompanyScope } from "@paperclipai/db";
+import { companies, costEvents, issues as issuesTable, mediaStudioDirectCreations, withCompanyScope } from "@paperclipai/db";
 import {
   MEDIA_STUDIO_DIRECT_BILLING_CODE,
   MEDIA_STUDIO_DIRECT_REWRITE_BILLING_CODE,
@@ -22,6 +22,8 @@ import { computeCostCents } from "./lane-a.js";
 import { pluginRegistryService } from "./plugin-registry.js";
 import { secretService } from "./secrets.js";
 import { costService } from "./costs.js";
+import { SOGNI_CREDIT_PRICE_CONFIG_KEY, recordSogniCost } from "./sogni-cost.js";
+import { falPricingClient, microUsdToCents, type FalUsage } from "./fal-pricing.js";
 import { issueService } from "./issues.js";
 import { executePinnedHttpRequest, validateAndResolveFetchUrl } from "./safe-outbound-fetch.js";
 import {
@@ -176,6 +178,35 @@ export function mediaStudioDirectService(
     return (config?.configJson ?? {}) as Record<string, unknown>;
   }
 
+  const falPricing = falPricingClient(safeFetch, () => nowOf().getTime());
+
+  async function refreshCompanyMonthlySpend(companyId: string): Promise<void> {
+    const { start, end } = currentUtcMonthWindow();
+    const [row] = await db
+      .select({ total: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::int` })
+      .from(costEvents)
+      .where(and(eq(costEvents.companyId, companyId), gte(costEvents.occurredAt, start), lt(costEvents.occurredAt, end)));
+    await db.update(companies).set({ spentMonthlyCents: Number(row?.total ?? 0), updatedAt: new Date() }).where(eq(companies.id, companyId));
+  }
+
+  /**
+   * DUR-4455: the actual cost of a finished Fal call, priced from Fal's
+   * published per-endpoint price. Falls back to the reservation estimate
+   * (cost_source "estimate") when Fal's price or unit is unavailable --
+   * "provider" is reserved for figures Fal's own billing confirms.
+   */
+  async function resolveActualFalCost(
+    companyId: string,
+    apiKey: string,
+    model: string,
+    usage: FalUsage,
+    estimateCents: number,
+  ): Promise<{ costCents: number; costMicroUsd: number; costSource: "provider" | "estimate" }> {
+    const priced = await falPricing.priceCall(apiKey, model, usage, companyId);
+    if (!priced) return { costCents: estimateCents, costMicroUsd: estimateCents * 10_000, costSource: "estimate" };
+    return { costCents: microUsdToCents(priced.costMicroUsd), costMicroUsd: priced.costMicroUsd, costSource: "estimate" };
+  }
+
   async function resolveFalApiKey(companyId: string, actorId: string): Promise<string> {
     const cfg = await getMediaStudioConfig();
     const ref = typeof cfg.falKeySecretRef === "string" ? cfg.falKeySecretRef.trim() : "";
@@ -302,6 +333,9 @@ export function mediaStudioDirectService(
           outputTokens: 0,
           cachedInputTokens: 0,
           costCents: estimateCents,
+          // DUR-4455: the reservation is only an estimate until finalize replaces it with the actual figure.
+          costMicroUsd: estimateCents * 10_000,
+          costSource: "estimate",
           occurredAt: nowOf(),
         })
         .returning();
@@ -341,9 +375,14 @@ export function mediaStudioDirectService(
     companyId: string,
     actor: MediaStudioDirectActor,
     costEventId: string,
-    params: { kind: MediaStudioDirectKind; provider: string; model: string; prompt: string | null; costCents: number; fileId: string },
+    params: { kind: MediaStudioDirectKind; provider: string; model: string; prompt: string | null; costCents: number; costMicroUsd: number; costSource: "provider" | "estimate"; fileId: string },
   ): Promise<void> {
-    await db.update(costEvents).set({ provider: params.provider, biller: params.provider, model: params.model }).where(eq(costEvents.id, costEventId));
+    // DUR-4455: the reservation held the estimate; now that the job finished, the event carries the actual figure.
+    await db
+      .update(costEvents)
+      .set({ provider: params.provider, biller: params.provider, model: params.model, costCents: params.costCents, costMicroUsd: params.costMicroUsd, costSource: params.costSource })
+      .where(eq(costEvents.id, costEventId));
+    await refreshCompanyMonthlySpend(companyId);
     await db.insert(mediaStudioDirectCreations).values({
       companyId,
       createdByUserId: actor.userId,
@@ -450,7 +489,7 @@ export function mediaStudioDirectService(
 
   function attachmentResponse(fileId: string, contentType: string) {
     const contentPath = `/api/attachments/${fileId}/content`;
-    return { fileId, contentPath, openPath: contentPath, downloadPath: `${contentPath}?download=1`, contentType };
+    return { fileId, contentPath, openPath: contentPath, thumbnailPath: `/api/attachments/${fileId}/thumbnail`, downloadPath: `${contentPath}?download=1`, contentType };
   }
 
   async function createPicture(companyId: string, actor: MediaStudioDirectActor, input: CreateMediaStudioDirectPictureInput) {
@@ -467,16 +506,23 @@ export function mediaStudioDirectService(
       const { contentBase64, contentType } = await pictureResultBytes(result);
       const file = await saveResultFile(companyId, actor, contentBase64, contentType, `picture-${result.provider}-${Date.now()}.${extensionFor(contentType)}`);
 
+      const actual = await resolveActualFalCost(
+        companyId,
+        apiKey,
+        result.model,
+        { images: result.usage.images, ...(result.usage.megapixels !== null ? { megapixels: result.usage.megapixels * result.usage.images } : {}) },
+        estimate.estimatedCostCents,
+      );
       await finalizeReservedCreation(companyId, actor, reservation.costEventId, {
         kind: "picture",
         provider: result.provider,
         model: result.model,
         prompt: input.prompt,
-        costCents: estimate.estimatedCostCents,
+        ...actual,
         fileId: file.id,
       });
 
-      return { ...attachmentResponse(file.id, file.contentType), costCents: estimate.estimatedCostCents, seed: result.seed, provider: result.provider, model: result.model };
+      return { ...attachmentResponse(file.id, file.contentType), costCents: actual.costCents, seed: result.seed, provider: result.provider, model: result.model };
     } catch (err) {
       await releaseReservation(companyId, reservation.costEventId);
       throw err;
@@ -498,16 +544,17 @@ export function mediaStudioDirectService(
       const { contentBase64, contentType } = await mediaResultBytes(result, "video/", "a video");
       const file = await saveResultFile(companyId, actor, contentBase64, contentType, `video-${handle.provider}-${Date.now()}.${extensionFor(contentType)}`);
 
+      const actual = await resolveActualFalCost(companyId, apiKey, handle.model, { seconds: input.durationSeconds }, estimate.estimatedCostCents);
       await finalizeReservedCreation(companyId, actor, reservation.costEventId, {
         kind: "video",
         provider: handle.provider,
         model: handle.model,
         prompt: input.prompt,
-        costCents: estimate.estimatedCostCents,
+        ...actual,
         fileId: file.id,
       });
 
-      return { ...attachmentResponse(file.id, file.contentType), costCents: estimate.estimatedCostCents, provider: handle.provider, model: handle.model };
+      return { ...attachmentResponse(file.id, file.contentType), costCents: actual.costCents, provider: handle.provider, model: handle.model };
     } catch (err) {
       await releaseReservation(companyId, reservation.costEventId);
       throw err;
@@ -529,16 +576,17 @@ export function mediaStudioDirectService(
       const { contentBase64, contentType } = await mediaResultBytes(result, "audio/", "audio");
       const file = await saveResultFile(companyId, actor, contentBase64, contentType, `audio-${handle.provider}-${Date.now()}.${extensionFor(contentType)}`);
 
+      const actual = await resolveActualFalCost(companyId, apiKey, handle.model, { seconds: input.durationSeconds }, estimate.estimatedCostCents);
       await finalizeReservedCreation(companyId, actor, reservation.costEventId, {
         kind: "audio",
         provider: handle.provider,
         model: handle.model,
         prompt: input.prompt,
-        costCents: estimate.estimatedCostCents,
+        ...actual,
         fileId: file.id,
       });
 
-      return { ...attachmentResponse(file.id, file.contentType), costCents: estimate.estimatedCostCents, provider: handle.provider, model: handle.model };
+      return { ...attachmentResponse(file.id, file.contentType), costCents: actual.costCents, provider: handle.provider, model: handle.model };
     } catch (err) {
       await releaseReservation(companyId, reservation.costEventId);
       throw err;
@@ -642,7 +690,121 @@ export function mediaStudioDirectService(
     }));
   }
 
+  /**
+   * DUR-4455: settles a paid Edit-tab Fal action's reservation to Fal's
+   * actual published per-unit price, the same way the Create tab settles
+   * its own Fal calls (resolveActualFalCost above). The plugin reports only
+   * which endpoint ran and what it consumed; the host -- never the plugin --
+   * resolves the company's own Fal key and prices the call. Pricing
+   * unavailable, or the reservation not belonging to this company and the
+   * Edit-tab billing lane, leaves the reservation's estimate standing --
+   * never an error, since the edit itself already succeeded.
+   */
+  async function settleSpend(
+    companyId: string,
+    reservationId: string,
+    endpointId: string,
+    usage: FalUsage,
+  ): Promise<{ settled: true; costCents: number } | { settled: false }> {
+    const [event] = await db
+      .select({ id: costEvents.id, billingCode: costEvents.billingCode, createdByUserId: costEvents.createdByUserId, costCents: costEvents.costCents })
+      .from(costEvents)
+      .where(and(eq(costEvents.id, reservationId), eq(costEvents.companyId, companyId)));
+    if (!event || event.billingCode !== MEDIA_STUDIO_DIRECT_BILLING_CODE || !event.createdByUserId) return { settled: false };
+    const apiKey = await resolveFalApiKey(companyId, event.createdByUserId);
+    const priced = await falPricing.priceCall(apiKey, endpointId, usage, companyId);
+    if (!priced) return { settled: false };
+    const costCents = microUsdToCents(priced.costMicroUsd);
+    await db.update(costEvents).set({ costCents, costMicroUsd: priced.costMicroUsd, costSource: "estimate" }).where(eq(costEvents.id, reservationId));
+    await refreshCompanyMonthlySpend(companyId);
+    return { settled: true, costCents };
+  }
+
+  /**
+   * DUR-4457: one cost event for a picture/video/audio an AGENT made through
+   * a plugin tool. Same ledger rows as the Create tab (billing code
+   * MEDIA_STUDIO_DIRECT_BILLING_CODE, so Media Studio's shared cap counts
+   * them) but attributed to the agent, and written through costService
+   * .createEvent, so the agent's and company's monthly spend refresh and
+   * budget evaluation run exactly like any other cost. Recorded after the
+   * provider call succeeded (never throws for a pricing problem, a paid
+   * generation must not be undone by it): Fal at its published per-unit
+   * price (falling back to the Create tab's estimate), Sogni at credits x
+   * the configured credit price. A provider that costs nothing records nothing.
+   */
+  async function recordAgentMediaCost(
+    companyId: string,
+    input: {
+      agentId: string;
+      kind: "image" | "video" | "audio";
+      provider: string;
+      model: string;
+      usage?: FalUsage;
+      credits?: number | null;
+      issueId?: string | null;
+    },
+  ): Promise<{ recorded: true; costCents: number } | { recorded: false; reason: string }> {
+    const model = input.model.slice(0, 200) || "unknown";
+    let issueId: string | null = null;
+    if (input.issueId) {
+      const [issue] = await db.select({ id: issuesTable.id }).from(issuesTable).where(and(eq(issuesTable.id, input.issueId), eq(issuesTable.companyId, companyId)));
+      issueId = issue?.id ?? null;
+    }
+    if (input.provider === "fal") {
+      const kind = input.kind === "image" ? "picture" : input.kind;
+      const seconds = Math.max(0, input.usage?.seconds ?? 0);
+      const estimateCents = estimateMediaStudioDirectCostCents({ kind, provider: "fal", durationSeconds: Math.ceil(seconds) }).estimatedCostCents;
+      let costMicroUsd = estimateCents * 10_000;
+      let costCents = estimateCents;
+      try {
+        const cfg = await getMediaStudioConfig();
+        const ref = typeof cfg.falKeySecretRef === "string" ? cfg.falKeySecretRef.trim() : "";
+        if (ref && input.usage) {
+          const apiKey = await secrets.resolveSecretValueForMediaStudioAgentPricing(companyId, ref, { agentId: input.agentId });
+          const priced = await falPricing.priceCall(apiKey, input.model, input.usage, companyId);
+          if (priced) {
+            costMicroUsd = priced.costMicroUsd;
+            costCents = microUsdToCents(priced.costMicroUsd);
+          }
+        }
+      } catch {
+        // Pricing unavailable: the estimate stands (never logs the key or response).
+      }
+      await costs.createEvent(companyId, {
+        agentId: input.agentId,
+        issueId,
+        provider: "fal",
+        biller: "fal",
+        billingType: "metered_api",
+        billingCode: MEDIA_STUDIO_DIRECT_BILLING_CODE,
+        model,
+        inputTokens: 0,
+        outputTokens: 0,
+        costCents,
+        costMicroUsd,
+        costSource: "estimate",
+        occurredAt: nowOf(),
+      });
+      return { recorded: true, costCents };
+    }
+    if (input.provider === "sogni") {
+      const cfg = await getMediaStudioConfig();
+      const outcome = await recordSogniCost(db, {
+        companyId,
+        agentId: input.agentId,
+        credits: input.credits ?? null,
+        creditPriceUsd: cfg[SOGNI_CREDIT_PRICE_CONFIG_KEY],
+        model,
+        issueId,
+        billingCode: MEDIA_STUDIO_DIRECT_BILLING_CODE,
+      });
+      return outcome.recorded ? { recorded: true, costCents: Math.round(outcome.costMicroUsd / 10_000) } : { recorded: false, reason: outcome.reason };
+    }
+    return { recorded: false, reason: "free_provider" };
+  }
+
   return {
+    recordAgentMediaCost,
     estimate: estimateMediaStudioDirectCostCents,
     createPicture,
     createVideo,
@@ -662,5 +824,7 @@ export function mediaStudioDirectService(
     /** DUR-4441: the plugin host's billing capability reuses the Create tab's exact reservation logic for paid Edit-tab actions. */
     reserveSpend,
     releaseReservation,
+    /** DUR-4455: ditto for settling a finished Edit-tab Fal action to its actual cost. */
+    settleSpend,
   };
 }

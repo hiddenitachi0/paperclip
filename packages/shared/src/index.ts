@@ -86,6 +86,11 @@ export {
   laneAModelPricing,
   laneAModelCostCents,
   laneAProviderModelCostCents,
+  laneACostCentsAtPricing,
+  HUGGINGFACE_ROUTER_BASE_URL,
+  HUGGINGFACE_POLICY_SUFFIXES,
+  buildHuggingFaceModelId,
+  splitHuggingFaceModelId,
   laneATransformWorstCaseDailyCents,
   type LaneAModel,
   type LaneAProvider,
@@ -1016,6 +1021,9 @@ export type {
   CostByAgent,
   CostByProviderModel,
   CostByBiller,
+  CostBySourceRow,
+  CostReconciliationRow,
+  CostSourceBreakdown,
   CostByAgentModel,
   CostWindowSpendRow,
   CostByProject,
@@ -1226,6 +1234,17 @@ export {
 } from "./issue-references.js";
 
 export {
+  ISSUE_SIZE_LABELS,
+  computeIssueProgress,
+  formatEtaLabel,
+  issueSizeWeight,
+  type IssueProgress,
+  type IssueProgressChild,
+  type IssueProgressSnapshot,
+  type IssueSizeLabel,
+} from "./issue-progress.js";
+
+export {
   anchorSnapshotToSelector,
   createDocumentAnchorSelector,
   normalizeAnchorText,
@@ -1402,6 +1421,9 @@ export {
   normalizeReactionEmoji,
   reactionEmojiMeaning,
   recordTelegramReactionSchema,
+  recordReactionFollowUpAnswerSchema,
+  REACTION_FOLLOW_UP_ANSWER_MAX,
+  type RecordReactionFollowUpAnswerInput,
   updateReactionEmojiConfigSchema,
   type ReactionEmojiConfig,
   type ReactionEmojiMeaning,
@@ -2798,3 +2820,21 @@ export {
   type DuplicateModelDirectoryEntry,
   type ModelDirectoryEntry,
 } from "./validators/index.js";
+
+export {
+  LOCAL_MODEL_RUNBOOK_PATH,
+  MODEL_HEALTH_STATUSES,
+  MODEL_TEST_PROMPT,
+  modelHealthReport,
+  normalizeLocalModelAddress,
+  localModelOfflineNotice,
+  localModelEveningWarning,
+  modelCannotRunReason,
+  type ModelHealthStatus,
+  type ModelHealthReport,
+  type ModelDirectoryEntryHealth,
+  type AgentModelHealth,
+  type ModelHealthOverview,
+  type ModelTestRun,
+  type ModelTestResult,
+} from "./model-health.js";

@@ -29,7 +29,9 @@ import {
   LANE_A_TRANSFORM_MAX_CONCURRENCY,
   envBindingSchema,
   laneAProviderLabel,
+  localModelOfflineNotice,
   laneAProviderModelCostCents,
+  laneACostCentsAtPricing,
   normalizeLaneAProvider,
   resolveLaneAModelForProvider,
   laneATemperatureForCall,
@@ -59,11 +61,14 @@ import {
 } from "./lane-a-providers.js";
 import { detectTextRefusalByPattern } from "./lane-a-refusal.js";
 import { costService } from "./costs.js";
+import { cachedHuggingFacePricing } from "./huggingface-catalogue.js";
 import { budgetService } from "./budgets.js";
 import { logger } from "../middleware/logger.js";
+import { openRouterCataloguePrice } from "./lane-a-openrouter-catalogue.js";
 import { logActivity } from "./activity-log.js";
 import { resolveAgentMcpToolLibraryServers } from "./mcp-tool-library.js";
 import { resolveBackupModelsThroughDirectory } from "./model-directory.js";
+import { classifyLocalFailure, modelHealthService } from "./model-health.js";
 import {
   buildLaneAActionClaimFallbackLine,
   buildLaneAActionClaimRetryNote,
@@ -203,13 +208,24 @@ const LANE_A_MAX_OUTPUT_TOKENS = LANE_A_DEFAULT_MAX_OUTPUT_TOKENS;
 // the budget the operator relies on.
 const unpricedModelsWarned = new Set<string>();
 
+function huggingFaceCost(model: string, inputTokens: number, outputTokens: number): { costCents: number; priced: boolean } {
+  const pricing = cachedHuggingFacePricing(model);
+  if (!pricing) return { costCents: 0, priced: false };
+  return { costCents: laneACostCentsAtPricing(pricing, inputTokens, outputTokens), priced: true };
+}
+
 export function computeCostCents(
   provider: LaneAProvider,
   model: string,
   inputTokens: number,
   outputTokens: number,
 ): number {
-  const priced = laneAProviderModelCostCents(provider, model, inputTokens, outputTokens);
+  // DUR-4447: Hugging Face has no static price list; it bills at the live
+  // catalogue price cached by huggingface-catalogue.ts (warmed on the call path).
+  const priced =
+    provider === "huggingface"
+      ? huggingFaceCost(model, inputTokens, outputTokens)
+      : laneAProviderModelCostCents(provider, model, inputTokens, outputTokens);
   if (!priced.priced) {
     const key = `${provider}:${model}`;
     if (!unpricedModelsWarned.has(key)) {
@@ -221,6 +237,56 @@ export function computeCostCents(
     }
   }
   return priced.costCents;
+}
+
+export type LaneAAttemptCostEvent = LaneACallCost & {
+  provider: LaneAProvider;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+};
+
+export type LaneACostSource = "provider" | "catalogue" | "static_table";
+
+export interface LaneACallCost {
+  costCents: number;
+  costMicroUsd: number;
+  costSource: LaneACostSource;
+}
+
+/**
+ * DUR-4454: what one call actually cost, best source first.
+ *  1. "provider": the host's own billed cost (OpenRouter `usage.cost`), 0 included.
+ *  2. "catalogue": OpenRouter's public per-token prices, for a model with no cost in the reply.
+ *  3. "static_table": Paperclip's built-in table; only when 1 and 2 are both unavailable.
+ */
+export async function priceLaneACall(input: {
+  provider: LaneAProvider;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  providerCostUsd?: number | null;
+  fetchImpl?: typeof fetch;
+}): Promise<LaneACallCost> {
+  const fromMicro = (costMicroUsd: number, costSource: LaneACostSource): LaneACallCost => ({
+    costCents: Math.round(costMicroUsd / 10_000),
+    costMicroUsd,
+    costSource,
+  });
+  if (typeof input.providerCostUsd === "number" && Number.isFinite(input.providerCostUsd) && input.providerCostUsd >= 0) {
+    return fromMicro(Math.round(input.providerCostUsd * 1_000_000), "provider");
+  }
+  if (input.provider === "openrouter") {
+    const price = await openRouterCataloguePrice(input.model, { fetchImpl: input.fetchImpl });
+    if (price) {
+      const usd =
+        Math.max(0, input.inputTokens) * price.promptUsdPerToken +
+        Math.max(0, input.outputTokens) * price.completionUsdPerToken;
+      return fromMicro(Math.round(usd * 1_000_000), "catalogue");
+    }
+  }
+  const costCents = computeCostCents(input.provider, input.model, input.inputTokens, input.outputTokens);
+  return { costCents, costMicroUsd: costCents * 10_000, costSource: "static_table" };
 }
 
 /** Rough token estimate (≈4 characters per token) — only used to bound replay, never for billing. */
@@ -1734,7 +1800,7 @@ export function backupMayUseMainBinding(
 class LaneAAttemptFailure extends Error {
   constructor(
     readonly original: unknown,
-    readonly partial: { toolsRan: boolean; inputTokens: number; outputTokens: number },
+    readonly partial: { toolsRan: boolean; inputTokens: number; outputTokens: number; costUsd?: number | null },
   ) {
     super(original instanceof Error ? original.message : String(original));
   }
@@ -2279,6 +2345,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     text: string;
     inputTokens: number;
     outputTokens: number;
+    /** DUR-4454: the provider's billed cost summed over every round, or null if any round did not report one. */
+    costUsd: number | null;
     stopReason: string | null;
     actions: LaneAAction[];
     businessDataOutputs: BusinessDataTurnOutput[];
@@ -2300,6 +2368,14 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     const actions: LaneAAction[] = [];
     let inputTokens = 0;
     let outputTokens = 0;
+    let costUsd = 0;
+    let costComplete = true;
+    const addUsage = (usage: { inputTokens: number; outputTokens: number; costUsd?: number | null }) => {
+      inputTokens += usage.inputTokens;
+      outputTokens += usage.outputTokens;
+      if (typeof usage.costUsd === "number") costUsd += usage.costUsd;
+      else costComplete = false;
+    };
     let toolCallsUsed = 0;
     let addonToolCallsUsed = 0;
     let finalRound = false;
@@ -2404,8 +2480,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       for (let round = 0; round < LANE_A_MAX_MODEL_ROUNDS; round++) {
         response = await completeRound();
         forcedToolName = undefined;
-        inputTokens += response.usage.inputTokens;
-        outputTokens += response.usage.outputTokens;
+        addUsage(response.usage);
 
         const toolUseBlocks = response.toolCalls;
         if (response.stop !== "tool_use" || toolUseBlocks.length === 0) {
@@ -2665,8 +2740,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           ...(providerRouting ? { providerRouting } : {}),
           ...(retryReasoningEffort ? { reasoningEffort: retryReasoningEffort } : {}),
         });
-        inputTokens += retry.usage.inputTokens;
-        outputTokens += retry.usage.outputTokens;
+        addUsage(retry.usage);
         response = retry;
       }
     } catch (err) {
@@ -2678,6 +2752,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           toolsRan: toolCallsUsed + addonToolCallsUsed > 0,
           inputTokens,
           outputTokens,
+          costUsd: costComplete && inputTokens + outputTokens > 0 ? costUsd : null,
         });
       }
       throw providerErrorToHttp(err, "chat");
@@ -2732,6 +2807,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       text: finalText,
       inputTokens,
       outputTokens,
+      costUsd: costComplete ? costUsd : null,
       stopReason: finalResponse.stopReason,
       actions,
       businessDataOutputs,
@@ -2987,9 +3063,14 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     let actions: LaneAAction[];
     let businessDataOutputs: BusinessDataTurnOutput[] = [];
     const attemptRecords: LaneAAttemptRecord[] = [];
-    const attemptCostEvents: { provider: LaneAProvider; model: string; inputTokens: number; outputTokens: number; costCents: number }[] = [];
+    const attemptCostEvents: LaneAAttemptCostEvent[] = [];
     let turnFailed = false;
     let refusalModeEntered = false;
+    // DUR-4419: how the main model's own attempt ended, for the local-model
+    // health state and the once-per-outage offline reminder.
+    let mainAttemptAnswered = false;
+    let mainAttemptError: unknown = null;
+    let offlineNotice: string | null = null;
     let answeredByPoolId: string;
     let answeredBy: LaneAAnsweredBy;
     try {
@@ -3107,8 +3188,9 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
             rawProviderErrors: true,
           });
           const durationMs = Date.now() - attemptStart;
-          const costCents = computeCostCents(entrySettings.provider, entryModel, result.inputTokens, result.outputTokens);
-          attemptCostEvents.push({ provider: entrySettings.provider, model: entryModel, inputTokens: result.inputTokens, outputTokens: result.outputTokens, costCents });
+          const callCost = await priceLaneACall({ provider: entrySettings.provider, model: entryModel, inputTokens: result.inputTokens, outputTokens: result.outputTokens, providerCostUsd: result.costUsd });
+          const costCents = callCost.costCents;
+          attemptCostEvents.push({ provider: entrySettings.provider, model: entryModel, inputTokens: result.inputTokens, outputTokens: result.outputTokens, ...callCost });
           // DUR-4347: a provider can refuse with a normal, successful
           // completion whose TEXT is the refusal rather than an error — the
           // refusal chain has to catch this case too.
@@ -3127,21 +3209,28 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
             return { outcome: "refusal", error: new Error(`lane A: reply text was a refusal (${textRefusal.rule})`) };
           }
           attemptRecords.push({ provider: entrySettings.provider, model: entryModel, outcome: "answered", durationMs, costCents, rule });
+          if (poolId === LANE_A_MAIN_POOL_ID) mainAttemptAnswered = true;
           return { outcome: "answered", value: { ...result, provider: entrySettings.provider, model: entryModel } };
         } catch (caught) {
           const durationMs = Date.now() - attemptStart;
           const failure = caught instanceof LaneAAttemptFailure ? caught : null;
           const err = failure ? failure.original : caught;
-          const failedCostCents = failure
-            ? computeCostCents(entrySettings.provider, entryModel, failure.partial.inputTokens, failure.partial.outputTokens)
-            : 0;
+          let failedCostCents = 0;
           if (failure && (failure.partial.inputTokens > 0 || failure.partial.outputTokens > 0)) {
+            const failedCost = await priceLaneACall({
+              provider: entrySettings.provider,
+              model: entryModel,
+              inputTokens: failure.partial.inputTokens,
+              outputTokens: failure.partial.outputTokens,
+              providerCostUsd: failure.partial.costUsd,
+            });
+            failedCostCents = failedCost.costCents;
             attemptCostEvents.push({
               provider: entrySettings.provider,
               model: entryModel,
               inputTokens: failure.partial.inputTokens,
               outputTokens: failure.partial.outputTokens,
-              costCents: failedCostCents,
+              ...failedCost,
             });
           }
           // A tool already ran on this attempt: another model would run it
@@ -3161,6 +3250,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
             costCents: failedCostCents,
             rule,
           });
+          if (poolId === LANE_A_MAIN_POOL_ID) mainAttemptError = err;
           return { outcome, error: err };
         }
       };
@@ -3170,6 +3260,35 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         refusalChain: routing.refusalChain,
         attempt: attemptPoolEntry,
       });
+      // DUR-4419: a local main model that answered clears any outage; one that
+      // could not be reached tells the person ONCE per outage (the notice
+      // rides the same reply path the person is already reading, chat or
+      // Telegram) and every later failed message in that outage stays quiet.
+      if (chatSettings.provider === "local" && chatSettings.baseUrl && (mainAttemptAnswered || mainAttemptError)) {
+        try {
+          const failure = mainAttemptAnswered ? null : classifyLocalFailure(mainAttemptError);
+          if (mainAttemptAnswered || failure) {
+            const { notify } = await modelHealthService(db).noteLocalAttempt({
+              companyId: params.companyId,
+              baseUrl: chatSettings.baseUrl,
+              model: chatModel,
+              outcome: failure ?? "ok",
+            });
+            if (notify) {
+              offlineNotice = localModelOfflineNotice({
+                agentName: personaIdentity?.displayName?.trim() || params.targetAgent.name,
+                backupModel: loopResult.ok ? loopResult.value.model : null,
+              });
+            }
+          }
+        } catch (healthErr) {
+          // Health bookkeeping must never break a chat turn.
+          logger.warn({ err: healthErr }, "lane A: could not record local model health");
+        }
+      }
+      if (!loopResult.ok && offlineNotice) {
+        throw new HttpError(503, offlineNotice, {});
+      }
       if (!loopResult.ok) {
         const httpErr = providerErrorToHttp(loopResult.error, "chat");
         throw httpErr instanceof HttpError ? httpErr : new HttpError(502, `Lane A model call failed: ${String((httpErr as Error)?.message ?? httpErr)}`, {});
@@ -3202,6 +3321,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
             inputTokens: event.inputTokens,
             outputTokens: event.outputTokens,
             costCents: event.costCents,
+            costMicroUsd: event.costMicroUsd,
+            costSource: event.costSource,
             occurredAt: new Date(),
           });
         }
@@ -3305,7 +3426,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
 
     return {
       conversationId: updated!.id,
-      response: text,
+      response: offlineNotice ? `${offlineNotice}\n\n${text}` : text,
       messageId: assistantMessageId,
       turnCount: updated!.turnCount,
       stopReason,
@@ -3619,12 +3740,13 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       text: string;
       inputTokens: number;
       outputTokens: number;
+      costUsd: number | null;
       stopReason: string | null;
       provider: LaneAProvider;
       model: string;
       costCents: number;
     };
-    const attemptCostEvents: { provider: LaneAProvider; model: string; inputTokens: number; outputTokens: number; costCents: number }[] = [];
+    const attemptCostEvents: LaneAAttemptCostEvent[] = [];
     let result: TransformAttempt;
     let turnFailed = false;
     try {
@@ -3685,8 +3807,9 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
               responseFormat: params.responseFormat,
               rawProviderErrors: true,
             });
-            const costCents = computeCostCents(entrySettings.provider, entryModel, r.inputTokens, r.outputTokens);
-            attemptCostEvents.push({ provider: entrySettings.provider, model: entryModel, inputTokens: r.inputTokens, outputTokens: r.outputTokens, costCents });
+            const callCost = await priceLaneACall({ provider: entrySettings.provider, model: entryModel, inputTokens: r.inputTokens, outputTokens: r.outputTokens, providerCostUsd: r.costUsd });
+            const costCents = callCost.costCents;
+            attemptCostEvents.push({ provider: entrySettings.provider, model: entryModel, inputTokens: r.inputTokens, outputTokens: r.outputTokens, ...callCost });
             const textRefusal = routing.refusalChain.length > 0 ? detectTextRefusalByPattern(r.text) : { isRefusal: false, rule: null };
             if (textRefusal.isRefusal) {
               return { outcome: "refusal", error: new Error(`lane A: reply text was a refusal (${textRefusal.rule})`) };
@@ -3719,6 +3842,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
             inputTokens: event.inputTokens,
             outputTokens: event.outputTokens,
             costCents: event.costCents,
+            costMicroUsd: event.costMicroUsd,
+            costSource: event.costSource,
             occurredAt: new Date(),
           });
         }
@@ -3807,6 +3932,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         text: response.text.trim(),
         inputTokens: response.usage.inputTokens,
         outputTokens: response.usage.outputTokens,
+        costUsd: response.usage.costUsd ?? null,
         stopReason: response.stopReason,
       };
     } catch (err) {
@@ -4087,6 +4213,13 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       } catch (err) {
         throw providerErrorToHttp(err, "chat");
       }
+      const topicCost = await priceLaneACall({
+        provider: settings.provider,
+        model,
+        inputTokens: completion.usage.inputTokens,
+        outputTokens: completion.usage.outputTokens,
+        providerCostUsd: completion.usage.costUsd,
+      });
       await costService(db).createEvent(companyId, {
         agentId: targetAgent.id,
         provider: settings.provider,
@@ -4095,7 +4228,9 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         model,
         inputTokens: completion.usage.inputTokens,
         outputTokens: completion.usage.outputTokens,
-        costCents: computeCostCents(settings.provider, model, completion.usage.inputTokens, completion.usage.outputTokens),
+        costCents: topicCost.costCents,
+        costMicroUsd: topicCost.costMicroUsd,
+        costSource: topicCost.costSource,
         occurredAt: new Date(),
       });
       const selection = parseTopicSelection(completion.text, candidates.length);

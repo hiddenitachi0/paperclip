@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, integer, doublePrecision, index } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, integer, bigint, doublePrecision, index } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
 import { issues } from "./issues.js";
@@ -36,6 +36,11 @@ export const costEvents = pgTable(
     cacheWrite1hInputTokens: integer("cache_write_1h_input_tokens").notNull().default(0),
     cacheWriteCostCents: doublePrecision("cache_write_cost_cents").notNull().default(0),
     costCents: integer("cost_cents").notNull(),
+    // DUR-4453: exact sub-cent cost (1 USD = 1,000,000). Nullable: older rows
+    // only carry cost_cents; readers fall back to cost_cents * 10000.
+    costMicroUsd: bigint("cost_micro_usd", { mode: "number" }),
+    // "provider" (exact, reported by the provider), "estimate", "static_table".
+    costSource: text("cost_source"),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },

@@ -66,6 +66,9 @@ const SPEND_SAMPLES: Record<
     billingCode: LANE_A_TRANSFORM_BILLING_CODE,
     expectObserved: 250,
   },
+  // DUR-4462: not spend -- reads cost_reconciliation_runs, so the cost-row loop
+  // below skips it; it is proven by its own test in cost-reconciliation.test.ts.
+  cost_reconciliation_mismatch_cents: { costCents: 0, inputTokens: 0, outputTokens: 0, expectObserved: 0 },
 };
 
 describe("budget metric list", () => {
@@ -174,6 +177,7 @@ describeEmbeddedPostgres("every budget metric is actually observed", () => {
   }
 
   for (const metric of BUDGET_METRICS) {
+    if (metric === "cost_reconciliation_mismatch_cents") continue;
     it(`observes real spend for "${metric}" instead of silently reporting zero`, async () => {
       const { companyId, agentId } = await seedCompanyAndAgent();
       const sample = SPEND_SAMPLES[metric];

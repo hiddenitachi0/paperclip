@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { PluginCompanySettingsPageProps, PluginDetailTabProps, PluginHostContext, PluginPageProps, PluginSidebarProps } from "@paperclipai/plugin-sdk/ui";
 import { usePluginAction, useHostNavigation, PluginConfigForm } from "@paperclipai/plugin-sdk/ui";
 import { MediaStudioEditTab } from "./edit-tab.js";
+import { StoryboardPanel, storyboardReadyToRender, type StoryboardSummary } from "./storyboard-panel.js";
+import { AdvancedFeaturesToggle, AiDirectorSection } from "./director-panel.js";
 
 // The plugin UI is served as a standalone ES module, so it must not import from
 // sibling plugin files (only bare specifiers resolve). Keep these in sync with
@@ -414,6 +416,10 @@ const ATTACHMENT_PATH = /^\/api\/attachments\/([0-9a-f-]{36})\/content$/i;
 
 function fileContentPath(fileId: string) {
   return `/api/attachments/${fileId}/content`;
+}
+
+function thumbnailPathFor(contentPath: string): string {
+  return contentPath.replace(/\/content$/, "/thumbnail");
 }
 
 export type LookDraft = {
@@ -1754,7 +1760,7 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                   {look.referenceFileIds.map((id, i) => (
                     <figure key={id} style={{ margin: 0, display: "flex", flexDirection: "column", gap: 2, alignItems: "center" }}>
-                      <img src={fileContentPath(id)} alt="Reference picture" style={thumb} />
+                      <img src={thumbnailPathFor(fileContentPath(id))} loading="lazy" alt="Reference picture" style={thumb} />
                       <figcaption style={{ fontSize: 11, opacity: 0.7 }}>{roleLabel(look.referenceRoles?.[i])}</figcaption>
                     </figure>
                   ))}
@@ -1995,7 +2001,7 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
                 {draft.referenceFileIds.map((id, i) => (
                   <div key={id} style={{ display: "flex", flexDirection: "column", gap: 4, width: 120 }}>
                     <span style={{ fontSize: 11, opacity: 0.7 }}>Picture {i + 1}</span>
-                    <img src={fileContentPath(id)} alt={`Reference picture ${i + 1}`} style={thumb} />
+                    <img src={thumbnailPathFor(fileContentPath(id))} loading="lazy" alt={`Reference picture ${i + 1}`} style={thumb} />
                     <select
                       aria-label={`What picture ${i + 1} is for`}
                       value={draftRoles(draft)[i]}
@@ -2032,7 +2038,7 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
                       onClick={() => toggleRef(img.fileId, refLimit)}
                       style={{ padding: 0, border: picked ? "3px solid #1971c2" : "3px solid transparent", borderRadius: 8, background: "none", cursor: "pointer" }}
                     >
-                      <img src={img.src} alt={img.title} style={thumb} />
+                      <img src={thumbnailPathFor(img.src)} loading="lazy" alt={img.title} style={thumb} />
                     </button>
                   );
                 })}
@@ -2402,7 +2408,7 @@ function DirectHistoryList({ history, error }: { history: DirectHistoryEntry[] |
           {history.map((entry) => (
             <div key={entry.id} style={{ display: "flex", gap: 10, alignItems: "center", fontSize: 12, borderBottom: "1px solid rgba(128,128,128,0.15)", paddingBottom: 6 }}>
               {entry.contentPath && entry.kind === "picture" ? (
-                <img src={entry.contentPath} alt="" style={thumb} />
+                <img src={ATTACHMENT_PATH.test(entry.contentPath) ? thumbnailPathFor(entry.contentPath) : entry.contentPath} loading="lazy" alt="" style={thumb} />
               ) : (
                 <div style={{ width: 72, height: 72, borderRadius: 6, background: "rgba(128,128,128,0.12)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "#868e96" }}>
                   {entry.kind === "rewrite_prompt" ? "Rewrite" : DIRECT_KIND_LABELS[entry.kind as DirectKind] ?? entry.kind}
@@ -2942,6 +2948,13 @@ interface VideoShotSummary {
   attempt: number;
   errorMessage: string | null;
   createdAt: string;
+  transitionIn?: "cut" | "fade" | "dissolve" | null;
+  proposedPrompt?: string | null;
+  proposedCameraNotes?: string | null;
+  proposedDurationSeconds?: number | null;
+  proposedTransitionIn?: "cut" | "fade" | "dissolve" | null;
+  proposalStatus?: string | null;
+  promptHistory?: Array<{ prompt: string }>;
 }
 
 interface VideoStorylineShotProgress {
@@ -3080,6 +3093,8 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
   const [scenes, setScenes] = useState<VideoSceneSummary[]>([]);
   const [shots, setShots] = useState<VideoShotSummary[]>([]);
   const [progress, setProgress] = useState<VideoStorylineProgress | null>(null);
+  const [storyboard, setStoryboard] = useState<StoryboardSummary | null>(null);
+  const [approvalPending, setApprovalPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -3102,6 +3117,34 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
   useEffect(() => {
     void loadSettings();
   }, [loadSettings]);
+
+  const [advancedEnabled, setAdvancedEnabled] = useState<boolean | null>(null);
+  const [advancedError, setAdvancedError] = useState<string | null>(null);
+  const [advancedBusy, setAdvancedBusy] = useState(false);
+
+  useEffect(() => {
+    if (!companyId) return;
+    hostFetchJson<{ enabled: boolean }>(`/api/companies/${companyId}/video-storylines/settings/advanced`)
+      .then((res) => setAdvancedEnabled(res.enabled))
+      .catch((e) => setAdvancedError(e instanceof Error ? e.message : String(e)));
+  }, [companyId]);
+
+  const toggleAdvanced = async (next: boolean) => {
+    if (!companyId) return;
+    setAdvancedBusy(true);
+    setAdvancedError(null);
+    try {
+      const res = await hostFetchJson<{ enabled: boolean }>(`/api/companies/${companyId}/video-storylines/settings/advanced`, {
+        method: "PATCH",
+        body: JSON.stringify({ enabled: next }),
+      });
+      setAdvancedEnabled(res.enabled);
+    } catch (e) {
+      setAdvancedError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAdvancedBusy(false);
+    }
+  };
 
   useEffect(() => {
     listLooks({})
@@ -3141,6 +3184,11 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
   }, [loadStorylines]);
 
   const selected = storylines?.find((s) => s.id === selectedId) ?? null;
+
+  useEffect(() => {
+    setApprovalPending(false);
+    setStoryboard(null);
+  }, [selectedId]);
 
   const loadDetail = useCallback(async () => {
     if (!companyId || !selectedId) return;
@@ -3374,10 +3422,17 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
         method: "POST",
         body: JSON.stringify({}),
       });
+      setApprovalPending(false);
       await loadStorylines();
       await loadProgress();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const message = e instanceof Error ? e.message : String(e);
+      if (message.includes("Waiting on a board decision")) {
+        // Not a failure: the request for the owner's go-ahead was sent; the storyboard panel explains the wait.
+        setApprovalPending(true);
+      } else {
+        setError(message);
+      }
     } finally {
       setBusy(false);
     }
@@ -3419,6 +3474,9 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
           </label>
         </div>
         {settingsError && <div style={errorBox}>{settingsError}</div>}
+        {enabled && (
+          <AdvancedFeaturesToggle enabled={advancedEnabled} busy={advancedBusy} error={advancedError} onChange={(v) => void toggleAdvanced(v)} />
+        )}
       </div>
 
       {!enabled ? (
@@ -3507,7 +3565,8 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                     <button
                       type="button"
                       style={primaryBtn}
-                      disabled={busy || shots.length === 0 || selected.budgetCapCents === null || !EDITABLE_STORYLINE_STATUSES.has(selected.status)}
+                      disabled={busy || shots.length === 0 || selected.budgetCapCents === null || !EDITABLE_STORYLINE_STATUSES.has(selected.status) || !storyboardReadyToRender(storyboard)}
+                      title={storyboardReadyToRender(storyboard) ? undefined : "Approve every shot's picture in the storyboard first (or leave out the shots you don't want)."}
                       onClick={() => void startRender()}
                     >
                       Start render
@@ -3525,6 +3584,33 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                     </p>
                   )}
                 </div>
+
+                {advancedEnabled && companyId && (
+                  <AiDirectorSection
+                    companyId={companyId}
+                    storylineId={selected.id}
+                    scenes={scenes}
+                    shots={shots}
+                    editable={EDITABLE_STORYLINE_STATUSES.has(selected.status)}
+                    fetchJson={hostFetchJson}
+                    onShotsChanged={loadDetail}
+                  />
+                )}
+
+                {shots.length > 0 && (
+                  <StoryboardPanel
+                    companyId={companyId!}
+                    storylineId={selected.id}
+                    shots={shots}
+                    editable={EDITABLE_STORYLINE_STATUSES.has(selected.status)}
+                    approvalPending={approvalPending}
+                    onSummary={setStoryboard}
+                    onShotsChanged={async () => {
+                      await loadDetail();
+                      await loadStorylines();
+                    }}
+                  />
+                )}
 
                 {progress && (
                   <div style={card}>

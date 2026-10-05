@@ -286,6 +286,7 @@ import {
   redactHeartbeatRunPatchSecrets,
   redactKnownSecretValues,
   redactSensitiveText,
+  stripAgentControlledIdAllowlistKeys,
 } from "../redaction.js";
 import {
   hasSessionCompactionThresholds,
@@ -13831,7 +13832,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           resultJson: mergeModelProfileRunMetadata(
             mergeAdapterRecoveryMetadata({
               resultJson: {
-                ...parseObject(adapterResult.resultJson),
+                // DUR-4540 SR2: adapterResult.resultJson is parsed from
+                // agent/adapter-controlled output, so it must not be allowed
+                // to declare `workspaceValidation`/`interruptedIssueId` --
+                // those keys are redaction-allowlisted elsewhere on the
+                // assumption they only ever hold server-constructed DB ids.
+                ...stripAgentControlledIdAllowlistKeys(parseObject(adapterResult.resultJson)),
                 configFreshness: configFreshnessResultMetadata,
                 ...(resolvedAdapterConfigMetadata ? { resolvedAdapterConfig: resolvedAdapterConfigMetadata } : {}),
               },

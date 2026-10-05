@@ -1524,15 +1524,78 @@
     {
       "idx": 218,
       "version": "7",
-      "when": 1791060424189,
-      "tag": "0218_cost_events_cache_write",
+      "when": 1791056987524,
+      "tag": "0218_slim_blue_shield",
       "breakpoints": true
     },
     {
       "idx": 219,
       "version": "7",
-      "when": 1791060691016,
-      "tag": "0219_company_cache_settings",
+      "when": 1791117675418,
+      "tag": "0219_cost_reconciliation",
+      "breakpoints": true
+    },
+    {
+      "idx": 220,
+      "version": "7",
+      "when": 1791118854588,
+      "tag": "0220_cost_reconciliation_micro_usd",
+      "breakpoints": true
+    },
+    {
+      "idx": 221,
+      "version": "7",
+      "when": 1791139532530,
+      "tag": "0221_worktree_cleanup_retention_days",
+      "breakpoints": true
+    },
+    {
+      "idx": 222,
+      "version": "7",
+      "when": 1791139532531,
+      "tag": "0222_issue_size_label",
+      "breakpoints": true
+    },
+    {
+      "idx": 223,
+      "version": "7",
+      "when": 1791155972128,
+      "tag": "0223_local_model_health",
+      "breakpoints": true
+    },
+    {
+      "idx": 224,
+      "version": "7",
+      "when": 1791156757413,
+      "tag": "0224_issue_overlaps",
+      "breakpoints": true
+    },
+    {
+      "idx": 225,
+      "version": "7",
+      "when": 1791157643415,
+      "tag": "0225_reaction_learning",
+      "breakpoints": true
+    },
+    {
+      "idx": 226,
+      "version": "7",
+      "when": 1791158648532,
+      "tag": "0226_brag_jobs",
+      "breakpoints": true
+    },
+    {
+      "idx": 227,
+      "version": "7",
+      "when": 1791158648533,
+      "tag": "0227_cost_events_cache_write",
+      "breakpoints": true
+    },
+    {
+      "idx": 228,
+      "version": "7",
+      "when": 1791158648534,
+      "tag": "0228_company_cache_settings",
       "breakpoints": true
     }
   ]

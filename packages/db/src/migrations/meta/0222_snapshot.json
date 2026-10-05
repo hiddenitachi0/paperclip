@@ -1,6 +1,6 @@
 {
-  "id": "499d923d-8407-4a31-a095-21ce02b1eb5b",
-  "prevId": "d7ef1c51-0d92-4ada-9a5d-72f4fde20b89",
+  "id": "8bfb5985-ec8a-46fa-bdb1-86410fce7b5c",
+  "prevId": "6a5fc168-3255-447a-a011-55cfceb2e8e0",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -8431,27 +8431,6 @@
         "output_tokens": {
           "name": "output_tokens",
           "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "cache_write_input_tokens": {
-          "name": "cache_write_input_tokens",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "cache_write_1h_input_tokens": {
-          "name": "cache_write_1h_input_tokens",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "cache_write_cost_cents": {
-          "name": "cache_write_cost_cents",
-          "type": "double precision",
           "primaryKey": false,
           "notNull": true,
           "default": 0
@@ -21904,6 +21883,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "'medium'"
+        },
+        "size_label": {
+          "name": "size_label",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         },
         "assignee_agent_id": {
           "name": "assignee_agent_id",

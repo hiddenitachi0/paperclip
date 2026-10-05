@@ -2366,6 +2366,16 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         requireCapability(manifest, capabilitySet, "billing.media_studio_direct.reserve");
         requireCompanyId(companyId);
       },
+      async settleMediaStudioDirectSpend(companyId) {
+        requireCapability(manifest, capabilitySet, "billing.media_studio_direct.reserve");
+        requireCompanyId(companyId);
+        return { settled: false };
+      },
+      async recordAgentMediaCost(companyId) {
+        requireCapability(manifest, capabilitySet, "billing.media_studio_direct.reserve");
+        requireCompanyId(companyId);
+        return { recorded: false, reason: "test_harness" };
+      },
     },
     personas: {
       async reserveDailyGeneration(companyId, options) {
@@ -2373,6 +2383,12 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         requireCompanyId(companyId);
         if (!options?.runId) throw new Error("reserveDailyGeneration requires options.runId");
         return { allowed: true, cap: null, usedToday: 0 };
+      },
+      async getPictureFeedbackRules(companyId, options) {
+        requireCapability(manifest, capabilitySet, "personas.picture_feedback.read");
+        requireCompanyId(companyId);
+        if (!options?.runId) throw new Error("getPictureFeedbackRules requires options.runId");
+        return { doMore: [], avoid: [] };
       },
     },
     files: {

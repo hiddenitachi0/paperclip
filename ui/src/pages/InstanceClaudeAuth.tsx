@@ -218,11 +218,11 @@ export function InstanceClaudeAuth() {
         </div>
       )}
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-2">
-              <h2 className="text-sm font-semibold">Status</h2>
+              <h2 className="section-title">Status</h2>
               {healthBadge(status)}
             </div>
             {status.configured && (
@@ -284,10 +284,10 @@ export function InstanceClaudeAuth() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="space-y-4">
           <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">{status.configured ? "Sign in again" : "Sign in with Claude"}</h2>
+            <h2 className="section-title">{status.configured ? "Sign in again" : "Sign in with Claude"}</h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               Three steps: click the button, approve Paperclip on the Claude page that opens, then paste the
               code Claude shows you back here. The token is tested with Claude and stored encrypted on this

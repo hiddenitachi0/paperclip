@@ -78,6 +78,7 @@ type PickerItem = {
   title: string;
   contentType: string | null;
   openPath: string | null;
+  thumbnailPath?: string | null;
   originalFilename: string | null;
 };
 
@@ -897,7 +898,8 @@ export function MediaStudioEditTab({ context, initialFileId }: { context: Plugin
               item.openPath ? (
                 <img
                   key={item.id}
-                  src={item.openPath}
+                  src={item.thumbnailPath ?? item.openPath}
+                  loading="lazy"
                   alt={item.title}
                   title={item.title}
                   style={thumb}

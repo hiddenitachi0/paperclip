@@ -9,6 +9,7 @@ import {
   redactKnownSecretValues,
   redactSensitiveText,
   sanitizeRecord,
+  stripAgentControlledIdAllowlistKeys,
 } from "../redaction.js";
 
 // DUR-4040: Stripe's canonical test Visa number -- obviously fake, Luhn-valid,
@@ -296,6 +297,69 @@ describe("redactCardNumbers", () => {
     expect(redactCardNumbers(input)).toBe(input);
   });
 
+  it("DUR-4536: no longer tries to detect UUID shape at all -- a Luhn-valid run inside a UUID-looking string is always redacted", () => {
+    // Earlier versions of this function tried to tell apart "incidental
+    // UUID digit coincidence" from "a card number dressed up as a UUID" by
+    // the shape of the surrounding characters. Every such heuristic was
+    // defeatable (DUR-4535, DUR-4536), because the string is fully
+    // attacker-controlled. redactCardNumbers no longer makes that
+    // distinction at all -- it always redacts. The original DUR-4534
+    // complaint (genuine server-generated UUIDs getting corrupted) is now
+    // fixed at the call site, not here -- see the
+    // redactKnownLeakedSecretPatternsDeep tests below for the exact-path
+    // allowlist that protects known-safe fields instead.
+    const input = "issueId: c10d6206-1c57-4904-9223-982c6cf4b18b";
+    expect(redactCardNumbers(input)).toBe(
+      "issueId: c10d6206-1c[REDACTED:card_number]c6cf4b18b",
+    );
+  });
+
+  it("DUR-4536: redacts a card number padded with hex letters on both sides to fit a UUID's interior groups", () => {
+    // DUR-4536's finding against the previous (now-removed) boundary
+    // heuristic: a PAN placed in the middle groups of a UUID shape, with
+    // hex letters on both sides so neither edge of the match touches the
+    // UUID span's outer edge, used to pass through unredacted.
+    const input = "aaaaaaaa-4111-1111-1111-1111aaaaaaaa";
+    expect(redactCardNumbers(input)).toBe(
+      "aaaaaaaa-[REDACTED:card_number]aaaaaaaa",
+    );
+  });
+
+  it("DUR-4535: does not let a real card number dressed up as a UUID bypass redaction", () => {
+    // The Visa test PAN 4111111111111111 laid out across the UUID's first
+    // three dash groups, with the remaining groups padded as hex so the
+    // whole token still matches the UUID shape. This must still be caught --
+    // the card match starts at the UUID span's own start, so it is not
+    // "incidental UUID noise" the way DUR-4534's fix is meant to protect.
+    const input = "card: 41111111-1111-1111-aaaa-aaaaaaaaaaaa";
+    expect(redactCardNumbers(input)).toBe(
+      "card: [REDACTED:card_number]-aaaa-aaaaaaaaaaaa",
+    );
+  });
+
+  it("DUR-4535: does not let a card number smuggled at the end of a UUID bypass redaction", () => {
+    // Same trick, mirrored: the PAN occupies the UUID's trailing groups and
+    // the match ends exactly at the UUID span's own end.
+    const input = "card: aaaaaaaa-aaaa-aaaa-4111-111111111111";
+    expect(redactCardNumbers(input)).toBe(
+      "card: aaaaaaaa-aaaa-aaaa-[REDACTED:card_number]",
+    );
+  });
+
+  it("DUR-4535: does not let a card number truncated by the 19-digit cap keep its UUID cover", () => {
+    // The digit run here is 20 digits long -- one over CARD_NUMBER_TOKEN_RE's
+    // 19-digit cap -- so the match itself falls one digit short of the
+    // UUID's own end. That is an artifact of our own token regex, not a
+    // genuine letter/dash boundary, so it must not be treated as "safely
+    // embedded in the UUID" either. (First 19 digits, "1111111111111111113",
+    // are themselves a valid Luhn check digit sequence; the trailing "4" is
+    // just padding to make the full run 20 digits.)
+    const input = "card: aaaaaaaa-aaaa-1111-1111-111111111134";
+    expect(redactCardNumbers(input)).toBe(
+      "card: aaaaaaaa-aaaa-[REDACTED:card_number]4",
+    );
+  });
+
   it("is folded into redactKnownLeakedSecretPatterns, the run-output redaction path", () => {
     const result = redactKnownLeakedSecretPatterns(
       `browser_type filled the field with ${CANARY_CARD_NUMBER}`,
@@ -336,9 +400,15 @@ describe("canary card number never survives serialization (DUR-4040)", () => {
   });
 });
 
-// DUR-372: exported so workspace-operations.ts can scrub its own
-// arbitrary-shaped `metadata` JSON with the same deep-walk used internally
-// by redactHeartbeatRunPatchSecrets below.
+// DUR-372: exported so workspace-operations.ts and data-read-audit.ts can
+// scrub their own arbitrary-shaped JSON with the same deep-walk used
+// internally by redactHeartbeatRunPatchSecrets below. DUR-4540 SR2: this
+// export deliberately has NO id-path allowlist -- unlike
+// redactHeartbeatRunPatchSecrets, callers of this function hand it
+// caller-shaped JSON this module cannot prove is free of
+// attacker/agent-controlled content, so a `workspaceValidation.issueId` (or
+// any other allowlisted path) key collision here always gets the full scrub,
+// even if the value happens to be a well-formed UUID.
 describe("redactKnownLeakedSecretPatternsDeep", () => {
   it("redacts a matching pattern nested inside arrays and objects", () => {
     const input = {
@@ -356,9 +426,152 @@ describe("redactKnownLeakedSecretPatternsDeep", () => {
     const input = { count: 3, ok: true, nested: { safe: "no secret here" } };
     expect(redactKnownLeakedSecretPatternsDeep(input)).toEqual(input);
   });
+
+  it("DUR-4540: has no id-path allowlist -- a card-shaped value at workspaceValidation.issueId is always scrubbed here, even though that exact path is allowlisted for redactHeartbeatRunPatchSecrets", () => {
+    const input = {
+      workspaceValidation: {
+        reason: "missing_project_id",
+        issueId: "aaaaaaaa-4111-1111-1111-1111aaaaaaaa",
+      },
+    };
+    const result = redactKnownLeakedSecretPatternsDeep(input) as {
+      workspaceValidation: { issueId: string };
+    };
+    expect(result.workspaceValidation.issueId).toBe("aaaaaaaa-[REDACTED:card_number]aaaaaaaa");
+  });
+
+  it("DUR-4540: has no root-level interruptedIssueId allowlist either", () => {
+    const input = { interruptedIssueId: "aaaaaaaa-4111-1111-1111-1111aaaaaaaa" };
+    const result = redactKnownLeakedSecretPatternsDeep(input) as { interruptedIssueId: string };
+    expect(result.interruptedIssueId).toBe("aaaaaaaa-[REDACTED:card_number]aaaaaaaa");
+  });
+});
+
+describe("stripAgentControlledIdAllowlistKeys", () => {
+  it("DUR-4540: strips workspaceValidation and interruptedIssueId, the two keys the redactHeartbeatRunPatchSecrets allowlist trusts by path alone", () => {
+    const input = {
+      summary: "agent-reported summary",
+      workspaceValidation: { issueId: "aaaaaaaa-4111-1111-1111-1111aaaaaaaa" },
+      interruptedIssueId: "aaaaaaaa-4111-1111-1111-1111aaaaaaaa",
+    };
+    expect(stripAgentControlledIdAllowlistKeys(input)).toEqual({ summary: "agent-reported summary" });
+  });
+
+  it("leaves unrelated keys, including similarly-named ones, untouched", () => {
+    const input = { otherInterruptedIssueId: "keep-me", workspaceValidationNote: "keep-me-too" };
+    expect(stripAgentControlledIdAllowlistKeys(input)).toEqual(input);
+  });
 });
 
 describe("redactHeartbeatRunPatchSecrets", () => {
+  // DUR-4534/4536/4538: the id-path allowlist is only safe within this
+  // function because every call site that builds its resultJson from
+  // agent/adapter-controlled output (heartbeat.ts's adapterResult.resultJson
+  // spread) runs stripAgentControlledIdAllowlistKeys first -- see the
+  // production wiring in services/heartbeat.ts. These tests exercise the
+  // allowlist exactly as this function sees it: a resultJson that is assumed
+  // trusted for these two keys by the time it gets here.
+  it("DUR-4534/4536: preserves a genuine UUID at the known workspaceValidation id paths", () => {
+    const patch = {
+      resultJson: {
+        workspaceValidation: {
+          reason: "missing_project_id",
+          issueId: "c10d6206-1c57-4904-9223-982c6cf4b18b",
+          issueProjectId: "aaaaaaaa-4111-1111-1111-1111aaaaaaaa",
+          unrelatedNote: "plain text",
+        },
+      },
+    };
+    expect(redactHeartbeatRunPatchSecrets(patch)).toEqual(patch);
+  });
+
+  it("DUR-4536: still redacts a card-shaped value at a path NOT on the known-id allowlist, even if it is UUID-shaped", () => {
+    // The allowlist is by exact field path, not by "looks like a UUID" --
+    // a value under an unrecognized key still gets the full scrub, so
+    // smuggling a PAN into some other field of workspaceValidation (or
+    // anywhere else in resultJson) does not get a free pass just because
+    // the string happens to be UUID-shaped.
+    const patch = {
+      resultJson: {
+        workspaceValidation: {
+          reason: "missing_project_id",
+          attackerControlledNote: "aaaaaaaa-4111-1111-1111-1111aaaaaaaa",
+        },
+      },
+    };
+    const result = redactHeartbeatRunPatchSecrets(patch) as {
+      resultJson: { workspaceValidation: { attackerControlledNote: string } };
+    };
+    expect(result.resultJson.workspaceValidation.attackerControlledNote).toBe(
+      "aaaaaaaa-[REDACTED:card_number]aaaaaaaa",
+    );
+  });
+
+  it("DUR-4536: a malformed value at a known id path (not actually a UUID) still gets scrubbed", () => {
+    const patch = {
+      resultJson: {
+        workspaceValidation: {
+          issueId: `prefix ${CANARY_CARD_NUMBER} suffix`,
+        },
+      },
+    };
+    const result = redactHeartbeatRunPatchSecrets(patch) as {
+      resultJson: { workspaceValidation: { issueId: string } };
+    };
+    expect(result.resultJson.workspaceValidation.issueId).not.toContain(CANARY_CARD_NUMBER);
+  });
+
+  // DUR-4538: cancelRunInternal's operator-interrupt resultJson
+  // (operatorInterruptCancelOptions in routes/issues.ts) writes the real
+  // issue.id to a root-level `interruptedIssueId` field, not under
+  // `workspaceValidation` -- it needs its own allowlist entry.
+  it("DUR-4538: preserves a genuine UUID at the root-level interruptedIssueId path used by operator-interrupt cancellation", () => {
+    const patch = {
+      resultJson: {
+        operatorInterrupted: true,
+        interruptionSource: "issue_comment_interrupt",
+        interruptedIssueId: "c10d6206-1c57-4904-9223-982c6cf4b18b",
+      },
+    };
+    expect(redactHeartbeatRunPatchSecrets(patch)).toEqual(patch);
+  });
+
+  it("DUR-4538: still redacts a card-shaped value smuggled under a field that merely resembles interruptedIssueId", () => {
+    const patch = { resultJson: { otherInterruptedIssueId: "aaaaaaaa-4111-1111-1111-1111aaaaaaaa" } };
+    const result = redactHeartbeatRunPatchSecrets(patch) as {
+      resultJson: { otherInterruptedIssueId: string };
+    };
+    expect(result.resultJson.otherInterruptedIssueId).toBe("aaaaaaaa-[REDACTED:card_number]aaaaaaaa");
+  });
+
+  // DUR-4540 SR2 finding: without stripAgentControlledIdAllowlistKeys having
+  // run first, a resultJson.workspaceValidation.issueId that is actually a
+  // hex-padded PAN would be allowlisted by path alone -- this test documents
+  // that redactHeartbeatRunPatchSecrets, in isolation, still trusts the path.
+  // The exploit is closed one layer up, at the heartbeat.ts call site that
+  // strips these two keys from adapter-controlled input before it ever
+  // reaches this function (see the "closes the DUR-4540 bypass end to end"
+  // integration-style test below using the exact exported helper).
+  it("DUR-4540: demonstrates why stripping must happen before this function runs -- an un-stripped forged workspaceValidation.issueId would be let through", () => {
+    const forgedAgentResultJson = {
+      workspaceValidation: { issueId: "aaaaaaaa-4111-1111-1111-1111aaaaaaaa" },
+    };
+    const patch = { resultJson: forgedAgentResultJson };
+    const result = redactHeartbeatRunPatchSecrets(patch) as {
+      resultJson: { workspaceValidation: { issueId: string } };
+    };
+    // Without the upstream strip, this function cannot tell this apart from
+    // a genuine server-constructed id -- which is exactly why
+    // stripAgentControlledIdAllowlistKeys must run first in heartbeat.ts.
+    expect(result.resultJson.workspaceValidation.issueId).toBe("aaaaaaaa-4111-1111-1111-1111aaaaaaaa");
+
+    // Once the production wiring's strip runs first, the same forged key is
+    // gone before redactHeartbeatRunPatchSecrets ever sees it, so the PAN
+    // falls back to the full, unconditional card scrub in
+    // redactKnownLeakedSecretPatterns instead of being allowlisted away.
+    const strippedPatch = { resultJson: stripAgentControlledIdAllowlistKeys(forgedAgentResultJson) };
+    expect(redactHeartbeatRunPatchSecrets(strippedPatch)).toEqual({ resultJson: {} });
+  });
   it("redacts matching patterns in error, stdoutExcerpt, stderrExcerpt, and nested resultJson strings", () => {
     const patch = {
       error: "push failed: ghp_1234567890abcdefghijklmnopqrstuvwxyz",

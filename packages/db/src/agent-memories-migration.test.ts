@@ -106,7 +106,7 @@ d(`migration ${MIGRATION_TAG}`, () => {
   it("creates agent_memories with the intended columns, keys and indexes", async () => {
     const cols = await columns("agent_memories");
     expect([...cols.keys()].sort()).toEqual([
-      "agent_id", "company_id", "created_at", "created_by_user_id", "id", "persona_id", "source", "text", "updated_at",
+      "agent_id", "category", "company_id", "created_at", "created_by_user_id", "id", "persona_id", "source", "terms", "text", "updated_at",
     ]);
     expect(cols.get("company_id")).toMatchObject({ type: "uuid", nullable: false });
     expect(cols.get("agent_id")).toMatchObject({ type: "uuid", nullable: false });
@@ -119,7 +119,7 @@ d(`migration ${MIGRATION_TAG}`, () => {
     expect(s.constraints.agent_memories_company_id_companies_id_fk).toBe("FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE");
     expect(s.constraints.agent_memories_agent_id_agents_id_fk).toBe("FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE");
     expect(s.constraints.agent_memories_persona_id_personas_id_fk).toBe("FOREIGN KEY (persona_id) REFERENCES personas(id) ON DELETE CASCADE");
-    expect(s.constraints.agent_memories_source_check).toBe("CHECK ((source = ANY (ARRAY['agent'::text, 'user'::text])))");
+    expect(s.constraints.agent_memories_source_check).toBe("CHECK ((source = ANY (ARRAY['agent'::text, 'user'::text, 'reaction'::text])))");
     expect(s.constraints.agent_memories_text_length_check).toContain("char_length(text)");
     expect(s.indexes).toEqual(["agent_memories_company_agent_idx", "agent_memories_company_persona_idx", "agent_memories_pkey"]);
   });

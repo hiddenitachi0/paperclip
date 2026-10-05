@@ -183,10 +183,10 @@ export function CompanySettings() {
 
       {/* General */}
       <div className="space-y-4">
-        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+        <div className="section-title">
           General
         </div>
-        <div className="space-y-3 rounded-md border border-border px-4 py-4">
+        <div className="space-y-3 rounded-md section-box px-4 py-4">
           <Field label="Company name" hint="The display name for your company.">
             <input
               className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
@@ -212,10 +212,10 @@ export function CompanySettings() {
 
       {/* Appearance */}
       <div className="space-y-4">
-        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+        <div className="section-title">
           Appearance
         </div>
-        <div className="space-y-3 rounded-md border border-border px-4 py-4">
+        <div className="space-y-3 rounded-md section-box px-4 py-4">
           <div className="flex items-start gap-4">
             <div className="shrink-0">
               <CompanyPatternIcon
@@ -366,10 +366,10 @@ export function CompanySettings() {
 
       {/* Hiring */}
       <div className="space-y-4" data-testid="company-settings-team-section">
-        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+        <div className="section-title">
           Hiring
         </div>
-        <div className="rounded-md border border-border px-4 py-3">
+        <div className="rounded-md section-box px-4 py-3">
           <ToggleField
             label="Require board approval for new hires"
             hint="New agent hires stay pending until approved by board."
@@ -384,10 +384,10 @@ export function CompanySettings() {
 
       {/* Import / Export */}
       <div className="space-y-4">
-        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+        <div className="section-title">
           Company Packages
         </div>
-        <div className="rounded-md border border-border px-4 py-4">
+        <div className="rounded-md section-box px-4 py-4">
           <p className="text-sm text-muted-foreground">
             Import and export have moved to dedicated pages accessible from the{" "}
             <Link to="/org" className="underline hover:text-foreground">Org Chart</Link> header.
@@ -420,10 +420,10 @@ export function CompanySettings() {
       {/* DUR-3997: AI-provider keys, data sources, Telegram bots and service
           tokens all live on the Connections page now. */}
       <div className="space-y-4">
-        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+        <div className="section-title">
           Connections
         </div>
-        <div className="rounded-md border border-border px-4 py-4">
+        <div className="rounded-md section-box px-4 py-4">
           <p className="text-sm text-muted-foreground">
             AI-provider keys, data sources, Telegram bots and keys for other systems have their own page.
           </p>
@@ -441,10 +441,10 @@ export function CompanySettings() {
       {/* DUR-4060: Media Studio's picture styles ("looks") moved from here into
           a Looks tab on Media Studio's own page, reached from the main menu. */}
       <div className="space-y-4">
-        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+        <div className="section-title">
           Pictures
         </div>
-        <div className="rounded-md border border-border px-4 py-4">
+        <div className="rounded-md section-box px-4 py-4">
           <p className="text-sm text-muted-foreground">
             Saved picture styles ("looks") for Media Studio now live on the Media Studio page.
           </p>

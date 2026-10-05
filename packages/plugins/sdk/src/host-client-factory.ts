@@ -320,6 +320,12 @@ export interface HostServices {
     releaseMediaStudioDirectSpend(
       params: WorkerToHostMethods["billing.releaseMediaStudioDirectSpend"][0],
     ): Promise<WorkerToHostMethods["billing.releaseMediaStudioDirectSpend"][1]>;
+    settleMediaStudioDirectSpend(
+      params: WorkerToHostMethods["billing.settleMediaStudioDirectSpend"][0],
+    ): Promise<WorkerToHostMethods["billing.settleMediaStudioDirectSpend"][1]>;
+    recordAgentMediaCost(
+      params: WorkerToHostMethods["billing.recordAgentMediaCost"][0],
+    ): Promise<WorkerToHostMethods["billing.recordAgentMediaCost"][1]>;
   };
 
   /** Provides persona-scoped enforcement helpers (DUR-177 daily generation cap). */
@@ -327,6 +333,9 @@ export interface HostServices {
     reserveDailyGeneration(
       params: WorkerToHostMethods["personas.reserveDailyGeneration"][0],
     ): Promise<WorkerToHostMethods["personas.reserveDailyGeneration"][1]>;
+    getPictureFeedbackRules(
+      params: WorkerToHostMethods["personas.getPictureFeedbackRules"][0],
+    ): Promise<WorkerToHostMethods["personas.getPictureFeedbackRules"][1]>;
   };
 }
 
@@ -530,8 +539,11 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
 
   // Personas
   "personas.reserveDailyGeneration": "personas.generation_cap.enforce",
+  "personas.getPictureFeedbackRules": "personas.picture_feedback.read",
   "billing.reserveMediaStudioDirectSpend": "billing.media_studio_direct.reserve",
   "billing.releaseMediaStudioDirectSpend": "billing.media_studio_direct.reserve",
+  "billing.settleMediaStudioDirectSpend": "billing.media_studio_direct.reserve",
+  "billing.recordAgentMediaCost": "billing.media_studio_direct.reserve",
 };
 
 // ---------------------------------------------------------------------------
@@ -1021,8 +1033,18 @@ export function createHostClientHandlers(
       return services.billing.releaseMediaStudioDirectSpend(params);
     }),
 
+    "billing.settleMediaStudioDirectSpend": gated("billing.settleMediaStudioDirectSpend", async (params) => {
+      return services.billing.settleMediaStudioDirectSpend(params);
+    }),
+    "billing.recordAgentMediaCost": gated("billing.recordAgentMediaCost", async (params) => {
+      return services.billing.recordAgentMediaCost(params);
+    }),
+
     "personas.reserveDailyGeneration": gated("personas.reserveDailyGeneration", async (params) => {
       return services.personas.reserveDailyGeneration(params);
+    }),
+    "personas.getPictureFeedbackRules": gated("personas.getPictureFeedbackRules", async (params) => {
+      return services.personas.getPictureFeedbackRules(params);
     }),
   };
 }

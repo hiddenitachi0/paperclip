@@ -177,7 +177,7 @@ export function InstanceSecurity() {
             <div className="flex items-start gap-3">
               <UserRoundCheck className="mt-0.5 h-5 w-5 text-muted-foreground" />
               <div>
-                <h2 className="text-sm font-semibold">Instance admins</h2>
+                <h2 className="section-title">Instance admins</h2>
                 <p className="text-sm text-muted-foreground">
                   These people have full access to every company on this server. Add or remove admins under Access.
                 </p>
@@ -214,7 +214,7 @@ export function InstanceSecurity() {
             <div className="flex items-start gap-3">
               <ShieldCheck className="mt-0.5 h-5 w-5 text-muted-foreground" />
               <div>
-                <h2 className="text-sm font-semibold">Admin account check</h2>
+                <h2 className="section-title">Admin account check</h2>
                 <p className="text-sm text-muted-foreground">
                   The server keeps a signed record of the admin list, each admin's sign-in email and a fingerprint of
                   their password. {overview.checkIntervalMinutes > 0
@@ -260,7 +260,7 @@ export function InstanceSecurity() {
             <div className="flex items-start gap-3">
               <LogOut className="mt-0.5 h-5 w-5 text-muted-foreground" />
               <div>
-                <h2 className="text-sm font-semibold">Signed-in devices</h2>
+                <h2 className="section-title">Signed-in devices</h2>
                 <p className="text-sm text-muted-foreground">
                   Every browser that is currently signed in to this server. If you see a device or address you do not
                   recognise, sign it out -- or sign out everywhere and change your password.

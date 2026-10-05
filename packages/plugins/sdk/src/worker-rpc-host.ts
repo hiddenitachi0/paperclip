@@ -1264,6 +1264,12 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
         async releaseMediaStudioDirectSpend(companyId, reservationId) {
           await callHost("billing.releaseMediaStudioDirectSpend", { companyId, reservationId });
         },
+        async settleMediaStudioDirectSpend(companyId, input) {
+          return callHost("billing.settleMediaStudioDirectSpend", { companyId, ...input });
+        },
+        async recordAgentMediaCost(companyId, input) {
+          return callHost("billing.recordAgentMediaCost", { companyId, ...input });
+        },
       },
 
       personas: {
@@ -1272,6 +1278,12 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
             throw new Error("reserveDailyGeneration requires options.runId (the invoking tool call's run id)");
           }
           return callHost("personas.reserveDailyGeneration", { companyId, runId: options.runId });
+        },
+        async getPictureFeedbackRules(companyId: string, options: { runId: string }) {
+          if (!options?.runId) {
+            throw new Error("getPictureFeedbackRules requires options.runId (the invoking tool call's run id)");
+          }
+          return callHost("personas.getPictureFeedbackRules", { companyId, runId: options.runId });
         },
       },
 

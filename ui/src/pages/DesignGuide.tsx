@@ -225,7 +225,7 @@ const DESIGN_GUIDE_DEGRADED_OUTPUTS: IssueWorkProduct[] = [
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="space-y-4">
-      <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">
+      <h3 className="section-title">
         {title}
       </h3>
       <Separator />
@@ -448,6 +448,8 @@ export function DesignGuide() {
             <Swatch name="Destructive" cssVar="--destructive" />
             <Swatch name="Border" cssVar="--border" />
             <Swatch name="Ring" cssVar="--ring" />
+            <Swatch name="Input background" cssVar="--input-background" />
+            <Swatch name="Code background" cssVar="--code-background" />
           </div>
         </SubSection>
 
@@ -476,8 +478,8 @@ export function DesignGuide() {
         <div className="space-y-3">
           <h2 className="text-xl font-bold">Page Title — text-xl font-bold</h2>
           <h2 className="text-lg font-semibold">Section Title — text-lg font-semibold</h2>
-          <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">
-            Section Heading — text-sm font-semibold uppercase tracking-wide
+          <h3 className="section-title">
+            Section Heading — section-title
           </h3>
           <p className="text-sm font-medium">Card Title — text-sm font-medium</p>
           <p className="text-sm font-semibold">Card Title Alt — text-sm font-semibold</p>
@@ -1394,7 +1396,7 @@ export function DesignGuide() {
       {/*  LOG VIEWER                                                   */}
       {/* ============================================================ */}
       <Section title="Log Viewer">
-        <div className="bg-neutral-950 rounded-lg p-3 font-mono text-xs max-h-80 overflow-y-auto">
+        <div className="bg-code-background border rounded-lg p-3 font-mono text-xs max-h-80 overflow-y-auto">
           <div className="text-foreground">[12:00:01] INFO  Agent started successfully</div>
           <div className="text-foreground">[12:00:02] INFO  Processing task PAP-001</div>
           <div className="text-yellow-400">[12:00:05] WARN  Rate limit approaching (80%)</div>

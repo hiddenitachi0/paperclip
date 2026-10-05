@@ -289,7 +289,7 @@ export function ProfileSettings() {
 
         <div className="rounded-[28px] border border-border/70 bg-card p-6 shadow-sm">
           <div className="space-y-1">
-            <h2 className="text-base font-semibold">Change password</h2>
+            <h2 className="section-title">Change password</h2>
             <p className="text-sm text-muted-foreground">
               Update the password you use to sign in with email.
             </p>

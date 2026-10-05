@@ -92,6 +92,7 @@ import { IssueMonitorActivityCard } from "../components/IssueMonitorActivityCard
 import { GoalConditionLoopCard } from "../components/GoalConditionLoopCard";
 import { IssueScheduledRetryCard } from "../components/IssueScheduledRetryCard";
 import { IssueProperties } from "../components/IssueProperties";
+import { IssueProgressBar, readIssueProgress } from "../components/IssueProgressBar";
 import { PauseAffectsSummaryView } from "../components/interrupt-handoff/InterruptHandoffViews";
 import { computePauseAffectsSummary } from "../lib/interrupt-handoff";
 import { useIssueExternalObjects } from "../hooks/useIssueExternalObjects";
@@ -4078,6 +4079,8 @@ export function IssueDetail() {
           className="text-xl font-bold"
         />
 
+        <IssueProgressBar progress={readIssueProgress(issue)} />
+
         <InlineEditor
           value={issue.description ?? ""}
           onSave={(description) => updateIssue.mutateAsync({ description })}
@@ -4142,7 +4145,7 @@ export function IssueDetail() {
       {showRichSubIssuesSection ? (
         <div className="space-y-3">
           <div className="flex items-center justify-between gap-2">
-            <h3 className="text-sm font-medium text-muted-foreground">Sub-tasks</h3>
+            <h3 className="section-title">Sub-tasks</h3>
           </div>
           <IssuesList
             issues={childIssues}
@@ -4281,7 +4284,7 @@ export function IssueDetail() {
         return (
           <div className="space-y-3">
             <div className="flex items-center justify-between gap-2">
-              <h3 className="text-sm font-medium text-muted-foreground">Artifacts</h3>
+              <h3 className="section-title">Artifacts</h3>
             </div>
             <div className="flex flex-wrap gap-2">
               {workProductsWithFileRefs.map(({ product, fileRef }) => (

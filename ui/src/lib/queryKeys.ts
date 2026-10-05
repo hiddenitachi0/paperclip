@@ -10,6 +10,8 @@ export const queryKeys = {
     speechSettings: (id: string) => ["companies", id, "speech-settings"] as const,
     dataConnections: (id: string) => ["companies", id, "data-connections"] as const,
     datasetSources: (id: string) => ["companies", id, "dataset-sources"] as const,
+    modelDirectory: (id: string) => ["companies", id, "model-directory"] as const,
+    modelStarters: (id: string) => ["companies", id, "model-directory", "starters"] as const,
     webSearch: (id: string) => ["companies", id, "web-search"] as const,
     dataReads: (id: string) => ["companies", id, "data-reads"] as const,
   },
@@ -304,6 +306,10 @@ export const queryKeys = {
   // Quick-agent memory notebook (the persona's when the agent has one).
   agentMemories: {
     list: (agentId: string) => ["agent-memories", agentId] as const,
+  },
+  // Overlapping work between open tasks.
+  overlaps: {
+    list: (companyId: string) => ["overlaps", companyId] as const,
   },
   // Market-price watchers.
   watchers: {

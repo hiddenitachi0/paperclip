@@ -25,6 +25,7 @@ import { IssueDetail } from "./pages/IssueDetail";
 import { IssueChatLongThreadPerf } from "./pages/IssueChatLongThreadPerf";
 import { Routines } from "./pages/Routines";
 import { Watchers } from "./pages/Watchers";
+import { Overlaps } from "./pages/Overlaps";
 import { Trading } from "./pages/Trading";
 import { TradingStrategyDetail } from "./pages/TradingStrategyDetail";
 import { ProductGrabber } from "./pages/ProductGrabber";
@@ -48,6 +49,7 @@ import { Inbox } from "./pages/Inbox";
 import { BoardChat } from "./pages/BoardChat";
 import { CompanySettings } from "./pages/CompanySettings";
 import { CompanyConnections } from "./pages/CompanyConnections";
+import { CompanyModels } from "./pages/CompanyModels";
 import { CompanyEnvironments } from "./pages/CompanyEnvironments";
 import { CloudUpstream } from "./pages/CloudUpstream";
 import { CloudUpstreamUxLab } from "./pages/CloudUpstreamUxLab";
@@ -71,6 +73,7 @@ import { InstanceCrossCompanyAccess } from "./pages/InstanceCrossCompanyAccess";
 import { InstanceAccess } from "./pages/InstanceAccess";
 import { InstanceSettings } from "./pages/InstanceSettings";
 import { InstanceExperimentalSettings } from "./pages/InstanceExperimentalSettings";
+import { PresentationModeSettings } from "./pages/PresentationModeSettings";
 import { ProfileSettings } from "./pages/ProfileSettings";
 import { PluginManager } from "./pages/PluginManager";
 import { PluginSettingsRoute } from "./pages/PluginSettingsRoute";
@@ -117,6 +120,7 @@ function boardRoutes() {
       <Route path="company/export/*" element={<CompanyExport />} />
       <Route path="company/import" element={<CompanyImport />} />
       <Route path="company/settings/connections" element={<CompanyConnections />} />
+      <Route path="company/settings/models" element={<CompanyModels />} />
       <Route path="company/settings/secrets" element={<Secrets />} />
       <Route path="company/settings/instance" element={<Navigate to="general" replace />} />
       <Route path="company/settings/instance/profile" element={<ProfileSettings />} />
@@ -128,6 +132,7 @@ function boardRoutes() {
       <Route path="company/settings/instance/access" element={<InstanceAccess />} />
       <Route path="company/settings/instance/heartbeats" element={<InstanceSettings />} />
       <Route path="company/settings/instance/experimental" element={<InstanceExperimentalSettings />} />
+      <Route path="company/settings/instance/presentation-mode" element={<PresentationModeSettings />} />
       <Route path="company/settings/instance/plugins" element={<PluginManager />} />
       <Route path="company/settings/instance/plugins/:pluginId" element={<PluginSettingsRoute />} />
       <Route path="company/settings/instance/adapters" element={<AdapterManager />} />
@@ -185,6 +190,7 @@ function boardRoutes() {
       <Route path="routines/:routineId/:section" element={<LegacyRoutinesRedirect />} />
       <Route path="workflow-map" element={<WorkflowMap />} />
       <Route path="watchers" element={<Watchers />} />
+      <Route path="overlaps" element={<Overlaps />} />
       <Route path="trading" element={<Trading />} />
       <Route path="trading/:strategyId" element={<TradingStrategyDetail />} />
       <Route path="product-grabber" element={<ProductGrabber />} />
@@ -497,6 +503,7 @@ export function App() {
           <Route path="issues/:issueId" element={<UnprefixedBoardRedirect />} />
           <Route path="routines" element={<UnprefixedBoardRedirect />} />
           <Route path="watchers" element={<UnprefixedBoardRedirect />} />
+          <Route path="overlaps" element={<UnprefixedBoardRedirect />} />
           <Route path="routines/:routineId" element={<UnprefixedBoardRedirect />} />
           <Route path="review-queue" element={<UnprefixedBoardRedirect />} />
           <Route path="learnings" element={<UnprefixedBoardRedirect />} />

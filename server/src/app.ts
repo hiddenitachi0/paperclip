@@ -1,3 +1,6 @@
+import { instanceDiskHealthRoutes } from "./routes/instance-disk-health.js";
+import { createDiskHealthService } from "./services/disk-health.js";
+import { resolveDefaultBackupDir } from "./home-paths.js";
 import express, { Router, type Request as ExpressRequest } from "express";
 import path from "node:path";
 import fs from "node:fs";
@@ -198,6 +201,7 @@ export async function createApp(
       }): Promise<unknown>;
     };
     databaseBackupService?: InstanceDatabaseBackupService;
+    databaseBackupDir?: string;
     deploymentMode: DeploymentMode;
     deploymentExposure: DeploymentExposure;
     allowedHostnames: string[];
@@ -389,6 +393,7 @@ export async function createApp(
   if (opts.databaseBackupService) {
     api.use(instanceDatabaseBackupRoutes(opts.databaseBackupService));
   }
+  api.use(instanceDiskHealthRoutes(createDiskHealthService({ backupDir: opts.databaseBackupDir ?? resolveDefaultBackupDir() })));
   const pluginRegistry = pluginRegistryService(db);
   const eventBus = createPluginEventBus();
   setPluginEventBus(eventBus);

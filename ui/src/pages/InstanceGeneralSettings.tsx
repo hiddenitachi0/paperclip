@@ -315,10 +315,10 @@ export function InstanceGeneralSettings() {
         </div>
       )}
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="space-y-3">
           <div className="flex items-center gap-2">
-            <h2 className="text-sm font-semibold">Deployment and auth</h2>
+            <h2 className="section-title">Deployment and auth</h2>
             <ModeBadge
               deploymentMode={healthQuery.data?.deploymentMode}
               deploymentExposure={healthQuery.data?.deploymentExposure}
@@ -348,10 +348,10 @@ export function InstanceGeneralSettings() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Censor username in logs</h2>
+            <h2 className="section-title">Censor username in logs</h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               Hide the username segment in home-directory paths and similar operator-visible log output. Standalone
               username mentions outside of paths are not yet masked in the live transcript view. This is off by
@@ -367,10 +367,10 @@ export function InstanceGeneralSettings() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Keyboard shortcuts</h2>
+            <h2 className="section-title">Keyboard shortcuts</h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               Enable app keyboard shortcuts, including inbox navigation and global shortcuts like creating tasks or
               toggling panels. This is off by default.
@@ -385,10 +385,10 @@ export function InstanceGeneralSettings() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="space-y-4">
           <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Max concurrent runs (whole instance)</h2>
+            <h2 className="section-title">Max concurrent runs (whole instance)</h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               How many agent runs may be going at the same time across every company on this server.
               When all of these slots are taken, new runs wait in the queue until one frees up; the
@@ -441,10 +441,10 @@ export function InstanceGeneralSettings() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="space-y-4">
           <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Run time limits</h2>
+            <h2 className="section-title">Run time limits</h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               Paperclip watches every agent run that runs as a program on this server. A run that goes on
               longer than the first limit without finishing, or whose program is still running but has
@@ -474,10 +474,10 @@ export function InstanceGeneralSettings() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="space-y-4">
           <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Work nobody is moving</h2>
+            <h2 className="section-title">Work nobody is moving</h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               The Now page&apos;s &quot;Needs you&quot; list also shows open tasks that have simply stopped, so
               work an agent finished and left for you to check cannot sit unnoticed. A task where nothing
@@ -501,10 +501,10 @@ export function InstanceGeneralSettings() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="space-y-4">
           <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Cards nobody answers</h2>
+            <h2 className="section-title">Cards nobody answers</h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               An agent can put a card in your queue: a yes/no question, a checklist, a short form or a list of
               proposed tasks. A card an agent filed that nobody answers within this many hours is closed by itself,
@@ -526,10 +526,10 @@ export function InstanceGeneralSettings() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="space-y-4">
           <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Turn limit and saved sessions</h2>
+            <h2 className="section-title">Turn limit and saved sessions</h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               Most of what an agent run costs is the context it re-reads on every turn, not what it writes.
               These two limits keep that in check. A run that reaches the turn limit stops with a plain note
@@ -578,10 +578,10 @@ export function InstanceGeneralSettings() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Stricter fact-check cards</h2>
+            <h2 className="section-title">Stricter fact-check cards</h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               Agents can ask you to check a fact (&quot;Do these numbers match Fiken?&quot;). Those asks get a calmer
               card that says this is not a decision. With this on, that calmer card is only used when the question
@@ -599,10 +599,10 @@ export function InstanceGeneralSettings() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="space-y-5">
           <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Quality check before a task is marked done</h2>
+            <h2 className="section-title">Quality check before a task is marked done</h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               When an agent says a task is finished, a second, cheap AI reviewer reads what the task asked for next to
               what the agent reported (and the change summary, when there was one) and answers &quot;looks done&quot; or
@@ -679,10 +679,10 @@ export function InstanceGeneralSettings() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="space-y-5">
           <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Backup retention</h2>
+            <h2 className="section-title">Backup retention</h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               Configure how long automatic database backups are retained. Backups run roughly
               every hour and are compressed with gzip. Within the daily window all backups are
@@ -691,7 +691,7 @@ export function InstanceGeneralSettings() {
           </div>
 
           <div className="space-y-1.5">
-            <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Daily</h3>
+            <h3 className="nav-group-title">Daily</h3>
             <div className="flex flex-wrap gap-2">
               {DAILY_RETENTION_PRESETS.map((days) => {
                 const active = backupRetention.dailyDays === days;
@@ -720,7 +720,7 @@ export function InstanceGeneralSettings() {
           </div>
 
           <div className="space-y-1.5">
-            <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Weekly</h3>
+            <h3 className="nav-group-title">Weekly</h3>
             <div className="flex flex-wrap gap-2">
               {WEEKLY_RETENTION_PRESETS.map((weeks) => {
                 const active = backupRetention.weeklyWeeks === weeks;
@@ -750,7 +750,7 @@ export function InstanceGeneralSettings() {
           </div>
 
           <div className="space-y-1.5">
-            <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Monthly</h3>
+            <h3 className="nav-group-title">Monthly</h3>
             <div className="flex flex-wrap gap-2">
               {MONTHLY_RETENTION_PRESETS.map((months) => {
                 const active = backupRetention.monthlyMonths === months;
@@ -781,10 +781,10 @@ export function InstanceGeneralSettings() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="space-y-4">
           <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">AI feedback sharing</h2>
+            <h2 className="section-title">AI feedback sharing</h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               Control whether thumbs up and thumbs down votes can send the voted AI output to
               Paperclip Labs. Votes are always saved locally.
@@ -857,10 +857,10 @@ export function InstanceGeneralSettings() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Sign out</h2>
+            <h2 className="section-title">Sign out</h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               Sign out of this Paperclip instance. You will be redirected to the login page.
             </p>

@@ -111,7 +111,7 @@ export function InstanceAccess() {
       </div>
 
       <div className="grid gap-6 lg:grid-cols-[320px_minmax(0,1fr)]">
-        <section className="space-y-4 rounded-xl border border-border bg-card p-4">
+        <section className="space-y-4 rounded-xl section-box bg-card p-4">
           <label className="block space-y-2 text-sm">
             <span className="font-medium">Search users</span>
             <input
@@ -150,7 +150,7 @@ export function InstanceAccess() {
           </div>
         </section>
 
-        <section className="space-y-4 rounded-xl border border-border bg-card p-5">
+        <section className="space-y-4 rounded-xl section-box bg-card p-5">
           {!selectedUserId ? (
             <div className="text-sm text-muted-foreground">Select a user to inspect instance access.</div>
           ) : userAccessQuery.isLoading ? (
@@ -181,7 +181,7 @@ export function InstanceAccess() {
 
               <div className="space-y-3">
                 <div>
-                  <h2 className="text-sm font-semibold">Company access</h2>
+                  <h2 className="section-title">Company access</h2>
                   <p className="text-sm text-muted-foreground">
                     Toggle company membership for this user. New access defaults to an active operator membership.
                   </p>
@@ -221,7 +221,7 @@ export function InstanceAccess() {
               </div>
 
               <div className="space-y-2">
-                <h2 className="text-sm font-semibold">Current memberships</h2>
+                <h2 className="section-title">Current memberships</h2>
                 <div className="space-y-2">
                   {(userAccessQuery.data?.companyAccess ?? []).map((membership) => (
                     <div

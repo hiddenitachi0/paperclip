@@ -43,6 +43,7 @@ import { heartbeatService } from "./heartbeat.js";
 import { budgetService } from "./budgets.js";
 import { issueApprovalService } from "./issue-approvals.js";
 import { agentDailyLimitService } from "./agent-daily-limits.js";
+import { reactionLearningService } from "./reaction-learning.js";
 import { findLaneAPluginRun, laneAPluginRunNamesIssue } from "./lane-a-plugin-runs.js";
 import { subscribeCompanyLiveEvents } from "./live-events.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -397,6 +398,7 @@ export function buildHostServices(
   const budgets = budgetService(db);
   const issueApprovals = issueApprovalService(db);
   const agentDailyLimits = agentDailyLimitService(db);
+  const reactionLearning = reactionLearningService(db);
   const mediaStudioDirect = mediaStudioDirectService(db);
   const scopedBus = eventBus.forPlugin(pluginKey);
 
@@ -2744,6 +2746,41 @@ export function buildHostServices(
         if (!event) return;
         await mediaStudioDirect.releaseReservation(companyId, params.reservationId);
       },
+      async settleMediaStudioDirectSpend(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        // Only a media-studio direct cost event of this company may be settled.
+        const [event] = await db
+          .select({ id: costEvents.id })
+          .from(costEvents)
+          .where(and(eq(costEvents.id, params.reservationId), eq(costEvents.companyId, companyId), eq(costEvents.billingCode, MEDIA_STUDIO_DIRECT_BILLING_CODE)));
+        if (!event) return { settled: false as const };
+        return mediaStudioDirect.settleSpend(companyId, params.reservationId, params.endpointId, params.usage);
+      },
+      async recordAgentMediaCost(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        // DUR-4457: runId is required and host-enforced; the agent is the
+        // run's own (resolved here, never plugin-supplied), so a plugin
+        // cannot bill another agent's budget.
+        if (!params.runId) throw new Error("runId is required");
+        const callingAgentId = await callingAgentIdForRun(companyId, params.runId);
+        if (!callingAgentId) throw new Error("Run not found in this company");
+        if (!["image", "video", "audio"].includes(params.kind)) throw new Error("Unknown media kind");
+        const usage = params.usage ?? {};
+        for (const value of [usage.images, usage.megapixels, usage.seconds, usage.units, params.credits ?? undefined]) {
+          if (value !== undefined && !(typeof value === "number" && Number.isFinite(value) && value >= 0)) throw new Error("usage values must be non-negative numbers");
+        }
+        return mediaStudioDirect.recordAgentMediaCost(companyId, {
+          agentId: callingAgentId,
+          kind: params.kind,
+          provider: params.provider,
+          model: params.model,
+          usage,
+          credits: params.credits ?? null,
+          issueId: params.issueId ?? null,
+        });
+      },
     },
 
     personas: {
@@ -2772,6 +2809,22 @@ export function buildHostServices(
         // method keeps its name and result shape so plugins built against
         // the SDK (media-studio) need no change.
         return agentDailyLimits.reserve(callingAgentId, "image_generation");
+      },
+
+      // DUR-4345: read-only, run-scoped like reserveDailyGeneration -- the
+      // agent is the run's own, never a plugin-supplied id, so a plugin cannot
+      // read another person's learned preferences.
+      async getPictureFeedbackRules(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        if (!params.runId) {
+          throw new Error("runId is required");
+        }
+        const callingAgentId = await callingAgentIdForRun(companyId, params.runId);
+        if (!callingAgentId) {
+          throw new Error("Run not found in this company");
+        }
+        return reactionLearning.pictureRules(companyId, callingAgentId);
       },
     },
 

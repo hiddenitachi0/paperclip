@@ -29,6 +29,7 @@ import {
   prepareEmbeddedPostgresNativeRuntime,
   reconcilePendingMigrationHistory,
   formatDatabaseBackupResult,
+  computeBackupStorageStats,
   runDatabaseBackup,
   authUsers,
   companies,
@@ -54,6 +55,7 @@ import {
   deployCarriedIssuesService,
   deployApprovalFeedbackService,
   mergePrAutomationService,
+  issueOverlapDetectorService,
   agentErrorAlertsService,
   untrackedWriteAlertsService,
   quietModeAlertsService,
@@ -75,6 +77,7 @@ import {
 import { schedulerLiveness } from "./services/scheduler-liveness.js";
 import { watcherService } from "./services/watchers.js";
 import { morningReportService } from "./services/morning-report.js";
+import { modelHealthService } from "./services/model-health.js";
 import { paymentCardService } from "./services/payment-cards.js";
 import { mailSecretaryService } from "./services/mail-secretary.js";
 import { mailAccountsService } from "./services/mail-accounts.js";
@@ -82,6 +85,9 @@ import { videoStorylineRenderService } from "./services/video-storyline-render.j
 import { tradingService } from "./services/trading.js";
 import { videoStorylineStitchService } from "./services/video-storyline-stitch.js";
 import { describeTickPhases } from "./services/scheduler-tick-phases.js";
+import { runDailyCostReconciliation } from "./services/cost-reconciliation.js";
+import { pluginRegistryService } from "./services/plugin-registry.js";
+import { secretService as costReconciliationSecretService } from "./services/secrets.js";
 import {
   SCHEDULER_TICK_CHAIN,
   schedulerTickSingleFlight,
@@ -107,6 +113,7 @@ import {
 import { initTelemetry, getTelemetryClient } from "./telemetry.js";
 import { waitForInFlightRunsToDrain } from "./shutdown-drain.js";
 import { startHeartbeatRunRetention } from "./services/heartbeat-run-retention.js";
+import { startWorktreeCleanup } from "./services/worktree-cleanup.js";
 import { startCrossCompanyAccessLogRetention } from "./services/cross-company-access-log-retention.js";
 import { conflict } from "./errors.js";
 import {
@@ -121,6 +128,9 @@ import type {
   InstanceDatabaseBackupRunResult,
   InstanceDatabaseBackupTrigger,
 } from "./routes/instance-database-backups.js";
+
+const LOCAL_MODEL_HEALTH_INTERVAL_MS = 3 * 60_000;
+let lastLocalModelHealthCheckAt = 0;
 
 type BetterAuthSessionUser = {
   id: string;
@@ -819,7 +829,16 @@ export async function startServer(): Promise<StartedServer> {
     serverPort: listenPort,
     storageService,
     feedbackExportService: feedback,
+    databaseBackupDir: config.databaseBackupDir,
     databaseBackupService: {
+      getStorageStats: async (override) => {
+        const retention = override ?? (await backupSettingsSvc.getGeneral()).backupRetention;
+        return {
+          ...computeBackupStorageStats(config.databaseBackupDir, retention, "paperclip"),
+          backupDir: config.databaseBackupDir,
+          retention,
+        };
+      },
       runManualBackup: async () => {
         const result = await runServerDatabaseBackup("manual");
         if (!result) {
@@ -1032,6 +1051,7 @@ export async function startServer(): Promise<StartedServer> {
     const deployCarriedIssues = deployCarriedIssuesService(schedulerDb as any);
     const deployApprovalFeedback = deployApprovalFeedbackService(schedulerDb as any);
     const mergePrAutomation = config.mergePrAutomationEnabled ? mergePrAutomationService(schedulerDb as any) : null;
+    const issueOverlapDetector = issueOverlapDetectorService(schedulerDb as any);
     const agentErrorAlerts = agentErrorAlertsService(schedulerDb as any);
     const marketWatchers = watcherService(schedulerDb as any);
     const morningReports = morningReportService(schedulerDb as any);
@@ -1375,6 +1395,30 @@ export async function startServer(): Promise<StartedServer> {
         );
       }
 
+      // DUR-4468: warn-only overlap detection between open tasks' workspaces
+      // (same file, same migration number, behind the base branch).
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.issueOverlapDetection, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: issueOverlapDetection",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:issueOverlapDetection",
+          },
+          async () => {
+            const companyRows = await schedulerDb.select({ id: companies.id }).from(companies);
+            for (const company of companyRows) {
+              const result = await issueOverlapDetector.runOverlapDetection(company.id);
+              if (result.opened > 0 || result.commentsPosted > 0) {
+                logger.info({ companyId: company.id, ...result }, "issue overlap detection found new overlaps");
+              }
+            }
+          },
+        ).catch((err) => {
+          logger.error({ err }, "issue overlap detection tick failed");
+        }),
+      );
+
       // DUR-128: an agent left sitting in "error" is invisible until someone
       // happens to look. Raise it as soon as it crosses the stall threshold
       // (see agent-error-alerts.ts) instead of waiting to be discovered.
@@ -1445,6 +1489,27 @@ export async function startServer(): Promise<StartedServer> {
             logger.error({ err }, "morning-report tick failed");
           }),
       );
+
+      // DUR-4419: local-model health. Probes every local model an agent is
+      // using (Ollama /api/tags), at most every few minutes however often the
+      // scheduler ticks, and keeps the outage state the offline reminder and
+      // the agent-page banner read. Each probe is bounded to 5s.
+      if (Date.now() - lastLocalModelHealthCheckAt >= LOCAL_MODEL_HEALTH_INTERVAL_MS) {
+        lastLocalModelHealthCheckAt = Date.now();
+        void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.localModelHealth, () =>
+          runInCompanyScopeBypass(
+            bypassDb,
+            {
+              reason: "heartbeat scheduler tick: localModelHealth",
+              actorType: "scheduler",
+              route: "heartbeat-scheduler:localModelHealth",
+            },
+            () => modelHealthService(schedulerDb as any).checkInUse(),
+          ).catch((err) => {
+            logger.error({ err }, "local-model health check failed");
+          }),
+        );
+      }
 
       // Payment cards: sweep available/reserved cards whose expiresOn has
       // passed to expired (see services/payment-cards.ts). Ships behind the
@@ -1872,6 +1937,47 @@ export async function startServer(): Promise<StartedServer> {
     setTimeout(tickWeeklyCheckup, 2 * 60 * 1000).unref?.();
     setInterval(tickWeeklyCheckup, config.weeklyCheckupTickMinutes * 60 * 1000);
 
+    // DUR-4462: daily Fal + Sogni billing reconciliation. Hourly tick; the
+    // job itself is once-per-day per company (run rows) and skips cleanly
+    // without an admin key / credit price. Bypass scope like the check-up
+    // above: it resolves the instance-wide Media Studio config, then touches
+    // only the company that owns each configured secret.
+    const costReconciliationRegistry = pluginRegistryService(schedulerDb as any);
+    const costReconciliationSecrets = costReconciliationSecretService(schedulerDb as any);
+    const tickCostReconciliation = () => {
+      if (heartbeatDrainState?.isDraining) return;
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.costReconciliation, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: daily Fal/Sogni cost reconciliation",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:costReconciliation",
+          },
+          () =>
+            runDailyCostReconciliation(schedulerDb as any, {
+              getConfig: async () => {
+                const plugin = await costReconciliationRegistry.getByKey("paperclip.media-studio");
+                if (!plugin) return {};
+                return ((await costReconciliationRegistry.getConfig(plugin.id))?.configJson ?? {}) as Record<string, unknown>;
+              },
+              resolveSecret: (companyId, secretId) => costReconciliationSecrets.resolveSecretValueForCostReconciliation(companyId, secretId),
+              falFetch: (url, init) => fetch(url, init),
+              sogniFetch: (url, init) => fetch(url, init),
+            }),
+        )
+          .then((results) => {
+            const reconciled = results.filter((r) => r.fal === "reconciled" || r.sogni === "reconciled" || r.sogni === "baseline");
+            if (reconciled.length > 0) logger.info({ reconciled: reconciled.length }, "daily cost reconciliation ran");
+          })
+          .catch((err) => {
+            logger.error({ err }, "daily cost reconciliation tick failed");
+          }),
+      );
+    };
+    setTimeout(tickCostReconciliation, 5 * 60 * 1000).unref?.();
+    setInterval(tickCostReconciliation, 60 * 60 * 1000);
+
     // Admin auth hardening: periodically compare the live instance-admin
     // set (plus each admin's email and password fingerprint) against the
     // signed record and report anything that changed outside the app. The
@@ -1991,6 +2097,14 @@ export async function startServer(): Promise<StartedServer> {
     );
   }
 
+  // DUR-4497: daily removal of finished-task agent worktrees (fail-closed;
+  // see worktree-cleanup.ts). On by default; PAPERCLIP_WORKTREE_CLEANUP_ENABLED=false
+  // is the kill switch.
+  if (process.env.PAPERCLIP_WORKTREE_CLEANUP_ENABLED !== "false") {
+    logger.info("Finished-task worktree cleanup enabled");
+    startWorktreeCleanup(db);
+  }
+
   // DUR-386: bound cross_company_access_log the same way. Bypass-scoped
   // forever for the same reason as the sweep above -- one batched DELETE
   // across every company's audit rows, with no company_id predicate (the
@@ -2008,6 +2122,21 @@ export async function startServer(): Promise<StartedServer> {
       config.crossCompanyAccessLogRetentionIntervalMinutes * 60 * 1000,
       config.crossCompanyAccessLogRetentionDays,
     );
+  }
+
+  // DUR-4498: bound data/run-logs on disk. Daily sweep, default 30 days;
+  // PAPERCLIP_RUN_LOG_RETENTION_DAYS overrides, 0 disables.
+  {
+    const envDays = process.env.PAPERCLIP_RUN_LOG_RETENTION_DAYS;
+    const runLogRetentionDays =
+      envDays !== undefined && envDays.trim() !== "" && Number.isFinite(Number(envDays))
+        ? Number(envDays)
+        : 30;
+    if (runLogRetentionDays > 0) {
+      logger.info({ retentionDays: runLogRetentionDays }, "Run log retention sweep enabled");
+      const { startRunLogRetention } = await import("./services/run-log-retention.js");
+      startRunLogRetention(24 * 60 * 60 * 1000, runLogRetentionDays);
+    }
   }
 
   // Wait for external adapters to finish loading before accepting requests.
