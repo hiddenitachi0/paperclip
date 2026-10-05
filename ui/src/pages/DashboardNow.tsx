@@ -13,6 +13,7 @@ import {
 import { Link } from "@/lib/router";
 import { heartbeatsApi, type LiveRunForIssue } from "../api/heartbeats";
 import { approvalsApi } from "../api/approvals";
+import { IssueProgressBar, readIssueProgress } from "../components/IssueProgressBar";
 import { issuesApi } from "../api/issues";
 import { interactionsApi, type PendingCompanyInteraction } from "../api/interactions";
 import { stalledTasksApi } from "../api/stalledTasks";
@@ -662,6 +663,9 @@ function RunRow({
       >
         {primary}
       </p>
+      {issue?.status === "in_progress" ? (
+        <IssueProgressBar progress={readIssueProgress(issue)} compact className="pl-4" />
+      ) : null}
       <div className="flex items-center justify-between gap-2 pl-4">
         {showTaskContext ? (
           <span className="min-w-0 truncate text-[10px] text-muted-foreground">on {taskTitle}</span>
