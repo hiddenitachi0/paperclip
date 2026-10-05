@@ -1014,6 +1014,17 @@ export interface PluginPersonaGenerationCapReservation {
   usedToday: number;
 }
 
+/**
+ * Result of `personas.getPictureFeedbackRules` — the "do more of / avoid"
+ * picture rules learned from the calling agent's person's emoji reactions
+ * (DUR-4345). Each entry is a label from a fixed vocabulary the host owns
+ * (never free text from a past prompt).
+ */
+export interface PluginPictureFeedbackRules {
+  doMore: string[];
+  avoid: string[];
+}
+
 // ---------------------------------------------------------------------------
 // Worker → Host Method Signatures (SDK client calls)
 // ---------------------------------------------------------------------------
@@ -1815,6 +1826,14 @@ export interface WorkerToHostMethods {
       runId: string;
     },
     result: PluginPersonaGenerationCapReservation,
+  ];
+  "personas.getPictureFeedbackRules": [
+    params: {
+      companyId: string;
+      /** The invoking tool call's run id; the host resolves the calling agent from it. */
+      runId: string;
+    },
+    result: PluginPictureFeedbackRules,
   ];
 }
 
