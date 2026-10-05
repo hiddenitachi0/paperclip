@@ -55,6 +55,7 @@ import {
   deployCarriedIssuesService,
   deployApprovalFeedbackService,
   mergePrAutomationService,
+  issueOverlapDetectorService,
   agentErrorAlertsService,
   untrackedWriteAlertsService,
   quietModeAlertsService,
@@ -76,6 +77,7 @@ import {
 import { schedulerLiveness } from "./services/scheduler-liveness.js";
 import { watcherService } from "./services/watchers.js";
 import { morningReportService } from "./services/morning-report.js";
+import { modelHealthService } from "./services/model-health.js";
 import { paymentCardService } from "./services/payment-cards.js";
 import { mailSecretaryService } from "./services/mail-secretary.js";
 import { mailAccountsService } from "./services/mail-accounts.js";
@@ -126,6 +128,9 @@ import type {
   InstanceDatabaseBackupRunResult,
   InstanceDatabaseBackupTrigger,
 } from "./routes/instance-database-backups.js";
+
+const LOCAL_MODEL_HEALTH_INTERVAL_MS = 3 * 60_000;
+let lastLocalModelHealthCheckAt = 0;
 
 type BetterAuthSessionUser = {
   id: string;
@@ -1046,6 +1051,7 @@ export async function startServer(): Promise<StartedServer> {
     const deployCarriedIssues = deployCarriedIssuesService(schedulerDb as any);
     const deployApprovalFeedback = deployApprovalFeedbackService(schedulerDb as any);
     const mergePrAutomation = config.mergePrAutomationEnabled ? mergePrAutomationService(schedulerDb as any) : null;
+    const issueOverlapDetector = issueOverlapDetectorService(schedulerDb as any);
     const agentErrorAlerts = agentErrorAlertsService(schedulerDb as any);
     const marketWatchers = watcherService(schedulerDb as any);
     const morningReports = morningReportService(schedulerDb as any);
@@ -1389,6 +1395,30 @@ export async function startServer(): Promise<StartedServer> {
         );
       }
 
+      // DUR-4468: warn-only overlap detection between open tasks' workspaces
+      // (same file, same migration number, behind the base branch).
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.issueOverlapDetection, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: issueOverlapDetection",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:issueOverlapDetection",
+          },
+          async () => {
+            const companyRows = await schedulerDb.select({ id: companies.id }).from(companies);
+            for (const company of companyRows) {
+              const result = await issueOverlapDetector.runOverlapDetection(company.id);
+              if (result.opened > 0 || result.commentsPosted > 0) {
+                logger.info({ companyId: company.id, ...result }, "issue overlap detection found new overlaps");
+              }
+            }
+          },
+        ).catch((err) => {
+          logger.error({ err }, "issue overlap detection tick failed");
+        }),
+      );
+
       // DUR-128: an agent left sitting in "error" is invisible until someone
       // happens to look. Raise it as soon as it crosses the stall threshold
       // (see agent-error-alerts.ts) instead of waiting to be discovered.
@@ -1459,6 +1489,27 @@ export async function startServer(): Promise<StartedServer> {
             logger.error({ err }, "morning-report tick failed");
           }),
       );
+
+      // DUR-4419: local-model health. Probes every local model an agent is
+      // using (Ollama /api/tags), at most every few minutes however often the
+      // scheduler ticks, and keeps the outage state the offline reminder and
+      // the agent-page banner read. Each probe is bounded to 5s.
+      if (Date.now() - lastLocalModelHealthCheckAt >= LOCAL_MODEL_HEALTH_INTERVAL_MS) {
+        lastLocalModelHealthCheckAt = Date.now();
+        void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.localModelHealth, () =>
+          runInCompanyScopeBypass(
+            bypassDb,
+            {
+              reason: "heartbeat scheduler tick: localModelHealth",
+              actorType: "scheduler",
+              route: "heartbeat-scheduler:localModelHealth",
+            },
+            () => modelHealthService(schedulerDb as any).checkInUse(),
+          ).catch((err) => {
+            logger.error({ err }, "local-model health check failed");
+          }),
+        );
+      }
 
       // Payment cards: sweep available/reserved cards whose expiresOn has
       // passed to expired (see services/payment-cards.ts). Ships behind the
