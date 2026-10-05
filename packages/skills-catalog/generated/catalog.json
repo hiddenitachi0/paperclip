@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "packageName": "@paperclipai/skills-catalog",
   "packageVersion": "0.3.1",
-  "generatedAt": "2026-10-04T21:17:04.721Z",
+  "generatedAt": "2026-10-04T23:24:22.174Z",
   "skills": [
     {
       "id": "paperclipai:bundled:docs:doc-maintenance",
@@ -1990,8 +1990,8 @@
         {
           "path": "references/audio.md",
           "kind": "reference",
-          "sizeBytes": 18208,
-          "sha256": "8225dc498aeddd693c11542beb57986a783b4f13e02e5b6d253256f21c3a1f1f"
+          "sizeBytes": 18374,
+          "sha256": "4e7b2b569dcfbc2a9614a3f6b4fa2f663071f3a9f740005d2df097f30f8c9e4b"
         },
         {
           "path": "references/step-1-inspect.md",
@@ -2008,8 +2008,8 @@
         {
           "path": "references/step-3-compose.md",
           "kind": "reference",
-          "sizeBytes": 14780,
-          "sha256": "e61e338fe47f51569905b61512a5502b3029ad1ab33a34aa436d9e937f804156"
+          "sizeBytes": 14993,
+          "sha256": "853f03dd9277a7827be748fae208241bdd0b720eb3cb27e3c4a7946f62dc0c8c"
         },
         {
           "path": "references/step-4-deliver.md",
@@ -2048,7 +2048,7 @@
           "sha256": "c97ea53d7c5df2a3dd64694a388c013a05c363ac7c2e4e0d956c18ad3bfaa5ee"
         }
       ],
-      "contentHash": "sha256:5fcd133a342015a3144e4268eb964f42a077ebaf53ad1a63751a6362d79308af"
+      "contentHash": "sha256:ff9e93a179e405e1f2ed43f34530b52d2060f749db527b526007c2f77090810d"
     },
     {
       "id": "paperclipai:optional:content:release-announcement",
