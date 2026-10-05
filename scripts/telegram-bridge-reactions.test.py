@@ -105,5 +105,68 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(bridge.send_plain("t", 1, "hi"), [77])
 
 
+class FollowUpTests(unittest.TestCase):
+    """DUR-4345: one follow-up question per disliked picture, answered only by replying to it."""
+
+    def setUp(self):
+        self.state = {"bots": {BOT["token"]: {"offset": 0, "chats": [OPERATOR]}}, "notified": []}
+        bridge.ALLOWED_USER_IDS = {OPERATOR}
+        self.save = mock.patch.object(bridge, "save_state")
+        self.save.start()
+
+    def tearDown(self):
+        self.save.stop()
+
+    def dispatch(self, res):
+        bridge.remember_reaction_target(self.state, BOT["token"], OPERATOR, 50, dict(TARGET, picture={"fileId": FILE}))
+        with mock.patch.object(bridge, "cli_env", return_value=res) as cli, \
+                mock.patch.object(bridge, "tg", return_value={"message_id": 60}) as tg:
+            bridge.handle_updates(self.state, BOT["token"], BOT, [
+                {"update_id": 1, "message_reaction": reaction(new=["👎"], message_id=50)}])
+        return cli, tg
+
+    def test_the_question_is_sent_as_a_reply_to_the_picture_when_the_server_offers_it(self):
+        _, tg = self.dispatch({"ok": True, "followUp": {"text": "What should I change?"}})
+        tg.assert_called_once()
+        self.assertEqual(tg.call_args.args[:2], ("bot-token", "sendMessage"))
+        self.assertEqual(tg.call_args.kwargs["text"], "What should I change?")
+        self.assertEqual(tg.call_args.kwargs["reply_to_message_id"], 50)
+        self.assertIn(f"{OPERATOR}:60", self.state["bots"][BOT["token"]]["reactionFollowUps"])
+
+    def test_no_question_when_the_server_does_not_offer_one(self):
+        _, tg = self.dispatch({"ok": True})
+        tg.assert_not_called()
+        self.assertNotIn("reactionFollowUps", self.state["bots"][BOT["token"]])
+
+    def test_no_question_when_the_reaction_was_refused(self):
+        _, tg = self.dispatch({"ok": False, "status": 409, "followUp": {"text": "x"}})
+        tg.assert_not_called()
+
+    def answer(self, text, user=OPERATOR, to=60):
+        m = {"chat": {"id": OPERATOR, "type": "private"}, "from": {"id": user}, "text": text,
+             "reply_to_message": {"message_id": to}}
+        with mock.patch.object(bridge, "cli_env", return_value={"ok": True}) as cli:
+            bridge.take_follow_up_answer(self.state, BOT, m, text)
+        return cli
+
+    def test_a_reply_to_the_question_is_the_answer_once(self):
+        self.dispatch({"ok": True, "followUp": {"text": "q"}})
+        cli = self.answer("too much text")
+        env, *parts = cli.call_args.args
+        self.assertIn("--follow-up-answer", parts)
+        sent = json.loads(env["TT"])
+        self.assertEqual((sent["answer"], sent["telegramMessageId"], sent["agentId"]), ("too much text", 50, "agent-1"))
+        self.assertEqual(self.answer("and more").call_count, 0)
+
+    def test_other_messages_are_never_taken_as_an_answer(self):
+        self.dispatch({"ok": True, "followUp": {"text": "q"}})
+        self.assertEqual(self.answer("hello", to=61).call_count, 0)
+        self.assertEqual(self.answer("hello", user=STRANGER).call_count, 0)
+        m = {"chat": {"id": OPERATOR}, "from": {"id": OPERATOR}, "text": "plain message"}
+        with mock.patch.object(bridge, "cli_env") as cli:
+            bridge.take_follow_up_answer(self.state, BOT, m, "plain message")
+        cli.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
