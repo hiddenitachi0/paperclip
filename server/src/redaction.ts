@@ -221,9 +221,31 @@ export const SECRET_LEAK_PATTERNS: readonly SecretLeakPattern[] = [
 // enough to replace the ORIGINAL spaced/dashed substring in place here.
 const CARD_NUMBER_TOKEN_RE = /\d(?:[\s-]?\d){11,18}/g;
 
+// DUR-4534: a canonical UUID (e.g. an issueId) has digit-heavy segments
+// separated by single dashes -- "57-4904-9223-98" inside
+// "c10d6206-1c57-4904-9223-982c6cf4b18b" satisfies CARD_NUMBER_TOKEN_RE and
+// is Luhn-valid purely by coincidence often enough to corrupt real UUIDs in
+// resultJson/heartbeat_runs rows, not just log display. Mask out any
+// RFC-4122-shaped UUID before scanning so its digit runs are never
+// considered card-number candidates.
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+
+function uuidRanges(input: string): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  for (const match of input.matchAll(UUID_RE)) {
+    const start = match.index ?? 0;
+    ranges.push([start, start + match[0].length]);
+  }
+  return ranges;
+}
+
 export function redactCardNumbers(input: string): string {
   if (!input) return input;
-  return input.replace(CARD_NUMBER_TOKEN_RE, (match) => {
+  const skipRanges = uuidRanges(input);
+  return input.replace(CARD_NUMBER_TOKEN_RE, (match, offset: number) => {
+    const matchEnd = offset + match.length;
+    const overlapsUuid = skipRanges.some(([start, end]) => offset < end && matchEnd > start);
+    if (overlapsUuid) return match;
     const digitsOnly = match.replace(/[\s-]/g, "");
     if (digitsOnly.length < 13 || digitsOnly.length > 19) return match;
     return isLuhnValid(digitsOnly) ? "[REDACTED:card_number]" : match;

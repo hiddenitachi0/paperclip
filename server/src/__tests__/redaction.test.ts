@@ -296,6 +296,11 @@ describe("redactCardNumbers", () => {
     expect(redactCardNumbers(input)).toBe(input);
   });
 
+  it("DUR-4534: does not mangle a UUID whose dash-separated digit run happens to be Luhn-valid", () => {
+    const input = "issueId: c10d6206-1c57-4904-9223-982c6cf4b18b";
+    expect(redactCardNumbers(input)).toBe(input);
+  });
+
   it("is folded into redactKnownLeakedSecretPatterns, the run-output redaction path", () => {
     const result = redactKnownLeakedSecretPatterns(
       `browser_type filled the field with ${CANARY_CARD_NUMBER}`,
