@@ -24,6 +24,14 @@ export type CreateApproval = z.infer<typeof createApprovalSchema>;
 
 export const resolveApprovalSchema = z.object({
   decisionNote: multilineTextSchema.optional().nullable(),
+  // DUR-4566 item 4: only meaningful on /approve for a merge_pr card with no
+  // `passed` security review at its current head commit. Ignored everywhere
+  // else (reject is never gated).
+  approveWithoutSecurityReview: z
+    .object({
+      reason: multilineTextSchema.pipe(z.string().trim().min(1)),
+    })
+    .optional(),
 });
 
 export type ResolveApproval = z.infer<typeof resolveApprovalSchema>;

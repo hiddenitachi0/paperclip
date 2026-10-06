@@ -43,8 +43,9 @@ export function Approvals() {
   });
 
   const approveMutation = useMutation({
-    mutationFn: (id: string) => approvalsApi.approve(id),
-    onSuccess: (_approval, id) => {
+    mutationFn: ({ id, reason }: { id: string; reason?: string }) =>
+      approvalsApi.approve(id, undefined, reason ? { reason } : undefined),
+    onSuccess: (_approval, { id }) => {
       setActionError(null);
       queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(selectedCompanyId!) });
       navigate(`/approvals/${id}?resolved=approved`);
@@ -62,6 +63,17 @@ export function Approvals() {
     },
     onError: (err) => {
       setActionError(err instanceof Error ? err.message : "Failed to reject");
+    },
+  });
+
+  const requestSecurityReviewMutation = useMutation({
+    mutationFn: (id: string) => approvalsApi.requestSecurityReview(id),
+    onSuccess: () => {
+      setActionError(null);
+      queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(selectedCompanyId!) });
+    },
+    onError: (err) => {
+      setActionError(err instanceof Error ? err.message : "Failed to request a security review");
     },
   });
 
@@ -138,8 +150,11 @@ export function Approvals() {
               key={approval.id}
               approval={approval}
               requesterAgent={approval.requestedByAgentId ? (agents ?? []).find((a) => a.id === approval.requestedByAgentId) ?? null : null}
-              onApprove={() => approveMutation.mutate(approval.id)}
+              onApprove={() => approveMutation.mutate({ id: approval.id })}
+              onApproveWithoutSecurityReview={(reason) => approveMutation.mutate({ id: approval.id, reason })}
               onReject={(note) => rejectMutation.mutate({ id: approval.id, note })}
+              onRequestSecurityReview={() => requestSecurityReviewMutation.mutate(approval.id)}
+              isRequestingSecurityReview={requestSecurityReviewMutation.isPending}
               detailLink={`/approvals/${approval.id}`}
               isPending={approveMutation.isPending || rejectMutation.isPending}
               pendingAction={

@@ -18,6 +18,7 @@ import {
   type ModelBoostRequestPayload,
   modelBoostBossReviewDecisionSchema,
   modelBoostRequestPayloadSchema,
+  recordSecurityReviewVerdictSchema,
   requestApprovalRevisionSchema,
   resolveApprovalSchema,
   resubmitApprovalSchema,
@@ -74,6 +75,7 @@ import { HttpError, conflict, forbidden, notFound, unprocessable } from "../erro
 import { companyScope, companyScopeFromParam } from "../middleware/company-scope.js";
 import { describeToolCapability, summarizeMcpServer } from "../services/agent-tool-audit.js";
 import { crossCompanyInstructionService } from "../services/cross-company-instructions.js";
+import { isMergePrApprovalPayload, securityReviewService } from "../services/security-review.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import { isStatusOnlyCheapRecoveryContext } from "../services/recovery/model-profile-hint.js";
 import { recordCheapRunEscalation } from "../services/recovery/cheap-run-escalation.js";
@@ -1618,6 +1620,7 @@ export function approvalRoutes(
     pluginWorkerManager: options.pluginWorkerManager,
   });
   const issueApprovalsSvc = issueApprovalService(db);
+  const securityReviewSvc = securityReviewService(db);
   const interactionsSvc = issueThreadInteractionService(db);
   const secretsSvc = secretService(db, rawDb);
   const escalationGrantsSvc = escalationGrantService(db);
@@ -1807,12 +1810,29 @@ export function approvalRoutes(
     return false;
   }
 
+  /**
+   * DUR-4566 item 1: every merge card shows its security-review state.
+   * Computed fresh on every read (never cached on the approval row) so a
+   * later push always shows up immediately as `out_of_date` -- see
+   * securityReviewService.computeState. Any approval that isn't a merge_pr
+   * card gets `securityReview: null`.
+   */
+  async function withSecurityReviewState<T extends { id: string; companyId: string; payload: unknown }>(
+    approval: T,
+  ): Promise<T & { securityReview: Awaited<ReturnType<typeof securityReviewSvc.computeState>> | null }> {
+    if (!isMergePrApprovalPayload(approval.payload)) {
+      return { ...approval, securityReview: null };
+    }
+    return { ...approval, securityReview: await securityReviewSvc.computeState(approval) };
+  }
+
   router.get("/companies/:companyId/approvals", scopeFromCompanyIdParam(checkApprovalReadAccess), async (req, res) => {
     const companyId = req.params.companyId as string;
     const status = req.query.status as string | undefined;
     const result = await svc.list(companyId, status);
     const personaNames = await personaDisplayNamesFor(result);
-    res.json(result.map((approval) => withPersonaMetadata(approval, personaNames)));
+    const withPersona = result.map((approval) => withPersonaMetadata(approval, personaNames));
+    res.json(await Promise.all(withPersona.map(withSecurityReviewState)));
   });
 
   router.get("/approvals/:id", scopeFromApprovalIdParam(checkApprovalReadAccess), async (req, res) => {
@@ -1823,8 +1843,39 @@ export function approvalRoutes(
       return;
     }
     const personaNames = await personaDisplayNamesFor([approval]);
-    res.json(withPersonaMetadata(approval, personaNames));
+    res.json(await withSecurityReviewState(withPersonaMetadata(approval, personaNames)));
   });
+
+  router.post(
+    "/approvals/:id/security-review/request",
+    scopeFromApprovalIdParam(checkApprovalReadAccess),
+    async (req, res) => {
+      const id = req.params.id as string;
+      const actorInfo = getActorInfo(req);
+      const actor = {
+        agentId: actorInfo.actorType === "agent" ? actorInfo.agentId : null,
+        userId: actorInfo.actorType === "user" ? actorInfo.actorId : null,
+      };
+      const state = await securityReviewSvc.requestReview(id, actor);
+      res.json(state);
+    },
+  );
+
+  router.post(
+    "/approvals/:id/security-review/verdict",
+    scopeFromApprovalIdParam(checkApprovalReadAccess),
+    validate(recordSecurityReviewVerdictSchema),
+    async (req, res) => {
+      const id = req.params.id as string;
+      const actorInfo = getActorInfo(req);
+      const actor = {
+        agentId: actorInfo.actorType === "agent" ? actorInfo.agentId : null,
+        userId: actorInfo.actorType === "user" ? actorInfo.actorId : null,
+      };
+      const state = await securityReviewSvc.recordVerdict(id, actor, req.body);
+      res.json(state);
+    },
+  );
 
   router.post(
     "/companies/:companyId/approvals",
@@ -2298,6 +2349,35 @@ export function approvalRoutes(
       const unsupportedKind = describeUnsupportedDeployLikeApproval(kind);
       if (unsupportedKind) {
         throw unprocessable(unsupportedKind, { kind });
+      }
+    }
+    // DUR-4566 item 4: approving a merge card with no `passed` security
+    // review at its current head commit needs an explicit, reasoned
+    // "approve without security review" opt-in -- otherwise refuse outright.
+    // Reject is never gated this way; this check only runs on /approve.
+    if (existingForKindCheck && isMergePrApprovalPayload(existingForKindCheck.payload)) {
+      const reviewState = await securityReviewSvc.computeState(existingForKindCheck);
+      if (reviewState.state !== "passed") {
+        const bypass = req.body.approveWithoutSecurityReview;
+        if (!bypass) {
+          throw unprocessable(
+            "This merge card has no passed security review at its current commit -- use " +
+              "\"Approve without security review\" with a reason if you want to approve it anyway.",
+            { securityReviewState: reviewState.state },
+          );
+        }
+        await logActivity(db, {
+          companyId: existingForKindCheck.companyId,
+          actorType: "user",
+          actorId: req.actor.userId ?? "board",
+          action: "approval.approved_without_security_review",
+          entityType: "approval",
+          entityId: existingForKindCheck.id,
+          details: {
+            securityReviewState: reviewState.state,
+            reason: bypass.reason,
+          },
+        });
       }
     }
     const { approval, applied, toolGrant, instructionsChange } = await svc.approve(

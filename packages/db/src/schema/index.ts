@@ -175,3 +175,5 @@ export { crmExternalRefs } from "./crm_external_refs.js";
 export { issueOverlaps } from "./issue_overlaps.js";
 export { costReconciliationRuns, sogniBalanceSnapshots } from "./cost_reconciliation.js";
 export { bragJobs, bragScenes } from "./brag_jobs.js";
+export { companySecurityReviewSettings } from "./company_security_review_settings.js";
+export { mergeSecurityReviews } from "./merge_security_reviews.js";
