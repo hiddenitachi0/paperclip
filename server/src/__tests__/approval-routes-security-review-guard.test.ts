@@ -1,9 +1,12 @@
 /**
- * DUR-4566 item 4: approving a merge card (`kind: "merge_pr"`) with no
- * `passed` security review at its current head commit needs an explicit,
- * reasoned "approve without security review" opt-in -- otherwise the route
- * refuses outright. Reject is never gated this way; this suite only covers
- * the /approve guard in server/src/routes/approvals.ts.
+ * DUR-4566 item 4 / DUR-4568 finding #1: approving a merge card (`kind:
+ * "merge_pr"`) with no `passed` security review at its current head commit
+ * needs an explicit, reasoned "approve without security review" opt-in. The
+ * actual gate (the state check, the refusal, the activity log) lives inside
+ * `approvalService.approve()` itself now, so every caller is covered -- not
+ * just this route. This suite covers only what the /approve route still
+ * owns: forwarding the user's bypass reason into `approve()`'s options, and
+ * surfacing whatever `approve()` decides.
  */
 
 import express from "express";
@@ -167,102 +170,51 @@ describe("DUR-4566: /approve is guarded by the merge card's security-review stat
     });
   });
 
-  it("refuses to approve a merge card with no passed review and no bypass", async () => {
+  it("forwards no bypass option when the request includes no reason", async () => {
     mockApprovalService.getById.mockResolvedValue(mergePrApproval());
-    mockSecurityReviewService.computeState.mockResolvedValue({
-      state: "not_requested",
-      headCommit: "deadbeef",
-      reviewIssueId: null,
-      reviewIssueIdentifier: null,
-      verdictNote: null,
-      verdictCommentUrl: null,
-      decidedAt: null,
-      priorState: null,
-    });
 
     const res = await request(await createBoardApp()).post("/api/approvals/approval-1/approve").send({});
 
-    expect(res.status).toBe(422);
-    expect(res.body.error).toContain("Approve without security review");
-    expect(mockApprovalService.approve).not.toHaveBeenCalled();
-    expect(mockLogActivity).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    expect(mockApprovalService.approve).toHaveBeenCalledWith(
+      "approval-1",
+      "user-1",
+      undefined,
+      expect.objectContaining({ securityReviewBypass: undefined }),
+    );
   });
 
-  it("refuses an out-of-date review (a later push invalidates a prior pass) without a bypass", async () => {
+  it("forwards the bypass reason as a user-actor option on approve()", async () => {
     mockApprovalService.getById.mockResolvedValue(mergePrApproval());
-    mockSecurityReviewService.computeState.mockResolvedValue({
-      state: "out_of_date",
-      headCommit: "oldsha",
-      reviewIssueId: "issue-1",
-      reviewIssueIdentifier: "DUR-1",
-      verdictNote: "looks good",
-      verdictCommentUrl: null,
-      decidedAt: new Date().toISOString(),
-      priorState: "passed",
-    });
-
-    const res = await request(await createBoardApp()).post("/api/approvals/approval-1/approve").send({});
-
-    expect(res.status).toBe(422);
-    expect(mockApprovalService.approve).not.toHaveBeenCalled();
-  });
-
-  it("approves with an explicit bypass reason, recording it in the activity log", async () => {
-    mockApprovalService.getById.mockResolvedValue(mergePrApproval());
-    mockSecurityReviewService.computeState.mockResolvedValue({
-      state: "not_requested",
-      headCommit: "deadbeef",
-      reviewIssueId: null,
-      reviewIssueIdentifier: null,
-      verdictNote: null,
-      verdictCommentUrl: null,
-      decidedAt: null,
-      priorState: null,
-    });
 
     const res = await request(await createBoardApp())
       .post("/api/approvals/approval-1/approve")
       .send({ approveWithoutSecurityReview: { reason: "Filip reviewed it himself, shipping now" } });
 
     expect(res.status).toBe(200);
-    expect(mockApprovalService.approve).toHaveBeenCalled();
-    expect(mockLogActivity).toHaveBeenCalledWith(
-      expect.anything(),
+    expect(mockApprovalService.approve).toHaveBeenCalledWith(
+      "approval-1",
+      "user-1",
+      undefined,
       expect.objectContaining({
-        action: "approval.approved_without_security_review",
-        entityId: "approval-1",
-        details: expect.objectContaining({
-          securityReviewState: "not_requested",
-          reason: "Filip reviewed it himself, shipping now",
-        }),
+        securityReviewBypass: { reason: "Filip reviewed it himself, shipping now", actorType: "user", actorId: "user-1" },
       }),
     );
   });
 
-  it("approves a merge card directly when the review already passed at the current head commit", async () => {
+  it("surfaces approve()'s refusal when the merge card has no passed review and no bypass", async () => {
+    const { unprocessable } = await import("../errors.js");
     mockApprovalService.getById.mockResolvedValue(mergePrApproval());
-    mockSecurityReviewService.computeState.mockResolvedValue({
-      state: "passed",
-      headCommit: "deadbeef",
-      reviewIssueId: "issue-1",
-      reviewIssueIdentifier: "DUR-1",
-      verdictNote: "Looks fine",
-      verdictCommentUrl: null,
-      decidedAt: new Date().toISOString(),
-      priorState: null,
-    });
+    mockApprovalService.approve.mockRejectedValue(
+      unprocessable("This merge card has no passed security review at its current commit"),
+    );
 
     const res = await request(await createBoardApp()).post("/api/approvals/approval-1/approve").send({});
 
-    expect(res.status).toBe(200);
-    expect(mockApprovalService.approve).toHaveBeenCalled();
-    expect(mockLogActivity).not.toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ action: "approval.approved_without_security_review" }),
-    );
+    expect(res.status).toBe(422);
   });
 
-  it("does not gate approvals that aren't merge cards", async () => {
+  it("does not require getById to classify the payload before calling approve()", async () => {
     mockApprovalService.getById.mockResolvedValue({
       id: "approval-1",
       companyId: COMPANY_ID,
@@ -275,7 +227,6 @@ describe("DUR-4566: /approve is guarded by the merge card's security-review stat
     const res = await request(await createBoardApp()).post("/api/approvals/approval-1/approve").send({});
 
     expect(res.status).toBe(200);
-    expect(mockSecurityReviewService.computeState).not.toHaveBeenCalled();
     expect(mockApprovalService.approve).toHaveBeenCalled();
   });
 });

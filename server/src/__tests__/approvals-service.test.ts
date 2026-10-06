@@ -26,6 +26,22 @@ vi.mock("../services/budgets.js", () => ({
   budgetService: vi.fn(() => mockBudgetService),
 }));
 
+const mockSecurityReviewService = vi.hoisted(() => ({
+  computeState: vi.fn(),
+}));
+
+vi.mock("../services/security-review.js", () => ({
+  securityReviewService: vi.fn(() => mockSecurityReviewService),
+  isMergePrApprovalPayload: (payload: unknown) =>
+    Boolean(payload) && typeof payload === "object" && (payload as Record<string, unknown>).kind === "merge_pr",
+}));
+
+const mockLogActivity = vi.hoisted(() => vi.fn());
+
+vi.mock("../services/activity-log.js", () => ({
+  logActivity: mockLogActivity,
+}));
+
 type ApprovalRecord = {
   id: string;
   companyId: string;
@@ -42,6 +58,17 @@ function createApproval(status: string): ApprovalRecord {
     type: "hire_agent",
     status,
     payload: { agentId: "agent-1" },
+    requestedByAgentId: "requester-1",
+  };
+}
+
+function createMergePrApproval(status: string): ApprovalRecord {
+  return {
+    id: "approval-1",
+    companyId: "company-1",
+    type: "request_board_approval",
+    status,
+    payload: { kind: "merge_pr", repo: "acme/paperclip", prNumber: 42, commit: "deadbeef" },
     requestedByAgentId: "requester-1",
   };
 }
@@ -276,6 +303,75 @@ describe("approvalService.findOpenHireApprovalForAgent", () => {
     const result = await svc.findOpenHireApprovalForAgent("company-1", "agent-1");
 
     expect(result).toBeNull();
+  });
+});
+
+// DUR-4568 finding #1: the security-review gate lives inside approve()
+// itself so every caller is covered (the HTTP route, issue-thread-interaction
+// auto-decisions, merge-pr automation) -- not just the /approve route.
+describe("approve() gates merge_pr cards on their security-review state", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockAgentService.activatePendingApproval.mockResolvedValue({ agent: { id: "agent-1" }, activated: true });
+    mockNotifyHireApproved.mockResolvedValue(undefined);
+    mockSecurityReviewService.computeState.mockReset();
+    mockLogActivity.mockReset().mockResolvedValue(undefined);
+  });
+
+  it("refuses to approve a merge card with no passed review and no bypass reason", async () => {
+    const dbStub = createDbStub([[createMergePrApproval("pending")]], []);
+    mockSecurityReviewService.computeState.mockResolvedValue({ state: "not_requested" });
+
+    const svc = approvalService(dbStub.db as any);
+    await expect(svc.approve("approval-1", "board", "ship it")).rejects.toThrow(
+      /security review/i,
+    );
+
+    expect(dbStub.returning).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it("approves with a bypass reason and logs it to the activity log", async () => {
+    const approved = createMergePrApproval("approved");
+    const dbStub = createDbStub([[createMergePrApproval("pending")]], [approved]);
+    mockSecurityReviewService.computeState.mockResolvedValue({ state: "out_of_date" });
+
+    const svc = approvalService(dbStub.db as any);
+    const result = await svc.approve("approval-1", "board", "ship it", {
+      securityReviewBypass: { reason: "Filip reviewed it himself", actorType: "user", actorId: "user-1" },
+    });
+
+    expect(result.applied).toBe(true);
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "approval.approved_without_security_review",
+        entityId: "approval-1",
+        details: expect.objectContaining({ securityReviewState: "out_of_date", reason: "Filip reviewed it himself" }),
+      }),
+    );
+  });
+
+  it("approves a merge card directly when the review already passed, with no activity entry", async () => {
+    const approved = createMergePrApproval("approved");
+    const dbStub = createDbStub([[createMergePrApproval("pending")]], [approved]);
+    mockSecurityReviewService.computeState.mockResolvedValue({ state: "passed" });
+
+    const svc = approvalService(dbStub.db as any);
+    const result = await svc.approve("approval-1", "board", "ship it");
+
+    expect(result.applied).toBe(true);
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it("does not gate approvals that aren't merge cards", async () => {
+    const approved = createApproval("approved");
+    const dbStub = createDbStub([[createApproval("pending")]], [approved]);
+
+    const svc = approvalService(dbStub.db as any);
+    await svc.approve("approval-1", "board", "ship it");
+
+    expect(mockSecurityReviewService.computeState).not.toHaveBeenCalled();
   });
 });
 

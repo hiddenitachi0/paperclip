@@ -11,7 +11,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { agents, approvals, companySecurityReviewSettings, issues, mergeSecurityReviews } from "@paperclipai/db";
 
-const mockIssueService = vi.hoisted(() => ({ create: vi.fn() }));
+const mockIssueService = vi.hoisted(() => ({ create: vi.fn(), update: vi.fn() }));
 vi.mock("./issues.js", () => ({ issueService: () => mockIssueService }));
 
 const mockIssueApprovalService = vi.hoisted(() => ({ linkManyForApproval: vi.fn() }));
@@ -229,6 +229,10 @@ describe("securityReviewService.requestReview (DUR-4566 item 2, single-flight)",
     await expect(
       securityReviewService(db).requestReview(APPROVAL_ID, { agentId: REQUESTER_AGENT_ID, userId: null }),
     ).resolves.toEqual(expect.objectContaining({ state: "not_requested" }));
+
+    // DUR-4568 finding #4: the review issue created before the race was lost
+    // must not be left behind as a duplicate task for the reviewer.
+    expect(mockIssueService.update).toHaveBeenCalledWith("review-issue-1", { status: "cancelled" });
   });
 });
 
@@ -296,6 +300,25 @@ describe("securityReviewService.recordVerdict (DUR-4566 item 3, authorization)",
         { verdict: "passed", note: "self-approved" },
       ),
     ).rejects.toThrow(/cannot record a security review verdict on its own merge card/i);
+  });
+
+  it("refuses the board user who filed the card, even though board users may otherwise record a verdict (DUR-4568 finding #3)", async () => {
+    const { securityReviewService } = await import("./security-review.js");
+    const db = makeFakeDb({
+      rowsByTable: new Map<unknown, unknown[]>([
+        [approvals, [mergeApproval({ requestedByAgentId: null, requestedByUserId: "board-user" })]],
+        [companySecurityReviewSettings, [{ securityReviewerAgentId: REVIEWER_AGENT_ID }]],
+        [mergeSecurityReviews, []],
+        [agents, [{ companyId: COMPANY_A }]],
+      ]),
+    });
+    await expect(
+      securityReviewService(db).recordVerdict(
+        APPROVAL_ID,
+        { agentId: null, userId: "board-user" },
+        { verdict: "passed", note: "self-approved" },
+      ),
+    ).rejects.toThrow(/cannot record a security review verdict on (its|their) own merge card/i);
   });
 
   it("refuses a reviewer agent that belongs to a different company (cross-company refused)", async () => {

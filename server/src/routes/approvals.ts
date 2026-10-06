@@ -69,7 +69,7 @@ import {
 } from "../services/deploy-change-guard.js";
 import { isCompletedDeployOutcome } from "../services/deploy-completion-gate.js";
 import { readDeployRunnerStatus, type DeployRunnerStatusEntry } from "../services/deploy-runner-status.js";
-import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
+import { assertBoard, assertCompanyAccess, getActorInfo, isCompanyOwnerOrAdmin } from "./authz.js";
 import { redactEventPayload } from "../redaction.js";
 import { HttpError, conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import { companyScope, companyScopeFromParam } from "../middleware/company-scope.js";
@@ -1695,6 +1695,32 @@ export function approvalRoutes(
   }
 
   /**
+   * DUR-4568 finding #2: the security-review request/verdict routes used to
+   * sit behind plain `company_scope:read` -- any actor allowed to read
+   * approvals (which includes ordinary company agents and read-only board
+   * members) could file a review request or, worse, record a verdict.
+   * `recordVerdict` itself still re-checks that an agent actor really is the
+   * configured reviewer, but a board actor needs more than read access: the
+   * same owner/admin bar as changing who the reviewer is
+   * (security-review-settings.ts's `assertCompanyOwnerOrAdmin`). Agents pass
+   * through to that per-agent check; a plain company membership is not
+   * enough for either actor type.
+   */
+  function checkSecurityReviewActionAccess(req: Request, companyId: string) {
+    if (req.actor.type === "agent") {
+      assertCompanyAccess(req, companyId);
+      return;
+    }
+    assertBoard(req);
+    if (!isCompanyOwnerOrAdmin(req, companyId)) {
+      throw forbidden(
+        "Only this company's owner or admin, or the configured security reviewer agent, may do this.",
+      );
+    }
+    assertCompanyAccess(req, companyId);
+  }
+
+  /**
    * Read routes additionally require the `company_scope:read` policy
    * decision on top of plain company membership (DUR-146 Stage 1's
    * `assertApprovalAccessAllowed`, folded into the pre-scope checkAccess
@@ -1848,7 +1874,7 @@ export function approvalRoutes(
 
   router.post(
     "/approvals/:id/security-review/request",
-    scopeFromApprovalIdParam(checkApprovalReadAccess),
+    scopeFromApprovalIdParam(checkSecurityReviewActionAccess),
     async (req, res) => {
       const id = req.params.id as string;
       const actorInfo = getActorInfo(req);
@@ -1863,7 +1889,7 @@ export function approvalRoutes(
 
   router.post(
     "/approvals/:id/security-review/verdict",
-    scopeFromApprovalIdParam(checkApprovalReadAccess),
+    scopeFromApprovalIdParam(checkSecurityReviewActionAccess),
     validate(recordSecurityReviewVerdictSchema),
     async (req, res) => {
       const id = req.params.id as string;
@@ -2351,40 +2377,22 @@ export function approvalRoutes(
         throw unprocessable(unsupportedKind, { kind });
       }
     }
-    // DUR-4566 item 4: approving a merge card with no `passed` security
-    // review at its current head commit needs an explicit, reasoned
-    // "approve without security review" opt-in -- otherwise refuse outright.
-    // Reject is never gated this way; this check only runs on /approve.
-    if (existingForKindCheck && isMergePrApprovalPayload(existingForKindCheck.payload)) {
-      const reviewState = await securityReviewSvc.computeState(existingForKindCheck);
-      if (reviewState.state !== "passed") {
-        const bypass = req.body.approveWithoutSecurityReview;
-        if (!bypass) {
-          throw unprocessable(
-            "This merge card has no passed security review at its current commit -- use " +
-              "\"Approve without security review\" with a reason if you want to approve it anyway.",
-            { securityReviewState: reviewState.state },
-          );
-        }
-        await logActivity(db, {
-          companyId: existingForKindCheck.companyId,
-          actorType: "user",
-          actorId: req.actor.userId ?? "board",
-          action: "approval.approved_without_security_review",
-          entityType: "approval",
-          entityId: existingForKindCheck.id,
-          details: {
-            securityReviewState: reviewState.state,
-            reason: bypass.reason,
-          },
-        });
-      }
-    }
+    // DUR-4568 finding #1: the security-review gate now lives inside
+    // `approve()` itself (services/approvals.ts), so every caller is
+    // covered -- not just this route. This route only surfaces the user's
+    // bypass reason, if given; `approve()` does the state check, the
+    // refusal and the activity log.
+    const securityReviewBypass = req.body.approveWithoutSecurityReview;
     const { approval, applied, toolGrant, instructionsChange } = await svc.approve(
       id,
       decidedByUserId,
       req.body.decisionNote,
-      { crossCompanyInstruction: crossCompanyDecisionHooks(decidedByUserId, req.body.decisionNote) },
+      {
+        crossCompanyInstruction: crossCompanyDecisionHooks(decidedByUserId, req.body.decisionNote),
+        securityReviewBypass: securityReviewBypass
+          ? { reason: securityReviewBypass.reason, actorType: "user", actorId: req.actor.userId ?? "board" }
+          : undefined,
+      },
     );
 
     if (applied) {

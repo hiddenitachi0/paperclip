@@ -213,7 +213,11 @@ export function securityReviewService(db: Db) {
     } catch (err) {
       // Single-flight race: someone else's request landed first for this
       // exact (approval, head commit) pair between our read and our write.
+      // The review issue above was already created before we lost the race
+      // -- cancel it so the reviewer isn't left with a duplicate task for
+      // the same (approval, head commit) pair (DUR-4568 finding #4).
       if (isUniqueViolation(err)) {
+        await issueService(db).update(reviewIssue.id, { status: "cancelled" });
         return computeState(approval);
       }
       throw err;
@@ -255,6 +259,11 @@ export function securityReviewService(db: Db) {
       }
     } else if (!actor.userId) {
       throw forbidden("Only the security reviewer agent or a board user may record a verdict.");
+    } else if (approval.requestedByUserId && approval.requestedByUserId === actor.userId) {
+      // DUR-4568 finding #3: the self-review block above only covered the
+      // agent path. A board user who filed this exact merge card must not
+      // be able to record "passed" on it either.
+      throw forbidden("A user cannot record a security review verdict on their own merge card.");
     }
 
     const [agentRow] = actor.agentId
