@@ -170,6 +170,8 @@ import {
   createModelDirectoryEntrySchema,
   updateModelDirectoryEntrySchema,
   duplicateModelDirectoryEntrySchema,
+  // Merge-card security review (DUR-4566)
+  recordSecurityReviewVerdictSchema,
 } from "@paperclipai/shared";
 
 type JsonSchema = Record<string, unknown>;
@@ -2808,6 +2810,27 @@ registry.registerPath({
   request: {
     params: z.object({ id: z.string() }),
     body: jsonBody(withdrawApprovalSchema),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/approvals/{id}/security-review/request",
+  tags: ["approvals"],
+  summary: "Request a security review for a merge card at its current head commit",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/approvals/{id}/security-review/verdict",
+  tags: ["approvals"],
+  summary: "Record a security review verdict for a merge card",
+  request: {
+    params: z.object({ id: z.string() }),
+    body: jsonBody(recordSecurityReviewVerdictSchema),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
 });

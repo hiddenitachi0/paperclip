@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { CheckCircle2, XCircle, Clock, AlertTriangle } from "lucide-react";
+import { CheckCircle2, XCircle, Clock, AlertTriangle, ShieldAlert, ShieldCheck, ShieldQuestion } from "lucide-react";
 import { Link } from "@/lib/router";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -19,8 +19,34 @@ import {
   typeLabel,
 } from "./ApprovalPayload";
 import { timeAgo } from "../lib/timeAgo";
-import { formatAgentDisplayName, type Approval, type Agent, type Issue } from "@paperclipai/shared";
+import { formatAgentDisplayName, type Approval, type Agent, type Issue, type SecurityReviewState } from "@paperclipai/shared";
 import { cn } from "@/lib/utils";
+
+/** DUR-4566: the plain-words line a merge card shows for its security-review state. */
+function securityReviewSummary(review: SecurityReviewState): { text: string; tone: "neutral" | "warn" | "ok" } {
+  switch (review.state) {
+    case "not_requested":
+      return { text: "Security review: not requested", tone: "warn" };
+    case "no_reviewer_configured":
+      return { text: "Security review: no reviewer chosen yet for this company", tone: "warn" };
+    case "in_progress":
+      return { text: "Security review: in progress", tone: "neutral" };
+    case "passed":
+      return { text: "Security review: passed", tone: "ok" };
+    case "failed":
+      return { text: "Security review: found problems", tone: "warn" };
+    case "out_of_date":
+      return { text: "Security review: out of date — code changed after the review", tone: "warn" };
+    default:
+      return { text: "Security review: not requested", tone: "warn" };
+  }
+}
+
+function securityReviewIcon(review: SecurityReviewState) {
+  if (review.state === "passed") return <ShieldCheck className="h-3.5 w-3.5 text-green-600 dark:text-green-400" />;
+  if (review.state === "in_progress") return <ShieldQuestion className="h-3.5 w-3.5 text-muted-foreground" />;
+  return <ShieldAlert className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />;
+}
 
 function statusIcon(status: string) {
   if (status === "approved") return <CheckCircle2 className="h-3.5 w-3.5 text-green-600 dark:text-green-400" />;
@@ -34,7 +60,10 @@ export function ApprovalCard({
   approval,
   requesterAgent,
   onApprove,
+  onApproveWithoutSecurityReview,
   onReject,
+  onRequestSecurityReview,
+  isRequestingSecurityReview = false,
   onOpen,
   detailLink,
   isPending = false,
@@ -45,7 +74,15 @@ export function ApprovalCard({
   approval: Approval;
   requesterAgent: Agent | null;
   onApprove?: () => void;
+  // DUR-4566 item 4: approving a merge card with no passed security review
+  // at its current head commit needs a reason, recorded in the activity log.
+  onApproveWithoutSecurityReview?: (reason: string) => void;
   onReject?: (note: string) => void;
+  // DUR-4566 item 2: shown when the state is not_requested, failed, or
+  // out_of_date. The button is single-flight server-side; this just disables
+  // it while a request from this card is in flight.
+  onRequestSecurityReview?: () => void;
+  isRequestingSecurityReview?: boolean;
   onOpen?: () => void;
   detailLink?: string;
   isPending?: boolean;
@@ -58,6 +95,7 @@ export function ApprovalCard({
   companyName?: string | null;
 }) {
   const [rejectDialogOpen, setRejectDialogOpen] = useState(false);
+  const [approveWithoutReviewDialogOpen, setApproveWithoutReviewDialogOpen] = useState(false);
   const payload = approval.payload as Record<string, unknown> | null;
   const Icon = typeIcon[approval.type] ?? defaultTypeIcon;
   const kindLabel = typeLabel[approval.type] ?? approval.type;
@@ -76,6 +114,16 @@ export function ApprovalCard({
     approval.type !== "budget_override_required" &&
     (approval.status === "pending" || approval.status === "revision_requested");
   const hasFooter = showResolutionButtons || Boolean(detailLink || onOpen);
+  const securityReview = approval.securityReview ?? null;
+  // DUR-4566 item 4: gated unless the review passed at the card's current head commit.
+  const approveGatedBySecurityReview = securityReview !== null && securityReview.state !== "passed";
+  const showRequestSecurityReviewButton =
+    securityReview !== null &&
+    Boolean(onRequestSecurityReview) &&
+    (securityReview.state === "not_requested" ||
+      securityReview.state === "failed" ||
+      securityReview.state === "out_of_date" ||
+      securityReview.state === "no_reviewer_configured");
 
   return (
     <div className="rounded-xl border border-border/70 bg-card p-4 shadow-sm">
@@ -187,6 +235,44 @@ export function ApprovalCard({
         approvalStatus={approval.status}
       />
 
+      {securityReview && (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border/60 bg-muted/30 px-3.5 py-2.5 text-xs leading-5">
+          <div className="flex items-center gap-1.5">
+            {securityReviewIcon(securityReview)}
+            <span className="font-medium text-foreground">{securityReviewSummary(securityReview).text}</span>
+            {securityReview.state === "in_progress" && securityReview.reviewIssueIdentifier && (
+              <Link
+                to={`/issues/${securityReview.reviewIssueIdentifier}`}
+                className="text-muted-foreground underline underline-offset-2"
+              >
+                ({securityReview.reviewIssueIdentifier})
+              </Link>
+            )}
+            {securityReview.state === "failed" && securityReview.verdictCommentUrl && (
+              <a
+                href={securityReview.verdictCommentUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="text-muted-foreground underline underline-offset-2"
+              >
+                See findings
+              </a>
+            )}
+          </div>
+          {showRequestSecurityReviewButton && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 px-2.5 text-xs"
+              onClick={onRequestSecurityReview}
+              disabled={isRequestingSecurityReview}
+            >
+              {isRequestingSecurityReview ? "Requesting…" : "Request security review"}
+            </Button>
+          )}
+        </div>
+      )}
+
       {approval.decisionNote && (
         <div className="mt-4 rounded-lg border border-border/60 bg-muted/30 px-3.5 py-3 text-xs leading-5 text-muted-foreground">
           <span className="font-medium text-foreground">Decision note.</span> {approval.decisionNote}
@@ -206,11 +292,23 @@ export function ApprovalCard({
               <>
                 <Button
                   size="sm"
-                  className="bg-green-700 hover:bg-green-600 text-white"
-                  onClick={onApprove}
+                  className={
+                    approveGatedBySecurityReview
+                      ? "border border-amber-600/50 bg-transparent text-amber-700 hover:bg-amber-500/10 dark:text-amber-400"
+                      : "bg-green-700 hover:bg-green-600 text-white"
+                  }
+                  variant={approveGatedBySecurityReview ? "outline" : "default"}
+                  onClick={() => {
+                    if (approveGatedBySecurityReview) setApproveWithoutReviewDialogOpen(true);
+                    else onApprove?.();
+                  }}
                   disabled={isPending}
                 >
-                  {pendingAction === "approve" ? "Approving..." : "Approve"}
+                  {pendingAction === "approve"
+                    ? "Approving..."
+                    : approveGatedBySecurityReview
+                      ? "Approve without security review"
+                      : "Approve"}
                 </Button>
                 <Button
                   variant="destructive"
@@ -248,6 +346,18 @@ export function ApprovalCard({
           onSubmit={(note) => {
             setRejectDialogOpen(false);
             onReject?.(note);
+          }}
+        />
+      )}
+      {showResolutionButtons && approveGatedBySecurityReview && (
+        <DecisionReasonDialog
+          open={approveWithoutReviewDialogOpen}
+          onOpenChange={setApproveWithoutReviewDialogOpen}
+          action="approve_without_review"
+          isPending={isPending}
+          onSubmit={(reason) => {
+            setApproveWithoutReviewDialogOpen(false);
+            onApproveWithoutSecurityReview?.(reason);
           }}
         />
       )}

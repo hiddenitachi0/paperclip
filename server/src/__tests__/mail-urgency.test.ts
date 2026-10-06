@@ -240,11 +240,15 @@ d("mail urgency pipeline", () => {
     expect(classify).toHaveBeenCalledTimes(1);
   });
 
-  it("Delivered-To alone can make a message handled", async () => {
-    const { svc, classify, fetchBox } = await setup();
-    fetchBox.messages = [msg({ uid: 1, to: ["list@example.com"], deliveredTo: ["filipdurkan@gmail.com"] })];
+  it("Delivered-To never makes a message handled (Gmail stamps it on everything)", async () => {
+    const { companyId, svc, classify, fetchBox } = await setup();
+    fetchBox.messages = [
+      msg({ uid: 1, to: ["post@nordstrandgruppen.no"], deliveredTo: ["filipdurkan@gmail.com"] }),
+      msg({ uid: 2, to: ["list@example.com"], deliveredTo: ["filipdurkan@gmail.com"] }),
+    ];
     await svc.tick(T0);
-    expect(classify).toHaveBeenCalledTimes(1);
+    expect(classify).not.toHaveBeenCalled();
+    expect(await db.select().from(mailMessageClassifications).where(eq(mailMessageClassifications.companyId, companyId))).toHaveLength(0);
   });
 
   it("other mailboxes are never classified", async () => {

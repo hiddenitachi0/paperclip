@@ -956,7 +956,7 @@ export function mailAccountsService(db: Db, deps: MailAccountServiceDeps = {}) {
           if (stored) {
             // Urgency triage (DUR-4573). A failure here never blocks sync or loses the stored message.
             await urgency
-              .processInbound(row, stored, [...message.to, ...message.cc, ...(message.deliveredTo ?? [])])
+              .processInbound(row, stored, [...message.to, ...message.cc])
               .catch((err) => {
                 logger.error({ err, accountId: row.id }, "mail-accounts: urgency triage failed for a message");
               });

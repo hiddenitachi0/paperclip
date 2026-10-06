@@ -4,6 +4,7 @@ import type {
   Issue,
   PreviewEnvironment,
   PreviewEnvironmentAvailability,
+  SecurityReviewState,
 } from "@paperclipai/shared";
 import { api } from "./client";
 
@@ -21,10 +22,12 @@ export const approvalsApi = {
   create: (companyId: string, data: Record<string, unknown>) =>
     api.post<Approval>(`/companies/${companyId}/approvals`, data),
   get: (id: string) => api.get<Approval>(`/approvals/${id}`),
-  approve: (id: string, decisionNote?: string) =>
-    api.post<Approval>(`/approvals/${id}/approve`, { decisionNote }),
+  approve: (id: string, decisionNote?: string, approveWithoutSecurityReview?: { reason: string }) =>
+    api.post<Approval>(`/approvals/${id}/approve`, { decisionNote, approveWithoutSecurityReview }),
   reject: (id: string, decisionNote?: string) =>
     api.post<Approval>(`/approvals/${id}/reject`, { decisionNote }),
+  requestSecurityReview: (id: string) =>
+    api.post<SecurityReviewState>(`/approvals/${id}/security-review/request`, {}),
   requestRevision: (id: string, decisionNote?: string) =>
     api.post<Approval>(`/approvals/${id}/request-revision`, { decisionNote }),
   resubmit: (id: string, payload?: Record<string, unknown>) =>

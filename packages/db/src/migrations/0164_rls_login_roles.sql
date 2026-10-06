@@ -190,6 +190,10 @@ DECLARE
     'company_secret_provider_configs',
     'company_secret_versions',
     'company_secrets',
+    -- DUR-4566 (merge-card security-review state). Created, granted on and
+    -- policed in the new 0231_merge_security_reviews.sql migration; listed
+    -- here so the login-role lists match the schema, as for the tables above.
+    'company_security_review_settings',
     -- DUR-3977. The real DDL, grant and policy for this table live in
     -- 0165_lane_a_transform.sql; the name is listed here because
     -- packages/db/src/rls-login-roles.test.ts holds these arrays to the
@@ -301,13 +305,17 @@ DECLARE
     'mail_message_classifications',
     'mail_messages',
     'mail_secretary_items',
-    -- DUR-4573. Created, granted on and policed in 0231_mail_urgency.sql;
+    -- DUR-4573. Created, granted on and policed in 0232_mail_urgency.sql;
     -- listed here so the login-role lists match the schema.
     'mail_urgency_alerts',
     -- DUR-4329. Created, granted on and policed in
     -- 0212_media_studio_direct_creations.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'media_studio_direct_creations',
+    -- DUR-4566 (merge-card security-review state). Created, granted on and
+    -- policed in the new 0231_merge_security_reviews.sql migration; listed
+    -- here so the login-role lists match the schema, as for the tables above.
+    'merge_security_reviews',
     -- DUR-4379. Created, granted on and policed in
     -- 0216_model_directory_entries.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
@@ -512,6 +520,10 @@ DECLARE
     'company_secret_bindings',
     'company_secret_provider_configs',
     'company_secrets',
+    -- DUR-4566 (merge-card security-review state). Created, granted on and
+    -- policed in the new 0231_merge_security_reviews.sql migration; listed
+    -- here so the login-role lists match the schema, as for the tables above.
+    'company_security_review_settings',
     'company_service_tokens',
     'company_skill_comments',
     'company_skill_stars',
@@ -605,13 +617,17 @@ DECLARE
     'mail_message_classifications',
     'mail_messages',
     'mail_secretary_items',
-    -- DUR-4573. Created, granted on and policed in 0231_mail_urgency.sql;
+    -- DUR-4573. Created, granted on and policed in 0232_mail_urgency.sql;
     -- listed here so the login-role lists match the schema.
     'mail_urgency_alerts',
     -- DUR-4329. Created, granted on and policed in
     -- 0212_media_studio_direct_creations.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'media_studio_direct_creations',
+    -- DUR-4566 (merge-card security-review state). Created, granted on and
+    -- policed in the new 0231_merge_security_reviews.sql migration; listed
+    -- here so the login-role lists match the schema, as for the tables above.
+    'merge_security_reviews',
     -- DUR-4379. Created, granted on and policed in
     -- 0216_model_directory_entries.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.

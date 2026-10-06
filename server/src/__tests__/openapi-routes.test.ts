@@ -138,6 +138,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "instance-disk-health.ts",
   // Company cache-aware-run settings (DUR-4471) are board-only, same bar as job-settings.ts, and not yet in the public OpenAPI document.
   "cache-settings.ts",
+  // Company security-review-reviewer settings (DUR-4566) are owner/admin-only, same bar as job-settings.ts, and not yet in the public OpenAPI document.
+  "security-review-settings.ts",
 ]);
 
 function createApp() {

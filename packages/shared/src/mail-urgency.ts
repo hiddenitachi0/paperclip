@@ -106,7 +106,7 @@ export function extractMailAddresses(values: readonly string[]): string[] {
 
 /**
  * Pure code, runs before any model call. Handled = at least one of the
- * To/Cc/Delivered-To/X-Original-To addresses is filipdurkan@gmail.com or at a
+ * To/Cc addresses (never Delivered-To/X-Original-To: Gmail stamps it on every message and it is forgeable) is filipdurkan@gmail.com or at a
  * durkanagency.com domain. A handled address wins over an ignored one in the
  * same message. Mail with no handled address (ignored-only or neither) is not
  * handled -- never classified, never alerted.

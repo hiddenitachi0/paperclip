@@ -108,7 +108,7 @@ export function mailUrgencyService(db: Db, deps: MailUrgencyDeps = {}) {
   }
 
   /**
-   * `recipients` is every To/Cc/Delivered-To/X-Original-To value. Idempotent
+   * `recipients` is every To/Cc value. Idempotent
    * on message.id: a retried pass finds the stored classification, never
    * calls the model again, never writes a second alert or draft.
    */

@@ -18,6 +18,7 @@ import {
   type ModelBoostRequestPayload,
   modelBoostBossReviewDecisionSchema,
   modelBoostRequestPayloadSchema,
+  recordSecurityReviewVerdictSchema,
   requestApprovalRevisionSchema,
   resolveApprovalSchema,
   resubmitApprovalSchema,
@@ -68,12 +69,13 @@ import {
 } from "../services/deploy-change-guard.js";
 import { isCompletedDeployOutcome } from "../services/deploy-completion-gate.js";
 import { readDeployRunnerStatus, type DeployRunnerStatusEntry } from "../services/deploy-runner-status.js";
-import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
+import { assertBoard, assertCompanyAccess, getActorInfo, isCompanyOwnerOrAdmin } from "./authz.js";
 import { redactEventPayload } from "../redaction.js";
 import { HttpError, conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import { companyScope, companyScopeFromParam } from "../middleware/company-scope.js";
 import { describeToolCapability, summarizeMcpServer } from "../services/agent-tool-audit.js";
 import { crossCompanyInstructionService } from "../services/cross-company-instructions.js";
+import { isMergePrApprovalPayload, securityReviewService } from "../services/security-review.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import { isStatusOnlyCheapRecoveryContext } from "../services/recovery/model-profile-hint.js";
 import { recordCheapRunEscalation } from "../services/recovery/cheap-run-escalation.js";
@@ -1618,6 +1620,7 @@ export function approvalRoutes(
     pluginWorkerManager: options.pluginWorkerManager,
   });
   const issueApprovalsSvc = issueApprovalService(db);
+  const securityReviewSvc = securityReviewService(db);
   const interactionsSvc = issueThreadInteractionService(db);
   const secretsSvc = secretService(db, rawDb);
   const escalationGrantsSvc = escalationGrantService(db);
@@ -1688,6 +1691,32 @@ export function approvalRoutes(
   /** Board-only routes (approve/reject/request-revision). */
   function checkBoardCompanyAccess(req: Request, companyId: string) {
     assertBoard(req);
+    assertCompanyAccess(req, companyId);
+  }
+
+  /**
+   * DUR-4568 finding #2: the security-review request/verdict routes used to
+   * sit behind plain `company_scope:read` -- any actor allowed to read
+   * approvals (which includes ordinary company agents and read-only board
+   * members) could file a review request or, worse, record a verdict.
+   * `recordVerdict` itself still re-checks that an agent actor really is the
+   * configured reviewer, but a board actor needs more than read access: the
+   * same owner/admin bar as changing who the reviewer is
+   * (security-review-settings.ts's `assertCompanyOwnerOrAdmin`). Agents pass
+   * through to that per-agent check; a plain company membership is not
+   * enough for either actor type.
+   */
+  function checkSecurityReviewActionAccess(req: Request, companyId: string) {
+    if (req.actor.type === "agent") {
+      assertCompanyAccess(req, companyId);
+      return;
+    }
+    assertBoard(req);
+    if (!isCompanyOwnerOrAdmin(req, companyId)) {
+      throw forbidden(
+        "Only this company's owner or admin, or the configured security reviewer agent, may do this.",
+      );
+    }
     assertCompanyAccess(req, companyId);
   }
 
@@ -1807,12 +1836,29 @@ export function approvalRoutes(
     return false;
   }
 
+  /**
+   * DUR-4566 item 1: every merge card shows its security-review state.
+   * Computed fresh on every read (never cached on the approval row) so a
+   * later push always shows up immediately as `out_of_date` -- see
+   * securityReviewService.computeState. Any approval that isn't a merge_pr
+   * card gets `securityReview: null`.
+   */
+  async function withSecurityReviewState<T extends { id: string; companyId: string; payload: unknown }>(
+    approval: T,
+  ): Promise<T & { securityReview: Awaited<ReturnType<typeof securityReviewSvc.computeState>> | null }> {
+    if (!isMergePrApprovalPayload(approval.payload)) {
+      return { ...approval, securityReview: null };
+    }
+    return { ...approval, securityReview: await securityReviewSvc.computeState(approval) };
+  }
+
   router.get("/companies/:companyId/approvals", scopeFromCompanyIdParam(checkApprovalReadAccess), async (req, res) => {
     const companyId = req.params.companyId as string;
     const status = req.query.status as string | undefined;
     const result = await svc.list(companyId, status);
     const personaNames = await personaDisplayNamesFor(result);
-    res.json(result.map((approval) => withPersonaMetadata(approval, personaNames)));
+    const withPersona = result.map((approval) => withPersonaMetadata(approval, personaNames));
+    res.json(await Promise.all(withPersona.map(withSecurityReviewState)));
   });
 
   router.get("/approvals/:id", scopeFromApprovalIdParam(checkApprovalReadAccess), async (req, res) => {
@@ -1823,8 +1869,39 @@ export function approvalRoutes(
       return;
     }
     const personaNames = await personaDisplayNamesFor([approval]);
-    res.json(withPersonaMetadata(approval, personaNames));
+    res.json(await withSecurityReviewState(withPersonaMetadata(approval, personaNames)));
   });
+
+  router.post(
+    "/approvals/:id/security-review/request",
+    scopeFromApprovalIdParam(checkSecurityReviewActionAccess),
+    async (req, res) => {
+      const id = req.params.id as string;
+      const actorInfo = getActorInfo(req);
+      const actor = {
+        agentId: actorInfo.actorType === "agent" ? actorInfo.agentId : null,
+        userId: actorInfo.actorType === "user" ? actorInfo.actorId : null,
+      };
+      const state = await securityReviewSvc.requestReview(id, actor);
+      res.json(state);
+    },
+  );
+
+  router.post(
+    "/approvals/:id/security-review/verdict",
+    scopeFromApprovalIdParam(checkSecurityReviewActionAccess),
+    validate(recordSecurityReviewVerdictSchema),
+    async (req, res) => {
+      const id = req.params.id as string;
+      const actorInfo = getActorInfo(req);
+      const actor = {
+        agentId: actorInfo.actorType === "agent" ? actorInfo.agentId : null,
+        userId: actorInfo.actorType === "user" ? actorInfo.actorId : null,
+      };
+      const state = await securityReviewSvc.recordVerdict(id, actor, req.body);
+      res.json(state);
+    },
+  );
 
   router.post(
     "/companies/:companyId/approvals",
@@ -2300,11 +2377,22 @@ export function approvalRoutes(
         throw unprocessable(unsupportedKind, { kind });
       }
     }
+    // DUR-4568 finding #1: the security-review gate now lives inside
+    // `approve()` itself (services/approvals.ts), so every caller is
+    // covered -- not just this route. This route only surfaces the user's
+    // bypass reason, if given; `approve()` does the state check, the
+    // refusal and the activity log.
+    const securityReviewBypass = req.body.approveWithoutSecurityReview;
     const { approval, applied, toolGrant, instructionsChange } = await svc.approve(
       id,
       decidedByUserId,
       req.body.decisionNote,
-      { crossCompanyInstruction: crossCompanyDecisionHooks(decidedByUserId, req.body.decisionNote) },
+      {
+        crossCompanyInstruction: crossCompanyDecisionHooks(decidedByUserId, req.body.decisionNote),
+        securityReviewBypass: securityReviewBypass
+          ? { reason: securityReviewBypass.reason, actorType: "user", actorId: req.actor.userId ?? "board" }
+          : undefined,
+      },
     );
 
     if (applied) {
