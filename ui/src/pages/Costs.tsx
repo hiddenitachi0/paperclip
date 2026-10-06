@@ -12,6 +12,7 @@ import type {
 } from "@paperclipai/shared";
 import { ArrowDownLeft, ArrowUpRight, ChevronDown, ChevronRight, Coins, DollarSign, ReceiptText } from "lucide-react";
 import { budgetsApi } from "../api/budgets";
+import { agentsApi } from "../api/agents";
 import { costsApi } from "../api/costs";
 import { CostSourceCard } from "../components/CostSourceCard";
 import { BillerSpendCard } from "../components/BillerSpendCard";
@@ -322,6 +323,19 @@ export function Costs() {
     refetchInterval: 30_000,
     staleTime: 10_000,
   });
+
+  const { data: allAgents } = useQuery({
+    queryKey: queryKeys.agents.list(companyId),
+    queryFn: () => agentsApi.list(companyId),
+    enabled: !!selectedCompanyId && mainTab === "overview",
+    staleTime: 30_000,
+  });
+
+  // Retired agents are always cold with no data, so keep them out of the panel.
+  const savedContextRows = useMemo(() => {
+    const retired = new Set((allAgents ?? []).filter((a) => a.status === "terminated").map((a) => a.id));
+    return (cacheStatusData ?? []).filter((row) => !retired.has(row.agentId));
+  }, [allAgents, cacheStatusData]);
 
   const { data: weekData } = useQuery({
     queryKey: queryKeys.usageByProvider(companyId, weekRange.from, weekRange.to),
@@ -890,7 +904,7 @@ export function Costs() {
               </div>
             </>
           )}
-          {cacheStatusData && cacheStatusData.length > 0 ? (
+          {savedContextRows.length > 0 ? (
             <Card>
               <CardHeader>
                 <CardTitle className="text-base">Saved context</CardTitle>
@@ -899,7 +913,7 @@ export function Costs() {
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-2">
-                {cacheStatusData.map((row) => (
+                {savedContextRows.map((row) => (
                   <div key={row.agentId} className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
                     <div className="flex min-w-0 items-center gap-2">
                       <Identity name={row.agentName} size="sm" />
