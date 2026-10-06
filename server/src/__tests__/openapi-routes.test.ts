@@ -136,6 +136,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "media-studio-direct.ts",
   // Instance disk-health report (DUR-4499) is an instance-admin-only read-only route and not yet in the public OpenAPI document.
   "instance-disk-health.ts",
+  // Company cache-aware-run settings (DUR-4471) are board-only, same bar as job-settings.ts, and not yet in the public OpenAPI document.
+  "cache-settings.ts",
 ]);
 
 function createApp() {
