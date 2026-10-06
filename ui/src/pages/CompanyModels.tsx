@@ -8,11 +8,12 @@ import {
   type ModelDirectoryEntry,
   type UpdateModelDirectoryEntry,
 } from "@paperclipai/shared";
-import { AlertCircle, Copy, Cpu, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
+import { AlertCircle, Copy, Cpu, Loader2, Pencil, Plus, Stethoscope, Trash2 } from "lucide-react";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useToastActions } from "../context/ToastContext";
 import { useCompanyRole } from "../hooks/useCompanyRole";
+import { ModelReviewPanel } from "../components/ModelReviewPanel";
 import { modelDirectoryApi } from "../api/modelDirectory";
 import { ApiError } from "../api/client";
 import { queryKeys } from "../lib/queryKeys";
@@ -259,6 +260,7 @@ export function CompanyModels() {
   const [editing, setEditing] = useState<ModelDirectoryEntry | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState<ModelDirectoryEntry | null>(null);
+  const [checkingUp, setCheckingUp] = useState<string | null>(null);
 
   useEffect(() => {
     setBreadcrumbs([
@@ -410,6 +412,19 @@ export function CompanyModels() {
                 <CardContent className="space-y-2 text-xs text-muted-foreground">
                   {entry.baseUrl && <p>Address: {entry.baseUrl}</p>}
                   {entry.note && <p>{entry.note}</p>}
+                  <div className="flex gap-2 pt-1">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setCheckingUp(checkingUp === entry.id ? null : entry.id)}
+                    >
+                      <Stethoscope className="mr-1.5 h-3.5 w-3.5" />
+                      {checkingUp === entry.id ? "Hide check-up" : "Check-up"}
+                    </Button>
+                  </div>
+                  {checkingUp === entry.id && (
+                    <ModelReviewPanel companyId={selectedCompanyId} entryId={entry.id} canManage={canManage} />
+                  )}
                   {canManage && (
                     <div className="flex gap-2 pt-1">
                       <Button
