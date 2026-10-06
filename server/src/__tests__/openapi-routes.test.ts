@@ -140,6 +140,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "cache-settings.ts",
   // Company security-review-reviewer settings (DUR-4566) are owner/admin-only, same bar as job-settings.ts, and not yet in the public OpenAPI document.
   "security-review-settings.ts",
+  // Brag launch-video routes (DUR-4520) are a new backend feature, off by default, and not yet in the public OpenAPI document.
+  "brag.ts",
 ]);
 
 function createApp() {
