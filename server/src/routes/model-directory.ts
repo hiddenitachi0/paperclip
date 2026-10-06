@@ -7,12 +7,13 @@ import {
   duplicateModelDirectoryEntrySchema,
   updateModelDirectoryEntrySchema,
 } from "@paperclipai/shared";
-import { forbidden } from "../errors.js";
+import { forbidden, notFound } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import { companyScope } from "../middleware/company-scope.js";
 import { logActivity } from "../services/activity-log.js";
 import { modelDirectoryService } from "../services/model-directory.js";
 import { modelHealthService } from "../services/model-health.js";
+import { modelSetupReviewerService } from "../services/model-setup-reviewer.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 
 /**
@@ -40,6 +41,7 @@ export function modelDirectoryRoutes(rawDb: Db) {
   const db = createRequestScopedDb(rawDb);
   const svc = modelDirectoryService(db);
   const health = modelHealthService(db);
+  const reviewer = modelSetupReviewerService(db);
 
   const scope = () =>
     companyScope(rawDb, (req) => {
@@ -117,6 +119,60 @@ export function modelDirectoryRoutes(rawDb: Db) {
     const entry = await svc.get(companyId, entryId);
     await audit(req, companyId, "model_directory_entry.tested", entry, { ran: result.ran, ok: result.runs.map((r) => r.ok) });
     res.json(result);
+  });
+
+  router.post("/companies/:companyId/model-directory/:entryId/probes", scope(), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const entryId = req.params.entryId as string;
+    const result = await health.probeEntry(companyId, entryId);
+    const entry = await svc.get(companyId, entryId);
+    await audit(req, companyId, "model_directory_entry.probed", entry, { ran: result.ran, callsUsed: result.callsUsed, ok: result.probes.map((p) => p.ok) });
+    res.json(result);
+  });
+
+  // DUR-4558: the model setup reviewer. Runs the probe set, applies passing allow-listed fixes, proposes the rest.
+  router.post("/companies/:companyId/model-directory/:entryId/reviews", scope(), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const result = await reviewer.review(companyId, req.params.entryId as string, { trigger: "manual", ...actorUser(req) });
+    const entry = await svc.get(companyId, req.params.entryId as string);
+    await audit(req, companyId, "model_directory_entry.reviewed", entry, {
+      reviewId: result.id,
+      applied: result.changes.filter((c) => c.status === "applied").map((c) => c.code),
+      proposed: result.changes.filter((c) => c.status === "proposed").map((c) => c.code),
+    });
+    res.status(201).json(result);
+  });
+
+  router.get("/companies/:companyId/model-directory/:entryId/reviews", scope(), async (req, res) => {
+    res.json(await reviewer.list(req.params.companyId as string, req.params.entryId as string));
+  });
+
+  const reviewChangeHandler = (action: "apply" | "decline" | "undo") =>
+    async (req: Request, res: import("express").Response) => {
+      const companyId = req.params.companyId as string;
+      const reviewId = req.params.reviewId as string;
+      const changeId = req.params.changeId as string;
+      const user = actorUser(req).userId;
+      const entry = await svc.get(companyId, req.params.entryId as string);
+      const before = (await reviewer.list(companyId, entry.id)).find((r) => r.id === reviewId);
+      if (!before) throw notFound("Review not found");
+      const result =
+        action === "apply" ? await reviewer.applyProposed(companyId, reviewId, changeId, user)
+        : action === "decline" ? await reviewer.decline(companyId, reviewId, changeId)
+        : await reviewer.undo(companyId, reviewId, changeId, user);
+      await audit(req, companyId, `model_directory_entry.review_change_${action}`, entry, {
+        reviewId,
+        changeId,
+        code: result.changes.find((c) => c.id === changeId)?.code,
+      });
+      res.json(result);
+    };
+  router.post("/companies/:companyId/model-directory/:entryId/reviews/:reviewId/changes/:changeId/apply", scope(), reviewChangeHandler("apply"));
+  router.post("/companies/:companyId/model-directory/:entryId/reviews/:reviewId/changes/:changeId/decline", scope(), reviewChangeHandler("decline"));
+  router.post("/companies/:companyId/model-directory/:entryId/reviews/:reviewId/changes/:changeId/undo", scope(), reviewChangeHandler("undo"));
+
+  router.get("/companies/:companyId/model-directory/:entryId/capabilities", scope(), async (req, res) => {
+    res.json(await health.capabilitiesForEntry(req.params.companyId as string, req.params.entryId as string));
   });
 
   router.get("/companies/:companyId/model-directory/:entryId", scope(), async (req, res) => {
