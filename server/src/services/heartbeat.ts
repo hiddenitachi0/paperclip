@@ -61,6 +61,7 @@ import {
   runInPooledScope,
   withCompanyScope,
   workspaceOperations,
+  companyCacheSettings,
 } from "@paperclipai/db";
 import { conflict, HttpError, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
@@ -77,6 +78,8 @@ import type {
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber, appendWithByteCap, MAX_EXCERPT_BYTES } from "../adapters/utils.js";
 import { costService } from "./costs.js";
+import { computeCacheWriteCostCents, isCacheWarm, splitCacheWriteTokens } from "@paperclipai/shared";
+import { companyCacheSettingsService } from "./company-cache-settings.js";
 import { trackAgentFirstHeartbeat } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
 import { companySkillService } from "./company-skills.js";
@@ -250,6 +253,7 @@ import { recoveryService } from "./recovery/service.js";
 import { productivityReviewService } from "./productivity-review.js";
 import { taskWatchdogService } from "./task-watchdogs.js";
 import { withAgentStartLock, withGlobalRunStartLock } from "./agent-start-lock.js";
+import { computeCacheAwareDueAtMs } from "./heartbeat-cache-aware-timer.js";
 import { computeHeartbeatTimerJitterMs, type HeartbeatTimerJitterOptions } from "./heartbeat-timer-jitter.js";
 import {
   buildAgentEnteredErrorNotice,
@@ -4705,6 +4709,13 @@ export interface SessionResetDecisionInput {
   sessionStartedAt: Date | null;
   /** Raw input tokens of the latest run in the session, when known. */
   latestRawInputTokens: number | null;
+  /**
+   * DUR-4474: cache-aware handoff. When present and enabled, a session whose
+   * context is above `tokenThreshold` AND whose prompt cache has gone cold is
+   * handed off, since resuming it would re-pay full price for the history.
+   * A warm cache resume is cheap, so it never triggers this.
+   */
+  cacheHandoff?: { enabled: boolean; tokenThreshold: number; cacheCold: boolean; contextTokens: number | null } | null;
   now: Date;
 }
 
@@ -4723,6 +4734,21 @@ export function decideSessionReset(input: SessionResetDecisionInput): { reset: b
       reason:
         `the saved session had already been used for ${sessionRunCount} run${sessionRunCount === 1 ? "" : "s"} on this task ` +
         `(the limit is ${policy.maxSessionRuns})`,
+    };
+  }
+  const cacheHandoff = input.cacheHandoff;
+  if (
+    cacheHandoff?.enabled &&
+    cacheHandoff.cacheCold &&
+    cacheHandoff.tokenThreshold > 0 &&
+    cacheHandoff.contextTokens !== null &&
+    cacheHandoff.contextTokens >= cacheHandoff.tokenThreshold
+  ) {
+    return {
+      reset: true,
+      reason:
+        `the saved session had grown to ${formatCount(cacheHandoff.contextTokens)} tokens and its prompt cache had expired, ` +
+        `so resuming it would re-read everything at full price (the handoff threshold is ${formatCount(cacheHandoff.tokenThreshold)})`,
     };
   }
   if (
@@ -6626,6 +6652,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .select({
         id: heartbeatRuns.id,
         createdAt: heartbeatRuns.createdAt,
+        finishedAt: heartbeatRuns.finishedAt,
         usageJson: heartbeatRuns.usageJson,
         error: heartbeatRuns.error,
         ...heartbeatRunListResultColumns,
@@ -6654,12 +6681,32 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     // operator reads the setting -- runs recorded against this session so
     // far, and hours since the session was first used (not since it was
     // last used, so an idle session still ages out).
+    const cacheSettings = await companyCacheSettingsService(db).get(agent.companyId);
+    const now = input.now ?? new Date();
+    const latestUsage = parseObject(latestRun?.usageJson);
+    const cacheHandoff =
+      cacheSettings.enabled && cacheSettings.handoffEnabled
+        ? {
+            enabled: true,
+            tokenThreshold: cacheSettings.handoffTokenThreshold,
+            cacheCold: !isCacheWarm(
+              {
+                lastHeartbeatAt: latestRun?.finishedAt ?? latestRun?.createdAt,
+                wroteOneHourCache: asNumber(latestUsage.cacheCreation1hInputTokens, 0) > 0,
+              },
+              cacheSettings.cacheLifetimeMinutes != null ? cacheSettings.cacheLifetimeMinutes * 60_000 : undefined,
+              now,
+            ),
+            contextTokens: latestRawUsage ? latestRawUsage.inputTokens + latestRawUsage.cachedInputTokens : null,
+          }
+        : null;
     const decision = decideSessionReset({
       policy,
+      cacheHandoff,
       sessionRunCount: runs.length,
       sessionStartedAt: oldestRun ? new Date(oldestRun.createdAt) : null,
       latestRawInputTokens: latestRawUsage ? latestRawUsage.inputTokens : null,
-      now: input.now ?? new Date(),
+      now,
     });
     const reason = decision.reset ? decision.reason : null;
 
@@ -11537,7 +11584,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const cachedInputTokens = usage?.cachedInputTokens ?? 0;
     const billingType = normalizeLedgerBillingType(result.billingType);
     const additionalCostCents = normalizeBilledCostCents(result.costUsd);
-    const hasTokenUsage = inputTokens > 0 || outputTokens > 0 || cachedInputTokens > 0;
+    const cacheWrite = splitCacheWriteTokens(
+      result.usage?.cacheCreationInputTokens,
+      result.usage?.cacheCreation1hInputTokens,
+    );
+    const hasTokenUsage =
+      inputTokens > 0 || outputTokens > 0 || cachedInputTokens > 0 || cacheWrite.total > 0;
     const provider = result.provider ?? "unknown";
     const biller = resolveLedgerBiller(result);
     const ledgerScope = await resolveLedgerScopeForRun(db, agent.companyId, run);
@@ -11572,6 +11624,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         inputTokens,
         cachedInputTokens,
         outputTokens,
+        cacheWriteInputTokens: cacheWrite.total,
+        cacheWrite1hInputTokens: cacheWrite.oneHour,
+        cacheWriteCostCents: computeCacheWriteCostCents(
+          result.model,
+          cacheWrite.total,
+          cacheWrite.oneHour,
+        ),
         costCents: additionalCostCents,
         occurredAt: new Date(),
       });
@@ -16626,6 +16685,27 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         let skipped = 0;
         let timedOut = 0;
 
+        // DUR-4473: companies that opted in to cache-aware scheduling. One query
+        // per tick; companies without an enabled row keep the plain timer.
+        const cacheSettingsByCompany = new Map<
+          string,
+          { enabled: boolean; schedulingEnabled: boolean; cacheLifetimeMinutes: number | null }
+        >();
+        try {
+          const rows = await db
+            .select({
+              companyId: companyCacheSettings.companyId,
+              enabled: companyCacheSettings.enabled,
+              schedulingEnabled: companyCacheSettings.schedulingEnabled,
+              cacheLifetimeMinutes: companyCacheSettings.cacheLifetimeMinutes,
+            })
+            .from(companyCacheSettings)
+            .where(and(eq(companyCacheSettings.enabled, true), eq(companyCacheSettings.schedulingEnabled, true)));
+          for (const row of rows) cacheSettingsByCompany.set(row.companyId, row);
+        } catch (err) {
+          logger.warn({ err }, "heartbeat scheduler tick: cache settings unavailable, using plain timers");
+        }
+
         // Pass one is pure in-memory arithmetic: no awaits, so it cannot hang
         // and it costs nothing to measure.
         const due: Array<{ agent: (typeof allAgents)[number]; baselineMs: number }> = [];
@@ -16637,12 +16717,19 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
           checked += 1;
           const baseline = new Date(agent.lastHeartbeatAt ?? agent.createdAt).getTime();
-          const elapsedMs = now.getTime() - baseline;
           // DUR-273: each agent waits its own small, stable extra offset past
           // the interval so a fleet whose lastHeartbeatAt values line up (after
           // a restart, a reap, or a shared creation time) does not wake as one.
           const jitterMs = computeHeartbeatTimerJitterMs(agent.id, policy.intervalSec, options.timerJitter);
-          if (elapsedMs < policy.intervalSec * 1000 + jitterMs) continue;
+          // DUR-4473: only an agent that has actually run has a cache to keep warm.
+          const dueAtMs = agent.lastHeartbeatAt
+            ? computeCacheAwareDueAtMs({
+                settings: cacheSettingsByCompany.get(agent.companyId),
+                lastHeartbeatAtMs: baseline,
+                dueAtMs: baseline + policy.intervalSec * 1000 + jitterMs,
+              })
+            : baseline + policy.intervalSec * 1000 + jitterMs;
+          if (now.getTime() < dueAtMs) continue;
           due.push({ agent, baselineMs: baseline });
         }
         // Longest-waiting first. The agent query has no ORDER BY, so without

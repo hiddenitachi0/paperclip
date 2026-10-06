@@ -1,6 +1,6 @@
 {
-  "id": "0af33b93-8b8c-410e-94cd-6a2364b717e3",
-  "prevId": "c9b7b3b2-3401-4fe1-8054-04e5108c73d4",
+  "id": "499d923d-8407-4a31-a095-21ce02b1eb5b",
+  "prevId": "c569a494-2a75-475f-9794-9ad479a6e654",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -8435,23 +8435,32 @@
           "notNull": true,
           "default": 0
         },
+        "cache_write_input_tokens": {
+          "name": "cache_write_input_tokens",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "cache_write_1h_input_tokens": {
+          "name": "cache_write_1h_input_tokens",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "cache_write_cost_cents": {
+          "name": "cache_write_cost_cents",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
         "cost_cents": {
           "name": "cost_cents",
           "type": "integer",
           "primaryKey": false,
           "notNull": true
-        },
-        "cost_micro_usd": {
-          "name": "cost_micro_usd",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "cost_source": {
-          "name": "cost_source",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
         },
         "occurred_at": {
           "name": "occurred_at",
@@ -8669,172 +8678,6 @@
             "id"
           ],
           "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.cost_reconciliation_runs": {
-      "name": "cost_reconciliation_runs",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "company_id": {
-          "name": "company_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "provider": {
-          "name": "provider",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "day": {
-          "name": "day",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "mismatch_cents": {
-          "name": "mismatch_cents",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "cost_reconciliation_runs_company_provider_day_uq": {
-          "name": "cost_reconciliation_runs_company_provider_day_uq",
-          "columns": [
-            {
-              "expression": "company_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "provider",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "day",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "cost_reconciliation_runs_company_created_idx": {
-          "name": "cost_reconciliation_runs_company_created_idx",
-          "columns": [
-            {
-              "expression": "company_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "cost_reconciliation_runs_company_id_companies_id_fk": {
-          "name": "cost_reconciliation_runs_company_id_companies_id_fk",
-          "tableFrom": "cost_reconciliation_runs",
-          "tableTo": "companies",
-          "columnsFrom": [
-            "company_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.sogni_balance_snapshots": {
-      "name": "sogni_balance_snapshots",
-      "schema": "",
-      "columns": {
-        "company_id": {
-          "name": "company_id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "spark": {
-          "name": "spark",
-          "type": "double precision",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "observed_at": {
-          "name": "observed_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "sogni_balance_snapshots_company_id_companies_id_fk": {
-          "name": "sogni_balance_snapshots_company_id_companies_id_fk",
-          "tableFrom": "sogni_balance_snapshots",
-          "tableTo": "companies",
-          "columnsFrom": [
-            "company_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
           "onUpdate": "no action"
         }
       },
