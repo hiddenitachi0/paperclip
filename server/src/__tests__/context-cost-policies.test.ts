@@ -306,6 +306,26 @@ describe("session reset policy (DUR-3943 item 5): reset decisions", () => {
       }),
     ).toEqual({ reset: true, reason: "the saved session had grown to 1,500 input tokens (the limit is 1,000)" });
   });
+
+  describe("cache-aware handoff (DUR-4474)", () => {
+    const base = { policy, sessionRunCount: 1, sessionStartedAt: hoursAgo(1), latestRawInputTokens: null, now };
+    const ch = { enabled: true, tokenThreshold: 150_000, cacheCold: true, contextTokens: 200_000 };
+
+    it("hands off above the threshold when the cache is cold", () => {
+      const d = decideSessionReset({ ...base, cacheHandoff: ch });
+      expect(d.reset).toBe(true);
+      expect(d.reason).toContain("prompt cache had expired");
+    });
+
+    it("does not hand off above the threshold while the cache is warm", () => {
+      expect(decideSessionReset({ ...base, cacheHandoff: { ...ch, cacheCold: false } })).toEqual({ reset: false, reason: null });
+    });
+
+    it("does not hand off below the threshold, or when the company toggle is off", () => {
+      expect(decideSessionReset({ ...base, cacheHandoff: { ...ch, contextTokens: 100_000 } }).reset).toBe(false);
+      expect(decideSessionReset({ ...base, cacheHandoff: { ...ch, enabled: false } }).reset).toBe(false);
+    });
+  });
 });
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();

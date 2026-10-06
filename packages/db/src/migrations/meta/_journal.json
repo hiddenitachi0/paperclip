@@ -1583,6 +1583,20 @@
       "when": 1791158648532,
       "tag": "0226_brag_jobs",
       "breakpoints": true
+    },
+    {
+      "idx": 227,
+      "version": "7",
+      "when": 1791158648533,
+      "tag": "0227_cost_events_cache_write",
+      "breakpoints": true
+    },
+    {
+      "idx": 228,
+      "version": "7",
+      "when": 1791158648534,
+      "tag": "0228_company_cache_settings",
+      "breakpoints": true
     }
   ]
 }
