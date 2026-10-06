@@ -5,6 +5,7 @@ export const queryKeys = {
     stats: ["companies", "stats"] as const,
     instructions: (id: string) => ["companies", id, "instructions"] as const,
     cacheSettings: (id: string) => ["companies", id, "cache-settings"] as const,
+    securityReviewSettings: (id: string) => ["companies", id, "security-review-settings"] as const,
     serviceTokens: (id: string) => ["companies", id, "service-tokens"] as const,
     telegramBots: (id: string) => ["companies", id, "telegram-bots"] as const,
     speechSettings: (id: string) => ["companies", id, "speech-settings"] as const,

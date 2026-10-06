@@ -177,3 +177,5 @@ export { issueOverlaps } from "./issue_overlaps.js";
 export { costReconciliationRuns, sogniBalanceSnapshots } from "./cost_reconciliation.js";
 export { bragJobs, bragScenes } from "./brag_jobs.js";
 export { modelSetupReviews } from "./model_setup_reviews.js";
+export { companySecurityReviewSettings } from "./company_security_review_settings.js";
+export { mergeSecurityReviews } from "./merge_security_reviews.js";

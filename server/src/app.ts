@@ -41,6 +41,7 @@ import { mailSecretaryRoutes } from "./routes/mail-secretary.js";
 import { mailAccountsRoutes } from "./routes/mail-accounts.js";
 import { modelDirectoryRoutes } from "./routes/model-directory.js";
 import { emailSettingsRoutes } from "./routes/email-settings.js";
+import { securityReviewSettingsRoutes } from "./routes/security-review-settings.js";
 import { videoStorylineRoutes } from "./routes/video-storylines.js";
 import { mediaStudioDirectRoutes } from "./routes/media-studio-direct.js";
 import { tradingRoutes } from "./routes/trading.js";
@@ -335,6 +336,7 @@ export async function createApp(
   api.use(mailAccountsRoutes(db));
   api.use(modelDirectoryRoutes(db));
   api.use(emailSettingsRoutes(db));
+  api.use(securityReviewSettingsRoutes(db));
   api.use(videoStorylineRoutes(db));
   api.use(mediaStudioDirectRoutes(db));
   api.use(tradingRoutes(db));

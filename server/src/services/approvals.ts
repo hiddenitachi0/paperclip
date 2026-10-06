@@ -18,6 +18,8 @@ import { agentInstructionsService } from "./agent-instructions.js";
 import { agentService } from "./agents.js";
 import { budgetService } from "./budgets.js";
 import { escalationGrantService } from "./escalation-grants.js";
+import { logActivity } from "./activity-log.js";
+import { isMergePrApprovalPayload, securityReviewService } from "./security-review.js";
 import { notifyHireApproved } from "./hire-hook.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { describeToolCapability, summarizeMcpServer } from "./agent-tool-audit.js";
@@ -81,8 +83,22 @@ export interface CrossCompanyInstructionDecisionHooks {
   markRejected: (approval: typeof approvals.$inferSelect) => Promise<unknown>;
 }
 
+/**
+ * Who is approving a merge card with no `passed` security review at its
+ * current head commit, and why. Required by every `approve()` caller --
+ * route, issue-thread-interaction auto-decision, merge-pr automation -- not
+ * just the `/approve` HTTP route, so the gate can't be skipped by going
+ * around it (DUR-4568 finding #1).
+ */
+export interface ApprovalSecurityReviewBypass {
+  reason: string;
+  actorType: "user" | "agent" | "system";
+  actorId: string;
+}
+
 export interface ApprovalDecisionOptions {
   crossCompanyInstruction?: CrossCompanyInstructionDecisionHooks;
+  securityReviewBypass?: ApprovalSecurityReviewBypass;
 }
 
 const CROSS_COMPANY_DECISION_ELSEWHERE =
@@ -108,6 +124,7 @@ export function approvalService(db: Db) {
   const budgets = budgetService(db);
   const escalationGrants = escalationGrantService(db);
   const instanceSettings = instanceSettingsService(db);
+  const securityReview = securityReviewService(db);
   const canResolveStatuses = new Set(["pending", "revision_requested"]);
   const resolvableStatuses = Array.from(canResolveStatuses);
   type ApprovalRecord = typeof approvals.$inferSelect;
@@ -159,6 +176,9 @@ export function approvalService(db: Db) {
     if (isCrossCompanyInstructionApproval(existing) && !options.crossCompanyInstruction) {
       throw unprocessable(CROSS_COMPANY_DECISION_ELSEWHERE, { kind: "cross_company_instruction" });
     }
+    if (targetStatus === "approved") {
+      await assertSecurityReviewClearedOrBypassed(existing, options);
+    }
 
     const now = new Date();
     const updated = await db
@@ -186,6 +206,45 @@ export function approvalService(db: Db) {
     throw unprocessable(
       `Only pending or revision requested approvals can be ${targetStatus === "approved" ? "approved" : "rejected"}`,
     );
+  }
+
+  /**
+   * DUR-4566 item 4 / DUR-4568 finding #1: every path that can move a
+   * merge_pr card to "approved" runs this, not just the `/approve` HTTP
+   * route -- `issue-thread-interactions.ts`'s linked-approval auto-decision
+   * and `merge-pr-automation.ts`'s rule-6 auto-approve both call `approve()`
+   * directly and used to skip the check entirely. Only runs when the card is
+   * actually about to be decided (not on an idempotent retry of an
+   * already-approved card), so a bypass reason is never required twice.
+   */
+  async function assertSecurityReviewClearedOrBypassed(
+    existing: ApprovalRecord,
+    options: ApprovalDecisionOptions,
+  ) {
+    if (!canResolveStatuses.has(existing.status)) return;
+    if (!isMergePrApprovalPayload(existing.payload)) return;
+    const reviewState = await securityReview.computeState(existing);
+    if (reviewState.state === "passed") return;
+    const bypass = options.securityReviewBypass;
+    if (!bypass?.reason) {
+      throw unprocessable(
+        "This merge card has no passed security review at its current commit -- approving it " +
+          "requires an explicit \"approve without security review\" reason.",
+        { securityReviewState: reviewState.state },
+      );
+    }
+    await logActivity(db, {
+      companyId: existing.companyId,
+      actorType: bypass.actorType,
+      actorId: bypass.actorId,
+      action: "approval.approved_without_security_review",
+      entityType: "approval",
+      entityId: existing.id,
+      details: {
+        securityReviewState: reviewState.state,
+        reason: bypass.reason,
+      },
+    });
   }
 
   /**

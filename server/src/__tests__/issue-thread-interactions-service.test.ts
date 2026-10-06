@@ -2358,10 +2358,13 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
     it("resolves a linked request_confirmation when its paired board approval is approved", async () => {
       const { companyId, issueId } = await seedConfirmationIssue("Approval decides the linked interaction");
 
+      // Not a merge_pr card on purpose: this test is about the generic
+      // approval <-> interaction linkage, not the DUR-4566 security-review
+      // gate (covered separately below), so it must not trip that gate.
       const [approval] = await db.insert(approvals).values({
         companyId,
         type: "request_board_approval",
-        payload: { kind: "merge_pr", title: "ship it" },
+        payload: { kind: "feature_launch", title: "ship it" },
         status: "pending",
       }).returning();
 
@@ -2418,10 +2421,12 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
     it("decides the linked board approval when the interaction is accepted directly", async () => {
       const { companyId, issueId } = await seedConfirmationIssue("Accepting the interaction decides the approval");
 
+      // Not a merge_pr card on purpose: see the dedicated DUR-4568 test below
+      // for the gated case.
       const [approval] = await db.insert(approvals).values({
         companyId,
         type: "request_board_approval",
-        payload: { kind: "merge_pr", title: "ship it" },
+        payload: { kind: "feature_launch", title: "ship it" },
         status: "pending",
       }).returning();
 
@@ -2440,6 +2445,44 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
 
       const [approvalRow] = await db.select().from(approvals).where(eq(approvals.id, approval!.id));
       expect(approvalRow?.status).toBe("approved");
+    });
+
+    // DUR-4568 finding #1: accepting a request_confirmation must not be a
+    // side door around the security-review gate. Before this fix,
+    // decideLinkedApprovalForInteractionDecision called approvalService.approve()
+    // directly and skipped the check entirely -- an agent could link an
+    // unreviewed merge_pr card to a confirmation and have the operator's
+    // ordinary "accept" approve it with no passed review and no bypass reason.
+    it("does not auto-approve a linked merge_pr card with no passed security review", async () => {
+      const { companyId, issueId } = await seedConfirmationIssue("Accepting must not bypass the security-review gate");
+
+      const [approval] = await db.insert(approvals).values({
+        companyId,
+        type: "request_board_approval",
+        payload: { kind: "merge_pr", repo: "acme/paperclip", prNumber: 1, commit: "deadbeef", title: "ship it" },
+        status: "pending",
+      }).returning();
+
+      const created = await interactionsSvc.create({ id: issueId, companyId }, {
+        kind: "request_confirmation",
+        linkedApprovalId: approval!.id,
+        payload: { version: 1, prompt: "Merge approval: ship it" },
+      }, { userId: "local-board" });
+
+      // decideLinkedApprovalForInteractionDecision is best-effort: a gate
+      // refusal must not stop the interaction itself from resolving.
+      await interactionsSvc.acceptInteraction(
+        { id: issueId, companyId, goalId: null, projectId: null },
+        created.id,
+        {},
+        { userId: "local-board" },
+      );
+
+      const resolved = await interactionsSvc.getById(created.id);
+      expect(resolved?.status).toBe("accepted");
+
+      const [approvalRow] = await db.select().from(approvals).where(eq(approvals.id, approval!.id));
+      expect(approvalRow?.status).toBe("pending");
     });
 
     it("decides the linked board approval when the interaction is rejected directly", async () => {

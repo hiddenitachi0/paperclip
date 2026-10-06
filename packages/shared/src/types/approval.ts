@@ -1,4 +1,5 @@
 import type { ApprovalStatus, ApprovalType } from "../constants.js";
+import type { SecurityReviewState } from "../security-review.js";
 
 export interface Approval {
   id: string;
@@ -13,6 +14,8 @@ export interface Approval {
   decidedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
+  /** DUR-4566: null for every approval that isn't a `kind: "merge_pr"` card. */
+  securityReview?: SecurityReviewState | null;
 }
 
 export interface ApprovalComment {

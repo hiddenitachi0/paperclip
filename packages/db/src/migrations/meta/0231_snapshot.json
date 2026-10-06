@@ -1,6 +1,6 @@
 {
-  "id": "838fbfe8-6630-4f18-812a-f517499f5dfe",
-  "prevId": "3e81dcfa-fce8-48b7-a14c-3f5c23412b21",
+  "id": "6c745b18-ab7b-4a88-8403-50044dfafaea",
+  "prevId": "838fbfe8-6630-4f18-812a-f517499f5dfe",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -39270,6 +39270,326 @@
             "id"
           ],
           "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.company_security_review_settings": {
+      "name": "company_security_review_settings",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "security_reviewer_agent_id": {
+          "name": "security_reviewer_agent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "company_security_review_settings_company_uq": {
+          "name": "company_security_review_settings_company_uq",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "company_security_review_settings_company_id_companies_id_fk": {
+          "name": "company_security_review_settings_company_id_companies_id_fk",
+          "tableFrom": "company_security_review_settings",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "company_security_review_settings_security_reviewer_agent_id_agents_id_fk": {
+          "name": "company_security_review_settings_security_reviewer_agent_id_agents_id_fk",
+          "tableFrom": "company_security_review_settings",
+          "tableTo": "agents",
+          "columnsFrom": [
+            "security_reviewer_agent_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.merge_security_reviews": {
+      "name": "merge_security_reviews",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "approval_id": {
+          "name": "approval_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "review_issue_id": {
+          "name": "review_issue_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "head_commit": {
+          "name": "head_commit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'requested'"
+        },
+        "requested_by_agent_id": {
+          "name": "requested_by_agent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "requested_by_user_id": {
+          "name": "requested_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reviewer_agent_id": {
+          "name": "reviewer_agent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reviewer_user_id": {
+          "name": "reviewer_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "verdict_note": {
+          "name": "verdict_note",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "verdict_comment_url": {
+          "name": "verdict_comment_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "decided_at": {
+          "name": "decided_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_by_run_id": {
+          "name": "created_by_run_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "merge_security_reviews_approval_created_idx": {
+          "name": "merge_security_reviews_approval_created_idx",
+          "columns": [
+            {
+              "expression": "approval_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "merge_security_reviews_company_idx": {
+          "name": "merge_security_reviews_company_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "merge_security_reviews_open_request_uq": {
+          "name": "merge_security_reviews_open_request_uq",
+          "columns": [
+            {
+              "expression": "approval_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "head_commit",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"merge_security_reviews\".\"status\" = 'requested'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "merge_security_reviews_company_id_companies_id_fk": {
+          "name": "merge_security_reviews_company_id_companies_id_fk",
+          "tableFrom": "merge_security_reviews",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "merge_security_reviews_approval_id_approvals_id_fk": {
+          "name": "merge_security_reviews_approval_id_approvals_id_fk",
+          "tableFrom": "merge_security_reviews",
+          "tableTo": "approvals",
+          "columnsFrom": [
+            "approval_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "merge_security_reviews_review_issue_id_issues_id_fk": {
+          "name": "merge_security_reviews_review_issue_id_issues_id_fk",
+          "tableFrom": "merge_security_reviews",
+          "tableTo": "issues",
+          "columnsFrom": [
+            "review_issue_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "merge_security_reviews_requested_by_agent_id_agents_id_fk": {
+          "name": "merge_security_reviews_requested_by_agent_id_agents_id_fk",
+          "tableFrom": "merge_security_reviews",
+          "tableTo": "agents",
+          "columnsFrom": [
+            "requested_by_agent_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "merge_security_reviews_reviewer_agent_id_agents_id_fk": {
+          "name": "merge_security_reviews_reviewer_agent_id_agents_id_fk",
+          "tableFrom": "merge_security_reviews",
+          "tableTo": "agents",
+          "columnsFrom": [
+            "reviewer_agent_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
           "onUpdate": "no action"
         }
       },
