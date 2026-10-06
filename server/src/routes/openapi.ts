@@ -801,6 +801,13 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "GET /api/companies/{companyId}/model-directory/{entryId}",
   "POST /api/companies/{companyId}/model-directory/{entryId}/check",
   "POST /api/companies/{companyId}/model-directory/{entryId}/test",
+  "POST /api/companies/{companyId}/model-directory/{entryId}/probes",
+  "GET /api/companies/{companyId}/model-directory/{entryId}/capabilities",
+  "POST /api/companies/{companyId}/model-directory/{entryId}/reviews",
+  "GET /api/companies/{companyId}/model-directory/{entryId}/reviews",
+  "POST /api/companies/{companyId}/model-directory/{entryId}/reviews/{reviewId}/changes/{changeId}/apply",
+  "POST /api/companies/{companyId}/model-directory/{entryId}/reviews/{reviewId}/changes/{changeId}/decline",
+  "POST /api/companies/{companyId}/model-directory/{entryId}/reviews/{reviewId}/changes/{changeId}/undo",
   "PATCH /api/companies/{companyId}/model-directory/{entryId}",
   "DELETE /api/companies/{companyId}/model-directory/{entryId}",
   "POST /api/companies/{companyId}/model-directory/{entryId}/duplicate",
@@ -6144,6 +6151,62 @@ registerCurrentRoute({
   path: "/api/companies/{companyId}/model-directory/{entryId}/test",
   tags: ["model-directory"],
   summary: "Test button: sends \"Say hi in five words\" and returns the answer, time to first word and total time (thinking on and off when supported). A setup that cannot run returns a plain-English reason and makes no call.",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/{entryId}/probes",
+  tags: ["model-directory"],
+  summary: "Probe set for a local setup: clock tool call, picture-request dry run (nothing is made), empty-reply rate over several runs with thinking on/off, and an everyday-request refusal check. Capped calls, count returned.",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/model-directory/{entryId}/capabilities",
+  tags: ["model-directory"],
+  summary: "Host capabilities for one setup (Ollama /api/show or OpenRouter model info) compared with what Paperclip sends for it",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/{entryId}/reviews",
+  tags: ["model-directory"],
+  summary: "Run the model setup reviewer: reads host capabilities, probes the setup, applies allow-listed fixes that pass a no-worse rerun, and proposes the rest. Never edits keys, addresses, host limits or cost limits.",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/model-directory/{entryId}/reviews",
+  tags: ["model-directory"],
+  summary: "Recent reviewer reports and changes for one setup",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/{entryId}/reviews/{reviewId}/changes/{changeId}/apply",
+  tags: ["model-directory"],
+  summary: "Owner accepts a proposed reviewer change",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/{entryId}/reviews/{reviewId}/changes/{changeId}/decline",
+  tags: ["model-directory"],
+  summary: "Owner declines a proposed reviewer change",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/{entryId}/reviews/{reviewId}/changes/{changeId}/undo",
+  tags: ["model-directory"],
+  summary: "Undo an applied reviewer change; restores the exact earlier state",
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
 });
 

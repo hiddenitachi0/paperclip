@@ -26,6 +26,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { AddIntegrationTokenDialog } from "../components/AddIntegrationTokenDialog";
+import { HuggingFaceConnectDialog } from "../components/HuggingFaceConnectDialog";
 import { DataSourcesSection } from "../components/DataSourcesSection";
 import { PaymentsAndLoginsSection } from "../components/PaymentsAndLoginsSection";
 import { ServiceTokensSection } from "../components/ServiceTokensSection";
@@ -51,7 +52,7 @@ import { WebSearchSection } from "../components/WebSearchSection";
  * test results only.
  */
 
-/** The five provider cards, in the order the design names them. */
+/** The provider cards, in the order the design names them. */
 export const AI_PROVIDER_CARDS: ReadonlyArray<{
   provider: SecretKindProvider;
   label: string;
@@ -81,6 +82,12 @@ export const AI_PROVIDER_CARDS: ReadonlyArray<{
     label: "OpenRouter",
     blurb: "Many models through one account at openrouter.ai.",
     addKind: "openrouter_api_key",
+  },
+  {
+    provider: "huggingface",
+    label: "Hugging Face",
+    blurb: "Thousands of open models through one account at huggingface.co.",
+    addKind: "huggingface_api_key",
   },
   {
     provider: "local",
@@ -423,8 +430,18 @@ export function CompanyConnections() {
       </div>
 
       {canManage && (
+        <HuggingFaceConnectDialog
+          open={addKind === "huggingface_api_key"}
+          onOpenChange={(open) => {
+            if (!open) setAddKind(null);
+          }}
+          companyId={selectedCompanyId}
+          existing={secretsForProvider(secrets, "huggingface")[0] ?? null}
+        />
+      )}
+      {canManage && (
         <AddIntegrationTokenDialog
-          open={addKind !== null}
+          open={addKind !== null && addKind !== "huggingface_api_key"}
           onOpenChange={(open) => {
             if (!open) setAddKind(null);
           }}
