@@ -105,6 +105,7 @@ export {
   type LaneABackupModelConfig,
   type LaneAKeywordRoute,
 } from "./lane-a-models.js";
+export * from "./prompt-cache.js";
 export {
   WEB_SEARCH_BINDING_TARGET_TYPE,
   WEB_SEARCH_KEY_CONFIG_PATH,

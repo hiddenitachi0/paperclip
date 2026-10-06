@@ -4,6 +4,7 @@ export const queryKeys = {
     detail: (id: string) => ["companies", id] as const,
     stats: ["companies", "stats"] as const,
     instructions: (id: string) => ["companies", id, "instructions"] as const,
+    cacheSettings: (id: string) => ["companies", id, "cache-settings"] as const,
     serviceTokens: (id: string) => ["companies", id, "service-tokens"] as const,
     telegramBots: (id: string) => ["companies", id, "telegram-bots"] as const,
     speechSettings: (id: string) => ["companies", id, "speech-settings"] as const,
@@ -377,6 +378,8 @@ export const queryKeys = {
     ["finance-by-kind", companyId, from, to] as const,
   financeEvents: (companyId: string, from?: string, to?: string, limit: number = 100) =>
     ["finance-events", companyId, from, to, limit] as const,
+  usageCacheStatus: (companyId: string) =>
+    ["usage-cache-status", companyId] as const,
   usageWindowSpend: (companyId: string) =>
     ["usage-window-spend", companyId] as const,
   usageQuotaWindows: (companyId: string) =>

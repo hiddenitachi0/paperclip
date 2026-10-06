@@ -2844,6 +2844,7 @@ const costSummaryPaths = [
   "summary", "by-agent", "by-agent-model", "by-provider", "by-source",
   "by-biller", "by-project", "finance-summary", "finance-by-biller",
   "finance-by-kind", "finance-events", "window-spend", "quota-windows",
+  "cache-status",
 ] as const;
 
 for (const segment of costSummaryPaths) {

@@ -315,6 +315,14 @@ export function Costs() {
     staleTime: 10_000,
   });
 
+  const { data: cacheStatusData } = useQuery({
+    queryKey: queryKeys.usageCacheStatus(companyId),
+    queryFn: () => costsApi.cacheStatus(companyId),
+    enabled: !!selectedCompanyId && mainTab === "overview",
+    refetchInterval: 30_000,
+    staleTime: 10_000,
+  });
+
   const { data: weekData } = useQuery({
     queryKey: queryKeys.usageByProvider(companyId, weekRange.from, weekRange.to),
     queryFn: () => costsApi.byProvider(companyId, weekRange.from, weekRange.to),
@@ -882,6 +890,45 @@ export function Costs() {
               </div>
             </>
           )}
+          {cacheStatusData && cacheStatusData.length > 0 ? (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Saved context</CardTitle>
+                <CardDescription>
+                  While an agent's saved context is warm, its next run is cheap. Once it goes cold, the next run pays to rebuild it.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-2">
+                {cacheStatusData.map((row) => (
+                  <div key={row.agentId} className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <Identity name={row.agentName} size="sm" />
+                      <span
+                        className={cn(
+                          "rounded-full px-2 py-0.5 text-xs font-medium",
+                          row.cacheWarm
+                            ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                            : "bg-muted text-muted-foreground",
+                        )}
+                      >
+                        {row.cacheWarm ? "Warm" : "Cold"}
+                      </span>
+                    </div>
+                    <div className="text-right text-xs text-muted-foreground tabular-nums">
+                      <div>
+                        Context size: {row.contextTokens != null ? `${formatTokens(row.contextTokens)} tokens` : "unknown"}
+                      </div>
+                      <div>
+                        Last rebuild: {row.lastRewriteCostCents != null ? formatCents(row.lastRewriteCostCents) : "none yet"}
+                        {" · "}
+                        Rebuilt this week: {formatCents(row.rewritesThisWeekCents)}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+          ) : null}
         </TabsContent>
 
         <TabsContent value="budgets" className="mt-4 space-y-4">
