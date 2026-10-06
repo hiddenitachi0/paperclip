@@ -801,6 +801,8 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "GET /api/companies/{companyId}/model-directory/{entryId}",
   "POST /api/companies/{companyId}/model-directory/{entryId}/check",
   "POST /api/companies/{companyId}/model-directory/{entryId}/test",
+  "POST /api/companies/{companyId}/model-directory/{entryId}/probes",
+  "GET /api/companies/{companyId}/model-directory/{entryId}/capabilities",
   "PATCH /api/companies/{companyId}/model-directory/{entryId}",
   "DELETE /api/companies/{companyId}/model-directory/{entryId}",
   "POST /api/companies/{companyId}/model-directory/{entryId}/duplicate",
@@ -6144,6 +6146,22 @@ registerCurrentRoute({
   path: "/api/companies/{companyId}/model-directory/{entryId}/test",
   tags: ["model-directory"],
   summary: "Test button: sends \"Say hi in five words\" and returns the answer, time to first word and total time (thinking on and off when supported). A setup that cannot run returns a plain-English reason and makes no call.",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/{entryId}/probes",
+  tags: ["model-directory"],
+  summary: "Probe set for a local setup: clock tool call, picture-request dry run (nothing is made), empty-reply rate over several runs with thinking on/off, and an everyday-request refusal check. Capped calls, count returned.",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/model-directory/{entryId}/capabilities",
+  tags: ["model-directory"],
+  summary: "Host capabilities for one setup (Ollama /api/show or OpenRouter model info) compared with what Paperclip sends for it",
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
 });
 

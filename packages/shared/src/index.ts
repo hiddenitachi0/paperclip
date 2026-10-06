@@ -2837,4 +2837,13 @@ export {
   type ModelHealthOverview,
   type ModelTestRun,
   type ModelTestResult,
+  MODEL_PROBE_KINDS,
+  MODEL_PROBE_MAX_CALLS,
+  MODEL_PROBE_EMPTY_REPLY_RUNS,
+  type ModelProbeKind,
+  type ModelProbeResult,
+  type ModelProbeSetResult,
+  type ModelHostEndpoint,
+  type ModelSentSummary,
+  type ModelHostCapabilities,
 } from "./model-health.js";

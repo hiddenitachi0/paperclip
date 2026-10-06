@@ -15,6 +15,7 @@ import {
   type ModelTestRun,
 } from "@paperclipai/shared";
 import { notFound } from "../errors.js";
+import { createModelSetupProbes } from "./model-setup-probes.js";
 
 /**
  * DUR-4419: local-model health, the once-per-outage reminder state, and the
@@ -349,7 +350,15 @@ export function modelHealthService(db: Db, deps: ModelHealthDeps = {}) {
     return { ...base, ran: true, reason: null, runs };
   }
 
-  return { probe: (b: string, m: string) => probeLocalModel(b, m, fetchImpl), record, noteLocalAttempt, claimOutageNotice, claimEveningWarning, checkEntry, overview, checkInUse, testEntry };
+  /** DUR-4557: the reviewer's probe set and host capability fetch for one saved setup (company-scoped lookup). */
+  async function probeEntry(companyId: string, entryId: string) {
+    return createModelSetupProbes(fetchImpl).runProbeSet(await getEntry(companyId, entryId));
+  }
+  async function capabilitiesForEntry(companyId: string, entryId: string, opts: { toolCount?: number | null; systemPromptChars?: number | null } = {}) {
+    return createModelSetupProbes(fetchImpl).fetchHostCapabilities(await getEntry(companyId, entryId), opts);
+  }
+
+  return { probeEntry, capabilitiesForEntry, probe: (b: string, m: string) => probeLocalModel(b, m, fetchImpl), record, noteLocalAttempt, claimOutageNotice, claimEveningWarning, checkEntry, overview, checkInUse, testEntry };
 }
 
 const MODEL_UNAVAILABLE_PATTERN = /model[^.]*(not loaded|not found|does not exist|is not available|unknown)/i;

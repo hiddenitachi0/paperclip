@@ -119,6 +119,19 @@ export function modelDirectoryRoutes(rawDb: Db) {
     res.json(result);
   });
 
+  router.post("/companies/:companyId/model-directory/:entryId/probes", scope(), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const entryId = req.params.entryId as string;
+    const result = await health.probeEntry(companyId, entryId);
+    const entry = await svc.get(companyId, entryId);
+    await audit(req, companyId, "model_directory_entry.probed", entry, { ran: result.ran, callsUsed: result.callsUsed, ok: result.probes.map((p) => p.ok) });
+    res.json(result);
+  });
+
+  router.get("/companies/:companyId/model-directory/:entryId/capabilities", scope(), async (req, res) => {
+    res.json(await health.capabilitiesForEntry(req.params.companyId as string, req.params.entryId as string));
+  });
+
   router.get("/companies/:companyId/model-directory/:entryId", scope(), async (req, res) => {
     res.json(await svc.get(req.params.companyId as string, req.params.entryId as string));
   });
