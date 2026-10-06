@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { agents, companies, createDb } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
-import { MODEL_DIRECTORY_STARTERS } from "@paperclipai/shared";
+import { MODEL_DIRECTORY_STARTERS, modelDirectoryEntryIssue } from "@paperclipai/shared";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { modelDirectoryService, resolveBackupModelsThroughDirectory } from "../services/model-directory.ts";
 
@@ -46,6 +46,15 @@ d("model directory starters and settings import", () => {
     expect((await svc.listStarters(a)).every((s) => s.alreadyAdded)).toBe(true);
     expect((await svc.listStarters(b)).every((s) => !s.alreadyAdded)).toBe(true);
     await expect(svc.addStarters(b, ["nope"], actor)).rejects.toMatchObject({ status: 422 });
+  });
+
+  it("ships tool-capable Hugging Face starters that pass entry validation", () => {
+    const hf = MODEL_DIRECTORY_STARTERS.filter((s) => s.provider === "huggingface");
+    expect(hf.map((s) => s.model)).toEqual(["Qwen/Qwen3-14B:deepinfra", "google/gemma-3-27b-it:deepinfra"]);
+    for (const s of hf) {
+      expect(s.baseUrl).toBeNull();
+      expect(modelDirectoryEntryIssue({ provider: s.provider, model: s.model, baseUrl: s.baseUrl })).toBeNull();
+    }
   });
 
   it("de-duplicates identical manual setups, links agents, and leaves their live settings alone", async () => {

@@ -230,7 +230,7 @@ describe("CompanyConnections", () => {
     expect(container.querySelector('a[href="/company/settings/secrets"]')).not.toBeNull();
     expect(container.querySelector('a[href="/tools"]')).not.toBeNull();
 
-    expect(buttons("Add key")).toHaveLength(5);
+    expect(buttons("Add key")).toHaveLength(6);
     expect(buttons("Test")).toHaveLength(2);
     expect(container.querySelector('[data-testid="connections-read-only-note"]')).toBeNull();
 
