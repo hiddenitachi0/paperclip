@@ -2847,3 +2847,22 @@ export {
   type ModelSentSummary,
   type ModelHostCapabilities,
 } from "./model-health.js";
+export {
+  MODEL_CONVERTER_OPS,
+  TOOL_DESCRIPTION_VARIANTS,
+  OUTPUT_WRAPPERS,
+  modelConverterOpSchema,
+  modelConverterOpListSchema,
+  parseModelConverterOps,
+  modelConverterOpsIssue,
+  applyRequestConverters,
+  applyOutputConverters,
+  resolveConverterRetry,
+  type ModelConverterOpKind,
+  type ModelConverterOp,
+  type ToolDescriptionVariant,
+  type OutputWrapper,
+  type ConverterToolShape,
+  type ConverterCallRequest,
+  type ConverterApplyResult,
+} from "./model-converter-engine.js";
