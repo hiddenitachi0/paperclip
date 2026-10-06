@@ -5,6 +5,9 @@ import {
   modelCannotRunReason,
   normalizeLaneAProviderRouting,
   LANE_A_DEFAULT_MAX_OUTPUT_TOKENS,
+  applyOutputConverters,
+  applyRequestConverters,
+  type ModelConverterOp,
   type ModelHostCapabilities,
   type ModelHostEndpoint,
   type ModelProbeResult,
@@ -58,6 +61,8 @@ const PICTURE_TOOL = {
     parameters: { type: "object", properties: { description: { type: "string" } }, required: ["description"] },
   },
 };
+// Real calls already drop <think> blocks (lane-a), so a reply that is only a <think> block is an empty one.
+const THINK_STRIP: ModelConverterOp = { op: "strip_output_wrapper", wrapper: "think" };
 const REFUSAL_PATTERN = /\b(i can(?:no|')t (?:help|assist|comply)|i(?:'m| am) (?:sorry|unable)|i cannot (?:help|assist|comply|fulfil)|i won't be able to)\b/i;
 
 interface Reply {
@@ -95,15 +100,34 @@ export function sentSummaryFor(entry: ProbeEntry, opts: { toolCount?: number | n
 }
 
 export function createModelSetupProbes(fetchImpl: FetchLike = fetch) {
-  async function chat(entry: ProbeEntry, thinking: ModelTestRun["thinking"], user: string, tools?: unknown[]): Promise<Reply> {
+  async function chat(entry: ProbeEntry, thinking: ModelTestRun["thinking"], user: string, tools?: unknown[], ops: readonly ModelConverterOp[] = []): Promise<Reply> {
+    // DUR-4558: a proposed converter list reshapes the probe request/output through the same engine real calls use.
+    type ProbeTool = { function: { name: string; description: string } };
+    const offered = (tools ?? []) as ProbeTool[];
+    const { request } = applyRequestConverters(
+      {
+        params: thinking === "off" ? { reasoning_effort: "none" } : {},
+        tools: offered.map((t) => ({ name: t.function.name, description: t.function.description })),
+        systemPrompt: "",
+        textToolCallParsingEnabled: false,
+      },
+      ops,
+    );
+    const keptTools = request.tools.flatMap((ct) => {
+      const orig = offered.find((t) => t.function.name === ct.name);
+      return orig ? [{ ...orig, function: { ...orig.function, description: ct.description } }] : [];
+    });
+    const messages: Array<{ role: string; content: string }> = [];
+    if (request.systemPrompt.trim()) messages.push({ role: "system", content: request.systemPrompt });
+    messages.push({ role: "user", content: user });
     const body: Record<string, unknown> = {
       model: entry.model,
       stream: false,
       max_tokens: PROBE_MAX_TOKENS,
-      messages: [{ role: "user", content: user }],
+      messages,
+      ...request.params,
     };
-    if (tools) body.tools = tools;
-    if (thinking === "off") body.reasoning_effort = "none";
+    if (tools && keptTools.length > 0) body.tools = keptTools;
     try {
       const res = await fetchImpl(chatUrl(entry.baseUrl!), {
         method: "POST",
@@ -113,7 +137,7 @@ export function createModelSetupProbes(fetchImpl: FetchLike = fetch) {
       });
       if (!res.ok) return { ok: false, text: "", toolCalls: [] };
       const msg = ((await res.json()) as { choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown } }> }).choices?.[0]?.message;
-      const text = typeof msg?.content === "string" ? msg.content.trim() : "";
+      const text = typeof msg?.content === "string" ? applyOutputConverters(msg.content, [...ops, THINK_STRIP]).trim() : "";
       const calls = Array.isArray(msg?.tool_calls) ? (msg!.tool_calls as Array<{ function?: { name?: string; arguments?: string } }>) : [];
       return {
         ok: true,
@@ -126,7 +150,7 @@ export function createModelSetupProbes(fetchImpl: FetchLike = fetch) {
   }
 
   /** Runs the four probes against one local entry. Never throws; never exceeds MODEL_PROBE_MAX_CALLS. */
-  async function runProbeSet(entry: ProbeEntry): Promise<ModelProbeSetResult> {
+  async function runProbeSet(entry: ProbeEntry, ops: readonly ModelConverterOp[] = [], opts: { onlyThinking?: ModelTestRun["thinking"] } = {}): Promise<ModelProbeSetResult> {
     const base = { entryId: entry.id, callsMax: MODEL_PROBE_MAX_CALLS };
     const cannot = modelCannotRunReason(entry);
     if (cannot) return { ...base, ran: false, reason: cannot, probes: [], callsUsed: 0 };
@@ -134,9 +158,9 @@ export function createModelSetupProbes(fetchImpl: FetchLike = fetch) {
       return { ...base, ran: false, reason: "This model needs a key, and saved setups never hold one. Probe it from an agent that uses it.", probes: [], callsUsed: 0 };
     }
     let calls = 0;
-    const call: typeof chat = (...args) => {
+    const call = (e: ProbeEntry, t: ModelTestRun["thinking"], u: string, tl?: unknown[]) => {
       calls += 1;
-      return chat(...args);
+      return chat(e, t, u, tl, ops);
     };
     const probes: ModelProbeResult[] = [];
 
@@ -160,7 +184,8 @@ export function createModelSetupProbes(fetchImpl: FetchLike = fetch) {
           : "It didn't ask for a picture; it answered in words (dry run, nothing was made).",
     });
 
-    const modes = thinkingModes(entry);
+    // opts.onlyThinking: rerun only the mode a proposed default would actually use.
+    const modes = opts.onlyThinking && thinkingModes(entry).includes(opts.onlyThinking) ? [opts.onlyThinking] : thinkingModes(entry);
     const emptyReplies: NonNullable<ModelProbeResult["emptyReplies"]> = [];
     for (const mode of modes) {
       let empty = 0;
