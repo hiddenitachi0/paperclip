@@ -91,7 +91,7 @@ describe("securityReviewService.computeState (DUR-4566)", () => {
   it("reads as not_requested with no review history, when a reviewer is configured", async () => {
     const { securityReviewService } = await import("./security-review.js");
     const db = makeFakeDb({
-      rowsByTable: new Map([[companySecurityReviewSettings, [{ securityReviewerAgentId: REVIEWER_AGENT_ID }]]]),
+      rowsByTable: new Map<unknown, unknown[]>([[companySecurityReviewSettings, [{ securityReviewerAgentId: REVIEWER_AGENT_ID }]]]),
     });
     const state = await securityReviewService(db).computeState(mergeApproval());
     expect(state.state).toBe("not_requested");
@@ -100,7 +100,7 @@ describe("securityReviewService.computeState (DUR-4566)", () => {
 
   it("reads as no_reviewer_configured with no review history and no reviewer set", async () => {
     const { securityReviewService } = await import("./security-review.js");
-    const db = makeFakeDb({ rowsByTable: new Map([[companySecurityReviewSettings, []]]) });
+    const db = makeFakeDb({ rowsByTable: new Map<unknown, unknown[]>([[companySecurityReviewSettings, []]]) });
     const state = await securityReviewService(db).computeState(mergeApproval());
     expect(state.state).toBe("no_reviewer_configured");
   });
@@ -108,7 +108,7 @@ describe("securityReviewService.computeState (DUR-4566)", () => {
   it("reads as passed when the newest review row matches the approval's current head commit", async () => {
     const { securityReviewService } = await import("./security-review.js");
     const db = makeFakeDb({
-      rowsByTable: new Map([
+      rowsByTable: new Map<unknown, unknown[]>([
         [
           mergeSecurityReviews,
           [{ id: "review-1", status: "passed", headCommit: "head-a", reviewIssueId: null, verdictNote: "ok", verdictCommentUrl: null, decidedAt: new Date("2026-01-01") }],
@@ -122,7 +122,7 @@ describe("securityReviewService.computeState (DUR-4566)", () => {
   it("a later push (new head commit) turns a prior pass out_of_date, without losing the old verdict", async () => {
     const { securityReviewService } = await import("./security-review.js");
     const db = makeFakeDb({
-      rowsByTable: new Map([
+      rowsByTable: new Map<unknown, unknown[]>([
         [
           mergeSecurityReviews,
           [{ id: "review-1", status: "passed", headCommit: "head-a", reviewIssueId: null, verdictNote: "ok", verdictCommentUrl: null, decidedAt: new Date("2026-01-01") }],
@@ -139,7 +139,7 @@ describe("securityReviewService.computeState (DUR-4566)", () => {
   it("an open (in-progress) review targeting a now-stale head still reads as in_progress, not out_of_date", async () => {
     const { securityReviewService } = await import("./security-review.js");
     const db = makeFakeDb({
-      rowsByTable: new Map([[mergeSecurityReviews, [{ id: "review-1", status: "requested", headCommit: "head-a", reviewIssueId: null }]]]),
+      rowsByTable: new Map<unknown, unknown[]>([[mergeSecurityReviews, [{ id: "review-1", status: "requested", headCommit: "head-a", reviewIssueId: null }]]]),
     });
     const state = await securityReviewService(db).computeState(mergeApproval({ payload: { kind: "merge_pr", commit: "head-b" } }));
     expect(state.state).toBe("in_progress");
@@ -147,7 +147,7 @@ describe("securityReviewService.computeState (DUR-4566)", () => {
 
   it("every non-merge_pr approval reads as not_requested with no head commit", async () => {
     const { securityReviewService } = await import("./security-review.js");
-    const db = makeFakeDb({ rowsByTable: new Map() });
+    const db = makeFakeDb({ rowsByTable: new Map<unknown, unknown[]>() });
     const state = await securityReviewService(db).computeState(mergeApproval({ payload: { kind: "hire_agent" } }));
     expect(state).toEqual(
       expect.objectContaining({ state: "not_requested", headCommit: null }),
@@ -159,7 +159,7 @@ describe("securityReviewService.requestReview (DUR-4566 item 2, single-flight)",
   it("creates a review task assigned to the configured reviewer and links it to the approval", async () => {
     const { securityReviewService } = await import("./security-review.js");
     const db = makeFakeDb({
-      rowsByTable: new Map([
+      rowsByTable: new Map<unknown, unknown[]>([
         [approvals, [mergeApproval()]],
         [companySecurityReviewSettings, [{ securityReviewerAgentId: REVIEWER_AGENT_ID }]],
         [mergeSecurityReviews, []],
@@ -183,7 +183,7 @@ describe("securityReviewService.requestReview (DUR-4566 item 2, single-flight)",
   it("refuses when no reviewer agent is configured for the company", async () => {
     const { securityReviewService } = await import("./security-review.js");
     const db = makeFakeDb({
-      rowsByTable: new Map([
+      rowsByTable: new Map<unknown, unknown[]>([
         [approvals, [mergeApproval()]],
         [companySecurityReviewSettings, []],
       ]),
@@ -197,7 +197,7 @@ describe("securityReviewService.requestReview (DUR-4566 item 2, single-flight)",
   it("is single-flight: a second request for the same open head commit does not create a second task", async () => {
     const { securityReviewService } = await import("./security-review.js");
     const db = makeFakeDb({
-      rowsByTable: new Map([
+      rowsByTable: new Map<unknown, unknown[]>([
         [approvals, [mergeApproval()]],
         [companySecurityReviewSettings, [{ securityReviewerAgentId: REVIEWER_AGENT_ID }]],
         [mergeSecurityReviews, [{ id: "review-1", status: "requested", headCommit: "head-a", reviewIssueId: "review-issue-1" }]],
@@ -213,7 +213,7 @@ describe("securityReviewService.requestReview (DUR-4566 item 2, single-flight)",
   it("treats a unique-constraint race on insert the same as an already-open request", async () => {
     const { securityReviewService } = await import("./security-review.js");
     const db = makeFakeDb({
-      rowsByTable: new Map([
+      rowsByTable: new Map<unknown, unknown[]>([
         [approvals, [mergeApproval()]],
         [companySecurityReviewSettings, [{ securityReviewerAgentId: REVIEWER_AGENT_ID }]],
         [mergeSecurityReviews, []],
@@ -282,7 +282,7 @@ describe("securityReviewService.recordVerdict (DUR-4566 item 3, authorization)",
   it("refuses the approval's own requester, even if it is the configured reviewer agent", async () => {
     const { securityReviewService } = await import("./security-review.js");
     const db = makeFakeDb({
-      rowsByTable: new Map([
+      rowsByTable: new Map<unknown, unknown[]>([
         [approvals, [mergeApproval({ requestedByAgentId: REVIEWER_AGENT_ID })]],
         [companySecurityReviewSettings, [{ securityReviewerAgentId: REVIEWER_AGENT_ID }]],
         [mergeSecurityReviews, []],
@@ -301,7 +301,7 @@ describe("securityReviewService.recordVerdict (DUR-4566 item 3, authorization)",
   it("refuses a reviewer agent that belongs to a different company (cross-company refused)", async () => {
     const { securityReviewService } = await import("./security-review.js");
     const db = makeFakeDb({
-      rowsByTable: new Map([
+      rowsByTable: new Map<unknown, unknown[]>([
         [approvals, [mergeApproval({ companyId: COMPANY_A })]],
         [companySecurityReviewSettings, [{ securityReviewerAgentId: REVIEWER_AGENT_ID }]],
         [mergeSecurityReviews, []],
