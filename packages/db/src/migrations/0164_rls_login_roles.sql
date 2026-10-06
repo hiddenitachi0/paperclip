@@ -163,6 +163,10 @@ DECLARE
     'cloud_upstream_runs',
     'companies',
     'company_agent_roles',
+    -- DUR-4471 cache-aware wake scheduling. Created, granted on and policed
+    -- in 0228_company_cache_settings.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'company_cache_settings',
     -- DUR-4142. Created, granted on and policed in
     -- 0207_company_job_settings.sql; listed here so the login-role lists
     -- match the schema, as for the tables above.
@@ -473,6 +477,10 @@ DECLARE
     'cloud_upstream_connections',
     'cloud_upstream_runs',
     'company_agent_roles',
+    -- DUR-4471 cache-aware wake scheduling. Created, granted on and policed
+    -- in 0228_company_cache_settings.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'company_cache_settings',
     -- DUR-4142. Created, granted on and policed in
     -- 0207_company_job_settings.sql; listed here so the login-role lists
     -- match the schema, as for the tables above.
