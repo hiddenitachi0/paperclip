@@ -1,6 +1,6 @@
 {
-  "id": "838fbfe8-6630-4f18-812a-f517499f5dfe",
-  "prevId": "3e81dcfa-fce8-48b7-a14c-3f5c23412b21",
+  "id": "2220f1cd-a2eb-48ec-ab4b-105d9ce2bfba",
+  "prevId": "838fbfe8-6630-4f18-812a-f517499f5dfe",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -27285,6 +27285,141 @@
           "value": "\"model_directory_entries\".\"default_thinking\" IS NULL OR \"model_directory_entries\".\"default_thinking\" IN ('on', 'off')"
         }
       },
+      "isRLSEnabled": false
+    },
+    "public.model_setup_reviews": {
+      "name": "model_setup_reviews",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "entry_id": {
+          "name": "entry_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "trigger": {
+          "name": "trigger",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'manual'"
+        },
+        "report": {
+          "name": "report",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "changes": {
+          "name": "changes",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "created_by_user_id": {
+          "name": "created_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "model_setup_reviews_entry_idx": {
+          "name": "model_setup_reviews_entry_idx",
+          "columns": [
+            {
+              "expression": "entry_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "model_setup_reviews_company_idx": {
+          "name": "model_setup_reviews_company_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "model_setup_reviews_company_id_companies_id_fk": {
+          "name": "model_setup_reviews_company_id_companies_id_fk",
+          "tableFrom": "model_setup_reviews",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "model_setup_reviews_entry_id_model_directory_entries_id_fk": {
+          "name": "model_setup_reviews_entry_id_model_directory_entries_id_fk",
+          "tableFrom": "model_setup_reviews",
+          "tableTo": "model_directory_entries",
+          "columnsFrom": [
+            "entry_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.morning_report_outbox": {
