@@ -333,8 +333,11 @@ export function Costs() {
 
   // Retired agents are always cold with no data, so keep them out of the panel.
   const savedContextRows = useMemo(() => {
-    const retired = new Set((allAgents ?? []).filter((a) => a.status === "terminated").map((a) => a.id));
-    return (cacheStatusData ?? []).filter((row) => !retired.has(row.agentId));
+    // The agents list leaves out terminated agents, so keep only rows for agents
+    // it still returns (and drop any it marks terminated, in case that changes).
+    if (!allAgents) return cacheStatusData ?? [];
+    const current = new Set(allAgents.filter((a) => a.status !== "terminated").map((a) => a.id));
+    return (cacheStatusData ?? []).filter((row) => current.has(row.agentId));
   }, [allAgents, cacheStatusData]);
 
   const { data: weekData } = useQuery({
