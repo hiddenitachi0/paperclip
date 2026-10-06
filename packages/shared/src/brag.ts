@@ -76,7 +76,7 @@ export const bragJobOptionsSchema = z
   .strict();
 export type BragJobOptionsInput = z.infer<typeof bragJobOptionsSchema>;
 
-export const createBragJobSchema = bragJobOptionsSchema.extend({ projectId: z.string().uuid() }).strict();
+export const createBragJobSchema = bragJobOptionsSchema.extend({ projectId: z.string().uuid(), issueId: z.string().uuid().optional() }).strict();
 export type CreateBragJobInput = z.infer<typeof createBragJobSchema>;
 
 export const bragEstimateSchema = z

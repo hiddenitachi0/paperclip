@@ -1,6 +1,6 @@
 import { and, asc, desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { bragJobs, bragScenes, projectWorkspaces, projects, withCompanyScope } from "@paperclipai/db";
+import { bragJobs, bragScenes, issues as issuesTable, projectWorkspaces, projects, withCompanyScope } from "@paperclipai/db";
 import {
   BRAG_BILLING_CODE,
   bragSceneCount,
@@ -42,7 +42,7 @@ export interface BragServiceDeps {
   loadSource?: (job: typeof bragJobs.$inferSelect, project: { name: string; workspaceCwd: string | null }) => Promise<BragSourceMaterial>;
   stitch?: (clips: Buffer[]) => Promise<StitchResult>;
   /** Persists bytes and returns the stored file id. Defaults to company storage + a Files-page row (same as Media Studio direct). */
-  saveFile?: (input: { companyId: string; actor: BragActor; filename: string; contentType: string; body: Buffer }) => Promise<{ id: string }>;
+  saveFile?: (input: { companyId: string; actor: BragActor; issueId?: string | null; filename: string; contentType: string; body: Buffer }) => Promise<{ id: string }>;
 }
 
 const SECONDS_PER_SCENE_CLIP = 4;
@@ -106,7 +106,12 @@ export function bragService(db: Db, deps: BragServiceDeps = {}) {
     return readWorkspaceMaterial(project.workspaceCwd, project.name);
   }
 
-  async function defaultSaveFile(input: { companyId: string; actor: BragActor; filename: string; contentType: string; body: Buffer }) {
+  /**
+   * Persists the object once, then creates exactly one asset row for it:
+   * an issue attachment when an issueId is present, else a company file.
+   * Two rows for one object would violate assets_company_object_key_uq.
+   */
+  async function defaultSaveFile(input: { companyId: string; actor: BragActor; issueId?: string | null; filename: string; contentType: string; body: Buffer }) {
     const stored = await getStorageService().putFile({
       companyId: input.companyId,
       namespace: "brag",
@@ -114,8 +119,7 @@ export function bragService(db: Db, deps: BragServiceDeps = {}) {
       contentType: input.contentType,
       body: input.body,
     });
-    return issues.createCompanyFile({
-      companyId: input.companyId,
+    const common = {
       provider: stored.provider,
       objectKey: stored.objectKey,
       contentType: stored.contentType,
@@ -124,7 +128,9 @@ export function bragService(db: Db, deps: BragServiceDeps = {}) {
       originalFilename: stored.originalFilename,
       createdByAgentId: input.actor.agentId ?? null,
       createdByUserId: input.actor.userId,
-    });
+    };
+    if (input.issueId) return issues.createAttachment({ issueId: input.issueId, ...common });
+    return issues.createCompanyFile({ companyId: input.companyId, ...common });
   }
 
   return {
@@ -137,6 +143,12 @@ export function bragService(db: Db, deps: BragServiceDeps = {}) {
         tx.select({ id: projects.id }).from(projects).where(and(eq(projects.id, input.projectId), eq(projects.companyId, companyId))).then((r) => r[0] ?? null),
       );
       if (!project) throw notFound("Project not found");
+      if (input.issueId) {
+        const issue = await withCompanyScope(db, companyId, (tx) =>
+          tx.select({ id: issuesTable.id }).from(issuesTable).where(and(eq(issuesTable.id, input.issueId!), eq(issuesTable.companyId, companyId))).then((r) => r[0] ?? null),
+        );
+        if (!issue) throw notFound("Task not found");
+      }
       const estimate = estimateBragCostCents({ lengthSeconds: input.lengthSeconds, music: input.music });
       const job = await withCompanyScope(db, companyId, (tx) =>
         tx
@@ -151,6 +163,7 @@ export function bragService(db: Db, deps: BragServiceDeps = {}) {
             lengthSeconds: input.lengthSeconds,
             music: input.music,
             note: input.note ? redactForScreen(input.note) : null,
+            options: { issueId: input.issueId ?? null },
             estimatedCostCents: estimate.estimatedCostCents,
             createdByAgentId: actor.agentId ?? null,
             createdByUserId: actor.userId,
@@ -288,8 +301,9 @@ export function bragService(db: Db, deps: BragServiceDeps = {}) {
           clips.push(await capturer.makeClip({ still, seconds: SECONDS_PER_SCENE_CLIP, format: job.format as BragFormat }));
         }
         const stitched = await (deps.stitch ?? ((c: Buffer[]) => stitchClipsWithTransitions(c.map((buffer, i) => ({ buffer, transitionIn: i === 0 ? "cut" as const : "fade" as const, transitionDurationMs: 400 })))))(clips);
-        const video = await (deps.saveFile ?? defaultSaveFile)({ companyId, actor, filename: "brag.mp4", contentType: "video/mp4", body: stitched.buffer });
-        const posterFile = await (deps.saveFile ?? defaultSaveFile)({ companyId, actor, filename: "brag-poster.png", contentType: "image/png", body: poster! });
+        const attachIssueId = ((job.options ?? {}) as { issueId?: string | null }).issueId ?? null;
+        const video = await (deps.saveFile ?? defaultSaveFile)({ companyId, actor, issueId: attachIssueId, filename: "brag.mp4", contentType: "video/mp4", body: stitched.buffer });
+        const posterFile = await (deps.saveFile ?? defaultSaveFile)({ companyId, actor, issueId: attachIssueId, filename: "brag-poster.png", contentType: "image/png", body: poster! });
         const shareCopy = inScenes.map((s) => s.description).filter(Boolean).slice(0, 3).join(" — ");
         await withCompanyScope(db, companyId, (tx) =>
           tx.update(bragJobs).set({

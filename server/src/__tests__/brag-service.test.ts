@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { bragJobs, bragScenes, companies, createDb, projects } from "@paperclipai/db";
+import { bragJobs, bragScenes, companies, createDb, issues, projects } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
 const store = new Map<string, Buffer>();
@@ -29,7 +29,7 @@ d("bragService gate (DUR-4520)", () => {
   let db!: ReturnType<typeof createDb>;
   let companyId: string;
   let projectId: string;
-  const makeCalls = { clips: 0, saved: [] as string[] };
+  const makeCalls = { clips: 0, saved: [] as string[], issueIds: [] as Array<string | null | undefined> };
   let svc!: ReturnType<typeof bragService>;
 
   beforeAll(async () => {
@@ -47,7 +47,7 @@ d("bragService gate (DUR-4520)", () => {
       },
       loadSource: async () => ({ kind: "website", title: "Acme", snippets: ["One great thing", "Another great thing"], skipped: [] }),
       stitch: async (clips) => ({ buffer: Buffer.concat(clips), contentType: "video/mp4" }),
-      saveFile: async ({ filename }) => { makeCalls.saved.push(filename); return { id: randomUUID() }; },
+      saveFile: async ({ filename, issueId }) => { makeCalls.saved.push(filename); makeCalls.issueIds.push(issueId); return { id: randomUUID() }; },
     });
   }, 120_000);
 
@@ -89,6 +89,21 @@ d("bragService gate (DUR-4520)", () => {
     await expect(svc.getJob(randomUUID(), job.id)).rejects.toThrow(/not found/i);
     await db.delete(bragScenes).where(eq(bragScenes.jobId, job.id));
     await db.delete(bragJobs).where(eq(bragJobs.id, job.id));
+  });
+
+  it("refuses to attach to a task that is not in this company", async () => {
+    await expect(svc.createJob(companyId, ACTOR, { projectId, issueId: randomUUID(), format: "square", lengthSeconds: 8, music: false } as never)).rejects.toThrow(/task not found/i);
+  });
+
+  it("passes the task id through to every saved file", async () => {
+    const issueId = randomUUID();
+    await db.insert(issues).values({ id: issueId, companyId, title: "Launch", status: "todo" } as never);
+    const job = await svc.createJob(companyId, ACTOR, { projectId, issueId, format: "square", lengthSeconds: 8, music: false } as never);
+    const { scenes } = await svc.planJob(companyId, job.id, ACTOR);
+    for (const s of scenes) await svc.updateScene(companyId, job.id, s.id, { action: "approve" });
+    makeCalls.issueIds.length = 0;
+    await svc.render(companyId, job.id, ACTOR);
+    expect(makeCalls.issueIds).toEqual([issueId, issueId]);
   });
 
   it("refuses to create a job for a project in another company", async () => {
