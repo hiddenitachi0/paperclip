@@ -8,6 +8,7 @@ import {
   type ComposeMailDraftInput,
   type CreateMailAccountInput,
   type MailMessageFolder,
+  type MailUrgencySummary,
   type UpdateMailAccountInput,
   type UpdateMailDraftInput,
 } from "@paperclipai/shared";
@@ -22,6 +23,7 @@ import {
 import { sendAccountMail, type MailAccountSmtpConnectionConfig } from "./mail-account-smtp-client.js";
 import { privateAccessService } from "./private-access.js";
 import { secretService } from "./secrets.js";
+import { mailUrgencyService, type MailUrgencyDeps, type MailUrgencyService } from "./mail-urgency.js";
 
 /**
  * DUR-4194: per-person mail accounts -- a real IMAP/SMTP mailbox, read,
@@ -110,6 +112,8 @@ export interface MailMessageSummary {
   isRead: boolean;
   isDraft: boolean;
   aiDrafted: boolean;
+  /** Urgency triage result (DUR-4573); null for mail the pipeline never classified. */
+  urgency?: MailUrgencySummary | null;
   receivedAt: string | null;
   sentAt: string | null;
   createdAt: string;
@@ -129,6 +133,9 @@ export interface MailAccountServiceDeps {
     maxMessages: number,
   ) => Promise<FetchedAccountMailMessage[]>;
   sendMail?: typeof sendAccountMail;
+  /** Urgency triage (DUR-4573); defaults to the real service with the real classifier. */
+  urgency?: MailUrgencyService;
+  urgencyClassifier?: MailUrgencyDeps["classifier"];
 }
 
 function iso(date: Date | null | undefined): string | null {
@@ -192,6 +199,30 @@ export function mailAccountsService(db: Db, deps: MailAccountServiceDeps = {}) {
   const fetchMessages = deps.fetchMessages ?? fetchNewAccountMailMessages;
   const sendMail = deps.sendMail ?? sendAccountMail;
   const nowOf = () => deps.now?.() ?? new Date();
+  const urgency =
+    deps.urgency ??
+    mailUrgencyService(db, {
+      classifier: deps.urgencyClassifier,
+      now: deps.now,
+      // The PA agent may only ever draft (createDraft); there is no send path here.
+      createReplyDraft: async (account, message, body) => {
+        if (!account.paAgentId) return;
+        await createDraft(
+          account.companyId,
+          account.id,
+          {
+            toAddresses: [message.fromAddress],
+            ccAddresses: [],
+            subject: /^re:/i.test(message.subject) ? message.subject : `Re: ${message.subject}`,
+            bodyText: body,
+            bodyHtml: null,
+            aiDrafted: true,
+            inReplyToMessageId: message.id,
+          },
+          { type: "agent", userId: null, agentId: account.paAgentId, isCompanyOwnerOrAdmin: false },
+        );
+      },
+    });
 
   // ─── Reading accounts ──────────────────────────────────────────────────────
 
@@ -488,7 +519,8 @@ export function mailAccountsService(db: Db, deps: MailAccountServiceDeps = {}) {
       .where(and(...conditions))
       .orderBy(desc(mailMessages.createdAt))
       .limit(normalizeLimit(opts.limit));
-    return rows.map(toMessageSummary);
+    const urgencies = await urgency.summariesFor(rows.map((r) => r.id));
+    return rows.map((r) => ({ ...toMessageSummary(r), urgency: urgencies.get(r.id) ?? null }));
   }
 
   async function listMessages(
@@ -535,7 +567,22 @@ export function mailAccountsService(db: Db, deps: MailAccountServiceDeps = {}) {
       await db.update(mailMessages).set({ isRead: true, updatedAt: nowOf() }).where(eq(mailMessages.id, row.id));
       row.isRead = true;
     }
-    return toMessageSummary(row);
+    const urgencies = await urgency.summariesFor([row.id]);
+    return { ...toMessageSummary(row), urgency: urgencies.get(row.id) ?? null };
+  }
+
+  /** Practice-mode "mark right/wrong" on a classification: the mailbox's owner only, as a board actor. */
+  async function setUrgencyFeedback(
+    companyId: string,
+    accountId: string,
+    messageId: string,
+    feedback: "correct" | "incorrect" | null,
+    actor: MailAccountActor,
+  ): Promise<MailUrgencySummary> {
+    const accountRow = await getAccountRow(companyId, accountId);
+    if (!isOwner(actor, accountRow)) throw forbidden("Only this mailbox's owner can mark a classification right or wrong.");
+    await getMessageRow(companyId, accountId, messageId);
+    return urgency.setFeedback(companyId, messageId, feedback);
   }
 
   /**
@@ -833,8 +880,12 @@ export function mailAccountsService(db: Db, deps: MailAccountServiceDeps = {}) {
       .where(eq(mailAccounts.id, row.id));
   }
 
-  async function insertFetchedMessage(row: MailAccountRow, message: FetchedAccountMailMessage, now: Date): Promise<void> {
-    await db
+  async function insertFetchedMessage(
+    row: MailAccountRow,
+    message: FetchedAccountMailMessage,
+    now: Date,
+  ): Promise<MailMessageRow | null> {
+    const [inserted] = await db
       .insert(mailMessages)
       .values({
         companyId: row.companyId,
@@ -854,7 +905,9 @@ export function mailAccountsService(db: Db, deps: MailAccountServiceDeps = {}) {
         createdAt: now,
         updatedAt: now,
       })
-      .onConflictDoNothing({ target: [mailMessages.accountId, mailMessages.messageUid] });
+      .onConflictDoNothing({ target: [mailMessages.accountId, mailMessages.messageUid] })
+      .returning();
+    return inserted ?? null;
   }
 
   async function tickAccount(row: MailAccountRow, now: Date): Promise<MailAccountTickResult> {
@@ -899,7 +952,15 @@ export function mailAccountsService(db: Db, deps: MailAccountServiceDeps = {}) {
     if (messages.length > 0) {
       for (const message of messages) {
         try {
-          await insertFetchedMessage(row, message, now);
+          const stored = await insertFetchedMessage(row, message, now);
+          if (stored) {
+            // Urgency triage (DUR-4573). A failure here never blocks sync or loses the stored message.
+            await urgency
+              .processInbound(row, stored, [...message.to, ...message.cc, ...(message.deliveredTo ?? [])])
+              .catch((err) => {
+                logger.error({ err, accountId: row.id }, "mail-accounts: urgency triage failed for a message");
+              });
+          }
         } catch (err) {
           result.errors += 1;
           logger.error({ err, accountId: row.id, uid: message.uid }, "mail-accounts: failed to store a synced message");
@@ -964,6 +1025,9 @@ export function mailAccountsService(db: Db, deps: MailAccountServiceDeps = {}) {
     updateDraft,
     removeDraft,
     sendDraft,
+    setUrgencyFeedback,
+    urgencyOutbox: urgency.outbox,
+    urgencyAck: urgency.ack,
     tick,
   };
 }
