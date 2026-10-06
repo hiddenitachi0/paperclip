@@ -75,7 +75,7 @@ import {
 import { trackAgentTaskCompleted } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
 import type { StorageService } from "../storage/types.js";
-import { getOrCreateThumbnail, isThumbnailableContentType } from "../services/attachment-thumbnail.js";
+import { getOrCreateThumbnail, isThumbnailableContentType, thumbnailObjectKey } from "../services/attachment-thumbnail.js";
 import { validate } from "../middleware/validate.js";
 import * as serviceIndex from "../services/index.js";
 import {
@@ -9821,6 +9821,12 @@ export function issueRoutes(
       await storage.deleteObject(attachment.companyId, attachment.objectKey);
     } catch (err) {
       logger.warn({ err, attachmentId }, "storage delete failed while removing attachment");
+    }
+    // The cached picture thumbnail is a copy of the file; remove it too (not-found is fine).
+    try {
+      await storage.deleteObject(attachment.companyId, thumbnailObjectKey(attachment.objectKey));
+    } catch (err) {
+      logger.warn({ err, attachmentId }, "storage delete failed while removing attachment thumbnail");
     }
 
     const removed = await svc.removeAttachment(attachmentId);

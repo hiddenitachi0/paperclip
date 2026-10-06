@@ -16,6 +16,7 @@ const mockIssueService = vi.hoisted(() => ({
   getByIdentifier: vi.fn(),
   createAttachment: vi.fn(),
   getAttachmentById: vi.fn(),
+  removeAttachment: vi.fn(),
 }));
 const mockCompanyService = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -567,6 +568,21 @@ describe("issue attachment routes", () => {
     expect(second.status).toBe(200);
     expect(second.body.equals(first.body)).toBe(true);
     expect(storage.putObjectAt).toHaveBeenCalledTimes(1);
+  });
+
+  it("deletes the cached thumbnail along with the attachment object", async () => {
+    const storage = createStorageService();
+    const attachment = makeAttachment("image/png", "big.png");
+    mockIssueService.getAttachmentById.mockResolvedValue(attachment);
+    mockIssueService.getById.mockResolvedValue({ id: attachment.issueId, companyId: attachment.companyId });
+    mockIssueService.removeAttachment.mockResolvedValue(attachment);
+
+    const app = await createApp(storage);
+    const res = await request(app).delete("/api/attachments/attachment-1");
+
+    expect(res.status).toBe(200);
+    expect(storage.deleteObject).toHaveBeenCalledWith(attachment.companyId, attachment.objectKey);
+    expect(storage.deleteObject).toHaveBeenCalledWith(attachment.companyId, `${attachment.objectKey}.thumb256.webp`);
   });
 
   it("rejects cross-company thumbnail reads like /content", async () => {
