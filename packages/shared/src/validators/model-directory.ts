@@ -121,6 +121,7 @@ export interface ModelDirectoryEntry {
 // for Paperclip is the server itself). No key is part of a starter.
 
 export const MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS = "http://100.124.232.68:11434/v1";
+const HUGGINGFACE_NOTE = "Tool-capable on the DeepInfra host. Needs a Hugging Face token on the agent.";
 const LOCAL_NOTE = "Needs your PC switched on, with Ollama and Tailscale running.";
 
 export interface ModelDirectoryStarter {
@@ -179,6 +180,24 @@ export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
     baseUrl: null,
     defaultThinking: null,
     note: "A good cloud backup for local models. Needs an OpenRouter key on the agent.",
+  },
+  {
+    id: "huggingface-qwen3-14b",
+    name: "Qwen3 14B (Hugging Face)",
+    provider: "huggingface",
+    model: "Qwen/Qwen3-14B:deepinfra",
+    baseUrl: null,
+    defaultThinking: null,
+    note: HUGGINGFACE_NOTE,
+  },
+  {
+    id: "huggingface-gemma-3-27b",
+    name: "Gemma 3 27B (Hugging Face)",
+    provider: "huggingface",
+    model: "google/gemma-3-27b-it:deepinfra",
+    baseUrl: null,
+    defaultThinking: null,
+    note: HUGGINGFACE_NOTE,
   },
 ];
 
