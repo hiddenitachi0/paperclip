@@ -1949,11 +1949,20 @@ def notify_mail_urgency_alerts(state, bots):
         if not isinstance(items, list) or not items:
             continue
         reports_to, names, roles = fetch_org(company_id)
-        bot = company_notice_bot(cbots, roles)
-        if bot is None:
-            continue
+        default_bot = company_notice_bot(cbots, roles)
+        bots_by_agent = {b["agentId"]: b for b in cbots}
         for it in items:
             if not isinstance(it, dict):
+                continue
+            # The mailbox's own assistant speaks for its mail. If the mailbox
+            # has an assistant but she has no bot yet, the alert waits (it is
+            # never sent from another agent's bot, e.g. Fork Lead's).
+            pa_agent = it.get("agentId")
+            if isinstance(pa_agent, str) and pa_agent:
+                bot = bots_by_agent.get(pa_agent)
+            else:
+                bot = default_bot
+            if bot is None:
                 continue
             alert_id = it.get("id")
             if not isinstance(alert_id, str) or not UUID_RE.match(alert_id):
