@@ -2904,3 +2904,28 @@ export {
   type ConverterCallRequest,
   type ConverterApplyResult,
 } from "./model-converter-engine.js";
+
+export {
+  MAIL_URGENCY_ACCOUNT_ADDRESSES,
+  MAIL_URGENCY_ALERT_STATUSES,
+  MAIL_URGENCY_CATEGORIES,
+  MAIL_URGENCY_FALLBACK_REASON,
+  MAIL_URGENCY_FEEDBACK,
+  MAIL_URGENCY_MAX_BODY_CHARS,
+  MAIL_URGENCY_MAX_OUTPUT_TOKENS,
+  ackMailUrgencyOutboxSchema,
+  extractMailAddresses,
+  isMailUrgencyAccount,
+  isMailUrgencyHandled,
+  isMailUrgencyIgnored,
+  setMailUrgencyFeedbackSchema,
+  type AckMailUrgencyOutboxInput,
+  type MailUrgencyAlertStatus,
+  type MailUrgencyAlertSummary,
+  type MailUrgencyCategory,
+  type MailUrgencyClassification,
+  type MailUrgencyFeedback,
+  type MailUrgencyOutboxItem,
+  type MailUrgencySummary,
+  type SetMailUrgencyFeedbackInput,
+} from "./mail-urgency.js";

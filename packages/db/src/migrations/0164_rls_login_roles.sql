@@ -302,8 +302,12 @@ DECLARE
     -- Per-person mail accounts (DUR-4194). Created (and granted on) in
     -- 0203_mail_accounts.sql; listed here so the login-role lists match the
     -- schema, as for the tables above.
+    'mail_message_classifications',
     'mail_messages',
     'mail_secretary_items',
+    -- DUR-4573. Created, granted on and policed in 0232_mail_urgency.sql;
+    -- listed here so the login-role lists match the schema.
+    'mail_urgency_alerts',
     -- DUR-4329. Created, granted on and policed in
     -- 0212_media_studio_direct_creations.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
@@ -610,8 +614,12 @@ DECLARE
     -- Per-person mail accounts (DUR-4194). Created (and granted on) in
     -- 0203_mail_accounts.sql; listed here so the login-role lists match the
     -- schema, as for the tables above.
+    'mail_message_classifications',
     'mail_messages',
     'mail_secretary_items',
+    -- DUR-4573. Created, granted on and policed in 0232_mail_urgency.sql;
+    -- listed here so the login-role lists match the schema.
+    'mail_urgency_alerts',
     -- DUR-4329. Created, granted on and policed in
     -- 0212_media_studio_direct_creations.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.

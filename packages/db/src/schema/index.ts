@@ -155,6 +155,7 @@ export { watchers, watcherPricePoints, watcherAlerts, watcherWebPageSnapshots } 
 export { morningReportOutbox } from "./morning_report.js";
 export { mailInboxes, mailInboxFilters, mailSecretaryItems } from "./mail_secretary.js";
 export { mailAccounts, mailMessages } from "./mail_accounts.js";
+export { mailMessageClassifications, mailUrgencyAlerts } from "./mail_urgency.js";
 export { modelDirectoryEntries } from "./model_directory_entries.js";
 export { modelDirectoryConverters } from "./model_directory_converters.js";
 export { localModelHealth } from "./local_model_health.js";
