@@ -1,5 +1,7 @@
 import type {
   ComposeMailDraftInput,
+  MailUrgencyFeedback,
+  MailUrgencySummary,
   CreateMailAccountInput,
   MailMessageFolder,
   MoveMailMessageInput,
@@ -46,6 +48,12 @@ export const mailApi = {
     api.post<MailMessageSummary>(`/companies/${companyId}/mail-accounts/${accountId}/messages/${messageId}/move`, input),
   archiveMessage: (companyId: string, accountId: string, messageId: string) =>
     api.post<MailMessageSummary>(`/companies/${companyId}/mail-accounts/${accountId}/messages/${messageId}/archive`, {}),
+
+  setUrgencyFeedback: (companyId: string, accountId: string, messageId: string, feedback: MailUrgencyFeedback | null) =>
+    api.post<MailUrgencySummary>(
+      `/companies/${companyId}/mail-accounts/${accountId}/messages/${messageId}/urgency-feedback`,
+      { feedback },
+    ),
 
   createDraft: (companyId: string, accountId: string, input: ComposeMailDraftInput) =>
     api.post<MailMessageSummary>(`/companies/${companyId}/mail-accounts/${accountId}/drafts`, input),

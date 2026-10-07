@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Archive, ArrowLeft, Mail, Reply, Search, Send, Sparkles, Trash2 } from "lucide-react";
-import type { MailMessageFolder } from "@paperclipai/shared";
+import { AlertTriangle, Archive, ArrowLeft, Check, Mail, Reply, Search, Send, Sparkles, ThumbsDown, ThumbsUp, Trash2 } from "lucide-react";
+import type { MailMessageFolder, MailUrgencyFeedback } from "@paperclipai/shared";
 import { MAIL_MESSAGE_FOLDERS } from "@paperclipai/shared";
 import type { MailAccountSummary, MailMessageSummary } from "../types/mail";
 import { useCompany } from "../context/CompanyContext";
@@ -218,6 +218,75 @@ function AddMailboxForm({ companyId, ownerUserId }: { companyId: string; ownerUs
   );
 }
 
+const CATEGORY_LABELS: Record<string, string> = {
+  person: "A person",
+  customer: "Customer",
+  supplier: "Supplier",
+  "bank-payment": "Bank or payment",
+  authority: "Authority",
+  newsletter: "Newsletter",
+  receipt: "Receipt",
+  notification: "Notification",
+  other: "Other",
+};
+
+function UrgencyPanel({
+  urgency,
+  onFeedback,
+  pending,
+}: {
+  urgency: NonNullable<MailMessageSummary["urgency"]>;
+  onFeedback: (feedback: MailUrgencyFeedback | null) => void;
+  pending: boolean;
+}) {
+  const feedback = urgency.operatorFeedback ?? null;
+  const toggle = (next: MailUrgencyFeedback) => onFeedback(feedback === next ? null : next);
+  return (
+    <div className="space-y-2 rounded-lg border border-border bg-muted/30 p-4 text-sm" data-testid="mail-urgency-panel">
+      <div className="flex flex-wrap items-center gap-2">
+        {urgency.urgent ? (
+          <Badge variant="outline" className="gap-1 border-red-500/50 text-red-600 dark:text-red-400">
+            <AlertTriangle className="h-3 w-3" /> Urgent
+          </Badge>
+        ) : (
+          <Badge variant="outline" className="gap-1">
+            <Check className="h-3 w-3" /> Not urgent
+          </Badge>
+        )}
+        <Badge variant="secondary">{CATEGORY_LABELS[urgency.category] ?? "Other"}</Badge>
+      </div>
+      {urgency.summary ? <p>{urgency.summary}</p> : null}
+      {urgency.reason ? (
+        <p className="text-muted-foreground">
+          <span className="font-medium text-foreground">Why: </span>
+          {urgency.reason}
+        </p>
+      ) : null}
+      <div className="flex flex-wrap items-center gap-2 pt-1">
+        <span className="text-xs text-muted-foreground">Was this call right?</span>
+        <Button
+          size="sm"
+          variant={feedback === "correct" ? "default" : "outline"}
+          aria-pressed={feedback === "correct"}
+          disabled={pending}
+          onClick={() => toggle("correct")}
+        >
+          <ThumbsUp className="mr-1.5 h-3.5 w-3.5" /> Right
+        </Button>
+        <Button
+          size="sm"
+          variant={feedback === "incorrect" ? "default" : "outline"}
+          aria-pressed={feedback === "incorrect"}
+          disabled={pending}
+          onClick={() => toggle("incorrect")}
+        >
+          <ThumbsDown className="mr-1.5 h-3.5 w-3.5" /> Wrong
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function MessageRow({
   message,
   selected,
@@ -248,6 +317,11 @@ function MessageRow({
             <span className={`truncate text-sm ${!message.isRead && message.direction === "inbound" ? "font-semibold" : "font-medium"}`}>
               {counterparty}
             </span>
+            {message.urgency?.urgent ? (
+              <Badge variant="outline" className="shrink-0 gap-1 border-red-500/50 text-[10px] text-red-600 dark:text-red-400">
+                <AlertTriangle className="h-3 w-3" /> Urgent
+              </Badge>
+            ) : null}
             {message.aiDrafted ? (
               <Badge variant="outline" className="shrink-0 gap-1 text-[10px]">
                 <Sparkles className="h-3 w-3" /> AI draft
@@ -327,12 +401,30 @@ export function Email() {
 
   const selectedMessage = messages.find((m) => m.id === selectedMessageId) ?? null;
 
+  // Reply drafts the assistant wrote for this mailbox, so a message can offer "Review draft reply".
+  const draftsQuery = useQuery({
+    queryKey: selectedCompanyId && accountId ? queryKeys.email.messages(selectedCompanyId, accountId, "drafts") : ["email", "__none__"],
+    queryFn: () => mailApi.listMessages(selectedCompanyId!, accountId!, "drafts"),
+    enabled: Boolean(selectedCompanyId) && Boolean(accountId) && Boolean(selectedMessage?.urgency),
+  });
+  const linkedAiDraft =
+    selectedMessage && !selectedMessage.isDraft
+      ? (draftsQuery.data ?? []).find((d) => d.aiDrafted && d.inReplyToMessageId === selectedMessage.id) ?? null
+      : null;
+
   const invalidateMessages = () => {
     if (selectedCompanyId && accountId) {
       queryClient.invalidateQueries({ queryKey: ["email", "messages", selectedCompanyId, accountId] });
       queryClient.invalidateQueries({ queryKey: ["email", "search", selectedCompanyId, accountId] });
     }
   };
+
+  const feedbackMutation = useMutation({
+    mutationFn: ({ messageId, feedback }: { messageId: string; feedback: MailUrgencyFeedback | null }) =>
+      mailApi.setUrgencyFeedback(selectedCompanyId!, accountId!, messageId, feedback),
+    onSuccess: invalidateMessages,
+    onError: (error) => pushToast({ title: "Could not save your answer", body: errorMessage(error, ""), tone: "error" }),
+  });
 
   const archiveMutation = useMutation({
     mutationFn: (messageId: string) => mailApi.archiveMessage(selectedCompanyId!, accountId!, messageId),
@@ -601,7 +693,34 @@ export function Email() {
                 ) : null}
               </div>
 
+              {selectedMessage.urgency ? (
+                <UrgencyPanel
+                  urgency={selectedMessage.urgency}
+                  pending={feedbackMutation.isPending}
+                  onFeedback={(feedback) => feedbackMutation.mutate({ messageId: selectedMessage.id, feedback })}
+                />
+              ) : null}
+
               <div className="flex flex-wrap items-center gap-2">
+                {linkedAiDraft ? (
+                  <Button
+                    size="sm"
+                    onClick={() =>
+                      setCompose({
+                        mode: "edit",
+                        draftId: linkedAiDraft.id,
+                        inReplyToMessageId: linkedAiDraft.inReplyToMessageId,
+                        to: linkedAiDraft.toAddresses.join(", "),
+                        cc: linkedAiDraft.ccAddresses.join(", "),
+                        subject: linkedAiDraft.subject,
+                        bodyText: linkedAiDraft.bodyText,
+                      })
+                    }
+                  >
+                    <Sparkles className="mr-1.5 h-3.5 w-3.5" />
+                    Review draft reply
+                  </Button>
+                ) : null}
                 {selectedMessage.isDraft ? (
                   <Button
                     size="sm"
