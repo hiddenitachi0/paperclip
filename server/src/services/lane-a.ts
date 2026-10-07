@@ -69,10 +69,12 @@ import { logActivity } from "./activity-log.js";
 import { resolveAgentMcpToolLibraryServers } from "./mcp-tool-library.js";
 import { resolveBackupModelsThroughDirectory } from "./model-directory.js";
 import { classifyLocalFailure, modelHealthService } from "./model-health.js";
+import { parseLaneATextToolCall } from "./lane-a-text-tool-calls.js";
 import {
   buildLaneAActionClaimFallbackLine,
   buildLaneAActionClaimRetryNote,
   detectLaneAActionClaim,
+  detectLaneAPictureRequest,
   isLaneAActionClaimFulfilled,
   pickLaneAForcedToolName,
   type LaneAActionClaimFamily,
@@ -1247,7 +1249,8 @@ export function withImageReplayNote(content: string, toolCalls: LaneAStoredToolC
     (image) =>
       `[Picture made in this turn: file id ${image.fileId}${image.seed !== null && image.seed !== undefined ? `, seed ${image.seed}` : ""}. ${LANE_A_PICTURE_REPLAY_REMINDER}]`,
   );
-  const otherCalls = calls.filter((call) => call && typeof call.tool === "string" && !call.image);
+  // action_claim_check is Paperclip's own bookkeeping, not a tool the model called.
+  const otherCalls = calls.filter((call) => call && typeof call.tool === "string" && !call.image && call.tool !== "action_claim_check");
   if (otherCalls.length > 0) {
     const described = otherCalls
       .slice(0, 8)
@@ -2400,6 +2403,12 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     const businessDataOutputs: BusinessDataTurnOutput[] = [];
     const messages: LaneAChatMessage[] = [...history, { role: "user", content: message }];
     const actions: LaneAAction[] = [];
+    // 8 Oct: the person asked for a picture (or "another one" right after
+    // one). If the reply then makes none, the one corrective retry forces the
+    // picture tool, exactly as for a reply that claims a picture it never made.
+    const pictureRequested = detectLaneAPictureRequest(message, {
+      pictureEarlier: history.some((turn) => turn.role === "assistant" && /\[\s*Picture made in this turn\b/i.test(turn.content)),
+    });
     let inputTokens = 0;
     let outputTokens = 0;
     let costUsd = 0;
@@ -2502,7 +2511,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     // tool-only action it did not back up with a successful call. Guards
     // against retrying more than once, and carries the family through to the
     // post-loop fallback/logging.
-    let claimRetry: { family: LaneAActionClaimFamily; matchedPhrase: string } | null = null;
+    let claimRetry: { family: LaneAActionClaimFamily; matchedPhrase: string; reason: "claim" | "request" } | null = null;
     let claimRetryOutcome: "recovered" | "failed" | null = null;
     // DUR-4371/DUR-4355: the claim-retry round and the empty-reply retry both
     // spend the turn's one allowed corrective model call. Once either has
@@ -2516,19 +2525,44 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         forcedToolName = undefined;
         addUsage(response.usage);
 
-        const toolUseBlocks = response.toolCalls;
+        let toolUseBlocks = response.toolCalls;
+        // 8 Oct: some models (small local ones, or a host without native
+        // tools) write the call as text -- {"name": "generate-image",
+        // "parameters": {...}} -- instead of making it. When the whole reply
+        // is such a call to a tool offered this turn, it is made for real,
+        // through exactly the same checks as a native call.
+        if ((response.stop !== "tool_use" || toolUseBlocks.length === 0) && !toolsOff && !finalRound) {
+          const textCall = parseLaneATextToolCall(response.text, tools.map((tool) => tool.name), `text_call_${round}`);
+          if (textCall) {
+            toolUseBlocks = [textCall];
+            response = { ...response, text: "", toolCalls: toolUseBlocks, stop: "tool_use" };
+          }
+        }
         if (response.stop !== "tool_use" || toolUseBlocks.length === 0) {
           // DUR-4355: the reply looks final -- before accepting it, check it
           // is not claiming an action (picture/video/audio, memory, task,
           // weather/price) that no tool actually performed this turn.
           if (!claimRetry && !finalRound) {
-            const claim = detectLaneAActionClaim(response.text);
-            if (claim && !isLaneAActionClaimFulfilled(claim.family, actions)) {
-              const forced = toolsOff ? null : pickLaneAForcedToolName(claim.family, tools.map((tool) => tool.name));
+            const detected = detectLaneAActionClaim(response.text);
+            const claim: { family: LaneAActionClaimFamily; matchedPhrase: string; reason: "claim" | "request" } | null =
+              detected && !isLaneAActionClaimFulfilled(detected.family, actions)
+                ? { ...detected, reason: "claim" }
+                : pictureRequested && !isLaneAActionClaimFulfilled("media", actions) && !toolsOff &&
+                    pickLaneAForcedToolName("media", tools.map((tool) => tool.name), message)
+                  ? { family: "media", matchedPhrase: message.slice(0, 200), reason: "request" }
+                  : null;
+            if (claim) {
+              const forced = toolsOff
+                ? null
+                : pickLaneAForcedToolName(
+                    claim.family,
+                    tools.map((tool) => tool.name),
+                    claim.reason === "request" ? message : `${message}\n${response.text}`,
+                  );
               claimRetry = claim;
               if (forced) {
                 messages.push({ role: "assistant", content: response.text });
-                messages.push({ role: "user", content: buildLaneAActionClaimRetryNote(claim.family) });
+                messages.push({ role: "user", content: buildLaneAActionClaimRetryNote(claim.family, claim.reason) });
                 forcedToolName = forced;
                 correctiveRetryUsed = true;
                 continue;
@@ -2805,15 +2839,22 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       if (claimRetryOutcome !== "failed") {
         claimRetryOutcome = isLaneAActionClaimFulfilled(claimRetry.family, actions) ? "recovered" : "failed";
       }
-      if (claimRetryOutcome === "failed") {
+      // A request-type retry (the person asked; the reply claimed nothing)
+      // keeps the model's own words when the retry still made nothing: it
+      // may be a fair question back ("which angle?"), not a false claim.
+      if (claimRetryOutcome === "failed" && claimRetry.reason === "claim") {
         finalText = buildLaneAActionClaimFallbackLine(claimRetry.family);
       }
       actions.push({
         tool: "action_claim_check",
         summary:
-          claimRetryOutcome === "recovered"
-            ? `Said it had done something (${claimRetry.family}) before calling the tool; the automatic retry called it.`
-            : `Said it had done something (${claimRetry.family}) without calling the tool, and the retry still did not call it; the person was told plainly instead.`,
+          claimRetry.reason === "request"
+            ? claimRetryOutcome === "recovered"
+              ? `Was asked for a picture and answered without making one; the automatic retry made it.`
+              : `Was asked for a picture and answered without making one; the retry still made none.`
+            : claimRetryOutcome === "recovered"
+              ? `Said it had done something (${claimRetry.family}) before calling the tool; the automatic retry called it.`
+              : `Said it had done something (${claimRetry.family}) without calling the tool, and the retry still did not call it; the person was told plainly instead.`,
         ok: claimRetryOutcome === "recovered",
       });
       try {
@@ -2830,6 +2871,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
             model: modelId,
             family: claimRetry.family,
             matchedPhrase: claimRetry.matchedPhrase.slice(0, 200),
+            reason: claimRetry.reason,
             retryOutcome: claimRetryOutcome,
           },
         });
