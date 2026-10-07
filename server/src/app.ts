@@ -44,6 +44,7 @@ import { emailSettingsRoutes } from "./routes/email-settings.js";
 import { securityReviewSettingsRoutes } from "./routes/security-review-settings.js";
 import { videoStorylineRoutes } from "./routes/video-storylines.js";
 import { mediaStudioDirectRoutes } from "./routes/media-studio-direct.js";
+import { bragRoutes } from "./routes/brag.js";
 import { tradingRoutes } from "./routes/trading.js";
 import { mcpOAuthRoutes } from "./routes/mcp-oauth.js";
 import { projectRoutes } from "./routes/projects.js";
@@ -339,6 +340,7 @@ export async function createApp(
   api.use(securityReviewSettingsRoutes(db));
   api.use(videoStorylineRoutes(db));
   api.use(mediaStudioDirectRoutes(db));
+  api.use(bragRoutes(db));
   api.use(tradingRoutes(db));
   api.use(mcpOAuthRoutes(db));
   api.use(assetRoutes(db, opts.storageService));

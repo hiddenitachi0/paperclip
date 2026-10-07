@@ -67,6 +67,36 @@ describe("Costs saved context panel", () => {
     vi.clearAllMocks();
   });
 
+  it("hides retired agents that the agents list leaves out (real API shape)", async () => {
+    for (const fn of Object.values(mockCostsApi)) fn.mockResolvedValue([]);
+    mockBudgetsApi.overview.mockResolvedValue({ policies: [], activeIncidents: [], pausedAgentCount: 0, pausedProjectCount: 0, pendingApprovalCount: 0 });
+    mockCostsApi.cacheStatus.mockResolvedValue([
+      cacheRow("a1", "Frontend Engineer"),
+      cacheRow("a2", "DUPLICATE - Security Reviewer"),
+    ]);
+    // GET /companies/:id/agents does not return terminated agents at all.
+    mockAgentsApi.list.mockResolvedValue([{ id: "a1", name: "Frontend Engineer", status: "active" }]);
+
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={client}>
+          <Costs />
+        </QueryClientProvider>,
+      );
+    });
+    await flush();
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("Frontend Engineer");
+    expect(text).not.toContain("DUPLICATE - Security Reviewer");
+
+    await act(async () => root.unmount());
+  });
+
   it("hides retired agents but keeps paused ones", async () => {
     for (const fn of Object.values(mockCostsApi)) fn.mockResolvedValue([]);
     mockBudgetsApi.overview.mockResolvedValue({ policies: [], activeIncidents: [], pausedAgentCount: 0, pausedProjectCount: 0, pendingApprovalCount: 0 });

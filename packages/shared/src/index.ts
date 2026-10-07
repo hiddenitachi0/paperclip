@@ -2708,6 +2708,33 @@ export {
   type MediaStudioDirectRewritePromptInput,
 } from "./media-studio-direct.js";
 
+export {
+  BRAG_BILLING_CODE,
+  BRAG_FORMATS,
+  BRAG_JOB_STATUSES,
+  BRAG_MAX_LENGTH_SECONDS,
+  BRAG_MAX_SCENES,
+  BRAG_MIN_LENGTH_SECONDS,
+  BRAG_OVERRUN_ABORT_MULTIPLIER,
+  BRAG_SCENE_APPROVAL_STATUSES,
+  BRAG_TONES,
+  bragEstimateSchema,
+  bragJobOptionsSchema,
+  bragSceneCount,
+  createBragJobSchema,
+  estimateBragCostCents,
+  isBragOverrun,
+  updateBragSceneSchema,
+  type BragEstimateInput,
+  type BragEstimateResult,
+  type BragFormat,
+  type BragJobOptionsInput,
+  type BragJobStatus,
+  type BragSceneApprovalStatus,
+  type CreateBragJobInput,
+  type UpdateBragSceneInput,
+} from "./brag.js";
+
 export { DOCUMENTS_PLUGIN_KEY, DOCUMENTS_SETTINGS_KEY } from "./documents.js";
 
 export {
