@@ -6,7 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MailAccountSummary, MailMessageSummary } from "../types/mail";
-import { Email } from "./Email";
+import { Email, MAIL_PROVIDER_PRESETS } from "./Email";
 
 /**
  * The Email page (DUR-4195):
@@ -193,6 +193,18 @@ describe("Email page", () => {
     await render();
     expect(container.textContent).toContain("Connect your mailbox");
     expect(container.querySelector("#mailbox-email")).not.toBeNull();
+  });
+
+  it("the connect form has a provider picker, and the Gmail preset has the right servers and app-password help", async () => {
+    mockMailApi.listAccounts.mockResolvedValue([]);
+    await render();
+    expect(container.querySelector("#mailbox-provider")).not.toBeNull();
+    const gmail = MAIL_PROVIDER_PRESETS.gmail;
+    expect(gmail).toMatchObject({ imapHost: "imap.gmail.com", imapPort: 993, smtpHost: "smtp.gmail.com", smtpPort: 465, smtpSecure: true });
+    expect(gmail.helpUrl).toBe("https://myaccount.google.com/apppasswords");
+    expect(gmail.steps.join(" ")).toContain("2-Step Verification");
+    expect(MAIL_PROVIDER_PRESETS.outlook.smtpSecure).toBe(false);
+    expect(MAIL_PROVIDER_PRESETS.domeneshop.imapHost).toBe("imap.domeneshop.no");
   });
 
   it("lists an inbox message with its subject and sender", async () => {
