@@ -1252,8 +1252,11 @@ export function withImageReplayNote(content: string, toolCalls: LaneAStoredToolC
     const described = otherCalls
       .slice(0, 8)
       .map((call) => {
-        const summary = typeof call.summary === "string" ? call.summary.replace(/[\[\]\n]/g, " ").trim().slice(0, 160) : "";
-        return summary ? `${call.tool} (${summary})` : call.tool;
+        // Tool names come from the model (refused unknown names are stored too),
+        // so they get the same bracket/newline stripping as the summary.
+        const name = call.tool.replace(/[\[\]\r\n]/g, " ").trim().slice(0, 64) || "tool";
+        const summary = typeof call.summary === "string" ? call.summary.replace(/[\[\]\r\n]/g, " ").trim().slice(0, 160) : "";
+        return summary ? `${name} (${summary})` : name;
       })
       .join("; ");
     lines.push(`[Tools used in this turn: ${described}. ${LANE_A_TOOL_REPLAY_REMINDER}]`);
