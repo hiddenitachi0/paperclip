@@ -17,6 +17,22 @@ vi.mock("./issues.js", () => ({ issueService: () => mockIssueService }));
 const mockIssueApprovalService = vi.hoisted(() => ({ linkManyForApproval: vi.fn() }));
 vi.mock("./issue-approvals.js", () => ({ issueApprovalService: () => mockIssueApprovalService }));
 
+/**
+ * DUR-4601: `requestReview`/`recordVerdict` now call out to GitHub (via
+ * `refreshMergePrHeadCommit`) to fill/refresh `payload.commit`. The service accepts an
+ * override so these existing tests never touch the network: this default passthrough
+ * reproduces the pre-DUR-4601 behavior exactly (whatever commit is already on the payload,
+ * unchanged). Tests of the new resolve/refresh behavior itself pass their own override.
+ */
+function noopRefreshHeadCommit(
+  _db: unknown,
+  approval: { payload: unknown },
+): Promise<{ payload: Record<string, unknown>; headCommit: string | null }> {
+  const payload = (approval.payload ?? {}) as Record<string, unknown>;
+  const commit = typeof payload.commit === "string" ? payload.commit.trim() : "";
+  return Promise.resolve({ payload, headCommit: commit || null });
+}
+
 type RowsByTable = Map<unknown, unknown[]>;
 
 function rowsChain(rows: unknown[]) {
@@ -93,7 +109,7 @@ describe("securityReviewService.computeState (DUR-4566)", () => {
     const db = makeFakeDb({
       rowsByTable: new Map<unknown, unknown[]>([[companySecurityReviewSettings, [{ securityReviewerAgentId: REVIEWER_AGENT_ID }]]]),
     });
-    const state = await securityReviewService(db).computeState(mergeApproval());
+    const state = await securityReviewService(db, { refreshHeadCommit: noopRefreshHeadCommit }).computeState(mergeApproval());
     expect(state.state).toBe("not_requested");
     expect(state.headCommit).toBe("head-a");
   });
@@ -101,7 +117,7 @@ describe("securityReviewService.computeState (DUR-4566)", () => {
   it("reads as no_reviewer_configured with no review history and no reviewer set", async () => {
     const { securityReviewService } = await import("./security-review.js");
     const db = makeFakeDb({ rowsByTable: new Map<unknown, unknown[]>([[companySecurityReviewSettings, []]]) });
-    const state = await securityReviewService(db).computeState(mergeApproval());
+    const state = await securityReviewService(db, { refreshHeadCommit: noopRefreshHeadCommit }).computeState(mergeApproval());
     expect(state.state).toBe("no_reviewer_configured");
   });
 
@@ -115,7 +131,7 @@ describe("securityReviewService.computeState (DUR-4566)", () => {
         ],
       ]),
     });
-    const state = await securityReviewService(db).computeState(mergeApproval());
+    const state = await securityReviewService(db, { refreshHeadCommit: noopRefreshHeadCommit }).computeState(mergeApproval());
     expect(state.state).toBe("passed");
   });
 
@@ -130,7 +146,7 @@ describe("securityReviewService.computeState (DUR-4566)", () => {
       ]),
     });
     // Same stored review row, but the approval's payload.commit has since moved on.
-    const state = await securityReviewService(db).computeState(mergeApproval({ payload: { kind: "merge_pr", commit: "head-b" } }));
+    const state = await securityReviewService(db, { refreshHeadCommit: noopRefreshHeadCommit }).computeState(mergeApproval({ payload: { kind: "merge_pr", commit: "head-b" } }));
     expect(state.state).toBe("out_of_date");
     expect(state.priorState).toBe("passed");
     expect(state.verdictNote).toBe("ok");
@@ -141,14 +157,14 @@ describe("securityReviewService.computeState (DUR-4566)", () => {
     const db = makeFakeDb({
       rowsByTable: new Map<unknown, unknown[]>([[mergeSecurityReviews, [{ id: "review-1", status: "requested", headCommit: "head-a", reviewIssueId: null }]]]),
     });
-    const state = await securityReviewService(db).computeState(mergeApproval({ payload: { kind: "merge_pr", commit: "head-b" } }));
+    const state = await securityReviewService(db, { refreshHeadCommit: noopRefreshHeadCommit }).computeState(mergeApproval({ payload: { kind: "merge_pr", commit: "head-b" } }));
     expect(state.state).toBe("in_progress");
   });
 
   it("every non-merge_pr approval reads as not_requested with no head commit", async () => {
     const { securityReviewService } = await import("./security-review.js");
     const db = makeFakeDb({ rowsByTable: new Map<unknown, unknown[]>() });
-    const state = await securityReviewService(db).computeState(mergeApproval({ payload: { kind: "hire_agent" } }));
+    const state = await securityReviewService(db, { refreshHeadCommit: noopRefreshHeadCommit }).computeState(mergeApproval({ payload: { kind: "hire_agent" } }));
     expect(state).toEqual(
       expect.objectContaining({ state: "not_requested", headCommit: null }),
     );
@@ -167,7 +183,7 @@ describe("securityReviewService.requestReview (DUR-4566 item 2, single-flight)",
     });
     mockIssueService.create.mockResolvedValue({ id: "review-issue-1", identifier: "DUR-9001" });
 
-    const state = await securityReviewService(db).requestReview(APPROVAL_ID, { agentId: REQUESTER_AGENT_ID, userId: null });
+    const state = await securityReviewService(db, { refreshHeadCommit: noopRefreshHeadCommit }).requestReview(APPROVAL_ID, { agentId: REQUESTER_AGENT_ID, userId: null });
 
     expect(mockIssueService.create).toHaveBeenCalledWith(
       COMPANY_A,
@@ -189,7 +205,7 @@ describe("securityReviewService.requestReview (DUR-4566 item 2, single-flight)",
       ]),
     });
     await expect(
-      securityReviewService(db).requestReview(APPROVAL_ID, { agentId: REQUESTER_AGENT_ID, userId: null }),
+      securityReviewService(db, { refreshHeadCommit: noopRefreshHeadCommit }).requestReview(APPROVAL_ID, { agentId: REQUESTER_AGENT_ID, userId: null }),
     ).rejects.toThrow(/no security reviewer agent is set/i);
     expect(mockIssueService.create).not.toHaveBeenCalled();
   });
@@ -204,7 +220,7 @@ describe("securityReviewService.requestReview (DUR-4566 item 2, single-flight)",
       ]),
     });
 
-    const state = await securityReviewService(db).requestReview(APPROVAL_ID, { agentId: REQUESTER_AGENT_ID, userId: null });
+    const state = await securityReviewService(db, { refreshHeadCommit: noopRefreshHeadCommit }).requestReview(APPROVAL_ID, { agentId: REQUESTER_AGENT_ID, userId: null });
 
     expect(mockIssueService.create).not.toHaveBeenCalled();
     expect(state.state).toBe("in_progress");
@@ -227,12 +243,111 @@ describe("securityReviewService.requestReview (DUR-4566 item 2, single-flight)",
     mockIssueService.create.mockResolvedValue({ id: "review-issue-1", identifier: "DUR-9001" });
 
     await expect(
-      securityReviewService(db).requestReview(APPROVAL_ID, { agentId: REQUESTER_AGENT_ID, userId: null }),
+      securityReviewService(db, { refreshHeadCommit: noopRefreshHeadCommit }).requestReview(APPROVAL_ID, { agentId: REQUESTER_AGENT_ID, userId: null }),
     ).resolves.toEqual(expect.objectContaining({ state: "not_requested" }));
 
     // DUR-4568 finding #4: the review issue created before the race was lost
     // must not be left behind as a duplicate task for the reviewer.
     expect(mockIssueService.update).toHaveBeenCalledWith("review-issue-1", { status: "cancelled" });
+  });
+});
+
+describe("securityReviewService.requestReview / recordVerdict (DUR-4601: filed without a commit)", () => {
+  it("requestReview resolves a missing commit via the injected refresh and then succeeds", async () => {
+    const { securityReviewService } = await import("./security-review.js");
+    const db = makeFakeDb({
+      rowsByTable: new Map<unknown, unknown[]>([
+        [approvals, [mergeApproval({ payload: { kind: "merge_pr", repo: "acme/paperclip", prNumber: 1 } })]],
+        [companySecurityReviewSettings, [{ securityReviewerAgentId: REVIEWER_AGENT_ID }]],
+        [mergeSecurityReviews, []],
+      ]),
+    });
+    mockIssueService.create.mockResolvedValue({ id: "review-issue-1", identifier: "DUR-9001" });
+    const refreshHeadCommit = vi.fn(async (_db: unknown, approval: { payload: unknown }) => ({
+      payload: { ...(approval.payload as Record<string, unknown>), commit: "resolved-from-github" },
+      headCommit: "resolved-from-github",
+    }));
+
+    const state = await securityReviewService(db, { refreshHeadCommit }).requestReview(APPROVAL_ID, {
+      agentId: REQUESTER_AGENT_ID,
+      userId: null,
+    });
+
+    expect(refreshHeadCommit).toHaveBeenCalled();
+    expect(mockIssueService.create).toHaveBeenCalledWith(
+      COMPANY_A,
+      expect.objectContaining({ originFingerprint: `security-review:${APPROVAL_ID}:resolved-from-github` }),
+    );
+    expect(state.headCommit).toBe("resolved-from-github");
+  });
+
+  it("requestReview still refuses when the commit cannot be resolved from GitHub either", async () => {
+    const { securityReviewService } = await import("./security-review.js");
+    const db = makeFakeDb({
+      rowsByTable: new Map<unknown, unknown[]>([
+        [approvals, [mergeApproval({ payload: { kind: "merge_pr", repo: "acme/paperclip", prNumber: 1 } })]],
+        [companySecurityReviewSettings, [{ securityReviewerAgentId: REVIEWER_AGENT_ID }]],
+      ]),
+    });
+    const refreshHeadCommit = vi.fn(async (_db: unknown, approval: { payload: unknown }) => ({
+      payload: approval.payload as Record<string, unknown>,
+      headCommit: null,
+    }));
+
+    await expect(
+      securityReviewService(db, { refreshHeadCommit }).requestReview(APPROVAL_ID, {
+        agentId: REQUESTER_AGENT_ID,
+        userId: null,
+      }),
+    ).rejects.toThrow(/no commit yet/i);
+    expect(mockIssueService.create).not.toHaveBeenCalled();
+  });
+
+  it("recordVerdict resolves a missing commit via the injected refresh and then succeeds", async () => {
+    const { securityReviewService } = await import("./security-review.js");
+    const db = makeFakeDb({
+      rowsByTable: new Map<unknown, unknown[]>([
+        [approvals, [mergeApproval({ payload: { kind: "merge_pr", repo: "acme/paperclip", prNumber: 1 } })]],
+        [companySecurityReviewSettings, [{ securityReviewerAgentId: REVIEWER_AGENT_ID }]],
+        [mergeSecurityReviews, []],
+        [agents, [{ companyId: COMPANY_A }]],
+      ]),
+    });
+    const refreshHeadCommit = vi.fn(async (_db: unknown, approval: { payload: unknown }) => ({
+      payload: { ...(approval.payload as Record<string, unknown>), commit: "resolved-from-github" },
+      headCommit: "resolved-from-github",
+    }));
+
+    const state = await securityReviewService(db, { refreshHeadCommit }).recordVerdict(
+      APPROVAL_ID,
+      { agentId: REVIEWER_AGENT_ID, userId: null },
+      { verdict: "passed", note: "fine once resolved" },
+    );
+
+    expect(refreshHeadCommit).toHaveBeenCalled();
+    expect(state.state).toBe("passed");
+    expect(state.headCommit).toBe("resolved-from-github");
+  });
+
+  it("recordVerdict does not call refresh at all when a commit is already on the payload", async () => {
+    const { securityReviewService } = await import("./security-review.js");
+    const db = makeFakeDb({
+      rowsByTable: new Map<unknown, unknown[]>([
+        [approvals, [mergeApproval()]],
+        [companySecurityReviewSettings, [{ securityReviewerAgentId: REVIEWER_AGENT_ID }]],
+        [mergeSecurityReviews, []],
+        [agents, [{ companyId: COMPANY_A }]],
+      ]),
+    });
+    const refreshHeadCommit = vi.fn();
+
+    await securityReviewService(db, { refreshHeadCommit }).recordVerdict(
+      APPROVAL_ID,
+      { agentId: REVIEWER_AGENT_ID, userId: null },
+      { verdict: "passed", note: "already had a commit" },
+    );
+
+    expect(refreshHeadCommit).not.toHaveBeenCalled();
   });
 });
 
@@ -252,7 +367,7 @@ describe("securityReviewService.recordVerdict (DUR-4566 item 3, authorization)",
   it("lets the configured reviewer agent record a verdict", async () => {
     const { securityReviewService } = await import("./security-review.js");
     const db = settingsDb();
-    const state = await securityReviewService(db).recordVerdict(
+    const state = await securityReviewService(db, { refreshHeadCommit: noopRefreshHeadCommit }).recordVerdict(
       APPROVAL_ID,
       { agentId: REVIEWER_AGENT_ID, userId: null },
       { verdict: "passed", note: "Looks safe" },
@@ -263,7 +378,7 @@ describe("securityReviewService.recordVerdict (DUR-4566 item 3, authorization)",
   it("lets a board user record a verdict", async () => {
     const { securityReviewService } = await import("./security-review.js");
     const db = settingsDb();
-    const state = await securityReviewService(db).recordVerdict(
+    const state = await securityReviewService(db, { refreshHeadCommit: noopRefreshHeadCommit }).recordVerdict(
       APPROVAL_ID,
       { agentId: null, userId: "board-user" },
       { verdict: "failed", note: "Found a problem" },
@@ -275,7 +390,7 @@ describe("securityReviewService.recordVerdict (DUR-4566 item 3, authorization)",
     const { securityReviewService } = await import("./security-review.js");
     const db = settingsDb();
     await expect(
-      securityReviewService(db).recordVerdict(
+      securityReviewService(db, { refreshHeadCommit: noopRefreshHeadCommit }).recordVerdict(
         APPROVAL_ID,
         { agentId: "some-other-agent", userId: null },
         { verdict: "passed", note: "trust me" },
@@ -294,7 +409,7 @@ describe("securityReviewService.recordVerdict (DUR-4566 item 3, authorization)",
       ]),
     });
     await expect(
-      securityReviewService(db).recordVerdict(
+      securityReviewService(db, { refreshHeadCommit: noopRefreshHeadCommit }).recordVerdict(
         APPROVAL_ID,
         { agentId: REVIEWER_AGENT_ID, userId: null },
         { verdict: "passed", note: "self-approved" },
@@ -313,7 +428,7 @@ describe("securityReviewService.recordVerdict (DUR-4566 item 3, authorization)",
       ]),
     });
     await expect(
-      securityReviewService(db).recordVerdict(
+      securityReviewService(db, { refreshHeadCommit: noopRefreshHeadCommit }).recordVerdict(
         APPROVAL_ID,
         { agentId: null, userId: "board-user" },
         { verdict: "passed", note: "self-approved" },
@@ -333,7 +448,7 @@ describe("securityReviewService.recordVerdict (DUR-4566 item 3, authorization)",
       ]),
     });
     await expect(
-      securityReviewService(db).recordVerdict(
+      securityReviewService(db, { refreshHeadCommit: noopRefreshHeadCommit }).recordVerdict(
         APPROVAL_ID,
         { agentId: REVIEWER_AGENT_ID, userId: null },
         { verdict: "passed", note: "cross-company" },
@@ -345,7 +460,7 @@ describe("securityReviewService.recordVerdict (DUR-4566 item 3, authorization)",
     const { securityReviewService } = await import("./security-review.js");
     const db = settingsDb();
     await expect(
-      securityReviewService(db).recordVerdict(APPROVAL_ID, { agentId: null, userId: null }, { verdict: "passed", note: "?" }),
+      securityReviewService(db, { refreshHeadCommit: noopRefreshHeadCommit }).recordVerdict(APPROVAL_ID, { agentId: null, userId: null }, { verdict: "passed", note: "?" }),
     ).rejects.toThrow(/security reviewer agent or a board user/i);
   });
 });
