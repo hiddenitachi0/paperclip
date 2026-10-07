@@ -18,7 +18,56 @@ import { laneABaseUrlValueSchema, laneAProviderRoutingSchema } from "./agent.js"
 // secrets and are bound to the agent, never to a directory entry.
 
 export const MODEL_DIRECTORY_NAME_MAX_LENGTH = 80;
-export const MODEL_DIRECTORY_NOTE_MAX_LENGTH = 500;
+export const MODEL_DIRECTORY_NOTE_MAX_LENGTH = 2000;
+export const MODEL_DIRECTORY_MAKER_MAX_LENGTH = 60;
+export const MODEL_DIRECTORY_BASE_MODEL_MAX_LENGTH = 80;
+export const MODEL_DIRECTORY_TAG_MAX_LENGTH = 32;
+export const MODEL_DIRECTORY_TAGS_MAX = 12;
+/** How many entries one catalogue import may carry. */
+export const MODEL_DIRECTORY_IMPORT_MAX = 200;
+
+// Catalogue fields: what a model is good for and whether it is ready to use.
+// None of them change how an agent calls the model.
+export const MODEL_DIRECTORY_LANES = ["quick", "full", "both"] as const;
+export type ModelDirectoryLane = (typeof MODEL_DIRECTORY_LANES)[number];
+export const MODEL_DIRECTORY_AVAILABILITY = ["installed", "downloading", "planned", "cloud"] as const;
+export type ModelDirectoryAvailability = (typeof MODEL_DIRECTORY_AVAILABILITY)[number];
+
+const optionalLabel = (max: number) => z.string().trim().max(max).nullable().optional();
+
+/**
+ * Facts that help pick a model. Every field is optional and informational:
+ * Paperclip does not enforce any of them.
+ */
+export const modelDirectorySpecsSchema = z
+  .object({
+    /** Parameter count in words, e.g. "27B" or "26B (4B active)". */
+    params: optionalLabel(40),
+    /** Quantisation of the local file, e.g. "Q4_K_M". */
+    quant: optionalLabel(40),
+    /** Download size in GB. */
+    sizeGb: z.number().min(0).max(2000).nullable().optional(),
+    /** Context window in tokens. */
+    contextTokens: z.number().int().min(0).max(10_000_000).nullable().optional(),
+    /** Whether it fits on the owner's graphics card. */
+    fitsLocalGpu: z.enum(["yes", "tight", "no"]).nullable().optional(),
+    /** Whether tool calling works with it. */
+    tools: z.enum(["yes", "partial", "no"]).nullable().optional(),
+    vision: z.boolean().nullable().optional(),
+    thinking: z.enum(["yes", "no", "toggle"]).nullable().optional(),
+    license: optionalLabel(80),
+    /** Where the model is described (model page). */
+    sourceUrl: z.string().trim().url().max(500).nullable().optional(),
+    /** The command that installs it on a local model server, e.g. "ollama pull qwen3:14b". */
+    pullCommand: optionalLabel(300),
+  })
+  .strict();
+export type ModelDirectorySpecs = z.infer<typeof modelDirectorySpecsSchema>;
+
+const tagsSchema = z
+  .array(z.string().trim().toLowerCase().min(1).max(MODEL_DIRECTORY_TAG_MAX_LENGTH))
+  .max(MODEL_DIRECTORY_TAGS_MAX)
+  .transform((tags) => Array.from(new Set(tags)));
 
 const nameSchema = z.string().trim().min(1, "Give this model setup a name.").max(MODEL_DIRECTORY_NAME_MAX_LENGTH);
 
@@ -39,6 +88,13 @@ const modelDirectoryFieldShape = {
     .optional(),
   backupEntryIds: z.array(z.string().uuid()).max(LANE_A_BACKUP_MODELS_MAX).optional(),
   note: z.string().trim().max(MODEL_DIRECTORY_NOTE_MAX_LENGTH).nullable().optional(),
+  maker: optionalLabel(MODEL_DIRECTORY_MAKER_MAX_LENGTH),
+  baseModel: optionalLabel(MODEL_DIRECTORY_BASE_MODEL_MAX_LENGTH),
+  lane: z.enum(MODEL_DIRECTORY_LANES).nullable().optional(),
+  availability: z.enum(MODEL_DIRECTORY_AVAILABILITY).nullable().optional(),
+  tags: tagsSchema.optional(),
+  specs: modelDirectorySpecsSchema.nullable().optional(),
+  favorite: z.boolean().optional(),
 };
 
 /**
@@ -88,6 +144,15 @@ export const updateModelDirectoryEntrySchema = z
     defaultMaxOutputTokens: modelDirectoryFieldShape.defaultMaxOutputTokens,
     backupEntryIds: modelDirectoryFieldShape.backupEntryIds,
     note: modelDirectoryFieldShape.note,
+    maker: modelDirectoryFieldShape.maker,
+    baseModel: modelDirectoryFieldShape.baseModel,
+    lane: modelDirectoryFieldShape.lane,
+    availability: modelDirectoryFieldShape.availability,
+    tags: modelDirectoryFieldShape.tags,
+    specs: modelDirectoryFieldShape.specs,
+    favorite: modelDirectoryFieldShape.favorite,
+    /** true hides the entry from agent pickers (kept, restorable); false brings it back. */
+    archived: z.boolean().optional(),
   })
   .strict();
 export type UpdateModelDirectoryEntry = z.infer<typeof updateModelDirectoryEntrySchema>;
@@ -110,6 +175,15 @@ export interface ModelDirectoryEntry {
   defaultMaxOutputTokens: number | null;
   backupEntryIds: string[];
   note: string | null;
+  maker: string | null;
+  baseModel: string | null;
+  lane: ModelDirectoryLane | null;
+  availability: ModelDirectoryAvailability | null;
+  tags: string[];
+  specs: ModelDirectorySpecs | null;
+  favorite: boolean;
+  /** Set when archived: hidden from agent pickers, kept in Settings > Models. */
+  archivedAt: string | null;
   createdByUserId: string | null;
   updatedByUserId: string | null;
   createdAt: string;
@@ -218,4 +292,57 @@ export interface ModelDirectoryImportResult {
   agentsLinked: number;
   /** Agents whose current setup could not be saved, with a plain-English reason. */
   skipped: { agentId: string; agentName: string; reason: string }[];
+}
+
+// Catalogue export / import (Settings > Models). An export is a plain JSON
+// file of setups -- never a key -- that can be imported into this or another
+// company. Backups are written as entry NAMES (ids differ between companies).
+
+export const MODEL_DIRECTORY_EXPORT_VERSION = 1;
+
+const catalogueEntryShape = {
+  ...modelDirectoryFieldShape,
+  backupEntryIds: z.never().optional(),
+  /** Names of other entries in the same file or company, in order. */
+  backupNames: z.array(nameSchema).max(LANE_A_BACKUP_MODELS_MAX).optional(),
+  archived: z.boolean().optional(),
+};
+
+export const modelDirectoryCatalogueEntrySchema = z
+  .object(catalogueEntryShape)
+  .strict()
+  .superRefine((value, ctx) => {
+    const issue = modelDirectoryEntryIssue({ ...value, backupEntryIds: [] });
+    if (issue) ctx.addIssue({ code: "custom", message: `${value.name}: ${issue}` });
+  });
+export type ModelDirectoryCatalogueEntry = z.infer<typeof modelDirectoryCatalogueEntrySchema>;
+
+export const importModelDirectoryCatalogueSchema = z
+  .object({
+    version: z.literal(MODEL_DIRECTORY_EXPORT_VERSION).optional(),
+    entries: z.array(modelDirectoryCatalogueEntrySchema).min(1).max(MODEL_DIRECTORY_IMPORT_MAX),
+    /** What to do when a setup with the same name already exists. Default: skip it. */
+    onExisting: z.enum(["skip", "update"]).optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    const seen = new Set<string>();
+    for (const entry of value.entries) {
+      const key = entry.name.trim().toLowerCase();
+      if (seen.has(key)) ctx.addIssue({ code: "custom", message: `"${entry.name}" is listed twice in the file.` });
+      seen.add(key);
+    }
+  });
+export type ImportModelDirectoryCatalogue = z.infer<typeof importModelDirectoryCatalogueSchema>;
+
+export interface ModelDirectoryCatalogueExport {
+  version: typeof MODEL_DIRECTORY_EXPORT_VERSION;
+  exportedAt: string;
+  entries: ModelDirectoryCatalogueEntry[];
+}
+
+export interface ModelDirectoryCatalogueImportResult {
+  created: string[];
+  updated: string[];
+  skipped: { name: string; reason: string }[];
 }
