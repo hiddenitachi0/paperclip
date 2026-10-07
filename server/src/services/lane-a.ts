@@ -1211,6 +1211,13 @@ const PICTURE_NOTE_PATTERN = /\[\s*Picture made in this turn:[^\]]*\]/gi;
  * person is told so plainly.
  */
 export function guardLaneAPictureClaims(text: string, actions: LaneAAction[]): string {
+  // The tools note is Paperclip's own replay marker; a model that copies it
+  // into a reply has it removed (it never reaches the person).
+  if (TOOLS_NOTE_PATTERN.test(text)) {
+    TOOLS_NOTE_PATTERN.lastIndex = 0;
+    text = text.replace(TOOLS_NOTE_PATTERN, "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  }
+  TOOLS_NOTE_PATTERN.lastIndex = 0;
   if (!PICTURE_NOTE_PATTERN.test(text)) return text;
   PICTURE_NOTE_PATTERN.lastIndex = 0;
   const cleaned = text.replace(PICTURE_NOTE_PATTERN, "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
@@ -1219,15 +1226,39 @@ export function guardLaneAPictureClaims(text: string, actions: LaneAAction[]): s
   return cleaned ? `${cleaned}\n\n${LANE_A_NO_PICTURE_MADE_NOTE}` : LANE_A_NO_PICTURE_MADE_NOTE;
 }
 
+/**
+ * Appended to the replayed note for non-picture tool calls. Without it the
+ * replay shows only the earlier answer's text, so the model reads "I answered
+ * the weather" and, on the next question, writes made-up figures instead of
+ * calling the tool again (7 Oct: qwen3.8-27b looked up Trondheim and Tromsø
+ * with get_weather, then answered "and Bergen?" with no tool call).
+ */
+export const LANE_A_TOOL_REPLAY_REMINDER =
+  "Those results were looked up at that moment by tool calls; a new question about live facts (weather, task status, anything that changes) needs a new tool call, never figures from earlier messages";
+
+const TOOLS_NOTE_PATTERN = /\[\s*Tools used in this turn:[^\]]*\]/gi;
+
 export function withImageReplayNote(content: string, toolCalls: LaneAStoredToolCall[] | null | undefined): string {
-  const images = (Array.isArray(toolCalls) ? toolCalls : [])
+  const calls = Array.isArray(toolCalls) ? toolCalls : [];
+  const images = calls
     .map((call) => call?.image)
     .filter((image): image is LaneAToolImage => Boolean(image && typeof image.fileId === "string"));
-  if (images.length === 0) return content;
   const lines = images.map(
     (image) =>
       `[Picture made in this turn: file id ${image.fileId}${image.seed !== null && image.seed !== undefined ? `, seed ${image.seed}` : ""}. ${LANE_A_PICTURE_REPLAY_REMINDER}]`,
   );
+  const otherCalls = calls.filter((call) => call && typeof call.tool === "string" && !call.image);
+  if (otherCalls.length > 0) {
+    const described = otherCalls
+      .slice(0, 8)
+      .map((call) => {
+        const summary = typeof call.summary === "string" ? call.summary.replace(/[\[\]\n]/g, " ").trim().slice(0, 160) : "";
+        return summary ? `${call.tool} (${summary})` : call.tool;
+      })
+      .join("; ");
+    lines.push(`[Tools used in this turn: ${described}. ${LANE_A_TOOL_REPLAY_REMINDER}]`);
+  }
+  if (lines.length === 0) return content;
   return `${content}\n\n${lines.join("\n")}`;
 }
 
