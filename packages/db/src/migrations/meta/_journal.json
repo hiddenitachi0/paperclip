@@ -1632,6 +1632,13 @@
       "when": 1791332000000,
       "tag": "0233_webhook_secret_readable_names",
       "breakpoints": true
+    },
+    {
+      "idx": 234,
+      "version": "7",
+      "when": 1791339200000,
+      "tag": "0234_webhook_secret_template_names",
+      "breakpoints": true
     }
   ]
 }
