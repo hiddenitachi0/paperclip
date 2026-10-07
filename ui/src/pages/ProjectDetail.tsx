@@ -37,6 +37,7 @@ import { collectLiveIssueIds } from "../lib/liveIssueIds";
 import { projectRouteRef } from "../lib/utils";
 import { PROJECT_ICONS } from "../lib/project-icons";
 import { Button } from "@/components/ui/button";
+import { BragVideoDialog } from "../components/BragVideoDialog";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
@@ -393,6 +394,7 @@ export function ProjectDetail() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const location = useLocation();
+  const [bragOpen, setBragOpen] = useState(false);
   const [fieldSaveStates, setFieldSaveStates] = useState<Partial<Record<ProjectConfigFieldKey, ProjectFieldSaveState>>>({});
   const [dismissedLeftProjectIds, setDismissedLeftProjectIds] = useState<Set<string>>(() => new Set());
   const fieldSaveRequestIds = useRef<Partial<Record<ProjectConfigFieldKey, number>>>({});
@@ -828,6 +830,15 @@ export function ProjectDetail() {
           ) : null}
         </div>
       </div>
+
+      <div className="flex flex-wrap gap-2">
+        <Button type="button" variant="outline" size="sm" onClick={() => setBragOpen(true)} disabled={!resolvedCompanyId}>
+          Make a brag video
+        </Button>
+      </div>
+      {resolvedCompanyId ? (
+        <BragVideoDialog open={bragOpen} onOpenChange={setBragOpen} companyId={resolvedCompanyId} projectId={project.id} />
+      ) : null}
 
       <PluginSlotOutlet
         slotTypes={["toolbarButton", "contextMenuItem"]}

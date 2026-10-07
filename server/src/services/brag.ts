@@ -189,6 +189,15 @@ export function bragService(db: Db, deps: BragServiceDeps = {}) {
       return { job, scenes: await loadScenes(companyId, jobId) };
     },
 
+    /** Resolves a scene's still to its storage key, scoped to this job's company. Used only by the still-content route. */
+    async getSceneStillRef(companyId: string, jobId: string, sceneId: string): Promise<string> {
+      await loadJob(companyId, jobId);
+      const scene = (await loadScenes(companyId, jobId)).find((s) => s.id === sceneId);
+      if (!scene) throw notFound("Scene not found");
+      if (!scene.stillRef) throw notFound("This scene has no picture yet");
+      return scene.stillRef;
+    },
+
     async listJobs(companyId: string, projectId: string) {
       return withCompanyScope(db, companyId, (tx) =>
         tx.select().from(bragJobs).where(and(eq(bragJobs.companyId, companyId), eq(bragJobs.projectId, projectId))).orderBy(desc(bragJobs.createdAt)).limit(50),

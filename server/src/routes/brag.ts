@@ -6,6 +6,7 @@ import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
 import { assertBoard, assertCompanyAccess } from "./authz.js";
 import { bragService, type BragActor } from "../services/brag.js";
+import { getStorageService } from "../storage/index.js";
 
 /**
  * DUR-4520: Brag video pipeline routes. Board-only (assertBoard refuses an
@@ -56,6 +57,24 @@ export function bragRoutes(rawDb: Db) {
 
   router.post("/companies/:companyId/brag/jobs/:jobId/cancel", scope(), async (req, res) => {
     res.json(await brag.cancel(req.params.companyId as string, req.params.jobId as string));
+  });
+
+  /**
+   * DUR-4521: streams a scene's still so the contact-sheet approval screen
+   * can show it before approval. Same shape as video-storylines.ts's
+   * shot-still route; the object key comes only from the stored scene row.
+   */
+  router.get("/companies/:companyId/brag/jobs/:jobId/scenes/:sceneId/still/content", scope(), async (req, res, next) => {
+    const { companyId, jobId, sceneId } = req.params as Record<string, string>;
+    const stillRef = await brag.getSceneStillRef(companyId!, jobId!, sceneId!);
+    const object = await getStorageService().getObject(companyId!, stillRef);
+    res.setHeader("Content-Type", object.contentType || "image/png");
+    if (object.contentLength) res.setHeader("Content-Length", String(object.contentLength));
+    res.setHeader("Cache-Control", "private, max-age=60");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Content-Disposition", "inline");
+    object.stream.on("error", (err) => next(err));
+    object.stream.pipe(res);
   });
 
   return router;
