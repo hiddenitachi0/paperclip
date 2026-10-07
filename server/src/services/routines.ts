@@ -1501,6 +1501,37 @@ export function routineService(
     return otherBinding.length > 0;
   }
 
+  // A secret is "shared" once anything besides this trigger's own bindings
+  // (its routine_trigger binding, and the generate-path's routine binding)
+  // references it. Agents must not rotate a shared secret: that would
+  // silently break every other consumer of the same secret value.
+  async function isSecretSharedWithOthers(
+    executor: Db,
+    trigger: { id: string; routineId: string; secretId: string },
+  ): Promise<boolean> {
+    const otherTrigger = await executor
+      .select({ id: routineTriggers.id })
+      .from(routineTriggers)
+      .where(and(eq(routineTriggers.secretId, trigger.secretId), ne(routineTriggers.id, trigger.id)))
+      .limit(1);
+    if (otherTrigger.length > 0) return true;
+    const ownConfigPath = routineWebhookSecretConfigPath(trigger.secretId);
+    const bindings = await executor
+      .select({
+        targetType: companySecretBindings.targetType,
+        targetId: companySecretBindings.targetId,
+        configPath: companySecretBindings.configPath,
+      })
+      .from(companySecretBindings)
+      .where(eq(companySecretBindings.secretId, trigger.secretId));
+    return bindings.some((b) => {
+      const isOwnTriggerBinding = b.targetType === "routine_trigger" && b.targetId === trigger.id;
+      const isOwnRoutineBinding =
+        b.targetType === "routine" && b.targetId === trigger.routineId && b.configPath === ownConfigPath;
+      return !isOwnTriggerBinding && !isOwnRoutineBinding;
+    });
+  }
+
   async function resolveTriggerSecret(trigger: typeof routineTriggers.$inferSelect, companyId: string) {
     if (!trigger.secretId) throw notFound("Routine trigger secret not found");
     const secret = await db
@@ -3070,6 +3101,16 @@ export function routineService(
       if (!existing) throw notFound("Routine trigger not found");
       if (existing.kind !== "webhook" || !existing.publicId || !existing.secretId) {
         throw unprocessable("Only webhook triggers can rotate secrets");
+      }
+      if (actor.agentId) {
+        const shared = await isSecretSharedWithOthers(db, {
+          id: existing.id,
+          routineId: existing.routineId,
+          secretId: existing.secretId,
+        });
+        if (shared) {
+          throw forbidden("Agents cannot rotate a webhook secret that is shared with other triggers or bindings");
+        }
       }
 
       const secretValue = crypto.randomBytes(24).toString("hex");

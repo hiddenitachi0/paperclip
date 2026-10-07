@@ -748,6 +748,17 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       }
     });
 
+    it("refuses an agent rotating a shared secret, even the routine's own assignee", async () => {
+      const { svc, first, attached, agentId } = await sharedFixture();
+      const oldValue = first.secretMaterial!.webhookSecret;
+      await expect(svc.rotateTriggerSecret(first.trigger.id, { agentId })).rejects.toMatchObject({ status: 403 });
+      const run = await svc.firePublicTrigger(attached.trigger.publicId!, {
+        authorizationHeader: `Bearer ${oldValue}`,
+        payload: {},
+      });
+      expect(run.source).toBe("webhook");
+    });
+
     it("deleting one trigger keeps the shared secret and the other trigger working", async () => {
       const { svc, first, attached, sharedSecretId } = await sharedFixture();
       await svc.deleteTrigger(first.trigger.id, {});
