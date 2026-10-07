@@ -807,13 +807,68 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     it("names generated secrets readably and never leaks the value into the secret row or revisions", async () => {
       const { first, sharedSecretId, svc, routine } = await sharedFixture();
       const [row] = await db.select().from(companySecrets).where(eq(companySecrets.id, sharedSecretId));
-      expect(row.name).toBe("Webhook password — routine: ascii frog (a human)");
+      expect(row.name).toBe("Webhook password — routine: ascii frog (CodexCoder)");
       expect(row.key).toMatch(/^routine-/);
       expect(row.description).toContain("'alpha'");
       expect(row.description).toContain(`/routines/${routine.id}`);
       expect(JSON.stringify(row)).not.toContain(first.secretMaterial!.webhookSecret);
       const revisions = await svc.listRevisions(routine.id);
       expect(JSON.stringify(revisions)).not.toContain(first.secretMaterial!.webhookSecret);
+    });
+
+    it("names the secret from the assignee agent, not the raw title, when the routine title is an unrendered template", async () => {
+      const { svc, companyId, projectId, agentId } = await seedFixture();
+      const templated = await svc.create(
+        companyId,
+        {
+          projectId,
+          goalId: null,
+          parentIssueId: null,
+          title: "{{title}}",
+          description: "Nordstrand report",
+          assigneeAgentId: agentId,
+          priority: "medium",
+          status: "active",
+          concurrencyPolicy: "coalesce_if_active",
+          catchUpPolicy: "skip_missed",
+        },
+        {},
+      );
+      const created = await svc.createTrigger(
+        templated.id,
+        { kind: "webhook", signingMode: "bearer", replayWindowSec: 300, label: "report" },
+        { userId: "board-user" },
+      );
+      const [row] = await db.select().from(companySecrets).where(eq(companySecrets.id, created.trigger.secretId!));
+      expect(row.name).toBe("Webhook password — CodexCoder's routine");
+      expect(row.name).not.toContain("{{");
+    });
+
+    it("falls back to a generic name when a templated routine has no assignee", async () => {
+      const { svc, companyId, projectId } = await seedFixture();
+      const templated = await svc.create(
+        companyId,
+        {
+          projectId,
+          goalId: null,
+          parentIssueId: null,
+          title: "{{title}}",
+          description: "Unassigned report",
+          assigneeAgentId: null,
+          priority: "medium",
+          status: "active",
+          concurrencyPolicy: "coalesce_if_active",
+          catchUpPolicy: "skip_missed",
+        },
+        {},
+      );
+      const created = await svc.createTrigger(
+        templated.id,
+        { kind: "webhook", signingMode: "bearer", replayWindowSec: 300, label: "report" },
+        { userId: "board-user" },
+      );
+      const [row] = await db.select().from(companySecrets).where(eq(companySecrets.id, created.trigger.secretId!));
+      expect(row.name).toBe("Webhook password — routine");
     });
 
     it("backfill migration renames legacy machine-named secrets and adds used-by bindings idempotently", async () => {
@@ -842,6 +897,48 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
         .from(companySecretBindings)
         .where(eq(companySecretBindings.targetType, "routine_trigger"));
       expect(used.filter((b) => b.companyId === companyId)).toHaveLength(1);
+    });
+
+    it("backfill migration renames secrets still carrying a raw {{title}} template, idempotently", async () => {
+      const { svc, companyId, projectId, agentId } = await seedFixture();
+      const templated = await svc.create(
+        companyId,
+        {
+          projectId,
+          goalId: null,
+          parentIssueId: null,
+          title: "{{title}}",
+          description: "Nordstrand report",
+          assigneeAgentId: agentId,
+          priority: "medium",
+          status: "active",
+          concurrencyPolicy: "coalesce_if_active",
+          catchUpPolicy: "skip_missed",
+        },
+        {},
+      );
+      const created = await svc.createTrigger(
+        templated.id,
+        { kind: "webhook", signingMode: "bearer", replayWindowSec: 300, label: "report" },
+        { agentId },
+      );
+      const secretId = created.trigger.secretId!;
+      const staleName = "Webhook password — routine: {{title}} (a human)";
+      await db.update(companySecrets).set({ name: staleName }).where(eq(companySecrets.id, secretId));
+
+      const { readFileSync } = await import("node:fs");
+      const migration = readFileSync(
+        new URL("../../../packages/db/src/migrations/0234_webhook_secret_template_names.sql", import.meta.url),
+        "utf8",
+      );
+      for (let pass = 0; pass < 2; pass += 1) {
+        for (const statement of migration.split("--> statement-breakpoint")) {
+          await db.execute(sql.raw(statement));
+        }
+      }
+      const [row] = await db.select().from(companySecrets).where(eq(companySecrets.id, secretId));
+      expect(row.name).toBe("Webhook password — CodexCoder's routine");
+      expect(row.name).not.toContain("{{");
     });
 
     it("swaps a trigger onto an existing secret and removes its orphaned generated secret", async () => {
