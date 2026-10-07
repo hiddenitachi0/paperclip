@@ -3,7 +3,6 @@ import { and, asc, desc, eq, inArray, isNotNull, isNull, lte, ne, not, or, sql }
 import type { Db } from "@paperclipai/db";
 import {
   agents,
-  authUsers,
   companySecretBindings,
   companySecretVersions,
   companySecrets,
@@ -105,9 +104,12 @@ function routineWebhookSecretConfigPath(secretId: string) {
 // goes through the per-routine binding above.
 const ROUTINE_TRIGGER_SECRET_CONFIG_PATH = "webhookSecret";
 
-function webhookSecretDisplayName(routineTitle: string, actorName: string | null) {
+function webhookSecretDisplayName(routineTitle: string, agentName: string | null) {
   const title = routineTitle.trim().slice(0, 120);
-  return `Webhook password — routine: ${title}${actorName ? ` (${actorName})` : ""}`;
+  if (title.includes("{{")) {
+    return agentName ? `Webhook password — ${agentName}'s routine` : "Webhook password — routine";
+  }
+  return `Webhook password — routine: ${title}${agentName ? ` (${agentName})` : ""}`;
 }
 
 function webhookSecretDescription(triggerLabel: string | null, routineId: string, routineTitle: string) {
@@ -1293,24 +1295,14 @@ export function routineService(
       .then((rows) => rows[0] ?? null);
   }
 
-  async function resolveActorDisplayName(actor: Actor, executor: Db): Promise<string | null> {
-    if (actor.agentId) {
-      const row = await executor
-        .select({ name: agents.name })
-        .from(agents)
-        .where(eq(agents.id, actor.agentId))
-        .then((rows) => rows[0] ?? null);
-      return row?.name ?? null;
-    }
-    if (actor.userId && actor.userId !== "board") {
-      const row = await executor
-        .select({ name: authUsers.name })
-        .from(authUsers)
-        .where(eq(authUsers.id, actor.userId))
-        .then((rows) => rows[0] ?? null);
-      return row?.name?.trim() || "a human";
-    }
-    return actor.userId ? "a human" : null;
+  async function resolveAgentDisplayName(agentId: string | null, executor: Db): Promise<string | null> {
+    if (!agentId) return null;
+    const row = await executor
+      .select({ name: agents.name })
+      .from(agents)
+      .where(eq(agents.id, agentId))
+      .then((rows) => rows[0] ?? null);
+    return row?.name ?? null;
   }
 
   async function createWebhookSecret(
@@ -1324,13 +1316,13 @@ export function routineService(
     const providerId = getConfiguredSecretProvider();
     const lookupDb = executor ?? db;
     const routineRow = await lookupDb
-      .select({ title: routines.title })
+      .select({ title: routines.title, assigneeAgentId: routines.assigneeAgentId })
       .from(routines)
       .where(eq(routines.id, routineId))
       .then((rows) => rows[0] ?? null);
     const routineTitle = routineRow?.title ?? routineId;
-    const actorName = await resolveActorDisplayName(actor, lookupDb);
-    let displayName = webhookSecretDisplayName(routineTitle, actorName);
+    const agentName = await resolveAgentDisplayName(routineRow?.assigneeAgentId ?? null, lookupDb);
+    let displayName = webhookSecretDisplayName(routineTitle, agentName);
     const nameTaken = await lookupDb
       .select({ id: companySecrets.id })
       .from(companySecrets)
