@@ -12,6 +12,7 @@ import {
   issues,
   projects,
   routines,
+  routineTriggers,
   secretAccessEvents,
   withCompanyScope,
 } from "@paperclipai/db";
@@ -1588,6 +1589,31 @@ export function secretService(db: Db, rawDb: Db = db) {
           label: row.title,
           href: `/routines/${row.id}`,
           status: row.status,
+        });
+      }
+    }
+
+    const routineTriggerIds = collectTargetIds(bindings, "routine_trigger", { uuidOnly: true });
+    if (routineTriggerIds.length > 0) {
+      const rows = await db
+        .select({
+          id: routineTriggers.id,
+          routineId: routineTriggers.routineId,
+          label: routineTriggers.label,
+          kind: routineTriggers.kind,
+          enabled: routineTriggers.enabled,
+          routineTitle: routines.title,
+        })
+        .from(routineTriggers)
+        .innerJoin(routines, eq(routines.id, routineTriggers.routineId))
+        .where(and(eq(routineTriggers.companyId, companyId), inArray(routineTriggers.id, routineTriggerIds)));
+      for (const row of rows) {
+        setTarget({
+          type: "routine_trigger",
+          id: row.id,
+          label: `${row.label?.trim() || `${row.kind} trigger`} — ${row.routineTitle}`,
+          href: `/routines/${row.routineId}`,
+          status: row.enabled ? "enabled" : "disabled",
         });
       }
     }

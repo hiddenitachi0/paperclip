@@ -14,7 +14,7 @@ import {
 import { trackRoutineCreated } from "@paperclipai/shared/telemetry";
 import { validate } from "../middleware/validate.js";
 import { accessService, documentAnnotationService, logActivity, routineService } from "../services/index.js";
-import { assertCompanyAccess, getActorInfo } from "./authz.js";
+import { assertCompanyAccess, assertCompanyOwnerAdminOrInstanceAdmin, getActorInfo } from "./authz.js";
 import { forbidden, unauthorized } from "../errors.js";
 import { getTelemetryClient } from "../telemetry.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
@@ -502,6 +502,9 @@ export function routineRoutes(
       return;
     }
     await assertBoardCanAssignTasks(req, routine.companyId);
+    if (req.body.kind === "webhook" && req.body.existingSecretId) {
+      assertCompanyOwnerAdminOrInstanceAdmin(req, routine.companyId, "a webhook trigger's secret");
+    }
     const created = await svc.createTrigger(routine.id, req.body, {
       agentId: req.actor.type === "agent" ? req.actor.agentId : null,
       userId: req.actor.type === "board" ? req.actor.userId ?? "board" : null,
@@ -517,7 +520,7 @@ export function routineRoutes(
       action: "routine.trigger_created",
       entityType: "routine_trigger",
       entityId: created.trigger.id,
-      details: { routineId: routine.id, kind: created.trigger.kind },
+      details: { routineId: routine.id, kind: created.trigger.kind, secretAttached: Boolean(req.body.existingSecretId) },
     });
     await logRoutineRevisionCreated(req, {
       companyId: routine.companyId,
@@ -542,6 +545,9 @@ export function routineRoutes(
       return;
     }
     await assertBoardCanAssignTasks(req, routine.companyId);
+    if (req.body.existingSecretId !== undefined) {
+      assertCompanyOwnerAdminOrInstanceAdmin(req, routine.companyId, "a webhook trigger's secret");
+    }
     const updated = await svc.updateTrigger(trigger.id, req.body, {
       agentId: req.actor.type === "agent" ? req.actor.agentId : null,
       userId: req.actor.type === "board" ? req.actor.userId ?? "board" : null,
@@ -557,7 +563,7 @@ export function routineRoutes(
       action: "routine.trigger_updated",
       entityType: "routine_trigger",
       entityId: trigger.id,
-      details: { routineId: routine.id, kind: updated?.trigger.kind ?? trigger.kind },
+      details: { routineId: routine.id, kind: updated?.trigger.kind ?? trigger.kind, secretChanged: req.body.existingSecretId !== undefined },
     });
     if (updated) {
       await logRoutineRevisionCreated(req, {

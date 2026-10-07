@@ -736,6 +736,11 @@ export const SECRET_BINDING_TARGET_TYPES = [
   "project",
   "environment",
   "routine",
+  // DUR-4583: one routine_triggers row's webhook secret (config_path
+  // 'webhookSecret'). Pure "used by" bookkeeping: resolution still goes
+  // through the "routine" binding above. Not dedicated -- one secret may be
+  // shared by triggers on several routines.
+  "routine_trigger",
   // DUR-4182: webhook auth secret for a job_triggers row, same shape as
   // "routine" above (routineWebhookSecretConfigPath-style config path).
   "job",
