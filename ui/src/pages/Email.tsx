@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Archive, ArrowLeft, Check, Mail, Reply, Search, Send, Sparkles, ThumbsDown, ThumbsUp, Trash2 } from "lucide-react";
-import type { MailMessageFolder, MailUrgencyFeedback } from "@paperclipai/shared";
+import type { CompanySecret, MailMessageFolder, MailUrgencyFeedback } from "@paperclipai/shared";
 import { MAIL_MESSAGE_FOLDERS } from "@paperclipai/shared";
 import type { MailAccountSummary, MailMessageSummary } from "../types/mail";
 import { useCompany } from "../context/CompanyContext";
@@ -149,7 +149,7 @@ export const MAIL_PROVIDER_PRESETS: Record<MailProviderId, MailProviderPreset> =
     imapSecure: true,
     smtpHost: "",
     smtpPort: 587,
-    smtpSecure: true,
+    smtpSecure: false,
     steps: ["Ask your email provider for the incoming (IMAP) and outgoing (SMTP) server names, then fill them in below."],
   },
 };
@@ -179,6 +179,13 @@ function AddMailboxForm({ companyId, ownerUserId }: { companyId: string; ownerUs
     queryFn: () => secretsApi.list(companyId),
   });
   const secrets = secretsQuery.data ?? [];
+  // Radix's Select mirrors its value onto a hidden native <select> for form semantics; if the
+  // value doesn't match a mounted <SelectItem> yet (e.g. a just-saved secret the list hasn't
+  // refetched), that sync fires onValueChange("") and silently clobbers the id. Only hand Radix
+  // a value once a matching item exists; the real id lives in imap/smtpCredentialSecretId and is
+  // what actually gets submitted.
+  const imapSelectValue = secrets.some((secret) => secret.id === imapCredentialSecretId) ? imapCredentialSecretId : "";
+  const smtpSelectValue = secrets.some((secret) => secret.id === smtpCredentialSecretId) ? smtpCredentialSecretId : "";
 
   function chooseProvider(next: MailProviderId) {
     const chosen = MAIL_PROVIDER_PRESETS[next];
@@ -196,11 +203,16 @@ function AddMailboxForm({ companyId, ownerUserId }: { companyId: string; ownerUs
         value: newPassword.replace(/\s+/g, ""),
       });
     },
-    onSuccess: async (secret) => {
-      await queryClient.invalidateQueries({ queryKey: ["secrets", companyId] });
+    onSuccess: (secret) => {
+      // Put the new secret in the cache before selecting it: invalidateQueries alone
+      // can resolve a render after the Select has already dropped an id with no matching item.
+      queryClient.setQueryData<CompanySecret[]>(["secrets", companyId], (old) =>
+        old ? [...old, secret] : [secret],
+      );
       setImapCredentialSecretId(secret.id);
       setNewPassword("");
       pushToast({ title: "Password saved", tone: "success" });
+      queryClient.invalidateQueries({ queryKey: ["secrets", companyId] });
     },
     onError: (error) =>
       pushToast({ title: "Could not save that password", body: errorMessage(error, "Try again in a moment."), tone: "error" }),
@@ -334,7 +346,7 @@ function AddMailboxForm({ companyId, ownerUserId }: { companyId: string; ownerUs
         </div>
         <div className="space-y-1.5">
           <Label>Password</Label>
-          <Select value={imapCredentialSecretId} onValueChange={setImapCredentialSecretId}>
+          <Select value={imapSelectValue} onValueChange={setImapCredentialSecretId}>
             <SelectTrigger>
               <SelectValue placeholder="Choose a saved password" />
             </SelectTrigger>
@@ -379,7 +391,7 @@ function AddMailboxForm({ companyId, ownerUserId }: { companyId: string; ownerUs
         {separateSendPassword ? (
           <div className="space-y-1.5">
             <Label>Password for sending</Label>
-            <Select value={smtpCredentialSecretId} onValueChange={setSmtpCredentialSecretId}>
+            <Select value={smtpSelectValue} onValueChange={setSmtpCredentialSecretId}>
               <SelectTrigger>
                 <SelectValue placeholder="Choose a saved password" />
               </SelectTrigger>

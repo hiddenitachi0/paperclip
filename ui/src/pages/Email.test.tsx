@@ -36,7 +36,7 @@ const mockMailApi = vi.hoisted(() => ({
   updateDraft: vi.fn(),
   sendDraft: vi.fn(),
 }));
-const mockSecretsApi = vi.hoisted(() => ({ list: vi.fn() }));
+const mockSecretsApi = vi.hoisted(() => ({ list: vi.fn(), create: vi.fn() }));
 const mockAuthApi = vi.hoisted(() => ({ getSession: vi.fn() }));
 const mockUseCompanyRole = vi.hoisted(() => vi.fn());
 const mockPushToast = vi.hoisted(() => vi.fn());
@@ -205,6 +205,51 @@ describe("Email page", () => {
     expect(gmail.steps.join(" ")).toContain("2-Step Verification");
     expect(MAIL_PROVIDER_PRESETS.outlook.smtpSecure).toBe(false);
     expect(MAIL_PROVIDER_PRESETS.domeneshop.imapHost).toBe("imap.domeneshop.no");
+  });
+
+  it("auto-selects a newly saved password for both IMAP and SMTP even if the secrets list hasn't refetched it yet", async () => {
+    mockMailApi.listAccounts.mockResolvedValue([]);
+    // The list refetch triggered after save still returns the old (empty) list, mirroring
+    // the real backend's timing. The newly created secret must still end up selected.
+    mockSecretsApi.list.mockResolvedValue([]);
+    mockSecretsApi.create.mockResolvedValue({ id: "secret-1", name: "Email password (filip@example.com) 2026-10-07 21:20" });
+    mockMailApi.createAccount.mockResolvedValue(account);
+    await render();
+
+    const nameInput = container.querySelector<HTMLInputElement>("#mailbox-name")!;
+    const emailInput = container.querySelector<HTMLInputElement>("#mailbox-email")!;
+    const imapHostInput = container.querySelector<HTMLInputElement>("#imap-host")!;
+    const smtpHostInput = container.querySelector<HTMLInputElement>("#smtp-host")!;
+    const nameSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    await act(async () => {
+      nameSetter?.call(nameInput, "My inbox");
+      nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+      nameSetter?.call(emailInput, "filip@example.com");
+      emailInput.dispatchEvent(new Event("input", { bubbles: true }));
+      nameSetter?.call(imapHostInput, "imap.example.com");
+      imapHostInput.dispatchEvent(new Event("input", { bubbles: true }));
+      nameSetter?.call(smtpHostInput, "smtp.example.com");
+      smtpHostInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    const passwordInput = container.querySelector<HTMLInputElement>("#mailbox-new-password")!;
+    await act(async () => {
+      nameSetter?.call(passwordInput, " abcd efgh ");
+      passwordInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => buttonByText("Save password")!.click());
+    await flush();
+
+    expect(mockSecretsApi.create).toHaveBeenCalledWith(COMPANY, expect.objectContaining({ value: "abcdefgh" }));
+    expect(mockPushToast).toHaveBeenCalledWith(expect.objectContaining({ title: "Password saved" }));
+
+    await act(async () => buttonByText("Connect mailbox")!.click());
+    await flush();
+
+    expect(mockMailApi.createAccount).toHaveBeenCalledWith(
+      COMPANY,
+      expect.objectContaining({ imapCredentialSecretId: "secret-1", smtpCredentialSecretId: "secret-1" }),
+    );
   });
 
   it("lists an inbox message with its subject and sender", async () => {
