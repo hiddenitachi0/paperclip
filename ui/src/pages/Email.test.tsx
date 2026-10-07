@@ -32,6 +32,7 @@ const mockMailApi = vi.hoisted(() => ({
   archiveMessage: vi.fn(),
   moveMessage: vi.fn(),
   createDraft: vi.fn(),
+  setUrgencyFeedback: vi.fn(),
   updateDraft: vi.fn(),
   sendDraft: vi.fn(),
 }));
@@ -245,5 +246,46 @@ describe("Email page", () => {
     await render();
     const row = container.querySelector('[data-testid="mail-message-row"]')!;
     expect(row.textContent).toContain("AI draft");
+  });
+
+  const urgency = {
+    urgent: true,
+    category: "bank-payment",
+    reason: "Payment is overdue.",
+    summary: "Invoice 12 is past due.",
+    classifiedAt: "2026-10-07T00:00:00Z",
+    operatorFeedback: null,
+  };
+
+  it("shows an Urgent badge on urgent mail and nothing on unchecked mail", async () => {
+    mockMailApi.listMessages.mockResolvedValue([{ ...message, urgency }, { ...message, id: "m2" }]);
+    await render();
+    const rows = container.querySelectorAll('[data-testid="mail-message-row"]');
+    expect(rows[0]!.textContent).toContain("Urgent");
+    expect(rows[1]!.textContent).not.toContain("Urgent");
+  });
+
+  it("reading urgent mail shows why, and Right/Wrong saves the answer", async () => {
+    mockMailApi.listMessages.mockResolvedValue([{ ...message, urgency }]);
+    mockMailApi.setUrgencyFeedback.mockResolvedValue({ ...urgency, operatorFeedback: "incorrect" });
+    await render();
+    await act(async () => {
+      (container.querySelector('[data-testid="mail-message-row"]') as HTMLElement).click();
+    });
+    const panel = container.querySelector('[data-testid="mail-urgency-panel"]')!;
+    expect(panel.textContent).toContain("Payment is overdue.");
+    expect(panel.textContent).toContain("Invoice 12 is past due.");
+    await act(async () => {
+      buttonByText("Wrong", panel)!.click();
+    });
+    expect(mockMailApi.setUrgencyFeedback).toHaveBeenCalledWith(expect.anything(), expect.anything(), message.id, "incorrect");
+  });
+
+  it("mail that was never checked has no urgency panel", async () => {
+    await render();
+    await act(async () => {
+      (container.querySelector('[data-testid="mail-message-row"]') as HTMLElement).click();
+    });
+    expect(container.querySelector('[data-testid="mail-urgency-panel"]')).toBeNull();
   });
 });
