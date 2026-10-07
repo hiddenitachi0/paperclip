@@ -79,6 +79,7 @@ import { schedulerLiveness } from "./services/scheduler-liveness.js";
 import { watcherService } from "./services/watchers.js";
 import { morningReportService } from "./services/morning-report.js";
 import { modelHealthService } from "./services/model-health.js";
+import { modelSetupReviewerService } from "./services/model-setup-reviewer.js";
 import { paymentCardService } from "./services/payment-cards.js";
 import { mailSecretaryService } from "./services/mail-secretary.js";
 import { mailAccountsService } from "./services/mail-accounts.js";
@@ -132,6 +133,10 @@ import type {
 
 const LOCAL_MODEL_HEALTH_INTERVAL_MS = 3 * 60_000;
 let lastLocalModelHealthCheckAt = 0;
+// DUR-4560: the weekly model setup review is gated by each entry's last review row; this only
+// limits how often the scheduler asks the question.
+const MODEL_SETUP_REVIEW_CHECK_INTERVAL_MS = 60 * 60_000;
+let lastModelSetupReviewCheckAt = 0;
 
 type BetterAuthSessionUser = {
   id: string;
@@ -1518,6 +1523,33 @@ export async function startServer(): Promise<StartedServer> {
             () => modelHealthService(schedulerDb as any).checkInUse(),
           ).catch((err) => {
             logger.error({ err }, "local-model health check failed");
+          }),
+        );
+      }
+
+      // DUR-4560: weekly model setup review (local models only, free probes).
+      if (Date.now() - lastModelSetupReviewCheckAt >= MODEL_SETUP_REVIEW_CHECK_INTERVAL_MS) {
+        lastModelSetupReviewCheckAt = Date.now();
+        void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.modelSetupReview, () =>
+          runInCompanyScopeBypass(
+            bypassDb,
+            {
+              reason: "heartbeat scheduler tick: modelSetupReview",
+              actorType: "scheduler",
+              route: "heartbeat-scheduler:modelSetupReview",
+            },
+            async () => {
+              const reviewer = modelSetupReviewerService(schedulerDb as any);
+              const companyRows = await schedulerDb.select({ id: companies.id }).from(companies);
+              for (const company of companyRows) {
+                const result = await reviewer.reviewDue(company.id, new Date());
+                if (result.reviewed > 0 || result.failed > 0) {
+                  logger.info({ companyId: company.id, ...result }, "weekly model setup review ran");
+                }
+              }
+            },
+          ).catch((err) => {
+            logger.error({ err }, "weekly model setup review failed");
           }),
         );
       }

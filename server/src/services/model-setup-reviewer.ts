@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, isNotNull, max } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { modelDirectoryConverters, modelDirectoryEntries, modelSetupReviews } from "@paperclipai/db";
 import {
@@ -36,6 +36,29 @@ import {
  * on every query. Probes cost nothing (local models only) -- see
  * model-setup-probes.ts.
  */
+
+/**
+ * DUR-4560: the standing reviewer's persona and hard scope. The persona is
+ * code, not a prompt: it names the only things the weekly run may touch, and
+ * `assertReviewerWriteScope` is the check every write target passes through,
+ * so a future change that widens the reviewer has to edit (and test) this list.
+ */
+export const MODEL_SETUP_REVIEWER_PERSONA = {
+  name: "Model setup reviewer",
+  purpose: "Once a week, check each saved local model, say in plain English how it is doing, and fix its setup when a fix is safe.",
+  mayWrite: ["model_directory_entries.reviewed_settings", "model_directory_converters", "model_setup_reviews"],
+  neverTouches: ["code", "keys and secrets", "budgets and cost limits", "host allow-lists or other host restrictions", "model addresses"],
+  alwaysAsksOwnerFor: ["any change that drops a capability"],
+} as const;
+
+export const MODEL_SETUP_REVIEW_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
+export const MODEL_SETUP_REVIEW_MAX_PER_TICK = 5;
+
+export function assertReviewerWriteScope(target: string): void {
+  if (!(MODEL_SETUP_REVIEWER_PERSONA.mayWrite as readonly string[]).includes(target)) {
+    throw unprocessable(`The model setup reviewer may not change ${target}`);
+  }
+}
 
 type FetchLike = typeof fetch;
 type ReviewRow = typeof modelSetupReviews.$inferSelect;
@@ -212,8 +235,43 @@ export function modelSetupReviewerService(db: Db, deps: { fetchImpl?: FetchLike;
     return toReview(row!);
   }
 
+  /**
+   * Weekly routine: reviews each local model setup in the company whose last
+   * review is older than a week (or that never had one). Bounded per call so
+   * one tick never runs an unbounded probe load; the rest wait for the next.
+   */
+  async function reviewDue(companyId: string, now: Date): Promise<{ reviewed: number; failed: number }> {
+    const entries = await db
+      .select({ id: modelDirectoryEntries.id })
+      .from(modelDirectoryEntries)
+      .where(and(eq(modelDirectoryEntries.companyId, companyId), eq(modelDirectoryEntries.provider, "local"), isNotNull(modelDirectoryEntries.baseUrl)));
+    const latest = await db
+      .select({ entryId: modelSetupReviews.entryId, at: max(modelSetupReviews.createdAt) })
+      .from(modelSetupReviews)
+      .where(eq(modelSetupReviews.companyId, companyId))
+      .groupBy(modelSetupReviews.entryId);
+    const lastAt = new Map(latest.map((r) => [r.entryId, r.at?.getTime() ?? 0]));
+    const due = entries
+      .filter((e) => now.getTime() - (lastAt.get(e.id) ?? 0) >= MODEL_SETUP_REVIEW_INTERVAL_MS)
+      .sort((a, b) => (lastAt.get(a.id) ?? 0) - (lastAt.get(b.id) ?? 0))
+      .slice(0, MODEL_SETUP_REVIEW_MAX_PER_TICK);
+    let reviewed = 0;
+    let failed = 0;
+    for (const e of due) {
+      try {
+        assertReviewerWriteScope("model_setup_reviews");
+        await review(companyId, e.id, { trigger: "weekly", userId: null });
+        reviewed++;
+      } catch {
+        failed++;
+      }
+    }
+    return { reviewed, failed };
+  }
+
   return {
     review,
+    reviewDue,
 
     async list(companyId: string, entryId: string): Promise<ModelSetupReview[]> {
       await getEntry(companyId, entryId);
