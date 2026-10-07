@@ -86,6 +86,7 @@ export {
 export { financeService } from "./finance.js";
 export { heartbeatService, isHeartbeatRunLiveInThisProcess } from "./heartbeat.js";
 export { mergeDeployVisibilityService, MERGE_DEPLOY_VISIBILITY_DELAY_MS } from "./merge-deploy-visibility.js";
+export { backfillOpenMergeCardHeadCommits } from "./merge-card-head-commit.js";
 export { deployCarriedIssuesService } from "./deploy-carried-issues.js";
 export { deployApprovalFeedbackService, DEPLOY_APPROVAL_FEEDBACK_DELAY_MS } from "./deploy-approval-feedback.js";
 export { mergePrAutomationService } from "./merge-pr-automation.js";

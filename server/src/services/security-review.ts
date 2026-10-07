@@ -14,6 +14,11 @@
  * a `passed`/`failed` row whose `headCommit` no longer matches the approval's
  * current `payload.commit` reads as `out_of_date` -- a later push on the same
  * PR invalidates a prior pass without deleting the review history.
+ *
+ * DUR-4601: `payload.commit` is not guaranteed to be there -- an agent filing a merge card
+ * often supplies only `repo`/`prNumber`. `requestReview`/`recordVerdict` resolve it from
+ * GitHub on demand (see merge-card-head-commit.ts) rather than ever requiring the filer to
+ * include one, which is also what lets a later push on the PR be noticed at all.
  */
 
 import { desc, eq } from "drizzle-orm";
@@ -29,6 +34,7 @@ import type { SecurityReviewState } from "@paperclipai/shared";
 import { forbidden, notFound, unprocessable } from "../errors.js";
 import { issueApprovalService } from "./issue-approvals.js";
 import { issueService } from "./issues.js";
+import { refreshMergePrHeadCommit as defaultRefreshMergePrHeadCommit } from "./merge-card-head-commit.js";
 
 export function isMergePrApprovalPayload(payload: unknown): payload is Record<string, unknown> {
   return Boolean(payload) && typeof payload === "object" && (payload as Record<string, unknown>).kind === "merge_pr";
@@ -50,7 +56,12 @@ function mergePrLinkText(payload: Record<string, unknown>): string {
   return pr || "(no PR link on this card)";
 }
 
-export function securityReviewService(db: Db) {
+export function securityReviewService(
+  db: Db,
+  options: { refreshHeadCommit?: typeof defaultRefreshMergePrHeadCommit } = {},
+) {
+  const refreshHeadCommit = options.refreshHeadCommit ?? defaultRefreshMergePrHeadCommit;
+
   async function getApproval(approvalId: string) {
     const [row] = await db.select().from(approvals).where(eq(approvals.id, approvalId));
     return row ?? null;
@@ -163,8 +174,12 @@ export function securityReviewService(db: Db) {
     if (!isMergePrApprovalPayload(approval.payload)) {
       throw unprocessable("Only a merge card can have a security review requested.");
     }
-    const payload = approval.payload as Record<string, unknown>;
-    const headCommit = mergePrHeadCommit(payload);
+    // DUR-4601: resolve/refresh the card's head commit from GitHub before gating on it --
+    // an agent-filed card legitimately carries only prNumber/repo, and a prior pass's commit
+    // may have since been superseded by another push on the same PR.
+    const { payload, headCommit } = await refreshHeadCommit(db, approval);
+    // computeState below must see the just-refreshed payload, not the pre-refresh row.
+    const refreshedApproval = { ...approval, payload };
     if (!headCommit) {
       throw unprocessable("This card has no commit yet, so a review cannot be requested.");
     }
@@ -177,7 +192,7 @@ export function securityReviewService(db: Db) {
 
     const existing = await latestReviewRow(approvalId);
     if (existing && existing.status === "requested" && existing.headCommit === headCommit) {
-      return computeState(approval);
+      return computeState(refreshedApproval);
     }
 
     const title = typeof payload.title === "string" && payload.title.trim() ? payload.title.trim() : "this merge";
@@ -218,14 +233,14 @@ export function securityReviewService(db: Db) {
       // the same (approval, head commit) pair (DUR-4568 finding #4).
       if (isUniqueViolation(err)) {
         await issueService(db).update(reviewIssue.id, { status: "cancelled" });
-        return computeState(approval);
+        return computeState(refreshedApproval);
       }
       throw err;
     }
 
     await issueApprovalService(db).linkManyForApproval(approvalId, [reviewIssue.id], actor);
 
-    return computeState(approval);
+    return computeState(refreshedApproval);
   }
 
   /**
@@ -243,8 +258,14 @@ export function securityReviewService(db: Db) {
     if (!isMergePrApprovalPayload(approval.payload)) {
       throw unprocessable("Only a merge card can have a security review verdict.");
     }
-    const payload = approval.payload as Record<string, unknown>;
-    const headCommit = mergePrHeadCommit(payload);
+    // DUR-4601: only fill a missing commit here, never refresh one that's already set -- a
+    // verdict must be recorded against the exact commit the review was requested/open
+    // against, not silently reassigned to a later push that landed mid-review.
+    let payload = approval.payload as Record<string, unknown>;
+    let headCommit = mergePrHeadCommit(payload);
+    if (!headCommit) {
+      ({ payload, headCommit } = await refreshHeadCommit(db, approval));
+    }
     if (!headCommit) {
       throw unprocessable("This card has no commit yet, so a verdict cannot be recorded against it.");
     }
@@ -302,7 +323,7 @@ export function securityReviewService(db: Db) {
       });
     }
 
-    return computeState(approval);
+    return computeState({ ...approval, payload });
   }
 
   return { computeState, requestReview, recordVerdict, getReviewerAgentId };

@@ -47,6 +47,7 @@ import { setupLiveEventsWebSocketServer } from "./realtime/live-events-ws.js";
 import {
   feedbackService,
   backfillPrincipalAccessCompatibility,
+  backfillOpenMergeCardHeadCommits,
   seedDurStarterJobs,
   bootstrapExecutionPolicyFromEnv,
   environmentCustomImageService,
@@ -678,6 +679,16 @@ export async function startServer(): Promise<StartedServer> {
     || accessBackfill.agentMergeRequestGrantsInserted > 0
   ) {
     logger.info(accessBackfill, "Backfilled principal access compatibility records");
+  }
+  // DUR-4601: open merge_pr cards filed before head-commit resolution existed are otherwise
+  // permanently stuck unable to ever request/record a security review -- idempotent, so safe
+  // to run on every boot.
+  const mergeCardHeadCommitBackfill = await backfillOpenMergeCardHeadCommits(db as any).catch((err) => {
+    logger.error({ err }, "merge card head-commit backfill failed");
+    return { checked: 0, resolved: 0 };
+  });
+  if (mergeCardHeadCommitBackfill.checked > 0) {
+    logger.info(mergeCardHeadCommitBackfill, "Backfilled merge card head commits");
   }
   const durStarterJobsSeeded = await seedDurStarterJobs(db as any);
   if (durStarterJobsSeeded.created.length > 0) {

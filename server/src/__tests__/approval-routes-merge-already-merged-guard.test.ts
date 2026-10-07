@@ -321,8 +321,13 @@ describe("DUR-3964 (c): a merge card with nothing left to merge is refused at fi
   );
 
   it(
-    "asks GitHub nothing when the card names no commit -- there is nothing to check",
+    "asks GitHub nothing for the already-merged check when the card names no commit -- there is nothing to compare yet",
     async () => {
+      // DUR-4601: filing now separately asks GitHub to resolve the missing commit (so the
+      // card can later have a security review requested against it) -- that's the one call
+      // this test still expects. It's not this suite's `/compare/` ancestor check, which has
+      // nothing to ask about until a commit exists.
+      mockGhFetch.mockResolvedValue(new Response(JSON.stringify({ head: { sha: COMMIT } }), { status: 200 }));
       const app = await createAgentApp();
 
       const res = await request(app)
@@ -330,7 +335,15 @@ describe("DUR-3964 (c): a merge card with nothing left to merge is refused at fi
         .send(mergePrBody({ commit: undefined }));
 
       expect(res.status).toBe(201);
-      expect(mockGhFetch).not.toHaveBeenCalled();
+      expect(mockGhFetch).toHaveBeenCalledTimes(1);
+      expect(mockGhFetch).toHaveBeenCalledWith(
+        expect.stringContaining("/pulls/42"),
+        expect.anything(),
+      );
+      expect(mockApprovalService.create).toHaveBeenCalledWith(
+        COMPANY_ID,
+        expect.objectContaining({ payload: expect.objectContaining({ commit: COMMIT }) }),
+      );
     },
     TEST_TIMEOUT,
   );

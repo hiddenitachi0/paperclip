@@ -83,6 +83,7 @@ import { recordCheapRunEscalation } from "../services/recovery/cheap-run-escalat
 // (it pulls in the issue/heartbeat graph, which route tests mock away).
 import { buildBossReviewStamp, readBossReview } from "../services/model-boost-boss-review.js";
 import { ghFetch, gitHubApiBase } from "../services/github-fetch.js";
+import { withResolvedMergePrHeadCommit } from "../services/merge-card-head-commit.js";
 
 function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(approval: T): T {
   return {
@@ -1486,6 +1487,9 @@ async function normalizeRequestBoardApprovalPayload(
   await assertMergePrRepoMatchesProject(db, companyId, issueIds, payload);
   if (payload.kind === "merge_pr") {
     await assertMergePrIssueIdsAreRelevant(db, companyId, issueIds, actor);
+    // DUR-4601: agents routinely file a merge card with only repo/prNumber -- fill the head
+    // commit from GitHub server-side so "Request security review" never 422s on it later.
+    payload = await withResolvedMergePrHeadCommit(db, companyId, payload);
   }
   stampOriginalIssueIds(payload, issueIds);
   if (typeof payload.title !== "string" || !payload.title.trim()) return payload;
