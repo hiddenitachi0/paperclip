@@ -12,6 +12,7 @@ export const queryKeys = {
     dataConnections: (id: string) => ["companies", id, "data-connections"] as const,
     datasetSources: (id: string) => ["companies", id, "dataset-sources"] as const,
     modelDirectory: (id: string) => ["companies", id, "model-directory"] as const,
+    modelReviews: (id: string, entryId: string) => ["companies", id, "model-directory", entryId, "reviews"] as const,
     modelStarters: (id: string) => ["companies", id, "model-directory", "starters"] as const,
     webSearch: (id: string) => ["companies", id, "web-search"] as const,
     dataReads: (id: string) => ["companies", id, "data-reads"] as const,
