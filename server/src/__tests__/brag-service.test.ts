@@ -109,4 +109,13 @@ d("bragService gate (DUR-4520)", () => {
   it("refuses to create a job for a project in another company", async () => {
     await expect(svc.createJob(companyId, ACTOR, { projectId: randomUUID(), format: "square", lengthSeconds: 8, music: false } as never)).rejects.toThrow(/not found/i);
   });
+
+  it("resolves a scene's still ref, scoped to this job and company", async () => {
+    const job = await svc.createJob(companyId, ACTOR, { projectId, format: "square", lengthSeconds: 8, music: false } as never);
+    const { scenes } = await svc.planJob(companyId, job.id, ACTOR);
+    const stillRef = await svc.getSceneStillRef(companyId, job.id, scenes[0]!.id);
+    expect(stillRef).toBe(scenes[0]!.stillRef);
+    await expect(svc.getSceneStillRef(randomUUID(), job.id, scenes[0]!.id)).rejects.toThrow(/not found/i);
+    await expect(svc.getSceneStillRef(companyId, job.id, randomUUID())).rejects.toThrow(/scene not found/i);
+  });
 });
