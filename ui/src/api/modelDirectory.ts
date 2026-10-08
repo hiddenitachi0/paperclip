@@ -1,13 +1,17 @@
 import type {
   CreateModelDirectoryEntry,
   ImportModelDirectoryCatalogue,
+  LocalModelsSyncResult,
   ModelDirectoryCatalogueExport,
   ModelDirectoryCatalogueImportResult,
   ModelDirectoryEntry,
+  ModelDirectorySettings,
+  ModelDirectoryStartersResult,
   ModelDirectoryStarterStatus,
   ModelConverterOp,
   ModelProbeSetResult,
   UpdateModelDirectoryEntry,
+  UpdateModelDirectorySettings,
 } from "@paperclipai/shared";
 import { api } from "./client";
 
@@ -73,10 +77,18 @@ export const modelDirectoryApi = {
   listStarters: (companyId: string) =>
     api.get<ModelDirectoryStarterStatus[]>(`/companies/${companyId}/model-directory/starters`),
   addStarters: (companyId: string, starterIds?: string[]) =>
-    api.post<ModelDirectoryEntry[]>(
+    api.post<ModelDirectoryStartersResult>(
       `/companies/${companyId}/model-directory/starters`,
       starterIds ? { starterIds } : {},
     ),
+  /** Settings > Models settings (graphics card memory, model server address). */
+  getSettings: (companyId: string) =>
+    api.get<ModelDirectorySettings>(`/companies/${companyId}/model-directory/settings`),
+  updateSettings: (companyId: string, body: UpdateModelDirectorySettings) =>
+    api.put<ModelDirectorySettings>(`/companies/${companyId}/model-directory/settings`, body),
+  /** Asks the local Ollama at one of the company's local addresses which models are installed and marks the setups there. */
+  syncLocal: (companyId: string, baseUrl: string) =>
+    api.post<LocalModelsSyncResult>(`/companies/${companyId}/model-directory/local-sync`, { baseUrl }),
   listReviews: (companyId: string, entryId: string) =>
     api.get<ModelReview[]>(`/companies/${companyId}/model-directory/${entryId}/reviews`),
   runReview: (companyId: string, entryId: string) =>

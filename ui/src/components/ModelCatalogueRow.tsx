@@ -21,14 +21,16 @@ import {
   duplicateLabel,
   laneLabel,
   noteFirstLine,
-  whereLabel,
+  ratingsAverage,
+  runOptionLabel,
 } from "../lib/model-catalogue";
 
 /**
- * One saved model in the Settings > Models catalogue: a compact row with the
- * favourite star, name, model id, chips, a one-line spec summary and the first
- * line of the note. "More" opens the rest (full note, address, links,
- * defaults). Change buttons only show for the owner and admins.
+ * One saved model in the Settings > Models catalogue (one way to run a model
+ * size): a compact row with the favourite star, name, how it runs ("Local ·
+ * llama3.2:3b" / "OpenRouter · deepinfra"), chips, the company's test
+ * scores, a one-line spec summary and the first line of the note. "More" opens the rest (full note, address, links,
+ * defaults). Change buttons only show for the company owner and admins.
  */
 
 function Chip({
@@ -102,6 +104,8 @@ export function ModelCatalogueRow({
   onCopyText: (text: string, what: string) => void;
 }) {
   const archived = Boolean(entry.archivedAt);
+  const ratings = entry.ratings ?? [];
+  const average = ratingsAverage(ratings);
   const specs = describeSpecs(entry.specs);
   const note = noteFirstLine(entry.note);
   const defaults = defaultsText(entry);
@@ -117,7 +121,7 @@ export function ModelCatalogueRow({
       data-testid={`model-card-${entry.id}`}
       data-archived={archived ? "true" : undefined}
       className={cn(
-        "space-y-2 rounded-md border border-border px-3 py-2.5",
+        "space-y-1.5 rounded-md border border-border px-3 py-2",
         archived && "border-dashed bg-muted/30 text-muted-foreground",
       )}
     >
@@ -146,7 +150,7 @@ export function ModelCatalogueRow({
             <span className={cn("text-sm font-semibold", archived ? "text-muted-foreground" : "text-foreground")}>
               {entry.name}
             </span>
-            <Chip>{whereLabel(entry.provider)}</Chip>
+            <Chip testId={`model-runs-${entry.id}`}>{runOptionLabel(entry)}</Chip>
             {entry.lane && <Chip>{laneLabel(entry.lane)}</Chip>}
             {entry.availability && <Chip tone="muted">{availabilityLabel(entry.availability)}</Chip>}
             {(entry.tags ?? []).map((tag) => (
@@ -184,6 +188,19 @@ export function ModelCatalogueRow({
               <ClipboardCopy className="h-3 w-3" />
             </button>
           </div>
+
+          {ratings.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1" data-testid={`model-ratings-${entry.id}`}>
+              {ratings.map((rating) => (
+                <Chip key={rating.criterion} tone="muted" title={rating.note ?? undefined}>
+                  {rating.criterion} {rating.score}
+                </Chip>
+              ))}
+              {average !== null && ratings.length > 1 && (
+                <span className="text-[11px] text-muted-foreground">average {average}</span>
+              )}
+            </div>
+          )}
 
           {specs && (
             <p className="text-xs text-muted-foreground" data-testid={`model-specs-${entry.id}`}>

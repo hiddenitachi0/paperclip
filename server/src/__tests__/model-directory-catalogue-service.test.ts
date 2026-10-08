@@ -164,10 +164,13 @@ d("model directory catalogue service", () => {
 
   it("counts archived entries as already added for starters and as taken names for the settings import", async () => {
     const c = await newCompany("CTE");
-    const [first] = await svc.addStarters(c, [MODEL_DIRECTORY_STARTERS[0]!.id], actor);
+    await svc.updateSettings(c, { localBaseUrl: "http://192.168.1.20:11434/v1" }, actor);
+    const {
+      created: [first],
+    } = await svc.addStarters(c, [MODEL_DIRECTORY_STARTERS[0]!.id], actor);
     await svc.update(c, first!.id, patch({ archived: true }), actor);
     expect((await svc.listStarters(c)).find((s) => s.id === MODEL_DIRECTORY_STARTERS[0]!.id)?.alreadyAdded).toBe(true);
-    expect(await svc.addStarters(c, [MODEL_DIRECTORY_STARTERS[0]!.id], actor)).toEqual([]);
+    expect(await svc.addStarters(c, [MODEL_DIRECTORY_STARTERS[0]!.id], actor)).toEqual({ created: [], skipped: [] });
 
     // An archived entry holds the name the import would pick; the import picks the next one.
     const taken = await svc.create(c, create({ name: "OpenRouter: vendor/a", provider: "anthropic", model: "claude-sonnet-5" }), actor);
@@ -219,6 +222,9 @@ d("model directory catalogue service", () => {
       tags: ["tools"],
       specs: { params: "14B" },
       favorite: true,
+      family: null,
+      variant: null,
+      ratings: [],
       backupNames: ["Mistral backup"],
       archived: false,
     });

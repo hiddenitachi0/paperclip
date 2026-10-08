@@ -55,6 +55,14 @@ export const modelDirectoryEntries = pgTable(
     note: text("note"),
     maker: text("maker"),
     baseModel: text("base_model"),
+    // Catalogue v2 (8 Oct): the model family ("Llama 3.2") and the size or
+    // variant ("3B", "14B uncensored") as their own fields, so the page can
+    // show Maker -> Model -> Size -> ways to run it. base_model stays for
+    // older rows and is read as a fallback.
+    family: text("family"),
+    variant: text("variant"),
+    // The owner's own test scores: [{ criterion, score 0-10, note?, updatedAt }].
+    ratings: jsonb("ratings").$type<Array<Record<string, unknown>>>().notNull().default([]),
     // "quick" | "full" | "both" | null (not said).
     lane: text("lane"),
     // "installed" | "downloading" | "planned" | "cloud" | null (not said).
