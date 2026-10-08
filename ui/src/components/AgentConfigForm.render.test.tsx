@@ -768,3 +768,257 @@ describe("AgentConfigForm persona and limits (DUR-4000)", () => {
     expect((onSave.mock.calls[0]![0] as { limits: unknown }).limits).toEqual({ dailyImageGenerations: null });
   });
 });
+
+// The agent's Configuration tab uses the "settings" layout: Identity first,
+// then "Full runs: engine and model" with the model at the top and the
+// technical fields folded into closed subsections, then the daily limits.
+describe("AgentConfigForm settings layout", () => {
+  let roots: Root[] = [];
+
+  beforeEach(() => {
+    window.localStorage.clear();
+    mockAgentsApi.adapterModelProfiles.mockResolvedValue([]);
+    mockAgentsApi.adapterModels.mockResolvedValue([]);
+    mockAgentsApi.detectModel.mockResolvedValue(null);
+    mockAgentsApi.list.mockResolvedValue([]);
+    mockEnvironmentsApi.list.mockResolvedValue([]);
+    mockInstanceSettingsApi.get.mockResolvedValue({ defaultEnvironmentId: null });
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableEnvironments: false });
+    mockInstanceSettingsApi.getGeneral.mockResolvedValue({ executionMode: "any" });
+    mockSecretsApi.list.mockResolvedValue([]);
+    mockPersonasApi.list.mockResolvedValue([]);
+  });
+
+  afterEach(async () => {
+    for (const root of roots) {
+      await act(async () => {
+        root.unmount();
+      });
+    }
+    roots = [];
+    document.body.innerHTML = "";
+    window.localStorage.clear();
+    vi.clearAllMocks();
+  });
+
+  async function renderSettingsForm(
+    agentOverrides: Partial<Agent> = {},
+    slots: { afterIdentity?: ReactNode } = {},
+  ) {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    roots.push(root);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    let saveAction: (() => void | Promise<void>) | null = null;
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <TooltipProvider>
+            <AgentConfigForm
+              mode="edit"
+              agent={makeAgent(agentOverrides)}
+              onSave={onSave}
+              onSaveActionChange={(action) => {
+                saveAction = action;
+              }}
+              hidePromptTemplate
+              showAdapterTypeField={false}
+              showAdapterTestEnvironmentButton={false}
+              sectionLayout="settings"
+              afterIdentity={slots.afterIdentity}
+            />
+          </TooltipProvider>
+        </QueryClientProvider>,
+      );
+    });
+    await flushReact();
+    return { container, onSave, save: () => saveAction?.() };
+  }
+
+  function byTestId(container: HTMLElement, testId: string): HTMLElement {
+    const element = container.querySelector<HTMLElement>(`[data-testid="${testId}"]`);
+    if (!element) throw new Error(`missing ${testId}`);
+    return element;
+  }
+
+  function isBefore(a: Element, b: Element) {
+    return Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+  }
+
+  async function toggle(section: HTMLElement) {
+    await act(async () => {
+      section.querySelector("button")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushReact();
+  }
+
+  it("orders the blocks Identity, slot, Full runs, Daily limits", async () => {
+    const { container } = await renderSettingsForm({}, {
+      afterIdentity: <div data-testid="slot-after-identity">Quick agent</div>,
+    });
+
+    const order = [
+      "agent-config-identity",
+      "slot-after-identity",
+      "agent-config-full-runs",
+      "agent-config-limits",
+    ].map((id) => byTestId(container, id));
+    for (let i = 1; i < order.length; i += 1) {
+      expect(isBefore(order[i - 1]!, order[i]!)).toBe(true);
+    }
+
+    expect(byTestId(container, "agent-config-identity").textContent).toContain("Identity");
+    expect(byTestId(container, "agent-config-full-runs").textContent).toContain("Full runs: engine and model");
+    expect(byTestId(container, "agent-config-limits").textContent).toContain("Daily limits and standing rules");
+    // The old card headings are gone from this layout.
+    expect(container.textContent).not.toContain("Permissions & Configuration");
+    expect(container.textContent).not.toContain("Advanced Run Policy");
+  });
+
+  it("puts the model fields first and folds the technical settings into closed subsections", async () => {
+    const { container } = await renderSettingsForm({
+      adapterConfig: { model: "gpt-5.4" },
+      runtimeConfig: { heartbeat: { enabled: true, intervalSec: 600 } },
+    });
+
+    const fullRuns = byTestId(container, "agent-config-full-runs");
+    expect(fullRuns.getAttribute("data-state")).toBe("open");
+
+    const modelFields = byTestId(container, "agent-config-model-fields");
+    expect(modelFields.textContent).toContain("Model");
+    expect(modelFields.textContent).toContain("Cheap model");
+    expect(modelFields.textContent).toContain("Thinking effort");
+    expect(modelFields.textContent).not.toContain("Command");
+
+    const advanced = byTestId(container, "agent-config-engine-advanced");
+    expect(advanced.getAttribute("data-state")).toBe("closed");
+    expect(advanced.textContent).toContain("Advanced engine settings");
+    expect(advanced.textContent).toContain("Command");
+    expect(advanced.textContent).toContain("Extra args (comma-separated)");
+    expect(advanced.textContent).toContain("Environment variables");
+    expect(isBefore(modelFields, advanced)).toBe(true);
+
+    const timeouts = byTestId(container, "agent-config-timeouts");
+    expect(timeouts.getAttribute("data-state")).toBe("closed");
+    expect(timeouts.querySelector('[data-testid="agent-max-run-duration-minutes"]')).not.toBeNull();
+    expect(timeouts.querySelector('[data-testid="agent-silent-run-timeout-minutes"]')).not.toBeNull();
+    expect(timeouts.textContent).toContain("Timeout (sec)");
+    expect(isBefore(advanced, timeouts)).toBe(true);
+
+    const schedule = byTestId(container, "agent-config-run-schedule");
+    expect(schedule.getAttribute("data-state")).toBe("open");
+    expect(schedule.textContent).toContain("Heartbeat on interval");
+    const moreSchedule = byTestId(container, "agent-config-run-schedule-more");
+    expect(moreSchedule.getAttribute("data-state")).toBe("closed");
+    expect(moreSchedule.textContent).toContain("Cooldown (sec)");
+    expect(moreSchedule.textContent).toContain("Max concurrent runs");
+    expect(isBefore(timeouts, schedule)).toBe(true);
+
+    expect(fullRuns.textContent).toContain("Saved changes take effect on the next run.");
+  });
+
+  it("says what is inside a block while it is closed", async () => {
+    const { container } = await renderSettingsForm({
+      name: "Cody",
+      title: "Support lead",
+      adapterConfig: { model: "gpt-5.4", maxRunDurationMinutes: 30 },
+      runtimeConfig: { heartbeat: { enabled: true, intervalSec: 600 } },
+    });
+
+    const identity = byTestId(container, "agent-config-identity");
+    await toggle(identity);
+    expect(identity.getAttribute("data-state")).toBe("closed");
+    expect(identity.textContent).toContain("Cody · Support lead");
+    // Closed blocks keep their fields mounted.
+    expect(identity.querySelector('input[placeholder="Agent name"]')).not.toBeNull();
+
+    const fullRuns = byTestId(container, "agent-config-full-runs");
+    await toggle(fullRuns);
+    expect(fullRuns.getAttribute("data-state")).toBe("closed");
+    expect(fullRuns.textContent).toMatch(/ · gpt-5\.4/);
+
+    expect(byTestId(container, "agent-config-timeouts").textContent).toContain("Stops a run after 30 min");
+
+    const schedule = byTestId(container, "agent-config-run-schedule");
+    await toggle(schedule);
+    expect(schedule.textContent).toContain("Checks for work every 10 min");
+  });
+
+  it("remembers a block the viewer opened, for every agent", async () => {
+    const first = await renderSettingsForm();
+    await toggle(byTestId(first.container, "agent-config-engine-advanced"));
+    expect(window.localStorage.getItem("paperclip.settingsSection.agent.configuration.engineAdvanced")).toBe("1");
+
+    const second = await renderSettingsForm({ id: "agent-2", name: "Other" });
+    const advanced = second.container.querySelectorAll('[data-testid="agent-config-engine-advanced"]');
+    expect(advanced[advanced.length - 1]?.getAttribute("data-state")).toBe("open");
+  });
+
+  it("still saves a field that sits in a closed subsection", async () => {
+    const { container, onSave, save } = await renderSettingsForm({ adapterConfig: { maxRunDurationMinutes: 30 } });
+    const silentInput = container.querySelector<HTMLInputElement>('[data-testid="agent-silent-run-timeout-minutes"]');
+    expect(byTestId(container, "agent-config-timeouts").getAttribute("data-state")).toBe("closed");
+
+    await act(async () => {
+      setInputValue(silentInput!, "0");
+      silentInput!.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    });
+    await flushReact();
+    await act(async () => {
+      await save();
+    });
+
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const patch = onSave.mock.calls[0]![0] as { adapterConfig: Record<string, unknown> };
+    expect(patch.adapterConfig.silentRunTimeoutMinutes).toBe(0);
+    expect(patch.adapterConfig.maxRunDurationMinutes).toBe(30);
+  });
+
+  it("keeps the limits editor working without the old field label", async () => {
+    const { container, onSave, save } = await renderSettingsForm({ limits: { dailyImageGenerations: 3 } });
+    const limits = byTestId(container, "agent-config-limits");
+    expect(limits.textContent).toContain("Pictures per day");
+    expect(limits.textContent).toContain("Standing rules");
+
+    const pictures = inputForLabel(container, "Pictures per day") as HTMLInputElement | null;
+    await act(async () => {
+      setInputValue(pictures!, "4");
+    });
+    await flushReact();
+    await act(async () => {
+      await save();
+    });
+    expect((onSave.mock.calls[0]![0] as { limits: unknown }).limits).toEqual({ dailyImageGenerations: 4 });
+  });
+
+  it("puts the environment override in the advanced engine settings", async () => {
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableEnvironments: true });
+    mockEnvironmentsApi.list.mockResolvedValue([
+      makeEnvironment({ id: "local-1", name: "Local", driver: "local" }),
+      makeEnvironment({ id: "sandbox-1", name: "E2B", driver: "sandbox", config: { provider: "e2b" } }),
+    ]);
+    const { container } = await renderSettingsForm();
+
+    const advanced = byTestId(container, "agent-config-engine-advanced");
+    expect(advanced.querySelector('select[aria-label="Environment override"]')).not.toBeNull();
+    expect(byTestId(container, "agent-config-model-fields").textContent).not.toContain("Environment override");
+  });
+
+  it("shows a remote engine's own fields under the engine, with no local-only subsections", async () => {
+    const { container } = await renderSettingsForm({
+      adapterType: "hermes_gateway",
+      adapterConfig: { apiBaseUrl: "http://127.0.0.1:8642" },
+    });
+
+    const modelFields = byTestId(container, "agent-config-model-fields");
+    expect(modelFields.querySelector('[data-testid="hermes-gateway-config-fields"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="agent-config-engine-advanced"]')).toBeNull();
+    expect(container.querySelector('[data-testid="agent-config-timeouts"]')).toBeNull();
+    expect(container.querySelector('[data-testid="agent-config-run-schedule"]')).not.toBeNull();
+  });
+});

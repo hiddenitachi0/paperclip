@@ -93,11 +93,11 @@ describe("AgentJobSection", () => {
     vi.clearAllMocks();
   });
 
-  async function render() {
+  async function render(options: { embedded?: boolean } = {}) {
     await act(async () => {
       root.render(
         <QueryClientProvider client={queryClient}>
-          <AgentJobSection agentId="agent-1" companyId="company-1" />
+          <AgentJobSection agentId="agent-1" companyId="company-1" embedded={options.embedded} />
         </QueryClientProvider>,
       );
     });
@@ -177,5 +177,35 @@ describe("AgentJobSection", () => {
       expect(container.textContent).toContain("Custom macro");
       expect(container.textContent).toContain("Process refunds");
     });
+  });
+
+  it("drops its own Position heading and frame when embedded, keeping the position button and lists", async () => {
+    vi.mocked(jobsApi.getAgentRoleState).mockResolvedValue({
+      job: null,
+      assignedAt: null,
+      tools: { fromJob: ["web_search"], added: [], removed: [] },
+      rights: { fromJob: [], added: [], removed: [] },
+    });
+
+    await render({ embedded: true });
+
+    await waitForAssertion(() => {
+      expect(container.textContent).toContain("No position assigned.");
+    });
+    const section = container.querySelector('[data-testid="agent-job-section"]');
+    expect(section).not.toBeNull();
+    expect(container.querySelector("h3")).toBeNull();
+    expect(container.querySelector(".rounded-lg.border")).toBeNull();
+    expect(section?.textContent).toContain("Position");
+    expect(section?.textContent).toContain("web_search");
+    const assignButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Assign a position",
+    );
+    expect(assignButton).toBeTruthy();
+    // Position comes before Tools, Rights and Skills.
+    const text = section?.textContent ?? "";
+    expect(text.indexOf("Position")).toBeLessThan(text.indexOf("Tools"));
+    expect(text.indexOf("Tools")).toBeLessThan(text.indexOf("Rights"));
+    expect(text.indexOf("Rights")).toBeLessThan(text.indexOf("Skills"));
   });
 });

@@ -80,6 +80,8 @@ export interface CompanyPluginTool extends AgentToolDescriptor {
   toolName: string;
   pluginKey: string;
   pluginDisplayName: string;
+  /** The manifest's group label for the Tools tab ("Pictures"); absent when the plugin sets none. */
+  category?: string;
 }
 
 export function checkPluginToolGrant(
@@ -150,6 +152,7 @@ export function pluginToolExecutionService(db: Db, toolDispatcher: PluginToolDis
         toolName: registered?.name ?? tool.name,
         pluginKey: plugin.pluginKey,
         pluginDisplayName: plugin.displayName,
+        ...(registered?.category ? { category: registered.category } : {}),
       });
     }
     return out;
