@@ -287,6 +287,19 @@
   label {
     touch-action: manipulation;
   }
+  /* Native <select> lists. Chrome and Edge on Windows and Linux draw the open
+     list with each option's own colours. Most selects here are bg-transparent
+     and inherit the light foreground in dark mode, so the open list showed light
+     text on the browser's white menu. Give options the popover surface so the
+     list follows the theme in both modes. */
+  select option,
+  select optgroup {
+    background-color: var(--popover);
+    color: var(--popover-foreground);
+  }
+  select option:disabled {
+    color: var(--muted-foreground);
+  }
   /* Let font-mono (utilities layer) override for monospace editors */
   .paperclip-mdxeditor [class*="_placeholder_"],
   .paperclip-mdxeditor-content {

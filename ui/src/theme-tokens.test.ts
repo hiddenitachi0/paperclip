@@ -91,6 +91,7 @@ const EXTRA_PAIRS: Array<[string, string, number]> = [
   ["muted-foreground", "muted", 4.5],
   ["muted-foreground", "accent", 4.5],
   ["muted-foreground", "popover", 4.5],
+  ["popover-foreground", "popover", 4.5],
   ["foreground", "background", 4.5],
   ["foreground", "input-background", 4.5],
   ["foreground", "code-background", 4.5],
@@ -158,5 +159,16 @@ describe("surface ladder", () => {
     expect(t.sidebar.l).toBeLessThan(t.background.l);
     expect(t.background.l).toBeLessThan(t.card.l);
     expect(t.card.l).toBe(1);
+  });
+});
+
+describe("native select lists", () => {
+  // Chrome/Edge on Windows draw an open <select> list with the options' own
+  // colours; without these the dark theme showed light text on a white menu.
+  it("gives options and option groups the popover surface and text", () => {
+    const rule = CSS.match(/select option,\s*select optgroup\s*\{([^}]*)\}/);
+    expect(rule, "select option rule in index.css").not.toBeNull();
+    expect(rule![1]).toMatch(/background-color:\s*var\(--popover\)/);
+    expect(rule![1]).toMatch(/color:\s*var\(--popover-foreground\)/);
   });
 });

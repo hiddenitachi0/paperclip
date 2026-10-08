@@ -211,6 +211,24 @@ d("mail urgency pipeline", () => {
     expect(acked!.status).toBe("delivered");
   });
 
+  it("outbox names the mailbox's assistant so the bridge sends from her bot", async () => {
+    const withPa = await setup("filipdurkan@gmail.com", true);
+    withPa.fetchBox.messages = [msg({ uid: 1 })];
+    await withPa.svc.tick(T0);
+    const outbox = await withPa.svc.urgencyOutbox(withPa.companyId);
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0]!.agentId).toBe(withPa.paAgentId);
+  });
+
+  it("outbox has no assistant when the mailbox has none", async () => {
+    const { companyId, svc, fetchBox } = await setup();
+    fetchBox.messages = [msg({ uid: 1 })];
+    await svc.tick(T0);
+    const outbox = await svc.urgencyOutbox(companyId);
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0]!.agentId).toBeNull();
+  });
+
   it("non-urgent mail produces no alert and no outbox row", async () => {
     const { companyId, account, svc, classify, fetchBox } = await setup();
     classify.mockResolvedValue(verdict({ urgent: false, category: "newsletter" }));

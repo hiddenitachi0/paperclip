@@ -1,6 +1,6 @@
 import { and, asc, eq, gte, inArray, lt } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { companies, mailMessageClassifications, mailUrgencyAlerts } from "@paperclipai/db";
+import { companies, mailAccounts, mailMessageClassifications, mailMessages, mailUrgencyAlerts } from "@paperclipai/db";
 import {
   isMailUrgencyAccount,
   isMailUrgencyHandled,
@@ -236,8 +236,16 @@ export function mailUrgencyService(db: Db, deps: MailUrgencyDeps = {}) {
         ),
       );
     const rows = await db
-      .select()
+      .select({ alert: mailUrgencyAlerts, paAgentId: mailAccounts.paAgentId })
       .from(mailUrgencyAlerts)
+      .leftJoin(
+        mailMessages,
+        and(eq(mailMessages.id, mailUrgencyAlerts.messageId), eq(mailMessages.companyId, mailUrgencyAlerts.companyId)),
+      )
+      .leftJoin(
+        mailAccounts,
+        and(eq(mailAccounts.id, mailMessages.accountId), eq(mailAccounts.companyId, mailUrgencyAlerts.companyId)),
+      )
       .where(
         and(
           eq(mailUrgencyAlerts.companyId, companyId),
@@ -247,10 +255,11 @@ export function mailUrgencyService(db: Db, deps: MailUrgencyDeps = {}) {
       )
       .orderBy(asc(mailUrgencyAlerts.createdAt))
       .limit(OUTBOX_BATCH);
-    return rows.map((alert) => ({
+    return rows.map(({ alert, paAgentId }) => ({
       id: alert.id,
       companyId: alert.companyId,
       messageId: alert.messageId,
+      agentId: paAgentId ?? null,
       text: alert.text,
       createdAt: alert.createdAt.toISOString(),
     }));
