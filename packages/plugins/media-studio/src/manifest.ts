@@ -437,7 +437,7 @@ const manifest: PaperclipPluginManifestV1 = {
       sogniVideoModel: {
         type: "string",
         title: "Sogni video model",
-        description: "Assumption, unverified against Sogni's own docs for video — see the DUR-4062 PR. Leave empty for the built-in default.",
+        description: "A Sogni video model, such as ltx25, wan22 or seedance2-mini (or a model id from Sogni's catalogue). Leave empty for Sogni's default (LTX 2.5).",
         default: "",
       },
       falMusicModel: {

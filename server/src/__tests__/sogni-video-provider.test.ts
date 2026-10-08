@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { SogniVideoProvider as PluginSogniVideoProvider } from "../../../packages/plugins/media-studio/src/video.js";
+import { sogniVideoModelKey as pluginModelKey, sogniVideoStep as pluginVideoStep } from "../../../packages/plugins/media-studio/src/sogni-video-step.js";
+import { guardedTransferFetch } from "../../../packages/plugins/media-studio/src/sogni.js";
 import { encodeMultipartBody, sogniStorageFetch } from "../services/image-provider-clients.ts";
 import { buildPinnedRequestOptions, type ValidatedFetchTarget } from "../services/safe-outbound-fetch.ts";
 import { SogniVideoProvider, sogniVideoModelKey, sogniVideoStep } from "../services/video-provider-clients.ts";
@@ -164,5 +167,83 @@ describe("Sogni video model names", () => {
     expect(sogniVideoStep("seedance-2-0", true)).toEqual({ tool: "generate_video", videoModel: "seedance2", pictures: "references" });
     expect(sogniVideoStep("minimax-h3-ref2va-fp8_r2v_turbo", true)).toEqual({ tool: "generate_video", videoModel: "minimax-h3-r2v-turbo", pictures: "references" });
     expect(sogniVideoStep("wan3.0-video", true)).toEqual({ tool: "animate_photo", videoModel: "wan3.0-video", pictures: "start" });
+  });
+});
+
+// ─── The plugin's own client (agent "generate-video" tool) ─────────────────
+
+const MODEL_IDS = [
+  null, "ltx25", "ltx25-22b-int8_i2v_distilled", "ltx23-22b-fp8_t2v_dev", "ltx23-22b-10eros-v1.4-fp8mixed_i2v", "wan22",
+  "wan_v2.2-14b-fp8_t2v_lightx2v", "wan3.0-video", "wan3.0-spicy-video", "seedance-2-0", "seedance-2-0-fast", "seedance-2-5",
+  "seedance2-mini", "happyhorse-1.1-t2v", "happyhorse-1.1-i2v", "happyhorse-1.1-r2v", "minimax-h3-fl2va-fp8_t2v",
+  "minimax-h3-fl2va-fp8_i2v_turbo", "minimax-h3-fastvideo-int8_t2v_turbo_2stage", "minimax-h3-fastvideo-int8_flf2v_turbo",
+  "minimax-h3-ref2va-fp8_r2v", "minimax-h3-ref2va-fp8_r2v_balanced_2stage", "my-custom-model",
+];
+
+describe("plugin and server Sogni video clients agree", () => {
+  it("same model keys and tool choice for every catalogue id", () => {
+    for (const id of MODEL_IDS) {
+      for (const withStart of [true, false]) {
+        expect(pluginModelKey(id, withStart)).toBe(sogniVideoModelKey(id, withStart));
+        expect(pluginVideoStep(id, withStart)).toEqual(sogniVideoStep(id, withStart));
+      }
+    }
+  });
+
+  it("same workflow request body for the same shot", async () => {
+    const cases = [
+      { model: "ltx23-22b-fp8_i2v_distilled", startImage: PNG_DATA_URI, durationSeconds: 5 },
+      { model: "seedance-2-0-fast", startImage: PNG_DATA_URI, referenceImages: [PNG_DATA_URI_2], durationSeconds: 8 },
+      { model: "minimax-h3-ref2va-fp8_r2v_turbo", referenceImages: [PNG_DATA_URI_2], durationSeconds: 6 },
+      { model: undefined, durationSeconds: 5, seed: 3 },
+    ];
+    for (const shot of cases) {
+      const serverApi = sogniApi();
+      const pluginApi = sogniApi();
+      const transfer = async () => new Response(null, { status: 204 });
+      await new SogniVideoProvider({ apiKey: "k", apiFetch: serverApi.apiFetch, transferFetch: transfer }).start({ kind: "video", prompt: "Shot", ...shot });
+      await new PluginSogniVideoProvider({ apiKey: "k", apiFetch: pluginApi.apiFetch, transferFetch: transfer }).start({ kind: "video", prompt: "Shot", ...shot });
+      expect(pluginApi.startBody()).toEqual(serverApi.startBody());
+      expect(pluginApi.uploadSlots()).toEqual(serverApi.uploadSlots());
+      const args = pluginApi.startBody().input.steps[0].arguments;
+      expect(Object.keys(args).filter((k) => ["model", "seed", "durationSeconds"].includes(k))).toEqual([]);
+    }
+  });
+});
+
+describe("plugin Sogni video uploads", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("sends the start frame as a real multipart upload through guardedTransferFetch", async () => {
+    const sent: Array<{ url: string; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        sent.push({ url, init });
+        return new Response(null, { status: 204 });
+      }),
+    );
+    const api = sogniApi();
+    const provider = new PluginSogniVideoProvider({ apiKey: "k", apiFetch: api.apiFetch, transferFetch: guardedTransferFetch, defaultModel: "wan22" });
+    await provider.start({ kind: "video", prompt: "Pan left", startImage: PNG_DATA_URI, durationSeconds: 5 });
+    expect(api.startBody().input.steps[0]).toEqual({ id: "video", toolName: "animate_photo", arguments: { prompt: "Pan left", duration: 5, videoModel: "wan22", sourceImageIndex: -1 } });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.url).toBe("https://bucket.s3-accelerate.amazonaws.com/up-1");
+    expect(sent[0]!.init!.redirect).toBe("error");
+    // What the platform fetch puts on the wire for this body: multipart with the picture bytes.
+    const wire = new Request("https://x.invalid/", { method: "POST", body: sent[0]!.init!.body as FormData });
+    expect(wire.headers.get("content-type")).toMatch(/^multipart\/form-data; boundary=/);
+    const bytes = Buffer.from(await wire.arrayBuffer());
+    expect(bytes.includes(PNG_BYTES)).toBe(true);
+    expect(bytes.toString("latin1")).toContain('name="key"');
+  });
+
+  it("refuses an upload address outside Sogni's storage", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    // Throws before any request (inside the provider's async upload this becomes a rejection).
+    expect(() => guardedTransferFetch("https://evil.example.com/up", { method: "POST" })).toThrow(/not Sogni's picture storage/);
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
