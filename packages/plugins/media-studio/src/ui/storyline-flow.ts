@@ -42,6 +42,13 @@ export interface FlowStoryboard {
   allApproved: boolean;
   videoEstimatedTotalCents: number | null;
   approvalThresholdCents: number | null;
+  /** What one storyboard picture costs on the chosen picture service (older servers leave it out). */
+  picture?: { costPerPictureCents: number } | null;
+}
+
+/** Rough cost of one storyboard picture on the chosen service. */
+export function pictureCostCents(storyboard: FlowStoryboard | null): number {
+  return storyboard?.picture?.costPerPictureCents ?? STILL_PICTURE_COST_CENTS;
 }
 
 export interface FlowProgress {
@@ -235,7 +242,7 @@ export const SKIP_PICTURES_EXPLANATION =
   "When the video is made, that shot starts from the last frame of the previous clip (or, for the first shot, from your character picture), so it may drift from what you pictured.";
 
 /** The "missing pictures" item (shared by the checklist and the server-refusal mapping). */
-function pictureItems(counts: PictureCounts): ReadinessItem[] {
+function pictureItems(counts: PictureCounts, costEach: number): ReadinessItem[] {
   const items: ReadinessItem[] = [];
   if (counts.missing > 0) {
     items.push({
@@ -243,7 +250,7 @@ function pictureItems(counts: PictureCounts): ReadinessItem[] {
       blocking: true,
       text: `${plural(counts.missing, "shot has", "shots have")} no approved picture yet.`,
       fixes: [
-        { kind: "make-pictures", shotIds: counts.missingIds, label: `Make ${counts.missing === 1 ? "it" : "them"} (about ${dollars(counts.missing * STILL_PICTURE_COST_CENTS)})` },
+        { kind: "make-pictures", shotIds: counts.missingIds, label: `Make ${counts.missing === 1 ? "it" : "them"} (about ${dollars(counts.missing * costEach)})` },
         { kind: "skip-pictures", shotIds: counts.missingIds, label: `Skip pictures for ${counts.missing === 1 ? "this shot" : "these"}` },
       ],
     });
@@ -281,7 +288,7 @@ export function renderReadiness(input: FlowInput): { ready: boolean; items: Read
   } else if (counts.total === 0) {
     items.push({ id: "all-dropped", blocking: true, text: "Every shot is left out, so there is nothing to render.", fixes: [{ kind: "go", step: "pictures", label: "Bring a shot back" }] });
   } else {
-    items.push(...pictureItems(counts));
+    items.push(...pictureItems(counts, pictureCostCents(input.storyboard)));
   }
 
   const estimate = storylineEstimate(input);
@@ -329,7 +336,7 @@ export function refusalToItem(message: string, input: FlowInput): ReadinessItem 
   if (/Waiting on a board decision/i.test(message)) return null;
 
   if (/storyboard still has not been approved/i.test(message)) {
-    const items = pictureItems(pictureCounts(input.storyboard));
+    const items = pictureItems(pictureCounts(input.storyboard), pictureCostCents(input.storyboard));
     return {
       id: "refusal-pictures",
       blocking: true,

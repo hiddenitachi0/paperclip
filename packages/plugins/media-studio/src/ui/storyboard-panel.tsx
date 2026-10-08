@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { errorText, storylineFetchJson } from "./storyline-api.js";
-import { SKIP_PICTURES_EXPLANATION, STILL_PICTURE_COST_CENTS, dollars, pictureCounts, plural } from "./storyline-flow.js";
+import { SKIP_PICTURES_EXPLANATION, dollars, pictureCostCents, pictureCounts, plural } from "./storyline-flow.js";
 
 // Standalone ES module (see index.tsx's note): bare specifiers only outside
 // this ui/ folder, so the helpers and style palette below are small local
@@ -50,6 +50,10 @@ export interface StoryboardSummary {
   videoEstimatedTotalCents: number | null;
   videoSpentCents: number;
   approvalThresholdCents: number | null;
+  /** Which picture services have a key set up (newer servers). */
+  pictureServices?: { fal: boolean; sogni: boolean };
+  /** What the next picture is made with (newer servers). */
+  picture?: { providerId: "fal" | "sogni"; model: string | null; lookId: string | null; costPerPictureCents: number };
 }
 
 /** The parts of a shot (from the scenes/shots list) the storyboard needs to show and edit. */
@@ -59,6 +63,8 @@ export interface StoryboardShotText {
   orderIndex: number;
   prompt: string;
   cameraNotes: string | null;
+  /** This shot's own look for its picture: a look id, "none", or null (the storyline's). */
+  pictureLookId?: string | null;
 }
 
 function money(cents: number | null): string {
@@ -246,6 +252,14 @@ export function StoryboardPanel(props: {
   actions: StoryboardActions;
   /** Moves the person on to step 3. */
   onNext: () => void;
+  /** The "Picture settings" block (service, model, look), drawn under the intro. */
+  settings?: React.ReactNode;
+  /** The company's saved looks, for a shot's own look. Empty = no per-shot look picker. */
+  looks?: Array<{ id: string; name: string }>;
+  /** The storyline's look name (what "Same as the storyline" means), or null. */
+  storylineLookName?: string | null;
+  /** Saves a shot's own look: a look id, "none", or null (use the storyline's). */
+  onShotLook?: (shotId: string, pictureLookId: string | null) => void;
 }) {
   const { base, summary, actions } = props;
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -263,7 +277,8 @@ export function StoryboardPanel(props: {
   const sorted = (summary?.shots ?? []).slice().sort((a, b) => a.orderIndex - b.orderIndex);
   const counts = pictureCounts(summary);
   const busy = actions.busyShotId !== null || actions.bulk !== null;
-  const makeCost = counts.missing * STILL_PICTURE_COST_CENTS;
+  const costEach = pictureCostCents(summary);
+  const makeCost = counts.missing * costEach;
 
   const startEdit = (shot: StoryboardShotText) => {
     setEditingId(shot.id);
@@ -306,9 +321,11 @@ export function StoryboardPanel(props: {
       <div>
         <strong style={{ fontSize: 14 }}>Step 2: Pictures</strong>
         <p style={muted}>
-          Check a cheap picture of each shot first (about {dollars(STILL_PICTURE_COST_CENTS)} each). Video is only made for shots you approve, so you don't pay for clips that look wrong.
+          Check a cheap picture of each shot first (about {dollars(costEach)} each). Video is only made for shots you approve, so you don't pay for clips that look wrong.
         </p>
       </div>
+
+      {props.settings}
 
       {props.loadError && <div style={errorBox}>{props.loadError}</div>}
       {actions.error && <div style={errorBox} role="alert">{actions.error}</div>}
@@ -325,7 +342,7 @@ export function StoryboardPanel(props: {
       {confirming === "make" && !actions.bulk && (
         <div style={noticeBox} data-testid="make-pictures-confirm">
           <div>
-            This makes {plural(counts.missing, "picture")}, one after another, at about {dollars(STILL_PICTURE_COST_CENTS)} each: about <strong>{dollars(makeCost)}</strong> in all. You can stop at any time; pictures already made are kept.
+            This makes {plural(counts.missing, "picture")}, one after another, at about {dollars(costEach)} each: about <strong>{dollars(makeCost)}</strong> in all. You can stop at any time; pictures already made are kept.
           </div>
           <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
             <button
@@ -442,6 +459,24 @@ export function StoryboardPanel(props: {
                   </span>
                 )}
               </div>
+              {props.editable && text && !editing && shot.storyboardStatus !== "dropped" && (props.looks?.length ?? 0) > 0 && props.onShotLook && (
+                <label style={{ fontSize: 11, color: "#868e96", display: "flex", flexDirection: "column", gap: 2 }}>
+                  Look for this picture
+                  <select
+                    style={{ ...input, padding: 4, fontSize: 12 }}
+                    aria-label={`Look for shot ${shot.orderIndex + 1}'s picture`}
+                    value={text.pictureLookId ?? ""}
+                    disabled={busy}
+                    onChange={(e) => props.onShotLook!(shot.id, e.target.value === "" ? null : e.target.value)}
+                  >
+                    <option value="">Same as the storyline{props.storylineLookName ? ` (${props.storylineLookName})` : " (no look)"}</option>
+                    <option value="none">No look for this shot</option>
+                    {props.looks!.map((l) => (
+                      <option key={l.id} value={l.id}>{l.name}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
               {text && !editing && <div style={{ fontSize: 12 }}>{text.prompt}{text.cameraNotes ? <span style={{ color: "#868e96" }}> · {text.cameraNotes}</span> : null}</div>}
               <div style={{ fontSize: 11, color: "#868e96" }}>
                 {shot.storyboardStatus === "dropped" ? "Not charged" : cost !== null ? `Picture cost: ${money(cost)}` : "Picture not made yet"}

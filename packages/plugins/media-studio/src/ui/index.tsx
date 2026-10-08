@@ -21,6 +21,7 @@ import {
   type ReadinessItem,
 } from "./storyline-flow.js";
 import { FilmPanel, ReadinessChecklist, StepBar, SuggestionsBanner } from "./storyline-steps.js";
+import { VideoModelPicker, type SogniVideoModelRow } from "./video-model-picker.js";
 
 // The plugin UI is served as a standalone ES module, so it must not import from
 // sibling plugin files (only bare specifiers resolve). Keep these in sync with
@@ -40,6 +41,7 @@ const ACTION_LOOK_RULES_SAVE = "lookRules.save";
 const ACTION_LOOK_RULES_PREVIEW = "lookRules.preview";
 const ACTION_SOGNI_MODELS = "sogni.models";
 const ACTION_SOGNI_LORAS = "sogni.loras";
+const ACTION_SOGNI_VIDEO_MODELS = "sogni.videoModels";
 const ACTION_LOOK_PROMPT_PREVIEW = "looks.previewPrompt";
 
 // Copies of look-prompt.ts (a test checks they match): what each reference
@@ -3005,6 +3007,8 @@ interface VideoStorylineSummary {
   estimatedTotalCents: number | null;
   estimatedTotalSeconds: number | null;
   characterReferenceAssetIds: string[];
+  /** Storyboard picture service / model / look (newer servers). */
+  pictureSettings?: StoryboardPictureSettingsValue;
   finalObjectKey: string | null;
   finalByteSize: number | null;
   finalDurationSeconds: number | null;
@@ -3051,6 +3055,151 @@ interface VideoShotSummary {
   proposedTransitionIn?: "cut" | "fade" | "dissolve" | null;
   proposalStatus?: string | null;
   promptHistory?: Array<{ prompt: string }>;
+  /** This shot's own look for its storyboard picture: a look id, "none", or null (the storyline's). */
+  pictureLookId?: string | null;
+}
+
+interface StoryboardPictureSettingsValue {
+  providerId?: "fal" | "sogni" | null;
+  model?: string | null;
+  lookId?: string | null;
+}
+
+/**
+ * Fal picture models offered for storyboard pictures (all text-to-picture;
+ * with character or look pictures Fal always uses FLUX Kontext so faces carry
+ * over). Rough quality/price order; Fal bills the real price.
+ */
+const FAL_STORYBOARD_PICTURE_MODELS: Array<{ id: string | null; name: string }> = [
+  { id: null, name: "Automatic (recommended): FLUX.1 schnell, the cheapest and fastest" },
+  { id: "fal-ai/flux/dev", name: "FLUX.1 dev: better detail, costs more" },
+  { id: "fal-ai/flux-pro/v1.1", name: "FLUX1.1 pro: high quality, costs more" },
+  { id: "fal-ai/flux-pro/v1.1-ultra", name: "FLUX1.1 pro ultra: best quality, costs the most" },
+];
+
+/** Step 2's "Picture settings": which service, model and look the storyboard pictures are made with. */
+function StoryboardPictureSettings(props: {
+  value: StoryboardPictureSettingsValue;
+  /** What the server will actually use next (after defaults and the look's own service/model). */
+  effective: { providerId: "fal" | "sogni"; model: string | null; lookId: string | null; costPerPictureCents: number } | null;
+  services: { fal: boolean; sogni: boolean } | null;
+  looks: Look[];
+  sogniModels: SogniModel[] | null;
+  sogniNote: string | null;
+  disabled: boolean;
+  onNeedSogniModels: () => void;
+  onSave: (next: StoryboardPictureSettingsValue) => void;
+}) {
+  const { value, effective, services, looks } = props;
+  const provider = effective?.providerId ?? value.providerId ?? "fal";
+  const [customModel, setCustomModel] = useState("");
+  useEffect(() => {
+    if (provider === "sogni") props.onNeedSogniModels();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [provider]);
+  const save = (patch: StoryboardPictureSettingsValue) => props.onSave({ ...value, ...patch });
+  const look = looks.find((l) => l.id === (value.lookId ?? "")) ?? null;
+  const noService = services !== null && !services.fal && !services.sogni;
+  const falKnown = FAL_STORYBOARD_PICTURE_MODELS.some((m) => m.id === (value.model ?? null));
+  return (
+    <details style={{ border: "1px solid rgba(128,128,128,0.3)", borderRadius: 8, padding: "8px 10px", fontSize: 12 }} data-testid="picture-settings">
+      <summary style={{ cursor: "pointer", fontWeight: 600 }}>
+        Picture settings: {provider === "sogni" ? "Sogni" : "Fal.ai"}
+        {effective?.model ? `, ${effective.model}` : ", default model"}
+        {look ? `, look "${look.name}"` : ", no look"}
+        {effective ? ` (about $${(effective.costPerPictureCents / 100).toFixed(2)} a picture)` : ""}
+      </summary>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 8 }}>
+        <p style={{ margin: 0, color: "#868e96" }}>
+          These decide how the cheap preview pictures are made. They do not change the video: that is set in step 3. A new setting only affects pictures you make
+          from now on; press Remake picture to update one you already have.
+        </p>
+        {noService && (
+          <div style={{ ...noticeBox, fontSize: 12 }}>
+            No picture service has an API key yet, so no pictures can be made. Ask an admin to add a Fal.ai or Sogni key on Media Studio's Settings tab, or approve
+            the shots without pictures.
+          </div>
+        )}
+        <div style={field}>
+          <label style={{ color: "#868e96" }} htmlFor="picture-service">Picture service</label>
+          <select
+            id="picture-service"
+            style={input}
+            aria-label="Picture service"
+            value={value.providerId ?? ""}
+            disabled={props.disabled}
+            onChange={(e) => save({ providerId: e.target.value === "" ? null : (e.target.value as "fal" | "sogni"), model: null })}
+          >
+            <option value="">Automatic (the look's service, else Fal.ai)</option>
+            {(services === null || services.fal || value.providerId === "fal") && <option value="fal">Fal.ai{services && !services.fal ? " (no key set up)" : ""}</option>}
+            {(services === null || services.sogni || value.providerId === "sogni") && <option value="sogni">Sogni{services && !services.sogni ? " (no key set up)" : ""}</option>}
+          </select>
+          <span style={{ color: "#868e96" }}>Only services with an API key in Media Studio settings are offered.</span>
+        </div>
+        <div style={field}>
+          <label style={{ color: "#868e96" }}>Picture model</label>
+          {provider === "sogni" ? (
+            <SogniModelPicker
+              models={props.sogniModels}
+              value={value.model ?? ""}
+              note={props.sogniNote}
+              disabled={props.disabled}
+              onPick={(model) => save({ model: model ? model.id : null })}
+            />
+          ) : (
+            <select
+              style={input}
+              aria-label="Picture model"
+              value={falKnown ? (value.model ?? "") : "__custom__"}
+              disabled={props.disabled}
+              onChange={(e) => {
+                if (e.target.value !== "__custom__") save({ model: e.target.value === "" ? null : e.target.value });
+              }}
+            >
+              {FAL_STORYBOARD_PICTURE_MODELS.map((m) => (
+                <option key={m.id ?? "auto"} value={m.id ?? ""}>{m.name}</option>
+              ))}
+              {!falKnown && <option value="__custom__">Custom: {value.model}</option>}
+            </select>
+          )}
+          {provider === "fal" && (
+            <span style={{ color: "#868e96" }}>With character or look pictures, Fal.ai always uses FLUX Kontext, which keeps faces the same.</span>
+          )}
+          <details>
+            <summary style={{ cursor: "pointer" }}>Advanced: use a model id that is not in the list</summary>
+            <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+              <input style={{ ...input, flex: "1 1 200px" }} aria-label="Custom picture model id" value={customModel} disabled={props.disabled} onChange={(e) => setCustomModel(e.target.value)} placeholder={provider === "fal" ? "e.g. fal-ai/flux/dev" : "Sogni model id"} />
+              <button type="button" style={secondaryBtn} disabled={props.disabled || !customModel.trim()} onClick={() => save({ model: customModel.trim() })}>
+                Use this model id
+              </button>
+            </div>
+          </details>
+        </div>
+        <div style={field}>
+          <label style={{ color: "#868e96" }} htmlFor="picture-look">Look (optional)</label>
+          <select
+            id="picture-look"
+            style={input}
+            aria-label="Look for storyboard pictures"
+            value={value.lookId ?? ""}
+            disabled={props.disabled}
+            onChange={(e) => save({ lookId: e.target.value === "" ? null : e.target.value })}
+          >
+            <option value="">No look</option>
+            {looks.map((l) => (
+              <option key={l.id} value={l.id}>{l.name}</option>
+            ))}
+            {value.lookId && !look && <option value={value.lookId}>A look that no longer exists</option>}
+          </select>
+          <span style={{ color: "#868e96" }}>
+            A look is a saved style from the Looks tab. Its style words, character description, reference pictures{provider === "sogni" ? " and LoRAs" : ""} are put on every
+            picture, the same way the Create tab uses it. You can pick a different look for one shot on its picture below.
+          </span>
+          {value.lookId && !look && <span style={{ color: "#c92a2a" }}>That look was deleted. Pick another one, or No look, before making pictures.</span>}
+        </div>
+      </div>
+    </details>
+  );
 }
 
 interface VideoStorylineShotProgress {
@@ -3183,6 +3332,29 @@ function LookReferencePicker(props: {
 export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
   const companyId = context.companyId;
   const listLooks = usePluginAction(ACTION_LOOKS_LIST);
+  const listSogniVideoModels = usePluginAction(ACTION_SOGNI_VIDEO_MODELS);
+  /** Sogni's video models (null until loaded); only read when a storyline uses Sogni. */
+  const [sogniVideoModels, setSogniVideoModels] = useState<SogniVideoModelRow[] | null>(null);
+  const [sogniVideoNote, setSogniVideoNote] = useState<string | null>(null);
+  // Sogni's picture models (the same catalogue the Looks tab's model picker uses), read when the picture service is Sogni.
+  const listSogniPictureModels = usePluginAction(ACTION_SOGNI_MODELS);
+  const [sogniPictureModels, setSogniPictureModels] = useState<SogniModel[] | null>(null);
+  const [sogniPictureNote, setSogniPictureNote] = useState<string | null>(null);
+  const sogniPictureRequested = useRef(false);
+  const loadSogniPictureModels = useCallback(() => {
+    if (sogniPictureRequested.current) return;
+    sogniPictureRequested.current = true;
+    listSogniPictureModels({})
+      .then((res) => {
+        const typed = res as { models?: SogniModel[]; note?: string | null };
+        setSogniPictureModels((typed.models ?? []).filter((m) => m.generates !== false));
+        setSogniPictureNote(typed.note ?? null);
+      })
+      .catch((e) => {
+        setSogniPictureModels([]);
+        setSogniPictureNote(`Sogni's picture models could not be loaded (${errorText(e)}). You can still type a model id under Advanced.`);
+      });
+  }, [listSogniPictureModels]);
 
   const [enabled, setEnabled] = useState<boolean | null>(null);
   /** False when the server has no ffmpeg: clips render but can never be combined into one film. */
@@ -3298,6 +3470,27 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
   }, [loadStorylines]);
 
   const selected = storylines?.find((s) => s.id === selectedId) ?? null;
+
+  const needsSogniModels = selected?.providerId === "sogni" && sogniVideoModels === null;
+  useEffect(() => {
+    if (!needsSogniModels) return;
+    let cancelled = false;
+    listSogniVideoModels({})
+      .then((res) => {
+        if (cancelled) return;
+        const typed = res as { models?: SogniVideoModelRow[]; note?: string | null };
+        setSogniVideoModels(typed.models ?? []);
+        setSogniVideoNote(typed.note ?? null);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setSogniVideoModels([]);
+        setSogniVideoNote(`Sogni's video models could not be loaded (${errorText(e)}). You can still type a model id under Advanced.`);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [needsSogniModels, listSogniVideoModels]);
   const base = companyId && selectedId ? `/api/companies/${companyId}/video-storylines/${selectedId}` : "";
   // Never show the previous storyline's pictures while the new one loads.
   const storyboard = storyboardRaw && storyboardRaw.storylineId === selectedId ? storyboardRaw : null;
@@ -4031,6 +4224,37 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                     editable={editable}
                     actions={actions}
                     onNext={() => setActiveStep("render")}
+                    looks={looks.map((l) => ({ id: l.id, name: l.name }))}
+                    storylineLookName={looks.find((l) => l.id === selected.pictureSettings?.lookId)?.name ?? null}
+                    onShotLook={(shotId, pictureLookId) =>
+                      void (async () => {
+                        setError(null);
+                        try {
+                          await storylineFetchJson(`${base}/shots/${shotId}`, { method: "PATCH", body: JSON.stringify({ pictureLookId }) }, "saving the shot's look");
+                          await loadDetail();
+                        } catch (e) {
+                          setError(errorText(e));
+                        }
+                      })()
+                    }
+                    settings={
+                      <StoryboardPictureSettings
+                        value={selected.pictureSettings ?? {}}
+                        effective={storyboard?.picture ?? null}
+                        services={storyboard?.pictureServices ?? null}
+                        looks={looks}
+                        sogniModels={sogniPictureModels}
+                        sogniNote={sogniPictureNote}
+                        disabled={anyBusy || !editable}
+                        onNeedSogniModels={loadSogniPictureModels}
+                        onSave={(next) =>
+                          void (async () => {
+                            await updateStorylineFields({ pictureSettings: next }, "saving the picture settings");
+                            await loadStoryboard();
+                          })()
+                        }
+                      />
+                    }
                   />
                 )}
 
@@ -4125,24 +4349,24 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                             aria-label="Video service"
                             value={selected.providerId}
                             disabled={busy || !editable}
-                            onChange={(e) => void updateStorylineFields({ providerId: e.target.value }, "changing the video service")}
+                            // A model belongs to one service, so switching service goes back to that service's default model.
+                            onChange={(e) => void updateStorylineFields({ providerId: e.target.value, model: null }, "changing the video service")}
                           >
                             {VIDEO_STORYLINE_PROVIDER_OPTIONS.map((p) => (
                               <option key={p.value} value={p.value}>{p.label}</option>
                             ))}
                           </select>
                         </div>
-                        <div style={{ ...field, flex: "1 1 200px" }}>
-                          <label style={{ fontSize: 12, color: "#868e96" }}>Video model (leave empty for the service's default)</label>
-                          <input
-                            key={`model-${selected.id}-${selected.model ?? ""}`}
-                            style={input}
-                            aria-label="Video model"
-                            placeholder={selected.providerId === "fal" ? "Default: Kling (picked per shot)" : "Default model"}
-                            defaultValue={selected.model ?? ""}
+                        <div style={{ ...field, flex: "1 1 260px" }}>
+                          <label style={{ fontSize: 12, color: "#868e96" }}>Video model</label>
+                          <VideoModelPicker
+                            key={`${selected.id}-${selected.providerId}`}
+                            provider={selected.providerId}
+                            value={selected.model}
+                            sogniModels={sogniVideoModels}
+                            sogniNote={sogniVideoNote}
                             disabled={busy || !editable}
-                            onBlur={(e) => {
-                              const next = e.target.value.trim() || null;
+                            onChange={(next) => {
                               if (next !== selected.model) void updateStorylineFields({ model: next }, "changing the video model");
                             }}
                           />
