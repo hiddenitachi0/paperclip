@@ -665,6 +665,58 @@ export function laneABackupModelEntryIssue(entry: {
   return null;
 }
 
+/**
+ * Where a quick agent's stashed key for one provider is bound:
+ * `adapterConfig.laneA.apiKeyByProvider.<provider>` (DUR-4400). The binding
+ * row uses this same path, so a backup on that provider resolves the key
+ * through the same binding gate and audit trail as the main key.
+ */
+export function laneAProviderKeyConfigPath(provider: LaneAProvider): string {
+  return `laneA.apiKeyByProvider.${provider}`;
+}
+
+/** The address a provider is really called at, compared case- and trailing-slash-blind. */
+function laneAEffectiveBaseUrlKey(provider: unknown, baseUrl: string | null | undefined): string {
+  const descriptor = LANE_A_PROVIDER_CATALOGUE[normalizeLaneAProvider(provider)];
+  const custom = typeof baseUrl === "string" && baseUrl.trim().length > 0 ? baseUrl.trim() : null;
+  const effective = descriptor.baseUrlEditable ? (custom ?? descriptor.defaultBaseUrl) : descriptor.defaultBaseUrl;
+  return (effective ?? "").replace(/\/+$/, "").toLowerCase();
+}
+
+/**
+ * Which of the agent's keys a backup model is called with:
+ *
+ *   - "main": same provider and same address as the main model, so it uses
+ *     the main key (adapterConfig.laneA.apiKey);
+ *   - "provider": a different provider, called at that provider's own
+ *     address (its default, or the address saved alongside the stashed key),
+ *     so it uses the agent's key for THAT provider
+ *     (adapterConfig.laneA.apiKeyByProvider.<provider>). One key serves every
+ *     backup on that provider;
+ *   - "none": no saved key may be sent there. Same provider at a different
+ *     address, or a different provider at an address other than the one its
+ *     key was saved for. A key is never sent to an address it was not chosen
+ *     for. (Claude then falls back to Paperclip's own key; a local model
+ *     usually needs none.)
+ */
+export type LaneABackupKeySlot = "main" | "provider" | "none";
+
+export function laneABackupKeySlot(
+  backup: { provider: unknown; baseUrl?: string | null },
+  main: { provider: unknown; baseUrl?: string | null },
+  stashedBaseUrlForBackupProvider?: string | null,
+): LaneABackupKeySlot {
+  const backupProvider = normalizeLaneAProvider(backup.provider);
+  const mainProvider = normalizeLaneAProvider(main.provider);
+  const backupUrl = laneAEffectiveBaseUrlKey(backupProvider, backup.baseUrl);
+  if (backupProvider === mainProvider) {
+    return backupUrl === laneAEffectiveBaseUrlKey(mainProvider, main.baseUrl) ? "main" : "none";
+  }
+  return backupUrl === laneAEffectiveBaseUrlKey(backupProvider, stashedBaseUrlForBackupProvider ?? null)
+    ? "provider"
+    : "none";
+}
+
 export const HUGGINGFACE_ROUTER_BASE_URL = "https://router.huggingface.co/v1";
 export const HUGGINGFACE_POLICY_SUFFIXES = ["cheapest", "fastest", "preferred"] as const;
 export type HuggingFacePolicySuffix = (typeof HUGGINGFACE_POLICY_SUFFIXES)[number];

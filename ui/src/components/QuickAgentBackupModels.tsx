@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   LANE_A_BACKUP_MODELS_MAX,
   LANE_A_KEYWORD_ROUTES_MAX,
@@ -7,6 +7,7 @@ import {
   LANE_A_PROVIDERS,
   LANE_A_PROVIDER_CATALOGUE,
   LANE_A_TEMPERATURE_PRESETS,
+  laneABackupKeySlot,
   laneABackupModelEntryIssue,
   laneAModelsForProvider,
   normalizeLaneAProvider,
@@ -172,21 +173,48 @@ function draftProblems(draft: Draft): string[] {
 export type BackupCheckResult = { ok: boolean; text: string };
 
 /**
- * "Test this one": answers in plain words whether this backup could run.
- * A backup can only borrow the main model's saved key when it uses the same
- * provider and address; Claude and local models can run without one.
+ * The agent's own keys for providers other than the main model's
+ * (adapterConfig.laneA.apiKeyByProvider), by provider. `name` is the saved
+ * key's name, or null when it is not known (still loading, or deleted).
+ */
+export type BackupProviderKeys = Partial<Record<LaneAProvider, { name: string | null }>>;
+
+/** Whether a backup on this provider needs a key of its own (not Claude, not a local model). */
+export function backupNeedsOwnKey(provider: LaneAProvider, mainProvider: LaneAProvider): boolean {
+  return provider !== mainProvider && provider !== "anthropic" && provider !== "local";
+}
+
+/**
+ * "Test this one": answers in plain words whether this backup could run, and
+ * with which key. Mirrors the server (laneABackupKeySlot): the main key on the
+ * main model's own provider and address; the agent's key for the backup's
+ * provider otherwise; a key is never sent to an address it was not picked for.
  */
 export function checkBackupEntry(
   entry: PoolDraft,
   main: { provider: LaneAProvider; baseUrl: string | null; hasKey: boolean },
+  keys: { providerKeys?: BackupProviderKeys; stashedBaseUrls?: Partial<Record<LaneAProvider, string | null>> } = {},
 ): BackupCheckResult {
   const problem = entryProblem(entry);
   if (problem) return { ok: false, text: problem };
   const label = LANE_A_PROVIDER_CATALOGUE[entry.provider].label;
   const descriptor = LANE_A_PROVIDER_CATALOGUE[entry.provider];
   const entryUrl = descriptor.baseUrlEditable ? entry.baseUrl.trim() || null : null;
-  const sameAsMain = entry.provider === main.provider && entryUrl === (main.baseUrl?.trim() || null);
-  if (sameAsMain && main.hasKey) return { ok: true, text: `Ready. It uses the same ${label} key as the main model.` };
+  const slot = laneABackupKeySlot(
+    { provider: entry.provider, baseUrl: entryUrl },
+    main,
+    keys.stashedBaseUrls?.[entry.provider] ?? null,
+  );
+  const ownKey = keys.providerKeys?.[entry.provider];
+  if (slot === "main" && main.hasKey) return { ok: true, text: `Ready. It uses the same ${label} key as the main model.` };
+  if (slot === "provider" && ownKey) {
+    return {
+      ok: true,
+      text: ownKey.name
+        ? `Ready. It uses the agent's ${label} key "${ownKey.name}".`
+        : `Ready. It uses the agent's saved ${label} key.`,
+    };
+  }
   if (entry.provider === "anthropic") {
     return { ok: true, text: "Ready, as long as Paperclip's own Claude key is set." };
   }
@@ -196,10 +224,19 @@ export function checkBackupEntry(
       text: `Ready to try. Paperclip will reach out to ${entryUrl} when it is needed; make sure that computer is switched on.`,
     };
   }
-  return {
-    ok: false,
-    text: `No key to use. A backup can only borrow the main model's key, so it needs the same provider and address as the main model, or ${LANE_A_PROVIDER_CATALOGUE.anthropic.label} or a local model, which need no key here.`,
-  };
+  if (slot === "main") {
+    return { ok: false, text: `The main model has no ${label} key yet. Pick one above; this backup uses the same key.` };
+  }
+  if (slot === "none") {
+    return {
+      ok: false,
+      text:
+        entry.provider === main.provider
+          ? `This backup uses a different ${label} address than the main model, so the main model's key is not sent there. Use the same address as the main model.`
+          : `This backup uses a different ${label} address than the agent's ${label} key was picked for, so that key is not sent there. Clear the address to use ${label}'s own.`,
+    };
+  }
+  return { ok: false, text: `Pick ${/^[AEIOU]/i.test(label) ? "an" : "a"} ${label} key for this backup.` };
 }
 
 /**
@@ -225,12 +262,25 @@ export function QuickAgentBackupModels({
   saved,
   main,
   savedModels = [],
+  providerKeys,
+  stashedBaseUrls,
+  renderProviderKeyPicker,
   disabled,
   saving,
   onSave,
 }: {
   saved: Saved;
   main: { provider: LaneAProvider; baseUrl: string | null; hasKey: boolean };
+  /** The agent's own keys for other providers (adapterConfig.laneA.apiKeyByProvider). */
+  providerKeys?: BackupProviderKeys;
+  /** The address each of those keys was saved with (adapterConfig.laneA.baseUrlByProvider). */
+  stashedBaseUrls?: Partial<Record<LaneAProvider, string | null>>;
+  /**
+   * The key picker for a provider other than the main model's. It saves
+   * straight to the agent (one key per provider, shared by every backup on
+   * that provider), separately from "Save backups".
+   */
+  renderProviderKeyPicker?: (provider: LaneAProvider) => ReactNode;
   /** Saved models from Settings > Models (archived ones are left out). */
   savedModels?: readonly ModelDirectoryEntry[];
   /** True when the person looking cannot edit (the whole form's own permission bar). */
@@ -243,6 +293,12 @@ export function QuickAgentBackupModels({
   const [draft, setDraft] = useState<Draft>(savedDraft);
   const [checks, setChecks] = useState<Record<string, BackupCheckResult>>({});
   const [showProblems, setShowProblems] = useState(false);
+
+  // A key picked or changed on any row makes earlier "Test this one" answers stale.
+  const providerKeysKey = JSON.stringify(providerKeys ?? {});
+  useEffect(() => {
+    setChecks({});
+  }, [providerKeysKey]);
 
   // A fresh copy from the server replaces the draft (after a save, or when
   // another tab changed it).
@@ -544,6 +600,17 @@ export function QuickAgentBackupModels({
                 </>
               )}
 
+              {renderProviderKeyPicker && backupNeedsOwnKey(entry.provider, main.provider) && (
+                <div className="space-y-1" data-testid={`backup-key-${index}`}>
+                  {renderProviderKeyPicker(entry.provider)}
+                  <span className="block text-xs text-muted-foreground">
+                    The agent's {LANE_A_PROVIDER_CATALOGUE[entry.provider].label} key. Every{" "}
+                    {LANE_A_PROVIDER_CATALOGUE[entry.provider].label} backup on this agent uses it; it is saved as soon as
+                    you pick it.
+                  </span>
+                </div>
+              )}
+
               <div className="flex flex-wrap items-center gap-2">
                 <Button
                   type="button"
@@ -551,7 +618,12 @@ export function QuickAgentBackupModels({
                   variant="outline"
                   disabled={readOnly}
                   data-testid={`backup-test-${index}`}
-                  onClick={() => setChecks((current) => ({ ...current, [entry.id]: checkBackupEntry(entry, main) }))}
+                  onClick={() =>
+                    setChecks((current) => ({
+                      ...current,
+                      [entry.id]: checkBackupEntry(entry, main, { providerKeys, stashedBaseUrls }),
+                    }))
+                  }
                 >
                   Test this one
                 </Button>

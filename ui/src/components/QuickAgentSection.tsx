@@ -302,6 +302,47 @@ export function QuickAgentSection({
       },
     });
 
+  // A backup on another provider uses the agent's own key for THAT provider
+  // (adapterConfig.laneA.apiKeyByProvider.<provider>), saved through the same
+  // path as the main key, so one OpenRouter key serves every OpenRouter backup.
+  const providerKeyBindings = useMemo(() => readLaneAProviderKeyBindings(agent.adapterConfig), [agent.adapterConfig]);
+  const backupProviderKeys = useMemo(() => {
+    const out: Partial<Record<LaneAProvider, { name: string | null }>> = {};
+    for (const [key, binding] of Object.entries(providerKeyBindings) as Array<[LaneAProvider, SecretBindingValue]>) {
+      const secret = (secretsQuery.data ?? []).find((candidate) => candidate.id === binding.secretId);
+      if (secretsQuery.isSuccess && !secret) continue; // the saved secret is gone: no key
+      out[key] = { name: secret?.name ?? null };
+    }
+    return out;
+  }, [providerKeyBindings, secretsQuery.data, secretsQuery.isSuccess]);
+  const stashedBaseUrls = useMemo(() => {
+    const raw = currentLaneA.baseUrlByProvider;
+    const out: Partial<Record<LaneAProvider, string | null>> = {};
+    if (typeof raw === "object" && raw !== null) {
+      for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+        if (typeof value === "string") out[normalizeLaneAProvider(key)] = value;
+      }
+    }
+    return out;
+  }, [currentLaneA]);
+  const saveProviderKeyBinding = (keyProvider: LaneAProvider, next: SecretBindingValue | null) => {
+    const existing =
+      typeof currentLaneA.apiKeyByProvider === "object" && currentLaneA.apiKeyByProvider !== null
+        ? (currentLaneA.apiKeyByProvider as Record<string, unknown>)
+        : {};
+    settingMutation.mutate({
+      adapterConfig: {
+        laneA: {
+          ...currentLaneA,
+          apiKeyByProvider: {
+            ...existing,
+            [keyProvider]: next ? { type: "secret_ref", secretId: next.secretId, version: next.version ?? "latest" } : null,
+          },
+        },
+      },
+    });
+  };
+
   // "Can search the web": off unless switched on here.
   const webSearchOn = readLaneAWebSearchSwitch(agent.adapterConfig);
   const webSearchQuery = useQuery({
@@ -735,6 +776,20 @@ export function QuickAgentSection({
             keywordRoutes: agent.laneAKeywordRoutes,
           }}
           main={{ provider, baseUrl: agent.laneABaseUrl ?? null, hasKey: Boolean(keyBinding) }}
+          providerKeys={backupProviderKeys}
+          stashedBaseUrls={stashedBaseUrls}
+          renderProviderKeyPicker={(keyProvider) => (
+            <SecretBindingPicker
+              label={`${LANE_A_PROVIDER_CATALOGUE[keyProvider].label} key`}
+              placeholder={`Pick the ${LANE_A_PROVIDER_CATALOGUE[keyProvider].label} key`}
+              value={providerKeyBindings[keyProvider] ?? null}
+              onChange={(next) => saveProviderKeyBinding(keyProvider, next)}
+              allowVersionSelector={false}
+              disabled={settingMutation.isPending}
+              rankSecret={rankSecretForProvider(keyProvider)}
+              emptyHint="No saved keys yet. Create one here or add it under Connections."
+            />
+          )}
           savedModels={modelDirectoryQuery.isSuccess ? savedModels : undefined}
           saving={settingMutation.isPending}
           onSave={(patch) => settingMutation.mutateAsync(patch)}
@@ -1002,6 +1057,23 @@ function ReadinessChecklist({ lines }: { lines: ReadinessLine[] }) {
       </ul>
     </div>
   );
+}
+
+/** The agent's per-provider keys (adapterConfig.laneA.apiKeyByProvider), secret_refs only. */
+function readLaneAProviderKeyBindings(
+  adapterConfig: Record<string, unknown> | undefined,
+): Partial<Record<LaneAProvider, SecretBindingValue>> {
+  const laneA = adapterConfig?.laneA;
+  if (typeof laneA !== "object" || laneA === null) return {};
+  const byProvider = (laneA as { apiKeyByProvider?: unknown }).apiKeyByProvider;
+  if (typeof byProvider !== "object" || byProvider === null) return {};
+  const out: Partial<Record<LaneAProvider, SecretBindingValue>> = {};
+  for (const [key, raw] of Object.entries(byProvider as Record<string, unknown>)) {
+    if (!(LANE_A_PROVIDERS as readonly string[]).includes(key)) continue;
+    const binding = readLaneAKeyBinding({ laneA: { apiKey: raw } });
+    if (binding) out[key as LaneAProvider] = binding;
+  }
+  return out;
 }
 
 /** The secret_ref bound at adapterConfig.laneA.apiKey, if any. */

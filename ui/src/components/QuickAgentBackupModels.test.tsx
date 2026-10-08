@@ -4,7 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LaneABackupModelConfig, LaneAKeywordRoute, LaneAProvider, ModelDirectoryEntry } from "@paperclipai/shared";
-import { QuickAgentBackupModels } from "./QuickAgentBackupModels";
+import { QuickAgentBackupModels, type BackupProviderKeys } from "./QuickAgentBackupModels";
 
 vi.mock("@/lib/router", () => ({
   Link: ({ children, to, ...rest }: { children: React.ReactNode; to: string; className?: string }) => (
@@ -44,10 +44,27 @@ describe("QuickAgentBackupModels", () => {
     container.remove();
   });
 
-  function render(saved: Saved = {}, main = claudeMain, disabled = false, savedModels?: ModelDirectoryEntry[]) {
+  function render(
+    saved: Saved = {},
+    main = claudeMain,
+    disabled = false,
+    savedModels?: ModelDirectoryEntry[],
+    keys: {
+      providerKeys?: BackupProviderKeys;
+      stashedBaseUrls?: Partial<Record<LaneAProvider, string | null>>;
+      renderProviderKeyPicker?: (provider: LaneAProvider) => React.ReactNode;
+    } = {},
+  ) {
     act(() => {
       root.render(
-        <QuickAgentBackupModels saved={saved} main={main} disabled={disabled} savedModels={savedModels} onSave={onSave} />,
+        <QuickAgentBackupModels
+          saved={saved}
+          main={main}
+          disabled={disabled}
+          savedModels={savedModels}
+          onSave={onSave}
+          {...keys}
+        />,
       );
     });
   }
@@ -135,7 +152,7 @@ describe("QuickAgentBackupModels", () => {
   it("test button reports a missing key and a ready backup in plain words", () => {
     render({ backups: [entry("a", "gpt-4.1-mini", "openai"), entry("b", "claude-sonnet-5")] }, { provider: "anthropic", baseUrl: null, hasKey: false });
     click(q("backup-test-0"));
-    expect(q("backup-test-result-0")?.textContent).toContain("No key to use");
+    expect(q("backup-test-result-0")?.textContent).toBe("Pick an OpenAI key for this backup.");
     click(q("backup-test-1"));
     expect(q("backup-test-result-1")?.textContent).toContain("Ready");
   });
@@ -147,6 +164,49 @@ describe("QuickAgentBackupModels", () => {
     );
     click(q("backup-test-0"));
     expect(q("backup-test-result-0")?.textContent).toContain("same OpenAI key");
+  });
+
+  describe("a backup on another provider uses the agent's key for that provider", () => {
+    const localMain: { provider: LaneAProvider; baseUrl: string | null; hasKey: boolean } = {
+      provider: "local",
+      baseUrl: "http://pc:11434/v1",
+      hasKey: false,
+    };
+    const openRouterBackup = entry("or", "meta-llama/llama-3.3-70b-instruct", "openrouter");
+    const picker = (provider: LaneAProvider) => <span data-testid={`picker-${provider}`}>picker</span>;
+
+    it("shows a key picker on the OpenRouter row and says which key it will use", () => {
+      render({ backups: [openRouterBackup, entry("cl", "claude-sonnet-5")] }, localMain, false, undefined, {
+        providerKeys: { openrouter: { name: "Openrouter" } },
+        renderProviderKeyPicker: picker,
+      });
+      expect(q("backup-key-0")?.querySelector('[data-testid="picker-openrouter"]')).not.toBeNull();
+      // Claude needs no key of its own here: no picker on that row.
+      expect(q("backup-key-1")).toBeNull();
+      click(q("backup-test-0"));
+      expect(q("backup-test-result-0")?.textContent).toBe('Ready. It uses the agent\'s OpenRouter key "Openrouter".');
+    });
+
+    it("asks for a key when the agent has none for that provider", () => {
+      render({ backups: [openRouterBackup] }, localMain, false, undefined, { renderProviderKeyPicker: picker });
+      click(q("backup-test-0"));
+      expect(q("backup-test-result-0")?.textContent).toBe("Pick an OpenRouter key for this backup.");
+    });
+
+    it("will not send the key to an address it was not picked for", () => {
+      render({ backups: [{ ...openRouterBackup, baseUrl: "https://elsewhere.example/v1" }] }, localMain, false, undefined, {
+        providerKeys: { openrouter: { name: "Openrouter" } },
+      });
+      click(q("backup-test-0"));
+      expect(q("backup-test-result-0")?.textContent).toContain("so that key is not sent there");
+    });
+
+    it("no picker on a backup that shares the main model's provider", () => {
+      render({ backups: [entry("a", "gpt-4.1-mini", "openai")] }, claudeMain, false, undefined, {
+        renderProviderKeyPicker: picker,
+      });
+      expect(q("backup-key-0")).toBeNull();
+    });
   });
 
   it("hides editing controls when the person cannot edit", () => {

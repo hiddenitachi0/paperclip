@@ -102,6 +102,9 @@ export {
   LANE_A_KEYWORD_ROUTES_MAX,
   LANE_A_BACKUP_ID_MAX_LENGTH,
   laneABackupModelEntryIssue,
+  laneABackupKeySlot,
+  laneAProviderKeyConfigPath,
+  type LaneABackupKeySlot,
   type LaneABackupModelConfig,
   type LaneAKeywordRoute,
 } from "./lane-a-models.js";
