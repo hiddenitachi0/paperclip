@@ -1,0 +1,53 @@
+import Anthropic from "@anthropic-ai/sdk";
+import { HttpError } from "../errors.js";
+
+/**
+ * The AI director (review, follow-up questions, rewrite proposals) makes
+ * plain Anthropic calls. A failure there used to escape as a raw SDK error,
+ * which the error handler turns into a bare 500 "Internal server error" --
+ * meaningless to the person in the editor. These map every known failure to
+ * a plain sentence with a non-500 status the editor can show as-is.
+ */
+
+export const DIRECTOR_AI_NOT_CONFIGURED_MESSAGE =
+  "The AI director isn't set up on this server yet: an Anthropic API key is needed (Instance settings, server Anthropic key).";
+
+export function directorAiNotConfigured(): HttpError {
+  return new HttpError(503, DIRECTOR_AI_NOT_CONFIGURED_MESSAGE);
+}
+
+/** instanceof that tolerates an SDK build (or test double) missing one of the error classes. */
+function isInstance(err: unknown, ctor: unknown): boolean {
+  return typeof ctor === "function" && err instanceof (ctor as new (...args: never[]) => unknown);
+}
+
+export function directorAiFailure(err: unknown): HttpError {
+  if (err instanceof HttpError) return err;
+  if (isInstance(err, Anthropic.AuthenticationError) || isInstance(err, Anthropic.PermissionDeniedError)) {
+    return new HttpError(502, "The AI director's Anthropic key was refused. Check the server Anthropic key in Instance settings.");
+  }
+  if (isInstance(err, Anthropic.RateLimitError)) {
+    return new HttpError(503, "The AI director is busy right now (rate limited). Try again in a minute.");
+  }
+  if (isInstance(err, Anthropic.APIConnectionError)) {
+    return new HttpError(502, "Could not reach the AI director service. Check the connection and try again.");
+  }
+  if (isInstance(err, Anthropic.APIError)) {
+    const apiErr = err as { status?: unknown; message: string };
+    const status = typeof apiErr.status === "number" ? apiErr.status : null;
+    if (status !== null && status >= 500) {
+      return new HttpError(502, "The AI director service had a problem on its side. Try again in a moment.");
+    }
+    return new HttpError(502, `The AI director could not answer: ${apiErr.message}`);
+  }
+  return new HttpError(502, `The AI director could not answer: ${err instanceof Error ? err.message : String(err)}`);
+}
+
+/** Runs one director model call, turning any failure into a plain-language HttpError. */
+export async function callDirectorModel<T>(call: () => Promise<T>): Promise<T> {
+  try {
+    return await call();
+  } catch (err) {
+    throw directorAiFailure(err);
+  }
+}
