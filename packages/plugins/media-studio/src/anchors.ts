@@ -282,6 +282,36 @@ async function addAgeBlock(ctx: PluginContext, companyId: string, fileId: string
   if (!list.includes(fileId)) await ctx.state.set(scope(companyId, "identityAgeBlocks"), [...list, fileId].slice(-1000));
 }
 
+/**
+ * Checked again right where pictures leave (ticking, download, Fal training,
+ * Higgsfield Soul ID): a picture added to the training set before the
+ * analysis flagged it must not go out afterwards.
+ */
+async function assertNoneAgeBlocked(ctx: PluginContext, companyId: string, fileIds: string[]): Promise<void> {
+  const blocks = await loadAgeBlocks(ctx, companyId);
+  if (fileIds.some((id) => blocks.includes(id))) {
+    throw new Error("One of the ticked pictures was flagged by the analysis as possibly showing someone under 18. Remove it from the training set first; it cannot be used or sent anywhere.");
+  }
+}
+
+/**
+ * In-process claims, so two clicks (or two tabs) cannot both start a paid
+ * training, or both settle the same finished one. Taken synchronously before
+ * the first await, so two calls can never both get it.
+ */
+const identityJobs = new Set<string>();
+function jobKey(kind: string, companyId: string, identityId: unknown): string {
+  return `${kind}:${companyId}:${typeof identityId === "string" ? identityId : ""}`;
+}
+function claimIdentityJob(kind: string, companyId: string, identityId: unknown): (() => void) | null {
+  const key = jobKey(kind, companyId, identityId);
+  if (identityJobs.has(key)) return null;
+  identityJobs.add(key);
+  return () => {
+    identityJobs.delete(key);
+  };
+}
+
 export interface IdentitySettings {
   analysis: AnalysisModelSetting | null;
   /** A company secret holding a Hugging Face token with write access. */
@@ -879,6 +909,7 @@ async function trainingSetAddAction(ctx: PluginContext, params: Record<string, u
 async function trainingSetSelectAction(ctx: PluginContext, params: Record<string, unknown>, context: ActionContext) {
   const { companyId } = managerOf(context, "pick training pictures");
   const ids = Array.isArray(params.fileIds) ? Array.from(new Set(params.fileIds.filter((x): x is string => typeof x === "string"))) : [];
+  await assertNoneAgeBlocked(ctx, companyId, ids);
   const identity = await updateIdentity(ctx, companyId, String(params.identityId ?? ""), (current) => {
     const set = current.trainingSet;
     if (!set || set.pictures.length === 0) throw new Error("Add pictures to the training set first.");
@@ -919,6 +950,7 @@ export async function trainingSetDownloadAction(ctx: PluginContext, params: Reco
   const identity = findIdentity(await loadIdentities(ctx, companyId), params.identityId);
   const set = identity.trainingSet;
   if (!set || set.selectedFileIds.length === 0) throw new Error("Tick the pictures to download first.");
+  await assertNoneAgeBlocked(ctx, companyId, set.selectedFileIds);
   const trigger = typeof params.triggerWord === "string" && params.triggerWord.trim() ? readTriggerWord(params.triggerWord) : null;
   const files: Array<{ name: string; bytes: Buffer }> = [];
   const lines: string[] = [];
@@ -969,61 +1001,107 @@ function newTraining(): IdentityTraining {
 
 export async function loraTrainAction(ctx: PluginContext, params: Record<string, unknown>, context: ActionContext, seams: AnchorSeams) {
   const { companyId, userId } = managerOf(context, "train a LoRA");
+  const release = claimIdentityJob("lora.train", companyId, params.identityId);
+  if (!release) throw new Error("A LoRA training for this person is already being started. Wait a moment, then reload the page.");
+  try {
+    return await startLoraTraining(ctx, params, companyId, userId, seams);
+  } finally {
+    release();
+  }
+}
+
+async function startLoraTraining(ctx: PluginContext, params: Record<string, unknown>, companyId: string, userId: string, seams: AnchorSeams) {
   const identity = findIdentity(await loadIdentities(ctx, companyId), params.identityId);
   assertTrainingMove(identity.training?.status ?? null, "training");
   const selected = identity.trainingSet?.selectedFileIds ?? [];
   if (selected.length < LORA_MIN_PICTURES) {
     throw new Error(`Tick at least ${LORA_MIN_PICTURES} pictures in the training set that truly look like ${identity.name} (12 to 25 is best).`);
   }
+  await assertNoneAgeBlocked(ctx, companyId, selected);
   const triggerWord = readTriggerWord(params.triggerWord);
   const cost = loraTrainingCostCents(LORA_TRAINING_STEPS);
   if (params.confirmCostCents !== cost) {
     throw new Error(`Training costs about $${(cost / 100).toFixed(2)} on Fal.ai. Confirm that price to start.`);
   }
-  const key = await falKey(ctx, companyId);
-  const files = [];
-  for (const [i, id] of selected.entries()) {
-    const p = await readPicture(ctx, companyId, id, "A ticked training picture");
-    const ext = p.contentType.includes("jpeg") || p.contentType.includes("jpg") ? "jpg" : p.contentType.includes("webp") ? "webp" : "png";
-    files.push({ name: `${String(i + 1).padStart(3, "0")}.${ext}`, bytes: p.bytes });
-  }
-  const zip = zipStore(files);
-  const bytesFetch = seams.bytesFetch ?? guardedBytesFetch;
-  const apiFetch: FetchImpl = (url, init) => ctx.http.fetch(url, init);
-  // The reservation is kept while Fal trains; it is given back if the training fails.
-  const reservation = await ctx.billing.reserveMediaStudioDirectSpend(companyId, {
-    userId,
-    action: "lora-training",
-    ...(typeof params.confirmBudgetCapCents === "number" ? { confirmBudgetCapCents: params.confirmBudgetCapCents } : {}),
+  // Mark it as training BEFORE anything is paid for, re-checking the move on
+  // the stored state, so a second start is refused even from another tab.
+  const previous = identity.training ?? null;
+  const startedAt = new Date().toISOString();
+  const isOurs = (current: Identity) => current.training?.status === "training" && current.training.startedAt === startedAt && !current.training.falRequestId;
+  await updateIdentity(ctx, companyId, identity.id, (current) => {
+    assertTrainingMove(current.training?.status ?? null, "training");
+    return {
+      ...current,
+      training: { ...newTraining(), trainedFileIds: [...selected], triggerWord, startedBy: userId, startedAt, updatedAt: startedAt },
+    };
   });
-  if (!reservation.allowed) throw new Error(reservation.message);
+  let reservationId: string | null = null;
   let requestId: string;
   try {
+    const key = await falKey(ctx, companyId);
+    const files = [];
+    for (const [i, id] of selected.entries()) {
+      const p = await readPicture(ctx, companyId, id, "A ticked training picture");
+      const ext = p.contentType.includes("jpeg") || p.contentType.includes("jpg") ? "jpg" : p.contentType.includes("webp") ? "webp" : "png";
+      files.push({ name: `${String(i + 1).padStart(3, "0")}.${ext}`, bytes: p.bytes });
+    }
+    const zip = zipStore(files);
+    const bytesFetch = seams.bytesFetch ?? guardedBytesFetch;
+    const apiFetch: FetchImpl = (url, init) => ctx.http.fetch(url, init);
+    // The reservation is kept while Fal trains; it is given back if the training fails.
+    const reservation = await ctx.billing.reserveMediaStudioDirectSpend(companyId, {
+      userId,
+      action: "lora-training",
+      ...(typeof params.confirmBudgetCapCents === "number" ? { confirmBudgetCapCents: params.confirmBudgetCapCents } : {}),
+    });
+    if (!reservation.allowed) throw new Error(reservation.message);
+    reservationId = reservation.reservationId;
     const zipUrl = await falUpload(apiFetch, bytesFetch, key, { bytes: zip, contentType: "application/zip", name: `${identity.id}.zip` });
     requestId = await falTrainerSubmit(apiFetch, key, { zipUrl, triggerWord, steps: LORA_TRAINING_STEPS });
   } catch (err) {
-    await ctx.billing.releaseMediaStudioDirectSpend(companyId, reservation.reservationId).catch(() => undefined);
+    if (reservationId) await ctx.billing.releaseMediaStudioDirectSpend(companyId, reservationId).catch(() => undefined);
+    // Nothing was started at Fal: put the training back to how it was.
+    await updateIdentity(ctx, companyId, identity.id, (current) => (isOurs(current) ? { ...current, training: previous } : current)).catch(() => undefined);
     throw err;
   }
   const now = new Date().toISOString();
-  const next = await updateIdentity(ctx, companyId, identity.id, (current) => ({
-    ...current,
-    training: {
-      ...newTraining(),
-      trainedFileIds: [...selected],
-      triggerWord,
-      falRequestId: requestId,
-      reservationId: reservation.reservationId,
-      startedBy: userId,
-      startedAt: now,
-      updatedAt: now,
-    },
-  }));
+  const next = await updateIdentity(ctx, companyId, identity.id, (current) => {
+    if (!isOurs(current)) {
+      // Cannot happen while the claim above is held; logged so a paid training is never silently lost.
+      ctx.logger.warn(`media-studio: LoRA training ${requestId} started while the identity's training state had changed; recording it anyway.`);
+    }
+    return {
+      ...current,
+      training: {
+        ...newTraining(),
+        trainedFileIds: [...selected],
+        triggerWord,
+        falRequestId: requestId,
+        reservationId,
+        startedBy: userId,
+        startedAt,
+        updatedAt: now,
+      },
+    };
+  });
   return { identity: identityView(next) };
 }
 
 export async function loraStatusAction(ctx: PluginContext, params: Record<string, unknown>, context: ActionContext) {
   const companyId = companyOf(context);
+  const release = claimIdentityJob("lora.status", companyId, params.identityId);
+  if (!release) {
+    // Another check of the same training is running; it will save the outcome once.
+    return { identity: identityView(findIdentity(await loadIdentities(ctx, companyId), params.identityId)), progress: null };
+  }
+  try {
+    return await checkLoraTraining(ctx, params, companyId);
+  } finally {
+    release();
+  }
+}
+
+async function checkLoraTraining(ctx: PluginContext, params: Record<string, unknown>, companyId: string) {
   const identity = findIdentity(await loadIdentities(ctx, companyId), params.identityId);
   const training = identity.training;
   if (!training || training.status !== "training" || !training.falRequestId) return { identity: identityView(identity), progress: null };
@@ -1033,7 +1111,8 @@ export async function loraStatusAction(ctx: PluginContext, params: Record<string
   if (poll.status === "failed") {
     if (training.reservationId) await ctx.billing.releaseMediaStudioDirectSpend(companyId, training.reservationId).catch(() => undefined);
     const next = await updateIdentity(ctx, companyId, identity.id, (current) => {
-      assertTrainingMove(current.training!.status, "failed");
+      // Only the training that was polled, and only once.
+      if (current.training?.status !== "training" || current.training.falRequestId !== training.falRequestId) return current;
       return { ...current, training: { ...current.training!, status: "failed", error: poll.error, reservationId: null, updatedAt: new Date().toISOString() } };
     });
     return { identity: identityView(next), progress: null };
@@ -1046,7 +1125,8 @@ export async function loraStatusAction(ctx: PluginContext, params: Record<string
     }
   }
   const next = await updateIdentity(ctx, companyId, identity.id, (current) => {
-    assertTrainingMove(current.training!.status, "trained");
+    // Only the training that was polled, and only once (no duplicate trained LoRA).
+    if (current.training?.status !== "training" || current.training.falRequestId !== training.falRequestId) return current;
     const now = new Date().toISOString();
     return {
       ...current,
@@ -1174,7 +1254,12 @@ async function trainedRemoveAction(ctx: PluginContext, params: Record<string, un
 async function loraResetAction(ctx: PluginContext, params: Record<string, unknown>, context: ActionContext) {
   const { companyId } = managerOf(context, "start the LoRA training over");
   const next = await updateIdentity(ctx, companyId, String(params.identityId ?? ""), (current) => {
-    if (current.training?.status === "training") throw new Error("A LoRA is being trained right now. Wait until it is done.");
+    // A start that never reached Fal (no request id, and not being started right
+    // now, e.g. the worker restarted mid-start) can be cleared.
+    const busyStarting = identityJobs.has(jobKey("lora.train", companyId, current.id));
+    if (current.training?.status === "training" && (current.training.falRequestId || busyStarting)) {
+      throw new Error("A LoRA is being trained right now. Wait until it is done.");
+    }
     return { ...current, training: null };
   });
   return { identity: identityView(next) };
@@ -1189,6 +1274,7 @@ export async function higgsfieldSoulAction(ctx: PluginContext, params: Record<st
   if (selected.length < HIGGSFIELD_MIN_SOUL_PICTURES || selected.length > HIGGSFIELD_MAX_SOUL_PICTURES) {
     throw new Error(`A Higgsfield Soul ID needs ${HIGGSFIELD_MIN_SOUL_PICTURES} to ${HIGGSFIELD_MAX_SOUL_PICTURES} ticked face pictures (${selected.length} ticked).`);
   }
+  await assertNoneAgeBlocked(ctx, companyId, selected);
   const variant = params.variant === "soul-cinematic" ? "soul-cinematic" : "soul-2";
   const client = await higgsfieldClient(ctx, companyId, seams);
   const made = await withSpend(ctx, "higgsfield-soul-id", companyId, userId, params, async () => {

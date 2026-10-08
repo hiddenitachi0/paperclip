@@ -129,8 +129,18 @@ export function estimateLoraTrainingCostCents(steps: number = MEDIA_STUDIO_LORA_
   return Math.max(30, Math.ceil(steps * MEDIA_STUDIO_LORA_TRAINING_USD_PER_STEP * 100));
 }
 
+/**
+ * Higgsfield publishes no per-picture API price (it bills in its own
+ * credits), so one Higgsfield Soul picture is charged at this ESTIMATE: the
+ * same amount a Higgsfield picture call on the Edit tab reserves. Agent-made
+ * Higgsfield pictures are recorded at this figure with cost_source
+ * "estimate", so budgets and Media Studio's shared cap see them.
+ */
+export const MEDIA_STUDIO_HIGGSFIELD_PICTURE_ESTIMATE_CENTS = 8;
+
 export function estimateMediaStudioEditCostCents(action: MediaStudioEditAction, provider: MediaStudioDirectProvider = "fal"): number {
   if (action === "lora-training") return estimateLoraTrainingCostCents();
+  if (action === "higgsfield-pictures") return MEDIA_STUDIO_HIGGSFIELD_PICTURE_ESTIMATE_CENTS;
   return estimateMediaStudioDirectCostCents({ kind: "picture", provider }).estimatedCostCents;
 }
 

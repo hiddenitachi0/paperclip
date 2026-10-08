@@ -12,6 +12,7 @@ import {
   MEDIA_STUDIO_DIRECT_BILLING_CODE,
   MEDIA_STUDIO_DIRECT_PICTURE_COST_CENTS,
   MEDIA_STUDIO_DIRECT_REWRITE_BILLING_CODE,
+  MEDIA_STUDIO_HIGGSFIELD_PICTURE_ESTIMATE_CENTS,
 } from "@paperclipai/shared";
 import { agents, companies, costEvents, createDb, mediaStudioDirectCreations, plugins } from "@paperclipai/db";
 import {
@@ -536,6 +537,64 @@ d("Media Studio Create tab direct generation (DUR-4329)", () => {
       await expect(
         mediaStudioDirectService(db).recordAgentMediaCost(companyId, { agentId: otherAgentId, kind: "image", provider: "sogni", model: "m", credits: 1 }),
       ).rejects.toThrow();
+    });
+
+    it("records an agent-made Higgsfield picture at the labelled estimate (Higgsfield returns no price), against the agent and the shared cap", async () => {
+      const companyId = await seedCompany({ budgetMonthlyCents: 100_000 });
+      const agentId = await seedAgent(companyId);
+      await setMediaStudioConfig({});
+      const out = await mediaStudioDirectService(db).recordAgentMediaCost(companyId, { agentId, kind: "image", provider: "higgsfield", model: "soul", usage: { images: 1 } });
+      expect(out).toEqual({ recorded: true, costCents: MEDIA_STUDIO_HIGGSFIELD_PICTURE_ESTIMATE_CENTS });
+      const events = await db.select().from(costEvents).where(eq(costEvents.agentId, agentId));
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        provider: "higgsfield",
+        biller: "higgsfield",
+        model: "soul",
+        costCents: MEDIA_STUDIO_HIGGSFIELD_PICTURE_ESTIMATE_CENTS,
+        costMicroUsd: MEDIA_STUDIO_HIGGSFIELD_PICTURE_ESTIMATE_CENTS * 10_000,
+        costSource: "estimate",
+        billingCode: MEDIA_STUDIO_DIRECT_BILLING_CODE,
+      });
+      const [agentRow] = await db.select().from(agents).where(eq(agents.id, agentId));
+      expect(agentRow.spentMonthlyCents).toBe(MEDIA_STUDIO_HIGGSFIELD_PICTURE_ESTIMATE_CENTS);
+      const [companyRow] = await db.select().from(companies).where(eq(companies.id, companyId));
+      expect(companyRow.spentMonthlyCents).toBe(MEDIA_STUDIO_HIGGSFIELD_PICTURE_ESTIMATE_CENTS);
+      // Higgsfield makes pictures only here; nothing is invented for other kinds.
+      expect(await mediaStudioDirectService(db).recordAgentMediaCost(companyId, { agentId, kind: "video", provider: "higgsfield", model: "soul" })).toEqual({ recorded: false, reason: "unpriced_kind" });
+    });
+
+    it("checks an agent's Higgsfield picture against the company budget, the agent budget and the shared cap before it is made", async () => {
+      await setMediaStudioConfig({});
+      const direct = mediaStudioDirectService(db);
+      const est = MEDIA_STUDIO_HIGGSFIELD_PICTURE_ESTIMATE_CENTS;
+
+      const roomy = await seedCompany({ budgetMonthlyCents: 100_000 });
+      const roomyAgent = await seedAgent(roomy);
+      expect(await direct.checkAgentMediaSpend(roomy, { agentId: roomyAgent, kind: "image", provider: "higgsfield", usage: { images: 1 } })).toEqual({ allowed: true, estimateCents: est });
+      // Nothing is recorded by the check itself.
+      expect(await db.select().from(costEvents).where(eq(costEvents.agentId, roomyAgent))).toHaveLength(0);
+
+      const tight = await seedCompany({ budgetMonthlyCents: est - 1 });
+      const tightAgent = await seedAgent(tight);
+      expect(await direct.checkAgentMediaSpend(tight, { agentId: tightAgent, kind: "image", provider: "higgsfield" })).toMatchObject({ allowed: false, reason: "company_budget" });
+
+      const agentCapped = await seedCompany({ budgetMonthlyCents: 100_000 });
+      const cappedAgent = await seedAgent(agentCapped);
+      await db.update(agents).set({ budgetMonthlyCents: est + 2, spentMonthlyCents: 3 }).where(eq(agents.id, cappedAgent));
+      expect(await direct.checkAgentMediaSpend(agentCapped, { agentId: cappedAgent, kind: "image", provider: "higgsfield" })).toMatchObject({ allowed: false, reason: "agent_budget" });
+
+      const paused = await seedCompany({ budgetMonthlyCents: 100_000 });
+      const pausedAgent = await seedAgent(paused);
+      await db.update(agents).set({ status: "paused", pauseReason: "budget" }).where(eq(agents.id, pausedAgent));
+      expect(await direct.checkAgentMediaSpend(paused, { agentId: pausedAgent, kind: "image", provider: "higgsfield" })).toMatchObject({ allowed: false, reason: "agent_budget_stop" });
+
+      await setMediaStudioConfig({ directCreateMonthlyCapCents: 1 });
+      expect(await direct.checkAgentMediaSpend(roomy, { agentId: roomyAgent, kind: "image", provider: "higgsfield" })).toMatchObject({ allowed: false, reason: "direct_create_cap" });
+      await setMediaStudioConfig({});
+
+      const other = await seedCompany({ budgetMonthlyCents: 100_000 });
+      await expect(direct.checkAgentMediaSpend(other, { agentId: roomyAgent, kind: "image", provider: "higgsfield" })).rejects.toThrow();
     });
   });
 

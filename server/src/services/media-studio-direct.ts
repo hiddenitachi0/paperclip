@@ -1,10 +1,11 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { and, desc, eq, gte, lt, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { companies, costEvents, issues as issuesTable, mediaStudioDirectCreations, withCompanyScope } from "@paperclipai/db";
+import { agents as agentsTable, companies, costEvents, issues as issuesTable, mediaStudioDirectCreations, withCompanyScope } from "@paperclipai/db";
 import {
   MEDIA_STUDIO_DIRECT_BILLING_CODE,
   MEDIA_STUDIO_DIRECT_REWRITE_BILLING_CODE,
+  MEDIA_STUDIO_HIGGSFIELD_PICTURE_ESTIMATE_CENTS,
   estimateMediaStudioDirectCostCents,
   type CreateMediaStudioDirectAudioInput,
   type CreateMediaStudioDirectPictureInput,
@@ -23,6 +24,7 @@ import { mediaStudioKeyRef } from "./media-studio-company-keys.js";
 import { pluginRegistryService } from "./plugin-registry.js";
 import { secretService } from "./secrets.js";
 import { costService } from "./costs.js";
+import { budgetService } from "./budgets.js";
 import { SOGNI_CREDIT_PRICE_CONFIG_KEY, recordSogniCost } from "./sogni-cost.js";
 import { falPricingClient, microUsdToCents, type FalUsage } from "./fal-pricing.js";
 import { issueService } from "./issues.js";
@@ -169,6 +171,7 @@ export function mediaStudioDirectService(
   const registry = pluginRegistryService(db);
   const secrets = secretService(db);
   const costs = costService(db);
+  const budgets = budgetService(db);
   const issues = issueService(db);
   const nowOf = () => deps.now?.() ?? new Date();
 
@@ -807,11 +810,106 @@ export function mediaStudioDirectService(
       });
       return outcome.recorded ? { recorded: true, costCents: Math.round(outcome.costMicroUsd / 10_000) } : { recorded: false, reason: outcome.reason };
     }
+    if (input.provider === "higgsfield") {
+      // Higgsfield publishes no API price, so this is the documented estimate
+      // (labelled cost_source "estimate"), never zero: budgets must see it.
+      const costCents = agentHiggsfieldEstimateCents(input.kind, input.usage);
+      if (costCents === null) return { recorded: false, reason: "unpriced_kind" };
+      await costs.createEvent(companyId, {
+        agentId: input.agentId,
+        issueId,
+        provider: "higgsfield",
+        biller: "higgsfield",
+        billingType: "metered_api",
+        billingCode: MEDIA_STUDIO_DIRECT_BILLING_CODE,
+        model,
+        inputTokens: 0,
+        outputTokens: 0,
+        costCents,
+        costMicroUsd: costCents * 10_000,
+        costSource: "estimate",
+        occurredAt: nowOf(),
+      });
+      return { recorded: true, costCents };
+    }
     return { recorded: false, reason: "free_provider" };
+  }
+
+  /** Higgsfield only makes pictures here: the per-picture estimate x pictures made (at least one). */
+  function agentHiggsfieldEstimateCents(kind: "image" | "video" | "audio", usage?: FalUsage): number | null {
+    if (kind !== "image") return null;
+    const images = Math.max(1, Math.ceil(usage?.images ?? 1));
+    return images * MEDIA_STUDIO_HIGGSFIELD_PICTURE_ESTIMATE_CENTS;
+  }
+
+  /** What an agent's paid call is expected to cost, for the check before it starts. Null: not a paid service. */
+  function agentMediaEstimateCents(input: { kind: "image" | "video" | "audio"; provider: string; usage?: FalUsage }): number | null {
+    if (input.provider === "higgsfield") return agentHiggsfieldEstimateCents(input.kind, input.usage);
+    if (input.provider === "fal") {
+      const kind = input.kind === "image" ? "picture" : input.kind;
+      return estimateMediaStudioDirectCostCents({ kind, provider: "fal", durationSeconds: Math.ceil(Math.max(0, input.usage?.seconds ?? 0)) }).estimatedCostCents;
+    }
+    return null;
+  }
+
+  /**
+   * Before an AGENT starts a paid picture (today: Higgsfield, whose cost is
+   * only known as an estimate): refuse when the agent or company is stopped
+   * by a budget hard-stop, or when the estimate would push the company's or
+   * the agent's monthly budget, or Media Studio's shared monthly cap, over.
+   * Read-only: the cost is recorded by recordAgentMediaCost after the call.
+   * There is no override here; an agent cannot pass the shared cap.
+   */
+  async function checkAgentMediaSpend(
+    companyId: string,
+    input: { agentId: string; kind: "image" | "video" | "audio"; provider: string; usage?: FalUsage },
+  ): Promise<{ allowed: true; estimateCents: number } | { allowed: false; message: string; reason: string | null }> {
+    const estimateCents = agentMediaEstimateCents(input) ?? 0;
+    const block = await budgets.getInvocationBlock(companyId, input.agentId);
+    if (block) return { allowed: false, message: block.reason, reason: `${block.scopeType}_budget_stop` };
+    if (estimateCents <= 0) return { allowed: true, estimateCents };
+    const company = await getCompanyRow(companyId);
+    if (company.budgetMonthlyCents > 0 && company.spentMonthlyCents + estimateCents > company.budgetMonthlyCents) {
+      return {
+        allowed: false,
+        message: `This picture would cost about ${estimateCents} cents on top of ${company.spentMonthlyCents} cents already spent this month, over the company's ${company.budgetMonthlyCents}-cent monthly budget.`,
+        reason: "company_budget",
+      };
+    }
+    const [agent] = await db
+      .select({ budgetMonthlyCents: agentsTable.budgetMonthlyCents, spentMonthlyCents: agentsTable.spentMonthlyCents })
+      .from(agentsTable)
+      .where(and(eq(agentsTable.id, input.agentId), eq(agentsTable.companyId, companyId)));
+    if (!agent) return { allowed: false, message: "This agent is not in this company.", reason: "agent_not_found" };
+    if (agent.budgetMonthlyCents > 0 && agent.spentMonthlyCents + estimateCents > agent.budgetMonthlyCents) {
+      return {
+        allowed: false,
+        message: `This picture would cost about ${estimateCents} cents on top of the ${agent.spentMonthlyCents} cents this agent already spent this month, over its ${agent.budgetMonthlyCents}-cent monthly budget.`,
+        reason: "agent_budget",
+      };
+    }
+    const capCents = await directCreatePluginCapCents();
+    if (capCents !== null) {
+      const { start, end } = currentUtcMonthWindow();
+      const [spendRow] = await db
+        .select({ total: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::int` })
+        .from(costEvents)
+        .where(and(eq(costEvents.billingCode, MEDIA_STUDIO_DIRECT_BILLING_CODE), gte(costEvents.occurredAt, start), lt(costEvents.occurredAt, end)));
+      const spentCents = Number(spendRow?.total ?? 0);
+      if (spentCents + estimateCents > capCents) {
+        return {
+          allowed: false,
+          message: `This picture would push Media Studio's spend this month to ${spentCents + estimateCents} cents, over the ${capCents}-cent cap. Ask an admin to raise the cap.`,
+          reason: "direct_create_cap",
+        };
+      }
+    }
+    return { allowed: true, estimateCents };
   }
 
   return {
     recordAgentMediaCost,
+    checkAgentMediaSpend,
     estimate: estimateMediaStudioDirectCostCents,
     createPicture,
     createVideo,

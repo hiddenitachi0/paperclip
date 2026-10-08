@@ -136,7 +136,13 @@ import { SOGNI_TOOLS, findSogniTool, prepareSogniCall, sogniToolDescription, sog
  * Resolve the operator-configured provider and run one generation. Shared by
  * the agent-callable tool and the UI action so both behave identically.
  */
-async function runGeneration(ctx: PluginContext, input: GenerationInput, companyId: string | null): Promise<GenerationResult> {
+async function runGeneration(
+  ctx: PluginContext,
+  input: GenerationInput,
+  companyId: string | null,
+  /** Set when an AGENT's tool call makes the picture: paid services whose price is only an estimate are budget-checked first. */
+  agentRun?: { companyId: string; runId: string },
+): Promise<GenerationResult> {
   // The company's own service keys win over the instance's (company-settings.ts).
   const cfg = await companyConfig(ctx, companyId);
   // A per-call choice or a look's service (already checked in prepareGeneration) wins over settings.
@@ -168,6 +174,13 @@ async function runGeneration(ctx: PluginContext, input: GenerationInput, company
     if (!ref) throw new Error("Pick the Higgsfield API key in Media Studio's Settings tab (it comes from the company's Secrets).");
     providerConfig.higgsfieldCredentials = readHiggsfieldCredentials(await ctx.secrets.resolve(ref));
     providerConfig.higgsfieldBytesFetch = guardedBytesFetch;
+    if (agentRun) {
+      // Higgsfield bills the company's key with no price in the reply, so the
+      // host checks the agent's and company's budgets (and Media Studio's
+      // shared cap) against its estimate BEFORE anything is spent.
+      const check = await ctx.billing.checkAgentMediaSpend(agentRun.companyId, { runId: agentRun.runId, kind: "image", provider: "higgsfield", usage: { images: 1 } });
+      if (!check.allowed) throw new Error(check.message);
+    }
   }
 
   const impl = selectProvider(providerConfig, (url, init) => ctx.http.fetch(url, init));
@@ -1655,7 +1668,7 @@ const plugin = definePlugin({
         }
 
         try {
-          const result = await runGeneration(ctx, input, runCtx.companyId);
+          const result = await runGeneration(ctx, input, runCtx.companyId, runCtx);
           await recordAgentMediaCost(ctx, runCtx, { kind: "image", provider: result.provider, model: result.model, usage: { images: 1 }, credits: sogniCreditsOf(result), issueId: issueId || null });
           const { contentBase64, contentType } = await toAttachmentBytes(ctx, result);
           const seed = typeof result.seed === "number" ? result.seed : null;
@@ -2905,7 +2918,7 @@ export async function runQuickPicture(
   try {
     made = await withQuickTimeout(
       (async () => {
-        const result = await runGeneration(ctx, input, runCtx.companyId);
+        const result = await runGeneration(ctx, input, runCtx.companyId, runCtx);
         await recordAgentMediaCost(ctx, runCtx, { kind: "image", provider: result.provider, model: result.model, usage: { images: 1 }, credits: sogniCreditsOf(result), issueId: issueId || null });
         return { result, ...(await toAttachmentBytes(ctx, result)) };
       })(),

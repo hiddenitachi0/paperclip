@@ -57,6 +57,7 @@ import type {
   PluginMediaStudioDirectSpendReservation,
   PluginMediaStudioDirectSpendSettlement,
   PluginAgentMediaCostRecording,
+  PluginAgentMediaSpendCheck,
   PluginImageAnalysisInput,
   PluginImageAnalysisResult,
 } from "./protocol.js";
@@ -1914,6 +1915,24 @@ export interface PluginBillingClient {
       issueId?: string | null;
     },
   ): Promise<PluginAgentMediaCostRecording>;
+
+  /**
+   * Before an AGENT starts a paid picture/video/audio: is the agent (or its
+   * company) stopped by a budget, and would the host's estimate for this call
+   * push the company's or agent's monthly budget, or Media Studio's shared
+   * cap, over? Nothing is recorded; record the cost with
+   * `recordAgentMediaCost` once the call finished. `runId` is the invoking
+   * tool call's run id; the host resolves the agent from it.
+   */
+  checkAgentMediaSpend(
+    companyId: string,
+    input: {
+      runId: string;
+      kind: "image" | "video" | "audio";
+      provider: string;
+      usage?: { images?: number; megapixels?: number; seconds?: number; units?: number };
+    },
+  ): Promise<PluginAgentMediaSpendCheck>;
 }
 
 /**

@@ -1041,6 +1041,11 @@ export type PluginAgentMediaCostRecording =
   | { recorded: true; costCents: number }
   | { recorded: false; reason: string };
 
+/** Result of `billing.checkAgentMediaSpend`: whether an agent may start a paid picture/video/audio now. A refusal is plain language, not an exception. */
+export type PluginAgentMediaSpendCheck =
+  | { allowed: true; estimateCents: number }
+  | { allowed: false; message: string; reason: string | null };
+
 /**
  * Result of `personas.reserveDailyGeneration` — whether one generation was
  * allowed (and, if so, atomically reserved) against the calling agent's
@@ -1852,7 +1857,7 @@ export interface WorkerToHostMethods {
       /** The invoking tool call's run id. Required and host-enforced: the host resolves the calling agent from this run, never from a plugin-supplied id. */
       runId: string;
       kind: "image" | "video" | "audio";
-      /** "fal" or "sogni"; any other provider (mock, a local ComfyUI) is free and records nothing. */
+      /** "fal", "sogni" or "higgsfield" (recorded at an estimate); any other provider (mock, a local ComfyUI) is free and records nothing. */
       provider: string;
       /** The model/endpoint actually used. The host prices it itself; the plugin never supplies an amount in money. */
       model: string;
@@ -1863,6 +1868,17 @@ export interface WorkerToHostMethods {
       issueId?: string | null;
     },
     result: PluginAgentMediaCostRecording,
+  ];
+  "billing.checkAgentMediaSpend": [
+    params: {
+      companyId: string;
+      /** The invoking tool call's run id. Required and host-enforced: the host resolves the calling agent from this run. */
+      runId: string;
+      kind: "image" | "video" | "audio";
+      provider: string;
+      usage?: { images?: number; megapixels?: number; seconds?: number; units?: number };
+    },
+    result: PluginAgentMediaSpendCheck,
   ];
 
   // Personas

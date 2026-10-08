@@ -334,6 +334,9 @@ export interface HostServices {
     recordAgentMediaCost(
       params: WorkerToHostMethods["billing.recordAgentMediaCost"][0],
     ): Promise<WorkerToHostMethods["billing.recordAgentMediaCost"][1]>;
+    checkAgentMediaSpend(
+      params: WorkerToHostMethods["billing.checkAgentMediaSpend"][0],
+    ): Promise<WorkerToHostMethods["billing.checkAgentMediaSpend"][1]>;
   };
 
   /** Provides persona-scoped enforcement helpers (DUR-177 daily generation cap). */
@@ -553,6 +556,7 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   "billing.releaseMediaStudioDirectSpend": "billing.media_studio_direct.reserve",
   "billing.settleMediaStudioDirectSpend": "billing.media_studio_direct.reserve",
   "billing.recordAgentMediaCost": "billing.media_studio_direct.reserve",
+  "billing.checkAgentMediaSpend": "billing.media_studio_direct.reserve",
 };
 
 // ---------------------------------------------------------------------------
@@ -1051,6 +1055,9 @@ export function createHostClientHandlers(
     }),
     "billing.recordAgentMediaCost": gated("billing.recordAgentMediaCost", async (params) => {
       return services.billing.recordAgentMediaCost(params);
+    }),
+    "billing.checkAgentMediaSpend": gated("billing.checkAgentMediaSpend", async (params) => {
+      return services.billing.checkAgentMediaSpend(params);
     }),
 
     "personas.reserveDailyGeneration": gated("personas.reserveDailyGeneration", async (params) => {

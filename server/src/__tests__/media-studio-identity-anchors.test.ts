@@ -835,6 +835,85 @@ describe("LoRA training flow (stubbed Fal and Hugging Face)", () => {
     expect(again.identity.training.status).toBe("training");
   });
 
+  async function tickTen(harness: TestHarness) {
+    const { identity, ids } = await ready(harness);
+    await harness.performAction("trainingSet.add", { identityId: identity.id, pictures: [up(EXTRA)] }, owner);
+    await harness.performAction("trainingSet.select", { identityId: identity.id, fileIds: [...ids, EXTRA] }, owner);
+    return { identity, ids: [...ids, EXTRA] };
+  }
+
+  it("two starts at once (double click, two tabs) start and pay for ONE training", async () => {
+    const { harness, fake } = await setup();
+    const { identity } = await tickTen(harness);
+    const reserve = vi.spyOn(harness.ctx.billing, "reserveMediaStudioDirectSpend");
+    const args = { identityId: identity.id, triggerWord: "majaberg", confirmCostCents: 300 };
+    const [a, b] = await Promise.allSettled([harness.performAction<any>("lora.train", args, owner), harness.performAction<any>("lora.train", args, owner)]);
+    expect([a.status, b.status].sort()).toEqual(["fulfilled", "rejected"]);
+    const rejected = (a.status === "rejected" ? a : b) as PromiseRejectedResult;
+    expect(String(rejected.reason)).toMatch(/already being started|cannot move/);
+    expect(reserve).toHaveBeenCalledTimes(1);
+    expect(fake.calls.filter((c) => c.url === "https://queue.fal.run/fal-ai/krea-2-trainer" && c.method === "POST")).toHaveLength(1);
+    const stored = (await harness.ctx.state.get(identitiesKey)) as Identity[];
+    expect(stored[0]!.training).toMatchObject({ status: "training", falRequestId: "req-1" });
+  });
+
+  it("two status checks at once settle the finished training once, with one trained LoRA", async () => {
+    const { harness, fake } = await setup();
+    const { identity } = await tickTen(harness);
+    await harness.performAction("lora.train", { identityId: identity.id, triggerWord: "majaberg", confirmCostCents: 300 }, owner);
+    fake.falStatus = "COMPLETED";
+    const settle = vi.spyOn(harness.ctx.billing, "settleMediaStudioDirectSpend");
+    await Promise.all([harness.performAction<any>("lora.status", { identityId: identity.id }, owner), harness.performAction<any>("lora.status", { identityId: identity.id }, owner)]);
+    const after = await harness.performAction<any>("lora.status", { identityId: identity.id }, owner);
+    expect(settle).toHaveBeenCalledTimes(1);
+    expect(after.identity.training.status).toBe("trained");
+    expect(after.identity.trainedIdentities.filter((t: any) => t.provider === "fal-lora")).toHaveLength(1);
+  });
+
+  it("marks the training as started before paying, and puts it back when the start is refused", async () => {
+    const { harness, fake } = await setup();
+    const { identity } = await tickTen(harness);
+    const reserve = vi.spyOn(harness.ctx.billing, "reserveMediaStudioDirectSpend").mockResolvedValueOnce({ allowed: false, message: "Over the company's budget.", reason: "company_budget" } as never);
+    await expect(harness.performAction("lora.train", { identityId: identity.id, triggerWord: "majaberg", confirmCostCents: 300 }, owner)).rejects.toThrow(/Over the company's budget/);
+    expect(fake.calls.some((c) => c.url.startsWith("https://queue.fal.run/"))).toBe(false);
+    expect(((await harness.ctx.state.get(identitiesKey)) as Identity[])[0]!.training).toBeNull();
+    reserve.mockRestore();
+    const again = await harness.performAction<any>("lora.train", { identityId: identity.id, triggerWord: "majaberg", confirmCostCents: 300 }, owner);
+    expect(again.identity.training).toMatchObject({ status: "training", falRequestId: "req-1" });
+  });
+
+  it("a start that never reached Fal (worker restarted mid-start) can be cleared; a real training cannot", async () => {
+    const { harness } = await setup();
+    const { identity } = await tickTen(harness);
+    const stored = (await harness.ctx.state.get(identitiesKey)) as Identity[];
+    const stuck = { status: "training", trainedFileIds: [], triggerWord: "majaberg", steps: 1000, estimatedCostCents: 300, falModel: "fal-ai/krea-2-trainer", falRequestId: null, reservationId: null, resultUrl: null, error: null, startedBy: "owner-1", startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    await harness.ctx.state.set(identitiesKey, stored.map((i) => ({ ...i, training: stuck })));
+    const reset = await harness.performAction<any>("lora.reset", { identityId: identity.id }, owner);
+    expect(reset.identity.training).toBeNull();
+    await harness.performAction("lora.train", { identityId: identity.id, triggerWord: "majaberg", confirmCostCents: 300 }, owner);
+    await expect(harness.performAction("lora.reset", { identityId: identity.id }, owner)).rejects.toThrow(/being trained/);
+  });
+
+  it("a picture flagged as possibly under 18 after it was added cannot be ticked, downloaded, trained on or sent to Higgsfield", async () => {
+    const { harness, fake } = await setup({ higgsfieldKeySecretRef: "12345678-1234-4234-8234-123456789016" });
+    const { identity, ids } = await tickTen(harness);
+    // Flagged later (e.g. analysed after it was put in the set).
+    await harness.ctx.state.set({ scopeKind: "company", scopeId: COMPANY, stateKey: "identityAgeBlocks" }, [EXTRA]);
+    const reserve = vi.spyOn(harness.ctx.billing, "reserveMediaStudioDirectSpend");
+    await expect(harness.performAction("lora.train", { identityId: identity.id, triggerWord: "majaberg", confirmCostCents: 300 }, owner)).rejects.toThrow(/under 18/);
+    await expect(harness.performAction("trainingSet.download", { identityId: identity.id }, owner)).rejects.toThrow(/under 18/);
+    await expect(harness.performAction("trainingSet.select", { identityId: identity.id, fileIds: [ids[0], EXTRA] }, owner)).rejects.toThrow(/under 18/);
+    await harness.performAction("trainingSet.select", { identityId: identity.id, fileIds: [FACE, BODY, OUTFIT, LOOKREF1, LOOKREF2] }, owner);
+    await harness.ctx.state.set({ scopeKind: "company", scopeId: COMPANY, stateKey: "identityAgeBlocks" }, [LOOKREF2]);
+    await expect(harness.performAction("higgsfield.soulId", { identityId: identity.id }, owner)).rejects.toThrow(/under 18/);
+    expect(reserve).not.toHaveBeenCalled();
+    expect(fake.calls.some((c) => c.url.startsWith("https://queue.fal.run/") || c.url.startsWith("https://api.higgsfield.ai/"))).toBe(false);
+    expect(fake.bytes).toHaveLength(0);
+    // Without the flagged picture it goes ahead.
+    await harness.performAction("trainingSet.remove", { identityId: identity.id, fileIds: [LOOKREF2] }, owner);
+    expect((await harness.performAction<any>("trainingSet.select", { identityId: identity.id, fileIds: ids.filter((id) => id !== EXTRA && id !== LOOKREF2) }, owner)).identity.trainingSet.selectedFileIds).toHaveLength(8);
+  });
+
   it("a ready Sogni LoRA rides along only with a filter-off look and a Krea model; a look can pick which one", async () => {
     const { harness } = await setup();
     const identity = await makeIdentity(harness);
@@ -926,6 +1005,29 @@ describe("Higgsfield (stubbed): Soul ID from the training set, and pictures with
     expect(prepared.input.customReferenceId).toBe("soul-1");
     expect(prepared.input.referenceImages ?? []).toHaveLength(0);
     expect(prepared.notes.join(" ")).toMatch(/Higgsfield takes no reference pictures/);
+  });
+
+  it("an agent's Higgsfield picture is budget-checked before the call and its cost recorded after (an estimate)", async () => {
+    const { harness, fake } = await setup({ higgsfieldKeySecretRef: HF_KEY });
+    higgsfieldFake(harness, fake);
+    const run = { agentId: "agent-maja", companyId: COMPANY, runId: "run-1" };
+    const soulCalls = () => fake.calls.filter((c) => c.url === "https://api.higgsfield.ai/v1/text2image/soul");
+
+    const check = vi.spyOn(harness.ctx.billing, "checkAgentMediaSpend").mockResolvedValueOnce({ allowed: false, message: "This agent is over its monthly budget.", reason: "agent_budget" });
+    const record = vi.spyOn(harness.ctx.billing, "recordAgentMediaCost");
+    const refused = await harness.executeTool<any>("generate-image", { prompt: "a sofa", provider: "higgsfield" }, run);
+    expect(refused.error).toMatch(/over its monthly budget/);
+    expect(check).toHaveBeenCalledWith(COMPANY, { runId: "run-1", kind: "image", provider: "higgsfield", usage: { images: 1 } });
+    expect(soulCalls()).toHaveLength(0);
+    expect(record).not.toHaveBeenCalled();
+
+    const made = await harness.executeTool<any>("generate-image", { prompt: "a sofa", provider: "higgsfield" }, run);
+    expect(made.error).toBeUndefined();
+    expect(check).toHaveBeenCalledTimes(2);
+    expect(soulCalls()).toHaveLength(1);
+    expect(check.mock.invocationCallOrder[1]!).toBeLessThan(record.mock.invocationCallOrder[0]!);
+    expect(record).toHaveBeenCalledWith(COMPANY, expect.objectContaining({ runId: "run-1", kind: "image", provider: "higgsfield", model: "soul", usage: { images: 1 } }));
+
   });
 
   it("refuses a key that is not id:secret, and says plainly that Soul takes no reference pictures", async () => {

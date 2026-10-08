@@ -2814,6 +2814,25 @@ export function buildHostServices(
           issueId: params.issueId ?? null,
         });
       },
+      async checkAgentMediaSpend(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        // Same rule as recordAgentMediaCost: the agent is the run's own, resolved here.
+        if (!params.runId) throw new Error("runId is required");
+        const callingAgentId = await callingAgentIdForRun(companyId, params.runId);
+        if (!callingAgentId) throw new Error("Run not found in this company");
+        if (!["image", "video", "audio"].includes(params.kind)) throw new Error("Unknown media kind");
+        const usage = params.usage ?? {};
+        for (const value of [usage.images, usage.megapixels, usage.seconds, usage.units]) {
+          if (value !== undefined && !(typeof value === "number" && Number.isFinite(value) && value >= 0)) throw new Error("usage values must be non-negative numbers");
+        }
+        return mediaStudioDirect.checkAgentMediaSpend(companyId, {
+          agentId: callingAgentId,
+          kind: params.kind,
+          provider: params.provider,
+          usage,
+        });
+      },
     },
 
     personas: {

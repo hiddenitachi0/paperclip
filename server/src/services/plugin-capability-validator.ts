@@ -105,6 +105,7 @@ const OPERATION_CAPABILITIES: Record<string, readonly PluginCapability[]> = {
   "billing.releaseMediaStudioDirectSpend": ["billing.media_studio_direct.reserve"],
   "billing.settleMediaStudioDirectSpend": ["billing.media_studio_direct.reserve"],
   "billing.recordAgentMediaCost": ["billing.media_studio_direct.reserve"],
+  "billing.checkAgentMediaSpend": ["billing.media_studio_direct.reserve"],
   "activity.log": ["activity.log.write"],
   "metrics.write": ["metrics.write"],
   "telemetry.track": ["telemetry.track"],
