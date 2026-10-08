@@ -1653,6 +1653,13 @@
       "when": 1791466090554,
       "tag": "0236_model_catalogue_v2",
       "breakpoints": true
+    },
+    {
+      "idx": 237,
+      "version": "7",
+      "when": 1791470873895,
+      "tag": "0237_openrouter_host_rules",
+      "breakpoints": true
     }
   ]
 }

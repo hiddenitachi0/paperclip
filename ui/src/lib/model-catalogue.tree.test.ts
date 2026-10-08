@@ -206,7 +206,7 @@ describe("known models", () => {
   it("advises OpenRouter hosts when a size is too big", () => {
     const big = KNOWN[1]!.variants[1]!;
     expect(tooBigAdvice(big, 12)).toBe(
-      "Too big for the graphics card (needs ~20 GB, this company's has 12 GB) - run it on OpenRouter: deepinfra, together",
+      "Too big for the graphics card (needs ~20 GB, this company's has 12 GB) - run it on OpenRouter (hosts with tool calling when last checked: deepinfra, together)",
     );
     expect(tooBigAdvice(big, 24)).toBeNull();
     expect(tooBigAdvice(big, null)).toBeNull();
@@ -264,12 +264,13 @@ describe("buildModelTree", () => {
     const qwen = tree.find((maker) => maker.title === "Alibaba")!.families[0]!;
     const fourteen = qwen.variants.find((v) => v.title === "14B")!;
     const router = fourteen.knownOptions.find((o) => o.provider === "openrouter")!;
-    expect(router.label).toBe("OpenRouter · nebius");
+    expect(router.label).toBe("OpenRouter · tools on nebius");
     expect(router.draft).toMatchObject({
       name: "Qwen3 14B via OpenRouter",
       provider: "openrouter",
       model: "qwen/qwen3-14b",
-      providerRouting: { only: ["nebius"] },
+      // No host is picked for the company; the host table and company rules decide.
+      providerRouting: null,
       maker: "Alibaba",
       family: "Qwen3",
       variant: "14B",
@@ -280,7 +281,7 @@ describe("buildModelTree", () => {
     const thirtyTwo = qwen.variants.find((v) => v.title === "32B")!;
     expect(thirtyTwo.fit).toBe("no");
     expect(thirtyTwo.pullCommand).toBeNull();
-    expect(thirtyTwo.tooBigAdvice).toContain("run it on OpenRouter: deepinfra, together");
+    expect(thirtyTwo.tooBigAdvice).toContain("hosts with tool calling when last checked: deepinfra, together");
     const local = thirtyTwo.knownOptions.find((o) => o.provider === "local")!;
     expect(local.draft).toMatchObject({ baseUrl: PC, availability: "planned", specs: { fitsLocalGpu: "no", pullCommand: "ollama pull qwen3:32b" } });
   });
@@ -519,7 +520,7 @@ describe("add dialog prefill", () => {
     });
     expect(prefillForModel("local", "qwen3:14b", { known: KNOWN }).availability).toBe("planned");
     expect(prefillForModel("openrouter", "qwen/qwen3-32b", { known: KNOWN })).toMatchObject({
-      providerRouting: { only: ["deepinfra", "together"] },
+      providerRouting: null,
       availability: "cloud",
       variant: "32B",
     });

@@ -26,6 +26,8 @@ import {
   normalizeLaneATrustLevel,
   normalizeLaneAProviderRouting,
   parseLaneAProviderSlugList,
+  isOpenRouterModelId,
+  resolveOpenRouterHostRouting,
   formatAgentDisplayName,
   readLaneABrowserAccess,
   readLaneAWebSearchSwitch,
@@ -51,6 +53,13 @@ import { instanceServerAnthropicKeyApi } from "../api/instanceServerAnthropicKey
 import { instanceSettingsApi } from "../api/instanceSettings";
 import { mcpToolLibraryApi } from "../api/mcpToolLibrary";
 import { modelDirectoryApi } from "../api/modelDirectory";
+import {
+  hostChoicesFromText,
+  hostTextsWithChoice,
+  OpenRouterHostsTable,
+  useOpenRouterHosts,
+} from "./OpenRouterHostsTable";
+import { useModelDirectorySettings } from "./ModelLocalSync";
 import { pluginsApi } from "../api/plugins";
 import { secretsApi } from "../api/secrets";
 import { webSearchApi } from "../api/webSearch";
@@ -727,6 +736,8 @@ export function QuickAgentSection({
 
         {provider === "openrouter" && (
           <ModelHostsSetting
+            companyId={effectiveCompanyId}
+            model={agent.laneAModel ?? ""}
             value={agent.laneAProviderRouting ?? null}
             disabled={settingMutation.isPending}
             onSave={(next) => settingMutation.mutateAsync({ laneAProviderRouting: next })}
@@ -1370,16 +1381,25 @@ function ThinkingSetting({
 
 /**
  * "Model hosts" (OpenRouter only): OpenRouter can send the same model to
- * different hosts, and some of them don't support tools. The operator lists
- * the hosts to use only, and/or the ones never to use. Both empty = no
- * preference (null), i.e. OpenRouter picks, as before. Any other routing
- * fields already stored (a try-first order, the fallback switch) are kept.
+ * different hosts, and what each supports (tools above all) differs per model.
+ * The table lists the hosts that run this agent's model, live from OpenRouter,
+ * with a Use / Never / Default choice per host; the two typed lists below are
+ * the same setting as text (an advanced fallback when the list cannot be
+ * read). Both empty = no preference (null), i.e. OpenRouter picks. On save the
+ * company's blocked hosts are added to Never unless marked Use here; the
+ * company's preferred hosts only fill an agent that had no host setting yet
+ * (precedence: packages/shared/src/openrouter-hosts.ts). A stored try-first
+ * order and fallback switch are kept.
  */
 function ModelHostsSetting({
+  companyId,
+  model,
   value,
   disabled,
   onSave,
 }: {
+  companyId: string;
+  model: string;
   value: LaneAProviderRouting | null;
   disabled?: boolean;
   onSave: (next: LaneAProviderRouting | null) => Promise<unknown>;
@@ -1394,6 +1414,47 @@ function ModelHostsSetting({
   const ignore = ignoreDraft ?? savedIgnore;
   const dirty =
     (onlyDraft !== null && onlyDraft !== savedOnly) || (ignoreDraft !== null && ignoreDraft !== savedIgnore);
+  const hostsQuery = useOpenRouterHosts(companyId, model);
+  const liveHosts = hostsQuery.data?.hosts ?? null;
+  const settingsQuery = useModelDirectorySettings(companyId);
+  const rules = settingsQuery.data
+    ? {
+        blocked: settingsQuery.data.openrouterBlockedHosts ?? [],
+        // Preferred hosts fill an agent only while it has no host setting of its own.
+        preferred: saved ? [] : (settingsQuery.data.openrouterPreferredHosts ?? []),
+      }
+    : null;
+  const choices = hostChoicesFromText(only, ignore);
+  const blockedToAdd = (rules?.blocked ?? []).filter((slug) => !choices[slug]);
+  const preferredApplies = Boolean(
+    rules &&
+      rules.preferred.length > 0 &&
+      !Object.values(choices).includes("use") &&
+      liveHosts?.some((host) => rules.preferred.includes(host.slug) && host.supportsTools),
+  );
+  const rulesChange = blockedToAdd.length > 0 || preferredApplies;
+
+  /** The routing a save sends: the typed / chosen lists, then the company rules. */
+  const build = (parsedOnly: string[], parsedIgnore: string[]): LaneAProviderRouting | null => {
+    const { only: _oldOnly, ignore: _oldIgnore, ...kept } = saved ?? {};
+    const typed: LaneAProviderRouting = {
+      ...kept,
+      ...(parsedOnly.length > 0 ? { only: parsedOnly } : {}),
+      ...(parsedIgnore.length > 0 ? { ignore: parsedIgnore } : {}),
+    };
+    if (!rules || (rules.blocked.length === 0 && rules.preferred.length === 0)) return normalizeLaneAProviderRouting(typed);
+    return resolveOpenRouterHostRouting({
+      choices: hostChoicesFromText(parsedOnly.join(","), parsedIgnore.join(",")),
+      rules,
+      hosts: liveHosts,
+      // Never null here, so typing hosts does not switch fallbacks off on its own.
+      base: typed,
+    });
+  };
+  const shownRouting = build(
+    parseLaneAProviderSlugList(only).slugs,
+    parseLaneAProviderSlugList(ignore).slugs,
+  );
 
   const save = async () => {
     const parsedOnly = parseLaneAProviderSlugList(only);
@@ -1401,7 +1462,7 @@ function ModelHostsSetting({
     const invalid = [...parsedOnly.invalid, ...parsedIgnore.invalid];
     if (invalid.length > 0) {
       setProblem(
-        `"${invalid[0]}" is not a host name. Use the short names OpenRouter shows, like deepinfra or mistral, separated by commas.`,
+        `"${invalid[0]}" is not a host name. Use the short names OpenRouter shows for each host, separated by commas.`,
       );
       return;
     }
@@ -1413,14 +1474,8 @@ function ModelHostsSetting({
       return;
     }
     setProblem(null);
-    const { only: _oldOnly, ignore: _oldIgnore, ...kept } = saved ?? {};
-    const next: LaneAProviderRouting = {
-      ...kept,
-      ...(parsedOnly.slugs.length > 0 ? { only: parsedOnly.slugs } : {}),
-      ...(parsedIgnore.slugs.length > 0 ? { ignore: parsedIgnore.slugs } : {}),
-    };
     try {
-      await onSave(normalizeLaneAProviderRouting(next));
+      await onSave(build(parsedOnly.slugs, parsedIgnore.slugs));
       setOnlyDraft(null);
       setIgnoreDraft(null);
     } catch (err) {
@@ -1438,44 +1493,71 @@ function ModelHostsSetting({
       <div className="space-y-1">
         <p className="text-xs font-medium">Model hosts</p>
         <p className="text-xs text-muted-foreground">
-          OpenRouter can send the same model to different hosts. Some hosts don't support tools. List the hosts you
-          want (for example deepinfra) to stop it picking one that doesn't.
+          OpenRouter can send the same model to different hosts, and not every host supports tools for every model.
+          Mark the hosts to use or never use for this agent's model, or leave them on Default.
         </p>
       </div>
-      <label className="block space-y-1">
-        <span className="text-xs text-muted-foreground">Use only these hosts</span>
-        <Input
-          type="text"
-          value={only}
-          placeholder="deepinfra"
-          disabled={disabled}
-          data-testid="model-hosts-only"
-          onChange={(event) => setOnlyDraft(event.target.value)}
+      {isOpenRouterModelId(model.trim()) && (
+        <OpenRouterHostsTable
+          hosts={liveHosts ?? undefined}
+          loading={hostsQuery.isFetching && !liveHosts}
+          error={hostsQuery.error}
+          choices={choices}
+          onChoice={
+            disabled
+              ? undefined
+              : (slug, choice) => {
+                  const texts = hostTextsWithChoice(only, ignore, slug, choice);
+                  setOnlyDraft(texts.use);
+                  setIgnoreDraft(texts.never);
+                }
+          }
+          rules={rules}
+          routing={shownRouting}
+          checkedAt={hostsQuery.data?.fetchedAt ?? null}
         />
-      </label>
-      <label className="block space-y-1">
-        <span className="text-xs text-muted-foreground">Never use these hosts</span>
-        <Input
-          type="text"
-          value={ignore}
-          placeholder="venice"
-          disabled={disabled}
-          data-testid="model-hosts-ignore"
-          onChange={(event) => setIgnoreDraft(event.target.value)}
-        />
-      </label>
+      )}
+      <details className="rounded-md border border-border px-2 py-1" open={hostsQuery.isError || !liveHosts || undefined}>
+        <summary className="cursor-pointer text-xs text-muted-foreground">Type host names yourself</summary>
+        <div className="space-y-2 pt-2">
+          <label className="block space-y-1">
+            <span className="text-xs text-muted-foreground">Use only these hosts</span>
+            <Input
+              type="text"
+              value={only}
+              placeholder="host names, separated by commas"
+              disabled={disabled}
+              data-testid="model-hosts-only"
+              onChange={(event) => setOnlyDraft(event.target.value)}
+            />
+          </label>
+          <label className="block space-y-1">
+            <span className="text-xs text-muted-foreground">Never use these hosts</span>
+            <Input
+              type="text"
+              value={ignore}
+              placeholder="host names, separated by commas"
+              disabled={disabled}
+              data-testid="model-hosts-ignore"
+              onChange={(event) => setIgnoreDraft(event.target.value)}
+            />
+          </label>
+        </div>
+      </details>
       <div className="flex flex-wrap items-center gap-2">
         <Button
           size="sm"
           variant="secondary"
-          disabled={!dirty || disabled}
+          disabled={!(dirty || rulesChange) || disabled}
           data-testid="model-hosts-save"
           onClick={() => void save()}
         >
           Save
         </Button>
         <span className="text-xs text-muted-foreground">
-          Separate hosts with commas. Leave both empty to let OpenRouter pick.
+          {rulesChange && !dirty
+            ? "Save to add the company's host rules (Settings > Models) to this agent."
+            : "Leave everything on Default and both lists empty to let OpenRouter pick."}
         </span>
       </div>
       {problem && (
