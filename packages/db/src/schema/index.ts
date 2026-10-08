@@ -73,6 +73,7 @@ export { routines, routineRevisions, routineTriggers, routineRuns } from "./rout
 export { jobs, jobPositions, jobTriggers, jobRuns } from "./jobs.js";
 export { companyJobSettings } from "./company_job_settings.js";
 export { companyCacheSettings } from "./company_cache_settings.js";
+export { companyHelperSettings } from "./company_helper_settings.js";
 export { pipelines, pipelineStages, pipelineTransitions } from "./pipelines.js";
 export {
   pipelineCases,

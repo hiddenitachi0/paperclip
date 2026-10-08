@@ -15,6 +15,7 @@ import { queryKeys } from "../lib/queryKeys";
 import { Button } from "@/components/ui/button";
 import { Link } from "@/lib/router";
 import { CacheSettingsSection } from "../components/CacheSettingsSection";
+import { HelperSettingsSection } from "../components/helper/HelperSettingsSection";
 import { SecurityReviewSettingsSection } from "../components/SecurityReviewSettingsSection";
 import { Settings, CloudUpload, Download, Plug, Upload, Image } from "lucide-react";
 import { CompanyPatternIcon } from "../components/CompanyPatternIcon";
@@ -228,6 +229,8 @@ export function CompanySettings() {
           ) : null}
         </div>
       </div>
+
+      {selectedCompanyId ? <HelperSettingsSection companyId={selectedCompanyId} /> : null}
 
       {/* Appearance */}
       <div className="space-y-4">
