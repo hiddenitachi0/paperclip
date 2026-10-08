@@ -56,8 +56,44 @@ describe("curated starters (8 Oct 2026)", () => {
     expect(new Set(MODEL_DIRECTORY_STARTERS.map((s) => s.id)).size).toBe(MODEL_DIRECTORY_STARTERS.length);
     expect(new Set(MODEL_DIRECTORY_STARTERS.map((s) => s.name)).size).toBe(MODEL_DIRECTORY_STARTERS.length);
     for (const { id: _id, ...starter } of MODEL_DIRECTORY_STARTERS) {
-      const parsed = createModelDirectoryEntrySchema.safeParse(starter);
+      // A local starter gets the company's model server address when it is added.
+      const withAddress = starter.provider === "local" ? { ...starter, baseUrl: "http://192.168.1.20:11434/v1" } : starter;
+      const parsed = createModelDirectoryEntrySchema.safeParse(withAddress);
       expect(parsed.success, `${starter.name}: ${parsed.success ? "" : parsed.error.message}`).toBe(true);
     }
+  });
+
+  it("assumes nobody's computer: no address, not installed, no fit verdict, neutral notes", async () => {
+    const { MODEL_DIRECTORY_STARTERS } = await import("./validators/model-directory.js");
+    const local = MODEL_DIRECTORY_STARTERS.filter((s) => s.provider === "local");
+    expect(local.length).toBeGreaterThan(0);
+    for (const starter of local) {
+      expect(starter.baseUrl, starter.name).toBeNull();
+      expect(starter.availability, starter.name).toBe("planned");
+    }
+    for (const starter of MODEL_DIRECTORY_STARTERS) {
+      expect(starter.specs?.fitsLocalGpu, starter.name).toBeUndefined();
+      expect(starter.note, starter.name).not.toMatch(/your PC|the PC|you asked|you started|your installed|already uses it|Filip/i);
+    }
+  });
+});
+
+describe("Settings > Models settings", () => {
+  it("takes the graphics memory and the model server address, each optional, null clears", async () => {
+    const { updateModelDirectorySettingsSchema } = await import("./validators/model-directory.js");
+    const ok = (body: unknown) => updateModelDirectorySettingsSchema.safeParse(body).success;
+    expect(ok({ localGpuVramGb: 12 })).toBe(true);
+    expect(ok({ localGpuVramGb: 0 })).toBe(true);
+    expect(ok({ localGpuVramGb: null })).toBe(true);
+    expect(ok({ localBaseUrl: "http://192.168.1.20:11434/v1" })).toBe(true);
+    expect(ok({ localBaseUrl: "https://gpu-box.tailnet.ts.net/v1", localGpuVramGb: 24 })).toBe(true);
+    expect(ok({ localBaseUrl: null })).toBe(true);
+    expect(ok({})).toBe(false);
+    expect(ok({ localGpuVramGb: -1 })).toBe(false);
+    expect(ok({ localBaseUrl: "192.168.1.20:11434" })).toBe(false);
+    expect(ok({ localBaseUrl: "ftp://box/v1" })).toBe(false);
+    expect(ok({ localBaseUrl: "http://user:pw@box:11434/v1" })).toBe(false);
+    expect(ok({ localBaseUrl: "http://box:11434/v1?x=1" })).toBe(false);
+    expect(ok({ localGpuVramGb: 12, other: 1 })).toBe(false);
   });
 });

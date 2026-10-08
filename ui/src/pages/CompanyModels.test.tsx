@@ -109,11 +109,11 @@ beforeEach(() => {
   mockApi.list.mockResolvedValue([ENTRY, GEMMA, OLD]);
   mockApi.update.mockResolvedValue(ENTRY);
   mockApi.listStarters.mockResolvedValue([
-    { id: "s1", name: "Local: Llama 3.2", note: "Needs your PC", alreadyAdded: false },
-    { id: "s2", name: "Mistral", note: "Cloud", alreadyAdded: true },
+    { id: "s1", name: "Local: Llama 3.2", provider: "local", note: "Runs on the model server", alreadyAdded: false },
+    { id: "s2", name: "Mistral", provider: "openrouter", note: "Cloud", alreadyAdded: true },
   ]);
   mockRole.mockReturnValue({ canManageConnections: true, isLoading: false });
-  mockApi.getSettings.mockResolvedValue({ localGpuVramGb: 12 });
+  mockApi.getSettings.mockResolvedValue({ localGpuVramGb: 12, localBaseUrl: null });
 });
 afterEach(() => {
   act(() => root?.unmount());
@@ -199,11 +199,33 @@ describe("CompanyModels", () => {
   });
 
   it("adds one starter by its id", async () => {
-    mockApi.addStarters.mockResolvedValue([]);
+    mockApi.getSettings.mockResolvedValue({ localGpuVramGb: 12, localBaseUrl: "http://192.168.1.20:11434/v1" });
+    mockApi.addStarters.mockResolvedValue({ created: [], skipped: [] });
     await render();
+    expect(byTestId("models-starters-needs-address")).toBeNull();
     const add = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Add")!;
     await act(async () => add.click());
     expect(mockApi.addStarters).toHaveBeenCalledWith(COMPANY, ["s1"]);
+  });
+
+  it("asks for the model server address before a local starter can be added; cloud ones can be added now", async () => {
+    mockApi.listStarters.mockResolvedValue([
+      { id: "s1", name: "Local: Llama 3.2", provider: "local", note: "Local", alreadyAdded: false },
+      { id: "s3", name: "Gemma cloud", provider: "openrouter", note: "Cloud", alreadyAdded: false },
+    ]);
+    mockApi.addStarters.mockResolvedValue({
+      created: [ENTRY],
+      skipped: [{ starterId: "s1", name: "Local: Llama 3.2", reason: "Set this company's model server address first." }],
+    });
+    await render();
+    expect(byTestId("models-starters-needs-address")!.textContent).toContain("set the model server address");
+    expect((byTestId("models-starter-add-s1") as HTMLButtonElement).disabled).toBe(true);
+    expect((byTestId("models-starter-add-s3") as HTMLButtonElement).disabled).toBe(false);
+    await click(buttonByText(container, "Add all ready-made models"));
+    expect(mockApi.addStarters).toHaveBeenCalledWith(COMPANY, undefined);
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "1 model added", body: expect.stringContaining("model server address"), tone: "success" }),
+    );
   });
 
   it("groups by maker and base model by default, and can group by where it runs", async () => {
@@ -215,8 +237,8 @@ describe("CompanyModels", () => {
     // Specs line and chips.
     expect(byTestId(`model-specs-${ENTRY.id}`)!.textContent).toBe("3B · Q4_K_M · 2 GB · tools: yes");
     const card = byTestId(`model-card-${ENTRY.id}`)!;
-    for (const chip of ["On your PC", "Quick chat", "Installed", "#chat"]) expect(card.textContent).toContain(chip);
-    expect(byTestId("models-counts")!.textContent).toBe("2 models · 1 on your PC · 1 in the cloud · 1 archived");
+    for (const chip of ["Local · llama3.2", "Quick chat", "Installed", "#chat"]) expect(card.textContent).toContain(chip);
+    expect(byTestId("models-counts")!.textContent).toBe("2 models · 1 local · 1 in the cloud · 1 archived");
 
     await selectValue("models-group-by", "where");
     expect(byTestId("models-group-maker-google")).toBeNull();
@@ -432,18 +454,18 @@ describe("CompanyModels catalogue v2", () => {
     // The saved size and a known size that is not saved yet.
     const fourteen = byTestId("models-size-maker-alibaba-qwen3-14b")!;
     expect(fourteen.textContent).toContain("Qwen at home");
-    expect(fourteen.textContent).toContain("Installed on your PC");
+    expect(fourteen.textContent).toContain("Installed on the model server");
     const eight = byTestId("models-size-maker-alibaba-qwen3-8b")!;
     expect(eight.textContent).toContain("ollama pull qwen3:8b");
     expect(eight.textContent).toContain("Add this way to run it");
     // Llama 3.2: the saved 3B and the 1B that is not saved.
     expect(byTestId("models-size-maker-meta-llama-3-2-1b")!.textContent).toContain("ollama pull llama3.2:1b");
-    expect(byTestId(`model-runs-${ENTRY.id}`)!.textContent).toBe("On your PC · llama3.2");
+    expect(byTestId(`model-runs-${ENTRY.id}`)!.textContent).toBe("Local · llama3.2");
     // 32B does not fit 12 GB: offered on OpenRouter as an upgrade.
     const upgrades = byTestId("models-upgrades-maker-alibaba-qwen3-14b")!;
     const big = byTestId("models-upgrade-alibaba-qwen3-32b")!;
     expect(upgrades.contains(big)).toBe(true);
-    expect(big.textContent).toContain("too big for your PC");
+    expect(big.textContent).toContain("too big for the graphics card");
     expect(big.textContent).toContain("deepinfra");
 
     mockApi.create.mockResolvedValue(QWEN);
@@ -511,17 +533,151 @@ describe("CompanyModels catalogue v2", () => {
     );
   });
 
-  it("saves the graphics card size", async () => {
-    mockApi.updateSettings.mockResolvedValue({ localGpuVramGb: 16 });
+  it("picks the graphics card memory from common sizes, CPU only or Not set", async () => {
+    mockApi.updateSettings.mockImplementation(async (_c: string, body: { localGpuVramGb: number | null }) => ({
+      localGpuVramGb: body.localGpuVramGb,
+      localBaseUrl: null,
+    }));
     await render();
+    const select = byTestId("models-gpu-select") as HTMLSelectElement;
+    expect(select.value).toBe("12");
+    expect(Array.from(select.options).map((o) => o.textContent)).toEqual([
+      "Not set",
+      "No graphics card / CPU only",
+      ...["4", "6", "8", "10", "12", "16", "20", "24", "32", "48", "64", "80"].map((n) => `${n} GB`),
+      "Other…",
+    ]);
+    expect(byTestId("models-gpu-input")).toBeNull();
+    await selectValue("models-gpu-select", "24");
+    expect(mockApi.updateSettings).toHaveBeenLastCalledWith(COMPANY, { localGpuVramGb: 24 });
+    await selectValue("models-gpu-select", "0");
+    expect(mockApi.updateSettings).toHaveBeenLastCalledWith(COMPANY, { localGpuVramGb: 0 });
+    await selectValue("models-gpu-select", "unset");
+    expect(mockApi.updateSettings).toHaveBeenLastCalledWith(COMPANY, { localGpuVramGb: null });
+    // Help says what it is and where to find it.
+    await click(byTestId("help-graphics-card-memory"));
+    const help = byTestId("models-gpu")!.textContent!;
+    for (const words of ["Task Manager > Performance > GPU > Dedicated GPU memory", "two thirds", "nvidia-smi", "this company only"]) {
+      expect(help).toContain(words);
+    }
+  });
+
+  it("takes any other graphics card size typed under Other…", async () => {
+    mockApi.updateSettings.mockResolvedValue({ localGpuVramGb: 11, localBaseUrl: null });
+    await render();
+    await selectValue("models-gpu-select", "other");
+    expect(mockApi.updateSettings).not.toHaveBeenCalled();
     const input = byTestId("models-gpu-input") as HTMLInputElement;
-    expect(input.value).toBe("12");
-    await typeInto(input, "16");
+    await typeInto(input, "lots");
+    expect(container.textContent).toContain("Type the memory in GB as a number above 0");
+    await typeInto(input, "11");
     await act(async () => {
       input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
     });
     await flush();
-    expect(mockApi.updateSettings).toHaveBeenCalledWith(COMPANY, { localGpuVramGb: 16 });
+    expect(mockApi.updateSettings).toHaveBeenCalledWith(COMPANY, { localGpuVramGb: 11 });
+  });
+
+  it("shows a saved size that is not in the list under Other…", async () => {
+    mockApi.getSettings.mockResolvedValue({ localGpuVramGb: 7.5, localBaseUrl: null });
+    await render();
+    expect((byTestId("models-gpu-select") as HTMLSelectElement).value).toBe("other");
+    expect((byTestId("models-gpu-input") as HTMLInputElement).value).toBe("7.5");
+  });
+
+  it("never guesses a graphics card: Not set by default, and fit advice asks for it", async () => {
+    mockApi.getSettings.mockResolvedValue({ localGpuVramGb: null, localBaseUrl: null });
+    await render();
+    expect((byTestId("models-gpu-select") as HTMLSelectElement).value).toBe("unset");
+    const tree = byTestId("models-list")!;
+    expect(tree.textContent).toContain("Set your graphics card memory above to see what fits.");
+    expect(tree.textContent).not.toMatch(/Fits the graphics card|Too big for the graphics card|you have 12 GB/);
+  });
+
+  it("shows the settings read-only, with a plain note, to someone who may not manage", async () => {
+    mockRole.mockReturnValue({ canManageConnections: false, isLoading: false });
+    mockApi.getSettings.mockResolvedValue({ localGpuVramGb: 0, localBaseUrl: "http://192.168.1.20:11434/v1" });
+    await render();
+    expect(byTestId("models-gpu-select")).toBeNull();
+    expect(byTestId("models-address-input")).toBeNull();
+    expect(byTestId("models-gpu-readonly")!.textContent).toContain("No graphics card (CPU only)");
+    expect(byTestId("models-address-readonly")!.textContent).toContain("http://192.168.1.20:11434/v1");
+    expect(byTestId("models-read-only-note")!.textContent).toContain("Only the company owner or an admin");
+  });
+
+  it("saves the model server address, refuses a malformed one and warns about localhost", async () => {
+    mockApi.updateSettings.mockResolvedValue({ localGpuVramGb: 12, localBaseUrl: "http://192.168.1.20:11434/v1" });
+    await render();
+    const input = byTestId("models-address-input") as HTMLInputElement;
+    expect(input.value).toBe("");
+    const blur = async () => {
+      await act(async () => {
+        input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+      });
+      await flush();
+    };
+    await typeInto(input, "192.168.1.20:11434");
+    await blur();
+    expect(byTestId("models-address-issue")).not.toBeNull();
+    await typeInto(input, "http://user:pw@192.168.1.20:11434/v1");
+    await blur();
+    expect(byTestId("models-address-issue")).not.toBeNull();
+    expect(mockApi.updateSettings).not.toHaveBeenCalled();
+    await typeInto(input, "http://localhost:11434/v1");
+    expect(byTestId("models-address-loopback")).not.toBeNull();
+    await typeInto(input, "http://192.168.1.20:11434/v1");
+    expect(byTestId("models-address-issue")).toBeNull();
+    await blur();
+    expect(mockApi.updateSettings).toHaveBeenCalledWith(COMPANY, { localBaseUrl: "http://192.168.1.20:11434/v1" });
+  });
+
+  it("asks for the model server address instead of using a built-in one for local options and the add dialog", async () => {
+    mockApi.list.mockResolvedValue([GEMMA]);
+    await render();
+    // A new local model in the dialog: no address filled in, a plain request, and it cannot be saved yet.
+    await click(buttonByText(container, "Add a model"));
+    const dialog = byTestId("model-entry-dialog")!;
+    await typeInto(dialog.querySelector("#model-name") as HTMLInputElement, "Qwen");
+    await typeInto(dialog.querySelector("#model-id") as HTMLInputElement, "qwen3:14b");
+    expect((dialog.querySelector("#model-address") as HTMLInputElement).value).toBe("");
+    expect(byTestId("model-entry-needs-address")!.textContent).toContain("no model server address yet");
+    expect(byTestId("model-entry-issue")!.textContent).toContain("Type the address of the model server");
+    expect(buttonByText(dialog, "Add model")!.disabled).toBe(true);
+    expect(container.textContent).not.toContain("100.124.232.68");
+  });
+
+  it("starts a new local model from the company's model server address", async () => {
+    mockApi.list.mockResolvedValue([GEMMA]);
+    mockApi.getSettings.mockResolvedValue({ localGpuVramGb: 12, localBaseUrl: "http://192.168.1.20:11434/v1" });
+    await render();
+    await click(buttonByText(container, "Add a model"));
+    const dialog = byTestId("model-entry-dialog")!;
+    await typeInto(dialog.querySelector("#model-id") as HTMLInputElement, "qwen3:14b");
+    expect((dialog.querySelector("#model-address") as HTMLInputElement).value).toBe("http://192.168.1.20:11434/v1");
+    expect(byTestId("model-entry-issue")).toBeNull();
+  });
+
+  it("asks for the address instead of resyncing when the company has no local address at all", async () => {
+    mockApi.list.mockResolvedValue([GEMMA]);
+    await render();
+    await click(byTestId("models-resync"));
+    expect(mockApi.syncLocal).not.toHaveBeenCalled();
+    expect(byTestId("models-resync-needs-address")!.textContent).toContain("Set the model server address above first");
+  });
+
+  it("resyncs at the company's model server address when no local model is saved yet", async () => {
+    mockApi.list.mockResolvedValue([GEMMA]);
+    mockApi.getSettings.mockResolvedValue({ localGpuVramGb: 12, localBaseUrl: "http://192.168.1.20:11434/v1" });
+    mockApi.syncLocal.mockResolvedValue({
+      baseUrl: "http://192.168.1.20:11434/v1",
+      checkedAt: "2026-10-08T12:00:00Z",
+      installed: [],
+      missingEntryIds: [],
+      markedInstalledEntryIds: [],
+    });
+    await render();
+    await click(byTestId("models-resync"));
+    expect(mockApi.syncLocal).toHaveBeenCalledWith(COMPANY, "http://192.168.1.20:11434/v1");
   });
 
   it("shows scores, filters by 'best for' and edits scores", async () => {
@@ -552,6 +708,58 @@ describe("CompanyModels catalogue v2", () => {
       "Coding 6",
       "Responsiveness 4",
     ]);
+  });
+
+  it("lets an owner edit every catalogue value of a saved setup, OpenRouter hosts included", async () => {
+    const ROUTED = {
+      ...BASE,
+      id: "55555555-5555-4555-8555-555555555555",
+      name: "Qwen routed",
+      provider: "openrouter",
+      model: "qwen/qwen3-32b",
+      baseUrl: null,
+      providerRouting: { only: ["deepinfra"], order: ["deepinfra"], ignore: [] },
+      maker: "Alibaba Qwen",
+      family: "Qwen3",
+      variant: "32B",
+      lane: "quick",
+      availability: "cloud",
+      tags: ["tools"],
+      specs: { params: "32B", tools: "yes" },
+    };
+    mockApi.list.mockResolvedValue([ROUTED]);
+    mockApi.update.mockResolvedValue(ROUTED);
+    await render();
+    await click(buttonByText(byTestId(`model-card-${ROUTED.id}`)!, "Edit"));
+    const dialog = () => byTestId("model-entry-dialog")!;
+    const field = (id: string) => dialog().querySelector(`#${id}`) as HTMLInputElement;
+    expect(field("model-hosts").value).toBe("deepinfra");
+    // Saving untouched keeps the saved routing exactly.
+    await click(buttonByText(dialog(), "Save changes"));
+    expect(mockApi.update.mock.calls.at(-1)![2].providerRouting).toEqual(ROUTED.providerRouting);
+
+    await click(buttonByText(byTestId(`model-card-${ROUTED.id}`)!, "Edit"));
+    for (const [id, value] of [
+      ["model-maker", "Qwen team"],
+      ["model-family", "Qwen3 tuned"],
+      ["model-variant", "32B fast"],
+      ["model-tags", "tools, fast"],
+      ["model-hosts", "Together, deepinfra"],
+    ] as const) {
+      await typeInto(field(id), value);
+    }
+    await click(buttonByText(dialog(), "Save changes"));
+    expect(mockApi.update.mock.calls.at(-1)![2]).toMatchObject({
+      maker: "Qwen team",
+      family: "Qwen3 tuned",
+      variant: "32B fast",
+      tags: ["tools", "fast"],
+      providerRouting: { only: ["together", "deepinfra"], order: ["deepinfra"], ignore: [] },
+    });
+    // Every field in the dialog explains itself.
+    await click(buttonByText(byTestId(`model-card-${ROUTED.id}`)!, "Edit"));
+    const helps = dialog().querySelectorAll("[data-testid^=help-]");
+    expect(helps.length).toBeGreaterThanOrEqual(20);
   });
 
   it("blocks two scores with the same name", async () => {
@@ -681,11 +889,11 @@ describe("add dialog prefill", () => {
     await click(buttonByText(container, "Add a model"));
     const first = byTestId("model-entry-dialog")!.querySelector("#model-id-options option") as HTMLOptionElement;
     expect(first.value).toBe("mystery:7b");
-    expect(first.textContent).toBe("Installed on your PC");
+    expect(first.textContent).toBe("Installed on the model server");
     await typeInto(dialogInput("model-id"), "mystery:7b");
     expect((dialogInput("model-availability") as unknown as HTMLSelectElement).value).toBe("installed");
     expect(dialogInput("model-address").value).toBe("http://100.1.1.1:11434/v1");
-    expect(dialogInput("model-name").value).toBe("mystery:7b on your PC");
+    expect(dialogInput("model-name").value).toBe("mystery:7b (local)");
   });
 });
 

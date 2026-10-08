@@ -27996,6 +27996,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "local_base_url": {
+          "name": "local_base_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "updated_by_user_id": {
           "name": "updated_by_user_id",
           "type": "text",

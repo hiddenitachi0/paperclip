@@ -1,7 +1,8 @@
 /**
  * Catalogue v2 (8 Oct 2026): a built-in list of known open models, so
  * Settings > Models can show Maker -> Model -> Size -> ways to run it, say
- * whether a size fits the owner's graphics card, give the `ollama pull`
+ * whether a size fits the graphics card the company entered (Settings >
+ * Models; nothing is assumed when it is not set), give the `ollama pull`
  * command for a size that is not installed, and offer the bigger cloud
  * version (OpenRouter, with the hosts that support tool calling) as an
  * "upgrade". Facts come from the 8 Oct model research (Ollama library, Hugging
@@ -52,7 +53,7 @@ export interface KnownModelVariant {
   vision: boolean;
   thinking: "yes" | "no" | "toggle";
   contextTokens: number | null;
-  /** One plain sentence for the owner. */
+  /** One plain sentence for whoever reads the catalogue. */
   note?: string;
 }
 
@@ -363,7 +364,7 @@ export const KNOWN_MODEL_FAMILIES: readonly KnownModelFamily[] = [
         vision: false,
         thinking: "toggle",
         contextTokens: 40960,
-        note: "Best local tool user that fits a 12 GB card; a good default for a private assistant.",
+        note: "Best local tool user that fits a 12 GB graphics card; a good default for a private assistant.",
       }),
       v({
         variant: "30B A3B (MoE)",
@@ -539,7 +540,7 @@ export const KNOWN_MODEL_FAMILIES: readonly KnownModelFamily[] = [
         vision: true,
         thinking: "toggle",
         contextTokens: 262144,
-        note: "Very cheap and fast cloud model with a huge memory (1M on OpenRouter). Only one host (Alibaba), so give agents a backup model. Far too big for a home PC. Its weights use the qwen-community-1.0 licence, not Apache-2.0.",
+        note: "Very cheap and fast cloud model with a huge memory (1M on OpenRouter). Only one host (Alibaba), so give agents a backup model. Far too big for an ordinary computer at home. Its weights use the qwen-community-1.0 licence, not Apache-2.0.",
       }),
     ],
   },
@@ -650,7 +651,7 @@ export const KNOWN_MODEL_FAMILIES: readonly KnownModelFamily[] = [
         vision: true,
         thinking: "toggle",
         contextTokens: 262144,
-        note: "Good tools (Tau2 69%), reads pictures, decent Norwegian, and fits a 12 GB card. Not offered in the cloud. Needs Ollama 0.30.9 or newer.",
+        note: "Good tools (Tau2 69%), reads pictures, decent Norwegian, and fits a 12 GB graphics card. Not offered in the cloud. Needs Ollama 0.30.9 or newer.",
       }),
       v({
         variant: "26B A4B (MoE)",
@@ -998,7 +999,7 @@ export const KNOWN_MODEL_FAMILIES: readonly KnownModelFamily[] = [
         huggingface: [
           {
             model: "huihui-ai/Huihui-Qwen3-14B-abliterated-v2:featherless-ai",
-            note: "Cloud copy for when the PC is off; about $0.48 in / $0.96 out per million tokens, 32k memory; tool calling unverified.",
+            note: "Cloud copy for when your own computer is off; about $0.48 in / $0.96 out per million tokens, 32k memory; tool calling unverified.",
           },
         ],
         tools: "yes",
@@ -1068,7 +1069,7 @@ export const KNOWN_MODEL_FAMILIES: readonly KnownModelFamily[] = [
         vision: true,
         thinking: "toggle",
         contextTokens: 262144,
-        note: "Strongest uncensored model that fits a 12 GB card, but only the heavily shrunk 2-bit copy fits, with a short (8k) memory. Separate private persona only. Needs Ollama 0.32.12 or newer.",
+        note: "Strongest uncensored model that fits a 12 GB graphics card, but only the heavily shrunk 2-bit copy fits, with a short (8k) memory. Separate private persona only. Needs Ollama 0.32.12 or newer.",
       }),
     ],
   },
@@ -1169,7 +1170,7 @@ function normalizeHuggingFaceModel(model: string): string {
 }
 
 /**
- * Finds the catalogue entry for a model the owner has saved. `provider` is the
+ * Finds the catalogue entry for a model a company has saved. `provider` is the
  * model directory's provider: "local" (or "ollama") matches Ollama tags and
  * their aliases ("llama3.2" equals "llama3.2:latest"); "openrouter" matches the
  * OpenRouter id, ignoring a ":free"/":nitro" style suffix; "huggingface"
@@ -1241,7 +1242,7 @@ export interface KnownUpgradeOption {
 /**
  * Bigger versions of a model worth offering as an upgrade: variants with more
  * parameters in the same family and in the family it derives from, that
- * either fit the owner's card ("yes" or "tight", offered as "local") or have an
+ * either fit the company's card ("yes" or "tight", offered as "local") or have an
  * OpenRouter option with at least one tool-capable host ("openrouter").
  * Local wins when both apply. Sorted by size, smallest first.
  */

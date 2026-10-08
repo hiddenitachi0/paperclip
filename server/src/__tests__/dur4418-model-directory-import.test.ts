@@ -36,8 +36,19 @@ d("model directory starters and settings import", () => {
   });
 
   it("creates the starters company-scoped, without a key, and is safe to repeat", async () => {
-    const first = await svc.addStarters(a, undefined, actor);
+    // Without the company's model server address, only the cloud starters are added.
+    const withoutAddress = await svc.addStarters(b, undefined, actor);
+    const localCount = MODEL_DIRECTORY_STARTERS.filter((s) => s.provider === "local").length;
+    expect(withoutAddress.created.length).toBe(MODEL_DIRECTORY_STARTERS.length - localCount);
+    expect(withoutAddress.created.every((e) => e.provider !== "local")).toBe(true);
+    expect(withoutAddress.skipped.length).toBe(localCount);
+    for (const entry of await svc.list(b)) await svc.remove(b, entry.id);
+
+    await svc.updateSettings(a, { localBaseUrl: "http://192.168.1.20:11434/v1" }, actor);
+    const { created: first, skipped } = await svc.addStarters(a, undefined, actor);
+    expect(skipped).toEqual([]);
     expect(first.length).toBe(MODEL_DIRECTORY_STARTERS.length);
+    expect(first.filter((e) => e.provider === "local").every((e) => e.baseUrl === "http://192.168.1.20:11434/v1")).toBe(true);
     expect(first.every((e) => e.companyId === a)).toBe(true);
     expect(first.find((e) => e.model.includes("mistral-small-3.2"))).toMatchObject({ provider: "openrouter", baseUrl: null });
     // Catalogue fields and defaults travel with the starter.
@@ -49,7 +60,7 @@ d("model directory starters and settings import", () => {
       defaultTemperature: 0.7,
     });
     expect(JSON.stringify(first)).not.toMatch(/apiKey|secret/i);
-    expect(await svc.addStarters(a, undefined, actor)).toEqual([]);
+    expect(await svc.addStarters(a, undefined, actor)).toEqual({ created: [], skipped: [] });
     expect(await svc.list(b)).toEqual([]);
     expect((await svc.listStarters(a)).every((s) => s.alreadyAdded)).toBe(true);
     expect((await svc.listStarters(b)).every((s) => !s.alreadyAdded)).toBe(true);

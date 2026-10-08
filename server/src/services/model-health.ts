@@ -26,7 +26,7 @@ import { createModelSetupProbes } from "./model-setup-probes.js";
 
 export const MODEL_HEALTH_PROBE_TIMEOUT_MS = 5_000;
 export const MODEL_TEST_TIMEOUT_MS = 60_000;
-/** How long the PC must have been unreachable before the evening warning goes out. */
+/** How long the local model server must have been unreachable before the evening warning goes out. */
 export const MODEL_OUTAGE_WARN_AFTER_MS = 60 * 60_000;
 /** One evening warning per outage, and never twice within this window. */
 export const MODEL_EVENING_WARNING_WINDOW_MS = 18 * 3_600_000;
@@ -322,7 +322,7 @@ export function modelHealthService(db: Db, deps: ModelHealthDeps = {}) {
         answer: null,
         firstWordMs,
         totalMs: Date.now() - started,
-        error: timedOut ? "The model took too long to answer." : "Couldn't reach the model. Is your PC on, and is Ollama running?",
+        error: timedOut ? "The model took too long to answer." : "Couldn't reach the model. Is the computer that runs it switched on, and is Ollama (or the model server) running?",
       };
     }
   }

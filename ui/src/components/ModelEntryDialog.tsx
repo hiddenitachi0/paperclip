@@ -39,7 +39,9 @@ import {
   describeSpecs,
   familiesInUse,
   knownFamilySuggestions,
+  isLoopbackAddress,
   laneLabel,
+  localAddressIssue,
   makersInUse,
   modelIdChoices,
   parseTags,
@@ -51,12 +53,16 @@ import {
   tagsIssue,
   variantSuggestions,
 } from "../lib/model-catalogue";
+import { HelpTip, MODEL_HELP } from "./ModelHelp";
 
 /**
  * The add / edit dialog of Settings > Models, in six blocks: name and
- * grouping (maker, model family, size), connection, defaults for agents,
- * your test scores, details (closed at first) and notes. Everything outside "Connection" and "Defaults" is a label for the
- * catalogue and never changes how an agent calls the model.
+ * grouping (maker, model family, size), connection (where it runs, model id,
+ * address or OpenRouter hosts), defaults for agents, test scores, details
+ * (closed at first) and notes. Every value the catalogue shows is editable
+ * here, and every field has a "?" with plain help text. Everything outside
+ * "Connection" and "Defaults" is a label for the catalogue and never changes
+ * how an agent calls the model.
  */
 
 export function providerLabel(provider: LaneAProvider): string {
@@ -113,10 +119,12 @@ export type ModelFormState = {
   favorite: boolean;
   specs: SpecsFormState;
   /**
-   * Only set when a new setup starts from a known OpenRouter option: the hosts
-   * that support tool calling. Editing keeps the saved hosts untouched.
+   * The saved (or suggested) OpenRouter routing. Its host list is edited
+   * through `hosts`; the rest (order, ignore, fallbacks) is kept as it is.
    */
   providerRouting?: CreateModelDirectoryEntry["providerRouting"];
+  /** OpenRouter only: the hosts to use, comma-separated, as typed. Empty = OpenRouter chooses. */
+  hosts?: string;
 };
 
 export const EMPTY_SPECS_FORM: SpecsFormState = {
@@ -196,7 +204,34 @@ export function formFromEntry(entry: ModelDirectoryEntry): ModelFormState {
     tags: (entry.tags ?? []).join(", "),
     favorite: Boolean(entry.favorite),
     specs: specsFormFromEntry(entry.specs ?? null),
+    ...(entry.providerRouting ? { providerRouting: entry.providerRouting } : {}),
+    hosts: (entry.providerRouting?.only ?? []).join(", "),
   };
+}
+
+/** "deepinfra, Together ,," -> ["deepinfra", "together"]. */
+export function parseHosts(text: string | undefined): string[] {
+  return [
+    ...new Set(
+      (text ?? "")
+        .split(/[\s,]+/)
+        .map((host) => host.trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  ];
+}
+
+/** OpenRouter routing from the form: the typed hosts, the rest of the saved routing kept. Undefined = leave as saved. */
+function routingFromForm(form: ModelFormState): CreateModelDirectoryEntry["providerRouting"] | undefined {
+  const base = form.providerRouting ?? null;
+  const only = parseHosts(form.hosts);
+  if (!base && only.length === 0) return form.hosts === undefined ? undefined : null;
+  const order = base?.order ?? [];
+  const ignore = base?.ignore ?? [];
+  if (only.length === 0 && order.length === 0 && ignore.length === 0) return null;
+  // Hosts typed on a new setup are strict (no other host); a saved setup keeps its own fallback choice.
+  if (!base) return { only, order, ignore, allowFallbacks: false };
+  return { only, order, ignore, ...(base.allowFallbacks !== undefined ? { allowFallbacks: base.allowFallbacks } : {}) };
 }
 
 /** A new setup pre-filled from a known way to run a model (Settings > Models "Add"). */
@@ -230,7 +265,7 @@ export function formFromDraft(draft: CreateModelDirectoryEntry): ModelFormState 
     createdAt: "",
     updatedAt: "",
   });
-  return draft.provider === "openrouter" && draft.providerRouting ? { ...form, providerRouting: draft.providerRouting } : form;
+  return form;
 }
 
 /** Filled-in score rows as the API takes them; touched rows get today's date. */
@@ -291,9 +326,10 @@ export function bodyFromForm(form: ModelFormState): CreateModelDirectoryEntry {
     model: form.model,
     baseUrl: providerUsesAddress(form.provider) && form.baseUrl.trim() ? form.baseUrl.trim() : null,
     ...(form.provider === "openrouter"
-      ? form.providerRouting
-        ? { providerRouting: form.providerRouting }
-        : {}
+      ? (() => {
+          const routing = routingFromForm(form);
+          return routing === undefined ? {} : { providerRouting: routing };
+        })()
       : { providerRouting: null }),
     defaultThinking: form.thinking === "" ? null : form.thinking,
     defaultTemperature: decimal(form.temperature),
@@ -324,6 +360,16 @@ export function formIssue(form: ModelFormState): string | null {
     !(Number.isInteger(maxTokens) && maxTokens >= LANE_A_MIN_MAX_OUTPUT_TOKENS && maxTokens <= LANE_A_MAX_MAX_OUTPUT_TOKENS)
   ) {
     return `Longest answer must be a whole number from ${LANE_A_MIN_MAX_OUTPUT_TOKENS} to ${LANE_A_MAX_MAX_OUTPUT_TOKENS}.`;
+  }
+  if (providerUsesAddress(form.provider)) {
+    if (!form.baseUrl.trim()) {
+      return "Type the address of the model server that runs this model, e.g. http://192.168.1.20:11434/v1.";
+    }
+    const address = localAddressIssue(form.baseUrl);
+    if (address) return address;
+  }
+  if (form.provider === "openrouter" && parseHosts(form.hosts).some((host) => !/^[a-z0-9][a-z0-9._/-]*$/.test(host))) {
+    return "Host names are short words like deepinfra or together, separated by commas.";
   }
   const tags = tagsIssue(parseTags(form.tags));
   if (tags) return tags;
@@ -381,9 +427,11 @@ export function applyPrefill(
   }
   if (prefill.providerRouting !== undefined && (form.providerRouting === undefined || auto.has("providerRouting"))) {
     next.providerRouting = prefill.providerRouting;
+    next.hosts = (prefill.providerRouting?.only ?? []).join(", ");
     nextAuto.add("providerRouting");
   } else if (prefill.providerRouting === undefined && auto.has("providerRouting")) {
     next.providerRouting = undefined;
+    next.hosts = "";
     nextAuto.delete("providerRouting");
   }
   // Facts: a model change replaces every fact filled in automatically before.
@@ -418,10 +466,26 @@ export function applyPrefill(
 
 const SELECT_CLASS = "w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none";
 
-function Field({ id, label, hint, children }: { id: string; label: string; hint?: ReactNode; children: ReactNode }) {
+function Field({
+  id,
+  label,
+  hint,
+  help,
+  children,
+}: {
+  id: string;
+  label: string;
+  hint?: ReactNode;
+  /** The "?" text: what the field is, in plain words. */
+  help?: string;
+  children: ReactNode;
+}) {
   return (
     <div className="space-y-1">
-      <Label htmlFor={id}>{label}</Label>
+      <div className="flex items-center gap-1">
+        <Label htmlFor={id}>{label}</Label>
+        {help && <HelpTip topic={label.toLowerCase()} text={help} />}
+      </div>
       {children}
       {hint ? <p className="text-xs text-muted-foreground">{hint}</p> : null}
     </div>
@@ -446,9 +510,9 @@ export function ModelEntryDialog({
   initial?: CreateModelDirectoryEntry | null;
   /** Ollama tags the last "Resync local Ollama models" found installed. */
   installedTags?: readonly string[];
-  /** The company's usual local model address. */
-  localAddress?: string;
-  /** Graphics card memory in GB, for "fits your graphics card". */
+  /** The company's model server address (Settings > Models); null = not set, the dialog asks for it. */
+  localAddress?: string | null;
+  /** Graphics card memory in GB, for "fits the graphics card"; null = not set. */
   gpuVramGb?: number | null;
   /** Every saved model, for the maker, family, size and score suggestions. */
   allEntries: readonly ModelDirectoryEntry[];
@@ -573,17 +637,18 @@ export function ModelEntryDialog({
             <Field
               id="model-name"
               label="Name"
-              hint="Your own name for this setup. Maker, model and size below decide where it is listed."
+              help={MODEL_HELP.name}
+              hint="Maker, model and size below decide where it is listed."
             >
               <Input
                 id="model-name"
                 value={form.name}
-                placeholder="Maja on my PC"
+                placeholder="Qwen3 14B (local)"
                 onChange={(event) => set("name", event.target.value)}
               />
             </Field>
             <div className="grid gap-3 sm:grid-cols-2">
-              <Field id="model-maker" label="Maker" hint="Who made the model, e.g. Meta, Google or Alibaba.">
+              <Field id="model-maker" label="Maker" help={MODEL_HELP.maker}>
                 <Input
                   id="model-maker"
                   list="model-maker-options"
@@ -597,7 +662,7 @@ export function ModelEntryDialog({
                   ))}
                 </datalist>
               </Field>
-              <Field id="model-family" label="Model" hint="The model family, without the size, e.g. Llama 3.2 or Qwen3.">
+              <Field id="model-family" label="Model" help={MODEL_HELP.family}>
                 <Input
                   id="model-family"
                   list="model-family-options"
@@ -625,7 +690,7 @@ export function ModelEntryDialog({
                   ))}
                 </datalist>
               </Field>
-              <Field id="model-variant" label="Size" hint="Which size of the model this is, e.g. 3B or 14B.">
+              <Field id="model-variant" label="Size" help={MODEL_HELP.variant}>
                 <Input
                   id="model-variant"
                   list="model-variant-options"
@@ -639,7 +704,7 @@ export function ModelEntryDialog({
                   ))}
                 </datalist>
               </Field>
-              <Field id="model-lane" label="What it's for">
+              <Field id="model-lane" label="What it's for" help={MODEL_HELP.lane}>
                 <select
                   id="model-lane"
                   className={SELECT_CLASS}
@@ -654,7 +719,7 @@ export function ModelEntryDialog({
                   ))}
                 </select>
               </Field>
-              <Field id="model-availability" label="Status">
+              <Field id="model-availability" label="Status" help={MODEL_HELP.availability}>
                 <select
                   id="model-availability"
                   className={SELECT_CLASS}
@@ -670,7 +735,7 @@ export function ModelEntryDialog({
                 </select>
               </Field>
             </div>
-            <Field id="model-tags" label="Tags" hint="Separate tags with commas, e.g. vision, uncensored, code.">
+            <Field id="model-tags" label="Tags" help={MODEL_HELP.tags} hint="Separate tags with commas.">
               <Input
                 id="model-tags"
                 value={form.tags}
@@ -695,12 +760,13 @@ export function ModelEntryDialog({
                 data-testid="model-favorite-toggle"
               />
               Favourite (shown first in its group)
+              <HelpTip topic="favourite" text={MODEL_HELP.favorite} />
             </label>
           </SettingsSubsection>
 
           <SettingsSubsection title="Connection" data-testid="model-entry-section-connection">
             <div className="grid gap-3 sm:grid-cols-2">
-              <Field id="model-provider" label="Where it runs">
+              <Field id="model-provider" label="Where it runs" help={MODEL_HELP.provider}>
                 <select
                   id="model-provider"
                   className={SELECT_CLASS}
@@ -717,6 +783,7 @@ export function ModelEntryDialog({
               <Field
                 id="model-id"
                 label="Model id"
+                help={MODEL_HELP.modelId}
                 hint={
                   fixedModels
                     ? "Pick one of the models it offers."
@@ -762,22 +829,59 @@ export function ModelEntryDialog({
                 )}
               </Field>
             </div>
-            {form.provider === "openrouter" && form.providerRouting?.only && form.providerRouting.only.length > 0 && (
-              <p className="text-xs text-muted-foreground" data-testid="model-entry-hosts">
-                Only these OpenRouter hosts will be used, because they support tool calling:{" "}
-                {form.providerRouting.only.join(", ")}. You can change this on the agent later.
-              </p>
+            {form.provider === "openrouter" && (
+              <Field
+                id="model-hosts"
+                label="OpenRouter hosts to use"
+                help={MODEL_HELP.hosts}
+                hint={
+                  parseHosts(form.hosts).length > 0 ? (
+                    <span data-testid="model-entry-hosts">
+                      Only these hosts will be used: {parseHosts(form.hosts).join(", ")}.
+                      {autoFilled.current.has("providerRouting") ? " Suggested because they support tool calling." : ""}
+                    </span>
+                  ) : (
+                    "Empty: OpenRouter picks a host for each request."
+                  )
+                }
+              >
+                <Input
+                  id="model-hosts"
+                  value={form.hosts ?? ""}
+                  placeholder="deepinfra, together"
+                  onChange={(event) => {
+                    autoFilled.current.delete("providerRouting");
+                    set("hosts", event.target.value);
+                  }}
+                  data-testid="model-hosts-input"
+                />
+              </Field>
             )}
             {providerUsesAddress(form.provider) ? (
               <Field
                 id="model-address"
-                label="Address of your model server"
-                hint="Your PC must be switched on for this to work."
+                label="Model server address"
+                help={MODEL_HELP.entryAddress}
+                hint={
+                  !form.baseUrl.trim() && !localAddress ? (
+                    <span className="text-amber-700 dark:text-amber-400" data-testid="model-entry-needs-address">
+                      This company has no model server address yet. Type it here, or set it once at the top of Settings
+                      &gt; Models so new local models start from it.
+                    </span>
+                  ) : isLoopbackAddress(form.baseUrl) ? (
+                    <span className="text-amber-700 dark:text-amber-400">
+                      This points at Paperclip's own server. Use it only if the models run on that same machine.
+                    </span>
+                  ) : (
+                    "The computer that runs this model must be switched on for agents to use it."
+                  )
+                }
               >
                 <Input
                   id="model-address"
+                  className="font-mono"
                   value={form.baseUrl}
-                  placeholder="http://100.124.232.68:11434/v1"
+                  placeholder="http://192.168.1.20:11434/v1"
                   onChange={(event) => set("baseUrl", event.target.value)}
                 />
               </Field>
@@ -796,7 +900,7 @@ export function ModelEntryDialog({
             data-testid="model-entry-section-defaults"
           >
             <div className="grid gap-3 sm:grid-cols-3">
-              <Field id="model-thinking" label="Thinking">
+              <Field id="model-thinking" label="Thinking" help={MODEL_HELP.thinking}>
                 <select
                   id="model-thinking"
                   className={SELECT_CLASS}
@@ -808,7 +912,7 @@ export function ModelEntryDialog({
                   <option value="off">Off</option>
                 </select>
               </Field>
-              <Field id="model-creativity" label="Creativity">
+              <Field id="model-creativity" label="Creativity" help={MODEL_HELP.creativity}>
                 <Input
                   id="model-creativity"
                   inputMode="decimal"
@@ -817,7 +921,7 @@ export function ModelEntryDialog({
                   onChange={(event) => set("temperature", event.target.value)}
                 />
               </Field>
-              <Field id="model-length" label="Longest answer">
+              <Field id="model-length" label="Longest answer" help={MODEL_HELP.maxTokens}>
                 <Input
                   id="model-length"
                   inputMode="numeric"
@@ -830,9 +934,9 @@ export function ModelEntryDialog({
           </SettingsSubsection>
 
           <SettingsSubsection
-            title="Your test scores"
+            title="Test scores"
             summary={ratingsSummary}
-            description="Score this setup from 0 (useless) to 10 (excellent) on whatever you test, so you can compare models later. Name the score yourself, e.g. Tool calling, Responsiveness, Coding."
+            description="Score this setup from 0 (useless) to 10 (excellent) on whatever you test, so models can be compared later. Name each score yourself, e.g. Tool calling, Responsiveness, Coding. Scores are only used to sort and compare here."
             data-testid="model-entry-section-ratings"
           >
             {form.ratings.length > 0 && (
@@ -922,7 +1026,7 @@ export function ModelEntryDialog({
             data-testid="model-entry-section-details"
           >
             <div className="grid gap-3 sm:grid-cols-2">
-              <Field id="model-spec-params" label="Size in parameters">
+              <Field id="model-spec-params" label="Size in parameters" help={MODEL_HELP.params}>
                 <Input
                   id="model-spec-params"
                   value={form.specs.params}
@@ -930,7 +1034,7 @@ export function ModelEntryDialog({
                   onChange={(event) => setSpec("params", event.target.value)}
                 />
               </Field>
-              <Field id="model-spec-quant" label="Quantisation">
+              <Field id="model-spec-quant" label="Quantisation" help={MODEL_HELP.quant}>
                 <Input
                   id="model-spec-quant"
                   value={form.specs.quant}
@@ -938,7 +1042,7 @@ export function ModelEntryDialog({
                   onChange={(event) => setSpec("quant", event.target.value)}
                 />
               </Field>
-              <Field id="model-spec-size" label="Download size (GB)">
+              <Field id="model-spec-size" label="Download size (GB)" help={MODEL_HELP.sizeGb}>
                 <Input
                   id="model-spec-size"
                   inputMode="decimal"
@@ -947,7 +1051,7 @@ export function ModelEntryDialog({
                   onChange={(event) => setSpec("sizeGb", event.target.value)}
                 />
               </Field>
-              <Field id="model-spec-context" label="Context length (tokens)">
+              <Field id="model-spec-context" label="Context length (tokens)" help={MODEL_HELP.context}>
                 <Input
                   id="model-spec-context"
                   inputMode="numeric"
@@ -956,7 +1060,7 @@ export function ModelEntryDialog({
                   onChange={(event) => setSpec("contextTokens", event.target.value)}
                 />
               </Field>
-              <Field id="model-spec-fits" label="Fits your graphics card">
+              <Field id="model-spec-fits" label="Fits the graphics card" help={MODEL_HELP.fits}>
                 <select
                   id="model-spec-fits"
                   className={SELECT_CLASS}
@@ -969,7 +1073,7 @@ export function ModelEntryDialog({
                   <option value="no">No</option>
                 </select>
               </Field>
-              <Field id="model-spec-tools" label="Tool use">
+              <Field id="model-spec-tools" label="Tool use" help={MODEL_HELP.tools}>
                 <select
                   id="model-spec-tools"
                   className={SELECT_CLASS}
@@ -982,7 +1086,7 @@ export function ModelEntryDialog({
                   <option value="no">Does not work</option>
                 </select>
               </Field>
-              <Field id="model-spec-vision" label="Pictures">
+              <Field id="model-spec-vision" label="Pictures" help={MODEL_HELP.vision}>
                 <select
                   id="model-spec-vision"
                   className={SELECT_CLASS}
@@ -994,7 +1098,7 @@ export function ModelEntryDialog({
                   <option value="no">Text only</option>
                 </select>
               </Field>
-              <Field id="model-spec-thinking" label="Thinking support">
+              <Field id="model-spec-thinking" label="Thinking support" help={MODEL_HELP.thinkingSupport}>
                 <select
                   id="model-spec-thinking"
                   className={SELECT_CLASS}
@@ -1007,7 +1111,7 @@ export function ModelEntryDialog({
                   <option value="no">Does not think</option>
                 </select>
               </Field>
-              <Field id="model-spec-license" label="Licence">
+              <Field id="model-spec-license" label="Licence" help={MODEL_HELP.license}>
                 <Input
                   id="model-spec-license"
                   value={form.specs.license}
@@ -1015,7 +1119,7 @@ export function ModelEntryDialog({
                   onChange={(event) => setSpec("license", event.target.value)}
                 />
               </Field>
-              <Field id="model-spec-link" label="Model page link">
+              <Field id="model-spec-link" label="Model page link" help={MODEL_HELP.sourceUrl}>
                 <Input
                   id="model-spec-link"
                   value={form.specs.sourceUrl}
@@ -1024,7 +1128,7 @@ export function ModelEntryDialog({
                 />
               </Field>
             </div>
-            <Field id="model-spec-pull" label="Install command" hint="What you type on your PC to download it.">
+            <Field id="model-spec-pull" label="Install command" help={MODEL_HELP.pullCommand}>
               <Input
                 id="model-spec-pull"
                 className="font-mono"
@@ -1036,7 +1140,7 @@ export function ModelEntryDialog({
           </SettingsSubsection>
 
           <SettingsSubsection title="Notes" data-testid="model-entry-section-notes">
-            <Field id="model-note" label="Note (optional)">
+            <Field id="model-note" label="Note (optional)" help={MODEL_HELP.note}>
               <Textarea
                 id="model-note"
                 rows={4}

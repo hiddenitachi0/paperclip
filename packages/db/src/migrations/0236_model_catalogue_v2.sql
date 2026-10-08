@@ -1,7 +1,8 @@
 -- Settings > Models, catalogue v2: model family and size/variant as their
 -- own fields, the owner's own test ratings per entry, and a per-company
--- settings row (graphics memory of the local model PC). All informational;
--- none change how an agent calls a model.
+-- settings row (graphics memory of the computer that runs local models, and
+-- the address of this company's local model server). The graphics memory is
+-- informational only; the address is the default for new local model setups.
 --
 -- Idempotent. model_directory_entries keeps its RLS and grants from 0216;
 -- the new model_directory_settings table gets the same guarded block.
@@ -11,9 +12,11 @@
 CREATE TABLE IF NOT EXISTS "model_directory_settings" (
 	"company_id" uuid PRIMARY KEY NOT NULL,
 	"local_gpu_vram_gb" real,
+	"local_base_url" text,
 	"updated_by_user_id" text,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );--> statement-breakpoint
+ALTER TABLE "model_directory_settings" ADD COLUMN IF NOT EXISTS "local_base_url" text;--> statement-breakpoint
 ALTER TABLE "model_directory_entries" ADD COLUMN IF NOT EXISTS "family" text;--> statement-breakpoint
 ALTER TABLE "model_directory_entries" ADD COLUMN IF NOT EXISTS "variant" text;--> statement-breakpoint
 ALTER TABLE "model_directory_entries" ADD COLUMN IF NOT EXISTS "ratings" jsonb DEFAULT '[]'::jsonb NOT NULL;--> statement-breakpoint

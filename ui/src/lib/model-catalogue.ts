@@ -23,7 +23,6 @@ import {
   type LocalInstalledModel,
   GPU_FIT_HEADROOM,
   KNOWN_MODEL_FAMILIES,
-  MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS,
   MODEL_DIRECTORY_RATINGS_MAX,
 } from "@paperclipai/shared";
 
@@ -58,9 +57,9 @@ export type CatalogueItem = Pick<
 
 // ---------------------------------------------------------------- labels
 
-/** Where a model runs, as the owner would say it. */
+/** Where a model runs, in plain words. "local" = this company's own model server (Ollama or similar). */
 export function whereLabel(provider: LaneAProvider): string {
-  if (provider === "local") return "On your PC";
+  if (provider === "local") return "On your own computer (local)";
   return LANE_A_PROVIDER_CATALOGUE[provider]?.label ?? provider;
 }
 
@@ -183,7 +182,7 @@ function uniqueKey(used: Set<string>, base: string): string {
   return key;
 }
 
-/** Order the "Where it runs" groups appear in: your PC, then the usual clouds, then the rest. */
+/** Order the "Where it runs" groups appear in: local, then the usual clouds, then the rest. */
 const WHERE_ORDER: readonly LaneAProvider[] = [
   "local",
   "openrouter",
@@ -258,7 +257,7 @@ export function groupEntries<T extends CatalogueItem>(entries: readonly T[], by:
 
 // ---------------------------------------------------------------- filtering
 
-/** "cloud" = anything not on your PC. */
+/** "cloud" = anything not on the company's own model server. */
 export type CatalogueWhereFilter = "all" | "cloud" | LaneAProvider;
 /** "quick" and "full" also match models marked for both. */
 export type CatalogueUseFilter = "all" | ModelDirectoryLane | "unset";
@@ -502,14 +501,14 @@ export function noteFirstLine(note: string | null | undefined): { first: string;
   return { first: lines[index]!, more: lines.slice(index + 1).some((line) => line !== "") };
 }
 
-/** "31 models · 12 on your PC · 19 in the cloud · 3 archived" (archived ones are not in the first three numbers). */
+/** "31 models · 12 local · 19 in the cloud · 3 archived" (archived ones are not in the first three numbers). */
 export function countsLine(entries: readonly CatalogueItem[], shown?: number): string {
   const active = entries.filter((entry) => !entry.archivedAt);
   const local = active.filter((entry) => entry.provider === "local").length;
   const archived = entries.length - active.length;
   const parts = [
     `${active.length} ${active.length === 1 ? "model" : "models"}`,
-    `${local} on your PC`,
+    `${local} local`,
     `${active.length - local} in the cloud`,
   ];
   if (archived > 0) parts.push(`${archived} archived`);
@@ -609,13 +608,13 @@ export function importPreview(
 //
 // Maker -> Model family -> Size -> ways to run it. Built from the saved
 // entries plus the built-in list of known open models (KNOWN_MODEL_FAMILIES),
-// so a family the owner has saved once also shows its other sizes, whether
+// so a family the company has saved once also shows its other sizes, whether
 // each fits the graphics card, the `ollama pull` command for a size that is
 // not installed, and the bigger cloud sizes as "upgrades".
 
 // ---------------------------------------------------------------- ratings
 
-/** The owner's score for one criterion (case ignored), or null. */
+/** The company's own score for one criterion (case ignored), or null. */
 export function ratingFor(entry: Pick<CatalogueItem, "ratings">, criterion: string): number | null {
   const wanted = criterion.trim().toLowerCase();
   if (!wanted) return null;
@@ -759,20 +758,25 @@ export type GpuFit = "yes" | "tight" | "no";
 
 /**
  * Whether a size fits a graphics card with this much memory: "yes" with room
- * to spare, "tight" when it only just fits, "no" when it is too big, null when
- * either number is unknown.
+ * to spare, "tight" when it only just fits, "no" when it is too big (or there
+ * is no graphics card: 0 GB), null when either number is unknown. Nothing is
+ * assumed while the company has not entered its graphics card memory.
  */
 export function gpuFit(minVramGb: number | null | undefined, vramGb: number | null | undefined): GpuFit | null {
-  if (typeof minVramGb !== "number" || typeof vramGb !== "number" || vramGb <= 0) return null;
+  if (typeof minVramGb !== "number" || typeof vramGb !== "number" || !Number.isFinite(vramGb) || vramGb < 0) return null;
+  if (vramGb === 0) return "no";
   if (minVramGb <= vramGb * GPU_FIT_HEADROOM) return "yes";
   if (minVramGb <= vramGb) return "tight";
   return "no";
 }
 
-export function gpuFitLabel(fit: GpuFit | null): string {
-  if (fit === "yes") return "Fits your graphics card";
-  if (fit === "tight") return "Just about fits your graphics card";
-  if (fit === "no") return "Too big for your graphics card";
+/** What to show while the graphics card memory is not set (Settings > Models top). */
+export const GPU_NOT_SET_ADVICE = "Set your graphics card memory above to see what fits.";
+
+export function gpuFitLabel(fit: GpuFit | null, vramGb?: number | null): string {
+  if (fit === "yes") return "Fits the graphics card";
+  if (fit === "tight") return "Just about fits the graphics card";
+  if (fit === "no") return vramGb === 0 ? "Needs a graphics card" : "Too big for the graphics card";
   return "";
 }
 
@@ -792,11 +796,11 @@ function hostsText(hosts: readonly string[]): string {
 }
 
 /**
- * How a saved entry runs, as the tree shows it: "On your PC · llama3.2:3b",
+ * How a saved entry runs, as the tree shows it: "Local · llama3.2:3b",
  * "OpenRouter · deepinfra, together", "Hugging Face · featherless-ai".
  */
 export function runOptionLabel(entry: Pick<CatalogueItem, "provider" | "model" | "providerRouting">): string {
-  if (entry.provider === "local") return `On your PC · ${entry.model}`;
+  if (entry.provider === "local") return `Local · ${entry.model}`;
   if (entry.provider === "openrouter") return `OpenRouter · ${hostsText(pinnedHosts(entry))}`;
   if (entry.provider === "huggingface") {
     const host = entry.model.includes(":") ? entry.model.split(":").slice(1).join(":") : "";
@@ -830,10 +834,15 @@ export interface KnownRunOption {
   key: string;
   provider: "local" | "openrouter" | "huggingface";
   model: string;
-  /** "On your PC · llama3.2:1b (Q4_K_M, 1.3 GB)", "OpenRouter · deepinfra, together", "Hugging Face". */
+  /** "Local · llama3.2:1b (Q4_K_M, 1.3 GB)", "OpenRouter · deepinfra, together", "Hugging Face". */
   label: string;
-  /** Local only: what to type on the PC to download it. */
+  /** Local only: what to type on the computer that runs the model server to download it. */
   pullCommand?: string;
+  /**
+   * Local only: true when the company has no model server address yet, so
+   * the draft has no address and the page asks for it instead of adding.
+   */
+  needsAddress?: boolean;
   /** OpenRouter only: hosts that support tool calling. */
   hosts?: string[];
   /** Ready to hand to the add dialog. */
@@ -867,7 +876,7 @@ export interface VariantNode<T extends CatalogueItem = CatalogueItem> {
   installedLocally: boolean;
   /** For a size Ollama has that is not installed: "ollama pull llama3.2:1b". */
   pullCommand: string | null;
-  /** "Too big for your PC (needs ~20 GB, you have 12 GB) - run it on OpenRouter: deepinfra, together". */
+  /** "Too big for the graphics card (needs ~20 GB, this company's has 12 GB) - run it on OpenRouter: deepinfra, together". */
   tooBigAdvice: string | null;
   upgrades: UpgradeOption[];
 }
@@ -890,23 +899,80 @@ export interface MakerNode<T extends CatalogueItem = CatalogueItem> {
 
 export interface ModelTreeOptions {
   known?: readonly KnownModelFamily[];
-  /** The owner's graphics card memory in GB, for fit advice. */
+  /** The company's graphics card memory in GB (0 = none), for fit advice; null = not set, no advice. */
   gpuVramGb?: number | null;
   /** Add the not-yet-saved sizes and ways to run them (default true). */
   includeKnown?: boolean;
   /** Which providers' known options to offer (default: all). */
   knownProviders?: ReadonlyArray<"local" | "openrouter" | "huggingface">;
-  /** Address used for local "Add" drafts. */
-  localAddress?: string;
+  /** Address used for local "Add" drafts; null = not set (local options then ask for it). */
+  localAddress?: string | null;
   sort?: CatalogueSort;
   criterion?: string | null;
   /** Installed Ollama tags from the last resync: local drafts for these are marked installed. */
   installedTags?: ReadonlySet<string>;
 }
 
-/** The company's usual local model address: the one most saved local entries use, else the default. */
-export function localAddressOf(entries: readonly Pick<CatalogueItem, "provider" | "baseUrl">[]): string {
-  return localAddressesInUse(entries)[0] ?? MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS;
+/** The address most saved local entries use, or null when there is none. */
+export function localAddressOf(entries: readonly Pick<CatalogueItem, "provider" | "baseUrl">[]): string | null {
+  return localAddressesInUse(entries)[0] ?? null;
+}
+
+/**
+ * The address new local setups start from: the company's model server
+ * address (Settings > Models), else the one its saved local models use most,
+ * else null, and the page asks for it. Never a built-in guess.
+ */
+export function defaultLocalAddress(
+  setting: string | null | undefined,
+  entries: readonly Pick<CatalogueItem, "provider" | "baseUrl">[],
+): string | null {
+  const trimmed = setting?.trim();
+  return trimmed ? normalizeAddress(trimmed) : localAddressOf(entries);
+}
+
+/**
+ * Where "Resync local models" asks: every local address in use plus the
+ * company's model server address, without duplicates. Empty = nothing to ask
+ * (the page then asks for the address).
+ */
+export function resyncTargets(
+  setting: string | null | undefined,
+  entries: readonly Pick<CatalogueItem, "provider" | "baseUrl">[],
+): string[] {
+  const out = localAddressesInUse(entries);
+  const trimmed = setting?.trim();
+  if (trimmed && !out.some((address) => address.toLowerCase() === normalizeAddress(trimmed).toLowerCase())) {
+    out.unshift(normalizeAddress(trimmed));
+  }
+  return out;
+}
+
+/** Why a local model server address cannot be used, in plain words, or null. Empty = null (not set). */
+export function localAddressIssue(text: string): string | null {
+  const value = text.trim();
+  if (!value) return null;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return "Type the whole address, starting with http:// or https://, e.g. http://192.168.1.20:11434/v1.";
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return "The address must start with http:// or https://.";
+  if (url.search || url.hash || url.username || url.password) {
+    return "Leave out any ?query, #part or user name and password; just the server address, e.g. http://192.168.1.20:11434/v1.";
+  }
+  return null;
+}
+
+/** True for localhost / 127.x / ::1: that is Paperclip's own server, rarely where the models run. */
+export function isLoopbackAddress(text: string): boolean {
+  try {
+    const host = new URL(text.trim()).hostname.toLowerCase();
+    return host === "localhost" || host.endsWith(".localhost") || host.startsWith("127.") || host === "[::1]" || host === "0.0.0.0";
+  } catch {
+    return false;
+  }
 }
 
 /** Every distinct local model address in use, most used first. */
@@ -931,7 +997,7 @@ export function draftFromKnown(
   family: KnownModelFamily,
   variant: KnownModelVariant,
   how:
-    | { provider: "local"; tag: KnownOllamaTag; address: string; installed?: boolean; gpuVramGb?: number | null }
+    | { provider: "local"; tag: KnownOllamaTag; address: string | null; installed?: boolean; gpuVramGb?: number | null }
     | { provider: "openrouter"; option: KnownOpenRouterOption }
     | { provider: "huggingface"; option: KnownHuggingFaceOption },
 ): CreateModelDirectoryEntry {
@@ -956,10 +1022,10 @@ export function draftFromKnown(
     const fit = gpuFit(variant.minVramGb, how.gpuVramGb);
     return {
       ...common,
-      name: `${title} on your PC`,
+      name: `${title} (local)`,
       provider: "local",
       model: how.tag.tag,
-      baseUrl: how.address,
+      baseUrl: how.address ?? null,
       availability: how.installed ? "installed" : "planned",
       specs: {
         ...specsBase,
@@ -1030,7 +1096,7 @@ export function draftFromInstalled(
   if (installed.quantization) specs.quant = installed.quantization;
   if (typeof installed.sizeGb === "number") specs.sizeGb = installed.sizeGb;
   return {
-    name: `${installed.name} on your PC`,
+    name: `${installed.name} (local)`,
     provider: "local",
     model: installed.name,
     baseUrl: address,
@@ -1062,7 +1128,7 @@ function savedRuns<T extends CatalogueItem>(entries: readonly T[]) {
 function knownOptionsFor(
   family: KnownModelFamily,
   variant: KnownModelVariant,
-  opts: Required<Pick<ModelTreeOptions, "localAddress">> & ModelTreeOptions,
+  opts: ModelTreeOptions & { localAddress: string | null },
 ): KnownRunOption[] {
   const allowed = new Set(opts.knownProviders ?? ["local", "openrouter", "huggingface"]);
   const out: KnownRunOption[] = [];
@@ -1073,8 +1139,9 @@ function knownOptionsFor(
         key: `local-${tag.tag}`,
         provider: "local",
         model: tag.tag,
-        label: `On your PC · ${tag.tag} (${tag.quant}, ${roundOne(tag.sizeGb)} GB)`,
+        label: `Local · ${tag.tag} (${tag.quant}, ${roundOne(tag.sizeGb)} GB)`,
         pullCommand: `ollama pull ${tag.tag}`,
+        ...(opts.localAddress ? {} : { needsAddress: true }),
         draft: draftFromKnown(family, variant, {
           provider: "local",
           tag,
@@ -1122,7 +1189,7 @@ export function upgradesFor<T extends CatalogueItem>(
   family: KnownModelFamily,
   variant: KnownModelVariant,
   allSaved: readonly T[],
-  opts: ModelTreeOptions & { localAddress: string },
+  opts: ModelTreeOptions & { localAddress: string | null },
 ): UpgradeOption[] {
   const known = opts.known ?? KNOWN_MODEL_FAMILIES;
   const parent = family.derivedFrom ? known.find((candidate) => candidate.id === family.derivedFrom) : undefined;
@@ -1150,8 +1217,9 @@ export function upgradesFor<T extends CatalogueItem>(
               key: `local-${tag.tag}`,
               provider: "local",
               model: tag.tag,
-              label: `On your PC · ${tag.tag}`,
+              label: `Local · ${tag.tag}`,
               pullCommand: `ollama pull ${tag.tag}`,
+              ...(opts.localAddress ? {} : { needsAddress: true }),
               draft: draftFromKnown(relative, bigger, {
                 provider: "local",
                 tag,
@@ -1177,10 +1245,16 @@ export function upgradesFor<T extends CatalogueItem>(
   return out.sort((a, b) => a.paramsB - b.paramsB || collator.compare(a.family, b.family));
 }
 
-/** "Too big for your PC (needs ~20 GB, you have 12 GB) - run it on OpenRouter: deepinfra, together", or null. */
+/**
+ * "Too big for the graphics card (needs ~20 GB, this company's has 12 GB) - run it on OpenRouter: deepinfra, together",
+ * or null (it fits, or the graphics card memory is not set).
+ */
 export function tooBigAdvice(variant: KnownModelVariant, gpuVramGb: number | null | undefined): string | null {
   if (gpuFit(variant.minVramGb, gpuVramGb) !== "no") return null;
-  const head = `Too big for your PC (needs ~${roundOne(variant.minVramGb!)} GB, you have ${roundOne(gpuVramGb!)} GB)`;
+  const head =
+    gpuVramGb === 0
+      ? `Needs a graphics card with ~${roundOne(variant.minVramGb!)} GB; this company's computer has none (on the processor alone it runs very slowly)`
+      : `Too big for the graphics card (needs ~${roundOne(variant.minVramGb!)} GB, this company's has ${roundOne(gpuVramGb!)} GB)`;
   const hosts = [...new Set(variant.openrouter.flatMap((option) => option.toolHosts))];
   if (hosts.length > 0) return `${head} - run it on OpenRouter: ${hosts.join(", ")}`;
   if (variant.openrouter.length > 0) return `${head} - OpenRouter has it, but no host there is known to support tool calling`;
@@ -1366,14 +1440,14 @@ export interface PickerGroup {
   options: PickerOption[];
 }
 
-/** How an entry runs, for a picker: "On your PC (llama3.2:latest)", "OpenRouter", "Hugging Face". */
+/** How an entry runs, for a picker: "Local (llama3.2:latest)", "OpenRouter", "Hugging Face". */
 export function pickerRunLabel(entry: Pick<CatalogueItem, "provider" | "model">): string {
-  if (entry.provider === "local") return `On your PC (${entry.model})`;
+  if (entry.provider === "local") return `Local (${entry.model})`;
   return whereLabel(entry.provider);
 }
 
 /**
- * The option text in the agent pickers: "3B · On your PC (llama3.2:latest)",
+ * The option text in the agent pickers: "3B · Local (llama3.2:latest)",
  * plus " — <name>" when the saved name says something the rest does not.
  */
 export function pickerOptionLabel(
@@ -1440,7 +1514,7 @@ export function claudeIdentity(model: string): { family: string; variant: string
 /**
  * The model ids the add dialog offers for a provider: the fixed list for
  * Claude / OpenAI / Google (the only ids those accept), the known OpenRouter
- * and Hugging Face ids, and for your PC the tags the last resync found
+ * and Hugging Face ids, and for local models the tags the last resync found
  * installed, then the known Ollama tags.
  */
 export function modelIdChoices(
@@ -1464,7 +1538,7 @@ export function modelIdChoices(
     push(id, claude && pricing ? `${title} (${pricing.label.toLowerCase()})` : title);
   }
   if (provider === "local") {
-    for (const tag of options.installedTags ?? []) push(tag, "Installed on your PC");
+    for (const tag of options.installedTags ?? []) push(tag, "Installed on the model server");
   }
   for (const family of known) {
     for (const variant of family.variants) {
@@ -1512,7 +1586,8 @@ export function prefillForModel(
   model: string,
   options: {
     installedTags?: readonly string[];
-    localAddress?: string;
+    /** The company's model server address; null/undefined = not set, so no address is filled in. */
+    localAddress?: string | null;
     gpuVramGb?: number | null;
     known?: readonly KnownModelFamily[];
   } = {},
@@ -1520,10 +1595,10 @@ export function prefillForModel(
   const id = model.trim();
   const installed = new Set((options.installedTags ?? []).map(normalizeOllamaTag));
   const isInstalled = provider === "local" && id !== "" && installed.has(normalizeOllamaTag(id));
-  const localAddress = options.localAddress ?? MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS;
+  const localAddress = options.localAddress?.trim() || null;
   const base: ModelPrefill =
     provider === "local"
-      ? { baseUrl: localAddress, availability: isInstalled ? "installed" : "planned", lane: "quick" }
+      ? { ...(localAddress ? { baseUrl: localAddress } : {}), availability: isInstalled ? "installed" : "planned", lane: "quick" }
       : { availability: "cloud", lane: "quick" };
   if (!id) return base;
 
@@ -1577,7 +1652,7 @@ export function prefillForModel(
   }
   return {
     ...base,
-    name: provider === "local" ? `${id} on your PC` : `${id} via ${whereLabel(provider)}`,
+    name: provider === "local" ? `${id} (local)` : `${id} via ${whereLabel(provider)}`,
     ...(provider === "local" ? { specs: { pullCommand: `ollama pull ${id}` } } : {}),
   };
 }

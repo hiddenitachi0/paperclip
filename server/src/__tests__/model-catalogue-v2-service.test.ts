@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { agents, companies, createDb } from "@paperclipai/db";
 import {
+  MODEL_DIRECTORY_NEEDS_LOCAL_ADDRESS_MESSAGE,
   MODEL_DIRECTORY_STARTERS,
   createModelDirectoryEntrySchema,
   importModelDirectoryCatalogueSchema,
@@ -9,7 +10,7 @@ import {
   updateModelDirectorySettingsSchema,
 } from "@paperclipai/shared";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
-import { localAddressKey, modelDirectoryService, parseOllamaTags } from "../services/model-directory.ts";
+import { localAddressKey, localSyncFailedMessage, modelDirectoryService, parseOllamaTags } from "../services/model-directory.ts";
 
 /**
  * Catalogue v2: family / variant / ratings round-trip everywhere (create,
@@ -45,6 +46,10 @@ describe("catalogue v2 validators and helpers (no database)", () => {
     expect(updateModelDirectorySettingsSchema.safeParse({ localGpuVramGb: null }).success).toBe(true);
     expect(updateModelDirectorySettingsSchema.safeParse({ localGpuVramGb: -1 }).success).toBe(false);
     expect(updateModelDirectorySettingsSchema.safeParse({ localGpuVramGb: 12, other: 1 }).success).toBe(false);
+    expect(updateModelDirectorySettingsSchema.safeParse({ localBaseUrl: "http://192.168.1.20:11434/v1" }).success).toBe(true);
+    expect(updateModelDirectorySettingsSchema.safeParse({ localBaseUrl: null }).success).toBe(true);
+    expect(updateModelDirectorySettingsSchema.safeParse({ localBaseUrl: "192.168.1.20:11434" }).success).toBe(false);
+    expect(updateModelDirectorySettingsSchema.safeParse({}).success).toBe(false);
   });
 
   it("normalises a local address: case, trailing slash and /v1 do not matter", () => {
@@ -154,19 +159,58 @@ d("catalogue v2 service", () => {
 
   it("starters carry their family and size", async () => {
     const c = await newCompany("CVD");
-    const [first] = await svc.addStarters(c, [MODEL_DIRECTORY_STARTERS[0]!.id], actor);
-    expect(first).toMatchObject({ family: MODEL_DIRECTORY_STARTERS[0]!.family, variant: MODEL_DIRECTORY_STARTERS[0]!.variant, ratings: [] });
+    const cloud = MODEL_DIRECTORY_STARTERS.find((s) => s.provider !== "local")!;
+    const { created: [first] } = await svc.addStarters(c, [cloud.id], actor);
+    expect(first).toMatchObject({ family: cloud.family, variant: cloud.variant, ratings: [] });
   });
 
-  it("reads defaults, saves and re-saves settings, per company", async () => {
+  it("local starters need the company's model server address; cloud ones are added anyway", async () => {
+    const c = await newCompany("CVL");
+    const local = MODEL_DIRECTORY_STARTERS.find((s) => s.provider === "local")!;
+    const cloud = MODEL_DIRECTORY_STARTERS.find((s) => s.provider !== "local")!;
+    // Only local asked for, no address: refused in plain words, nothing saved.
+    await expect(svc.addStarters(c, [local.id], actor)).rejects.toMatchObject({ status: 422, message: MODEL_DIRECTORY_NEEDS_LOCAL_ADDRESS_MESSAGE });
+    expect(await svc.list(c)).toEqual([]);
+    // Mixed: the cloud one is added, the local one skipped with the reason.
+    const mixed = await svc.addStarters(c, [local.id, cloud.id], actor);
+    expect(mixed.created.map((e) => e.name)).toEqual([cloud.name]);
+    expect(mixed.skipped).toEqual([{ starterId: local.id, name: local.name, reason: MODEL_DIRECTORY_NEEDS_LOCAL_ADDRESS_MESSAGE }]);
+    // With the address set, the local one gets it and starts as planned.
+    await svc.updateSettings(c, { localBaseUrl: "http://192.168.1.20:11434/v1" }, actor);
+    const after = await svc.addStarters(c, [local.id, cloud.id], actor);
+    expect(after.skipped).toEqual([]);
+    expect(after.created).toHaveLength(1);
+    expect(after.created[0]).toMatchObject({ name: local.name, provider: "local", baseUrl: "http://192.168.1.20:11434/v1", availability: "planned" });
+    // Counts as added at any address from now on.
+    expect((await svc.listStarters(c)).find((s) => s.id === local.id)!.alreadyAdded).toBe(true);
+  });
+
+  it("reads defaults, saves and re-saves settings (graphics memory and address), per company", async () => {
     const a = await newCompany("CVE");
     const b = await newCompany("CVF");
-    expect(await svc.getSettings(a)).toEqual({ localGpuVramGb: null });
-    expect(await svc.updateSettings(a, { localGpuVramGb: 12 }, actor)).toEqual({ localGpuVramGb: 12 });
-    expect(await svc.updateSettings(a, { localGpuVramGb: 16.5 }, actor)).toEqual({ localGpuVramGb: 16.5 });
-    expect(await svc.getSettings(a)).toEqual({ localGpuVramGb: 16.5 });
-    expect(await svc.getSettings(b)).toEqual({ localGpuVramGb: null });
-    expect(await svc.updateSettings(a, { localGpuVramGb: null }, actor)).toEqual({ localGpuVramGb: null });
+    const empty = { localGpuVramGb: null, localBaseUrl: null };
+    expect(await svc.getSettings(a)).toEqual(empty);
+    expect(await svc.updateSettings(a, { localGpuVramGb: 12 }, actor)).toEqual({ localGpuVramGb: 12, localBaseUrl: null });
+    expect(await svc.updateSettings(a, { localGpuVramGb: 16.5 }, actor)).toEqual({ localGpuVramGb: 16.5, localBaseUrl: null });
+    // Saving the address alone keeps the graphics memory, and the other way round.
+    expect(await svc.updateSettings(a, { localBaseUrl: " http://192.168.1.20:11434/v1 " }, actor)).toEqual({ localGpuVramGb: 16.5, localBaseUrl: "http://192.168.1.20:11434/v1" });
+    expect(await svc.updateSettings(a, { localGpuVramGb: 0 }, actor)).toEqual({ localGpuVramGb: 0, localBaseUrl: "http://192.168.1.20:11434/v1" });
+    expect(await svc.getSettings(a)).toEqual({ localGpuVramGb: 0, localBaseUrl: "http://192.168.1.20:11434/v1" });
+    expect(await svc.getSettings(b)).toEqual(empty);
+    expect(await svc.updateSettings(a, { localGpuVramGb: null, localBaseUrl: null }, actor)).toEqual(empty);
+  });
+
+  it("resyncs at the company's model server address even with no saved local model", async () => {
+    const c = await newCompany("CVM");
+    fetchStub.mockReset();
+    await expect(svc.syncLocalModels(c, "http://192.168.1.20:11434/v1")).rejects.toMatchObject({ status: 422 });
+    expect(fetchStub).not.toHaveBeenCalled();
+    await svc.updateSettings(c, { localBaseUrl: "http://192.168.1.20:11434/v1" }, actor);
+    fetchStub.mockResolvedValue(tags(["qwen3:14b"]));
+    const result = await svc.syncLocalModels(c, "http://192.168.1.20:11434");
+    expect(fetchStub.mock.calls[0]![0]).toBe("http://192.168.1.20:11434/api/tags");
+    expect(fetchStub.mock.calls[0]![1]).toMatchObject({ redirect: "error" });
+    expect(result).toMatchObject({ baseUrl: "http://192.168.1.20:11434/v1", installed: [{ name: "qwen3:14b", entryIds: [] }] });
   });
 
   it("marks local entries installed / planned from Ollama's list, only at that address and in this company", async () => {
@@ -220,7 +264,7 @@ d("catalogue v2 service", () => {
     expect(fetchStub).not.toHaveBeenCalled();
   });
 
-  it("accepts a quick agent's local address, and reports an unreachable PC plainly", async () => {
+  it("accepts a quick agent's local address, and reports every failure with one plain message", async () => {
     const c = await newCompany("CVK");
     await db.insert(agents).values({
       role: "engineer",
@@ -241,11 +285,18 @@ d("catalogue v2 service", () => {
     expect(result).toMatchObject({ baseUrl: "http://100.5.5.5:11434/v1", markedInstalledEntryIds: [], missingEntryIds: [] });
     expect(result.installed[0]).toMatchObject({ name: "qwen3:14b", entryIds: [] });
 
-    fetchStub.mockReset();
-    fetchStub.mockRejectedValue(new Error("connect ETIMEDOUT"));
-    await expect(svc.syncLocalModels(c, "http://100.5.5.5:11434/v1")).rejects.toMatchObject({ status: 422 });
-    fetchStub.mockReset();
-    fetchStub.mockResolvedValue(new Response("<html>", { status: 200 }));
-    await expect(svc.syncLocalModels(c, "http://100.5.5.5:11434/v1")).rejects.toMatchObject({ status: 422 });
+    // Unreachable, an error status, a redirect refused by fetch, or not Ollama: the same message, no detail.
+    const plain = { status: 422, message: localSyncFailedMessage("http://100.5.5.5:11434/v1") };
+    expect(plain.message).toBe("Could not read the installed models from http://100.5.5.5:11434/v1. Check that the computer is on and the model server is running.");
+    for (const failure of [
+      () => fetchStub.mockRejectedValue(new Error("connect ETIMEDOUT")),
+      () => fetchStub.mockRejectedValue(new TypeError("fetch failed: unexpected redirect")),
+      () => fetchStub.mockResolvedValue(new Response("nope", { status: 500 })),
+      () => fetchStub.mockResolvedValue(new Response("<html>", { status: 200 })),
+    ]) {
+      fetchStub.mockReset();
+      failure();
+      await expect(svc.syncLocalModels(c, "http://100.5.5.5:11434/v1")).rejects.toMatchObject(plain);
+    }
   });
 });

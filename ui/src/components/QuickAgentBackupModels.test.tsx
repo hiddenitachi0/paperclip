@@ -276,7 +276,7 @@ describe("QuickAgentBackupModels", () => {
       expect([...select.querySelectorAll("optgroup")].map((g) => g.label)).toEqual(["Google · Gemma 3", "Mistral"]);
       // Size (when known) · where it runs, plus the saved name when it adds something.
       expect([...select.querySelectorAll("optgroup option")].map((o) => o.textContent)).toEqual([
-        "12B · On your PC (gemma3:12b) — Gemma on my PC",
+        "12B · Local (gemma3:12b) — Gemma on my PC",
         "OpenRouter — Mistral via OpenRouter",
       ]);
       expect(select.textContent).toContain("Type it myself");

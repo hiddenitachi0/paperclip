@@ -6,6 +6,7 @@ import {
   LANE_A_PROVIDER_CATALOGUE,
   MODEL_DIRECTORY_EXPORT_VERSION,
   MODEL_DIRECTORY_NAME_MAX_LENGTH,
+  MODEL_DIRECTORY_NEEDS_LOCAL_ADDRESS_MESSAGE,
   MODEL_DIRECTORY_STARTERS,
   modelDirectoryEntryIssue,
   normalizeLaneAProvider,
@@ -21,12 +22,14 @@ import {
   type ModelDirectoryEntry,
   type ModelDirectoryRating,
   type ModelDirectorySettings,
+  type ModelDirectoryStartersResult,
   type UpdateModelDirectorySettings,
   type LocalInstalledModel,
   type LocalModelsSyncResult,
   type UpdateModelDirectoryEntry,
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
+import { logger } from "../middleware/logger.js";
 
 /**
  * DUR-4379: the company model directory (saved model setups). Every query
@@ -262,6 +265,17 @@ export const LOCAL_MODELS_SYNC_TIMEOUT_MS = 10_000;
  * slashes and the OpenAI-compatible "/v1" suffix do not matter. Ollama's own
  * API (/api/tags) lives at this root.
  */
+type SettingsRow = typeof modelDirectorySettings.$inferSelect;
+
+function toSettings(row: SettingsRow | undefined): ModelDirectorySettings {
+  return { localGpuVramGb: row?.localGpuVramGb ?? null, localBaseUrl: row?.localBaseUrl ?? null };
+}
+
+/** The one plain message for any failed local resync (unreachable, error status, not Ollama). */
+export function localSyncFailedMessage(address: string): string {
+  return `Could not read the installed models from ${address}. Check that the computer is on and the model server is running.`;
+}
+
 export function localAddressKey(baseUrl: string | null | undefined): string {
   return (baseUrl ?? "").trim().replace(/\/+$/, "").replace(/\/v1$/i, "").replace(/\/+$/, "").toLowerCase();
 }
@@ -351,18 +365,22 @@ export function modelDirectoryService(db: Db, deps: ModelDirectoryServiceDeps = 
     /** Settings > Models settings for this company (defaults when never saved). */
     async getSettings(companyId: string): Promise<ModelDirectorySettings> {
       const [row] = await db.select().from(modelDirectorySettings).where(eq(modelDirectorySettings.companyId, companyId));
-      return { localGpuVramGb: row?.localGpuVramGb ?? null };
+      return toSettings(row);
     },
 
+    /** Saves only the fields sent; a field left out keeps its value, null clears it. */
     async updateSettings(companyId: string, input: UpdateModelDirectorySettings, actor: { userId: string | null }): Promise<ModelDirectorySettings> {
       const now = nowOf();
-      const values = { localGpuVramGb: input.localGpuVramGb, updatedByUserId: actor.userId, updatedAt: now };
+      const changed: { localGpuVramGb?: number | null; localBaseUrl?: string | null } = {};
+      if (input.localGpuVramGb !== undefined) changed.localGpuVramGb = input.localGpuVramGb;
+      if (input.localBaseUrl !== undefined) changed.localBaseUrl = input.localBaseUrl?.trim() ? input.localBaseUrl.trim() : null;
+      const values = { ...changed, updatedByUserId: actor.userId, updatedAt: now };
       const [row] = await db
         .insert(modelDirectorySettings)
         .values({ companyId, ...values })
         .onConflictDoUpdate({ target: modelDirectorySettings.companyId, set: values })
         .returning();
-      return { localGpuVramGb: row?.localGpuVramGb ?? null };
+      return toSettings(row);
     },
 
     /**
@@ -370,8 +388,10 @@ export function modelDirectoryService(db: Db, deps: ModelDirectoryServiceDeps = 
      * entries at that address: "installed" when their tag is there, back to
      * "planned" when they were "installed" and the tag is gone. "downloading"
      * is left alone until the tag shows up. The address must already be one
-     * this company uses (a saved local entry or a quick agent on a local
-     * model), so the server never calls a host on someone's say-so.
+     * this company uses (its model server address setting, a saved local
+     * entry or a quick agent on a local model), so the server never calls a
+     * host on someone's say-so. Redirects are not followed, and every failure
+     * gives the same plain message (details only in the server log).
      */
     async syncLocalModels(companyId: string, rawBaseUrl: string): Promise<LocalModelsSyncResult> {
       const key = localAddressKey(rawBaseUrl);
@@ -379,6 +399,11 @@ export function modelDirectoryService(db: Db, deps: ModelDirectoryServiceDeps = 
         await db.select().from(modelDirectoryEntries).where(and(eq(modelDirectoryEntries.companyId, companyId), eq(modelDirectoryEntries.provider, "local")))
       ).filter((e) => e.baseUrl && localAddressKey(e.baseUrl) === key);
       let known = entries.length > 0 ? entries[0]!.baseUrl! : null;
+      if (!known) {
+        const [settingsRow] = await db.select().from(modelDirectorySettings).where(eq(modelDirectorySettings.companyId, companyId));
+        const setting = settingsRow?.localBaseUrl ?? null;
+        if (setting && localAddressKey(setting) === key) known = setting;
+      }
       if (!known) {
         const agentRows = await db
           .select({ baseUrl: agents.laneABaseUrl })
@@ -388,18 +413,27 @@ export function modelDirectoryService(db: Db, deps: ModelDirectoryServiceDeps = 
       }
       if (!key || !known) {
         throw unprocessable(
-          "That address is not one of your local model addresses. Save a local model with this address first (or use the address a quick agent already uses), then try again.",
+          "That address is not one this company uses for local models. Set it as the model server address in Settings > Models (or save a local model with it) first, then try again.",
         );
       }
       // Built from the stored address, not the request, so only a known host is called.
       const root = known.trim().replace(/\/+$/, "").replace(/\/v1$/i, "").replace(/\/+$/, "");
+      // One plain message for every failure; the detail goes to the server log only.
+      const unreadable = (detail: string) => {
+        logger.warn({ companyId, baseUrl: known, detail }, "model directory local sync failed");
+        return unprocessable(localSyncFailedMessage(known!));
+      };
       let res: Response;
       try {
-        res = await fetchImpl(`${root}/api/tags`, { signal: AbortSignal.timeout(LOCAL_MODELS_SYNC_TIMEOUT_MS) });
-      } catch {
-        throw unprocessable("Could not reach the model PC at that address. Check that the PC is on and Ollama (and Tailscale) are running.");
+        res = await fetchImpl(`${root}/api/tags`, {
+          signal: AbortSignal.timeout(LOCAL_MODELS_SYNC_TIMEOUT_MS),
+          // A saved address that redirects elsewhere is not followed.
+          redirect: "error",
+        });
+      } catch (error) {
+        throw unreadable(error instanceof Error ? error.message : "request failed");
       }
-      if (!res.ok) throw unprocessable(`The model PC answered with an error (HTTP ${res.status}). Check that Ollama is running there.`);
+      if (!res.ok) throw unreadable(`HTTP ${res.status}`);
       let body: unknown;
       try {
         body = await res.json();
@@ -407,7 +441,7 @@ export function modelDirectoryService(db: Db, deps: ModelDirectoryServiceDeps = 
         body = null;
       }
       const listed = parseOllamaTags(body);
-      if (!listed) throw unprocessable("Something answered at that address, but it does not look like Ollama.");
+      if (!listed) throw unreadable("answer is not an Ollama model list");
 
       const present = new Set(listed.map((m) => ollamaTagKey(m.name)));
       const now = nowOf();
@@ -600,28 +634,48 @@ export function modelDirectoryService(db: Db, deps: ModelDirectoryServiceDeps = 
       });
     },
 
-    /** Every ready-made starter, flagged with whether this company already has it. */
+    /**
+     * Every ready-made starter, flagged with whether this company already has
+     * it. A local starter has no address of its own, so it counts as added
+     * when the company has a local setup with the same model id at any address.
+     */
     async listStarters(companyId: string): Promise<ModelDirectoryStarterStatus[]> {
       const existing = await db
         .select({ provider: modelDirectoryEntries.provider, model: modelDirectoryEntries.model, baseUrl: modelDirectoryEntries.baseUrl })
         .from(modelDirectoryEntries)
         .where(eq(modelDirectoryEntries.companyId, companyId));
-      const have = new Set(existing.map((e) => `${e.provider}\u0000${e.model}\u0000${(e.baseUrl ?? "").replace(/\/+$/, "")}`));
+      const keyOf = (provider: string, model: string, baseUrl: string | null) =>
+        provider === "local" ? `local\u0000${model}` : `${provider}\u0000${model}\u0000${(baseUrl ?? "").replace(/\/+$/, "")}`;
+      const have = new Set(existing.map((e) => keyOf(e.provider, e.model, e.baseUrl)));
       return MODEL_DIRECTORY_STARTERS.map((starter) => ({
         ...starter,
-        alreadyAdded: have.has(`${starter.provider}\u0000${starter.model}\u0000${(starter.baseUrl ?? "").replace(/\/+$/, "")}`),
+        alreadyAdded: have.has(keyOf(starter.provider, starter.model, starter.baseUrl)),
       }));
     },
 
-    /** Adds the chosen (default: all) starters this company lacks. Safe to repeat. */
-    async addStarters(companyId: string, starterIds: readonly string[] | undefined, actor: { userId: string | null }) {
+    /**
+     * Adds the chosen (default: all) starters this company lacks. Safe to
+     * repeat. Local starters get the company's model server address; while it
+     * is not set they are skipped with a plain reason (cloud ones are still
+     * added). Asking only for local starters without an address is refused.
+     */
+    async addStarters(companyId: string, starterIds: readonly string[] | undefined, actor: { userId: string | null }): Promise<ModelDirectoryStartersResult> {
       const wanted = starterIds ?? MODEL_DIRECTORY_STARTERS.map((s) => s.id);
       const unknown = wanted.filter((id) => !MODEL_DIRECTORY_STARTERS.some((s) => s.id === id));
       if (unknown.length > 0) throw unprocessable("One of the ready-made model setups you picked does not exist.");
+      const localAddress = (await this.getSettings(companyId)).localBaseUrl;
       const status = await this.listStarters(companyId);
+      const pending = status.filter((starter) => wanted.includes(starter.id) && !starter.alreadyAdded);
+      if (!localAddress && pending.length > 0 && pending.every((starter) => starter.provider === "local")) {
+        throw unprocessable(MODEL_DIRECTORY_NEEDS_LOCAL_ADDRESS_MESSAGE);
+      }
       const created: ModelDirectoryEntry[] = [];
-      for (const starter of status) {
-        if (!wanted.includes(starter.id) || starter.alreadyAdded) continue;
+      const skipped: ModelDirectoryStartersResult["skipped"] = [];
+      for (const starter of pending) {
+        if (starter.provider === "local" && !localAddress) {
+          skipped.push({ starterId: starter.id, name: starter.name, reason: MODEL_DIRECTORY_NEEDS_LOCAL_ADDRESS_MESSAGE });
+          continue;
+        }
         const taken = await db
           .select({ id: modelDirectoryEntries.id })
           .from(modelDirectoryEntries)
@@ -633,7 +687,7 @@ export function modelDirectoryService(db: Db, deps: ModelDirectoryServiceDeps = 
             name: starter.name,
             provider: starter.provider,
             model: starter.model,
-            baseUrl: starter.baseUrl,
+            baseUrl: starter.provider === "local" ? localAddress : starter.baseUrl,
             providerRouting: starter.providerRouting,
             defaultThinking: starter.defaultThinking,
             defaultTemperature: starter.defaultTemperature,
@@ -653,7 +707,7 @@ export function modelDirectoryService(db: Db, deps: ModelDirectoryServiceDeps = 
           }),
         );
       }
-      return created;
+      return { created, skipped };
     },
 
     /**

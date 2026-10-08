@@ -267,7 +267,7 @@ export function QuickAgentSection({
     enabled: Boolean(effectiveCompanyId),
   });
   const savedModels = modelDirectoryQuery.data ?? [];
-  // "Meta · Llama 3.2" > "3B · On your PC (llama3.2:latest)", so two setups of one model can be told apart.
+  // "Meta · Llama 3.2" > "3B · Local (llama3.2:latest)", so two setups of one model can be told apart.
   const savedModelGroups = useMemo(() => pickerGroups(savedModels), [savedModels]);
   const applySavedModel = (entryId: string) => {
     const entry = savedModels.find((candidate) => candidate.id === entryId);
@@ -668,11 +668,11 @@ export function QuickAgentSection({
             label="Model address"
             hint={
               provider === "local"
-                ? "The OpenAI-compatible address of your local model server, for example http://localhost:11434/v1 (Ollama) or http://localhost:1234/v1 (LM Studio)."
+                ? "The OpenAI-compatible address of the computer that runs the model server, as Paperclip's server reaches it, for example http://192.168.1.20:11434/v1 (Ollama) or http://192.168.1.20:1234/v1 (LM Studio), or a Tailscale address. Not localhost unless the models run on Paperclip's own server."
                 : `Leave empty to use ${providerDescriptor.defaultBaseUrl}.`
             }
             value={agent.laneABaseUrl ?? null}
-            placeholder={providerDescriptor.defaultBaseUrl ?? "http://localhost:11434/v1"}
+            placeholder={providerDescriptor.defaultBaseUrl ?? "http://192.168.1.20:11434/v1"}
             disabled={settingMutation.isPending}
             onSave={(next) => settingMutation.mutateAsync({ laneABaseUrl: next })}
           />

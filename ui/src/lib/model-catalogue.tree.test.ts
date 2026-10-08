@@ -9,7 +9,12 @@ import {
   entryIdentity,
   filterEntries,
   findKnownMatch,
+  defaultLocalAddress,
+  GPU_NOT_SET_ADVICE,
   gpuFit,
+  gpuFitLabel,
+  isLoopbackAddress,
+  localAddressIssue,
   localAddressesInUse,
   localAddressOf,
   modelIdChoices,
@@ -20,6 +25,7 @@ import {
   ratingsAverage,
   ratingsIssue,
   ratingsLine,
+  resyncTargets,
   runOptionLabel,
   tooBigAdvice,
 } from "./model-catalogue";
@@ -200,10 +206,27 @@ describe("known models", () => {
   it("advises OpenRouter hosts when a size is too big", () => {
     const big = KNOWN[1]!.variants[1]!;
     expect(tooBigAdvice(big, 12)).toBe(
-      "Too big for your PC (needs ~20 GB, you have 12 GB) - run it on OpenRouter: deepinfra, together",
+      "Too big for the graphics card (needs ~20 GB, this company's has 12 GB) - run it on OpenRouter: deepinfra, together",
     );
     expect(tooBigAdvice(big, 24)).toBeNull();
     expect(tooBigAdvice(big, null)).toBeNull();
+  });
+
+  it("treats 'No graphics card' (0 GB) as known: nothing fits, and says so plainly", () => {
+    const big = KNOWN[1]!.variants[1]!;
+    expect(gpuFit(3, 0)).toBe("no");
+    expect(gpuFitLabel("no", 0)).toBe("Needs a graphics card");
+    expect(gpuFitLabel("no", 12)).toBe("Too big for the graphics card");
+    expect(tooBigAdvice(big, 0)).toMatch(/^Needs a graphics card with ~20 GB; this company's computer has none/);
+  });
+
+  it("gives no fit verdict at all while the graphics card memory is not set", () => {
+    const tree = buildModelTree([qwenLocal], { known: KNOWN, gpuVramGb: null });
+    const variants = tree.flatMap((m) => m.families.flatMap((f) => f.variants));
+    expect(variants.every((v) => v.fit === null && v.tooBigAdvice === null)).toBe(true);
+    // No local upgrade is offered on a guess; cloud ones still are.
+    expect(variants.flatMap((v) => v.upgrades).every((u) => u.local === null)).toBe(true);
+    expect(GPU_NOT_SET_ADVICE).toBe("Set your graphics card memory above to see what fits.");
   });
 });
 
@@ -230,7 +253,7 @@ describe("buildModelTree", () => {
     expect(oneB!.entries).toHaveLength(0);
     expect(oneB!.fit).toBe("yes");
     expect(oneB!.pullCommand).toBe("ollama pull llama3.2:1b");
-    expect(oneB!.knownOptions.map((o) => o.label)).toEqual(["On your PC · llama3.2:1b (Q8_0, 1.3 GB)"]);
+    expect(oneB!.knownOptions.map((o) => o.label)).toEqual(["Local · llama3.2:1b (Q8_0, 1.3 GB)"]);
     expect(threeB!.installedLocally).toBe(true);
     expect(threeB!.pullCommand).toBeNull();
     // Both the local tag (saved as its alias) and the OpenRouter id are saved already.
@@ -300,10 +323,58 @@ describe("buildModelTree", () => {
 });
 
 describe("local addresses and installed models", () => {
-  it("finds the addresses in use, most used first, with a default", () => {
-    const other = entry({ name: "Other PC", baseUrl: "http://10.0.0.2:11434/v1/" });
+  it("finds the addresses in use, most used first, and never invents one", () => {
+    const other = entry({ name: "Other server", baseUrl: "http://10.0.0.2:11434/v1/" });
     expect(localAddressesInUse([llamaLocal, qwenLocal, other, llamaCloud])).toEqual([PC, "http://10.0.0.2:11434/v1"]);
-    expect(localAddressOf([llamaCloud])).toBe("http://100.124.232.68:11434/v1");
+    expect(localAddressOf([llamaCloud])).toBeNull();
+  });
+
+  it("starts new local models from the company's address setting, else a saved one, else asks", () => {
+    expect(defaultLocalAddress("http://192.168.1.20:11434/v1/", [llamaLocal])).toBe("http://192.168.1.20:11434/v1");
+    expect(defaultLocalAddress(null, [llamaLocal])).toBe(PC);
+    expect(defaultLocalAddress("  ", [llamaCloud])).toBeNull();
+    expect(defaultLocalAddress(null, [])).toBeNull();
+  });
+
+  it("resyncs the address setting and every local address in use, once each", () => {
+    expect(resyncTargets(null, [llamaCloud])).toEqual([]);
+    expect(resyncTargets("http://192.168.1.20:11434/v1", [llamaCloud])).toEqual(["http://192.168.1.20:11434/v1"]);
+    expect(resyncTargets("http://192.168.1.20:11434/v1", [llamaLocal])).toEqual(["http://192.168.1.20:11434/v1", PC]);
+    expect(resyncTargets(`${PC}/`, [llamaLocal, qwenLocal])).toEqual([PC]);
+  });
+
+  it("checks a model server address like the server does, and spots localhost", () => {
+    expect(localAddressIssue("")).toBeNull();
+    expect(localAddressIssue("http://192.168.1.20:11434/v1")).toBeNull();
+    expect(localAddressIssue("https://gpu.tailnet.ts.net/v1")).toBeNull();
+    expect(localAddressIssue("192.168.1.20:11434")).toMatch(/http:\/\//);
+    expect(localAddressIssue("ftp://box/v1")).toMatch(/http/);
+    expect(localAddressIssue("http://u:p@box/v1")).toMatch(/user name and password/);
+    expect(localAddressIssue("http://box/v1?x=1")).toMatch(/query/);
+    expect(isLoopbackAddress("http://localhost:11434/v1")).toBe(true);
+    expect(isLoopbackAddress("http://127.0.0.1:11434")).toBe(true);
+    expect(isLoopbackAddress("http://192.168.1.20:11434")).toBe(false);
+  });
+
+  it("marks local options that need an address, with no address in the draft", () => {
+    const without = buildModelTree([qwenLocal], { known: KNOWN, gpuVramGb: 24, localAddress: null });
+    const withAddress = buildModelTree([llamaCloud], { known: KNOWN, gpuVramGb: 24, localAddress: "http://192.168.1.20:11434/v1" });
+    const localOptions = (tree: typeof without) =>
+      tree.flatMap((m) => m.families.flatMap((f) => f.variants.flatMap((v) => v.knownOptions))).filter((o) => o.provider === "local");
+    // With no setting, a saved local address is used.
+    expect(localOptions(without).every((o) => !o.needsAddress && o.draft.baseUrl === PC)).toBe(true);
+    const bare = buildModelTree([llamaCloud], { known: KNOWN, gpuVramGb: 24, localAddress: null });
+    expect(localOptions(bare).length).toBeGreaterThan(0);
+    expect(localOptions(bare).every((o) => o.needsAddress === true && o.draft.baseUrl === null)).toBe(true);
+    expect(localOptions(withAddress).every((o) => !o.needsAddress && o.draft.baseUrl === "http://192.168.1.20:11434/v1")).toBe(true);
+  });
+
+  it("leaves the address empty in the add dialog prefill when none is set", () => {
+    expect(prefillForModel("local", "qwen3:14b", { known: KNOWN, localAddress: null }).baseUrl).toBeUndefined();
+    expect(prefillForModel("local", "qwen3:14b", { known: KNOWN }).baseUrl).toBeUndefined();
+    expect(prefillForModel("local", "qwen3:14b", { known: KNOWN, localAddress: "http://192.168.1.20:11434/v1" }).baseUrl).toBe(
+      "http://192.168.1.20:11434/v1",
+    );
   });
 
   it("drafts an installed model, using the known facts when it is a known tag", () => {
@@ -324,7 +395,7 @@ describe("local addresses and installed models", () => {
       known: KNOWN,
     });
     expect(unknown).toMatchObject({
-      name: "mystery:7b on your PC",
+      name: "mystery:7b (local)",
       variant: "7.2B",
       availability: "installed",
       specs: { params: "7.2B", quant: "Q4_0", sizeGb: 4 },
@@ -334,20 +405,20 @@ describe("local addresses and installed models", () => {
 
 describe("labels", () => {
   it("says how a saved entry runs", () => {
-    expect(runOptionLabel(llamaLocal)).toBe("On your PC · llama3.2:latest");
+    expect(runOptionLabel(llamaLocal)).toBe("Local · llama3.2:latest");
     expect(runOptionLabel(llamaCloud)).toBe("OpenRouter · deepinfra");
     expect(runOptionLabel(loose)).toBe("OpenRouter · any host");
     expect(runOptionLabel({ provider: "huggingface", model: "a/b:novita", providerRouting: null })).toBe("Hugging Face · novita");
   });
 
   it("makes two Llama 3.2 entries distinguishable in the agent pickers", () => {
-    expect(pickerOptionLabel(llamaLocal, KNOWN)).toBe("3B · On your PC (llama3.2:latest) — Maja local");
+    expect(pickerOptionLabel(llamaLocal, KNOWN)).toBe("3B · Local (llama3.2:latest) — Maja local");
     expect(pickerOptionLabel(llamaCloud, KNOWN)).toBe("3B · OpenRouter");
     const groups = pickerGroups([llamaLocal, llamaCloud, custom, loose], KNOWN);
     expect(groups.map((g) => g.label)).toEqual(["Acme · Thing", "Meta · Llama 3.2", "Other"]);
     expect(groups[1]!.options.map((o) => o.label)).toEqual([
       "3B · OpenRouter",
-      "3B · On your PC (llama3.2:latest) — Maja local",
+      "3B · Local (llama3.2:latest) — Maja local",
     ]);
     expect(groups[2]!.options[0]!.label).toBe("OpenRouter — Loose");
   });
@@ -405,7 +476,7 @@ describe("add dialog prefill", () => {
     expect(claudeIdentity("gpt-4.1")).toBeNull();
   });
 
-  it("offers the right ids per provider, installed tags first for your PC", () => {
+  it("offers the right ids per provider, installed tags first for local models", () => {
     expect(modelIdChoices("anthropic", { known: KNOWN }).map((c) => c.value)).toEqual([
       "claude-haiku-4-5",
       "claude-sonnet-5",
@@ -413,8 +484,8 @@ describe("add dialog prefill", () => {
     ]);
     const local = modelIdChoices("local", { known: KNOWN, installedTags: ["llama3.2:latest", "mystery:7b"] });
     expect(local.slice(0, 2)).toEqual([
-      { value: "llama3.2:latest", label: "Installed on your PC" },
-      { value: "mystery:7b", label: "Installed on your PC" },
+      { value: "llama3.2:latest", label: "Installed on the model server" },
+      { value: "mystery:7b", label: "Installed on the model server" },
     ]);
     // llama3.2:3b is the same file as the installed llama3.2:latest, so it is not offered twice.
     expect(local.map((c) => c.value)).not.toContain("llama3.2:3b");
@@ -438,7 +509,7 @@ describe("add dialog prefill", () => {
 
   it("fills known local and OpenRouter models, and marks installed tags", () => {
     expect(prefillForModel("local", "llama3.2:1b", { known: KNOWN, localAddress: PC, gpuVramGb: 12, installedTags: ["llama3.2:1b"] })).toMatchObject({
-      name: "Llama 3.2 1B on your PC",
+      name: "Llama 3.2 1B (local)",
       maker: "Meta",
       family: "Llama 3.2",
       variant: "1B",

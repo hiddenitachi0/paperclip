@@ -6158,7 +6158,7 @@ registerCurrentRoute({
   method: "get",
   path: "/api/companies/{companyId}/model-directory/settings",
   tags: ["model-directory"],
-  summary: "Read the company's Settings > Models settings (the model PC's graphics memory in GB, or null). Owner/admin only.",
+  summary: "Read the company's Settings > Models settings: localGpuVramGb (graphics card memory in GB of the computer that runs local models; null = not set, 0 = no graphics card) and localBaseUrl (the company's local model server address; null = not set). Owner/admin only.",
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
 });
 
@@ -6166,7 +6166,7 @@ registerCurrentRoute({
   method: "put",
   path: "/api/companies/{companyId}/model-directory/settings",
   tags: ["model-directory"],
-  summary: "Save the company's Settings > Models settings (the model PC's graphics memory in GB). Informational only. Owner/admin only.",
+  summary: "Save the company's Settings > Models settings. Send localGpuVramGb, localBaseUrl or both; a field left out keeps its value, null clears it. The graphics memory is informational; the address is the default for new local setups and ready-made local models. Owner/admin only.",
   body: updateModelDirectorySettingsSchema,
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
 });
@@ -6175,7 +6175,7 @@ registerCurrentRoute({
   method: "post",
   path: "/api/companies/{companyId}/model-directory/local-sync",
   tags: ["model-directory"],
-  summary: "Ask the local Ollama at one of this company's saved local addresses which models are installed, and mark the saved local setups there as installed or planned. An address the company does not already use is refused (422). Owner/admin only.",
+  summary: "Ask the local Ollama at one of this company's local addresses (its model server address setting, a saved local setup's or a quick agent's) which models are installed, and mark the saved local setups there as installed or planned. An address the company does not already use is refused (422). Owner/admin only.",
   body: syncLocalModelsSchema,
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 422: r.unprocessable },
 });
@@ -6184,7 +6184,7 @@ registerCurrentRoute({
   method: "get",
   path: "/api/companies/{companyId}/model-directory/starters",
   tags: ["model-directory"],
-  summary: "List the ready-made model setups (local Ollama models, Mistral Small 3.2 on OpenRouter) and whether each is already added",
+  summary: "List the ready-made model setups (local Ollama models and cloud models) and whether each is already added",
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
 });
 
@@ -6192,7 +6192,7 @@ registerCurrentRoute({
   method: "post",
   path: "/api/companies/{companyId}/model-directory/starters",
   tags: ["model-directory"],
-  summary: "Add ready-made model setups (all, or the chosen starterIds); ones already added are skipped. No key is stored.",
+  summary: "Add ready-made model setups (all, or the chosen starterIds); ones already added are skipped. Returns { created, skipped }: local ones get the company's model server address and are skipped with a reason while it is not set (422 when only local ones were asked for). No key is stored.",
   body: addModelDirectoryStartersSchema,
   responses: { 201: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 422: r.unprocessable },
 });

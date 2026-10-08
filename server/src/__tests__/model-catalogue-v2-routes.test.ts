@@ -19,6 +19,7 @@ const mockSvc = vi.hoisted(() => ({
   getSettings: vi.fn(),
   updateSettings: vi.fn(),
   syncLocalModels: vi.fn(),
+  addStarters: vi.fn(),
 }));
 vi.mock("../services/model-directory.js", () => ({ modelDirectoryService: () => mockSvc }));
 const mockLog = vi.hoisted(() => vi.fn());
@@ -60,8 +61,11 @@ const syncResult = {
 describe("catalogue v2 routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockSvc.getSettings.mockResolvedValue({ localGpuVramGb: 12 });
-    mockSvc.updateSettings.mockImplementation(async (_c: string, body: { localGpuVramGb: number | null }) => body);
+    mockSvc.getSettings.mockResolvedValue({ localGpuVramGb: 12, localBaseUrl: null });
+    mockSvc.updateSettings.mockImplementation(async (_c: string, body: { localGpuVramGb?: number | null; localBaseUrl?: string | null }) => ({
+      localGpuVramGb: body.localGpuVramGb ?? null,
+      localBaseUrl: body.localBaseUrl ?? null,
+    }));
     mockSvc.syncLocalModels.mockResolvedValue(syncResult);
   });
 
@@ -91,27 +95,37 @@ describe("catalogue v2 routes", () => {
     const app = await buildApp(board(role));
     const read = await request(app).get(`${base}/settings`);
     expect(read.status).toBe(200);
-    expect(read.body).toEqual({ localGpuVramGb: 12 });
+    expect(read.body).toEqual({ localGpuVramGb: 12, localBaseUrl: null });
     expect(mockSvc.get).not.toHaveBeenCalled(); // not swallowed by /:entryId
     expect(mockLog).not.toHaveBeenCalled();
 
-    const saved = await request(app).put(`${base}/settings`).send({ localGpuVramGb: 16 });
+    const body = { localGpuVramGb: 16, localBaseUrl: "http://192.168.1.20:11434/v1" };
+    const saved = await request(app).put(`${base}/settings`).send(body);
     expect(saved.status).toBe(200);
-    expect(saved.body).toEqual({ localGpuVramGb: 16 });
-    expect(mockSvc.updateSettings).toHaveBeenCalledWith(companyId, { localGpuVramGb: 16 }, { userId: "filip" });
+    expect(saved.body).toEqual(body);
+    expect(mockSvc.updateSettings).toHaveBeenCalledWith(companyId, body, { userId: "filip" });
     expect(mockLog).toHaveBeenCalledTimes(1);
     expect(mockLog.mock.calls[0]![1]).toMatchObject({
       companyId,
       action: "model_directory.settings_updated",
       entityType: "model_directory_settings",
       entityId: companyId,
-      details: { localGpuVramGb: 16 },
+      details: { localGpuVramGb: 16, localBaseUrl: "http://192.168.1.20:11434/v1" },
     });
   });
 
   it("rejects bad settings before the service", async () => {
     const app = await buildApp(board("owner"));
-    for (const body of [{}, { localGpuVramGb: "12" }, { localGpuVramGb: -2 }, { localGpuVramGb: 12, extra: 1 }]) {
+    for (const body of [
+      {},
+      { localGpuVramGb: "12" },
+      { localGpuVramGb: -2 },
+      { localGpuVramGb: 12, extra: 1 },
+      { localBaseUrl: "192.168.1.20:11434" },
+      { localBaseUrl: "http://me:secret@192.168.1.20:11434/v1" },
+      { localBaseUrl: "http://192.168.1.20:11434/v1?key=1" },
+      { localBaseUrl: 42 },
+    ]) {
       expect((await request(app).put(`${base}/settings`).send(body)).status, JSON.stringify(body)).toBe(400);
     }
     expect(mockSvc.updateSettings).not.toHaveBeenCalled();
@@ -141,5 +155,17 @@ describe("catalogue v2 routes", () => {
       expect((await request(app).post(`${base}/local-sync`).send(body)).status, JSON.stringify(body)).toBe(400);
     }
     expect(mockSvc.syncLocalModels).toHaveBeenCalledTimes(1);
+  });
+
+  it("adds starters and returns what was added and what was skipped, logging only the added ones", async () => {
+    const app = await buildApp(board("owner"));
+    const created = { id: "e9", name: "Mistral Small 3.2 (cloud)", provider: "openrouter", model: "mistralai/mistral-small-3.2-24b-instruct" };
+    const skipped = [{ starterId: "local-qwen3-14b", name: "Qwen3 14B", reason: "Set this company's model server address first." }];
+    mockSvc.addStarters.mockResolvedValue({ created: [created], skipped });
+    const res = await request(app).post(`${base}/starters`).send({});
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({ created: [created], skipped });
+    expect(mockLog).toHaveBeenCalledTimes(1);
+    expect(mockLog.mock.calls[0]![1]).toMatchObject({ action: "model_directory_entry.created", entityId: "e9", details: { source: "starter" } });
   });
 });

@@ -69,7 +69,7 @@ const ALL = [gemmaSmall, gemmaFav, gemmaBig, googleLoose, qwen, nomaker, archive
 
 describe("labels", () => {
   it("says where, what for and status in plain words", () => {
-    expect(whereLabel("local")).toBe("On your PC");
+    expect(whereLabel("local")).toBe("On your own computer (local)");
     expect(whereLabel("openrouter")).toBe("OpenRouter");
     expect(whereLabel("huggingface")).toBe("Hugging Face");
     expect(laneLabel("quick")).toBe("Quick chat");
@@ -99,9 +99,9 @@ describe("groupEntries", () => {
     expect(groups[3]!.entries.map((e) => e.name)).toEqual(["Mystery"]);
   });
 
-  it("groups by where it runs: your PC, OpenRouter, Hugging Face, then the rest", () => {
+  it("groups by where it runs: local, OpenRouter, Hugging Face, then the rest", () => {
     const groups = groupEntries(ALL, "where");
-    expect(groups.map((g) => g.title)).toEqual(["On your PC", "OpenRouter", "Hugging Face", "OpenAI"]);
+    expect(groups.map((g) => g.title)).toEqual(["On your own computer (local)", "OpenRouter", "Hugging Face", "OpenAI"]);
     expect(groups.map((g) => g.key)).toEqual(["where-local", "where-openrouter", "where-huggingface", "where-openai"]);
     expect(groups[0]!.subgroups).toBeUndefined();
     // Archived entries sort after active ones.
@@ -211,9 +211,9 @@ describe("texts", () => {
   });
 
   it("counts active models by place, archived separately", () => {
-    expect(countsLine(ALL)).toBe("6 models · 3 on your PC · 3 in the cloud · 1 archived");
-    expect(countsLine([gemmaSmall])).toBe("1 model · 1 on your PC · 0 in the cloud");
-    expect(countsLine(ALL, 2)).toBe("6 models · 3 on your PC · 3 in the cloud · 1 archived · 2 shown");
+    expect(countsLine(ALL)).toBe("6 models · 3 local · 3 in the cloud · 1 archived");
+    expect(countsLine([gemmaSmall])).toBe("1 model · 1 local · 0 in the cloud");
+    expect(countsLine(ALL, 2)).toBe("6 models · 3 local · 3 in the cloud · 1 archived · 2 shown");
   });
 
   it("reads comma-separated tags and checks them", () => {

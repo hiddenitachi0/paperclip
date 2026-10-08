@@ -196,7 +196,7 @@ describe("QuickAgentSection saved-model dropdown", () => {
     expect(groups.map((g) => g.label)).toEqual(["Meta · Llama 3.2"]);
     expect([...groups[0]!.querySelectorAll("option")].map((o) => o.textContent)).toEqual([
       "3B · OpenRouter",
-      "3B · On your PC (llama3.2:latest) — Maja local",
+      "3B · Local (llama3.2:latest) — Maja local",
     ]);
     await act(async () => root.unmount());
   });

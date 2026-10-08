@@ -309,7 +309,7 @@ export function QuickAgentBackupModels({
   }, [savedKey]);
 
   const pickable = useMemo(() => filterEntries(savedModels, {}), [savedModels]);
-  // "Meta · Llama 3.2" > "3B · On your PC (llama3.2:latest)", so two setups of one model can be told apart.
+  // "Meta · Llama 3.2" > "3B · Local (llama3.2:latest)", so two setups of one model can be told apart.
   const pickableGroups = useMemo(() => pickerGroups(pickable), [pickable]);
   const savedModelById = useMemo(() => new Map(savedModels.map((entry) => [entry.id, entry])), [savedModels]);
 
@@ -570,7 +570,7 @@ export function QuickAgentBackupModels({
                         value={entry.baseUrl}
                         disabled={busy}
                         data-testid={`backup-baseurl-${index}`}
-                        placeholder={descriptor.defaultBaseUrl ?? "http://localhost:11434/v1"}
+                        placeholder={descriptor.defaultBaseUrl ?? "http://192.168.1.20:11434/v1"}
                         onChange={(event) => updateEntry(entry.id, { baseUrl: event.target.value })}
                       />
                     </label>

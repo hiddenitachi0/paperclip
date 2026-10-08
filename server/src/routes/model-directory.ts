@@ -104,7 +104,8 @@ export function modelDirectoryRoutes(rawDb: Db) {
     res.json(outcome.result);
   });
 
-  // Catalogue v2: per-company settings (the model PC's graphics memory).
+  // Catalogue v2: per-company settings (graphics card memory of the computer
+  // that runs local models, and the company's local model server address).
   // Same access as the list; saving is gated like saving a setup.
   router.get("/companies/:companyId/model-directory/settings", scope(), async (req, res) => {
     res.json(await svc.getSettings(req.params.companyId as string));
@@ -123,7 +124,7 @@ export function modelDirectoryRoutes(rawDb: Db) {
       action: "model_directory.settings_updated",
       entityType: "model_directory_settings",
       entityId: companyId,
-      details: { localGpuVramGb: updated.localGpuVramGb },
+      details: { localGpuVramGb: updated.localGpuVramGb, localBaseUrl: updated.localBaseUrl },
     });
     res.json(updated);
   });
@@ -160,9 +161,10 @@ export function modelDirectoryRoutes(rawDb: Db) {
 
   router.post("/companies/:companyId/model-directory/starters", scope(), validate(addModelDirectoryStartersSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
-    const created = await svc.addStarters(companyId, (req.body as { starterIds?: string[] }).starterIds, actorUser(req));
-    for (const entry of created) await audit(req, companyId, "model_directory_entry.created", entry, { source: "starter" });
-    res.status(201).json(created);
+    const result = await svc.addStarters(companyId, (req.body as { starterIds?: string[] }).starterIds, actorUser(req));
+    for (const entry of result.created) await audit(req, companyId, "model_directory_entry.created", entry, { source: "starter" });
+    // { created, skipped }: local ready-made models are skipped (with a plain reason) while no model server address is set.
+    res.status(201).json(result);
   });
 
   router.post("/companies/:companyId/model-directory/import-agent-settings", scope(), async (req, res) => {

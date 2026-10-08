@@ -4,7 +4,9 @@ import { ArrowUpCircle, ClipboardCopy, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { SettingsSection, SettingsSubsection } from "./SettingsSection";
+import { HelpTip, MODEL_HELP } from "./ModelHelp";
 import {
+  GPU_NOT_SET_ADVICE,
   gpuFitLabel,
   UNSPECIFIED_VARIANT,
   type FamilyNode,
@@ -27,8 +29,10 @@ type Entry = ModelDirectoryEntry;
 export interface ModelCatalogueTreeProps {
   makers: MakerNode<Entry>[];
   canManage: boolean;
-  /** Whether the graphics card size is known (fit advice needs it). */
+  /** Whether the graphics card memory is set (fit advice needs it; nothing is guessed while it is not). */
   gpuKnown: boolean;
+  /** The graphics card memory in GB (0 = none), for the badge wording. */
+  gpuVramGb?: number | null;
   renderRow: (entry: Entry) => ReactNode;
   onAdd: (draft: CreateModelDirectoryEntry) => void;
   onCopyText: (text: string, what: string) => void;
@@ -42,7 +46,10 @@ function count(n: number, one: string, many: string): string {
   return `${n} ${n === 1 ? one : many}`;
 }
 
-function FitBadge({ fit }: { fit: GpuFit | null }) {
+/** Shown on a local option while the company has no model server address. */
+export const NEEDS_ADDRESS_TO_ADD = "Set the model server address at the top of this page to add local models.";
+
+function FitBadge({ fit, vramGb }: { fit: GpuFit | null; vramGb?: number | null }) {
   if (!fit) return null;
   return (
     <span
@@ -53,7 +60,7 @@ function FitBadge({ fit }: { fit: GpuFit | null }) {
         fit === "no" && "border-red-500/40 text-red-700 dark:text-red-400",
       )}
     >
-      {gpuFitLabel(fit)}
+      {gpuFitLabel(fit, vramGb)}
     </span>
   );
 }
@@ -66,7 +73,7 @@ function CopyCommand({ command, onCopyText }: { command: string; onCopyText: (te
         type="button"
         className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-foreground"
         aria-label={`Copy ${command}`}
-        title="Copy the command, then paste it in a terminal on your PC"
+        title="Copy the command, then paste it in a terminal on the computer that runs the model server"
         onClick={() => onCopyText(command, "Install command")}
       >
         <ClipboardCopy className="h-3 w-3" />
@@ -103,11 +110,16 @@ function KnownOptionRow({
           )}
         </p>
       </div>
-      {canManage && (
-        <Button size="xs" variant="outline" onClick={() => onAdd(option.draft)}>
-          <Plus /> Add this way to run it
-        </Button>
-      )}
+      {canManage &&
+        (option.needsAddress ? (
+          <span className="text-[11px] text-amber-700 dark:text-amber-400" data-testid={`models-known-needs-address-${testIdPart(option.key)}`}>
+            {NEEDS_ADDRESS_TO_ADD}
+          </span>
+        ) : (
+          <Button size="xs" variant="outline" onClick={() => onAdd(option.draft)}>
+            <Plus /> Add this way to run it
+          </Button>
+        ))}
     </li>
   );
 }
@@ -122,7 +134,7 @@ function UpgradeRow({
   onAdd: (draft: CreateModelDirectoryEntry) => void;
 }) {
   const where = [
-    upgrade.local ? "fits on your PC" : upgrade.fit === "no" ? "too big for your PC" : null,
+    upgrade.local ? "fits the graphics card" : upgrade.fit === "no" ? "too big for the graphics card" : null,
     upgrade.openrouter ? `OpenRouter: ${upgrade.openrouter.hosts?.join(", ")}` : null,
   ]
     .filter(Boolean)
@@ -141,11 +153,14 @@ function UpgradeRow({
       </span>
       {canManage && (
         <span className="flex flex-wrap gap-1">
-          {upgrade.local && (
-            <Button size="xs" variant="outline" onClick={() => onAdd(upgrade.local!.draft)}>
-              <Plus /> Add on your PC
-            </Button>
-          )}
+          {upgrade.local &&
+            (upgrade.local.needsAddress ? (
+              <span className="text-[11px] text-amber-700 dark:text-amber-400">{NEEDS_ADDRESS_TO_ADD}</span>
+            ) : (
+              <Button size="xs" variant="outline" onClick={() => onAdd(upgrade.local!.draft)}>
+                <Plus /> Add as local
+              </Button>
+            ))}
           {upgrade.openrouter && (
             <Button size="xs" variant="outline" onClick={() => onAdd(upgrade.openrouter!.draft)}>
               <Plus /> Add via OpenRouter
@@ -162,6 +177,7 @@ function SizeBody({
   familyTitle,
   canManage,
   gpuKnown,
+  gpuVramGb,
   renderRow,
   onAdd,
   onCopyText,
@@ -172,16 +188,18 @@ function SizeBody({
     <div className="space-y-2">
       {known && (
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground" data-testid={`models-size-status-${variant.key}`}>
-          <FitBadge fit={variant.fit} />
-          {variant.installedLocally && <span>Installed on your PC</span>}
+          <FitBadge fit={variant.fit} vramGb={gpuVramGb} />
+          {variant.installedLocally && <span>Installed on the model server</span>}
           {!variant.installedLocally && variant.pullCommand && (
             <span className="inline-flex min-w-0 flex-wrap items-center gap-1">
-              Not on your PC yet. To install it: <CopyCommand command={variant.pullCommand} onCopyText={onCopyText} />
+              Not installed locally yet. To install it: <CopyCommand command={variant.pullCommand} onCopyText={onCopyText} />
             </span>
           )}
           {!hasLocalWay && <span>Not available for Ollama.</span>}
           {!gpuKnown && hasLocalWay && known.minVramGb !== null && (
-            <span>Needs about {known.minVramGb} GB of graphics memory.</span>
+            <span data-testid={`models-gpu-not-set-${variant.key}`}>
+              Needs about {known.minVramGb} GB of graphics memory. {GPU_NOT_SET_ADVICE}
+            </span>
           )}
         </div>
       )}
@@ -196,14 +214,15 @@ function SizeBody({
         <ul className="space-y-2">{variant.entries.map(renderRow)}</ul>
       ) : (
         <p className="text-xs text-muted-foreground">
-          You have not saved {familyTitle} {variant.title} yet.
+          {familyTitle} {variant.title} is not saved yet.
         </p>
       )}
 
       {variant.knownOptions.length > 0 && (
         <div className="space-y-1.5" data-testid={`models-known-options-${variant.key}`}>
-          <p className="text-xs font-medium text-muted-foreground">
+          <p className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
             {variant.entries.length > 0 ? "Other ways to run it" : "Ways to run it"}
+            <HelpTip topic="ways to run it" text={MODEL_HELP.runOptions} />
           </p>
           <ul className="space-y-1.5">
             {variant.knownOptions.map((option) => (
@@ -220,7 +239,13 @@ function SizeBody({
         >
           <p className="flex items-center gap-1.5 text-xs font-medium">
             <ArrowUpCircle className="h-3.5 w-3.5 text-sky-600" /> Upgrade: bigger versions of this model
+            <HelpTip topic="upgrade" text={MODEL_HELP.upgrade} />
           </p>
+          {!gpuKnown && (
+            <p className="text-[11px] text-muted-foreground" data-testid={`models-upgrades-gpu-not-set-${variant.key}`}>
+              Only cloud versions are offered. {GPU_NOT_SET_ADVICE}
+            </p>
+          )}
           <ul className="space-y-1">
             {variant.upgrades.map((upgrade) => (
               <UpgradeRow key={upgrade.key} upgrade={upgrade} canManage={canManage} onAdd={onAdd} />
@@ -232,11 +257,11 @@ function SizeBody({
   );
 }
 
-function sizeSummary(variant: VariantNode<Entry>): string {
+function sizeSummary(variant: VariantNode<Entry>, gpuVramGb?: number | null): string {
   const parts: string[] = [];
   parts.push(variant.entries.length > 0 ? count(variant.entries.length, "saved way", "saved ways") : "not saved");
   if (variant.installedLocally) parts.push("installed");
-  const fit = gpuFitLabel(variant.fit);
+  const fit = gpuFitLabel(variant.fit, gpuVramGb);
   if (fit) parts.push(fit.toLowerCase());
   return parts.join(" · ");
 }
@@ -253,7 +278,7 @@ function FamilyBody(props: Omit<ModelCatalogueTreeProps, "makers"> & { family: F
         <SettingsSubsection
           key={variant.key}
           title={variant.title === UNSPECIFIED_VARIANT ? "Size not set" : `${family.unset ? "" : `${family.title} `}${variant.title}`}
-          summary={sizeSummary(variant)}
+          summary={sizeSummary(variant, props.gpuVramGb)}
           defaultOpen={variant.entries.length > 0}
           storageKey={`models.size.${variant.key}`}
           data-testid={`models-size-${variant.key}`}

@@ -27,10 +27,10 @@ import {
 
 /**
  * One saved model in the Settings > Models catalogue (one way to run a model
- * size): a compact row with the favourite star, name, how it runs ("On your
- * PC · llama3.2:3b" / "OpenRouter · deepinfra"), chips, the owner's test
+ * size): a compact row with the favourite star, name, how it runs ("Local ·
+ * llama3.2:3b" / "OpenRouter · deepinfra"), chips, the company's test
  * scores, a one-line spec summary and the first line of the note. "More" opens the rest (full note, address, links,
- * defaults). Change buttons only show for the owner and admins.
+ * defaults). Change buttons only show for the company owner and admins.
  */
 
 function Chip({

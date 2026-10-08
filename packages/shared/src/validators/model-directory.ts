@@ -49,7 +49,7 @@ export const modelDirectorySpecsSchema = z
     sizeGb: z.number().min(0).max(2000).nullable().optional(),
     /** Context window in tokens. */
     contextTokens: z.number().int().min(0).max(10_000_000).nullable().optional(),
-    /** Whether it fits on the owner's graphics card. */
+    /** Whether it fits the graphics card of the computer that runs local models (as the person saving it judged). */
     fitsLocalGpu: z.enum(["yes", "tight", "no"]).nullable().optional(),
     /** Whether tool calling works with it. */
     tools: z.enum(["yes", "partial", "no"]).nullable().optional(),
@@ -64,7 +64,7 @@ export const modelDirectorySpecsSchema = z
   .strict();
 export type ModelDirectorySpecs = z.infer<typeof modelDirectorySpecsSchema>;
 
-// Catalogue v2: the owner's own test scores, one per criterion they choose
+// Catalogue v2: the company's own test scores, one per criterion they choose
 // ("Tool calling", "Responsiveness", "Long conversations", "Coding", ...).
 export const MODEL_DIRECTORY_RATINGS_MAX = 20;
 export const modelDirectoryRatingSchema = z
@@ -215,12 +215,12 @@ export interface ModelDirectoryEntry {
 }
 
 // DUR-4418: ready-made starter setups, replaced 8 Oct 2026 by the curated
-// catalogue from the model-library research (local models for a 12 GB card,
-// their bigger tool-capable cloud versions, OpenRouter hosts checked for tool
-// support). Local models reached over Tailscale (never "localhost", which
-// for Paperclip is the server itself). No key is part of a starter.
-
-export const MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS = "http://100.124.232.68:11434/v1";
+// catalogue from the model-library research (small local models, their bigger
+// tool-capable cloud versions, OpenRouter hosts checked for tool support).
+// Nothing here assumes one company's computer: local starters carry no
+// address (baseUrl null) and get the company's own model server address
+// (Settings > Models) when they are added; they start as "planned" until a
+// resync finds them installed. No key is part of a starter.
 
 export interface ModelDirectoryStarter {
   /** Stable slug, used to pick which starters to add. */
@@ -228,6 +228,7 @@ export interface ModelDirectoryStarter {
   name: string;
   provider: (typeof LANE_A_PROVIDERS)[number];
   model: string;
+  /** Always null for a local starter: the company's model server address is used when it is added. */
   baseUrl: string | null;
   providerRouting: { only?: string[]; ignore?: string[] } | null;
   defaultThinking: (typeof LANE_A_THINKING_MODES)[number] | null;
@@ -251,7 +252,7 @@ export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
     name: "Llama 3.2 3B",
     provider: "local",
     model: "llama3.2:latest",
-    baseUrl: MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS,
+    baseUrl: null,
     providerRouting: null,
     defaultThinking: null,
     defaultTemperature: 0.3,
@@ -261,9 +262,9 @@ export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
     family: "Llama 3.2",
     variant: "3B",
     lane: "quick",
-    availability: "installed",
+    availability: "planned",
     tags: ["small", "fast", "tools", "fallback", "censored", "private"],
-    specs: {"params": "3B", "quant": "Q4_K_M", "sizeGb": 2.0, "fitsLocalGpu": "yes", "tools": "partial", "vision": false, "thinking": "no", "pullCommand": "ollama pull llama3.2"},
+    specs: {"params": "3B", "quant": "Q4_K_M", "sizeGb": 2.0, "tools": "partial", "vision": false, "thinking": "no", "pullCommand": "ollama pull llama3.2"},
     note: "Tiny and quick. Good as a backup or a simple router, but it gets facts wrong and its Norwegian is weak.",
   },
   {
@@ -271,7 +272,7 @@ export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
     name: "Qwen3 14B",
     provider: "local",
     model: "qwen3:14b",
-    baseUrl: MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS,
+    baseUrl: null,
     providerRouting: null,
     defaultThinking: "off",
     defaultTemperature: 0.7,
@@ -281,17 +282,17 @@ export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
     family: "Qwen3",
     variant: "14B",
     lane: "quick",
-    availability: "downloading",
+    availability: "planned",
     tags: ["tools", "private", "norwegian-ok", "default-local", "censored"],
-    specs: {"params": "14B", "quant": "Q4_K_M", "sizeGb": 9.3, "fitsLocalGpu": "tight", "tools": "yes", "vision": false, "thinking": "toggle", "pullCommand": "ollama pull qwen3:14b"},
-    note: "Best local model for a normal assistant: the most reliable tool use that fits your PC. Use this for company-facing quick agents.",
+    specs: {"params": "14B", "quant": "Q4_K_M", "sizeGb": 9.3, "tools": "yes", "vision": false, "thinking": "toggle", "pullCommand": "ollama pull qwen3:14b"},
+    note: "Best local model for a normal assistant: the most reliable tool use that fits a 12 GB graphics card. Use this for company-facing quick agents.",
   },
   {
     id: "local-qwen3-14b-uncensored",
     name: "Qwen3 14B uncensored",
     provider: "local",
     model: "huihui_ai/qwen3-abliterated:14b",
-    baseUrl: MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS,
+    baseUrl: null,
     providerRouting: null,
     defaultThinking: "off",
     defaultTemperature: 0.7,
@@ -301,9 +302,9 @@ export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
     family: "Qwen3",
     variant: "14B uncensored",
     lane: "quick",
-    availability: "installed",
+    availability: "planned",
     tags: ["uncensored", "persona", "private", "tools-untested"],
-    specs: {"params": "14B", "quant": "Q4_K_M", "sizeGb": 9.0, "fitsLocalGpu": "tight", "tools": "yes", "vision": false, "thinking": "toggle", "pullCommand": "ollama pull huihui_ai/qwen3-abliterated:14b"},
+    specs: {"params": "14B", "quant": "Q4_K_M", "sizeGb": 9.0, "tools": "yes", "vision": false, "thinking": "toggle", "pullCommand": "ollama pull huihui_ai/qwen3-abliterated:14b"},
     note: "Same 14B with refusals removed. Only for a separate private persona; never on agents that touch company data. Test tools once first.",
   },
   {
@@ -311,7 +312,7 @@ export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
     name: "Qwen3 8B uncensored",
     provider: "local",
     model: "huihui_ai/qwen3-abliterated:8b-v2",
-    baseUrl: MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS,
+    baseUrl: null,
     providerRouting: null,
     defaultThinking: "off",
     defaultTemperature: 0.7,
@@ -321,9 +322,9 @@ export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
     family: "Qwen3",
     variant: "8B uncensored",
     lane: "quick",
-    availability: "downloading",
+    availability: "planned",
     tags: ["uncensored", "persona", "private", "fast", "tools-untested"],
-    specs: {"params": "8B", "quant": "Q4_K_M", "sizeGb": 5.0, "fitsLocalGpu": "yes", "tools": "yes", "vision": false, "thinking": "toggle", "pullCommand": "ollama pull huihui_ai/qwen3-abliterated:8b-v2"},
+    specs: {"params": "8B", "quant": "Q4_K_M", "sizeGb": 5.0, "tools": "yes", "vision": false, "thinking": "toggle", "pullCommand": "ollama pull huihui_ai/qwen3-abliterated:8b-v2"},
     note: "Lighter, faster uncensored Qwen with room for long chats. Same rule: separate persona only.",
   },
   {
@@ -331,7 +332,7 @@ export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
     name: "Qwen3.8 27B uncensored (2-bit, local)",
     provider: "local",
     model: "qwen38-27b-unc-8k",
-    baseUrl: MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS,
+    baseUrl: null,
     providerRouting: null,
     defaultThinking: "off",
     defaultTemperature: 0.7,
@@ -343,8 +344,8 @@ export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
     lane: "quick",
     availability: "planned",
     tags: ["uncensored", "persona", "vision", "experimental", "private"],
-    specs: {"params": "27B", "quant": "IQ2_XXS", "sizeGb": 9.8, "contextTokens": 8192, "fitsLocalGpu": "tight", "tools": "yes", "vision": true, "thinking": "toggle", "pullCommand": "ollama pull orcarouter/Qwen3.8-27B-Uncensored:iq2_xxs"},
-    note: "Strongest uncensored model that fits your PC, but heavily shrunk with short memory. Pull orcarouter/Qwen3.8-27B-Uncensored:iq2_xxs and create this name with num_ctx 8192.",
+    specs: {"params": "27B", "quant": "IQ2_XXS", "sizeGb": 9.8, "contextTokens": 8192, "tools": "yes", "vision": true, "thinking": "toggle", "pullCommand": "ollama pull orcarouter/Qwen3.8-27B-Uncensored:iq2_xxs"},
+    note: "Strongest uncensored model that fits a 12 GB graphics card, but heavily shrunk with short memory. Pull orcarouter/Qwen3.8-27B-Uncensored:iq2_xxs and create this name with num_ctx 8192.",
   },
   {
     id: "openrouter-qwen3-8-27b-cloud",
@@ -364,7 +365,7 @@ export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
     availability: "cloud",
     tags: ["tools", "vision", "coding", "agent", "default-cloud"],
     specs: {"params": "27B", "contextTokens": 262144, "tools": "yes", "vision": true, "thinking": "toggle"},
-    note: "Full-quality 27B with reliable tools; an agent already uses it. About $0.15 in / $1.88 out per million tokens on DeepInfra.",
+    note: "Full-quality 27B with reliable tools. About $0.15 in / $1.88 out per million tokens on DeepInfra.",
   },
   {
     id: "openrouter-qwen3-8-flash-cloud",
@@ -391,7 +392,7 @@ export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
     name: "Gemma 4 12B",
     provider: "local",
     model: "gemma4:12b",
-    baseUrl: MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS,
+    baseUrl: null,
     providerRouting: null,
     defaultThinking: "off",
     defaultTemperature: 0.7,
@@ -403,7 +404,7 @@ export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
     lane: "quick",
     availability: "planned",
     tags: ["tools", "vision", "private", "norwegian-ok", "censored"],
-    specs: {"params": "12B", "quant": "Q4_K_M", "sizeGb": 8.0, "fitsLocalGpu": "yes", "tools": "yes", "vision": true, "thinking": "toggle", "pullCommand": "ollama pull gemma4:12b"},
+    specs: {"params": "12B", "quant": "Q4_K_M", "sizeGb": 8.0, "tools": "yes", "vision": true, "thinking": "toggle", "pullCommand": "ollama pull gemma4:12b"},
     note: "Google's 12B: good tools, reads pictures, decent Norwegian. Replaces Gemma 3 12B. Needs Ollama 0.30.9 or newer.",
   },
   {
@@ -411,7 +412,7 @@ export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
     name: "Gemma 4 12B uncensored",
     provider: "local",
     model: "huihui_ai/gemma-4-abliterated:12b-qat",
-    baseUrl: MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS,
+    baseUrl: null,
     providerRouting: null,
     defaultThinking: "off",
     defaultTemperature: 0.7,
@@ -423,15 +424,15 @@ export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
     lane: "quick",
     availability: "planned",
     tags: ["uncensored", "persona", "vision", "private", "tools-untested"],
-    specs: {"params": "12B", "quant": "QAT Q4", "sizeGb": 7.6, "fitsLocalGpu": "yes", "tools": "yes", "vision": true, "thinking": "toggle", "pullCommand": "ollama pull huihui_ai/gemma-4-abliterated:12b-qat"},
-    note: "Uncensored Gemma 12B. Pull this :12b-qat tag instead of the :12b you started: same size, better quality. Separate persona only.",
+    specs: {"params": "12B", "quant": "QAT Q4", "sizeGb": 7.6, "tools": "yes", "vision": true, "thinking": "toggle", "pullCommand": "ollama pull huihui_ai/gemma-4-abliterated:12b-qat"},
+    note: "Uncensored Gemma 12B. Use this :12b-qat tag rather than :12b: same size, better quality. Separate persona only.",
   },
   {
     id: "local-gemma-4-e4b-small",
     name: "Gemma 4 E4B (small)",
     provider: "local",
     model: "gemma4:e4b",
-    baseUrl: MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS,
+    baseUrl: null,
     providerRouting: null,
     defaultThinking: "off",
     defaultTemperature: 0.7,
@@ -441,9 +442,9 @@ export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
     family: "Gemma 4",
     variant: "E4B",
     lane: "quick",
-    availability: "downloading",
+    availability: "planned",
     tags: ["small", "fast", "vision", "audio", "private", "censored"],
-    specs: {"params": "4.5B effective", "quant": "Q4_K_M", "sizeGb": 6.6, "fitsLocalGpu": "yes", "tools": "yes", "vision": true, "thinking": "toggle", "pullCommand": "ollama pull gemma4:e4b"},
+    specs: {"params": "4.5B effective", "quant": "Q4_K_M", "sizeGb": 6.6, "tools": "yes", "vision": true, "thinking": "toggle", "pullCommand": "ollama pull gemma4:e4b"},
     note: "What 'ollama pull gemma4' actually gives you: a small, fast model that reads pictures and audio. Fine for one simple tool call, weak at more.",
   },
   {
@@ -491,7 +492,7 @@ export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
     name: "Hermes 3 8B",
     provider: "local",
     model: "hermes3:8b",
-    baseUrl: MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS,
+    baseUrl: null,
     providerRouting: null,
     defaultThinking: null,
     defaultTemperature: 0.6,
@@ -501,9 +502,9 @@ export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
     family: "Hermes 3",
     variant: "8B",
     lane: "quick",
-    availability: "downloading",
+    availability: "planned",
     tags: ["persona", "roleplay", "private", "tools-fragile"],
-    specs: {"params": "8B", "quant": "Q4_0", "sizeGb": 4.7, "fitsLocalGpu": "yes", "tools": "partial", "vision": false, "thinking": "no", "pullCommand": "ollama pull hermes3:8b"},
+    specs: {"params": "8B", "quant": "Q4_0", "sizeGb": 4.7, "tools": "partial", "vision": false, "thinking": "no", "pullCommand": "ollama pull hermes3:8b"},
     note: "Good at staying in character. Tool calls can break when many tools are offered, so test first. Weak Norwegian. Better copy: hermes3:8b-llama3.1-q6_K.",
   },
   {
@@ -524,7 +525,7 @@ export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
     availability: "cloud",
     tags: ["cheap", "vision", "tools"],
     specs: {"params": "400B MoE (17B active)", "tools": "yes", "vision": true, "thinking": "no"},
-    note: "The Llama 4 you asked about, run in the cloud (far too big for your PC). Cheap, reads images, fine for single tool calls; weak at long tasks and Norwegian.",
+    note: "Llama 4, run in the cloud (far too big for an ordinary computer). Cheap, reads images, fine for single tool calls; weak at long tasks and Norwegian.",
   },
   {
     id: "openrouter-deepseek-v4-flash-cloud",
@@ -564,7 +565,7 @@ export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
     availability: "planned",
     tags: ["uncensored", "persona", "cloud", "tools-untested"],
     specs: {"params": "14B", "contextTokens": 32768, "thinking": "toggle"},
-    note: "Cloud copy of your installed uncensored 14B, for when the PC is off. Needs Hugging Face set up; about $0.48 in / $0.96 out per million tokens. Test tools first.",
+    note: "Cloud copy of the local uncensored Qwen3 14B, for when your own computer is off. Needs Hugging Face set up; about $0.48 in / $0.96 out per million tokens. Test tools first.",
   },
   {
     id: "huggingface-qwen3-8-27b-uncensored-cloud",
@@ -684,19 +685,56 @@ export interface ModelDirectoryCatalogueImportResult {
 
 // ─── Catalogue v2: settings, local Ollama resync ─────────────────────────────
 
+/**
+ * Per-company Settings > Models settings. Send only the fields to change; a
+ * field left out keeps its saved value, null clears it.
+ * - localGpuVramGb: graphics card memory (GB) of the computer that runs this
+ *   company's local models; 0 = no graphics card (runs on the processor).
+ *   Only used for "fits / too big" advice.
+ * - localBaseUrl: the address of the company's local model server (Ollama or
+ *   another OpenAI-compatible server) as Paperclip's server reaches it, e.g.
+ *   http://192.168.1.20:11434/v1. The default for new local setups and the
+ *   address the ready-made local models get.
+ */
 export const updateModelDirectorySettingsSchema = z
-  .object({ localGpuVramGb: z.number().min(0).max(1024).nullable() })
-  .strict();
+  .object({
+    localGpuVramGb: z.number().min(0).max(1024).nullable().optional(),
+    localBaseUrl: laneABaseUrlValueSchema.nullable().optional(),
+  })
+  .strict()
+  .refine((value) => value.localGpuVramGb !== undefined || value.localBaseUrl !== undefined, {
+    message: "Nothing to save: send localGpuVramGb, localBaseUrl or both.",
+  });
 export type UpdateModelDirectorySettings = z.infer<typeof updateModelDirectorySettingsSchema>;
 
 export interface ModelDirectorySettings {
+  /** Graphics card memory in GB; null = not set (no fit advice), 0 = no graphics card. */
   localGpuVramGb: number | null;
+  /** This company's local model server address; null = not set (Paperclip asks for it). */
+  localBaseUrl: string | null;
 }
+
+/** Why a ready-made model was not added (e.g. a local one while no model server address is set). */
+export interface ModelDirectoryStarterSkip {
+  starterId: string;
+  name: string;
+  reason: string;
+}
+
+export interface ModelDirectoryStartersResult {
+  created: ModelDirectoryEntry[];
+  skipped: ModelDirectoryStarterSkip[];
+}
+
+/** The plain message for a local ready-made model while the company has no model server address. */
+export const MODEL_DIRECTORY_NEEDS_LOCAL_ADDRESS_MESSAGE =
+  "Set this company's model server address at the top of Settings > Models first. Local models need it, and Paperclip does not guess it.";
 
 /**
  * Ask a local Ollama which models are installed. The address must be one this
- * company already uses (a saved local model's address or a quick agent's), so
- * the server never calls an arbitrary host on someone's say-so.
+ * company already uses (its model server address setting, a saved local
+ * model's address or a quick agent's), so the server never calls an arbitrary
+ * host on someone's say-so.
  */
 export const syncLocalModelsSchema = z.object({ baseUrl: z.string().trim().url().max(500) }).strict();
 export type SyncLocalModels = z.infer<typeof syncLocalModelsSchema>;
