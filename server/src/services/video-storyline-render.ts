@@ -1,7 +1,7 @@
 import { buffer as streamToBuffer } from "node:stream/consumers";
-import { and, asc, eq, inArray, lt, ne } from "drizzle-orm";
+import { and, asc, eq, inArray, lt, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { assets, issueAttachments, videoShotRenderJobs, videoShots, videoStorylines } from "@paperclipai/db";
+import { assets, issueAttachments, videoShotRenderJobs, videoShots, videoStorylines, withCompanyScope } from "@paperclipai/db";
 import {
   MEDIA_STUDIO_PLUGIN_KEY,
   VIDEO_RENDER_JOB_MAX_AGE_MS,
@@ -27,7 +27,7 @@ import { secretService } from "./secrets.js";
 import { extractLastFrameDataUri } from "./video-ffmpeg.js";
 import { loadApprovedStillDataUri } from "./video-storyline-still-frame.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
-import { videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
+import { lockStorylineRow, videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
 import { executePinnedHttpRequest, validateAndResolveFetchUrl } from "./safe-outbound-fetch.js";
 
 /**
@@ -117,6 +117,43 @@ export async function loadReferenceImages(db: Db, companyId: string, assetIds: r
   return out;
 }
 
+type StorylineRow = typeof videoStorylines.$inferSelect;
+type ShotRow = typeof videoShots.$inferSelect;
+
+/**
+ * Security review: the ONE provider/model resolution every render-cost
+ * estimate and the actual render call share -- a shot's own provider/model
+ * (set from the last real render job) wins over the storyline's. Before,
+ * beginShotRender billed with the shot's values while the budget gates
+ * estimated with the storyline's, so a shot re-rendered on a pricier model
+ * could pass a budget check it should have failed.
+ */
+export function resolveShotRenderTarget(
+  storyline: Pick<StorylineRow, "providerId" | "model">,
+  shot: Pick<ShotRow, "providerId" | "model">,
+): { providerId: VideoStorylineProvider; model: string | null } {
+  return {
+    providerId: (shot.providerId ?? storyline.providerId) as VideoStorylineProvider,
+    model: shot.model ?? storyline.model,
+  };
+}
+
+/** Render-cost estimate for a set of shots, each priced with resolveShotRenderTarget (shots on different providers/models are summed). */
+export function estimateShotRenderCents(
+  storyline: Pick<StorylineRow, "providerId" | "model">,
+  shots: ReadonlyArray<Pick<ShotRow, "providerId" | "model" | "durationSeconds">>,
+): { shotCount: number; totalSeconds: number; estimatedTotalCents: number } {
+  let totalSeconds = 0;
+  let estimatedTotalCents = 0;
+  for (const shot of shots) {
+    const { providerId, model } = resolveShotRenderTarget(storyline, shot);
+    const one = estimateVideoStorylineCostCents([{ durationSeconds: shot.durationSeconds }], providerId, { model });
+    totalSeconds += one.totalSeconds;
+    estimatedTotalCents += one.estimatedTotalCents;
+  }
+  return { shotCount: shots.length, totalSeconds, estimatedTotalCents };
+}
+
 function formatDollars(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
@@ -189,8 +226,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
         `Shot ${shot.orderIndex + 1}'s storyboard still has not been approved yet. Generate and approve a still for it (or drop it) before rendering.`,
       );
     }
-    const providerId = (shot.providerId ?? storyline.providerId) as VideoStorylineProvider;
-    const model = shot.model ?? storyline.model;
+    const { providerId, model } = resolveShotRenderTarget(storyline, shot);
     const apiKey = await resolveProviderApiKey(companyId, providerId, actorId);
     const provider = buildProvider(providerId, apiKey, model);
 
@@ -285,7 +321,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       );
     }
 
-    const estimateResult = estimateVideoStorylineCostCents(renderableShots, storyline.providerId as VideoStorylineProvider, { model: storyline.model });
+    const estimateResult = estimateShotRenderCents(storyline, renderableShots);
     const effectiveBudgetCapCents = input.confirmBudgetCapCents ?? storyline.budgetCapCents;
     if (effectiveBudgetCapCents === null || effectiveBudgetCapCents === undefined) {
       throw badRequest(
@@ -295,10 +331,9 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     // Only shots still to render cost anything from here on -- counting
     // already-finished shots again (their cost is in spentCents) made a
     // storyline paused at its cap impossible to resume.
-    const remainingEstimate = estimateVideoStorylineCostCents(
+    const remainingEstimate = estimateShotRenderCents(
+      storyline,
       renderableShots.filter((s) => s.status !== "done"),
-      storyline.providerId as VideoStorylineProvider,
-      { model: storyline.model },
     );
     if (storyline.spentCents + remainingEstimate.estimatedTotalCents > effectiveBudgetCapCents) {
       throw unprocessable(
@@ -343,19 +378,35 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       return storylines.getStoryline(companyId, storylineId);
     }
 
-    await db
-      .update(videoStorylines)
-      .set({
-        status: "rendering",
-        budgetCapCents: effectiveBudgetCapCents,
-        estimatedTotalCents: estimateResult.estimatedTotalCents,
-        estimatedTotalSeconds: estimateResult.totalSeconds,
-        errorMessage: null,
-        updatedAt: nowOf(),
-      })
-      .where(eq(videoStorylines.id, storylineId));
+    // Security review (replace-import TOCTOU): flip to "rendering" under the
+    // storyline row lock a "replace" import also takes, after re-checking
+    // nothing moved since the reads above -- a replace that committed in
+    // between has deleted `pending`, and one that comes after sees
+    // "rendering" and is refused.
+    const lockedPending = await withCompanyScope(db, companyId, async (tx) => {
+      const locked = await lockStorylineRow(tx, companyId, storylineId);
+      if (!["draft", "estimated", "paused", "failed", "cancelled"].includes(locked.status)) {
+        throw conflict(`This storyline is already ${locked.status.replace(/_/g, " ")}.`);
+      }
+      const [current] = await tx.select().from(videoShots).where(and(eq(videoShots.id, pending.id), eq(videoShots.storylineId, storylineId)));
+      if (!current || current.storyboardStatus !== "approved" || current.status === "done") {
+        throw conflict("This storyline's shots changed while the render was starting. Check them and start the render again.");
+      }
+      await tx
+        .update(videoStorylines)
+        .set({
+          status: "rendering",
+          budgetCapCents: effectiveBudgetCapCents,
+          estimatedTotalCents: estimateResult.estimatedTotalCents,
+          estimatedTotalSeconds: estimateResult.totalSeconds,
+          errorMessage: null,
+          updatedAt: nowOf(),
+        })
+        .where(eq(videoStorylines.id, storylineId));
+      return current;
+    });
     const refreshed = await storylines.getStorylineRow(companyId, storylineId);
-    await beginShotRender(companyId, refreshed, pending, actor.agentId ?? actor.actorId);
+    await beginShotRender(companyId, refreshed, lockedPending, actor.agentId ?? actor.actorId);
 
     await logActivity(db, {
       companyId,
@@ -388,26 +439,37 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     }
     const refundCents = shot.actualCostCents ?? 0;
     const spentAfterRefund = Math.max(0, storyline.spentCents - refundCents);
-    const shotEstimate = estimateVideoStorylineCostCents([{ durationSeconds: shot.durationSeconds }], storyline.providerId as VideoStorylineProvider, { model: storyline.model });
+    const shotEstimate = estimateShotRenderCents(storyline, [shot]);
     if (storyline.budgetCapCents !== null && spentAfterRefund + shotEstimate.estimatedTotalCents > storyline.budgetCapCents) {
       throw unprocessable(
         `Re-rendering this shot (estimated ${shotEstimate.estimatedTotalCents} cents) would push spend to ${spentAfterRefund + shotEstimate.estimatedTotalCents} cents, over the budget cap (${storyline.budgetCapCents} cents). Raise the cap first.`,
       );
     }
-    await db
-      .update(videoShots)
-      .set({ status: "queued", errorMessage: null, resultProvider: null, resultObjectKey: null, resultContentType: null, resultByteSize: null, resultSha256: null, actualCostCents: null, updatedAt: nowOf() })
-      .where(eq(videoShots.id, shotId));
-    if (refundCents > 0) {
-      await db
+    // Security review (replace-import TOCTOU): queue the shot and flip the
+    // storyline to "rendering" under the storyline row lock a "replace"
+    // import also takes, re-checking the shot is still there and idle.
+    await withCompanyScope(db, companyId, async (tx) => {
+      const locked = await lockStorylineRow(tx, companyId, storylineId);
+      if (locked.status === "stitching") {
+        throw conflict("A stitch is currently running for this storyline. Wait for it to finish before re-rendering a shot.");
+      }
+      const [current] = await tx.select().from(videoShots).where(and(eq(videoShots.id, shotId), eq(videoShots.storylineId, storylineId)));
+      if (!current) throw conflict("This shot was removed while the re-render was starting.");
+      if (current.status === "queued" || current.status === "rendering") throw conflict("This shot is already rendering.");
+      const lockedRefund = current.actualCostCents ?? 0;
+      await tx
+        .update(videoShots)
+        .set({ status: "queued", errorMessage: null, resultProvider: null, resultObjectKey: null, resultContentType: null, resultByteSize: null, resultSha256: null, actualCostCents: null, updatedAt: nowOf() })
+        .where(eq(videoShots.id, shotId));
+      await tx
         .update(videoStorylines)
-        .set({ spentCents: Math.max(0, storyline.spentCents - refundCents), updatedAt: nowOf() })
+        .set({
+          ...(lockedRefund > 0 ? { spentCents: Math.max(0, locked.spentCents - lockedRefund) } : {}),
+          ...(locked.status !== "rendering" ? { status: "rendering", errorMessage: null } : {}),
+          updatedAt: nowOf(),
+        })
         .where(eq(videoStorylines.id, storylineId));
-    }
-    const refreshedStoryline = await storylines.getStorylineRow(companyId, storylineId);
-    if (!["rendering"].includes(refreshedStoryline.status)) {
-      await db.update(videoStorylines).set({ status: "rendering", errorMessage: null, updatedAt: nowOf() }).where(eq(videoStorylines.id, storylineId));
-    }
+    });
     const refreshedShot = await storylines.getShotRow(companyId, storylineId, shotId);
     const finalStoryline = await storylines.getStorylineRow(companyId, storylineId);
     await beginShotRender(companyId, finalStoryline, refreshedShot, actor.agentId ?? actor.actorId);
@@ -451,18 +513,63 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       throw conflict("This shot is currently rendering. Wait for it to finish before rendering a preview.");
     }
 
-    const providerId = (shot.providerId ?? storyline.providerId) as VideoStorylineProvider;
-    const model = shot.model ?? storyline.model;
+    const { providerId, model } = resolveShotRenderTarget(storyline, shot);
     // The shortest clip this model will actually make (1s for a model that
     // takes any length, 5s for Fal's Kling models, which refuse 1s).
     const previewDurationSeconds = videoRenderDurationSeconds(providerId, model, PREVIEW_DURATION_SECONDS);
     const previewEstimate = estimateVideoStorylineCostCents([{ durationSeconds: previewDurationSeconds }], providerId);
-    if (storyline.budgetCapCents !== null && storyline.spentCents + previewEstimate.estimatedTotalCents > storyline.budgetCapCents) {
+    const previewCents = previewEstimate.estimatedTotalCents;
+    const overCap = (row: { budgetCapCents: number | null; spentCents: number }) =>
+      row.budgetCapCents !== null && row.spentCents + previewCents > row.budgetCapCents;
+    if (overCap(storyline)) {
       throw unprocessable(
-        `Rendering a preview (estimated ${previewEstimate.estimatedTotalCents} cents) would exceed the budget cap (${storyline.budgetCapCents} cents). Raise the cap first.`,
+        `Rendering a preview (estimated ${previewCents} cents) would exceed the budget cap (${storyline.budgetCapCents} cents). Raise the cap first.`,
       );
     }
 
+    // Security review (replace-import TOCTOU): reserve the preview's cost
+    // under the storyline row lock a "replace" import also takes, before the
+    // paid provider call -- spentCents > 0 makes a replace refuse while this
+    // preview is in flight. Refunded below if the preview fails.
+    await withCompanyScope(db, companyId, async (tx) => {
+      const locked = await lockStorylineRow(tx, companyId, storylineId);
+      if (locked.status === "stitching") {
+        throw conflict("A stitch is currently running for this storyline. Wait for it to finish before rendering a preview.");
+      }
+      const [current] = await tx.select({ id: videoShots.id }).from(videoShots).where(and(eq(videoShots.id, shotId), eq(videoShots.storylineId, storylineId)));
+      if (!current) throw conflict("This shot was removed while the preview was starting.");
+      if (overCap(locked)) {
+        throw unprocessable(
+          `Rendering a preview (estimated ${previewCents} cents) would exceed the budget cap (${locked.budgetCapCents} cents). Raise the cap first.`,
+        );
+      }
+      await tx
+        .update(videoStorylines)
+        .set({ spentCents: sql`${videoStorylines.spentCents} + ${previewCents}`, updatedAt: nowOf() })
+        .where(eq(videoStorylines.id, storylineId));
+    });
+    try {
+      return await finishPreview(companyId, storyline, shot, providerId, model, previewDurationSeconds, previewCents, actor);
+    } catch (err) {
+      await db
+        .update(videoStorylines)
+        .set({ spentCents: sql`greatest(0, ${videoStorylines.spentCents} - ${previewCents})`, updatedAt: nowOf() })
+        .where(eq(videoStorylines.id, storylineId));
+      throw err;
+    }
+  }
+
+  async function finishPreview(
+    companyId: string,
+    storyline: StorylineRow,
+    shot: ShotRow,
+    providerId: VideoStorylineProvider,
+    model: string | null,
+    previewDurationSeconds: number,
+    previewCents: number,
+    actor: VideoStorylineActor,
+  ) {
+    const shotId = shot.id;
     const apiKey = await resolveProviderApiKey(companyId, providerId, actor.agentId ?? actor.actorId);
     const provider = buildProvider(providerId, apiKey, model);
 
@@ -538,11 +645,6 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       .returning();
     if (!row) throw new Error("Video shot preview update returned no row");
 
-    await db
-      .update(videoStorylines)
-      .set({ spentCents: storyline.spentCents + previewEstimate.estimatedTotalCents, updatedAt: generatedAt })
-      .where(eq(videoStorylines.id, storylineId));
-
     await logActivity(db, {
       companyId,
       actorType: actor.actorType,
@@ -551,7 +653,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       action: "video_shot.preview_rendered",
       entityType: "video_shot",
       entityId: shotId,
-      details: { orderIndex: shot.orderIndex, costCents: previewEstimate.estimatedTotalCents },
+      details: { orderIndex: shot.orderIndex, costCents: previewCents },
     });
     return storylines.toShotSummary(row);
   }
@@ -667,17 +769,18 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       contentType,
       body: buffer,
     });
-    const estimateForShot = estimateVideoStorylineCostCents([{ durationSeconds: shot.durationSeconds }], storyline.providerId as VideoStorylineProvider, { model: storyline.model });
+    const target = resolveShotRenderTarget(storyline, shot);
+    const estimateForShot = estimateShotRenderCents(storyline, [shot]);
     let actualCostCents = estimateForShot.estimatedTotalCents;
     // DUR-4455: Fal video is priced per its published unit (usually seconds); Sogni has no Fal price and keeps the static estimate.
-    if (storyline.providerId === "fal" && fal) {
+    if (target.providerId === "fal" && fal) {
       const recorded = await recordFalCostEvent(db, safeFetch, {
         companyId,
         apiKey: fal.apiKey,
         agentId: storyline.createdByAgentId,
         createdByUserId: storyline.createdByAgentId ? null : storyline.createdByUserId,
         model: fal.model,
-        usage: { seconds: videoRenderDurationSeconds("fal", shot.model ?? storyline.model, shot.durationSeconds) },
+        usage: { seconds: videoRenderDurationSeconds("fal", target.model, shot.durationSeconds) },
         estimateCents: estimateForShot.estimatedTotalCents,
         billingCode: "video-storyline-shot",
       });
@@ -689,7 +792,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     // Sogni reported actual credits for this job -- tagged
     // converted_from_credits, never silently recorded as 0 when the owner
     // hasn't set a credit price yet.
-    if (storyline.providerId === "sogni") {
+    if (target.providerId === "sogni") {
       const sogniCredits = typeof result.meta?.sogniCredits === "number" ? result.meta.sogniCredits : null;
       if (sogniCredits !== null) {
         const plugin = await registry.getByKey(MEDIA_STUDIO_PLUGIN_KEY);
@@ -700,7 +803,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
           agentId: storyline.createdByAgentId ?? null,
           credits: sogniCredits,
           creditPriceUsd: cfg[SOGNI_CREDIT_PRICE_CONFIG_KEY],
-          model: shot.model ?? storyline.model ?? "sogni-video",
+          model: target.model ?? "sogni-video",
           // Per-shot key so a retried tick after a crash does not write a second row.
           billingCode: `video_storyline_render:${shot.id}`,
           idempotent: true,
@@ -749,7 +852,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
         .where(eq(videoStorylines.id, storyline.id));
       return;
     }
-    const nextEstimate = estimateVideoStorylineCostCents([{ durationSeconds: next.durationSeconds }], storyline.providerId as VideoStorylineProvider, { model: storyline.model });
+    const nextEstimate = estimateShotRenderCents(storyline, [next]);
     if (storyline.budgetCapCents !== null && spentCents + nextEstimate.estimatedTotalCents > storyline.budgetCapCents) {
       await db
         .update(videoStorylines)

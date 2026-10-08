@@ -242,7 +242,7 @@ const SHOT_ORDER_PARK_OFFSET = 1_000_000;
  * live, uses the scheduler's bypass connection inside a tick, and opens its
  * own pooled transaction when there is no scope at all (scripts/tests).
  */
-type ScopedTx = Parameters<Parameters<typeof withCompanyScope>[2]>[0];
+export type ScopedTx = Parameters<Parameters<typeof withCompanyScope>[2]>[0];
 
 /**
  * The storyline's shots in play order: scene by scene (scene orderIndex),
@@ -324,8 +324,46 @@ function shotHasPaidWork(shot: ShotRow): boolean {
     (shot.actualCostCents ?? 0) > 0 ||
     shot.stillObjectKey !== null ||
     (shot.stillActualCostCents ?? 0) > 0 ||
+    // Set before a storyboard still's paid image call starts (see
+    // video-storyline-stills.ts's generateStill), so a still in flight
+    // counts as paid work too.
+    (shot.stillEstimatedCostCents ?? 0) > 0 ||
     shot.previewObjectKey !== null
   );
+}
+
+/**
+ * Security review (replace-import TOCTOU): locks a storyline's row for the
+ * rest of the caller's transaction (SELECT ... FOR UPDATE, by id AND
+ * company). Every path that starts paid work (render start/re-render,
+ * storyboard still, preview) and the "replace" import take this same lock
+ * before their final check-and-write, so a replace can never delete scenes
+ * a render or still has just started on.
+ */
+export async function lockStorylineRow(tx: ScopedTx, companyId: string, storylineId: string): Promise<StorylineRow> {
+  const [row] = await tx
+    .select()
+    .from(videoStorylines)
+    .where(and(eq(videoStorylines.id, storylineId), eq(videoStorylines.companyId, companyId)))
+    .for("update");
+  if (!row) throw notFound("Video storyline not found");
+  return row;
+}
+
+const REPLACE_REFUSED_MESSAGE =
+  "This storyline already has rendered or paid-for shots (videos, storyboard pictures or previews), so it can't be replaced. Import with \"Add to the end\" instead, or start a new storyline from this script.";
+
+/** Refuses a "replace" import once anything was rendered, queued or paid for (shots, stills, previews, spend, or any render job). */
+async function assertNothingPaidToReplace(executor: Db | ScopedTx, storyline: StorylineRow): Promise<void> {
+  if (storyline.spentCents > 0) throw conflict(REPLACE_REFUSED_MESSAGE);
+  const shots = await executor.select().from(videoShots).where(eq(videoShots.storylineId, storyline.id));
+  if (shots.some(shotHasPaidWork)) throw conflict(REPLACE_REFUSED_MESSAGE);
+  const [job] = await executor
+    .select({ id: videoShotRenderJobs.id })
+    .from(videoShotRenderJobs)
+    .where(eq(videoShotRenderJobs.storylineId, storyline.id))
+    .limit(1);
+  if (job) throw conflict(REPLACE_REFUSED_MESSAGE);
 }
 
 export function videoStorylineService(db: Db) {
@@ -884,11 +922,9 @@ export function videoStorylineService(db: Db) {
     const storyline = await getStorylineRow(companyId, storylineId);
     assertStorylineEditable(storyline);
     const existingShots = await db.select().from(videoShots).where(eq(videoShots.storylineId, storylineId));
-    if (mode === "replace" && (existingShots.some(shotHasPaidWork) || storyline.spentCents > 0)) {
-      throw conflict(
-        "This storyline already has rendered or paid-for shots (videos, storyboard pictures or previews), so it can't be replaced. Import with \"Add to the end\" instead, or start a new storyline from this script.",
-      );
-    }
+    // Checked here too so a dry run reports it; re-checked under the row
+    // lock below before anything is deleted.
+    if (mode === "replace") await assertNothingPaidToReplace(db, storyline);
     const keptShots = mode === "replace" ? 0 : existingShots.length;
     if (keptShots + script.shotCount > VIDEO_STORYLINE_MAX_SHOTS) {
       throw unprocessable(
@@ -914,7 +950,16 @@ export function videoStorylineService(db: Db) {
     });
     if (options.dryRun) return summary;
 
-    await withCompanyScope(db, companyId, (tx) => writeScript(tx, companyId, storylineId, script, mode));
+    await withCompanyScope(db, companyId, async (tx) => {
+      // Security review (TOCTOU): the checks above ran outside this
+      // transaction, so a render, still or preview could have started
+      // since. Lock the storyline row (the same lock every paid-work start
+      // path takes) and check again before deleting anything.
+      const locked = await lockStorylineRow(tx, companyId, storylineId);
+      assertStorylineEditable(locked);
+      if (mode === "replace") await assertNothingPaidToReplace(tx, locked);
+      await writeScript(tx, companyId, storylineId, script, mode);
+    });
     await recomputeEstimate(companyId, storylineId);
     await logActivity(db, {
       companyId,

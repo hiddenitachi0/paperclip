@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { HttpError } from "../errors.js";
+import { logger } from "../middleware/logger.js";
 
 /**
  * The AI director (review, follow-up questions, rewrite proposals) makes
@@ -12,6 +13,14 @@ import { HttpError } from "../errors.js";
 export const DIRECTOR_AI_NOT_CONFIGURED_MESSAGE =
   "The AI director isn't set up on this server yet: an Anthropic API key is needed (Instance settings, server Anthropic key).";
 
+/**
+ * Security review: shown (and stored on a failed director run) for any
+ * failure that is not one of the specific cases below. The upstream error
+ * text is never passed through -- it can carry provider internals, request
+ * ids or echoed input -- only logged server-side.
+ */
+export const DIRECTOR_AI_GENERIC_FAILURE_MESSAGE = "The AI director could not answer this time. Try again in a moment.";
+
 export function directorAiNotConfigured(): HttpError {
   return new HttpError(503, DIRECTOR_AI_NOT_CONFIGURED_MESSAGE);
 }
@@ -23,6 +32,7 @@ function isInstance(err: unknown, ctor: unknown): boolean {
 
 export function directorAiFailure(err: unknown): HttpError {
   if (err instanceof HttpError) return err;
+  logger.warn({ err }, "video-storyline-director: AI call failed");
   if (isInstance(err, Anthropic.AuthenticationError) || isInstance(err, Anthropic.PermissionDeniedError)) {
     return new HttpError(502, "The AI director's Anthropic key was refused. Check the server Anthropic key in Instance settings.");
   }
@@ -38,9 +48,8 @@ export function directorAiFailure(err: unknown): HttpError {
     if (status !== null && status >= 500) {
       return new HttpError(502, "The AI director service had a problem on its side. Try again in a moment.");
     }
-    return new HttpError(502, `The AI director could not answer: ${apiErr.message}`);
   }
-  return new HttpError(502, `The AI director could not answer: ${err instanceof Error ? err.message : String(err)}`);
+  return new HttpError(502, DIRECTOR_AI_GENERIC_FAILURE_MESSAGE);
 }
 
 /** Runs one director model call, turning any failure into a plain-language HttpError. */

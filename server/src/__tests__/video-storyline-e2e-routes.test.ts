@@ -536,4 +536,47 @@ d("video storylines end to end through the real request-scoped db", () => {
     expect(film.headers["content-type"]).toBe("video/mp4");
     expect((film.body as Buffer).byteLength).toBeGreaterThan(1000);
   }, 180_000);
+
+  it("gates script transitions behind the advanced setting on both import routes, dry run included (security review)", async () => {
+    const plainCompanyId = randomUUID();
+    await db.insert(companies).values({
+      id: plainCompanyId,
+      name: "Plain Co",
+      issuePrefix: `P${plainCompanyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    const plainBase = `/api/companies/${plainCompanyId}/video-storylines`;
+    expect((await request(app).patch(`${plainBase}/settings`).send({ enabled: true })).status).toBe(200);
+
+    const withTransition = { title: "Fades", scenes: [{ scene_title: "One", shots: [{ prompt: "a", transition_in: "fade" }, { prompt: "b" }] }] };
+    const plain = { title: "Cuts", scenes: [{ scene_title: "One", shots: [{ prompt: "a" }, { prompt: "b", transition_in: null }] }] };
+
+    // Advanced off + a transition: refused on both routes, dry run or not, with the same plain message shot edits get.
+    for (const dryRun of [true, false]) {
+      const refused = await request(app).post(`${plainBase}/import`).send({ script: withTransition, dryRun });
+      expect(refused.status).toBe(422);
+      expect(refused.body.error).toContain("transitions and music are switched off");
+    }
+    expect((await request(app).get(plainBase)).body).toHaveLength(0);
+
+    // Advanced off, no transitions: fine.
+    const created = await request(app).post(`${plainBase}/import`).send({ script: plain });
+    expect(created.status).toBe(201);
+    const plainStorylineId = created.body.storyline.id as string;
+    const appended = await request(app).post(`${plainBase}/${plainStorylineId}/import`).send({ mode: "append", script: plain });
+    expect(appended.status).toBe(200);
+
+    for (const dryRun of [true, false]) {
+      const refused = await request(app).post(`${plainBase}/${plainStorylineId}/import`).send({ mode: "append", script: withTransition, dryRun });
+      expect(refused.status).toBe(422);
+      expect(refused.body.error).toContain("transitions and music are switched off");
+    }
+    const shotsRes = await request(app).get(`${plainBase}/${plainStorylineId}/shots`);
+    expect(shotsRes.body).toHaveLength(4);
+
+    // Advanced on: transitions import fine on both routes.
+    expect((await request(app).patch(`${plainBase}/settings/advanced`).send({ enabled: true })).status).toBe(200);
+    expect((await request(app).post(`${plainBase}/import`).send({ script: withTransition })).status).toBe(201);
+    expect((await request(app).post(`${plainBase}/${plainStorylineId}/import`).send({ mode: "append", script: withTransition })).status).toBe(200);
+  });
 });

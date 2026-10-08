@@ -262,6 +262,17 @@ export function videoStorylineRoutes(rawDb: Db) {
     return result.script;
   }
 
+  /**
+   * Security review: a script's transition_in lands on shot.transitionIn --
+   * the same round-2 ("advanced") field shot create/PATCH gate through
+   * assertAdvancedIfValuesPresent(hasAdvancedShotValues). Without this, an
+   * import (dry run included) was a way around that gate.
+   */
+  async function assertAdvancedIfScriptHasTransitions(companyId: string, script: ParsedVideoStorylineScript): Promise<void> {
+    const usesTransitions = script.scenes.some((scene) => scene.shots.some((shot) => hasAdvancedShotValues({ transitionIn: shot.transitionIn })));
+    if (usesTransitions) await settings.assertAdvancedEnabled(companyId);
+  }
+
   // ─── Script-writer instructions + JSON import ─────────────────────────
 
   /**
@@ -287,6 +298,7 @@ export function videoStorylineRoutes(rawDb: Db) {
     async (req, res) => {
       const companyId = req.params.companyId as string;
       const script = parseScriptOrThrow(req.body.script);
+      await assertAdvancedIfScriptHasTransitions(companyId, script);
       const title = (req.body.title as string | undefined) ?? script.title;
       if (!title) {
         throw badRequest("Give the storyline a title (or add a \"title\" to the script).");
@@ -473,6 +485,7 @@ export function videoStorylineRoutes(rawDb: Db) {
       const companyId = req.params.companyId as string;
       const storylineId = req.params.storylineId as string;
       const script = parseScriptOrThrow(req.body.script);
+      await assertAdvancedIfScriptHasTransitions(companyId, script);
       res.json(await storylines.importScript(companyId, storylineId, script, req.body.mode, actorOf(req), { dryRun: req.body.dryRun }));
     },
   );

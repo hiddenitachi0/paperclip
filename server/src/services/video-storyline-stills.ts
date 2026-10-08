@@ -1,6 +1,6 @@
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { videoShots } from "@paperclipai/db";
+import { videoShots, withCompanyScope } from "@paperclipai/db";
 import {
   MEDIA_STUDIO_PLUGIN_KEY,
   estimateStoryboardCostCents,
@@ -19,7 +19,7 @@ import { secretService } from "./secrets.js";
 import { loadReferenceImages } from "./video-storyline-render.js";
 import { recordFalCostEvent } from "./fal-cost-events.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
-import { videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
+import { lockStorylineRow, videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
 
 /**
  * DUR-4317/DUR-4320 (backend half, storyboard-of-stills approval gate):
@@ -115,6 +115,40 @@ export function videoStorylineStillsService(db: Db) {
     const estimate = estimateStoryboardCostCents([{ storyboardStatus: shot.storyboardStatus as VideoShotStoryboardStatus }], "fal");
     const { provider, apiKey } = await resolveImageProvider(companyId, actor.agentId ?? actor.actorId);
 
+    // Security review (replace-import TOCTOU): under the storyline row lock a
+    // "replace" import also takes, re-check the shot is still there and
+    // idle, and mark the still as being paid for (stillEstimatedCostCents,
+    // which a replace counts as paid work) BEFORE the paid image call. Put
+    // back if the call fails, so a failed still does not block a replace.
+    const previousStillEstimate = await withCompanyScope(db, companyId, async (tx) => {
+      await lockStorylineRow(tx, companyId, storylineId);
+      const [current] = await tx.select().from(videoShots).where(and(eq(videoShots.id, shotId), eq(videoShots.storylineId, storylineId)));
+      if (!current) throw conflict("This shot was removed while its still was starting.");
+      if (current.status === "rendering" || current.status === "queued") {
+        throw conflict("This shot is currently rendering. Wait for it to finish before regenerating its still.");
+      }
+      await tx.update(videoShots).set({ stillEstimatedCostCents: estimate.estimatedTotalCents }).where(eq(videoShots.id, shotId));
+      return current.stillEstimatedCostCents;
+    });
+    try {
+      return await finishStill(companyId, storyline, shot, actor, provider, apiKey, estimate.estimatedTotalCents);
+    } catch (err) {
+      await db.update(videoShots).set({ stillEstimatedCostCents: previousStillEstimate }).where(eq(videoShots.id, shotId));
+      throw err;
+    }
+  }
+
+  async function finishStill(
+    companyId: string,
+    storyline: Awaited<ReturnType<typeof storylines.getStorylineRow>>,
+    shot: ShotRow,
+    actor: VideoStorylineActor,
+    provider: ImageGenerationProvider,
+    apiKey: string,
+    estimateCents: number,
+  ): Promise<VideoStoryboardShotSummary> {
+    const shotId = shot.id;
+    const estimate = { estimatedTotalCents: estimateCents };
     const referenceAssetIds = [...shot.lookReferenceAssetIds, ...storyline.characterReferenceAssetIds];
     const referenceImages = await loadReferenceImages(db, companyId, referenceAssetIds);
 
