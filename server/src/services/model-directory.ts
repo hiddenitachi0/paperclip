@@ -1,14 +1,21 @@
-import { and, asc, eq, inArray, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, modelDirectoryEntries } from "@paperclipai/db";
+import { agents, modelDirectoryEntries, withCompanyScope } from "@paperclipai/db";
 import {
+  LANE_A_BACKUP_MODELS_MAX,
   LANE_A_PROVIDER_CATALOGUE,
+  MODEL_DIRECTORY_EXPORT_VERSION,
   MODEL_DIRECTORY_NAME_MAX_LENGTH,
   MODEL_DIRECTORY_STARTERS,
   modelDirectoryEntryIssue,
   normalizeLaneAProvider,
+  type ImportModelDirectoryCatalogue,
   type LaneABackupModelConfig,
+  type ModelDirectoryCatalogueEntry,
+  type ModelDirectoryCatalogueExport,
+  type ModelDirectoryCatalogueImportResult,
   type ModelDirectoryImportResult,
+  type ModelDirectorySpecs,
   type ModelDirectoryStarterStatus,
   type CreateModelDirectoryEntry,
   type ModelDirectoryEntry,
@@ -39,11 +46,118 @@ export function toModelDirectoryEntry(row: Row): ModelDirectoryEntry {
     defaultMaxOutputTokens: row.defaultMaxOutputTokens,
     backupEntryIds: Array.isArray(row.backupEntryIds) ? row.backupEntryIds : [],
     note: row.note,
+    maker: row.maker ?? null,
+    baseModel: row.baseModel ?? null,
+    lane: (row.lane as ModelDirectoryEntry["lane"]) ?? null,
+    availability: (row.availability as ModelDirectoryEntry["availability"]) ?? null,
+    tags: Array.isArray(row.tags) ? row.tags : [],
+    specs: (row.specs as ModelDirectorySpecs | null) ?? null,
+    favorite: row.favorite === true,
+    archivedAt: row.archivedAt ? row.archivedAt.toISOString() : null,
     createdByUserId: row.createdByUserId,
     updatedByUserId: row.updatedByUserId,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
+}
+
+/** A blank maker / base model is "not said" (null), so it groups and sorts with the other unsaid ones. */
+function label(value: string | null | undefined): string | null | undefined {
+  if (value === undefined) return undefined;
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
+function compareText(a: string | null, b: string | null): number {
+  const x = a?.trim() || null;
+  const y = b?.trim() || null;
+  if (x === y) return 0;
+  if (x === null) return 1; // nulls last
+  if (y === null) return -1;
+  // Case-insensitive, and "8B" before "14B".
+  return x.localeCompare(y, "en", { sensitivity: "base", numeric: true });
+}
+
+/**
+ * Catalogue order: favourites first, then maker, base model and name (each
+ * case-insensitive, blanks last). Done here rather than in SQL so the order
+ * does not depend on the database's collation.
+ */
+export function compareModelDirectoryRows(
+  a: Pick<Row, "favorite" | "maker" | "baseModel" | "name" | "id">,
+  b: Pick<Row, "favorite" | "maker" | "baseModel" | "name" | "id">,
+): number {
+  if (a.favorite !== b.favorite) return a.favorite ? -1 : 1;
+  return (
+    compareText(a.maker, b.maker) ||
+    compareText(a.baseModel, b.baseModel) ||
+    compareText(a.name, b.name) ||
+    (a.name < b.name ? -1 : a.name > b.name ? 1 : 0) ||
+    (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+  );
+}
+
+/** Exact name first (the unique index is on the exact name), else a case-insensitive match. */
+function findByName<T extends { name: string }>(rows: readonly T[], name: string): T | undefined {
+  const exact = rows.find((r) => r.name === name);
+  if (exact) return exact;
+  const lower = name.trim().toLowerCase();
+  return rows.find((r) => r.name.trim().toLowerCase() === lower);
+}
+
+/** Catalogue (export/import) fields that map 1:1 onto columns. */
+function catalogueColumns(entry: ModelDirectoryCatalogueEntry): Partial<typeof modelDirectoryEntries.$inferInsert> {
+  const set: Partial<typeof modelDirectoryEntries.$inferInsert> = {
+    provider: entry.provider,
+    model: entry.model,
+  };
+  if (entry.baseUrl !== undefined) set.baseUrl = entry.baseUrl;
+  if (entry.providerRouting !== undefined) set.providerRouting = entry.providerRouting;
+  if (entry.defaultThinking !== undefined) set.defaultThinking = entry.defaultThinking;
+  if (entry.defaultTemperature !== undefined) set.defaultTemperature = entry.defaultTemperature;
+  if (entry.defaultMaxOutputTokens !== undefined) set.defaultMaxOutputTokens = entry.defaultMaxOutputTokens;
+  if (entry.note !== undefined) set.note = entry.note;
+  if (entry.maker !== undefined) set.maker = label(entry.maker);
+  if (entry.baseModel !== undefined) set.baseModel = label(entry.baseModel);
+  if (entry.lane !== undefined) set.lane = entry.lane;
+  if (entry.availability !== undefined) set.availability = entry.availability;
+  if (entry.tags !== undefined) set.tags = entry.tags;
+  if (entry.specs !== undefined) set.specs = entry.specs;
+  if (entry.favorite !== undefined) set.favorite = entry.favorite;
+  return set;
+}
+
+/** One row as it appears in an exported catalogue file: no ids, company, people or timestamps. */
+function toCatalogueEntry(row: Row, nameById: ReadonlyMap<string, string>): ModelDirectoryCatalogueEntry {
+  const backupIds = Array.isArray(row.backupEntryIds) ? row.backupEntryIds : [];
+  return {
+    name: row.name,
+    provider: row.provider as ModelDirectoryEntry["provider"],
+    model: row.model,
+    baseUrl: row.baseUrl,
+    providerRouting: (row.providerRouting as ModelDirectoryEntry["providerRouting"]) ?? null,
+    defaultThinking: (row.defaultThinking as ModelDirectoryEntry["defaultThinking"]) ?? null,
+    defaultTemperature: row.defaultTemperature,
+    defaultMaxOutputTokens: row.defaultMaxOutputTokens,
+    note: row.note,
+    maker: row.maker ?? null,
+    baseModel: row.baseModel ?? null,
+    lane: (row.lane as ModelDirectoryEntry["lane"]) ?? null,
+    availability: (row.availability as ModelDirectoryEntry["availability"]) ?? null,
+    tags: Array.isArray(row.tags) ? row.tags : [],
+    specs: (row.specs as ModelDirectorySpecs | null) ?? null,
+    favorite: row.favorite === true,
+    // A dangling id (entry deleted outside the service) is left out, as on read.
+    backupNames: backupIds.map((id) => nameById.get(id)).filter((n): n is string => typeof n === "string"),
+    archived: row.archivedAt != null,
+  };
+}
+
+/** What importCatalogue did: the API result plus the touched rows, for the activity log. */
+export interface ModelDirectoryCatalogueImportOutcome {
+  result: ModelDirectoryCatalogueImportResult;
+  createdEntries: ModelDirectoryEntry[];
+  updatedEntries: ModelDirectoryEntry[];
 }
 
 function isUniqueViolation(error: unknown): boolean {
@@ -153,13 +267,21 @@ export function modelDirectoryService(db: Db) {
   }
 
   return {
-    async list(companyId: string): Promise<ModelDirectoryEntry[]> {
+    /**
+     * The company's setups in catalogue order (see compareModelDirectoryRows).
+     * Archived entries are left out unless asked for: they are hidden from
+     * agent pickers but still listed in Settings > Models on request.
+     */
+    async list(companyId: string, opts: { includeArchived?: boolean } = {}): Promise<ModelDirectoryEntry[]> {
       const rows = await db
         .select()
         .from(modelDirectoryEntries)
-        .where(eq(modelDirectoryEntries.companyId, companyId))
-        .orderBy(asc(modelDirectoryEntries.name));
-      return rows.map(toModelDirectoryEntry);
+        .where(
+          opts.includeArchived
+            ? eq(modelDirectoryEntries.companyId, companyId)
+            : and(eq(modelDirectoryEntries.companyId, companyId), isNull(modelDirectoryEntries.archivedAt)),
+        );
+      return rows.sort(compareModelDirectoryRows).map(toModelDirectoryEntry);
     },
 
     async get(companyId: string, id: string): Promise<ModelDirectoryEntry> {
@@ -181,6 +303,13 @@ export function modelDirectoryService(db: Db) {
         defaultMaxOutputTokens: input.defaultMaxOutputTokens ?? null,
         backupEntryIds: input.backupEntryIds ?? [],
         note: input.note ?? null,
+        maker: label(input.maker) ?? null,
+        baseModel: label(input.baseModel) ?? null,
+        lane: input.lane ?? null,
+        availability: input.availability ?? null,
+        tags: input.tags ?? [],
+        specs: input.specs ?? null,
+        favorite: input.favorite ?? false,
         createdByUserId: actor.userId,
         updatedByUserId: actor.userId,
       });
@@ -210,6 +339,16 @@ export function modelDirectoryService(db: Db) {
       if (patch.defaultMaxOutputTokens !== undefined) set.defaultMaxOutputTokens = patch.defaultMaxOutputTokens;
       if (patch.backupEntryIds !== undefined) set.backupEntryIds = patch.backupEntryIds;
       if (patch.note !== undefined) set.note = patch.note;
+      if (patch.maker !== undefined) set.maker = label(patch.maker);
+      if (patch.baseModel !== undefined) set.baseModel = label(patch.baseModel);
+      if (patch.lane !== undefined) set.lane = patch.lane;
+      if (patch.availability !== undefined) set.availability = patch.availability;
+      if (patch.tags !== undefined) set.tags = patch.tags;
+      if (patch.specs !== undefined) set.specs = patch.specs;
+      if (patch.favorite !== undefined) set.favorite = patch.favorite;
+      // Archiving keeps the first archive time; un-archiving clears it.
+      if (patch.archived === true) set.archivedAt = current.archivedAt ?? new Date();
+      if (patch.archived === false) set.archivedAt = null;
       try {
         const [row] = await db
           .update(modelDirectoryEntries)
@@ -271,6 +410,15 @@ export function modelDirectoryService(db: Db) {
         defaultMaxOutputTokens: source.defaultMaxOutputTokens,
         backupEntryIds: source.backupEntryIds,
         note: source.note,
+        maker: source.maker,
+        baseModel: source.baseModel,
+        lane: source.lane,
+        availability: source.availability,
+        tags: Array.isArray(source.tags) ? source.tags : [],
+        specs: source.specs,
+        // A copy starts as an ordinary, visible entry.
+        favorite: false,
+        archivedAt: null,
         createdByUserId: actor.userId,
         updatedByUserId: actor.userId,
       });
@@ -310,12 +458,18 @@ export function modelDirectoryService(db: Db) {
             provider: starter.provider,
             model: starter.model,
             baseUrl: starter.baseUrl,
-            providerRouting: null,
+            providerRouting: starter.providerRouting,
             defaultThinking: starter.defaultThinking,
-            defaultTemperature: null,
-            defaultMaxOutputTokens: null,
+            defaultTemperature: starter.defaultTemperature,
+            defaultMaxOutputTokens: starter.defaultMaxOutputTokens,
             backupEntryIds: [],
             note: starter.note,
+            maker: starter.maker,
+            baseModel: starter.baseModel,
+            lane: starter.lane,
+            availability: starter.availability,
+            tags: starter.tags,
+            specs: starter.specs,
             createdByUserId: actor.userId,
             updatedByUserId: actor.userId,
           }),
@@ -336,8 +490,12 @@ export function modelDirectoryService(db: Db) {
       const result: ModelDirectoryImportResult = { created: [], agentsLinked: 0, skipped: [] };
       const existing = await db.select().from(modelDirectoryEntries).where(eq(modelDirectoryEntries.companyId, companyId));
       const byKey = new Map<string, string>();
+      // Every name blocks a new entry (archived ones too: the unique index
+      // covers them), but an identical setup links to a visible entry before
+      // an archived one.
       const names = new Set<string>();
-      for (const e of existing) {
+      const visibleFirst = [...existing].sort((x, y) => Number(x.archivedAt != null) - Number(y.archivedAt != null));
+      for (const e of visibleFirst) {
         names.add(e.name);
         const key = setupKeyOf(e);
         if (!byKey.has(key)) byKey.set(key, e.id);
@@ -442,5 +600,165 @@ export function modelDirectoryService(db: Db) {
       }
       return result;
     },
+
+    /**
+     * The whole catalogue as a plain file, archived entries included. Backups
+     * are written as names (ids differ between companies). Never a key, id,
+     * company, person or timestamp.
+     */
+    async exportCatalogue(companyId: string, now: Date = new Date()): Promise<ModelDirectoryCatalogueExport> {
+      const rows = await db.select().from(modelDirectoryEntries).where(eq(modelDirectoryEntries.companyId, companyId));
+      const nameById = new Map(rows.map((r) => [r.id, r.name]));
+      return {
+        version: MODEL_DIRECTORY_EXPORT_VERSION,
+        exportedAt: now.toISOString(),
+        entries: rows.sort(compareModelDirectoryRows).map((r) => toCatalogueEntry(r, nameById)),
+      };
+    },
+
+    /**
+     * Imports a catalogue file in ONE transaction: nothing is half-imported.
+     * A setup whose name already exists (any capitalisation) is skipped, or
+     * with onExisting "update" overwritten with the fields the file gives
+     * (its name is kept). Backups are matched by name against the file and
+     * the existing entries; an unknown name, or an entry naming itself, is
+     * left out of that entry's backups and reported, but the entry is saved.
+     */
+    async importCatalogue(
+      companyId: string,
+      input: ImportModelDirectoryCatalogue,
+      actor: { userId: string | null },
+    ): Promise<ModelDirectoryCatalogueImportOutcome> {
+      try {
+        return await withCompanyScope(db, companyId, (tx) => importCatalogueWith(tx as unknown as Db, companyId, input, actor));
+      } catch (error) {
+        if (isUniqueViolation(error)) throw conflict("Another model setup with one of these names was saved at the same time. Try the import again.");
+        throw error;
+      }
+    },
+  };
+}
+
+async function importCatalogueWith(
+  q: Db,
+  companyId: string,
+  input: ImportModelDirectoryCatalogue,
+  actor: { userId: string | null },
+): Promise<ModelDirectoryCatalogueImportOutcome> {
+  const onExisting = input.onExisting ?? "skip";
+  const result: ModelDirectoryCatalogueImportResult = { created: [], updated: [], skipped: [] };
+  const existing = await q.select().from(modelDirectoryEntries).where(eq(modelDirectoryEntries.companyId, companyId));
+  // Everything a backup name may point at: existing entries plus what this import creates.
+  const known: Row[] = [...existing];
+  // File entries that were saved (created or updated), for the backup pass.
+  const saved: Array<{ entry: ModelDirectoryCatalogueEntry; row: Row; created: boolean }> = [];
+  const now = new Date();
+
+  for (const entry of input.entries) {
+    const match = findByName(existing, entry.name);
+    if (match) {
+      if (onExisting === "skip") {
+        result.skipped.push({ name: entry.name, reason: `Not imported: a model setup named "${match.name}" already exists.` });
+        continue;
+      }
+      const set = catalogueColumns(entry);
+      const issue = modelDirectoryEntryIssue({
+        id: match.id,
+        provider: set.provider,
+        model: set.model,
+        baseUrl: set.baseUrl === undefined ? match.baseUrl : set.baseUrl,
+        providerRouting: set.providerRouting === undefined ? match.providerRouting : set.providerRouting,
+      });
+      if (issue) {
+        result.skipped.push({ name: entry.name, reason: `Not updated: ${issue}` });
+        continue;
+      }
+      if (entry.archived === true) set.archivedAt = match.archivedAt ?? now;
+      if (entry.archived === false) set.archivedAt = null;
+      const [row] = await q
+        .update(modelDirectoryEntries)
+        .set({ ...set, updatedAt: now, updatedByUserId: actor.userId })
+        .where(and(eq(modelDirectoryEntries.companyId, companyId), eq(modelDirectoryEntries.id, match.id)))
+        .returning();
+      known[known.indexOf(match)] = row!;
+      saved.push({ entry, row: row!, created: false });
+      result.updated.push(match.name);
+      continue;
+    }
+    const [row] = await q
+      .insert(modelDirectoryEntries)
+      .values({
+        companyId,
+        name: entry.name,
+        provider: entry.provider,
+        model: entry.model,
+        baseUrl: entry.baseUrl ?? null,
+        providerRouting: entry.providerRouting ?? null,
+        defaultThinking: entry.defaultThinking ?? null,
+        defaultTemperature: entry.defaultTemperature ?? null,
+        defaultMaxOutputTokens: entry.defaultMaxOutputTokens ?? null,
+        backupEntryIds: [],
+        note: entry.note ?? null,
+        maker: label(entry.maker) ?? null,
+        baseModel: label(entry.baseModel) ?? null,
+        lane: entry.lane ?? null,
+        availability: entry.availability ?? null,
+        tags: entry.tags ?? [],
+        specs: entry.specs ?? null,
+        favorite: entry.favorite ?? false,
+        archivedAt: entry.archived ? now : null,
+        createdByUserId: actor.userId,
+        updatedByUserId: actor.userId,
+      })
+      .returning();
+    known.push(row!);
+    saved.push({ entry, row: row!, created: true });
+    result.created.push(row!.name);
+  }
+
+  // Backups second, so an entry may name one that comes later in the file.
+  // An exact name wins; otherwise a case-insensitive match, the file's own
+  // entries before older ones.
+  const fileRows = saved.map((s) => s.row);
+  const resolve = (name: string) => known.find((r) => r.name === name) ?? findByName(fileRows, name) ?? findByName(known, name);
+  for (const item of saved) {
+    if (item.entry.backupNames === undefined) continue; // update: leave the chain as it is
+    const ids: string[] = [];
+    const missing: string[] = [];
+    let namedItself = false;
+    for (const backupName of item.entry.backupNames) {
+      const target = resolve(backupName);
+      if (!target) missing.push(backupName);
+      else if (target.id === item.row.id) namedItself = true;
+      else if (!ids.includes(target.id)) ids.push(target.id);
+    }
+    const backupEntryIds = ids.slice(0, LANE_A_BACKUP_MODELS_MAX);
+    const reasons: string[] = [];
+    if (missing.length > 0) {
+      reasons.push(
+        missing.length === 1
+          ? `backup "${missing[0]}" was left out because no model setup has that name`
+          : `backups ${missing.map((n) => `"${n}"`).join(", ")} were left out because no model setups have those names`,
+      );
+    }
+    if (namedItself) reasons.push("it was listed as its own backup, which was left out");
+    if (reasons.length > 0) {
+      result.skipped.push({ name: item.row.name, reason: `${item.created ? "Imported" : "Updated"}, but ${reasons.join(", and ")}.` });
+    }
+    const current = Array.isArray(item.row.backupEntryIds) ? item.row.backupEntryIds : [];
+    if (item.created && backupEntryIds.length === 0) continue;
+    if (!item.created && JSON.stringify(current) === JSON.stringify(backupEntryIds)) continue;
+    const [row] = await q
+      .update(modelDirectoryEntries)
+      .set({ backupEntryIds })
+      .where(and(eq(modelDirectoryEntries.companyId, companyId), eq(modelDirectoryEntries.id, item.row.id)))
+      .returning();
+    item.row = row!;
+  }
+
+  return {
+    result,
+    createdEntries: saved.filter((s) => s.created).map((s) => toModelDirectoryEntry(s.row)),
+    updatedEntries: saved.filter((s) => !s.created).map((s) => toModelDirectoryEntry(s.row)),
   };
 }

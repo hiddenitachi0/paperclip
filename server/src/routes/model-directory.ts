@@ -5,7 +5,9 @@ import {
   addModelDirectoryStartersSchema,
   createModelDirectoryEntrySchema,
   duplicateModelDirectoryEntrySchema,
+  importModelDirectoryCatalogueSchema,
   updateModelDirectoryEntrySchema,
+  type ImportModelDirectoryCatalogue,
 } from "@paperclipai/shared";
 import { forbidden, notFound } from "../errors.js";
 import { validate } from "../middleware/validate.js";
@@ -68,8 +70,11 @@ export function modelDirectoryRoutes(rawDb: Db) {
     });
   }
 
+  // Archived setups are left out unless ?includeArchived=true (or 1).
   router.get("/companies/:companyId/model-directory", scope(), async (req, res) => {
-    res.json(await svc.list(req.params.companyId as string));
+    const flag = req.query.includeArchived;
+    const includeArchived = flag === "true" || flag === "1";
+    res.json(await svc.list(req.params.companyId as string, { includeArchived }));
   });
 
   router.post("/companies/:companyId/model-directory", scope(), validate(createModelDirectoryEntrySchema), async (req, res) => {
@@ -77,6 +82,24 @@ export function modelDirectoryRoutes(rawDb: Db) {
     const created = await svc.create(companyId, req.body, actorUser(req));
     await audit(req, companyId, "model_directory_entry.created", created);
     res.status(201).json(created);
+  });
+
+  // The catalogue as a file (archived setups included, backups by name, never
+  // a key or id). Same access as the list. Registered before /:entryId.
+  router.get("/companies/:companyId/model-directory/export", scope(), async (req, res) => {
+    res.json(await svc.exportCatalogue(req.params.companyId as string));
+  });
+
+  // Imports a catalogue file into this company in one transaction. Same access
+  // as saving a setup; one activity row per setup created or updated.
+  router.post("/companies/:companyId/model-directory/import", scope(), validate(importModelDirectoryCatalogueSchema), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const body = req.body as ImportModelDirectoryCatalogue;
+    const outcome = await svc.importCatalogue(companyId, body, actorUser(req));
+    const extra = { source: "catalogue_import", onExisting: body.onExisting ?? "skip" };
+    for (const entry of outcome.createdEntries) await audit(req, companyId, "model_directory_entry.created", entry, extra);
+    for (const entry of outcome.updatedEntries) await audit(req, companyId, "model_directory_entry.updated", entry, extra);
+    res.json(outcome.result);
   });
 
   router.get("/companies/:companyId/model-directory/starters", scope(), async (req, res) => {

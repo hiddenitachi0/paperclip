@@ -170,6 +170,7 @@ import {
   createModelDirectoryEntrySchema,
   updateModelDirectoryEntrySchema,
   duplicateModelDirectoryEntrySchema,
+  importModelDirectoryCatalogueSchema,
   // Merge-card security review (DUR-4566)
   recordSecurityReviewVerdictSchema,
 } from "@paperclipai/shared";
@@ -796,6 +797,8 @@ const BOARD_ONLY_OPERATIONS = new Set([
   // a saved model setup, so it cannot re-point itself or another agent.
   "GET /api/companies/{companyId}/model-directory",
   "POST /api/companies/{companyId}/model-directory",
+  "GET /api/companies/{companyId}/model-directory/export",
+  "POST /api/companies/{companyId}/model-directory/import",
   "GET /api/companies/{companyId}/model-directory/starters",
   "POST /api/companies/{companyId}/model-directory/starters",
   "POST /api/companies/{companyId}/model-directory/import-agent-settings",
@@ -6108,8 +6111,26 @@ registerCurrentRoute({
   method: "get",
   path: "/api/companies/{companyId}/model-directory",
   tags: ["model-directory"],
-  summary: "List a company's saved model setups (owner/admin only; never returns a key)",
+  summary: "List a company's saved model setups in catalogue order (owner/admin only; never returns a key). Archived setups are left out unless includeArchived is true.",
+  query: z.object({ includeArchived: z.enum(["true", "1", "false", "0"]).optional() }),
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/model-directory/export",
+  tags: ["model-directory"],
+  summary: "Export the company's model catalogue as a file: every saved setup (archived ones included), backups by name. No key, id, person or timestamp.",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/import",
+  tags: ["model-directory"],
+  summary: "Import a model catalogue file in one transaction. A setup whose name already exists is skipped (or updated with onExisting \"update\"); backups are matched by name. Owner/admin only; no key is accepted.",
+  body: importModelDirectoryCatalogueSchema,
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 409: r.conflict },
 });
 
 registerCurrentRoute({

@@ -3,8 +3,16 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { LaneABackupModelConfig, LaneAKeywordRoute, LaneAProvider } from "@paperclipai/shared";
+import type { LaneABackupModelConfig, LaneAKeywordRoute, LaneAProvider, ModelDirectoryEntry } from "@paperclipai/shared";
 import { QuickAgentBackupModels } from "./QuickAgentBackupModels";
+
+vi.mock("@/lib/router", () => ({
+  Link: ({ children, to, ...rest }: { children: React.ReactNode; to: string; className?: string }) => (
+    <a href={to} {...rest}>
+      {children}
+    </a>
+  ),
+}));
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -36,9 +44,11 @@ describe("QuickAgentBackupModels", () => {
     container.remove();
   });
 
-  function render(saved: Saved = {}, main = claudeMain, disabled = false) {
+  function render(saved: Saved = {}, main = claudeMain, disabled = false, savedModels?: ModelDirectoryEntry[]) {
     act(() => {
-      root.render(<QuickAgentBackupModels saved={saved} main={main} disabled={disabled} onSave={onSave} />);
+      root.render(
+        <QuickAgentBackupModels saved={saved} main={main} disabled={disabled} savedModels={savedModels} onSave={onSave} />,
+      );
     });
   }
   const q = (id: string) => container.querySelector<HTMLElement>(`[data-testid="${id}"]`);
@@ -143,5 +153,136 @@ describe("QuickAgentBackupModels", () => {
     render({ backups: [entry("a", "gpt-4.1-mini", "openai")] }, claudeMain, true);
     expect(q("backup-save")).toBeNull();
     expect((q("backup-add") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  describe("saved models", () => {
+    const savedModel = (over: Partial<ModelDirectoryEntry>): ModelDirectoryEntry => ({
+      id: "11111111-1111-4111-8111-111111111111",
+      companyId: "c1",
+      name: "Saved",
+      provider: "openrouter",
+      model: "mistralai/mistral-small",
+      baseUrl: null,
+      providerRouting: null,
+      defaultThinking: null,
+      defaultTemperature: null,
+      defaultMaxOutputTokens: null,
+      backupEntryIds: [],
+      note: null,
+      maker: null,
+      baseModel: null,
+      lane: null,
+      availability: null,
+      tags: [],
+      specs: null,
+      favorite: false,
+      archivedAt: null,
+      createdByUserId: null,
+      updatedByUserId: null,
+      createdAt: "2026-10-01T00:00:00Z",
+      updatedAt: "2026-10-01T00:00:00Z",
+      ...over,
+    });
+    const GEMMA = savedModel({
+      id: "22222222-2222-4222-8222-222222222222",
+      name: "Gemma on my PC",
+      provider: "local",
+      model: "gemma3:12b",
+      baseUrl: "http://pc:11434/v1",
+      defaultTemperature: 0.4,
+      maker: "Google",
+      baseModel: "Gemma 3",
+    });
+    const MISTRAL = savedModel({
+      id: "33333333-3333-4333-8333-333333333333",
+      name: "Mistral via OpenRouter",
+      maker: "Mistral",
+    });
+    const OLD = savedModel({
+      id: "44444444-4444-4444-8444-444444444444",
+      name: "Old archived one",
+      archivedAt: "2026-10-02T00:00:00Z",
+    });
+
+    it("offers saved models grouped by maker, leaving archived ones out", () => {
+      render({ backups: [entry("a", "gpt-4.1-mini", "openai")] }, claudeMain, false, [MISTRAL, GEMMA, OLD]);
+      const select = q("backup-saved-model-0") as HTMLSelectElement;
+      expect(select).not.toBeNull();
+      expect(select.value).toBe("");
+      expect([...select.querySelectorAll("optgroup")].map((g) => g.label)).toEqual(["Google", "Mistral"]);
+      expect(select.textContent).toContain("Type it myself");
+      expect(select.textContent).toContain("Gemma on my PC");
+      expect(select.textContent).not.toContain("Old archived one");
+      // Manual fields still there while nothing is picked.
+      expect(q("backup-provider-0")).not.toBeNull();
+    });
+
+    it("has no saved-model picker when there are no saved models", () => {
+      render({ backups: [entry("a", "gpt-4.1-mini", "openai")] });
+      expect(q("backup-saved-model-0")).toBeNull();
+      expect(q("backup-provider-0")).not.toBeNull();
+    });
+
+    it("picking a saved model fills the backup and saves the link", () => {
+      render({ backups: [entry("a", "gpt-4.1-mini", "openai")] }, claudeMain, false, [GEMMA, MISTRAL]);
+      change(q("backup-saved-model-0"), GEMMA.id);
+      expect(q("backup-provider-0")).toBeNull();
+      expect(q("backup-saved-model-summary-0")?.textContent).toContain('Uses "Gemma on my PC"');
+      click(q("backup-save"));
+      const patch = onSave.mock.calls[0]![0];
+      expect(patch.laneABackupModels).toEqual([
+        {
+          id: "a",
+          provider: "local",
+          model: "gemma3:12b",
+          baseUrl: "http://pc:11434/v1",
+          temperature: 0.4,
+          directoryEntryId: GEMMA.id,
+        },
+      ]);
+    });
+
+    it("shows the saved model's name for a backup that already uses one", () => {
+      render(
+        {
+          backups: [{ id: "a", provider: "openrouter", model: "mistralai/mistral-small", directoryEntryId: MISTRAL.id }],
+          noAnswerChainIds: ["a"],
+        },
+        claudeMain,
+        false,
+        [MISTRAL],
+      );
+      expect((q("backup-saved-model-0") as HTMLSelectElement).value).toBe(MISTRAL.id);
+      expect(q("backup-saved-model-summary-0")?.textContent).toContain("Mistral via OpenRouter");
+      expect(q("backup-chain-no-answer-item-0")?.textContent).toContain("Backup 1 (Mistral via OpenRouter)");
+    });
+
+    it("'Type it myself' drops the link and keeps the filled-in details", () => {
+      render(
+        { backups: [{ id: "a", provider: "openrouter", model: "mistralai/mistral-small", directoryEntryId: MISTRAL.id }] },
+        claudeMain,
+        false,
+        [MISTRAL],
+      );
+      change(q("backup-saved-model-0"), "");
+      expect((q("backup-provider-0") as HTMLSelectElement).value).toBe("openrouter");
+      expect((q("backup-model-0") as HTMLInputElement).value).toBe("mistralai/mistral-small");
+      click(q("backup-save"));
+      const saved = onSave.mock.calls[0]![0].laneABackupModels[0];
+      expect(saved.directoryEntryId).toBeUndefined();
+      expect(saved.model).toBe("mistralai/mistral-small");
+    });
+
+    it("keeps a link to a saved model that is no longer listed and says so", () => {
+      render(
+        { backups: [{ id: "a", provider: "openrouter", model: "x/y", directoryEntryId: OLD.id }] },
+        claudeMain,
+        false,
+        [MISTRAL],
+      );
+      expect((q("backup-saved-model-0") as HTMLSelectElement).value).toBe(OLD.id);
+      expect(q("backup-saved-model-summary-0")?.textContent).toContain("archived or deleted");
+      expect((q("backup-save") as HTMLButtonElement).disabled).toBe(true);
+    });
   });
 });

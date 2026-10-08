@@ -802,6 +802,7 @@ export function QuickAgentSection({
               keywordRoutes: agent.laneAKeywordRoutes,
             }}
             main={{ provider, baseUrl: agent.laneABaseUrl ?? null, hasKey: Boolean(keyBinding) }}
+            savedModels={savedModels}
             saving={settingMutation.isPending}
             onSave={(patch) => settingMutation.mutateAsync(patch)}
           />

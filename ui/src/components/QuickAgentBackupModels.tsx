@@ -13,7 +13,10 @@ import {
   type LaneABackupModelConfig,
   type LaneAKeywordRoute,
   type LaneAProvider,
+  type ModelDirectoryEntry,
 } from "@paperclipai/shared";
+import { Link } from "@/lib/router";
+import { filterEntries, groupEntries } from "@/lib/model-catalogue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
@@ -32,6 +35,8 @@ type PoolDraft = {
   baseUrl: string;
   /** "" = model default. */
   temperature: string;
+  /** Saved model (Settings > Models) this backup uses; "" = typed in by hand. */
+  directoryEntryId: string;
 };
 
 type RouteDraft = { id: string; phrases: string; backupId: string };
@@ -77,6 +82,7 @@ function draftFromSaved(saved: Saved): Draft {
       model: entry.model,
       baseUrl: entry.baseUrl ?? "",
       temperature: entry.temperature === null || entry.temperature === undefined ? "" : String(entry.temperature),
+      directoryEntryId: entry.directoryEntryId ?? "",
     })),
     noAnswer: [...(saved.noAnswerChainIds ?? [])],
     refusal: [...(saved.refusalChainIds ?? [])],
@@ -127,6 +133,7 @@ function draftToPatch(draft: Draft): BackupSettingsPatch {
         model: entry.model.trim(),
         ...(descriptor.baseUrlEditable && baseUrl ? { baseUrl } : {}),
         ...(entry.temperature !== "" ? { temperature: Number(entry.temperature) } : {}),
+        ...(entry.directoryEntryId ? { directoryEntryId: entry.directoryEntryId } : {}),
       };
     }),
     laneANoAnswerChainIds: draft.noAnswer,
@@ -195,15 +202,37 @@ export function checkBackupEntry(
   };
 }
 
+/**
+ * The draft fields a saved model fills in. The server uses the saved model's
+ * own settings at call time; these copies are what is used if that saved
+ * model is later deleted.
+ */
+export function backupFieldsFromSavedModel(
+  entry: Pick<ModelDirectoryEntry, "id" | "provider" | "model" | "baseUrl" | "defaultTemperature">,
+): Pick<PoolDraft, "provider" | "model" | "baseUrl" | "temperature" | "directoryEntryId"> {
+  const provider = normalizeLaneAProvider(entry.provider);
+  return {
+    provider,
+    model: entry.model,
+    baseUrl: LANE_A_PROVIDER_CATALOGUE[provider].baseUrlEditable ? (entry.baseUrl ?? "") : "",
+    temperature:
+      entry.defaultTemperature === null || entry.defaultTemperature === undefined ? "" : String(entry.defaultTemperature),
+    directoryEntryId: entry.id,
+  };
+}
+
 export function QuickAgentBackupModels({
   saved,
   main,
+  savedModels = [],
   disabled,
   saving,
   onSave,
 }: {
   saved: Saved;
   main: { provider: LaneAProvider; baseUrl: string | null; hasKey: boolean };
+  /** Saved models from Settings > Models (archived ones are left out). */
+  savedModels?: readonly ModelDirectoryEntry[];
   /** True when the person looking cannot edit (the whole form's own permission bar). */
   disabled?: boolean;
   saving?: boolean;
@@ -223,6 +252,10 @@ export function QuickAgentBackupModels({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [savedKey]);
 
+  const pickable = useMemo(() => filterEntries(savedModels, {}), [savedModels]);
+  const pickableGroups = useMemo(() => groupEntries(pickable, "maker"), [pickable]);
+  const savedModelById = useMemo(() => new Map(savedModels.map((entry) => [entry.id, entry])), [savedModels]);
+
   const dirty = JSON.stringify(draft) !== savedKey;
   const problems = draftProblems(draft);
   const readOnly = Boolean(disabled);
@@ -232,6 +265,8 @@ export function QuickAgentBackupModels({
     const index = draft.pool.findIndex((entry) => entry.id === id);
     if (index < 0) return "A backup that was removed";
     const entry = draft.pool[index]!;
+    const savedModel = entry.directoryEntryId ? savedModelById.get(entry.directoryEntryId) : undefined;
+    if (savedModel) return `Backup ${index + 1} (${savedModel.name})`;
     const providerLabel = LANE_A_PROVIDER_CATALOGUE[entry.provider].label;
     return `Backup ${index + 1} (${providerLabel}${entry.model ? `, ${entry.model}` : ""})`;
   };
@@ -256,7 +291,14 @@ export function QuickAgentBackupModels({
         ...current,
         pool: [
           ...current.pool,
-          { id: newId("bk"), provider, model: descriptor.defaultModel ?? "", baseUrl: "", temperature: "" },
+          {
+            id: newId("bk"),
+            provider,
+            model: descriptor.defaultModel ?? "",
+            baseUrl: "",
+            temperature: "",
+            directoryEntryId: "",
+          },
         ],
       };
     });
@@ -277,6 +319,16 @@ export function QuickAgentBackupModels({
       model: descriptor.freeForm ? "" : (descriptor.defaultModel ?? ""),
       baseUrl: descriptor.baseUrlEditable ? entry.baseUrl : "",
     });
+  };
+
+  const pickSavedModel = (entry: PoolDraft, value: string) => {
+    if (!value) {
+      // "Type it myself": keep the fields as they are, just stop following the saved model.
+      updateEntry(entry.id, { directoryEntryId: "" });
+      return;
+    }
+    const savedModel = savedModelById.get(value);
+    if (savedModel) updateEntry(entry.id, backupFieldsFromSavedModel(savedModel));
   };
 
   const setChain = (which: "noAnswer" | "refusal", next: string[]) =>
@@ -318,6 +370,8 @@ export function QuickAgentBackupModels({
           const descriptor = LANE_A_PROVIDER_CATALOGUE[entry.provider];
           const models = laneAModelsForProvider(entry.provider);
           const check = checks[entry.id];
+          const linked = entry.directoryEntryId !== "";
+          const linkedModel = linked ? savedModelById.get(entry.directoryEntryId) : undefined;
           return (
             <li
               key={entry.id}
@@ -360,88 +414,134 @@ export function QuickAgentBackupModels({
                 </span>
               </div>
 
-              <label className="block space-y-1">
-                <span className="text-xs text-muted-foreground">Who answers</span>
-                <select
-                  className={selectClass}
-                  value={entry.provider}
-                  disabled={busy}
-                  data-testid={`backup-provider-${index}`}
-                  onChange={(event) => changeProvider(entry, event.target.value)}
-                >
-                  {LANE_A_PROVIDERS.map((provider) => (
-                    <option key={provider} value={provider}>
-                      {LANE_A_PROVIDER_CATALOGUE[provider].label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              {descriptor.freeForm ? (
+              {(pickable.length > 0 || linked) && (
                 <label className="block space-y-1">
-                  <span className="text-xs text-muted-foreground">Model</span>
-                  <Input
-                    value={entry.model}
-                    disabled={busy}
-                    data-testid={`backup-model-${index}`}
-                    placeholder={entry.provider === "openrouter" ? "openai/gpt-4.1-mini" : "llama3.1"}
-                    onChange={(event) => updateEntry(entry.id, { model: event.target.value })}
-                  />
-                </label>
-              ) : (
-                <label className="block space-y-1">
-                  <span className="text-xs text-muted-foreground">Model</span>
+                  <span className="text-xs text-muted-foreground">Saved model</span>
                   <select
                     className={selectClass}
-                    value={models.includes(entry.model) ? entry.model : ""}
+                    value={entry.directoryEntryId}
                     disabled={busy}
-                    data-testid={`backup-model-${index}`}
-                    onChange={(event) => updateEntry(entry.id, { model: event.target.value })}
+                    data-testid={`backup-saved-model-${index}`}
+                    onChange={(event) => pickSavedModel(entry, event.target.value)}
                   >
-                    {!models.includes(entry.model) && <option value="">Pick a model</option>}
-                    {models.map((model) => (
-                      <option key={model} value={model}>
-                        {descriptor.models[model]?.label ?? model} ({model})
-                      </option>
+                    <option value="">Type it myself</option>
+                    {linked && !linkedModel && (
+                      <option value={entry.directoryEntryId}>A saved model that is no longer in the list</option>
+                    )}
+                    {pickableGroups.map((group) => (
+                      <optgroup key={group.key} label={group.title}>
+                        {group.entries.map((option) => (
+                          <option key={option.id} value={option.id}>
+                            {option.name}
+                          </option>
+                        ))}
+                      </optgroup>
                     ))}
                   </select>
+                  {linked ? (
+                    <span className="block text-xs text-muted-foreground" data-testid={`backup-saved-model-summary-${index}`}>
+                      {linkedModel
+                        ? `Uses "${linkedModel.name}" (${LANE_A_PROVIDER_CATALOGUE[entry.provider].label}, ${entry.model}). Changes you make to it in Settings > Models apply here too.`
+                        : `This saved model was archived or deleted. It keeps using ${LANE_A_PROVIDER_CATALOGUE[entry.provider].label}, ${entry.model}. Pick another saved model or choose "Type it myself".`}{" "}
+                      <Link to="/company/settings/models" className="underline">
+                        Manage saved models
+                      </Link>
+                      .
+                    </span>
+                  ) : (
+                    <span className="block text-xs text-muted-foreground">
+                      Pick one of your saved models, or type the details in below.
+                    </span>
+                  )}
                 </label>
               )}
 
-              {descriptor.baseUrlEditable && (
-                <label className="block space-y-1">
-                  <span className="text-xs text-muted-foreground">Address</span>
-                  <Input
-                    value={entry.baseUrl}
-                    disabled={busy}
-                    data-testid={`backup-baseurl-${index}`}
-                    placeholder={descriptor.defaultBaseUrl ?? "http://localhost:11434/v1"}
-                    onChange={(event) => updateEntry(entry.id, { baseUrl: event.target.value })}
-                  />
-                </label>
-              )}
+              {!linked && (
+                <>
+                  <label className="block space-y-1">
+                    <span className="text-xs text-muted-foreground">Who answers</span>
+                    <select
+                      className={selectClass}
+                      value={entry.provider}
+                      disabled={busy}
+                      data-testid={`backup-provider-${index}`}
+                      onChange={(event) => changeProvider(entry, event.target.value)}
+                    >
+                      {LANE_A_PROVIDERS.map((provider) => (
+                        <option key={provider} value={provider}>
+                          {LANE_A_PROVIDER_CATALOGUE[provider].label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
 
-              <label className="block space-y-1">
-                <span className="text-xs text-muted-foreground">Creativity</span>
-                <select
-                  className={selectClass}
-                  value={entry.temperature}
-                  disabled={busy}
-                  data-testid={`backup-temperature-${index}`}
-                  onChange={(event) => updateEntry(entry.id, { temperature: event.target.value })}
-                >
-                  <option value="">Model default</option>
-                  {LANE_A_TEMPERATURE_PRESETS.map((preset) => (
-                    <option key={preset.value} value={String(preset.value)}>
-                      {preset.label} ({preset.value})
-                    </option>
-                  ))}
-                  {entry.temperature !== "" &&
-                    !LANE_A_TEMPERATURE_PRESETS.some((preset) => String(preset.value) === entry.temperature) && (
-                      <option value={entry.temperature}>Custom ({entry.temperature})</option>
-                    )}
-                </select>
-              </label>
+                  {descriptor.freeForm ? (
+                    <label className="block space-y-1">
+                      <span className="text-xs text-muted-foreground">Model</span>
+                      <Input
+                        value={entry.model}
+                        disabled={busy}
+                        data-testid={`backup-model-${index}`}
+                        placeholder={entry.provider === "openrouter" ? "openai/gpt-4.1-mini" : "llama3.1"}
+                        onChange={(event) => updateEntry(entry.id, { model: event.target.value })}
+                      />
+                    </label>
+                  ) : (
+                    <label className="block space-y-1">
+                      <span className="text-xs text-muted-foreground">Model</span>
+                      <select
+                        className={selectClass}
+                        value={models.includes(entry.model) ? entry.model : ""}
+                        disabled={busy}
+                        data-testid={`backup-model-${index}`}
+                        onChange={(event) => updateEntry(entry.id, { model: event.target.value })}
+                      >
+                        {!models.includes(entry.model) && <option value="">Pick a model</option>}
+                        {models.map((model) => (
+                          <option key={model} value={model}>
+                            {descriptor.models[model]?.label ?? model} ({model})
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+
+                  {descriptor.baseUrlEditable && (
+                    <label className="block space-y-1">
+                      <span className="text-xs text-muted-foreground">Address</span>
+                      <Input
+                        value={entry.baseUrl}
+                        disabled={busy}
+                        data-testid={`backup-baseurl-${index}`}
+                        placeholder={descriptor.defaultBaseUrl ?? "http://localhost:11434/v1"}
+                        onChange={(event) => updateEntry(entry.id, { baseUrl: event.target.value })}
+                      />
+                    </label>
+                  )}
+
+                  <label className="block space-y-1">
+                    <span className="text-xs text-muted-foreground">Creativity</span>
+                    <select
+                      className={selectClass}
+                      value={entry.temperature}
+                      disabled={busy}
+                      data-testid={`backup-temperature-${index}`}
+                      onChange={(event) => updateEntry(entry.id, { temperature: event.target.value })}
+                    >
+                      <option value="">Model default</option>
+                      {LANE_A_TEMPERATURE_PRESETS.map((preset) => (
+                        <option key={preset.value} value={String(preset.value)}>
+                          {preset.label} ({preset.value})
+                        </option>
+                      ))}
+                      {entry.temperature !== "" &&
+                        !LANE_A_TEMPERATURE_PRESETS.some((preset) => String(preset.value) === entry.temperature) && (
+                          <option value={entry.temperature}>Custom ({entry.temperature})</option>
+                        )}
+                    </select>
+                  </label>
+                </>
+              )}
 
               <div className="flex flex-wrap items-center gap-2">
                 <Button

@@ -1,5 +1,8 @@
 import type {
   CreateModelDirectoryEntry,
+  ImportModelDirectoryCatalogue,
+  ModelDirectoryCatalogueExport,
+  ModelDirectoryCatalogueImportResult,
   ModelDirectoryEntry,
   ModelDirectoryStarterStatus,
   ModelConverterOp,
@@ -45,11 +48,24 @@ export interface ModelReview {
 
 /** Saved model setups for a company ("Settings > Models"). Never carries a key. */
 export const modelDirectoryApi = {
-  list: (companyId: string) => api.get<ModelDirectoryEntry[]>(`/companies/${companyId}/model-directory`),
+  /** Archived setups are left out unless includeArchived is set (Settings > Models "Show archived"). */
+  list: (companyId: string, opts: { includeArchived?: boolean } = {}) =>
+    api.get<ModelDirectoryEntry[]>(
+      `/companies/${companyId}/model-directory${opts.includeArchived ? "?includeArchived=true" : ""}`,
+    ),
   create: (companyId: string, body: CreateModelDirectoryEntry) =>
     api.post<ModelDirectoryEntry>(`/companies/${companyId}/model-directory`, body),
+  /** Also archives / restores: update(companyId, entryId, { archived: true | false }). */
   update: (companyId: string, entryId: string, body: UpdateModelDirectoryEntry) =>
     api.patch<ModelDirectoryEntry>(`/companies/${companyId}/model-directory/${entryId}`, body),
+  archive: (companyId: string, entryId: string, archived = true) =>
+    api.patch<ModelDirectoryEntry>(`/companies/${companyId}/model-directory/${entryId}`, { archived }),
+  /** The whole catalogue as a file (archived included, backups by name, never a key). */
+  exportCatalogue: (companyId: string) =>
+    api.get<ModelDirectoryCatalogueExport>(`/companies/${companyId}/model-directory/export`),
+  /** Imports a catalogue file; same-name setups are skipped unless onExisting is "update". */
+  importCatalogue: (companyId: string, body: ImportModelDirectoryCatalogue) =>
+    api.post<ModelDirectoryCatalogueImportResult>(`/companies/${companyId}/model-directory/import`, body),
   remove: (companyId: string, entryId: string) =>
     api.delete<void>(`/companies/${companyId}/model-directory/${entryId}`),
   duplicate: (companyId: string, entryId: string) =>
