@@ -19,7 +19,7 @@ import {
 } from "../../../packages/plugins/media-studio/src/identity.js";
 import { ANALYSIS_SYSTEM_PROMPT, parseAnalysis } from "../../../packages/plugins/media-studio/src/vision-analysis.js";
 import { crc32, zipStore } from "../../../packages/plugins/media-studio/src/lora-training.js";
-import { AGE_CHECK_SYSTEM_PROMPT, parseAgeCheck, sha256Of } from "../../../packages/plugins/media-studio/src/age-check.js";
+import { AGE_CHECK_SYSTEM_PROMPT, parseAgeCheck, recordAgeCheck, runAgeCheck, sha256Of } from "../../../packages/plugins/media-studio/src/age-check.js";
 import { HiggsfieldClient, HiggsfieldProvider, readHiggsfieldCredentials, soulSize } from "../../../packages/plugins/media-studio/src/higgsfield.js";
 
 /**
@@ -1310,6 +1310,99 @@ describe("age check: every picture must be clearly of an adult before it leaves 
     await expect(harness.performAction("lora.publish", { identityId: identity.id, repoName: "maja-lora", confirmPublic: true }, owner)).rejects.toThrow(/photo-3\.png/);
     expect(fake.calls.some((c) => c.url.startsWith("https://huggingface.co/"))).toBe(false);
     expect(fake.bytes.some((b) => b.url.startsWith("https://hf-hub-lfs"))).toBe(false);
+  });
+
+  /** Answers held back until released, so two checks can be made to finish in a chosen order. */
+  function heldModel(harness: TestHarness, answers: Record<string, string>) {
+    const release: Record<string, () => void> = {};
+    const started: string[] = [];
+    const analyse = vi.fn(async (_companyId: string, input: { fileId: string }) => {
+      started.push(input.fileId);
+      await new Promise<void>((resolve) => (release[input.fileId] = resolve));
+      return { text: answers[input.fileId]!, entryName: "Vision model", provider: "anthropic", model: "m", costCents: 1 };
+    });
+    harness.ctx.models.analyseImage = analyse as never;
+    return { analyse, release, started };
+  }
+  /** Slow state reads, so a read-modify-write without a lock would lose results. */
+  function slowState(harness: TestHarness) {
+    const get = harness.ctx.state.get.bind(harness.ctx.state);
+    harness.ctx.state.get = (async (key: never) => {
+      const value = await get(key);
+      await new Promise((r) => setTimeout(r, 5));
+      return value;
+    }) as never;
+  }
+  const until = async (cond: () => boolean) => {
+    for (let i = 0; i < 200 && !cond(); i++) await new Promise((r) => setTimeout(r, 1));
+    expect(cond()).toBe(true);
+  };
+
+  for (const order of [["under18", "adult"], ["adult", "under18"]] as const) {
+    it(`two concurrent checks of the same picture (under18 and adult, ${order.join(" first, then ")}) keep under18`, async () => {
+      const { harness } = await world();
+      await ageModel(harness);
+      slowState(harness);
+      // P[0] and COPY have the same bytes: one picture, two file ids.
+      const byVerdict = { under18: P[0]!, adult: COPY };
+      const { analyse, release, started } = heldModel(harness, { [P[0]!]: '{"apparentAdult": false}', [COPY]: '{"apparentAdult": true}' });
+      const a = harness.performAction<any>("ageCheck.run", { fileIds: [P[0]] }, owner);
+      const b = harness.performAction<any>("ageCheck.run", { fileIds: [COPY] }, owner);
+      await until(() => started.length === 2);
+      release[byVerdict[order[0]]]!();
+      await new Promise((r) => setTimeout(r, 20));
+      release[byVerdict[order[1]]]!();
+      const [ra, rb] = await Promise.all([a, b]);
+      expect(analyse).toHaveBeenCalledTimes(2);
+      // The check that finished last reports the stored (strictest) result.
+      expect((order[1] === "under18" ? ra : rb).pictures[0].verdict).toBe("under18");
+      expect((await harness.performAction<any>("ageCheck.status", { fileIds: [P[0], COPY] }, owner)).pictures.map((p: any) => p.verdict)).toEqual(["under18", "under18"]);
+      const stored = (await harness.ctx.state.get(ageKey(COMPANY))) as Record<string, any>;
+      expect(stored[sha256Of(BYTES[0]!)].verdict).toBe("under18");
+    });
+  }
+
+  it("concurrent checks of different pictures keep both results", async () => {
+    const { harness } = await world();
+    await ageModel(harness);
+    slowState(harness);
+    const { release, started } = heldModel(harness, { [P[0]!]: '{"apparentAdult": true}', [P[1]!]: '{"apparentAdult": false}', [P[2]!]: '{"apparentAdult": null}' });
+    const runs = [P[0], P[1], P[2]].map((id) => harness.performAction<any>("ageCheck.run", { fileIds: [id] }, owner));
+    await until(() => started.length === 3);
+    for (const id of started) release[id]!();
+    await Promise.all(runs);
+    const stored = (await harness.ctx.state.get(ageKey(COMPANY))) as Record<string, any>;
+    expect(Object.keys(stored)).toHaveLength(3);
+    expect(stored[sha256Of(BYTES[0]!)].verdict).toBe("adult");
+    expect(stored[sha256Of(BYTES[1]!)].verdict).toBe("under18");
+    expect(stored[sha256Of(BYTES[2]!)].verdict).toBe("unclear");
+  });
+
+  it("recording never softens and keeps unrelated results, even when many writes race", async () => {
+    const { harness } = await world();
+    slowState(harness);
+    const hash = (i: number) => sha256Of(BYTES[i]!);
+    const rec = (i: number, verdict: "adult" | "under18" | "unclear") => ({ sha256: hash(i), verdict, modelEntryId: AGE_ENTRY, checkedAt: new Date().toISOString() });
+    const results = await Promise.all([
+      recordAgeCheck(harness.ctx, COMPANY, rec(0, "under18")),
+      recordAgeCheck(harness.ctx, COMPANY, rec(0, "adult")),
+      recordAgeCheck(harness.ctx, COMPANY, rec(0, "unclear")),
+      ...[1, 2, 3, 4, 5].map((i) => recordAgeCheck(harness.ctx, COMPANY, rec(i, "adult"))),
+    ]);
+    expect(results.slice(0, 3).map((r) => r.verdict)).toEqual(["under18", "under18", "under18"]);
+    const stored = (await harness.ctx.state.get(ageKey(COMPANY))) as Record<string, any>;
+    expect(Object.keys(stored)).toHaveLength(6);
+    expect(stored[hash(0)].verdict).toBe("under18");
+  });
+
+  it("a picture refused while another check was waiting is not sent to the model again", async () => {
+    const { harness } = await world();
+    const analyse = await ageModel(harness);
+    const picture = { fileId: COPY, name: null, sha256: sha256Of(BYTES[0]!) };
+    await recordAgeCheck(harness.ctx, COMPANY, { sha256: picture.sha256, verdict: "unclear", modelEntryId: AGE_ENTRY, checkedAt: new Date().toISOString() });
+    const res = await runAgeCheck(harness.ctx, COMPANY, { entryId: AGE_ENTRY, label: null, keySecretId: SECRET }, picture);
+    expect(res.verdict).toBe("unclear");
+    expect(analyse).not.toHaveBeenCalled();
   });
 
   it("results are kept per company: another company's copy of the same picture is checked on its own", async () => {

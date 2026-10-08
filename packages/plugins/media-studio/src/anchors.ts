@@ -90,6 +90,7 @@ import {
   AGE_CHECK_NO_MODEL_MESSAGE,
   loadAgeChecks,
   recordAgeCheck,
+  storedAgeCheck,
   refusedMessage,
   runAgeCheck,
   sha256Of,
@@ -609,7 +610,9 @@ export async function analyseAction(ctx: PluginContext, params: Record<string, u
   }
   const picture = await hashPicture(ctx, companyId, fileId, "The picture");
   // A copy of a picture already judged not clearly adult is refused without asking again.
-  const known = (await loadAgeChecks(ctx, companyId)).get(picture.sha256);
+  // Read inside the age-check lock, right before the call, so a picture another
+  // call refused meanwhile is not sent to the model again.
+  const known = await storedAgeCheck(ctx, companyId, picture.sha256);
   if (known && known.verdict !== "adult") {
     return { ok: false, blocked: true, message: "This picture was already found not to be clearly of an adult (18 or older), so it cannot be used for an identity." };
   }
@@ -634,8 +637,12 @@ export async function analyseAction(ctx: PluginContext, params: Record<string, u
     }
     return { ok: false, blocked: false, message: outcome.message };
   }
-  // The analysis said "clearly an adult": that is this picture's age check too.
-  await record("adult");
+  // The analysis said "clearly an adult": that is this picture's age check too,
+  // unless another check stored a stricter result meanwhile (never softened).
+  const stored = await record("adult");
+  if (stored.verdict !== "adult") {
+    return { ok: false, blocked: true, message: "This picture was found not to be clearly of an adult (18 or older), so it cannot be used for an identity." };
+  }
   return { ok: true, sheet: outcome.result.sheet, crops: outcome.result.crops, model: settings.analysis.label ?? answer.entryName };
 }
 

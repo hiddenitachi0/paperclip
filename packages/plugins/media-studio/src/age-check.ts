@@ -116,23 +116,58 @@ export async function loadAgeChecks(ctx: PluginContext, companyId: string): Prom
 }
 
 /**
- * Store one result. Re-reads right before writing so results stored by
- * another call meanwhile are kept, and never makes a stored result milder.
+ * In-process lock per company: every read-modify-write of the stored results
+ * runs one after another, so two checks finishing at the same time can never
+ * drop each other's results or let a milder verdict overwrite a stricter one.
+ * The chain is entered synchronously, before the first await.
  */
-export async function recordAgeCheck(ctx: PluginContext, companyId: string, record: AgeCheckRecord): Promise<AgeCheckRecord> {
-  const all = await loadAgeChecks(ctx, companyId);
-  const existing = all.get(record.sha256);
-  if (existing && SEVERITY[existing.verdict] >= SEVERITY[record.verdict]) return existing;
-  all.set(record.sha256, record);
-  let entries = [...all.values()];
-  if (entries.length > MAX_RECORDS) {
-    // Forget the oldest "adult" results first; refusals are kept.
-    const adults = entries.filter((e) => e.verdict === "adult").sort((a, b) => a.checkedAt.localeCompare(b.checkedAt));
-    const drop = new Set(adults.slice(0, entries.length - MAX_RECORDS).map((e) => e.sha256));
-    entries = entries.filter((e) => !drop.has(e.sha256));
-  }
-  await ctx.state.set(scope(companyId), Object.fromEntries(entries.map((e) => [e.sha256, e])));
-  return record;
+const companyLocks = new Map<string, Promise<unknown>>();
+export function withAgeCheckLock<T>(companyId: string, fn: () => Promise<T>): Promise<T> {
+  const key = `${STATE_KEY}:${companyId}`;
+  const run = (companyLocks.get(key) ?? Promise.resolve()).then(() => fn());
+  const tail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  companyLocks.set(key, tail);
+  void tail.then(() => {
+    if (companyLocks.get(key) === tail) companyLocks.delete(key);
+  });
+  return run;
+}
+
+function stricter(a: AgeCheckRecord | undefined, b: AgeCheckRecord): AgeCheckRecord {
+  return a && SEVERITY[a.verdict] >= SEVERITY[b.verdict] ? a : b;
+}
+
+/** The stored result of one picture, read inside the lock (null: not checked yet). */
+export function storedAgeCheck(ctx: PluginContext, companyId: string, sha256: string): Promise<AgeCheckRecord | null> {
+  return withAgeCheckLock(companyId, async () => (await loadAgeChecks(ctx, companyId)).get(sha256) ?? null);
+}
+
+/**
+ * Store one result. Runs inside the company's lock and re-reads right before
+ * writing, so results stored by another call meanwhile are kept, and a stored
+ * result never gets milder (under18 > unclear > adult). Returns the result
+ * that is stored for the picture afterwards (possibly a stricter earlier one).
+ */
+export function recordAgeCheck(ctx: PluginContext, companyId: string, record: AgeCheckRecord): Promise<AgeCheckRecord> {
+  return withAgeCheckLock(companyId, async () => {
+    const all = await loadAgeChecks(ctx, companyId);
+    const existing = all.get(record.sha256);
+    const kept = stricter(existing, record);
+    if (kept === existing) return existing;
+    all.set(record.sha256, kept);
+    let entries = [...all.values()];
+    if (entries.length > MAX_RECORDS) {
+      // Forget the oldest "adult" results first; refusals are kept.
+      const adults = entries.filter((e) => e.verdict === "adult").sort((a, b) => a.checkedAt.localeCompare(b.checkedAt));
+      const drop = new Set(adults.slice(0, entries.length - MAX_RECORDS).map((e) => e.sha256));
+      entries = entries.filter((e) => !drop.has(e.sha256));
+    }
+    await ctx.state.set(scope(companyId), Object.fromEntries(entries.map((e) => [e.sha256, e])));
+    return kept;
+  });
 }
 
 export interface AgeCheckPicture {
@@ -154,6 +189,10 @@ export async function runAgeCheck(
   analysis: AnalysisModelSetting,
   picture: AgeCheckPicture,
 ): Promise<AgeCheckRecord> {
+  // Checked again right before the call: a picture another call has judged
+  // meanwhile (e.g. refused) is not sent to the model again.
+  const known = await storedAgeCheck(ctx, companyId, picture.sha256);
+  if (known) return known;
   const answer = await ctx.models.analyseImage(companyId, {
     entryId: analysis.entryId,
     fileId: picture.fileId,
