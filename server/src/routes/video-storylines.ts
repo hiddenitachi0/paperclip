@@ -36,6 +36,7 @@ import { videoStorylineService, type VideoStorylineActor } from "../services/vid
 import { videoStorylineRenderService } from "../services/video-storyline-render.js";
 import { videoStorylineStitchService } from "../services/video-storyline-stitch.js";
 import { videoStorylineSettingsService } from "../services/video-storyline-settings.js";
+import { checkFfmpegAvailable } from "../services/video-ffmpeg.js";
 import { videoStorylineStillsService } from "../services/video-storyline-stills.js";
 import { videoStorylineDirectorService } from "../services/video-storyline-director.js";
 import { videoStorylineDirectorConversationStore } from "../services/video-storyline-director-conversation.js";
@@ -150,7 +151,10 @@ export function videoStorylineRoutes(rawDb: Db) {
 
   router.get("/companies/:companyId/video-storylines/settings", scope(), async (req, res) => {
     const companyId = req.params.companyId as string;
-    res.json({ enabled: await settings.isEnabled(companyId) });
+    // ffmpegAvailable lets the editor warn up front: without ffmpeg on the
+    // server, finished clips cannot be combined into one film and shots do
+    // not continue from the previous shot's last frame.
+    res.json({ enabled: await settings.isEnabled(companyId), ffmpegAvailable: await checkFfmpegAvailable() });
   });
 
   router.patch(

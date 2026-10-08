@@ -70,7 +70,11 @@ export function videoStorylineStitchService(db: Db, deps: VideoStorylineStitchDe
     if (!(await checkFfmpegAvailable())) {
       await db
         .update(videoStorylines)
-        .set({ stitchBlockedReason: "ffmpeg is not available on this host.", updatedAt: nowOf() })
+        .set({
+          stitchBlockedReason:
+            "Combining the clips needs ffmpeg, which is not installed on this server (ffmpeg is not available on this host). The rendered clips are kept and will be combined automatically once an admin installs it.",
+          updatedAt: nowOf(),
+        })
         .where(eq(videoStorylines.id, storyline.id));
       return "blocked";
     }

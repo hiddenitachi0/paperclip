@@ -263,6 +263,8 @@ d("video storylines end to end through the real request-scoped db", () => {
   it("turns the feature on and creates a storyline with two scenes", async () => {
     expect((await request(app).patch(`${base}/settings`).send({ enabled: true })).status).toBe(200);
     expect((await request(app).patch(`${base}/settings/advanced`).send({ enabled: true })).status).toBe(200);
+    const settings = await request(app).get(`${base}/settings`);
+    expect(settings.body).toEqual({ enabled: true, ffmpegAvailable });
 
     const created = await request(app).post(base).send({ title: "Lighthouse", providerId: "fal" });
     expect(created.status).toBe(201);

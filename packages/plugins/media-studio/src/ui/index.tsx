@@ -3088,6 +3088,8 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
   const listLooks = usePluginAction(ACTION_LOOKS_LIST);
 
   const [enabled, setEnabled] = useState<boolean | null>(null);
+  /** False when the server has no ffmpeg: clips render but can never be combined into one film. */
+  const [ffmpegAvailable, setFfmpegAvailable] = useState<boolean | null>(null);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [settingsBusy, setSettingsBusy] = useState(false);
 
@@ -3116,8 +3118,9 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
   const loadSettings = useCallback(async () => {
     if (!companyId) return;
     try {
-      const res = await storylineFetchJson<{ enabled: boolean }>(`/api/companies/${companyId}/video-storylines/settings`);
+      const res = await storylineFetchJson<{ enabled: boolean; ffmpegAvailable?: boolean }>(`/api/companies/${companyId}/video-storylines/settings`);
       setEnabled(res.enabled);
+      setFfmpegAvailable(res.ffmpegAvailable ?? null);
     } catch (e) {
       setSettingsError(errorText(e));
     }
@@ -3546,6 +3549,12 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
           </label>
         </div>
         {settingsError && <div style={errorBox}>{settingsError}</div>}
+        {enabled && ffmpegAvailable === false && (
+          <div style={errorBox} data-testid="ffmpeg-missing">
+            This server can't combine clips into one video yet: the ffmpeg program is not installed. Shots can still be written and rendered (and are kept), but the
+            finished film needs ffmpeg -- ask your admin to install it before you pay for a full render.
+          </div>
+        )}
         {enabled && (
           <AdvancedFeaturesToggle enabled={advancedEnabled} busy={advancedBusy} error={advancedError} onChange={(v) => void toggleAdvanced(v)} />
         )}
