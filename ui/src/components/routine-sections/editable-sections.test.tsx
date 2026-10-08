@@ -14,6 +14,10 @@ import {
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+vi.mock("../../hooks/useCompanyRole", () => ({
+  useCompanyRole: () => ({ canManageConnections: true }),
+}));
+
 vi.mock("../MarkdownEditor", () => ({
   MarkdownEditor: () => null,
 }));
@@ -56,6 +60,11 @@ function Harness({ createMutate }: { createMutate: ReturnType<typeof vi.fn> }) {
     updateTrigger: { mutate: vi.fn() },
     deleteTrigger: { mutate: vi.fn() },
     rotateTrigger: { mutate: vi.fn() },
+    secretMessage: null,
+    setSecretMessage: vi.fn(),
+    copySecretValue: vi.fn(),
+    availableSecrets: [],
+    companyId: "company-1",
   } as unknown as RoutineDetailContextValue;
 
   return (
