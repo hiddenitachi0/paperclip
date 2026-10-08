@@ -151,6 +151,34 @@ describe("script import and instructions dialogs", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it("checks a chosen file straight away, without pressing Check script", async () => {
+    routes = (path, method, body) => {
+      if (path === `${BASE}/sl-1/import` && method === "POST") {
+        const dryRun = JSON.parse(body ?? "{}").dryRun === true;
+        return json({ dryRun, mode: "append", storylineId: "sl-1", sceneCount: 1, shotCount: 1, totalSeconds: 5, billedSeconds: 5, estimatedCostCents: 250, characterCount: 0 });
+      }
+      return null;
+    };
+    await act(async () => {
+      root.render(<ScriptImportDialog companyId={COMPANY} storylineId="sl-1" onImported={vi.fn()} onClose={vi.fn()} />);
+    });
+    const input = container.querySelector('input[aria-label="Script file"]') as HTMLInputElement;
+    const file = new File(['{"scenes":[{"scene_title":"a","shots":[{"prompt":"b"}]}]}'], "script.json", { type: "application/json" });
+    Object.defineProperty(input, "files", { value: [file], configurable: true });
+    await act(async () => {
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    for (let i = 0; i < 5; i += 1) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    }
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]!.body!)).toMatchObject({ dryRun: true });
+    expect(container.querySelector('[data-testid="script-import-preview"]')?.textContent ?? "").toContain("1 scene, 1 shot");
+    expect(button(container, "Import").disabled).toBe(false);
+  });
+
   it("lists every problem the server found in the script", async () => {
     routes = (path) =>
       path.endsWith("/import")
