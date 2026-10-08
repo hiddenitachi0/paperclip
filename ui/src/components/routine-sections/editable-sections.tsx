@@ -33,6 +33,9 @@ import { MarkdownEditor } from "../MarkdownEditor";
 import { ScheduleEditor, getScheduleCronValidation } from "../ScheduleEditor";
 import { RoutineVariablesEditor, RoutineVariablesHint } from "../RoutineVariablesEditor";
 import { RoutineTriggerCard } from "../RoutineTriggerCard";
+import { WebhookSecretReveal } from "../WebhookSecretReveal";
+import { WebhookSecretChoice } from "../WebhookSecretChoice";
+import { useCompanyRole } from "../../hooks/useCompanyRole";
 import { EnvironmentVariablesEditor } from "../environment-variables-editor";
 import { createDefaultNewTrigger, useRoutineDetail } from "./context";
 import type { EnvBinding, RoutineDetail as RoutineDetailType } from "@paperclipai/shared";
@@ -390,7 +393,28 @@ function SummaryCard({
 
 export function TriggersSection() {
   const ctx = useRoutineDetail();
-  const { routine, newTrigger, setNewTrigger, createTrigger, updateTrigger, deleteTrigger, rotateTrigger } = ctx;
+  const {
+    routine,
+    newTrigger,
+    setNewTrigger,
+    createTrigger,
+    updateTrigger,
+    deleteTrigger,
+    rotateTrigger,
+    secretMessage,
+    setSecretMessage,
+    copySecretValue,
+    availableSecrets,
+    companyId,
+  } = ctx;
+  const { canManageConnections } = useCompanyRole(companyId);
+  const savedSecretOptions = useMemo(
+    () =>
+      availableSecrets
+        .filter((secret) => secret.status === "active")
+        .map((secret) => ({ id: secret.id, name: secret.name, description: secret.description })),
+    [availableSecrets],
+  );
   const [addOpen, setAddOpen] = useState(false);
   const [newScheduleEditorValid, setNewScheduleEditorValid] = useState(true);
   const newScheduleValidation = useMemo(
@@ -399,7 +423,8 @@ export function TriggersSection() {
   );
   const addDisabled =
     createTrigger.isPending ||
-    (newScheduleValidation ? !newScheduleValidation.valid || !newScheduleEditorValid : false);
+    (newScheduleValidation ? !newScheduleValidation.valid || !newScheduleEditorValid : false) ||
+    (newTrigger.kind === "webhook" && newTrigger.secretMode === "existing" && !newTrigger.existingSecretId);
 
   useEffect(() => {
     if (newTrigger.kind !== "schedule") setNewScheduleEditorValid(true);
@@ -407,6 +432,15 @@ export function TriggersSection() {
 
   return (
     <div className="space-y-4">
+      {secretMessage ? (
+        <WebhookSecretReveal
+          title={secretMessage.title}
+          entries={secretMessage.entries}
+          onCopy={copySecretValue}
+          onDismiss={() => setSecretMessage(null)}
+        />
+      ) : null}
+
       {/* Add-trigger drawer header (§3.2) */}
       <div className="flex items-center justify-between">
         <p className="text-sm font-medium text-muted-foreground">
@@ -450,9 +484,8 @@ export function TriggersSection() {
               </SelectTrigger>
               <SelectContent>
                 {triggerKinds.map((kind) => (
-                  <SelectItem key={kind} value={kind} disabled={kind === "webhook"}>
+                  <SelectItem key={kind} value={kind}>
                     {kind}
-                    {kind === "webhook" ? " — COMING SOON" : ""}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -506,6 +539,19 @@ export function TriggersSection() {
                   />
                 </div>
               )}
+              {canManageConnections ? (
+                <WebhookSecretChoice
+                  mode={newTrigger.secretMode}
+                  secretId={newTrigger.existingSecretId}
+                  options={savedSecretOptions}
+                  onModeChange={(secretMode) =>
+                    setNewTrigger((current) => ({ ...current, secretMode, existingSecretId: "" }))
+                  }
+                  onSecretChange={(existingSecretId) =>
+                    setNewTrigger((current) => ({ ...current, existingSecretId }))
+                  }
+                />
+              ) : null}
             </>
           )}
         </div>
@@ -548,6 +594,7 @@ export function TriggersSection() {
               routineId={routine.id}
               onSave={(id, patch) => updateTrigger.mutate({ id, patch })}
               onRotate={(id) => rotateTrigger.mutate(id)}
+              savedSecretOptions={canManageConnections ? savedSecretOptions : undefined}
               onDelete={(id) => deleteTrigger.mutate(id)}
             />
           ))}
@@ -597,7 +644,7 @@ export function VariablesSection() {
 
 export function SecretsSection() {
   const ctx = useRoutineDetail();
-  const { editDraft, setEditDraft, availableSecrets, createSecret, secretMessage, copySecretValue } = ctx;
+  const { editDraft, setEditDraft, availableSecrets, createSecret } = ctx;
 
   // Project/company-scoped secrets that already see real usage, surfaced as
   // quick-bind chips (§3.4). Ranked by reference count then recency.
@@ -620,35 +667,6 @@ export function SecretsSection() {
         Routine secrets apply to every task this routine creates. They override matching keys in
         project and agent env. <span className="font-mono">PAPERCLIP_*</span> names are reserved.
       </div>
-
-      {secretMessage ? (
-        <div className="space-y-3 rounded-lg border border-blue-500/30 bg-blue-500/5 p-4 text-sm">
-          <div>
-            <p className="font-medium">{secretMessage.title}</p>
-            <p className="text-xs text-muted-foreground">
-              Save this now. Paperclip will not show the secret value again.
-            </p>
-          </div>
-          <div className="space-y-3">
-            {secretMessage.entries.map((entry, index) => (
-              <div key={`${entry.webhookUrl}-${index}`} className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <Input value={entry.webhookUrl} readOnly className="flex-1" />
-                  <Button variant="outline" size="sm" onClick={() => copySecretValue("Webhook URL", entry.webhookUrl)}>
-                    URL
-                  </Button>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Input value={entry.webhookSecret} readOnly className="flex-1" />
-                  <Button variant="outline" size="sm" onClick={() => copySecretValue("Webhook secret", entry.webhookSecret)}>
-                    Secret
-                  </Button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      ) : null}
 
       <EnvironmentVariablesEditor
         value={(editDraft.env ?? {}) as Record<string, EnvBinding>}
