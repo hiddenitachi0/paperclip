@@ -125,6 +125,8 @@ import {
   type CharacterSheet,
   type ReferenceRole,
 } from "./look-prompt.js";
+import { identitiesMentionedIn, loraFitsModel, planIdentityReferences, sheetWithIdentity, sogniSlots, type Identity } from "./identity.js";
+import { loadIdentities, registerAnchorActions } from "./anchors.js";
 import { SOGNI_TOOLS, findSogniTool, prepareSogniCall, sogniToolDescription, sogniToolParameters, type SogniToolDef } from "./sogni-tools.js";
 
 /**
@@ -317,6 +319,10 @@ export interface Look {
   safeContentFilter: boolean;
   /** The owner/admin (user id) who saved the look with the filter off. The filter is only off with this set. */
   contentFilterOffBy: string | null;
+  /** The saved person (identity) every picture with this look shows; null: none. */
+  identityId: string | null;
+  /** Also send the identity's outfit crop ("same outfit"). Off: the outfit comes from the look or the request. */
+  identitySameOutfit: boolean;
   updatedAt: string;
 }
 
@@ -379,6 +385,8 @@ function normalizeLook(look: Look): Look {
     // Off only when saved off by a named owner/admin; anything else is on.
     safeContentFilter: !(raw.safeContentFilter === false && offBy !== null),
     contentFilterOffBy: raw.safeContentFilter === false ? offBy : null,
+    identityId: textOrNull(raw.identityId),
+    identitySameOutfit: raw.identitySameOutfit === true,
   };
 }
 
@@ -843,11 +851,13 @@ async function prepareSogni(
   lookModelUsed: boolean,
   referenceCount: number,
   notes: string[],
+  /** Another model an owner/admin chose (the identity's), let through when Sogni's list cannot be read. */
+  trustedModel: string | null = null,
 ): Promise<{ error: string } | { info: SogniModelInfo | null; editing: boolean; usesOwnModel: boolean }> {
   const catalog = sogniCatalogFor(ctx);
   let info: SogniModelInfo | null = null;
   if (input.model) {
-    const resolved = await resolveSogniModel(catalog, input.model, [look?.model, textOrNull(cfg.sogniModel)]);
+    const resolved = await resolveSogniModel(catalog, input.model, [look?.model, textOrNull(cfg.sogniModel), trustedModel]);
     if ("error" in resolved) {
       return lookModelUsed && look && !resolved.error.startsWith(CATALOG_UNREACHABLE)
         ? { error: `The look "${look.name}" uses the model ${look.modelName ?? look.model}, which Sogni no longer offers. An owner or admin can pick another model for the look.` }
@@ -1070,6 +1080,23 @@ export async function prepareGeneration(
     }
   }
 
+  // The person in the picture: the look's identity, else (no look identity)
+  // one identity the request names by name or nickname. Its pictures go first.
+  let identity: Identity | null = null;
+  if (!noLook) {
+    const identities = await loadIdentities(ctx, companyId);
+    if (look?.identityId) {
+      identity = identities.find((i) => i.id === look!.identityId) ?? null;
+      if (!identity) notes.push(`The look "${look.name}" points at a person (identity) that no longer exists, so no identity was used.`);
+    } else if (identities.length > 0) {
+      const named = identitiesMentionedIn(input.prompt, identities);
+      if (named.length === 1) identity = named[0]!;
+      else if (named.length > 1) {
+        return { error: `The request names more than one saved person (${named.map((i) => `"${i.name}"`).join(", ")}). Make one picture per person, or save a look for them.` };
+      }
+    }
+  }
+
   const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
   const settingsProvider = String(cfg.provider ?? "mock").toLowerCase();
   const catalog = sogniCatalogFor(ctx);
@@ -1103,6 +1130,35 @@ export async function prepareGeneration(
   );
   if ("error" in chosen) return chosen;
   input.provider = chosen.service;
+  if (identity) {
+    // The model that will make the picture when nothing else pins it: the call's, or the look's.
+    const lookModel = chosen.useLookModel && look?.model ? look.model : null;
+    const fixedModel = callModel ?? lookModel ?? null;
+    const fixedSlots =
+      chosen.service === "sogni"
+        ? fixedModel
+          ? sogniSlots(fixedModel)
+          : SOGNI_MAX_REFERENCES
+        : MAX_REFERENCE_FILES;
+    const plan = planIdentityReferences({
+      identity,
+      lookFileIds: referenceFileIds,
+      lookRoles: referenceRoles,
+      sameOutfit: look?.identitySameOutfit === true,
+      service: chosen.service,
+      fixedModel,
+      fixedSlots,
+    });
+    referenceFileIds.splice(0, referenceFileIds.length, ...plan.fileIds);
+    referenceRoles.splice(0, referenceRoles.length, ...plan.roles);
+    if (plan.model && chosen.service === "sogni") {
+      input.model = plan.model;
+    }
+    notes.push(`The saved person "${identity.name}" was used: their face picture went first${plan.roles.includes("body") ? ", then their body picture" : ""}.`, ...plan.notes);
+    if (typeof input.seed === "number" || look?.seed != null) {
+      notes.push("A seed does not keep a person the same; the identity's reference pictures do.");
+    }
+  }
   // Sogni's picture-editing models take up to 16 (each model's own limit is checked below); Fal's Kontext 4.
   const referenceCap = chosen.service === "sogni" ? SOGNI_MAX_REFERENCES : MAX_REFERENCE_FILES;
   if (referenceFileIds.length > referenceCap) {
@@ -1113,12 +1169,32 @@ export async function prepareGeneration(
     ? Boolean(look?.model) && sogniCanonicalModelId(callModel) === sogniCanonicalModelId(look!.model!)
     : Boolean(look?.model) && chosen.useLookModel;
   if (lookModelUsed && !callModel) input.model = look!.model!;
+  const identityModel = identity && !callModel && !lookModelUsed && chosen.service === "sogni" ? input.model ?? null : null;
 
   // Sogni's own limits, checked here so a mistake does not use up one of the day's pictures.
   let negativeAllowed = false;
   if (chosen.service === "sogni") {
-    const prepared = await prepareSogni(ctx, cfg, input, look, lookModelUsed, referenceFileIds.length, notes);
+    const prepared = await prepareSogni(ctx, cfg, input, look, lookModelUsed, referenceFileIds.length, notes, identityModel);
     if ("error" in prepared) return prepared;
+    // The identity's LoRA (imported into Sogni and ready) for a model of its family.
+    // Sogni marks personal LoRAs as needing its content filter off, and only a
+    // look an owner/admin saved with the filter off turns it off, so the LoRA
+    // rides along only then (the same rule as a look's own personal LoRAs).
+    const lora = identity?.lora;
+    if (lora && lora.sogniLoraId && lora.sogniStatus === "ready") {
+      const used = input.model ?? identityModel;
+      if (input.safeContentFilter !== false) {
+        notes.push(`The LoRA of "${identity!.name}" was not used: Sogni only runs your own LoRAs with its content filter off, which only a look an owner or admin saved that way can do. The reference pictures still keep the person the same.`);
+      } else if (loraFitsModel(lora, used) && prepared.usesOwnModel) {
+        const picks = input.loras ?? [];
+        if (!picks.some((p) => p.id === lora.sogniLoraId) && picks.length < SOGNI_MAX_LORAS) {
+          input.loras = [...picks, { id: lora.sogniLoraId, strength: lora.strength }];
+        }
+        if (lora.triggerWord && !input.prompt.includes(lora.triggerWord)) input.prompt = `${lora.triggerWord}, ${input.prompt}`;
+      } else {
+        notes.push(`The LoRA of "${identity!.name}" was not used: it is made for Krea 2 models, and this picture uses another model.`);
+      }
+    }
     // "Always avoid" goes into the model's own "things to avoid" text when this picture can use it.
     negativeAllowed = !prepared.editing && prepared.usesOwnModel && prepared.info?.negativePrompt != null;
   } else if (look && look.loras.length > 0) {
@@ -1143,7 +1219,7 @@ export async function prepareGeneration(
   const assembled = assemblePrompt({
     request: input.prompt,
     style: look?.style,
-    sheet: look?.sheet,
+    sheet: identity ? sheetWithIdentity(look?.sheet, identity) : look?.sheet,
     roles: referenceFileIds.length > 0 ? referenceRoles : [],
     service: chosen.service,
     avoidAsNegative: negativeAllowed,
@@ -1298,7 +1374,21 @@ async function validateLookInput(
   }
   const settingsService = isPictureService(String(cfg.provider ?? "").toLowerCase()) ? (String(cfg.provider).toLowerCase() as PictureService) : null;
   const service = provider ?? modelService ?? settingsService;
-  const base = { name, style, provider, seed: seed ?? null, referenceFileIds: refs, referenceRoles, sheet };
+  const identityId = textOrNull(params.identityId);
+  if (identityId && !(await loadIdentities(ctx, companyId)).some((i) => i.id === identityId)) {
+    throw new Error("That person (identity) no longer exists. Pick another, or none.");
+  }
+  const base = {
+    name,
+    style,
+    provider,
+    seed: seed ?? null,
+    referenceFileIds: refs,
+    referenceRoles,
+    sheet,
+    identityId,
+    identitySameOutfit: identityId !== null && params.identitySameOutfit === true,
+  };
 
   if (service !== "sogni") {
     if (refs.length > MAX_REFERENCE_FILES) {
@@ -1619,6 +1709,7 @@ const plugin = definePlugin({
         const defaultId = (await loadLookDefaults(ctx, runCtx.companyId))[runCtx.agentId] ?? null;
         const defaultLook = looks.find((look) => look.id === defaultId) ?? null;
         const rules = await describeAgentRules(ctx, runCtx.companyId, runCtx.agentId, looks);
+        const identities = await loadIdentities(ctx, runCtx.companyId);
         const defaultSentence = defaultLook
           ? `\nYour default look is "${defaultLook.name}": it is used for every picture where no look is named${rules.lines.length > 0 ? " and no automatic look fits" : ""}. A look named in the request wins over it.`
           : "";
@@ -1642,6 +1733,7 @@ const plugin = definePlugin({
               references: look.referenceFileIds.length,
               referenceRoles: look.referenceRoles,
               sheet: look.sheet,
+              identity: look.identityId ? (identities.find((i) => i.id === look.identityId)?.name ?? null) : null,
             })),
           },
         };
@@ -1744,7 +1836,7 @@ const plugin = definePlugin({
     // made or spent; anyone in the company may try it.
     ctx.actions.register(ACTION_LOOK_PROMPT_PREVIEW, async (params, context) => {
       if (!context.companyId) throw new Error("Open this page from inside a company.");
-      return previewLookPrompt(ctx, params);
+      return previewLookPrompt(ctx, params, context.companyId);
     });
 
     // Default look per agent (same page). Anyone in the company may see it;
@@ -2216,6 +2308,9 @@ const plugin = definePlugin({
       );
     }
 
+    // Identities (people), rooms and LoRA training: anchors.ts.
+    registerAnchorActions(ctx);
+
     registerMediaJobTools(ctx);
     ctx.jobs.register(JOB_KEY_MEDIA_POLL, (job) => advanceMediaJobs(ctx, job.runId));
 
@@ -2625,13 +2720,13 @@ export interface PromptPreview {
  * worked out as for a real picture; Sogni's catalog (public) is read to know
  * whether the model takes "things to avoid" text.
  */
-export async function previewLookPrompt(ctx: PluginContext, params: Record<string, unknown>): Promise<PromptPreview> {
+export async function previewLookPrompt(ctx: PluginContext, params: Record<string, unknown>, companyId: string | null = null): Promise<PromptPreview> {
   const request = typeof params.request === "string" && params.request.trim() ? params.request.trim().slice(0, 2000) : PREVIEW_SAMPLE_REQUEST;
   const style = typeof params.style === "string" ? params.style.trim().slice(0, LOOK_STYLE_MAX) : "";
   const refs = readReferenceIds(params.referenceFileIds);
   if (refs === "invalid") throw new Error("The reference pictures could not be read. Pick them again.");
-  const roles = readReferenceRoles(params.referenceRoles, refs.length);
-  const sheet = readSheet(params.sheet);
+  let roles = readReferenceRoles(params.referenceRoles, refs.length);
+  let sheet = readSheet(params.sheet);
   const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
   const settingsProvider = String(cfg.provider ?? "mock").toLowerCase();
   const rawProvider = typeof params.provider === "string" ? params.provider.trim().toLowerCase() : "";
@@ -2663,6 +2758,25 @@ export async function previewLookPrompt(ctx: PluginContext, params: Record<strin
   } else if (service === "fal") {
     // As Fal is called: the look's model, else Kontext for reference pictures, else the settings' model.
     model = rawModel || (refs.length > 0 ? FAL_REFERENCE_MODEL : (textOrNull(cfg.falModel) ?? "fal-ai/flux/schnell"));
+  }
+  // With a person (identity): their pictures first and their description, as for a real picture.
+  const identityId = textOrNull(params.identityId);
+  const identity = identityId && companyId ? ((await loadIdentities(ctx, companyId)).find((i) => i.id === identityId) ?? null) : null;
+  if (identity) {
+    const plan = planIdentityReferences({
+      identity,
+      lookFileIds: refs,
+      lookRoles: roles,
+      sameOutfit: params.identitySameOutfit === true,
+      service,
+      fixedModel: rawModel || null,
+      fixedSlots: service === "sogni" ? (rawModel ? sogniSlots(rawModel) : SOGNI_MAX_REFERENCES) : MAX_REFERENCE_FILES,
+    });
+    refs.splice(0, refs.length, ...plan.fileIds);
+    roles = plan.roles;
+    sheet = sheetWithIdentity(sheet, identity);
+    if (plan.model) model = plan.model;
+    negativeAllowed = false;
   }
   const assembled = assemblePrompt({ request, style, sheet, roles: refs.length > 0 ? roles : [], service, avoidAsNegative: negativeAllowed });
   const ownNegative = service === "sogni" && refs.length === 0 ? textOrNull(params.negativePrompt) : null;
