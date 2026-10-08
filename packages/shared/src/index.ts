@@ -106,6 +106,7 @@ export {
   type LaneAKeywordRoute,
 } from "./lane-a-models.js";
 export * from "./prompt-cache.js";
+export * from "./known-models.js";
 export {
   WEB_SEARCH_BINDING_TARGET_TYPE,
   WEB_SEARCH_KEY_CONFIG_PATH,
@@ -2841,6 +2842,16 @@ export {
 
 export {
   MODEL_DIRECTORY_NAME_MAX_LENGTH,
+  MODEL_DIRECTORY_RATINGS_MAX,
+  modelDirectoryRatingSchema,
+  type ModelDirectoryRating,
+  updateModelDirectorySettingsSchema,
+  type UpdateModelDirectorySettings,
+  type ModelDirectorySettings,
+  syncLocalModelsSchema,
+  type SyncLocalModels,
+  type LocalInstalledModel,
+  type LocalModelsSyncResult,
   MODEL_DIRECTORY_NOTE_MAX_LENGTH,
   MODEL_DIRECTORY_MAKER_MAX_LENGTH,
   MODEL_DIRECTORY_BASE_MODEL_MAX_LENGTH,

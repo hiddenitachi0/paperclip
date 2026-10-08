@@ -64,6 +64,19 @@ export const modelDirectorySpecsSchema = z
   .strict();
 export type ModelDirectorySpecs = z.infer<typeof modelDirectorySpecsSchema>;
 
+// Catalogue v2: the owner's own test scores, one per criterion they choose
+// ("Tool calling", "Responsiveness", "Long conversations", "Coding", ...).
+export const MODEL_DIRECTORY_RATINGS_MAX = 20;
+export const modelDirectoryRatingSchema = z
+  .object({
+    criterion: z.string().trim().min(1).max(40),
+    score: z.number().int().min(0).max(10),
+    note: z.string().trim().max(300).nullable().optional(),
+    updatedAt: z.string().max(40).optional(),
+  })
+  .strict();
+export type ModelDirectoryRating = z.infer<typeof modelDirectoryRatingSchema>;
+
 const tagsSchema = z
   .array(z.string().trim().toLowerCase().min(1).max(MODEL_DIRECTORY_TAG_MAX_LENGTH))
   .max(MODEL_DIRECTORY_TAGS_MAX)
@@ -95,6 +108,9 @@ const modelDirectoryFieldShape = {
   tags: tagsSchema.optional(),
   specs: modelDirectorySpecsSchema.nullable().optional(),
   favorite: z.boolean().optional(),
+  family: optionalLabel(MODEL_DIRECTORY_BASE_MODEL_MAX_LENGTH),
+  variant: optionalLabel(40),
+  ratings: z.array(modelDirectoryRatingSchema).max(MODEL_DIRECTORY_RATINGS_MAX).optional(),
 };
 
 /**
@@ -151,6 +167,9 @@ export const updateModelDirectoryEntrySchema = z
     tags: modelDirectoryFieldShape.tags,
     specs: modelDirectoryFieldShape.specs,
     favorite: modelDirectoryFieldShape.favorite,
+    family: modelDirectoryFieldShape.family,
+    variant: modelDirectoryFieldShape.variant,
+    ratings: modelDirectoryFieldShape.ratings,
     /** true hides the entry from agent pickers (kept, restorable); false brings it back. */
     archived: z.boolean().optional(),
   })
@@ -184,6 +203,11 @@ export interface ModelDirectoryEntry {
   favorite: boolean;
   /** Set when archived: hidden from agent pickers, kept in Settings > Models. */
   archivedAt: string | null;
+  /** Model family, e.g. "Llama 3.2" (falls back to baseModel on older rows). */
+  family: string | null;
+  /** Size or variant within the family, e.g. "3B" or "14B uncensored". */
+  variant: string | null;
+  ratings: ModelDirectoryRating[];
   createdByUserId: string | null;
   updatedByUserId: string | null;
   createdAt: string;
@@ -617,4 +641,47 @@ export interface ModelDirectoryCatalogueImportResult {
   created: string[];
   updated: string[];
   skipped: { name: string; reason: string }[];
+}
+
+// ─── Catalogue v2: settings, local Ollama resync ─────────────────────────────
+
+export const updateModelDirectorySettingsSchema = z
+  .object({ localGpuVramGb: z.number().min(0).max(1024).nullable() })
+  .strict();
+export type UpdateModelDirectorySettings = z.infer<typeof updateModelDirectorySettingsSchema>;
+
+export interface ModelDirectorySettings {
+  localGpuVramGb: number | null;
+}
+
+/**
+ * Ask a local Ollama which models are installed. The address must be one this
+ * company already uses (a saved local model's address or a quick agent's), so
+ * the server never calls an arbitrary host on someone's say-so.
+ */
+export const syncLocalModelsSchema = z.object({ baseUrl: z.string().trim().url().max(500) }).strict();
+export type SyncLocalModels = z.infer<typeof syncLocalModelsSchema>;
+
+export interface LocalInstalledModel {
+  /** Ollama tag, e.g. "llama3.2:latest". */
+  name: string;
+  sizeGb: number | null;
+  /** From Ollama's details, e.g. "3.2B". */
+  parameterSize: string | null;
+  /** From Ollama's details, e.g. "Q4_K_M". */
+  quantization: string | null;
+  /** From Ollama's details, e.g. "llama". */
+  family: string | null;
+  /** Saved entries (this address) that run this tag. */
+  entryIds: string[];
+}
+
+export interface LocalModelsSyncResult {
+  baseUrl: string;
+  checkedAt: string;
+  installed: LocalInstalledModel[];
+  /** Saved local entries at this address whose tag is no longer installed (now marked "planned"). */
+  missingEntryIds: string[];
+  /** Saved local entries marked "installed" by this sync. */
+  markedInstalledEntryIds: string[];
 }
