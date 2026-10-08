@@ -57,6 +57,10 @@ function toCatalogueItem(option: HelperModelOption): CatalogueItem & { option: H
     specs: null,
     favorite: option.favorite,
     archivedAt: null,
+    family: null,
+    variant: null,
+    ratings: [],
+    providerRouting: null,
     option,
   };
 }
