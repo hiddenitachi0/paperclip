@@ -7,7 +7,12 @@
 //   identities          Identity[]                (identity.ts)
 //   rooms               Room[]                    (rooms.ts)
 //   identitySettings    {analysis, hfTokenSecretId, hfNamespace}
-//   identityAgeBlocks   file ids the analysis flagged as maybe under 18
+//   identityAgeBlocks   file ids the analysis flagged as maybe under 18 (older flags; still honoured)
+//   pictureAgeChecks    age check results by picture content hash (age-check.ts)
+//
+// Age check: every picture is checked for apparent age before it leaves
+// Paperclip for training or identity (Fal LoRA training, Higgsfield Soul ID,
+// Hugging Face publish, training-set zip). See requireAdultPictures below.
 //
 // Who may do what: anyone in the company can see identities and rooms and
 // place products into a room (paid, like the Edit tab); only an owner or
@@ -79,6 +84,19 @@ import {
 } from "./identity.js";
 import { cropPicture, maskBoundingBox, sogniSizeLike } from "./image-ops.js";
 import { ANALYSIS_SYSTEM_PROMPT, ANALYSIS_USER_PROMPT, parseAnalysis, type AnalysisModelSetting } from "./vision-analysis.js";
+import {
+  AGE_CHECK_COST_NOTE,
+  AGE_CHECK_EXPLANATION,
+  AGE_CHECK_NO_MODEL_MESSAGE,
+  loadAgeChecks,
+  recordAgeCheck,
+  refusedMessage,
+  runAgeCheck,
+  sha256Of,
+  withVerdicts,
+  type AgeCheckPicture,
+  type AgeCheckedPicture,
+} from "./age-check.js";
 import { companyConfig } from "./company-settings.js";
 import { MAX_ROOMS, ROOM_SOGNI_MODEL, normalizeRoom, placementPrompt, readRoomInput, type Room } from "./rooms.js";
 import {
@@ -123,6 +141,8 @@ export const ACTION_LORA_PUBLISH = "lora.publish";
 export const ACTION_LORA_IMPORT_SOGNI = "lora.importSogni";
 export const ACTION_LORA_ATTACH = "lora.attach";
 export const ACTION_LORA_RESET = "lora.reset";
+export const ACTION_AGE_CHECK_STATUS = "ageCheck.status";
+export const ACTION_AGE_CHECK_RUN = "ageCheck.run";
 
 // ─── Context helpers ─────────────────────────────────────────────────────────
 
@@ -292,6 +312,100 @@ async function assertNoneAgeBlocked(ctx: PluginContext, companyId: string, fileI
   if (fileIds.some((id) => blocks.includes(id))) {
     throw new Error("One of the ticked pictures was flagged by the analysis as possibly showing someone under 18. Remove it from the training set first; it cannot be used or sent anywhere.");
   }
+}
+
+/** A picture of this company with the hash of its bytes (what the age check is kept by). */
+async function hashPicture(ctx: PluginContext, companyId: string, fileId: string, what: string): Promise<AgeCheckPicture> {
+  const file = await ctx.files.get(fileId, companyId);
+  if (!file) throw new Error(`${what} is not in this company's Files. Pick it again.`);
+  if (!file.contentType.toLowerCase().startsWith("image/")) throw new Error(`"${file.originalFilename ?? "That file"}" is not a picture.`);
+  const content = await ctx.files.readContent(fileId, companyId);
+  return { fileId, name: file.originalFilename ?? null, sha256: sha256Of(Buffer.from(content.contentBase64, "base64")) };
+}
+
+/** The stored age check of each picture (null: not checked yet). Calls no model. */
+async function ageStatus(ctx: PluginContext, companyId: string, fileIds: string[], what = "A picture"): Promise<AgeCheckedPicture[]> {
+  const pictures: AgeCheckPicture[] = [];
+  for (const id of fileIds) pictures.push(await hashPicture(ctx, companyId, id, what));
+  const checked = withVerdicts(pictures, await loadAgeChecks(ctx, companyId));
+  // Older flags by file id still count as "may be under 18".
+  const blocks = await loadAgeBlocks(ctx, companyId);
+  return checked.map((p) => (blocks.includes(p.fileId) ? { ...p, verdict: "under18" as const } : p));
+}
+
+function throwIfRefused(checked: AgeCheckedPicture[], fileIds: string[]): void {
+  const refused = checked
+    .map((p) => ({ ...p, position: fileIds.indexOf(p.fileId) + 1 }))
+    .filter((p) => p.verdict !== null && p.verdict !== "adult");
+  if (refused.length > 0) throw new Error(refusedMessage(refused));
+}
+
+/**
+ * The gate every picture passes before it leaves Paperclip for training or
+ * identity. Each picture needs an "adult" age check (kept by the hash of its
+ * bytes); pictures not checked yet are checked now, one analysis call each.
+ * Throws, naming the refused pictures, unless every picture is clearly of an
+ * adult; callers call this before anything is paid for or sent.
+ */
+export async function requireAdultPictures(ctx: PluginContext, companyId: string, fileIds: string[], what = "A ticked picture"): Promise<void> {
+  const ids = Array.from(new Set(fileIds));
+  await assertNoneAgeBlocked(ctx, companyId, ids);
+  let checked = await ageStatus(ctx, companyId, ids, what);
+  // Known refusals first: no analysis call is spent when one is already refused.
+  throwIfRefused(checked, ids);
+  const missing = Array.from(new Map(checked.filter((p) => p.verdict === null).map((p) => [p.sha256, p])).values());
+  if (missing.length > 0) {
+    const settings = await loadIdentitySettings(ctx, companyId);
+    if (!settings.analysis) throw new Error(AGE_CHECK_NO_MODEL_MESSAGE);
+    for (const p of missing) {
+      const rec = await runAgeCheck(ctx, companyId, settings.analysis, p);
+      checked = checked.map((c) => (c.sha256 === rec.sha256 ? { ...c, verdict: rec.verdict, checkedAt: rec.checkedAt } : c));
+    }
+  }
+  throwIfRefused(checked, ids);
+  if (checked.some((p) => p.verdict !== "adult")) throw new Error(`Not every picture could be checked for apparent age, so nothing was sent. ${AGE_CHECK_EXPLANATION}`);
+}
+
+function readFileIds(value: unknown, max: number): string[] {
+  const ids = Array.isArray(value) ? Array.from(new Set(value.filter((x): x is string => typeof x === "string" && x.trim() !== "").map((x) => x.trim()))) : [];
+  if (ids.length === 0) throw new Error("Pick the pictures to check.");
+  if (ids.length > max) throw new Error(`Check at most ${max} pictures at a time.`);
+  return ids;
+}
+
+function ageView(checked: AgeCheckedPicture[]) {
+  return checked.map((p) => ({ fileId: p.fileId, name: p.name, verdict: p.verdict, checkedAt: p.checkedAt }));
+}
+
+/** The stored age checks of some pictures (free: no model is called). */
+async function ageCheckStatusAction(ctx: PluginContext, params: Record<string, unknown>, context: ActionContext) {
+  const { companyId } = personOf(context);
+  const ids = readFileIds(params.fileIds, TRAINING_SET_MAX);
+  const settings = await loadIdentitySettings(ctx, companyId);
+  return {
+    pictures: ageView(await ageStatus(ctx, companyId, ids)),
+    analysisReady: settings.analysis !== null,
+    model: settings.analysis?.label ?? null,
+    explanation: AGE_CHECK_EXPLANATION,
+    costNote: AGE_CHECK_COST_NOTE,
+  };
+}
+
+/** Check the pictures not checked yet (one analysis call each); the page calls it a few at a time to show progress. */
+async function ageCheckRunAction(ctx: PluginContext, params: Record<string, unknown>, context: ActionContext) {
+  const { companyId } = managerOf(context, "check pictures");
+  const ids = readFileIds(params.fileIds, 5);
+  let checked = await ageStatus(ctx, companyId, ids);
+  const missing = Array.from(new Map(checked.filter((p) => p.verdict === null).map((p) => [p.sha256, p])).values());
+  if (missing.length > 0) {
+    const settings = await loadIdentitySettings(ctx, companyId);
+    if (!settings.analysis) throw new Error(AGE_CHECK_NO_MODEL_MESSAGE);
+    for (const p of missing) {
+      const rec = await runAgeCheck(ctx, companyId, settings.analysis, p);
+      checked = checked.map((c) => (c.sha256 === rec.sha256 ? { ...c, verdict: rec.verdict, checkedAt: rec.checkedAt } : c));
+    }
+  }
+  return { pictures: ageView(checked), checked: missing.length };
 }
 
 /**
@@ -493,7 +607,12 @@ export async function analyseAction(ctx: PluginContext, params: Record<string, u
   if (!settings.analysis) {
     throw new Error("Pick an analysis model (one that can see pictures) in the identity settings first. You can also fill in the description and crops yourself.");
   }
-  await assertPictureFile(ctx, companyId, fileId, "The picture");
+  const picture = await hashPicture(ctx, companyId, fileId, "The picture");
+  // A copy of a picture already judged not clearly adult is refused without asking again.
+  const known = (await loadAgeChecks(ctx, companyId)).get(picture.sha256);
+  if (known && known.verdict !== "adult") {
+    return { ok: false, blocked: true, message: "This picture was already found not to be clearly of an adult (18 or older), so it cannot be used for an identity." };
+  }
   // The server makes the call (it can reach the company's own model server);
   // the answer is still checked strictly here.
   const answer = await ctx.models.analyseImage(companyId, {
@@ -505,13 +624,18 @@ export async function analyseAction(ctx: PluginContext, params: Record<string, u
     maxOutputTokens: 900,
   });
   const outcome = parseAnalysis(answer.text);
+  const record = (verdict: "adult" | "under18" | "unclear") =>
+    recordAgeCheck(ctx, companyId, { sha256: picture.sha256, verdict, modelEntryId: settings.analysis!.entryId, checkedAt: new Date().toISOString() });
   if (!outcome.ok) {
     if (outcome.kind === "not-adult") {
       await addAgeBlock(ctx, companyId, fileId);
+      await record(outcome.verdict);
       return { ok: false, blocked: true, message: outcome.message };
     }
     return { ok: false, blocked: false, message: outcome.message };
   }
+  // The analysis said "clearly an adult": that is this picture's age check too.
+  await record("adult");
   return { ok: true, sheet: outcome.result.sheet, crops: outcome.result.crops, model: settings.analysis.label ?? answer.entryName };
 }
 
@@ -896,6 +1020,9 @@ async function trainingSetAddAction(ctx: PluginContext, params: Record<string, u
   }
   const blocks = await loadAgeBlocks(ctx, companyId);
   if (added.some((p) => blocks.includes(p.fileId))) throw new Error("One of these pictures was flagged as possibly showing someone under 18, so it cannot be used.");
+  // Copies of pictures already found not clearly adult are refused right away (no model call here).
+  const ids = added.map((p) => p.fileId);
+  throwIfRefused(await ageStatus(ctx, companyId, ids, "A training picture"), ids);
   const identity = await updateIdentity(ctx, companyId, String(params.identityId ?? ""), (current) => {
     const set = current.trainingSet ?? emptyTrainingSet();
     const known = new Set(set.pictures.map((p) => p.fileId));
@@ -950,7 +1077,7 @@ export async function trainingSetDownloadAction(ctx: PluginContext, params: Reco
   const identity = findIdentity(await loadIdentities(ctx, companyId), params.identityId);
   const set = identity.trainingSet;
   if (!set || set.selectedFileIds.length === 0) throw new Error("Tick the pictures to download first.");
-  await assertNoneAgeBlocked(ctx, companyId, set.selectedFileIds);
+  await requireAdultPictures(ctx, companyId, set.selectedFileIds);
   const trigger = typeof params.triggerWord === "string" && params.triggerWord.trim() ? readTriggerWord(params.triggerWord) : null;
   const files: Array<{ name: string; bytes: Buffer }> = [];
   const lines: string[] = [];
@@ -1023,6 +1150,8 @@ async function startLoraTraining(ctx: PluginContext, params: Record<string, unkn
   if (params.confirmCostCents !== cost) {
     throw new Error(`Training costs about $${(cost / 100).toFixed(2)} on Fal.ai. Confirm that price to start.`);
   }
+  // Every ticked picture must be clearly of an adult before anything is paid for or sent.
+  await requireAdultPictures(ctx, companyId, selected);
   // Mark it as training BEFORE anything is paid for, re-checking the move on
   // the stored state, so a second start is refused even from another tab.
   const previous = identity.training ?? null;
@@ -1153,6 +1282,11 @@ export async function loraPublishAction(ctx: PluginContext, params: Record<strin
   const repoName = readRepoName(params.repoName);
   const settings = await loadIdentitySettings(ctx, companyId);
   if (!settings.hfTokenSecretId) throw new Error("Pick a Hugging Face token (with write access) in the identity settings first.");
+  // The LoRA carries the pictures it was trained on: they pass the age check too.
+  if (training.trainedFileIds.length === 0) {
+    throw new Error(`The pictures this LoRA was trained on are not recorded, so their age cannot be checked and it cannot be published. ${AGE_CHECK_EXPLANATION}`);
+  }
+  await requireAdultPictures(ctx, companyId, training.trainedFileIds, "A picture the LoRA was trained on");
   let token: string;
   try {
     token = await ctx.secrets.resolve(settings.hfTokenSecretId);
@@ -1274,7 +1408,7 @@ export async function higgsfieldSoulAction(ctx: PluginContext, params: Record<st
   if (selected.length < HIGGSFIELD_MIN_SOUL_PICTURES || selected.length > HIGGSFIELD_MAX_SOUL_PICTURES) {
     throw new Error(`A Higgsfield Soul ID needs ${HIGGSFIELD_MIN_SOUL_PICTURES} to ${HIGGSFIELD_MAX_SOUL_PICTURES} ticked face pictures (${selected.length} ticked).`);
   }
-  await assertNoneAgeBlocked(ctx, companyId, selected);
+  await requireAdultPictures(ctx, companyId, selected);
   const variant = params.variant === "soul-cinematic" ? "soul-cinematic" : "soul-2";
   const client = await higgsfieldClient(ctx, companyId, seams);
   const made = await withSpend(ctx, "higgsfield-soul-id", companyId, userId, params, async () => {
@@ -1344,6 +1478,7 @@ export function registerAnchorActions(ctx: PluginContext, seams: AnchorSeams = a
         presets: TRAINING_REQUESTS,
       },
       editModels: Object.keys(SOGNI_EDIT_MODELS),
+      ageCheck: { explanation: AGE_CHECK_EXPLANATION, costNote: AGE_CHECK_COST_NOTE, model: settings.analysis?.label ?? null },
     };
   });
   reg(ACTION_IDENTITIES_SAVE, (p, c) => saveIdentityAction(ctx, p, c));
@@ -1398,4 +1533,6 @@ export function registerAnchorActions(ctx: PluginContext, seams: AnchorSeams = a
   reg(ACTION_HIGGSFIELD_SOUL, (p, c) => higgsfieldSoulAction(ctx, p, c, seams));
   reg(ACTION_TRAINED_STATUS, (p, c) => trainedStatusAction(ctx, p, c, seams));
   reg(ACTION_TRAINED_REMOVE, (p, c) => trainedRemoveAction(ctx, p, c));
+  reg(ACTION_AGE_CHECK_STATUS, (p, c) => ageCheckStatusAction(ctx, p, c));
+  reg(ACTION_AGE_CHECK_RUN, (p, c) => ageCheckRunAction(ctx, p, c));
 }

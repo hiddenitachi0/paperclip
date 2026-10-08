@@ -34,6 +34,8 @@ export const ACTION_LORA_PUBLISH = "lora.publish";
 export const ACTION_LORA_IMPORT_SOGNI = "lora.importSogni";
 export const ACTION_LORA_ATTACH = "lora.attach";
 export const ACTION_LORA_RESET = "lora.reset";
+export const ACTION_AGE_CHECK_STATUS = "ageCheck.status";
+export const ACTION_AGE_CHECK_RUN = "ageCheck.run";
 export const ACTION_EDIT_SEGMENT = "edit.segment";
 export const ACTION_EDIT_SOGNI = "edit.sogni";
 

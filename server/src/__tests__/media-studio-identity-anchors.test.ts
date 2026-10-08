@@ -19,6 +19,7 @@ import {
 } from "../../../packages/plugins/media-studio/src/identity.js";
 import { ANALYSIS_SYSTEM_PROMPT, parseAnalysis } from "../../../packages/plugins/media-studio/src/vision-analysis.js";
 import { crc32, zipStore } from "../../../packages/plugins/media-studio/src/lora-training.js";
+import { AGE_CHECK_SYSTEM_PROMPT, parseAgeCheck, sha256Of } from "../../../packages/plugins/media-studio/src/age-check.js";
 import { HiggsfieldClient, HiggsfieldProvider, readHiggsfieldCredentials, soulSize } from "../../../packages/plugins/media-studio/src/higgsfield.js";
 
 /**
@@ -186,6 +187,25 @@ async function setup(config: Record<string, unknown> = {}): Promise<{ harness: T
   anchorSeams.sogniTransferFetch = bytesFetch as never;
   anchorSeams.sogniPollIntervalMs = 1;
   return { harness, fake };
+}
+
+const AGE_ENTRY = "4b4b4b4b-4b4b-4b4b-8b4b-4b4b4b4b4b4b";
+
+/**
+ * Picks an analysis model and stubs the server's analysis call. The age check
+ * answers `answer` (default: clearly an adult) for every picture.
+ */
+async function ageModel(harness: TestHarness, answer: (fileId: string) => string = () => '{"apparentAdult": true}') {
+  await harness.performAction("identitySettings.save", { analysis: { entryId: AGE_ENTRY, label: "Vision model", keySecretId: SECRET } }, owner);
+  const analyseImage = vi.fn(async (_companyId: string, input: { fileId: string; systemPrompt: string }) => ({
+    text: answer(input.fileId),
+    entryName: "Vision model",
+    provider: "anthropic",
+    model: "claude-sonnet-5",
+    costCents: 1,
+  }));
+  harness.ctx.models.analyseImage = analyseImage as never;
+  return analyseImage;
 }
 
 const identitiesKey = { scopeKind: "company" as const, scopeId: COMPANY, stateKey: "identities" };
@@ -714,6 +734,7 @@ describe("training set: generate anywhere, keep provenance, mix batches", () => 
 
   it("downloads the ticked pictures as a zip with captions and a README of where each came from", async () => {
     const { harness } = await setup();
+    await ageModel(harness);
     const identity = await makeIdentity(harness);
     await harness.performAction("trainingSet.add", { identityId: identity.id, pictures: [{ fileId: LOOKREF1, provenance: { service: "sogni", model: "qwen", prompt: "a walk", loras: [] } }, up(EXTRA)] }, owner);
     await expect(harness.performAction("trainingSet.download", { identityId: identity.id }, owner)).rejects.toThrow(/Tick/);
@@ -733,6 +754,7 @@ describe("training set: generate anywhere, keep provenance, mix batches", () => 
 
 describe("LoRA training flow (stubbed Fal and Hugging Face)", () => {
   async function ready(harness: TestHarness) {
+    await ageModel(harness);
     const identity = await makeIdentity(harness);
     const ids = [FACE, BODY, OUTFIT, LOOKREF1, LOOKREF2, ROOM, SOFA, ORIGINAL, MASK];
     await harness.performAction("trainingSet.add", { identityId: identity.id, pictures: ids.map(up) }, owner);
@@ -967,6 +989,7 @@ describe("Higgsfield (stubbed): Soul ID from the training set, and pictures with
   it("makes a Soul ID from 5-20 ticked pictures, polls it ready, then generates training pictures and agent pictures with it", async () => {
     const { harness, fake } = await setup({ higgsfieldKeySecretRef: HF_KEY });
     higgsfieldFake(harness, fake);
+    await ageModel(harness);
     const identity = await makeIdentity(harness);
     await harness.performAction("trainingSet.add", { identityId: identity.id, pictures: [FACE, BODY, OUTFIT, LOOKREF1].map(up) }, owner);
     await harness.performAction("trainingSet.select", { identityId: identity.id, fileIds: [FACE, BODY, OUTFIT, LOOKREF1] }, owner);
@@ -1116,5 +1139,192 @@ describe("each company's own service keys (Sogni, Fal.ai, Higgsfield)", () => {
     const text = JSON.stringify(await harness.performAction<any>("serviceKeys.get", {}, owner));
     expect(text).not.toContain("resolved:");
     expect(text).not.toContain(FAL_REF);
+  });
+});
+
+
+// ─── Age check before pictures leave Paperclip ────────────────────────────────
+
+describe("age check: every picture must be clearly of an adult before it leaves Paperclip", () => {
+  const HIGGS_KEY = "12345678-1234-4234-8234-123456789016";
+  const P = Array.from({ length: 10 }, (_, i) => `a${i}a${i}a${i}a${i}-0000-4000-8000-00000000000${i}`);
+  const COPY = "c0c0c0c0-0000-4000-8000-00000000c0c0";
+  const OTHER_COPY = "d0d0d0d0-0000-4000-8000-00000000d0d0";
+  const GENERATED = "e0e0e0e0-0000-4000-8000-00000000e0e0";
+  const ageKey = (companyId: string) => ({ scopeKind: "company" as const, scopeId: companyId, stateKey: "pictureAgeChecks" });
+  let BYTES: Buffer[];
+
+  async function world(config: Record<string, unknown> = {}) {
+    const { harness, fake } = await setup(config);
+    BYTES ??= await Promise.all(Array.from({ length: 11 }, (_, i) => solid(20, 20, [i * 20, 255 - i * 20, 7])));
+    harness.seed({
+      companyFiles: [
+        ...P.map((id, i) => ({ ...(file(id, BYTES[i]!) as object), originalFilename: `photo-${i + 1}.png` }) as never),
+        // The same bytes as photo-1, uploaded again under a new file id.
+        file(COPY, BYTES[0]!),
+        // The same bytes in another company.
+        file(OTHER_COPY, BYTES[0]!, OTHER),
+        // A newly generated picture (new content).
+        file(GENERATED, BYTES[10]!),
+      ],
+    });
+    return { harness, fake };
+  }
+
+  async function tickedSet(harness: TestHarness, ids: string[]) {
+    const identity = await makeIdentity(harness);
+    await harness.performAction("trainingSet.add", { identityId: identity.id, pictures: ids.map(up) }, owner);
+    await harness.performAction("trainingSet.select", { identityId: identity.id, fileIds: ids }, owner);
+    return identity;
+  }
+
+  const ageCalls = (fn: ReturnType<typeof vi.fn>) => fn.mock.calls.filter((c) => (c[1] as { systemPrompt: string }).systemPrompt === AGE_CHECK_SYSTEM_PROMPT);
+  const outsideCalls = (fake: Fake) =>
+    fake.calls.filter((c) => /queue\.fal\.run|rest\.alpha\.fal\.ai|huggingface\.co|api\.higgsfield\.ai/.test(c.url)).length + fake.bytes.length;
+
+  it("reads the model's answer strictly: only true is an adult", () => {
+    expect(parseAgeCheck('{"apparentAdult": true}')).toBe("adult");
+    expect(parseAgeCheck('```json\n{"apparentAdult": true}\n```')).toBe("adult");
+    expect(parseAgeCheck('{"apparentAdult": false}')).toBe("under18");
+    expect(parseAgeCheck('{"apparentAdult": null}')).toBe("unclear");
+    expect(parseAgeCheck("I can't help with judging people's ages.")).toBe("unclear");
+    expect(parseAgeCheck('{"refused": true}')).toBe("unclear");
+    expect(parseAgeCheck('{"apparentAdult": "yes"}')).toBe("unreadable");
+    expect(parseAgeCheck('{"apparentAdult": true, "age": 30}')).toBe("unreadable");
+    expect(parseAgeCheck("maybe")).toBe("unreadable");
+  });
+
+  it("keeps the result by the picture's content: a re-uploaded copy (new file id) is not checked again", async () => {
+    const { harness } = await world();
+    const analyse = await ageModel(harness);
+    const first = await harness.performAction<any>("ageCheck.run", { fileIds: [P[0]] }, owner);
+    expect(first.pictures).toEqual([expect.objectContaining({ fileId: P[0], verdict: "adult" })]);
+    expect(ageCalls(analyse)).toHaveLength(1);
+    expect(analyse.mock.calls[0]![1]).toMatchObject({ entryId: AGE_ENTRY, fileId: P[0], keySecretId: SECRET });
+    const stored = (await harness.ctx.state.get(ageKey(COMPANY))) as Record<string, any>;
+    const hash = sha256Of(BYTES[0]!);
+    expect(stored[hash]).toEqual({ sha256: hash, verdict: "adult", modelEntryId: AGE_ENTRY, checkedAt: expect.any(String) });
+    const copy = await harness.performAction<any>("ageCheck.status", { fileIds: [COPY] }, member);
+    expect(copy.pictures[0]).toMatchObject({ fileId: COPY, verdict: "adult" });
+    expect(copy.explanation).toBe("Every picture is checked for apparent age before it leaves Paperclip. Pictures that are not clearly of an adult are never sent.");
+    expect(copy.costNote).toMatch(/one call each/);
+    await harness.performAction("ageCheck.run", { fileIds: [COPY] }, owner);
+    expect(ageCalls(analyse)).toHaveLength(1);
+    await expect(harness.performAction("ageCheck.run", { fileIds: [P[1]] }, member)).rejects.toThrow(/owner or an admin/);
+  });
+
+  it("checks pictures not checked yet automatically (one call each) before training, then never again", async () => {
+    const { harness, fake } = await world();
+    const analyse = await ageModel(harness);
+    const identity = await tickedSet(harness, P);
+    expect(ageCalls(analyse)).toHaveLength(0);
+    const started = await harness.performAction<any>("lora.train", { identityId: identity.id, triggerWord: "majaberg", confirmCostCents: 300 }, owner);
+    expect(started.identity.training.status).toBe("training");
+    expect(ageCalls(analyse).map((c) => (c[1] as { fileId: string }).fileId).sort()).toEqual([...P].sort());
+    expect(ageCalls(analyse).every((c) => c[0] === COMPANY)).toBe(true);
+    // The download of the same pictures needs no new check.
+    await harness.performAction("trainingSet.download", { identityId: identity.id }, owner);
+    expect(ageCalls(analyse)).toHaveLength(10);
+    expect(fake.calls.some((c) => c.url === "https://queue.fal.run/fal-ai/krea-2-trainer")).toBe(true);
+  });
+
+  it("refuses unclear and under-18 pictures, lists them, and sends nothing anywhere (Fal, Higgsfield, zip, Hugging Face)", async () => {
+    const { harness, fake } = await world({ higgsfieldKeySecretRef: HIGGS_KEY });
+    const answers: Record<string, string> = { [P[3]!]: '{"apparentAdult": null}', [P[7]!]: '{"apparentAdult": false}' };
+    const analyse = await ageModel(harness, (id) => answers[id] ?? '{"apparentAdult": true}');
+    const identity = await tickedSet(harness, P);
+    const reserve = vi.spyOn(harness.ctx.billing, "reserveMediaStudioDirectSpend");
+    const err = await harness.performAction("lora.train", { identityId: identity.id, triggerWord: "majaberg", confirmCostCents: 300 }, owner).catch((e) => e as Error);
+    expect(String(err)).toMatch(/Nothing was sent: 2 pictures are not clearly of an adult/);
+    expect(String(err)).toContain("photo-4.png (not clearly an adult)");
+    expect(String(err)).toContain("photo-8.png (may be under 18)");
+    await expect(harness.performAction("trainingSet.download", { identityId: identity.id }, owner)).rejects.toThrow(/not clearly of an adult/);
+    await harness.performAction("trainingSet.select", { identityId: identity.id, fileIds: P.slice(0, 5) }, owner);
+    await expect(harness.performAction("higgsfield.soulId", { identityId: identity.id }, owner)).rejects.toThrow(/photo-4\.png/);
+    expect(reserve).not.toHaveBeenCalled();
+    expect(outsideCalls(fake)).toBe(0);
+    expect(((await harness.ctx.state.get(identitiesKey)) as Identity[])[0]!.training).toBeNull();
+    // The verdicts are kept: a later "adult" answer cannot change them, and no new call is made.
+    const before = ageCalls(analyse).length;
+    delete answers[P[3]!];
+    await expect(harness.performAction("higgsfield.soulId", { identityId: identity.id }, owner)).rejects.toThrow(/photo-4\.png/);
+    expect(ageCalls(analyse)).toHaveLength(before);
+    // A copy of a refused picture cannot even join a training set, and Analyse refuses it without a call.
+    const stored = (await harness.ctx.state.get(ageKey(COMPANY))) as Record<string, any>;
+    expect(stored[sha256Of(BYTES[7]!)].verdict).toBe("under18");
+    expect(stored[sha256Of(BYTES[3]!)].verdict).toBe("unclear");
+  });
+
+  it("an unreadable answer is not stored and sends nothing; no analysis model means nothing is sent", async () => {
+    const { harness, fake } = await world();
+    const identity = await tickedSet(harness, P);
+    await expect(harness.performAction("lora.train", { identityId: identity.id, triggerWord: "majaberg", confirmCostCents: 300 }, owner)).rejects.toThrow(/Pick an analysis model/);
+    await expect(harness.performAction("trainingSet.download", { identityId: identity.id }, owner)).rejects.toThrow(/Pick an analysis model/);
+    const analyse = await ageModel(harness, () => "The person is wearing a blue shirt.");
+    await expect(harness.performAction("lora.train", { identityId: identity.id, triggerWord: "majaberg", confirmCostCents: 300 }, owner)).rejects.toThrow(/could not be read/);
+    expect(ageCalls(analyse)).toHaveLength(1);
+    expect(await harness.ctx.state.get(ageKey(COMPANY))).toBeFalsy();
+    expect(outsideCalls(fake)).toBe(0);
+  });
+
+  it("a newly generated picture added to the set is new content and is checked before it is sent", async () => {
+    const { harness } = await world();
+    const analyse = await ageModel(harness);
+    const identity = await tickedSet(harness, P);
+    await harness.performAction("trainingSet.download", { identityId: identity.id }, owner);
+    expect(ageCalls(analyse)).toHaveLength(10);
+    await harness.performAction(
+      "trainingSet.add",
+      { identityId: identity.id, pictures: [{ fileId: GENERATED, provenance: { service: "sogni", model: "krea-identity-edit", prompt: "profile view", loras: [] } }] },
+      owner,
+    );
+    await harness.performAction("trainingSet.select", { identityId: identity.id, fileIds: [...P, GENERATED] }, owner);
+    await harness.performAction("trainingSet.download", { identityId: identity.id }, owner);
+    expect(ageCalls(analyse)).toHaveLength(11);
+    expect((ageCalls(analyse).at(-1)![1] as { fileId: string }).fileId).toBe(GENERATED);
+  });
+
+  it("a copy of a refused picture is refused when added, and by Analyse, without asking the model", async () => {
+    const { harness } = await world();
+    const analyse = await ageModel(harness, () => '{"apparentAdult": false}');
+    await harness.performAction("ageCheck.run", { fileIds: [P[0]] }, owner);
+    expect(analyse).toHaveBeenCalledTimes(1);
+    const identity = await makeIdentity(harness);
+    await expect(harness.performAction("trainingSet.add", { identityId: identity.id, pictures: [up(COPY)] }, owner)).rejects.toThrow(/may be under 18/);
+    expect(await harness.performAction<any>("identities.analyse", { fileId: COPY }, owner)).toMatchObject({ ok: false, blocked: true });
+    expect(analyse).toHaveBeenCalledTimes(1);
+  });
+
+  it("a Hugging Face publish checks the pictures the LoRA was trained on", async () => {
+    const { harness, fake } = await world();
+    await ageModel(harness);
+    const identity = await tickedSet(harness, P);
+    await harness.performAction("lora.train", { identityId: identity.id, triggerWord: "majaberg", confirmCostCents: 300 }, owner);
+    fake.falStatus = "COMPLETED";
+    await harness.performAction("lora.status", { identityId: identity.id }, owner);
+    await harness.performAction("identitySettings.save", { analysis: { entryId: AGE_ENTRY, keySecretId: SECRET }, hfTokenSecretId: HF_SECRET }, owner);
+    // Found later to be not clearly adult (e.g. checked again by Analyse with a stricter model).
+    const hash = sha256Of(BYTES[2]!);
+    const stored = (await harness.ctx.state.get(ageKey(COMPANY))) as Record<string, any>;
+    await harness.ctx.state.set(ageKey(COMPANY), { ...stored, [hash]: { ...stored[hash], verdict: "unclear" } });
+    await expect(harness.performAction("lora.publish", { identityId: identity.id, repoName: "maja-lora", confirmPublic: true }, owner)).rejects.toThrow(/photo-3\.png/);
+    expect(fake.calls.some((c) => c.url.startsWith("https://huggingface.co/"))).toBe(false);
+    expect(fake.bytes.some((b) => b.url.startsWith("https://hf-hub-lfs"))).toBe(false);
+  });
+
+  it("results are kept per company: another company's copy of the same picture is checked on its own", async () => {
+    const { harness } = await world();
+    const analyse = await ageModel(harness, () => '{"apparentAdult": false}');
+    await harness.performAction("ageCheck.run", { fileIds: [P[0]] }, owner);
+    // The other company has the same bytes but no result of its own.
+    await harness.performAction("identitySettings.save", { analysis: { entryId: AGE_ENTRY, keySecretId: SECRET } }, otherOwner);
+    expect((await harness.performAction<any>("ageCheck.status", { fileIds: [OTHER_COPY] }, otherOwner)).pictures[0].verdict).toBeNull();
+    await expect(harness.performAction("ageCheck.status", { fileIds: [P[0]] }, otherOwner)).rejects.toThrow(/not in this company's Files/);
+    analyse.mockImplementation(async () => ({ text: '{"apparentAdult": true}', entryName: "x", provider: "anthropic", model: "m", costCents: 1 }));
+    const other = await harness.performAction<any>("ageCheck.run", { fileIds: [OTHER_COPY] }, otherOwner);
+    expect(other.pictures[0].verdict).toBe("adult");
+    expect(analyse.mock.calls.at(-1)![0]).toBe(OTHER);
+    expect(((await harness.ctx.state.get(ageKey(COMPANY))) as Record<string, any>)[sha256Of(BYTES[0]!)].verdict).toBe("under18");
+    expect(((await harness.ctx.state.get(ageKey(OTHER))) as Record<string, any>)[sha256Of(BYTES[0]!)].verdict).toBe("adult");
   });
 });

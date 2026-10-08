@@ -53,7 +53,7 @@ export interface AnalysisResult {
 export type AnalysisOutcome =
   | { ok: true; result: AnalysisResult }
   | { ok: false; kind: "refused" | "unreadable"; message: string }
-  | { ok: false; kind: "not-adult"; message: string };
+  | { ok: false; kind: "not-adult"; message: string; verdict: "under18" | "unclear" };
 
 export const ANALYSIS_REFUSED_MESSAGE =
   "The analysis model would not describe this picture. Try another analysis model in Media Studio's identity settings, or fill in the description and crops yourself.";
@@ -98,7 +98,7 @@ export function parseAnalysis(answer: string): AnalysisOutcome {
   }
   if (obj.apparentAdult !== "yes") {
     return obj.apparentAdult === "no" || obj.apparentAdult === "unsure"
-      ? { ok: false, kind: "not-adult", message: ANALYSIS_NOT_ADULT_MESSAGE }
+      ? { ok: false, kind: "not-adult", message: ANALYSIS_NOT_ADULT_MESSAGE, verdict: obj.apparentAdult === "no" ? "under18" : "unclear" }
       : { ok: false, kind: "unreadable", message: ANALYSIS_UNREADABLE_MESSAGE };
   }
   const sheetRaw = obj.sheet as Record<string, unknown> | null;

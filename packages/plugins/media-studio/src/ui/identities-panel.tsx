@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { PluginHostContext } from "@paperclipai/plugin-sdk/ui";
 import { usePluginAction } from "@paperclipai/plugin-sdk/ui";
 import {
+  ACTION_AGE_CHECK_RUN,
+  ACTION_AGE_CHECK_STATUS,
   ACTION_EDIT_SEGMENT,
   ACTION_IDENTITIES_ANALYSE,
   ACTION_IDENTITIES_CANDIDATES,
@@ -121,7 +123,21 @@ type ListResponse = {
   seedExplanation: string;
   training: { steps: number; costCents: number; minPictures: number; maxPictures: number; soulMin: number; soulMax: number; presets: string[] };
   editModels: string[];
+  ageCheck?: { explanation: string; costNote: string; model: string | null };
 };
+
+export type AgeVerdict = "adult" | "under18" | "unclear";
+type AgeRow = { fileId: string; name: string | null; verdict: AgeVerdict | null };
+
+export const AGE_CHECK_EXPLANATION_FALLBACK =
+  "Every picture is checked for apparent age before it leaves Paperclip. Pictures that are not clearly of an adult are never sent.";
+
+function ageLabel(verdict: AgeVerdict | null | undefined): string {
+  if (verdict === "adult") return "Age checked: adult";
+  if (verdict === "under18") return "Refused: may be under 18";
+  if (verdict === "unclear") return "Refused: not clearly an adult";
+  return "Age not checked yet";
+}
 
 type Draft = {
   id: string | null;
@@ -718,6 +734,9 @@ function downloadBase64(filename: string, contentType: string, base64: string) {
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
+/** Actions that send pictures out (their errors show under "Train with"). */
+const SENDING_ACTIONS = new Set(["ages", "train", "status", "publish", "import", "attach", "reset", "soul", "download"]);
+
 function TrainingSection(props: { identity: Identity; companyId: string; info: ListResponse; onChanged: (i: Identity) => void }) {
   const { identity, companyId, info } = props;
   const generate = usePluginAction(ACTION_TRAINING_SET_GENERATE);
@@ -735,6 +754,8 @@ function TrainingSection(props: { identity: Identity; companyId: string; info: L
   const soul = usePluginAction(ACTION_HIGGSFIELD_SOUL);
   const trainedStatus = usePluginAction(ACTION_TRAINED_STATUS);
   const trainedRemove = usePluginAction(ACTION_TRAINED_REMOVE);
+  const ageStatus = usePluginAction(ACTION_AGE_CHECK_STATUS);
+  const ageRun = usePluginAction(ACTION_AGE_CHECK_RUN);
   const options = useGenerationOptions();
   const set: TrainingSet = identity.trainingSet ?? { pictures: [], selectedFileIds: [], batches: [], presets: info.training.presets };
   const [choice, setChoice] = useState<GenerateChoice | null>(null);
@@ -750,16 +771,74 @@ function TrainingSection(props: { identity: Identity; companyId: string; info: L
   const [publicOk, setPublicOk] = useState(false);
   const [manualId, setManualId] = useState("");
   const [variant, setVariant] = useState<"soul-2" | "soul-cinematic">("soul-2");
+  const [errorKey, setErrorKey] = useState<string | null>(null);
+  const [ages, setAges] = useState<Record<string, AgeVerdict | null>>({});
+  const [ageProgress, setAgeProgress] = useState<string | null>(null);
   const ownPhotos = useRef<HTMLInputElement>(null);
   const training = identity.training;
   const trained = identity.trainedIdentities ?? [];
   const selected = new Set(set.selectedFileIds);
   const current = choice ?? defaultChoice(identity, options);
   const presets = presetsText.split("\n").map((p) => p.trim()).filter(Boolean);
+  const ageText = info.ageCheck?.explanation ?? AGE_CHECK_EXPLANATION_FALLBACK;
+  const pictureKey = set.pictures.map((p) => p.fileId).join(",");
+
+  const noteAges = (rows: AgeRow[] | undefined) => {
+    if (!rows || rows.length === 0) return;
+    setAges((prev) => ({ ...prev, ...Object.fromEntries(rows.map((r) => [r.fileId, r.verdict])) }));
+  };
+
+  // What is already known about each picture (free: no model is called).
+  useEffect(() => {
+    if (set.pictures.length === 0) return;
+    let stop = false;
+    void (async () => {
+      try {
+        const res = (await ageStatus({ fileIds: set.pictures.map((p) => p.fileId) })) as { pictures?: AgeRow[] } | undefined;
+        if (!stop) noteAges(res?.pictures);
+      } catch {
+        // Shown again when an action checks the pictures.
+      }
+    })();
+    return () => {
+      stop = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pictureKey]);
+
+  /**
+   * Every picture must be clearly of an adult before it leaves Paperclip.
+   * Pictures not checked yet are checked here one at a time (one analysis
+   * call each), with progress; the server checks again before sending.
+   */
+  const ensureAdults = async (fileIds: string[]) => {
+    const refusedText = (rows: AgeRow[]) =>
+      `Nothing was sent. ${rows.length === 1 ? "This picture is" : "These pictures are"} not clearly of an adult: ${rows
+        .map((r) => `${r.name ?? `picture ${fileIds.indexOf(r.fileId) + 1}`} (${r.verdict === "under18" ? "may be under 18" : "not clearly an adult"})`)
+        .join(", ")}. Untick or remove ${rows.length === 1 ? "it" : "them"}. ${ageText}`;
+    const status = (await ageStatus({ fileIds })) as { pictures?: AgeRow[] } | undefined;
+    const rows = status?.pictures ?? [];
+    noteAges(rows);
+    const refused = rows.filter((r) => r.verdict === "under18" || r.verdict === "unclear");
+    if (refused.length > 0) throw new Error(refusedText(refused));
+    const missing = fileIds.filter((id) => rows.find((r) => r.fileId === id)?.verdict !== "adult");
+    try {
+      for (const [i, id] of missing.entries()) {
+        setAgeProgress(`Checking apparent age: ${i + 1} of ${missing.length} (one analysis call per picture not checked before)…`);
+        const res = (await ageRun({ fileIds: [id] })) as { pictures?: AgeRow[] } | undefined;
+        noteAges(res?.pictures);
+        const row = res?.pictures?.find((r) => r.fileId === id);
+        if (!row || row.verdict !== "adult") throw new Error(refusedText([row ?? { fileId: id, name: null, verdict: "unclear" }]));
+      }
+    } finally {
+      setAgeProgress(null);
+    }
+  };
 
   const run = async (key: string, fn: () => Promise<unknown>) => {
     setBusy(key);
     setError(null);
+    setErrorKey(key);
     try {
       const res = (await fn()) as { identity?: Identity; progress?: string | null } | undefined;
       if (res?.identity) props.onChanged(res.identity);
@@ -872,7 +951,7 @@ function TrainingSection(props: { identity: Identity; companyId: string; info: L
           </button>
           <input ref={ownPhotos} type="file" multiple accept="image/png,image/jpeg,image/webp" style={{ display: "none" }} onChange={(e) => void addOwn(e.target.files)} />
         </div>
-        {error ? <div style={errorBox}>{error}</div> : null}
+        {error && !SENDING_ACTIONS.has(errorKey ?? "") ? <div style={errorBox}>{error}</div> : null}
         {set.pictures.length > 0 ? (
           <>
             <div style={help}>
@@ -884,6 +963,12 @@ function TrainingSection(props: { identity: Identity; companyId: string; info: L
                   <img src={fileContentPath(p.fileId)} alt="Training picture" style={{ ...thumb, outline: selected.has(p.fileId) ? "3px solid #2f9e44" : "none" }} />
                   <input type="checkbox" checked={selected.has(p.fileId)} disabled={busy !== null} onChange={() => toggle(p.fileId)} style={{ position: "absolute", top: 4, left: 4 }} aria-label="Use for training" />
                   <span style={{ ...help, display: "block", maxWidth: 96, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{provenanceText(p)}</span>
+                  <span
+                    style={{ ...help, display: "block", maxWidth: 96, color: ages[p.fileId] === "adult" ? "#2f9e44" : ages[p.fileId] ? "#a61e4d" : undefined }}
+                    data-age={ages[p.fileId] ?? "unchecked"}
+                  >
+                    {ageLabel(ages[p.fileId])}
+                  </span>
                 </label>
               ))}
             </div>
@@ -903,6 +988,27 @@ function TrainingSection(props: { identity: Identity; companyId: string; info: L
 
       <div style={card} aria-label="Train with">
         <strong>Train with</strong>
+        <div style={warnBox} aria-label="Age check">
+          {ageText} {info.ageCheck?.costNote ?? "Pictures not checked before take one analysis call each."}
+          {info.ageCheck?.model ? ` Checked with ${info.ageCheck.model}.` : ""}
+        </div>
+        {ageProgress ? <div style={help} role="status">{ageProgress}</div> : null}
+        <div>
+          <button
+            type="button"
+            style={ghostBtn}
+            disabled={busy !== null || selected.size === 0}
+            onClick={() =>
+              void run("ages", async () => {
+                await ensureAdults(set.selectedFileIds);
+                return undefined;
+              })
+            }
+          >
+            {busy === "ages" ? "Checking…" : `Check the age of the ${selected.size} ticked pictures`}
+          </button>
+        </div>
+        {error && SENDING_ACTIONS.has(errorKey ?? "") ? <div style={errorBox}>{error}</div> : null}
         <label style={field}>
           <span>Trigger word</span>
           <input style={input} value={trigger} onChange={(e) => setTrigger(e.target.value)} />
@@ -927,7 +1033,12 @@ function TrainingSection(props: { identity: Identity; companyId: string; info: L
                   type="button"
                   style={primaryBtn}
                   disabled={busy !== null || !costOk || selected.size < info.training.minPictures}
-                  onClick={() => void run("train", () => train({ identityId: identity.id, triggerWord: trigger, confirmCostCents: info.training.costCents }))}
+                  onClick={() =>
+                    void run("train", async () => {
+                      await ensureAdults(set.selectedFileIds);
+                      return train({ identityId: identity.id, triggerWord: trigger, confirmCostCents: info.training.costCents });
+                    })
+                  }
                 >
                   {busy === "train" ? "Starting…" : "Train the LoRA"}
                 </button>
@@ -952,7 +1063,12 @@ function TrainingSection(props: { identity: Identity; companyId: string; info: L
                 <input type="checkbox" checked={publicOk} onChange={(e) => setPublicOk(e.target.checked)} /> I understand anyone can download it.
               </label>
               <div style={row}>
-                <button type="button" style={primaryBtn} disabled={busy !== null || !publicOk || !info.hfReady} onClick={() => void run("publish", () => publish({ identityId: identity.id, repoName: repo, confirmPublic: true }))}>
+                <button type="button" style={primaryBtn} disabled={busy !== null || !publicOk || !info.hfReady} onClick={() =>
+                    void run("publish", async () => {
+                      await ensureAdults(training?.trainedFileIds ?? []);
+                      return publish({ identityId: identity.id, repoName: repo, confirmPublic: true });
+                    })
+                  }>
                   {busy === "publish" ? "Publishing…" : "Publish to Hugging Face"}
                 </button>
                 {!info.hfReady ? <span style={help}>Pick a Hugging Face token in the identity settings first.</span> : null}
@@ -998,7 +1114,12 @@ function TrainingSection(props: { identity: Identity; companyId: string; info: L
               type="button"
               style={primaryBtn}
               disabled={busy !== null || selected.size < info.training.soulMin || selected.size > info.training.soulMax || !(options?.services.higgsfield ?? false)}
-              onClick={() => void run("soul", () => soul({ identityId: identity.id, variant }))}
+              onClick={() =>
+                void run("soul", async () => {
+                  await ensureAdults(set.selectedFileIds);
+                  return soul({ identityId: identity.id, variant });
+                })
+              }
             >
               {busy === "soul" ? "Uploading…" : "Make a Soul ID"}
             </button>
@@ -1019,6 +1140,7 @@ function TrainingSection(props: { identity: Identity; companyId: string; info: L
               disabled={busy !== null || selected.size === 0}
               onClick={() =>
                 void run("download", async () => {
+                  await ensureAdults(set.selectedFileIds);
                   const res = (await download({ identityId: identity.id, triggerWord: trigger })) as { filename: string; contentType: string; contentBase64: string };
                   downloadBase64(res.filename, res.contentType, res.contentBase64);
                   return undefined;

@@ -216,6 +216,7 @@ describe("Identities tab", () => {
     actions["identities.list"] = vi.fn(async () => ({ ...LIST_BASE, identities: [identity({ trainingSet })] }));
     actions["identities.generationOptions"] = vi.fn(async () => OPTIONS);
     actions["lora.train"] = vi.fn(async () => ({ identity: identity({ trainingSet, training: { status: "training", trainedFileIds: ids, triggerWord: "maja_person", steps: 1000, estimatedCostCents: 300, resultUrl: null, error: null } }) }));
+    actions["ageCheck.status"] = vi.fn(async (p: { fileIds: string[] }) => ({ pictures: p.fileIds.map((fileId) => ({ fileId, name: null, verdict: "adult" })) }));
     root = createRoot(container);
     await act(async () => root.render(<IdentitiesPanel context={{ companyId: COMPANY } as never} />));
     await flush();
@@ -232,6 +233,46 @@ describe("Identities tab", () => {
     // Higgsfield's Soul ID needs its key; 10 ticked is inside 5-20.
     expect(buttonNamed(container, "Make a Soul ID").disabled).toBe(true);
     expect(buttonNamed(container, "Download 10 pictures").disabled).toBe(false);
+  });
+
+  it("checks pictures not checked yet (with progress) before training, and refuses pictures that are not clearly adult", async () => {
+    const ids = Array.from({ length: 10 }, (_, i) => `pic-${i}`);
+    const trainingSet = {
+      pictures: ids.map((fileId) => ({ fileId, source: "upload" as const, service: null, model: null, loras: [], prompt: null, seed: null, batchId: null })),
+      selectedFileIds: ids,
+      batches: [],
+      presets: ["front view"],
+    };
+    const explanation = "Every picture is checked for apparent age before it leaves Paperclip. Pictures that are not clearly of an adult are never sent.";
+    actions["identities.list"] = vi.fn(async () => ({ ...LIST_BASE, identities: [identity({ trainingSet })], ageCheck: { explanation, costNote: "One call each.", model: "Vision" } }));
+    actions["identities.generationOptions"] = vi.fn(async () => OPTIONS);
+    // pic-0..7 already checked; pic-8 and pic-9 are not.
+    const known: Record<string, string | null> = Object.fromEntries(ids.map((id, i) => [id, i < 8 ? "adult" : null]));
+    actions["ageCheck.status"] = vi.fn(async (p: { fileIds: string[] }) => ({ pictures: p.fileIds.map((fileId) => ({ fileId, name: `${fileId}.png`, verdict: known[fileId] })) }));
+    actions["ageCheck.run"] = vi.fn(async (p: { fileIds: string[] }) => {
+      for (const id of p.fileIds) known[id] = id === "pic-9" ? "unclear" : "adult";
+      return { pictures: p.fileIds.map((fileId) => ({ fileId, name: `${fileId}.png`, verdict: known[fileId] })) };
+    });
+    actions["lora.train"] = vi.fn(async () => ({}));
+    root = createRoot(container);
+    await act(async () => root.render(<IdentitiesPanel context={{ companyId: COMPANY } as never} />));
+    await flush();
+    await click(buttonNamed(container, /Maja/));
+    expect(container.querySelector('[aria-label="Age check"]')!.textContent).toContain(explanation);
+    expect(container.querySelector('[data-age="unchecked"]')!.textContent).toBe("Age not checked yet");
+    const cost = [...container.querySelectorAll("label")].find((l) => l.textContent?.includes("Training costs about"))!.querySelector("input")!;
+    await click(cost);
+    await click(buttonNamed(container, "Train the LoRA"));
+    // Only the two unchecked pictures were checked, one call each; pic-9 is refused and training never starts.
+    expect(actions["ageCheck.run"]!.mock.calls.map((c) => c[0])).toEqual([{ fileIds: ["pic-8"] }, { fileIds: ["pic-9"] }]);
+    expect(actions["lora.train"]).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Nothing was sent. This picture is not clearly of an adult: pic-9.png (not clearly an adult)");
+    expect(container.querySelector('[data-age="unclear"]')!.textContent).toBe("Refused: not clearly an adult");
+    // Without the refused picture it goes ahead, with no further checks.
+    known["pic-9"] = "adult";
+    await click(buttonNamed(container, "Train the LoRA"));
+    expect(actions["ageCheck.run"]).toHaveBeenCalledTimes(2);
+    expect(actions["lora.train"]).toHaveBeenCalledTimes(1);
   });
 
   it("Generate with offers only services with a key, models per service, and the estimate", async () => {

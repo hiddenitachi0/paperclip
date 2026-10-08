@@ -258,6 +258,14 @@ The approval it files is a normal `request_board_approval`, so it also shows up 
   each picture keeps its provenance) plus own photos; tick the best. **Train with**: a Krea 2 LoRA on Fal.ai
   (published PUBLIC to Hugging Face, imported into Sogni personal LoRAs), a Higgsfield Soul ID, or download the
   set as a zip with captions. Results are kept as `trainedIdentities` per service; a look can pick one.
+- **Age check** (`src/age-check.ts`): every picture is checked for apparent age before it leaves Paperclip for
+  training or identity (Fal LoRA training, Higgsfield Soul ID, Hugging Face publish of a LoRA, training-set zip).
+  The result is kept per company by the sha256 of the picture's bytes (`pictureAgeChecks`:
+  `{sha256, verdict: adult|under18|unclear, modelEntryId, checkedAt}`), so a re-uploaded copy keeps it. Pictures
+  not checked yet are checked automatically with one call each to the company's analysis model (strict JSON
+  `{"apparentAdult": true|false|null}`); only `true` passes, an unreadable answer is not stored, a stored refusal
+  never gets milder, and the action does not start (nothing is paid for or sent) unless every picture passes.
+  "Analyse picture" stores its adult/not-adult answer the same way.
 - **Higgsfield** (`src/higgsfield.ts`) is a picture service: Soul text-to-picture with an optional Soul ID. It takes
   no reference pictures, so looks' outfit/style pictures and rooms go through Sogni or Fal.
 - **Rooms** (`src/rooms.ts`): a room photo, named areas (masks from Sogni's selection or painted), products (with
