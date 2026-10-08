@@ -28,7 +28,7 @@ import type {
   WorkerHostCallContext,
 } from "@paperclipai/plugin-sdk";
 import type { CreateIssueThreadInteraction, InviteJoinType, IssueDocumentSummary, PermissionKey, PrincipalType } from "@paperclipai/shared";
-import { MEDIA_STUDIO_DIRECT_BILLING_CODE, MEDIA_STUDIO_EDIT_ACTIONS, MEDIA_STUDIO_EDIT_BILLING_CODE, estimateMediaStudioEditCostCents, pluginOperationIssueOriginKind, type MediaStudioEditAction } from "@paperclipai/shared";
+import { MEDIA_STUDIO_DIRECT_BILLING_CODE, MEDIA_STUDIO_EDIT_ACTIONS, MEDIA_STUDIO_EDIT_BILLING_CODE, estimateMediaStudioEditCostCents, mediaStudioEditActionProvider, pluginOperationIssueOriginKind, type MediaStudioEditAction } from "@paperclipai/shared";
 import { HttpError } from "../errors.js";
 import { mediaStudioDirectService } from "./media-studio-direct.js";
 import { companyService } from "./companies.js";
@@ -2706,7 +2706,7 @@ export function buildHostServices(
         if (params.confirmBudgetCapCents != null && !(Number.isInteger(params.confirmBudgetCapCents) && params.confirmBudgetCapCents >= 0)) {
           throw new Error("confirmBudgetCapCents must be a non-negative integer");
         }
-        const provider = action === "variation" || action === "prompt-edit" || action === "inpaint" ? "fal" : "sogni";
+        const provider = mediaStudioEditActionProvider(action);
         // Admin status is decided here from real instance/company roles for
         // this user id -- never from anything the worker says about itself.
         // Anyone who is not an active member of this company (and not an
