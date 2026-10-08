@@ -158,6 +158,7 @@ export { mailAccounts, mailMessages } from "./mail_accounts.js";
 export { mailMessageClassifications, mailUrgencyAlerts } from "./mail_urgency.js";
 export { modelDirectoryEntries } from "./model_directory_entries.js";
 export { modelDirectoryConverters } from "./model_directory_converters.js";
+export { modelDirectorySettings } from "./model_directory_settings.js";
 export { localModelHealth } from "./local_model_health.js";
 export { paymentNotices } from "./payment_notices.js";
 export { companyPaymentSettings } from "./company_payment_settings.js";

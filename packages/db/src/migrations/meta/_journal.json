@@ -1646,6 +1646,13 @@
       "when": 1791414577865,
       "tag": "0235_model_directory_catalogue",
       "breakpoints": true
+    },
+    {
+      "idx": 236,
+      "version": "7",
+      "when": 1791466090554,
+      "tag": "0236_model_catalogue_v2",
+      "breakpoints": true
     }
   ]
 }
