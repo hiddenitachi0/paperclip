@@ -125,7 +125,9 @@ import {
   type CharacterSheet,
   type ReferenceRole,
 } from "./look-prompt.js";
-import { identitiesMentionedIn, loraFitsModel, planIdentityReferences, sheetWithIdentity, sogniSlots, type Identity } from "./identity.js";
+import { HIGGSFIELD_MODELS, readHiggsfieldCredentials } from "./higgsfield.js";
+import { guardedBytesFetch } from "./lora-training.js";
+import { identitiesMentionedIn, loraFitsModel, pickTrained, planIdentityReferences, sheetWithIdentity, sogniSlots, type Identity } from "./identity.js";
 import { loadIdentities, registerAnchorActions } from "./anchors.js";
 import { SOGNI_TOOLS, findSogniTool, prepareSogniCall, sogniToolDescription, sogniToolParameters, type SogniToolDef } from "./sogni-tools.js";
 
@@ -159,6 +161,12 @@ async function runGeneration(ctx: PluginContext, input: GenerationInput): Promis
     if (!ref) throw new Error("Pick the Sogni API key in Media Studio settings (it comes from the company's Secrets).");
     providerConfig.sogniKey = await ctx.secrets.resolve(ref);
   }
+  if (provider === "higgsfield") {
+    const ref = typeof cfg.higgsfieldKeySecretRef === "string" ? cfg.higgsfieldKeySecretRef : "";
+    if (!ref) throw new Error("Pick the Higgsfield API key in Media Studio settings (it comes from the company's Secrets).");
+    providerConfig.higgsfieldCredentials = readHiggsfieldCredentials(await ctx.secrets.resolve(ref));
+    providerConfig.higgsfieldBytesFetch = guardedBytesFetch;
+  }
 
   const impl = selectProvider(providerConfig, (url, init) => ctx.http.fetch(url, init));
   ctx.logger.info(`media-studio: generating via ${impl.name}`);
@@ -184,7 +192,7 @@ function toInput(params: Record<string, unknown>): GenerationInput {
   };
 }
 
-const SERVICE_NAME: Record<PictureService, string> = { fal: "Fal.ai", sogni: "Sogni" };
+const SERVICE_NAME: Record<PictureService, string> = { fal: "Fal.ai", sogni: "Sogni", higgsfield: "Higgsfield" };
 
 /**
  * Which service makes this picture. In order: the per-call provider; a model
@@ -323,6 +331,8 @@ export interface Look {
   identityId: string | null;
   /** Also send the identity's outfit crop ("same outfit"). Off: the outfit comes from the look or the request. */
   identitySameOutfit: boolean;
+  /** Which trained identity (TrainedIdentity id) to use per service; missing: the newest ready one. */
+  identityTrained: { sogni?: string | null; fal?: string | null; higgsfield?: string | null };
   updatedAt: string;
 }
 
@@ -387,7 +397,17 @@ function normalizeLook(look: Look): Look {
     contentFilterOffBy: raw.safeContentFilter === false ? offBy : null,
     identityId: textOrNull(raw.identityId),
     identitySameOutfit: raw.identitySameOutfit === true,
+    identityTrained: readTrainedPicks(raw.identityTrained),
   };
+}
+
+function readTrainedPicks(value: unknown): Look["identityTrained"] {
+  const raw = value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+  const out: Look["identityTrained"] = {};
+  for (const key of ["sogni", "fal", "higgsfield"] as const) {
+    if (typeof raw[key] === "string" && raw[key]) out[key] = raw[key] as string;
+  }
+  return out;
 }
 
 /** The Sensitive Content Filter is off for this look (saved off by an owner/admin). */
@@ -1001,7 +1021,7 @@ export async function prepareGeneration(
   if (requestedRefs === "invalid") return { error: "referenceFileIds must be a list of file ids." };
   const rawProvider = typeof params.provider === "string" ? params.provider.trim().toLowerCase() : "";
   if (rawProvider && !isPictureService(rawProvider)) {
-    return { error: `"${String(params.provider)}" is not a picture service. Use fal (Fal.ai) or sogni (Sogni), or leave it out.` };
+    return { error: `"${String(params.provider)}" is not a picture service. Use fal (Fal.ai), sogni (Sogni) or higgsfield (Higgsfield), or leave it out.` };
   }
   // DUR-4138 (was DUR-4133): adds "fully clothed" and a fixed safety negative
   // prompt to the request, regardless of any look's own text. It does NOT
@@ -1159,6 +1179,21 @@ export async function prepareGeneration(
       notes.push("A seed does not keep a person the same; the identity's reference pictures do.");
     }
   }
+  if (chosen.service === "higgsfield") {
+    // Higgsfield Soul takes no reference pictures (see higgsfield.ts); it keeps
+    // a person only through a ready Soul ID of the identity.
+    if (referenceFileIds.length > 0) {
+      notes.push("Higgsfield takes no reference pictures, so the pictures (the look's and the person's) were left out; use Sogni or Fal.ai to make a picture from them.");
+      referenceFileIds.splice(0, referenceFileIds.length);
+      referenceRoles.splice(0, referenceRoles.length);
+    }
+    if (identity) {
+      const soul = pickTrained(identity, "higgsfield", look?.identityTrained?.higgsfield);
+      if (soul) input.customReferenceId = soul.ref;
+      else notes.push(`"${identity.name}" has no ready Higgsfield Soul ID, so Higgsfield only had the description to go on. Make one on the Identities tab.`);
+    }
+    if (input.model && !(HIGGSFIELD_MODELS as readonly string[]).includes(input.model)) input.model = undefined;
+  }
   // Sogni's picture-editing models take up to 16 (each model's own limit is checked below); Fal's Kontext 4.
   const referenceCap = chosen.service === "sogni" ? SOGNI_MAX_REFERENCES : MAX_REFERENCE_FILES;
   if (referenceFileIds.length > referenceCap) {
@@ -1180,12 +1215,13 @@ export async function prepareGeneration(
     // Sogni marks personal LoRAs as needing its content filter off, and only a
     // look an owner/admin saved with the filter off turns it off, so the LoRA
     // rides along only then (the same rule as a look's own personal LoRAs).
-    const lora = identity?.lora;
-    if (lora && lora.sogniLoraId && lora.sogniStatus === "ready") {
+    const trained = identity ? pickTrained(identity, "sogni", look?.identityTrained?.sogni) : null;
+    const lora = trained ? { sogniLoraId: trained.ref, strength: trained.strength ?? 0.8, triggerWord: trained.triggerWord ?? "", baseModel: identity?.lora?.baseModel ?? "krea-2" } : null;
+    if (lora) {
       const used = input.model ?? identityModel;
       if (input.safeContentFilter !== false) {
         notes.push(`The LoRA of "${identity!.name}" was not used: Sogni only runs your own LoRAs with its content filter off, which only a look an owner or admin saved that way can do. The reference pictures still keep the person the same.`);
-      } else if (loraFitsModel(lora, used) && prepared.usesOwnModel) {
+      } else if (loraFitsModel(lora.baseModel, used) && prepared.usesOwnModel) {
         const picks = input.loras ?? [];
         if (!picks.some((p) => p.id === lora.sogniLoraId) && picks.length < SOGNI_MAX_LORAS) {
           input.loras = [...picks, { id: lora.sogniLoraId, strength: lora.strength }];
@@ -1340,7 +1376,7 @@ async function validateLookInput(
   const style = typeof params.style === "string" ? params.style.trim() : "";
   if (style.length > LOOK_STYLE_MAX) throw new Error(`Keep the style text under ${LOOK_STYLE_MAX} characters.`);
   const rawProvider = typeof params.provider === "string" ? params.provider.trim().toLowerCase() : "";
-  if (rawProvider && !isPictureService(rawProvider)) throw new Error("Pick Fal.ai, Sogni, or the normal picture service for the look.");
+  if (rawProvider && !isPictureService(rawProvider)) throw new Error("Pick Fal.ai, Sogni, Higgsfield, or the normal picture service for the look.");
   const provider: PictureService | null = isPictureService(rawProvider) ? rawProvider : null;
   const rawModel = typeof params.model === "string" ? params.model.trim() : "";
   const seed = parseSeed(params.seed);
@@ -1388,6 +1424,7 @@ async function validateLookInput(
     sheet,
     identityId,
     identitySameOutfit: identityId !== null && params.identitySameOutfit === true,
+    identityTrained: identityId ? readTrainedPicks(params.identityTrained) : {},
   };
 
   if (service !== "sogni") {
@@ -1398,7 +1435,12 @@ async function validateLookInput(
       throw new Error(SOGNI_ONLY_SETTINGS);
     }
     let model: string | null = null;
-    if (rawModel) {
+    if (rawModel && service === "higgsfield") {
+      if (!(HIGGSFIELD_MODELS as readonly string[]).includes(rawModel)) {
+        throw new Error(`Higgsfield's picture model here is ${HIGGSFIELD_MODELS.join(", ")}. Leave the model empty to use it.`);
+      }
+      model = rawModel;
+    } else if (rawModel) {
       try {
         model = assertFalModelId(rawModel);
       } catch {
@@ -2015,7 +2057,8 @@ const plugin = definePlugin({
       const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
       const sogniRef = typeof cfg.sogniKeySecretRef === "string" ? cfg.sogniKeySecretRef.trim() : "";
       const falRef = typeof cfg.falKeySecretRef === "string" ? cfg.falKeySecretRef.trim() : "";
-      return { sogni: sogniRef.length > 0, fal: falRef.length > 0 };
+      const higgsfieldRef = typeof cfg.higgsfieldKeySecretRef === "string" ? cfg.higgsfieldKeySecretRef.trim() : "";
+      return { sogni: sogniRef.length > 0, fal: falRef.length > 0, higgsfield: higgsfieldRef.length > 0 };
     });
 
     // DUR-4441: every paid Edit-tab action reserves spend through the host

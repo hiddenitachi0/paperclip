@@ -110,8 +110,9 @@ export const GENERATE_IMAGE_PARAMETERS = {
     },
     provider: {
       type: "string",
-      enum: ["fal", "sogni"],
-      description: "Optional. Which picture service to use for this one picture: fal (Fal.ai) or sogni (Sogni). Leave it out to use the one in Media Studio settings.",
+      enum: ["fal", "sogni", "higgsfield"],
+      description:
+        "Optional. Which picture service to use for this one picture: fal (Fal.ai), sogni (Sogni) or higgsfield (Higgsfield Soul; no reference pictures). Leave it out to use the one in Media Studio settings.",
     },
   },
   required: ["prompt"],
@@ -358,8 +359,8 @@ const manifest: PaperclipPluginManifestV1 = {
         type: "string",
         title: "Picture service",
         description:
-          "Which service makes the pictures: mock (a free placeholder picture, for trying things out), fal (Fal.ai), sogni (Sogni), or comfyui (your own ComfyUI server).",
-        enum: ["mock", "fal", "sogni", "comfyui"],
+          "Which service makes the pictures: mock (a free placeholder picture, for trying things out), fal (Fal.ai), sogni (Sogni), higgsfield (Higgsfield Soul: text to picture, keeps a person through a Soul ID, takes no reference pictures), or comfyui (your own ComfyUI server).",
+        enum: ["mock", "fal", "sogni", "higgsfield", "comfyui"],
         default: "mock",
       },
       falKeySecretRef: {
@@ -387,6 +388,14 @@ const manifest: PaperclipPluginManifestV1 = {
         title: "Sogni API key",
         description:
           "Pick the Sogni key from the company's Secrets (create the key at dashboard.sogni.ai/api-key and save it as a secret first). It is looked up each time a picture is made and never shown here.",
+        format: "secret-ref",
+        default: "",
+      },
+      higgsfieldKeySecretRef: {
+        type: "string",
+        title: "Higgsfield API key",
+        description:
+          "Pick the Higgsfield key from the company's Secrets. Save it there as key id and key secret joined by a colon (id:secret), from Higgsfield's console (API keys). It is looked up each time and never shown here.",
         format: "secret-ref",
         default: "",
       },

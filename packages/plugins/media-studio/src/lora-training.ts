@@ -93,7 +93,7 @@ export function zipStore(files: Array<{ name: string; bytes: Buffer }>): Buffer 
 // ─── Byte transfers ──────────────────────────────────────────────────────────
 
 /** Storage hosts raw bytes may go to or come from. */
-const BYTE_HOST_SUFFIXES = [".fal.media", ".fal.ai", ".fal.run", ".huggingface.co", ".hf.co", ".amazonaws.com", ".cloudfront.net", ".storage.googleapis.com"];
+const BYTE_HOST_SUFFIXES = [".fal.media", ".fal.ai", ".fal.run", ".huggingface.co", ".hf.co", ".amazonaws.com", ".cloudfront.net", ".storage.googleapis.com", ".higgsfield.ai", ".r2.cloudflarestorage.com"];
 const BYTE_HOSTS = ["fal.media", "storage.googleapis.com", "huggingface.co"];
 
 export function assertByteTransferUrl(raw: string): URL {

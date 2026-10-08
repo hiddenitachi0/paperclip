@@ -99,6 +99,9 @@ export const MEDIA_STUDIO_EDIT_ACTIONS = [
   // picture call that makes up to 2 pictures of a saved person; placing a
   // product into a room photo with Sogni or Fal; training a LoRA on Fal.
   "identity-pictures",
+  "identity-pictures-fal",
+  "higgsfield-pictures",
+  "higgsfield-soul-id",
   "room-place",
   "room-place-fal",
   "lora-training",
@@ -107,8 +110,9 @@ export type MediaStudioEditAction = (typeof MEDIA_STUDIO_EDIT_ACTIONS)[number];
 export const MEDIA_STUDIO_EDIT_BILLING_CODE = MEDIA_STUDIO_DIRECT_BILLING_CODE;
 
 /** Which service each paid edit action runs on (for the cost row). */
-export function mediaStudioEditActionProvider(action: MediaStudioEditAction): "fal" | "sogni" {
-  return action === "variation" || action === "prompt-edit" || action === "inpaint" || action === "room-place-fal" || action === "lora-training"
+export function mediaStudioEditActionProvider(action: MediaStudioEditAction): "fal" | "sogni" | "higgsfield" {
+  if (action === "higgsfield-pictures" || action === "higgsfield-soul-id") return "higgsfield";
+  return action === "variation" || action === "prompt-edit" || action === "inpaint" || action === "room-place-fal" || action === "lora-training" || action === "identity-pictures-fal"
     ? "fal"
     : "sogni";
 }

@@ -546,7 +546,7 @@ describe("media-studio worker with Sogni", () => {
     await setup(SOGNI_CONFIG);
     const reserve = vi.spyOn(harness.ctx.personas, "reserveDailyGeneration");
     expect((await run({ prompt: "x", provider: "midjourney" })).error).toBe(
-      '"midjourney" is not a picture service. Use fal (Fal.ai) or sogni (Sogni), or leave it out.',
+      '"midjourney" is not a picture service. Use fal (Fal.ai), sogni (Sogni) or higgsfield (Higgsfield), or leave it out.',
     );
     expect((await run({ prompt: "x", provider: "sogni", model: "fal-ai/flux/dev" })).error).toBe(
       "The model fal-ai/flux/dev is a Fal.ai model, not a Sogni one. Leave out the model, or use Fal.ai.",
