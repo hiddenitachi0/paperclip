@@ -4,6 +4,8 @@ import { usePluginAction, useHostNavigation, PluginConfigForm } from "@paperclip
 import { MediaStudioEditTab } from "./edit-tab.js";
 import { StoryboardPanel, storyboardReadyToRender, type StoryboardSummary } from "./storyboard-panel.js";
 import { AdvancedFeaturesToggle, AiDirectorSection } from "./director-panel.js";
+import { IdentitiesPanel } from "./identities-panel.js";
+import { RoomsPanel } from "./rooms-panel.js";
 
 // The plugin UI is served as a standalone ES module, so it must not import from
 // sibling plugin files (only bare specifiers resolve). Keep these in sync with
@@ -25,6 +27,7 @@ const ACTION_LOOK_RULES_PREVIEW = "lookRules.preview";
 const ACTION_SOGNI_MODELS = "sogni.models";
 const ACTION_SOGNI_LORAS = "sogni.loras";
 const ACTION_LOOK_PROMPT_PREVIEW = "looks.previewPrompt";
+const ACTION_IDENTITIES_LIST = "identities.list";
 
 // Copies of look-prompt.ts (a test checks they match): what each reference
 // picture is for, and the character sheet's fields.
@@ -340,6 +343,8 @@ type Look = {
   negativePrompt?: string | null;
   size?: string | null;
   safeContentFilter?: boolean;
+  identityId?: string | null;
+  identitySameOutfit?: boolean;
   updatedAt: string;
 };
 
@@ -449,6 +454,9 @@ export type LookDraft = {
   width: string;
   height: string;
   safeContentFilter: boolean;
+  /** The saved person every picture with this look shows ("" = none). */
+  identityId?: string;
+  identitySameOutfit?: boolean;
 };
 
 const EMPTY_DRAFT: LookDraft = {
@@ -570,6 +578,8 @@ export function draftToSaveParams(draft: LookDraft): Record<string, unknown> {
     negativePrompt: sogni && draft.negativePrompt.trim() ? draft.negativePrompt.trim() : null,
     size,
     safeContentFilter: sogni ? draft.safeContentFilter : true,
+    identityId: draft.identityId || null,
+    identitySameOutfit: Boolean(draft.identityId) && draft.identitySameOutfit === true,
   };
 }
 
@@ -591,6 +601,8 @@ function lookToDraft(look: Look): LookDraft {
     width: width && height ? width : "",
     height: width && height ? height : "",
     safeContentFilter: look.safeContentFilter !== false,
+    identityId: look.identityId ?? "",
+    identitySameOutfit: look.identitySameOutfit === true,
   };
 }
 
@@ -1617,8 +1629,17 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
   const listLookDefaults = usePluginAction(ACTION_LOOK_DEFAULTS_LIST);
   const setLookDefault = usePluginAction(ACTION_LOOK_DEFAULTS_SET);
   const previewPrompt = usePluginAction(ACTION_LOOK_PROMPT_PREVIEW);
+  const listIdentities = usePluginAction(ACTION_IDENTITIES_LIST);
 
   const [looks, setLooks] = useState<Look[]>([]);
+  const [identities, setIdentities] = useState<Array<{ id: string; name: string }>>([]);
+  useEffect(() => {
+    Promise.resolve()
+      .then(() => listIdentities({}))
+      .then((r) => setIdentities(((r as { identities?: Array<{ id: string; name: string }> } | undefined)?.identities ?? []).map(({ id, name }) => ({ id, name }))))
+      .catch(() => setIdentities([]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [agents, setAgents] = useState<LookAgent[] | null>(null);
   const [defaults, setDefaults] = useState<Record<string, string>>({});
   const [savingDefaultFor, setSavingDefaultFor] = useState<string | null>(null);
@@ -2143,6 +2164,33 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
             />
           )}
 
+          <div style={{ ...card, gap: 6 }} aria-label="Person (identity)">
+            <label style={field}>
+              <span style={{ fontWeight: 600 }}>Person (identity)</span>
+              <select
+                style={input}
+                value={draft.identityId ?? ""}
+                disabled={busy}
+                onChange={(e) => setDraft((d) => (d ? { ...d, identityId: e.target.value, identitySameOutfit: e.target.value ? d.identitySameOutfit : false } : d))}
+              >
+                <option value="">None</option>
+                {identities.map((i) => (
+                  <option key={i.id} value={i.id}>{i.name}</option>
+                ))}
+              </select>
+              <span style={{ fontSize: 12, opacity: 0.8 }}>
+                Every picture with this look shows this person: their face picture is always sent first (and their body picture when the model
+                has room), then this look's own pictures. Add people on the Identities tab.
+              </span>
+            </label>
+            {draft.identityId ? (
+              <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 13 }}>
+                <input type="checkbox" checked={draft.identitySameOutfit === true} disabled={busy} onChange={(e) => setDraft((d) => (d ? { ...d, identitySameOutfit: e.target.checked } : d))} />
+                Same outfit as in the person's outfit picture
+              </label>
+            ) : null}
+          </div>
+
           <details style={{ ...card, gap: 8 }} open={sheetOpen} onToggle={(e) => setSheetOpen(e.currentTarget.open)}>
             <summary style={{ fontWeight: 600, cursor: "pointer" }}>Character sheet (optional)</summary>
             <div style={{ fontSize: 12, opacity: 0.8 }}>
@@ -2321,13 +2369,13 @@ export function SidebarLink(_props: PluginSidebarProps) {
   );
 }
 
-type MediaStudioTabKey = "create" | "edit" | "looks" | "storylines" | "settings";
+type MediaStudioTabKey = "create" | "edit" | "looks" | "identities" | "rooms" | "storylines" | "settings";
 
 /** Reads ?tab= from the current URL without pulling in the host router (standalone module). */
 function initialTabFromLocation(): MediaStudioTabKey {
   if (typeof window === "undefined") return "create";
   const tab = new URLSearchParams(window.location.search).get("tab");
-  return tab === "looks" || tab === "edit" || tab === "storylines" || tab === "settings" ? tab : "create";
+  return tab === "looks" || tab === "edit" || tab === "identities" || tab === "rooms" || tab === "storylines" || tab === "settings" ? tab : "create";
 }
 
 const tabBtn: React.CSSProperties = { padding: "8px 14px", borderRadius: 8, border: "1px solid transparent", cursor: "pointer", fontSize: 13, fontWeight: 600, background: "transparent" };
@@ -2392,6 +2440,12 @@ export function MediaStudioPage({ context }: PluginPageProps) {
         <button type="button" role="tab" aria-selected={activeTab === "looks"} style={activeTab === "looks" ? tabBtnActive : tabBtnInactive} onClick={() => selectTab("looks")}>
           Looks
         </button>
+        <button type="button" role="tab" aria-selected={activeTab === "identities"} style={activeTab === "identities" ? tabBtnActive : tabBtnInactive} onClick={() => selectTab("identities")}>
+          Identities
+        </button>
+        <button type="button" role="tab" aria-selected={activeTab === "rooms"} style={activeTab === "rooms" ? tabBtnActive : tabBtnInactive} onClick={() => selectTab("rooms")}>
+          Rooms
+        </button>
         <button type="button" role="tab" aria-selected={activeTab === "storylines"} style={activeTab === "storylines" ? tabBtnActive : tabBtnInactive} onClick={() => selectTab("storylines")}>
           Storylines
         </button>
@@ -2407,6 +2461,10 @@ export function MediaStudioPage({ context }: PluginPageProps) {
         showSettings ? <PluginConfigForm pluginId={PLUGIN_ID} /> : null
       ) : activeTab === "edit" ? (
         <MediaStudioEditTab context={context} initialFileId={editFileId} />
+      ) : activeTab === "identities" ? (
+        <IdentitiesPanel context={context} />
+      ) : activeTab === "rooms" ? (
+        <RoomsPanel context={context} />
       ) : activeTab === "storylines" ? (
         <MediaStudioStorylinesPage context={context} />
       ) : (

@@ -112,12 +112,12 @@ describe("Media Studio main-menu link and page (DUR-4060)", () => {
   const tabLabels = () =>
     [...container.querySelectorAll('[role="tablist"][aria-label="Media Studio"] [role="tab"]')].map((el) => el.textContent);
 
-  it("shows the Settings tab to an owner/admin, after the four creative tabs", async () => {
+  it("shows the Settings tab to an owner/admin, after the creative tabs", async () => {
     actions["settings.access"] = vi.fn(async () => ({ canManage: true }));
     root = createRoot(container);
     root.render(<MediaStudioPage context={{ companyId: COMPANY } as never} />);
     await flush();
-    expect(tabLabels()).toEqual(["Create", "Edit", "Looks", "Storylines", "Settings"]);
+    expect(tabLabels()).toEqual(["Create", "Edit", "Looks", "Identities", "Rooms", "Storylines", "Settings"]);
   });
 
   it("hides the Settings tab from everyone else", async () => {
@@ -125,7 +125,7 @@ describe("Media Studio main-menu link and page (DUR-4060)", () => {
     root = createRoot(container);
     root.render(<MediaStudioPage context={{ companyId: COMPANY } as never} />);
     await flush();
-    expect(tabLabels()).toEqual(["Create", "Edit", "Looks", "Storylines"]);
+    expect(tabLabels()).toEqual(["Create", "Edit", "Looks", "Identities", "Rooms", "Storylines"]);
   });
 
   it("falls back to Create when a non-admin opens ?tab=settings", async () => {
