@@ -17,6 +17,8 @@ export const ACTION_LOOKS_LIST = "looks.list";
 export const ACTION_SETTINGS_ACCESS = "settings.access";
 export const ACTION_LOOKS_SAVE = "looks.save";
 export const ACTION_LOOKS_DELETE = "looks.delete";
+/** "Make a copy" on the looks page: the same look under a new name. Owner/admin only. */
+export const ACTION_LOOKS_COPY = "looks.copy";
 /** The company's agents and each one's default look, for the looks page. */
 export const ACTION_LOOK_DEFAULTS_LIST = "looks.defaults.list";
 /** Set (or clear) one agent's default look. Owner/admin only. */

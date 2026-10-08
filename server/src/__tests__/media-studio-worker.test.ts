@@ -267,6 +267,17 @@ describe("media-studio saved looks", () => {
     expect(result.content).toContain('Used the saved look "Catalogue"');
   });
 
+  it("sends nothing for a look's Sogni LoRAs to Fal.ai, and says they were not used", async () => {
+    const harness = await setup(FAL_CONFIG);
+    await harness.ctx.state.set(looksKey, [{ ...catalogue, provider: "fal", loras: [{ id: "krea2-candid", name: "Editorial <-> Candid", strength: 3 }] }]);
+    const calls = fakeFal(harness);
+    const result = await harness.executeTool<any>(TOOL_GENERATE, { prompt: "a sofa", look: "Catalogue" }, runCtx);
+    expect(result.error).toBeUndefined();
+    expect(JSON.stringify(calls[0]?.body)).not.toContain("krea2-candid");
+    expect(JSON.stringify(calls[0]?.body)).not.toMatch(/lora/i);
+    expect(result.content).toContain("The look's LoRAs were not used: they are Sogni LoRAs, and this picture was made with Fal.ai.");
+  });
+
   it("lets an explicit seed win over the look's fixed seed, and adds the person's references to the look's", async () => {
     const harness = await setup(FAL_CONFIG);
     await harness.ctx.state.set(looksKey, [catalogue]);

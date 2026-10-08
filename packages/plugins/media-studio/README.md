@@ -126,6 +126,16 @@ Under **Company settings → Media Studio looks**, an owner or admin can make a 
   default, with the maker's recommended range and a link to the LoRA's page. **Sogni does not add a LoRA's trigger
   words**: if the LoRA's page names one, put it in the look's style words. Not every model has LoRAs (in September
   2026 only the Krea 2 family had public ones; Dark Beast Z-Image Turbo v9 had none).
+- **Changing the model (or service) keeps the LoRAs.** Sogni's catalog lists, for each LoRA, the models it is made for
+  (there is no separate "family" field, so the page names those models). A LoRA made for other models than the chosen
+  one stays on the look with a plain warning ("Made for Krea 2 Turbo, ...; Z-Image Turbo may ignore it or give odd
+  results"), its own Remove button and a **Remove all that don't fit** button; when Sogni does not list a LoRA (any
+  more) or the list cannot be read, the page says it can't tell. Such a look can still be saved. Each picture then
+  leaves out only the LoRAs Sogni does not list for its model (sending them could fail the whole picture) and says
+  which in the result. A look switched to Fal.ai keeps its Sogni LoRAs unused (Fal is sent nothing for them).
+- **Make a copy** (next to Edit) duplicates a look with everything in it (style words, character sheet, reference
+  pictures and their roles, service, model, LoRAs, settings, seed, content filter) as "<name> (copy)" and opens the
+  copy for editing, for example to try the same look on another model. Owner/admin only, within the company.
 - **Model settings** the model allows: guidance (only where the model lets it change), "things to keep out of the
   picture" (only models that use it), and the picture size (inside the model's width and height range). Steps cannot
   be set: Sogni's workflow step has no steps setting.
@@ -135,8 +145,9 @@ Under **Company settings → Media Studio looks**, an owner or admin can make a 
   also checks that the account may make such pictures (a subscription, Premium Spark, or paying with SOGNI).
 
 Everything in a look is checked again in the worker when it is saved and before every picture: the model must be in
-Sogni's catalog, each LoRA must work with that model at a strength inside its range, at most 8, and a LoRA Sogni marks
-as needing the filter off needs a look with the filter off. A problem is reported in a plain sentence before the
+Sogni's catalog, each LoRA must be one Sogni lists at a strength inside its range, at most 8, and a LoRA Sogni marks
+as needing the filter off needs a look with the filter off. LoRAs made for other models are allowed on save and left
+out of each picture (see above). A problem is reported in a plain sentence before the
 agent's daily picture limit is touched. When Sogni's catalog cannot be reached, a look keeps working with the model and
 LoRAs it was saved with, but new models cannot be picked.
 
