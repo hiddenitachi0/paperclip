@@ -343,18 +343,17 @@ function PicturePicker(props: { companyId: string; onPick: (fileId: string) => v
 
 type SavedModel = { id: string; name: string; provider: string; model: string; baseUrl: string | null; specs?: { vision?: boolean | null } | null; archivedAt?: string | null };
 type Secret = { id: string; name: string };
-type AnalysisSetting = { source: "directory" | "custom"; entryId: string | null; label: string | null; provider: string; model: string; baseUrl: string | null; keySecretId: string | null };
+type AnalysisSetting = { entryId: string; label: string | null; keySecretId: string | null };
 type Settings = { analysis: AnalysisSetting | null; hfTokenSecretId: string | null; hfNamespace: string | null };
 
-const ANALYSIS_PROVIDER_OPTIONS = [
-  { value: "anthropic", label: "Claude (Anthropic)" },
-  { value: "openai", label: "OpenAI" },
-  { value: "google", label: "Google (Gemini)" },
-  { value: "openrouter", label: "OpenRouter" },
-  { value: "huggingface", label: "Hugging Face" },
-  { value: "local", label: "Own model server (OpenAI-compatible)" },
-  { value: "openai-compatible", label: "Other OpenAI-compatible service" },
-];
+const PROVIDER_NAMES: Record<string, string> = {
+  anthropic: "Claude",
+  openai: "OpenAI",
+  google: "Google Gemini",
+  openrouter: "OpenRouter",
+  huggingface: "Hugging Face",
+  local: "own model server",
+};
 
 export function IdentitySettingsPanel({ companyId, onSaved }: { companyId: string; onSaved?: () => void }) {
   const getSettings = usePluginAction(ACTION_IDENTITY_SETTINGS_GET);
@@ -378,18 +377,18 @@ export function IdentitySettingsPanel({ companyId, onSaved }: { companyId: strin
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [companyId]);
   if (!settings) return error ? <div style={errorBox}>{error}</div> : <div style={help}>Loading settings…</div>;
-  const a: AnalysisSetting = settings.analysis ?? { source: "directory", entryId: null, label: null, provider: "anthropic", model: "", baseUrl: null, keySecretId: null };
-  const setA = (patch: Partial<AnalysisSetting>) => setSettings({ ...settings, analysis: { ...a, ...patch } });
+  const a = settings.analysis;
+  const picked = a ? models.find((m) => m.id === a.entryId) ?? null : null;
+  const setA = (next: AnalysisSetting | null) => setSettings({ ...settings, analysis: next });
   const pickEntry = (id: string) => {
     const m = models.find((x) => x.id === id);
-    if (!m) return setA({ entryId: null });
-    setA({ source: "directory", entryId: m.id, label: m.name, provider: m.provider, model: m.model, baseUrl: m.baseUrl });
+    setA(m ? { entryId: m.id, label: m.name, keySecretId: a?.keySecretId ?? null } : null);
   };
   const onSave = async () => {
     setError(null);
     setSaved(false);
     try {
-      const res = (await saveSettings({ analysis: a.model ? a : null, hfTokenSecretId: settings.hfTokenSecretId, hfNamespace: settings.hfNamespace })) as { settings: Settings };
+      const res = (await saveSettings({ analysis: a, hfTokenSecretId: settings.hfTokenSecretId, hfNamespace: settings.hfNamespace })) as { settings: Settings };
       setSettings(res.settings);
       setSaved(true);
       onSaved?.();
@@ -408,37 +407,33 @@ export function IdentitySettingsPanel({ companyId, onSaved }: { companyId: strin
         <span>Analysis model (must be able to see pictures)</span>
         <span style={help}>
           "Analyse picture" sends the uploaded picture to this model. It describes stable physical traits and suggests crop boxes; it never
-          says who the person is. Pick a saved model from Settings &gt; Models, or type one in.
+          says who the person is. Pick one of the company's saved models (Settings &gt; Models). Paperclip's server makes the call, so a
+          model on the company's own model server (for example Ollama on your own computer) works too, the same way it does for quick agents.
         </span>
-        <select style={input} disabled={disabled} value={a.source === "directory" ? a.entryId ?? "" : "__custom"} onChange={(e) => (e.target.value === "__custom" ? setA({ source: "custom", entryId: null, label: null }) : pickEntry(e.target.value))}>
-          <option value="">Pick a saved model…</option>
+        <select style={input} disabled={disabled} value={a?.entryId ?? ""} onChange={(e) => pickEntry(e.target.value)} aria-label="Analysis model">
+          <option value="">{models.length === 0 ? "No saved models yet: add one in Settings > Models" : "Pick a saved model…"}</option>
           {models.map((m) => (
             <option key={m.id} value={m.id}>
-              {m.name} ({m.model}){m.specs?.vision === true ? ", can see pictures" : ""}
+              {m.name} ({m.model}, {PROVIDER_NAMES[m.provider] ?? m.provider}){m.specs?.vision === true ? ", can see pictures" : ""}
             </option>
           ))}
-          <option value="__custom">Type a model in…</option>
+          {a && !picked && models.length > 0 ? <option value={a.entryId}>{a.label ?? "A saved model that no longer exists"}</option> : null}
         </select>
-        {a.source === "custom" ? (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 8 }}>
-            <select style={input} disabled={disabled} value={a.provider} onChange={(e) => setA({ provider: e.target.value })} aria-label="Service">
-              {ANALYSIS_PROVIDER_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>{o.label}</option>
-              ))}
-            </select>
-            <input style={input} disabled={disabled} placeholder="Model name, e.g. claude-sonnet-5" value={a.model} onChange={(e) => setA({ model: e.target.value })} aria-label="Model name" />
-            <input style={input} disabled={disabled} placeholder="Address (only for own or other services)" value={a.baseUrl ?? ""} onChange={(e) => setA({ baseUrl: e.target.value || null })} aria-label="Address" />
-          </div>
+        {a && !picked && models.length > 0 ? (
+          <span style={help}>The saved model picked here is gone from Settings &gt; Models. Pick another one.</span>
         ) : null}
         <label style={field}>
           <span>Key for the analysis model</span>
-          <select style={input} disabled={disabled} value={a.keySecretId ?? ""} onChange={(e) => setA({ keySecretId: e.target.value || null })}>
-            <option value="">No key (own model server)</option>
+          <select style={input} disabled={disabled || !a} value={a?.keySecretId ?? ""} onChange={(e) => a && setA({ ...a, keySecretId: e.target.value || null })}>
+            <option value="">{picked?.provider === "local" ? "No key (own model server)" : picked?.provider === "anthropic" ? "No key (use Paperclip's own Claude key, if the instance has one)" : "No key"}</option>
             {secrets.map((s) => (
               <option key={s.id} value={s.id}>{s.name}</option>
             ))}
           </select>
-          <span style={help}>A company secret (Company settings &gt; Secrets). It is read on the server for each analysis and never shown here.</span>
+          <span style={help}>
+            A company secret (Company settings &gt; Secrets) with the key for the model's service. A model on your own model server usually
+            needs none. It is read on the server for each analysis and never shown here. Each analysis is added to the company's costs.
+          </span>
         </label>
       </div>
       <label style={field}>
@@ -449,7 +444,7 @@ export function IdentitySettingsPanel({ companyId, onSaved }: { companyId: strin
             <option key={s.id} value={s.id}>{s.name}</option>
           ))}
         </select>
-        <span style={help}>The token needs write access. Published LoRAs are public (Sogni can only import public files).</span>
+        <span style={help}>Only needed to publish a trained LoRA. The token needs write access. Published LoRAs are public (Sogni can only import public files).</span>
       </label>
       <label style={field}>
         <span>Hugging Face account or organisation (optional)</span>
@@ -529,7 +524,7 @@ export function GenerateWith(props: { options: GenerationOptions; value: Generat
   return (
     <div style={{ ...card, gap: 6 }} aria-label="Generate with">
       <strong>Generate with</strong>
-      {services.length === 0 ? <div style={errorBox}>No picture service has a key yet. An admin adds them in Media Studio's Settings tab.</div> : null}
+      {services.length === 0 ? <div style={errorBox}>No picture service has a key yet. The company's owner or an admin adds them in Media Studio's Settings tab.</div> : null}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 8 }}>
         <label style={field}>
           <span>Picture service</span>
@@ -1007,7 +1002,7 @@ function TrainingSection(props: { identity: Identity; companyId: string; info: L
             >
               {busy === "soul" ? "Uploading…" : "Make a Soul ID"}
             </button>
-            {!(options?.services.higgsfield ?? false) ? <span style={help}>An admin adds the Higgsfield key in Media Studio's Settings tab first.</span> : null}
+            {!(options?.services.higgsfield ?? false) ? <span style={help}>The company's owner or an admin adds the Higgsfield key in Media Studio's Settings tab first.</span> : null}
           </div>
           <div style={help}>
             The kind is kept with the Soul ID; Higgsfield's API documentation does not say how to ask for one or the other, so it is a label for now.

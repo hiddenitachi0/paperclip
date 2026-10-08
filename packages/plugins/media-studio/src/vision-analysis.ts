@@ -8,54 +8,25 @@
 // say whether the person clearly looks like an adult. Anything but a clear
 // "yes" blocks the picture for identities (checked again when saving).
 //
-// Two wire formats cover every provider the app already calls:
-//   Anthropic Messages  POST https://api.anthropic.com/v1/messages
-//                       content: [{type:"image", source:{type:"base64", media_type, data}}, {type:"text"}]
-//   OpenAI-compatible   POST <base>/chat/completions
-//                       content: [{type:"text"}, {type:"image_url", image_url:{url:"data:..."}}]
-//                       (OpenAI, Google's OpenAI endpoint, OpenRouter, Hugging Face router, local servers)
+// Where the call happens: on the Paperclip server, not in this worker
+// (ctx.models.analyseImage, capability models.image_analysis.run). The
+// worker only names one of the company's saved models (Settings > Models),
+// the picture's file id and the key's company secret; the server finds the
+// provider, model id and address itself, so a company's own model server on
+// its own network (Ollama on the owner's computer) can be used the same way
+// quick agents use it, and the plugin can never point the call at an address
+// of its choosing. The server sends no tools and returns only the text,
+// which parseAnalysis below checks strictly.
 
-import type { FetchImpl } from "./providers.js";
 import { IDENTITY_FIELD_MAX, IDENTITY_SHEET_KEYS, readCropBox, type CropBox, type IdentitySheet } from "./identity.js";
 
-export const ANALYSIS_PROVIDERS = ["anthropic", "openai", "google", "openrouter", "huggingface", "local", "openai-compatible"] as const;
-export type AnalysisProvider = (typeof ANALYSIS_PROVIDERS)[number];
-
-/** The fixed addresses of the hosted providers; the others need the saved model's own address. */
-export const ANALYSIS_DEFAULT_BASE_URL: Partial<Record<AnalysisProvider, string>> = {
-  anthropic: "https://api.anthropic.com/v1",
-  openai: "https://api.openai.com/v1",
-  google: "https://generativelanguage.googleapis.com/v1beta/openai",
-  openrouter: "https://openrouter.ai/api/v1",
-  huggingface: "https://router.huggingface.co/v1",
-};
-
 export interface AnalysisModelSetting {
-  /** "directory": a saved model from Settings > Models; "custom": typed in here. */
-  source: "directory" | "custom";
-  entryId: string | null;
+  /** A saved model of this company (Settings > Models). */
+  entryId: string;
   /** Shown on the page ("Claude Sonnet (saved model)"). */
   label: string | null;
-  provider: AnalysisProvider;
-  model: string;
-  baseUrl: string | null;
-  /** A company secret (id) holding the provider's key; null for a local server that needs none. */
+  /** A company secret (id) holding the service's key; null for a local server or Paperclip's own Claude key. */
   keySecretId: string | null;
-}
-
-export function isAnalysisProvider(value: unknown): value is AnalysisProvider {
-  return typeof value === "string" && (ANALYSIS_PROVIDERS as readonly string[]).includes(value);
-}
-
-/** The address calls go to. Hosted providers always use their own address; the rest need an http(s) address. */
-export function analysisBaseUrl(setting: Pick<AnalysisModelSetting, "provider" | "baseUrl">): string {
-  const fixed = ANALYSIS_DEFAULT_BASE_URL[setting.provider];
-  if (fixed && setting.provider !== "openrouter") return fixed;
-  const given = setting.baseUrl?.trim() || fixed || "";
-  if (!/^https?:\/\/[^\s]+$/i.test(given)) {
-    throw new Error("The analysis model has no address. Pick a saved model that has one, or type the address in Media Studio's identity settings.");
-  }
-  return given.replace(/\/+$/, "");
 }
 
 export const ANALYSIS_SYSTEM_PROMPT = [
@@ -154,96 +125,4 @@ export function parseAnalysis(answer: string): AnalysisOutcome {
   } catch {
     return { ok: false, kind: "unreadable", message: ANALYSIS_UNREADABLE_MESSAGE };
   }
-}
-
-function asRecord(v: unknown): Record<string, unknown> | null {
-  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
-}
-
-/**
- * Send one picture to the analysis model and return its text answer. The key
- * stays in this call; error texts never include it.
- */
-export async function callVisionModel(
-  fetchImpl: FetchImpl,
-  setting: AnalysisModelSetting,
-  apiKey: string | null,
-  picture: { contentType: string; contentBase64: string },
-): Promise<string> {
-  const base = analysisBaseUrl(setting);
-  const scrub = (t: string) => (apiKey ? t.split(apiKey).join("[key]") : t).slice(0, 200);
-  if (setting.provider !== "local" && setting.provider !== "openai-compatible" && !apiKey) {
-    throw new Error("Pick the analysis model's key (a company secret) in Media Studio's identity settings.");
-  }
-  let res: Response;
-  if (setting.provider === "anthropic") {
-    res = await fetchImpl(`${base}/messages`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-api-key": apiKey ?? "", "anthropic-version": "2023-06-01" },
-      body: JSON.stringify({
-        model: setting.model,
-        max_tokens: 900,
-        system: ANALYSIS_SYSTEM_PROMPT,
-        messages: [
-          {
-            role: "user",
-            content: [
-              { type: "image", source: { type: "base64", media_type: picture.contentType, data: picture.contentBase64 } },
-              { type: "text", text: ANALYSIS_USER_PROMPT },
-            ],
-          },
-        ],
-      }),
-    });
-  } else {
-    res = await fetchImpl(`${base}/chat/completions`, {
-      method: "POST",
-      headers: { "content-type": "application/json", ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}) },
-      body: JSON.stringify({
-        model: setting.model,
-        max_tokens: 900,
-        messages: [
-          { role: "system", content: ANALYSIS_SYSTEM_PROMPT },
-          {
-            role: "user",
-            content: [
-              { type: "text", text: ANALYSIS_USER_PROMPT },
-              { type: "image_url", image_url: { url: `data:${picture.contentType};base64,${picture.contentBase64}` } },
-            ],
-          },
-        ],
-      }),
-    });
-  }
-  const raw = await res.text();
-  if (!res.ok) {
-    if (res.status === 401 || res.status === 403) throw new Error("The analysis model's service did not accept the key. Pick the right key in Media Studio's identity settings.");
-    if (res.status === 429) throw new Error("The analysis model's service is busy. Try again in a minute.");
-    let detail = "";
-    try {
-      const body = asRecord(JSON.parse(raw));
-      const m = asRecord(body?.error)?.message ?? body?.message;
-      if (typeof m === "string") detail = `: ${scrub(m)}`;
-    } catch {
-      // keep it short
-    }
-    throw new Error(`The analysis model could not look at the picture (error ${res.status})${detail}. If it cannot see pictures, pick another model.`);
-  }
-  let body: Record<string, unknown> | null = null;
-  try {
-    body = asRecord(JSON.parse(raw));
-  } catch {
-    body = null;
-  }
-  if (setting.provider === "anthropic") {
-    const parts = Array.isArray(body?.content) ? (body!.content as unknown[]) : [];
-    return parts.map((p) => (asRecord(p)?.type === "text" ? String(asRecord(p)?.text ?? "") : "")).join("");
-  }
-  const choice = Array.isArray(body?.choices) ? asRecord((body!.choices as unknown[])[0]) : null;
-  const message = asRecord(choice?.message);
-  if (typeof message?.refusal === "string" && message.refusal) return message.refusal;
-  const content = message?.content;
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) return content.map((p) => String(asRecord(p)?.text ?? "")).join("");
-  return "";
 }

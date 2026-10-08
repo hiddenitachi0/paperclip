@@ -19,6 +19,7 @@ import { normalizeContentType, isAllowedContentType, normalizeIssueAttachmentMax
 import { getStorageService } from "../storage/index.js";
 import { logActivity } from "./activity-log.js";
 import { computeCostCents } from "./lane-a.js";
+import { mediaStudioKeyRef } from "./media-studio-company-keys.js";
 import { pluginRegistryService } from "./plugin-registry.js";
 import { secretService } from "./secrets.js";
 import { costService } from "./costs.js";
@@ -178,6 +179,14 @@ export function mediaStudioDirectService(
     return (config?.configJson ?? {}) as Record<string, unknown>;
   }
 
+  /** The company's own Fal.ai key (Media Studio's Settings tab), else the instance's. */
+  async function falKeyRefFor(companyId: string): Promise<string> {
+    const plugin = await registry.getByKey(MEDIA_STUDIO_PLUGIN_KEY);
+    if (!plugin) throw unprocessable("The media-studio plugin is not installed, so direct generation has no provider configured.");
+    const config = await registry.getConfig(plugin.id);
+    return mediaStudioKeyRef(db, plugin.id, companyId, "fal", (config?.configJson ?? {}) as Record<string, unknown>);
+  }
+
   const falPricing = falPricingClient(safeFetch, () => nowOf().getTime());
 
   async function refreshCompanyMonthlySpend(companyId: string): Promise<void> {
@@ -208,9 +217,8 @@ export function mediaStudioDirectService(
   }
 
   async function resolveFalApiKey(companyId: string, actorId: string): Promise<string> {
-    const cfg = await getMediaStudioConfig();
-    const ref = typeof cfg.falKeySecretRef === "string" ? cfg.falKeySecretRef.trim() : "";
-    if (!ref) throw unprocessable("No Fal.ai API key is configured in Media Studio settings yet.");
+    const ref = await falKeyRefFor(companyId);
+    if (!ref) throw unprocessable("No Fal.ai API key is set for this company yet. The company's owner or an admin can pick one in Media Studio's Settings tab.");
     return secrets.resolveSecretValueForMediaStudioDirect(companyId, ref, { actorId });
   }
 
@@ -757,8 +765,7 @@ export function mediaStudioDirectService(
       let costMicroUsd = estimateCents * 10_000;
       let costCents = estimateCents;
       try {
-        const cfg = await getMediaStudioConfig();
-        const ref = typeof cfg.falKeySecretRef === "string" ? cfg.falKeySecretRef.trim() : "";
+        const ref = await falKeyRefFor(companyId);
         if (ref && input.usage) {
           const apiKey = await secrets.resolveSecretValueForMediaStudioAgentPricing(companyId, ref, { agentId: input.agentId });
           const priced = await falPricing.priceCall(apiKey, input.model, input.usage, companyId);

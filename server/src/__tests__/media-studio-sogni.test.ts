@@ -524,7 +524,7 @@ describe("media-studio worker with Sogni", () => {
   it("says which setting is missing when no Sogni key is picked", async () => {
     await setup({ provider: "sogni" });
     const result = await run({ prompt: "a sofa" });
-    expect(result.error).toBe("Pick the Sogni API key in Media Studio settings (it comes from the company's Secrets).");
+    expect(result.error).toBe("Pick the Sogni API key in Media Studio's Settings tab (it comes from the company's Secrets).");
     expect(fake.api).toHaveLength(0);
   });
 

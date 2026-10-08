@@ -282,6 +282,17 @@ export type PluginRpcErrorCode =
 export interface PluginInvocationScope {
   companyId: string;
   runId?: string | null;
+  /**
+   * The board user behind a UI action (`performAction`), as the host's own
+   * session said -- never a worker-supplied id. Absent for tool calls, jobs
+   * and events.
+   */
+  userId?: string | null;
+  /**
+   * Whether that user may manage this company (owner/admin, instance admin
+   * or the local single-user board), as the host decided for the action.
+   */
+  canManageCompany?: boolean;
 }
 
 /**
@@ -992,6 +1003,38 @@ export type PluginMediaStudioDirectSpendReservation =
 export type PluginMediaStudioDirectSpendSettlement =
   | { settled: true; costCents: number }
   | { settled: false };
+
+/**
+ * Input of `models.analyseImage`: look at one picture in this company's
+ * Files with one of this company's saved models (Settings > Models). The
+ * host finds the model's provider, name and address itself; a plugin can
+ * never name an address. Requires `models.image_analysis.run`.
+ */
+export interface PluginImageAnalysisInput {
+  /** A saved model (model directory entry) of this company. */
+  entryId: string;
+  /** A picture in this company's Files. */
+  fileId: string;
+  /** A company secret holding the model service's key; null/absent for a local model server or Paperclip's own Claude key. */
+  keySecretId?: string | null;
+  /** The plugin's fixed instructions for the model. */
+  systemPrompt: string;
+  /** The text sent with the picture. */
+  userPrompt: string;
+  /** At most this many tokens in the answer (the host caps it). */
+  maxOutputTokens?: number;
+}
+
+/** Result of `models.analyseImage`: the model's text answer, unchecked (the plugin checks it). */
+export interface PluginImageAnalysisResult {
+  text: string;
+  /** The saved model's name, provider and model id, for showing which model answered. */
+  entryName: string;
+  provider: string;
+  model: string;
+  /** What the call cost, as recorded on the company's costs. */
+  costCents: number;
+}
 
 /** Result of `billing.recordAgentMediaCost` (DUR-4457): whether a cost event was written for an agent-made picture/video/audio. */
 export type PluginAgentMediaCostRecording =
@@ -1764,6 +1807,15 @@ export interface WorkerToHostMethods {
   "files.readContent": [
     params: { fileId: string; companyId: string },
     result: PluginCompanyFileContent,
+  ];
+
+  // Models
+  "models.analyseImage": [
+    params: PluginImageAnalysisInput & {
+      /** Must be the company the host confirmed for the current UI action. */
+      companyId: string;
+    },
+    result: PluginImageAnalysisResult,
   ];
 
   // Billing

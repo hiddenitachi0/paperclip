@@ -44,12 +44,6 @@ export async function maskBoundingBox(mask: Buffer): Promise<CropBox | null> {
   return { x: minX / width, y: minY / height, w: (maxX - minX + 1) / width, h: (maxY - minY + 1) / height };
 }
 
-/** A JPEG no bigger than `maxSide` on its longest side, for the analysis model. */
-export async function shrinkForAnalysis(bytes: Buffer, maxSide = 1536): Promise<{ contentType: string; contentBase64: string }> {
-  const out = await sharp(bytes).rotate().resize(maxSide, maxSide, { fit: "inside", withoutEnlargement: true }).jpeg({ quality: 88 }).toBuffer();
-  return { contentType: "image/jpeg", contentBase64: out.toString("base64") };
-}
-
 /** "WxH" close to the picture's own shape, inside Sogni's size limits (multiples of 16). */
 export async function sogniSizeLike(bytes: Buffer, maxSide = 1536, minSide = 256): Promise<string | null> {
   const meta = await sharp(bytes).rotate().metadata();

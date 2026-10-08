@@ -77,14 +77,9 @@ import {
   type Identity,
   type IdentityTraining,
 } from "./identity.js";
-import { cropPicture, maskBoundingBox, shrinkForAnalysis, sogniSizeLike } from "./image-ops.js";
-import {
-  ANALYSIS_DEFAULT_BASE_URL,
-  callVisionModel,
-  isAnalysisProvider,
-  parseAnalysis,
-  type AnalysisModelSetting,
-} from "./vision-analysis.js";
+import { cropPicture, maskBoundingBox, sogniSizeLike } from "./image-ops.js";
+import { ANALYSIS_SYSTEM_PROMPT, ANALYSIS_USER_PROMPT, parseAnalysis, type AnalysisModelSetting } from "./vision-analysis.js";
+import { companyConfig } from "./company-settings.js";
 import { MAX_ROOMS, ROOM_SOGNI_MODEL, normalizeRoom, placementPrompt, readRoomInput, type Room } from "./rooms.js";
 import {
   downloadBytes,
@@ -159,8 +154,9 @@ function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-async function config(ctx: PluginContext): Promise<Record<string, unknown>> {
-  return ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
+/** The instance's Media Studio settings with this company's own service keys on top (company-settings.ts). */
+async function config(ctx: PluginContext, companyId: string): Promise<Record<string, unknown>> {
+  return companyConfig(ctx, companyId);
 }
 
 function tokenType(cfg: Record<string, unknown>): SogniTokenType {
@@ -174,10 +170,10 @@ export interface AnchorSeams {
   sogniPollIntervalMs?: number;
 }
 
-async function sogniClient(ctx: PluginContext, seams: AnchorSeams): Promise<SogniProvider> {
-  const cfg = await config(ctx);
+async function sogniClient(ctx: PluginContext, companyId: string, seams: AnchorSeams): Promise<SogniProvider> {
+  const cfg = await config(ctx, companyId);
   const ref = typeof cfg.sogniKeySecretRef === "string" ? cfg.sogniKeySecretRef.trim() : "";
-  if (!ref) throw new Error("Ask an admin to add a Sogni API key in Media Studio settings first.");
+  if (!ref) throw new Error("Ask the company's owner or an admin to add a Sogni API key in Media Studio's Settings tab first.");
   let apiKey: string;
   try {
     apiKey = await ctx.secrets.resolve(ref);
@@ -194,10 +190,10 @@ async function sogniClient(ctx: PluginContext, seams: AnchorSeams): Promise<Sogn
   });
 }
 
-async function falKey(ctx: PluginContext): Promise<string> {
-  const cfg = await config(ctx);
+async function falKey(ctx: PluginContext, companyId: string): Promise<string> {
+  const cfg = await config(ctx, companyId);
   const ref = typeof cfg.falKeySecretRef === "string" ? cfg.falKeySecretRef.trim() : "";
-  if (!ref) throw new Error("Ask an admin to add a Fal.ai API key in Media Studio settings first.");
+  if (!ref) throw new Error("Ask the company's owner or an admin to add a Fal.ai API key in Media Studio's Settings tab first.");
   try {
     return await ctx.secrets.resolve(ref);
   } catch (err) {
@@ -300,6 +296,8 @@ export async function loadIdentitySettings(ctx: PluginContext, companyId: string
   try {
     analysis = raw.analysis ? readAnalysisSetting(raw.analysis) : null;
   } catch {
+    // An older setting with a typed-in model and address (no saved model) is
+    // no longer used: the server only calls the company's saved models.
     analysis = null;
   }
   const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
@@ -314,22 +312,24 @@ function readSecretId(value: unknown, label: string): string | null {
   return value.trim();
 }
 
+const ENTRY_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The analysis model: one of the company's saved models (Settings > Models),
+ * by id, plus the company secret holding its key. Nothing else: no service,
+ * model name or address can be typed in here, because the server reads
+ * those from the saved model itself.
+ */
 export function readAnalysisSetting(value: unknown): AnalysisModelSetting | null {
   if (value === undefined || value === null) return null;
   const raw = value as Record<string, unknown>;
-  if (!isAnalysisProvider(raw.provider)) throw new Error("Pick which service the analysis model runs on.");
-  const model = typeof raw.model === "string" ? raw.model.trim() : "";
-  if (!model || model.length > 200) throw new Error("Type the analysis model's name.");
-  const baseUrl = typeof raw.baseUrl === "string" && raw.baseUrl.trim() ? raw.baseUrl.trim() : null;
-  if (baseUrl && !/^https?:\/\/[^\s]{3,300}$/i.test(baseUrl)) throw new Error("The analysis model's address must start with http:// or https://.");
-  if (!baseUrl && !ANALYSIS_DEFAULT_BASE_URL[raw.provider]) throw new Error("This kind of model needs its address (for example http://my-server:11434/v1).");
+  const entryId = typeof raw.entryId === "string" ? raw.entryId.trim() : "";
+  if (!entryId || !ENTRY_ID.test(entryId)) {
+    throw new Error("Pick the analysis model from the company's saved models (Settings > Models). Add the model there first if it is not listed.");
+  }
   return {
-    source: raw.source === "directory" ? "directory" : "custom",
-    entryId: typeof raw.entryId === "string" && raw.entryId ? raw.entryId : null,
+    entryId,
     label: typeof raw.label === "string" && raw.label.trim() ? raw.label.trim().slice(0, 120) : null,
-    provider: raw.provider,
-    model,
-    baseUrl,
     keySecretId: readSecretId(raw.keySecretId, "analysis model's key"),
   };
 }
@@ -463,18 +463,18 @@ export async function analyseAction(ctx: PluginContext, params: Record<string, u
   if (!settings.analysis) {
     throw new Error("Pick an analysis model (one that can see pictures) in the identity settings first. You can also fill in the description and crops yourself.");
   }
-  const picture = await readPicture(ctx, companyId, fileId);
-  let apiKey: string | null = null;
-  if (settings.analysis.keySecretId) {
-    try {
-      apiKey = await ctx.secrets.resolve(settings.analysis.keySecretId);
-    } catch (err) {
-      throw new Error(`The analysis model's key could not be read: ${errorText(err)}`);
-    }
-  }
-  const small = await shrinkForAnalysis(picture.bytes);
-  const answer = await callVisionModel((url, init) => ctx.http.fetch(url, init), settings.analysis, apiKey, small);
-  const outcome = parseAnalysis(answer);
+  await assertPictureFile(ctx, companyId, fileId, "The picture");
+  // The server makes the call (it can reach the company's own model server);
+  // the answer is still checked strictly here.
+  const answer = await ctx.models.analyseImage(companyId, {
+    entryId: settings.analysis.entryId,
+    fileId,
+    keySecretId: settings.analysis.keySecretId,
+    systemPrompt: ANALYSIS_SYSTEM_PROMPT,
+    userPrompt: ANALYSIS_USER_PROMPT,
+    maxOutputTokens: 900,
+  });
+  const outcome = parseAnalysis(answer.text);
   if (!outcome.ok) {
     if (outcome.kind === "not-adult") {
       await addAgeBlock(ctx, companyId, fileId);
@@ -482,7 +482,7 @@ export async function analyseAction(ctx: PluginContext, params: Record<string, u
     }
     return { ok: false, blocked: false, message: outcome.message };
   }
-  return { ok: true, sheet: outcome.result.sheet, crops: outcome.result.crops, model: settings.analysis.label ?? settings.analysis.model };
+  return { ok: true, sheet: outcome.result.sheet, crops: outcome.result.crops, model: settings.analysis.label ?? answer.entryName };
 }
 
 /** Cut crops out of one picture (several boxes from the same picture). Returns the pictures; the page saves them to Files. */
@@ -559,10 +559,10 @@ function readPicks(value: unknown): Array<{ id: string; strength: number }> {
   });
 }
 
-async function higgsfieldClient(ctx: PluginContext, seams: AnchorSeams): Promise<HiggsfieldClient> {
-  const cfg = await config(ctx);
+async function higgsfieldClient(ctx: PluginContext, companyId: string, seams: AnchorSeams): Promise<HiggsfieldClient> {
+  const cfg = await config(ctx, companyId);
   const ref = typeof cfg.higgsfieldKeySecretRef === "string" ? cfg.higgsfieldKeySecretRef.trim() : "";
-  if (!ref) throw new Error("Ask an admin to add a Higgsfield API key in Media Studio settings first.");
+  if (!ref) throw new Error("Ask the company's owner or an admin to add a Higgsfield API key in Media Studio's Settings tab first.");
   let value: string;
   try {
     value = await ctx.secrets.resolve(ref);
@@ -613,7 +613,7 @@ export async function makeIdentityPictures(
     const pictures: string[] = [];
     for (const id of refs.fileIds) pictures.push((await readPicture(ctx, companyId, id, "The identity's picture")).dataUrl);
     const prompt = identityPicturePrompt(identity, options.request, refs.roles);
-    const sogni = await sogniClient(ctx, seams);
+    const sogni = await sogniClient(ctx, companyId, seams);
     return withSpend(ctx, SPEND_ACTION.sogni, companyId, userId, options.raw, async () => {
       const made = await sogni.editPictures({
         prompt,
@@ -643,7 +643,7 @@ export async function makeIdentityPictures(
     const pictures: string[] = [];
     for (const id of refs.fileIds.slice(0, max)) pictures.push((await readPicture(ctx, companyId, id, "The identity's picture")).dataUrl);
     const prompt = assemblePrompt({ request: options.request, sheet: sheetWithIdentity({}, identity), roles: refs.roles.slice(0, max), service: "fal" }).prompt;
-    const key = await falKey(ctx);
+    const key = await falKey(ctx, companyId);
     const count = Math.min(4, Math.max(1, options.count));
     return withSpend(ctx, SPEND_ACTION.fal, companyId, userId, options.raw, async () => {
       const res = await ctx.http.fetch(`https://fal.run/${checked}`, {
@@ -672,7 +672,7 @@ export async function makeIdentityPictures(
   }
   if (options.loras.length > 0) throw new Error("Higgsfield takes no LoRAs. Remove them, or use Sogni.");
   const prompt = assemblePrompt({ request: options.request, sheet: sheetWithIdentity({}, identity), roles: [], service: "higgsfield" }).prompt;
-  const client = await higgsfieldClient(ctx, seams);
+  const client = await higgsfieldClient(ctx, companyId, seams);
   const seed = Math.floor(Math.random() * 1_000_000);
   return withSpend(ctx, SPEND_ACTION.higgsfield, companyId, userId, options.raw, async () => {
     // Soul makes 1 or 4 pictures per call; more than 1 asked for: 4, keeping as many as asked.
@@ -776,7 +776,7 @@ async function placeAction(ctx: PluginContext, params: Record<string, unknown>, 
   const size = await sogniSizeLike(photo.bytes);
 
   if (service === "sogni") {
-    const sogni = await sogniClient(ctx, seams);
+    const sogni = await sogniClient(ctx, companyId, seams);
     return withSpend(ctx, "room-place", companyId, userId, params, async () => {
       const made = await sogni.editPictures({
         prompt,
@@ -791,7 +791,7 @@ async function placeAction(ctx: PluginContext, params: Record<string, unknown>, 
       return { imageDataUrl: `data:image/png;base64,${composited.toString("base64")}`, prompt, provider: "sogni", model: made.model };
     });
   }
-  const key = await falKey(ctx);
+  const key = await falKey(ctx, companyId);
   return withSpend(ctx, "room-place-fal", companyId, userId, params, async () => {
     const impl = selectProvider({ provider: "fal", falKey: key, falModel: FAL_REFERENCE_MODEL }, (url, init) => ctx.http.fetch(url, init));
     const result = await impl.generate({ prompt, referenceImages: [photo.dataUrl, ...productPictures] });
@@ -980,7 +980,7 @@ export async function loraTrainAction(ctx: PluginContext, params: Record<string,
   if (params.confirmCostCents !== cost) {
     throw new Error(`Training costs about $${(cost / 100).toFixed(2)} on Fal.ai. Confirm that price to start.`);
   }
-  const key = await falKey(ctx);
+  const key = await falKey(ctx, companyId);
   const files = [];
   for (const [i, id] of selected.entries()) {
     const p = await readPicture(ctx, companyId, id, "A ticked training picture");
@@ -1027,7 +1027,7 @@ export async function loraStatusAction(ctx: PluginContext, params: Record<string
   const identity = findIdentity(await loadIdentities(ctx, companyId), params.identityId);
   const training = identity.training;
   if (!training || training.status !== "training" || !training.falRequestId) return { identity: identityView(identity), progress: null };
-  const key = await falKey(ctx);
+  const key = await falKey(ctx, companyId);
   const poll = await falTrainerPoll((url, init) => ctx.http.fetch(url, init), key, training.falRequestId);
   if (poll.status === "running") return { identity: identityView(identity), progress: poll.progress };
   if (poll.status === "failed") {
@@ -1114,7 +1114,7 @@ async function loraImportSogniAction(ctx: PluginContext, params: Record<string, 
   if (lora.visibility !== "public" || (lora.source !== "huggingface" && lora.source !== "civitai")) {
     throw new Error("Sogni can only import a public Hugging Face or Civitai file.");
   }
-  const sogni = await sogniClient(ctx, seams);
+  const sogni = await sogniClient(ctx, companyId, seams);
   const started = await sogni.importPersonalLora({ url: lora.url, name: `${identity.name} (person)`, modelId: LORA_SOGNI_BASE_MODEL_ID });
   const next = await updateIdentity(ctx, companyId, identity.id, (current) => ({
     ...current,
@@ -1134,8 +1134,8 @@ async function trainedStatusAction(ctx: PluginContext, params: Record<string, un
   if (pending.length === 0) return { identity: identityView(identity) };
   const updates = new Map<string, string>();
   for (const t of pending) {
-    if (t.provider === "sogni-lora") updates.set(t.id, (await (await sogniClient(ctx, seams)).personalLora(t.ref)).status);
-    else if (t.provider === "higgsfield-soul") updates.set(t.id, await (await higgsfieldClient(ctx, seams)).soulIdStatus(t.ref));
+    if (t.provider === "sogni-lora") updates.set(t.id, (await (await sogniClient(ctx, companyId, seams)).personalLora(t.ref)).status);
+    else if (t.provider === "higgsfield-soul") updates.set(t.id, await (await higgsfieldClient(ctx, companyId, seams)).soulIdStatus(t.ref));
   }
   const next = await updateIdentity(ctx, companyId, identity.id, (current) => ({
     ...current,
@@ -1190,7 +1190,7 @@ export async function higgsfieldSoulAction(ctx: PluginContext, params: Record<st
     throw new Error(`A Higgsfield Soul ID needs ${HIGGSFIELD_MIN_SOUL_PICTURES} to ${HIGGSFIELD_MAX_SOUL_PICTURES} ticked face pictures (${selected.length} ticked).`);
   }
   const variant = params.variant === "soul-cinematic" ? "soul-cinematic" : "soul-2";
-  const client = await higgsfieldClient(ctx, seams);
+  const client = await higgsfieldClient(ctx, companyId, seams);
   const made = await withSpend(ctx, "higgsfield-soul-id", companyId, userId, params, async () => {
     const urls: string[] = [];
     for (const id of selected) {
@@ -1211,8 +1211,8 @@ export async function higgsfieldSoulAction(ctx: PluginContext, params: Record<st
 
 /** Which services have a key, the models to offer, and the price notes, for "Generate with". */
 async function generationOptionsAction(ctx: PluginContext, _params: Record<string, unknown>, context: ActionContext) {
-  companyOf(context);
-  const cfg = await config(ctx);
+  const companyId = companyOf(context);
+  const cfg = await config(ctx, companyId);
   const has = (k: string) => typeof cfg[k] === "string" && (cfg[k] as string).trim() !== "";
   return {
     services: { sogni: has("sogniKeySecretRef"), fal: has("falKeySecretRef"), higgsfield: has("higgsfieldKeySecretRef") },

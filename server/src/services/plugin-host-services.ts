@@ -31,6 +31,7 @@ import type { CreateIssueThreadInteraction, InviteJoinType, IssueDocumentSummary
 import { MEDIA_STUDIO_DIRECT_BILLING_CODE, MEDIA_STUDIO_EDIT_ACTIONS, MEDIA_STUDIO_EDIT_BILLING_CODE, estimateMediaStudioEditCostCents, mediaStudioEditActionProvider, pluginOperationIssueOriginKind, type MediaStudioEditAction } from "@paperclipai/shared";
 import { HttpError } from "../errors.js";
 import { mediaStudioDirectService } from "./media-studio-direct.js";
+import { pluginImageAnalysisService, type ImageAnalysisDeps } from "./plugin-image-analysis.js";
 import { companyService } from "./companies.js";
 import { agentService } from "./agents.js";
 import { projectService } from "./projects.js";
@@ -346,6 +347,8 @@ export function buildHostServices(
     pluginWorkerManager?: PluginWorkerManager;
     manifest?: import("@paperclipai/shared").PaperclipPluginManifestV1;
     storage?: import("../storage/types.js").StorageService;
+    /** Test seams for models.analyseImage (the model call, the public-address check, Paperclip's own Claude key). */
+    imageAnalysis?: Omit<ImageAnalysisDeps, "storage">;
   } = {},
 ): HostServices & { dispose(): void } {
   const getStorage = () => options.storage ?? getStorageService();
@@ -400,6 +403,7 @@ export function buildHostServices(
   const agentDailyLimits = agentDailyLimitService(db);
   const reactionLearning = reactionLearningService(db);
   const mediaStudioDirect = mediaStudioDirectService(db);
+  const imageAnalysis = pluginImageAnalysisService(db, { ...options.imageAnalysis, storage: getStorage });
   const scopedBus = eventBus.forPlugin(pluginKey);
 
   // Track active session event subscriptions for cleanup
@@ -2693,6 +2697,35 @@ export function buildHostServices(
             ? sanitizeRecord(row.details)
             : row.details ?? null,
         }));
+      },
+    },
+
+    models: {
+      async analyseImage(params, context) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        // Only inside a UI action: the company and the person come from the
+        // host's own invocation scope (routes/plugins.ts resolved both from
+        // the session), never from what the worker sends. A tool call, job
+        // or webhook has no person, so it is refused.
+        const scope = context?.invalidInvocationScope ? null : context?.invocationScope ?? null;
+        if (!scope || scope.companyId !== companyId || !scope.userId) {
+          throw new Error("Picture analysis only works from a person's action on Paperclip's own pages, for the company they have open.");
+        }
+        const { companyId: _ignored, ...input } = params;
+        const result = await imageAnalysis.analyseImage(
+          { companyId, userId: scope.userId, canManageCompany: scope.canManageCompany, pluginId },
+          input,
+        );
+        await logPluginActivity({
+          companyId,
+          action: "plugin.image_analysis.run",
+          entityType: "attachment",
+          entityId: input.fileId,
+          actor: { actorUserId: scope.userId },
+          details: { modelDirectoryEntryId: input.entryId, provider: result.provider, model: result.model, costCents: result.costCents },
+        });
+        return result;
       },
     },
 

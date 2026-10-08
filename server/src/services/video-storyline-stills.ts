@@ -20,6 +20,7 @@ import { loadReferenceImages } from "./video-storyline-render.js";
 import { recordFalCostEvent } from "./fal-cost-events.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
 import { videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
+import { mediaStudioKeyRef } from "./media-studio-company-keys.js";
 
 /**
  * DUR-4317/DUR-4320 (backend half, storyboard-of-stills approval gate):
@@ -95,8 +96,9 @@ export function videoStorylineStillsService(db: Db) {
     if (!plugin) throw unprocessable("The media-studio plugin is not installed, so there is no Fal key configured.");
     const config = await registry.getConfig(plugin.id);
     const cfg = (config?.configJson ?? {}) as Record<string, unknown>;
-    const ref = typeof cfg.falKeySecretRef === "string" ? cfg.falKeySecretRef.trim() : "";
-    if (!ref) throw unprocessable("No Fal.ai API key is configured in Media Studio settings yet.");
+    // The company's own key (Media Studio's Settings tab), else the instance's.
+    const ref = await mediaStudioKeyRef(db, plugin.id, companyId, "fal", cfg);
+    if (!ref) throw unprocessable("No Fal.ai API key is set for this company yet. The company's owner or an admin can pick one in Media Studio's Settings tab.");
     const apiKey = await secrets.resolveSecretValueForVideoRender(companyId, ref, { actorId });
     return { provider: new FalImageProvider(apiKey, safeImageFetch), apiKey };
   }

@@ -265,6 +265,9 @@ const manifest: PaperclipPluginManifestV1 = {
     "issues.checkout",
     // DUR-4360: read the attached task's title/description to see whether a person named a model.
     "issues.read",
+    // "Analyse picture" on Identities: the server sends the picture to one of
+    // the company's saved models (it can reach the company's own model server).
+    "models.image_analysis.run",
   ],
   entrypoints: {
     worker: "./dist/worker.js",
@@ -366,7 +369,7 @@ const manifest: PaperclipPluginManifestV1 = {
       falKeySecretRef: {
         type: "string",
         title: "Fal.ai API key (secret ref)",
-        description: "A Paperclip secret reference resolved at call time to the FAL key.",
+        description: "A Paperclip secret reference resolved at call time to the FAL key. This is the instance's default: a company's owner or admin can pick the company's own key in Media Studio's Settings tab, and that one is used for that company instead.",
         format: "secret-ref",
         default: "",
       },
@@ -387,7 +390,7 @@ const manifest: PaperclipPluginManifestV1 = {
         type: "string",
         title: "Sogni API key",
         description:
-          "Pick the Sogni key from the company's Secrets (create the key at dashboard.sogni.ai/api-key and save it as a secret first). It is looked up each time a picture is made and never shown here.",
+          "Pick the Sogni key from the company's Secrets (create the key at dashboard.sogni.ai/api-key and save it as a secret first). It is looked up each time a picture is made and never shown here. This is the instance's default: a company's owner or admin can pick the company's own key in Media Studio's Settings tab, and that one is used for that company instead.",
         format: "secret-ref",
         default: "",
       },
@@ -395,7 +398,7 @@ const manifest: PaperclipPluginManifestV1 = {
         type: "string",
         title: "Higgsfield API key",
         description:
-          "Pick the Higgsfield key from the company's Secrets. Save it there as key id and key secret joined by a colon (id:secret), from Higgsfield's console (API keys). It is looked up each time and never shown here.",
+          "Pick the Higgsfield key from the company's Secrets. Save it there as key id and key secret joined by a colon (id:secret), from Higgsfield's console (API keys). It is looked up each time and never shown here. This is the instance's default: a company's owner or admin can pick the company's own key in Media Studio's Settings tab, and that one is used for that company instead.",
         format: "secret-ref",
         default: "",
       },

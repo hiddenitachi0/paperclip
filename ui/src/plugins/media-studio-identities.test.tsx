@@ -3,7 +3,9 @@
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { IdentitiesPanel, draftToParams, identityToDraft, type Identity } from "../../../packages/plugins/media-studio/src/ui/identities-panel";
+import { IdentitiesPanel, IdentitySettingsPanel, draftToParams, identityToDraft, type Identity } from "../../../packages/plugins/media-studio/src/ui/identities-panel";
+import * as settingsPanel from "../../../packages/plugins/media-studio/src/ui/settings-panel";
+import * as companySettings from "../../../packages/plugins/media-studio/src/company-settings";
 import { RoomsPanel } from "../../../packages/plugins/media-studio/src/ui/rooms-panel";
 import { MediaStudioLooksPage, draftToSaveParams, type LookDraft } from "../../../packages/plugins/media-studio/src/ui/index";
 import * as helpers from "../../../packages/plugins/media-studio/src/ui/anchor-helpers";
@@ -130,6 +132,42 @@ describe("anchor helpers", () => {
     data[(1 * w + 2) * 4] = 255;
     expect(helpers.maskBox(data, w, h)).toEqual({ x: 0.5, y: 0.5, w: 0.25, h: 0.5 });
     expect(helpers.maskBox(new Uint8ClampedArray(w * h * 4), w, h)).toBeNull();
+  });
+});
+
+describe("Settings: analysis model and service keys", () => {
+  it("the service-key action names match the worker's", () => {
+    expect(settingsPanel.ACTION_SERVICE_KEYS_GET).toBe(companySettings.ACTION_SERVICE_KEYS_GET);
+    expect(settingsPanel.ACTION_SERVICE_KEYS_SAVE).toBe(companySettings.ACTION_SERVICE_KEYS_SAVE);
+  });
+
+  it("the analysis model is picked only from the company's saved models (a local one included); nothing can be typed in", async () => {
+    actions["identitySettings.get"] = vi.fn(async () => ({ settings: { analysis: null, hfTokenSecretId: null, hfNamespace: null }, canManage: true }));
+    actions["identitySettings.save"] = vi.fn(async (p: any) => ({ settings: { analysis: p.analysis, hfTokenSecretId: null, hfNamespace: null } }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (path: string) => {
+        const body = path.endsWith("/model-directory")
+          ? [
+              { id: "e-local", name: "Llava on the office PC", provider: "local", model: "llava:13b", baseUrl: "http://100.64.0.5:11434/v1", specs: { vision: true } },
+              { id: "e-claude", name: "Claude Sonnet", provider: "anthropic", model: "claude-sonnet-5", baseUrl: null, specs: { vision: true } },
+            ]
+          : [{ id: "s-1", name: "Claude key" }];
+        return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      }),
+    );
+    root = createRoot(container);
+    await act(async () => root.render(<IdentitySettingsPanel companyId={COMPANY} />));
+    await flush();
+    const select = container.querySelector('select[aria-label="Analysis model"]') as HTMLSelectElement;
+    const labels = [...select.options].map((o) => o.textContent);
+    expect(labels).toEqual(["Pick a saved model…", "Llava on the office PC (llava:13b, own model server), can see pictures", "Claude Sonnet (claude-sonnet-5, Claude), can see pictures"]);
+    expect(container.textContent).not.toMatch(/Type a model in|Address/);
+    expect(container.textContent).toContain("own model server");
+    setValue(select, "e-local");
+    await flush();
+    await click(buttonNamed(container, "Save settings"));
+    expect(actions["identitySettings.save"]).toHaveBeenCalledWith({ analysis: { entryId: "e-local", label: "Llava on the office PC", keySecretId: null }, hfTokenSecretId: null, hfNamespace: null });
   });
 });
 

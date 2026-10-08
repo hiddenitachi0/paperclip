@@ -312,6 +312,14 @@ export interface HostServices {
     readContent(params: WorkerToHostMethods["files.readContent"][0]): Promise<WorkerToHostMethods["files.readContent"][1]>;
   };
 
+  /** Picture analysis with a company's saved model, run by the host. */
+  models: {
+    analyseImage(
+      params: WorkerToHostMethods["models.analyseImage"][0],
+      context?: WorkerHostCallContext,
+    ): Promise<WorkerToHostMethods["models.analyseImage"][1]>;
+  };
+
   /** Media Studio spend reservation (DUR-4441). */
   billing: {
     reserveMediaStudioDirectSpend(
@@ -540,6 +548,7 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   // Personas
   "personas.reserveDailyGeneration": "personas.generation_cap.enforce",
   "personas.getPictureFeedbackRules": "personas.picture_feedback.read",
+  "models.analyseImage": "models.image_analysis.run",
   "billing.reserveMediaStudioDirectSpend": "billing.media_studio_direct.reserve",
   "billing.releaseMediaStudioDirectSpend": "billing.media_studio_direct.reserve",
   "billing.settleMediaStudioDirectSpend": "billing.media_studio_direct.reserve",
@@ -1024,6 +1033,10 @@ export function createHostClientHandlers(
     }),
     "files.readContent": gated("files.readContent", async (params) => {
       return services.files.readContent(params);
+    }),
+
+    "models.analyseImage": gated("models.analyseImage", async (params, context) => {
+      return services.models.analyseImage(params, context);
     }),
 
     "billing.reserveMediaStudioDirectSpend": gated("billing.reserveMediaStudioDirectSpend", async (params) => {

@@ -129,14 +129,16 @@ import { HIGGSFIELD_MODELS, readHiggsfieldCredentials } from "./higgsfield.js";
 import { guardedBytesFetch } from "./lora-training.js";
 import { identitiesMentionedIn, loraFitsModel, pickTrained, planIdentityReferences, sheetWithIdentity, sogniSlots, type Identity } from "./identity.js";
 import { loadIdentities, registerAnchorActions } from "./anchors.js";
+import { companyConfig, registerServiceKeyActions } from "./company-settings.js";
 import { SOGNI_TOOLS, findSogniTool, prepareSogniCall, sogniToolDescription, sogniToolParameters, type SogniToolDef } from "./sogni-tools.js";
 
 /**
  * Resolve the operator-configured provider and run one generation. Shared by
  * the agent-callable tool and the UI action so both behave identically.
  */
-async function runGeneration(ctx: PluginContext, input: GenerationInput): Promise<GenerationResult> {
-  const cfg = (await ctx.config.get()) as Record<string, unknown>;
+async function runGeneration(ctx: PluginContext, input: GenerationInput, companyId: string | null): Promise<GenerationResult> {
+  // The company's own service keys win over the instance's (company-settings.ts).
+  const cfg = await companyConfig(ctx, companyId);
   // A per-call choice or a look's service (already checked in prepareGeneration) wins over settings.
   const provider = input.provider ?? String(cfg.provider ?? "mock");
 
@@ -153,17 +155,17 @@ async function runGeneration(ctx: PluginContext, input: GenerationInput): Promis
 
   if (provider === "fal") {
     const ref = typeof cfg.falKeySecretRef === "string" ? cfg.falKeySecretRef : "";
-    if (!ref) throw new Error("Set the Fal.ai API key secret reference in Media Studio settings.");
+    if (!ref) throw new Error("Pick the Fal.ai API key in Media Studio's Settings tab (it comes from the company's Secrets).");
     providerConfig.falKey = await ctx.secrets.resolve(ref);
   }
   if (provider === "sogni") {
     const ref = typeof cfg.sogniKeySecretRef === "string" ? cfg.sogniKeySecretRef : "";
-    if (!ref) throw new Error("Pick the Sogni API key in Media Studio settings (it comes from the company's Secrets).");
+    if (!ref) throw new Error("Pick the Sogni API key in Media Studio's Settings tab (it comes from the company's Secrets).");
     providerConfig.sogniKey = await ctx.secrets.resolve(ref);
   }
   if (provider === "higgsfield") {
     const ref = typeof cfg.higgsfieldKeySecretRef === "string" ? cfg.higgsfieldKeySecretRef : "";
-    if (!ref) throw new Error("Pick the Higgsfield API key in Media Studio settings (it comes from the company's Secrets).");
+    if (!ref) throw new Error("Pick the Higgsfield API key in Media Studio's Settings tab (it comes from the company's Secrets).");
     providerConfig.higgsfieldCredentials = readHiggsfieldCredentials(await ctx.secrets.resolve(ref));
     providerConfig.higgsfieldBytesFetch = guardedBytesFetch;
   }
@@ -1117,7 +1119,7 @@ export async function prepareGeneration(
     }
   }
 
-  const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
+  const cfg = await companyConfig(ctx, companyId);
   const settingsProvider = String(cfg.provider ?? "mock").toLowerCase();
   const catalog = sogniCatalogFor(ctx);
   // A model named in the call only counts when a person asked for it by name.
@@ -1402,7 +1404,7 @@ async function validateLookInput(
   const size = textOrNull(params.size);
   const safeContentFilter = params.safeContentFilter !== false;
 
-  const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
+  const cfg = await companyConfig(ctx, companyId);
   const catalog = sogniCatalogFor(ctx);
   const modelService = rawModel ? (serviceForModel(rawModel) ?? (catalog.knows(rawModel) ? "sogni" : null)) : null;
   if (provider && modelService && modelService !== provider) {
@@ -1653,7 +1655,7 @@ const plugin = definePlugin({
         }
 
         try {
-          const result = await runGeneration(ctx, input);
+          const result = await runGeneration(ctx, input, runCtx.companyId);
           await recordAgentMediaCost(ctx, runCtx, { kind: "image", provider: result.provider, model: result.model, usage: { images: 1 }, credits: sogniCreditsOf(result), issueId: issueId || null });
           const { contentBase64, contentType } = await toAttachmentBytes(ctx, result);
           const seed = typeof result.seed === "number" ? result.seed : null;
@@ -1783,20 +1785,25 @@ const plugin = definePlugin({
     );
 
     // UI-callable action: the Media Studio panel calls this via usePluginAction.
-    ctx.actions.register(ACTION_GENERATE, async (params) => {
+    ctx.actions.register(ACTION_GENERATE, async (params, context) => {
       const input = toInput(params);
       if (!input.prompt) throw new Error("prompt is required");
-      return runGeneration(ctx, input);
+      return runGeneration(ctx, input, context.companyId ?? null);
     });
 
-    // Tells the page whether to show the Settings tab. Saving goes through
-    // the generic plugin-config route (POST /plugins/:pluginId/config),
-    // which is instance-admin gated -- so the tab must match that, not the
-    // looser canManageCompany (company owner/admin) used elsewhere on this
-    // page, or a company owner/admin sees the tab and gets a save error.
-    ctx.actions.register(ACTION_SETTINGS_ACCESS, async (_params, context) => ({
-      canManage: context.actor.type === "user" && context.actor.isInstanceAdmin === true,
-    }));
+    // Tells the page whether to show the Settings tab and which parts of it.
+    // The company's own service keys and identity settings are for the
+    // company's owner/admin (canManageCompany, decided by the host). The
+    // instance-wide defaults below them are saved through the generic
+    // plugin-config route (POST /plugins/:pluginId/config), which is
+    // instance-admin gated, so that part is shown to instance admins only.
+    ctx.actions.register(ACTION_SETTINGS_ACCESS, async (_params, context) => {
+      const isInstanceAdmin = context.actor.type === "user" && context.actor.isInstanceAdmin === true;
+      return {
+        canManage: context.actor.type === "user" && (context.actor.canManageCompany === true || isInstanceAdmin),
+        isInstanceAdmin,
+      };
+    });
 
     // Looks page (Company settings → Media Studio looks). Anyone in the
     // company may see the list; only an owner/admin may change it. The host
@@ -2022,7 +2029,7 @@ const plugin = definePlugin({
       let personal: "included" | "not-allowed" | "no-key" | "unavailable" | "owners-only" = "owners-only";
       let note: string | null = publicCatalog ? null : "Sogni's list of LoRAs could not be reached just now. Try again in a minute.";
       if (context.actor.type === "user" && context.actor.canManageCompany === true) {
-        const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
+        const cfg = await companyConfig(ctx, context.companyId);
         const key = await resolveSogniKey(ctx, cfg);
         if (!key) {
           personal = "no-key";
@@ -2054,7 +2061,7 @@ const plugin = definePlugin({
     // would just fail.
     ctx.actions.register(ACTION_EDIT_CAPABILITIES, async (_params, context) => {
       if (!context.companyId) throw new Error("Open this page from inside a company.");
-      const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
+      const cfg = await companyConfig(ctx, context.companyId);
       const sogniRef = typeof cfg.sogniKeySecretRef === "string" ? cfg.sogniKeySecretRef.trim() : "";
       const falRef = typeof cfg.falKeySecretRef === "string" ? cfg.falKeySecretRef.trim() : "";
       const higgsfieldRef = typeof cfg.higgsfieldKeySecretRef === "string" ? cfg.higgsfieldKeySecretRef.trim() : "";
@@ -2130,7 +2137,7 @@ const plugin = definePlugin({
       const imageDataUrl = typeof raw.imageDataUrl === "string" ? raw.imageDataUrl : "";
       if (!/^data:image\//i.test(imageDataUrl)) throw new Error("Open a picture in the editor first.");
 
-      const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
+      const cfg = await companyConfig(ctx, context.companyId);
       const defaultModel = textOrNull(cfg.sogniModel) ?? SOGNI_DEFAULT_MODEL;
       const callParams: Record<string, unknown> = { ...raw, fileId: "editor" };
       delete callParams.tool;
@@ -2147,7 +2154,7 @@ const plugin = definePlugin({
 
       const ref = typeof cfg.sogniKeySecretRef === "string" ? cfg.sogniKeySecretRef.trim() : "";
       if (!ref) {
-        throw new Error("Ask an admin to add a Sogni API key in Media Studio settings to use AI edits.");
+        throw new Error("Ask the company's owner or an admin to add a Sogni API key in Media Studio's Settings tab to use AI edits.");
       }
       let apiKey: string;
       try {
@@ -2191,10 +2198,10 @@ const plugin = definePlugin({
       const prompt = typeof raw.prompt === "string" ? raw.prompt.trim() : "";
       if (!prompt) throw new Error("Describe what to change first.");
 
-      const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
+      const cfg = await companyConfig(ctx, context.companyId);
       const ref = typeof cfg.falKeySecretRef === "string" ? cfg.falKeySecretRef.trim() : "";
       if (!ref) {
-        throw new Error("Ask an admin to add a Fal.ai API key in Media Studio settings to use AI edits.");
+        throw new Error("Ask the company's owner or an admin to add a Fal.ai API key in Media Studio's Settings tab to use AI edits.");
       }
       let falKey: string;
       try {
@@ -2235,7 +2242,7 @@ const plugin = definePlugin({
       if (!/^data:image\//i.test(imageDataUrl)) throw new Error("Open a picture in the editor first.");
 
       const def = findSogniTool("sogni-segment-image")!;
-      const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
+      const cfg = await companyConfig(ctx, context.companyId);
       const defaultModel = textOrNull(cfg.sogniModel) ?? SOGNI_DEFAULT_MODEL;
       const callParams: Record<string, unknown> = { ...raw, fileId: "editor", applyMask: false };
       delete callParams.imageDataUrl;
@@ -2249,7 +2256,7 @@ const plugin = definePlugin({
 
       const ref = typeof cfg.sogniKeySecretRef === "string" ? cfg.sogniKeySecretRef.trim() : "";
       if (!ref) {
-        throw new Error("Ask an admin to add a Sogni API key in Media Studio settings to use AI edits.");
+        throw new Error("Ask the company's owner or an admin to add a Sogni API key in Media Studio's Settings tab to use AI edits.");
       }
       let apiKey: string;
       try {
@@ -2311,10 +2318,10 @@ const plugin = definePlugin({
               return given;
             })();
 
-      const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
+      const cfg = await companyConfig(ctx, context.companyId);
       const ref = typeof cfg.falKeySecretRef === "string" ? cfg.falKeySecretRef.trim() : "";
       if (!ref) {
-        throw new Error("Ask an admin to add a Fal.ai API key in Media Studio settings to use AI edits.");
+        throw new Error("Ask the company's owner or an admin to add a Fal.ai API key in Media Studio's Settings tab to use AI edits.");
       }
       let falKey: string;
       try {
@@ -2353,6 +2360,8 @@ const plugin = definePlugin({
 
     // Identities (people), rooms and LoRA training: anchors.ts.
     registerAnchorActions(ctx);
+    // Each company's own Sogni / Fal.ai / Higgsfield keys (company-settings.ts).
+    registerServiceKeyActions(ctx);
 
     registerMediaJobTools(ctx);
     ctx.jobs.register(JOB_KEY_MEDIA_POLL, (job) => advanceMediaJobs(ctx, job.runId));
@@ -2440,7 +2449,7 @@ function registerMediaJobTools(ctx: PluginContext): void {
         }
       }
 
-      const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
+      const cfg = await companyConfig(ctx, runCtx.companyId);
       const settingsProvider = String(cfg.provider ?? "").toLowerCase();
       const provider = rawProvider || (settingsProvider === "fal" || settingsProvider === "sogni" ? settingsProvider : "fal");
 
@@ -2606,7 +2615,7 @@ async function runSogniTool(
   params: unknown,
   runCtx: { companyId: string; runId: string; agentId: string },
 ): Promise<ToolResult> {
-  const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
+  const cfg = await companyConfig(ctx, runCtx.companyId);
   const defaultModel = textOrNull(cfg.sogniModel) ?? SOGNI_DEFAULT_MODEL;
   const prepared = prepareSogniCall(def, params, { defaultModel });
   if ("error" in prepared) return { error: prepared.error };
@@ -2770,7 +2779,7 @@ export async function previewLookPrompt(ctx: PluginContext, params: Record<strin
   if (refs === "invalid") throw new Error("The reference pictures could not be read. Pick them again.");
   let roles = readReferenceRoles(params.referenceRoles, refs.length);
   let sheet = readSheet(params.sheet);
-  const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
+  const cfg = await companyConfig(ctx, companyId);
   const settingsProvider = String(cfg.provider ?? "mock").toLowerCase();
   const rawProvider = typeof params.provider === "string" ? params.provider.trim().toLowerCase() : "";
   const rawModel = typeof params.model === "string" ? params.model.trim() : "";
@@ -2865,7 +2874,7 @@ export async function runQuickPicture(
     if (!look) return { error: `There is no saved look called "${lookName}". ${lookNamesSentence(looks)}` };
   }
 
-  const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
+  const cfg = await companyConfig(ctx, runCtx.companyId);
   const settingsProvider = String(cfg.provider ?? "mock").toLowerCase();
   const catalog = sogniCatalogFor(ctx);
   const lookService = look
@@ -2896,7 +2905,7 @@ export async function runQuickPicture(
   try {
     made = await withQuickTimeout(
       (async () => {
-        const result = await runGeneration(ctx, input);
+        const result = await runGeneration(ctx, input, runCtx.companyId);
         await recordAgentMediaCost(ctx, runCtx, { kind: "image", provider: result.provider, model: result.model, usage: { images: 1 }, credits: sogniCreditsOf(result), issueId: issueId || null });
         return { result, ...(await toAttachmentBytes(ctx, result)) };
       })(),

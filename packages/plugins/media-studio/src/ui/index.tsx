@@ -6,6 +6,7 @@ import { StoryboardPanel, storyboardReadyToRender, type StoryboardSummary } from
 import { AdvancedFeaturesToggle, AiDirectorSection } from "./director-panel.js";
 import { IdentitiesPanel } from "./identities-panel.js";
 import { RoomsPanel } from "./rooms-panel.js";
+import { MediaStudioSettingsTab } from "./settings-panel.js";
 
 // The plugin UI is served as a standalone ES module, so it must not import from
 // sibling plugin files (only bare specifiers resolve). Keep these in sync with
@@ -2433,16 +2434,23 @@ export function MediaStudioPage({ context }: PluginPageProps) {
   const nav = useHostNavigation();
   const [tab, setTab] = useState<MediaStudioTabKey>(initialTabFromLocation);
   const [editFileId, setEditFileId] = useState<string | null>(initialEditFileIdFromLocation);
-  // Settings holds the instance-wide plugin config (API keys), saved through
-  // the instance-admin-gated generic route, so it's instance-admin only --
-  // not company owners/admins, who manage looks but not this. Everyone else
-  // never sees the tab, and a link straight to it shows the Create tab instead.
+  // Settings holds this company's own service keys and identity settings
+  // (company owner/admin) and, for the instance admin only, the instance-wide
+  // defaults (saved through the instance-admin-gated generic plugin-config
+  // route). Everyone else never sees the tab, and a link straight to it shows
+  // the Create tab instead.
   const checkSettingsAccess = usePluginAction(ACTION_SETTINGS_ACCESS);
   const [canManageSettings, setCanManageSettings] = useState<boolean | null>(null);
+  const [isInstanceAdmin, setIsInstanceAdmin] = useState(false);
   useEffect(() => {
     let cancelled = false;
     checkSettingsAccess({})
-      .then((result) => { if (!cancelled) setCanManageSettings((result as { canManage?: boolean } | null)?.canManage === true); })
+      .then((result) => {
+        if (cancelled) return;
+        const access = (result ?? {}) as { canManage?: boolean; isInstanceAdmin?: boolean };
+        setCanManageSettings(access.canManage === true);
+        setIsInstanceAdmin(access.isInstanceAdmin === true);
+      })
       .catch(() => { if (!cancelled) setCanManageSettings(false); });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2494,7 +2502,9 @@ export function MediaStudioPage({ context }: PluginPageProps) {
       {activeTab === "create" ? (
         <MediaStudioCreateTab context={context} onEditFile={(fileId) => selectTab("edit", { fileId })} />
       ) : activeTab === "settings" ? (
-        showSettings ? <PluginConfigForm pluginId={PLUGIN_ID} /> : null
+        showSettings ? (
+          <MediaStudioSettingsTab companyId={context.companyId ?? null} isInstanceAdmin={isInstanceAdmin} instanceForm={<PluginConfigForm pluginId={PLUGIN_ID} />} />
+        ) : null
       ) : activeTab === "edit" ? (
         <MediaStudioEditTab context={context} initialFileId={editFileId} />
       ) : activeTab === "identities" ? (

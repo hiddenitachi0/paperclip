@@ -312,6 +312,33 @@ export function parseOllamaTags(body: unknown): Array<Omit<LocalInstalledModel, 
   return out;
 }
 
+/**
+ * The stored form of a local model address this company already uses -- its
+ * model server address setting (Settings > Models), a saved local model, or
+ * a quick agent on a local model -- or null when it uses no such address.
+ * Callers build the request from the returned (stored) address, never from
+ * the one they were given, so the server only ever calls a local host the
+ * company itself set up (the local resync, picture analysis for plugins).
+ */
+export async function findCompanyLocalAddress(db: Db, companyId: string, rawBaseUrl: string | null | undefined): Promise<string | null> {
+  const key = localAddressKey(rawBaseUrl);
+  if (!key) return null;
+  const entries = await db
+    .select({ baseUrl: modelDirectoryEntries.baseUrl })
+    .from(modelDirectoryEntries)
+    .where(and(eq(modelDirectoryEntries.companyId, companyId), eq(modelDirectoryEntries.provider, "local")));
+  const fromEntry = entries.find((e) => e.baseUrl && localAddressKey(e.baseUrl) === key)?.baseUrl;
+  if (fromEntry) return fromEntry;
+  const [settingsRow] = await db.select().from(modelDirectorySettings).where(eq(modelDirectorySettings.companyId, companyId));
+  const setting = settingsRow?.localBaseUrl ?? null;
+  if (setting && localAddressKey(setting) === key) return setting;
+  const agentRows = await db
+    .select({ baseUrl: agents.laneABaseUrl })
+    .from(agents)
+    .where(and(eq(agents.companyId, companyId), eq(agents.laneAProvider, "local")));
+  return agentRows.find((a) => a.baseUrl && localAddressKey(a.baseUrl) === key)?.baseUrl ?? null;
+}
+
 export interface ModelDirectoryServiceDeps {
   /** Used for the local resync (GET /api/tags); tests pass a stub. */
   fetchImpl?: typeof fetch;
@@ -398,19 +425,7 @@ export function modelDirectoryService(db: Db, deps: ModelDirectoryServiceDeps = 
       const entries = (
         await db.select().from(modelDirectoryEntries).where(and(eq(modelDirectoryEntries.companyId, companyId), eq(modelDirectoryEntries.provider, "local")))
       ).filter((e) => e.baseUrl && localAddressKey(e.baseUrl) === key);
-      let known = entries.length > 0 ? entries[0]!.baseUrl! : null;
-      if (!known) {
-        const [settingsRow] = await db.select().from(modelDirectorySettings).where(eq(modelDirectorySettings.companyId, companyId));
-        const setting = settingsRow?.localBaseUrl ?? null;
-        if (setting && localAddressKey(setting) === key) known = setting;
-      }
-      if (!known) {
-        const agentRows = await db
-          .select({ baseUrl: agents.laneABaseUrl })
-          .from(agents)
-          .where(and(eq(agents.companyId, companyId), eq(agents.laneAProvider, "local")));
-        known = agentRows.find((a) => a.baseUrl && localAddressKey(a.baseUrl) === key)?.baseUrl ?? null;
-      }
+      const known = await findCompanyLocalAddress(db, companyId, rawBaseUrl);
       if (!key || !known) {
         throw unprocessable(
           "That address is not one this company uses for local models. Set it as the model server address in Settings > Models (or save a local model with it) first, then try again.",

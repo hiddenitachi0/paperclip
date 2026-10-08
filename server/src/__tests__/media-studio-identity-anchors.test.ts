@@ -306,51 +306,90 @@ describe("analysis answers are checked strictly", () => {
   });
 });
 
-describe("Analyse picture (stubbed model)", () => {
-  async function withSettings(harness: TestHarness, provider = "anthropic") {
-    await harness.performAction(
-      "identitySettings.save",
-      { analysis: { source: "custom", provider, model: provider === "anthropic" ? "claude-sonnet-5" : "qwen/qwen2.5-vl-72b-instruct", keySecretId: SECRET }, hfTokenSecretId: HF_SECRET },
-      owner,
-    );
+describe("Analyse picture (the server calls the model; stubbed here)", () => {
+  const ENTRY = "5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a";
+
+  async function withSettings(harness: TestHarness, fake: Fake) {
+    await harness.performAction("identitySettings.save", { analysis: { entryId: ENTRY, label: "Claude Sonnet", keySecretId: SECRET }, hfTokenSecretId: HF_SECRET }, owner);
+    const analyseImage = vi.fn(async (_companyId: string, _input: Record<string, unknown>) => ({
+      text: fake.analysisAnswer,
+      entryName: "Claude Sonnet",
+      provider: "anthropic",
+      model: "claude-sonnet-5",
+      costCents: 1,
+    }));
+    harness.ctx.models.analyseImage = analyseImage as never;
+    return analyseImage;
   }
 
   it("needs a chosen analysis model; settings are owner/admin only", async () => {
     const { harness } = await setup();
     await expect(harness.performAction("identities.analyse", { fileId: ORIGINAL }, owner)).rejects.toThrow(/Pick an analysis model/);
-    await expect(
-      harness.performAction("identitySettings.save", { analysis: { provider: "anthropic", model: "x" } }, member),
-    ).rejects.toThrow(/owner or an admin/);
+    await expect(harness.performAction("identitySettings.save", { analysis: { entryId: ENTRY } }, member)).rejects.toThrow(/owner or an admin/);
     await expect(harness.performAction("identitySettings.save", { hfTokenSecretId: "not-a-secret" }, owner)).rejects.toThrow(/Secrets/);
   });
 
-  it("sends the picture to the chosen model with the key from the company secret and returns the checked result", async () => {
-    const { harness, fake } = await setup();
-    await withSettings(harness);
-    fake.analysisAnswer = JSON.stringify(GOOD_ANALYSIS);
-    const res = await harness.performAction<any>("identities.analyse", { fileId: ORIGINAL }, owner);
-    expect(res).toMatchObject({ ok: true, sheet: { eyes: "blue almond eyes" }, crops: { face: { x: 0.35 } } });
-    const call = fake.calls.find((c) => c.url === "https://api.anthropic.com/v1/messages")!;
-    expect(call.headers["x-api-key"]).toBe(`resolved:${SECRET}`);
-    expect(call.body.system).toBe(ANALYSIS_SYSTEM_PROMPT);
-    expect(call.body.messages[0].content[0]).toMatchObject({ type: "image", source: { type: "base64", media_type: "image/jpeg" } });
+  it("the analysis model can only be a saved model: a typed-in service, model or address is refused, and an old typed-in setting is ignored", async () => {
+    const { harness } = await setup();
+    await expect(
+      harness.performAction("identitySettings.save", { analysis: { source: "custom", provider: "local", model: "llava", baseUrl: "http://100.64.0.5:11434/v1" } }, owner),
+    ).rejects.toThrow(/saved models/);
+    await expect(harness.performAction("identitySettings.save", { analysis: { entryId: "http://evil.example/v1" } }, owner)).rejects.toThrow(/saved models/);
+    // A setting saved before this change (typed-in model and address) reads back as "not set".
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: COMPANY, stateKey: "identitySettings" },
+      { analysis: { source: "custom", provider: "local", model: "llava", baseUrl: "http://100.64.0.5:11434/v1", keySecretId: null } },
+    );
+    const got = await harness.performAction<any>("identitySettings.get", {}, owner);
+    expect(got.settings.analysis).toBeNull();
+    // What is stored for a saved model: its id, its label and the key's secret id. No address, provider or model name.
+    const saved = await harness.performAction<any>("identitySettings.save", { analysis: { entryId: ENTRY, label: "Local llava", keySecretId: null, baseUrl: "http://x" } }, owner);
+    expect(saved.settings.analysis).toEqual({ entryId: ENTRY, label: "Local llava", keySecretId: null });
   });
 
-  it("works with an OpenAI-compatible model too, and a refusal is a plain message", async () => {
+  it("asks the server to analyse the picture with the saved model, the key's secret id and the fixed instructions; no address leaves the plugin", async () => {
     const { harness, fake } = await setup();
-    await withSettings(harness, "openrouter");
+    const analyseImage = await withSettings(harness, fake);
+    fake.analysisAnswer = JSON.stringify(GOOD_ANALYSIS);
+    const res = await harness.performAction<any>("identities.analyse", { fileId: ORIGINAL }, owner);
+    expect(res).toMatchObject({ ok: true, sheet: { eyes: "blue almond eyes" }, crops: { face: { x: 0.35 } }, model: "Claude Sonnet" });
+    expect(analyseImage).toHaveBeenCalledTimes(1);
+    const [companyId, input] = analyseImage.mock.calls[0]!;
+    expect(companyId).toBe(COMPANY);
+    expect(input).toEqual({
+      entryId: ENTRY,
+      fileId: ORIGINAL,
+      keySecretId: SECRET,
+      systemPrompt: ANALYSIS_SYSTEM_PROMPT,
+      userPrompt: expect.any(String),
+      maxOutputTokens: 900,
+    });
+    // The worker itself calls no model service any more.
+    expect(fake.calls.filter((c) => /anthropic|openrouter|11434/.test(c.url))).toEqual([]);
+  });
+
+  it("a picture of another company is refused before the server is asked", async () => {
+    const { harness, fake } = await setup();
+    const analyseImage = await withSettings(harness, fake);
+    await expect(harness.performAction("identities.analyse", { fileId: FOREIGN }, owner)).rejects.toThrow(/not in this company's Files/);
+    await expect(harness.performAction("identities.analyse", { fileId: ORIGINAL }, member)).rejects.toThrow(/owner or an admin/);
+    expect(analyseImage).not.toHaveBeenCalled();
+  });
+
+  it("a refusal (prose) is a plain message; the strict check still applies to the server's answer", async () => {
+    const { harness, fake } = await setup();
+    await withSettings(harness, fake);
     fake.analysisAnswer = "I can't describe people in pictures.";
     const res = await harness.performAction<any>("identities.analyse", { fileId: ORIGINAL }, owner);
     expect(res).toMatchObject({ ok: false, blocked: false });
     expect(res.message).toMatch(/Try another analysis model/);
-    const call = fake.calls.find((c) => c.url === "https://openrouter.ai/api/v1/chat/completions")!;
-    expect(call.headers.authorization).toBe(`Bearer resolved:${SECRET}`);
-    expect(call.body.messages[1].content[1].image_url.url).toMatch(/^data:image\/jpeg;base64,/);
+    fake.analysisAnswer = JSON.stringify({ ...GOOD_ANALYSIS, name: "Somebody Famous" });
+    expect(await harness.performAction<any>("identities.analyse", { fileId: ORIGINAL }, owner)).toMatchObject({ ok: false, blocked: false });
   });
 
   it("an answer that cannot confirm an adult blocks the picture for analysis, crops and saving", async () => {
     const { harness, fake } = await setup();
-    await withSettings(harness);
+    const analyseImage = await withSettings(harness, fake);
     fake.analysisAnswer = JSON.stringify({ ...GOOD_ANALYSIS, apparentAdult: "unsure" });
     const res = await harness.performAction<any>("identities.analyse", { fileId: ORIGINAL }, owner);
     expect(res).toMatchObject({ ok: false, blocked: true });
@@ -359,9 +398,10 @@ describe("Analyse picture (stubbed model)", () => {
       harness.performAction("identities.crop", { fileId: ORIGINAL, boxes: [{ role: "face", box: { x: 0, y: 0, w: 0.5, h: 0.5 } }] }, owner),
     ).rejects.toThrow(/under 18/);
     await expect(makeIdentity(harness)).rejects.toThrow(/under 18/);
-    // The block holds even with a model that would now say "yes".
+    // The block holds even with a model that would now say "yes" -- and the model is not asked again.
     fake.analysisAnswer = JSON.stringify(GOOD_ANALYSIS);
     expect(await harness.performAction<any>("identities.analyse", { fileId: ORIGINAL }, owner)).toMatchObject({ ok: false, blocked: true });
+    expect(analyseImage).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -904,5 +944,75 @@ describe("the zip writer", () => {
     expect(zip.readUInt32LE(14)).toBe(crc32(Buffer.from("hello")));
     expect(zip.subarray(30, 35).toString()).toBe("a.txt");
     expect(zip.readUInt32LE(zip.length - 22)).toBe(0x06054b50);
+  });
+});
+
+// ─── Each company's own service keys ──────────────────────────────────────────
+
+describe("each company's own service keys (Sogni, Fal.ai, Higgsfield)", () => {
+  const COMPANY_FAL = "12345678-1234-4234-8234-123456789020";
+  const COMPANY_HIGGS = "12345678-1234-4234-8234-123456789021";
+  const UNREADABLE = "12345678-1234-4234-8234-123456789022";
+
+  it("without its own keys a company uses the instance's, and the page says so in plain words", async () => {
+    const { harness } = await setup();
+    const res = await harness.performAction<any>("serviceKeys.get", {}, member);
+    expect(res.canManage).toBe(false);
+    expect(res.keys.map((k: any) => [k.service, k.source, k.sourceText, k.companySecretId])).toEqual([
+      ["sogni", "instance", "Using the instance's key (set by the instance admin)", null],
+      ["fal", "instance", "Using the instance's key (set by the instance admin)", null],
+      ["higgsfield", "none", expect.stringMatching(/^No key yet/), null],
+    ]);
+    for (const k of res.keys) expect(k.help.length).toBeGreaterThan(40);
+  });
+
+  it("only the company's owner or an admin can pick keys, and only secrets the company can read", async () => {
+    const { harness } = await setup();
+    await expect(harness.performAction("serviceKeys.save", { fal: COMPANY_FAL }, member)).rejects.toThrow(/owner or an admin/);
+    await expect(harness.performAction("serviceKeys.save", { fal: "sk-live-not-a-secret-id" }, owner)).rejects.toThrow(/company's Secrets/);
+    const realResolve = harness.ctx.secrets.resolve.bind(harness.ctx.secrets);
+    harness.ctx.secrets.resolve = vi.fn(async (ref: string) => {
+      if (ref === UNREADABLE) throw new Error("Secret not found");
+      return realResolve(ref);
+    }) as never;
+    await expect(harness.performAction("serviceKeys.save", { fal: UNREADABLE }, owner)).rejects.toThrow(/could not be read/);
+    expect((await harness.performAction<any>("serviceKeys.get", {}, owner)).keys[1]).toMatchObject({ service: "fal", source: "instance" });
+  });
+
+  it("the company's own key wins for that company only; clearing it goes back to the instance's key", async () => {
+    const { harness, fake } = await setup();
+    const saved = await harness.performAction<any>("serviceKeys.save", { fal: COMPANY_FAL, higgsfield: COMPANY_HIGGS }, owner);
+    expect(saved.keys.map((k: any) => [k.service, k.source, k.companySecretId])).toEqual([
+      ["sogni", "instance", null],
+      ["fal", "company", COMPANY_FAL],
+      ["higgsfield", "company", COMPANY_HIGGS],
+    ]);
+    expect(saved.keys[1].sourceText).toBe("This company's own key");
+    // Another company still sees (and would use) the instance's keys.
+    expect((await harness.performAction<any>("serviceKeys.get", {}, otherOwner)).keys.map((k: any) => k.source)).toEqual(["instance", "instance", "none"]);
+    expect((await harness.performAction<any>("identities.generationOptions", {}, owner)).services).toEqual({ sogni: true, fal: true, higgsfield: true });
+    expect((await harness.performAction<any>("identities.generationOptions", {}, otherOwner)).services).toEqual({ sogni: true, fal: true, higgsfield: false });
+    expect(await harness.performAction<any>("edit.capabilities", {}, owner)).toEqual({ sogni: true, fal: true, higgsfield: true });
+
+    // A real Fal call for this company is made with the company's key.
+    const identity = await makeIdentity(harness);
+    await harness.performAction<any>("identities.candidates", { identityId: identity.id, kind: "portrait", service: "fal", model: "fal-ai/flux-2-pro/edit" }, owner);
+    const call = fake.calls.find((c) => c.url === "https://fal.run/fal-ai/flux-2-pro/edit")!;
+    expect(call.headers.Authorization).toBe(`Key resolved:${COMPANY_FAL}`);
+
+    // Cleared: back to the instance's key.
+    const cleared = await harness.performAction<any>("serviceKeys.save", { fal: null }, owner);
+    expect(cleared.keys.map((k: any) => k.source)).toEqual(["instance", "instance", "company"]);
+    fake.calls.length = 0;
+    await harness.performAction<any>("identities.candidates", { identityId: identity.id, kind: "portrait", service: "fal", model: "fal-ai/flux-2-pro/edit" }, owner);
+    expect(fake.calls.find((c) => c.url === "https://fal.run/fal-ai/flux-2-pro/edit")!.headers.Authorization).toBe(`Key resolved:${FAL_REF}`);
+  });
+
+  it("no key reaches the browser: the page only gets secret ids and where each key comes from", async () => {
+    const { harness } = await setup();
+    await harness.performAction("serviceKeys.save", { fal: COMPANY_FAL }, owner);
+    const text = JSON.stringify(await harness.performAction<any>("serviceKeys.get", {}, owner));
+    expect(text).not.toContain("resolved:");
+    expect(text).not.toContain(FAL_REF);
   });
 });

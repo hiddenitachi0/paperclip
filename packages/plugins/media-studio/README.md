@@ -64,6 +64,15 @@ Generation runs behind a `GenerationProvider` interface, selected in the plugin'
 | `sogni` | a Sogni key (as a Paperclip **secret ref** set in settings) | durable workflow at `https://api.sogni.ai` — see below |
 | `comfyui` | a `comfyUrl` (over Tailscale) | self-hosted, swappable GPU endpoint |
 
+**Keys per company.** The Sogni, Fal.ai and Higgsfield keys can be set per company: in Media Studio's
+**Settings** tab the company's owner or an admin picks the company's own key for each service from the
+company's Secrets (`src/company-settings.ts`, plugin state `serviceKeys`). A service without the company's own
+key uses the instance's key from the plugin's instance settings, which only the instance admin sees and changes
+(at the bottom of the same tab). The tab says which one each service uses ("This company's own key" /
+"Using the instance's key (set by the instance admin)"). Only secret ids are stored; values are read on the
+server for each call and never reach the browser. The server's own Media Studio paths (Create tab, storylines)
+read the same picks (`server/src/services/media-studio-company-keys.ts`).
+
 ## Keeping a character consistent
 
 A look can describe one person (or product) in detail, so every picture of them looks alike over time. All of it is
@@ -235,9 +244,13 @@ The approval it files is a normal `request_board_approval`, so it also shows up 
 
 - **Identity** (`src/identity.ts`, stored per company in plugin state `identities`): a saved person, separate
   from looks. Creating one requires two ticked confirmations (fictional/AI-made or written consent; adult 18+).
-  "Analyse picture" sends the upload to the company's analysis model (identity settings: a saved model from
-  Settings > Models or one typed in, key from company Secrets) and accepts only strict JSON; anything that does
-  not clearly say "adult" blocks the picture. Crops (face, body, outfit, other) are cut on the server with sharp.
+  "Analyse picture" sends the upload to the company's analysis model (identity settings: one of the company's
+  saved models from Settings > Models, key from company Secrets). The Paperclip server makes that call
+  (`ctx.models.analyseImage`, capability `models.image_analysis.run`), not the worker: it reads the saved model's
+  provider, model and address itself, reaches a company's own model server (Ollama on a tailnet address) the same
+  way quick agents do, sends no tools and records the cost. The plugin never names an address. The answer is
+  still checked here as strict JSON; anything that does not clearly say "adult" blocks the picture. Crops (face,
+  body, outfit, other) are cut on the server with sharp.
 - A look with an identity sends the face crop as picture 1, the body crop as picture 2 when the model has room,
   the outfit crop only with "same outfit", then the look's own pictures. On Sogni with no model on the look, the
   identity's model is used (krea-identity-edit; qwen when a third picture is needed). Seeds never keep a person.

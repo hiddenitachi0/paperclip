@@ -1257,6 +1257,12 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
         },
       },
 
+      models: {
+        async analyseImage(companyId, input) {
+          return callHost("models.analyseImage", { companyId, ...input });
+        },
+      },
+
       billing: {
         async reserveMediaStudioDirectSpend(companyId, input) {
           return callHost("billing.reserveMediaStudioDirectSpend", { companyId, ...input });

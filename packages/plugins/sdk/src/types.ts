@@ -57,6 +57,8 @@ import type {
   PluginMediaStudioDirectSpendReservation,
   PluginMediaStudioDirectSpendSettlement,
   PluginAgentMediaCostRecording,
+  PluginImageAnalysisInput,
+  PluginImageAnalysisResult,
 } from "./protocol.js";
 
 // ---------------------------------------------------------------------------
@@ -1843,6 +1845,21 @@ export interface PluginPersonasClient {
 }
 
 /**
+ * `ctx.models` — ask one of the company's saved models (Settings > Models)
+ * to look at a picture. Requires `models.image_analysis.run`.
+ *
+ * The host does the call, not the worker: it finds the model's provider,
+ * model id and address from the company's saved model (so a company's own
+ * model server on its own network can be reached the same way quick agents
+ * reach it), reads the picture from the company's Files itself, sends no
+ * tools, records the cost on the company, and returns only the text. It only
+ * works inside a UI action of a person who manages the company.
+ */
+export interface PluginModelsClient {
+  analyseImage(companyId: string, input: PluginImageAnalysisInput): Promise<PluginImageAnalysisResult>;
+}
+
+/**
  * `ctx.billing` — reserve spend against the same company budget and shared
  * Media Studio cap the Create tab uses (DUR-4441). Requires
  * `billing.media_studio_direct.reserve`.
@@ -2087,6 +2104,9 @@ export interface PluginContext {
 
   /** Spend reservation against the company budget and shared Media Studio cap. Requires `billing.media_studio_direct.reserve`. */
   billing: PluginBillingClient;
+
+  /** Picture analysis with the company's saved models, run by the host. Requires `models.image_analysis.run`. */
+  models: PluginModelsClient;
 
   /** Company files not tied to a task. Requires `company.files.create` / `company.files.read`. */
   files: PluginFilesClient;
