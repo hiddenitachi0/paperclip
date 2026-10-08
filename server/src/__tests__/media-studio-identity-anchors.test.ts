@@ -19,6 +19,7 @@ import {
 } from "../../../packages/plugins/media-studio/src/identity.js";
 import { ANALYSIS_SYSTEM_PROMPT, parseAnalysis } from "../../../packages/plugins/media-studio/src/vision-analysis.js";
 import { crc32, zipStore } from "../../../packages/plugins/media-studio/src/lora-training.js";
+import { HiggsfieldClient, HiggsfieldProvider, readHiggsfieldCredentials, soulSize } from "../../../packages/plugins/media-studio/src/higgsfield.js";
 
 /**
  * Identity anchors (people), rooms and LoRA training in Media Studio. Every
@@ -603,13 +604,98 @@ describe("rooms: place a product through a zone mask", () => {
   });
 });
 
-// ─── LoRA training ────────────────────────────────────────────────────────────
+// ─── Training set ─────────────────────────────────────────────────────────────
+
+const up = (fileId: string) => ({ fileId, provenance: { source: "upload" } });
+
+describe("training set: generate anywhere, keep provenance, mix batches", () => {
+  it("generates with Sogni (with a public LoRA) and with Fal, and each picture keeps how it was made", async () => {
+    const { harness, fake } = await setup();
+    const identity = await makeIdentity(harness);
+    const options = await harness.performAction<any>("identities.generationOptions", {}, owner);
+    expect(options.services).toEqual({ sogni: true, fal: true, higgsfield: false });
+    expect(options.models.sogni[0]).toBe("krea-identity-edit");
+    expect(options.models.fal).toContain("fal-ai/nano-banana-2/edit");
+
+    const sogni = await harness.performAction<any>(
+      "trainingSet.generate",
+      { identityId: identity.id, service: "sogni", model: "krea-identity-edit", loras: [{ id: "lora-x", strength: 0.6 }], prompt: "three-quarter view, window light", count: 2 },
+      owner,
+    );
+    expect(sogni.pictures).toHaveLength(2);
+    expect(sogni.pictures[0]).toMatchObject({ service: "sogni", model: "krea-identity-edit", loras: [{ id: "lora-x", strength: 0.6 }], seed: null });
+    const step = fake.calls.find((c) => c.url.endsWith("/v1/creative-agent/workflows") && c.method === "POST")!.body.input.steps[0].arguments;
+    expect(step).toMatchObject({ loras: ["lora-x"], loraStrengths: [0.6], numberOfVariations: 2 });
+    expect(step.prompt).toMatch(/three-quarter view, window light/);
+
+    const reserve = vi.spyOn(harness.ctx.billing, "reserveMediaStudioDirectSpend");
+    const fal = await harness.performAction<any>(
+      "trainingSet.generate",
+      { identityId: identity.id, service: "fal", model: "fal-ai/nano-banana-2/edit", prompt: "laughing, outdoors", count: 2 },
+      owner,
+    );
+    expect(reserve).toHaveBeenCalledWith(COMPANY, expect.objectContaining({ action: "identity-pictures-fal" }));
+    const falCall = fake.calls.find((c) => c.url === "https://fal.run/fal-ai/nano-banana-2/edit")!;
+    expect(falCall.body).toMatchObject({ num_images: 2 });
+    expect(falCall.body.image_urls).toHaveLength(2);
+    expect(fal.pictures[0]).toMatchObject({ service: "fal", model: "fal-ai/nano-banana-2/edit" });
+
+    await expect(
+      harness.performAction("trainingSet.generate", { identityId: identity.id, service: "fal", model: "fal-ai/nano-banana-2/edit", loras: [{ id: "x", strength: 1 }], prompt: "p" }, owner),
+    ).rejects.toThrow(/take no LoRAs/);
+    await expect(
+      harness.performAction("trainingSet.generate", { identityId: identity.id, service: "sogni", loras: [{ id: "personal-1", strength: 1 }], prompt: "p" }, owner),
+    ).rejects.toThrow(/content filter off/);
+    await expect(harness.performAction("trainingSet.generate", { identityId: identity.id, service: "higgsfield", prompt: "p" }, owner)).rejects.toThrow(/Soul ID/);
+
+    // Mix both batches and an own photo into one set.
+    await harness.performAction("trainingSet.add", { identityId: identity.id, pictures: [{ fileId: LOOKREF1, provenance: sogni.pictures[0] }], batch: { service: "sogni", model: "krea-identity-edit", loras: [{ id: "lora-x", strength: 0.6 }], prompts: ["three-quarter view, window light"] } }, owner);
+    await harness.performAction("trainingSet.add", { identityId: identity.id, pictures: [{ fileId: LOOKREF2, provenance: fal.pictures[0] }], batch: { service: "fal", model: "fal-ai/nano-banana-2/edit", prompts: ["laughing, outdoors"] } }, owner);
+    const added = await harness.performAction<any>("trainingSet.add", { identityId: identity.id, pictures: [up(EXTRA)] }, owner);
+    const set = added.identity.trainingSet;
+    expect(set.pictures.map((p: any) => [p.fileId, p.source, p.service, p.model])).toEqual([
+      [LOOKREF1, "generated", "sogni", "krea-identity-edit"],
+      [LOOKREF2, "generated", "fal", "fal-ai/nano-banana-2/edit"],
+      [EXTRA, "upload", null, null],
+    ]);
+    expect(set.pictures[0].loras).toEqual([{ id: "lora-x", strength: 0.6 }]);
+    expect(set.batches.map((b: any) => b.service)).toEqual(["sogni", "fal"]);
+    await expect(harness.performAction("trainingSet.add", { identityId: identity.id, pictures: [up(FOREIGN)] }, owner)).rejects.toThrow(/not in this company's Files/);
+    await expect(harness.performAction("trainingSet.add", { identityId: identity.id, pictures: [up(SOFA)] }, member)).rejects.toThrow(/owner or an admin/);
+  });
+
+  it("candidates can use the chosen service and model too", async () => {
+    const { harness, fake } = await setup();
+    const identity = await makeIdentity(harness);
+    const res = await harness.performAction<any>("identities.candidates", { identityId: identity.id, kind: "portrait", service: "fal", model: "fal-ai/flux-2-pro/edit" }, owner);
+    expect(res.candidates[0]).toMatchObject({ service: "fal", model: "fal-ai/flux-2-pro/edit", kind: "portrait" });
+    expect(fake.calls.some((c) => c.url === "https://fal.run/fal-ai/flux-2-pro/edit")).toBe(true);
+  });
+
+  it("downloads the ticked pictures as a zip with captions and a README of where each came from", async () => {
+    const { harness } = await setup();
+    const identity = await makeIdentity(harness);
+    await harness.performAction("trainingSet.add", { identityId: identity.id, pictures: [{ fileId: LOOKREF1, provenance: { service: "sogni", model: "qwen", prompt: "a walk", loras: [] } }, up(EXTRA)] }, owner);
+    await expect(harness.performAction("trainingSet.download", { identityId: identity.id }, owner)).rejects.toThrow(/Tick/);
+    await harness.performAction("trainingSet.select", { identityId: identity.id, fileIds: [LOOKREF1, EXTRA] }, owner);
+    const res = await harness.performAction<any>("trainingSet.download", { identityId: identity.id, triggerWord: "majaberg" }, owner);
+    expect(res.filename).toBe("maja-berg-training-set.zip");
+    const zip = Buffer.from(res.contentBase64, "base64");
+    const text = zip.toString("latin1");
+    for (const name of ["001.png", "001.txt", "002.png", "002.txt", "README.md"]) expect(text).toContain(name);
+    expect(text).toContain("majaberg, a walk");
+    expect(text).toContain("002.png: own photo");
+    expect(zip.readUInt16LE(zip.length - 22 + 10)).toBe(5);
+  });
+});
+
+// ─── Train with: Fal LoRA ─────────────────────────────────────────────────────
 
 describe("LoRA training flow (stubbed Fal and Hugging Face)", () => {
   async function ready(harness: TestHarness) {
     const identity = await makeIdentity(harness);
     const ids = [FACE, BODY, OUTFIT, LOOKREF1, LOOKREF2, ROOM, SOFA, ORIGINAL, MASK];
-    await harness.performAction("lora.addPictures", { identityId: identity.id, fileIds: ids }, owner);
+    await harness.performAction("trainingSet.add", { identityId: identity.id, pictures: ids.map(up) }, owner);
     return { identity, ids };
   }
 
@@ -619,34 +705,26 @@ describe("LoRA training flow (stubbed Fal and Hugging Face)", () => {
     expect(loraTrainingCostCents()).toBe(300);
     expect(mediaStudioEditActionProvider("lora-training")).toBe("fal");
     expect(mediaStudioEditActionProvider("identity-pictures")).toBe("sogni");
+    expect(mediaStudioEditActionProvider("identity-pictures-fal")).toBe("fal");
+    expect(mediaStudioEditActionProvider("higgsfield-soul-id")).toBe("higgsfield");
   });
 
   it("the state machine only allows the documented moves", () => {
-    expect(() => assertTrainingMove("collecting", "published")).toThrow(/cannot move/);
-    expect(() => assertTrainingMove("training", "collecting")).toThrow(/cannot move/);
+    expect(() => assertTrainingMove(null, "published")).toThrow(/cannot move/);
+    expect(() => assertTrainingMove("training", "training")).toThrow(/cannot move/);
     expect(() => assertTrainingMove("trained", "published")).not.toThrow();
     expect(() => assertTrainingMove("failed", "training")).not.toThrow();
+    expect(() => assertTrainingMove("published", "training")).not.toThrow();
   });
 
-  it("training pictures come from the face crop with varied requests", async () => {
-    const { harness, fake } = await setup();
-    const identity = await makeIdentity(harness);
-    const res = await harness.performAction<any>("lora.pictures", { identityId: identity.id, index: 4 }, owner);
-    expect(res.pictures).toHaveLength(2);
-    const start = fake.calls.find((c) => c.url.endsWith("/v1/creative-agent/workflows") && c.method === "POST")!;
-    expect(start.body.input.steps[0].arguments.prompt).toMatch(/walking on a city street/);
-  });
-
-  it("collect -> tick (at least 10) -> confirm price -> train -> poll -> publish (public) -> import into Sogni", async () => {
+  it("tick (at least 10) -> confirm price -> train -> poll -> publish (public) -> import into Sogni", async () => {
     const { harness, fake } = await setup();
     const { identity, ids } = await ready(harness);
-    await expect(harness.performAction("lora.select", { identityId: identity.id, fileIds: [FOREIGN] }, owner)).rejects.toThrow(/Only pictures made for this training/);
-    await harness.performAction("lora.select", { identityId: identity.id, fileIds: ids }, owner);
+    await expect(harness.performAction("trainingSet.select", { identityId: identity.id, fileIds: [FOREIGN] }, owner)).rejects.toThrow(/Only pictures in this training set/);
+    await harness.performAction("trainingSet.select", { identityId: identity.id, fileIds: ids }, owner);
     await expect(harness.performAction("lora.train", { identityId: identity.id, triggerWord: "majaberg", confirmCostCents: 300 }, owner)).rejects.toThrow(/at least 10/);
-    // Ten ticked pictures (one more added).
-    await harness.performAction("lora.addPictures", { identityId: identity.id, fileIds: [EXTRA] }, owner);
-    const all = [...ids, EXTRA];
-    await harness.performAction("lora.select", { identityId: identity.id, fileIds: all }, owner);
+    await harness.performAction("trainingSet.add", { identityId: identity.id, pictures: [up(EXTRA)] }, owner);
+    await harness.performAction("trainingSet.select", { identityId: identity.id, fileIds: [...ids, EXTRA] }, owner);
     await expect(harness.performAction("lora.train", { identityId: identity.id, triggerWord: "majaberg" }, owner)).rejects.toThrow(/\$3\.00/);
     await expect(harness.performAction("lora.train", { identityId: identity.id, triggerWord: "majaberg", confirmCostCents: 300 }, member)).rejects.toThrow(/owner or an admin/);
     await expect(harness.performAction("lora.train", { identityId: identity.id, triggerWord: "a", confirmCostCents: 300 }, owner)).rejects.toThrow(/trigger word/);
@@ -655,20 +733,21 @@ describe("LoRA training flow (stubbed Fal and Hugging Face)", () => {
     const started = await harness.performAction<any>("lora.train", { identityId: identity.id, triggerWord: "majaberg", confirmCostCents: 300 }, owner);
     expect(reserve).toHaveBeenCalledWith(COMPANY, expect.objectContaining({ action: "lora-training" }));
     expect(started.identity.training).toMatchObject({ status: "training", falRequestId: "req-1", triggerWord: "majaberg", steps: 1000 });
+    expect(started.identity.training.trainedFileIds).toHaveLength(10);
     const zipPut = fake.bytes.find((b) => b.url === "https://upload.fal.media/put/zip")!;
     const zip = Buffer.from(zipPut.body as Uint8Array);
     expect(zip.readUInt32LE(0)).toBe(0x04034b50);
-    expect(zip.readUInt16LE(zip.length - 22 + 10)).toBe(10); // ten pictures
+    expect(zip.readUInt16LE(zip.length - 22 + 10)).toBe(10);
     const submit = fake.calls.find((c) => c.url === "https://queue.fal.run/fal-ai/krea-2-trainer" && c.method === "POST")!;
     expect(submit.body).toMatchObject({ images_data_url: "https://v3.fal.media/files/dataset.zip", trigger_phrase: "majaberg", steps: 1000 });
     expect(submit.headers.Authorization).toBe(`Key resolved:${FAL_REF}`);
     await expect(harness.performAction("lora.train", { identityId: identity.id, triggerWord: "majaberg", confirmCostCents: 300 }, owner)).rejects.toThrow(/cannot move/);
 
-    // Still training.
     expect((await harness.performAction<any>("lora.status", { identityId: identity.id }, member)).progress).toBe("training");
     fake.falStatus = "COMPLETED";
     const done = await harness.performAction<any>("lora.status", { identityId: identity.id }, member);
     expect(done.identity.training).toMatchObject({ status: "trained", resultUrl: "https://v3.fal.media/files/lora.safetensors" });
+    expect(done.identity.trainedIdentities).toEqual([expect.objectContaining({ provider: "fal-lora", ref: "https://v3.fal.media/files/lora.safetensors", status: "ready" })]);
 
     await expect(harness.performAction("lora.publish", { identityId: identity.id, repoName: "maja-lora" }, owner)).rejects.toThrow(/PUBLIC/);
     await expect(harness.performAction("lora.publish", { identityId: identity.id, repoName: "maja-lora", confirmPublic: true }, owner)).rejects.toThrow(/Hugging Face token/);
@@ -681,8 +760,8 @@ describe("LoRA training flow (stubbed Fal and Hugging Face)", () => {
       url: "https://huggingface.co/acme/maja-lora/resolve/main/maja-lora.safetensors",
       triggerWord: "majaberg",
       repo: "acme/maja-lora",
-      sogniLoraId: null,
     });
+    expect(published.identity.trainedIdentities[0].url).toBe(published.identity.lora.url);
     expect(published.identity.training.status).toBe("published");
     const create = fake.calls.find((c) => c.url === "https://huggingface.co/api/repos/create")!;
     expect(create.body).toMatchObject({ type: "model", name: "maja-lora", private: false });
@@ -693,18 +772,18 @@ describe("LoRA training flow (stubbed Fal and Hugging Face)", () => {
     expect(String(commit.body).split("\n").map((l) => JSON.parse(l).key)).toEqual(["header", "lfsFile", "file"]);
 
     const imported = await harness.performAction<any>("lora.importSogni", { identityId: identity.id }, owner);
-    expect(imported.identity.lora).toMatchObject({ sogniLoraId: "personal-abc", sogniStatus: "queued" });
+    expect(imported.identity.trainedIdentities[1]).toMatchObject({ provider: "sogni-lora", ref: "personal-abc", status: "queued", triggerWord: "majaberg" });
     const importCall = fake.calls.find((c) => c.url === "https://api.sogni.ai/v1/loras/personal")!;
     expect(importCall.body).toMatchObject({ url: published.identity.lora.url, modelId: "krea2_identity_edit_v1_2", rightsConfirmed: true });
-    const checked = await harness.performAction<any>("lora.sogniStatus", { identityId: identity.id }, owner);
-    expect(checked.identity.lora.sogniStatus).toBe("ready");
+    const checked = await harness.performAction<any>("trained.status", { identityId: identity.id }, owner);
+    expect(checked.identity.trainedIdentities[1].status).toBe("ready");
   });
 
   it("a failed training gives the reservation back and can be retried", async () => {
     const { harness, fake } = await setup();
     const { identity, ids } = await ready(harness);
-    await harness.performAction("lora.addPictures", { identityId: identity.id, fileIds: [EXTRA] }, owner);
-    await harness.performAction("lora.select", { identityId: identity.id, fileIds: [...ids, EXTRA] }, owner);
+    await harness.performAction("trainingSet.add", { identityId: identity.id, pictures: [up(EXTRA)] }, owner);
+    await harness.performAction("trainingSet.select", { identityId: identity.id, fileIds: [...ids, EXTRA] }, owner);
     await harness.performAction("lora.train", { identityId: identity.id, triggerWord: "majaberg", confirmCostCents: 300 }, owner);
     const release = vi.spyOn(harness.ctx.billing, "releaseMediaStudioDirectSpend");
     fake.falStatus = "ERROR";
@@ -716,14 +795,16 @@ describe("LoRA training flow (stubbed Fal and Hugging Face)", () => {
     expect(again.identity.training.status).toBe("training");
   });
 
-  it("a ready Sogni LoRA rides along only with a filter-off look and a Krea model", async () => {
+  it("a ready Sogni LoRA rides along only with a filter-off look and a Krea model; a look can pick which one", async () => {
     const { harness } = await setup();
-    const identity = await makeIdentity(harness, {
-      lora: { source: "huggingface", url: "https://huggingface.co/acme/m/resolve/main/m.safetensors", triggerWord: "majaberg", strength: 0.7, sogniLoraId: "personal-abc", sogniStatus: "ready" },
-    });
+    const identity = await makeIdentity(harness);
+    await harness.performAction("lora.attach", { identityId: identity.id, sogniLoraId: "personal-old", strength: 0.5, triggerWord: "oldword" }, owner);
+    const attached = await harness.performAction<any>("lora.attach", { identityId: identity.id, sogniLoraId: "personal-abc", strength: 0.7, triggerWord: "majaberg" }, owner);
+    const oldId = attached.identity.trainedIdentities[0].id;
     await harness.ctx.state.set({ scopeKind: "company", scopeId: COMPANY, stateKey: "looks" }, [
       { id: "on", name: "Filtered", style: "", model: null, seed: null, referenceFileIds: [], identityId: identity.id, updatedAt: "x" },
       { id: "off", name: "Open", style: "", model: null, seed: null, referenceFileIds: [], identityId: identity.id, safeContentFilter: false, contentFilterOffBy: "owner-1", updatedAt: "x" },
+      { id: "old", name: "Old", style: "", model: null, seed: null, referenceFileIds: [], identityId: identity.id, identityTrained: { sogni: oldId }, safeContentFilter: false, contentFilterOffBy: "owner-1", updatedAt: "x" },
     ]);
     const filtered = await prepareGeneration(harness.ctx, COMPANY, { prompt: "a walk", look: "Filtered" });
     if ("error" in filtered) throw new Error(filtered.error);
@@ -733,6 +814,86 @@ describe("LoRA training flow (stubbed Fal and Hugging Face)", () => {
     if ("error" in open) throw new Error(open.error);
     expect(open.input.loras).toEqual([{ id: "personal-abc", strength: 0.7 }]);
     expect(open.input.prompt.startsWith("majaberg, a walk")).toBe(true);
+    const old = await prepareGeneration(harness.ctx, COMPANY, { prompt: "a walk", look: "Old" });
+    if ("error" in old) throw new Error(old.error);
+    expect(old.input.loras).toEqual([{ id: "personal-old", strength: 0.5 }]);
+  });
+});
+
+// ─── Train with: Higgsfield Soul ID ───────────────────────────────────────────
+
+describe("Higgsfield (stubbed): Soul ID from the training set, and pictures with it", () => {
+  const HF_KEY = "12345678-1234-4234-8234-123456789016";
+
+  function higgsfieldFake(harness: TestHarness, fake: Fake) {
+    const base = harness.ctx.http.fetch;
+    harness.ctx.http.fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      const u = new URL(url);
+      if (u.host !== "api.higgsfield.ai" && u.host !== "cdn.higgsfield.ai") return base(url, init);
+      const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+      fake.calls.push({ url, method: init?.method ?? "GET", body, headers: (init?.headers ?? {}) as Record<string, string> });
+      if (u.host === "cdn.higgsfield.ai") return new Response(new Uint8Array(PICTURE), { status: 200, headers: { "Content-Type": "image/png" } });
+      if (u.pathname === "/files/generate-upload-url") return json(200, { upload_url: "https://uploads.higgsfield.ai/put/1", public_url: "https://cdn.higgsfield.ai/in/1.png", upload_headers: { "Content-Type": "image/png" } });
+      if (u.pathname === "/v1/custom-references") return json(200, { id: "soul-1", name: "Maja Berg", status: "queued" });
+      if (u.pathname === "/v1/custom-references/soul-1") return json(200, { id: "soul-1", status: "completed" });
+      if (u.pathname === "/v1/text2image/soul") return json(200, { id: "set-1", jobs: [{ id: "j1", status: "queued" }] });
+      if (u.pathname === "/v1/job-sets/set-1") {
+        const done = (n: number) => ({ id: `j${n}`, status: "completed", results: { raw: { url: `https://cdn.higgsfield.ai/out/${n}.png` }, min: { url: `https://cdn.higgsfield.ai/out/${n}.png` } } });
+        return json(200, { id: "set-1", jobs: [done(1), done(2), done(3), done(4)] });
+      }
+      return json(404, { detail: "unexpected" });
+    }) as typeof harness.ctx.http.fetch;
+  }
+
+  it("makes a Soul ID from 5-20 ticked pictures, polls it ready, then generates training pictures and agent pictures with it", async () => {
+    const { harness, fake } = await setup({ higgsfieldKeySecretRef: HF_KEY });
+    higgsfieldFake(harness, fake);
+    const identity = await makeIdentity(harness);
+    await harness.performAction("trainingSet.add", { identityId: identity.id, pictures: [FACE, BODY, OUTFIT, LOOKREF1].map(up) }, owner);
+    await harness.performAction("trainingSet.select", { identityId: identity.id, fileIds: [FACE, BODY, OUTFIT, LOOKREF1] }, owner);
+    await expect(harness.performAction("higgsfield.soulId", { identityId: identity.id }, owner)).rejects.toThrow(/5 to 20/);
+    await harness.performAction("trainingSet.add", { identityId: identity.id, pictures: [up(LOOKREF2)] }, owner);
+    await harness.performAction("trainingSet.select", { identityId: identity.id, fileIds: [FACE, BODY, OUTFIT, LOOKREF1, LOOKREF2] }, owner);
+    await expect(harness.performAction("higgsfield.soulId", { identityId: identity.id }, member)).rejects.toThrow(/owner or an admin/);
+    const reserve = vi.spyOn(harness.ctx.billing, "reserveMediaStudioDirectSpend");
+    const made = await harness.performAction<any>("higgsfield.soulId", { identityId: identity.id, variant: "soul-cinematic" }, owner);
+    expect(reserve).toHaveBeenCalledWith(COMPANY, expect.objectContaining({ action: "higgsfield-soul-id" }));
+    expect(made.identity.trainedIdentities).toEqual([expect.objectContaining({ provider: "higgsfield-soul", ref: "soul-1", variant: "soul-cinematic", status: "queued" })]);
+    const create = fake.calls.find((c) => c.url === "https://api.higgsfield.ai/v1/custom-references")!;
+    // The harness resolves a secret to "resolved:<ref>", which has the id:secret shape.
+    expect(create.headers.Authorization).toBe(`Key resolved:${HF_KEY}`);
+    expect(create.body).toEqual({ name: "Maja Berg", input_images: Array.from({ length: 5 }, () => ({ type: "image_url", image_url: "https://cdn.higgsfield.ai/in/1.png" })) });
+    // Pictures went to Higgsfield's storage with the upload headers, never with the key.
+    const puts = fake.bytes.filter((b) => b.url === "https://uploads.higgsfield.ai/put/1");
+    expect(puts).toHaveLength(5);
+    expect(puts[0]!.headers).toEqual({ "Content-Type": "image/png" });
+
+    const ready = await harness.performAction<any>("trained.status", { identityId: identity.id }, owner);
+    expect(ready.identity.trainedIdentities[0].status).toBe("completed");
+
+    // Training pictures on Higgsfield: Soul with the Soul ID, no reference pictures.
+    const pics = await harness.performAction<any>("trainingSet.generate", { identityId: identity.id, service: "higgsfield", model: "soul", prompt: "profile view", count: 2 }, owner);
+    expect(pics.pictures).toHaveLength(2);
+    expect(pics.pictures[0]).toMatchObject({ service: "higgsfield", model: "soul", workflowId: "set-1" });
+    expect(typeof pics.pictures[0].seed).toBe("number");
+    const gen = fake.calls.find((c) => c.url === "https://api.higgsfield.ai/v1/text2image/soul")!;
+    expect(gen.body.params).toMatchObject({ custom_reference_id: "soul-1", custom_reference_strength: 1, batch_size: 4, quality: "1080p" });
+    expect(gen.body.params.prompt).toMatch(/profile view/);
+
+    // An agent picture with provider higgsfield: the person's Soul ID, no reference pictures.
+    const prepared = await prepareGeneration(harness.ctx, COMPANY, { prompt: "Maja on a beach", provider: "higgsfield" });
+    if ("error" in prepared) throw new Error(prepared.error);
+    expect(prepared.input.customReferenceId).toBe("soul-1");
+    expect(prepared.input.referenceImages ?? []).toHaveLength(0);
+    expect(prepared.notes.join(" ")).toMatch(/Higgsfield takes no reference pictures/);
+  });
+
+  it("refuses a key that is not id:secret, and says plainly that Soul takes no reference pictures", async () => {
+    expect(() => readHiggsfieldCredentials("just-a-key")).toThrow(/id:secret/);
+    const provider = new HiggsfieldProvider(new HiggsfieldClient({ credentials: "a:b", apiFetch: vi.fn() as never, bytesFetch: vi.fn() as never }));
+    await expect(provider.generate({ prompt: "x", referenceImages: ["data:image/png;base64,AA=="] })).rejects.toThrow(/does not take reference pictures/);
+    expect(soulSize("portrait_16_9")).toBe("1152x2048");
+    expect(soulSize("1280x720")).toBe("2048x1152");
   });
 });
 

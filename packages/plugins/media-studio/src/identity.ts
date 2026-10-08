@@ -74,12 +74,84 @@ export interface IdentityLora {
   triggerWord: string;
   /** 0..1 (Sogni personal LoRAs take 0 < strength <= 1). */
   strength: number;
-  /** Sogni's id for it once imported ("personal-..."), else null. */
-  sogniLoraId: string | null;
-  /** Sogni's import state: queued, ready, rejected, revoked (null: not imported). */
-  sogniStatus: string | null;
   /** "user/repo" on Hugging Face, when published there. */
   repo: string | null;
+}
+
+/**
+ * What a training produced that a picture service can use, one per service:
+ * a Sogni personal LoRA ("personal-..."), a LoRA file usable on Fal (its
+ * address), or a Higgsfield Soul ID. A look picks which one to use per
+ * service; without a pick the newest ready one is used.
+ */
+export const TRAINED_PROVIDERS = ["sogni-lora", "fal-lora", "higgsfield-soul"] as const;
+export type TrainedProvider = (typeof TRAINED_PROVIDERS)[number];
+export interface TrainedIdentity {
+  id: string;
+  provider: TrainedProvider;
+  /** The service's own id (Sogni "personal-...", Higgsfield Soul ID) or the file's address (Fal). */
+  ref: string;
+  url: string | null;
+  /** Higgsfield: "soul-2" (pictures) or "soul-cinematic" (video). Otherwise null. */
+  variant: string | null;
+  triggerWord: string | null;
+  strength: number | null;
+  /** ready | queued | in_progress | failed | rejected | revoked ... (the service's own word, "ready" when usable). */
+  status: string;
+  createdAt: string;
+}
+
+/** Which picture service a trained identity is for. */
+export function trainedService(provider: TrainedProvider): "sogni" | "fal" | "higgsfield" {
+  return provider === "sogni-lora" ? "sogni" : provider === "fal-lora" ? "fal" : "higgsfield";
+}
+
+/** Usable now: Sogni says ready, Higgsfield says completed, a Fal file is always usable. */
+export function trainedReady(t: TrainedIdentity): boolean {
+  return t.status === "ready" || t.status === "completed";
+}
+
+/** The trained identity a picture on `service` uses: the look's pick when it is ready, else the newest ready one. */
+export function pickTrained(identity: Identity, service: string, lookPick: string | null | undefined): TrainedIdentity | null {
+  const usable = identity.trainedIdentities.filter((t) => trainedService(t.provider) === service && trainedReady(t));
+  if (lookPick) {
+    const picked = usable.find((t) => t.id === lookPick);
+    if (picked) return picked;
+  }
+  return usable.length > 0 ? usable[usable.length - 1]! : null;
+}
+
+/** Where one training picture came from: the service, model, LoRAs, request and seed it was made with, or an upload. */
+export interface TrainingPicture {
+  fileId: string;
+  source: "generated" | "upload";
+  service: string | null;
+  model: string | null;
+  loras: Array<{ id: string; strength: number }>;
+  prompt: string | null;
+  seed: number | null;
+  batchId: string | null;
+  addedAt: string;
+}
+
+/** One "Generate with" run: what it was made with, so the set can be made again. */
+export interface TrainingBatch {
+  id: string;
+  service: string;
+  model: string;
+  loras: Array<{ id: string; strength: number }>;
+  prompts: string[];
+  count: number;
+  createdAt: string;
+}
+
+/** The training set: pictures from any services (and own photos), and the ones ticked for training. */
+export interface TrainingSet {
+  pictures: TrainingPicture[];
+  selectedFileIds: string[];
+  batches: TrainingBatch[];
+  /** The editable list of variations ("three-quarter view, window light", ...). */
+  presets: string[];
 }
 
 export interface IdentityProvenance {
@@ -100,15 +172,13 @@ export interface IdentityConsent {
   confirmedAt: string;
 }
 
-export const TRAINING_STATES = ["collecting", "training", "trained", "published", "failed"] as const;
+export const TRAINING_STATES = ["training", "trained", "published", "failed"] as const;
 export type TrainingState = (typeof TRAINING_STATES)[number];
 
 export interface IdentityTraining {
   status: TrainingState;
-  /** Pictures made for training (company files), in the order they were made. */
-  datasetFileIds: string[];
-  /** The ones a person ticked as truly looking like this person. */
-  selectedFileIds: string[];
+  /** The training-set pictures this LoRA was trained on. */
+  trainedFileIds: string[];
   triggerWord: string;
   steps: number;
   estimatedCostCents: number;
@@ -139,7 +209,11 @@ export interface Identity {
   canonicalAsReference: boolean;
   /** Which model to use per service when a look does not pick one. */
   preferredModels: { sogni: string; sogniExtraSlot: string; fal: string | null };
+  /** The trained LoRA file and where it is published (the source of a "fal-lora"/"sogni-lora"). */
   lora: IdentityLora | null;
+  /** What trainings produced, per service (see TrainedIdentity). */
+  trainedIdentities: TrainedIdentity[];
+  trainingSet: TrainingSet | null;
   provenance: IdentityProvenance | null;
   consent: IdentityConsent;
   training: IdentityTraining | null;
@@ -224,7 +298,6 @@ export function readLoraInput(value: unknown, existing: IdentityLora | null): Id
   const triggerWord = text(raw.triggerWord, 60, "Trigger word") ?? "";
   const strength = typeof raw.strength === "number" ? raw.strength : Number(raw.strength ?? 0.8);
   if (!Number.isFinite(strength) || strength <= 0 || strength > 1) throw new Error("LoRA strength must be more than 0 and at most 1.");
-  const sogniLoraId = typeof raw.sogniLoraId === "string" && /^personal-[A-Za-z0-9-]{1,100}$/.test(raw.sogniLoraId) ? raw.sogniLoraId : null;
   return {
     source,
     url,
@@ -232,8 +305,6 @@ export function readLoraInput(value: unknown, existing: IdentityLora | null): Id
     baseModel: text(raw.baseModel, 100, "Base model") ?? "krea-2",
     triggerWord,
     strength,
-    sogniLoraId,
-    sogniStatus: sogniLoraId ? (typeof raw.sogniStatus === "string" ? raw.sogniStatus : existing?.sogniStatus ?? null) : null,
     repo: text(raw.repo, 200, "Repository") ?? null,
   };
 }
@@ -296,10 +367,33 @@ export function normalizeIdentity(value: unknown): Identity | null {
     lora,
     provenance: (raw.provenance as IdentityProvenance | null) ?? null,
     consent: consent as unknown as IdentityConsent,
+    trainedIdentities: Array.isArray(raw.trainedIdentities)
+      ? (raw.trainedIdentities as TrainedIdentity[]).filter(
+          (t) => t && typeof t.id === "string" && typeof t.ref === "string" && (TRAINED_PROVIDERS as readonly string[]).includes(t.provider),
+        )
+      : [],
+    trainingSet: normalizeTrainingSet(raw.trainingSet),
     training: (raw.training as IdentityTraining | null) ?? null,
     createdAt: str(raw.createdAt) ?? new Date(0).toISOString(),
     updatedAt: str(raw.updatedAt) ?? new Date(0).toISOString(),
   };
+}
+
+export function normalizeTrainingSet(value: unknown): TrainingSet | null {
+  const raw = value as Record<string, unknown> | null;
+  if (!raw || typeof raw !== "object") return null;
+  const pictures = Array.isArray(raw.pictures) ? (raw.pictures as TrainingPicture[]).filter((p) => p && typeof p.fileId === "string") : [];
+  const ids = new Set(pictures.map((p) => p.fileId));
+  return {
+    pictures,
+    selectedFileIds: Array.isArray(raw.selectedFileIds) ? (raw.selectedFileIds as unknown[]).filter((x): x is string => typeof x === "string" && ids.has(x)) : [],
+    batches: Array.isArray(raw.batches) ? (raw.batches as TrainingBatch[]) : [],
+    presets: Array.isArray(raw.presets) ? (raw.presets as unknown[]).filter((x): x is string => typeof x === "string").slice(0, 60) : [...TRAINING_REQUESTS],
+  };
+}
+
+export function emptyTrainingSet(): TrainingSet {
+  return { pictures: [], selectedFileIds: [], batches: [], presets: [...TRAINING_REQUESTS] };
 }
 
 export function cropFor(identity: Identity, role: CropRole): IdentityCrop | null {
@@ -431,10 +525,10 @@ export function sheetWithIdentity(lookSheet: CharacterSheet | null | undefined, 
 }
 
 /** Krea 2 family models a Krea 2 LoRA works with. */
-export function loraFitsModel(lora: IdentityLora, model: string | null | undefined): boolean {
+export function loraFitsModel(baseModel: string, model: string | null | undefined): boolean {
   if (!model) return false;
   const id = sogniCanonicalModelId(model).toLowerCase();
-  return /krea/i.test(lora.baseModel) ? id.startsWith("krea2") || id.startsWith("dark_beast_krea2") : false;
+  return /krea/i.test(baseModel) ? id.startsWith("krea2") || id.startsWith("dark_beast_krea2") : false;
 }
 
 // ─── Candidates and training pictures ────────────────────────────────────────
@@ -491,8 +585,9 @@ export const LORA_TRAINER_MODEL = "fal-ai/krea-2-trainer";
 export const LORA_TRAINING_STEPS = 1000;
 export const LORA_TRAINING_USD_PER_STEP = 0.003;
 export const LORA_MIN_PICTURES = 10;
-export const LORA_MAX_PICTURES = 30;
-export const LORA_DATASET_MAX = 40;
+export const LORA_MAX_PICTURES = 40;
+/** Pictures a training set can hold (generated batches and own photos together). */
+export const TRAINING_SET_MAX = 80;
 export const LORA_SOGNI_BASE_MODEL_ID = "krea2_identity_edit_v1_2";
 
 export function loraTrainingCostCents(steps = LORA_TRAINING_STEPS): number {
@@ -518,29 +613,21 @@ export function readRepoName(value: unknown): string {
 }
 
 /**
- * What a training may move to from where it is. "collecting": pictures are
- * being made and ticked; "training": Fal is training; "trained": the file is
- * on Fal; "published": the file is on Hugging Face; "failed": try again from
- * the ticked pictures.
+ * What a Fal LoRA training may move to. "training": Fal is training;
+ * "trained": the file is on Fal; "published": the file is on Hugging Face;
+ * "failed": try again. A new training can start when none is running.
  */
 export const TRAINING_TRANSITIONS: Record<TrainingState, TrainingState[]> = {
-  collecting: ["training"],
   training: ["trained", "failed"],
-  trained: ["published"],
-  published: [],
-  failed: ["training", "collecting"],
+  trained: ["published", "training"],
+  published: ["training"],
+  failed: ["training"],
 };
 
 export function assertTrainingMove(from: TrainingState | null, to: TrainingState): void {
-  const allowed = from === null ? to === "collecting" : TRAINING_TRANSITIONS[from].includes(to) || (to === "collecting" && from !== "training");
+  const allowed = from === null ? to === "training" : TRAINING_TRANSITIONS[from].includes(to);
   if (!allowed) {
-    const words: Record<TrainingState, string> = {
-      collecting: "picking pictures",
-      training: "training",
-      trained: "trained",
-      published: "published",
-      failed: "failed",
-    };
+    const words: Record<TrainingState, string> = { training: "training", trained: "trained", published: "published", failed: "failed" };
     throw new Error(`The LoRA training is ${from ? words[from] : "not started"}, so it cannot move to ${words[to]} now.`);
   }
 }

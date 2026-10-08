@@ -17,14 +17,21 @@ export const ACTION_ROOMS_LIST = "rooms.list";
 export const ACTION_ROOMS_SAVE = "rooms.save";
 export const ACTION_ROOMS_DELETE = "rooms.delete";
 export const ACTION_ROOMS_PLACE = "rooms.place";
-export const ACTION_LORA_PICTURES = "lora.pictures";
-export const ACTION_LORA_ADD_PICTURES = "lora.addPictures";
-export const ACTION_LORA_SELECT = "lora.select";
+export const ACTION_IDENTITIES_GENERATION_OPTIONS = "identities.generationOptions";
+export const ACTION_TRAINING_SET_GENERATE = "trainingSet.generate";
+export const ACTION_TRAINING_SET_ADD = "trainingSet.add";
+export const ACTION_TRAINING_SET_SELECT = "trainingSet.select";
+export const ACTION_TRAINING_SET_REMOVE = "trainingSet.remove";
+export const ACTION_TRAINING_SET_PRESETS = "trainingSet.presets";
+export const ACTION_TRAINING_SET_DOWNLOAD = "trainingSet.download";
+export const ACTION_HIGGSFIELD_SOUL = "higgsfield.soulId";
+export const ACTION_TRAINED_STATUS = "trained.status";
+export const ACTION_TRAINED_REMOVE = "trained.remove";
+export const ACTION_SOGNI_LORAS = "sogni.loras";
 export const ACTION_LORA_TRAIN = "lora.train";
 export const ACTION_LORA_STATUS = "lora.status";
 export const ACTION_LORA_PUBLISH = "lora.publish";
 export const ACTION_LORA_IMPORT_SOGNI = "lora.importSogni";
-export const ACTION_LORA_SOGNI_STATUS = "lora.sogniStatus";
 export const ACTION_LORA_ATTACH = "lora.attach";
 export const ACTION_LORA_RESET = "lora.reset";
 export const ACTION_EDIT_SEGMENT = "edit.segment";
@@ -109,8 +116,6 @@ export function formatDollars(cents: number): string {
 /** Plain words for where a LoRA training is. */
 export function trainingStatusText(status: string | null | undefined, progress?: string | null): string {
   switch (status) {
-    case "collecting":
-      return "Making and picking training pictures.";
     case "training":
       return `Fal.ai is training the LoRA${progress ? ` (${progress})` : ""}. This usually takes 10 to 30 minutes; you can leave this page.`;
     case "trained":
@@ -175,4 +180,14 @@ export async function listCompanyPictures(companyId: string): Promise<Array<{ fi
 export function visionModelsFirst<T extends { specs?: { vision?: boolean | null } | null; archivedAt?: string | null }>(entries: T[]): T[] {
   const live = entries.filter((e) => !e.archivedAt);
   return [...live.filter((e) => e.specs?.vision === true), ...live.filter((e) => e.specs?.vision !== true)];
+}
+
+/** The page's cost estimate for one batch: pictures x price per picture, or null when the service publishes none. */
+export function batchEstimateCents(priceCentsPerPicture: number | null | undefined, pictures: number): number | null {
+  return typeof priceCentsPerPicture === "number" ? priceCentsPerPicture * pictures : null;
+}
+
+/** How many calls a batch needs on a service that makes `perCall` pictures per call. */
+export function callsFor(pictures: number, perCall: number): number {
+  return Math.ceil(Math.max(0, pictures) / Math.max(1, perCall));
 }

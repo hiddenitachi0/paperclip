@@ -12,16 +12,25 @@ import {
   ACTION_IDENTITIES_USE_CANDIDATE,
   ACTION_IDENTITY_SETTINGS_GET,
   ACTION_IDENTITY_SETTINGS_SAVE,
-  ACTION_LORA_ADD_PICTURES,
+  ACTION_HIGGSFIELD_SOUL,
+  ACTION_IDENTITIES_GENERATION_OPTIONS,
   ACTION_LORA_ATTACH,
   ACTION_LORA_IMPORT_SOGNI,
-  ACTION_LORA_PICTURES,
   ACTION_LORA_PUBLISH,
   ACTION_LORA_RESET,
-  ACTION_LORA_SELECT,
-  ACTION_LORA_SOGNI_STATUS,
   ACTION_LORA_STATUS,
   ACTION_LORA_TRAIN,
+  ACTION_SOGNI_LORAS,
+  ACTION_TRAINED_REMOVE,
+  ACTION_TRAINED_STATUS,
+  ACTION_TRAINING_SET_ADD,
+  ACTION_TRAINING_SET_DOWNLOAD,
+  ACTION_TRAINING_SET_GENERATE,
+  ACTION_TRAINING_SET_PRESETS,
+  ACTION_TRAINING_SET_REMOVE,
+  ACTION_TRAINING_SET_SELECT,
+  batchEstimateCents,
+  callsFor,
   CROP_ROLE_OPTIONS,
   IDENTITY_SHEET_OPTIONS,
   defaultBox,
@@ -51,20 +60,40 @@ export type IdentityLora = {
   baseModel: string;
   triggerWord: string;
   strength: number;
-  sogniLoraId: string | null;
-  sogniStatus: string | null;
   repo: string | null;
 };
 export type IdentityTraining = {
-  status: "collecting" | "training" | "trained" | "published" | "failed";
-  datasetFileIds: string[];
-  selectedFileIds: string[];
+  status: "training" | "trained" | "published" | "failed";
+  trainedFileIds: string[];
   triggerWord: string;
   steps: number;
   estimatedCostCents: number;
   resultUrl: string | null;
   error: string | null;
 };
+export type TrainedIdentity = {
+  id: string;
+  provider: "sogni-lora" | "fal-lora" | "higgsfield-soul";
+  ref: string;
+  url: string | null;
+  variant: string | null;
+  triggerWord: string | null;
+  strength: number | null;
+  status: string;
+  createdAt: string;
+};
+export type LoraPick = { id: string; strength: number };
+export type TrainingPicture = {
+  fileId: string;
+  source: "generated" | "upload";
+  service: string | null;
+  model: string | null;
+  loras: LoraPick[];
+  prompt: string | null;
+  seed: number | null;
+  batchId: string | null;
+};
+export type TrainingSet = { pictures: TrainingPicture[]; selectedFileIds: string[]; batches: Array<{ id: string; service: string; model: string; count: number; createdAt: string }>; presets: string[] };
 export type Identity = {
   id: string;
   name: string;
@@ -76,6 +105,8 @@ export type Identity = {
   canonicalAsReference: boolean;
   preferredModels: { sogni: string; sogniExtraSlot: string; fal: string | null };
   lora: IdentityLora | null;
+  trainedIdentities?: TrainedIdentity[];
+  trainingSet?: TrainingSet | null;
   provenance: { model: string | null; seed: number | null; workflowId: string | null; chosenAt: string } | null;
   consent: { likeness: true; adult: true; confirmedBy: string; confirmedAt: string };
   training: IdentityTraining | null;
@@ -88,7 +119,7 @@ type ListResponse = {
   hfReady: boolean;
   consentText: { likeness: string; adult: string };
   seedExplanation: string;
-  training: { steps: number; costCents: number; minPictures: number; maxPictures: number; prompts: number };
+  training: { steps: number; costCents: number; minPictures: number; maxPictures: number; soulMin: number; soulMax: number; presets: string[] };
   editModels: string[];
 };
 
@@ -435,18 +466,168 @@ export function IdentitySettingsPanel({ companyId, onSaved }: { companyId: strin
   );
 }
 
+// ─── Generate with (service, model, LoRAs) ───────────────────────────────────
+
+type Service = "sogni" | "fal" | "higgsfield";
+export type GenerationOptions = {
+  services: Record<Service, boolean>;
+  models: Record<Service, string[]>;
+  priceCents: Record<string, number | null>;
+  priceNotes: Record<Service, string>;
+  reservedPerCallCents: number;
+  perCall: Record<Service, number>;
+  higgsfieldNote: string;
+};
+export type GenerateChoice = { service: Service; model: string; loras: LoraPick[] };
+const SERVICE_NAMES: Record<Service, string> = { sogni: "Sogni", fal: "Fal.ai", higgsfield: "Higgsfield" };
+
+/** The starting choice: the identity's preferred Sogni model when Sogni has a key, else the first service that has one. */
+export function defaultChoice(identity: Identity, options: GenerationOptions | null): GenerateChoice {
+  const service: Service = !options || options.services.sogni ? "sogni" : options.services.fal ? "fal" : options.services.higgsfield ? "higgsfield" : "sogni";
+  const model = service === "sogni" ? identity.preferredModels.sogni : service === "fal" ? identity.preferredModels.fal ?? options?.models.fal[0] ?? "" : "soul";
+  return { service, model, loras: [] };
+}
+
+/** Plain-words estimate for N pictures with this choice. */
+export function estimateText(options: GenerationOptions, choice: GenerateChoice, pictures: number): string {
+  const calls = callsFor(pictures, options.perCall[choice.service]);
+  const reserved = formatDollars(calls * options.reservedPerCallCents);
+  const cents = batchEstimateCents(options.priceCents[choice.model], pictures);
+  const price = cents === null ? options.priceNotes[choice.service] : `About ${formatDollars(cents)} at ${SERVICE_NAMES[choice.service]} (${options.priceNotes[choice.service]})`;
+  return `${pictures} pictures in ${calls} ${calls === 1 ? "call" : "calls"}. ${price} Media Studio reserves ${reserved} against its spending limit.`;
+}
+
+type SogniLoraRow = { id: string; name: string; min: number; max: number; default: number; personal: boolean };
+
+export function GenerateWith(props: { options: GenerationOptions; value: GenerateChoice; onChange: (c: GenerateChoice) => void; pictures: number; disabled?: boolean }) {
+  const { options, value } = props;
+  const listLoras = usePluginAction(ACTION_SOGNI_LORAS);
+  const [loras, setLoras] = useState<SogniLoraRow[] | null>(null);
+  const [checks, setChecks] = useState<Array<{ id: string; fit: string; name: string }>>([]);
+  useEffect(() => {
+    if (value.service !== "sogni" || !value.model) {
+      setLoras(null);
+      return;
+    }
+    let stop = false;
+    Promise.resolve()
+      .then(() => listLoras({ modelId: value.model, picked: value.loras.map((l) => ({ id: l.id })) }))
+      .then((r) => {
+        if (stop) return;
+        const res = (r ?? {}) as { loras?: SogniLoraRow[]; checks?: Array<{ id: string; fit: string; name: string }> };
+        setLoras((res.loras ?? []).filter((l) => !l.personal));
+        setChecks(res.checks ?? []);
+      })
+      .catch(() => !stop && setLoras([]));
+    return () => {
+      stop = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value.service, value.model]);
+  const services = (Object.keys(SERVICE_NAMES) as Service[]).filter((s) => options.services[s]);
+  const misfits = checks.filter((c) => c.fit !== "fits" && value.loras.some((l) => l.id === c.id));
+  return (
+    <div style={{ ...card, gap: 6 }} aria-label="Generate with">
+      <strong>Generate with</strong>
+      {services.length === 0 ? <div style={errorBox}>No picture service has a key yet. An admin adds them in Media Studio's Settings tab.</div> : null}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 8 }}>
+        <label style={field}>
+          <span>Picture service</span>
+          <select
+            style={input}
+            disabled={props.disabled}
+            value={value.service}
+            onChange={(e) => {
+              const service = e.target.value as Service;
+              props.onChange({ service, model: options.models[service][0] ?? "", loras: [] });
+            }}
+          >
+            {services.map((s) => (
+              <option key={s} value={s}>{SERVICE_NAMES[s]}</option>
+            ))}
+          </select>
+        </label>
+        <label style={field}>
+          <span>Model</span>
+          <select style={input} disabled={props.disabled} value={value.model} onChange={(e) => props.onChange({ ...value, model: e.target.value, loras: value.service === "sogni" ? value.loras : [] })}>
+            {options.models[value.service].map((m, i) => (
+              <option key={m} value={m}>{m}{i === 0 ? " (keeps faces best)" : ""}</option>
+            ))}
+          </select>
+        </label>
+      </div>
+      {value.service === "higgsfield" ? <div style={warnBox}>{options.higgsfieldNote}</div> : null}
+      {value.service === "sogni" ? (
+        <div style={field}>
+          <span>LoRAs (optional)</span>
+          {loras === null ? <span style={help}>Loading LoRAs…</span> : loras.length === 0 ? <span style={help}>Sogni lists no public LoRAs for this model.</span> : null}
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 180, overflowY: "auto" }}>
+            {(loras ?? []).map((l) => {
+              const picked = value.loras.find((p) => p.id === l.id);
+              return (
+                <label key={l.id} style={{ ...row, fontSize: 12 }}>
+                  <input
+                    type="checkbox"
+                    disabled={props.disabled}
+                    checked={Boolean(picked)}
+                    onChange={(e) => props.onChange({ ...value, loras: e.target.checked ? [...value.loras, { id: l.id, strength: l.default }] : value.loras.filter((p) => p.id !== l.id) })}
+                  />
+                  {l.name}
+                  {picked ? (
+                    <input
+                      type="number"
+                      style={{ ...input, width: 80, padding: 4 }}
+                      min={l.min}
+                      max={l.max}
+                      step={0.05}
+                      value={picked.strength}
+                      onChange={(e) => props.onChange({ ...value, loras: value.loras.map((p) => (p.id === l.id ? { ...p, strength: Number(e.target.value) } : p)) })}
+                      aria-label={`Strength of ${l.name}`}
+                    />
+                  ) : null}
+                </label>
+              );
+            })}
+          </div>
+          {misfits.length > 0 ? <div style={warnBox}>Not made for this model: {misfits.map((m) => m.name).join(", ")}. Remove them or pick another model.</div> : null}
+          <span style={help}>Your own Sogni LoRAs are not offered here: Sogni only runs them with its content filter off.</span>
+        </div>
+      ) : (
+        <span style={help}>{SERVICE_NAMES[value.service]} takes no LoRAs here.</span>
+      )}
+      {services.includes(value.service) ? <div style={help}>{estimateText(options, value, props.pictures)}</div> : null}
+    </div>
+  );
+}
+
+function useGenerationOptions(): GenerationOptions | null {
+  const load = usePluginAction(ACTION_IDENTITIES_GENERATION_OPTIONS);
+  const [options, setOptions] = useState<GenerationOptions | null>(null);
+  useEffect(() => {
+    Promise.resolve()
+      .then(() => load({}))
+      .then((r) => setOptions(r && typeof r === "object" && "services" in r && "models" in r ? (r as GenerationOptions) : null))
+      .catch(() => setOptions(null));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return options;
+}
+
 // ─── Candidates ──────────────────────────────────────────────────────────────
 
-type Candidate = { imageDataUrl: string; kind: string; model: string; workflowId: string };
+type Candidate = { imageDataUrl: string; kind: string; model: string; service: string; workflowId: string | null; seed: number | null };
 
 function CandidatesSection({ identity, companyId, seedExplanation, onChanged }: { identity: Identity; companyId: string; seedExplanation: string; onChanged: (i: Identity) => void }) {
   const makeCandidates = usePluginAction(ACTION_IDENTITIES_CANDIDATES);
   const useCandidate = usePluginAction(ACTION_IDENTITIES_USE_CANDIDATE);
+  const options = useGenerationOptions();
+  const [choice, setChoice] = useState<GenerateChoice | null>(null);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [prompt, setPrompt] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [asReference, setAsReference] = useState(identity.canonicalAsReference);
+  const current = choice ?? defaultChoice(identity, options);
 
   const make = async () => {
     setBusy("make");
@@ -455,8 +636,8 @@ function CandidatesSection({ identity, companyId, seedExplanation, onChanged }: 
     try {
       const out: Candidate[] = [];
       for (const kind of ["portrait", "full-body"]) {
-        const res = (await makeCandidates({ identityId: identity.id, kind })) as { candidates: Candidate[]; prompt: string };
-        out.push(...res.candidates);
+        const res = (await makeCandidates({ identityId: identity.id, kind, ...current })) as { candidates: Candidate[]; prompt: string };
+        out.push(...res.candidates.slice(0, 2));
         setCandidates([...out]);
         setPrompt(res.prompt);
       }
@@ -483,8 +664,8 @@ function CandidatesSection({ identity, companyId, seedExplanation, onChanged }: 
     <div style={card} aria-label="Candidates">
       <strong>Canonical picture</strong>
       <div style={help}>
-        Make 4 candidates (2 front portraits and 2 full-body pictures on a plain background) from the crops with Sogni, and pick the one that
-        looks most like the person. It is kept as the identity's main picture. {seedExplanation}
+        Make 4 candidates (2 front portraits and 2 full-body pictures on a plain background) from the crops, and pick the one that looks most like
+        the person. It is kept as the identity's main picture. {seedExplanation}
       </div>
       {identity.canonicalFileId ? (
         <div style={row}>
@@ -495,6 +676,7 @@ function CandidatesSection({ identity, companyId, seedExplanation, onChanged }: 
           </div>
         </div>
       ) : null}
+      {options ? <GenerateWith options={options} value={current} onChange={setChoice} pictures={4} disabled={busy !== null} /> : null}
       <label style={{ ...row, fontSize: 13 }}>
         <input type="checkbox" checked={asReference} onChange={(e) => setAsReference(e.target.checked)} /> Also send the chosen picture as an extra face picture when the model has room
       </label>
@@ -502,7 +684,6 @@ function CandidatesSection({ identity, companyId, seedExplanation, onChanged }: 
         <button type="button" style={primaryBtn} disabled={busy !== null} onClick={() => void make()}>
           {busy === "make" ? "Making…" : candidates.length > 0 ? "Re-roll (4 new ones)" : "Make 4 candidates"}
         </button>
-        <span style={help}>Uses 2 Sogni picture calls; counts toward Media Studio's spending limit.</span>
       </div>
       {error ? <div style={errorBox}>{error}</div> : null}
       <div style={row}>
@@ -519,20 +700,51 @@ function CandidatesSection({ identity, companyId, seedExplanation, onChanged }: 
   );
 }
 
-// ─── LoRA training ───────────────────────────────────────────────────────────
+// ─── Training set and "Train with" ───────────────────────────────────────────
 
-function LoraSection(props: { identity: Identity; companyId: string; info: ListResponse; onChanged: (i: Identity) => void }) {
+const PROVIDER_LABEL: Record<TrainedIdentity["provider"], string> = { "sogni-lora": "Sogni LoRA", "fal-lora": "LoRA file (Fal)", "higgsfield-soul": "Higgsfield Soul ID" };
+
+function provenanceText(p: TrainingPicture): string {
+  if (p.source === "upload") return "Own photo";
+  const loras = p.loras.length > 0 ? `, LoRAs ${p.loras.map((l) => `${l.id} at ${l.strength}`).join(", ")}` : "";
+  const seed = p.seed !== null ? `, seed ${p.seed}` : "";
+  return `${p.service ?? "?"} ${p.model ?? ""}${loras}${seed}`;
+}
+
+function downloadBase64(filename: string, contentType: string, base64: string) {
+  const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+  const url = URL.createObjectURL(new Blob([bytes], { type: contentType }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+function TrainingSection(props: { identity: Identity; companyId: string; info: ListResponse; onChanged: (i: Identity) => void }) {
   const { identity, companyId, info } = props;
-  const makePictures = usePluginAction(ACTION_LORA_PICTURES);
-  const addPictures = usePluginAction(ACTION_LORA_ADD_PICTURES);
-  const selectPictures = usePluginAction(ACTION_LORA_SELECT);
+  const generate = usePluginAction(ACTION_TRAINING_SET_GENERATE);
+  const add = usePluginAction(ACTION_TRAINING_SET_ADD);
+  const select = usePluginAction(ACTION_TRAINING_SET_SELECT);
+  const removePictures = usePluginAction(ACTION_TRAINING_SET_REMOVE);
+  const savePresets = usePluginAction(ACTION_TRAINING_SET_PRESETS);
+  const download = usePluginAction(ACTION_TRAINING_SET_DOWNLOAD);
   const train = usePluginAction(ACTION_LORA_TRAIN);
   const status = usePluginAction(ACTION_LORA_STATUS);
   const publish = usePluginAction(ACTION_LORA_PUBLISH);
   const importSogni = usePluginAction(ACTION_LORA_IMPORT_SOGNI);
-  const sogniStatus = usePluginAction(ACTION_LORA_SOGNI_STATUS);
   const attach = usePluginAction(ACTION_LORA_ATTACH);
   const reset = usePluginAction(ACTION_LORA_RESET);
+  const soul = usePluginAction(ACTION_HIGGSFIELD_SOUL);
+  const trainedStatus = usePluginAction(ACTION_TRAINED_STATUS);
+  const trainedRemove = usePluginAction(ACTION_TRAINED_REMOVE);
+  const options = useGenerationOptions();
+  const set: TrainingSet = identity.trainingSet ?? { pictures: [], selectedFileIds: [], batches: [], presets: info.training.presets };
+  const [choice, setChoice] = useState<GenerateChoice | null>(null);
+  const [presetsText, setPresetsText] = useState(set.presets.join("\n"));
+  const [batchSize, setBatchSize] = useState(24);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
@@ -542,8 +754,13 @@ function LoraSection(props: { identity: Identity; companyId: string; info: ListR
   const [repo, setRepo] = useState(`${identity.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}-lora`);
   const [publicOk, setPublicOk] = useState(false);
   const [manualId, setManualId] = useState("");
+  const [variant, setVariant] = useState<"soul-2" | "soul-cinematic">("soul-2");
+  const ownPhotos = useRef<HTMLInputElement>(null);
   const training = identity.training;
-  const selected = new Set(training?.selectedFileIds ?? []);
+  const trained = identity.trainedIdentities ?? [];
+  const selected = new Set(set.selectedFileIds);
+  const current = choice ?? defaultChoice(identity, options);
+  const presets = presetsText.split("\n").map((p) => p.trim()).filter(Boolean);
 
   const run = async (key: string, fn: () => Promise<unknown>) => {
     setBusy(key);
@@ -559,7 +776,6 @@ function LoraSection(props: { identity: Identity; companyId: string; info: ListR
     }
   };
 
-  // Check the training now and then while Fal works on it.
   useEffect(() => {
     if (training?.status !== "training") return;
     let stop = false;
@@ -570,7 +786,7 @@ function LoraSection(props: { identity: Identity; companyId: string; info: ListR
         setProgress(res.progress);
         if (res.identity.training?.status !== "training") props.onChanged(res.identity);
       } catch {
-        // Keep trying; the next check may work.
+        // The next check may work.
       }
     };
     void tick();
@@ -582,78 +798,134 @@ function LoraSection(props: { identity: Identity; companyId: string; info: ListR
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [training?.status, identity.id]);
 
-  const makeAll = () =>
-    run("pictures", async () => {
-      let last: unknown;
+  const makeBatch = () =>
+    run("batch", async () => {
+      if (presets.length === 0) throw new Error("Add at least one variation.");
+      const perCall = options?.perCall[current.service] ?? 2;
+      const uploaded: Array<{ fileId: string; provenance: unknown }> = [];
+      const used: string[] = [];
       setMade(0);
-      for (let index = 0; index < info.training.prompts; index += 1) {
-        const res = (await makePictures({ identityId: identity.id, index })) as { pictures: Array<{ imageDataUrl: string }> };
-        const ids: string[] = [];
-        for (const [n, p] of res.pictures.entries()) ids.push(await uploadPicture(companyId, p.imageDataUrl, `${repo}-train-${index + 1}-${n + 1}.png`));
-        last = await addPictures({ identityId: identity.id, fileIds: ids });
-        setMade((m) => m + ids.length);
-        if ((last as { identity?: Identity })?.identity) props.onChanged((last as { identity: Identity }).identity);
+      for (let i = 0; uploaded.length < batchSize; i += 1) {
+        const prompt = presets[i % presets.length]!;
+        const count = Math.min(perCall, batchSize - uploaded.length);
+        const res = (await generate({ identityId: identity.id, ...current, prompt, count })) as { pictures: Array<{ imageDataUrl: string } & Record<string, unknown>> };
+        used.push(prompt);
+        for (const [n, p] of res.pictures.entries()) {
+          if (uploaded.length >= batchSize) break;
+          const fileId = await uploadPicture(companyId, p.imageDataUrl, `${repo}-set-${uploaded.length + 1}-${n + 1}.png`);
+          const { imageDataUrl: _drop, ...provenance } = p;
+          uploaded.push({ fileId, provenance });
+          setMade(uploaded.length);
+        }
+        if (i > batchSize * 2) break; // a service that keeps sending nothing
       }
-      return last;
+      return add({ identityId: identity.id, pictures: uploaded, batch: { ...current, prompts: used } });
+    });
+
+  const addOwn = (files: FileList | null) =>
+    run("own", async () => {
+      if (!files || files.length === 0) return undefined;
+      const pictures = [];
+      for (const f of Array.from(files).slice(0, 40)) pictures.push({ fileId: await uploadPicture(companyId, f, f.name), provenance: { source: "upload" } });
+      return add({ identityId: identity.id, pictures });
     });
 
   const toggle = (fileId: string) => {
     const next = new Set(selected);
     if (next.has(fileId)) next.delete(fileId);
     else next.add(fileId);
-    void run("select", () => selectPictures({ identityId: identity.id, fileIds: [...next] }));
+    void run("select", () => select({ identityId: identity.id, fileIds: [...next] }));
   };
 
   if (!info.canManage) {
     return (
       <div style={card}>
-        <strong>LoRA</strong>
-        <div style={help}>{identity.lora ? `This person has a LoRA (${identity.lora.visibility}).` : "No LoRA yet. An owner or admin can train one."}</div>
+        <strong>Trained identities</strong>
+        <div style={help}>{trained.length > 0 ? trained.map((t) => `${PROVIDER_LABEL[t.provider]} (${t.status})`).join(", ") : "None yet. An owner or admin can make a training set and train one."}</div>
       </div>
     );
   }
 
   return (
-    <div style={card} aria-label="LoRA training">
-      <strong>Train a LoRA (optional)</strong>
-      <div style={help}>
-        A LoRA is a small add-on file that teaches the picture model this person, so pictures keep them even without the reference pictures.
-        Steps: make about {info.training.prompts * 2} varied pictures from the chosen picture, tick the {info.training.minPictures + 2} to 20 that truly look like the
-        person (at least {info.training.minPictures}), train on Fal.ai, publish to Hugging Face, and import it into Sogni.
+    <>
+      <div style={card} aria-label="Training set">
+        <strong>Training set</strong>
+        <div style={help}>
+          Pictures to teach a service this person: generate batches from the chosen picture with any service (each picture remembers how it was made),
+          add your own photos, then tick the 12 to 25 that truly look like the person. The same set can train a Sogni/Fal LoRA, a Higgsfield Soul ID,
+          or be downloaded.
+        </div>
+        {options ? <GenerateWith options={options} value={current} onChange={setChoice} pictures={batchSize} disabled={busy !== null} /> : null}
+        <label style={field}>
+          <span>Variations (one per line; used in turn)</span>
+          <textarea style={{ ...input, minHeight: 110 }} value={presetsText} onChange={(e) => setPresetsText(e.target.value)} disabled={busy !== null} />
+          <span style={help}>Angles, outfits, lighting, expressions, places. Each line becomes one request.</span>
+        </label>
+        <div style={row}>
+          <button type="button" style={ghostBtn} disabled={busy !== null} onClick={() => void run("presets", () => savePresets({ identityId: identity.id, presets }))}>
+            Save variations
+          </button>
+          <label style={{ ...row, fontSize: 13 }}>
+            Batch size
+            <input type="number" min={1} max={40} style={{ ...input, width: 70 }} value={batchSize} onChange={(e) => setBatchSize(Math.min(40, Math.max(1, Number(e.target.value) || 1)))} />
+          </label>
+          <button type="button" style={primaryBtn} disabled={busy !== null || !identity.crops.some((c) => c.role === "face")} onClick={() => void makeBatch()}>
+            {busy === "batch" ? `Making… (${made} of ${batchSize})` : "Generate batch"}
+          </button>
+          <button type="button" style={secondaryBtn} disabled={busy !== null} onClick={() => ownPhotos.current?.click()}>
+            {busy === "own" ? "Adding…" : "Add own photos"}
+          </button>
+          <input ref={ownPhotos} type="file" multiple accept="image/png,image/jpeg,image/webp" style={{ display: "none" }} onChange={(e) => void addOwn(e.target.files)} />
+        </div>
+        {error ? <div style={errorBox}>{error}</div> : null}
+        {set.pictures.length > 0 ? (
+          <>
+            <div style={help}>
+              Ticked: {selected.size} of {set.pictures.length}. {set.batches.length} {set.batches.length === 1 ? "batch" : "batches"} so far.
+            </div>
+            <div style={row}>
+              {set.pictures.map((p) => (
+                <label key={p.fileId} style={{ position: "relative", cursor: "pointer" }} title={provenanceText(p)}>
+                  <img src={fileContentPath(p.fileId)} alt="Training picture" style={{ ...thumb, outline: selected.has(p.fileId) ? "3px solid #2f9e44" : "none" }} />
+                  <input type="checkbox" checked={selected.has(p.fileId)} disabled={busy !== null} onChange={() => toggle(p.fileId)} style={{ position: "absolute", top: 4, left: 4 }} aria-label="Use for training" />
+                  <span style={{ ...help, display: "block", maxWidth: 96, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{provenanceText(p)}</span>
+                </label>
+              ))}
+            </div>
+            <div>
+              <button
+                type="button"
+                style={ghostBtn}
+                disabled={busy !== null}
+                onClick={() => void run("prune", () => removePictures({ identityId: identity.id, fileIds: set.pictures.filter((p) => !selected.has(p.fileId)).map((p) => p.fileId) }))}
+              >
+                Remove the unticked pictures
+              </button>
+            </div>
+          </>
+        ) : null}
       </div>
-      <div style={warnBox}>{trainingStatusText(training?.status, progress)}</div>
-      {training?.error ? <div style={errorBox}>{training.error}</div> : null}
-      {error ? <div style={errorBox}>{error}</div> : null}
 
-      {!training || training.status === "collecting" || training.status === "failed" ? (
-        <>
-          <div style={row}>
-            <button type="button" style={secondaryBtn} disabled={busy !== null || !identity.crops.some((c) => c.role === "face")} onClick={() => void makeAll()}>
-              {busy === "pictures" ? `Making… (${made} so far)` : `Make ${info.training.prompts * 2} training pictures`}
-            </button>
-            <span style={help}>{info.training.prompts} Sogni picture calls; counts toward Media Studio's spending limit.</span>
+      <div style={card} aria-label="Train with">
+        <strong>Train with</strong>
+        <label style={field}>
+          <span>Trigger word</span>
+          <input style={input} value={trigger} onChange={(e) => setTrigger(e.target.value)} />
+          <span style={help}>A made-up word that means "this person" to a LoRA (also written into the downloaded captions).</span>
+        </label>
+
+        <div style={{ ...card, gap: 6 }} aria-label="Fal LoRA">
+          <strong>A. LoRA (Fal.ai, for Sogni and Fal)</strong>
+          <div style={help}>
+            Trains a Krea 2 LoRA on Fal.ai from the ticked pictures (at least {info.training.minPictures}), then publishes it to Hugging Face and imports it into Sogni.
           </div>
-          {training && training.datasetFileIds.length > 0 ? (
+          <div style={warnBox}>{trainingStatusText(training?.status, progress)}</div>
+          {training?.error ? <div style={errorBox}>{training.error}</div> : null}
+          {training?.status !== "training" ? (
             <>
-              <div style={help}>
-                Ticked: {selected.size} of {training.datasetFileIds.length}. Tick only pictures that truly look like {identity.name}.
-              </div>
-              <div style={row}>
-                {training.datasetFileIds.map((id) => (
-                  <label key={id} style={{ position: "relative", cursor: "pointer" }}>
-                    <img src={fileContentPath(id)} alt="Training picture" style={{ ...thumb, outline: selected.has(id) ? "3px solid #2f9e44" : "none" }} />
-                    <input type="checkbox" checked={selected.has(id)} disabled={busy !== null} onChange={() => toggle(id)} style={{ position: "absolute", top: 4, left: 4 }} aria-label="Use for training" />
-                  </label>
-                ))}
-              </div>
-              <label style={field}>
-                <span>Trigger word</span>
-                <input style={input} value={trigger} onChange={(e) => setTrigger(e.target.value)} />
-                <span style={help}>A made-up word that means "this person" to the model, for example {trigger || "majaberg_person"}.</span>
-              </label>
               <label style={{ ...row, fontSize: 13 }}>
-                <input type="checkbox" checked={costOk} onChange={(e) => setCostOk(e.target.checked)} /> Training costs about {formatDollars(info.training.costCents)} on Fal.ai ({info.training.steps} steps at
-                $0.003 a step). Start it.
+                <input type="checkbox" checked={costOk} onChange={(e) => setCostOk(e.target.checked)} /> Training costs about {formatDollars(info.training.costCents)} on Fal.ai ({info.training.steps} steps
+                at $0.003 a step). Start it.
               </label>
               <div>
                 <button
@@ -666,82 +938,127 @@ function LoraSection(props: { identity: Identity; companyId: string; info: ListR
                 </button>
               </div>
             </>
+          ) : (
+            <div>
+              <button type="button" style={ghostBtn} disabled={busy !== null} onClick={() => void run("status", () => status({ identityId: identity.id }))}>Check now</button>
+            </div>
+          )}
+          {training?.status === "trained" ? (
+            <>
+              <div style={warnBox}>
+                Publishing makes the LoRA PUBLIC on Hugging Face: anyone can download it. Sogni can only import public files today. Only publish a LoRA
+                of a person who agreed to this (or a fictional/AI-made person).
+              </div>
+              <label style={field}>
+                <span>Repository name</span>
+                <input style={input} value={repo} onChange={(e) => setRepo(e.target.value)} />
+              </label>
+              <label style={{ ...row, fontSize: 13 }}>
+                <input type="checkbox" checked={publicOk} onChange={(e) => setPublicOk(e.target.checked)} /> I understand anyone can download it.
+              </label>
+              <div style={row}>
+                <button type="button" style={primaryBtn} disabled={busy !== null || !publicOk || !info.hfReady} onClick={() => void run("publish", () => publish({ identityId: identity.id, repoName: repo, confirmPublic: true }))}>
+                  {busy === "publish" ? "Publishing…" : "Publish to Hugging Face"}
+                </button>
+                {!info.hfReady ? <span style={help}>Pick a Hugging Face token in the identity settings first.</span> : null}
+              </div>
+            </>
           ) : null}
-        </>
-      ) : null}
-
-      {training?.status === "training" ? (
-        <div>
-          <button type="button" style={ghostBtn} disabled={busy !== null} onClick={() => void run("status", () => status({ identityId: identity.id }))}>
-            Check now
-          </button>
-        </div>
-      ) : null}
-
-      {training?.status === "trained" ? (
-        <>
-          <div style={warnBox}>
-            Publishing makes the LoRA PUBLIC on Hugging Face: anyone can download it. Sogni can only import public files today. Only publish a
-            LoRA of a person who agreed to this (or a fictional/AI-made person).
-          </div>
-          <label style={field}>
-            <span>Repository name</span>
-            <input style={input} value={repo} onChange={(e) => setRepo(e.target.value)} />
-          </label>
-          <label style={{ ...row, fontSize: 13 }}>
-            <input type="checkbox" checked={publicOk} onChange={(e) => setPublicOk(e.target.checked)} /> I understand anyone can download it.
-          </label>
-          <div style={row}>
-            <button type="button" style={primaryBtn} disabled={busy !== null || !publicOk || !info.hfReady} onClick={() => void run("publish", () => publish({ identityId: identity.id, repoName: repo, confirmPublic: true }))}>
-              {busy === "publish" ? "Publishing…" : "Publish to Hugging Face"}
-            </button>
-            {!info.hfReady ? <span style={help}>Pick a Hugging Face token in the identity settings first.</span> : null}
-          </div>
-        </>
-      ) : null}
-
-      {identity.lora ? (
-        <div style={{ ...card, gap: 6 }}>
-          <div style={help}>
-            LoRA: <a href={identity.lora.url} target="_blank" rel="noreferrer">{identity.lora.repo ?? identity.lora.url}</a> ({identity.lora.visibility}), trigger word{" "}
-            <code>{identity.lora.triggerWord || "none"}</code>. In Sogni: {identity.lora.sogniLoraId ? `${identity.lora.sogniLoraId} (${identity.lora.sogniStatus ?? "unknown"})` : "not imported yet"}.
-          </div>
-          <div style={help}>
-            It is used for this person's pictures with Krea 2 models once Sogni says it is ready, and only with a look an owner or admin saved
-            with Sogni's content filter off (Sogni requires that for your own LoRAs).
-          </div>
-          <div style={row}>
-            {!identity.lora.sogniLoraId ? (
+          {identity.lora ? (
+            <div style={row}>
+              <span style={help}>
+                Published: <a href={identity.lora.url} target="_blank" rel="noreferrer">{identity.lora.repo ?? identity.lora.url}</a> ({identity.lora.visibility}).
+              </span>
               <button type="button" style={secondaryBtn} disabled={busy !== null} onClick={() => void run("import", () => importSogni({ identityId: identity.id }))}>
                 Import into Sogni
               </button>
-            ) : (
-              <button type="button" style={ghostBtn} disabled={busy !== null} onClick={() => void run("sogni", () => sogniStatus({ identityId: identity.id }))}>
-                Check Sogni import
-              </button>
-            )}
-          </div>
+            </div>
+          ) : null}
           <div style={help}>
-            Needs an active Sogni Unlimited plan (5 imports a day). If the import does not work here, import it by hand in Sogni (Personal LoRAs,
-            Import, paste the address above, base model Krea 2 Identity Edit) and paste its id here:
+            Already imported into Sogni by hand (Personal LoRAs, Import, base model Krea 2 Identity Edit; needs Sogni Unlimited)? Paste its id:
           </div>
           <div style={row}>
             <input style={input} placeholder="personal-…" value={manualId} onChange={(e) => setManualId(e.target.value)} />
-            <button type="button" style={ghostBtn} disabled={busy !== null || !manualId.trim()} onClick={() => void run("attach", () => attach({ identityId: identity.id, sogniLoraId: manualId.trim() }))}>
+            <button type="button" style={ghostBtn} disabled={busy !== null || !manualId.trim()} onClick={() => void run("attach", () => attach({ identityId: identity.id, sogniLoraId: manualId.trim(), triggerWord: trigger }))}>
               Attach
+            </button>
+            {training && training.status !== "training" ? (
+              <button type="button" style={ghostBtn} disabled={busy !== null} onClick={() => void run("reset", () => reset({ identityId: identity.id }))}>Clear the LoRA training</button>
+            ) : null}
+          </div>
+        </div>
+
+        <div style={{ ...card, gap: 6 }} aria-label="Higgsfield Soul ID">
+          <strong>B. Higgsfield Soul ID</strong>
+          <div style={help}>
+            Uploads {info.training.soulMin} to {info.training.soulMax} ticked face pictures to Higgsfield and makes a Soul ID. Higgsfield then keeps this person in
+            its Soul pictures (it takes no reference pictures, so outfit pictures and rooms go through Sogni or Fal.ai).
+          </div>
+          <div style={row}>
+            <select style={input} value={variant} onChange={(e) => setVariant(e.target.value === "soul-cinematic" ? "soul-cinematic" : "soul-2")} aria-label="Soul ID kind">
+              <option value="soul-2">For pictures (Soul 2)</option>
+              <option value="soul-cinematic">For video (Soul Cinematic)</option>
+            </select>
+            <button
+              type="button"
+              style={primaryBtn}
+              disabled={busy !== null || selected.size < info.training.soulMin || selected.size > info.training.soulMax || !(options?.services.higgsfield ?? false)}
+              onClick={() => void run("soul", () => soul({ identityId: identity.id, variant }))}
+            >
+              {busy === "soul" ? "Uploading…" : "Make a Soul ID"}
+            </button>
+            {!(options?.services.higgsfield ?? false) ? <span style={help}>An admin adds the Higgsfield key in Media Studio's Settings tab first.</span> : null}
+          </div>
+          <div style={help}>
+            The kind is kept with the Soul ID; Higgsfield's API documentation does not say how to ask for one or the other, so it is a label for now.
+          </div>
+        </div>
+
+        <div style={{ ...card, gap: 6 }} aria-label="Download training set">
+          <strong>C. Download the training set (.zip)</strong>
+          <div style={help}>The ticked pictures with a caption file each and a README saying where each picture came from, for training anywhere else.</div>
+          <div>
+            <button
+              type="button"
+              style={secondaryBtn}
+              disabled={busy !== null || selected.size === 0}
+              onClick={() =>
+                void run("download", async () => {
+                  const res = (await download({ identityId: identity.id, triggerWord: trigger })) as { filename: string; contentType: string; contentBase64: string };
+                  downloadBase64(res.filename, res.contentType, res.contentBase64);
+                  return undefined;
+                })
+              }
+            >
+              {busy === "download" ? "Packing…" : `Download ${selected.size} pictures`}
             </button>
           </div>
         </div>
-      ) : null}
+      </div>
 
-      {training && training.status !== "training" ? (
-        <div>
-          <button type="button" style={ghostBtn} disabled={busy !== null} onClick={() => void run("reset", () => reset({ identityId: identity.id }))}>
-            Start the training over
-          </button>
+      <div style={card} aria-label="Trained identities">
+        <strong>Trained identities</strong>
+        <div style={help}>What the trainings produced. A look with this person uses the newest ready one per service, unless the look picks another.</div>
+        {trained.length === 0 ? <div style={help}>None yet.</div> : null}
+        {trained.map((t) => (
+          <div key={t.id} style={row}>
+            <span style={{ fontSize: 13 }}>
+              {PROVIDER_LABEL[t.provider]}: <code>{t.ref.length > 60 ? `${t.ref.slice(0, 57)}…` : t.ref}</code> ({t.status}){t.variant ? `, ${t.variant}` : ""}
+              {t.triggerWord ? `, trigger word ${t.triggerWord}` : ""}
+            </span>
+            <button type="button" style={ghostBtn} disabled={busy !== null} onClick={() => void run(`rm-${t.id}`, () => trainedRemove({ identityId: identity.id, trainedId: t.id }))}>Remove</button>
+          </div>
+        ))}
+        {trained.some((t) => t.status !== "ready" && t.status !== "completed" && t.status !== "failed") ? (
+          <div>
+            <button type="button" style={ghostBtn} disabled={busy !== null} onClick={() => void run("tstatus", () => trainedStatus({ identityId: identity.id }))}>Check status</button>
+          </div>
+        ) : null}
+        <div style={help}>
+          Your own Sogni LoRAs are used only with a look an owner or admin saved with Sogni's content filter off (Sogni requires that).
         </div>
-      ) : null}
-    </div>
+      </div>
+    </>
   );
 }
 
@@ -1051,7 +1368,7 @@ export function IdentitiesPanel({ context }: { context: PluginHostContext }) {
           </div>
         </div>
         {info.canManage ? <CandidatesSection identity={open} companyId={companyId} seedExplanation={info.seedExplanation} onChanged={updated} /> : null}
-        <LoraSection identity={open} companyId={companyId} info={info} onChanged={updated} />
+        <TrainingSection identity={open} companyId={companyId} info={info} onChanged={updated} />
       </div>
     );
   }
@@ -1083,7 +1400,7 @@ export function IdentitiesPanel({ context }: { context: PluginHostContext }) {
             <button key={identity.id} type="button" style={{ ...card, cursor: "pointer", background: "none", color: "inherit", alignItems: "center", width: 140 }} onClick={() => setOpen(identity)}>
               {pic ? <img src={fileContentPath(pic)} alt={identity.name} style={thumb} /> : null}
               <span style={{ fontSize: 13, fontWeight: 600 }}>{identity.name}</span>
-              {identity.lora?.sogniStatus === "ready" ? <span style={help}>Has a LoRA</span> : null}
+              {(identity.trainedIdentities ?? []).some((t) => t.status === "ready" || t.status === "completed") ? <span style={help}>Trained</span> : null}
             </button>
           );
         })}

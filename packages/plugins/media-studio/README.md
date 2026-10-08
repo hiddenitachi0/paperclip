@@ -231,6 +231,26 @@ using JSON Schema features the plugin's checker does not understand. To add a So
 The approval it files is a normal `request_board_approval`, so it also shows up in the
 **Now view → Needs you** lane.
 
+## Identities, rooms and training (Identities and Rooms tabs)
+
+- **Identity** (`src/identity.ts`, stored per company in plugin state `identities`): a saved person, separate
+  from looks. Creating one requires two ticked confirmations (fictional/AI-made or written consent; adult 18+).
+  "Analyse picture" sends the upload to the company's analysis model (identity settings: a saved model from
+  Settings > Models or one typed in, key from company Secrets) and accepts only strict JSON; anything that does
+  not clearly say "adult" blocks the picture. Crops (face, body, outfit, other) are cut on the server with sharp.
+- A look with an identity sends the face crop as picture 1, the body crop as picture 2 when the model has room,
+  the outfit crop only with "same outfit", then the look's own pictures. On Sogni with no model on the look, the
+  identity's model is used (krea-identity-edit; qwen when a third picture is needed). Seeds never keep a person.
+- **Training set**: batches generated with Sogni, Fal.ai or Higgsfield (model, LoRAs, variations chosen per batch,
+  each picture keeps its provenance) plus own photos; tick the best. **Train with**: a Krea 2 LoRA on Fal.ai
+  (published PUBLIC to Hugging Face, imported into Sogni personal LoRAs), a Higgsfield Soul ID, or download the
+  set as a zip with captions. Results are kept as `trainedIdentities` per service; a look can pick one.
+- **Higgsfield** (`src/higgsfield.ts`) is a picture service: Soul text-to-picture with an optional Soul ID. It takes
+  no reference pictures, so looks' outfit/style pictures and rooms go through Sogni or Fal.
+- **Rooms** (`src/rooms.ts`): a room photo, named areas (masks from Sogni's selection or painted), products (with
+  background removal). "Place product" sends the room as picture 1 and products as 2.., then puts the result back
+  only inside the area (`mask-composite.ts`), so the rest of the room is pixel-identical.
+
 ## How it fits together (zero core edits)
 
 The plugin uses only existing Paperclip REST routes from its UI (running under the user

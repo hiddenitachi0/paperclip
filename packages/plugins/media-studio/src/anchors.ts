@@ -19,6 +19,14 @@
 
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 import { FAL_REFERENCE_MODEL, assertFalModelId, selectProvider, type FetchImpl } from "./providers.js";
+import { assemblePrompt } from "./look-prompt.js";
+import {
+  HIGGSFIELD_MAX_SOUL_PICTURES,
+  HIGGSFIELD_MIN_SOUL_PICTURES,
+  HIGGSFIELD_MODELS,
+  HiggsfieldClient,
+  readHiggsfieldCredentials,
+} from "./higgsfield.js";
 import { compositeMaskedEdit } from "./mask-composite.js";
 import {
   SOGNI_DEFAULT_MODEL,
@@ -37,7 +45,13 @@ import {
   IDENTITY_DEFAULT_SOGNI_MODEL,
   IDENTITY_EXTRA_SLOT_SOGNI_MODEL,
   IDENTITY_NAME_MAX,
-  LORA_DATASET_MAX,
+  TRAINING_SET_MAX,
+  emptyTrainingSet,
+  pickTrained,
+  sheetWithIdentity,
+  trainedReady,
+  type TrainingBatch,
+  type TrainingPicture,
   LORA_MAX_PICTURES,
   LORA_MIN_PICTURES,
   LORA_SOGNI_BASE_MODEL_ID,
@@ -98,14 +112,20 @@ export const ACTION_ROOMS_LIST = "rooms.list";
 export const ACTION_ROOMS_SAVE = "rooms.save";
 export const ACTION_ROOMS_DELETE = "rooms.delete";
 export const ACTION_ROOMS_PLACE = "rooms.place";
-export const ACTION_LORA_PICTURES = "lora.pictures";
-export const ACTION_LORA_ADD_PICTURES = "lora.addPictures";
-export const ACTION_LORA_SELECT = "lora.select";
+export const ACTION_IDENTITIES_GENERATION_OPTIONS = "identities.generationOptions";
+export const ACTION_TRAINING_SET_GENERATE = "trainingSet.generate";
+export const ACTION_TRAINING_SET_ADD = "trainingSet.add";
+export const ACTION_TRAINING_SET_SELECT = "trainingSet.select";
+export const ACTION_TRAINING_SET_REMOVE = "trainingSet.remove";
+export const ACTION_TRAINING_SET_PRESETS = "trainingSet.presets";
+export const ACTION_TRAINING_SET_DOWNLOAD = "trainingSet.download";
+export const ACTION_HIGGSFIELD_SOUL = "higgsfield.soulId";
+export const ACTION_TRAINED_STATUS = "trained.status";
+export const ACTION_TRAINED_REMOVE = "trained.remove";
 export const ACTION_LORA_TRAIN = "lora.train";
 export const ACTION_LORA_STATUS = "lora.status";
 export const ACTION_LORA_PUBLISH = "lora.publish";
 export const ACTION_LORA_IMPORT_SOGNI = "lora.importSogni";
-export const ACTION_LORA_SOGNI_STATUS = "lora.sogniStatus";
 export const ACTION_LORA_ATTACH = "lora.attach";
 export const ACTION_LORA_RESET = "lora.reset";
 
@@ -398,6 +418,8 @@ export async function saveIdentityAction(ctx: PluginContext, params: Record<stri
     canonicalAsReference: params.canonicalAsReference === undefined ? existing?.canonicalAsReference ?? false : params.canonicalAsReference === true,
     preferredModels,
     lora,
+    trainedIdentities: existing?.trainedIdentities ?? [],
+    trainingSet: existing?.trainingSet ?? null,
     provenance: existing?.provenance ?? null,
     consent,
     training: existing?.training ?? null,
@@ -485,33 +507,209 @@ async function cropAction(ctx: PluginContext, params: Record<string, unknown>, c
   return { crops };
 }
 
+// ─── Making pictures of an identity (candidates and training sets) ───────────
+
+/** The models offered per service for pictures of a person; the identity-keeping ones first. */
+export const IDENTITY_PICTURE_MODELS: Record<"sogni" | "fal" | "higgsfield", string[]> = {
+  sogni: ["krea-identity-edit", "qwen", "qwen-lightning", "dark-beast-krea2-identity-edit", "gpt-image-2", "gpt-image-2.5-sunburst", "gpt-image-2.5-flare"],
+  fal: ["fal-ai/flux-2-pro/edit", "fal-ai/nano-banana-2/edit", FAL_REFERENCE_MODEL],
+  higgsfield: [...HIGGSFIELD_MODELS],
+};
+
+/** How many reference pictures each Fal edit model takes (Fal's model pages, 8 Oct 2026). */
+export const FAL_EDIT_MAX_REFERENCES: Record<string, number> = {
+  "fal-ai/flux-2-pro/edit": 9,
+  "fal-ai/nano-banana-2/edit": 14,
+  [FAL_REFERENCE_MODEL]: 4,
+};
+
+/**
+ * What one picture roughly costs on each service, for the page's estimate
+ * (null: the service does not publish a price per picture). Fal: its model
+ * pages (flux-2-pro edit about $0.03 per megapixel, nano-banana-2 edit $0.08,
+ * FLUX Kontext pro $0.04). Every call also reserves Media Studio's flat edit
+ * estimate against the company's limit.
+ */
+export const PICTURE_PRICE_CENTS: Record<string, number | null> = {
+  "fal-ai/flux-2-pro/edit": 3,
+  "fal-ai/nano-banana-2/edit": 8,
+  [FAL_REFERENCE_MODEL]: 4,
+};
+export const PRICE_NOTES: Record<"sogni" | "fal" | "higgsfield", string> = {
+  sogni: "Sogni charges in its own credits (shown on the Costs page when a credit price is set).",
+  fal: "Fal.ai's published price per picture.",
+  higgsfield: "Higgsfield's API documentation does not publish a price per picture; it is charged in Higgsfield credits.",
+};
+const SPEND_ACTION: Record<"sogni" | "fal" | "higgsfield", string> = { sogni: "identity-pictures", fal: "identity-pictures-fal", higgsfield: "higgsfield-pictures" };
+
+export type PictureService3 = "sogni" | "fal" | "higgsfield";
+function readService(value: unknown, fallback: PictureService3 = "sogni"): PictureService3 {
+  return value === "fal" || value === "higgsfield" || value === "sogni" ? value : fallback;
+}
+
+function readPicks(value: unknown): Array<{ id: string; strength: number }> {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > 8) throw new Error("Pick at most 8 LoRAs.");
+  return value.map((v) => {
+    const row = (v ?? {}) as Record<string, unknown>;
+    const id = typeof row.id === "string" ? row.id.trim() : "";
+    const strength = typeof row.strength === "string" ? Number(row.strength) : row.strength;
+    if (!id || id.length > 200 || typeof strength !== "number" || !Number.isFinite(strength)) throw new Error("The LoRAs could not be read. Pick them again.");
+    return { id, strength };
+  });
+}
+
+async function higgsfieldClient(ctx: PluginContext, seams: AnchorSeams): Promise<HiggsfieldClient> {
+  const cfg = await config(ctx);
+  const ref = typeof cfg.higgsfieldKeySecretRef === "string" ? cfg.higgsfieldKeySecretRef.trim() : "";
+  if (!ref) throw new Error("Ask an admin to add a Higgsfield API key in Media Studio settings first.");
+  let value: string;
+  try {
+    value = await ctx.secrets.resolve(ref);
+  } catch (err) {
+    throw new Error(`The Higgsfield API key picked in Media Studio's settings could not be read: ${errorText(err)}`);
+  }
+  return new HiggsfieldClient({
+    credentials: readHiggsfieldCredentials(value),
+    apiFetch: (url, init) => ctx.http.fetch(url, init),
+    bytesFetch: seams.bytesFetch ?? guardedBytesFetch,
+    ...(seams.sogniPollIntervalMs !== undefined ? { pollIntervalMs: 0, sleep: async () => {} } : {}),
+  });
+}
+
+export interface MadePicture {
+  imageDataUrl: string;
+  service: PictureService3;
+  model: string;
+  loras: Array<{ id: string; strength: number }>;
+  prompt: string;
+  seed: number | null;
+  workflowId: string | null;
+}
+
+/**
+ * Pictures of one identity on the chosen service: Sogni or Fal edit the
+ * identity's own pictures (face first, body second when there is room);
+ * Higgsfield keeps the person only through a ready Soul ID (it takes no
+ * reference pictures). Reserves spend first; gives it back on failure.
+ */
+export async function makeIdentityPictures(
+  ctx: PluginContext,
+  seams: AnchorSeams,
+  companyId: string,
+  userId: string,
+  identity: Identity,
+  options: { service: PictureService3; model: string | null; loras: Array<{ id: string; strength: number }>; request: string; count: number; imageSize?: string; raw: Record<string, unknown> },
+): Promise<{ pictures: MadePicture[]; prompt: string }> {
+  const service = options.service;
+  const model = options.model?.trim() || (service === "sogni" ? identity.preferredModels.sogni || IDENTITY_DEFAULT_SOGNI_MODEL : service === "fal" ? identity.preferredModels.fal || IDENTITY_PICTURE_MODELS.fal[0]! : "soul");
+  if (service === "sogni") {
+    const key = sogniWorkflowModel(model, "edit_image");
+    if (!(key in SOGNI_EDIT_MODELS)) throw new Error(`Pictures of a person on Sogni need one of its picture-editing models (${Object.keys(SOGNI_EDIT_MODELS).join(", ")}).`);
+    if (options.loras.some((l) => l.id.startsWith("personal-"))) {
+      throw new Error("Your own Sogni LoRAs only run with Sogni's content filter off, which only a look an owner or admin saved that way can do. Pick public LoRAs here.");
+    }
+    const refs = candidateReferences(identity, key);
+    const pictures: string[] = [];
+    for (const id of refs.fileIds) pictures.push((await readPicture(ctx, companyId, id, "The identity's picture")).dataUrl);
+    const prompt = identityPicturePrompt(identity, options.request, refs.roles);
+    const sogni = await sogniClient(ctx, seams);
+    return withSpend(ctx, SPEND_ACTION.sogni, companyId, userId, options.raw, async () => {
+      const made = await sogni.editPictures({
+        prompt,
+        model: key,
+        pictures,
+        variations: Math.min(2, Math.max(1, options.count)),
+        ...(options.imageSize ? { imageSize: options.imageSize } : {}),
+        ...(options.loras.length > 0 ? { loras: options.loras } : {}),
+        safeContentFilter: true,
+      });
+      return {
+        prompt,
+        pictures: made.pictures.map((p) => ({ imageDataUrl: asDataUrl(p), service, model: made.model, loras: options.loras, prompt, seed: null, workflowId: made.workflowId })),
+      };
+    });
+  }
+  if (service === "fal") {
+    const checked = assertFalModelId(model);
+    const max = FAL_EDIT_MAX_REFERENCES[checked];
+    if (!max) throw new Error(`Pick one of Fal.ai's picture-editing models for pictures of a person: ${IDENTITY_PICTURE_MODELS.fal.join(", ")}.`);
+    if (options.loras.length > 0) throw new Error("These Fal.ai editing models take no LoRAs. Remove the LoRAs, or use Sogni.");
+    const refs = candidateReferences(identity, "qwen");
+    if (identity.canonicalFileId && refs.fileIds.length < max && !refs.fileIds.includes(identity.canonicalFileId)) {
+      refs.fileIds.push(identity.canonicalFileId);
+      refs.roles.push("face");
+    }
+    const pictures: string[] = [];
+    for (const id of refs.fileIds.slice(0, max)) pictures.push((await readPicture(ctx, companyId, id, "The identity's picture")).dataUrl);
+    const prompt = assemblePrompt({ request: options.request, sheet: sheetWithIdentity({}, identity), roles: refs.roles.slice(0, max), service: "fal" }).prompt;
+    const key = await falKey(ctx);
+    const count = Math.min(4, Math.max(1, options.count));
+    return withSpend(ctx, SPEND_ACTION.fal, companyId, userId, options.raw, async () => {
+      const res = await ctx.http.fetch(`https://fal.run/${checked}`, {
+        method: "POST",
+        headers: { Authorization: `Key ${key}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt, image_urls: pictures, num_images: count }),
+      });
+      if (!res.ok) throw new Error(`Fal.ai could not make the pictures (error ${res.status}).`);
+      const body = (await res.json()) as { images?: Array<{ url?: string }>; seed?: number };
+      const urls = (body.images ?? []).map((i) => i.url ?? "").filter((u) => /^https:\/\/|^data:image\//.test(u));
+      if (urls.length === 0) throw new Error("Fal.ai sent no picture back. Try again.");
+      const out: MadePicture[] = [];
+      for (const url of urls) {
+        const dataUrl = url.startsWith("data:") ? url : await fetchAsDataUrl(ctx, url);
+        out.push({ imageDataUrl: dataUrl, service, model: checked, loras: [], prompt, seed: typeof body.seed === "number" ? body.seed : null, workflowId: null });
+      }
+      return { prompt, pictures: out };
+    });
+  }
+  // Higgsfield: only through a ready Soul ID.
+  const soul = pickTrained(identity, "higgsfield", null);
+  if (!soul) {
+    throw new Error(
+      `Higgsfield cannot take ${identity.name}'s pictures; it keeps a person only through a Soul ID. Make one under "Train with: Higgsfield Soul ID" first, or pick Sogni or Fal.ai.`,
+    );
+  }
+  if (options.loras.length > 0) throw new Error("Higgsfield takes no LoRAs. Remove them, or use Sogni.");
+  const prompt = assemblePrompt({ request: options.request, sheet: sheetWithIdentity({}, identity), roles: [], service: "higgsfield" }).prompt;
+  const client = await higgsfieldClient(ctx, seams);
+  const seed = Math.floor(Math.random() * 1_000_000);
+  return withSpend(ctx, SPEND_ACTION.higgsfield, companyId, userId, options.raw, async () => {
+    // Soul makes 1 or 4 pictures per call; more than 1 asked for: 4, keeping as many as asked.
+    const made = await client.soulPictures({ prompt, imageSize: options.imageSize, count: options.count >= 2 ? 4 : 1, seed, soulId: soul.ref });
+    const out: MadePicture[] = [];
+    for (const url of made.urls.slice(0, Math.max(1, options.count))) out.push({ imageDataUrl: await fetchAsDataUrl(ctx, url), service, model: "soul", loras: [], prompt, seed, workflowId: made.jobSetId });
+    return { prompt, pictures: out };
+  });
+}
+
+async function fetchAsDataUrl(ctx: PluginContext, url: string): Promise<string> {
+  const res = await ctx.http.fetch(url);
+  if (!res.ok) throw new Error(`The finished picture could not be fetched (error ${res.status}).`);
+  const type = (res.headers?.get?.("content-type") ?? "image/png").split(";")[0]!.trim().toLowerCase();
+  if (!type.startsWith("image/")) throw new Error("The service sent something that is not a picture.");
+  return `data:${type};base64,${Buffer.from(await res.arrayBuffer()).toString("base64")}`;
+}
+
 async function candidatesAction(ctx: PluginContext, params: Record<string, unknown>, context: ActionContext, seams: AnchorSeams) {
   const { companyId, userId } = managerOf(context, "make candidate pictures");
   const identity = findIdentity(await loadIdentities(ctx, companyId), params.identityId);
   const kind = (CANDIDATE_KINDS as readonly string[]).includes(String(params.kind)) ? (params.kind as CandidateKind) : null;
   if (!kind) throw new Error('Pick "portrait" or "full body".');
-  const model = identity.preferredModels.sogni || IDENTITY_DEFAULT_SOGNI_MODEL;
-  const refs = candidateReferences(identity, model);
-  const pictures: string[] = [];
-  for (const id of refs.fileIds) pictures.push((await readPicture(ctx, companyId, id, "The identity's crop")).dataUrl);
-  const prompt = identityPicturePrompt(identity, CANDIDATE_REQUESTS[kind], refs.roles);
-  const sogni = await sogniClient(ctx, seams);
-  return withSpend(ctx, "identity-pictures", companyId, userId, params, async () => {
-    const made = await sogni.editPictures({
-      prompt,
-      model,
-      pictures,
-      variations: 2,
-      imageSize: kind === "portrait" ? "portrait_4_3" : "portrait_16_9",
-      safeContentFilter: true,
-    });
-    return {
-      candidates: made.pictures.map((p) => ({ imageDataUrl: asDataUrl(p), kind, model: made.model, workflowId: made.workflowId })),
-      prompt,
-      credits: made.credits,
-      seedExplanation: SEED_EXPLANATION,
-    };
+  const made = await makeIdentityPictures(ctx, seams, companyId, userId, identity, {
+    service: readService(params.service),
+    model: typeof params.model === "string" ? params.model : null,
+    loras: readPicks(params.loras),
+    request: CANDIDATE_REQUESTS[kind],
+    count: 2,
+    imageSize: kind === "portrait" ? "portrait_4_3" : "portrait_16_9",
+    raw: params,
   });
+  return {
+    candidates: made.pictures.map((p) => ({ ...p, kind })),
+    prompt: made.prompt,
+    seedExplanation: SEED_EXPLANATION,
+  };
 }
 
 async function useCandidateAction(ctx: PluginContext, params: Record<string, unknown>, context: ActionContext) {
@@ -606,13 +804,155 @@ async function placeAction(ctx: PluginContext, params: Record<string, unknown>, 
   });
 }
 
-// ─── LoRA training ───────────────────────────────────────────────────────────
+// ─── Training set (provider-agnostic) ────────────────────────────────────────
 
-function emptyTraining(): IdentityTraining {
+async function trainingSetGenerateAction(ctx: PluginContext, params: Record<string, unknown>, context: ActionContext, seams: AnchorSeams) {
+  const { companyId, userId } = managerOf(context, "make training pictures");
+  const identity = findIdentity(await loadIdentities(ctx, companyId), params.identityId);
+  const request = typeof params.prompt === "string" ? params.prompt.trim() : "";
+  if (!request || request.length > 500) throw new Error("Each variation needs a short description (under 500 characters).");
+  const count = Number.isInteger(params.count) ? Math.min(4, Math.max(1, params.count as number)) : 2;
+  const made = await makeIdentityPictures(ctx, seams, companyId, userId, identity, {
+    service: readService(params.service),
+    model: typeof params.model === "string" ? params.model : null,
+    loras: readPicks(params.loras),
+    request,
+    count,
+    raw: params,
+  });
+  return { pictures: made.pictures };
+}
+
+function readProvenance(value: unknown, fileId: string, batchId: string | null): TrainingPicture {
+  const raw = (value ?? {}) as Record<string, unknown>;
+  const text = (v: unknown, max: number) => (typeof v === "string" && v.trim() ? v.trim().slice(0, max) : null);
+  const generated = raw.source !== "upload" && text(raw.service, 20) !== null;
   return {
-    status: "collecting",
-    datasetFileIds: [],
-    selectedFileIds: [],
+    fileId,
+    source: generated ? "generated" : "upload",
+    service: generated ? text(raw.service, 20) : null,
+    model: generated ? text(raw.model, 200) : null,
+    loras: generated && Array.isArray(raw.loras) ? readPicks(raw.loras) : [],
+    prompt: generated ? text(raw.prompt, 4000) : null,
+    seed: generated && typeof raw.seed === "number" && Number.isInteger(raw.seed) ? raw.seed : null,
+    batchId,
+    addedAt: new Date().toISOString(),
+  };
+}
+
+async function trainingSetAddAction(ctx: PluginContext, params: Record<string, unknown>, context: ActionContext) {
+  const { companyId } = managerOf(context, "add training pictures");
+  const rows = Array.isArray(params.pictures) ? params.pictures : [];
+  if (rows.length === 0 || rows.length > 40) throw new Error("Add between 1 and 40 pictures at a time.");
+  const batchRaw = params.batch as Record<string, unknown> | undefined;
+  const batch: TrainingBatch | null = batchRaw
+    ? {
+        id: crypto.randomUUID(),
+        service: readService(batchRaw.service),
+        model: typeof batchRaw.model === "string" ? batchRaw.model.slice(0, 200) : "",
+        loras: readPicks(batchRaw.loras),
+        prompts: Array.isArray(batchRaw.prompts) ? batchRaw.prompts.filter((p): p is string => typeof p === "string").map((p) => p.slice(0, 500)).slice(0, 60) : [],
+        count: rows.length,
+        createdAt: new Date().toISOString(),
+      }
+    : null;
+  const added: TrainingPicture[] = [];
+  for (const row of rows) {
+    const r = (row ?? {}) as Record<string, unknown>;
+    const fileId = typeof r.fileId === "string" ? r.fileId.trim() : "";
+    if (!fileId) throw new Error("A picture has no file. Save it again.");
+    await assertPictureFile(ctx, companyId, fileId, "A training picture");
+    added.push(readProvenance(r.provenance, fileId, batch?.id ?? null));
+  }
+  const blocks = await loadAgeBlocks(ctx, companyId);
+  if (added.some((p) => blocks.includes(p.fileId))) throw new Error("One of these pictures was flagged as possibly showing someone under 18, so it cannot be used.");
+  const identity = await updateIdentity(ctx, companyId, String(params.identityId ?? ""), (current) => {
+    const set = current.trainingSet ?? emptyTrainingSet();
+    const known = new Set(set.pictures.map((p) => p.fileId));
+    const pictures = [...set.pictures, ...added.filter((p) => !known.has(p.fileId))];
+    if (pictures.length > TRAINING_SET_MAX) throw new Error(`A training set holds at most ${TRAINING_SET_MAX} pictures. Remove some first.`);
+    return { ...current, trainingSet: { ...set, pictures, batches: batch ? [...set.batches, batch] : set.batches } };
+  });
+  return { identity: identityView(identity) };
+}
+
+async function trainingSetSelectAction(ctx: PluginContext, params: Record<string, unknown>, context: ActionContext) {
+  const { companyId } = managerOf(context, "pick training pictures");
+  const ids = Array.isArray(params.fileIds) ? Array.from(new Set(params.fileIds.filter((x): x is string => typeof x === "string"))) : [];
+  const identity = await updateIdentity(ctx, companyId, String(params.identityId ?? ""), (current) => {
+    const set = current.trainingSet;
+    if (!set || set.pictures.length === 0) throw new Error("Add pictures to the training set first.");
+    if (ids.some((id) => !set.pictures.some((p) => p.fileId === id))) throw new Error("Only pictures in this training set can be ticked.");
+    if (ids.length > LORA_MAX_PICTURES) throw new Error(`Tick at most ${LORA_MAX_PICTURES} pictures (12 to 25 is best).`);
+    return { ...current, trainingSet: { ...set, selectedFileIds: ids } };
+  });
+  return { identity: identityView(identity) };
+}
+
+async function trainingSetRemoveAction(ctx: PluginContext, params: Record<string, unknown>, context: ActionContext) {
+  const { companyId } = managerOf(context, "remove training pictures");
+  const ids = Array.isArray(params.fileIds) ? params.fileIds.filter((x): x is string => typeof x === "string") : [];
+  const identity = await updateIdentity(ctx, companyId, String(params.identityId ?? ""), (current) => {
+    const set = current.trainingSet ?? emptyTrainingSet();
+    return {
+      ...current,
+      trainingSet: { ...set, pictures: set.pictures.filter((p) => !ids.includes(p.fileId)), selectedFileIds: set.selectedFileIds.filter((id) => !ids.includes(id)) },
+    };
+  });
+  return { identity: identityView(identity) };
+}
+
+async function trainingSetPresetsAction(ctx: PluginContext, params: Record<string, unknown>, context: ActionContext) {
+  const { companyId } = managerOf(context, "change the variations");
+  const presets = Array.isArray(params.presets) ? params.presets.filter((p): p is string => typeof p === "string").map((p) => p.trim()).filter(Boolean) : [];
+  if (presets.length === 0 || presets.length > 60 || presets.some((p) => p.length > 500)) throw new Error("Keep 1 to 60 variations, each under 500 characters.");
+  const identity = await updateIdentity(ctx, companyId, String(params.identityId ?? ""), (current) => ({
+    ...current,
+    trainingSet: { ...(current.trainingSet ?? emptyTrainingSet()), presets },
+  }));
+  return { identity: identityView(identity) };
+}
+
+/** The ticked pictures as a zip, with one caption file per picture and a README, for training anywhere. */
+export async function trainingSetDownloadAction(ctx: PluginContext, params: Record<string, unknown>, context: ActionContext) {
+  const { companyId } = managerOf(context, "download the training set");
+  const identity = findIdentity(await loadIdentities(ctx, companyId), params.identityId);
+  const set = identity.trainingSet;
+  if (!set || set.selectedFileIds.length === 0) throw new Error("Tick the pictures to download first.");
+  const trigger = typeof params.triggerWord === "string" && params.triggerWord.trim() ? readTriggerWord(params.triggerWord) : null;
+  const files: Array<{ name: string; bytes: Buffer }> = [];
+  const lines: string[] = [];
+  for (const [i, id] of set.selectedFileIds.entries()) {
+    const p = await readPicture(ctx, companyId, id, "A ticked picture");
+    const ext = p.contentType.includes("jpeg") || p.contentType.includes("jpg") ? "jpg" : p.contentType.includes("webp") ? "webp" : "png";
+    const base = String(i + 1).padStart(3, "0");
+    const info = set.pictures.find((x) => x.fileId === id);
+    const caption = [trigger, info?.prompt ? info.prompt.split("\n")[0] : null].filter(Boolean).join(", ") || identity.name;
+    files.push({ name: `${base}.${ext}`, bytes: p.bytes }, { name: `${base}.txt`, bytes: Buffer.from(caption, "utf8") });
+    lines.push(`- ${base}.${ext}: ${info?.source === "upload" ? "own photo" : `${info?.service ?? "?"} ${info?.model ?? ""}${info?.loras.length ? ` with LoRAs ${info.loras.map((l) => `${l.id}@${l.strength}`).join(", ")}` : ""}${info?.seed != null ? `, seed ${info.seed}` : ""}`}`);
+  }
+  const readme = [
+    `# Training set: ${identity.name}`,
+    "",
+    `${set.selectedFileIds.length} pictures, each with a caption file of the same name${trigger ? ` starting with the trigger word "${trigger}"` : ""}.`,
+    "Made with Paperclip Media Studio. Only use it for a person who is fictional/AI-made, or an adult who gave written consent.",
+    "",
+    "## Where each picture came from",
+    ...lines,
+    "",
+  ].join("\n");
+  files.push({ name: "README.md", bytes: Buffer.from(readme, "utf8") });
+  const zip = zipStore(files);
+  const filename = `${identity.name.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "person"}-training-set.zip`;
+  return { filename, contentType: "application/zip", contentBase64: zip.toString("base64"), pictures: set.selectedFileIds.length };
+}
+
+// ─── Train with: Fal LoRA ────────────────────────────────────────────────────
+
+function newTraining(): IdentityTraining {
+  return {
+    status: "training",
+    trainedFileIds: [],
     triggerWord: "",
     steps: LORA_TRAINING_STEPS,
     estimatedCostCents: loraTrainingCostCents(),
@@ -627,63 +967,13 @@ function emptyTraining(): IdentityTraining {
   };
 }
 
-async function loraPicturesAction(ctx: PluginContext, params: Record<string, unknown>, context: ActionContext, seams: AnchorSeams) {
-  const { companyId, userId } = managerOf(context, "make training pictures");
-  const identity = findIdentity(await loadIdentities(ctx, companyId), params.identityId);
-  if (identity.training?.status === "training") throw new Error("A LoRA is being trained right now. Wait until it is done.");
-  const index = Number.isInteger(params.index) ? Math.abs(params.index as number) % TRAINING_REQUESTS.length : 0;
-  const model = identity.preferredModels.sogni || IDENTITY_DEFAULT_SOGNI_MODEL;
-  const refs = candidateReferences(identity, model);
-  // The chosen canonical picture is the best face there is: use it as the face when there is one.
-  if (identity.canonicalFileId) refs.fileIds[0] = identity.canonicalFileId;
-  const pictures: string[] = [];
-  for (const id of refs.fileIds) pictures.push((await readPicture(ctx, companyId, id, "The identity's picture")).dataUrl);
-  const prompt = identityPicturePrompt(identity, TRAINING_REQUESTS[index]!, refs.roles);
-  const sogni = await sogniClient(ctx, seams);
-  return withSpend(ctx, "identity-pictures", companyId, userId, params, async () => {
-    const made = await sogni.editPictures({ prompt, model, pictures, variations: 2, safeContentFilter: true });
-    return { pictures: made.pictures.map((p) => ({ imageDataUrl: asDataUrl(p) })), index, prompt, of: TRAINING_REQUESTS.length };
-  });
-}
-
-async function loraAddPicturesAction(ctx: PluginContext, params: Record<string, unknown>, context: ActionContext) {
-  const { companyId } = managerOf(context, "add training pictures");
-  const ids = Array.isArray(params.fileIds) ? params.fileIds.filter((x): x is string => typeof x === "string" && x.trim() !== "") : [];
-  if (ids.length === 0) throw new Error("No pictures to add.");
-  for (const id of ids) await assertPictureFile(ctx, companyId, id, "A training picture");
-  const identity = await updateIdentity(ctx, companyId, String(params.identityId ?? ""), (current) => {
-    const training = current.training ?? emptyTraining();
-    if (current.training && current.training.status !== "collecting" && current.training.status !== "failed") {
-      throw new Error("This identity's LoRA is already trained. Start over to make a new one.");
-    }
-    const dataset = Array.from(new Set([...training.datasetFileIds, ...ids]));
-    if (dataset.length > LORA_DATASET_MAX) throw new Error(`Keep at most ${LORA_DATASET_MAX} training pictures.`);
-    return { ...current, training: { ...training, status: "collecting", datasetFileIds: dataset, updatedAt: new Date().toISOString() } };
-  });
-  return { identity: identityView(identity) };
-}
-
-async function loraSelectAction(ctx: PluginContext, params: Record<string, unknown>, context: ActionContext) {
-  const { companyId } = managerOf(context, "pick training pictures");
-  const ids = Array.isArray(params.fileIds) ? Array.from(new Set(params.fileIds.filter((x): x is string => typeof x === "string"))) : [];
-  const identity = await updateIdentity(ctx, companyId, String(params.identityId ?? ""), (current) => {
-    const training = current.training;
-    if (!training || (training.status !== "collecting" && training.status !== "failed")) throw new Error("Make training pictures first.");
-    if (ids.some((id) => !training.datasetFileIds.includes(id))) throw new Error("Only pictures made for this training can be ticked.");
-    if (ids.length > LORA_MAX_PICTURES) throw new Error(`Tick at most ${LORA_MAX_PICTURES} pictures (12 to 20 is best).`);
-    return { ...current, training: { ...training, selectedFileIds: ids, updatedAt: new Date().toISOString() } };
-  });
-  return { identity: identityView(identity) };
-}
-
 export async function loraTrainAction(ctx: PluginContext, params: Record<string, unknown>, context: ActionContext, seams: AnchorSeams) {
   const { companyId, userId } = managerOf(context, "train a LoRA");
   const identity = findIdentity(await loadIdentities(ctx, companyId), params.identityId);
-  const training = identity.training;
-  if (!training) throw new Error("Make and tick training pictures first.");
-  assertTrainingMove(training.status, "training");
-  if (training.selectedFileIds.length < LORA_MIN_PICTURES) {
-    throw new Error(`Tick at least ${LORA_MIN_PICTURES} pictures that truly look like ${identity.name} (12 to 20 is best).`);
+  assertTrainingMove(identity.training?.status ?? null, "training");
+  const selected = identity.trainingSet?.selectedFileIds ?? [];
+  if (selected.length < LORA_MIN_PICTURES) {
+    throw new Error(`Tick at least ${LORA_MIN_PICTURES} pictures in the training set that truly look like ${identity.name} (12 to 25 is best).`);
   }
   const triggerWord = readTriggerWord(params.triggerWord);
   const cost = loraTrainingCostCents(LORA_TRAINING_STEPS);
@@ -692,7 +982,7 @@ export async function loraTrainAction(ctx: PluginContext, params: Record<string,
   }
   const key = await falKey(ctx);
   const files = [];
-  for (const [i, id] of training.selectedFileIds.entries()) {
+  for (const [i, id] of selected.entries()) {
     const p = await readPicture(ctx, companyId, id, "A ticked training picture");
     const ext = p.contentType.includes("jpeg") || p.contentType.includes("jpg") ? "jpg" : p.contentType.includes("webp") ? "webp" : "png";
     files.push({ name: `${String(i + 1).padStart(3, "0")}.${ext}`, bytes: p.bytes });
@@ -719,16 +1009,11 @@ export async function loraTrainAction(ctx: PluginContext, params: Record<string,
   const next = await updateIdentity(ctx, companyId, identity.id, (current) => ({
     ...current,
     training: {
-      ...(current.training ?? emptyTraining()),
-      status: "training",
+      ...newTraining(),
+      trainedFileIds: [...selected],
       triggerWord,
-      steps: LORA_TRAINING_STEPS,
-      estimatedCostCents: cost,
-      falModel: LORA_TRAINER_MODEL,
       falRequestId: requestId,
       reservationId: reservation.reservationId,
-      resultUrl: null,
-      error: null,
       startedBy: userId,
       startedAt: now,
       updatedAt: now,
@@ -762,7 +1047,16 @@ export async function loraStatusAction(ctx: PluginContext, params: Record<string
   }
   const next = await updateIdentity(ctx, companyId, identity.id, (current) => {
     assertTrainingMove(current.training!.status, "trained");
-    return { ...current, training: { ...current.training!, status: "trained", resultUrl: poll.loraUrl, updatedAt: new Date().toISOString() } };
+    const now = new Date().toISOString();
+    return {
+      ...current,
+      training: { ...current.training!, status: "trained", resultUrl: poll.loraUrl, updatedAt: now },
+      // Usable right away by Fal LoRA models from Fal's own (private, time-limited) address.
+      trainedIdentities: [
+        ...current.trainedIdentities,
+        { id: crypto.randomUUID(), provider: "fal-lora", ref: poll.loraUrl, url: poll.loraUrl, variant: null, triggerWord: current.training!.triggerWord, strength: 0.8, status: "ready", createdAt: now },
+      ],
+    };
   });
   return { identity: identityView(next), progress: null };
 }
@@ -804,17 +1098,9 @@ export async function loraPublishAction(ctx: PluginContext, params: Record<strin
   const published = await hfPublishPublic(apiFetch, bytesFetch, token, { namespace, repoName, fileName, bytes, readme });
   const next = await updateIdentity(ctx, companyId, identity.id, (current) => ({
     ...current,
-    lora: {
-      source: "huggingface",
-      url: published.url,
-      visibility: "public",
-      baseModel: "krea-2",
-      triggerWord: current.training!.triggerWord,
-      strength: current.lora?.strength ?? 0.8,
-      sogniLoraId: null,
-      sogniStatus: null,
-      repo: published.repo,
-    },
+    lora: { source: "huggingface", url: published.url, visibility: "public", baseModel: "krea-2", triggerWord: current.training!.triggerWord, strength: current.lora?.strength ?? 0.8, repo: published.repo },
+    // The public address replaces Fal's time-limited one for Fal LoRA models.
+    trainedIdentities: current.trainedIdentities.map((t) => (t.provider === "fal-lora" && t.ref === current.training!.resultUrl ? { ...t, url: published.url } : t)),
     training: { ...current.training!, status: "published", updatedAt: new Date().toISOString() },
   }));
   return { identity: identityView(next) };
@@ -824,7 +1110,7 @@ async function loraImportSogniAction(ctx: PluginContext, params: Record<string, 
   const { companyId } = managerOf(context, "import a LoRA into Sogni");
   const identity = findIdentity(await loadIdentities(ctx, companyId), params.identityId);
   const lora = identity.lora;
-  if (!lora) throw new Error("This identity has no LoRA yet.");
+  if (!lora) throw new Error("Publish the LoRA first (Sogni imports from a public address).");
   if (lora.visibility !== "public" || (lora.source !== "huggingface" && lora.source !== "civitai")) {
     throw new Error("Sogni can only import a public Hugging Face or Civitai file.");
   }
@@ -832,32 +1118,56 @@ async function loraImportSogniAction(ctx: PluginContext, params: Record<string, 
   const started = await sogni.importPersonalLora({ url: lora.url, name: `${identity.name} (person)`, modelId: LORA_SOGNI_BASE_MODEL_ID });
   const next = await updateIdentity(ctx, companyId, identity.id, (current) => ({
     ...current,
-    lora: { ...current.lora!, sogniLoraId: started.id, sogniStatus: started.status },
+    trainedIdentities: [
+      ...current.trainedIdentities.filter((t) => !(t.provider === "sogni-lora" && t.ref === started.id)),
+      { id: crypto.randomUUID(), provider: "sogni-lora", ref: started.id, url: lora.url, variant: null, triggerWord: lora.triggerWord || null, strength: lora.strength, status: started.status, createdAt: new Date().toISOString() },
+    ],
   }));
   return { identity: identityView(next) };
 }
 
-async function loraSogniStatusAction(ctx: PluginContext, params: Record<string, unknown>, context: ActionContext, seams: AnchorSeams) {
+/** Check every Sogni import and Higgsfield Soul ID that is not finished yet. */
+async function trainedStatusAction(ctx: PluginContext, params: Record<string, unknown>, context: ActionContext, seams: AnchorSeams) {
   const companyId = companyOf(context);
   const identity = findIdentity(await loadIdentities(ctx, companyId), params.identityId);
-  if (!identity.lora?.sogniLoraId) return { identity: identityView(identity), reason: null };
-  const sogni = await sogniClient(ctx, seams);
-  const state = await sogni.personalLora(identity.lora.sogniLoraId);
-  const next = await updateIdentity(ctx, companyId, identity.id, (current) => ({ ...current, lora: { ...current.lora!, sogniStatus: state.status } }));
-  return { identity: identityView(next), reason: state.reason };
+  const pending = identity.trainedIdentities.filter((t) => !trainedReady(t) && !["failed", "rejected", "revoked"].includes(t.status));
+  if (pending.length === 0) return { identity: identityView(identity) };
+  const updates = new Map<string, string>();
+  for (const t of pending) {
+    if (t.provider === "sogni-lora") updates.set(t.id, (await (await sogniClient(ctx, seams)).personalLora(t.ref)).status);
+    else if (t.provider === "higgsfield-soul") updates.set(t.id, await (await higgsfieldClient(ctx, seams)).soulIdStatus(t.ref));
+  }
+  const next = await updateIdentity(ctx, companyId, identity.id, (current) => ({
+    ...current,
+    trainedIdentities: current.trainedIdentities.map((t) => (updates.has(t.id) ? { ...t, status: updates.get(t.id)! } : t)),
+  }));
+  return { identity: identityView(next) };
 }
 
-/** Attach a LoRA already imported into Sogni by hand (its "personal-..." id). */
+/** Attach a LoRA already in the Sogni account (its "personal-..." id), e.g. imported by hand. */
 async function loraAttachAction(ctx: PluginContext, params: Record<string, unknown>, context: ActionContext) {
   const { companyId } = managerOf(context, "attach a LoRA");
   const id = typeof params.sogniLoraId === "string" ? params.sogniLoraId.trim() : "";
   if (!/^personal-[A-Za-z0-9-]{1,100}$/.test(id)) throw new Error("Pick one of your own Sogni LoRAs (its id starts with personal-).");
-  const strength = params.strength === undefined ? null : Number(params.strength);
-  if (strength !== null && (!Number.isFinite(strength) || strength <= 0 || strength > 1)) throw new Error("LoRA strength must be more than 0 and at most 1.");
-  const next = await updateIdentity(ctx, companyId, String(params.identityId ?? ""), (current) => {
-    if (!current.lora) throw new Error("Publish the LoRA (or add its address) first.");
-    return { ...current, lora: { ...current.lora, sogniLoraId: id, sogniStatus: "ready", strength: strength ?? current.lora.strength } };
-  });
+  const strength = params.strength === undefined || params.strength === null || params.strength === "" ? 0.8 : Number(params.strength);
+  if (!Number.isFinite(strength) || strength <= 0 || strength > 1) throw new Error("LoRA strength must be more than 0 and at most 1.");
+  const triggerWord = typeof params.triggerWord === "string" && params.triggerWord.trim() ? readTriggerWord(params.triggerWord) : null;
+  const next = await updateIdentity(ctx, companyId, String(params.identityId ?? ""), (current) => ({
+    ...current,
+    trainedIdentities: [
+      ...current.trainedIdentities.filter((t) => !(t.provider === "sogni-lora" && t.ref === id)),
+      { id: crypto.randomUUID(), provider: "sogni-lora", ref: id, url: current.lora?.url ?? null, variant: null, triggerWord: triggerWord ?? current.lora?.triggerWord ?? null, strength, status: "ready", createdAt: new Date().toISOString() },
+    ],
+  }));
+  return { identity: identityView(next) };
+}
+
+async function trainedRemoveAction(ctx: PluginContext, params: Record<string, unknown>, context: ActionContext) {
+  const { companyId } = managerOf(context, "remove a trained identity");
+  const next = await updateIdentity(ctx, companyId, String(params.identityId ?? ""), (current) => ({
+    ...current,
+    trainedIdentities: current.trainedIdentities.filter((t) => t.id !== params.trainedId),
+  }));
   return { identity: identityView(next) };
 }
 
@@ -868,6 +1178,52 @@ async function loraResetAction(ctx: PluginContext, params: Record<string, unknow
     return { ...current, training: null };
   });
   return { identity: identityView(next) };
+}
+
+// ─── Train with: Higgsfield Soul ID ──────────────────────────────────────────
+
+export async function higgsfieldSoulAction(ctx: PluginContext, params: Record<string, unknown>, context: ActionContext, seams: AnchorSeams) {
+  const { companyId, userId } = managerOf(context, "make a Higgsfield Soul ID");
+  const identity = findIdentity(await loadIdentities(ctx, companyId), params.identityId);
+  const selected = identity.trainingSet?.selectedFileIds ?? [];
+  if (selected.length < HIGGSFIELD_MIN_SOUL_PICTURES || selected.length > HIGGSFIELD_MAX_SOUL_PICTURES) {
+    throw new Error(`A Higgsfield Soul ID needs ${HIGGSFIELD_MIN_SOUL_PICTURES} to ${HIGGSFIELD_MAX_SOUL_PICTURES} ticked face pictures (${selected.length} ticked).`);
+  }
+  const variant = params.variant === "soul-cinematic" ? "soul-cinematic" : "soul-2";
+  const client = await higgsfieldClient(ctx, seams);
+  const made = await withSpend(ctx, "higgsfield-soul-id", companyId, userId, params, async () => {
+    const urls: string[] = [];
+    for (const id of selected) {
+      const p = await readPicture(ctx, companyId, id, "A ticked picture");
+      urls.push(await client.upload(p.bytes, p.contentType === "image/jpg" ? "image/jpeg" : p.contentType));
+    }
+    return client.createSoulId(`${identity.name}`, urls);
+  });
+  const next = await updateIdentity(ctx, companyId, identity.id, (current) => ({
+    ...current,
+    trainedIdentities: [
+      ...current.trainedIdentities,
+      { id: crypto.randomUUID(), provider: "higgsfield-soul", ref: made.id, url: null, variant, triggerWord: null, strength: 1, status: made.status, createdAt: new Date().toISOString() },
+    ],
+  }));
+  return { identity: identityView(next) };
+}
+
+/** Which services have a key, the models to offer, and the price notes, for "Generate with". */
+async function generationOptionsAction(ctx: PluginContext, _params: Record<string, unknown>, context: ActionContext) {
+  companyOf(context);
+  const cfg = await config(ctx);
+  const has = (k: string) => typeof cfg[k] === "string" && (cfg[k] as string).trim() !== "";
+  return {
+    services: { sogni: has("sogniKeySecretRef"), fal: has("falKeySecretRef"), higgsfield: has("higgsfieldKeySecretRef") },
+    models: IDENTITY_PICTURE_MODELS,
+    priceCents: PICTURE_PRICE_CENTS,
+    priceNotes: PRICE_NOTES,
+    reservedPerCallCents: 8,
+    perCall: { sogni: 2, fal: 4, higgsfield: 4 },
+    higgsfieldNote:
+      "Higgsfield keeps a person only through a Soul ID: it takes no reference pictures, so a look's outfit or style pictures and rooms cannot be combined with it. Those go through Sogni or Fal.ai.",
+  };
 }
 
 // ─── Registration ────────────────────────────────────────────────────────────
@@ -892,7 +1248,15 @@ export function registerAnchorActions(ctx: PluginContext, seams: AnchorSeams = a
       hfReady: settings.hfTokenSecretId !== null,
       consentText: { likeness: CONSENT_LIKENESS_TEXT, adult: CONSENT_ADULT_TEXT },
       seedExplanation: SEED_EXPLANATION,
-      training: { steps: LORA_TRAINING_STEPS, costCents: loraTrainingCostCents(), minPictures: LORA_MIN_PICTURES, maxPictures: LORA_MAX_PICTURES, prompts: TRAINING_REQUESTS.length },
+      training: {
+        steps: LORA_TRAINING_STEPS,
+        costCents: loraTrainingCostCents(),
+        minPictures: LORA_MIN_PICTURES,
+        maxPictures: LORA_MAX_PICTURES,
+        soulMin: HIGGSFIELD_MIN_SOUL_PICTURES,
+        soulMax: HIGGSFIELD_MAX_SOUL_PICTURES,
+        presets: TRAINING_REQUESTS,
+      },
       editModels: Object.keys(SOGNI_EDIT_MODELS),
     };
   });
@@ -902,6 +1266,7 @@ export function registerAnchorActions(ctx: PluginContext, seams: AnchorSeams = a
   reg(ACTION_IDENTITIES_CROP, (p, c) => cropAction(ctx, p, c));
   reg(ACTION_IDENTITIES_CANDIDATES, (p, c) => candidatesAction(ctx, p, c, seams));
   reg(ACTION_IDENTITIES_USE_CANDIDATE, (p, c) => useCandidateAction(ctx, p, c));
+  reg(ACTION_IDENTITIES_GENERATION_OPTIONS, (p, c) => generationOptionsAction(ctx, p, c));
 
   reg(ACTION_IDENTITY_SETTINGS_GET, async (_p, context) => {
     const companyId = companyOf(context);
@@ -932,14 +1297,19 @@ export function registerAnchorActions(ctx: PluginContext, seams: AnchorSeams = a
   });
   reg(ACTION_ROOMS_PLACE, (p, c) => placeAction(ctx, p, c, seams));
 
-  reg(ACTION_LORA_PICTURES, (p, c) => loraPicturesAction(ctx, p, c, seams));
-  reg(ACTION_LORA_ADD_PICTURES, (p, c) => loraAddPicturesAction(ctx, p, c));
-  reg(ACTION_LORA_SELECT, (p, c) => loraSelectAction(ctx, p, c));
+  reg(ACTION_TRAINING_SET_GENERATE, (p, c) => trainingSetGenerateAction(ctx, p, c, seams));
+  reg(ACTION_TRAINING_SET_ADD, (p, c) => trainingSetAddAction(ctx, p, c));
+  reg(ACTION_TRAINING_SET_SELECT, (p, c) => trainingSetSelectAction(ctx, p, c));
+  reg(ACTION_TRAINING_SET_REMOVE, (p, c) => trainingSetRemoveAction(ctx, p, c));
+  reg(ACTION_TRAINING_SET_PRESETS, (p, c) => trainingSetPresetsAction(ctx, p, c));
+  reg(ACTION_TRAINING_SET_DOWNLOAD, (p, c) => trainingSetDownloadAction(ctx, p, c));
   reg(ACTION_LORA_TRAIN, (p, c) => loraTrainAction(ctx, p, c, seams));
   reg(ACTION_LORA_STATUS, (p, c) => loraStatusAction(ctx, p, c));
   reg(ACTION_LORA_PUBLISH, (p, c) => loraPublishAction(ctx, p, c, seams));
   reg(ACTION_LORA_IMPORT_SOGNI, (p, c) => loraImportSogniAction(ctx, p, c, seams));
-  reg(ACTION_LORA_SOGNI_STATUS, (p, c) => loraSogniStatusAction(ctx, p, c, seams));
   reg(ACTION_LORA_ATTACH, (p, c) => loraAttachAction(ctx, p, c));
   reg(ACTION_LORA_RESET, (p, c) => loraResetAction(ctx, p, c));
+  reg(ACTION_HIGGSFIELD_SOUL, (p, c) => higgsfieldSoulAction(ctx, p, c, seams));
+  reg(ACTION_TRAINED_STATUS, (p, c) => trainedStatusAction(ctx, p, c, seams));
+  reg(ACTION_TRAINED_REMOVE, (p, c) => trainedRemoveAction(ctx, p, c));
 }

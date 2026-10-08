@@ -345,10 +345,19 @@ type Look = {
   safeContentFilter?: boolean;
   identityId?: string | null;
   identitySameOutfit?: boolean;
+  identityTrained?: Record<string, string | null | undefined>;
   updatedAt: string;
 };
 
-const SERVICE_LABEL: Record<string, string> = { fal: "Fal.ai", sogni: "Sogni" };
+export type LookIdentity = { id: string; name: string; trainedIdentities?: Array<{ id: string; provider: string; ref: string; status: string }> };
+
+/** The trained identities (Sogni LoRAs, Higgsfield Soul IDs) a look can pick for one service. */
+export function trainedFor(identity: LookIdentity | undefined, service: "sogni" | "higgsfield") {
+  const provider = service === "sogni" ? "sogni-lora" : "higgsfield-soul";
+  return (identity?.trainedIdentities ?? []).filter((t) => t.provider === provider);
+}
+
+const SERVICE_LABEL: Record<string, string> = { fal: "Fal.ai", sogni: "Sogni", higgsfield: "Higgsfield" };
 
 type LooksResponse = { looks: Look[]; canManage?: boolean; maxReferenceFiles?: number; defaults?: Record<string, string> };
 
@@ -457,6 +466,8 @@ export type LookDraft = {
   /** The saved person every picture with this look shows ("" = none). */
   identityId?: string;
   identitySameOutfit?: boolean;
+  /** Which trained identity (Sogni LoRA, Higgsfield Soul ID) to use per service; missing: the newest ready one. */
+  identityTrained?: Record<string, string>;
 };
 
 const EMPTY_DRAFT: LookDraft = {
@@ -580,6 +591,7 @@ export function draftToSaveParams(draft: LookDraft): Record<string, unknown> {
     safeContentFilter: sogni ? draft.safeContentFilter : true,
     identityId: draft.identityId || null,
     identitySameOutfit: Boolean(draft.identityId) && draft.identitySameOutfit === true,
+    identityTrained: draft.identityId ? (draft.identityTrained ?? {}) : {},
   };
 }
 
@@ -603,6 +615,7 @@ function lookToDraft(look: Look): LookDraft {
     safeContentFilter: look.safeContentFilter !== false,
     identityId: look.identityId ?? "",
     identitySameOutfit: look.identitySameOutfit === true,
+    identityTrained: Object.fromEntries(Object.entries(look.identityTrained ?? {}).filter((e): e is [string, string] => typeof e[1] === "string")),
   };
 }
 
@@ -1632,11 +1645,11 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
   const listIdentities = usePluginAction(ACTION_IDENTITIES_LIST);
 
   const [looks, setLooks] = useState<Look[]>([]);
-  const [identities, setIdentities] = useState<Array<{ id: string; name: string }>>([]);
+  const [identities, setIdentities] = useState<LookIdentity[]>([]);
   useEffect(() => {
     Promise.resolve()
       .then(() => listIdentities({}))
-      .then((r) => setIdentities(((r as { identities?: Array<{ id: string; name: string }> } | undefined)?.identities ?? []).map(({ id, name }) => ({ id, name }))))
+      .then((r) => setIdentities(((r as { identities?: LookIdentity[] } | undefined)?.identities ?? []).map(({ id, name, trainedIdentities }) => ({ id, name, trainedIdentities: trainedIdentities ?? [] }))))
       .catch(() => setIdentities([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -2039,6 +2052,7 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
                 <option value="">The normal one (from settings)</option>
                 <option value="fal">Fal.ai</option>
                 <option value="sogni">Sogni</option>
+                <option value="higgsfield">Higgsfield</option>
               </select>
             </label>
             {draft.provider !== "sogni" ? (
@@ -2183,6 +2197,28 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
                 has room), then this look's own pictures. Add people on the Identities tab.
               </span>
             </label>
+            {draft.identityId
+              ? (["sogni", "higgsfield"] as const).map((svc) => {
+                  const options = trainedFor(identities.find((i) => i.id === draft.identityId), svc);
+                  if (options.length === 0) return null;
+                  return (
+                    <label key={svc} style={field}>
+                      <span>{svc === "sogni" ? "Sogni LoRA for this person" : "Higgsfield Soul ID for this person"}</span>
+                      <select
+                        style={input}
+                        disabled={busy}
+                        value={draft.identityTrained?.[svc] ?? ""}
+                        onChange={(e) => setDraft((d) => (d ? { ...d, identityTrained: { ...(d.identityTrained ?? {}), [svc]: e.target.value } } : d))}
+                      >
+                        <option value="">The newest ready one</option>
+                        {options.map((t) => (
+                          <option key={t.id} value={t.id}>{t.ref} ({t.status})</option>
+                        ))}
+                      </select>
+                    </label>
+                  );
+                })
+              : null}
             {draft.identityId ? (
               <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 13 }}>
                 <input type="checkbox" checked={draft.identitySameOutfit === true} disabled={busy} onChange={(e) => setDraft((d) => (d ? { ...d, identitySameOutfit: e.target.checked } : d))} />

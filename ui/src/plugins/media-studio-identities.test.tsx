@@ -61,7 +61,7 @@ const LIST_BASE = {
   hfReady: true,
   consentText: { likeness: "This person is fictional/AI-generated, or I have their written consent to use their likeness.", adult: "This person is an adult (18+)." },
   seedExplanation: "Sogni's picture-editing models take no seed.",
-  training: { steps: 1000, costCents: 300, minPictures: 10, maxPictures: 30, prompts: 12 },
+  training: { steps: 1000, costCents: 300, minPictures: 10, maxPictures: 40, soulMin: 5, soulMax: 20, presets: ["front view", "profile view"] },
   editModels: ["qwen-lightning", "qwen", "krea-identity-edit"],
 };
 
@@ -84,6 +84,16 @@ function identity(over: Partial<Identity> = {}): Identity {
     ...over,
   };
 }
+
+const OPTIONS = {
+  services: { sogni: true, fal: true, higgsfield: false },
+  models: { sogni: ["krea-identity-edit", "qwen"], fal: ["fal-ai/nano-banana-2/edit", "fal-ai/flux-2-pro/edit"], higgsfield: ["soul"] },
+  priceCents: { "fal-ai/nano-banana-2/edit": 8, "fal-ai/flux-2-pro/edit": 3 },
+  priceNotes: { sogni: "Sogni credits.", fal: "Fal.ai's published price per picture.", higgsfield: "Not published." },
+  reservedPerCallCents: 8,
+  perCall: { sogni: 2, fal: 4, higgsfield: 4 },
+  higgsfieldNote: "Higgsfield takes no reference pictures.",
+};
 
 let container: HTMLDivElement;
 let root: Root;
@@ -159,9 +169,15 @@ describe("Identities tab", () => {
 
   it("training needs the price confirmed before it starts", async () => {
     const ids = Array.from({ length: 10 }, (_, i) => `pic-${i}`);
-    const training = { status: "collecting" as const, datasetFileIds: ids, selectedFileIds: ids, triggerWord: "", steps: 1000, estimatedCostCents: 300, resultUrl: null, error: null };
-    actions["identities.list"] = vi.fn(async () => ({ ...LIST_BASE, identities: [identity({ training })] }));
-    actions["lora.train"] = vi.fn(async () => ({ identity: identity({ training: { ...training, status: "training" } }) }));
+    const trainingSet = {
+      pictures: ids.map((fileId) => ({ fileId, source: "generated" as const, service: "sogni", model: "krea-identity-edit", loras: [], prompt: "front view", seed: null, batchId: "b1" })),
+      selectedFileIds: ids,
+      batches: [{ id: "b1", service: "sogni", model: "krea-identity-edit", count: 10, createdAt: "x" }],
+      presets: ["front view"],
+    };
+    actions["identities.list"] = vi.fn(async () => ({ ...LIST_BASE, identities: [identity({ trainingSet })] }));
+    actions["identities.generationOptions"] = vi.fn(async () => OPTIONS);
+    actions["lora.train"] = vi.fn(async () => ({ identity: identity({ trainingSet, training: { status: "training", trainedFileIds: ids, triggerWord: "maja_person", steps: 1000, estimatedCostCents: 300, resultUrl: null, error: null } }) }));
     root = createRoot(container);
     await act(async () => root.render(<IdentitiesPanel context={{ companyId: COMPANY } as never} />));
     await flush();
@@ -169,10 +185,35 @@ describe("Identities tab", () => {
     const train = buttonNamed(container, "Train the LoRA");
     expect(train.disabled).toBe(true);
     expect(container.textContent).toContain("$3.00");
+    // Each picture says how it was made.
+    expect(container.querySelector('[aria-label="Training set"]')!.textContent).toContain("sogni krea-identity-edit");
     const cost = [...container.querySelectorAll("label")].find((l) => l.textContent?.includes("Training costs about"))!.querySelector("input")!;
     await click(cost);
     await click(buttonNamed(container, "Train the LoRA"));
     expect(actions["lora.train"]).toHaveBeenCalledWith(expect.objectContaining({ identityId: "id-1", confirmCostCents: 300 }));
+    // Higgsfield's Soul ID needs its key; 10 ticked is inside 5-20.
+    expect(buttonNamed(container, "Make a Soul ID").disabled).toBe(true);
+    expect(buttonNamed(container, "Download 10 pictures").disabled).toBe(false);
+  });
+
+  it("Generate with offers only services with a key, models per service, and the estimate", async () => {
+    actions["identities.list"] = vi.fn(async () => ({ ...LIST_BASE, identities: [identity()] }));
+    actions["identities.generationOptions"] = vi.fn(async () => OPTIONS);
+    actions["sogni.loras"] = vi.fn(async () => ({ loras: [{ id: "l1", name: "Film look", min: 0, max: 1, default: 0.6, personal: false }], checks: [] }));
+    actions["trainingSet.generate"] = vi.fn(async () => ({ pictures: [] }));
+    root = createRoot(container);
+    await act(async () => root.render(<IdentitiesPanel context={{ companyId: COMPANY } as never} />));
+    await flush();
+    await click(buttonNamed(container, /Maja/));
+    const panel = container.querySelector('[aria-label="Training set"] [aria-label="Generate with"]')!;
+    const [serviceSelect] = [...panel.querySelectorAll("select")] as HTMLSelectElement[];
+    expect([...serviceSelect!.options].map((o) => o.value)).toEqual(["sogni", "fal"]);
+    expect(panel.textContent).toContain("24 pictures in 12 calls");
+    expect(panel.textContent).toContain("Film look");
+    await act(async () => setValue(serviceSelect!, "fal"));
+    await flush();
+    const after = container.querySelector('[aria-label="Training set"] [aria-label="Generate with"]')!;
+    expect(after.textContent).toContain("About $1.92 at Fal.ai");
   });
 
   it("an existing identity's edit form keeps its crops and sends no consent again", () => {
