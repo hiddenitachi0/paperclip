@@ -320,9 +320,6 @@ DECLARE
     -- 0216_model_directory_entries.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'model_directory_entries',
-    -- Created, granted on and policed in 0236_model_catalogue_v2.sql;
-    -- listed here so the login-role lists match the schema.
-    'model_directory_settings',
     -- DUR-4392. Created, granted on and policed in
     -- 0229_model_directory_converters.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
@@ -639,9 +636,6 @@ DECLARE
     -- 0216_model_directory_entries.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'model_directory_entries',
-    -- Created, granted on and policed in 0236_model_catalogue_v2.sql;
-    -- listed here so the login-role lists match the schema.
-    'model_directory_settings',
     -- DUR-4392. Created, granted on and policed in
     -- 0229_model_directory_converters.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
