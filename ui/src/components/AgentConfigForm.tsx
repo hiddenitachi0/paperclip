@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   Agent,
@@ -50,8 +50,10 @@ import { ToggleSwitch } from "@/components/ui/toggle-switch";
 import { AgentLimitsFields, PERSONA_VOICE_WINS_HINT, PersonaPicker } from "./AgentPersonaFields";
 import { defaultCreateValues } from "./agent-config-defaults";
 import { getUIAdapter } from "../adapters";
+import { SchemaConfigFields } from "../adapters/schema-config-fields";
 import { ClaudeLocalAdvancedFields } from "../adapters/claude-local/config-fields";
 import { MarkdownEditor } from "./MarkdownEditor";
+import { SettingsSection, SettingsSubsection } from "./SettingsSection";
 import { ChoosePathButton } from "./PathInstructionsModal";
 import { OpenCodeLogoIcon } from "./OpenCodeLogoIcon";
 import { ReportsToPicker } from "./ReportsToPicker";
@@ -95,8 +97,16 @@ type AgentConfigFormProps = {
   hideInstructionsFile?: boolean;
   /** Hide the prompt template field from the Identity section (used when it's shown in a separate Prompts tab). */
   hidePromptTemplate?: boolean;
-  /** "cards" renders each section as heading + bordered card (for settings pages). Default: "inline" (border-b dividers). */
-  sectionLayout?: "inline" | "cards";
+  /**
+   * "cards" renders each section as heading + bordered card. "settings" (the
+   * agent's Configuration tab) groups the same fields into collapsible
+   * sections: Identity, "Full runs: engine and model" (model first, technical
+   * fields folded away) and "Daily limits and standing rules".
+   * Default: "inline" (border-b dividers).
+   */
+  sectionLayout?: "inline" | "cards" | "settings";
+  /** Rendered right after the Identity block (e.g. the quick agent settings). */
+  afterIdentity?: ReactNode;
 } & (
   | {
       mode: "create";
@@ -191,6 +201,14 @@ function clampDelayMsFromSeconds(value: number) {
   return clampInteger(value, 0, MAX_TURN_CONTINUATION_MAX_DELAY_SEC) * 1000;
 }
 
+/** "300" -> "5 min", "7200" -> "2 h", "45" -> "45 sec" (closed Run schedule summary). */
+export function describeIntervalSeconds(seconds: number): string {
+  const value = Number.isFinite(seconds) ? Math.max(0, Math.floor(seconds)) : 0;
+  if (value > 0 && value % 3600 === 0) return `${value / 3600} h`;
+  if (value > 0 && value % 60 === 0) return `${value / 60} min`;
+  return `${value} sec`;
+}
+
 
 /* ---- Form ---- */
 
@@ -198,6 +216,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
   const { mode, adapterModels: externalModels } = props;
   const isCreate = mode === "create";
   const cards = props.sectionLayout === "cards";
+  const settingsLayout = props.sectionLayout === "settings";
   const showAdapterTypeField = props.showAdapterTypeField ?? true;
   const showAdapterTestEnvironmentButton = props.showAdapterTestEnvironmentButton ?? true;
   const showInlineAdapterTestEnvironmentButton =
@@ -903,23 +922,850 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     });
   }
 
+  // ---- Field blocks ----
+  // Every block below is shared by both layouts. The classic inline/cards
+  // layout (New Agent page, company import) keeps its original order; the
+  // "settings" layout (the agent's Configuration tab) regroups the very same
+  // blocks into collapsible sections. Moving a block never changes what it
+  // saves.
+
+  const saveBar = isDirty && !props.hideInlineSave ? (
+    <div className="sticky top-0 z-10 flex items-center justify-end px-4 py-2 bg-background/90 backdrop-blur-sm border-b border-primary/20">
+      <div className="flex items-center gap-3">
+        <span className="text-xs text-muted-foreground">Unsaved changes</span>
+        <Button
+          size="sm"
+          onClick={handleSave}
+          disabled={!isCreate && props.isSaving}
+        >
+          {!isCreate && props.isSaving ? "Saving..." : "Save"}
+        </Button>
+      </div>
+    </div>
+  ) : null;
+
+  const identityFields = !isCreate ? (
+    <>
+      <Field label="Name" hint={help.name}>
+        <DraftInput
+          value={eff("identity", "name", props.agent.name)}
+          onCommit={(v) => mark("identity", "name", v)}
+          immediate
+          className={inputClass}
+          placeholder="Agent name"
+        />
+      </Field>
+      <Field label="Title" hint={help.title}>
+        <DraftInput
+          value={eff("identity", "title", props.agent.title ?? "")}
+          onCommit={(v) => mark("identity", "title", v || null)}
+          immediate
+          className={inputClass}
+          placeholder="e.g. VP of Engineering"
+        />
+      </Field>
+      <Field label="Persona" hint={help.persona}>
+        <PersonaPicker
+          companyId={selectedCompanyId ?? props.agent.companyId}
+          value={effectivePersonaId}
+          onChange={(personaId) => mark("identity", "personaId", personaId)}
+          className="font-mono"
+        />
+      </Field>
+      <Field label="Reports to" hint={help.reportsTo}>
+        <ReportsToPicker
+          agents={companyAgents}
+          value={eff("identity", "reportsTo", props.agent.reportsTo ?? null)}
+          onChange={(id) => mark("identity", "reportsTo", id)}
+          excludeAgentIds={[props.agent.id]}
+          chooseLabel="Choose manager…"
+        />
+      </Field>
+      <Field label="Capabilities" hint={help.capabilities}>
+        <MarkdownEditor
+          value={eff("identity", "capabilities", props.agent.capabilities ?? "") ?? ""}
+          onChange={(v) => mark("identity", "capabilities", v || null)}
+          placeholder="Describe what this agent can do..."
+          contentClassName="min-h-[44px] text-sm font-mono"
+          imageUploadHandler={async (file) => {
+            const asset = await uploadMarkdownImage.mutateAsync({
+              file,
+              namespace: `agents/${props.agent.id}/capabilities`,
+            });
+            return asset.contentPath;
+          }}
+        />
+      </Field>
+      <Field label="Tone" hint={help.tone}>
+        {(() => {
+          const toneValue = eff("identity", "tone", props.agent.tone ?? "") ?? "";
+          return (
+            <>
+              <MarkdownEditor
+                value={toneValue}
+                onChange={(v) => mark("identity", "tone", (v ?? "").slice(0, 600) || null)}
+                placeholder="Warm and cheerful. Short sentences, no corporate filler."
+                contentClassName="min-h-[44px] text-sm"
+              />
+              <div
+                className={cn(
+                  "text-xs mt-1 flex items-center justify-between gap-2",
+                  toneValue.length > 600 ? "text-destructive" : "text-muted-foreground",
+                )}
+              >
+                <span>{effectivePersonaId ? PERSONA_VOICE_WINS_HINT : ""}</span>
+                <span>{toneValue.length}/600</span>
+              </div>
+            </>
+          );
+        })()}
+      </Field>
+      {!effectivePersonaId && (
+        <Field label="Personality" hint={help.personality}>
+          {(() => {
+            const personalityValue = eff("identity", "personality", props.agent.personality ?? "") ?? "";
+            return (
+              <>
+                <MarkdownEditor
+                  value={personalityValue}
+                  onChange={(v) => mark("identity", "personality", (v ?? "").slice(0, 20000) || null)}
+                  placeholder="Backstory, likes and dislikes, how they look, how they behave. Leave blank unless this job should feel like someone — or attach a persona instead."
+                  contentClassName="min-h-[88px] text-sm"
+                />
+                <div
+                  className={cn(
+                    "text-xs mt-1 text-right",
+                    personalityValue.length > 20000 ? "text-destructive" : "text-muted-foreground",
+                  )}
+                >
+                  {personalityValue.length}/20000
+                </div>
+              </>
+            );
+          })()}
+        </Field>
+      )}
+      {isLocal && !props.hidePromptTemplate && (
+        <>
+          <Field label="Prompt Template" hint={help.promptTemplate}>
+            <MarkdownEditor
+              value={eff(
+                "adapterConfig",
+                "promptTemplate",
+                String(config.promptTemplate ?? ""),
+              )}
+              onChange={(v) => mark("adapterConfig", "promptTemplate", v ?? "")}
+              placeholder="You are agent {{ agent.name }}. Your role is {{ agent.role }}..."
+              contentClassName="min-h-[88px] text-sm font-mono"
+              imageUploadHandler={async (file) => {
+                const namespace = `agents/${props.agent.id}/prompt-template`;
+                const asset = await uploadMarkdownImage.mutateAsync({ file, namespace });
+                return asset.contentPath;
+              }}
+            />
+          </Field>
+          <div className="rounded-md border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+            Prompt template is replayed on every heartbeat. Keep it compact and dynamic to avoid recurring token cost and cache churn.
+          </div>
+        </>
+      )}
+    </>
+  ) : null;
+
+  const limitsEditor = !isCreate ? (
+    <AgentLimitsFields
+      value={effectiveLimits}
+      onChange={(next) => mark("identity", "limits", next)}
+      inputClassName="font-mono"
+    />
+  ) : null;
+
+  // Instance execution policy forces the managed Kubernetes sandbox
+  // (executionMode=kubernetes): never offer local / non-Kubernetes targets.
+  // Render the environment read-only instead of the selectable picker.
+  const environmentField = forcedKubernetes ? (
+    <Field
+      label="Default environment"
+      hint="This instance runs all agents in the Kubernetes sandbox. Local execution is disabled."
+    >
+      {kubernetesEnvironment ? (
+        <div className={cn(inputClass, "flex items-center text-muted-foreground")}>
+          {kubernetesEnvironment.name} · Kubernetes sandbox
+        </div>
+      ) : (
+        <div className="rounded-md border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+          This instance requires the Kubernetes sandbox, but no managed Kubernetes
+          environment is available for this company yet. Configure one before creating
+          agents; execution will not fall back to local.
+        </div>
+      )}
+    </Field>
+  ) : showEnvironmentOverrideControl ? (
+    <Field label="Environment override">
+      <div className="space-y-2">
+        <select
+          aria-label="Environment override"
+          className={inputClass}
+          value={currentDefaultEnvironmentId}
+          onChange={(event) => {
+            const nextValue = event.target.value;
+            if (isCreate) {
+              set!({ defaultEnvironmentId: nextValue });
+              return;
+            }
+            mark("identity", "defaultEnvironmentId", nextValue || null);
+          }}
+        >
+          <option value="">Default: {inheritedEnvironmentLabel}</option>
+          {environmentOptions.map((environment) => (
+            <option key={environment.id} value={environment.id}>
+              {environment.name} · {environment.driver}
+            </option>
+          ))}
+        </select>
+      </div>
+    </Field>
+  ) : null;
+
+  const testButton = showInlineAdapterTestEnvironmentButton ? (
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      className="h-7 px-2.5 text-xs"
+      onClick={triggerTestEnvironment}
+      disabled={testEnvironmentDisabled}
+    >
+      {testActionPending ? `${testActionLabel}...` : testActionLabel}
+    </Button>
+  ) : null;
+
+  const adapterTypeField = showAdapterTypeField ? (
+    <Field label="Adapter type" hint={help.adapterType}>
+      <AdapterTypeDropdown
+        value={adapterType}
+        disabledTypes={disabledTypes}
+        onChange={(t) => {
+          if (isCreate) {
+            // Reset all adapter-specific fields to defaults when switching adapter type
+            const { adapterType: _at, ...defaults } = defaultCreateValues;
+            const nextValues: CreateConfigValues = { ...defaults, adapterType: t };
+            if (t === "codex_local") {
+              nextValues.dangerouslyBypassSandbox =
+                DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX;
+            } else if (t === "gemini_local") {
+              nextValues.model = DEFAULT_GEMINI_LOCAL_MODEL;
+            } else if (t === "cursor") {
+              nextValues.model = DEFAULT_CURSOR_LOCAL_MODEL;
+            } else if (t === "opencode_local") {
+              nextValues.model = DEFAULT_OPENCODE_LOCAL_MODEL;
+            }
+            set!(nextValues);
+          } else {
+            // Clear all adapter config and explicitly blank out model + effort/mode keys
+            // so the old adapter's values don't bleed through via eff()
+            setOverlay((prev) => ({
+              ...prev,
+              adapterType: t,
+              modelProfiles: { cheap: { cleared: true } },
+              adapterConfig: {
+                model:
+                  t === "gemini_local"
+                    ? DEFAULT_GEMINI_LOCAL_MODEL
+                    : t === "opencode_local"
+                      ? DEFAULT_OPENCODE_LOCAL_MODEL
+                    : t === "cursor"
+                      ? DEFAULT_CURSOR_LOCAL_MODEL
+                      : "",
+                effort: "",
+                modelReasoningEffort: "",
+                variant: "",
+                mode: "",
+                ...(t === "codex_local"
+                  ? {
+                      dangerouslyBypassApprovalsAndSandbox:
+                        DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX,
+                    }
+                  : {}),
+              },
+            }));
+          }
+        }}
+      />
+    </Field>
+  ) : null;
+
+  const testFeedback = (
+    <>
+      {showInlineAdapterTestEnvironmentFeedback && (testActionError || testEnvironment.error) && (
+        <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          {testActionError
+            ?? (testEnvironment.error instanceof Error
+              ? testEnvironment.error.message
+              : "Environment test failed")}
+        </div>
+      )}
+
+      {showInlineAdapterTestEnvironmentFeedback && testEnvironment.data && (
+        <AdapterEnvironmentResult result={testEnvironment.data} />
+      )}
+    </>
+  );
+
+  const workingDirectoryField = showLegacyWorkingDirectoryField ? (
+    <Field label="Working directory (deprecated)" hint={help.cwd}>
+      <div className="flex items-center gap-2 rounded-md border border-border px-2.5 py-1.5">
+        <FolderOpen className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+        <DraftInput
+          value={
+            isCreate
+              ? val!.cwd
+              : eff("adapterConfig", "cwd", String(config.cwd ?? ""))
+          }
+          onCommit={(v) =>
+            isCreate
+              ? set!({ cwd: v })
+              : mark("adapterConfig", "cwd", v || undefined)
+          }
+          immediate
+          className="w-full bg-transparent outline-none text-sm font-mono placeholder:text-muted-foreground/40"
+          placeholder="/path/to/project"
+        />
+        <ChoosePathButton />
+      </div>
+    </Field>
+  ) : null;
+
+  const adapterConfigFields = <uiAdapter.ConfigFields {...adapterFieldProps} />;
+
+  const commandField = (
+    <Field label="Command" hint={help.localCommand}>
+      <DraftInput
+        value={
+          isCreate
+            ? val!.command
+            : eff(
+                "adapterConfig",
+                adapterCommandField,
+                String(
+                  config.command ?? "",
+                ),
+              )
+        }
+        onCommit={(v) =>
+          isCreate
+            ? set!({ command: v })
+            : mark("adapterConfig", adapterCommandField, v || null)
+        }
+        immediate
+        className={inputClass}
+        placeholder={
+          ({
+            claude_local: "claude",
+            codex_local: "codex",
+            gemini_local: "gemini",
+            pi_local: "pi",
+            cursor: "agent",
+            opencode_local: "opencode",
+          } as Record<string, string>)[adapterType] ?? adapterType.replace(/_local$/, "")
+        }
+      />
+    </Field>
+  );
+
+  const modelFields = (
+    <>
+      {supportsModelProfiles && (
+        <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Primary model</div>
+      )}
+      <ModelDropdown
+        models={models}
+        value={currentModelId}
+        onChange={(v) =>
+          isCreate
+            ? set!({ model: v })
+            : mark("adapterConfig", "model", v || undefined)
+        }
+        open={modelOpen}
+        onOpenChange={setModelOpen}
+        allowDefault={adapterType !== "opencode_local"}
+        required={adapterType === "opencode_local"}
+        groupByProvider={adapterType === "opencode_local"}
+        creatable
+        detectedModel={detectedModel}
+        detectedModelCandidates={[]}
+        onDetectModel={adapterType === "opencode_local"
+          ? undefined
+          : async () => {
+              const result = await refetchDetectedModel();
+              return result.data?.model ?? null;
+            }}
+        onRefreshModels={
+          supportsAdapterModelRefresh(adapterType)
+            ? handleRefreshModels
+            : undefined
+        }
+        refreshingModels={refreshingModels}
+        detectModelLabel="Detect model"
+        emptyDetectHint="No model detected. Select or enter one manually."
+      />
+      {(refreshModelsError || fetchedModelsError) && (
+        <p className="text-xs text-destructive">
+          {refreshModelsError
+            ?? (fetchedModelsError instanceof Error
+              ? fetchedModelsError.message
+              : "Failed to load adapter models.")}
+        </p>
+      )}
+      {adapterType === "opencode_local"
+        && currentDefaultEnvironment
+        && currentDefaultEnvironment.driver !== "local" && (
+        <p className="text-xs text-muted-foreground">
+          Live OpenCode model discovery only runs for Local environments. Using the curated list and manual entry for {currentDefaultEnvironment.name}.
+        </p>
+      )}
+
+      {supportsModelProfiles && (
+        <CheapModelSection
+          enabled={currentCheapEnabled}
+          model={currentCheapModel}
+          models={models}
+          adapterType={adapterType}
+          adapterDefaultModel={adapterCheapDefaultModel}
+          onEnabledChange={setCheapEnabled}
+          onModelChange={setCheapModel}
+          open={cheapModelOpen}
+          onOpenChange={setCheapModelOpen}
+        />
+      )}
+
+      {showThinkingEffort && (
+        <>
+          <ThinkingEffortDropdown
+            value={currentThinkingEffort}
+            options={thinkingEffortOptions}
+            onChange={(v) =>
+              isCreate
+                ? set!({ thinkingEffort: v })
+                : mark("adapterConfig", thinkingEffortKey, v || undefined)
+            }
+            open={thinkingEffortOpen}
+            onOpenChange={setThinkingEffortOpen}
+          />
+          {adapterType === "codex_local" &&
+            codexSearchEnabled &&
+            currentThinkingEffort === "minimal" && (
+              <p className="text-xs text-amber-400">
+                Codex may reject `minimal` thinking when search is enabled.
+              </p>
+            )}
+        </>
+      )}
+    </>
+  );
+
+  const bootstrapField = !isCreate && typeof config.bootstrapPromptTemplate === "string" && config.bootstrapPromptTemplate ? (
+    <>
+      <Field label="Bootstrap prompt (legacy)" hint={help.bootstrapPrompt}>
+        <MarkdownEditor
+          value={eff(
+            "adapterConfig",
+            "bootstrapPromptTemplate",
+            String(config.bootstrapPromptTemplate ?? ""),
+          )}
+          onChange={(v) =>
+            mark("adapterConfig", "bootstrapPromptTemplate", v || undefined)
+          }
+          placeholder="Optional initial setup prompt for the first run"
+          contentClassName="min-h-[44px] text-sm font-mono"
+          imageUploadHandler={async (file) => {
+            const namespace = `agents/${props.agent.id}/bootstrap-prompt`;
+            const asset = await uploadMarkdownImage.mutateAsync({ file, namespace });
+            return asset.contentPath;
+          }}
+        />
+      </Field>
+      <div className="rounded-md border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+        Bootstrap prompt is legacy and will be removed in a future release. Consider moving this content into the agent&apos;s prompt template or instructions file instead.
+      </div>
+    </>
+  ) : null;
+
+  const claudeAdvancedFields = adapterType === "claude_local" ? (
+    <ClaudeLocalAdvancedFields {...adapterFieldProps} />
+  ) : null;
+
+  const extraArgsField = (
+    <Field label="Extra args (comma-separated)" hint={help.extraArgs}>
+      <DraftInput
+        value={
+          isCreate
+            ? val!.extraArgs
+            : eff("adapterConfig", "extraArgs", formatArgList(config.extraArgs))
+        }
+        onCommit={(v) =>
+          isCreate
+            ? set!({ extraArgs: v })
+            : mark("adapterConfig", "extraArgs", v?.trim() ? parseCommaArgs(v) : null)
+        }
+        className={inputClass}
+        placeholder="e.g. --verbose, --foo=bar"
+      />
+    </Field>
+  );
+
+  const envVarsField = (
+    <Field label="Environment variables" hint={help.envVars}>
+      <EnvironmentVariablesEditor
+        ref={environmentVariablesEditorRef}
+        value={
+          isCreate
+            ? ((val!.envBindings ?? EMPTY_ENV) as Record<string, EnvBinding>)
+            : ((eff("adapterConfig", "env", (config.env ?? EMPTY_ENV) as Record<string, EnvBinding>))
+            )
+        }
+        secrets={availableSecrets}
+        onCreateSecret={async (name, value) => {
+          const created = await createSecret.mutateAsync({ name, value });
+          return created;
+        }}
+        onChange={(env) =>
+          isCreate
+            ? set!({ envBindings: env ?? {}, envVars: "" })
+            : mark("adapterConfig", "env", env)
+        }
+      />
+    </Field>
+  );
+
+  // Edit-only: timeout + grace period
+  const timeoutFields = !isCreate ? (
+    <>
+      <Field label="Timeout (sec)" hint={help.timeoutSec}>
+        <DraftNumberInput
+          value={eff(
+            "adapterConfig",
+            "timeoutSec",
+            Number(config.timeoutSec ?? 0),
+          )}
+          onCommit={(v) => mark("adapterConfig", "timeoutSec", v)}
+          immediate
+          className={inputClass}
+        />
+      </Field>
+      <Field label="Interrupt grace period (sec)" hint={help.graceSec}>
+        <DraftNumberInput
+          value={eff(
+            "adapterConfig",
+            "graceSec",
+            Number(config.graceSec ?? 15),
+          )}
+          onCommit={(v) => mark("adapterConfig", "graceSec", v)}
+          immediate
+          className={inputClass}
+        />
+      </Field>
+      {/* Polish round 3: per-agent overrides of the instance-wide run
+          time limits (DUR-3940). Empty = instance default, 0 = off for
+          this agent; the heartbeat's resolveFrozenRunCaps reads them. */}
+      <Field label="Stop a run after (min)" hint={help.maxRunDurationMinutes}>
+        <DraftInput
+          data-testid="agent-max-run-duration-minutes"
+          type="number"
+          min={0}
+          step={1}
+          inputMode="numeric"
+          value={formatOptionalMinutes(eff("adapterConfig", "maxRunDurationMinutes", config.maxRunDurationMinutes))}
+          onCommit={(v) => {
+            const parsed = parseOptionalMinutes(v);
+            if (parsed !== "invalid") mark("adapterConfig", "maxRunDurationMinutes", parsed);
+          }}
+          className={inputClass}
+          placeholder={`Instance default: ${generalSettings?.maxRunDurationMinutes ?? DEFAULT_MAX_RUN_DURATION_MINUTES} min`}
+        />
+      </Field>
+      <Field label="Stop a silent run after (min)" hint={help.silentRunTimeoutMinutes}>
+        <DraftInput
+          data-testid="agent-silent-run-timeout-minutes"
+          type="number"
+          min={0}
+          step={1}
+          inputMode="numeric"
+          value={formatOptionalMinutes(eff("adapterConfig", "silentRunTimeoutMinutes", config.silentRunTimeoutMinutes))}
+          onCommit={(v) => {
+            const parsed = parseOptionalMinutes(v);
+            if (parsed !== "invalid") mark("adapterConfig", "silentRunTimeoutMinutes", parsed);
+          }}
+          className={inputClass}
+          placeholder={`Instance default: ${generalSettings?.silentRunTimeoutMinutes ?? DEFAULT_SILENT_RUN_TIMEOUT_MINUTES} min`}
+        />
+      </Field>
+    </>
+  ) : null;
+
+  const createHeartbeatField = isCreate ? (
+    <ToggleWithNumber
+      label="Heartbeat on interval"
+      hint={help.heartbeatInterval}
+      checked={val!.heartbeatEnabled}
+      onCheckedChange={(v) => set!({ heartbeatEnabled: v })}
+      number={val!.intervalSec}
+      onNumberChange={(v) => set!({ intervalSec: v })}
+      numberLabel="sec"
+      numberPrefix="Run heartbeat every"
+      numberHint={help.intervalSec}
+      showNumber={val!.heartbeatEnabled}
+    />
+  ) : null;
+
+  const editHeartbeatField = !isCreate ? (
+    <ToggleWithNumber
+      label="Heartbeat on interval"
+      hint={help.heartbeatInterval}
+      checked={eff("heartbeat", "enabled", heartbeat.enabled === true)}
+      onCheckedChange={(v) => mark("heartbeat", "enabled", v)}
+      number={eff("heartbeat", "intervalSec", Number(heartbeat.intervalSec ?? 300))}
+      onNumberChange={(v) => mark("heartbeat", "intervalSec", v)}
+      numberLabel="sec"
+      numberPrefix="Run heartbeat every"
+      numberHint={help.intervalSec}
+      showNumber={eff("heartbeat", "enabled", heartbeat.enabled === true)}
+    />
+  ) : null;
+
+  const runPolicyAdvancedFields = !isCreate ? (
+    <div className="space-y-3">
+      <ToggleField
+        label="Wake on demand"
+        hint={help.wakeOnDemand}
+        checked={eff(
+          "heartbeat",
+          "wakeOnDemand",
+          heartbeat.wakeOnDemand !== false,
+        )}
+        onChange={(v) => mark("heartbeat", "wakeOnDemand", v)}
+      />
+      <Field label="Cooldown (sec)" hint={help.cooldownSec}>
+        <DraftNumberInput
+          value={eff(
+            "heartbeat",
+            "cooldownSec",
+            Number(heartbeat.cooldownSec ?? 10),
+          )}
+          onCommit={(v) => mark("heartbeat", "cooldownSec", v)}
+          immediate
+          className={inputClass}
+        />
+      </Field>
+      <Field label="Max concurrent runs" hint={help.maxConcurrentRuns}>
+        <DraftNumberInput
+          value={eff(
+            "heartbeat",
+            "maxConcurrentRuns",
+            Number(heartbeat.maxConcurrentRuns ?? AGENT_DEFAULT_MAX_CONCURRENT_RUNS),
+          )}
+          onCommit={(v) => mark("heartbeat", "maxConcurrentRuns", v)}
+          immediate
+          className={inputClass}
+        />
+      </Field>
+      <div className="rounded-md border border-border/70 px-3 py-2">
+        <ToggleField
+          label="Continue after max-turn stop"
+          hint={help.maxTurnContinuationEnabled}
+          checked={maxTurnContinuationEnabled}
+          onChange={(v) => updateMaxTurnContinuation({ enabled: v })}
+        />
+        {maxTurnContinuationEnabled ? (
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <Field label="Continuation attempts" hint={help.maxTurnContinuationMaxAttempts}>
+              <DraftNumberInput
+                value={maxTurnContinuationMaxAttempts}
+                onCommit={(v) =>
+                  updateMaxTurnContinuation({
+                    maxAttempts: clampInteger(v, 0, MAX_TURN_CONTINUATION_MAX_ATTEMPTS_CAP),
+                  })}
+                immediate
+                className={inputClass}
+              />
+            </Field>
+            <Field label="Continuation delay (sec)" hint={help.maxTurnContinuationDelaySec}>
+              <DraftNumberInput
+                value={maxTurnContinuationDelaySec}
+                onCommit={(v) =>
+                  updateMaxTurnContinuation({
+                    delayMs: clampDelayMsFromSeconds(v),
+                  })}
+                immediate
+                className={inputClass}
+              />
+            </Field>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  ) : null;
+
+  if (settingsLayout) {
+    // ---- Settings layout (agent Configuration tab) ----
+    // Model first, plumbing folded away: the engine + model + cheap model +
+    // thinking effort sit at the top of "Full runs"; the generic technical
+    // fields (command, extra args, environment variables, MCP servers JSON,
+    // timeouts) live in closed subsections. Adapter-specific fields that come
+    // from a schema (ACPX, Hermes, plugin adapters) can hold the main choice
+    // for that engine, so they stay visible under the model instead.
+    const adapterFieldsFromSchema = uiAdapter.ConfigFields === SchemaConfigFields;
+    const showAdapterFieldsUnderModel = !isLocal || adapterFieldsFromSchema;
+    const showAdvancedEngine = isLocal || environmentField !== null;
+    const showTimeouts = isLocal && !isCreate;
+    const showRunSchedule = isCreate ? showCreateRunPolicySection : true;
+
+    const adapterDisplayLabel = adapterLabels[adapterType] ?? getAdapterLabel(adapterType);
+    const currentModelLabel = currentModelId
+      ? models.find((model) => model.id === currentModelId)?.label ?? currentModelId
+      : "default model";
+    const fullRunsSummary = isLocal ? `${adapterDisplayLabel} · ${currentModelLabel}` : adapterDisplayLabel;
+
+    const scheduleEnabled = isCreate
+      ? val!.heartbeatEnabled
+      : eff("heartbeat", "enabled", heartbeat.enabled === true);
+    const scheduleIntervalSec = isCreate
+      ? val!.intervalSec
+      : eff("heartbeat", "intervalSec", Number(heartbeat.intervalSec ?? 300));
+    const runScheduleSummary = scheduleEnabled
+      ? `Checks for work every ${describeIntervalSeconds(scheduleIntervalSec)}`
+      : "No timed check-ins";
+
+    const timeoutsSummary = (() => {
+      if (isCreate) return undefined;
+      const maxRun = formatOptionalMinutes(eff("adapterConfig", "maxRunDurationMinutes", config.maxRunDurationMinutes));
+      const silent = formatOptionalMinutes(eff("adapterConfig", "silentRunTimeoutMinutes", config.silentRunTimeoutMinutes));
+      const parts: string[] = [];
+      if (maxRun) parts.push(maxRun === "0" ? "No run time limit" : `Stops a run after ${maxRun} min`);
+      if (silent) parts.push(silent === "0" ? "No silence limit" : `Stops a silent run after ${silent} min`);
+      return parts.length > 0 ? parts.join(" · ") : "Using the instance defaults";
+    })();
+
+    return (
+      <div className="relative space-y-6" data-testid="agent-config-settings">
+        {saveBar}
+
+        {!isCreate && (
+          <SettingsSection
+            title="Identity"
+            description="Who this agent is, who it reports to and how it writes."
+            summary={[props.agent.name, props.agent.title].filter(Boolean).join(" · ")}
+            storageKey="agent.configuration.identity"
+            data-testid="agent-config-identity"
+            contentClassName="space-y-3"
+          >
+            {identityFields}
+          </SettingsSection>
+        )}
+
+        {props.afterIdentity}
+
+        <SettingsSection
+          title="Full runs: engine and model"
+          description="The engine and AI model this agent uses when it works on a task."
+          summary={fullRunsSummary}
+          actions={testButton}
+          storageKey="agent.configuration.fullRuns"
+          data-testid="agent-config-full-runs"
+        >
+          <div className="space-y-3" data-testid="agent-config-model-fields">
+            {adapterTypeField}
+            {testFeedback}
+            {isLocal ? modelFields : null}
+            {showAdapterFieldsUnderModel ? adapterConfigFields : null}
+          </div>
+
+          {showAdvancedEngine && (
+            <SettingsSubsection
+              title="Advanced engine settings"
+              description="Technical options for the engine. Most agents never need these changed."
+              summary="Command, extra options, environment variables and more"
+              defaultOpen={false}
+              storageKey="agent.configuration.engineAdvanced"
+              data-testid="agent-config-engine-advanced"
+            >
+              {environmentField}
+              {isLocal && (
+                <>
+                  {commandField}
+                  {claudeAdvancedFields}
+                  {showAdapterFieldsUnderModel ? null : adapterConfigFields}
+                  {extraArgsField}
+                  {envVarsField}
+                  {workingDirectoryField}
+                  {bootstrapField}
+                </>
+              )}
+            </SettingsSubsection>
+          )}
+
+          {showTimeouts && (
+            <SettingsSubsection
+              title="Timeouts"
+              description="When a run is stopped for taking too long or going quiet."
+              summary={timeoutsSummary}
+              defaultOpen={false}
+              storageKey="agent.configuration.timeouts"
+              data-testid="agent-config-timeouts"
+            >
+              {timeoutFields}
+            </SettingsSubsection>
+          )}
+
+          {showRunSchedule && (
+            <SettingsSubsection
+              title="Run schedule"
+              description="How often the agent wakes up by itself to look for work."
+              summary={runScheduleSummary}
+              storageKey="agent.configuration.runSchedule"
+              data-testid="agent-config-run-schedule"
+            >
+              {isCreate ? createHeartbeatField : editHeartbeatField}
+              {!isCreate && (
+                <SettingsSubsection
+                  title="More schedule options"
+                  summary="Waking on request, pauses between runs, runs at the same time"
+                  defaultOpen={false}
+                  storageKey="agent.configuration.runScheduleMore"
+                  data-testid="agent-config-run-schedule-more"
+                >
+                  {runPolicyAdvancedFields}
+                </SettingsSubsection>
+              )}
+            </SettingsSubsection>
+          )}
+
+          {!isCreate && (
+            <p className="text-xs text-muted-foreground">
+              Saved changes take effect on the next run. A run that is already going keeps the settings it
+              started with, and a change may make the agent start a fresh session.
+            </p>
+          )}
+        </SettingsSection>
+
+        {!isCreate && (
+          <SettingsSection
+            title="Daily limits and standing rules"
+            description="Caps on what this agent may do each day, and rules it should always keep to."
+            storageKey="agent.configuration.limits"
+            data-testid="agent-config-limits"
+          >
+            {limitsEditor}
+          </SettingsSection>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className={cn("relative", cards && "space-y-6")}>
       {/* ---- Floating Save button (edit mode, when dirty) ---- */}
-      {isDirty && !props.hideInlineSave && (
-        <div className="sticky top-0 z-10 flex items-center justify-end px-4 py-2 bg-background/90 backdrop-blur-sm border-b border-primary/20">
-          <div className="flex items-center gap-3">
-            <span className="text-xs text-muted-foreground">Unsaved changes</span>
-            <Button
-              size="sm"
-              onClick={handleSave}
-              disabled={!isCreate && props.isSaving}
-            >
-              {!isCreate && props.isSaving ? "Saving..." : "Save"}
-            </Button>
-          </div>
-        </div>
-      )}
+      {saveBar}
 
       {/* ---- Identity (edit only) ---- */}
       {!isCreate && (
@@ -929,132 +1775,12 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
             : <div className="px-4 py-2 text-xs font-medium text-muted-foreground">Identity</div>
           }
           <div className={cn(cards ? "border border-border rounded-lg p-4 space-y-3" : "px-4 pb-3 space-y-3")}>
-            <Field label="Name" hint={help.name}>
-              <DraftInput
-                value={eff("identity", "name", props.agent.name)}
-                onCommit={(v) => mark("identity", "name", v)}
-                immediate
-                className={inputClass}
-                placeholder="Agent name"
-              />
-            </Field>
-            <Field label="Title" hint={help.title}>
-              <DraftInput
-                value={eff("identity", "title", props.agent.title ?? "")}
-                onCommit={(v) => mark("identity", "title", v || null)}
-                immediate
-                className={inputClass}
-                placeholder="e.g. VP of Engineering"
-              />
-            </Field>
-            <Field label="Persona" hint={help.persona}>
-              <PersonaPicker
-                companyId={selectedCompanyId ?? props.agent.companyId}
-                value={effectivePersonaId}
-                onChange={(personaId) => mark("identity", "personaId", personaId)}
-                className="font-mono"
-              />
-            </Field>
-            <Field label="Reports to" hint={help.reportsTo}>
-              <ReportsToPicker
-                agents={companyAgents}
-                value={eff("identity", "reportsTo", props.agent.reportsTo ?? null)}
-                onChange={(id) => mark("identity", "reportsTo", id)}
-                excludeAgentIds={[props.agent.id]}
-                chooseLabel="Choose manager…"
-              />
-            </Field>
-            <Field label="Capabilities" hint={help.capabilities}>
-              <MarkdownEditor
-                value={eff("identity", "capabilities", props.agent.capabilities ?? "") ?? ""}
-                onChange={(v) => mark("identity", "capabilities", v || null)}
-                placeholder="Describe what this agent can do..."
-                contentClassName="min-h-[44px] text-sm font-mono"
-                imageUploadHandler={async (file) => {
-                  const asset = await uploadMarkdownImage.mutateAsync({
-                    file,
-                    namespace: `agents/${props.agent.id}/capabilities`,
-                  });
-                  return asset.contentPath;
-                }}
-              />
-            </Field>
-            <Field label="Tone" hint={help.tone}>
-              {(() => {
-                const toneValue = eff("identity", "tone", props.agent.tone ?? "") ?? "";
-                return (
-                  <>
-                    <MarkdownEditor
-                      value={toneValue}
-                      onChange={(v) => mark("identity", "tone", (v ?? "").slice(0, 600) || null)}
-                      placeholder="Warm and cheerful. Short sentences, no corporate filler."
-                      contentClassName="min-h-[44px] text-sm"
-                    />
-                    <div
-                      className={cn(
-                        "text-xs mt-1 flex items-center justify-between gap-2",
-                        toneValue.length > 600 ? "text-destructive" : "text-muted-foreground",
-                      )}
-                    >
-                      <span>{effectivePersonaId ? PERSONA_VOICE_WINS_HINT : ""}</span>
-                      <span>{toneValue.length}/600</span>
-                    </div>
-                  </>
-                );
-              })()}
-            </Field>
-            {!effectivePersonaId && (
-              <Field label="Personality" hint={help.personality}>
-                {(() => {
-                  const personalityValue = eff("identity", "personality", props.agent.personality ?? "") ?? "";
-                  return (
-                    <>
-                      <MarkdownEditor
-                        value={personalityValue}
-                        onChange={(v) => mark("identity", "personality", (v ?? "").slice(0, 20000) || null)}
-                        placeholder="Backstory, likes and dislikes, how they look, how they behave. Leave blank unless this job should feel like someone — or attach a persona instead."
-                        contentClassName="min-h-[88px] text-sm"
-                      />
-                      <div
-                        className={cn(
-                          "text-xs mt-1 text-right",
-                          personalityValue.length > 20000 ? "text-destructive" : "text-muted-foreground",
-                        )}
-                      >
-                        {personalityValue.length}/20000
-                      </div>
-                    </>
-                  );
-                })()}
-              </Field>
-            )}
-            {isLocal && !props.hidePromptTemplate && (
-              <>
-                <Field label="Prompt Template" hint={help.promptTemplate}>
-                  <MarkdownEditor
-                    value={eff(
-                      "adapterConfig",
-                      "promptTemplate",
-                      String(config.promptTemplate ?? ""),
-                    )}
-                    onChange={(v) => mark("adapterConfig", "promptTemplate", v ?? "")}
-                    placeholder="You are agent {{ agent.name }}. Your role is {{ agent.role }}..."
-                    contentClassName="min-h-[88px] text-sm font-mono"
-                    imageUploadHandler={async (file) => {
-                      const namespace = `agents/${props.agent.id}/prompt-template`;
-                      const asset = await uploadMarkdownImage.mutateAsync({ file, namespace });
-                      return asset.contentPath;
-                    }}
-                  />
-                </Field>
-                <div className="rounded-md border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
-                  Prompt template is replayed on every heartbeat. Keep it compact and dynamic to avoid recurring token cost and cache churn.
-                </div>
-              </>
-            )}
+            {identityFields}
           </div>
         </div>
       )}
+
+      {props.afterIdentity}
 
       {/* ---- Limits (edit only; DUR-4000) ---- */}
       {!isCreate && (
@@ -1065,76 +1791,21 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
           }
           <div className={cn(cards ? "border border-border rounded-lg p-4 space-y-3" : "px-4 pb-3 space-y-3")}>
             <Field label="Daily limits and standing rules" hint={help.limits}>
-              <AgentLimitsFields
-                value={effectiveLimits}
-                onChange={(next) => mark("identity", "limits", next)}
-                inputClassName="font-mono"
-              />
+              {limitsEditor}
             </Field>
           </div>
         </div>
       )}
 
       {/* ---- Execution ---- */}
-      {forcedKubernetes ? (
-        // Instance execution policy forces the managed Kubernetes sandbox
-        // (executionMode=kubernetes): never offer local / non-Kubernetes targets.
-        // Render the environment read-only instead of the selectable picker.
+      {environmentField ? (
         <div className={cn(!cards && (isCreate ? "border-t border-border" : "border-b border-border"))}>
           {cards
             ? <h3 className="text-sm font-medium mb-3">Environment</h3>
             : <div className="px-4 py-2 text-xs font-medium text-muted-foreground">Environment</div>
           }
           <div className={cn(cards ? "border border-border rounded-lg p-4 space-y-3" : "px-4 pb-3 space-y-3")}>
-            <Field
-              label="Default environment"
-              hint="This instance runs all agents in the Kubernetes sandbox. Local execution is disabled."
-            >
-              {kubernetesEnvironment ? (
-                <div className={cn(inputClass, "flex items-center text-muted-foreground")}>
-                  {kubernetesEnvironment.name} · Kubernetes sandbox
-                </div>
-              ) : (
-                <div className="rounded-md border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-                  This instance requires the Kubernetes sandbox, but no managed Kubernetes
-                  environment is available for this company yet. Configure one before creating
-                  agents; execution will not fall back to local.
-                </div>
-              )}
-            </Field>
-          </div>
-        </div>
-      ) : showEnvironmentOverrideControl ? (
-        <div className={cn(!cards && (isCreate ? "border-t border-border" : "border-b border-border"))}>
-          {cards
-            ? <h3 className="text-sm font-medium mb-3">Environment</h3>
-            : <div className="px-4 py-2 text-xs font-medium text-muted-foreground">Environment</div>
-          }
-          <div className={cn(cards ? "border border-border rounded-lg p-4 space-y-3" : "px-4 pb-3 space-y-3")}>
-            <Field label="Environment override">
-              <div className="space-y-2">
-                <select
-                  aria-label="Environment override"
-                  className={inputClass}
-                  value={currentDefaultEnvironmentId}
-                  onChange={(event) => {
-                    const nextValue = event.target.value;
-                    if (isCreate) {
-                      set!({ defaultEnvironmentId: nextValue });
-                      return;
-                    }
-                    mark("identity", "defaultEnvironmentId", nextValue || null);
-                  }}
-                >
-                  <option value="">Default: {inheritedEnvironmentLabel}</option>
-                  {environmentOptions.map((environment) => (
-                    <option key={environment.id} value={environment.id}>
-                      {environment.name} · {environment.driver}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </Field>
+            {environmentField}
           </div>
         </div>
       ) : null}
@@ -1146,114 +1817,17 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
             ? <h3 className="text-sm font-medium">Adapter</h3>
             : <span className="text-xs font-medium text-muted-foreground">Adapter</span>
           }
-          {showInlineAdapterTestEnvironmentButton && (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="h-7 px-2.5 text-xs"
-              onClick={triggerTestEnvironment}
-              disabled={testEnvironmentDisabled}
-            >
-              {testActionPending ? `${testActionLabel}...` : testActionLabel}
-            </Button>
-          )}
+          {testButton}
         </div>
         <div className={cn(cards ? "border border-border rounded-lg p-4 space-y-3" : "px-4 pb-3 space-y-3")}>
-          {showAdapterTypeField && (
-            <Field label="Adapter type" hint={help.adapterType}>
-              <AdapterTypeDropdown
-                value={adapterType}
-                disabledTypes={disabledTypes}
-                onChange={(t) => {
-                  if (isCreate) {
-                    // Reset all adapter-specific fields to defaults when switching adapter type
-                    const { adapterType: _at, ...defaults } = defaultCreateValues;
-                    const nextValues: CreateConfigValues = { ...defaults, adapterType: t };
-                    if (t === "codex_local") {
-                      nextValues.dangerouslyBypassSandbox =
-                        DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX;
-                    } else if (t === "gemini_local") {
-                      nextValues.model = DEFAULT_GEMINI_LOCAL_MODEL;
-                    } else if (t === "cursor") {
-                      nextValues.model = DEFAULT_CURSOR_LOCAL_MODEL;
-                    } else if (t === "opencode_local") {
-                      nextValues.model = DEFAULT_OPENCODE_LOCAL_MODEL;
-                    }
-                    set!(nextValues);
-                  } else {
-                    // Clear all adapter config and explicitly blank out model + effort/mode keys
-                    // so the old adapter's values don't bleed through via eff()
-                    setOverlay((prev) => ({
-                      ...prev,
-                      adapterType: t,
-                      modelProfiles: { cheap: { cleared: true } },
-                      adapterConfig: {
-                        model:
-                          t === "gemini_local"
-                            ? DEFAULT_GEMINI_LOCAL_MODEL
-                            : t === "opencode_local"
-                              ? DEFAULT_OPENCODE_LOCAL_MODEL
-                            : t === "cursor"
-                              ? DEFAULT_CURSOR_LOCAL_MODEL
-                              : "",
-                        effort: "",
-                        modelReasoningEffort: "",
-                        variant: "",
-                        mode: "",
-                        ...(t === "codex_local"
-                          ? {
-                              dangerouslyBypassApprovalsAndSandbox:
-                                DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX,
-                            }
-                          : {}),
-                      },
-                    }));
-                  }
-                }}
-              />
-            </Field>
-          )}
+          {adapterTypeField}
 
-          {showInlineAdapterTestEnvironmentFeedback && (testActionError || testEnvironment.error) && (
-            <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-              {testActionError
-                ?? (testEnvironment.error instanceof Error
-                  ? testEnvironment.error.message
-                  : "Environment test failed")}
-            </div>
-          )}
-
-          {showInlineAdapterTestEnvironmentFeedback && testEnvironment.data && (
-            <AdapterEnvironmentResult result={testEnvironment.data} />
-          )}
+          {testFeedback}
 
           {/* Working directory */}
-          {showLegacyWorkingDirectoryField && (
-            <Field label="Working directory (deprecated)" hint={help.cwd}>
-              <div className="flex items-center gap-2 rounded-md border border-border px-2.5 py-1.5">
-                <FolderOpen className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                <DraftInput
-                  value={
-                    isCreate
-                      ? val!.cwd
-                      : eff("adapterConfig", "cwd", String(config.cwd ?? ""))
-                  }
-                  onCommit={(v) =>
-                    isCreate
-                      ? set!({ cwd: v })
-                      : mark("adapterConfig", "cwd", v || undefined)
-                  }
-                  immediate
-                  className="w-full bg-transparent outline-none text-sm font-mono placeholder:text-muted-foreground/40"
-                  placeholder="/path/to/project"
-                />
-                <ChoosePathButton />
-              </div>
-            </Field>
-          )}
+          {workingDirectoryField}
 
-          {!isLocal && <uiAdapter.ConfigFields {...adapterFieldProps} />}
+          {!isLocal && adapterConfigFields}
 
           {/* Local adapter-specific fields are rendered inside Permissions & Configuration */}
         </div>
@@ -1268,259 +1842,18 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
             : <div className="px-4 py-2 text-xs font-medium text-muted-foreground">Permissions &amp; Configuration</div>
           }
           <div className={cn(cards ? "border border-border rounded-lg p-4 space-y-3" : "px-4 pb-3 space-y-3")}>
-              <Field label="Command" hint={help.localCommand}>
-                <DraftInput
-                  value={
-                    isCreate
-                      ? val!.command
-                      : eff(
-                          "adapterConfig",
-                          adapterCommandField,
-                          String(
-                            config.command ?? "",
-                          ),
-                        )
-                  }
-                  onCommit={(v) =>
-                    isCreate
-                      ? set!({ command: v })
-                      : mark("adapterConfig", adapterCommandField, v || null)
-                  }
-                  immediate
-                  className={inputClass}
-                  placeholder={
-                    ({
-                      claude_local: "claude",
-                      codex_local: "codex",
-                      gemini_local: "gemini",
-                      pi_local: "pi",
-                      cursor: "agent",
-                      opencode_local: "opencode",
-                    } as Record<string, string>)[adapterType] ?? adapterType.replace(/_local$/, "")
-                  }
-                />
-              </Field>
+              {commandField}
 
-              {supportsModelProfiles && (
-                <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Primary model</div>
-              )}
-              <ModelDropdown
-                models={models}
-                value={currentModelId}
-                onChange={(v) =>
-                  isCreate
-                    ? set!({ model: v })
-                    : mark("adapterConfig", "model", v || undefined)
-                }
-                open={modelOpen}
-                onOpenChange={setModelOpen}
-                allowDefault={adapterType !== "opencode_local"}
-                required={adapterType === "opencode_local"}
-                groupByProvider={adapterType === "opencode_local"}
-                creatable
-                detectedModel={detectedModel}
-                detectedModelCandidates={[]}
-                onDetectModel={adapterType === "opencode_local"
-                  ? undefined
-                  : async () => {
-                      const result = await refetchDetectedModel();
-                      return result.data?.model ?? null;
-                    }}
-                onRefreshModels={
-                  supportsAdapterModelRefresh(adapterType)
-                    ? handleRefreshModels
-                    : undefined
-                }
-                refreshingModels={refreshingModels}
-                detectModelLabel="Detect model"
-                emptyDetectHint="No model detected. Select or enter one manually."
-              />
-              {(refreshModelsError || fetchedModelsError) && (
-                <p className="text-xs text-destructive">
-                  {refreshModelsError
-                    ?? (fetchedModelsError instanceof Error
-                      ? fetchedModelsError.message
-                      : "Failed to load adapter models.")}
-                </p>
-              )}
-              {adapterType === "opencode_local"
-                && currentDefaultEnvironment
-                && currentDefaultEnvironment.driver !== "local" && (
-                <p className="text-xs text-muted-foreground">
-                  Live OpenCode model discovery only runs for Local environments. Using the curated list and manual entry for {currentDefaultEnvironment.name}.
-                </p>
-              )}
+              {modelFields}
+              {bootstrapField}
+              {claudeAdvancedFields}
+              {adapterConfigFields}
 
-              {supportsModelProfiles && (
-                <CheapModelSection
-                  enabled={currentCheapEnabled}
-                  model={currentCheapModel}
-                  models={models}
-                  adapterType={adapterType}
-                  adapterDefaultModel={adapterCheapDefaultModel}
-                  onEnabledChange={setCheapEnabled}
-                  onModelChange={setCheapModel}
-                  open={cheapModelOpen}
-                  onOpenChange={setCheapModelOpen}
-                />
-              )}
+              {extraArgsField}
 
-              {showThinkingEffort && (
-                <>
-                  <ThinkingEffortDropdown
-                    value={currentThinkingEffort}
-                    options={thinkingEffortOptions}
-                    onChange={(v) =>
-                      isCreate
-                        ? set!({ thinkingEffort: v })
-                        : mark("adapterConfig", thinkingEffortKey, v || undefined)
-                    }
-                    open={thinkingEffortOpen}
-                    onOpenChange={setThinkingEffortOpen}
-                  />
-                  {adapterType === "codex_local" &&
-                    codexSearchEnabled &&
-                    currentThinkingEffort === "minimal" && (
-                      <p className="text-xs text-amber-400">
-                        Codex may reject `minimal` thinking when search is enabled.
-                      </p>
-                    )}
-                </>
-              )}
-              {!isCreate && typeof config.bootstrapPromptTemplate === "string" && config.bootstrapPromptTemplate && (
-                <>
-                  <Field label="Bootstrap prompt (legacy)" hint={help.bootstrapPrompt}>
-                    <MarkdownEditor
-                      value={eff(
-                        "adapterConfig",
-                        "bootstrapPromptTemplate",
-                        String(config.bootstrapPromptTemplate ?? ""),
-                      )}
-                      onChange={(v) =>
-                        mark("adapterConfig", "bootstrapPromptTemplate", v || undefined)
-                      }
-                      placeholder="Optional initial setup prompt for the first run"
-                      contentClassName="min-h-[44px] text-sm font-mono"
-                      imageUploadHandler={async (file) => {
-                        const namespace = `agents/${props.agent.id}/bootstrap-prompt`;
-                        const asset = await uploadMarkdownImage.mutateAsync({ file, namespace });
-                        return asset.contentPath;
-                      }}
-                    />
-                  </Field>
-                  <div className="rounded-md border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-                    Bootstrap prompt is legacy and will be removed in a future release. Consider moving this content into the agent&apos;s prompt template or instructions file instead.
-                  </div>
-                </>
-              )}
-              {adapterType === "claude_local" && (
-                <ClaudeLocalAdvancedFields {...adapterFieldProps} />
-              )}
-              <uiAdapter.ConfigFields {...adapterFieldProps} />
+              {envVarsField}
 
-              <Field label="Extra args (comma-separated)" hint={help.extraArgs}>
-                <DraftInput
-                  value={
-                    isCreate
-                      ? val!.extraArgs
-                      : eff("adapterConfig", "extraArgs", formatArgList(config.extraArgs))
-                  }
-                  onCommit={(v) =>
-                    isCreate
-                      ? set!({ extraArgs: v })
-                      : mark("adapterConfig", "extraArgs", v?.trim() ? parseCommaArgs(v) : null)
-                  }
-                  className={inputClass}
-                  placeholder="e.g. --verbose, --foo=bar"
-                />
-              </Field>
-
-              <Field label="Environment variables" hint={help.envVars}>
-                <EnvironmentVariablesEditor
-                  ref={environmentVariablesEditorRef}
-                  value={
-                    isCreate
-                      ? ((val!.envBindings ?? EMPTY_ENV) as Record<string, EnvBinding>)
-                      : ((eff("adapterConfig", "env", (config.env ?? EMPTY_ENV) as Record<string, EnvBinding>))
-                      )
-                  }
-                  secrets={availableSecrets}
-                  onCreateSecret={async (name, value) => {
-                    const created = await createSecret.mutateAsync({ name, value });
-                    return created;
-                  }}
-                  onChange={(env) =>
-                    isCreate
-                      ? set!({ envBindings: env ?? {}, envVars: "" })
-                      : mark("adapterConfig", "env", env)
-                  }
-                />
-              </Field>
-
-              {/* Edit-only: timeout + grace period */}
-              {!isCreate && (
-                <>
-                  <Field label="Timeout (sec)" hint={help.timeoutSec}>
-                    <DraftNumberInput
-                      value={eff(
-                        "adapterConfig",
-                        "timeoutSec",
-                        Number(config.timeoutSec ?? 0),
-                      )}
-                      onCommit={(v) => mark("adapterConfig", "timeoutSec", v)}
-                      immediate
-                      className={inputClass}
-                    />
-                  </Field>
-                  <Field label="Interrupt grace period (sec)" hint={help.graceSec}>
-                    <DraftNumberInput
-                      value={eff(
-                        "adapterConfig",
-                        "graceSec",
-                        Number(config.graceSec ?? 15),
-                      )}
-                      onCommit={(v) => mark("adapterConfig", "graceSec", v)}
-                      immediate
-                      className={inputClass}
-                    />
-                  </Field>
-                  {/* Polish round 3: per-agent overrides of the instance-wide run
-                      time limits (DUR-3940). Empty = instance default, 0 = off for
-                      this agent; the heartbeat's resolveFrozenRunCaps reads them. */}
-                  <Field label="Stop a run after (min)" hint={help.maxRunDurationMinutes}>
-                    <DraftInput
-                      data-testid="agent-max-run-duration-minutes"
-                      type="number"
-                      min={0}
-                      step={1}
-                      inputMode="numeric"
-                      value={formatOptionalMinutes(eff("adapterConfig", "maxRunDurationMinutes", config.maxRunDurationMinutes))}
-                      onCommit={(v) => {
-                        const parsed = parseOptionalMinutes(v);
-                        if (parsed !== "invalid") mark("adapterConfig", "maxRunDurationMinutes", parsed);
-                      }}
-                      className={inputClass}
-                      placeholder={`Instance default: ${generalSettings?.maxRunDurationMinutes ?? DEFAULT_MAX_RUN_DURATION_MINUTES} min`}
-                    />
-                  </Field>
-                  <Field label="Stop a silent run after (min)" hint={help.silentRunTimeoutMinutes}>
-                    <DraftInput
-                      data-testid="agent-silent-run-timeout-minutes"
-                      type="number"
-                      min={0}
-                      step={1}
-                      inputMode="numeric"
-                      value={formatOptionalMinutes(eff("adapterConfig", "silentRunTimeoutMinutes", config.silentRunTimeoutMinutes))}
-                      onCommit={(v) => {
-                        const parsed = parseOptionalMinutes(v);
-                        if (parsed !== "invalid") mark("adapterConfig", "silentRunTimeoutMinutes", parsed);
-                      }}
-                      className={inputClass}
-                      placeholder={`Instance default: ${generalSettings?.silentRunTimeoutMinutes ?? DEFAULT_SILENT_RUN_TIMEOUT_MINUTES} min`}
-                    />
-                  </Field>
-                </>
-              )}
+              {timeoutFields}
           </div>
         </div>
       )}
@@ -1533,18 +1866,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
             : <div className="px-4 py-2 text-xs font-medium text-muted-foreground flex items-center gap-2"><Heart className="h-3 w-3" /> Run Policy</div>
           }
           <div className={cn(cards ? "border border-border rounded-lg p-4 space-y-3" : "px-4 pb-3 space-y-3")}>
-            <ToggleWithNumber
-              label="Heartbeat on interval"
-              hint={help.heartbeatInterval}
-              checked={val!.heartbeatEnabled}
-              onCheckedChange={(v) => set!({ heartbeatEnabled: v })}
-              number={val!.intervalSec}
-              onNumberChange={(v) => set!({ intervalSec: v })}
-              numberLabel="sec"
-              numberPrefix="Run heartbeat every"
-              numberHint={help.intervalSec}
-              showNumber={val!.heartbeatEnabled}
-            />
+            {createHeartbeatField}
           </div>
         </div>
       ) : !isCreate ? (
@@ -1555,18 +1877,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
           }
           <div className={cn(cards ? "border border-border rounded-lg overflow-hidden" : "")}>
             <div className={cn(cards ? "p-4 space-y-3" : "px-4 pb-3 space-y-3")}>
-              <ToggleWithNumber
-                label="Heartbeat on interval"
-                hint={help.heartbeatInterval}
-                checked={eff("heartbeat", "enabled", heartbeat.enabled === true)}
-                onCheckedChange={(v) => mark("heartbeat", "enabled", v)}
-                number={eff("heartbeat", "intervalSec", Number(heartbeat.intervalSec ?? 300))}
-                onNumberChange={(v) => mark("heartbeat", "intervalSec", v)}
-                numberLabel="sec"
-                numberPrefix="Run heartbeat every"
-                numberHint={help.intervalSec}
-                showNumber={eff("heartbeat", "enabled", heartbeat.enabled === true)}
-              />
+              {editHeartbeatField}
             </div>
             <CollapsibleSection
               title="Advanced Run Policy"
@@ -1574,81 +1885,11 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
               open={runPolicyAdvancedOpen}
               onToggle={() => setRunPolicyAdvancedOpen(!runPolicyAdvancedOpen)}
             >
-            <div className="space-y-3">
-              <ToggleField
-                label="Wake on demand"
-                hint={help.wakeOnDemand}
-                checked={eff(
-                  "heartbeat",
-                  "wakeOnDemand",
-                  heartbeat.wakeOnDemand !== false,
-                )}
-                onChange={(v) => mark("heartbeat", "wakeOnDemand", v)}
-              />
-              <Field label="Cooldown (sec)" hint={help.cooldownSec}>
-                <DraftNumberInput
-                  value={eff(
-                    "heartbeat",
-                    "cooldownSec",
-                    Number(heartbeat.cooldownSec ?? 10),
-                  )}
-                  onCommit={(v) => mark("heartbeat", "cooldownSec", v)}
-                  immediate
-                  className={inputClass}
-                />
-              </Field>
-              <Field label="Max concurrent runs" hint={help.maxConcurrentRuns}>
-                <DraftNumberInput
-                  value={eff(
-                    "heartbeat",
-                    "maxConcurrentRuns",
-                    Number(heartbeat.maxConcurrentRuns ?? AGENT_DEFAULT_MAX_CONCURRENT_RUNS),
-                  )}
-                  onCommit={(v) => mark("heartbeat", "maxConcurrentRuns", v)}
-                  immediate
-                  className={inputClass}
-                />
-              </Field>
-              <div className="rounded-md border border-border/70 px-3 py-2">
-                <ToggleField
-                  label="Continue after max-turn stop"
-                  hint={help.maxTurnContinuationEnabled}
-                  checked={maxTurnContinuationEnabled}
-                  onChange={(v) => updateMaxTurnContinuation({ enabled: v })}
-                />
-                {maxTurnContinuationEnabled ? (
-                  <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                    <Field label="Continuation attempts" hint={help.maxTurnContinuationMaxAttempts}>
-                      <DraftNumberInput
-                        value={maxTurnContinuationMaxAttempts}
-                        onCommit={(v) =>
-                          updateMaxTurnContinuation({
-                            maxAttempts: clampInteger(v, 0, MAX_TURN_CONTINUATION_MAX_ATTEMPTS_CAP),
-                          })}
-                        immediate
-                        className={inputClass}
-                      />
-                    </Field>
-                    <Field label="Continuation delay (sec)" hint={help.maxTurnContinuationDelaySec}>
-                      <DraftNumberInput
-                        value={maxTurnContinuationDelaySec}
-                        onCommit={(v) =>
-                          updateMaxTurnContinuation({
-                            delayMs: clampDelayMsFromSeconds(v),
-                          })}
-                        immediate
-                        className={inputClass}
-                      />
-                    </Field>
-                  </div>
-                ) : null}
-              </div>
-            </div>
+            {runPolicyAdvancedFields}
           </CollapsibleSection>
           </div>
         </div>
       ) : null}
-
     </div>
   );
 }

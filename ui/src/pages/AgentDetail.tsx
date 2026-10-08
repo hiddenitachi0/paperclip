@@ -56,6 +56,7 @@ import { MorningReportSection } from "../components/MorningReportSection";
 import { QuickAgentChatPanel } from "../components/QuickAgentChatPanel";
 import { AgentAddOnToolsSection } from "../components/AgentAddOnToolsSection";
 import { TrustPresetSection } from "../components/TrustPresetSection";
+import { SettingsSection, SettingsSubsection } from "../components/SettingsSection";
 import { FileTree, buildFileTree } from "../components/FileTree";
 import { ScrollToBottom } from "../components/ScrollToBottom";
 import { SourceResolvedFoldCallout } from "../components/SourceResolvedFoldCallout";
@@ -84,7 +85,6 @@ import {
   EyeOff,
   Copy,
   ChevronRight,
-  ChevronDown,
   ArrowLeft,
   HelpCircle,
   FolderOpen,
@@ -1574,7 +1574,7 @@ function CostsSection({
 
 /* ---- Agent Configure Page ---- */
 
-function AgentConfigurePage({
+export function AgentConfigurePage({
   agent,
   agentId,
   companyId,
@@ -1594,7 +1594,6 @@ function AgentConfigurePage({
   updatePermissions: { mutate: (permissions: AgentPermissionUpdate) => void; isPending: boolean };
 }) {
   const queryClient = useQueryClient();
-  const [revisionsOpen, setRevisionsOpen] = useState(false);
 
   const { data: configRevisions } = useQuery({
     queryKey: queryKeys.agents.configRevisions(agent.id),
@@ -1610,6 +1609,21 @@ function AgentConfigurePage({
     },
   });
 
+  // Quick agent settings always sit right under Identity. The block keeps one
+  // fixed place so flipping the quick agent switch does not remount it (which
+  // would drop its unsaved drafts and status) or move it off screen. While
+  // quick agent is off it is only the switch; memory and morning report show
+  // once it is on.
+  const quickAgentOn = Boolean(agent.laneAEnabled);
+  const quickAgentBlock = (
+    <>
+      <QuickAgentSection agent={agent} companyId={companyId} />
+      {quickAgentOn && <QuickAgentMemorySection agentId={agent.id} />}
+      {quickAgentOn && <MorningReportSection agent={agent} companyId={companyId} />}
+    </>
+  );
+  const revisionCount = configRevisions?.length ?? 0;
+
   return (
     <div className="max-w-3xl space-y-6">
       <ConfigurationTab
@@ -1622,67 +1636,60 @@ function AgentConfigurePage({
         companyId={companyId}
         hidePromptTemplate
         hideInstructionsFile
+        afterIdentity={quickAgentBlock}
       />
-      <QuickAgentSection agent={agent} companyId={companyId} />
-      {agent.laneAEnabled && <QuickAgentMemorySection agentId={agent.id} />}
-      {agent.laneAEnabled && (
-        <MorningReportSection agent={agent} companyId={companyId} />
-      )}
-      <div>
-        <h3 className="section-title mb-3">API Keys</h3>
-        <KeysTab agentId={agentId} companyId={companyId} />
-      </div>
 
-      {/* Configuration Revisions — collapsible at the bottom */}
-      <div>
-        <button
-          className="flex items-center gap-2 text-sm font-medium hover:text-foreground transition-colors"
-          onClick={() => setRevisionsOpen((v) => !v)}
-        >
-          {revisionsOpen
-            ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
-            : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
-          }
-          Configuration Revisions
-          <span className="text-xs font-normal text-muted-foreground">{configRevisions?.length ?? 0}</span>
-        </button>
-        {revisionsOpen && (
-          <div className="mt-3">
-            {(configRevisions ?? []).length === 0 ? (
-              <p className="text-sm text-muted-foreground">No configuration revisions yet.</p>
-            ) : (
-              <div className="space-y-2">
-                {(configRevisions ?? []).slice(0, 10).map((revision) => (
-                  <div key={revision.id} className="border border-border/70 rounded-md p-3 space-y-2">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="text-xs text-muted-foreground">
-                        <span className="font-mono">{revision.id.slice(0, 8)}</span>
-                        <span className="mx-1">·</span>
-                        <span>{formatDate(revision.createdAt)}</span>
-                        <span className="mx-1">·</span>
-                        <span>{revision.source}</span>
-                      </div>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-7 px-2.5 text-xs"
-                        onClick={() => rollbackConfig.mutate(revision.id)}
-                        disabled={rollbackConfig.isPending}
-                      >
-                        Restore
-                      </Button>
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      Changed:{" "}
-                      {revision.changedKeys.length > 0 ? revision.changedKeys.join(", ") : "no tracked changes"}
-                    </p>
+      <SettingsSection
+        title="API keys"
+        description="Keys that let a program outside Paperclip act as this agent."
+        defaultOpen={false}
+        storageKey="agent.configuration.apiKeys"
+        data-testid="agent-config-api-keys"
+      >
+        <KeysTab agentId={agentId} companyId={companyId} />
+      </SettingsSection>
+
+      <SettingsSection
+        title="Configuration history"
+        description="Earlier versions of these settings. Restore one to undo a change."
+        summary={revisionCount === 1 ? "1 saved version" : `${revisionCount} saved versions`}
+        defaultOpen={false}
+        storageKey="agent.configuration.history"
+        data-testid="agent-config-history"
+      >
+        {(configRevisions ?? []).length === 0 ? (
+          <p className="text-sm text-muted-foreground">No configuration revisions yet.</p>
+        ) : (
+          <div className="space-y-2">
+            {(configRevisions ?? []).slice(0, 10).map((revision) => (
+              <div key={revision.id} className="border border-border/70 rounded-md p-3 space-y-2">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-xs text-muted-foreground">
+                    <span className="font-mono">{revision.id.slice(0, 8)}</span>
+                    <span className="mx-1">·</span>
+                    <span>{formatDate(revision.createdAt)}</span>
+                    <span className="mx-1">·</span>
+                    <span>{revision.source}</span>
                   </div>
-                ))}
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 px-2.5 text-xs"
+                    onClick={() => rollbackConfig.mutate(revision.id)}
+                    disabled={rollbackConfig.isPending}
+                  >
+                    Restore
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Changed:{" "}
+                  {revision.changedKeys.length > 0 ? revision.changedKeys.join(", ") : "no tracked changes"}
+                </p>
               </div>
-            )}
+            ))}
           </div>
         )}
-      </div>
+      </SettingsSection>
     </div>
   );
 }
@@ -1699,6 +1706,7 @@ function ConfigurationTab({
   updatePermissions,
   hidePromptTemplate,
   hideInstructionsFile,
+  afterIdentity,
 }: {
   agent: AgentDetailRecord;
   companyId?: string;
@@ -1709,6 +1717,8 @@ function ConfigurationTab({
   updatePermissions: { mutate: (permissions: AgentPermissionUpdate) => void; isPending: boolean };
   hidePromptTemplate?: boolean;
   hideInstructionsFile?: boolean;
+  /** Rendered right after Identity (see AgentConfigForm). */
+  afterIdentity?: React.ReactNode;
 }) {
   const queryClient = useQueryClient();
   const { pushToast } = useToastActions();
@@ -1804,99 +1814,115 @@ function ConfigurationTab({
         hideInlineSave
         hidePromptTemplate={hidePromptTemplate}
         hideInstructionsFile={hideInstructionsFile}
-        sectionLayout="cards"
-      />
-      <p className="text-xs text-muted-foreground">
-        Saved adapter config affects the next run. Active runs keep the config they started with, and config changes may start a fresh adapter session.
-      </p>
-
-      <TrustPresetSection
-        permissions={agent.permissions}
-        disabled={updatePermissions.isPending}
-        companyId={companyId}
-        projectCandidates={(boundaryProjects ?? []).map((project) => ({
-          id: project.id,
-          label: project.name,
-        }))}
-        issueCandidates={(boundaryIssues ?? []).map((issue) => ({
-          id: issue.id,
-          label: `${issue.identifier ?? issue.id.slice(0, 8)} · ${issue.title}`,
-        }))}
-        candidatesLoading={boundaryProjectsLoading || boundaryIssuesLoading}
-        onChange={(nextPermissions) =>
-          updatePermissions.mutate({
-            canCreateAgents,
-            canCreateSkills,
-            canAssignTasks,
-            ...buildPermissionsForTrustPreset(nextPermissions, nextPermissions.trustPreset === "low_trust_review" ? "low_trust_review" : "standard"),
-          })
-        }
+        sectionLayout="settings"
+        afterIdentity={afterIdentity}
       />
 
-      <div>
-        <h3 className="section-title mb-3">Permissions</h3>
-        <div className="section-box rounded-lg p-4 space-y-4">
-          <div className="flex items-center justify-between gap-4 text-sm">
-            <div className="space-y-1">
-              <div>Can create new agents</div>
-              <p className="text-xs text-muted-foreground">
-                Lets this agent create or hire agents. This also grants task assignment authority.
-              </p>
-            </div>
-            <ToggleSwitch
-              checked={canCreateAgents}
-              onCheckedChange={() =>
-                updatePermissions.mutate({
-                  canCreateAgents: !canCreateAgents,
-                  canCreateSkills,
-                  canAssignTasks: !canCreateAgents ? true : canAssignTasks,
-                })
-              }
-              disabled={updatePermissions.isPending}
-            />
-          </div>
-          <div className="flex items-center justify-between gap-4 text-sm">
-            <div className="space-y-1">
-              <div>Can create/import skills</div>
-              <p className="text-xs text-muted-foreground">
-                Lets this agent install, import, create, and scan company skills without creating agents.
-              </p>
-            </div>
-            <ToggleSwitch
-              checked={canCreateSkills}
-              onCheckedChange={() =>
-                updatePermissions.mutate({
-                  canCreateAgents,
-                  canCreateSkills: !canCreateSkills,
-                  canAssignTasks,
-                })
-              }
-              disabled={updatePermissions.isPending}
-            />
-          </div>
-          <div className="flex items-center justify-between gap-4 text-sm">
-            <div className="space-y-1">
-              <div>Can assign tasks</div>
-              <p className="text-xs text-muted-foreground">
-                {taskAssignHint}
-              </p>
-            </div>
-            <ToggleSwitch
-              checked={canAssignTasks}
-              onCheckedChange={() =>
-                updatePermissions.mutate({
-                  canCreateAgents,
-                  canCreateSkills,
-                  canAssignTasks: !canAssignTasks,
-                })
-              }
-              disabled={updatePermissions.isPending || taskAssignLocked}
-            />
-          </div>
-        </div>
-      </div>
+      <SettingsSection
+        title="Trust and permissions"
+        description="How far this agent is trusted, and what it may do on its own."
+        storageKey="agent.configuration.trust"
+        data-testid="agent-config-trust"
+      >
+        <TrustPresetSection
+          embedded
+          permissions={agent.permissions}
+          disabled={updatePermissions.isPending}
+          companyId={companyId}
+          projectCandidates={(boundaryProjects ?? []).map((project) => ({
+            id: project.id,
+            label: project.name,
+          }))}
+          issueCandidates={(boundaryIssues ?? []).map((issue) => ({
+            id: issue.id,
+            label: `${issue.identifier ?? issue.id.slice(0, 8)} · ${issue.title}`,
+          }))}
+          candidatesLoading={boundaryProjectsLoading || boundaryIssuesLoading}
+          onChange={(nextPermissions) =>
+            updatePermissions.mutate({
+              canCreateAgents,
+              canCreateSkills,
+              canAssignTasks,
+              ...buildPermissionsForTrustPreset(nextPermissions, nextPermissions.trustPreset === "low_trust_review" ? "low_trust_review" : "standard"),
+            })
+          }
+        />
 
-      <AgentJobSection agentId={agent.id} companyId={companyId} />
+        <SettingsSubsection
+          title="Permissions"
+          storageKey="agent.configuration.permissions"
+          data-testid="agent-config-permissions"
+        >
+          <div className="space-y-4">
+            <div className="flex items-center justify-between gap-4 text-sm">
+              <div className="space-y-1">
+                <div>Can create new agents</div>
+                <p className="text-xs text-muted-foreground">
+                  Lets this agent create or hire agents. This also grants task assignment authority.
+                </p>
+              </div>
+              <ToggleSwitch
+                checked={canCreateAgents}
+                onCheckedChange={() =>
+                  updatePermissions.mutate({
+                    canCreateAgents: !canCreateAgents,
+                    canCreateSkills,
+                    canAssignTasks: !canCreateAgents ? true : canAssignTasks,
+                  })
+                }
+                disabled={updatePermissions.isPending}
+              />
+            </div>
+            <div className="flex items-center justify-between gap-4 text-sm">
+              <div className="space-y-1">
+                <div>Can create/import skills</div>
+                <p className="text-xs text-muted-foreground">
+                  Lets this agent install, import, create, and scan company skills without creating agents.
+                </p>
+              </div>
+              <ToggleSwitch
+                checked={canCreateSkills}
+                onCheckedChange={() =>
+                  updatePermissions.mutate({
+                    canCreateAgents,
+                    canCreateSkills: !canCreateSkills,
+                    canAssignTasks,
+                  })
+                }
+                disabled={updatePermissions.isPending}
+              />
+            </div>
+            <div className="flex items-center justify-between gap-4 text-sm">
+              <div className="space-y-1">
+                <div>Can assign tasks</div>
+                <p className="text-xs text-muted-foreground">
+                  {taskAssignHint}
+                </p>
+              </div>
+              <ToggleSwitch
+                checked={canAssignTasks}
+                onCheckedChange={() =>
+                  updatePermissions.mutate({
+                    canCreateAgents,
+                    canCreateSkills,
+                    canAssignTasks: !canAssignTasks,
+                  })
+                }
+                disabled={updatePermissions.isPending || taskAssignLocked}
+              />
+            </div>
+          </div>
+        </SettingsSubsection>
+      </SettingsSection>
+
+      <SettingsSection
+        title="Job, tools and rights"
+        description="The position this agent holds, and the tools, rights and skills that come with it."
+        storageKey="agent.configuration.job"
+        data-testid="agent-config-job"
+      >
+        <AgentJobSection agentId={agent.id} companyId={companyId} embedded />
+      </SettingsSection>
     </div>
   );
 }

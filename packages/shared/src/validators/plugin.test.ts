@@ -97,6 +97,29 @@ describe("plugin manifest validators", () => {
     if (parsed.success) return;
     expect(parsed.error.issues.some((issue) => issue.message.includes("provider key"))).toBe(true);
   });
+
+  it("keeps a tool's optional category (the group label on an agent's Tools tab)", () => {
+    const manifest = (tools: unknown[]) => ({
+      id: "paperclip.tool-groups",
+      apiVersion: 1,
+      version: "0.1.0",
+      displayName: "Tool Groups",
+      description: "Plugin with grouped tools.",
+      author: "Paperclip",
+      categories: ["automation"],
+      capabilities: ["agent.tools.register"],
+      entrypoints: { worker: "./dist/worker.js" },
+      tools,
+    });
+    const tool = { name: "make", displayName: "Make", description: "Makes.", parametersSchema: { type: "object" } };
+
+    const parsed = pluginManifestV1Schema.parse(manifest([{ ...tool, category: "Pictures" }, { ...tool, name: "plain" }]));
+    expect(parsed.tools?.[0]?.category).toBe("Pictures");
+    expect(parsed.tools?.[1]?.category).toBeUndefined();
+
+    expect(pluginManifestV1Schema.safeParse(manifest([{ ...tool, category: "" }])).success).toBe(false);
+    expect(pluginManifestV1Schema.safeParse(manifest([{ ...tool, category: "x".repeat(61) }])).success).toBe(false);
+  });
 });
 
 describe("plugin managed routine validators", () => {

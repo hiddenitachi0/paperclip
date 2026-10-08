@@ -221,6 +221,8 @@ export interface AgentPluginToolOption {
   pluginId: string;
   pluginKey: string;
   pluginDisplayName: string;
+  /** The add-on's group label for this tool ("Pictures"); absent when the add-on sets none. */
+  category?: string;
 }
 
 export interface AgentPluginToolGrants {

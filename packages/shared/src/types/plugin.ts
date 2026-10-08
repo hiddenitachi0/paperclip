@@ -116,6 +116,12 @@ export interface PluginToolDeclaration {
   description: string;
   /** JSON Schema describing the tool's input parameters. */
   parametersSchema: JsonSchema;
+  /**
+   * Optional plain-English group label (e.g. "Pictures", "Video and sound").
+   * An agent's Tools tab lists add-on tools grouped under it; tools without
+   * one are grouped under their plugin's name.
+   */
+  category?: string;
 }
 
 /**
