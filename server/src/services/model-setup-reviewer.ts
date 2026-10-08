@@ -1,4 +1,4 @@
-import { and, desc, eq, isNotNull, max } from "drizzle-orm";
+import { and, desc, eq, isNotNull, isNull, max } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { modelDirectoryConverters, modelDirectoryEntries, modelSetupReviews } from "@paperclipai/db";
 import {
@@ -244,7 +244,7 @@ export function modelSetupReviewerService(db: Db, deps: { fetchImpl?: FetchLike;
     const entries = await db
       .select({ id: modelDirectoryEntries.id })
       .from(modelDirectoryEntries)
-      .where(and(eq(modelDirectoryEntries.companyId, companyId), eq(modelDirectoryEntries.provider, "local"), isNotNull(modelDirectoryEntries.baseUrl)));
+      .where(and(eq(modelDirectoryEntries.companyId, companyId), eq(modelDirectoryEntries.provider, "local"), isNotNull(modelDirectoryEntries.baseUrl), isNull(modelDirectoryEntries.archivedAt)));
     const latest = await db
       .select({ entryId: modelSetupReviews.entryId, at: max(modelSetupReviews.createdAt) })
       .from(modelSetupReviews)

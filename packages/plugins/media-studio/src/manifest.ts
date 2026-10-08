@@ -1,5 +1,5 @@
 import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
-import { sogniToolDeclarations } from "./sogni-tools.js";
+import { sogniToolDeclarations, TOOL_CATEGORY_PICTURES, TOOL_CATEGORY_VIDEO_AND_SOUND } from "./sogni-tools.js";
 import { JOB_KEY_MEDIA_POLL, MEDIA_POLL_SCHEDULE } from "./media-jobs.js";
 
 export const PLUGIN_ID = "paperclip.media-studio";
@@ -271,18 +271,21 @@ const manifest: PaperclipPluginManifestV1 = {
     {
       name: TOOL_GENERATE,
       displayName: "Generate image",
+      category: TOOL_CATEGORY_PICTURES,
       description: GENERATE_IMAGE_DESCRIPTION,
       parametersSchema: GENERATE_IMAGE_PARAMETERS as unknown as Record<string, unknown>,
     },
     {
       name: TOOL_QUICK_PICTURE,
       displayName: "Quick picture",
+      category: TOOL_CATEGORY_PICTURES,
       description: QUICK_PICTURE_DESCRIPTION,
       parametersSchema: QUICK_PICTURE_PARAMETERS as unknown as Record<string, unknown>,
     },
     {
       name: TOOL_LIST_LOOKS,
       displayName: "List saved looks",
+      category: TOOL_CATEGORY_PICTURES,
       description: LIST_LOOKS_DESCRIPTION,
       parametersSchema: { type: "object", properties: {} },
     },
@@ -290,18 +293,21 @@ const manifest: PaperclipPluginManifestV1 = {
     {
       name: TOOL_GENERATE_VIDEO,
       displayName: "Generate video",
+      category: TOOL_CATEGORY_VIDEO_AND_SOUND,
       description: GENERATE_VIDEO_DESCRIPTION,
       parametersSchema: GENERATE_VIDEO_PARAMETERS as unknown as Record<string, unknown>,
     },
     {
       name: TOOL_GENERATE_AUDIO,
       displayName: "Generate audio",
+      category: TOOL_CATEGORY_VIDEO_AND_SOUND,
       description: GENERATE_AUDIO_DESCRIPTION,
       parametersSchema: GENERATE_AUDIO_PARAMETERS as unknown as Record<string, unknown>,
     },
     {
       name: TOOL_CHECK_MEDIA_JOB,
       displayName: "Check video/audio job",
+      category: TOOL_CATEGORY_VIDEO_AND_SOUND,
       description: CHECK_MEDIA_JOB_DESCRIPTION,
       parametersSchema: CHECK_MEDIA_JOB_PARAMETERS as unknown as Record<string, unknown>,
     },

@@ -5,13 +5,15 @@ import { apiToolsApi, type AgentApiToolListItem } from "../api/apiTools";
 import { queryKeys } from "../lib/queryKeys";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Skeleton } from "@/components/ui/skeleton";
+import { SettingsSection } from "./SettingsSection";
 
 /**
  * DUR-4004: the "API with a key" half of an agent's Tools tab. Tick a tool
  * and every action it lists becomes something this agent can call (a quick
  * agent gets it as a chat tool, a full agent is told about it in its prompt
  * and calls it over HTTP); untick to take it away. The key never leaves the
- * server either way.
+ * server either way. Shown as a foldable "Tools with a key" section whose
+ * closed heading says how many are on.
  */
 export function AgentApiToolsSection({ agentId, companyId }: { agentId: string; companyId?: string }) {
   const queryClient = useQueryClient();
@@ -39,19 +41,24 @@ export function AgentApiToolsSection({ agentId, companyId }: { agentId: string; 
     sync.mutate(next);
   }
 
+  const enabledCount = tools?.filter((tool) => tool.enabled).length ?? 0;
+
   return (
-    <section className="space-y-3" data-testid="agent-api-tools">
-      <div>
-        <h3 className="text-sm font-medium">Tools with a key</h3>
-        <p className="text-sm text-muted-foreground">
+    <SettingsSection
+      title="Tools with a key"
+      description={
+        <>
           Services with an API key, added under{" "}
           <Link to="/tools" className="underline underline-offset-2">
             Tools
           </Link>{" "}
           as "API with a key". Tick one and this agent can call its actions; the key stays on the server.
-        </p>
-      </div>
-
+        </>
+      }
+      summary={tools && tools.length > 0 ? `${enabledCount} of ${tools.length} on` : undefined}
+      storageKey="agent.tools.withKey"
+      data-testid="agent-api-tools"
+    >
       {isLoading ? (
         <Skeleton className="h-16 w-full" />
       ) : error ? (
@@ -61,9 +68,9 @@ export function AgentApiToolsSection({ agentId, companyId }: { agentId: string; 
           No API tools yet. Add one on the Tools page ("Add tool", then "API with a key") and it will show up here.
         </p>
       ) : (
-        <ul className="divide-y divide-border border border-border rounded-lg">
+        <ul className="divide-y divide-border">
           {tools.map((tool) => (
-            <li key={tool.id} className="flex items-start gap-3 px-4 py-3">
+            <li key={tool.id} className="flex items-start gap-3 py-3 first:pt-0 last:pb-0">
               <Checkbox
                 checked={tool.enabled}
                 disabled={sync.isPending && pendingToolId === tool.id}
@@ -93,6 +100,6 @@ export function AgentApiToolsSection({ agentId, companyId }: { agentId: string; 
       {sync.isError ? (
         <p className="text-xs text-destructive">{sync.error instanceof Error ? sync.error.message : "Could not update the tools."}</p>
       ) : null}
-    </section>
+    </SettingsSection>
   );
 }

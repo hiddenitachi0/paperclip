@@ -69,12 +69,12 @@ import {
 import { useCompanyRole } from "../hooks/useCompanyRole";
 import { useToastActions } from "../context/ToastContext";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleSwitch } from "@/components/ui/toggle-switch";
 import { SecretBindingPicker, type SecretBindingValue } from "./SecretBindingPicker";
 import { QuickAgentBackupModels } from "./QuickAgentBackupModels";
+import { SettingsSection, SettingsSubsection } from "./SettingsSection";
 
 /**
  * Quick agent settings: the on/off switch plus the instruction set the quick
@@ -92,6 +92,17 @@ import { QuickAgentBackupModels } from "./QuickAgentBackupModels";
  * can use, and the line says exactly what to do. Switching OFF is always
  * allowed. Everything is computed from endpoints the page already calls; no
  * new server route.
+ *
+ * Layout (one titled, foldable block; each group remembers open/closed per
+ * viewer and shows a one-line summary while folded):
+ *   1. intro, the on/off switch (in the heading row) and "Is it ready?"
+ *   2. Model: saved model, provider, key, address, model, hosts, creativity,
+ *      thinking, longest answer — the model and its limits in one place
+ *   3. Backup models (open by default only when there are some)
+ *   4. Instructions
+ *   5. What it can do: web search, browser access
+ *   6. Who can use it and how much it is trusted
+ *   7. Rewrites from other systems: limits and cost
  */
 
 /** Plain-language labels for the "Browser access" dial (DUR-4020). */
@@ -165,12 +176,19 @@ export function QuickAgentSection({
   const savedInstructions = agent.laneAInstructions ?? "";
   const displayName = formatAgentDisplayName(agent, agent.persona);
   const [draft, setDraft] = useState<string | null>(null);
+  // Why the switch or a setting could not be saved: shown at the top of the
+  // block, next to the switch, because the settings it is about are spread
+  // over several groups below.
   const [error, setError] = useState<string | null>(null);
+  // Why the instructions could not be saved: shown under the Save button,
+  // since the instructions have their own group further down.
+  const [instructionsError, setInstructionsError] = useState<string | null>(null);
   const effectiveCompanyId = companyId ?? agent.companyId;
 
   useEffect(() => {
     setDraft(null);
     setError(null);
+    setInstructionsError(null);
   }, [savedInstructions]);
 
   const instructions = draft ?? savedInstructions;
@@ -216,12 +234,12 @@ export function QuickAgentSection({
       agentsApi.update(agent.id, { laneAInstructions: instructions.trim() ? instructions : null }, companyId),
     onSuccess: () => {
       setDraft(null);
-      setError(null);
+      setInstructionsError(null);
       invalidate();
       pushToast({ title: "Quick agent instructions saved", tone: "success" });
     },
     onError: (err) => {
-      setError(err instanceof ApiError ? err.message : "Could not save the instructions");
+      setInstructionsError(err instanceof ApiError ? err.message : "Could not save the instructions");
     },
   });
 
@@ -421,25 +439,88 @@ export function QuickAgentSection({
   // state.
   const cannotSwitchOn = !savedEnabled && readinessBlocksSwitchOn(modelLine.state);
 
+  // ─── Short read-outs shown beside a group's heading while it is folded ──
+  const modelText = agent.laneAModel
+    ? agent.laneAModel
+    : providerDescriptor.defaultModel
+      ? `default (${providerDescriptor.models[providerDescriptor.defaultModel]?.label ?? providerDescriptor.defaultModel})`
+      : "no model yet";
+  const modelSummary = `${providerDescriptor.label} · ${modelText}`;
+
+  const savedBackups = agent.laneABackupModels ?? [];
+  const backupNames = savedBackups.map(
+    (backup) =>
+      (backup.directoryEntryId ? savedModels.find((entry) => entry.id === backup.directoryEntryId)?.name : null) ??
+      backup.model,
+  );
+  const backupsSummary =
+    savedBackups.length === 0
+      ? "None yet"
+      : `${savedBackups.length} ${savedBackups.length === 1 ? "backup" : "backups"}: ${backupNames.join(", ")}`;
+
+  const trimmedInstructions = savedInstructions.trim().replace(/\s+/g, " ");
+  const instructionsSummary = trimmedInstructions
+    ? trimmedInstructions.length > 80
+      ? `${trimmedInstructions.slice(0, 80)}…`
+      : trimmedInstructions
+    : "None yet";
+
+  const abilitiesSummary = `${webSearchOn ? "Can search the web" : "No web search"} · Browser: ${BROWSER_ACCESS_LABELS[browserAccess].toLowerCase()}`;
+
+  const assignedCount = membersQuery.data
+    ? membersQuery.data.members.filter(
+        (member) =>
+          member.status === "active" &&
+          member.membershipRole !== "owner" &&
+          assignedUserIds.includes(member.principalId),
+      ).length
+    : assignedUserIds.length;
+  const accessSummary = `Trust: ${LANE_A_TRUST_LEVEL_LABELS[trustLevel].split(" — ")[0]} · ${
+    assignedCount === 0
+      ? "only the owner can chat"
+      : `the owner and ${assignedCount} ${assignedCount === 1 ? "other" : "others"} can chat`
+  }`;
+
+  // Same query (and cache entry) the monthly limit field below uses.
+  const budgetOverviewQuery = useQuery({
+    queryKey: queryKeys.budgets.overview(effectiveCompanyId),
+    queryFn: () => budgetsApi.overview(effectiveCompanyId),
+  });
+  const rewriteBudget = budgetOverviewQuery.data?.policies.find(
+    (entry) => entry.scopeType === "agent" && entry.scopeId === agent.id && entry.metric === "lane_a_transform_cents",
+  );
+  const rewritesSummary = `Up to ${agent.laneATransformDailyCallCap ?? LANE_A_DEFAULT_TRANSFORM_DAILY_CALL_CAP} texts a day · ${
+    rewriteBudget && rewriteBudget.amount > 0
+      ? `at most $${centsToDollarString(rewriteBudget.amount)} a month`
+      : "no monthly limit"
+  }`;
+
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-start justify-between gap-4">
-          <div className="space-y-1.5">
-            <CardTitle>Quick agent</CardTitle>
-            <p className="text-xs text-muted-foreground">{displayName}</p>
-            <CardDescription>
-              A quick agent answers you directly in chat instead of running as a full agent in its own workspace.
-              It remembers the conversation, keeps notes you ask it to remember (you can read and edit them here
-              once it is on), and can hand work to a colleague, look up the weather, tell the time anywhere and read a task summary. Switch on "Can search the web" below to let it look up live facts. Good for a secretary or a weather helper. Only you can switch this on.
-            </CardDescription>
-          </div>
-          <ToggleSwitch
-            checked={savedEnabled}
-            onCheckedChange={(next) => toggleMutation.mutate(next)}
-            disabled={toggleMutation.isPending || cannotSwitchOn}
-            aria-label="Quick agent on or off"
-          />
+    <SettingsSection
+      title="Quick agent (chat)"
+      summary={`${savedEnabled ? "On" : "Off"} · ${modelSummary}`}
+      storageKey="agent.quickAgent.section"
+      data-testid="quick-agent-section"
+      actions={
+        <ToggleSwitch
+          checked={savedEnabled}
+          onCheckedChange={(next) => toggleMutation.mutate(next)}
+          disabled={toggleMutation.isPending || cannotSwitchOn}
+          aria-label="Quick agent on or off"
+        />
+      }
+    >
+      {/* 1. What a quick agent is, the switch's reason, and the readiness list: always visible. */}
+      <div className="space-y-3" data-testid="quick-agent-overview">
+        <div className="space-y-1.5">
+          <p className="text-xs text-muted-foreground">{displayName}</p>
+          <p className="text-sm text-muted-foreground">
+            A quick agent answers you directly in chat instead of running as a full agent in its own workspace. It
+            remembers the conversation, keeps notes you ask it to remember (you can read and edit them here once it is
+            on), and can hand work to a colleague, look up the weather, tell the time anywhere and read a task summary.
+            Switch on "Can search the web" below to let it look up live facts. Good for a secretary or a weather
+            helper. Only you can switch this on.
+          </p>
         </div>
         {cannotSwitchOn && (
           <p className="text-xs text-muted-foreground" data-testid="quick-agent-switch-reason">
@@ -448,17 +529,219 @@ export function QuickAgentSection({
               : `Cannot switch on yet: ${modelLine.text}`}
           </p>
         )}
-      </CardHeader>
-      <CardContent className="space-y-3">
-        <ReadinessChecklist lines={readiness} />
-
-        <div className="space-y-1.5 border-t pt-4">
-          <p className="text-sm font-medium">Instructions</p>
-          <p className="text-xs text-muted-foreground">
-            Tell the quick agent who it is and what to do, in plain words. Example: "You are the front desk. Anything
-            about invoices goes to Finn. Anything technical goes to Bob. Answer in Norwegian."
+        {error && (
+          <p className="text-sm text-destructive" role="alert" data-testid="quick-agent-error">
+            {error}
           </p>
-        </div>
+        )}
+        <ReadinessChecklist lines={readiness} />
+      </div>
+
+      {/* 2. The model and everything about how it answers, together. */}
+      <SettingsSubsection
+        title="Model"
+        description="Pick a saved model, or set one up by hand. Used both in chat and when another system asks for a text to be rewritten. Anything left empty uses the default; leave the provider on Claude with no key to use Paperclip's own key."
+        summary={modelSummary}
+        storageKey="agent.quickAgent.model"
+        data-testid="quick-agent-model-group"
+      >
+        {savedModels.length > 0 && (
+          <label className="block space-y-1">
+            <span className="text-xs text-muted-foreground">Saved model</span>
+            <select
+              className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
+              data-testid="quick-agent-saved-model-select"
+              value=""
+              disabled={settingMutation.isPending}
+              onChange={(event) => {
+                if (event.target.value) applySavedModel(event.target.value);
+              }}
+            >
+              <option value="">Custom (set it up below)</option>
+              {savedModels.map((entry) => (
+                <option key={entry.id} value={entry.id}>
+                  {entry.name}
+                </option>
+              ))}
+            </select>
+            <span className="block text-xs text-muted-foreground">
+              Picking a saved model fills the fields below and clears the ones that don't apply to it.{" "}
+              <Link to="/company/settings/models" className="underline">
+                Manage saved models
+              </Link>
+              .
+            </span>
+          </label>
+        )}
+
+        <label className="block space-y-1">
+          <span className="text-xs text-muted-foreground">Provider</span>
+          <select
+            className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
+            value={agent.laneAProvider ?? ""}
+            disabled={settingMutation.isPending}
+            onChange={(event) =>
+              // The model list changes with the provider, so the model is
+              // cleared to the new provider's default at the same time.
+              settingMutation.mutate({
+                laneAProvider: event.target.value ? event.target.value : null,
+                laneAModel: null,
+              })
+            }
+          >
+            <option value="">Claude (Paperclip's own key unless you pick one)</option>
+            {LANE_A_PROVIDERS.map((key) => (
+              <option key={key} value={key}>
+                {LANE_A_PROVIDER_CATALOGUE[key].label}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <p className="text-xs" data-testid="quick-agent-provider-status">
+          <span className="text-muted-foreground">Using: </span>
+          <span className="font-medium">{providerDescriptor.label}</span>
+          <span className="text-muted-foreground"> · {keyStatus}</span>
+        </p>
+
+        <SecretBindingPicker
+          label="Key"
+          placeholder={provider === "local" ? "No key (optional)" : `Pick the ${providerDescriptor.label} key`}
+          value={keyBinding}
+          onChange={saveKeyBinding}
+          allowVersionSelector={false}
+          disabled={settingMutation.isPending}
+          rankSecret={rankSecret}
+          emptyHint={`No saved keys yet. Create one here or add it under Connections.`}
+        />
+
+        {providerDescriptor.baseUrlEditable && (
+          <TextSetting
+            label="Model address"
+            hint={
+              provider === "local"
+                ? "The OpenAI-compatible address of your local model server, for example http://localhost:11434/v1 (Ollama) or http://localhost:1234/v1 (LM Studio)."
+                : `Leave empty to use ${providerDescriptor.defaultBaseUrl}.`
+            }
+            value={agent.laneABaseUrl ?? null}
+            placeholder={providerDescriptor.defaultBaseUrl ?? "http://localhost:11434/v1"}
+            disabled={settingMutation.isPending}
+            onSave={(next) => settingMutation.mutateAsync({ laneABaseUrl: next })}
+          />
+        )}
+
+        {providerDescriptor.freeForm ? (
+          <>
+            {!agent.laneAModel && (
+              <p className="text-xs text-amber-600 dark:text-amber-400" data-testid="quick-agent-model-missing-notice">
+                Pick a model for {providerDescriptor.label} — quick answers won't work until one is set, and a
+                message to this agent will be turned into a task instead.
+              </p>
+            )}
+            <TextSetting
+              label="Model"
+              hint={
+                provider === "openrouter"
+                  ? "The OpenRouter model id, for example openai/gpt-4.1-mini or meta-llama/llama-3.3-70b-instruct. Paperclip has a price for some OpenRouter models; others are recorded as costing 0 until priced."
+                  : "The model name your local server exposes, for example llama3.1 or qwen2.5:7b. Local models cost nothing."
+              }
+              value={agent.laneAModel ?? null}
+              placeholder={provider === "openrouter" ? "openai/gpt-4.1-mini" : "llama3.1"}
+              disabled={settingMutation.isPending}
+              onSave={(next) => settingMutation.mutateAsync({ laneAModel: next })}
+            />
+          </>
+        ) : (
+          <label className="block space-y-1">
+            <span className="text-xs text-muted-foreground">Model</span>
+            <select
+              className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
+              value={providerModels.includes(agent.laneAModel ?? "") ? (agent.laneAModel ?? "") : ""}
+              disabled={settingMutation.isPending}
+              onChange={(event) =>
+                settingMutation.mutate({ laneAModel: event.target.value ? event.target.value : null })
+              }
+            >
+              <option value="">
+                Default
+                {providerDescriptor.defaultModel
+                  ? ` (${providerDescriptor.models[providerDescriptor.defaultModel]?.label ?? providerDescriptor.defaultModel})`
+                  : ""}
+              </option>
+              {providerModels.map((model) => (
+                <option key={model} value={model}>
+                  {providerDescriptor.models[model]?.label ?? model} ({model})
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+
+        {provider === "openrouter" && (
+          <ModelHostsSetting
+            value={agent.laneAProviderRouting ?? null}
+            disabled={settingMutation.isPending}
+            onSave={(next) => settingMutation.mutateAsync({ laneAProviderRouting: next })}
+          />
+        )}
+
+        <CreativitySetting
+          value={agent.laneATemperature ?? null}
+          provider={provider}
+          model={agent.laneAModel ?? null}
+          disabled={settingMutation.isPending}
+          onSave={(next) => settingMutation.mutateAsync({ laneATemperature: next })}
+        />
+
+        <ThinkingSetting
+          value={(agent.laneAThinking as LaneAThinkingMode | null) ?? null}
+          provider={provider}
+          model={agent.laneAModel ?? null}
+          disabled={settingMutation.isPending}
+          onSave={(next) => settingMutation.mutateAsync({ laneAThinking: next })}
+        />
+
+        <NumberSetting
+          label="Longest answer (tokens)"
+          hint={`Empty = ${LANE_A_DEFAULT_MAX_OUTPUT_TOKENS}. Stops an answer from becoming unexpectedly long and expensive.`}
+          value={agent.laneAMaxOutputTokens ?? null}
+          min={LANE_A_MIN_MAX_OUTPUT_TOKENS}
+          max={LANE_A_MAX_MAX_OUTPUT_TOKENS}
+          disabled={settingMutation.isPending}
+          onSave={(next) => settingMutation.mutate({ laneAMaxOutputTokens: next })}
+        />
+      </SettingsSubsection>
+
+      {/* 3. Other models to fall back on. Open by default only when there are some. */}
+      <SettingsSubsection
+        title="Backup models"
+        summary={backupsSummary}
+        defaultOpen={savedBackups.length > 0}
+        storageKey="agent.quickAgent.backups"
+        data-testid="quick-agent-backups-group"
+      >
+        <QuickAgentBackupModels
+          saved={{
+            backups: agent.laneABackupModels,
+            noAnswerChainIds: agent.laneANoAnswerChainIds,
+            refusalChainIds: agent.laneARefusalChainIds,
+            keywordRoutes: agent.laneAKeywordRoutes,
+          }}
+          main={{ provider, baseUrl: agent.laneABaseUrl ?? null, hasKey: Boolean(keyBinding) }}
+          savedModels={modelDirectoryQuery.isSuccess ? savedModels : undefined}
+          saving={settingMutation.isPending}
+          onSave={(patch) => settingMutation.mutateAsync(patch)}
+        />
+      </SettingsSubsection>
+
+      {/* 4. Who it is and what it does, in plain words. */}
+      <SettingsSubsection
+        title="Instructions"
+        description={`Tell the quick agent who it is and what to do, in plain words. Example: "You are the front desk. Anything about invoices goes to Finn. Anything technical goes to Bob. Answer in Norwegian."`}
+        summary={instructionsSummary}
+        storageKey="agent.quickAgent.instructions"
+        data-testid="quick-agent-instructions-group"
+      >
         <Textarea
           value={instructions}
           onChange={(event) => setDraft(event.target.value)}
@@ -475,7 +758,14 @@ export function QuickAgentSection({
           </p>
           <div className="flex items-center gap-2">
             {dirty && (
-              <Button variant="ghost" size="sm" onClick={() => { setDraft(null); setError(null); }}>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setDraft(null);
+                  setInstructionsError(null);
+                }}
+              >
                 Cancel
               </Button>
             )}
@@ -484,106 +774,18 @@ export function QuickAgentSection({
             </Button>
           </div>
         </div>
-        {error && <p className="text-sm text-destructive">{error}</p>}
+        {instructionsError && <p className="text-sm text-destructive">{instructionsError}</p>}
+      </SettingsSubsection>
 
-        {/* DUR-3997: who answers, and with whose key. */}
-        <div className="space-y-3 border-t pt-4">
-          <div className="space-y-1.5">
-            <p className="text-sm font-medium">Provider and key</p>
-            <p className="text-xs text-muted-foreground">
-              Which AI service answers this quick agent, and which of the company's saved keys it uses. Leave the
-              provider on Claude with no key to keep using Paperclip's own key, as before.
-            </p>
-          </div>
-
-          <p className="text-xs" data-testid="quick-agent-provider-status">
-            <span className="text-muted-foreground">Using: </span>
-            <span className="font-medium">{providerDescriptor.label}</span>
-            <span className="text-muted-foreground"> · {keyStatus}</span>
-          </p>
-
-          {savedModels.length > 0 && (
-            <label className="block space-y-1">
-              <span className="text-xs text-muted-foreground">Saved model</span>
-              <select
-                className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
-                data-testid="quick-agent-saved-model-select"
-                value=""
-                disabled={settingMutation.isPending}
-                onChange={(event) => {
-                  if (event.target.value) applySavedModel(event.target.value);
-                }}
-              >
-                <option value="">Custom (set it up below)</option>
-                {savedModels.map((entry) => (
-                  <option key={entry.id} value={entry.id}>
-                    {entry.name}
-                  </option>
-                ))}
-              </select>
-              <span className="block text-xs text-muted-foreground">
-                Picking a saved model fills the fields below and clears the ones that don't apply to it.{" "}
-                <Link to="/company/settings/models" className="underline">
-                  Manage saved models
-                </Link>
-                .
-              </span>
-            </label>
-          )}
-
-          <label className="block space-y-1">
-            <span className="text-xs text-muted-foreground">Provider</span>
-            <select
-              className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
-              value={agent.laneAProvider ?? ""}
-              disabled={settingMutation.isPending}
-              onChange={(event) =>
-                // The model list changes with the provider, so the model is
-                // cleared to the new provider's default at the same time.
-                settingMutation.mutate({
-                  laneAProvider: event.target.value ? event.target.value : null,
-                  laneAModel: null,
-                })
-              }
-            >
-              <option value="">Claude (Paperclip's own key unless you pick one)</option>
-              {LANE_A_PROVIDERS.map((key) => (
-                <option key={key} value={key}>
-                  {LANE_A_PROVIDER_CATALOGUE[key].label}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <SecretBindingPicker
-            label="Key"
-            placeholder={provider === "local" ? "No key (optional)" : `Pick the ${providerDescriptor.label} key`}
-            value={keyBinding}
-            onChange={saveKeyBinding}
-            allowVersionSelector={false}
-            disabled={settingMutation.isPending}
-            rankSecret={rankSecret}
-            emptyHint={`No saved keys yet. Create one here or add it under Connections.`}
-          />
-
-          {providerDescriptor.baseUrlEditable && (
-            <TextSetting
-              label="Model address"
-              hint={
-                provider === "local"
-                  ? "The OpenAI-compatible address of your local model server, for example http://localhost:11434/v1 (Ollama) or http://localhost:1234/v1 (LM Studio)."
-                  : `Leave empty to use ${providerDescriptor.defaultBaseUrl}.`
-              }
-              value={agent.laneABaseUrl ?? null}
-              placeholder={providerDescriptor.defaultBaseUrl ?? "http://localhost:11434/v1"}
-              disabled={settingMutation.isPending}
-              onSave={(next) => settingMutation.mutateAsync({ laneABaseUrl: next })}
-            />
-          )}
-        </div>
-
+      {/* 5. What it is allowed to reach: the web, a browser. */}
+      <SettingsSubsection
+        title="What it can do"
+        summary={abilitiesSummary}
+        storageKey="agent.quickAgent.abilities"
+        data-testid="quick-agent-abilities-group"
+      >
         {/* Web search: off by default, per quick agent. */}
-        <div className="space-y-2 border-t pt-4" data-testid="quick-agent-web-search">
+        <div className="space-y-2" data-testid="quick-agent-web-search">
           <div className="flex items-start justify-between gap-4">
             <div className="space-y-1.5">
               <p className="text-sm font-medium">Can search the web</p>
@@ -619,8 +821,8 @@ export function QuickAgentSection({
           )}
         </div>
 
-        {/* Browser access: off by default, applies to full runs only. DUR-4020. */}
-        <div className="space-y-2 border-t pt-4" data-testid="quick-agent-browser-access">
+        {/* Browser access: off by default, applies to full runs only. */}
+        <div className="space-y-2 border-t pt-3" data-testid="quick-agent-browser-access">
           <div className="space-y-1.5">
             <p className="text-sm font-medium">Browser access</p>
             <p className="text-xs text-muted-foreground">
@@ -645,9 +847,17 @@ export function QuickAgentSection({
             ))}
           </select>
         </div>
+      </SettingsSubsection>
 
-        {/* DUR-4070: the trust-level ceiling. */}
-        <div className="space-y-2 border-t pt-4" data-testid="quick-agent-trust-level">
+      {/* 6. How far it is trusted, and who may talk to it. */}
+      <SettingsSubsection
+        title="Who can use it and how much it is trusted"
+        summary={accessSummary}
+        storageKey="agent.quickAgent.access"
+        data-testid="quick-agent-access-group"
+      >
+        {/* The trust-level ceiling. */}
+        <div className="space-y-2" data-testid="quick-agent-trust-level">
           <div className="space-y-1.5">
             <p className="text-sm font-medium">Trust level</p>
             <p className="text-xs text-muted-foreground">
@@ -671,8 +881,8 @@ export function QuickAgentSection({
           </select>
         </div>
 
-        {/* DUR-4070: who may chat with this quick agent at all. */}
-        <div className="space-y-2 border-t pt-4" data-testid="quick-agent-assigned-people">
+        {/* Who may chat with this quick agent at all. */}
+        <div className="space-y-2 border-t pt-3" data-testid="quick-agent-assigned-people">
           <div className="space-y-1.5">
             <p className="text-sm font-medium">Who can chat with {displayName}</p>
             <p className="text-xs text-muted-foreground">
@@ -711,135 +921,40 @@ export function QuickAgentSection({
             </ul>
           )}
         </div>
+      </SettingsSubsection>
 
-        {/* DUR-3977: the settings that decide what a batch of rewrites costs
-            and how far it can run before it stops on its own. */}
-        <div className="space-y-3 border-t pt-4">
-          <div className="space-y-1.5">
-            <p className="text-sm font-medium">Model and limits</p>
-            <p className="text-xs text-muted-foreground">
-              Used both in chat and when another system asks for a text to be rewritten. Everything here can be left
-              empty — then the defaults apply.
-            </p>
-          </div>
+      {/* 7. What a batch of rewrites from other systems may cost and how far
+          it can run before it stops on its own. */}
+      <SettingsSubsection
+        title="Rewrites from other systems: limits and cost"
+        description="Only for texts another system sends this agent to rewrite, not for chat. Empty uses the default."
+        summary={rewritesSummary}
+        storageKey="agent.quickAgent.rewrites"
+        data-testid="quick-agent-rewrites-group"
+      >
+        <NumberSetting
+          label="How many texts per day"
+          hint={`Empty = ${LANE_A_DEFAULT_TRANSFORM_DAILY_CALL_CAP}. Only applies to rewrites from other systems, not chat. When the limit is reached it stops until midnight.`}
+          value={agent.laneATransformDailyCallCap ?? null}
+          min={LANE_A_MIN_TRANSFORM_DAILY_CALL_CAP}
+          max={LANE_A_MAX_TRANSFORM_DAILY_CALL_CAP}
+          disabled={settingMutation.isPending}
+          onSave={(next) => settingMutation.mutate({ laneATransformDailyCallCap: next })}
+        />
 
-          {providerDescriptor.freeForm ? (
-            <>
-              {!agent.laneAModel && (
-                <p className="text-xs text-amber-600 dark:text-amber-400" data-testid="quick-agent-model-missing-notice">
-                  Pick a model for {providerDescriptor.label} — quick answers won't work until one is set, and a
-                  message to this agent will be turned into a task instead.
-                </p>
-              )}
-              <TextSetting
-                label="Model"
-                hint={
-                  provider === "openrouter"
-                    ? "The OpenRouter model id, for example openai/gpt-4.1-mini or meta-llama/llama-3.3-70b-instruct. Paperclip has a price for some OpenRouter models; others are recorded as costing 0 until priced."
-                    : "The model name your local server exposes, for example llama3.1 or qwen2.5:7b. Local models cost nothing."
-                }
-                value={agent.laneAModel ?? null}
-                placeholder={provider === "openrouter" ? "openai/gpt-4.1-mini" : "llama3.1"}
-                disabled={settingMutation.isPending}
-                onSave={(next) => settingMutation.mutateAsync({ laneAModel: next })}
-              />
-            </>
-          ) : (
-            <label className="block space-y-1">
-              <span className="text-xs text-muted-foreground">Model</span>
-              <select
-                className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
-                value={providerModels.includes(agent.laneAModel ?? "") ? (agent.laneAModel ?? "") : ""}
-                disabled={settingMutation.isPending}
-                onChange={(event) =>
-                  settingMutation.mutate({ laneAModel: event.target.value ? event.target.value : null })
-                }
-              >
-                <option value="">
-                  Default
-                  {providerDescriptor.defaultModel
-                    ? ` (${providerDescriptor.models[providerDescriptor.defaultModel]?.label ?? providerDescriptor.defaultModel})`
-                    : ""}
-                </option>
-                {providerModels.map((model) => (
-                  <option key={model} value={model}>
-                    {providerDescriptor.models[model]?.label ?? model} ({model})
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-
-          {provider === "openrouter" && (
-            <ModelHostsSetting
-              value={agent.laneAProviderRouting ?? null}
-              disabled={settingMutation.isPending}
-              onSave={(next) => settingMutation.mutateAsync({ laneAProviderRouting: next })}
-            />
-          )}
-
-          <CreativitySetting
-            value={agent.laneATemperature ?? null}
-            provider={provider}
-            model={agent.laneAModel ?? null}
-            disabled={settingMutation.isPending}
-            onSave={(next) => settingMutation.mutateAsync({ laneATemperature: next })}
-          />
-
-          <ThinkingSetting
-            value={(agent.laneAThinking as LaneAThinkingMode | null) ?? null}
-            provider={provider}
-            model={agent.laneAModel ?? null}
-            disabled={settingMutation.isPending}
-            onSave={(next) => settingMutation.mutateAsync({ laneAThinking: next })}
-          />
-
-          <QuickAgentBackupModels
-            saved={{
-              backups: agent.laneABackupModels,
-              noAnswerChainIds: agent.laneANoAnswerChainIds,
-              refusalChainIds: agent.laneARefusalChainIds,
-              keywordRoutes: agent.laneAKeywordRoutes,
-            }}
-            main={{ provider, baseUrl: agent.laneABaseUrl ?? null, hasKey: Boolean(keyBinding) }}
-            saving={settingMutation.isPending}
-            onSave={(patch) => settingMutation.mutateAsync(patch)}
-          />
-
-          <NumberSetting
-            label="Longest answer (tokens)"
-            hint={`Empty = ${LANE_A_DEFAULT_MAX_OUTPUT_TOKENS}. Stops an answer from becoming unexpectedly long and expensive.`}
-            value={agent.laneAMaxOutputTokens ?? null}
-            min={LANE_A_MIN_MAX_OUTPUT_TOKENS}
-            max={LANE_A_MAX_MAX_OUTPUT_TOKENS}
-            disabled={settingMutation.isPending}
-            onSave={(next) => settingMutation.mutate({ laneAMaxOutputTokens: next })}
-          />
-
-          <NumberSetting
-            label="How many texts per day"
-            hint={`Empty = ${LANE_A_DEFAULT_TRANSFORM_DAILY_CALL_CAP}. Only applies to rewrites from other systems, not chat. When the limit is reached it stops until midnight.`}
-            value={agent.laneATransformDailyCallCap ?? null}
-            min={LANE_A_MIN_TRANSFORM_DAILY_CALL_CAP}
-            max={LANE_A_MAX_TRANSFORM_DAILY_CALL_CAP}
-            disabled={settingMutation.isPending}
-            onSave={(next) => settingMutation.mutate({ laneATransformDailyCallCap: next })}
-          />
-
-          <MonthlyTransformBudget
-            agentId={agent.id}
-            companyId={effectiveCompanyId}
-            worstCaseDailyCents={laneATransformWorstCaseDailyCents({
-              provider: agent.laneAProvider,
-              model: agent.laneAModel,
-              maxOutputTokens: agent.laneAMaxOutputTokens,
-              dailyCallCap: agent.laneATransformDailyCallCap,
-              maxTotalInputChars: LANE_A_TRANSFORM_MAX_TOTAL_CHARS,
-            })}
-          />
-        </div>
-      </CardContent>
-    </Card>
+        <MonthlyTransformBudget
+          agentId={agent.id}
+          companyId={effectiveCompanyId}
+          worstCaseDailyCents={laneATransformWorstCaseDailyCents({
+            provider: agent.laneAProvider,
+            model: agent.laneAModel,
+            maxOutputTokens: agent.laneAMaxOutputTokens,
+            dailyCallCap: agent.laneATransformDailyCallCap,
+            maxTotalInputChars: LANE_A_TRANSFORM_MAX_TOTAL_CHARS,
+          })}
+        />
+      </SettingsSubsection>
+    </SettingsSection>
   );
 }
 

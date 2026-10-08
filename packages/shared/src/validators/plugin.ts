@@ -106,7 +106,8 @@ export type PluginWebhookDeclarationInput = z.infer<typeof pluginWebhookDeclarat
 /**
  * Validates a {@link PluginToolDeclaration} — an agent tool contributed by the
  * plugin. Requires `name`, `displayName`, `description`, and a valid
- * `parametersSchema`. Requires the `agent.tools.register` capability.
+ * `parametersSchema`; `category` (a short group label) is optional.
+ * Requires the `agent.tools.register` capability.
  *
  * @see PLUGIN_SPEC.md §11 — Agent Tools
  */
@@ -115,6 +116,8 @@ export const pluginToolDeclarationSchema = z.object({
   displayName: z.string().min(1),
   description: z.string().min(1),
   parametersSchema: jsonSchemaSchema,
+  /** Optional group label for the agent Tools tab (e.g. "Pictures"). */
+  category: z.string().trim().min(1).max(60).optional(),
 });
 
 const pluginEnvironmentTemplateConfigFieldSchema = z.string()

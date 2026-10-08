@@ -224,4 +224,19 @@ describe("QuickAgentMemorySection", () => {
     expect(box.placeholder).toBe("The memory is full. Delete a note to add another.");
     expect(button("Add note").disabled).toBe(true);
   });
+
+  it("folds away and then says how many notes are used", async () => {
+    mockApi.list.mockResolvedValue(list([note("n1", "I prefer short answers."), note("n2", "My dog is called Rex.")]));
+    await render();
+    const section = container.querySelector<HTMLElement>('[data-testid="quick-agent-memory"]')!;
+    expect(section.getAttribute("data-state")).toBe("open");
+    try {
+      await click("Memory");
+      expect(section.getAttribute("data-state")).toBe("closed");
+      expect(section.textContent).toContain("2 of 100 notes used");
+    } finally {
+      // Open/closed is remembered per viewer; do not leak it into other tests.
+      window.localStorage.clear();
+    }
+  });
 });
