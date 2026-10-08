@@ -6,6 +6,8 @@ import {
   createModelDirectoryEntrySchema,
   duplicateModelDirectoryEntrySchema,
   importModelDirectoryCatalogueSchema,
+  syncLocalModelsSchema,
+  updateModelDirectorySettingsSchema,
   updateModelDirectoryEntrySchema,
   type ImportModelDirectoryCatalogue,
 } from "@paperclipai/shared";
@@ -100,6 +102,56 @@ export function modelDirectoryRoutes(rawDb: Db) {
     for (const entry of outcome.createdEntries) await audit(req, companyId, "model_directory_entry.created", entry, extra);
     for (const entry of outcome.updatedEntries) await audit(req, companyId, "model_directory_entry.updated", entry, extra);
     res.json(outcome.result);
+  });
+
+  // Catalogue v2: per-company settings (the model PC's graphics memory).
+  // Same access as the list; saving is gated like saving a setup.
+  router.get("/companies/:companyId/model-directory/settings", scope(), async (req, res) => {
+    res.json(await svc.getSettings(req.params.companyId as string));
+  });
+
+  router.put("/companies/:companyId/model-directory/settings", scope(), validate(updateModelDirectorySettingsSchema), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const updated = await svc.updateSettings(companyId, req.body, actorUser(req));
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "model_directory.settings_updated",
+      entityType: "model_directory_settings",
+      entityId: companyId,
+      details: { localGpuVramGb: updated.localGpuVramGb },
+    });
+    res.json(updated);
+  });
+
+  // Catalogue v2: ask the local Ollama which models are installed and mark the
+  // saved local setups at that address. Only an address this company already
+  // uses is called (422 otherwise).
+  router.post("/companies/:companyId/model-directory/local-sync", scope(), validate(syncLocalModelsSchema), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const result = await svc.syncLocalModels(companyId, (req.body as { baseUrl: string }).baseUrl);
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "model_directory.local_synced",
+      entityType: "model_directory_settings",
+      entityId: companyId,
+      details: {
+        baseUrl: result.baseUrl,
+        installedCount: result.installed.length,
+        markedInstalledEntryIds: result.markedInstalledEntryIds,
+        missingEntryIds: result.missingEntryIds,
+      },
+    });
+    res.json(result);
   });
 
   router.get("/companies/:companyId/model-directory/starters", scope(), async (req, res) => {

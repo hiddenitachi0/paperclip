@@ -2,6 +2,7 @@ import {
   importModelDirectoryCatalogueSchema,
   LANE_A_PROVIDER_CATALOGUE,
   LANE_A_PROVIDERS,
+  laneAModelsForProvider,
   MODEL_DIRECTORY_EXPORT_VERSION,
   MODEL_DIRECTORY_IMPORT_MAX,
   MODEL_DIRECTORY_TAG_MAX_LENGTH,
@@ -12,6 +13,18 @@ import {
   type ModelDirectoryEntry,
   type ModelDirectoryLane,
   type ModelDirectorySpecs,
+  type ModelDirectoryRating,
+  type CreateModelDirectoryEntry,
+  type KnownModelFamily,
+  type KnownModelVariant,
+  type KnownOllamaTag,
+  type KnownOpenRouterOption,
+  type KnownHuggingFaceOption,
+  type LocalInstalledModel,
+  GPU_FIT_HEADROOM,
+  KNOWN_MODEL_FAMILIES,
+  MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS,
+  MODEL_DIRECTORY_RATINGS_MAX,
 } from "@paperclipai/shared";
 
 /**
@@ -37,6 +50,10 @@ export type CatalogueItem = Pick<
   | "specs"
   | "favorite"
   | "archivedAt"
+  | "family"
+  | "variant"
+  | "ratings"
+  | "providerRouting"
 >;
 
 // ---------------------------------------------------------------- labels
@@ -91,7 +108,7 @@ function sorted<T extends CatalogueItem>(entries: readonly T[]): T[] {
 
 export type CatalogueGroupBy = "maker" | "where" | "use" | "none";
 export const CATALOGUE_GROUP_BY_OPTIONS: ReadonlyArray<{ value: CatalogueGroupBy; label: string }> = [
-  { value: "maker", label: "Maker and base model" },
+  { value: "maker", label: "Maker, model and size" },
   { value: "where", label: "Where it runs" },
   { value: "use", label: "What it's for" },
   { value: "none", label: "No grouping" },
@@ -255,6 +272,8 @@ export interface CatalogueFilters {
   /** Every chosen tag must be on the entry. */
   tags?: readonly string[];
   showArchived?: boolean;
+  /** "Best for": only entries with a score for this criterion (case ignored). */
+  criterion?: string;
 }
 
 export function hasActiveFilters(filters: CatalogueFilters): boolean {
@@ -263,12 +282,22 @@ export function hasActiveFilters(filters: CatalogueFilters): boolean {
     (filters.where ?? "all") !== "all" ||
     (filters.use ?? "all") !== "all" ||
     (filters.availability ?? "all") !== "all" ||
-    (filters.tags?.length ?? 0) > 0
+    (filters.tags?.length ?? 0) > 0 ||
+    Boolean(filters.criterion?.trim())
   );
 }
 
 function searchText(entry: CatalogueItem): string {
-  return [entry.name, entry.model, entry.maker, entry.baseModel, ...(entry.tags ?? []), entry.note]
+  return [
+    entry.name,
+    entry.model,
+    entry.maker,
+    entry.baseModel,
+    entry.family,
+    entry.variant,
+    ...(entry.tags ?? []),
+    entry.note,
+  ]
     .filter((part): part is string => typeof part === "string" && part !== "")
     .join("\n")
     .toLowerCase();
@@ -285,7 +314,9 @@ export function filterEntries<T extends CatalogueItem>(entries: readonly T[], fi
   const use = filters.use ?? "all";
   const availability = filters.availability ?? "all";
   const tags = (filters.tags ?? []).map((tag) => tag.toLowerCase());
+  const criterion = filters.criterion?.trim().toLowerCase() ?? "";
   return entries.filter((entry) => {
+    if (criterion && ratingFor(entry, criterion) === null) return false;
     if (!filters.showArchived && entry.archivedAt) return false;
     if (where === "cloud" ? entry.provider === "local" : where !== "all" && entry.provider !== where) return false;
     if (use !== "all") {
@@ -337,6 +368,48 @@ export function baseModelsInUse(entries: readonly CatalogueItem[], maker?: strin
       .filter((entry) => !wanted || (entry.maker ?? "").trim().toLowerCase() === wanted)
       .map((entry) => entry.baseModel),
   );
+}
+
+/** Model families already used (family, else the older base model), only this maker's when one is given. */
+export function familiesInUse(entries: readonly CatalogueItem[], maker?: string | null): string[] {
+  const wanted = maker?.trim().toLowerCase();
+  return distinctLabels(
+    entries
+      .filter((entry) => !wanted || (entry.maker ?? "").trim().toLowerCase() === wanted)
+      .map((entry) => entry.family ?? entry.baseModel),
+  );
+}
+
+/**
+ * Family suggestions for the edit dialog: the ones in use plus the known ones
+ * (only this maker's known ones when the maker is a known maker).
+ */
+export function knownFamilySuggestions(
+  maker: string | null | undefined,
+  inUse: readonly string[],
+  known: readonly KnownModelFamily[] = KNOWN_MODEL_FAMILIES,
+): string[] {
+  const wanted = maker?.trim().toLowerCase() ?? "";
+  const byMaker = known.filter((family) => family.maker.toLowerCase() === wanted);
+  const pool = wanted && byMaker.length > 0 ? byMaker : known;
+  return distinctLabels([...inUse, ...pool.map((family) => family.family)]);
+}
+
+/** Size suggestions for a family: the known sizes (smallest first), then sizes already used for it. */
+export function variantSuggestions(
+  family: string | null | undefined,
+  entries: readonly CatalogueItem[],
+  known: readonly KnownModelFamily[] = KNOWN_MODEL_FAMILIES,
+): string[] {
+  const wanted = family?.trim().toLowerCase() ?? "";
+  if (!wanted) return [];
+  const knownFamily = known.find((candidate) => candidate.family.toLowerCase() === wanted);
+  const knownSizes = [...(knownFamily?.variants ?? [])].sort((a, b) => a.paramsB - b.paramsB).map((v) => v.variant);
+  const used = entries
+    .filter((entry) => (entry.family ?? entry.baseModel ?? "").trim().toLowerCase() === wanted)
+    .map((entry) => entry.variant);
+  const seen = new Set(knownSizes.map((size) => size.toLowerCase()));
+  return [...knownSizes, ...distinctLabels(used).filter((size) => !seen.has(size.toLowerCase()))];
 }
 
 /** Cloud providers that have at least one entry, in the usual order. */
@@ -530,4 +603,981 @@ export function importPreview(
     (here.has(entry.name.trim().toLowerCase()) ? already : fresh).push(entry.name);
   }
   return { fresh, existing: already };
+}
+
+// ================================================================ catalogue v2
+//
+// Maker -> Model family -> Size -> ways to run it. Built from the saved
+// entries plus the built-in list of known open models (KNOWN_MODEL_FAMILIES),
+// so a family the owner has saved once also shows its other sizes, whether
+// each fits the graphics card, the `ollama pull` command for a size that is
+// not installed, and the bigger cloud sizes as "upgrades".
+
+// ---------------------------------------------------------------- ratings
+
+/** The owner's score for one criterion (case ignored), or null. */
+export function ratingFor(entry: Pick<CatalogueItem, "ratings">, criterion: string): number | null {
+  const wanted = criterion.trim().toLowerCase();
+  if (!wanted) return null;
+  const found = (entry.ratings ?? []).find((rating) => rating.criterion.trim().toLowerCase() === wanted);
+  return found ? found.score : null;
+}
+
+/** Average of all scores, one decimal, or null when there are none. */
+export function ratingsAverage(ratings: readonly ModelDirectoryRating[] | null | undefined): number | null {
+  const list = ratings ?? [];
+  if (list.length === 0) return null;
+  return Math.round((list.reduce((sum, rating) => sum + rating.score, 0) / list.length) * 10) / 10;
+}
+
+/** "Tool calling 8 · Responsiveness 6". */
+export function ratingsLine(ratings: readonly ModelDirectoryRating[] | null | undefined): string {
+  return (ratings ?? []).map((rating) => `${rating.criterion} ${rating.score}`).join(" · ");
+}
+
+/** Criteria the company already scores models on, for the suggestions and the "Best for" filter. */
+export function criteriaInUse(entries: readonly Pick<CatalogueItem, "ratings">[]): string[] {
+  return distinctLabels(entries.flatMap((entry) => (entry.ratings ?? []).map((rating) => rating.criterion)));
+}
+
+/** Offered even before anyone has scored anything. */
+export const SUGGESTED_CRITERIA: readonly string[] = [
+  "Tool calling",
+  "Responsiveness",
+  "Works well on longer conversations",
+  "Coding",
+  "Writing",
+  "Following instructions",
+];
+
+export type CatalogueSort = "name" | "rating";
+
+/** The score used for "Sort by rating": the chosen criterion, else the average. */
+export function sortScore(entry: Pick<CatalogueItem, "ratings">, criterion?: string | null): number | null {
+  return criterion?.trim() ? ratingFor(entry, criterion) : ratingsAverage(entry.ratings);
+}
+
+/** Sort order for one list: by name (favourites first), or best score first (unscored last). */
+export function compareEntriesBy(sort: CatalogueSort, criterion?: string | null) {
+  return (a: CatalogueItem, b: CatalogueItem): number => {
+    if (sort === "rating") {
+      const archived = Number(Boolean(a.archivedAt)) - Number(Boolean(b.archivedAt));
+      if (archived !== 0) return archived;
+      const sa = sortScore(a, criterion);
+      const sb = sortScore(b, criterion);
+      if (sa !== sb) return (sb ?? -1) - (sa ?? -1);
+    }
+    return compareEntries(a, b);
+  };
+}
+
+export interface RatingRowIssueInput {
+  criterion: string;
+  score: number | string;
+}
+
+/** Why these score rows cannot be saved, in plain words, or null. Empty rows are ignored. */
+export function ratingsIssue(rows: readonly RatingRowIssueInput[]): string | null {
+  const filled = rows.filter((row) => row.criterion.trim() !== "");
+  if (filled.length > MODEL_DIRECTORY_RATINGS_MAX) return `Keep at most ${MODEL_DIRECTORY_RATINGS_MAX} scores.`;
+  const seen = new Set<string>();
+  for (const row of filled) {
+    const name = row.criterion.trim();
+    if (name.length > 40) return `"${name.slice(0, 20)}…" is too long for a score name (at most 40 letters).`;
+    const norm = name.toLowerCase();
+    if (seen.has(norm)) return `"${name}" has two scores. Keep one.`;
+    seen.add(norm);
+    const score = typeof row.score === "number" ? row.score : Number(String(row.score).trim().replace(",", "."));
+    if (String(row.score).trim() === "" || !Number.isInteger(score) || score < 0 || score > 10) {
+      return `The score for "${name}" must be a whole number from 0 to 10.`;
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------- known models
+
+export interface KnownMatch {
+  family: KnownModelFamily;
+  variant: KnownModelVariant;
+  ollamaTag?: KnownOllamaTag;
+  openrouter?: KnownOpenRouterOption;
+  huggingface?: KnownHuggingFaceOption;
+}
+
+/** "llama3.2" and "llama3.2:latest" are the same Ollama tag. */
+export function normalizeOllamaTag(tag: string): string {
+  // Same rule as the shared findKnownVariant: no registry prefix, ":latest" when the last segment has no tag.
+  const trimmed = tag.trim().toLowerCase().replace(/^registry\.ollama\.ai\//, "").replace(/^library\//, "");
+  const lastSegment = trimmed.slice(trimmed.lastIndexOf("/") + 1);
+  return lastSegment.includes(":") ? trimmed : `${trimmed}:latest`;
+}
+
+function tagNames(tag: KnownOllamaTag): string[] {
+  return [tag.tag, ...(tag.aliases ?? [])].map(normalizeOllamaTag);
+}
+
+/** Model id without a ":free" / ":featherless-ai" style suffix. */
+function idStem(id: string): string {
+  return id.trim().toLowerCase().split(":")[0]!;
+}
+
+/**
+ * Which known model size a provider + model id is, or null. Local tags match
+ * any listed alias; OpenRouter and Hugging Face ids match with or without a
+ * ":suffix".
+ */
+export function findKnownMatch(
+  provider: LaneAProvider,
+  model: string,
+  known: readonly KnownModelFamily[] = KNOWN_MODEL_FAMILIES,
+): KnownMatch | null {
+  const id = model.trim().toLowerCase();
+  if (!id) return null;
+  for (const family of known) {
+    for (const variant of family.variants) {
+      if (provider === "local") {
+        const tag = variant.ollama.find((candidate) => tagNames(candidate).includes(normalizeOllamaTag(id)));
+        if (tag) return { family, variant, ollamaTag: tag };
+      } else if (provider === "openrouter") {
+        const option =
+          variant.openrouter.find((candidate) => candidate.id.toLowerCase() === id) ??
+          variant.openrouter.find((candidate) => idStem(candidate.id) === idStem(id));
+        if (option) return { family, variant, openrouter: option };
+      } else if (provider === "huggingface") {
+        const option =
+          variant.huggingface.find((candidate) => candidate.model.toLowerCase() === id) ??
+          variant.huggingface.find((candidate) => idStem(candidate.model) === idStem(id));
+        if (option) return { family, variant, huggingface: option };
+      }
+    }
+  }
+  return null;
+}
+
+export type GpuFit = "yes" | "tight" | "no";
+
+/**
+ * Whether a size fits a graphics card with this much memory: "yes" with room
+ * to spare, "tight" when it only just fits, "no" when it is too big, null when
+ * either number is unknown.
+ */
+export function gpuFit(minVramGb: number | null | undefined, vramGb: number | null | undefined): GpuFit | null {
+  if (typeof minVramGb !== "number" || typeof vramGb !== "number" || vramGb <= 0) return null;
+  if (minVramGb <= vramGb * GPU_FIT_HEADROOM) return "yes";
+  if (minVramGb <= vramGb) return "tight";
+  return "no";
+}
+
+export function gpuFitLabel(fit: GpuFit | null): string {
+  if (fit === "yes") return "Fits your graphics card";
+  if (fit === "tight") return "Just about fits your graphics card";
+  if (fit === "no") return "Too big for your graphics card";
+  return "";
+}
+
+// ---------------------------------------------------------------- run labels
+
+function normalizeAddress(url: string | null | undefined): string {
+  return (url ?? "").trim().replace(/\/+$/, "");
+}
+
+/** The model hosts an OpenRouter entry is pinned to, or [] for "any host". */
+function pinnedHosts(entry: Pick<CatalogueItem, "providerRouting">): string[] {
+  return entry.providerRouting?.only ?? [];
+}
+
+function hostsText(hosts: readonly string[]): string {
+  return hosts.length > 0 ? hosts.join(", ") : "any host";
+}
+
+/**
+ * How a saved entry runs, as the tree shows it: "On your PC · llama3.2:3b",
+ * "OpenRouter · deepinfra, together", "Hugging Face · featherless-ai".
+ */
+export function runOptionLabel(entry: Pick<CatalogueItem, "provider" | "model" | "providerRouting">): string {
+  if (entry.provider === "local") return `On your PC · ${entry.model}`;
+  if (entry.provider === "openrouter") return `OpenRouter · ${hostsText(pinnedHosts(entry))}`;
+  if (entry.provider === "huggingface") {
+    const host = entry.model.includes(":") ? entry.model.split(":").slice(1).join(":") : "";
+    return host ? `Hugging Face · ${host}` : "Hugging Face";
+  }
+  return whereLabel(entry.provider);
+}
+
+// ---------------------------------------------------------------- names
+
+export const UNSPECIFIED_VARIANT = "Unspecified";
+export const NO_FAMILY_TITLE = "Model not set";
+
+/** Maker, family and size of a saved entry, filled in from the known list where the entry leaves them out. */
+export function entryIdentity(
+  entry: Pick<CatalogueItem, "provider" | "model" | "maker" | "family" | "baseModel" | "variant" | "specs">,
+  known: readonly KnownModelFamily[] = KNOWN_MODEL_FAMILIES,
+): { maker: string | null; family: string | null; variant: string | null; match: KnownMatch | null } {
+  const match = findKnownMatch(entry.provider, entry.model, known);
+  return {
+    maker: entry.maker?.trim() || match?.family.maker || null,
+    family: entry.family?.trim() || entry.baseModel?.trim() || match?.family.family || null,
+    variant: entry.variant?.trim() || match?.variant.variant || entry.specs?.params?.trim() || null,
+    match,
+  };
+}
+
+// ---------------------------------------------------------------- tree
+
+export interface KnownRunOption {
+  key: string;
+  provider: "local" | "openrouter" | "huggingface";
+  model: string;
+  /** "On your PC · llama3.2:1b (Q4_K_M, 1.3 GB)", "OpenRouter · deepinfra, together", "Hugging Face". */
+  label: string;
+  /** Local only: what to type on the PC to download it. */
+  pullCommand?: string;
+  /** OpenRouter only: hosts that support tool calling. */
+  hosts?: string[];
+  /** Ready to hand to the add dialog. */
+  draft: CreateModelDirectoryEntry;
+}
+
+export interface UpgradeOption {
+  key: string;
+  family: string;
+  variant: string;
+  paramsB: number;
+  fit: GpuFit | null;
+  /** Set when it fits your graphics card and Ollama has it. */
+  local: KnownRunOption | null;
+  /** Set when OpenRouter has hosts with tool calling. */
+  openrouter: KnownRunOption | null;
+  /** True when this size is already saved (any way of running it). */
+  saved: boolean;
+}
+
+export interface VariantNode<T extends CatalogueItem = CatalogueItem> {
+  key: string;
+  title: string;
+  known: KnownModelVariant | null;
+  /** Saved ways to run this size, in display order. */
+  entries: T[];
+  /** Known ways not saved yet (only when known options are asked for). */
+  knownOptions: KnownRunOption[];
+  fit: GpuFit | null;
+  /** A saved local entry of this size is marked installed. */
+  installedLocally: boolean;
+  /** For a size Ollama has that is not installed: "ollama pull llama3.2:1b". */
+  pullCommand: string | null;
+  /** "Too big for your PC (needs ~20 GB, you have 12 GB) - run it on OpenRouter: deepinfra, together". */
+  tooBigAdvice: string | null;
+  upgrades: UpgradeOption[];
+}
+
+export interface FamilyNode<T extends CatalogueItem = CatalogueItem> {
+  key: string;
+  title: string;
+  unset: boolean;
+  known: KnownModelFamily | null;
+  variants: VariantNode<T>[];
+  entries: T[];
+}
+
+export interface MakerNode<T extends CatalogueItem = CatalogueItem> {
+  key: string;
+  title: string;
+  families: FamilyNode<T>[];
+  entries: T[];
+}
+
+export interface ModelTreeOptions {
+  known?: readonly KnownModelFamily[];
+  /** The owner's graphics card memory in GB, for fit advice. */
+  gpuVramGb?: number | null;
+  /** Add the not-yet-saved sizes and ways to run them (default true). */
+  includeKnown?: boolean;
+  /** Which providers' known options to offer (default: all). */
+  knownProviders?: ReadonlyArray<"local" | "openrouter" | "huggingface">;
+  /** Address used for local "Add" drafts. */
+  localAddress?: string;
+  sort?: CatalogueSort;
+  criterion?: string | null;
+  /** Installed Ollama tags from the last resync: local drafts for these are marked installed. */
+  installedTags?: ReadonlySet<string>;
+}
+
+/** The company's usual local model address: the one most saved local entries use, else the default. */
+export function localAddressOf(entries: readonly Pick<CatalogueItem, "provider" | "baseUrl">[]): string {
+  return localAddressesInUse(entries)[0] ?? MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS;
+}
+
+/** Every distinct local model address in use, most used first. */
+export function localAddressesInUse(entries: readonly Pick<CatalogueItem, "provider" | "baseUrl">[]): string[] {
+  const counts = new Map<string, { address: string; n: number }>();
+  for (const entry of entries) {
+    if (entry.provider !== "local" || !entry.baseUrl?.trim()) continue;
+    const norm = normalizeAddress(entry.baseUrl).toLowerCase();
+    const found = counts.get(norm);
+    if (found) found.n += 1;
+    else counts.set(norm, { address: normalizeAddress(entry.baseUrl), n: 1 });
+  }
+  return [...counts.values()].sort((a, b) => b.n - a.n).map((item) => item.address);
+}
+
+function paramsText(variant: KnownModelVariant): string {
+  return variant.variant;
+}
+
+/** A ready-made new entry for one known way of running a size. */
+export function draftFromKnown(
+  family: KnownModelFamily,
+  variant: KnownModelVariant,
+  how:
+    | { provider: "local"; tag: KnownOllamaTag; address: string; installed?: boolean; gpuVramGb?: number | null }
+    | { provider: "openrouter"; option: KnownOpenRouterOption }
+    | { provider: "huggingface"; option: KnownHuggingFaceOption },
+): CreateModelDirectoryEntry {
+  const common = {
+    maker: family.maker,
+    family: family.family,
+    variant: variant.variant,
+    lane: "quick" as const,
+    tags: family.uncensored ? ["uncensored"] : [],
+    favorite: false,
+  };
+  const specsBase: ModelDirectorySpecs = {
+    params: paramsText(variant),
+    ...(variant.contextTokens ? { contextTokens: variant.contextTokens } : {}),
+    tools: variant.tools,
+    vision: variant.vision,
+    thinking: variant.thinking,
+    ...(family.license ? { license: family.license } : {}),
+  };
+  const title = `${family.family} ${variant.variant}`;
+  if (how.provider === "local") {
+    const fit = gpuFit(variant.minVramGb, how.gpuVramGb);
+    return {
+      ...common,
+      name: `${title} on your PC`,
+      provider: "local",
+      model: how.tag.tag,
+      baseUrl: how.address,
+      availability: how.installed ? "installed" : "planned",
+      specs: {
+        ...specsBase,
+        quant: how.tag.quant,
+        sizeGb: how.tag.sizeGb,
+        ...(fit ? { fitsLocalGpu: fit } : {}),
+        pullCommand: `ollama pull ${how.tag.tag}`,
+      },
+      note: variant.note ?? null,
+    };
+  }
+  if (how.provider === "openrouter") {
+    return {
+      ...common,
+      name: `${title} via OpenRouter`,
+      provider: "openrouter",
+      model: how.option.id,
+      baseUrl: null,
+      providerRouting:
+        how.option.toolHosts.length > 0
+          ? { only: [...how.option.toolHosts], order: [], ignore: [], allowFallbacks: false }
+          : null,
+      availability: "cloud",
+      specs: { ...specsBase, ...(how.option.contextTokens ? { contextTokens: how.option.contextTokens } : {}) },
+      note: variant.note ?? null,
+    };
+  }
+  return {
+    ...common,
+    name: `${title} on Hugging Face`,
+    provider: "huggingface",
+    model: how.option.model,
+    baseUrl: null,
+    availability: "cloud",
+    specs: specsBase,
+    note: how.option.note ?? variant.note ?? null,
+  };
+}
+
+/** A new entry for an installed Ollama model with no saved entry yet. */
+export function draftFromInstalled(
+  installed: Pick<LocalInstalledModel, "name" | "sizeGb" | "parameterSize" | "quantization">,
+  address: string,
+  options: { known?: readonly KnownModelFamily[]; gpuVramGb?: number | null } = {},
+): CreateModelDirectoryEntry {
+  const match = findKnownMatch("local", installed.name, options.known ?? KNOWN_MODEL_FAMILIES);
+  if (match?.ollamaTag) {
+    const draft = draftFromKnown(match.family, match.variant, {
+      provider: "local",
+      tag: match.ollamaTag,
+      address,
+      installed: true,
+      gpuVramGb: options.gpuVramGb,
+    });
+    // Keep the exact tag Ollama reports ("llama3.2:latest"), so resync matches it.
+    return {
+      ...draft,
+      model: installed.name,
+      specs: {
+        ...draft.specs,
+        ...(installed.quantization ? { quant: installed.quantization } : {}),
+        ...(typeof installed.sizeGb === "number" ? { sizeGb: installed.sizeGb } : {}),
+      },
+    };
+  }
+  const specs: ModelDirectorySpecs = {};
+  if (installed.parameterSize) specs.params = installed.parameterSize;
+  if (installed.quantization) specs.quant = installed.quantization;
+  if (typeof installed.sizeGb === "number") specs.sizeGb = installed.sizeGb;
+  return {
+    name: `${installed.name} on your PC`,
+    provider: "local",
+    model: installed.name,
+    baseUrl: address,
+    availability: "installed",
+    lane: "quick",
+    variant: installed.parameterSize ?? null,
+    tags: [],
+    favorite: false,
+    specs: Object.keys(specs).length > 0 ? specs : null,
+  };
+}
+
+function sameKnownLabel(a: string | null | undefined, b: string | null | undefined): boolean {
+  const norm = (text: string | null | undefined) => (text ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+  return norm(a) !== "" && norm(a) === norm(b);
+}
+
+function savedRuns<T extends CatalogueItem>(entries: readonly T[]) {
+  const localTags = new Set(entries.filter((e) => e.provider === "local").map((e) => normalizeOllamaTag(e.model)));
+  const routerIds = new Set(entries.filter((e) => e.provider === "openrouter").map((e) => idStem(e.model)));
+  const hfIds = new Set(entries.filter((e) => e.provider === "huggingface").map((e) => e.model.trim().toLowerCase()));
+  return {
+    hasLocal: (tag: KnownOllamaTag) => tagNames(tag).some((name) => localTags.has(name)),
+    hasRouter: (option: KnownOpenRouterOption) => routerIds.has(idStem(option.id)),
+    hasHf: (option: KnownHuggingFaceOption) => hfIds.has(option.model.trim().toLowerCase()),
+  };
+}
+
+function knownOptionsFor(
+  family: KnownModelFamily,
+  variant: KnownModelVariant,
+  opts: Required<Pick<ModelTreeOptions, "localAddress">> & ModelTreeOptions,
+): KnownRunOption[] {
+  const allowed = new Set(opts.knownProviders ?? ["local", "openrouter", "huggingface"]);
+  const out: KnownRunOption[] = [];
+  if (allowed.has("local")) {
+    for (const tag of variant.ollama) {
+      const installed = tagNames(tag).some((name) => opts.installedTags?.has(name));
+      out.push({
+        key: `local-${tag.tag}`,
+        provider: "local",
+        model: tag.tag,
+        label: `On your PC · ${tag.tag} (${tag.quant}, ${roundOne(tag.sizeGb)} GB)`,
+        pullCommand: `ollama pull ${tag.tag}`,
+        draft: draftFromKnown(family, variant, {
+          provider: "local",
+          tag,
+          address: opts.localAddress,
+          installed,
+          gpuVramGb: opts.gpuVramGb,
+        }),
+      });
+    }
+  }
+  if (allowed.has("openrouter")) {
+    for (const option of variant.openrouter) {
+      out.push({
+        key: `openrouter-${option.id}`,
+        provider: "openrouter",
+        model: option.id,
+        label: `OpenRouter · ${option.toolHosts.length > 0 ? option.toolHosts.join(", ") : "no host with tool calling"}`,
+        hosts: [...option.toolHosts],
+        draft: draftFromKnown(family, variant, { provider: "openrouter", option }),
+      });
+    }
+  }
+  if (allowed.has("huggingface")) {
+    for (const option of variant.huggingface) {
+      const host = option.model.includes(":") ? option.model.split(":").slice(1).join(":") : "";
+      out.push({
+        key: `huggingface-${option.model}`,
+        provider: "huggingface",
+        model: option.model,
+        label: host ? `Hugging Face · ${host}` : "Hugging Face",
+        draft: draftFromKnown(family, variant, { provider: "huggingface", option }),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Bigger sizes of the same family and of the family it derives from, that fit
+ * the graphics card or have OpenRouter hosts with tool calling. Same rule as
+ * the shared upgradeOptions(), but against the list passed in (so it can be
+ * tested) and offering both ways when both apply.
+ */
+export function upgradesFor<T extends CatalogueItem>(
+  family: KnownModelFamily,
+  variant: KnownModelVariant,
+  allSaved: readonly T[],
+  opts: ModelTreeOptions & { localAddress: string },
+): UpgradeOption[] {
+  const known = opts.known ?? KNOWN_MODEL_FAMILIES;
+  const parent = family.derivedFrom ? known.find((candidate) => candidate.id === family.derivedFrom) : undefined;
+  const relatives = parent && parent.id !== family.id ? [family, parent] : [family];
+  const out: UpgradeOption[] = [];
+  for (const relative of relatives) {
+    for (const bigger of relative.variants) {
+      if (bigger.paramsB <= variant.paramsB) continue;
+      const fit = gpuFit(bigger.minVramGb, opts.gpuVramGb);
+      const tag = fit === "yes" || fit === "tight" ? bigger.ollama[0] : undefined;
+      const router = bigger.openrouter.find((option) => option.toolHosts.length > 0);
+      if (!tag && !router) continue;
+      const saved = allSaved.some((entry) => {
+        const match = findKnownMatch(entry.provider, entry.model, known);
+        return match?.family.id === relative.id && match.variant.variant === bigger.variant;
+      });
+      out.push({
+        key: `${relative.id}-${bigger.variant}`,
+        family: relative.family,
+        variant: bigger.variant,
+        paramsB: bigger.paramsB,
+        fit,
+        local: tag
+          ? {
+              key: `local-${tag.tag}`,
+              provider: "local",
+              model: tag.tag,
+              label: `On your PC · ${tag.tag}`,
+              pullCommand: `ollama pull ${tag.tag}`,
+              draft: draftFromKnown(relative, bigger, {
+                provider: "local",
+                tag,
+                address: opts.localAddress,
+                gpuVramGb: opts.gpuVramGb,
+              }),
+            }
+          : null,
+        openrouter: router
+          ? {
+              key: `openrouter-${router.id}`,
+              provider: "openrouter",
+              model: router.id,
+              label: `OpenRouter · ${router.toolHosts.join(", ")}`,
+              hosts: [...router.toolHosts],
+              draft: draftFromKnown(relative, bigger, { provider: "openrouter", option: router }),
+            }
+          : null,
+        saved,
+      });
+    }
+  }
+  return out.sort((a, b) => a.paramsB - b.paramsB || collator.compare(a.family, b.family));
+}
+
+/** "Too big for your PC (needs ~20 GB, you have 12 GB) - run it on OpenRouter: deepinfra, together", or null. */
+export function tooBigAdvice(variant: KnownModelVariant, gpuVramGb: number | null | undefined): string | null {
+  if (gpuFit(variant.minVramGb, gpuVramGb) !== "no") return null;
+  const head = `Too big for your PC (needs ~${roundOne(variant.minVramGb!)} GB, you have ${roundOne(gpuVramGb!)} GB)`;
+  const hosts = [...new Set(variant.openrouter.flatMap((option) => option.toolHosts))];
+  if (hosts.length > 0) return `${head} - run it on OpenRouter: ${hosts.join(", ")}`;
+  if (variant.openrouter.length > 0) return `${head} - OpenRouter has it, but no host there is known to support tool calling`;
+  return `${head} - no cloud version is known`;
+}
+
+function variantSortKey(node: { known: KnownModelVariant | null; title: string }): number {
+  if (node.known) return node.known.paramsB;
+  const parsed = /([\d.]+)\s*b/i.exec(node.title);
+  return parsed ? Number(parsed[1]) : Number.POSITIVE_INFINITY;
+}
+
+function bestScore<T extends CatalogueItem>(entries: readonly T[], criterion?: string | null): number {
+  return entries.reduce((best, entry) => Math.max(best, sortScore(entry, criterion) ?? -1), -1);
+}
+
+/**
+ * The three-level tree the Settings > Models page shows: Maker -> Model family
+ * -> Size -> ways to run it. Saved entries go where their maker / family /
+ * size (or the known list) says. For each family with at least one saved
+ * entry, the other known sizes and the known ways of running each size are
+ * added (as "Add" options) unless includeKnown is false.
+ */
+export function buildModelTree<T extends CatalogueItem>(entries: readonly T[], options: ModelTreeOptions = {}): MakerNode<T>[] {
+  const known = options.known ?? KNOWN_MODEL_FAMILIES;
+  const includeKnown = options.includeKnown ?? true;
+  const localAddress = options.localAddress ?? localAddressOf(entries);
+  const sort = options.sort ?? "name";
+  const compare = compareEntriesBy(sort, options.criterion);
+  const opts = { ...options, known, localAddress };
+
+  type Raw = { maker: string | null; family: string | null; variant: string | null; match: KnownMatch | null; entry: T };
+  const rows: Raw[] = entries.map((entry) => ({ ...entryIdentity(entry, known), entry }));
+
+  // Maker buckets (case-insensitive, first spelling wins).
+  const makerOrder: string[] = [];
+  const makerMap = new Map<string, { title: string; rows: Raw[] }>();
+  for (const row of rows) {
+    const norm = row.maker?.toLowerCase() ?? "";
+    let bucketRow = makerMap.get(norm);
+    if (!bucketRow) {
+      bucketRow = { title: row.maker ?? OTHER_MAKER_TITLE, rows: [] };
+      makerMap.set(norm, bucketRow);
+      makerOrder.push(norm);
+    }
+    bucketRow.rows.push(row);
+  }
+
+  const usedMakerKeys = new Set<string>();
+  const makers: MakerNode<T>[] = [...makerMap.entries()].map(([norm, maker]) => {
+    const makerKey = uniqueKey(usedMakerKeys, norm ? `maker-${slug(norm)}` : "maker-other");
+    const familyMap = new Map<string, { title: string | null; rows: Raw[] }>();
+    for (const row of maker.rows) {
+      const fnorm = row.family?.toLowerCase() ?? "";
+      const found = familyMap.get(fnorm);
+      if (found) found.rows.push(row);
+      else familyMap.set(fnorm, { title: row.family, rows: [row] });
+    }
+    const usedFamilyKeys = new Set<string>();
+    const families: FamilyNode<T>[] = [...familyMap.entries()].map(([fnorm, fam]) => {
+      const familyKey = uniqueKey(usedFamilyKeys, `${makerKey}-${fnorm ? slug(fnorm) : "none"}`);
+      const knownFamily =
+        fam.rows.find((row) => row.match && sameKnownLabel(row.match.family.family, fam.title))?.match?.family ??
+        known.find((candidate) => sameKnownLabel(candidate.family, fam.title)) ??
+        null;
+
+      // Size buckets.
+      const variantMap = new Map<string, { title: string; known: KnownModelVariant | null; rows: Raw[] }>();
+      const knownVariantOf = (row: Raw): KnownModelVariant | null => {
+        if (!knownFamily) return null;
+        if (row.match && row.match.family.id === knownFamily.id && (!row.variant || sameKnownLabel(row.variant, row.match.variant.variant))) {
+          return row.match.variant;
+        }
+        return knownFamily.variants.find((candidate) => sameKnownLabel(candidate.variant, row.variant)) ?? null;
+      };
+      for (const row of fam.rows) {
+        const kv = knownVariantOf(row);
+        const title = row.variant ?? kv?.variant ?? UNSPECIFIED_VARIANT;
+        const vnorm = title.toLowerCase();
+        const found = variantMap.get(vnorm);
+        if (found) {
+          found.rows.push(row);
+          found.known ??= kv;
+        } else variantMap.set(vnorm, { title, known: kv, rows: [row] });
+      }
+      if (includeKnown && knownFamily) {
+        for (const variant of knownFamily.variants) {
+          const vnorm = variant.variant.toLowerCase();
+          if (!variantMap.has(vnorm)) variantMap.set(vnorm, { title: variant.variant, known: variant, rows: [] });
+        }
+      }
+
+      const usedVariantKeys = new Set<string>();
+      let variants: VariantNode<T>[] = [...variantMap.entries()].map(([vnorm, v]) => {
+        const vEntries = v.rows.map((row) => row.entry).sort(compare);
+        const runs = savedRuns(vEntries);
+        const knownOptions =
+          includeKnown && knownFamily && v.known
+            ? knownOptionsFor(knownFamily, v.known, opts).filter((option) =>
+                option.provider === "local"
+                  ? !v.known!.ollama.some((tag) => tag.tag === option.model && runs.hasLocal(tag))
+                  : option.provider === "openrouter"
+                    ? !v.known!.openrouter.some((o) => o.id === option.model && runs.hasRouter(o))
+                    : !v.known!.huggingface.some((o) => o.model === option.model && runs.hasHf(o)),
+              )
+            : [];
+        const installedLocally = vEntries.some(
+          (entry) => entry.provider === "local" && entry.availability === "installed" && !entry.archivedAt,
+        );
+        const fit = v.known ? gpuFit(v.known.minVramGb, options.gpuVramGb) : null;
+        const firstTag = v.known?.ollama[0];
+        return {
+          key: uniqueKey(usedVariantKeys, `${familyKey}-${slug(vnorm)}`),
+          title: v.title,
+          known: v.known,
+          entries: vEntries,
+          knownOptions,
+          fit,
+          installedLocally,
+          pullCommand: !installedLocally && firstTag && fit !== "no" ? `ollama pull ${firstTag.tag}` : null,
+          tooBigAdvice: v.known ? tooBigAdvice(v.known, options.gpuVramGb) : null,
+          upgrades:
+            includeKnown && knownFamily && v.known && vEntries.length > 0
+              ? upgradesFor(knownFamily, v.known, entries, opts)
+              : [],
+        };
+      });
+      variants = variants.sort((a, b) => {
+        if (sort === "rating") {
+          const diff = bestScore(b.entries, options.criterion) - bestScore(a.entries, options.criterion);
+          if (diff !== 0) return diff;
+        }
+        const unspecified = Number(a.title === UNSPECIFIED_VARIANT) - Number(b.title === UNSPECIFIED_VARIANT);
+        if (unspecified !== 0) return unspecified;
+        return variantSortKey(a) - variantSortKey(b) || collator.compare(a.title, b.title);
+      });
+      const familyEntries = variants.flatMap((variant) => variant.entries);
+      return {
+        key: familyKey,
+        title: fam.title ?? NO_FAMILY_TITLE,
+        unset: !fam.title,
+        known: knownFamily,
+        variants,
+        entries: familyEntries,
+      };
+    });
+    families.sort((a, b) => {
+      if (a.unset !== b.unset) return a.unset ? 1 : -1;
+      if (sort === "rating") {
+        const diff = bestScore(b.entries, options.criterion) - bestScore(a.entries, options.criterion);
+        if (diff !== 0) return diff;
+      }
+      return collator.compare(a.title, b.title);
+    });
+    return {
+      key: makerKey,
+      title: maker.title,
+      families,
+      entries: families.flatMap((family) => family.entries),
+    };
+  });
+  return makers.sort((a, b) => {
+    const other = Number(a.key === "maker-other") - Number(b.key === "maker-other");
+    if (other !== 0) return other;
+    if (sort === "rating") {
+      const diff = bestScore(b.entries, options.criterion) - bestScore(a.entries, options.criterion);
+      if (diff !== 0) return diff;
+    }
+    return collator.compare(a.title, b.title);
+  });
+}
+
+// ---------------------------------------------------------------- agent pickers
+
+export interface PickerOption {
+  id: string;
+  label: string;
+}
+export interface PickerGroup {
+  key: string;
+  /** "Meta · Llama 3.2", or the maker alone, or "Other". */
+  label: string;
+  options: PickerOption[];
+}
+
+/** How an entry runs, for a picker: "On your PC (llama3.2:latest)", "OpenRouter", "Hugging Face". */
+export function pickerRunLabel(entry: Pick<CatalogueItem, "provider" | "model">): string {
+  if (entry.provider === "local") return `On your PC (${entry.model})`;
+  return whereLabel(entry.provider);
+}
+
+/**
+ * The option text in the agent pickers: "3B · On your PC (llama3.2:latest)",
+ * plus " — <name>" when the saved name says something the rest does not.
+ */
+export function pickerOptionLabel(
+  entry: CatalogueItem,
+  known: readonly KnownModelFamily[] = KNOWN_MODEL_FAMILIES,
+): string {
+  const identity = entryIdentity(entry, known);
+  const parts = [identity.variant, pickerRunLabel(entry)].filter(Boolean).join(" · ");
+  const auto = [identity.family, identity.variant].filter(Boolean).join(" ");
+  const name = entry.name.trim();
+  const redundant = sameKnownLabel(name, auto) || sameKnownLabel(name, identity.family);
+  return redundant || !name ? parts : `${parts} — ${name}`;
+}
+
+/** Saved models for a picker, grouped as "Maker · Family", each option distinguishable. */
+export function pickerGroups(
+  entries: readonly CatalogueItem[],
+  known: readonly KnownModelFamily[] = KNOWN_MODEL_FAMILIES,
+): PickerGroup[] {
+  const tree = buildModelTree(entries, { known, includeKnown: false });
+  const groups: PickerGroup[] = [];
+  for (const maker of tree) {
+    for (const family of maker.families) {
+      const label = family.unset
+        ? maker.key === "maker-other"
+          ? OTHER_MAKER_TITLE
+          : maker.title
+        : maker.key === "maker-other"
+          ? family.title
+          : `${maker.title} · ${family.title}`;
+      const options = family.entries.map((entry) => ({ id: entry.id, label: pickerOptionLabel(entry, known) }));
+      // Same text twice (same size, same way to run): add the name so they differ.
+      const counts = new Map<string, number>();
+      for (const option of options) counts.set(option.label, (counts.get(option.label) ?? 0) + 1);
+      for (const option of options) {
+        const entry = family.entries.find((candidate) => candidate.id === option.id)!;
+        if ((counts.get(option.label) ?? 0) > 1 && !option.label.endsWith(` — ${entry.name}`)) {
+          option.label = `${option.label} — ${entry.name}`;
+        }
+      }
+      groups.push({ key: family.key, label, options });
+    }
+  }
+  return groups;
+}
+
+// ---------------------------------------------------------------- add dialog: model id choices and prefill
+
+export interface ModelIdChoice {
+  value: string;
+  label: string;
+}
+
+/** "claude-sonnet-5" -> Claude Sonnet / 5; "claude-haiku-4-5-20251001" -> Claude Haiku / 4.5. */
+export function claudeIdentity(model: string): { family: string; variant: string | null } | null {
+  const match = /^claude-(haiku|sonnet|opus)(?:-(\d{1,2}))?(?:-(\d{1,2}))?(?:-\d{6,})?$/i.exec(model.trim());
+  if (!match) return null;
+  const tier = match[1]!.toLowerCase();
+  const family = `Claude ${tier.charAt(0).toUpperCase()}${tier.slice(1)}`;
+  const variant = match[2] ? (match[3] ? `${match[2]}.${match[3]}` : match[2]) : null;
+  return { family, variant };
+}
+
+/**
+ * The model ids the add dialog offers for a provider: the fixed list for
+ * Claude / OpenAI / Google (the only ids those accept), the known OpenRouter
+ * and Hugging Face ids, and for your PC the tags the last resync found
+ * installed, then the known Ollama tags.
+ */
+export function modelIdChoices(
+  provider: LaneAProvider,
+  options: { installedTags?: readonly string[]; known?: readonly KnownModelFamily[] } = {},
+): ModelIdChoice[] {
+  const known = options.known ?? KNOWN_MODEL_FAMILIES;
+  const out: ModelIdChoice[] = [];
+  const seen = new Set<string>();
+  const push = (value: string, label: string, sameAs: readonly string[] = []) => {
+    const norms = [value, ...sameAs].map((name) => (provider === "local" ? normalizeOllamaTag(name) : name.toLowerCase()));
+    if (norms.some((norm) => seen.has(norm))) return;
+    for (const norm of norms) seen.add(norm);
+    out.push({ value, label });
+  };
+  const catalogue = LANE_A_PROVIDER_CATALOGUE[provider];
+  for (const id of laneAModelsForProvider(provider)) {
+    const pricing = catalogue.models[id];
+    const claude = provider === "anthropic" ? claudeIdentity(id) : null;
+    const title = claude ? [claude.family, claude.variant].filter(Boolean).join(" ") : pricing?.label ?? id;
+    push(id, claude && pricing ? `${title} (${pricing.label.toLowerCase()})` : title);
+  }
+  if (provider === "local") {
+    for (const tag of options.installedTags ?? []) push(tag, "Installed on your PC");
+  }
+  for (const family of known) {
+    for (const variant of family.variants) {
+      const title = `${family.family} ${variant.variant}`;
+      if (provider === "local") {
+        for (const tag of variant.ollama) {
+          push(tag.tag, `${title} · ${tag.quant} · ${roundOne(tag.sizeGb)} GB`, tag.aliases ?? []);
+        }
+      } else if (provider === "openrouter") {
+        for (const option of variant.openrouter) {
+          push(option.id, option.toolHosts.length > 0 ? title : `${title} (no host with tool calling)`);
+        }
+      } else if (provider === "huggingface") {
+        for (const option of variant.huggingface) push(option.model, title);
+      }
+    }
+  }
+  return out;
+}
+
+/** What picking a model id fills in on the add dialog. Undefined = leave the field alone. */
+export interface ModelPrefill {
+  name?: string;
+  maker?: string;
+  family?: string;
+  variant?: string;
+  lane?: ModelDirectoryLane;
+  availability?: ModelDirectoryAvailability;
+  specs?: ModelDirectorySpecs;
+  providerRouting?: CreateModelDirectoryEntry["providerRouting"];
+  baseUrl?: string;
+  note?: string;
+}
+
+const CLOUD_MAKERS: Partial<Record<LaneAProvider, string>> = { anthropic: "Anthropic", openai: "OpenAI", google: "Google" };
+
+/**
+ * The sensible values for a provider + model id: maker, family, size, a name,
+ * facts, what it is for, whether it is ready, OpenRouter hosts with tool
+ * calling, and the local address. Uses the built-in model list where it knows
+ * the id.
+ */
+export function prefillForModel(
+  provider: LaneAProvider,
+  model: string,
+  options: {
+    installedTags?: readonly string[];
+    localAddress?: string;
+    gpuVramGb?: number | null;
+    known?: readonly KnownModelFamily[];
+  } = {},
+): ModelPrefill {
+  const id = model.trim();
+  const installed = new Set((options.installedTags ?? []).map(normalizeOllamaTag));
+  const isInstalled = provider === "local" && id !== "" && installed.has(normalizeOllamaTag(id));
+  const localAddress = options.localAddress ?? MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS;
+  const base: ModelPrefill =
+    provider === "local"
+      ? { baseUrl: localAddress, availability: isInstalled ? "installed" : "planned", lane: "quick" }
+      : { availability: "cloud", lane: "quick" };
+  if (!id) return base;
+
+  if (provider === "anthropic") {
+    const claude = claudeIdentity(id);
+    const title = claude ? [claude.family, claude.variant].filter(Boolean).join(" ") : id;
+    return {
+      ...base,
+      lane: "both",
+      maker: "Anthropic",
+      ...(claude ? { family: claude.family } : {}),
+      ...(claude?.variant ? { variant: claude.variant } : {}),
+      name: title,
+      specs: { tools: "yes", vision: true, thinking: "toggle" },
+      note: "Runs on Paperclip's own Claude key, so there is no key to add. An agent can still pick its own key under Connections.",
+    };
+  }
+  if (CLOUD_MAKERS[provider]) {
+    const label = LANE_A_PROVIDER_CATALOGUE[provider].models[id]?.label;
+    return { ...base, maker: CLOUD_MAKERS[provider], name: label ? `${whereLabel(provider)} ${id}` : id };
+  }
+
+  const match = findKnownMatch(provider, id, options.known ?? KNOWN_MODEL_FAMILIES);
+  if (match) {
+    const { family, variant } = match;
+    const draft =
+      provider === "local"
+        ? draftFromKnown(family, variant, {
+            provider: "local",
+            tag: match.ollamaTag!,
+            address: localAddress,
+            installed: isInstalled,
+            gpuVramGb: options.gpuVramGb,
+          })
+        : provider === "openrouter"
+          ? draftFromKnown(family, variant, { provider: "openrouter", option: match.openrouter! })
+          : draftFromKnown(family, variant, { provider: "huggingface", option: match.huggingface! });
+    return {
+      ...base,
+      name: draft.name,
+      maker: family.maker,
+      family: family.family,
+      variant: variant.variant,
+      specs: {
+        ...draft.specs,
+        // The tag typed may be another quant than the first listed; keep the exact one.
+        ...(provider === "local" ? { pullCommand: `ollama pull ${id}` } : {}),
+      },
+      ...(provider === "openrouter" ? { providerRouting: draft.providerRouting ?? null } : {}),
+    };
+  }
+  return {
+    ...base,
+    name: provider === "local" ? `${id} on your PC` : `${id} via ${whereLabel(provider)}`,
+    ...(provider === "local" ? { specs: { pullCommand: `ollama pull ${id}` } } : {}),
+  };
 }

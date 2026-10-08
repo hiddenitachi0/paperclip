@@ -16,7 +16,7 @@ import {
   type ModelDirectoryEntry,
 } from "@paperclipai/shared";
 import { Link } from "@/lib/router";
-import { filterEntries, groupEntries } from "@/lib/model-catalogue";
+import { filterEntries, pickerGroups } from "@/lib/model-catalogue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
@@ -253,7 +253,8 @@ export function QuickAgentBackupModels({
   }, [savedKey]);
 
   const pickable = useMemo(() => filterEntries(savedModels, {}), [savedModels]);
-  const pickableGroups = useMemo(() => groupEntries(pickable, "maker"), [pickable]);
+  // "Meta · Llama 3.2" > "3B · On your PC (llama3.2:latest)", so two setups of one model can be told apart.
+  const pickableGroups = useMemo(() => pickerGroups(pickable), [pickable]);
   const savedModelById = useMemo(() => new Map(savedModels.map((entry) => [entry.id, entry])), [savedModels]);
 
   const dirty = JSON.stringify(draft) !== savedKey;
@@ -429,10 +430,10 @@ export function QuickAgentBackupModels({
                       <option value={entry.directoryEntryId}>A saved model that is no longer in the list</option>
                     )}
                     {pickableGroups.map((group) => (
-                      <optgroup key={group.key} label={group.title}>
-                        {group.entries.map((option) => (
+                      <optgroup key={group.key} label={group.label}>
+                        {group.options.map((option) => (
                           <option key={option.id} value={option.id}>
-                            {option.name}
+                            {option.label}
                           </option>
                         ))}
                       </optgroup>

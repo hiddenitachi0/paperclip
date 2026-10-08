@@ -171,6 +171,8 @@ import {
   updateModelDirectoryEntrySchema,
   duplicateModelDirectoryEntrySchema,
   importModelDirectoryCatalogueSchema,
+  syncLocalModelsSchema,
+  updateModelDirectorySettingsSchema,
   // Merge-card security review (DUR-4566)
   recordSecurityReviewVerdictSchema,
 } from "@paperclipai/shared";
@@ -798,6 +800,9 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "GET /api/companies/{companyId}/model-directory",
   "POST /api/companies/{companyId}/model-directory",
   "GET /api/companies/{companyId}/model-directory/export",
+  "GET /api/companies/{companyId}/model-directory/settings",
+  "PUT /api/companies/{companyId}/model-directory/settings",
+  "POST /api/companies/{companyId}/model-directory/local-sync",
   "POST /api/companies/{companyId}/model-directory/import",
   "GET /api/companies/{companyId}/model-directory/starters",
   "POST /api/companies/{companyId}/model-directory/starters",
@@ -6147,6 +6152,32 @@ registerCurrentRoute({
     409: r.conflict,
     422: r.unprocessable,
   },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/model-directory/settings",
+  tags: ["model-directory"],
+  summary: "Read the company's Settings > Models settings (the model PC's graphics memory in GB, or null). Owner/admin only.",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "put",
+  path: "/api/companies/{companyId}/model-directory/settings",
+  tags: ["model-directory"],
+  summary: "Save the company's Settings > Models settings (the model PC's graphics memory in GB). Informational only. Owner/admin only.",
+  body: updateModelDirectorySettingsSchema,
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/local-sync",
+  tags: ["model-directory"],
+  summary: "Ask the local Ollama at one of this company's saved local addresses which models are installed, and mark the saved local setups there as installed or planned. An address the company does not already use is refused (422). Owner/admin only.",
+  body: syncLocalModelsSchema,
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 422: r.unprocessable },
 });
 
 registerCurrentRoute({

@@ -56,6 +56,7 @@ import { secretsApi } from "../api/secrets";
 import { webSearchApi } from "../api/webSearch";
 import { ApiError } from "../api/client";
 import { queryKeys } from "../lib/queryKeys";
+import { pickerGroups } from "../lib/model-catalogue";
 import { agentRouteRef } from "../lib/utils";
 import {
   dataLine,
@@ -266,6 +267,8 @@ export function QuickAgentSection({
     enabled: Boolean(effectiveCompanyId),
   });
   const savedModels = modelDirectoryQuery.data ?? [];
+  // "Meta · Llama 3.2" > "3B · On your PC (llama3.2:latest)", so two setups of one model can be told apart.
+  const savedModelGroups = useMemo(() => pickerGroups(savedModels), [savedModels]);
   const applySavedModel = (entryId: string) => {
     const entry = savedModels.find((candidate) => candidate.id === entryId);
     if (entry) settingMutation.mutate(patchFromDirectoryEntry(entry));
@@ -558,10 +561,14 @@ export function QuickAgentSection({
               }}
             >
               <option value="">Custom (set it up below)</option>
-              {savedModels.map((entry) => (
-                <option key={entry.id} value={entry.id}>
-                  {entry.name}
-                </option>
+              {savedModelGroups.map((group) => (
+                <optgroup key={group.key} label={group.label}>
+                  {group.options.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </optgroup>
               ))}
             </select>
             <span className="block text-xs text-muted-foreground">

@@ -219,6 +219,9 @@ d("model directory catalogue service", () => {
       tags: ["tools"],
       specs: { params: "14B" },
       favorite: true,
+      family: null,
+      variant: null,
+      ratings: [],
       backupNames: ["Mistral backup"],
       archived: false,
     });

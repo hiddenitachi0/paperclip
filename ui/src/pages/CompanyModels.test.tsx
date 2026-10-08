@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client";
-import { EMPTY_MODEL_FORM } from "../components/ModelEntryDialog";
+import { applyPrefill, EMPTY_MODEL_FORM } from "../components/ModelEntryDialog";
 import { bodyFromForm, CompanyModels, modelErrorMessage } from "./CompanyModels";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -22,6 +22,9 @@ const mockApi = vi.hoisted(() => ({
   exportCatalogue: vi.fn(),
   importCatalogue: vi.fn(),
   listReviews: vi.fn(),
+  getSettings: vi.fn(),
+  updateSettings: vi.fn(),
+  syncLocal: vi.fn(),
 }));
 const mockRole = vi.hoisted(() => vi.fn());
 const mockToast = vi.hoisted(() => vi.fn());
@@ -50,6 +53,9 @@ const BASE = {
   specs: null,
   favorite: false,
   archivedAt: null,
+  family: null,
+  variant: null,
+  ratings: [],
   createdByUserId: null,
   updatedByUserId: null,
   createdAt: "2026-10-01T00:00:00Z",
@@ -107,6 +113,7 @@ beforeEach(() => {
     { id: "s2", name: "Mistral", note: "Cloud", alreadyAdded: true },
   ]);
   mockRole.mockReturnValue({ canManageConnections: true, isLoading: false });
+  mockApi.getSettings.mockResolvedValue({ localGpuVramGb: 12 });
 });
 afterEach(() => {
   act(() => root?.unmount());
@@ -374,9 +381,14 @@ describe("CompanyModels", () => {
         model: "qwen3:14b",
         maker: "Alibaba",
         baseModel: null,
-        lane: null,
+        // Filled in from the model id: a known Qwen3 size, on the company's own PC address.
+        family: "Qwen3",
+        variant: "14B",
+        baseUrl: "http://100.1.1.1:11434/v1",
+        lane: "quick",
+        availability: "planned",
         tags: ["code", "tools"],
-        specs: null,
+        specs: expect.objectContaining({ params: "14B", quant: "Q4_K_M", pullCommand: "ollama pull qwen3:14b" }),
         favorite: false,
         note: "Hello",
       }),
@@ -392,6 +404,288 @@ describe("CompanyModels", () => {
     await typeInto(dialog.querySelector("#model-spec-size") as HTMLInputElement, "big");
     expect(byTestId("model-entry-issue")!.textContent).toContain("Download size");
     expect(buttonByText(dialog, "Add model")!.disabled).toBe(true);
+  });
+});
+
+describe("CompanyModels catalogue v2", () => {
+  const QWEN = {
+    ...BASE,
+    id: "66666666-6666-4666-8666-666666666666",
+    name: "Qwen at home",
+    provider: "local",
+    model: "qwen3:14b",
+    baseUrl: "http://100.1.1.1:11434/v1",
+    availability: "installed",
+    ratings: [
+      { criterion: "Tool calling", score: 8 },
+      { criterion: "Coding", score: 6 },
+    ],
+  };
+
+  it("shows Maker > Model > Size with the sizes not saved yet, their install command and upgrades", async () => {
+    mockApi.list.mockResolvedValue([QWEN, ENTRY]);
+    await render();
+    const alibaba = byTestId("models-group-maker-alibaba")!;
+    expect(alibaba).not.toBeNull();
+    const family = byTestId("models-family-maker-alibaba-qwen3")!;
+    expect(family.textContent).toContain("Qwen3");
+    // The saved size and a known size that is not saved yet.
+    const fourteen = byTestId("models-size-maker-alibaba-qwen3-14b")!;
+    expect(fourteen.textContent).toContain("Qwen at home");
+    expect(fourteen.textContent).toContain("Installed on your PC");
+    const eight = byTestId("models-size-maker-alibaba-qwen3-8b")!;
+    expect(eight.textContent).toContain("ollama pull qwen3:8b");
+    expect(eight.textContent).toContain("Add this way to run it");
+    // Llama 3.2: the saved 3B and the 1B that is not saved.
+    expect(byTestId("models-size-maker-meta-llama-3-2-1b")!.textContent).toContain("ollama pull llama3.2:1b");
+    expect(byTestId(`model-runs-${ENTRY.id}`)!.textContent).toBe("On your PC · llama3.2");
+    // 32B does not fit 12 GB: offered on OpenRouter as an upgrade.
+    const upgrades = byTestId("models-upgrades-maker-alibaba-qwen3-14b")!;
+    const big = byTestId("models-upgrade-alibaba-qwen3-32b")!;
+    expect(upgrades.contains(big)).toBe(true);
+    expect(big.textContent).toContain("too big for your PC");
+    expect(big.textContent).toContain("deepinfra");
+
+    mockApi.create.mockResolvedValue(QWEN);
+    await click(buttonByText(big, "Add via OpenRouter"));
+    const dialog = byTestId("model-entry-dialog")!;
+    expect((dialog.querySelector("#model-name") as HTMLInputElement).value).toBe("Qwen3 32B via OpenRouter");
+    expect((dialog.querySelector("#model-family") as HTMLInputElement).value).toBe("Qwen3");
+    expect((dialog.querySelector("#model-variant") as HTMLInputElement).value).toBe("32B");
+    await click(buttonByText(dialog, "Add model"));
+    expect(mockApi.create).toHaveBeenCalledWith(
+      COMPANY,
+      expect.objectContaining({
+        provider: "openrouter",
+        model: "qwen/qwen3-32b",
+        maker: "Alibaba",
+        family: "Qwen3",
+        variant: "32B",
+        availability: "cloud",
+        providerRouting: expect.objectContaining({ only: expect.arrayContaining(["deepinfra"]) }),
+      }),
+    );
+  });
+
+  it("adds a known local size with the company's own address", async () => {
+    mockApi.list.mockResolvedValue([QWEN]);
+    mockApi.create.mockResolvedValue(QWEN);
+    await render();
+    const eight = byTestId("models-size-maker-alibaba-qwen3-8b")!;
+    const row = eight.querySelector('[data-testid="models-known-local-qwen3-8b"]')!;
+    await click(buttonByText(row, "Add this way to run it"));
+    const dialog = byTestId("model-entry-dialog")!;
+    expect((dialog.querySelector("#model-address") as HTMLInputElement).value).toBe("http://100.1.1.1:11434/v1");
+    await click(buttonByText(dialog, "Add model"));
+    expect(mockApi.create).toHaveBeenCalledWith(
+      COMPANY,
+      expect.objectContaining({ provider: "local", model: "qwen3:8b", baseUrl: "http://100.1.1.1:11434/v1", variant: "8B", availability: "planned" }),
+    );
+  });
+
+  it("resyncs local Ollama models and offers to add installed ones that are not saved", async () => {
+    mockApi.syncLocal.mockResolvedValue({
+      baseUrl: "http://100.1.1.1:11434/v1",
+      checkedAt: "2026-10-08T12:00:00Z",
+      installed: [
+        { name: "llama3.2:latest", sizeGb: 2, parameterSize: "3.2B", quantization: "Q4_K_M", family: "llama", entryIds: [ENTRY.id] },
+        { name: "qwen3:8b", sizeGb: 5.2, parameterSize: "8.2B", quantization: "Q4_K_M", family: "qwen3", entryIds: [] },
+      ],
+      missingEntryIds: [],
+      markedInstalledEntryIds: [ENTRY.id],
+    });
+    mockApi.create.mockResolvedValue(ENTRY);
+    await render();
+    await click(byTestId("models-resync"));
+    expect(mockApi.syncLocal).toHaveBeenCalledWith(COMPANY, "http://100.1.1.1:11434/v1");
+    const result = byTestId("models-resync-result")!;
+    expect(byTestId("models-installed-llama3.2:latest")!.textContent).toContain("saved as Maja local");
+    expect(byTestId("models-resync-marked-installed")!.textContent).toContain("Maja local");
+    const qwenRow = byTestId("models-installed-qwen3:8b")!;
+    expect(result.contains(qwenRow)).toBe(true);
+    await click(buttonByText(qwenRow, "Add"));
+    await click(buttonByText(byTestId("model-entry-dialog")!, "Add model"));
+    expect(mockApi.create).toHaveBeenCalledWith(
+      COMPANY,
+      expect.objectContaining({ provider: "local", model: "qwen3:8b", family: "Qwen3", variant: "8B", availability: "installed" }),
+    );
+  });
+
+  it("saves the graphics card size", async () => {
+    mockApi.updateSettings.mockResolvedValue({ localGpuVramGb: 16 });
+    await render();
+    const input = byTestId("models-gpu-input") as HTMLInputElement;
+    expect(input.value).toBe("12");
+    await typeInto(input, "16");
+    await act(async () => {
+      input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    });
+    await flush();
+    expect(mockApi.updateSettings).toHaveBeenCalledWith(COMPANY, { localGpuVramGb: 16 });
+  });
+
+  it("shows scores, filters by 'best for' and edits scores", async () => {
+    mockApi.list.mockResolvedValue([QWEN, ENTRY, GEMMA]);
+    mockApi.update.mockResolvedValue(QWEN);
+    await render();
+    const scores = byTestId(`model-ratings-${QWEN.id}`)!;
+    expect(scores.textContent).toContain("Tool calling 8");
+    expect(scores.textContent).toContain("Coding 6");
+    expect(scores.textContent).toContain("average 7");
+
+    await selectValue("models-filter-criterion", "Coding");
+    expect(shownNames()).toEqual(["Qwen at home"]);
+    expect((byTestId("models-sort") as HTMLSelectElement).value).toBe("rating");
+    await click(byTestId("models-clear-filters"));
+    expect(shownNames()).toHaveLength(3);
+
+    await click(buttonByText(byTestId(`model-card-${QWEN.id}`)!, "Edit"));
+    const dialog = byTestId("model-entry-dialog")!;
+    expect((byTestId("model-rating-criterion-0") as HTMLInputElement).value).toBe("Tool calling");
+    await click(byTestId("model-rating-add"));
+    await typeInto(byTestId("model-rating-criterion-2") as HTMLInputElement, "Responsiveness");
+    await typeInto(byTestId("model-rating-score-2") as HTMLInputElement, "4");
+    await click(buttonByText(dialog, "Save changes"));
+    const body = mockApi.update.mock.calls.at(-1)![2];
+    expect(body.ratings.map((r: { criterion: string; score: number }) => `${r.criterion} ${r.score}`)).toEqual([
+      "Tool calling 8",
+      "Coding 6",
+      "Responsiveness 4",
+    ]);
+  });
+
+  it("blocks two scores with the same name", async () => {
+    await render();
+    await click(buttonByText(container, "Add a model"));
+    await click(byTestId("model-rating-add"));
+    await click(byTestId("model-rating-add"));
+    await typeInto(byTestId("model-rating-criterion-0") as HTMLInputElement, "Coding");
+    await typeInto(byTestId("model-rating-criterion-1") as HTMLInputElement, "coding");
+    expect(byTestId("model-entry-issue")!.textContent).toContain("two scores");
+  });
+
+  it("fills in the maker when a known model family is typed", async () => {
+    await render();
+    await click(buttonByText(container, "Add a model"));
+    const dialog = byTestId("model-entry-dialog")!;
+    await typeInto(dialog.querySelector("#model-family") as HTMLInputElement, "Llama 3.2");
+    expect((dialog.querySelector("#model-maker") as HTMLInputElement).value).toBe("Meta");
+    const sizes = Array.from(dialog.querySelectorAll("#model-variant-options option")).map((o) => (o as HTMLOptionElement).value);
+    expect(sizes).toEqual(["1B", "3B"]);
+  });
+});
+
+describe("add dialog prefill", () => {
+  const dialogInput = (id: string) => byTestId("model-entry-dialog")!.querySelector(`#${id}`) as HTMLInputElement;
+
+  it("offers Claude's models and fills in a finished Claude setup", async () => {
+    mockApi.create.mockResolvedValue(ENTRY);
+    await render();
+    await click(buttonByText(container, "Add a model"));
+    const provider = dialogInput("model-provider") as unknown as HTMLSelectElement;
+    await act(async () => {
+      provider.value = "anthropic";
+      provider.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await flush();
+    const model = dialogInput("model-id") as unknown as HTMLSelectElement;
+    expect(model.tagName).toBe("SELECT");
+    expect(model.value).toBe("claude-sonnet-5");
+    expect(Array.from(model.options).map((o) => o.value)).toEqual(
+      expect.arrayContaining(["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5"]),
+    );
+    expect(dialogInput("model-name").value).toBe("Claude Sonnet 5");
+    expect(dialogInput("model-maker").value).toBe("Anthropic");
+    expect(dialogInput("model-family").value).toBe("Claude Sonnet");
+    expect(dialogInput("model-variant").value).toBe("5");
+    expect(byTestId("model-entry-dialog")!.textContent).toContain("No key needed");
+
+    // Another model: the automatic name follows.
+    await act(async () => {
+      model.value = "claude-opus-5";
+      model.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await flush();
+    expect(dialogInput("model-name").value).toBe("Claude Opus 5");
+    // A name typed by the person is never overwritten.
+    await typeInto(dialogInput("model-name"), "Boss brain");
+    await act(async () => {
+      model.value = "claude-haiku-4-5";
+      model.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await flush();
+    expect(dialogInput("model-name").value).toBe("Boss brain");
+    expect(dialogInput("model-variant").value).toBe("4.5");
+
+    await click(buttonByText(byTestId("model-entry-dialog")!, "Add model"));
+    expect(mockApi.create).toHaveBeenCalledWith(
+      COMPANY,
+      expect.objectContaining({
+        name: "Boss brain",
+        provider: "anthropic",
+        model: "claude-haiku-4-5",
+        maker: "Anthropic",
+        family: "Claude Haiku",
+        variant: "4.5",
+        lane: "both",
+        availability: "cloud",
+        baseUrl: null,
+        providerRouting: null,
+        specs: expect.objectContaining({ tools: "yes", vision: true }),
+      }),
+    );
+  });
+
+  it("fills OpenRouter hosts with tool calling but keeps a maker the person typed", async () => {
+    mockApi.create.mockResolvedValue(ENTRY);
+    await render();
+    await click(buttonByText(container, "Add a model"));
+    const provider = dialogInput("model-provider") as unknown as HTMLSelectElement;
+    await act(async () => {
+      provider.value = "openrouter";
+      provider.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await flush();
+    const options = Array.from(byTestId("model-entry-dialog")!.querySelectorAll("#model-id-options option")).map(
+      (o) => (o as HTMLOptionElement).value,
+    );
+    expect(options).toContain("qwen/qwen3-32b");
+    await typeInto(dialogInput("model-maker"), "Qwen team");
+    await typeInto(dialogInput("model-id"), "qwen/qwen3-32b");
+    expect(dialogInput("model-maker").value).toBe("Qwen team");
+    expect(dialogInput("model-family").value).toBe("Qwen3");
+    expect(dialogInput("model-variant").value).toBe("32B");
+    expect(byTestId("model-entry-hosts")!.textContent).toContain("deepinfra");
+    await click(buttonByText(byTestId("model-entry-dialog")!, "Add model"));
+    expect(mockApi.create).toHaveBeenCalledWith(
+      COMPANY,
+      expect.objectContaining({
+        name: "Qwen3 32B via OpenRouter",
+        maker: "Qwen team",
+        availability: "cloud",
+        providerRouting: expect.objectContaining({ only: expect.arrayContaining(["deepinfra"]) }),
+      }),
+    );
+  });
+
+  it("suggests the tags the last resync found installed and marks them installed", async () => {
+    mockApi.syncLocal.mockResolvedValue({
+      baseUrl: "http://100.1.1.1:11434/v1",
+      checkedAt: "2026-10-08T12:00:00Z",
+      installed: [{ name: "mystery:7b", sizeGb: 4, parameterSize: "7B", quantization: "Q4_0", family: null, entryIds: [] }],
+      missingEntryIds: [],
+      markedInstalledEntryIds: [],
+    });
+    await render();
+    await click(byTestId("models-resync"));
+    await click(buttonByText(container, "Add a model"));
+    const first = byTestId("model-entry-dialog")!.querySelector("#model-id-options option") as HTMLOptionElement;
+    expect(first.value).toBe("mystery:7b");
+    expect(first.textContent).toBe("Installed on your PC");
+    await typeInto(dialogInput("model-id"), "mystery:7b");
+    expect((dialogInput("model-availability") as unknown as HTMLSelectElement).value).toBe("installed");
+    expect(dialogInput("model-address").value).toBe("http://100.1.1.1:11434/v1");
+    expect(dialogInput("model-name").value).toBe("mystery:7b on your PC");
   });
 });
 
@@ -425,6 +719,18 @@ describe("helpers", () => {
       defaultTemperature: 0.7,
       specs: { params: "27B", sizeGb: 16.5, contextTokens: 131072, vision: false, fitsLocalGpu: "tight" },
     });
+  });
+  it("prefills only empty or automatically filled fields, and clears stale automatic ones", () => {
+    const first = applyPrefill(
+      { ...EMPTY_MODEL_FORM, maker: "Mine" },
+      { name: "A", maker: "Meta", family: "Llama 3.2", specs: { params: "3B", tools: "yes" } },
+      new Set(),
+    );
+    expect(first.form).toMatchObject({ name: "A", maker: "Mine", family: "Llama 3.2" });
+    expect(first.form.specs).toMatchObject({ params: "3B", tools: "yes" });
+    const second = applyPrefill(first.form, { name: "B", specs: { params: "7B" } }, first.auto);
+    expect(second.form).toMatchObject({ name: "B", maker: "Mine", family: "" });
+    expect(second.form.specs).toMatchObject({ params: "7B", tools: "" });
   });
   it("explains refusals in plain English", () => {
     expect(modelErrorMessage(new ApiError("Forbidden", 403, null), "delete this model setup")).toBe(

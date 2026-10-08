@@ -11,18 +11,23 @@ import { ApiError } from "../api/client";
 import { queryKeys } from "../lib/queryKeys";
 import { copyTextToClipboard } from "../lib/clipboard";
 import {
+  buildModelTree,
   CATALOGUE_GROUP_BY_OPTIONS,
   catalogueFileName,
   cloudProvidersInUse,
+  compareEntriesBy,
   countsLine,
+  criteriaInUse,
   filterEntries,
   findDuplicates,
   groupEntries,
   hasActiveFilters,
   isCatalogueGroupBy,
+  localAddressOf,
   tagsInUse,
   whereLabel,
   type CatalogueGroupBy,
+  type CatalogueSort,
   type CatalogueStatusFilter,
   type CatalogueUseFilter,
   type CatalogueWhereFilter,
@@ -30,6 +35,15 @@ import {
 import { ModelEntryDialog } from "../components/ModelEntryDialog";
 import { ModelCatalogueRow } from "../components/ModelCatalogueRow";
 import { ModelCatalogueImport } from "../components/ModelCatalogueImport";
+import { ModelCatalogueTree } from "../components/ModelCatalogueTree";
+import {
+  GpuMemoryField,
+  LocalSyncResults,
+  ResyncButton,
+  useLocalResync,
+  useModelDirectorySettings,
+  type SyncOutcome,
+} from "../components/ModelLocalSync";
 import { SettingsSubsection } from "../components/SettingsSection";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -49,8 +63,11 @@ import {
  * Settings > Models: the company's catalogue of saved model setups. A setup
  * is a name plus the provider, model, address and defaults a quick agent
  * needs, so switching an agent's model is one pick instead of retyping five
- * fields. With ~30 models the page groups them (by maker and base model by
- * default), filters them, and can export / import the whole list as a file.
+ * fields. By default the page shows Maker > Model > Size > ways to run it,
+ * adding the sizes and ways the built-in model list knows of (with "Add",
+ * the `ollama pull` command, graphics-card fit and bigger "upgrade" sizes).
+ * It filters, sorts by the owner's test scores, resyncs what Ollama has
+ * installed, and can export / import the whole list as a file.
  * No key is ever part of a setup; keys stay under Connections.
  *
  * Only the company owner and admins may change setups (the server enforces
@@ -117,6 +134,11 @@ export function CompanyModels() {
   const role = useCompanyRole(selectedCompanyId);
   const canManage = role.canManageConnections;
   const [editing, setEditing] = useState<ModelDirectoryEntry | null>(null);
+  /** For "Add this way to run it": the new setup starts from these values. */
+  const [dialogInitial, setDialogInitial] = useState<CreateModelDirectoryEntry | null>(null);
+  const [syncOutcomes, setSyncOutcomes] = useState<SyncOutcome[] | null>(null);
+  /** Kept after the result panel is closed: the add dialog suggests these tags first. */
+  const [lastSync, setLastSync] = useState<SyncOutcome[]>([]);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState<ModelDirectoryEntry | null>(null);
   const [checkingUp, setCheckingUp] = useState<string | null>(null);
@@ -129,6 +151,8 @@ export function CompanyModels() {
   const [status, setStatus] = useState<CatalogueStatusFilter>("all");
   const [tags, setTags] = useState<string[]>([]);
   const [showArchived, setShowArchived] = useState(false);
+  const [sort, setSort] = useState<CatalogueSort>("name");
+  const [criterion, setCriterion] = useState("");
   const setGroupBy = (value: CatalogueGroupBy) => {
     setGroupByState(value);
     writeGroupBy(value);
@@ -155,16 +179,39 @@ export function CompanyModels() {
     enabled: Boolean(selectedCompanyId) && canManage,
     retry: false,
   });
+  const settingsQuery = useModelDirectorySettings(selectedCompanyId);
+  const gpuVramGb = settingsQuery.data?.localGpuVramGb ?? null;
   const entries = useMemo(() => listQuery.data ?? [], [listQuery.data]);
   const missingStarters = (startersQuery.data ?? []).filter((starter) => !starter.alreadyAdded);
 
-  const filters = { search, where, use, availability: status, tags, showArchived };
+  const filters = { search, where, use, availability: status, tags, showArchived, criterion };
   const filtersOn = hasActiveFilters(filters);
   const visible = useMemo(
-    () => filterEntries(entries, { search, where, use, availability: status, tags, showArchived }),
-    [entries, search, where, use, status, tags, showArchived],
+    () => filterEntries(entries, { search, where, use, availability: status, tags, showArchived, criterion }),
+    [entries, search, where, use, status, tags, showArchived, criterion],
   );
-  const groups = useMemo(() => groupEntries(visible, groupBy), [visible, groupBy]);
+  const groups = useMemo(() => {
+    const compare = compareEntriesBy(sort, criterion);
+    return groupEntries(visible, groupBy).map((group) => ({ ...group, entries: [...group.entries].sort(compare) }));
+  }, [visible, groupBy, sort, criterion]);
+  // Known sizes and ways to run them are offered unless a filter narrows the list to what is saved.
+  const offerKnown = where === "all" && use === "all" && status === "all" && tags.length === 0 && !criterion;
+  const tree = useMemo(
+    () =>
+      buildModelTree(visible, {
+        gpuVramGb,
+        includeKnown: offerKnown,
+        localAddress: localAddressOf(entries),
+        sort,
+        criterion,
+      }),
+    [visible, gpuVramGb, offerKnown, entries, sort, criterion],
+  );
+  const criteria = useMemo(() => criteriaInUse(entries), [entries]);
+  const installedTags = useMemo(
+    () => lastSync.flatMap((outcome) => outcome.result?.installed.map((model) => model.name) ?? []),
+    [lastSync],
+  );
   const duplicates = useMemo(() => findDuplicates(entries.filter((entry) => !entry.archivedAt)), [entries]);
   const tagOptions = useMemo(
     () => [...new Set([...tagsInUse(showArchived ? entries : entries.filter((e) => !e.archivedAt)), ...tags])].sort(),
@@ -179,6 +226,7 @@ export function CompanyModels() {
     setUse("all");
     setStatus("all");
     setTags([]);
+    setCriterion("");
   };
 
   const refresh = () => {
@@ -260,6 +308,25 @@ export function CompanyModels() {
     onError: fail("export the models"),
   });
 
+  const resyncMutation = useLocalResync(
+    selectedCompanyId ?? "",
+    entries,
+    (error) => modelErrorMessage(error, "check which models are installed"),
+    () => refresh(),
+  );
+  const resync = () => resyncMutation.mutate(undefined, {
+      onSuccess: (outcomes) => {
+        setSyncOutcomes(outcomes);
+        setLastSync(outcomes);
+      },
+    });
+
+  const openAdd = (initial: CreateModelDirectoryEntry | null) => {
+    setEditing(null);
+    setDialogInitial(initial);
+    setDialogOpen(true);
+  };
+
   const busyId = (mutation: { isPending: boolean; variables?: ModelDirectoryEntry }) =>
     mutation.isPending ? mutation.variables?.id : undefined;
   const busyIds = new Set(
@@ -303,6 +370,7 @@ export function CompanyModels() {
       onToggleFavorite={() => favoriteMutation.mutate(entry)}
       onEdit={() => {
         setEditing(entry);
+        setDialogInitial(null);
         setDialogOpen(true);
       }}
       onDuplicate={() => duplicateMutation.mutate(entry)}
@@ -338,13 +406,7 @@ export function CompanyModels() {
               <ModelCatalogueImport companyId={selectedCompanyId} existing={entries} onImported={refresh} />
             )}
             {canManage && (
-              <Button
-                size="sm"
-                onClick={() => {
-                  setEditing(null);
-                  setDialogOpen(true);
-                }}
-              >
+              <Button size="sm" onClick={() => openAdd(null)}>
                 <Plus className="mr-1.5 h-3.5 w-3.5" /> Add a model
               </Button>
             )}
@@ -354,6 +416,27 @@ export function CompanyModels() {
           Save each model once, with its address and settings. Then switch any quick agent to it in one click.
           Keys are not stored here; they stay under Connections.
         </p>
+        <div className="flex flex-wrap items-center gap-3" data-testid="models-your-pc">
+          {selectedCompanyId && (
+            <GpuMemoryField
+              companyId={selectedCompanyId}
+              settings={settingsQuery.data}
+              canManage={canManage}
+              onError={fail("save the graphics card size")}
+            />
+          )}
+          {canManage && <ResyncButton pending={resyncMutation.isPending} onClick={resync} />}
+        </div>
+        {syncOutcomes && (
+          <LocalSyncResults
+            outcomes={syncOutcomes}
+            entries={entries}
+            canManage={canManage}
+            gpuVramGb={gpuVramGb}
+            onAdd={openAdd}
+            onClose={() => setSyncOutcomes(null)}
+          />
+        )}
         {!canManage && !role.isLoading && (
           <p className="text-xs text-muted-foreground" data-testid="models-read-only-note">
             You can see the saved models here. Only the company owner or an admin can add or change them.
@@ -412,6 +495,42 @@ export function CompanyModels() {
                   ))}
                 </select>
               </label>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 sm:items-end">
+              <label className="space-y-1 text-xs text-muted-foreground">
+                <span className="block">Sort</span>
+                <select
+                  className={SELECT_CLASS}
+                  value={sort}
+                  onChange={(event) => setSort(event.target.value as CatalogueSort)}
+                  data-testid="models-sort"
+                >
+                  <option value="name">By name</option>
+                  <option value="rating">By your scores (best first)</option>
+                </select>
+              </label>
+              {criteria.length > 0 && (
+                <label className="space-y-1 text-xs text-muted-foreground">
+                  <span className="block">Best for</span>
+                  <select
+                    className={SELECT_CLASS}
+                    value={criterion}
+                    onChange={(event) => {
+                      setCriterion(event.target.value);
+                      if (event.target.value) setSort("rating");
+                    }}
+                    data-testid="models-filter-criterion"
+                  >
+                    <option value="">Anything</option>
+                    {criteria.map((name) => (
+                      <option key={name} value={name}>
+                        {name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
             </div>
 
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 sm:items-end">
@@ -526,6 +645,15 @@ export function CompanyModels() {
                 </CardDescription>
               </CardHeader>
             </Card>
+          ) : groupBy === "maker" ? (
+            <ModelCatalogueTree
+              makers={tree}
+              canManage={canManage}
+              gpuKnown={gpuVramGb !== null}
+              renderRow={renderRow}
+              onAdd={openAdd}
+              onCopyText={copyText}
+            />
           ) : groupBy === "none" ? (
             <ul className="space-y-2" data-testid="models-list">
               {groups[0]?.entries.map(renderRow)}
@@ -610,6 +738,10 @@ export function CompanyModels() {
         <ModelEntryDialog
           open={dialogOpen}
           entry={editing}
+          initial={dialogInitial}
+          installedTags={installedTags}
+          localAddress={localAddressOf(entries)}
+          gpuVramGb={gpuVramGb}
           allEntries={entries}
           busy={saveMutation.isPending}
           onClose={() => setDialogOpen(false)}

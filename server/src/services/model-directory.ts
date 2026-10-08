@@ -1,6 +1,6 @@
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, modelDirectoryEntries, withCompanyScope } from "@paperclipai/db";
+import { agents, modelDirectoryEntries, modelDirectorySettings, withCompanyScope } from "@paperclipai/db";
 import {
   LANE_A_BACKUP_MODELS_MAX,
   LANE_A_PROVIDER_CATALOGUE,
@@ -19,6 +19,11 @@ import {
   type ModelDirectoryStarterStatus,
   type CreateModelDirectoryEntry,
   type ModelDirectoryEntry,
+  type ModelDirectoryRating,
+  type ModelDirectorySettings,
+  type UpdateModelDirectorySettings,
+  type LocalInstalledModel,
+  type LocalModelsSyncResult,
   type UpdateModelDirectoryEntry,
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
@@ -54,11 +59,28 @@ export function toModelDirectoryEntry(row: Row): ModelDirectoryEntry {
     specs: (row.specs as ModelDirectorySpecs | null) ?? null,
     favorite: row.favorite === true,
     archivedAt: row.archivedAt ? row.archivedAt.toISOString() : null,
+    family: row.family ?? null,
+    variant: row.variant ?? null,
+    ratings: ratingsOf(row.ratings),
     createdByUserId: row.createdByUserId,
     updatedByUserId: row.updatedByUserId,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
+}
+
+/** Stored ratings, defensively: anything that is not a rating object is dropped. */
+function ratingsOf(value: unknown): ModelDirectoryRating[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (r): r is ModelDirectoryRating =>
+      !!r && typeof r === "object" && typeof (r as { criterion?: unknown }).criterion === "string" && typeof (r as { score?: unknown }).score === "number",
+  );
+}
+
+/** Ratings as saved: each one stamped with when it was set, unless the caller gave a time. */
+function stampRatings(ratings: readonly ModelDirectoryRating[], now: Date = new Date()): ModelDirectoryRating[] {
+  return ratings.map((r) => ({ ...r, updatedAt: r.updatedAt ?? now.toISOString() }));
 }
 
 /** A blank maker / base model is "not said" (null), so it groups and sorts with the other unsaid ones. */
@@ -124,6 +146,9 @@ function catalogueColumns(entry: ModelDirectoryCatalogueEntry): Partial<typeof m
   if (entry.tags !== undefined) set.tags = entry.tags;
   if (entry.specs !== undefined) set.specs = entry.specs;
   if (entry.favorite !== undefined) set.favorite = entry.favorite;
+  if (entry.family !== undefined) set.family = label(entry.family);
+  if (entry.variant !== undefined) set.variant = label(entry.variant);
+  if (entry.ratings !== undefined) set.ratings = stampRatings(entry.ratings);
   return set;
 }
 
@@ -147,6 +172,9 @@ function toCatalogueEntry(row: Row, nameById: ReadonlyMap<string, string>): Mode
     tags: Array.isArray(row.tags) ? row.tags : [],
     specs: (row.specs as ModelDirectorySpecs | null) ?? null,
     favorite: row.favorite === true,
+    family: row.family ?? null,
+    variant: row.variant ?? null,
+    ratings: ratingsOf(row.ratings),
     // A dangling id (entry deleted outside the service) is left out, as on read.
     backupNames: backupIds.map((id) => nameById.get(id)).filter((n): n is string => typeof n === "string"),
     archived: row.archivedAt != null,
@@ -226,7 +254,60 @@ export async function resolveBackupModelsThroughDirectory(
   });
 }
 
-export function modelDirectoryService(db: Db) {
+/** How long the local resync waits for Ollama's model list. */
+export const LOCAL_MODELS_SYNC_TIMEOUT_MS = 10_000;
+
+/**
+ * One key for a local model address, however it was typed: case, trailing
+ * slashes and the OpenAI-compatible "/v1" suffix do not matter. Ollama's own
+ * API (/api/tags) lives at this root.
+ */
+export function localAddressKey(baseUrl: string | null | undefined): string {
+  return (baseUrl ?? "").trim().replace(/\/+$/, "").replace(/\/v1$/i, "").replace(/\/+$/, "").toLowerCase();
+}
+
+/** Ollama lists "name:tag"; a bare name means ":latest". */
+function ollamaTagKey(tag: string): string {
+  const t = tag.trim().toLowerCase();
+  return t.includes(":") ? t : `${t}:latest`;
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+/** Parses Ollama's GET /api/tags body; null when it does not look like Ollama. */
+export function parseOllamaTags(body: unknown): Array<Omit<LocalInstalledModel, "entryIds">> | null {
+  const models = (body as { models?: unknown } | null)?.models;
+  if (!Array.isArray(models)) return null;
+  const out: Array<Omit<LocalInstalledModel, "entryIds">> = [];
+  for (const raw of models) {
+    if (!raw || typeof raw !== "object") continue;
+    const m = raw as { name?: unknown; model?: unknown; size?: unknown; details?: Record<string, unknown> | null };
+    const name = stringOrNull(m.name) ?? stringOrNull(m.model);
+    if (!name) continue;
+    const details = m.details && typeof m.details === "object" ? m.details : {};
+    out.push({
+      name,
+      sizeGb: typeof m.size === "number" && Number.isFinite(m.size) && m.size >= 0 ? Math.round((m.size / 1e9) * 10) / 10 : null,
+      parameterSize: stringOrNull(details.parameter_size),
+      quantization: stringOrNull(details.quantization_level),
+      family: stringOrNull(details.family),
+    });
+  }
+  return out;
+}
+
+export interface ModelDirectoryServiceDeps {
+  /** Used for the local resync (GET /api/tags); tests pass a stub. */
+  fetchImpl?: typeof fetch;
+  now?: () => Date;
+}
+
+export function modelDirectoryService(db: Db, deps: ModelDirectoryServiceDeps = {}) {
+  const fetchImpl = deps.fetchImpl ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
+  const nowOf = () => deps.now?.() ?? new Date();
+
   async function getRow(companyId: string, id: string): Promise<Row> {
     const [row] = await db
       .select()
@@ -267,6 +348,92 @@ export function modelDirectoryService(db: Db) {
   }
 
   return {
+    /** Settings > Models settings for this company (defaults when never saved). */
+    async getSettings(companyId: string): Promise<ModelDirectorySettings> {
+      const [row] = await db.select().from(modelDirectorySettings).where(eq(modelDirectorySettings.companyId, companyId));
+      return { localGpuVramGb: row?.localGpuVramGb ?? null };
+    },
+
+    async updateSettings(companyId: string, input: UpdateModelDirectorySettings, actor: { userId: string | null }): Promise<ModelDirectorySettings> {
+      const now = nowOf();
+      const values = { localGpuVramGb: input.localGpuVramGb, updatedByUserId: actor.userId, updatedAt: now };
+      const [row] = await db
+        .insert(modelDirectorySettings)
+        .values({ companyId, ...values })
+        .onConflictDoUpdate({ target: modelDirectorySettings.companyId, set: values })
+        .returning();
+      return { localGpuVramGb: row?.localGpuVramGb ?? null };
+    },
+
+    /**
+     * Asks a local Ollama which models it has and marks this company's local
+     * entries at that address: "installed" when their tag is there, back to
+     * "planned" when they were "installed" and the tag is gone. "downloading"
+     * is left alone until the tag shows up. The address must already be one
+     * this company uses (a saved local entry or a quick agent on a local
+     * model), so the server never calls a host on someone's say-so.
+     */
+    async syncLocalModels(companyId: string, rawBaseUrl: string): Promise<LocalModelsSyncResult> {
+      const key = localAddressKey(rawBaseUrl);
+      const entries = (
+        await db.select().from(modelDirectoryEntries).where(and(eq(modelDirectoryEntries.companyId, companyId), eq(modelDirectoryEntries.provider, "local")))
+      ).filter((e) => e.baseUrl && localAddressKey(e.baseUrl) === key);
+      let known = entries.length > 0 ? entries[0]!.baseUrl! : null;
+      if (!known) {
+        const agentRows = await db
+          .select({ baseUrl: agents.laneABaseUrl })
+          .from(agents)
+          .where(and(eq(agents.companyId, companyId), eq(agents.laneAProvider, "local")));
+        known = agentRows.find((a) => a.baseUrl && localAddressKey(a.baseUrl) === key)?.baseUrl ?? null;
+      }
+      if (!key || !known) {
+        throw unprocessable(
+          "That address is not one of your local model addresses. Save a local model with this address first (or use the address a quick agent already uses), then try again.",
+        );
+      }
+      // Built from the stored address, not the request, so only a known host is called.
+      const root = known.trim().replace(/\/+$/, "").replace(/\/v1$/i, "").replace(/\/+$/, "");
+      let res: Response;
+      try {
+        res = await fetchImpl(`${root}/api/tags`, { signal: AbortSignal.timeout(LOCAL_MODELS_SYNC_TIMEOUT_MS) });
+      } catch {
+        throw unprocessable("Could not reach the model PC at that address. Check that the PC is on and Ollama (and Tailscale) are running.");
+      }
+      if (!res.ok) throw unprocessable(`The model PC answered with an error (HTTP ${res.status}). Check that Ollama is running there.`);
+      let body: unknown;
+      try {
+        body = await res.json();
+      } catch {
+        body = null;
+      }
+      const listed = parseOllamaTags(body);
+      if (!listed) throw unprocessable("Something answered at that address, but it does not look like Ollama.");
+
+      const present = new Set(listed.map((m) => ollamaTagKey(m.name)));
+      const now = nowOf();
+      const markedInstalledEntryIds: string[] = [];
+      const missingEntryIds: string[] = [];
+      for (const entry of entries) {
+        const has = present.has(ollamaTagKey(entry.model));
+        let next: string | null = null;
+        if (has && entry.availability !== "installed") next = "installed";
+        if (!has && entry.availability === "installed") next = "planned";
+        if (!has && entry.availability === "installed") missingEntryIds.push(entry.id);
+        if (next === "installed") markedInstalledEntryIds.push(entry.id);
+        if (next) {
+          await db
+            .update(modelDirectoryEntries)
+            .set({ availability: next, updatedAt: now })
+            .where(and(eq(modelDirectoryEntries.companyId, companyId), eq(modelDirectoryEntries.id, entry.id)));
+        }
+      }
+      const installed: LocalInstalledModel[] = listed.map((m) => ({
+        ...m,
+        entryIds: entries.filter((e) => ollamaTagKey(e.model) === ollamaTagKey(m.name)).map((e) => e.id),
+      }));
+      return { baseUrl: known, checkedAt: now.toISOString(), installed, missingEntryIds, markedInstalledEntryIds };
+    },
+
     /**
      * The company's setups in catalogue order (see compareModelDirectoryRows).
      * Archived entries are left out unless asked for: they are hidden from
@@ -310,6 +477,9 @@ export function modelDirectoryService(db: Db) {
         tags: input.tags ?? [],
         specs: input.specs ?? null,
         favorite: input.favorite ?? false,
+        family: label(input.family) ?? null,
+        variant: label(input.variant) ?? null,
+        ratings: stampRatings(input.ratings ?? [], nowOf()),
         createdByUserId: actor.userId,
         updatedByUserId: actor.userId,
       });
@@ -346,6 +516,9 @@ export function modelDirectoryService(db: Db) {
       if (patch.tags !== undefined) set.tags = patch.tags;
       if (patch.specs !== undefined) set.specs = patch.specs;
       if (patch.favorite !== undefined) set.favorite = patch.favorite;
+      if (patch.family !== undefined) set.family = label(patch.family);
+      if (patch.variant !== undefined) set.variant = label(patch.variant);
+      if (patch.ratings !== undefined) set.ratings = stampRatings(patch.ratings, nowOf());
       // Archiving keeps the first archive time; un-archiving clears it.
       if (patch.archived === true) set.archivedAt = current.archivedAt ?? new Date();
       if (patch.archived === false) set.archivedAt = null;
@@ -416,6 +589,9 @@ export function modelDirectoryService(db: Db) {
         availability: source.availability,
         tags: Array.isArray(source.tags) ? source.tags : [],
         specs: source.specs,
+        family: source.family,
+        variant: source.variant,
+        ratings: ratingsOf(source.ratings),
         // A copy starts as an ordinary, visible entry.
         favorite: false,
         archivedAt: null,
@@ -466,6 +642,8 @@ export function modelDirectoryService(db: Db) {
             note: starter.note,
             maker: starter.maker,
             baseModel: starter.baseModel,
+            family: starter.family,
+            variant: starter.variant,
             lane: starter.lane,
             availability: starter.availability,
             tags: starter.tags,
@@ -706,6 +884,9 @@ async function importCatalogueWith(
         tags: entry.tags ?? [],
         specs: entry.specs ?? null,
         favorite: entry.favorite ?? false,
+        family: label(entry.family) ?? null,
+        variant: label(entry.variant) ?? null,
+        ratings: stampRatings(entry.ratings ?? [], now),
         archivedAt: entry.archived ? now : null,
         createdByUserId: actor.userId,
         updatedByUserId: actor.userId,

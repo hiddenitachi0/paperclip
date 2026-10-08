@@ -177,6 +177,9 @@ describe("QuickAgentBackupModels", () => {
       specs: null,
       favorite: false,
       archivedAt: null,
+      family: null,
+      variant: null,
+      ratings: [],
       createdByUserId: null,
       updatedByUserId: null,
       createdAt: "2026-10-01T00:00:00Z",
@@ -192,6 +195,7 @@ describe("QuickAgentBackupModels", () => {
       defaultTemperature: 0.4,
       maker: "Google",
       baseModel: "Gemma 3",
+      variant: "12B",
     });
     const MISTRAL = savedModel({
       id: "33333333-3333-4333-8333-333333333333",
@@ -209,7 +213,12 @@ describe("QuickAgentBackupModels", () => {
       const select = q("backup-saved-model-0") as HTMLSelectElement;
       expect(select).not.toBeNull();
       expect(select.value).toBe("");
-      expect([...select.querySelectorAll("optgroup")].map((g) => g.label)).toEqual(["Google", "Mistral"]);
+      expect([...select.querySelectorAll("optgroup")].map((g) => g.label)).toEqual(["Google · Gemma 3", "Mistral"]);
+      // Size (when known) · where it runs, plus the saved name when it adds something.
+      expect([...select.querySelectorAll("optgroup option")].map((o) => o.textContent)).toEqual([
+        "12B · On your PC (gemma3:12b) — Gemma on my PC",
+        "OpenRouter — Mistral via OpenRouter",
+      ]);
       expect(select.textContent).toContain("Type it myself");
       expect(select.textContent).toContain("Gemma on my PC");
       expect(select.textContent).not.toContain("Old archived one");
