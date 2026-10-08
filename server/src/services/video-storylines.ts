@@ -1,10 +1,16 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { videoScenes, videoShotRenderJobs, videoShots, videoStorylines } from "@paperclipai/db";
+import { videoScenes, videoShotRenderJobs, videoShots, videoStorylines, withCompanyScope } from "@paperclipai/db";
 import {
+  VIDEO_SCRIPT_SCENE_NOTES_MAX_LENGTH,
   VIDEO_STORYLINE_MAX_SCENES,
   VIDEO_STORYLINE_MAX_SHOTS,
   estimateVideoStorylineCostCents,
+  formatVideoScriptCharacters,
+  type ParsedVideoStorylineScript,
+  type VideoScriptImportMode,
+  type VideoScriptImportSummary,
+  type VideoStorylineProvider,
   type CreateVideoSceneInput,
   type CreateVideoShotInput,
   type CreateVideoStorylineInput,
@@ -203,7 +209,8 @@ function toShotSummary(row: ShotRow): VideoShotSummary {
 }
 
 /** A storyline being rendered/stitched owns its own shot tree via the render tick; hand edits mid-flight would race it. */
-const EDITABLE_STORYLINE_STATUSES = new Set(["draft", "estimated", "paused", "failed"]);
+// "cancelled" is editable too: cancelling stops spending, it must not leave the storyline stuck forever.
+const EDITABLE_STORYLINE_STATUSES = new Set(["draft", "estimated", "paused", "failed", "cancelled"]);
 
 export function assertStorylineEditable(row: StorylineRow) {
   if (!EDITABLE_STORYLINE_STATUSES.has(row.status)) {
@@ -224,6 +231,102 @@ function activityActor(actor: VideoStorylineActor) {
 
 /** Temporary offset used while renumbering a storyline's shots (far above any real position). */
 const SHOT_ORDER_PARK_OFFSET = 1_000_000;
+
+/**
+ * The transaction handle withCompanyScope hands its callback. Every
+ * multi-statement write in this file goes through withCompanyScope(db, ...)
+ * -- NEVER db.transaction(): routes/video-storylines.ts builds this service
+ * on createRequestScopedDb's proxy, which refuses .transaction() outright
+ * (that is exactly what made POST .../shots 500 on every real request).
+ * withCompanyScope reuses the request's reserved connection when one is
+ * live, uses the scheduler's bypass connection inside a tick, and opens its
+ * own pooled transaction when there is no scope at all (scripts/tests).
+ */
+type ScopedTx = Parameters<Parameters<typeof withCompanyScope>[2]>[0];
+
+/**
+ * The storyline's shots in play order: scene by scene (scene orderIndex),
+ * then by each shot's current orderIndex within its scene. When `move` is
+ * given, that one shot is taken out and put back inside its (current) scene
+ * at the storyline-wide position `move.targetIndex` (clamped to that
+ * scene's block), or at the end of its scene when no target is given.
+ */
+async function computeShotOrder(
+  tx: ScopedTx,
+  storylineId: string,
+  move?: { shotId: string; targetIndex?: number },
+): Promise<string[]> {
+  const sceneRows = await tx
+    .select({ id: videoScenes.id, orderIndex: videoScenes.orderIndex })
+    .from(videoScenes)
+    .where(eq(videoScenes.storylineId, storylineId))
+    .orderBy(asc(videoScenes.orderIndex));
+  const shotRows = await tx
+    .select({ id: videoShots.id, sceneId: videoShots.sceneId, orderIndex: videoShots.orderIndex })
+    .from(videoShots)
+    .where(eq(videoShots.storylineId, storylineId))
+    .orderBy(asc(videoShots.orderIndex));
+  const byScene = new Map<string, string[]>(sceneRows.map((scene) => [scene.id, []]));
+  let movedSceneId: string | null = null;
+  for (const shot of shotRows) {
+    if (move && shot.id === move.shotId) {
+      movedSceneId = shot.sceneId;
+      continue;
+    }
+    byScene.get(shot.sceneId)?.push(shot.id);
+  }
+  const ordered: string[] = [];
+  for (const scene of sceneRows) {
+    const block = byScene.get(scene.id) ?? [];
+    if (move && scene.id === movedSceneId) {
+      const blockStart = ordered.length;
+      const position =
+        move.targetIndex === undefined
+          ? block.length
+          : Math.min(block.length, Math.max(0, move.targetIndex - blockStart));
+      block.splice(position, 0, move.shotId);
+    }
+    ordered.push(...block);
+  }
+  return ordered;
+}
+
+/** Writes 0..n-1 positions for `orderedIds`, parking every shot first so the unique (storyline, order) index never sees a clash mid-update. */
+async function applyShotOrder(tx: ScopedTx, storylineId: string, orderedIds: readonly string[]): Promise<void> {
+  if (orderedIds.length === 0) return;
+  await tx
+    .update(videoShots)
+    .set({ orderIndex: sql`${videoShots.orderIndex} + ${SHOT_ORDER_PARK_OFFSET}` })
+    .where(eq(videoShots.storylineId, storylineId));
+  const values = sql.join(
+    orderedIds.map((id, index) => sql`(${id}::uuid, ${index}::int)`),
+    sql`, `,
+  );
+  await tx.execute(sql`
+    UPDATE ${videoShots} AS s
+    SET order_index = v.rn
+    FROM (VALUES ${values}) AS v(id, rn)
+    WHERE s.id = v.id AND s.storyline_id = ${storylineId}
+  `);
+}
+
+async function renumberShots(tx: ScopedTx, storylineId: string, move?: { shotId: string; targetIndex?: number }): Promise<void> {
+  await applyShotOrder(tx, storylineId, await computeShotOrder(tx, storylineId, move));
+}
+
+/** Shot states that mean money was spent on (or is being spent on) a shot -- "replace" imports refuse to throw these away. */
+function shotHasPaidWork(shot: ShotRow): boolean {
+  return (
+    shot.status === "done" ||
+    shot.status === "rendering" ||
+    shot.status === "queued" ||
+    shot.resultObjectKey !== null ||
+    (shot.actualCostCents ?? 0) > 0 ||
+    shot.stillObjectKey !== null ||
+    (shot.stillActualCostCents ?? 0) > 0 ||
+    shot.previewObjectKey !== null
+  );
+}
 
 export function videoStorylineService(db: Db) {
   async function getStorylineRow(companyId: string, storylineId: string): Promise<StorylineRow> {
@@ -345,6 +448,8 @@ export function videoStorylineService(db: Db) {
       .set({
         ...(input.title !== undefined ? { title: input.title } : {}),
         ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
+        ...(input.providerId !== undefined ? { providerId: input.providerId } : {}),
+        ...(input.model !== undefined ? { model: input.model } : {}),
         ...(input.budgetCapCents !== undefined ? { budgetCapCents: input.budgetCapCents } : {}),
         ...(input.characterReferenceAssetIds !== undefined
           ? { characterReferenceAssetIds: input.characterReferenceAssetIds }
@@ -363,6 +468,9 @@ export function videoStorylineService(db: Db) {
       .where(eq(videoStorylines.id, storylineId))
       .returning();
     if (!row) throw new Error("Video storyline update returned no row");
+    // A different provider/model changes what each clip costs (and which
+    // clip lengths are rendered), so the cached estimate must follow.
+    const refreshed = input.providerId !== undefined || input.model !== undefined ? await recomputeEstimate(companyId, storylineId) : null;
     await logActivity(db, {
       companyId,
       ...activityActor(actor),
@@ -371,7 +479,7 @@ export function videoStorylineService(db: Db) {
       entityId: row.id,
       details: { fields: Object.keys(input) },
     });
-    return toStorylineSummary(row);
+    return refreshed ?? toStorylineSummary(row);
   }
 
   async function deleteStoryline(companyId: string, storylineId: string, actor: VideoStorylineActor): Promise<void> {
@@ -457,6 +565,10 @@ export function videoStorylineService(db: Db) {
         throw isUniqueViolation(err) ? conflict(`A scene already exists at position ${input.orderIndex}.`) : err;
       });
     if (!row) throw new Error("Video scene update returned no row");
+    if (input.orderIndex !== undefined) {
+      // Play order is scene by scene, so moving a scene moves its shots too.
+      await withCompanyScope(db, companyId, (tx) => renumberShots(tx, storylineId));
+    }
     await logActivity(db, {
       companyId,
       ...activityActor(actor),
@@ -472,7 +584,11 @@ export function videoStorylineService(db: Db) {
     const storyline = await getStorylineRow(companyId, storylineId);
     assertStorylineEditable(storyline);
     await getSceneRow(companyId, storylineId, sceneId);
-    await db.delete(videoScenes).where(eq(videoScenes.id, sceneId));
+    await withCompanyScope(db, companyId, async (tx) => {
+      await tx.delete(videoScenes).where(eq(videoScenes.id, sceneId));
+      await renumberShots(tx, storylineId);
+    });
+    await recomputeEstimate(companyId, storylineId);
     await logActivity(db, {
       companyId,
       ...activityActor(actor),
@@ -505,19 +621,15 @@ export function videoStorylineService(db: Db) {
     // every shot is renumbered 0..n-1 in scene order. The client's orderIndex is
     // ignored (the board UI used to send the position within the scene, which made
     // the first shot of every scene after the first collide at 0).
-    const row = await db.transaction(async (tx) => {
-      // Move existing shots out of the way so the renumbering never collides.
-      await tx
-        .update(videoShots)
-        .set({ orderIndex: sql`${videoShots.orderIndex} + ${SHOT_ORDER_PARK_OFFSET}` })
-        .where(eq(videoShots.storylineId, storylineId));
+    const row = await withCompanyScope(db, companyId, async (tx) => {
       const inserted = await tx
         .insert(videoShots)
         .values({
           companyId,
           storylineId,
           sceneId: input.sceneId,
-          // Larger than every parked shot, so it sorts last within its scene.
+          // Above every real position (they are all < SHOT_ORDER_PARK_OFFSET),
+          // so it can never clash and sorts last within its scene.
           orderIndex: SHOT_ORDER_PARK_OFFSET * 2,
           prompt: input.prompt,
           cameraNotes: input.cameraNotes,
@@ -530,17 +642,7 @@ export function videoStorylineService(db: Db) {
         .returning()
         .then((rows) => rows[0]);
       if (!inserted) throw new Error("Video shot insert returned no row");
-      await tx.execute(sql`
-        UPDATE ${videoShots} AS s
-        SET order_index = r.rn
-        FROM (
-          SELECT s2.id, (row_number() OVER (ORDER BY sc.order_index, s2.order_index) - 1)::int AS rn
-          FROM ${videoShots} AS s2
-          JOIN ${videoScenes} AS sc ON sc.id = s2.scene_id
-          WHERE s2.storyline_id = ${storylineId}
-        ) AS r
-        WHERE s.id = r.id
-      `);
+      await renumberShots(tx, storylineId);
       const [final] = await tx.select().from(videoShots).where(eq(videoShots.id, inserted.id));
       return final;
     });
@@ -576,37 +678,47 @@ export function videoStorylineService(db: Db) {
     // transitionIn don't affect the still's composition, so they leave
     // storyboardStatus/the still columns alone.
     const touchesStillContent = input.prompt !== undefined || input.cameraNotes !== undefined || input.lookReferenceAssetIds !== undefined;
-    const row = await db
-      .update(videoShots)
-      .set({
-        ...(input.sceneId !== undefined ? { sceneId: input.sceneId } : {}),
-        ...(input.orderIndex !== undefined ? { orderIndex: input.orderIndex } : {}),
-        ...(input.prompt !== undefined ? { prompt: input.prompt } : {}),
-        ...(input.cameraNotes !== undefined ? { cameraNotes: input.cameraNotes } : {}),
-        ...(input.durationSeconds !== undefined ? { durationSeconds: input.durationSeconds } : {}),
-        ...(input.lookReferenceAssetIds !== undefined ? { lookReferenceAssetIds: input.lookReferenceAssetIds } : {}),
-        ...(input.transitionIn !== undefined ? { transitionIn: input.transitionIn } : {}),
-        ...(touchesStillContent
-          ? {
-              storyboardStatus: "pending" as const,
-              stillProvider: null,
-              stillObjectKey: null,
-              stillContentType: null,
-              stillByteSize: null,
-              stillSha256: null,
-              stillGeneratedAt: null,
-              stillEstimatedCostCents: null,
-              stillActualCostCents: null,
-            }
-          : {}),
-        updatedAt: new Date(),
-      })
-      .where(eq(videoShots.id, shotId))
-      .returning()
-      .then((rows) => rows[0])
-      .catch((err) => {
-        throw isUniqueViolation(err) ? conflict(`A shot already exists at position ${input.orderIndex}.`) : err;
-      });
+    const fields = {
+      ...(input.sceneId !== undefined ? { sceneId: input.sceneId } : {}),
+      ...(input.prompt !== undefined ? { prompt: input.prompt } : {}),
+      ...(input.cameraNotes !== undefined ? { cameraNotes: input.cameraNotes } : {}),
+      ...(input.durationSeconds !== undefined ? { durationSeconds: input.durationSeconds } : {}),
+      ...(input.lookReferenceAssetIds !== undefined ? { lookReferenceAssetIds: input.lookReferenceAssetIds } : {}),
+      ...(input.transitionIn !== undefined ? { transitionIn: input.transitionIn } : {}),
+      ...(touchesStillContent
+        ? {
+            storyboardStatus: "pending" as const,
+            stillProvider: null,
+            stillObjectKey: null,
+            stillContentType: null,
+            stillByteSize: null,
+            stillSha256: null,
+            stillGeneratedAt: null,
+            stillEstimatedCostCents: null,
+            stillActualCostCents: null,
+          }
+        : {}),
+      updatedAt: new Date(),
+    };
+    // A move (new position and/or new scene) renumbers the whole storyline
+    // in one transaction: orderIndex is the shot's place in the whole
+    // storyline (scene by scene), so it is never written raw -- that used
+    // to 409 on any occupied position and let scene order and play order
+    // drift apart.
+    const moves = input.orderIndex !== undefined || input.sceneId !== undefined;
+    const row = moves
+      ? await withCompanyScope(db, companyId, async (tx) => {
+          await tx.update(videoShots).set(fields).where(eq(videoShots.id, shotId));
+          await renumberShots(tx, storylineId, { shotId, targetIndex: input.orderIndex });
+          const [final] = await tx.select().from(videoShots).where(eq(videoShots.id, shotId));
+          return final;
+        })
+      : await db
+          .update(videoShots)
+          .set(fields)
+          .where(eq(videoShots.id, shotId))
+          .returning()
+          .then((rows) => rows[0]);
     if (!row) throw new Error("Video shot update returned no row");
     if (input.durationSeconds !== undefined) await recomputeEstimate(companyId, storylineId);
     await logActivity(db, {
@@ -624,7 +736,10 @@ export function videoStorylineService(db: Db) {
     const storyline = await getStorylineRow(companyId, storylineId);
     assertStorylineEditable(storyline);
     await getShotRow(companyId, storylineId, shotId);
-    await db.delete(videoShots).where(eq(videoShots.id, shotId));
+    await withCompanyScope(db, companyId, async (tx) => {
+      await tx.delete(videoShots).where(eq(videoShots.id, shotId));
+      await renumberShots(tx, storylineId);
+    });
     await recomputeEstimate(companyId, storylineId);
     await logActivity(db, {
       companyId,
@@ -651,7 +766,7 @@ export function videoStorylineService(db: Db) {
       .from(videoShots)
       .where(eq(videoShots.storylineId, storylineId));
     const shots = allShots.filter((s) => s.storyboardStatus !== "dropped");
-    const estimate = estimateVideoStorylineCostCents(shots, storyline.providerId as "fal" | "sogni");
+    const estimate = estimateVideoStorylineCostCents(shots, storyline.providerId as VideoStorylineProvider, { model: storyline.model });
     const [row] = await db
       .update(videoStorylines)
       .set({
@@ -663,6 +778,200 @@ export function videoStorylineService(db: Db) {
       .where(eq(videoStorylines.id, storylineId))
       .returning();
     return toStorylineSummary(row!);
+  }
+
+  function summarizeScript(
+    script: ParsedVideoStorylineScript,
+    providerId: VideoStorylineProvider,
+    model: string | null,
+    extra: { dryRun: boolean; mode: VideoScriptImportMode | "new"; storylineId: string | null },
+  ): VideoScriptImportSummary {
+    const allShots = script.scenes.flatMap((scene) => scene.shots);
+    const estimate = estimateVideoStorylineCostCents(allShots, providerId, { model });
+    return {
+      ...extra,
+      sceneCount: script.sceneCount,
+      shotCount: script.shotCount,
+      totalSeconds: script.totalSeconds,
+      billedSeconds: estimate.totalSeconds,
+      estimatedCostCents: estimate.estimatedTotalCents,
+      characterCount: script.characters.length,
+    };
+  }
+
+  /** The first imported scene's notes, with the script's character sheet on top (the storyline has no notes field of its own). */
+  function firstSceneNotes(script: ParsedVideoStorylineScript, sceneNotes: string | null): string | null {
+    const sheet = formatVideoScriptCharacters(script.characters);
+    if (!sheet) return sceneNotes;
+    const combined = sceneNotes ? `${sheet}\n\n${sceneNotes}` : sheet;
+    if (combined.length > VIDEO_SCRIPT_SCENE_NOTES_MAX_LENGTH) {
+      throw unprocessable(
+        `The character list plus scene 1's notes come to ${combined.length.toLocaleString("en-US")} characters; scene notes can hold at most ${VIDEO_SCRIPT_SCENE_NOTES_MAX_LENGTH.toLocaleString("en-US")}. Shorten the character descriptions or scene 1's notes.`,
+      );
+    }
+    return combined;
+  }
+
+  /** Writes a script's scenes and shots into a storyline inside one transaction (all or nothing). */
+  async function writeScript(
+    tx: ScopedTx,
+    companyId: string,
+    storylineId: string,
+    script: ParsedVideoStorylineScript,
+    mode: VideoScriptImportMode,
+  ): Promise<void> {
+    if (mode === "replace") {
+      // Shots go with their scenes (ON DELETE CASCADE).
+      await tx.delete(videoScenes).where(eq(videoScenes.storylineId, storylineId));
+    }
+    const [{ maxScene }] = await tx
+      .select({ maxScene: sql<number>`coalesce(max(${videoScenes.orderIndex}), -1)::int` })
+      .from(videoScenes)
+      .where(eq(videoScenes.storylineId, storylineId));
+    const now = new Date();
+    let parkedPosition = SHOT_ORDER_PARK_OFFSET * 2;
+    for (const [index, scene] of script.scenes.entries()) {
+      const [sceneRow] = await tx
+        .insert(videoScenes)
+        .values({
+          companyId,
+          storylineId,
+          orderIndex: maxScene + 1 + index,
+          title: scene.title,
+          notes: index === 0 ? firstSceneNotes(script, scene.notes) : scene.notes,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      if (!sceneRow) throw new Error("Video scene insert returned no row");
+      if (scene.shots.length === 0) continue;
+      await tx.insert(videoShots).values(
+        scene.shots.map((shot) => ({
+          companyId,
+          storylineId,
+          sceneId: sceneRow.id,
+          // Unique, above every real position; renumberShots below puts
+          // everything at 0..n-1 in scene order.
+          orderIndex: parkedPosition++,
+          prompt: shot.prompt,
+          cameraNotes: shot.cameraNotes,
+          durationSeconds: shot.durationSeconds,
+          lookReferenceAssetIds: [],
+          transitionIn: shot.transitionIn,
+          createdAt: now,
+          updatedAt: now,
+        })),
+      );
+    }
+    await renumberShots(tx, storylineId);
+  }
+
+  /**
+   * POST .../video-storylines/:storylineId/import. "append" adds the
+   * script's scenes after the existing ones; "replace" swaps the whole
+   * scene/shot tree, and is refused once anything has been rendered or
+   * paid for (renders, storyboard pictures, previews) so no paid work is
+   * ever silently thrown away.
+   */
+  async function importScript(
+    companyId: string,
+    storylineId: string,
+    script: ParsedVideoStorylineScript,
+    mode: VideoScriptImportMode,
+    actor: VideoStorylineActor,
+    options: { dryRun?: boolean } = {},
+  ): Promise<VideoScriptImportSummary> {
+    const storyline = await getStorylineRow(companyId, storylineId);
+    assertStorylineEditable(storyline);
+    const existingShots = await db.select().from(videoShots).where(eq(videoShots.storylineId, storylineId));
+    if (mode === "replace" && (existingShots.some(shotHasPaidWork) || storyline.spentCents > 0)) {
+      throw conflict(
+        "This storyline already has rendered or paid-for shots (videos, storyboard pictures or previews), so it can't be replaced. Import with \"Add to the end\" instead, or start a new storyline from this script.",
+      );
+    }
+    const keptShots = mode === "replace" ? 0 : existingShots.length;
+    if (keptShots + script.shotCount > VIDEO_STORYLINE_MAX_SHOTS) {
+      throw unprocessable(
+        `This storyline already has ${keptShots} shots; adding ${script.shotCount} more would go over the limit of ${VIDEO_STORYLINE_MAX_SHOTS.toLocaleString("en-US")} shots.`,
+      );
+    }
+    const [{ sceneCount }] = await db
+      .select({ sceneCount: sql<number>`count(*)::int` })
+      .from(videoScenes)
+      .where(eq(videoScenes.storylineId, storylineId));
+    const keptScenes = mode === "replace" ? 0 : sceneCount;
+    if (keptScenes + script.sceneCount > VIDEO_STORYLINE_MAX_SCENES) {
+      throw unprocessable(
+        `This storyline already has ${keptScenes} scenes; adding ${script.sceneCount} more would go over the limit of ${VIDEO_STORYLINE_MAX_SCENES} scenes.`,
+      );
+    }
+    // Checked up front so a dry run reports it too.
+    firstSceneNotes(script, script.scenes[0]?.notes ?? null);
+    const summary = summarizeScript(script, storyline.providerId as VideoStorylineProvider, storyline.model, {
+      dryRun: options.dryRun === true,
+      mode,
+      storylineId,
+    });
+    if (options.dryRun) return summary;
+
+    await withCompanyScope(db, companyId, (tx) => writeScript(tx, companyId, storylineId, script, mode));
+    await recomputeEstimate(companyId, storylineId);
+    await logActivity(db, {
+      companyId,
+      ...activityActor(actor),
+      action: "video_storyline.script_imported",
+      entityType: "video_storyline",
+      entityId: storylineId,
+      details: { mode, sceneCount: script.sceneCount, shotCount: script.shotCount, characterCount: script.characters.length },
+    });
+    return summary;
+  }
+
+  /** POST .../video-storylines/import: a new storyline plus all its scenes and shots, in one transaction. */
+  async function createStorylineFromScript(
+    companyId: string,
+    input: { title: string; providerId: VideoStorylineProvider; model: string | null; budgetCapCents: number | null },
+    script: ParsedVideoStorylineScript,
+    actor: VideoStorylineActor,
+    options: { dryRun?: boolean } = {},
+  ): Promise<VideoScriptImportSummary & { storyline: VideoStorylineSummary | null }> {
+    firstSceneNotes(script, script.scenes[0]?.notes ?? null);
+    if (options.dryRun) {
+      return { ...summarizeScript(script, input.providerId, input.model, { dryRun: true, mode: "new", storylineId: null }), storyline: null };
+    }
+    const now = new Date();
+    const storylineId = await withCompanyScope(db, companyId, async (tx) => {
+      const [row] = await tx
+        .insert(videoStorylines)
+        .values({
+          companyId,
+          title: input.title,
+          providerId: input.providerId,
+          model: input.model,
+          budgetCapCents: input.budgetCapCents,
+          createdByAgentId: actor.agentId,
+          createdByUserId: actor.actorType === "user" ? actor.actorId : null,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      if (!row) throw new Error("Video storyline insert returned no row");
+      await writeScript(tx, companyId, row.id, script, "append");
+      return row.id;
+    });
+    const storyline = await recomputeEstimate(companyId, storylineId);
+    await logActivity(db, {
+      companyId,
+      ...activityActor(actor),
+      action: "video_storyline.created",
+      entityType: "video_storyline",
+      entityId: storylineId,
+      details: { title: input.title, providerId: input.providerId, fromScript: true, sceneCount: script.sceneCount, shotCount: script.shotCount },
+    });
+    return {
+      ...summarizeScript(script, input.providerId, input.model, { dryRun: false, mode: "new", storylineId }),
+      storyline,
+    };
   }
 
   async function getProgress(companyId: string, storylineId: string): Promise<VideoStorylineProgress> {
@@ -721,6 +1030,8 @@ export function videoStorylineService(db: Db) {
     updateShot,
     deleteShot,
     recomputeEstimate,
+    importScript,
+    createStorylineFromScript,
     getProgress,
     listRenderJobsForShot,
     toStorylineSummary,
