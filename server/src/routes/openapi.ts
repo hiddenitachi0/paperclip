@@ -822,6 +822,9 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "PATCH /api/companies/{companyId}/model-directory/{entryId}",
   "DELETE /api/companies/{companyId}/model-directory/{entryId}",
   "POST /api/companies/{companyId}/model-directory/{entryId}/duplicate",
+  // "Check this setup": a real (tiny, paid) model call for one quick agent's
+  // main model or backup. Company owner/admin only; an agent never runs it.
+  "POST /api/agents/{agentId}/lane-a/check",
 ]);
 
 const INSTANCE_ADMIN_OPERATIONS = new Set([
@@ -3759,6 +3762,26 @@ registerCurrentRoute({
     401: r.unauthorized,
     403: r.forbidden,
     404: r.notFound,
+  },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/agents/{agentId}/lane-a/check",
+  tags: ["agents"],
+  summary:
+    "Check this setup: one tiny real call (with one harmless test tool) through exactly the path a chat turn takes for the agent's main model or one saved backup. Reports reachable, key, model found, answer time, tool calling, thinking setting and the cost in plain words. Company owner/admin only, one per agent every 10 seconds; the cost is recorded, no conversation is stored.",
+  body: z.object({
+    companyId: z.string().uuid(),
+    target: z.union([z.literal("main"), z.object({ backupId: z.string() })]),
+  }),
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    429: r.tooManyRequests,
   },
 });
 

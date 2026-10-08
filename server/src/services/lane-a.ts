@@ -50,6 +50,10 @@ import {
   type LaneABackupModelConfig,
   type LaneAKeywordRoute,
   withOpenRouterBlockedHostsForCall,
+  type LaneASetupCheckResult,
+  type LaneASetupCheckStep,
+  type LaneASetupCheckTarget,
+  type LaneASetupCheckToolCalling,
 } from "@paperclipai/shared";
 import { HttpError, conflict, forbidden, notFound, tooManyRequests, unprocessable } from "../errors.js";
 import {
@@ -58,6 +62,7 @@ import {
   fromAnthropicTool,
   resolveLaneABaseUrl,
   type LaneAChatMessage,
+  type LaneACompletion,
   type LaneAModelClient,
   type LaneAProviderClient,
   type LaneATool,
@@ -4685,6 +4690,337 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     }
   }
 
+  // ─── "Check this setup": one real, tiny call through the chat path ──────
+
+  /**
+   * Runs ONE minimal call (two at most: the tool round and the answer after
+   * it) through exactly the path a chat turn would take for the agent's main
+   * model or one of its backups: the same provider, model, address, key slot,
+   * OpenRouter host rules (company blocked hosts included), thinking and
+   * creativity settings. Offers one harmless test tool to see whether tool
+   * calling works. Nothing is stored as a conversation; the cost is recorded
+   * like every other quick-agent call, and a local model's health is updated.
+   * Every outcome comes back as plain-English steps, never as an error,
+   * except "no such agent / backup" (404).
+   */
+  async function checkSetup(params: {
+    companyId: string;
+    agentId: string;
+    target: LaneASetupCheckTarget;
+    actor?: AuthorizationActor;
+  }): Promise<LaneASetupCheckResult> {
+    const checkedAt = new Date();
+    const [agentBase] = await db
+      .select({ id: agents.id, name: agents.name, laneAMaxOutputTokens: agents.laneAMaxOutputTokens })
+      .from(agents)
+      .where(and(eq(agents.id, params.agentId), eq(agents.companyId, params.companyId)));
+    const row = agentBase ? await loadLaneAAgentRow(params.companyId, params.agentId) : null;
+    if (!agentBase || !row) throw notFound("Agent not found");
+    const mainAgent: LaneATargetAgent = {
+      id: agentBase.id,
+      companyId: params.companyId,
+      name: agentBase.name,
+      laneAEnabled: row.laneAEnabled,
+      laneAProvider: row.laneAProvider,
+      laneABaseUrl: row.laneABaseUrl,
+      laneAModel: row.laneAModel,
+      laneATemperature: row.laneATemperature,
+      laneAThinking: row.laneAThinking,
+      laneAProviderRouting: (row.laneAProviderRouting as LaneAProviderRouting | null) ?? null,
+      laneAMaxOutputTokens: agentBase.laneAMaxOutputTokens,
+    };
+    const mainSettings = resolveLaneASettings(mainAgent);
+    let settings = mainSettings;
+    let keySlot: LaneABackupKeySlot | undefined;
+    if (params.target !== "main") {
+      const backupId = params.target.backupId;
+      const backups = await resolveBackupModelsThroughDirectory(db, params.companyId, (row.laneABackupModels as LaneABackupModelConfig[] | null) ?? []);
+      const backup = backups.find((b) => b.id === backupId);
+      if (!backup) throw notFound("That backup model is not saved on this agent. Save the backups first, then check again.");
+      settings = resolveLaneAPoolEntrySettings(
+        { id: backup.id, provider: backup.provider, model: backup.model, baseUrl: backup.baseUrl ?? null, temperature: backup.temperature ?? null },
+        mainAgent,
+      );
+      keySlot = backupKeySlotFor(settings, mainSettings, row.adapterConfig);
+    }
+    const provider = settings.provider;
+    const label = laneAProviderLabel(provider);
+    const steps: LaneASetupCheckStep[] = [];
+    let toolCalling: LaneASetupCheckToolCalling = "not_tested";
+    let thinkingAccepted: boolean | null = null;
+    const base = { target: params.target, provider, model: settings.model, checkedAt: checkedAt.toISOString() };
+    const finish = (ok: boolean, summary: string, extra: { answerMs?: number | null; costCents?: number; costMicroUsd?: number } = {}): LaneASetupCheckResult => ({
+      ...base,
+      ok,
+      summary,
+      steps,
+      answerMs: extra.answerMs ?? null,
+      toolCalling,
+      thinkingAccepted,
+      costCents: extra.costCents ?? 0,
+      costMicroUsd: extra.costMicroUsd ?? 0,
+    });
+
+    // 1. Settings that can be judged without a call.
+    let model: string;
+    try {
+      model = assertLaneASettingsRunnable(settings);
+    } catch (err) {
+      const text = err instanceof Error ? err.message : String(err);
+      steps.push({ id: "settings", ok: false, text });
+      return finish(false, text);
+    }
+    steps.push({
+      id: "settings",
+      ok: true,
+      text: `${label}, model "${model}"${settings.baseUrl && provider !== "anthropic" ? ` at ${settings.baseUrl}` : ""}.`,
+    });
+
+    // 2. The key, from the same slot a chat turn would use.
+    let credential: LaneACredential;
+    try {
+      credential = await resolveLaneACredential({
+        companyId: params.companyId,
+        agentId: params.agentId,
+        provider,
+        adapterConfig: row.adapterConfig,
+        actor: params.actor,
+        keyOptional: provider === "anthropic" && Boolean(options.createModelClient),
+        ...(keySlot ? { keySlot } : {}),
+      });
+    } catch (err) {
+      const text = err instanceof Error ? err.message : String(err);
+      steps.push({ id: "key", ok: false, text });
+      return finish(false, text);
+    }
+    steps.push({
+      id: "key",
+      ok: true,
+      text:
+        provider === "local" && !credential.apiKey ? "No key needed for a local model."
+        : credential.source === "instance" ? "Uses Paperclip's own Claude key."
+        : `Uses this agent's saved ${label} key.`,
+    });
+
+    // 3. The call itself, with one harmless tool.
+    let client: LaneAProviderClient;
+    try {
+      client = buildProviderClient({ companyId: params.companyId, provider, baseUrl: settings.baseUrl, credential });
+    } catch (err) {
+      const text = `Could not set up the call: ${err instanceof Error ? err.message : String(err)}`;
+      steps.push({ id: "reachable", ok: false, text });
+      return finish(false, text);
+    }
+    const tool: LaneATool = {
+      name: LANE_A_SETUP_CHECK_TOOL,
+      description: "Setup check. Call this once with the word \"ready\".",
+      inputSchema: { type: "object", properties: { word: { type: "string" } }, required: ["word"] },
+    };
+    const system = "This is an automatic setup check, not a real conversation. Follow the instruction exactly and keep the answer to one word.";
+    const messages: LaneAChatMessage[] = [{ role: "user", content: `Call the ${LANE_A_SETUP_CHECK_TOOL} tool with the word "ready". When it answers, reply with the single word OK.` }];
+    const maxTokens = Math.min(settings.maxOutputTokens, LANE_A_SETUP_CHECK_MAX_OUTPUT_TOKENS);
+    let temperatureOff = typeof settings.temperature !== "number";
+    let reasoningOff = settings.reasoningEffort == null;
+    let toolsOff = false;
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let providerCost = 0;
+    let providerCostComplete = true;
+    const send = async (msgs: LaneAChatMessage[]): Promise<LaneACompletion> => {
+      for (;;) {
+        try {
+          const completion = await client.complete({
+            model,
+            system,
+            messages: msgs,
+            maxTokens,
+            ...(toolsOff ? {} : { tools: [tool] }),
+            ...(temperatureOff ? {} : { temperature: settings.temperature }),
+            ...(reasoningOff ? {} : { reasoningEffort: settings.reasoningEffort }),
+            ...(settings.providerRouting ? { providerRouting: settings.providerRouting } : {}),
+          });
+          inputTokens += completion.usage.inputTokens;
+          outputTokens += completion.usage.outputTokens;
+          if (typeof completion.usage.costUsd === "number") providerCost += completion.usage.costUsd;
+          else providerCostComplete = false;
+          return completion;
+        } catch (err) {
+          // The same fall-backs a chat turn uses, in the same order.
+          if (isLaneATemperatureUnsupportedError(err) && !reasoningOff) {
+            reasoningOff = true;
+            thinkingAccepted = false;
+            continue;
+          }
+          if (isLaneATemperatureUnsupportedError(err) && !temperatureOff) {
+            temperatureOff = true;
+            continue;
+          }
+          if (!toolsOff && (isLaneAToolsUnsupportedError(err) || isLaneAOpenRouterNoHostForParametersError(err))) {
+            toolsOff = true;
+            toolCalling = "not_supported";
+            continue;
+          }
+          throw err;
+        }
+      }
+    };
+    const started = Date.now();
+    let answer = "";
+    let failure: unknown = null;
+    try {
+      const first = await send(messages);
+      let calls = first.toolCalls;
+      if (calls.length === 0 && !toolsOff) {
+        const textCall = parseLaneATextToolCall(first.text, [tool.name], "setup_check_text_call");
+        if (textCall) calls = [textCall];
+      }
+      const ping = calls.find((c) => c.name === tool.name);
+      if (ping) {
+        toolCalling = "works";
+        const second = await send([
+          ...messages,
+          { role: "assistant", content: first.text, toolCalls: calls },
+          { role: "tool", results: calls.map((c) => ({ toolCallId: c.id, name: c.name, content: c.name === tool.name ? "pong" : "Unknown tool.", isError: c.name !== tool.name })) },
+        ]);
+        answer = second.text.trim();
+      } else {
+        if (!toolsOff) toolCalling = "not_used";
+        answer = first.text.trim();
+      }
+    } catch (err) {
+      failure = err;
+    }
+    const answerMs = Date.now() - started;
+    if (thinkingAccepted === null && settings.reasoningEffort && !reasoningOff) thinkingAccepted = true;
+
+    // Cost, recorded like any other quick-agent call (no conversation is stored).
+    let costCents = 0;
+    let costMicroUsd = 0;
+    if (inputTokens > 0 || outputTokens > 0) {
+      const cost = await priceLaneACall({ provider, model, inputTokens, outputTokens, providerCostUsd: providerCostComplete ? providerCost : null });
+      costCents = cost.costCents;
+      costMicroUsd = cost.costMicroUsd;
+      await costService(db).createEvent(params.companyId, {
+        agentId: params.agentId,
+        provider,
+        biller: provider,
+        billingType: "metered_api",
+        model,
+        inputTokens,
+        outputTokens,
+        costCents: cost.costCents,
+        costMicroUsd: cost.costMicroUsd,
+        costSource: cost.costSource,
+        occurredAt: new Date(),
+      });
+    }
+    const costText = (): string => {
+      if (inputTokens === 0 && outputTokens === 0) return "Cost: nothing was charged.";
+      if (provider === "local") return "Cost: nothing (a local model).";
+      const usd = costMicroUsd / 1_000_000;
+      return `Cost of this check: about $${usd < 0.0001 ? "0.0001 or less" : usd.toFixed(4)} (${inputTokens + outputTokens} tokens).`;
+    };
+
+    // A local model's health follows what the check found.
+    const noteLocal = async (status: "ready" | "unreachable" | "model_missing") => {
+      if (provider !== "local" || !settings.baseUrl) return;
+      try {
+        await modelHealthService(db).record(params.companyId, settings.baseUrl, model, status);
+      } catch (err) {
+        logger.warn({ err, companyId: params.companyId }, "lane A: could not record local model health after a setup check");
+      }
+    };
+
+    if (failure) {
+      const err = failure;
+      const where = provider === "anthropic" ? label : `${label} at ${settings.baseUrl}`;
+      let text: string;
+      let stepId: LaneASetupCheckStep["id"] = "answer";
+      if (err instanceof LaneAProviderError && err.kind === "network") {
+        stepId = "reachable";
+        text =
+          provider === "local"
+            ? `Could not reach the model server at ${settings.baseUrl}. Is the computer on and the model server (for example Ollama) running?`
+            : `Could not reach ${label}. Try again in a minute.`;
+        await noteLocal("unreachable");
+      } else if (err instanceof LaneAProviderError && err.kind === "auth") {
+        stepId = "key";
+        text = `${label} refused the key. Pick the right key, or replace it under Connections.`;
+      } else if (err instanceof LaneAProviderError && err.kind === "rate_limit") {
+        stepId = "answer";
+        text = `${label} is busy right now (rate limited). Everything else looked fine; try again in a minute.`;
+      } else if (
+        err instanceof LaneAProviderError &&
+        err.kind === "upstream" &&
+        (LANE_A_SETUP_CHECK_MODEL_MISSING.test(err.message) || err.status === 404)
+      ) {
+        stepId = "model";
+        text =
+          provider === "local"
+            ? `The model server answered, but it does not have "${model}". Install it there first (for example: ollama pull ${model}).`
+            : `${label} does not know the model "${model}". Check the spelling of the model id.`;
+        await noteLocal("model_missing");
+      } else if (err instanceof LaneAProviderError) {
+        text = `${where} refused the request: ${providerErrorDetail(err.message)}`;
+      } else {
+        text = `The check failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      if (stepId !== "reachable") steps.push({ id: "reachable", ok: true, text: `Reached ${where}.` });
+      if (stepId === "key") {
+        const keyStep = steps.find((s) => s.id === "key");
+        if (keyStep) {
+          keyStep.ok = false;
+          keyStep.text = text;
+        }
+      } else {
+        steps.push({ id: stepId, ok: false, text });
+      }
+      steps.push({ id: "cost", ok: null, text: costText() });
+      return finish(false, text, { answerMs: null, costCents, costMicroUsd });
+    }
+
+    await noteLocal("ready");
+    const seconds = (answerMs / 1000).toFixed(1);
+    steps.push({ id: "reachable", ok: true, text: provider === "anthropic" ? `Reached ${label}.` : `Reached ${settings.baseUrl}.` });
+    steps.push({ id: "model", ok: true, text: `Model "${model}" found.` });
+    steps.push(
+      answer
+        ? { id: "answer", ok: true, text: `Answered in ${seconds} s.` }
+        : { id: "answer", ok: false, text: `Answered in ${seconds} s, but with no words. It may be spending all its room on thinking; try thinking "off" or a larger longest answer.` },
+    );
+    const toolResult = toolCalling as LaneASetupCheckToolCalling;
+    const thinkingResult = thinkingAccepted as boolean | null;
+    steps.push(
+      toolResult === "works" ? { id: "tools", ok: true, text: "Tool calling works." }
+      : toolResult === "not_supported" ? { id: "tools", ok: false, text: "Tool calling does not work here: it was refused, so this model can chat but cannot make pictures, check the weather or hand work over." }
+      : { id: "tools", ok: false, text: "It answered without using the test tool, so tool calling may not work reliably with this model." },
+    );
+    if (settings.reasoningEffort) {
+      steps.push(
+        thinkingResult === false
+          ? { id: "thinking", ok: false, text: 'The thinking "off" setting was refused here; Paperclip leaves it out, so the model decides.' }
+          : { id: "thinking", ok: true, text: 'The thinking "off" setting was accepted.' },
+      );
+    } else {
+      steps.push({ id: "thinking", ok: null, text: "No thinking setting is sent for this model (model default)." });
+    }
+    if (typeof settings.temperature === "number") {
+      steps.push(
+        temperatureOff
+          ? { id: "temperature", ok: false, text: "The creativity setting was refused here; Paperclip leaves it out." }
+          : { id: "temperature", ok: true, text: `Creativity ${settings.temperature} was accepted.` },
+      );
+    }
+    steps.push({ id: "cost", ok: null, text: costText() });
+    const ok = Boolean(answer) && toolResult === "works";
+    const summary = ok
+      ? `Everything works: it answered in ${seconds} s and tool calling works.`
+      : !answer
+        ? "It was reached, but gave no answer."
+        : "It answers, but tool calling does not work with it.";
+    return finish(ok, summary, { answerMs, costCents, costMicroUsd });
+  }
+
   return {
     sendMessage,
     getConversation,
@@ -4694,8 +5030,15 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     continueConversation,
     listLooks,
     makePicture,
+    checkSetup,
   };
 }
+
+/** The one harmless tool "Check this setup" offers, to see whether tool calling works. */
+export const LANE_A_SETUP_CHECK_TOOL = "setup_check_ping";
+/** Room for a short answer, plus a little thinking. */
+export const LANE_A_SETUP_CHECK_MAX_OUTPUT_TOKENS = 512;
+const LANE_A_SETUP_CHECK_MODEL_MISSING = /model[^.]*(not loaded|not found|does not exist|is not available|unknown)|no such model|invalid model/i;
 
 /** The bare name of Media Studio's "List saved looks" tool (its grant is `<plugin>:list-looks`). */
 export const LANE_A_LIST_LOOKS_TOOL = "list-looks";

@@ -11,11 +11,11 @@ import {
   updateModelDirectoryEntrySchema,
   type ImportModelDirectoryCatalogue,
 } from "@paperclipai/shared";
-import { forbidden, notFound } from "../errors.js";
+import { HttpError, forbidden, notFound } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import { companyScope } from "../middleware/company-scope.js";
 import { logActivity } from "../services/activity-log.js";
-import { modelDirectoryService } from "../services/model-directory.js";
+import { LOCAL_SYNC_UNREADABLE_CODE, modelDirectoryService } from "../services/model-directory.js";
 import { modelHealthService } from "../services/model-health.js";
 import { modelSetupReviewerService } from "../services/model-setup-reviewer.js";
 import { openRouterHostsForModel } from "../services/openrouter-hosts.js";
@@ -29,13 +29,13 @@ import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
  * mutation writes an activity row. Bodies never carry a key.
  */
 
-function assertCompanyOwnerOrAdmin(req: Request, companyId: string) {
+export function assertCompanyOwnerOrAdmin(req: Request, companyId: string, what = "use the model directory") {
   assertBoard(req);
   if (req.actor.source !== "local_implicit" && !req.actor.isInstanceAdmin) {
     const membership = (req.actor.memberships ?? []).find((item) => item.companyId === companyId);
     const role = membership?.status === "active" ? membership.membershipRole : null;
     if (role !== "owner" && role !== "admin") {
-      throw forbidden("Only a company owner or admin can use the model directory.");
+      throw forbidden(`Only a company owner or admin can ${what}.`);
     }
   }
   assertCompanyAccess(req, companyId);
@@ -150,7 +150,19 @@ export function modelDirectoryRoutes(rawDb: Db, deps: { fetchImpl?: typeof fetch
   // uses is called (422 otherwise).
   router.post("/companies/:companyId/model-directory/local-sync", scope(), validate(syncLocalModelsSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
-    const result = await svc.syncLocalModels(companyId, (req.body as { baseUrl: string }).baseUrl);
+    const baseUrl = (req.body as { baseUrl: string }).baseUrl;
+    let result: Awaited<ReturnType<typeof svc.syncLocalModels>>;
+    try {
+      result = await svc.syncLocalModels(companyId, baseUrl);
+    } catch (err) {
+      // The server could not be read: the models there are now "Offline".
+      // (An address the company does not use records nothing.)
+      if (err instanceof HttpError && (err.details as { code?: string } | undefined)?.code === LOCAL_SYNC_UNREADABLE_CODE) {
+        await health.recordLocalSync(companyId, baseUrl, null).catch(() => undefined);
+      }
+      throw err;
+    }
+    await health.recordLocalSync(companyId, result.baseUrl, result.installed.map((m) => m.name));
     const actor = getActorInfo(req);
     await logActivity(db, {
       companyId,
