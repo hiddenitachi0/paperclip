@@ -12,7 +12,9 @@ import { LANE_A_PROVIDER_ROUTING_MAX_ENTRIES, type LaneAProviderRouting } from "
  * - preferred hosts: used for a new OpenRouter model setup when at least one
  *   of them runs that model with tool calling (they become its "Use" list);
  * - blocked hosts: never used. They are added to every OpenRouter setup's
- *   "Never" list when it is saved.
+ *   "Never" list when it is saved, AND again to every OpenRouter request at
+ *   call time (withOpenRouterBlockedHostsForCall), so a setup saved before a
+ *   host was blocked is covered too.
  *
  * Precedence, for one model setup (resolveOpenRouterHostRouting):
  * 1. A host the setup itself marks "Use" or "Never" follows that choice.
@@ -165,6 +167,33 @@ export function resolveOpenRouterHostRouting(input: {
   if (typeof input.base?.allowFallbacks === "boolean") out.allowFallbacks = input.base.allowFallbacks;
   else if (explicitUse.length > 0 && !input.base) out.allowFallbacks = false;
   return out.only || out.order || out.ignore ? out : null;
+}
+
+/**
+ * The routing one OpenRouter request is actually sent with: the setup's own
+ * routing plus the company's blocked hosts in "ignore", read at call time so
+ * setups saved before a host was blocked are covered too. A host the setup
+ * explicitly lists under "only" (marked "Use") is not added: an explicit Use
+ * still wins (rule 1 above). Blocked hosts are also dropped from "order".
+ * Null = no host rule at all (OpenRouter chooses).
+ */
+export function withOpenRouterBlockedHostsForCall(
+  routing: LaneAProviderRouting | null | undefined,
+  blocked: readonly string[] | null | undefined,
+): LaneAProviderRouting | null {
+  const current = routing ?? null;
+  const only = current?.only ?? [];
+  const add = cleanOpenRouterHostList(blocked ?? []).filter((slug) => !only.includes(slug));
+  if (add.length === 0) return current;
+  // The blocked hosts go first, so the limit can never push one out.
+  const ignore = [...new Set([...add, ...(current?.ignore ?? [])])].slice(0, LANE_A_PROVIDER_ROUTING_MAX_ENTRIES);
+  const out: LaneAProviderRouting = { ...(current ?? {}), ignore };
+  if (current?.order) {
+    const order = current.order.filter((slug) => !ignore.includes(slug));
+    if (order.length > 0) out.order = order;
+    else delete out.order;
+  }
+  return out;
 }
 
 /**

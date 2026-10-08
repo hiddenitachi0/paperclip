@@ -27,9 +27,9 @@ export const OPENROUTER_HOST_RULES_HELP = {
   preferred:
     "Hosts you trust. A new OpenRouter model setup uses only these, if at least one of them runs that model with tool calling; otherwise OpenRouter chooses as usual.",
   blocked:
-    "Hosts never to use. They are added to every OpenRouter model setup's Never list when it is saved, also for models they do not run today.",
+    "Blocked hosts are never used for this company's OpenRouter calls, including setups saved earlier, unless a setup explicitly marks that host Use. They are also added to a setup's Never list when it is saved, also for models they do not run today.",
   precedence:
-    "Which wins: what a model setup says itself comes first. A host marked Use on a setup is used even if it is on the blocked list here (a deliberate exception), and a setup with any host marked Use ignores the preferred list. Hosts left on Default follow these lists. Setups saved before a change keep their own lists until they are opened and saved again.",
+    "Which wins: what a model setup says itself comes first. A host marked Use on a setup is used even if it is on the blocked list here (a deliberate exception), and a setup with any host marked Use ignores the preferred list. Hosts left on Default follow these lists. A blocked host is kept out of every call straight away, also for setups saved before it was blocked; a new preferred host only applies to a setup once it is opened and saved again.",
 };
 
 /** Host names the company already uses or has seen in its OpenRouter setups, for the suggestions. */

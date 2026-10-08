@@ -11,6 +11,7 @@ import {
   openRouterHostsSeen,
   openRouterNoToolHostWarning,
   resolveOpenRouterHostRouting,
+  withOpenRouterBlockedHostsForCall,
 } from "./openrouter-hosts.js";
 import { modelDirectorySpecsSchema } from "./validators/model-directory.js";
 
@@ -143,5 +144,52 @@ describe("tool-support warning and refresh diff", () => {
       modelDirectorySpecsSchema.safeParse({ openrouterHostsSeen: Array.from({ length: 101 }, (_, i) => ({ slug: `h${i}`, tools: true })) }).success,
     ).toBe(false);
     expect(modelDirectorySpecsSchema.safeParse({ openrouterHostsCheckedAt: "yesterday" }).success).toBe(false);
+  });
+});
+
+describe("withOpenRouterBlockedHostsForCall (blocked hosts at call time)", () => {
+  it("adds the blocked hosts to a setup saved before they were blocked", () => {
+    expect(withOpenRouterBlockedHostsForCall(null, ["venice"])).toEqual({ ignore: ["venice"] });
+    expect(withOpenRouterBlockedHostsForCall({ order: ["deepinfra"], allowFallbacks: true }, ["Venice", "bad host"])).toEqual({
+      order: ["deepinfra"],
+      ignore: ["venice"],
+      allowFallbacks: true,
+    });
+  });
+
+  it("keeps the setup's own Never list and does not repeat a host", () => {
+    expect(withOpenRouterBlockedHostsForCall({ ignore: ["novita", "venice"] }, ["venice", "chutes"])).toEqual({
+      ignore: ["venice", "chutes", "novita"],
+    });
+  });
+
+  it("never ignores a host the setup explicitly marks Use", () => {
+    expect(withOpenRouterBlockedHostsForCall({ only: ["venice", "deepinfra"] }, ["venice", "chutes"])).toEqual({
+      only: ["venice", "deepinfra"],
+      ignore: ["chutes"],
+    });
+    const pinned = { only: ["venice"] };
+    expect(withOpenRouterBlockedHostsForCall(pinned, ["venice"])).toBe(pinned);
+  });
+
+  it("drops a blocked host from the try-first order", () => {
+    expect(withOpenRouterBlockedHostsForCall({ order: ["venice"] }, ["venice"])).toEqual({ ignore: ["venice"] });
+    expect(withOpenRouterBlockedHostsForCall({ order: ["venice", "deepinfra"] }, ["venice"])).toEqual({
+      order: ["deepinfra"],
+      ignore: ["venice"],
+    });
+  });
+
+  it("changes nothing with no blocked hosts", () => {
+    const routing = { only: ["deepinfra"] };
+    expect(withOpenRouterBlockedHostsForCall(routing, [])).toBe(routing);
+    expect(withOpenRouterBlockedHostsForCall(null, null)).toBeNull();
+  });
+
+  it("keeps every blocked host within the host-list limit", () => {
+    const own = Array.from({ length: 30 }, (_, i) => `own-${i}`);
+    const out = withOpenRouterBlockedHostsForCall({ ignore: own }, ["venice"]);
+    expect(out!.ignore).toHaveLength(30);
+    expect(out!.ignore![0]).toBe("venice");
   });
 });

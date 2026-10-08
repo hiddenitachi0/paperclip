@@ -6167,7 +6167,7 @@ registerCurrentRoute({
   method: "put",
   path: "/api/companies/{companyId}/model-directory/settings",
   tags: ["model-directory"],
-  summary: "Save the company's Settings > Models settings. Send any of localGpuVramGb, localBaseUrl, openrouterPreferredHosts, openrouterBlockedHosts; a field left out keeps its value, null clears it (an empty list clears a host list). The graphics memory is informational; the address is the default for new local setups and ready-made local models. Preferred hosts become a new OpenRouter setup's host list when one of them runs the model with tool calling; blocked hosts are added to every OpenRouter setup's never-use list unless that setup marks the host Use itself. A host cannot be on both lists (422). Owner/admin only.",
+  summary: "Save the company's Settings > Models settings. Send any of localGpuVramGb, localBaseUrl, openrouterPreferredHosts, openrouterBlockedHosts; a field left out keeps its value, null clears it (an empty list clears a host list). The graphics memory is informational; the address is the default for new local setups and ready-made local models. Preferred hosts become a new OpenRouter setup's host list when one of them runs the model with tool calling; blocked hosts are added to every OpenRouter setup's never-use list when it is saved, and to every OpenRouter call at call time (so setups saved earlier are covered), unless that setup marks the host Use itself. A host cannot be on both lists (422). Owner/admin only.",
   body: updateModelDirectorySettingsSchema,
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
 });

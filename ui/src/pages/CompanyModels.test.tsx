@@ -1056,6 +1056,7 @@ describe("OpenRouter hosts", () => {
     const block = byTestId("models-openrouter-hosts")!;
     expect(block.textContent).toContain("A host is a company that actually runs a model for OpenRouter");
     expect(byTestId("models-hosts-precedence")!.textContent).toContain("A host marked Use on a setup is used even if it is on the blocked list");
+    expect(byTestId("models-hosts-precedence")!.textContent).toContain("also for setups saved before it was blocked");
     await typeInto(byTestId("models-hosts-blocked-input") as HTMLInputElement, "Venice");
     await click(byTestId("models-hosts-blocked-add"));
     expect(mockApi.updateSettings).toHaveBeenCalledWith(COMPANY, { openrouterBlockedHosts: ["venice"] });
