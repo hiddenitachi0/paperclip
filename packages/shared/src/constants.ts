@@ -817,6 +817,12 @@ export const SECRET_BINDING_TARGET_TYPES = [
   // mailbox's credential is that person's alone, never shared across two
   // mail accounts the way one watcher's price-check key might be.
   "mail_account",
+  // "Ask Paperclip" helper: the key the helper calls one provider with
+  // (target_id = the company id, config_path helperKeyConfigPath(provider),
+  // e.g. "helper.apiKey.openrouter"). Never resolved by any agent -- only by
+  // the server-side helper service, which makes the model call itself. Not
+  // dedicated: the same OpenRouter key may also be a quick agent's key.
+  "helper",
 ] as const;
 export type SecretBindingTargetType = (typeof SECRET_BINDING_TARGET_TYPES)[number];
 

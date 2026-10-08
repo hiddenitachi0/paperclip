@@ -15,6 +15,7 @@ export const queryKeys = {
     modelReviews: (id: string, entryId: string) => ["companies", id, "model-directory", entryId, "reviews"] as const,
     modelStarters: (id: string) => ["companies", id, "model-directory", "starters"] as const,
     webSearch: (id: string) => ["companies", id, "web-search"] as const,
+    helperSettings: (id: string) => ["companies", id, "helper-settings"] as const,
     dataReads: (id: string) => ["companies", id, "data-reads"] as const,
   },
   companySkills: {
