@@ -50,6 +50,13 @@ describe("catalogue v2 validators and helpers (no database)", () => {
     expect(updateModelDirectorySettingsSchema.safeParse({ localBaseUrl: null }).success).toBe(true);
     expect(updateModelDirectorySettingsSchema.safeParse({ localBaseUrl: "192.168.1.20:11434" }).success).toBe(false);
     expect(updateModelDirectorySettingsSchema.safeParse({}).success).toBe(false);
+    expect(updateModelDirectorySettingsSchema.parse({ openrouterBlockedHosts: ["Venice", "venice"] })).toEqual({ openrouterBlockedHosts: ["venice"] });
+    expect(updateModelDirectorySettingsSchema.safeParse({ openrouterBlockedHosts: ["deep infra"] }).success).toBe(false);
+    expect(updateModelDirectorySettingsSchema.safeParse({ openrouterBlockedHosts: ["deepinfra/fp8"] }).success).toBe(false);
+    expect(updateModelDirectorySettingsSchema.safeParse({ openrouterBlockedHosts: Array.from({ length: 31 }, (_, i) => `h${i}`) }).success).toBe(false);
+    expect(
+      updateModelDirectorySettingsSchema.safeParse({ openrouterPreferredHosts: ["novita"], openrouterBlockedHosts: ["novita"] }).success,
+    ).toBe(false);
   });
 
   it("normalises a local address: case, trailing slash and /v1 do not matter", () => {
@@ -189,15 +196,48 @@ d("catalogue v2 service", () => {
     const a = await newCompany("CVE");
     const b = await newCompany("CVF");
     const empty = { localGpuVramGb: null, localBaseUrl: null };
-    expect(await svc.getSettings(a)).toEqual(empty);
-    expect(await svc.updateSettings(a, { localGpuVramGb: 12 }, actor)).toEqual({ localGpuVramGb: 12, localBaseUrl: null });
-    expect(await svc.updateSettings(a, { localGpuVramGb: 16.5 }, actor)).toEqual({ localGpuVramGb: 16.5, localBaseUrl: null });
+    expect(await svc.getSettings(a)).toMatchObject(empty);
+    expect(await svc.updateSettings(a, { localGpuVramGb: 12 }, actor)).toMatchObject({ localGpuVramGb: 12, localBaseUrl: null });
+    expect(await svc.updateSettings(a, { localGpuVramGb: 16.5 }, actor)).toMatchObject({ localGpuVramGb: 16.5, localBaseUrl: null });
     // Saving the address alone keeps the graphics memory, and the other way round.
-    expect(await svc.updateSettings(a, { localBaseUrl: " http://192.168.1.20:11434/v1 " }, actor)).toEqual({ localGpuVramGb: 16.5, localBaseUrl: "http://192.168.1.20:11434/v1" });
-    expect(await svc.updateSettings(a, { localGpuVramGb: 0 }, actor)).toEqual({ localGpuVramGb: 0, localBaseUrl: "http://192.168.1.20:11434/v1" });
-    expect(await svc.getSettings(a)).toEqual({ localGpuVramGb: 0, localBaseUrl: "http://192.168.1.20:11434/v1" });
-    expect(await svc.getSettings(b)).toEqual(empty);
-    expect(await svc.updateSettings(a, { localGpuVramGb: null, localBaseUrl: null }, actor)).toEqual(empty);
+    expect(await svc.updateSettings(a, { localBaseUrl: " http://192.168.1.20:11434/v1 " }, actor)).toMatchObject({ localGpuVramGb: 16.5, localBaseUrl: "http://192.168.1.20:11434/v1" });
+    expect(await svc.updateSettings(a, { localGpuVramGb: 0 }, actor)).toMatchObject({ localGpuVramGb: 0, localBaseUrl: "http://192.168.1.20:11434/v1" });
+    expect(await svc.getSettings(a)).toMatchObject({ localGpuVramGb: 0, localBaseUrl: "http://192.168.1.20:11434/v1" });
+    expect(await svc.getSettings(b)).toMatchObject(empty);
+    expect(await svc.updateSettings(a, { localGpuVramGb: null, localBaseUrl: null }, actor)).toMatchObject(empty);
+  });
+
+  it("saves the OpenRouter host rules, refuses a host on both lists, and blocks hosts on new setups", async () => {
+    const c = await newCompany("CVOR");
+    expect(await svc.getSettings(c)).toMatchObject({ openrouterPreferredHosts: [], openrouterBlockedHosts: [] });
+    const saved = await svc.updateSettings(
+      c,
+      updateModelDirectorySettingsSchema.parse({ openrouterPreferredHosts: ["Novita", "parasail"], openrouterBlockedHosts: ["venice"] }),
+      actor,
+    );
+    expect(saved).toMatchObject({ openrouterPreferredHosts: ["novita", "parasail"], openrouterBlockedHosts: ["venice"] });
+    // Saving another field keeps the lists.
+    expect(await svc.updateSettings(c, { localGpuVramGb: 8 }, actor)).toMatchObject({ openrouterBlockedHosts: ["venice"] });
+    // A host on both lists is refused, also when only one list is sent.
+    await expect(svc.updateSettings(c, { openrouterBlockedHosts: ["novita"] }, actor)).rejects.toMatchObject({ status: 422 });
+    // A new OpenRouter setup gets the blocked host in its "never" list...
+    const plain = await svc.create(c, create({ name: "Qwen cloud", provider: "openrouter", model: "qwen/qwen3.8-27b" }), actor);
+    expect(plain.providerRouting).toEqual({ ignore: ["venice"] });
+    // ...unless it marks that host "Use" itself (an explicit exception).
+    const exception = await svc.create(
+      c,
+      create({ name: "Venice on purpose", provider: "openrouter", model: "qwen/qwen3.8-27b", providerRouting: { only: ["venice"] } }),
+      actor,
+    );
+    expect(exception.providerRouting).toEqual({ only: ["venice"] });
+    // Not OpenRouter: nothing to block.
+    await svc.updateSettings(c, { localBaseUrl: "http://192.168.1.20:11434/v1" }, actor);
+    const local = await svc.create(c, create({ name: "Local", provider: "local", model: "qwen3:14b", baseUrl: "http://192.168.1.20:11434/v1" }), actor);
+    expect(local.providerRouting).toBeNull();
+    // Ready-made cloud setups get it too, and none of them picks a host itself.
+    const cloud = MODEL_DIRECTORY_STARTERS.find((s) => s.provider === "openrouter" && s.model !== "qwen/qwen3.8-27b")!;
+    const { created } = await svc.addStarters(c, [cloud.id], actor);
+    expect(created[0]!.providerRouting).toEqual({ ignore: ["venice"] });
   });
 
   it("resyncs at the company's model server address even with no saved local model", async () => {

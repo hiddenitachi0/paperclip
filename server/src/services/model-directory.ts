@@ -10,6 +10,9 @@ import {
   MODEL_DIRECTORY_STARTERS,
   modelDirectoryEntryIssue,
   normalizeLaneAProvider,
+  cleanOpenRouterHostList,
+  openRouterHostChoicesFromRouting,
+  resolveOpenRouterHostRouting,
   type ImportModelDirectoryCatalogue,
   type LaneABackupModelConfig,
   type ModelDirectoryCatalogueEntry,
@@ -268,7 +271,30 @@ export const LOCAL_MODELS_SYNC_TIMEOUT_MS = 10_000;
 type SettingsRow = typeof modelDirectorySettings.$inferSelect;
 
 function toSettings(row: SettingsRow | undefined): ModelDirectorySettings {
-  return { localGpuVramGb: row?.localGpuVramGb ?? null, localBaseUrl: row?.localBaseUrl ?? null };
+  return {
+    localGpuVramGb: row?.localGpuVramGb ?? null,
+    localBaseUrl: row?.localBaseUrl ?? null,
+    openrouterPreferredHosts: cleanOpenRouterHostList(row?.openrouterPreferredHosts ?? []),
+    openrouterBlockedHosts: cleanOpenRouterHostList(row?.openrouterBlockedHosts ?? []),
+  };
+}
+
+/**
+ * A new OpenRouter setup gets the company's blocked hosts in its "never"
+ * list, except hosts the setup itself lists under "use" (an explicit
+ * exception). The preferred list needs the live host list (tool support per
+ * model), so the Saved model dialog applies it; this only does what can be
+ * done without asking OpenRouter. See packages/shared/src/openrouter-hosts.ts.
+ */
+export function withCompanyBlockedHosts(
+  provider: string,
+  routing: CreateModelDirectoryEntry["providerRouting"] | null | undefined,
+  blocked: readonly string[],
+): CreateModelDirectoryEntry["providerRouting"] | null {
+  const current = routing ?? null;
+  if (normalizeLaneAProvider(provider) !== "openrouter" || blocked.length === 0) return current;
+  const choices = openRouterHostChoicesFromRouting(current);
+  return resolveOpenRouterHostRouting({ choices, rules: { preferred: [], blocked }, base: current });
 }
 
 /** The one plain message for any failed local resync (unreachable, error status, not Ollama). */
@@ -398,9 +424,26 @@ export function modelDirectoryService(db: Db, deps: ModelDirectoryServiceDeps = 
     /** Saves only the fields sent; a field left out keeps its value, null clears it. */
     async updateSettings(companyId: string, input: UpdateModelDirectorySettings, actor: { userId: string | null }): Promise<ModelDirectorySettings> {
       const now = nowOf();
-      const changed: { localGpuVramGb?: number | null; localBaseUrl?: string | null } = {};
+      const changed: {
+        localGpuVramGb?: number | null;
+        localBaseUrl?: string | null;
+        openrouterPreferredHosts?: string[];
+        openrouterBlockedHosts?: string[];
+      } = {};
       if (input.localGpuVramGb !== undefined) changed.localGpuVramGb = input.localGpuVramGb;
       if (input.localBaseUrl !== undefined) changed.localBaseUrl = input.localBaseUrl?.trim() ? input.localBaseUrl.trim() : null;
+      if (input.openrouterPreferredHosts !== undefined || input.openrouterBlockedHosts !== undefined) {
+        // A host cannot be both preferred and blocked, also when only one list is sent.
+        const saved = await this.getSettings(companyId);
+        const preferred = input.openrouterPreferredHosts ?? saved.openrouterPreferredHosts;
+        const blocked = input.openrouterBlockedHosts ?? saved.openrouterBlockedHosts;
+        const both = blocked.filter((host) => preferred.includes(host));
+        if (both.length > 0) {
+          throw unprocessable(`${both.join(", ")} cannot be both preferred and blocked. Take it off one of the lists.`);
+        }
+        if (input.openrouterPreferredHosts !== undefined) changed.openrouterPreferredHosts = preferred;
+        if (input.openrouterBlockedHosts !== undefined) changed.openrouterBlockedHosts = blocked;
+      }
       const values = { ...changed, updatedByUserId: actor.userId, updatedAt: now };
       const [row] = await db
         .insert(modelDirectorySettings)
@@ -507,6 +550,8 @@ export function modelDirectoryService(db: Db, deps: ModelDirectoryServiceDeps = 
     async create(companyId: string, input: CreateModelDirectoryEntry, actor: { userId: string | null }) {
       await assertNameFree(companyId, input.name);
       await assertBackupsBelongToCompany(companyId, input.backupEntryIds ?? []);
+      const blocked = (await this.getSettings(companyId)).openrouterBlockedHosts;
+      input = { ...input, providerRouting: withCompanyBlockedHosts(input.provider, input.providerRouting, blocked) };
       return insert(companyId, {
         companyId,
         name: input.name,
@@ -678,7 +723,8 @@ export function modelDirectoryService(db: Db, deps: ModelDirectoryServiceDeps = 
       const wanted = starterIds ?? MODEL_DIRECTORY_STARTERS.map((s) => s.id);
       const unknown = wanted.filter((id) => !MODEL_DIRECTORY_STARTERS.some((s) => s.id === id));
       if (unknown.length > 0) throw unprocessable("One of the ready-made model setups you picked does not exist.");
-      const localAddress = (await this.getSettings(companyId)).localBaseUrl;
+      const settings = await this.getSettings(companyId);
+      const localAddress = settings.localBaseUrl;
       const status = await this.listStarters(companyId);
       const pending = status.filter((starter) => wanted.includes(starter.id) && !starter.alreadyAdded);
       if (!localAddress && pending.length > 0 && pending.every((starter) => starter.provider === "local")) {
@@ -703,7 +749,7 @@ export function modelDirectoryService(db: Db, deps: ModelDirectoryServiceDeps = 
             provider: starter.provider,
             model: starter.model,
             baseUrl: starter.provider === "local" ? localAddress : starter.baseUrl,
-            providerRouting: starter.providerRouting,
+            providerRouting: withCompanyBlockedHosts(starter.provider, starter.providerRouting, settings.openrouterBlockedHosts),
             defaultThinking: starter.defaultThinking,
             defaultTemperature: starter.defaultTemperature,
             defaultMaxOutputTokens: starter.defaultMaxOutputTokens,

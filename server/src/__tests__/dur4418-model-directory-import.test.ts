@@ -56,7 +56,8 @@ d("model directory starters and settings import", () => {
       maker: "Alibaba Qwen",
       lane: "both",
       availability: "cloud",
-      providerRouting: { only: ["deepinfra", "parasail", "novita"] },
+      // No ready-made setup picks an OpenRouter host: that is the company's choice.
+      providerRouting: null,
       defaultTemperature: 0.7,
     });
     expect(JSON.stringify(first)).not.toMatch(/apiKey|secret/i);

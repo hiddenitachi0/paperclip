@@ -18,6 +18,7 @@ import {
   createDb,
   laneAConversations,
   laneAMessages,
+  modelDirectorySettings,
   secretAccessEvents,
 } from "@paperclipai/db";
 import { LANE_A_API_KEY_CONFIG_PATH } from "@paperclipai/shared";
@@ -469,6 +470,60 @@ describeEmbeddedPostgres("lane A provider key resolution (DUR-3997)", () => {
     // Remembered for this host choice only: another host list tries tools again.
     expect(lane.laneAModelRefusesTools(lane.laneAToolsRefusalKey("mistralai/mistral-small-3.2-24b-instruct", { only: ["venice"] }))).toBe(true);
     expect(lane.laneAModelRefusesTools("mistralai/mistral-small-3.2-24b-instruct")).toBe(false);
+    lane.resetLaneAModelsRefusingTools();
+  });
+
+  it("applies the company's blocked OpenRouter hosts at call time, to setups saved before the block, except hosts marked Use", async () => {
+    // Owner decision 8 Oct: blocked hosts apply to every call, not only to
+    // setups saved after the block. An explicit "Use" still wins, and one
+    // company's list never reaches another company's calls.
+    const companyId = await seedCompany();
+    const otherCompanyId = await seedCompany("Other company");
+    await db.insert(modelDirectorySettings).values({ companyId, openrouterBlockedHosts: ["venice", "novita"] });
+    const secret = await seedSecret(companyId, `sk-or-v1-${randomUUID()}`);
+    const otherSecret = await seedSecret(otherCompanyId, `sk-or-v1-${randomUUID()}`);
+    const model = "mistralai/mistral-small-3.2-24b-instruct";
+    // Saved before the block: a try-first order that even names a now-blocked host, no Never list.
+    const oldSetup = await seedQuickAgent(companyId, {
+      provider: "openrouter",
+      model,
+      keySecretId: secret.id,
+      providerRouting: { order: ["venice", "deepinfra"] },
+    });
+    const pinned = await seedQuickAgent(companyId, {
+      provider: "openrouter",
+      model,
+      keySecretId: secret.id,
+      providerRouting: { only: ["venice"] },
+    });
+    const otherCompanyAgent = await seedQuickAgent(otherCompanyId, {
+      provider: "openrouter",
+      model,
+      keySecretId: otherSecret.id,
+    });
+    const bodies: Array<Record<string, unknown>> = [];
+    const providerFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "GET") return new Response("{}");
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return completionResponse("Hei!");
+    }) as unknown as typeof fetch;
+    const lane = await import("../services/lane-a.ts");
+    lane.resetLaneAModelsRefusingTools();
+    const service = lane.laneAService(db, { providerFetch });
+    const ask = (cid: string, target: typeof oldSetup) =>
+      service.sendMessage({ companyId: cid, targetAgent: target, requester: { userId: "filip", agentId: null }, message: "hei" });
+
+    await ask(companyId, oldSetup);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]!.provider).toEqual({ require_parameters: true, order: ["deepinfra"], ignore: ["venice", "novita"] });
+
+    await ask(companyId, pinned);
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]!.provider).toEqual({ require_parameters: true, only: ["venice"], ignore: ["novita"] });
+
+    await ask(otherCompanyId, otherCompanyAgent);
+    expect(bodies).toHaveLength(3);
+    expect(bodies[2]!.provider).toEqual({ require_parameters: true });
     lane.resetLaneAModelsRefusingTools();
   });
 

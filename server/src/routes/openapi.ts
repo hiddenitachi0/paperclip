@@ -802,6 +802,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "GET /api/companies/{companyId}/model-directory/export",
   "GET /api/companies/{companyId}/model-directory/settings",
   "PUT /api/companies/{companyId}/model-directory/settings",
+  "GET /api/companies/{companyId}/model-directory/openrouter-hosts",
   "POST /api/companies/{companyId}/model-directory/local-sync",
   "POST /api/companies/{companyId}/model-directory/import",
   "GET /api/companies/{companyId}/model-directory/starters",
@@ -6158,7 +6159,7 @@ registerCurrentRoute({
   method: "get",
   path: "/api/companies/{companyId}/model-directory/settings",
   tags: ["model-directory"],
-  summary: "Read the company's Settings > Models settings: localGpuVramGb (graphics card memory in GB of the computer that runs local models; null = not set, 0 = no graphics card) and localBaseUrl (the company's local model server address; null = not set). Owner/admin only.",
+  summary: "Read the company's Settings > Models settings: localGpuVramGb (graphics card memory in GB of the computer that runs local models; null = not set, 0 = no graphics card), localBaseUrl (the company's local model server address; null = not set), openrouterPreferredHosts and openrouterBlockedHosts (the company's OpenRouter host rules; empty lists = none). Owner/admin only.",
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
 });
 
@@ -6166,9 +6167,18 @@ registerCurrentRoute({
   method: "put",
   path: "/api/companies/{companyId}/model-directory/settings",
   tags: ["model-directory"],
-  summary: "Save the company's Settings > Models settings. Send localGpuVramGb, localBaseUrl or both; a field left out keeps its value, null clears it. The graphics memory is informational; the address is the default for new local setups and ready-made local models. Owner/admin only.",
+  summary: "Save the company's Settings > Models settings. Send any of localGpuVramGb, localBaseUrl, openrouterPreferredHosts, openrouterBlockedHosts; a field left out keeps its value, null clears it (an empty list clears a host list). The graphics memory is informational; the address is the default for new local setups and ready-made local models. Preferred hosts become a new OpenRouter setup's host list when one of them runs the model with tool calling; blocked hosts are added to every OpenRouter setup's never-use list when it is saved, and to every OpenRouter call at call time (so setups saved earlier are covered), unless that setup marks the host Use itself. A host cannot be on both lists (422). Owner/admin only.",
   body: updateModelDirectorySettingsSchema,
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/model-directory/openrouter-hosts",
+  tags: ["model-directory"],
+  summary: "List the hosts that run one OpenRouter model and what each supports for THAT model: { model, fetchedAt, hosts: [{ slug, name, quantization, contextTokens, maxOutputTokens, priceInPerM, priceOutPerM (US dollars per million tokens), supportsTools, supportsToolChoice, supportsReasoning, supportsImages, status, uptimeLast30m }] }. Read live from OpenRouter's public endpoint list (openrouter.ai only, no key sent), cached about ten minutes; refresh=true skips the cache (at most every 30 seconds per model). 422 for an id that is not \"maker/model\", 404 when OpenRouter does not know the model, 502 when OpenRouter cannot be read. Owner/admin only.",
+  query: z.object({ model: z.string(), refresh: z.enum(["true", "1", "false", "0"]).optional() }),
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 422: r.unprocessable, 502: { description: "OpenRouter could not be read", content: { "application/json": { schema: ErrorSchema } } } },
 });
 
 registerCurrentRoute({

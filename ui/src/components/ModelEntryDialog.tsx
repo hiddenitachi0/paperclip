@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   LANE_A_MAX_MAX_OUTPUT_TOKENS,
   LANE_A_MAX_TEMPERATURE,
@@ -10,7 +11,14 @@ import {
   MODEL_DIRECTORY_NOTE_MAX_LENGTH,
   MODEL_DIRECTORY_RATINGS_MAX,
   KNOWN_MODEL_FAMILIES,
+  describeOpenRouterHostsChange,
+  diffOpenRouterHosts,
+  openRouterHostsSeen,
+  resolveOpenRouterHostRouting,
   type CreateModelDirectoryEntry,
+  type OpenRouterHost,
+  type OpenRouterHostRules,
+  type OpenRouterHostSeen,
   type ModelDirectoryRating,
   type LaneAProvider,
   type ModelDirectoryAvailability,
@@ -54,6 +62,14 @@ import {
   variantSuggestions,
 } from "../lib/model-catalogue";
 import { HelpTip, MODEL_HELP } from "./ModelHelp";
+import { modelDirectoryApi } from "../api/modelDirectory";
+import {
+  hostChoicesFromText,
+  hostTextsWithChoice,
+  OpenRouterHostsTable,
+  openRouterHostsQueryKey,
+  useOpenRouterHosts,
+} from "./OpenRouterHostsTable";
 
 /**
  * The add / edit dialog of Settings > Models, in six blocks: name and
@@ -123,8 +139,23 @@ export type ModelFormState = {
    * through `hosts`; the rest (order, ignore, fallbacks) is kept as it is.
    */
   providerRouting?: CreateModelDirectoryEntry["providerRouting"];
-  /** OpenRouter only: the hosts to use, comma-separated, as typed. Empty = OpenRouter chooses. */
+  /** OpenRouter only: the hosts to use ("Use"), comma-separated, as typed. Empty = no "Use" host. */
   hosts?: string;
+  /** OpenRouter only: the hosts never to use ("Never"), comma-separated. */
+  ignoreHosts?: string;
+  /** True once a host choice was changed in this dialog (the routing is then rebuilt on save). */
+  hostsTouched?: boolean;
+  /** OpenRouter only: the host list seen at the last check (saved in specs), for "what changed". */
+  hostsSeen?: OpenRouterHostSeen[] | null;
+  hostsCheckedAt?: string | null;
+};
+
+/** What the host choices are combined with when the routing is built (company rules, live hosts). */
+export type HostRoutingContext = {
+  rules?: OpenRouterHostRules | null;
+  hosts?: readonly Pick<OpenRouterHost, "slug" | "supportsTools">[] | null;
+  /** A new setup: the company's preferred hosts apply (an edited one keeps its own list). */
+  isNew?: boolean;
 };
 
 export const EMPTY_SPECS_FORM: SpecsFormState = {
@@ -206,6 +237,9 @@ export function formFromEntry(entry: ModelDirectoryEntry): ModelFormState {
     specs: specsFormFromEntry(entry.specs ?? null),
     ...(entry.providerRouting ? { providerRouting: entry.providerRouting } : {}),
     hosts: (entry.providerRouting?.only ?? []).join(", "),
+    ignoreHosts: (entry.providerRouting?.ignore ?? []).join(", "),
+    hostsSeen: entry.specs?.openrouterHostsSeen ?? null,
+    hostsCheckedAt: entry.specs?.openrouterHostsCheckedAt ?? null,
   };
 }
 
@@ -221,17 +255,32 @@ export function parseHosts(text: string | undefined): string[] {
   ];
 }
 
-/** OpenRouter routing from the form: the typed hosts, the rest of the saved routing kept. Undefined = leave as saved. */
-function routingFromForm(form: ModelFormState): CreateModelDirectoryEntry["providerRouting"] | undefined {
+/**
+ * OpenRouter routing from the form: the per-host Use / Never choices combined
+ * with the company's host rules (precedence: packages/shared/src/openrouter-hosts.ts
+ * - an explicit Use beats the company's preferred AND blocked lists; blocked
+ * hosts are always added to Never otherwise; preferred hosts only fill a NEW
+ * setup with no Use host, and only when one of them runs the model with tools).
+ * The saved order and fallback choice are kept. Undefined = leave as saved
+ * (an edited setup whose hosts were not touched, with no company rule to add).
+ */
+export function routingFromForm(
+  form: ModelFormState,
+  ctx: HostRoutingContext = {},
+): CreateModelDirectoryEntry["providerRouting"] | undefined {
   const base = form.providerRouting ?? null;
-  const only = parseHosts(form.hosts);
-  if (!base && only.length === 0) return form.hosts === undefined ? undefined : null;
-  const order = base?.order ?? [];
-  const ignore = base?.ignore ?? [];
-  if (only.length === 0 && order.length === 0 && ignore.length === 0) return null;
-  // Hosts typed on a new setup are strict (no other host); a saved setup keeps its own fallback choice.
-  if (!base) return { only, order, ignore, allowFallbacks: false };
-  return { only, order, ignore, ...(base.allowFallbacks !== undefined ? { allowFallbacks: base.allowFallbacks } : {}) };
+  const blocked = ctx.rules?.blocked ?? [];
+  const preferred = ctx.isNew ? (ctx.rules?.preferred ?? []) : [];
+  if (!form.hostsTouched && blocked.length === 0 && preferred.length === 0) {
+    if (ctx.isNew) return base;
+    return undefined;
+  }
+  return resolveOpenRouterHostRouting({
+    choices: hostChoicesFromText(form.hosts, form.ignoreHosts),
+    rules: { preferred, blocked },
+    hosts: ctx.hosts ?? null,
+    base,
+  });
 }
 
 /** A new setup pre-filled from a known way to run a model (Settings > Models "Add"). */
@@ -318,8 +367,13 @@ export function specsFromForm(specs: SpecsFormState): ModelDirectorySpecs | null
 }
 
 /** Fields to send; anything that does not apply to the provider is cleared so nothing stale lingers. */
-export function bodyFromForm(form: ModelFormState): CreateModelDirectoryEntry {
+export function bodyFromForm(form: ModelFormState, ctx: HostRoutingContext = {}): CreateModelDirectoryEntry {
   const maxTokens = decimal(form.maxOutputTokens);
+  const specs = specsFromForm(form.specs);
+  const seen =
+    form.provider === "openrouter" && form.hostsSeen
+      ? { openrouterHostsSeen: form.hostsSeen, openrouterHostsCheckedAt: form.hostsCheckedAt ?? null }
+      : null;
   return {
     name: form.name,
     provider: form.provider,
@@ -327,7 +381,7 @@ export function bodyFromForm(form: ModelFormState): CreateModelDirectoryEntry {
     baseUrl: providerUsesAddress(form.provider) && form.baseUrl.trim() ? form.baseUrl.trim() : null,
     ...(form.provider === "openrouter"
       ? (() => {
-          const routing = routingFromForm(form);
+          const routing = routingFromForm(form, ctx);
           return routing === undefined ? {} : { providerRouting: routing };
         })()
       : { providerRouting: null }),
@@ -343,7 +397,7 @@ export function bodyFromForm(form: ModelFormState): CreateModelDirectoryEntry {
     lane: form.lane === "" ? null : form.lane,
     availability: form.availability === "" ? null : form.availability,
     tags: parseTags(form.tags),
-    specs: specsFromForm(form.specs),
+    specs: seen ? { ...(specs ?? {}), ...seen } : specs,
     favorite: form.favorite,
   };
 }
@@ -368,8 +422,11 @@ export function formIssue(form: ModelFormState): string | null {
     const address = localAddressIssue(form.baseUrl);
     if (address) return address;
   }
-  if (form.provider === "openrouter" && parseHosts(form.hosts).some((host) => !/^[a-z0-9][a-z0-9._/-]*$/.test(host))) {
-    return "Host names are short words like deepinfra or together, separated by commas.";
+  if (
+    form.provider === "openrouter" &&
+    [...parseHosts(form.hosts), ...parseHosts(form.ignoreHosts)].some((host) => !/^[a-z0-9][a-z0-9._-]*$/.test(host))
+  ) {
+    return "Host names are the short lower-case names OpenRouter shows for each host, separated by commas.";
   }
   const tags = tagsIssue(parseTags(form.tags));
   if (tags) return tags;
@@ -428,10 +485,12 @@ export function applyPrefill(
   if (prefill.providerRouting !== undefined && (form.providerRouting === undefined || auto.has("providerRouting"))) {
     next.providerRouting = prefill.providerRouting;
     next.hosts = (prefill.providerRouting?.only ?? []).join(", ");
+    next.ignoreHosts = (prefill.providerRouting?.ignore ?? []).join(", ");
     nextAuto.add("providerRouting");
   } else if (prefill.providerRouting === undefined && auto.has("providerRouting")) {
     next.providerRouting = undefined;
     next.hosts = "";
+    next.ignoreHosts = "";
     nextAuto.delete("providerRouting");
   }
   // Facts: a model change replaces every fact filled in automatically before.
@@ -503,7 +562,13 @@ export function ModelEntryDialog({
   busy,
   onClose,
   onSave,
+  companyId,
+  hostRules = null,
 }: {
+  /** The company, for the live OpenRouter host list; without it only typed host names are offered. */
+  companyId?: string | null;
+  /** The company's OpenRouter host rules (Settings > Models > OpenRouter hosts). */
+  hostRules?: OpenRouterHostRules | null;
   open: boolean;
   entry: ModelDirectoryEntry | null;
   /** For a new setup: start from these values (a known way to run a model). */
@@ -563,7 +628,14 @@ export function ModelEntryDialog({
   /** A model id was picked or typed: fill in what follows from it. */
   const pickModel = (model: string) => {
     autoFilled.current.delete("model");
-    setForm((current) => prefilled({ ...current, model }, current.provider, model));
+    // The remembered host list belongs to the previous model.
+    setForm((current) =>
+      prefilled(
+        { ...current, model, ...(current.model !== model ? { hostsSeen: null, hostsCheckedAt: null } : {}) },
+        current.provider,
+        model,
+      ),
+    );
   };
   /** Another provider: Claude / OpenAI / Google get their standard model, then everything that follows. */
   const pickProvider = (provider: LaneAProvider) => {
@@ -584,6 +656,63 @@ export function ModelEntryDialog({
   );
   // Claude, OpenAI and Google only accept their own listed models; the rest take any id.
   const fixedModels = !LANE_A_PROVIDER_CATALOGUE[form.provider].freeForm;
+
+  // OpenRouter: the hosts that run this model, live, and what changed since the last check.
+  const queryClient = useQueryClient();
+  const isOpenRouter = form.provider === "openrouter";
+  const hostsQuery = useOpenRouterHosts(companyId, form.model, open && isOpenRouter);
+  const liveHosts = hostsQuery.data && hostsQuery.data.model === form.model.trim() ? hostsQuery.data.hosts : null;
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState<unknown>(null);
+  const [changeNote, setChangeNote] = useState<string | null>(null);
+  const refreshAsked = useRef(false);
+  const lastSeenData = useRef<unknown>(null);
+  useEffect(() => {
+    if (!open) {
+      setChangeNote(null);
+      setRefreshError(null);
+      lastSeenData.current = null;
+      return;
+    }
+    const data = hostsQuery.data;
+    if (!data || !isOpenRouter || data.model !== form.model.trim() || lastSeenData.current === data) return;
+    lastSeenData.current = data;
+    const current = openRouterHostsSeen(data.hosts);
+    const previous = form.hostsSeen ?? null;
+    if (previous && previous.length > 0) {
+      const note = describeOpenRouterHostsChange(diffOpenRouterHosts(previous, current));
+      setChangeNote(note === "Nothing changed." && !refreshAsked.current ? null : note);
+    }
+    refreshAsked.current = false;
+    setForm((f) => ({ ...f, hostsSeen: current, hostsCheckedAt: data.fetchedAt }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, hostsQuery.data, isOpenRouter, form.model]);
+  const refreshHosts = async () => {
+    if (!companyId) return;
+    setRefreshing(true);
+    setRefreshError(null);
+    try {
+      refreshAsked.current = true;
+      const fresh = await modelDirectoryApi.openrouterHosts(companyId, form.model.trim(), { refresh: true });
+      queryClient.setQueryData(openRouterHostsQueryKey(companyId, form.model), fresh);
+    } catch (error) {
+      refreshAsked.current = false;
+      setRefreshError(error);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+  const hostCtx: HostRoutingContext = { rules: hostRules, hosts: liveHosts, isNew: !entry };
+  const builtRouting = isOpenRouter ? routingFromForm(form, hostCtx) : null;
+  const shownRouting = builtRouting === undefined ? (form.providerRouting ?? null) : builtRouting;
+  const hostChoices = hostChoicesFromText(form.hosts, form.ignoreHosts);
+  const chooseHost = (slug: string, choice: "use" | "never" | "default") => {
+    autoFilled.current.delete("providerRouting");
+    setForm((current) => {
+      const texts = hostTextsWithChoice(current.hosts, current.ignoreHosts, slug, choice);
+      return { ...current, hosts: texts.use, ignoreHosts: texts.never, hostsTouched: true };
+    });
+  };
 
   const setRating = (index: number, patch: Partial<RatingFormRow>) =>
     setForm((current) => ({
@@ -830,32 +959,67 @@ export function ModelEntryDialog({
               </Field>
             </div>
             {form.provider === "openrouter" && (
-              <Field
-                id="model-hosts"
-                label="OpenRouter hosts to use"
-                help={MODEL_HELP.hosts}
-                hint={
-                  parseHosts(form.hosts).length > 0 ? (
-                    <span data-testid="model-entry-hosts">
-                      Only these hosts will be used: {parseHosts(form.hosts).join(", ")}.
-                      {autoFilled.current.has("providerRouting") ? " Suggested because they support tool calling." : ""}
-                    </span>
-                  ) : (
-                    "Empty: OpenRouter picks a host for each request."
-                  )
-                }
-              >
-                <Input
-                  id="model-hosts"
-                  value={form.hosts ?? ""}
-                  placeholder="deepinfra, together"
-                  onChange={(event) => {
-                    autoFilled.current.delete("providerRouting");
-                    set("hosts", event.target.value);
-                  }}
-                  data-testid="model-hosts-input"
-                />
-              </Field>
+              <div className="space-y-2" data-testid="model-entry-hosts-section">
+                <div className="flex items-center gap-1">
+                  <Label>Hosts for this model</Label>
+                  <HelpTip topic="hosts for this model" text={MODEL_HELP.hosts} />
+                </div>
+                {companyId && (
+                  <OpenRouterHostsTable
+                    hosts={liveHosts ?? undefined}
+                    loading={hostsQuery.isFetching && !liveHosts}
+                    error={refreshError ?? (form.model.trim() && !hostsQuery.isFetching && !liveHosts ? hostsQuery.error : null)}
+                    choices={hostChoices}
+                    onChoice={chooseHost}
+                    rules={hostRules}
+                    routing={shownRouting}
+                    onRefresh={liveHosts || hostsQuery.isError ? () => void refreshHosts() : undefined}
+                    refreshing={refreshing}
+                    changeNote={changeNote}
+                    checkedAt={hostsQuery.data?.fetchedAt ?? null}
+                  />
+                )}
+                <p className="text-xs text-muted-foreground" data-testid="model-entry-hosts">
+                  {shownRouting?.only?.length
+                    ? `Only these hosts will be used: ${shownRouting.only.join(", ")}.`
+                    : "No host marked Use: OpenRouter picks a host for each request."}
+                  {shownRouting?.ignore?.length ? ` Never used: ${shownRouting.ignore.join(", ")}.` : ""}
+                </p>
+                <details
+                  className="rounded-md border border-border px-2 py-1 text-xs"
+                  open={!companyId || Boolean(hostsQuery.error) || undefined}
+                >
+                  <summary className="cursor-pointer text-muted-foreground">Type host names yourself</summary>
+                  <div className="grid gap-2 pt-2 sm:grid-cols-2">
+                    <Field id="model-hosts" label="Use only these hosts" hint="Short host names, separated by commas.">
+                      <Input
+                        id="model-hosts"
+                        value={form.hosts ?? ""}
+                        placeholder="host names"
+                        onChange={(event) => {
+                          autoFilled.current.delete("providerRouting");
+                          const value = event.target.value;
+                          setForm((current) => ({ ...current, hosts: value, hostsTouched: true }));
+                        }}
+                        data-testid="model-hosts-input"
+                      />
+                    </Field>
+                    <Field id="model-hosts-never" label="Never use these hosts" hint="Short host names, separated by commas.">
+                      <Input
+                        id="model-hosts-never"
+                        value={form.ignoreHosts ?? ""}
+                        placeholder="host names"
+                        onChange={(event) => {
+                          autoFilled.current.delete("providerRouting");
+                          const value = event.target.value;
+                          setForm((current) => ({ ...current, ignoreHosts: value, hostsTouched: true }));
+                        }}
+                        data-testid="model-hosts-never-input"
+                      />
+                    </Field>
+                  </div>
+                </details>
+              </div>
             )}
             {providerUsesAddress(form.provider) ? (
               <Field
@@ -1164,7 +1328,7 @@ export function ModelEntryDialog({
           <Button variant="ghost" onClick={onClose} disabled={busy}>
             Cancel
           </Button>
-          <Button onClick={() => onSave(bodyFromForm(form))} disabled={!canSave || busy}>
+          <Button onClick={() => onSave(bodyFromForm(form, hostCtx))} disabled={!canSave || busy}>
             {busy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
             {entry ? "Save changes" : "Add model"}
           </Button>

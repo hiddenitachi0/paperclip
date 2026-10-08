@@ -34,6 +34,7 @@ import {
   type CatalogueWhereFilter,
 } from "../lib/model-catalogue";
 import { ModelEntryDialog } from "../components/ModelEntryDialog";
+import { OpenRouterHostRules } from "../components/OpenRouterHostRules";
 import { ModelCatalogueRow } from "../components/ModelCatalogueRow";
 import { ModelCatalogueImport } from "../components/ModelCatalogueImport";
 import { ModelCatalogueTree } from "../components/ModelCatalogueTree";
@@ -479,6 +480,13 @@ export function CompanyModels() {
             </p>
           )}
         </div>
+        <OpenRouterHostRules
+          companyId={selectedCompanyId}
+          settings={settingsQuery.data}
+          entries={entries}
+          canManage={canManage}
+          onError={fail("save the OpenRouter host lists")}
+        />
         {syncOutcomes && (
           <LocalSyncResults
             outcomes={syncOutcomes}
@@ -492,7 +500,7 @@ export function CompanyModels() {
         {!canManage && !role.isLoading && (
           <p className="text-xs text-muted-foreground" data-testid="models-read-only-note">
             You can see the saved models and settings here, but not change them. Only the company owner or an admin
-            can add, edit, archive or delete models, or change the settings above.
+            can add, edit, archive or delete models, or change the settings above (including the OpenRouter hosts).
           </p>
         )}
       </div>
@@ -825,6 +833,15 @@ export function CompanyModels() {
           localAddress={localAddress}
           gpuVramGb={gpuVramGb}
           allEntries={entries}
+          companyId={selectedCompanyId}
+          hostRules={
+            settingsQuery.data
+              ? {
+                  preferred: settingsQuery.data.openrouterPreferredHosts ?? [],
+                  blocked: settingsQuery.data.openrouterBlockedHosts ?? [],
+                }
+              : null
+          }
           busy={saveMutation.isPending}
           onClose={() => setDialogOpen(false)}
           onSave={(body) => saveMutation.mutate(body)}
