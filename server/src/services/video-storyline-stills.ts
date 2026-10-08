@@ -20,6 +20,7 @@ import { loadReferenceImages } from "./video-storyline-render.js";
 import { recordFalCostEvent } from "./fal-cost-events.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
 import { lockStorylineRow, videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
+import { mediaStudioKeyRef } from "./media-studio-company-keys.js";
 
 /**
  * DUR-4317/DUR-4320 (backend half, storyboard-of-stills approval gate):
@@ -97,8 +98,9 @@ export function videoStorylineStillsService(db: Db) {
     if (!plugin) throw unprocessable(noKey);
     const config = await registry.getConfig(plugin.id);
     const cfg = (config?.configJson ?? {}) as Record<string, unknown>;
-    const ref = typeof cfg.falKeySecretRef === "string" ? cfg.falKeySecretRef.trim() : "";
-    if (!ref) throw unprocessable(noKey);
+    // The company's own key (Media Studio's Settings tab), else the instance's.
+    const ref = await mediaStudioKeyRef(db, plugin.id, companyId, "fal", cfg);
+    if (!ref) throw unprocessable("Storyboard pictures are made with Fal.ai, and no Fal.ai API key is set for this company yet. The company's owner or an admin can pick one in Media Studio's Settings tab, or approve this shot without a picture.");
     const apiKey = await secrets.resolveSecretValueForVideoRender(companyId, ref, { actorId });
     return { provider: new FalImageProvider(apiKey, safeImageFetch), apiKey };
   }

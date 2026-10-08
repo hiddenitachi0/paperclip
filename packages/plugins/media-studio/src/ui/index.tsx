@@ -4,6 +4,9 @@ import { usePluginAction, useHostNavigation, PluginConfigForm } from "@paperclip
 import { MediaStudioEditTab } from "./edit-tab.js";
 import { StoryboardPanel, storyboardReadyToRender, type StoryboardSummary } from "./storyboard-panel.js";
 import { AdvancedFeaturesToggle, AiDirectorSection } from "./director-panel.js";
+import { IdentitiesPanel } from "./identities-panel.js";
+import { RoomsPanel } from "./rooms-panel.js";
+import { MediaStudioSettingsTab } from "./settings-panel.js";
 import { errorText, storylineFetchJson } from "./storyline-api.js";
 import { ScriptImportDialog, ScriptInstructionsDialog } from "./script-import.js";
 
@@ -18,6 +21,7 @@ const ACTION_LOOKS_LIST = "looks.list";
 const ACTION_SETTINGS_ACCESS = "settings.access";
 const ACTION_LOOKS_SAVE = "looks.save";
 const ACTION_LOOKS_DELETE = "looks.delete";
+const ACTION_LOOKS_COPY = "looks.copy";
 const ACTION_LOOK_DEFAULTS_LIST = "looks.defaults.list";
 const ACTION_LOOK_DEFAULTS_SET = "looks.defaults.set";
 const ACTION_LOOK_RULES_LIST = "lookRules.list";
@@ -26,6 +30,7 @@ const ACTION_LOOK_RULES_PREVIEW = "lookRules.preview";
 const ACTION_SOGNI_MODELS = "sogni.models";
 const ACTION_SOGNI_LORAS = "sogni.loras";
 const ACTION_LOOK_PROMPT_PREVIEW = "looks.previewPrompt";
+const ACTION_IDENTITIES_LIST = "identities.list";
 
 // Copies of look-prompt.ts (a test checks they match): what each reference
 // picture is for, and the character sheet's fields.
@@ -400,10 +405,21 @@ type Look = {
   negativePrompt?: string | null;
   size?: string | null;
   safeContentFilter?: boolean;
+  identityId?: string | null;
+  identitySameOutfit?: boolean;
+  identityTrained?: Record<string, string | null | undefined>;
   updatedAt: string;
 };
 
-const SERVICE_LABEL: Record<string, string> = { fal: "Fal.ai", sogni: "Sogni" };
+export type LookIdentity = { id: string; name: string; trainedIdentities?: Array<{ id: string; provider: string; ref: string; status: string }> };
+
+/** The trained identities (Sogni LoRAs, Higgsfield Soul IDs) a look can pick for one service. */
+export function trainedFor(identity: LookIdentity | undefined, service: "sogni" | "higgsfield") {
+  const provider = service === "sogni" ? "sogni-lora" : "higgsfield-soul";
+  return (identity?.trainedIdentities ?? []).filter((t) => t.provider === provider);
+}
+
+const SERVICE_LABEL: Record<string, string> = { fal: "Fal.ai", sogni: "Sogni", higgsfield: "Higgsfield" };
 
 type LooksResponse = { looks: Look[]; canManage?: boolean; maxReferenceFiles?: number; defaults?: Record<string, string> };
 
@@ -471,7 +487,15 @@ function roleLabel(role: string | undefined): string {
   return REFERENCE_ROLE_OPTIONS.find((o) => o.value === role)?.label ?? "Other";
 }
 
-type SogniLorasResponse = { modelId: string; loras: SogniLora[]; maxLoras?: number; personal?: string; note?: string | null };
+type SogniLorasResponse = {
+  modelId: string;
+  loras: SogniLora[];
+  maxLoras?: number;
+  personal?: string;
+  note?: string | null;
+  /** The look's own LoRAs checked against this model (they are kept when the model changes). */
+  checks?: LoraFitCheck[];
+};
 
 const ATTACHMENT_PATH = /^\/api\/attachments\/([0-9a-f-]{36})\/content$/i;
 
@@ -501,6 +525,11 @@ export type LookDraft = {
   width: string;
   height: string;
   safeContentFilter: boolean;
+  /** The saved person every picture with this look shows ("" = none). */
+  identityId?: string;
+  identitySameOutfit?: boolean;
+  /** Which trained identity (Sogni LoRA, Higgsfield Soul ID) to use per service; missing: the newest ready one. */
+  identityTrained?: Record<string, string>;
 };
 
 const EMPTY_DRAFT: LookDraft = {
@@ -599,7 +628,11 @@ export function randomSeed(): string {
   return String(Math.floor(Math.random() * 4_294_967_295));
 }
 
-/** Turn the form into what looks.save takes. Only Sogni looks carry LoRAs and model settings. */
+/**
+ * Turn the form into what looks.save takes. Only Sogni looks carry model
+ * settings; LoRAs are kept whatever the service or model (a look switched
+ * away from Sogni keeps them unused, with a warning, until they are removed).
+ */
 export function draftToSaveParams(draft: LookDraft): Record<string, unknown> {
   const sogni = draft.provider === "sogni";
   const size = sogni && draft.width.trim() && draft.height.trim() ? `${draft.width.trim()}x${draft.height.trim()}` : null;
@@ -613,11 +646,14 @@ export function draftToSaveParams(draft: LookDraft): Record<string, unknown> {
     referenceFileIds: draft.referenceFileIds,
     referenceRoles: draftRoles(draft),
     sheet: draftSheet(draft),
-    loras: sogni ? draft.loras.map(({ id, strength }) => ({ id, strength })) : [],
+    loras: draft.loras.map(({ id, strength }) => ({ id, strength })),
     guidance: sogni && draft.guidance.trim() !== "" ? draft.guidance.trim() : null,
     negativePrompt: sogni && draft.negativePrompt.trim() ? draft.negativePrompt.trim() : null,
     size,
     safeContentFilter: sogni ? draft.safeContentFilter : true,
+    identityId: draft.identityId || null,
+    identitySameOutfit: Boolean(draft.identityId) && draft.identitySameOutfit === true,
+    identityTrained: draft.identityId ? (draft.identityTrained ?? {}) : {},
   };
 }
 
@@ -639,6 +675,9 @@ function lookToDraft(look: Look): LookDraft {
     width: width && height ? width : "",
     height: width && height ? height : "",
     safeContentFilter: look.safeContentFilter !== false,
+    identityId: look.identityId ?? "",
+    identitySameOutfit: look.identitySameOutfit === true,
+    identityTrained: Object.fromEntries(Object.entries(look.identityTrained ?? {}).filter((e): e is [string, string] => typeof e[1] === "string")),
   };
 }
 
@@ -778,7 +817,52 @@ function SogniModelDetails({ model }: { model: SogniModel }) {
   );
 }
 
-/** The LoRAs on a look: add, remove, and set each one's strength inside its own range. */
+/** Copy of sogni-catalog.ts LoraFitCheck (the worker sends these with the model's LoRAs). */
+export type LoraFitCheck = {
+  id: string;
+  name: string;
+  fit: "fits" | "other-models" | "unknown";
+  madeFor: string[];
+  warning: string | null;
+};
+
+/**
+ * Whether each LoRA on the look fits the chosen model, with the sentence to
+ * show. In the model's own LoRA list: fits. Otherwise the worker's check says
+ * what the LoRA is made for; with no check either, nobody can tell. Nothing is
+ * said while the model's LoRAs are still loading.
+ */
+export function loraFits(
+  picked: LookLora[],
+  model: Pick<SogniModel, "id" | "name">,
+  available: SogniLora[] | null,
+  checks: LoraFitCheck[] | null | undefined,
+): Record<string, { fit: LoraFitCheck["fit"]; warning: string | null } | null> {
+  const out: Record<string, { fit: LoraFitCheck["fit"]; warning: string | null } | null> = {};
+  for (const pick of picked) {
+    if (available?.some((lora) => lora.id === pick.id)) {
+      out[pick.id] = { fit: "fits", warning: null };
+      continue;
+    }
+    const check = checks?.find((c) => c.id === pick.id) ?? null;
+    if (check) out[pick.id] = { fit: check.fit, warning: check.warning };
+    else if (available === null) out[pick.id] = null;
+    else out[pick.id] = { fit: "unknown", warning: `We can't tell whether this LoRA works with ${model.name}.` };
+  }
+  return out;
+}
+
+/** The look's LoRAs without the ones made for other models than the chosen one. */
+export function withoutMisfits(picked: LookLora[], fits: ReturnType<typeof loraFits>): LookLora[] {
+  return picked.filter((pick) => fits[pick.id]?.fit !== "other-models");
+}
+
+/**
+ * The LoRAs on a look: add, remove, and set each one's strength inside its own range.
+ * LoRAs stay when the model changes; the ones that do not fit the model get a
+ * warning and a Remove button (they are left out of pictures until removed or
+ * until a model they fit is picked again).
+ */
 export function SogniLoraSection(props: {
   model: SogniModel | null;
   available: SogniLora[] | null;
@@ -788,17 +872,39 @@ export function SogniLoraSection(props: {
   filterOn: boolean;
   note?: string | null;
   disabled?: boolean;
+  checks?: LoraFitCheck[] | null;
 }) {
-  const { model, available, picked, onChange, maxLoras, filterOn, note, disabled } = props;
+  const { model, available, picked, onChange, maxLoras, filterOn, note, disabled, checks } = props;
   const [adding, setAdding] = useState("");
+  const remove = (id: string) => onChange(picked.filter((p) => p.id !== id));
   if (!model) {
     return (
-      <div style={field}>
+      <div style={field} aria-label="LoRAs">
         <span>LoRAs</span>
-        <div style={{ opacity: 0.7 }}>Pick a Sogni model first; LoRAs belong to one model.</div>
+        <div style={{ opacity: 0.7 }}>Pick a Sogni model to add LoRAs; LoRAs are made for particular models.</div>
+        {picked.length > 0 ? (
+          <>
+            <div style={{ color: "#b45309", fontSize: 12 }}>
+              This look keeps {picked.length === 1 ? "this LoRA" : `these ${picked.length} LoRAs`}, but {picked.length === 1 ? "it is" : "they are"} only used
+              once a Sogni model is picked.
+            </div>
+            {picked.map((pick) => (
+              <div key={pick.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "baseline" }}>
+                <span>
+                  {pick.name} (strength {showNumber(pick.strength)})
+                </span>
+                <button type="button" style={ghostBtn} disabled={disabled} onClick={() => remove(pick.id)} aria-label={`Remove ${pick.name}`}>
+                  Remove
+                </button>
+              </div>
+            ))}
+          </>
+        ) : null}
       </div>
     );
   }
+  const fits = loraFits(picked, model, available, checks);
+  const misfits = picked.filter((pick) => fits[pick.id]?.fit === "other-models");
   const addable = (available ?? []).filter((lora) => !picked.some((p) => p.id === lora.id));
   const full = picked.length >= maxLoras;
   const add = () => {
@@ -817,9 +923,24 @@ export function SogniLoraSection(props: {
         words for you: if a LoRA's page says it needs a trigger word, put it in the style words above.
       </div>
       {note ? <div style={{ opacity: 0.75, fontSize: 12 }}>{note}</div> : null}
+      {misfits.length > 0 ? (
+        <div style={{ ...card, gap: 6, borderColor: "#f08c00" }} aria-label="LoRAs that do not fit">
+          <div style={{ color: "#b45309", fontSize: 12 }}>
+            {misfits.length === 1 ? "One LoRA on this look is" : `${misfits.length} LoRAs on this look are`} made for other models than{" "}
+            {model.name}. {misfits.length === 1 ? "It stays" : "They stay"} on the look, but {misfits.length === 1 ? "it is" : "they are"} left out of
+            pictures made with {model.name}. We advise removing {misfits.length === 1 ? "it" : "them"}, unless you plan to switch back.
+          </div>
+          <div>
+            <button type="button" style={secondaryBtn} disabled={disabled} onClick={() => onChange(withoutMisfits(picked, fits))}>
+              Remove all that don't fit
+            </button>
+          </div>
+        </div>
+      ) : null}
       {picked.map((pick, index) => {
         const lora = available?.find((l) => l.id === pick.id) ?? null;
         const step = lora?.step ?? 0.05;
+        const fit = fits[pick.id];
         return (
           <div key={pick.id} style={{ ...card, gap: 4 }}>
             <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "baseline" }}>
@@ -827,7 +948,7 @@ export function SogniLoraSection(props: {
                 {index + 1}. {lora?.name ?? pick.name}
                 {lora?.personal ? " (your own)" : ""}
               </span>
-              <button type="button" style={ghostBtn} disabled={disabled} onClick={() => onChange(picked.filter((p) => p.id !== pick.id))}>
+              <button type="button" style={ghostBtn} disabled={disabled} onClick={() => remove(pick.id)} aria-label={`Remove ${lora?.name ?? pick.name}`}>
                 Remove
               </button>
             </div>
@@ -873,8 +994,14 @@ export function SogniLoraSection(props: {
                 ) : null}
               </>
             ) : (
-              <div style={{ fontSize: 12, color: "#b45309" }}>
-                {available === null ? `Strength ${showNumber(pick.strength)}.` : `This LoRA does not work with ${model.name}. Remove it, or pick another model.`}
+              <div style={{ fontSize: 12 }}>
+                <div style={{ opacity: 0.75 }}>Strength {showNumber(pick.strength)}.</div>
+                {fit?.warning ? (
+                  <div style={{ color: "#b45309" }} role="note">
+                    {fit.warning}
+                    {fit.fit === "other-models" ? " It is left out of pictures with this model. Remove it, or pick a model it is made for." : ""}
+                  </div>
+                ) : null}
               </div>
             )}
           </div>
@@ -901,6 +1028,38 @@ export function SogniLoraSection(props: {
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+/** A look on another service than Sogni that still has Sogni LoRAs: they are kept, not used, and can be removed. */
+export function KeptLorasNotice(props: { picked: LookLora[]; serviceLabel: string | null; onChange: (next: LookLora[]) => void; disabled?: boolean }) {
+  const { picked, serviceLabel, onChange, disabled } = props;
+  if (picked.length === 0) return null;
+  const why = serviceLabel
+    ? `${serviceLabel} does not use Sogni's LoRAs, so ${picked.length === 1 ? "it is" : "they are"} left out of its pictures`
+    : `LoRAs are only used when the look's picture service is Sogni with a model picked, so ${picked.length === 1 ? "it is" : "they are"} left out for now`;
+  return (
+    <div style={{ ...card, gap: 6, borderColor: "#f08c00" }} aria-label="LoRAs kept from Sogni">
+      <div style={{ color: "#b45309", fontSize: 12 }}>
+        This look keeps {picked.length === 1 ? "a Sogni LoRA" : `${picked.length} Sogni LoRAs`}. {why} ({picked.length === 1 ? "it comes" : "they come"}{" "}
+        back into use if the look is switched back to Sogni). We advise removing {picked.length === 1 ? "it" : "them"} if you don't need {picked.length === 1 ? "it" : "them"}.
+      </div>
+      {picked.map((pick) => (
+        <div key={pick.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "baseline" }}>
+          <span>
+            {pick.name} (strength {showNumber(pick.strength)})
+          </span>
+          <button type="button" style={ghostBtn} disabled={disabled} onClick={() => onChange(picked.filter((p) => p.id !== pick.id))} aria-label={`Remove ${pick.name}`}>
+            Remove
+          </button>
+        </div>
+      ))}
+      <div>
+        <button type="button" style={secondaryBtn} disabled={disabled} onClick={() => onChange([])}>
+          Remove all LoRAs
+        </button>
+      </div>
     </div>
   );
 }
@@ -1539,13 +1698,23 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
   const listLooks = usePluginAction(ACTION_LOOKS_LIST);
   const saveLook = usePluginAction(ACTION_LOOKS_SAVE);
   const deleteLook = usePluginAction(ACTION_LOOKS_DELETE);
+  const copyLook = usePluginAction(ACTION_LOOKS_COPY);
   const listSogniModels = usePluginAction(ACTION_SOGNI_MODELS);
   const listSogniLoras = usePluginAction(ACTION_SOGNI_LORAS);
   const listLookDefaults = usePluginAction(ACTION_LOOK_DEFAULTS_LIST);
   const setLookDefault = usePluginAction(ACTION_LOOK_DEFAULTS_SET);
   const previewPrompt = usePluginAction(ACTION_LOOK_PROMPT_PREVIEW);
+  const listIdentities = usePluginAction(ACTION_IDENTITIES_LIST);
 
   const [looks, setLooks] = useState<Look[]>([]);
+  const [identities, setIdentities] = useState<LookIdentity[]>([]);
+  useEffect(() => {
+    Promise.resolve()
+      .then(() => listIdentities({}))
+      .then((r) => setIdentities(((r as { identities?: LookIdentity[] } | undefined)?.identities ?? []).map(({ id, name, trainedIdentities }) => ({ id, name, trainedIdentities: trainedIdentities ?? [] }))))
+      .catch(() => setIdentities([]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [agents, setAgents] = useState<LookAgent[] | null>(null);
   const [defaults, setDefaults] = useState<Record<string, string>>({});
   const [savingDefaultFor, setSavingDefaultFor] = useState<string | null>(null);
@@ -1614,6 +1783,9 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
 
   const wantsSogni = draft?.provider === "sogni";
   const draftModel = draft?.model ?? "";
+  // The look's LoRAs when the model's LoRAs are asked for, so the worker can say which fit the model.
+  const draftLorasRef = useRef<LookLora[]>([]);
+  draftLorasRef.current = draft?.loras ?? [];
 
   // Sogni's model list, read once the editor is on Sogni.
   useEffect(() => {
@@ -1645,7 +1817,8 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
     setSogniLoras(null);
     (async () => {
       try {
-        const res = (await listSogniLoras({ modelId: draftModel })) as SogniLorasResponse;
+        const picked = draftLorasRef.current.map(({ id, name }) => ({ id, name }));
+        const res = (await listSogniLoras({ modelId: draftModel, picked })) as SogniLorasResponse;
         if (!cancelled) setSogniLoras(res);
       } catch (e) {
         if (!cancelled) setSogniLoras({ modelId: draftModel, loras: [], note: e instanceof Error ? e.message : String(e) });
@@ -1725,13 +1898,31 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
     }
   };
 
-  // A new model starts with no LoRAs or model settings: those belong to one model.
+  // A new model keeps the look's LoRAs: the LoRA section says which ones do
+  // not fit the new model (with Remove buttons) instead of dropping them all.
+  // Guidance, "things to avoid" text and picture size start empty: their
+  // allowed ranges belong to one model and the new model's defaults apply.
   const pickModel = (model: SogniModel | null) => {
     setDraft((d) =>
       d && (model?.id ?? "") !== d.model && (model === null || model.id !== sogniLoras?.modelId)
-        ? { ...d, model: model?.id ?? "", loras: [], guidance: "", negativePrompt: "", width: "", height: "" }
+        ? { ...d, model: model?.id ?? "", guidance: "", negativePrompt: "", width: "", height: "" }
         : d,
     );
+  };
+
+  // "Make a copy": the worker copies every field under "<name> (copy)"; the copy opens for editing.
+  const onCopy = async (look: Look) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = (await copyLook({ id: look.id })) as LooksResponse & { look?: Look };
+      setLooks(res.looks ?? []);
+      if (res.look) startEdit(res.look);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const onSave = async () => {
@@ -1798,6 +1989,15 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
                 {canManage ? (
                   <span style={{ display: "flex", gap: 8 }}>
                     <button type="button" style={ghostBtn} disabled={busy} onClick={() => startEdit(look)}>Edit</button>
+                    <button
+                      type="button"
+                      style={ghostBtn}
+                      disabled={busy}
+                      title="Make a new look with everything this one has (LoRAs, character sheet, reference pictures...), for example to try another model"
+                      onClick={() => void onCopy(look)}
+                    >
+                      Make a copy
+                    </button>
                     <button type="button" style={ghostBtn} disabled={busy} onClick={() => void onDelete(look)}>Delete</button>
                   </span>
                 ) : null}
@@ -1905,9 +2105,8 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
                   setDraft({
                     ...draft,
                     provider: e.target.value,
-                    // A model belongs to one service.
+                    // A model belongs to one service. LoRAs stay (unused, with a warning, off Sogni).
                     model: e.target.value === draft.provider ? draft.model : "",
-                    loras: e.target.value === "sogni" ? draft.loras : [],
                   })
                 }
                 style={input}
@@ -1915,6 +2114,7 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
                 <option value="">The normal one (from settings)</option>
                 <option value="fal">Fal.ai</option>
                 <option value="sogni">Sogni</option>
+                <option value="higgsfield">Higgsfield</option>
               </select>
             </label>
             {draft.provider !== "sogni" ? (
@@ -1948,6 +2148,7 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
                 filterOn={draft.safeContentFilter}
                 note={sogniLoras?.note ?? null}
                 disabled={busy}
+                checks={sogniLoras?.checks ?? null}
               />
               {chosenModel ? (
                 <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
@@ -2030,7 +2231,63 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
                 ) : null}
               </div>
             </>
-          ) : null}
+          ) : (
+            <KeptLorasNotice
+              picked={draft.loras}
+              serviceLabel={SERVICE_LABEL[draft.provider] ?? null}
+              onChange={(loras) => setDraft((d) => (d ? { ...d, loras } : d))}
+              disabled={busy}
+            />
+          )}
+
+          <div style={{ ...card, gap: 6 }} aria-label="Person (identity)">
+            <label style={field}>
+              <span style={{ fontWeight: 600 }}>Person (identity)</span>
+              <select
+                style={input}
+                value={draft.identityId ?? ""}
+                disabled={busy}
+                onChange={(e) => setDraft((d) => (d ? { ...d, identityId: e.target.value, identitySameOutfit: e.target.value ? d.identitySameOutfit : false } : d))}
+              >
+                <option value="">None</option>
+                {identities.map((i) => (
+                  <option key={i.id} value={i.id}>{i.name}</option>
+                ))}
+              </select>
+              <span style={{ fontSize: 12, opacity: 0.8 }}>
+                Every picture with this look shows this person: their face picture is always sent first (and their body picture when the model
+                has room), then this look's own pictures. Add people on the Identities tab.
+              </span>
+            </label>
+            {draft.identityId
+              ? (["sogni", "higgsfield"] as const).map((svc) => {
+                  const options = trainedFor(identities.find((i) => i.id === draft.identityId), svc);
+                  if (options.length === 0) return null;
+                  return (
+                    <label key={svc} style={field}>
+                      <span>{svc === "sogni" ? "Sogni LoRA for this person" : "Higgsfield Soul ID for this person"}</span>
+                      <select
+                        style={input}
+                        disabled={busy}
+                        value={draft.identityTrained?.[svc] ?? ""}
+                        onChange={(e) => setDraft((d) => (d ? { ...d, identityTrained: { ...(d.identityTrained ?? {}), [svc]: e.target.value } } : d))}
+                      >
+                        <option value="">The newest ready one</option>
+                        {options.map((t) => (
+                          <option key={t.id} value={t.id}>{t.ref} ({t.status})</option>
+                        ))}
+                      </select>
+                    </label>
+                  );
+                })
+              : null}
+            {draft.identityId ? (
+              <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 13 }}>
+                <input type="checkbox" checked={draft.identitySameOutfit === true} disabled={busy} onChange={(e) => setDraft((d) => (d ? { ...d, identitySameOutfit: e.target.checked } : d))} />
+                Same outfit as in the person's outfit picture
+              </label>
+            ) : null}
+          </div>
 
           <details style={{ ...card, gap: 8 }} open={sheetOpen} onToggle={(e) => setSheetOpen(e.currentTarget.open)}>
             <summary style={{ fontWeight: 600, cursor: "pointer" }}>Character sheet (optional)</summary>
@@ -2228,13 +2485,13 @@ export function SidebarLink(_props: PluginSidebarProps) {
   );
 }
 
-type MediaStudioTabKey = "create" | "edit" | "looks" | "storylines" | "settings";
+type MediaStudioTabKey = "create" | "edit" | "looks" | "identities" | "rooms" | "storylines" | "settings";
 
 /** Reads ?tab= from the current URL without pulling in the host router (standalone module). */
 function initialTabFromLocation(): MediaStudioTabKey {
   if (typeof window === "undefined") return "create";
   const tab = new URLSearchParams(window.location.search).get("tab");
-  return tab === "looks" || tab === "edit" || tab === "storylines" || tab === "settings" ? tab : "create";
+  return tab === "looks" || tab === "edit" || tab === "identities" || tab === "rooms" || tab === "storylines" || tab === "settings" ? tab : "create";
 }
 
 const tabBtn: React.CSSProperties = { padding: "8px 14px", borderRadius: 8, border: "1px solid transparent", cursor: "pointer", fontSize: 13, fontWeight: 600, background: "transparent" };
@@ -2256,16 +2513,23 @@ export function MediaStudioPage({ context }: PluginPageProps) {
   const nav = useHostNavigation();
   const [tab, setTab] = useState<MediaStudioTabKey>(initialTabFromLocation);
   const [editFileId, setEditFileId] = useState<string | null>(initialEditFileIdFromLocation);
-  // Settings holds the instance-wide plugin config (API keys), saved through
-  // the instance-admin-gated generic route, so it's instance-admin only --
-  // not company owners/admins, who manage looks but not this. Everyone else
-  // never sees the tab, and a link straight to it shows the Create tab instead.
+  // Settings holds this company's own service keys and identity settings
+  // (company owner/admin) and, for the instance admin only, the instance-wide
+  // defaults (saved through the instance-admin-gated generic plugin-config
+  // route). Everyone else never sees the tab, and a link straight to it shows
+  // the Create tab instead.
   const checkSettingsAccess = usePluginAction(ACTION_SETTINGS_ACCESS);
   const [canManageSettings, setCanManageSettings] = useState<boolean | null>(null);
+  const [isInstanceAdmin, setIsInstanceAdmin] = useState(false);
   useEffect(() => {
     let cancelled = false;
     checkSettingsAccess({})
-      .then((result) => { if (!cancelled) setCanManageSettings((result as { canManage?: boolean } | null)?.canManage === true); })
+      .then((result) => {
+        if (cancelled) return;
+        const access = (result ?? {}) as { canManage?: boolean; isInstanceAdmin?: boolean };
+        setCanManageSettings(access.canManage === true);
+        setIsInstanceAdmin(access.isInstanceAdmin === true);
+      })
       .catch(() => { if (!cancelled) setCanManageSettings(false); });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2299,6 +2563,12 @@ export function MediaStudioPage({ context }: PluginPageProps) {
         <button type="button" role="tab" aria-selected={activeTab === "looks"} style={activeTab === "looks" ? tabBtnActive : tabBtnInactive} onClick={() => selectTab("looks")}>
           Looks
         </button>
+        <button type="button" role="tab" aria-selected={activeTab === "identities"} style={activeTab === "identities" ? tabBtnActive : tabBtnInactive} onClick={() => selectTab("identities")}>
+          Identities
+        </button>
+        <button type="button" role="tab" aria-selected={activeTab === "rooms"} style={activeTab === "rooms" ? tabBtnActive : tabBtnInactive} onClick={() => selectTab("rooms")}>
+          Rooms
+        </button>
         <button type="button" role="tab" aria-selected={activeTab === "storylines"} style={activeTab === "storylines" ? tabBtnActive : tabBtnInactive} onClick={() => selectTab("storylines")}>
           Storylines
         </button>
@@ -2311,9 +2581,15 @@ export function MediaStudioPage({ context }: PluginPageProps) {
       {activeTab === "create" ? (
         <MediaStudioCreateTab context={context} onEditFile={(fileId) => selectTab("edit", { fileId })} />
       ) : activeTab === "settings" ? (
-        showSettings ? <PluginConfigForm pluginId={PLUGIN_ID} /> : null
+        showSettings ? (
+          <MediaStudioSettingsTab companyId={context.companyId ?? null} isInstanceAdmin={isInstanceAdmin} instanceForm={<PluginConfigForm pluginId={PLUGIN_ID} />} />
+        ) : null
       ) : activeTab === "edit" ? (
         <MediaStudioEditTab context={context} initialFileId={editFileId} />
+      ) : activeTab === "identities" ? (
+        <IdentitiesPanel context={context} />
+      ) : activeTab === "rooms" ? (
+        <RoomsPanel context={context} />
       ) : activeTab === "storylines" ? (
         <MediaStudioStorylinesPage context={context} />
       ) : (

@@ -144,6 +144,9 @@ export function sogniWorkflowModel(model: string, tool: SogniTool): string {
   return key ?? canonical;
 }
 
+/** edit_image makes at most this many pictures per call for Media Studio (krea-identity-edit's own limit is 2). */
+export const SOGNI_MAX_VARIATIONS = 2;
+
 /** At most this many LoRAs on one picture (Sogni's limit, also advertised as constraints.maxPerRequest). */
 export const SOGNI_MAX_LORAS = 8;
 
@@ -600,6 +603,103 @@ export class SogniProvider implements GenerationProvider {
   }
 
   /**
+   * edit_image with up to SOGNI_MAX_VARIATIONS pictures from one call (used
+   * for identity candidates and LoRA training pictures). The pictures (data:
+   * URIs) are uploaded in order, so picture 1 in the prompt is the first one.
+   * edit_image takes no seed: nothing here can hold a person steady across
+   * calls except the reference pictures themselves.
+   */
+  async editPictures(request: {
+    prompt: string;
+    model: string;
+    pictures: string[];
+    variations: number;
+    loras?: SogniLoraPick[];
+    imageSize?: string;
+    sizeBounds?: SogniSizeBounds;
+    safeContentFilter?: boolean;
+  }): Promise<{ pictures: Array<{ contentType: string; contentBase64: string }>; workflowId: string; model: string; credits: number | null }> {
+    if (request.pictures.length === 0) throw new Error("At least one reference picture is needed.");
+    const deadline = this.now() + this.timeoutMs;
+    const model = sogniWorkflowModel(assertSogniModelId(request.model), "edit_image");
+    const max = sogniMaxReferences(model, true);
+    if (request.pictures.length > max) {
+      throw new Error(`Sogni's ${model} model takes at most ${max} reference pictures; this asked for ${request.pictures.length}.`);
+    }
+    const variations = Math.max(1, Math.min(SOGNI_MAX_VARIATIONS, Math.floor(request.variations)));
+    const mediaReferences: Array<{ kind: "image"; url: string }> = [];
+    for (const [index, picture] of request.pictures.entries()) {
+      mediaReferences.push({ kind: "image", url: await this.uploadReference(picture, index, deadline) });
+    }
+    const loras = (request.loras ?? []).slice(0, SOGNI_MAX_LORAS);
+    const step: Json = {
+      id: "picture",
+      toolName: "edit_image",
+      arguments: {
+        prompt: request.prompt,
+        model,
+        sourceImageIndex: -1,
+        numberOfVariations: variations,
+        ...(request.imageSize ? sogniSize(request.imageSize, request.sizeBounds) : {}),
+        ...(loras.length > 0 ? { loras: loras.map((l) => l.id), loraStrengths: loras.map((l) => l.strength) } : {}),
+      },
+    };
+    const { workflowId, pictures } = await this.runWorkflow(
+      "Paperclip identity pictures",
+      step,
+      mediaReferences,
+      request.safeContentFilter !== false,
+      deadline,
+      this.timeoutMs,
+      variations,
+    );
+    return {
+      pictures: pictures.map((p) => ({ contentType: p.contentType, contentBase64: p.bytes.toString("base64") })),
+      workflowId,
+      model,
+      credits: this.lastCredits,
+    };
+  }
+
+  /**
+   * Start a personal LoRA import from a public Hugging Face or Civitai file
+   * address (POST /v1/loras/personal, docs.sogni.ai/api-reference/personal-loras).
+   * Needs an active Sogni Unlimited plan. The import runs on Sogni's side;
+   * check it with personalLora(id).
+   */
+  async importPersonalLora(request: { url: string; name: string; modelId: string }): Promise<{ id: string; status: string }> {
+    const deadline = this.now() + SOGNI_EXECUTE_TIMEOUT_MS;
+    const answer = await this.api(
+      "/v1/loras/personal",
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json", "Idempotency-Key": this.newId() }),
+        body: JSON.stringify({ url: request.url, name: request.name.slice(0, 80), modelId: request.modelId, rightsConfirmed: true }),
+      },
+      deadline,
+    );
+    if (answer.res.status === 403) {
+      throw new Error("Sogni only imports your own LoRAs with an active Sogni Unlimited plan, or the key was not accepted.");
+    }
+    if (!answer.res.ok) throw this.refusal(answer.res, answer.body, "LoRA import");
+    const data = asRecord(answer.body?.data);
+    const id = typeof data?.id === "string" ? data.id : "";
+    if (!id.startsWith("personal-")) throw new Error("Sogni did not say which LoRA it started importing.");
+    return { id, status: typeof data?.status === "string" ? data.status : "queued" };
+  }
+
+  /** A personal LoRA import's state (GET /v1/loras/personal/:id): queued, ready, rejected or revoked. */
+  async personalLora(id: string): Promise<{ id: string; status: string; reason: string | null }> {
+    if (!/^personal-[A-Za-z0-9-]{1,100}$/.test(id)) throw new Error("That is not a Sogni personal LoRA id.");
+    const deadline = this.now() + SOGNI_EXECUTE_TIMEOUT_MS;
+    const answer = await this.api(`/v1/loras/personal/${encodeURIComponent(id)}`, { method: "GET", headers: this.headers() }, deadline);
+    if (!answer.res.ok) throw this.refusal(answer.res, answer.body, "LoRA check");
+    const data = asRecord(answer.body?.data);
+    const reason = [data?.reason, data?.error, data?.message].find((v): v is string => typeof v === "string" && v.trim() !== "") ?? null;
+    return { id, status: typeof data?.status === "string" ? data.status : "unknown", reason: reason ? reason.slice(0, 200) : null };
+  }
+
+  /**
    * One of Sogni's synchronous tools (enhance_prompt) on
    * POST /v1/creative-agent/tools/execute. Returns the tool's text.
    */
@@ -641,7 +741,16 @@ export class SogniProvider implements GenerationProvider {
     safeContentFilter: boolean,
     deadline: number,
     timeoutMs: number,
-  ): Promise<{ workflowId: string; firstStep: Json | null; artifact: Json; picture: { bytes: Buffer; contentType: string }; artifactCount: number }> {
+    /** How many of the finished pictures to download (the first one is always). */
+    download = 1,
+  ): Promise<{
+    workflowId: string;
+    firstStep: Json | null;
+    artifact: Json;
+    picture: { bytes: Buffer; contentType: string };
+    pictures: Array<{ bytes: Buffer; contentType: string }>;
+    artifactCount: number;
+  }> {
     const body: Json = {
       input: { title, steps: [step] },
       token_type: this.options.tokenType ?? "auto",
@@ -672,7 +781,9 @@ export class SogniProvider implements GenerationProvider {
     const artifact = artifacts[0];
     if (!artifact) throw new Error("Sogni finished but sent no picture back. Try again.");
     const picture = await this.download(String(artifact.url), artifact);
-    return { workflowId, firstStep, artifact, picture, artifactCount: artifacts.length };
+    const pictures = [picture];
+    for (const extra of artifacts.slice(1, Math.max(1, download))) pictures.push(await this.download(String(extra.url), extra));
+    return { workflowId, firstStep, artifact, picture, pictures, artifactCount: artifacts.length };
   }
 
   private async waitForWorkflow(workflowId: string, deadline: number, timeoutMs: number): Promise<Json> {

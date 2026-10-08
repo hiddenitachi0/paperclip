@@ -15,15 +15,16 @@ import {
   type SogniSizeBounds,
   type SogniTokenType,
 } from "./sogni.js";
+import { HiggsfieldClient, HiggsfieldProvider } from "./higgsfield.js";
 
 export type FetchImpl = (url: string, init?: RequestInit) => Promise<Response>;
 
-/** The two paid picture services a call or a look can pick between. */
-export const PICTURE_SERVICES = ["fal", "sogni"] as const;
+/** The paid picture services a call or a look can pick between. */
+export const PICTURE_SERVICES = ["fal", "sogni", "higgsfield"] as const;
 export type PictureService = (typeof PICTURE_SERVICES)[number];
 
 export function isPictureService(value: unknown): value is PictureService {
-  return value === "fal" || value === "sogni";
+  return value === "fal" || value === "sogni" || value === "higgsfield";
 }
 
 /**
@@ -72,6 +73,8 @@ export interface GenerationInput {
   sizeBounds?: SogniSizeBounds;
   /** Fal text-to-picture only: how many denoising steps (Fal's num_inference_steps). Quick pictures use few. */
   steps?: number;
+  /** Higgsfield only: a Soul ID (trained face identity) to keep the person, from a saved identity. */
+  customReferenceId?: string;
   /** How long this one picture may take before it is given up (Sogni stops its job). The provider's own limit otherwise. */
   timeoutMs?: number;
 }
@@ -324,6 +327,9 @@ export interface ProviderConfig {
   sogniTokenType?: SogniTokenType;
   /** Byte transfers to and from Sogni's storage (see sogni.ts for why this is not the host fetch). */
   sogniTransferFetch?: FetchImpl;
+  /** Higgsfield "key id:key secret", and the byte fetch for its storage. */
+  higgsfieldCredentials?: string;
+  higgsfieldBytesFetch?: FetchImpl;
 }
 
 export function selectProvider(config: ProviderConfig, fetchImpl: FetchImpl): GenerationProvider {
@@ -347,6 +353,12 @@ export function selectProvider(config: ProviderConfig, fetchImpl: FetchImpl): Ge
       defaultModel: config.sogniModel,
       tokenType: config.sogniTokenType,
     });
+  }
+  if (which === "higgsfield") {
+    if (!config.higgsfieldCredentials) throw new Error("Pick the Higgsfield API key in Media Studio settings (it comes from the company's Secrets).");
+    return new HiggsfieldProvider(
+      new HiggsfieldClient({ credentials: config.higgsfieldCredentials, apiFetch: fetchImpl, bytesFetch: config.higgsfieldBytesFetch ?? fetchImpl }),
+    );
   }
   throw new Error(`unknown provider: ${which}`);
 }

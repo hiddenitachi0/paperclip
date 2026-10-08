@@ -891,7 +891,7 @@ describe.sequential("plugin tool and bridge authz", () => {
         isInstanceAdmin: true,
       },
       renderEnvironment: null,
-    });
+    }, 300_000);
   });
 
   it("passes authenticated actor context and overrides spoofed company scope for plugin actions", async () => {
@@ -930,7 +930,7 @@ describe.sequential("plugin tool and bridge authz", () => {
         isInstanceAdmin: false,
       },
       renderEnvironment: null,
-    });
+    }, 300_000);
   });
 
   it("uses null for board actor userId when no authenticated user id is present", async () => {
@@ -953,7 +953,7 @@ describe.sequential("plugin tool and bridge authz", () => {
         userId: null,
         companyId: companyA,
       }),
-    }));
+    }), 300_000);
   });
 
   it("tells the plugin whether the board user may manage the company (owner/admin, instance admin), never from params", async () => {
@@ -1022,7 +1022,7 @@ describe.sequential("plugin tool and bridge authz", () => {
         isInstanceAdmin: false,
       },
       renderEnvironment: null,
-    });
+    }, 300_000);
 
     call.mockClear();
     const legacyRes = await request(app)
@@ -1053,7 +1053,7 @@ describe.sequential("plugin tool and bridge authz", () => {
         isInstanceAdmin: false,
       },
       renderEnvironment: null,
-    });
+    }, 300_000);
   });
 
   it("rejects agent plugin actions outside the authenticated company scope", async () => {

@@ -1262,6 +1262,8 @@ export const PLUGIN_CAPABILITIES = [
   "personas.picture_feedback.read",
   // Billing
   "billing.media_studio_direct.reserve",
+  // Models: picture analysis with a company's saved model, run by the host
+  "models.image_analysis.run",
   // Plugin State
   "plugin.state.read",
   "plugin.state.write",
