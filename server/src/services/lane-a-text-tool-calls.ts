@@ -76,3 +76,27 @@ export function parseLaneATextToolCall(text: string, offeredToolNames: readonly 
   if (!input) return null;
   return { id, name, input };
 }
+
+const EMPTY_WORDS = new Set(["", "null", "none", "undefined", "nil", "n/a", "na"]);
+
+/**
+ * Small local models often fill optional add-on tool fields with words that
+ * mean "nothing" -- seed "null", issueId "None", look "none", fileId "<ID>" --
+ * and the add-on then refuses the whole call ("The seed must be a whole
+ * number", "Issue not found"). Seen 8 Oct with llama3.2 and qwen3:14b. Such
+ * top-level fields are left out, exactly as if the model had not sent them;
+ * real values are passed through untouched.
+ */
+export function cleanLaneAAddonToolInput(input: Record<string, unknown> | null): Record<string, unknown> | null {
+  if (!input) return input;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (value === null || value === undefined) continue;
+    if (typeof value === "string") {
+      const word = value.trim().toLowerCase();
+      if (EMPTY_WORDS.has(word) || /^<[^<>]{0,40}>$/.test(word)) continue;
+    }
+    out[key] = value;
+  }
+  return out;
+}

@@ -69,7 +69,7 @@ import { logActivity } from "./activity-log.js";
 import { resolveAgentMcpToolLibraryServers } from "./mcp-tool-library.js";
 import { resolveBackupModelsThroughDirectory } from "./model-directory.js";
 import { classifyLocalFailure, modelHealthService } from "./model-health.js";
-import { parseLaneATextToolCall } from "./lane-a-text-tool-calls.js";
+import { cleanLaneAAddonToolInput, parseLaneATextToolCall } from "./lane-a-text-tool-calls.js";
 import {
   buildLaneAActionClaimFallbackLine,
   buildLaneAActionClaimRetryNote,
@@ -2682,7 +2682,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
               try {
                 const executed = await execution.execute({
                   tool: pluginTool.namespacedName,
-                  parameters: input,
+                  parameters: cleanLaneAAddonToolInput(input),
                   runContext: {
                     agentId: ctx.agent.id,
                     runId: pluginRun.run.runId,

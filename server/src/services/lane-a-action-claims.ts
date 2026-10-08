@@ -61,6 +61,8 @@ const FAMILY_RULES: FamilyRule[] = [
       /\bhere(?:'s| is| are) (?:your|the|another|a new|some|more|a few|two|three) (?:(?:new|other|different|fresh)\s+)?(?:pictures?|images?|photos?|shots?|selfies?|videos?|clips?|songs?|audio)\b/i,
       /\bi(?:'m| am|'ll| will|'ve| have)?\s*(?:generat(?:e|ed|ing)|mak(?:e|ing)|made|creat(?:e|ed|ing)|draw(?:ing|n)?|snap(?:ped|ping)?)\s+(?:you\s+)?(?:a|an|the|your|another|one more|a new|new|more|some|a few|two|three)?\s*(?:(?:new|other|different|fresh|quick)\s+)?(?:pictures?|images?|photos?|selfies?|videos?|clips?|songs?|audio)\b/i,
       /\[\s*generating\s+(?:a|the|another)?\s*(?:picture|image|photo|video|audio)[^\]]*\]/i,
+      // "I've started making the video", "I have sent off the job to make your picture".
+      /\bi(?:'ve| have)\s+(?:started|begun|kicked off)\s+(?:making|generating|creating|rendering)\s+(?:you\s+)?(?:a|an|the|your|another)?\s*(?:\S+\s+){0,2}?(?:pictures?|images?|photos?|videos?|clips?|songs?|audio)\b/i,
       /\bi('ll| will) fix it and (?:give|send) you another (?:attempt|try|one|picture|image)\b/i,
       // Norwegian: "her er bildet", "her er et nytt bilde", "jeg lager et bilde til deg".
       /\bher (?:er|kommer) (?:bildet|bildene|videoen|lydklippet|bildet ditt|et nytt bilde|et bilde|et annet bilde|enda et bilde)\b/i,
