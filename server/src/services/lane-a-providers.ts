@@ -452,7 +452,10 @@ export function toOpenAiMessages(system: string, messages: LaneAChatMessage[]): 
       const toolCalls = message.toolCalls ?? [];
       out.push({
         role: "assistant",
-        content: message.content.length > 0 ? message.content : null,
+        // null only beside tool calls: Ollama refuses an assistant message
+        // whose content is null otherwise ("invalid message content type:
+        // <nil>", 8 Oct with qwen3:14b on a video turn).
+        content: message.content && message.content.length > 0 ? message.content : toolCalls.length > 0 ? null : "",
         ...(toolCalls.length > 0
           ? {
               tool_calls: toolCalls.map(
@@ -472,7 +475,7 @@ export function toOpenAiMessages(system: string, messages: LaneAChatMessage[]): 
         out.push({
           role: "tool",
           tool_call_id: result.toolCallId,
-          content: result.isError ? `Error: ${result.content}` : result.content,
+          content: result.isError ? `Error: ${result.content ?? ""}` : (result.content ?? ""),
         });
       }
     }
