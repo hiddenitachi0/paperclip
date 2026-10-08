@@ -85,18 +85,20 @@ export function videoStorylineStillsService(db: Db) {
   const registry = pluginRegistryService(db);
   const secrets = secretService(db);
 
-  async function resolveImageProvider(companyId: string, providerId: VideoStorylineProvider, actorId: string): Promise<{ provider: ImageGenerationProvider; apiKey: string }> {
-    if (providerId !== "fal") {
-      throw unprocessable(
-        "Storyboard stills currently only support the Fal provider. Switch this storyline's provider to Fal to generate stills (Sogni video rendering is unaffected).",
-      );
-    }
+  /**
+   * Storyboard pictures are always made with Fal.ai's image models, whatever
+   * provider renders the video -- a still is just a picture, and Sogni has
+   * no still path here. (Before, a Sogni storyline could never get a still,
+   * so it could never be approved, so it could never render.)
+   */
+  async function resolveImageProvider(companyId: string, actorId: string): Promise<{ provider: ImageGenerationProvider; apiKey: string }> {
+    const noKey = "Storyboard pictures are made with Fal.ai, and no Fal.ai API key is set up in Media Studio settings yet. Add one there, or approve this shot without a picture.";
     const plugin = await registry.getByKey(MEDIA_STUDIO_PLUGIN_KEY);
-    if (!plugin) throw unprocessable("The media-studio plugin is not installed, so there is no Fal key configured.");
+    if (!plugin) throw unprocessable(noKey);
     const config = await registry.getConfig(plugin.id);
     const cfg = (config?.configJson ?? {}) as Record<string, unknown>;
     const ref = typeof cfg.falKeySecretRef === "string" ? cfg.falKeySecretRef.trim() : "";
-    if (!ref) throw unprocessable("No Fal.ai API key is configured in Media Studio settings yet.");
+    if (!ref) throw unprocessable(noKey);
     const apiKey = await secrets.resolveSecretValueForVideoRender(companyId, ref, { actorId });
     return { provider: new FalImageProvider(apiKey, safeImageFetch), apiKey };
   }
@@ -109,9 +111,9 @@ export function videoStorylineStillsService(db: Db) {
       throw conflict("This shot is currently rendering. Wait for it to finish before regenerating its still.");
     }
 
-    const providerId = (shot.providerId ?? storyline.providerId) as VideoStorylineProvider;
-    const estimate = estimateStoryboardCostCents([{ storyboardStatus: shot.storyboardStatus as VideoShotStoryboardStatus }], providerId);
-    const { provider, apiKey } = await resolveImageProvider(companyId, providerId, actor.agentId ?? actor.actorId);
+    // Stills are always a Fal image call (see resolveImageProvider), so they are priced as one.
+    const estimate = estimateStoryboardCostCents([{ storyboardStatus: shot.storyboardStatus as VideoShotStoryboardStatus }], "fal");
+    const { provider, apiKey } = await resolveImageProvider(companyId, actor.agentId ?? actor.actorId);
 
     const referenceAssetIds = [...shot.lookReferenceAssetIds, ...storyline.characterReferenceAssetIds];
     const referenceImages = await loadReferenceImages(db, companyId, referenceAssetIds);
@@ -181,15 +183,21 @@ export function videoStorylineStillsService(db: Db) {
     return toStoryboardShotSummary(row);
   }
 
-  async function approveShot(companyId: string, storylineId: string, shotId: string, actor: VideoStorylineActor): Promise<VideoStoryboardShotSummary> {
+  async function approveShot(
+    companyId: string,
+    storylineId: string,
+    shotId: string,
+    actor: VideoStorylineActor,
+    options: { withoutStill?: boolean } = {},
+  ): Promise<VideoStoryboardShotSummary> {
     await settings.assertEnabled(companyId);
     await storylines.getStorylineRow(companyId, storylineId);
     const shot = await storylines.getShotRow(companyId, storylineId, shotId);
     if (shot.storyboardStatus === "dropped") {
       throw conflict("This shot has been dropped from the storyboard. Edit it to bring it back before approving it.");
     }
-    if (!shot.stillObjectKey) {
-      throw unprocessable("Generate a still for this shot before approving it.");
+    if (!shot.stillObjectKey && !options.withoutStill) {
+      throw unprocessable("Make a storyboard picture for this shot before approving it, or approve it without a picture.");
     }
     const now = new Date();
     const [row] = await db
@@ -206,7 +214,7 @@ export function videoStorylineStillsService(db: Db) {
       action: "video_shot.storyboard_approved",
       entityType: "video_shot",
       entityId: shotId,
-      details: { orderIndex: shot.orderIndex },
+      details: { orderIndex: shot.orderIndex, withoutStill: !shot.stillObjectKey },
     });
     return toStoryboardShotSummary(row);
   }

@@ -1,13 +1,14 @@
 import { buffer as streamToBuffer } from "node:stream/consumers";
 import { and, asc, eq, inArray, lt, ne } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { assets, videoShotRenderJobs, videoShots, videoStorylines } from "@paperclipai/db";
+import { assets, issueAttachments, videoShotRenderJobs, videoShots, videoStorylines } from "@paperclipai/db";
 import {
   MEDIA_STUDIO_PLUGIN_KEY,
   VIDEO_RENDER_JOB_MAX_AGE_MS,
   VIDEO_RENDER_TICK_BATCH,
   VIDEO_SHOT_MIN_DURATION_SECONDS,
   estimateVideoStorylineCostCents,
+  videoRenderDurationSeconds,
   videoRenderRequestPayloadSchema,
   type StartVideoStorylineRenderInput,
   type VideoStorylineProvider,
@@ -88,7 +89,21 @@ export async function loadReferenceImages(db: Db, companyId: string, assetIds: r
   const ids = assetIds.slice(0, MAX_REFERENCE_IMAGES);
   if (ids.length === 0) return [];
   const rows = await db.select().from(assets).where(and(eq(assets.companyId, companyId), inArray(assets.id, ids)));
-  const byId = new Map(rows.map((r) => [r.id, r]));
+  const byId = new Map<string, { provider: string; objectKey: string; contentType: string }>(rows.map((r) => [r.id, r]));
+  // The editor picks character/look pictures from Media Studio's saved
+  // Looks, whose reference ids are company FILE ids (issue_attachments.id,
+  // what the plugin file API hands out) -- not assets.id. Looking those up
+  // only in `assets` found nothing, so every character picture was silently
+  // dropped from stills and renders. Resolve either kind of id.
+  const unresolved = ids.filter((id) => !byId.has(id));
+  if (unresolved.length > 0) {
+    const fileRows = await db
+      .select({ fileId: issueAttachments.id, provider: assets.provider, objectKey: assets.objectKey, contentType: assets.contentType })
+      .from(issueAttachments)
+      .innerJoin(assets, eq(issueAttachments.assetId, assets.id))
+      .where(and(eq(issueAttachments.companyId, companyId), inArray(issueAttachments.id, unresolved)));
+    for (const row of fileRows) byId.set(row.fileId, row);
+  }
   const out: string[] = [];
   for (const id of ids) {
     const row = byId.get(id);
@@ -100,6 +115,10 @@ export async function loadReferenceImages(db: Db, companyId: string, assetIds: r
     }
   }
   return out;
+}
+
+function formatDollars(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`;
 }
 
 export interface VideoStorylineRenderDeps {
@@ -167,7 +186,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
   async function beginShotRender(companyId: string, storyline: typeof videoStorylines.$inferSelect, shot: typeof videoShots.$inferSelect, actorId: string) {
     if (shot.storyboardStatus !== "approved") {
       throw unprocessable(
-        `Shot ${shot.orderIndex}'s storyboard still has not been approved yet. Generate and approve a still for it (or drop it) before rendering.`,
+        `Shot ${shot.orderIndex + 1}'s storyboard still has not been approved yet. Generate and approve a still for it (or drop it) before rendering.`,
       );
     }
     const providerId = (shot.providerId ?? storyline.providerId) as VideoStorylineProvider;
@@ -204,7 +223,10 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       model: model ?? undefined,
       startImage,
       referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
-      durationSeconds: shot.durationSeconds,
+      // Snapped to a length the model accepts (Fal's Kling models only take
+      // 5 or 10 seconds and refuse anything else) -- see
+      // videoRenderDurationSeconds; the estimate bills the same length.
+      durationSeconds: videoRenderDurationSeconds(providerId, model, shot.durationSeconds),
     };
     const handle = await provider.start(input);
     const attempt = shot.attempt + 1;
@@ -240,7 +262,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
   async function startRender(companyId: string, storylineId: string, actor: VideoStorylineActor, input: StartVideoStorylineRenderInput) {
     await settings.assertEnabled(companyId);
     const storyline = await storylines.getStorylineRow(companyId, storylineId);
-    if (!["draft", "estimated", "paused", "failed"].includes(storyline.status)) {
+    if (!["draft", "estimated", "paused", "failed", "cancelled"].includes(storyline.status)) {
       throw conflict(`This storyline is already ${storyline.status.replace(/_/g, " ")}.`);
     }
     const shots = await db.select().from(videoShots).where(eq(videoShots.storylineId, storylineId)).orderBy(asc(videoShots.orderIndex));
@@ -259,18 +281,28 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     const unapproved = renderableShots.find((s) => s.status !== "done" && s.storyboardStatus !== "approved");
     if (unapproved) {
       throw unprocessable(
-        `Shot ${unapproved.orderIndex}'s storyboard still has not been approved yet. Approve every shot's still before starting the render (or drop shots you don't want to render).`,
+        `Shot ${unapproved.orderIndex + 1}'s storyboard still has not been approved yet. Approve every shot's still before starting the render (or drop shots you don't want to render).`,
       );
     }
 
-    const estimateResult = estimateVideoStorylineCostCents(renderableShots, storyline.providerId as VideoStorylineProvider);
+    const estimateResult = estimateVideoStorylineCostCents(renderableShots, storyline.providerId as VideoStorylineProvider, { model: storyline.model });
     const effectiveBudgetCapCents = input.confirmBudgetCapCents ?? storyline.budgetCapCents;
     if (effectiveBudgetCapCents === null || effectiveBudgetCapCents === undefined) {
-      throw badRequest("Set a budget cap before starting a render (or pass confirmBudgetCapCents to set one now).");
+      throw badRequest(
+        `Set a budget cap before starting a render, so spending stops at a limit you chose. This render is estimated at ${formatDollars(estimateResult.estimatedTotalCents)}.`,
+      );
     }
-    if (storyline.spentCents + estimateResult.estimatedTotalCents > effectiveBudgetCapCents) {
+    // Only shots still to render cost anything from here on -- counting
+    // already-finished shots again (their cost is in spentCents) made a
+    // storyline paused at its cap impossible to resume.
+    const remainingEstimate = estimateVideoStorylineCostCents(
+      renderableShots.filter((s) => s.status !== "done"),
+      storyline.providerId as VideoStorylineProvider,
+      { model: storyline.model },
+    );
+    if (storyline.spentCents + remainingEstimate.estimatedTotalCents > effectiveBudgetCapCents) {
       throw unprocessable(
-        `Estimated cost (${estimateResult.estimatedTotalCents} cents) plus what's already spent (${storyline.spentCents} cents) would exceed the budget cap (${effectiveBudgetCapCents} cents). Raise the cap or pass a higher confirmBudgetCapCents to proceed anyway.`,
+        `This render is estimated at ${formatDollars(remainingEstimate.estimatedTotalCents)}, and ${formatDollars(storyline.spentCents)} is already spent -- together that is over the budget cap of ${formatDollars(effectiveBudgetCapCents)}. Raise the budget cap to at least ${formatDollars(storyline.spentCents + remainingEstimate.estimatedTotalCents)} to go ahead.`,
       );
     }
 
@@ -352,11 +384,11 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       throw conflict("This shot has been dropped from the storyboard. Edit it to bring it back before re-rendering it.");
     }
     if (shot.storyboardStatus !== "approved") {
-      throw unprocessable(`Shot ${shot.orderIndex}'s storyboard still has not been approved yet. Approve it before re-rendering.`);
+      throw unprocessable(`Shot ${shot.orderIndex + 1}'s storyboard still has not been approved yet. Approve it before re-rendering.`);
     }
     const refundCents = shot.actualCostCents ?? 0;
     const spentAfterRefund = Math.max(0, storyline.spentCents - refundCents);
-    const shotEstimate = estimateVideoStorylineCostCents([{ durationSeconds: shot.durationSeconds }], storyline.providerId as VideoStorylineProvider);
+    const shotEstimate = estimateVideoStorylineCostCents([{ durationSeconds: shot.durationSeconds }], storyline.providerId as VideoStorylineProvider, { model: storyline.model });
     if (storyline.budgetCapCents !== null && spentAfterRefund + shotEstimate.estimatedTotalCents > storyline.budgetCapCents) {
       throw unprocessable(
         `Re-rendering this shot (estimated ${shotEstimate.estimatedTotalCents} cents) would push spend to ${spentAfterRefund + shotEstimate.estimatedTotalCents} cents, over the budget cap (${storyline.budgetCapCents} cents). Raise the cap first.`,
@@ -421,7 +453,10 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
 
     const providerId = (shot.providerId ?? storyline.providerId) as VideoStorylineProvider;
     const model = shot.model ?? storyline.model;
-    const previewEstimate = estimateVideoStorylineCostCents([{ durationSeconds: PREVIEW_DURATION_SECONDS }], providerId);
+    // The shortest clip this model will actually make (1s for a model that
+    // takes any length, 5s for Fal's Kling models, which refuse 1s).
+    const previewDurationSeconds = videoRenderDurationSeconds(providerId, model, PREVIEW_DURATION_SECONDS);
+    const previewEstimate = estimateVideoStorylineCostCents([{ durationSeconds: previewDurationSeconds }], providerId);
     if (storyline.budgetCapCents !== null && storyline.spentCents + previewEstimate.estimatedTotalCents > storyline.budgetCapCents) {
       throw unprocessable(
         `Rendering a preview (estimated ${previewEstimate.estimatedTotalCents} cents) would exceed the budget cap (${storyline.budgetCapCents} cents). Raise the cap first.`,
@@ -447,7 +482,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       model: model ?? undefined,
       startImage,
       referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
-      durationSeconds: PREVIEW_DURATION_SECONDS,
+      durationSeconds: previewDurationSeconds,
     });
 
     const deadline = nowOf().getTime() + PREVIEW_POLL_TIMEOUT_MS;
@@ -632,7 +667,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       contentType,
       body: buffer,
     });
-    const estimateForShot = estimateVideoStorylineCostCents([{ durationSeconds: shot.durationSeconds }], storyline.providerId as VideoStorylineProvider);
+    const estimateForShot = estimateVideoStorylineCostCents([{ durationSeconds: shot.durationSeconds }], storyline.providerId as VideoStorylineProvider, { model: storyline.model });
     let actualCostCents = estimateForShot.estimatedTotalCents;
     // DUR-4455: Fal video is priced per its published unit (usually seconds); Sogni has no Fal price and keeps the static estimate.
     if (storyline.providerId === "fal" && fal) {
@@ -642,7 +677,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
         agentId: storyline.createdByAgentId,
         createdByUserId: storyline.createdByAgentId ? null : storyline.createdByUserId,
         model: fal.model,
-        usage: { seconds: shot.durationSeconds },
+        usage: { seconds: videoRenderDurationSeconds("fal", shot.model ?? storyline.model, shot.durationSeconds) },
         estimateCents: estimateForShot.estimatedTotalCents,
         billingCode: "video-storyline-shot",
       });
@@ -708,17 +743,17 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
         .set({
           spentCents,
           status: "paused",
-          errorMessage: `Shot ${next.orderIndex}'s storyboard still needs approval before rendering can continue. Approve it and start the render again.`,
+          errorMessage: `Shot ${next.orderIndex + 1}'s storyboard still needs approval before rendering can continue. Approve it and start the render again.`,
           updatedAt: nowOf(),
         })
         .where(eq(videoStorylines.id, storyline.id));
       return;
     }
-    const nextEstimate = estimateVideoStorylineCostCents([{ durationSeconds: next.durationSeconds }], storyline.providerId as VideoStorylineProvider);
+    const nextEstimate = estimateVideoStorylineCostCents([{ durationSeconds: next.durationSeconds }], storyline.providerId as VideoStorylineProvider, { model: storyline.model });
     if (storyline.budgetCapCents !== null && spentCents + nextEstimate.estimatedTotalCents > storyline.budgetCapCents) {
       await db
         .update(videoStorylines)
-        .set({ spentCents, status: "paused", errorMessage: `Budget cap reached before shot ${next.orderIndex}. Raise the cap and start the render again to continue.`, updatedAt: nowOf() })
+        .set({ spentCents, status: "paused", errorMessage: `Budget cap reached before shot ${next.orderIndex + 1}. Raise the cap and start the render again to continue.`, updatedAt: nowOf() })
         .where(eq(videoStorylines.id, storyline.id));
       return;
     }
