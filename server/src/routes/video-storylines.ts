@@ -7,8 +7,15 @@ import {
   approveVideoDirectorRunSchema,
   createVideoSceneSchema,
   createVideoShotSchema,
+  createVideoStorylineFromScriptSchema,
   createVideoStorylineSchema,
   draftVideoDirectorShotsSchema,
+  importVideoStorylineScriptSchema,
+  validateVideoStorylineScript,
+  VIDEO_CLIP_LENGTH_NOTE,
+  VIDEO_STORYLINE_SCRIPT_EXAMPLE,
+  VIDEO_STORYLINE_SCRIPT_INSTRUCTIONS,
+  type ParsedVideoStorylineScript,
   editVideoDirectorProposalSchema,
   dropStoryboardShotSchema,
   generateStoryboardStillSchema,
@@ -22,7 +29,7 @@ import {
 import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
 import { assertBoardOrAgent, assertBoardOrgAccess, assertCompanyAccess } from "./authz.js";
-import { notFound } from "../errors.js";
+import { badRequest, notFound, unprocessable } from "../errors.js";
 import { logActivity } from "../services/activity-log.js";
 import { getStorageService } from "../storage/index.js";
 import { videoStorylineService, type VideoStorylineActor } from "../services/video-storylines.js";
@@ -238,6 +245,59 @@ export function videoStorylineRoutes(rawDb: Db) {
     },
   );
 
+  /** A script that fails validation is refused with every problem listed in plain words (details.errors), never a raw schema dump. */
+  function parseScriptOrThrow(script: unknown): ParsedVideoStorylineScript {
+    const result = validateVideoStorylineScript(script);
+    if (!result.ok) {
+      const count = result.errors.length;
+      throw unprocessable(
+        count === 1 ? `The script has a problem: ${result.errors[0]}` : `The script has ${count} problems. First: ${result.errors[0]}`,
+        { errors: result.errors },
+      );
+    }
+    return result.script;
+  }
+
+  // ─── Script-writer instructions + JSON import ─────────────────────────
+
+  /**
+   * The ready-made instructions to hand an AI script writer -- the same
+   * shared constant the editor's "Script-writer instructions" button shows
+   * (it fetches this route), so the two can never drift apart. Registered
+   * before GET .../:storylineId so "script-instructions" is never read as a
+   * storyline id.
+   */
+  router.get("/companies/:companyId/video-storylines/script-instructions", ...gatedScope(), async (_req, res) => {
+    res.json({
+      markdown: VIDEO_STORYLINE_SCRIPT_INSTRUCTIONS,
+      example: VIDEO_STORYLINE_SCRIPT_EXAMPLE,
+      clipLengthNote: VIDEO_CLIP_LENGTH_NOTE,
+    });
+  });
+
+  /** A brand-new storyline (plus all its scenes and shots, in one transaction) from a script. dryRun: true only checks it and returns the summary. */
+  router.post(
+    "/companies/:companyId/video-storylines/import",
+    validate(createVideoStorylineFromScriptSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const script = parseScriptOrThrow(req.body.script);
+      const title = (req.body.title as string | undefined) ?? script.title;
+      if (!title) {
+        throw badRequest("Give the storyline a title (or add a \"title\" to the script).");
+      }
+      const result = await storylines.createStorylineFromScript(
+        companyId,
+        { title, providerId: req.body.providerId, model: req.body.model, budgetCapCents: req.body.budgetCapCents },
+        script,
+        actorOf(req),
+        { dryRun: req.body.dryRun },
+      );
+      res.status(req.body.dryRun ? 200 : 201).json(result);
+    },
+  );
+
   // ─── Storylines ────────────────────────────────────────────────────────
 
   router.get("/companies/:companyId/video-storylines", ...gatedScope(), async (req, res) => {
@@ -394,6 +454,25 @@ export function videoStorylineRoutes(rawDb: Db) {
     },
   );
 
+  /**
+   * Imports a script into an existing storyline -- same gate as creating
+   * shots (gatedScope: board or agent of this company, feature on). "append"
+   * adds after the existing scenes; "replace" swaps the scene/shot tree and
+   * is refused once anything was rendered or paid for. All scenes and shots
+   * are written in one transaction.
+   */
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/import",
+    validate(importVideoStorylineScriptSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      const script = parseScriptOrThrow(req.body.script);
+      res.json(await storylines.importScript(companyId, storylineId, script, req.body.mode, actorOf(req), { dryRun: req.body.dryRun }));
+    },
+  );
+
   // ─── Scenes ──────────────────────────────────────────────────────────
 
   router.get("/companies/:companyId/video-storylines/:storylineId/scenes", ...gatedScope(), async (req, res) => {
@@ -520,7 +599,7 @@ export function videoStorylineRoutes(rawDb: Db) {
       const companyId = req.params.companyId as string;
       const storylineId = req.params.storylineId as string;
       const shotId = req.params.shotId as string;
-      res.json(await stills.approveShot(companyId, storylineId, shotId, actorOf(req)));
+      res.json(await stills.approveShot(companyId, storylineId, shotId, actorOf(req), { withoutStill: req.body.withoutStill === true }));
     },
   );
 
