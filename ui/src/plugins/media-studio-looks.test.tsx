@@ -6,11 +6,14 @@ import {
   MediaStudioLooksPage,
   clampStrength,
   draftToSaveParams,
+  loraFits,
+  withoutMisfits,
   filterSogniModels,
   modelFilterNotice,
   type LookDraft,
 } from "../../../packages/plugins/media-studio/src/ui/index";
 import {
+  classifyLoras,
   lorasForModel,
   parseSogniLoraCatalog,
   parseSogniModelCatalog,
@@ -129,7 +132,7 @@ describe("Media Studio looks page with Sogni models and LoRAs", () => {
     await openNewSogniLook();
     options().find((o) => o.textContent?.startsWith("Krea 2 Turbo"))!.click();
     await flush();
-    expect(actions["sogni.loras"]).toHaveBeenLastCalledWith({ modelId: "krea2_turbo_fp8_scaled" });
+    expect(actions["sogni.loras"]).toHaveBeenLastCalledWith({ modelId: "krea2_turbo_fp8_scaled", picked: [] });
     expect(container.querySelector('[aria-label="Chosen model"]')!.textContent).toContain(
       "Picture size: width 512 to 2048 (usually 1024), height 512 to 2048 (usually 1024).",
     );
@@ -198,6 +201,200 @@ describe("Media Studio looks page with Sogni models and LoRAs", () => {
     expect(actions["looks.save"]).toHaveBeenCalledWith(
       expect.objectContaining({ model: DARK_BEAST_V9, loras: [], safeContentFilter: false }),
     );
+  });
+});
+
+const MODEL_NAMES = Object.fromEntries(MODELS.map((model) => [model.id, model.name]));
+
+/** The worker's sogni.loras answer, with the look's LoRAs checked against the model (as the worker does). */
+function lorasAnswer({ modelId, picked }: { modelId: string; picked?: Array<{ id: string; name?: string }> }) {
+  return {
+    modelId,
+    loras: lorasForModel(LORAS, modelId),
+    maxLoras: 8,
+    personal: "owners-only",
+    note: null,
+    checks: classifyLoras({ id: modelId, name: MODEL_NAMES[modelId] ?? modelId }, picked ?? [], LORAS.loras, MODEL_NAMES),
+  };
+}
+
+const SAVED_LOOK = {
+  id: "look-1",
+  name: "Catalogue",
+  style: "soft daylight",
+  provider: "sogni",
+  model: "krea2_turbo_fp8_scaled",
+  modelName: "Krea 2 Turbo",
+  seed: 1234,
+  referenceFileIds: [],
+  referenceRoles: [],
+  sheet: { hair: "long, blonde" },
+  loras: [
+    { id: "krea2-candid", name: "Editorial <-> Candid", strength: 4 },
+    { id: "krea2-warm-light", name: "Warm Light", strength: 2 },
+  ],
+  guidance: null,
+  negativePrompt: null,
+  size: null,
+  safeContentFilter: true,
+  updatedAt: "2026-10-08T00:00:00.000Z",
+};
+
+describe("Media Studio looks page: LoRAs survive a model change, and Make a copy", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    for (const key of Object.keys(actions)) delete actions[key];
+    actions["looks.list"] = vi.fn(async () => ({ looks: [SAVED_LOOK], canManage: true, maxReferenceFiles: 4 }));
+    actions["looks.save"] = vi.fn(async () => ({ looks: [SAVED_LOOK] }));
+    actions["looks.copy"] = vi.fn(async () => ({
+      looks: [SAVED_LOOK, { ...SAVED_LOOK, id: "look-2", name: "Catalogue (copy)" }],
+      look: { ...SAVED_LOOK, id: "look-2", name: "Catalogue (copy)" },
+    }));
+    actions["sogni.models"] = vi.fn(async () => ({ models: MODELS_WITH_LORA_FLAG, live: true, maxLoras: 8, note: null }));
+    actions["sogni.loras"] = vi.fn(async (params: { modelId: string; picked?: Array<{ id: string; name?: string }> }) => lorasAnswer(params));
+    installBridge();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ artifacts: [] }), { status: 200 })));
+    container = document.createElement("div");
+    document.body.appendChild(container);
+  });
+
+  afterEach(() => {
+    root?.unmount();
+    container.remove();
+    vi.unstubAllGlobals();
+  });
+
+  async function render() {
+    root = createRoot(container);
+    root.render(<MediaStudioLooksPage context={{ companyId: COMPANY } as never} />);
+    await flush();
+  }
+
+  const option = (name: string) =>
+    [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')].find((o) => o.querySelector("span")?.textContent === name)!;
+  const loraSection = () => container.querySelector('[aria-label="LoRAs"]')!;
+
+  it("keeps the LoRAs when switching Krea 2 Turbo -> Dark Beast KREA 2 -> Z-Image Turbo, and warns about the ones that do not fit", async () => {
+    await render();
+    buttonNamed(container, "Edit").click();
+    await flush();
+    expect(actions["sogni.loras"]).toHaveBeenLastCalledWith({
+      modelId: "krea2_turbo_fp8_scaled",
+      picked: [
+        { id: "krea2-candid", name: "Editorial <-> Candid" },
+        { id: "krea2-warm-light", name: "Warm Light" },
+      ],
+    });
+
+    option("Dark Beast KREA 2 黑兽").click();
+    await flush();
+    expect(loraSection().textContent).toContain("LoRAs (2 of at most 8)");
+    expect(container.querySelector('input[aria-label="Strength of Editorial <-> Candid"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="LoRAs that do not fit"]')).toBeNull();
+
+    option("Z-Image Turbo").click();
+    await flush();
+    expect(actions["sogni.loras"]).toHaveBeenLastCalledWith(expect.objectContaining({ modelId: "z_image_turbo_bf16" }));
+    // Still both, each with a plain warning and its own Remove button.
+    expect(loraSection().textContent).toContain("LoRAs (2 of at most 8)");
+    expect(loraSection().textContent).toContain(
+      "Made for Krea 2 Turbo, Krea 2 Identity Edit, Dark Beast KREA 2 黑兽 and 2 more; Z-Image Turbo may ignore it or give odd results.",
+    );
+    expect(container.querySelector('[aria-label="LoRAs that do not fit"]')!.textContent).toContain(
+      "2 LoRAs on this look are made for other models than Z-Image Turbo.",
+    );
+    expect(container.querySelector('button[aria-label="Remove Warm Light"]')).not.toBeNull();
+
+    // Saving with LoRAs that do not fit is allowed: they go with the look.
+    buttonNamed(container, "Save look").click();
+    await flush();
+    expect(actions["looks.save"]).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        id: "look-1",
+        model: "z_image_turbo_bf16",
+        loras: [
+          { id: "krea2-candid", strength: 4 },
+          { id: "krea2-warm-light", strength: 2 },
+        ],
+      }),
+    );
+  });
+
+  it("removes one misfit, or all of them at once", async () => {
+    await render();
+    buttonNamed(container, "Edit").click();
+    await flush();
+    option("Z-Image Turbo").click();
+    await flush();
+    container.querySelector<HTMLButtonElement>('button[aria-label="Remove Warm Light"]')!.click();
+    await flush();
+    expect(loraSection().textContent).toContain("LoRAs (1 of at most 8)");
+    buttonNamed(container, "Remove all that don't fit").click();
+    await flush();
+    expect(loraSection().textContent).toContain("LoRAs (0 of at most 8)");
+  });
+
+  it("keeps the LoRAs when the service changes to Fal.ai, says they are not used there, and can remove them", async () => {
+    await render();
+    buttonNamed(container, "Edit").click();
+    await flush();
+    const service = [...container.querySelectorAll("select")].find((s) => [...s.options].some((o) => o.value === "fal"))!;
+    setValue(service, "fal");
+    await flush();
+    const notice = container.querySelector('[aria-label="LoRAs kept from Sogni"]')!;
+    expect(notice.textContent).toContain("This look keeps 2 Sogni LoRAs. Fal.ai does not use Sogni's LoRAs");
+    // Back on Sogni (the model starts empty, as a model belongs to one service): still there.
+    setValue(service, "sogni");
+    await flush();
+    expect(loraSection().textContent).toContain("This look keeps these 2 LoRAs, but they are only used once a Sogni model is picked.");
+    setValue(service, "fal");
+    await flush();
+    buttonNamed(container, "Remove all LoRAs").click();
+    await flush();
+    expect(container.querySelector('[aria-label="LoRAs kept from Sogni"]')).toBeNull();
+  });
+
+  it("Make a copy asks the worker for a copy and opens it for editing", async () => {
+    await render();
+    buttonNamed(container, "Make a copy").click();
+    await flush();
+    expect(actions["looks.copy"]).toHaveBeenCalledWith({ id: "look-1" });
+    expect(container.textContent).toContain("Edit look");
+    expect(container.querySelector<HTMLInputElement>('input[placeholder="Catalogue"]')!.value).toBe("Catalogue (copy)");
+    // Everything came along, the LoRAs included.
+    expect(loraSection().textContent).toContain("LoRAs (2 of at most 8)");
+    buttonNamed(container, "Save look").click();
+    await flush();
+    expect(actions["looks.save"]).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: "look-2", name: "Catalogue (copy)", seed: "1234", sheet: { hair: "long, blonde" } }),
+    );
+  });
+
+  it("does not offer Make a copy to a member", async () => {
+    actions["looks.list"] = vi.fn(async () => ({ looks: [SAVED_LOOK], canManage: false, maxReferenceFiles: 4 }));
+    await render();
+    expect([...container.querySelectorAll("button")].some((b) => b.textContent === "Make a copy")).toBe(false);
+  });
+});
+
+describe("LoRA fit helpers", () => {
+  const picked = [
+    { id: "krea2-candid", name: "Editorial <-> Candid", strength: 4 },
+    { id: "gone", name: "Gone", strength: 1 },
+  ];
+  it("fits when in the model's list, else uses the worker's check, else can't tell", () => {
+    const z = { id: "z_image_turbo_bf16", name: "Z-Image Turbo" };
+    expect(loraFits(picked, z, null, null)).toEqual({ "krea2-candid": null, gone: null });
+    const checks = classifyLoras(z, picked, LORAS.loras, MODEL_NAMES);
+    const fits = loraFits(picked, z, [], checks);
+    expect(fits["krea2-candid"]!.fit).toBe("other-models");
+    expect(fits.gone!.fit).toBe("unknown");
+    expect(loraFits(picked, z, [], null).gone).toEqual({ fit: "unknown", warning: "We can't tell whether this LoRA works with Z-Image Turbo." });
+    expect(withoutMisfits(picked, fits).map((l) => l.id)).toEqual(["gone"]);
+    const krea = { id: "krea2_turbo_fp8_scaled", name: "Krea 2 Turbo" };
+    expect(loraFits(picked, krea, lorasForModel(LORAS, krea.id) as never, null)["krea2-candid"]).toEqual({ fit: "fits", warning: null });
   });
 });
 
@@ -333,7 +530,14 @@ describe("looks page helpers", () => {
       height: "720",
       safeContentFilter: false,
     };
-    expect(draftToSaveParams(draft)).toMatchObject({ loras: [], guidance: null, negativePrompt: null, size: null, safeContentFilter: true });
+    // LoRAs stay on a look switched to another service (unused there, with a warning on the page).
+    expect(draftToSaveParams(draft)).toMatchObject({
+      loras: [{ id: "krea2-candid", strength: 3 }],
+      guidance: null,
+      negativePrompt: null,
+      size: null,
+      safeContentFilter: true,
+    });
     expect(draftToSaveParams({ ...draft, provider: "sogni" })).toMatchObject({
       loras: [{ id: "krea2-candid", strength: 3 }],
       guidance: "2",

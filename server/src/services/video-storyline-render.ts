@@ -30,6 +30,7 @@ import { loadApprovedStillDataUri } from "./video-storyline-still-frame.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
 import { lockStorylineRow, videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
 import { executePinnedHttpRequest, validateAndResolveFetchUrl } from "./safe-outbound-fetch.js";
+import { mediaStudioKeyRef } from "./media-studio-company-keys.js";
 
 /**
  * DUR-4127: render orchestration for a video storyline. Reuses the Fal/Sogni
@@ -177,11 +178,11 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     if (!plugin) throw unprocessable("The media-studio plugin is not installed, so there is no Fal/Sogni key configured.");
     const config = await registry.getConfig(plugin.id);
     const cfg = (config?.configJson ?? {}) as Record<string, unknown>;
-    const refKey = providerId === "fal" ? "falKeySecretRef" : "sogniKeySecretRef";
-    const ref = typeof cfg[refKey] === "string" ? (cfg[refKey] as string).trim() : "";
+    // The company's own key (Media Studio's Settings tab), else the instance's.
+    const ref = await mediaStudioKeyRef(db, plugin.id, companyId, providerId === "fal" ? "fal" : "sogni", cfg);
     if (!ref) {
       throw unprocessable(
-        `No ${providerId === "fal" ? "Fal.ai" : "Sogni"} API key is configured in Media Studio settings yet.`,
+        `No ${providerId === "fal" ? "Fal.ai" : "Sogni"} API key is set for this company yet. The company's owner or an admin can pick one in Media Studio's Settings tab.`,
       );
     }
     return secrets.resolveSecretValueForVideoRender(companyId, ref, { actorId });

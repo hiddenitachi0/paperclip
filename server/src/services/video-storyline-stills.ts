@@ -39,6 +39,7 @@ import { loadReferenceImages } from "./video-storyline-render.js";
 import { recordFalCostEvent } from "./fal-cost-events.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
 import { lockStorylineRow, videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
+import { mediaStudioKeyRef } from "./media-studio-company-keys.js";
 
 /**
  * DUR-4317/DUR-4320 (backend half, storyboard-of-stills approval gate):
@@ -118,15 +119,17 @@ export function videoStorylineStillsService(db: Db) {
     return { pluginId: plugin.id, cfg: (config?.configJson ?? {}) as Record<string, unknown> };
   }
 
-  function keyRef(cfg: Record<string, unknown>, providerId: VideoStorylineProvider): string {
-    const value = cfg[providerId === "fal" ? "falKeySecretRef" : "sogniKeySecretRef"];
-    return typeof value === "string" ? value.trim() : "";
+  /** The secret id for one picture service: the company's own key (Media Studio's Settings tab), else the instance's, else "". */
+  async function keyRef(pluginId: string | null, companyId: string, cfg: Record<string, unknown>, providerId: VideoStorylineProvider): Promise<string> {
+    if (!pluginId) return "";
+    return mediaStudioKeyRef(db, pluginId, companyId, providerId === "fal" ? "fal" : "sogni", cfg);
   }
 
-  /** Which picture services have a key set up (the editor only offers those). */
-  async function pictureServices(): Promise<{ fal: boolean; sogni: boolean }> {
-    const { cfg } = await mediaStudioConfig();
-    return { fal: keyRef(cfg, "fal") !== "", sogni: keyRef(cfg, "sogni") !== "" };
+  /** Which picture services this company has a key for (the editor only offers those). */
+  async function pictureServices(companyId: string): Promise<{ fal: boolean; sogni: boolean }> {
+    const { pluginId, cfg } = await mediaStudioConfig();
+    const [fal, sogni] = await Promise.all([keyRef(pluginId, companyId, cfg, "fal"), keyRef(pluginId, companyId, cfg, "sogni")]);
+    return { fal: fal !== "", sogni: sogni !== "" };
   }
 
   /** What the shot's next storyboard picture is made with: the storyline's picture settings, the shot's own look, the company's looks. */
@@ -143,20 +146,20 @@ export function videoStorylineStillsService(db: Db) {
 
   /**
    * The picture client for the chosen service, with the company's key for it
-   * (resolved company-scoped, same as the video render). Fal.ai unless the
-   * storyline's picture settings or its look pick Sogni.
+   * (the company's own pick in Media Studio's Settings tab, else the
+   * instance's; resolved company-scoped, same as the video render). Fal.ai
+   * unless the storyline's picture settings or its look pick Sogni.
    */
   async function resolveImageProvider(
     companyId: string,
     actorId: string,
     target: StoryboardPictureTarget,
     cfg: Record<string, unknown>,
-    pluginInstalled: boolean,
+    pluginId: string | null,
   ): Promise<{ provider: ImageGenerationProvider; apiKey: string }> {
     const name = SERVICE_NAME[target.providerId];
-    const noKey = `Storyboard pictures for this storyline are made with ${name}, and no ${name} API key is set up in Media Studio settings yet. Add one there, pick another picture service in step 2, or approve this shot without a picture.`;
-    if (!pluginInstalled) throw unprocessable(noKey);
-    const ref = keyRef(cfg, target.providerId);
+    const noKey = `Storyboard pictures for this storyline are made with ${name}, and no ${name} API key is set for this company yet. The company's owner or an admin can pick one in Media Studio's Settings tab. Or pick another picture service in step 2, or approve this shot without a picture.`;
+    const ref = await keyRef(pluginId, companyId, cfg, target.providerId);
     if (!ref) throw unprocessable(noKey);
     const apiKey = await secrets.resolveSecretValueForVideoRender(companyId, ref, { actorId });
     if (target.providerId === "sogni") {
@@ -181,7 +184,7 @@ export function videoStorylineStillsService(db: Db) {
       );
     }
     const estimate = estimateStoryboardCostCents([{ storyboardStatus: shot.storyboardStatus as VideoShotStoryboardStatus }], target.providerId);
-    const { provider, apiKey } = await resolveImageProvider(companyId, actor.agentId ?? actor.actorId, target, cfg, pluginId !== null);
+    const { provider, apiKey } = await resolveImageProvider(companyId, actor.agentId ?? actor.actorId, target, cfg, pluginId);
 
     // Security review (replace-import TOCTOU): under the storyline row lock a
     // "replace" import also takes, re-check the shot is still there and
@@ -398,7 +401,7 @@ export function videoStorylineStillsService(db: Db) {
       videoEstimatedTotalCents: storyline.estimatedTotalCents,
       videoSpentCents: storyline.spentCents,
       approvalThresholdCents,
-      pictureServices: await pictureServices(),
+      pictureServices: await pictureServices(companyId),
       picture: {
         providerId: target.providerId,
         model: target.model,

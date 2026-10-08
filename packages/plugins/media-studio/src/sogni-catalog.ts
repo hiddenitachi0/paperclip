@@ -646,7 +646,7 @@ export function checkSogniLoras(
   model: Pick<SogniModelInfo, "id" | "name">,
   picks: SogniLoraPick[],
   known: SogniLoraInfo[],
-  options: { maxPerRequest?: number; contentFilterOn: boolean },
+  options: { maxPerRequest?: number; contentFilterOn: boolean; allowOtherModels?: boolean },
 ): string | null {
   const max = Math.min(options.maxPerRequest ?? SOGNI_MAX_LORAS, SOGNI_MAX_LORAS);
   if (picks.length > max) return `A picture can use at most ${max} LoRAs; this has ${picks.length}. Remove some.`;
@@ -656,7 +656,7 @@ export function checkSogniLoras(
     seen.add(pick.id);
     const lora = known.find((l) => l.id === pick.id);
     if (!lora) return `Sogni has no LoRA called "${pick.id}" that this account can use. Pick LoRAs from the list.`;
-    if (!lora.modelIds.includes(model.id)) {
+    if (!options.allowOtherModels && !lora.modelIds.includes(sogniCanonicalModelId(model.id))) {
       return `The LoRA "${lora.name}" does not work with the model ${model.name}. Pick LoRAs from the list for this model.`;
     }
     if (typeof pick.strength !== "number" || !Number.isFinite(pick.strength)) {
@@ -673,6 +673,67 @@ export function checkSogniLoras(
     }
   }
   return null;
+}
+
+/**
+ * Whether one LoRA on a look fits the look's model:
+ *   "fits"         Sogni lists the model among the LoRA's models.
+ *   "other-models" Sogni lists the LoRA, but only for other models (madeFor).
+ *   "unknown"      Sogni's LoRA list could not be read, or Sogni does not list
+ *                  this LoRA (any more) for this account, so nobody can tell.
+ * Sogni's catalog has no "family" field: a LoRA's family is the set of
+ * catalog models it lists (modelIds minus restrictedModelIds), so the
+ * models' own names are what the owner sees ("Made for Krea 2 Turbo, ...").
+ */
+export type LoraFit = "fits" | "other-models" | "unknown";
+
+export interface LoraFitCheck {
+  id: string;
+  name: string;
+  fit: LoraFit;
+  /** Names of the models Sogni lists for the LoRA (catalog ids where the name is not known). Empty for "unknown". */
+  madeFor: string[];
+  /** One plain sentence for the owner, or null when the LoRA fits. */
+  warning: string | null;
+}
+
+/** "A, B and C", or "A, B, C and 2 more" for long lists. */
+export function madeForText(names: string[], show = 3): string {
+  if (names.length === 0) return "no model Sogni offers right now";
+  if (names.length > show) return `${names.slice(0, show).join(", ")} and ${names.length - show} more`;
+  if (names.length === 1) return names[0]!;
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
+/**
+ * Sort a look's LoRAs by whether they fit `model`. `known` null: Sogni's LoRA
+ * list could not be read (every LoRA is "unknown"). `modelNames` turns
+ * catalog ids into the names people know.
+ */
+export function classifyLoras(
+  model: Pick<SogniModelInfo, "id" | "name">,
+  picks: Array<{ id: string; name?: string }>,
+  known: SogniLoraInfo[] | null,
+  modelNames: Record<string, string> = {},
+): LoraFitCheck[] {
+  const modelId = sogniCanonicalModelId(model.id);
+  return picks.map((pick) => {
+    const lora = known?.find((l) => l.id === pick.id) ?? null;
+    const name = lora?.name ?? pick.name ?? pick.id;
+    if (!lora) {
+      const why = known === null ? "Sogni's list of LoRAs could not be read just now, so we" : "Sogni does not list this LoRA for this account any more, so we";
+      return { id: pick.id, name, fit: "unknown", madeFor: [], warning: `${why} can't tell whether it works with ${model.name}.` };
+    }
+    if (lora.modelIds.includes(modelId)) return { id: pick.id, name, fit: "fits", madeFor: [], warning: null };
+    const madeFor = [...new Set(lora.modelIds.map((id) => modelNames[id] ?? id))];
+    return {
+      id: pick.id,
+      name,
+      fit: "other-models",
+      madeFor,
+      warning: `Made for ${madeForText(madeFor)}; ${model.name} may ignore it or give odd results.`,
+    };
+  });
 }
 
 export interface SogniOverrides {
