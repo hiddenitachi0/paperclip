@@ -7,7 +7,7 @@ import { conflict, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { getStorageService } from "../storage/index.js";
 import { logActivity } from "./activity-log.js";
-import { addMusicBed, checkFfmpegAvailable, stitchClips, stitchClipsWithTransitions, type ShotTransitionInput } from "./video-ffmpeg.js";
+import { addMusicBed, checkFfmpegAvailable, normalizeClipsForStitch, stitchClips, stitchClipsWithTransitions, type ShotTransitionInput } from "./video-ffmpeg.js";
 import { runVideoQualityCheck, type VideoQualityCheckShotPlan } from "./video-quality-check.js";
 
 /**
@@ -109,33 +109,35 @@ export function videoStorylineStitchService(db: Db, deps: VideoStorylineStitchDe
       // storyline's default) -- shot 0 always renders "cut" regardless of
       // what's stored, since there is no previous clip to transition from.
       const allCut = shots.every((shot, index) => index === 0 || (shot.transitionIn ?? storyline.defaultTransition) === "cut");
+      const rawClips: Buffer[] = [];
+      for (const shot of shots) {
+        rawClips.push(await downloadClip(storyline.companyId, shot.resultObjectKey!));
+      }
+      // Same size/frame rate/codecs for every clip first -- see
+      // normalizeClipsForStitch -- and the real length of each one.
+      const normalized = await normalizeClipsForStitch(rawClips);
       let stitched: Awaited<ReturnType<typeof stitchClips>>;
       if (allCut) {
-        const clipBuffers: Buffer[] = [];
-        for (const shot of shots) {
-          clipBuffers.push(await downloadClip(storyline.companyId, shot.resultObjectKey!));
-        }
-        stitched = await stitchClips(clipBuffers);
+        stitched = await stitchClips(normalized.buffers);
       } else {
-        const shotInputs: ShotTransitionInput[] = [];
-        for (const [index, shot] of shots.entries()) {
-          const transitionIn = (index === 0 ? "cut" : (shot.transitionIn ?? storyline.defaultTransition)) as VideoShotTransition;
-          shotInputs.push({
-            buffer: await downloadClip(storyline.companyId, shot.resultObjectKey!),
-            transitionIn,
-            transitionDurationMs: storyline.defaultTransitionDurationMs,
-          });
-        }
+        const shotInputs: ShotTransitionInput[] = shots.map((shot, index) => ({
+          buffer: normalized.buffers[index]!,
+          transitionIn: (index === 0 ? "cut" : (shot.transitionIn ?? storyline.defaultTransition)) as VideoShotTransition,
+          transitionDurationMs: storyline.defaultTransitionDurationMs,
+        }));
         stitched = await stitchClipsWithTransitions(shotInputs);
       }
       if (musicBed) {
         stitched = await addMusicBed(stitched, musicBed);
       }
-      const durationSeconds = shots.reduce((sum, s) => sum + s.durationSeconds, 0);
+      const durationSeconds = Math.round(normalized.durationsSeconds.reduce((sum, seconds) => sum + seconds, 0));
 
       // DUR-4318: check the stitched file before it is ever shown as "done".
+      // Planned against each clip's REAL length: providers snap or round
+      // clip lengths (Kling only makes 5s/10s clips), so the written shot
+      // durations are not what the film is made of.
       const shotPlans: VideoQualityCheckShotPlan[] = shots.map((shot, index) => ({
-        durationSeconds: shot.durationSeconds,
+        durationSeconds: normalized.durationsSeconds[index] ?? shot.durationSeconds,
         transitionIn: (index === 0 ? "cut" : (shot.transitionIn ?? storyline.defaultTransition)) as VideoShotTransition,
         transitionDurationMs: storyline.defaultTransitionDurationMs,
       }));
