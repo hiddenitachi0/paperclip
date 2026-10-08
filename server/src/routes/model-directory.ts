@@ -18,6 +18,7 @@ import { logActivity } from "../services/activity-log.js";
 import { modelDirectoryService } from "../services/model-directory.js";
 import { modelHealthService } from "../services/model-health.js";
 import { modelSetupReviewerService } from "../services/model-setup-reviewer.js";
+import { openRouterHostsForModel } from "../services/openrouter-hosts.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 
 /**
@@ -40,7 +41,7 @@ function assertCompanyOwnerOrAdmin(req: Request, companyId: string) {
   assertCompanyAccess(req, companyId);
 }
 
-export function modelDirectoryRoutes(rawDb: Db) {
+export function modelDirectoryRoutes(rawDb: Db, deps: { fetchImpl?: typeof fetch } = {}) {
   const router = Router();
   const db = createRequestScopedDb(rawDb);
   const svc = modelDirectoryService(db);
@@ -124,9 +125,24 @@ export function modelDirectoryRoutes(rawDb: Db) {
       action: "model_directory.settings_updated",
       entityType: "model_directory_settings",
       entityId: companyId,
-      details: { localGpuVramGb: updated.localGpuVramGb, localBaseUrl: updated.localBaseUrl },
+      details: {
+        localGpuVramGb: updated.localGpuVramGb,
+        localBaseUrl: updated.localBaseUrl,
+        openrouterPreferredHosts: updated.openrouterPreferredHosts,
+        openrouterBlockedHosts: updated.openrouterBlockedHosts,
+      },
     });
     res.json(updated);
+  });
+
+  // OpenRouter hosts: which hosts run one OpenRouter model and what each
+  // supports, read live from OpenRouter's public endpoint list (no key sent,
+  // openrouter.ai only, cached ~10 minutes). ?refresh=true skips the cache.
+  // Same access as the list. Registered before /:entryId.
+  router.get("/companies/:companyId/model-directory/openrouter-hosts", scope(), async (req, res) => {
+    const model = typeof req.query.model === "string" ? req.query.model : "";
+    const refresh = req.query.refresh === "true" || req.query.refresh === "1";
+    res.json(await openRouterHostsForModel(model, { refresh, ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}) }));
   });
 
   // Catalogue v2: ask the local Ollama which models are installed and mark the

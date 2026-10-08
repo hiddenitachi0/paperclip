@@ -457,8 +457,11 @@ export interface LaneAProviderRouting {
 
 /** An OpenRouter host slug, lower case: "deepinfra", "mistral", "together", "novita". */
 export const LANE_A_PROVIDER_SLUG_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
-/** At most this many hosts in any one list. */
-export const LANE_A_PROVIDER_ROUTING_MAX_ENTRIES = 10;
+/**
+ * At most this many hosts in any one list. 30 (was 10) so a company's whole
+ * blocked-hosts list (OPENROUTER_HOST_RULES_MAX) fits a setup's "never" list.
+ */
+export const LANE_A_PROVIDER_ROUTING_MAX_ENTRIES = 30;
 
 const LANE_A_PROVIDER_ROUTING_LISTS = ["only", "order", "ignore"] as const;
 

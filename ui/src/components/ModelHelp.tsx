@@ -68,7 +68,9 @@ export const MODEL_HELP = {
   entryAddress:
     "The address of the model server for this model, as Paperclip's server reaches it, e.g. http://192.168.1.20:11434/v1. Starts from this company's model server address. Not localhost - that is Paperclip's own server.",
   hosts:
-    "OpenRouter sends each request to one of several hosting companies. List the ones to use, separated by commas (e.g. deepinfra, together); leave empty to let OpenRouter choose. Only some hosts support tool calling.",
+    "OpenRouter passes each request to one of several hosting companies (hosts) that run this model. The table shows each host's price, memory and what it supports for THIS model, read live from OpenRouter. Mark a host Use (only the hosts marked Use are used), Never, or leave it on Default (the company's OpenRouter host rules in Settings > Models decide; with none, OpenRouter picks). No host is recommended by Paperclip.",
+  hostRules:
+    "The company's own lists of OpenRouter hosts to prefer and to block. They fill in the Default choices of each OpenRouter model setup; a setup's own Use / Never choice always comes first.",
   thinking: "Whether the model thinks step by step before answering, when it supports that. Agents start from this and can change it.",
   creativity: "How varied the answers are, from 0 (steady, repeatable) to 2 (very loose). Empty = the model's own default.",
   maxTokens: "The longest answer the model may write, in tokens (about 3/4 of a word each). Empty = the model's own default.",

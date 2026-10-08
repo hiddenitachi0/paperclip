@@ -26,6 +26,7 @@ const mockServerKeyApi = vi.hoisted(() => ({ get: vi.fn() }));
 const mockInstanceSettingsApi = vi.hoisted(() => ({ getExperimental: vi.fn() }));
 const mockPushToast = vi.hoisted(() => vi.fn());
 const mockUseCompanyRole = vi.hoisted(() => vi.fn());
+const mockModelDirectoryApi = vi.hoisted(() => ({ list: vi.fn(), getSettings: vi.fn(), openrouterHosts: vi.fn() }));
 
 vi.mock("@/lib/router", () => ({
   Link: ({ children, to, ...rest }: { children: React.ReactNode; to: string; className?: string }) => (
@@ -36,6 +37,7 @@ vi.mock("@/lib/router", () => ({
 }));
 vi.mock("../api/agents", () => ({ agentsApi: mockAgentsApi }));
 vi.mock("../api/budgets", () => ({ budgetsApi: mockBudgetsApi }));
+vi.mock("../api/modelDirectory", () => ({ modelDirectoryApi: mockModelDirectoryApi }));
 vi.mock("../api/secrets", () => ({ secretsApi: mockSecretsApi }));
 vi.mock("../api/mcpToolLibrary", () => ({ mcpToolLibraryApi: mockMcpApi }));
 vi.mock("../api/plugins", () => ({ pluginsApi: mockPluginsApi }));
@@ -137,6 +139,15 @@ describe("QuickAgentSection model hosts", () => {
     mockDataApi.listDatasetSources.mockResolvedValue([]);
     mockUseCompanyRole.mockReturnValue(roleInfo(false));
     mockAgentsApi.update.mockResolvedValue({});
+    mockModelDirectoryApi.list.mockResolvedValue([]);
+    mockModelDirectoryApi.getSettings.mockResolvedValue({
+      localGpuVramGb: null,
+      localBaseUrl: null,
+      openrouterPreferredHosts: [],
+      openrouterBlockedHosts: [],
+    });
+    // The live host list is not reachable unless a test says so: the typed fields still work.
+    mockModelDirectoryApi.openrouterHosts.mockRejectedValue(new ApiError("Could not read the host list.", 502, null));
   });
 
   afterEach(() => {
@@ -189,8 +200,10 @@ describe("QuickAgentSection model hosts", () => {
     expect(section()!.textContent).toContain("Use only these hosts");
     expect(section()!.textContent).toContain("Never use these hosts");
     expect(section()!.textContent).toContain(
-      "OpenRouter can send the same model to different hosts. Some hosts don't support tools. List the hosts you want (for example deepinfra) to stop it picking one that doesn't.",
+      "OpenRouter can send the same model to different hosts, and not every host supports tools for every model.",
     );
+    // No host is suggested as a default.
+    expect(section()!.textContent!.toLowerCase()).not.toContain("deepinfra");
     expect(onlyInput()?.value).toBe("");
     expect(ignoreInput()?.value).toBe("");
     expect(saveButton()?.disabled).toBe(true);
@@ -300,6 +313,74 @@ describe("QuickAgentSection model hosts", () => {
     expect(mockAgentsApi.update).not.toHaveBeenCalled();
     expect(problem()?.textContent).toContain('"Infra!" is not a host name.');
 
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  const host = (slug: string, supportsTools: boolean) => ({
+    slug,
+    name: slug[0]!.toUpperCase() + slug.slice(1),
+    quantization: "fp8",
+    contextTokens: 131072,
+    maxOutputTokens: null,
+    priceInPerM: 0.1,
+    priceOutPerM: 0.3,
+    supportsTools,
+    supportsToolChoice: supportsTools,
+    supportsReasoning: false,
+    supportsImages: true,
+    status: "ok",
+    uptimeLast30m: null,
+  });
+
+  it("shows the live hosts for the agent's model and saves a choice from the table", async () => {
+    mockModelDirectoryApi.openrouterHosts.mockResolvedValue({
+      model: OPENROUTER.laneAModel,
+      fetchedAt: "2026-10-08T12:00:00.000Z",
+      hosts: [host("mistral", true), host("venice", false)],
+    });
+    const root = await render(agent(OPENROUTER));
+    expect(mockModelDirectoryApi.openrouterHosts).toHaveBeenCalledWith(COMPANY, OPENROUTER.laneAModel);
+    expect(container.querySelector('[data-testid="openrouter-host-row-mistral"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="openrouter-host-no-tools-venice"]')?.textContent).toContain(
+      "No tool support",
+    );
+    const select = container.querySelector<HTMLSelectElement>('[data-testid="openrouter-host-choice-venice"]')!;
+    await act(async () => {
+      select.value = "use";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await flushReact();
+    // Only a host without tools allowed: warned in plain words.
+    expect(container.querySelector('[data-testid="openrouter-hosts-warning"]')?.textContent).toContain(
+      "No host you allow supports tool calling for this model",
+    );
+    expect(onlyInput()?.value).toBe("venice");
+    await clickSave();
+    expect(mockAgentsApi.update).toHaveBeenCalledWith(AGENT, { laneAProviderRouting: { only: ["venice"] } }, COMPANY);
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("adds the company's blocked hosts on save unless the agent marks them Use", async () => {
+    mockModelDirectoryApi.getSettings.mockResolvedValue({
+      localGpuVramGb: null,
+      localBaseUrl: null,
+      openrouterPreferredHosts: [],
+      openrouterBlockedHosts: ["venice"],
+    });
+    const root = await render(agent(OPENROUTER));
+    // Nothing typed, but the company rule is pending: Save is offered with a plain hint.
+    expect(saveButton()?.disabled).toBe(false);
+    expect(section()!.textContent).toContain("Save to add the company's host rules");
+    await clickSave();
+    expect(mockAgentsApi.update).toHaveBeenLastCalledWith(AGENT, { laneAProviderRouting: { ignore: ["venice"] } }, COMPANY);
+
+    await type(onlyInput()!, "venice");
+    await clickSave();
+    expect(mockAgentsApi.update).toHaveBeenLastCalledWith(AGENT, { laneAProviderRouting: { only: ["venice"] } }, COMPANY);
     await act(async () => {
       root.unmount();
     });
