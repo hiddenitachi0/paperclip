@@ -16,7 +16,7 @@ import { logActivity } from "./activity-log.js";
 import {
   FalImageProvider,
   SogniImageProvider,
-  assertSogniStorageUrl,
+  sogniStorageFetch,
   type ImageFetchImpl,
   type ImageGenerationInput,
   type ImageGenerationProvider,
@@ -70,14 +70,8 @@ const safeImageFetch: ImageFetchImpl = async (url, init) => {
   }
 };
 
-/**
- * Byte transfers to and from Sogni's storage (reference uploads, the finished
- * picture). The address is checked against Sogni's storage hosts first, and
- * redirects are refused -- the plugin's guardedTransferFetch. Not the pinned
- * fetch above: that one sends bodies as text, which breaks a multipart upload.
- */
-const sogniTransferFetch: ImageFetchImpl = (url, init) =>
-  globalThis.fetch(assertSogniStorageUrl(url).toString(), { ...init, redirect: "error", signal: AbortSignal.timeout(60_000) });
+/** Sogni storage transfers: Sogni's storage hosts only, through the pinned fetch above, multipart encoded to bytes. */
+const sogniTransferFetch: ImageFetchImpl = sogniStorageFetch(safeImageFetch);
 
 const SERVICE_NAME: Record<VideoStorylineProvider, string> = { fal: "Fal.ai", sogni: "Sogni" };
 /** At most this many reference pictures go with one storyboard picture (the render's own limit). */

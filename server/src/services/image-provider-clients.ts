@@ -152,6 +152,30 @@ export function assertSogniStorageUrl(raw: string): URL {
   return url;
 }
 
+/**
+ * A FormData body encoded to real multipart bytes, with its boundary in the
+ * content-type header, so it can go through the pinned fetch (which writes
+ * strings and bytes only). Other bodies are returned unchanged.
+ */
+export async function encodeMultipartBody(init?: RequestInit): Promise<RequestInit | undefined> {
+  if (!init || !(init.body instanceof FormData)) return init;
+  const encoded = new Request("https://multipart.invalid/", { method: "POST", body: init.body });
+  const bytes = Buffer.from(await encoded.arrayBuffer());
+  const headers = new Headers(init.headers);
+  headers.set("content-type", encoded.headers.get("content-type") ?? "multipart/form-data");
+  return { ...init, body: bytes, headers };
+}
+
+/**
+ * Byte transfers to and from Sogni's storage (reference/start-frame uploads,
+ * finished pictures) through the SSRF-guarded, DNS-pinned fetch: the address
+ * must be one of Sogni's storage hosts, and multipart uploads are encoded to
+ * bytes first.
+ */
+export function sogniStorageFetch(pinned: ImageFetchImpl): ImageFetchImpl {
+  return async (url, init) => pinned(assertSogniStorageUrl(url).toString(), await encodeMultipartBody(init));
+}
+
 export interface SogniImageProviderOptions {
   apiKey: string;
   /** JSON calls to api.sogni.ai. */

@@ -92,7 +92,7 @@ export function sogniVideoOptions(rows: SogniVideoModelRow[]): VideoModelOption[
       takesStartImage: true,
       needsStartImage: false,
       maxReferences: 3,
-      note: "Whatever Sogni uses when no model is named.",
+      note: "Sogni picks: LTX 2.5 today (2 to 20 second clips, can start from a picture).",
     },
     ...rows.map((row) => ({
       id: row.id,
