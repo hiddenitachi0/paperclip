@@ -74,13 +74,16 @@ const ENTRY: ModelDirectoryEntry = {
   backupEntryIds: [],
   note: null,
   maker: "Mistral AI",
-  baseModel: "Mistral Small 3.2 24B",
+  baseModel: "Mistral Small 3.2",
+  variant: "24B",
   lane: "quick",
   availability: "cloud",
   tags: [],
   specs: null,
   favorite: false,
   archivedAt: null,
+  family: null,
+  ratings: [],
   createdByUserId: null,
   updatedByUserId: null,
   createdAt: "2026-10-01T00:00:00Z",
@@ -247,8 +250,9 @@ describe("QuickAgentSection layout", () => {
     expect(select).not.toBeNull();
     expect(Array.from(select!.options).map((o) => o.textContent)).toEqual([
       "Type it myself",
-      "Mistral via OpenRouter",
+      "24B · OpenRouter — Mistral via OpenRouter",
     ]);
+    expect(Array.from(select!.querySelectorAll("optgroup")).map((g) => g.label)).toEqual(["Mistral AI · Mistral Small 3.2"]);
   });
 
   it("says what is in a group while it is folded", async () => {
