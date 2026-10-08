@@ -102,6 +102,8 @@ export interface VideoStoryboardShotSummary {
   stillGeneratedAt: string | null;
   stillEstimatedCostCents: number | null;
   stillActualCostCents: number | null;
+  /** Only right after a picture is made: plain notes about how the cast's saved people were used (pictures left out, LoRA not used, ...). */
+  notes?: string[];
 }
 
 export interface VideoStoryboardSummary {

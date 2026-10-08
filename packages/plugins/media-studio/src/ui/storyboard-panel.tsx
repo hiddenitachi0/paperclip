@@ -115,6 +115,8 @@ export interface StoryboardActions {
   error: string | null;
   clearError: () => void;
   makePicture: (shotId: string) => Promise<void>;
+  /** Plain notes the server sent with a shot's newest picture (how the cast's saved people were used). */
+  pictureNotes: Record<string, string[]>;
   approve: (shotId: string) => Promise<void>;
   approveWithoutPicture: (shotId: string) => Promise<void>;
   drop: (shotId: string) => Promise<void>;
@@ -139,12 +141,23 @@ export function useStoryboardActions(opts: {
   const [busyShotId, setBusyShotId] = useState<string | null>(null);
   const [bulk, setBulk] = useState<BulkProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pictureNotes, setPictureNotes] = useState<Record<string, string[]>>({});
   const stopRef = useRef(false);
 
   const post = useCallback(
     (shotId: string, what: "still" | "approve" | "drop", body: Record<string, unknown>, action: string) =>
       hostFetchJson(`${base}/shots/${shotId}/${what}`, { method: "POST", body: JSON.stringify(body) }, action),
     [base],
+  );
+
+  /** Makes one shot's picture and keeps the server's notes about it. */
+  const makeStill = useCallback(
+    async (shotId: string, action: string) => {
+      const res = (await post(shotId, "still", {}, action)) as { notes?: unknown } | undefined;
+      const notes = Array.isArray(res?.notes) ? res!.notes.filter((n): n is string => typeof n === "string") : [];
+      setPictureNotes((prev) => ({ ...prev, [shotId]: notes }));
+    },
+    [post],
   );
 
   const runOne = useCallback(
@@ -196,7 +209,8 @@ export function useStoryboardActions(opts: {
     bulk,
     error,
     clearError: () => setError(null),
-    makePicture: (shotId) => runOne(shotId, () => post(shotId, "still", {}, "making the picture")),
+    makePicture: (shotId) => runOne(shotId, () => makeStill(shotId, "making the picture")),
+    pictureNotes,
     approve: (shotId) => runOne(shotId, () => post(shotId, "approve", {}, "approving the picture")),
     approveWithoutPicture: (shotId) => runOne(shotId, () => post(shotId, "approve", { withoutStill: true }, "approving the shot")),
     drop: (shotId) => runOne(shotId, () => post(shotId, "drop", {}, "leaving the shot out")),
@@ -209,7 +223,7 @@ export function useStoryboardActions(opts: {
       });
       return ok;
     },
-    makeMany: (ids) => runMany("Making picture", ids, (id) => post(id, "still", {}, "making a picture")),
+    makeMany: (ids) => runMany("Making picture", ids, (id) => makeStill(id, "making a picture")),
     approveMany: (ids) => runMany("Approving picture", ids, (id) => post(id, "approve", {}, "approving a picture")),
     skipMany: (ids) => runMany("Skipping picture for shot", ids, (id) => post(id, "approve", { withoutStill: true }, "approving a shot without a picture")),
     stop: () => {
@@ -260,6 +274,8 @@ export function StoryboardPanel(props: {
   storylineLookName?: string | null;
   /** Saves a shot's own look: a look id, "none", or null (use the storyline's). */
   onShotLook?: (shotId: string, pictureLookId: string | null) => void;
+  /** Who is in each shot (from step 1's Cast), as plain labels such as "Maja (saved person)". */
+  shotCast?: Record<string, string[]>;
 }) {
   const { base, summary, actions } = props;
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -459,6 +475,18 @@ export function StoryboardPanel(props: {
                   </span>
                 )}
               </div>
+              {(props.shotCast?.[shot.id]?.length ?? 0) > 0 && (
+                <div style={{ fontSize: 11, color: "#868e96" }} data-testid={`shot-cast-${shot.id}`}>
+                  In this shot: {props.shotCast![shot.id]!.join(", ")}
+                </div>
+              )}
+              {(actions.pictureNotes[shot.id]?.length ?? 0) > 0 && (
+                <ul style={{ margin: 0, paddingLeft: 16, fontSize: 11, color: "#b45309" }} data-testid={`picture-notes-${shot.id}`}>
+                  {actions.pictureNotes[shot.id]!.map((note, i) => (
+                    <li key={i}>{note}</li>
+                  ))}
+                </ul>
+              )}
               {props.editable && text && !editing && shot.storyboardStatus !== "dropped" && (props.looks?.length ?? 0) > 0 && props.onShotLook && (
                 <label style={{ fontSize: 11, color: "#868e96", display: "flex", flexDirection: "column", gap: 2 }}>
                   Look for this picture

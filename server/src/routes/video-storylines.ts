@@ -22,6 +22,8 @@ import {
   startVideoStorylineRenderSchema,
   updateVideoSceneSchema,
   updateVideoShotSchema,
+  updateVideoShotCastSchema,
+  updateVideoStorylineCastSchema,
   updateVideoStorylineApprovalThresholdSchema,
   updateVideoStorylineSchema,
   updateVideoStorylineSettingsSchema,
@@ -345,6 +347,30 @@ export function videoStorylineRoutes(rawDb: Db) {
       const companyId = req.params.companyId as string;
       const storylineId = req.params.storylineId as string;
       res.json(await storylines.updateStoryline(companyId, storylineId, req.body, actorOf(req)));
+    },
+  );
+
+  // The storyline's Cast: the script's characters, each optionally linked to one of the company's saved people (Media Studio identities).
+  router.put(
+    "/companies/:companyId/video-storylines/:storylineId/cast",
+    validate(updateVideoStorylineCastSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      res.json(await storylines.setCast(companyId, storylineId, req.body, actorOf(req)));
+    },
+  );
+
+  router.put(
+    "/companies/:companyId/video-storylines/:storylineId/shots/:shotId/cast",
+    validate(updateVideoShotCastSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      const shotId = req.params.shotId as string;
+      res.json(await storylines.setShotCast(companyId, storylineId, shotId, req.body.castIds, actorOf(req)));
     },
   );
 
