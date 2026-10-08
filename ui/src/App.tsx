@@ -61,6 +61,7 @@ import { CompanySkills } from "./pages/CompanySkills";
 import { CompanyMcpTools } from "./pages/CompanyMcpTools";
 import { Personas } from "./pages/Personas";
 import { PersonaDetail } from "./pages/PersonaDetail";
+import { PersonaEdit } from "./pages/PersonaEdit";
 import { Positions } from "./pages/Positions";
 import { Secrets } from "./pages/Secrets";
 import { CompanyExport } from "./pages/CompanyExport";
@@ -145,7 +146,9 @@ function boardRoutes() {
       <Route path="skills/*" element={<CompanySkills />} />
       <Route path="tools" element={<CompanyMcpTools />} />
       <Route path="personas" element={<Personas />} />
+      <Route path="personas/new" element={<PersonaEdit />} />
       <Route path="personas/:personaId" element={<PersonaDetail />} />
+      <Route path="personas/:personaId/edit" element={<PersonaEdit />} />
       <Route path="positions" element={<Positions />} />
       <Route path="settings" element={<LegacySettingsRedirect />} />
       <Route path="settings/*" element={<LegacySettingsRedirect />} />

@@ -16,8 +16,10 @@ const mockPersonasApi = vi.hoisted(() => ({
   attachToAgent: vi.fn(),
 }));
 const pushToast = vi.hoisted(() => vi.fn());
+const navigate = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/router", () => ({
+  useNavigate: () => navigate,
   Link: ({ children, to, ...props }: { children: ReactNode; to: string }) => (
     <a href={to} {...props}>
       {children}
@@ -43,20 +45,6 @@ vi.mock("../api/personas", () => ({
 
 const mockAgentsApi = vi.hoisted(() => ({ list: vi.fn() }));
 vi.mock("../api/agents", () => ({ agentsApi: mockAgentsApi }));
-
-vi.mock("../api/assets", () => ({
-  assetsApi: { uploadImage: vi.fn() },
-}));
-
-// Radix portals are not what these tests are about: render the dialog inline.
-vi.mock("@/components/ui/dialog", () => ({
-  Dialog: ({ open, children }: { open: boolean; children: ReactNode }) => (open ? <div>{children}</div> : null),
-  DialogContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  DialogHeader: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  DialogTitle: ({ children }: { children: ReactNode }) => <h2>{children}</h2>,
-  DialogDescription: ({ children }: { children: ReactNode }) => <p>{children}</p>,
-  DialogFooter: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-}));
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -89,13 +77,6 @@ async function flushReact() {
       await new Promise((resolve) => window.setTimeout(resolve, 0));
     }
   });
-}
-
-function setValue(element: HTMLInputElement | HTMLTextAreaElement, value: string) {
-  const proto = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-  const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
-  setter?.call(element, value);
-  element.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
 function buttonByText(container: HTMLElement, text: string): HTMLButtonElement | null {
@@ -137,54 +118,28 @@ describe("Personas page (DUR-4000)", () => {
     await flushReact();
   }
 
-  it("creates a persona without picking an agent, with pronouns as free text and no picture limit", async () => {
-    mockPersonasApi.list.mockResolvedValue([]);
+  it("New persona opens the persona page form instead of a dialog", async () => {
+    mockPersonasApi.list.mockResolvedValue([makePersona()]);
     await render();
+    expect(container.querySelector("#persona-name")).toBeNull();
 
     await act(async () => {
       buttonByText(container, "New persona")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     await flushReact();
 
-    const text = container.textContent ?? "";
-    expect(text).toContain("A person, not a job.");
-    // No agent picker: a persona exists on its own and is attached to jobs afterwards.
-    expect(container.querySelector("select")).toBeNull();
-    expect(text).not.toContain("Pick an agent");
-    // The picture limit moved to the agent's own Limits box.
-    expect(text).not.toContain("Daily picture limit");
-    // Pronouns are free text, suggested not assumed.
-    const pronouns = container.querySelector<HTMLInputElement>("#persona-pronouns");
-    expect(pronouns?.placeholder).toBe("they/them");
-    expect(text).toContain("Who they are");
-    expect(text).toContain("How they write");
+    expect(navigate).toHaveBeenCalledWith("/personas/new");
+    expect(container.querySelector("#persona-name")).toBeNull();
+    expect(mockPersonasApi.create).not.toHaveBeenCalled();
+  });
 
+  it("the empty list's action also opens the new persona page", async () => {
+    mockPersonasApi.list.mockResolvedValue([]);
+    await render();
     await act(async () => {
-      setValue(container.querySelector<HTMLInputElement>("#persona-name")!, "Maja");
-      setValue(pronouns!, "they/them");
-      setValue(container.querySelector<HTMLTextAreaElement>("#persona-traits")!, "Curious, dry humour");
-      setValue(container.querySelector<HTMLTextAreaElement>("#persona-voice")!, "Short sentences.");
+      buttonByText(container, "New persona")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
-    await flushReact();
-
-    await act(async () => {
-      buttonByText(container, "Save")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-    await flushReact();
-
-    expect(mockPersonasApi.create).toHaveBeenCalledTimes(1);
-    const [companyId, input] = mockPersonasApi.create.mock.calls[0]!;
-    expect(companyId).toBe("company-1");
-    expect(input).toMatchObject({
-      displayName: "Maja",
-      pronouns: "they/them",
-      traits: "Curious, dry humour",
-      voice: "Short sentences.",
-      status: "active",
-    });
-    expect(input).not.toHaveProperty("agentId");
-    expect(input).not.toHaveProperty("dailyGenerationCap");
-    expect(pushToast).toHaveBeenCalledWith(expect.objectContaining({ title: "Persona created" }));
+    expect(navigate).toHaveBeenCalledWith("/personas/new");
   });
 
   it("lists each persona with pronouns and how many jobs they hold, without she/her by default", async () => {

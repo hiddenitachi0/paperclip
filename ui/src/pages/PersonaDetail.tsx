@@ -20,12 +20,6 @@ import { PersonaAvatar } from "../components/PersonaAvatar";
 import { AgentAvatar } from "../components/AgentAvatar";
 import { ApprovalCard } from "../components/ApprovalCard";
 import { PersonaPublishingPanel } from "../components/PersonaPublishingPanel";
-import {
-  PersonaFormDialog,
-  draftFromPersona,
-  updateInputFromDraft,
-  type PersonaDraft,
-} from "../components/PersonaFormDialog";
 
 function errorMessage(error: unknown, fallback: string): string {
   if (error instanceof ApiError) return error.message;
@@ -54,7 +48,6 @@ export function PersonaDetail() {
   const { setBreadcrumbs } = useBreadcrumbs();
   const { pushToast } = useToastActions();
   const queryClient = useQueryClient();
-  const [editOpen, setEditOpen] = useState(false);
   const [attachAgentId, setAttachAgentId] = useState("");
 
   const personaQuery = useQuery({
@@ -115,16 +108,6 @@ export function PersonaDetail() {
       queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(selectedCompanyId) });
     }
   };
-
-  const updatePersona = useMutation({
-    mutationFn: (draft: PersonaDraft) => personasApi.update(persona!.id, updateInputFromDraft(draft)),
-    onSuccess: () => {
-      invalidate();
-      setEditOpen(false);
-      pushToast({ title: "Persona saved", tone: "success" });
-    },
-    onError: (error) => pushToast({ title: "Could not save persona", body: errorMessage(error, ""), tone: "error" }),
-  });
 
   const attachMutation = useMutation({
     mutationFn: (agentId: string) => personasApi.attachToAgent(agentId, persona!.id),
@@ -192,7 +175,7 @@ export function PersonaDetail() {
   const name = persona.displayName;
 
   return (
-    <div className="mx-auto max-w-3xl space-y-8">
+    <div className="mx-auto max-w-3xl space-y-8" data-helper-entity={`persona:${persona.id}`}>
       <div className="flex items-start justify-between gap-4">
         <div className="flex items-center gap-4">
           <PersonaAvatar persona={persona} size="lg" />
@@ -205,9 +188,11 @@ export function PersonaDetail() {
             {persona.handle ? <p className="text-sm text-muted-foreground">@{persona.handle}</p> : null}
           </div>
         </div>
-        <Button type="button" variant="outline" size="sm" onClick={() => setEditOpen(true)}>
-          <Pencil className="mr-1.5 h-3.5 w-3.5" />
-          Edit
+        <Button asChild variant="outline" size="sm">
+          <Link to={`/personas/${persona.id}/edit`} className="no-underline">
+            <Pencil className="mr-1.5 h-3.5 w-3.5" />
+            Edit
+          </Link>
         </Button>
       </div>
 
@@ -377,15 +362,6 @@ export function PersonaDetail() {
 
       <PersonaPublishingPanel persona={persona} />
 
-      <PersonaFormDialog
-        open={editOpen}
-        onOpenChange={setEditOpen}
-        initialDraft={draftFromPersona(persona)}
-        title="Edit persona"
-        isEditing
-        onSubmit={(draft) => updatePersona.mutate(draft)}
-        isPending={updatePersona.isPending}
-      />
     </div>
   );
 }

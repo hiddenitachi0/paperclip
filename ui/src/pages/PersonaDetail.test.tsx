@@ -200,6 +200,15 @@ describe("PersonaDetail (DUR-4000)", () => {
     expect(container.querySelector('[data-testid="publishing-panel"]')).not.toBeNull();
   });
 
+  it("Edit opens the persona's edit page, and the page is marked as this persona for the helper", async () => {
+    await render();
+    const edit = container.querySelector<HTMLAnchorElement>('a[href="/personas/persona-1/edit"]');
+    expect(edit?.textContent).toContain("Edit");
+    // The edit form no longer lives in a dialog on this page.
+    expect(container.querySelector("#persona-name")).toBeNull();
+    expect(container.querySelector('[data-helper-entity="persona:persona-1"]')).not.toBeNull();
+  });
+
   it("attaches a job from the company's agents and detaches one from the list", async () => {
     await render();
 
