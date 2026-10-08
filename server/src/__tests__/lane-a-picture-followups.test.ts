@@ -6,7 +6,7 @@ import {
   laneAMediaToolAttempted,
   pickLaneAForcedToolName,
 } from "../services/lane-a-action-claims.ts";
-import { parseLaneATextToolCall } from "../services/lane-a-text-tool-calls.ts";
+import { cleanLaneAAddonToolInput, parseLaneATextToolCall } from "../services/lane-a-text-tool-calls.ts";
 
 /**
  * 7-8 Oct: Maja made the first picture of a conversation, then answered every
@@ -58,6 +58,12 @@ describe("detectLaneAPictureRequest", () => {
     expect(detectLaneAPictureRequest("Improvise, show me the artistic side of yourself through an image", after)).toBe(true);
     expect(detectLaneAPictureRequest("Try again, i didnt get an image. Show me an image of yourself", after)).toBe(true);
     expect(detectLaneAPictureRequest("Show me with an image how you would dress for this weather", { pictureEarlier: false })).toBe(true);
+  });
+
+  it("recognises noun-led follow-ups such as 'And a short video of ...'", () => {
+    expect(detectLaneAPictureRequest("And a short video of the lighthouse beam sweeping over the sea at night.", { pictureEarlier: true })).toBe(true);
+    expect(detectLaneAPictureRequest("A picture of the fjord, please", { pictureEarlier: false })).toBe(true);
+    expect(detectLaneAPictureRequest("A video call later would be nice", { pictureEarlier: true })).toBe(false);
   });
 
   it("recognises Norwegian requests", () => {
@@ -135,5 +141,21 @@ describe("laneAMediaToolAttempted", () => {
     expect(laneAMediaToolAttempted([{ tool: "acme_pictures__make-picture", summary: "refused", ok: false }])).toBe(true);
     expect(laneAMediaToolAttempted([{ tool: "get_weather", summary: "Oslo", ok: true }])).toBe(false);
     expect(laneAMediaToolAttempted([])).toBe(false);
+  });
+});
+
+describe("cleanLaneAAddonToolInput", () => {
+  it("drops 'nothing' words and placeholders that small models put in optional fields (8 Oct, llama3.2 / qwen3:14b)", () => {
+    expect(
+      cleanLaneAAddonToolInput({ prompt: "A lighthouse", seed: "null", issueId: "None", look: "none", model: null, fileId: "<ID>", scale: 4 }),
+    ).toEqual({ prompt: "A lighthouse", scale: 4 });
+    expect(cleanLaneAAddonToolInput({ prompt: "None of the above, a lighthouse" })).toEqual({ prompt: "None of the above, a lighthouse" });
+    expect(cleanLaneAAddonToolInput(null)).toBeNull();
+  });
+});
+
+describe("started-making claims", () => {
+  it("catches 'I've started making the video'", () => {
+    expect(detectLaneAActionClaim("I've started making the video of the red lighthouse beam, boss")?.family).toBe("media");
   });
 });

@@ -61,6 +61,8 @@ const FAMILY_RULES: FamilyRule[] = [
       /\bhere(?:'s| is| are) (?:your|the|another|a new|some|more|a few|two|three) (?:(?:new|other|different|fresh)\s+)?(?:pictures?|images?|photos?|shots?|selfies?|videos?|clips?|songs?|audio)\b/i,
       /\bi(?:'m| am|'ll| will|'ve| have)?\s*(?:generat(?:e|ed|ing)|mak(?:e|ing)|made|creat(?:e|ed|ing)|draw(?:ing|n)?|snap(?:ped|ping)?)\s+(?:you\s+)?(?:a|an|the|your|another|one more|a new|new|more|some|a few|two|three)?\s*(?:(?:new|other|different|fresh|quick)\s+)?(?:pictures?|images?|photos?|selfies?|videos?|clips?|songs?|audio)\b/i,
       /\[\s*generating\s+(?:a|the|another)?\s*(?:picture|image|photo|video|audio)[^\]]*\]/i,
+      // "I've started making the video", "I have sent off the job to make your picture".
+      /\bi(?:'ve| have)\s+(?:started|begun|kicked off)\s+(?:making|generating|creating|rendering)\s+(?:you\s+)?(?:a|an|the|your|another)?\s*(?:\S+\s+){0,2}?(?:pictures?|images?|photos?|videos?|clips?|songs?|audio)\b/i,
       /\bi('ll| will) fix it and (?:give|send) you another (?:attempt|try|one|picture|image)\b/i,
       // Norwegian: "her er bildet", "her er et nytt bilde", "jeg lager et bilde til deg".
       /\bher (?:er|kommer) (?:bildet|bildene|videoen|lydklippet|bildet ditt|et nytt bilde|et bilde|et annet bilde|enda et bilde)\b/i,
@@ -227,6 +229,8 @@ export function detectLaneAPictureRequest(message: string, opts: { pictureEarlie
   const verb = "(?:send|show|make|create|generate|draw|paint|render|snap|share|post)";
   if (new RegExp(`\\b${verb}\\b(?:\\s+\\S+){0,8}?\\s+${noun}\\b`).test(text)) return true;
   if (new RegExp(`\\b(?:another|one more|a new|different)\\s+(?:\\S+\\s+){0,2}?${noun}\\b`).test(text)) return true;
+  // Noun-led follow-ups: "And a short video of the beam at night."
+  if (new RegExp(`^(?:and\\s+|now\\s+|then\\s+|also\\s+)?(?:a|an)\\s+(?:\\S+\\s+){0,2}?${noun}\\s+(?:of|from|with|showing)\\b`).test(text)) return true;
   const nounNo = "(?:bilde|bildet|bilder|bildene|foto|selfie|tegning|video|videoen)";
   const verbNo = "(?:send|vis|lag|tegn|generer|mal)";
   if (new RegExp(`\\b${verbNo}\\b(?:\\s+\\S+){0,8}?\\s+${nounNo}\\b`).test(text)) return true;
