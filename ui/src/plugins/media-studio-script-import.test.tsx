@@ -183,18 +183,24 @@ describe("script import and instructions dialogs", () => {
   });
 });
 
-describe("Start render asks for a budget instead of a dead button", () => {
+describe("Step 3 offers a one-click budget instead of a dead button", () => {
   let container: HTMLDivElement;
   let root: Root;
 
+  let budget: number | null;
   beforeEach(async () => {
     calls = [];
-    routes = (path, method) => {
+    budget = null;
+    routes = (path, method, body) => {
+      if (path === `${BASE}/sl-1` && method === "PATCH") {
+        budget = JSON.parse(body!).budgetCapCents;
+        return json({});
+      }
       if (path === `${BASE}/settings`) return json({ enabled: true });
       if (path === `${BASE}/settings/advanced`) return json({ enabled: false });
       if (path === BASE) {
         return json([
-          { id: "sl-1", companyId: COMPANY, projectId: null, title: "Test film", status: "estimated", providerId: "fal", model: null, budgetCapCents: null, spentCents: 0, estimatedTotalCents: 1000, estimatedTotalSeconds: 20, characterReferenceAssetIds: [], finalObjectKey: null, finalByteSize: null, finalDurationSeconds: null, stitchBlockedReason: null, errorMessage: null, createdAt: "", updatedAt: "" },
+          { id: "sl-1", companyId: COMPANY, projectId: null, title: "Test film", status: "estimated", providerId: "fal", model: null, budgetCapCents: budget, spentCents: 0, estimatedTotalCents: 1000, estimatedTotalSeconds: 20, characterReferenceAssetIds: [], finalObjectKey: null, finalByteSize: null, finalDurationSeconds: null, stitchBlockedReason: null, errorMessage: null, createdAt: "", updatedAt: "" },
         ]);
       }
       if (path === `${BASE}/sl-1/scenes`) return json([{ id: "sc-1", storylineId: "sl-1", orderIndex: 0, title: "Opening", notes: null, createdAt: "" }]);
@@ -234,22 +240,27 @@ describe("Start render asks for a budget instead of a dead button", () => {
     vi.unstubAllGlobals();
   });
 
-  it("asks for a spending limit and sends it with the start", async () => {
-    expect(container.textContent).toContain("you'll be asked for one when you start the render");
-    const start = button(container, "Start render");
-    expect(start.disabled).toBe(false);
-    await click(start);
-    const ask = container.querySelector('[data-testid="budget-ask"]');
-    expect(ask?.textContent).toContain("Set a spending limit first");
+  it("lists the missing budget with a suggested amount, sets it in one click, then starts", async () => {
+    // Everything else is ready, so the guided flow opens step 3 straight away.
+    expect(container.querySelector('[data-testid="render-step"]')).toBeTruthy();
+    const start = container.querySelector('[data-testid="start-render"]') as HTMLButtonElement;
+    expect(start.disabled).toBe(true);
+    expect(container.querySelector('[data-testid="readiness-no-budget"]')?.textContent).toContain("No budget set");
     // Suggests the estimate plus a 20% margin, rounded up to whole dollars.
-    expect((container.querySelector('input[aria-label="Most this render may spend"]') as HTMLInputElement).value).toBe("12");
+    await click(button(container, "Set budget to $12.00 (estimate + 20%)"));
+    const patch = calls.find((c) => c.path === `${BASE}/sl-1` && c.method === "PATCH");
+    expect(JSON.parse(patch!.body!)).toEqual({ budgetCapCents: 1200 });
+    expect(container.querySelector('[data-testid="readiness-ready"]')).toBeTruthy();
     vi.spyOn(window, "confirm").mockReturnValue(true);
-    await click(button(container, "Set limit and start render"));
+    await click(container.querySelector('[data-testid="start-render"]') as HTMLButtonElement);
     const startCall = calls.find((c) => c.path === `${BASE}/sl-1/render/start`);
-    expect(JSON.parse(startCall!.body!)).toEqual({ confirmBudgetCapCents: 1200 });
+    expect(JSON.parse(startCall!.body!)).toEqual({});
+    // Once started, the page moves on to step 4.
+    expect(container.querySelector('[data-testid="film-panel"]')).toBeTruthy();
   });
 
   it("offers script import and the writer instructions on the editor and the list", async () => {
+    await click(container.querySelector('[data-testid="step-script"]') as HTMLButtonElement);
     expect(button(container, "Import script (JSON)")).toBeTruthy();
     expect(button(container, "New from script (JSON)")).toBeTruthy();
     expect(container.querySelectorAll("button").length).toBeGreaterThan(0);
