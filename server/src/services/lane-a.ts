@@ -49,6 +49,7 @@ import {
   type LaneABackupKeySlot,
   type LaneABackupModelConfig,
   type LaneAKeywordRoute,
+  withOpenRouterBlockedHostsForCall,
 } from "@paperclipai/shared";
 import { HttpError, conflict, forbidden, notFound, tooManyRequests, unprocessable } from "../errors.js";
 import {
@@ -70,7 +71,7 @@ import { logger } from "../middleware/logger.js";
 import { openRouterCataloguePrice } from "./lane-a-openrouter-catalogue.js";
 import { logActivity } from "./activity-log.js";
 import { resolveAgentMcpToolLibraryServers } from "./mcp-tool-library.js";
-import { resolveBackupModelsThroughDirectory } from "./model-directory.js";
+import { modelDirectoryService, resolveBackupModelsThroughDirectory } from "./model-directory.js";
 import { classifyLocalFailure, modelHealthService } from "./model-health.js";
 import { cleanLaneAAddonToolInput, parseLaneATextToolCall } from "./lane-a-text-tool-calls.js";
 import {
@@ -873,6 +874,9 @@ export function resolveTransformMaxTokens(input: {
  * the resolved OpenAI-compatible endpoint (null for Claude, and for a local
  * model whose address has not been set).
  */
+/** How long a company's blocked OpenRouter hosts are kept between reads (lane A calls). */
+export const LANE_A_BLOCKED_HOSTS_TTL_MS = 30_000;
+
 export function resolveLaneASettings(agent: LaneATargetAgent) {
   const provider = normalizeLaneAProvider(agent.laneAProvider);
   const model = resolveLaneAModelForProvider(provider, agent.laneAModel);
@@ -2373,13 +2377,42 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     });
   }
 
-  /** One provider client for one call. The key lives in its closure and nowhere else. */
+  // The company's OpenRouter blocked hosts (Settings > Models), read at call
+  // time so a setup saved before a host was blocked is covered too. Kept for
+  // a short while per company: one quick-agent turn makes several calls, and
+  // a changed list is picked up within LANE_A_BLOCKED_HOSTS_TTL_MS.
+  const blockedHostsCache = new Map<string, { at: number; hosts: Promise<string[]> }>();
+  const modelDirectory = modelDirectoryService(db);
+  function companyBlockedOpenRouterHosts(companyId: string): Promise<string[]> {
+    const now = Date.now();
+    const cached = blockedHostsCache.get(companyId);
+    if (cached && now - cached.at < LANE_A_BLOCKED_HOSTS_TTL_MS) return cached.hosts;
+    const hosts = modelDirectory.getSettings(companyId).then(
+      (settings) => settings.openrouterBlockedHosts,
+      (err: unknown) => {
+        // Not cached: the next call asks again.
+        blockedHostsCache.delete(companyId);
+        logger.warn({ err, companyId }, "lane A: could not read the company's blocked OpenRouter hosts; calling without them");
+        return [] as string[];
+      },
+    );
+    blockedHostsCache.set(companyId, { at: now, hosts });
+    return hosts;
+  }
+
+  /**
+   * One provider client for one call. The key lives in its closure and
+   * nowhere else. For OpenRouter every request also gets the company's
+   * blocked hosts in its "ignore" list (except hosts the setup explicitly
+   * marks "Use"), whatever routing the caller passes.
+   */
   function buildProviderClient(input: {
+    companyId: string;
     provider: LaneAProvider;
     baseUrl: string | null;
     credential: LaneACredential;
   }): LaneAProviderClient {
-    return createLaneAProviderClient({
+    const client = createLaneAProviderClient({
       provider: input.provider,
       apiKey: input.credential.apiKey,
       baseUrl: input.baseUrl,
@@ -2387,6 +2420,15 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         input.provider === "anthropic" && options.createModelClient ? options.createModelClient() : undefined,
       fetch: options.providerFetch,
     });
+    if (input.provider !== "openrouter") return client;
+    return {
+      provider: client.provider,
+      async complete(request) {
+        const blocked = await companyBlockedOpenRouterHosts(input.companyId);
+        const providerRouting = withOpenRouterBlockedHostsForCall(request.providerRouting ?? null, blocked);
+        return client.complete(providerRouting ? { ...request, providerRouting } : request);
+      },
+    };
   }
 
   /**
@@ -3056,6 +3098,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     // already committed to opening tools (so there is nothing left to leak
     // by resolving a backup's credential a little later).
     const mainClient = buildProviderClient({
+      companyId: params.companyId,
       provider: chatSettings.provider,
       baseUrl: chatSettings.baseUrl,
       credential,
@@ -3294,7 +3337,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
               actor: params.actor,
               keyOptional: entrySettings.provider === "anthropic" && Boolean(options.createModelClient),
             });
-            entryClient = buildProviderClient({ provider: entrySettings.provider, baseUrl: entrySettings.baseUrl, credential: backupCredential });
+            entryClient = buildProviderClient({ companyId: params.companyId, provider: entrySettings.provider, baseUrl: entrySettings.baseUrl, credential: backupCredential });
           } catch (err) {
             // A backup that cannot even be set up (bad model id, missing
             // key) is skipped rather than ending the whole turn over it.
@@ -3935,7 +3978,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
                 poolId === LANE_A_MAIN_POOL_ID ? undefined : backupKeySlotFor(entrySettings, settings, agentRow?.adapterConfig),
               keyOptional: entrySettings.provider === "anthropic" && Boolean(options.createModelClient),
             });
-            entryClient = buildProviderClient({ provider: entrySettings.provider, baseUrl: entrySettings.baseUrl, credential });
+            entryClient = buildProviderClient({ companyId: params.companyId, provider: entrySettings.provider, baseUrl: entrySettings.baseUrl, credential });
           } catch (err) {
             // The main model's setup failure is the caller's to see; a backup
             // that cannot be set up is just skipped.
@@ -4358,7 +4401,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         actor: params.actor,
         keyOptional: settings.provider === "anthropic" && Boolean(options.createModelClient),
       });
-      const client = buildProviderClient({ provider: settings.provider, baseUrl: settings.baseUrl, credential });
+      const client = buildProviderClient({ companyId, provider: settings.provider, baseUrl: settings.baseUrl, credential });
       const candidates = boundCandidates(considered);
       const request = buildTopicSelectionRequest({
         spec: plan.topic,

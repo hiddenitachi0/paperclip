@@ -876,7 +876,7 @@ export interface VariantNode<T extends CatalogueItem = CatalogueItem> {
   installedLocally: boolean;
   /** For a size Ollama has that is not installed: "ollama pull llama3.2:1b". */
   pullCommand: string | null;
-  /** "Too big for the graphics card (needs ~20 GB, this company's has 12 GB) - run it on OpenRouter: deepinfra, together". */
+  /** "Too big for the graphics card (needs ~20 GB, this company's has 12 GB) - run it on OpenRouter (hosts with tool calling when last checked: deepinfra, together)". */
   tooBigAdvice: string | null;
   upgrades: UpgradeOption[];
 }
@@ -1044,10 +1044,10 @@ export function draftFromKnown(
       provider: "openrouter",
       model: how.option.id,
       baseUrl: null,
-      providerRouting:
-        how.option.toolHosts.length > 0
-          ? { only: [...how.option.toolHosts], order: [], ignore: [], allowFallbacks: false }
-          : null,
+      // No host is picked for the company: the setup's host table and the
+      // company's OpenRouter host rules decide (and tool requests only ever
+      // go to a host that supports tools).
+      providerRouting: null,
       availability: "cloud",
       specs: { ...specsBase, ...(how.option.contextTokens ? { contextTokens: how.option.contextTokens } : {}) },
       note: variant.note ?? null,
@@ -1158,7 +1158,7 @@ function knownOptionsFor(
         key: `openrouter-${option.id}`,
         provider: "openrouter",
         model: option.id,
-        label: `OpenRouter · ${option.toolHosts.length > 0 ? option.toolHosts.join(", ") : "no host with tool calling"}`,
+        label: `OpenRouter · ${option.toolHosts.length > 0 ? `tools on ${option.toolHosts.join(", ")}` : "no host with tool calling"}`,
         hosts: [...option.toolHosts],
         draft: draftFromKnown(family, variant, { provider: "openrouter", option }),
       });
@@ -1233,7 +1233,7 @@ export function upgradesFor<T extends CatalogueItem>(
               key: `openrouter-${router.id}`,
               provider: "openrouter",
               model: router.id,
-              label: `OpenRouter · ${router.toolHosts.join(", ")}`,
+              label: `OpenRouter · tools on ${router.toolHosts.join(", ")}`,
               hosts: [...router.toolHosts],
               draft: draftFromKnown(relative, bigger, { provider: "openrouter", option: router }),
             }
@@ -1246,7 +1246,7 @@ export function upgradesFor<T extends CatalogueItem>(
 }
 
 /**
- * "Too big for the graphics card (needs ~20 GB, this company's has 12 GB) - run it on OpenRouter: deepinfra, together",
+ * "Too big for the graphics card (needs ~20 GB, this company's has 12 GB) - run it on OpenRouter (hosts with tool calling when last checked: deepinfra, together)",
  * or null (it fits, or the graphics card memory is not set).
  */
 export function tooBigAdvice(variant: KnownModelVariant, gpuVramGb: number | null | undefined): string | null {
@@ -1256,7 +1256,7 @@ export function tooBigAdvice(variant: KnownModelVariant, gpuVramGb: number | nul
       ? `Needs a graphics card with ~${roundOne(variant.minVramGb!)} GB; this company's computer has none (on the processor alone it runs very slowly)`
       : `Too big for the graphics card (needs ~${roundOne(variant.minVramGb!)} GB, this company's has ${roundOne(gpuVramGb!)} GB)`;
   const hosts = [...new Set(variant.openrouter.flatMap((option) => option.toolHosts))];
-  if (hosts.length > 0) return `${head} - run it on OpenRouter: ${hosts.join(", ")}`;
+  if (hosts.length > 0) return `${head} - run it on OpenRouter (hosts with tool calling when last checked: ${hosts.join(", ")})`;
   if (variant.openrouter.length > 0) return `${head} - OpenRouter has it, but no host there is known to support tool calling`;
   return `${head} - no cloud version is known`;
 }

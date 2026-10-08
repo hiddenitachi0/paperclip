@@ -10,6 +10,7 @@ import type {
   ModelDirectoryStarterStatus,
   ModelConverterOp,
   ModelProbeSetResult,
+  OpenRouterHostsResult,
   UpdateModelDirectoryEntry,
   UpdateModelDirectorySettings,
 } from "@paperclipai/shared";
@@ -86,6 +87,14 @@ export const modelDirectoryApi = {
     api.get<ModelDirectorySettings>(`/companies/${companyId}/model-directory/settings`),
   updateSettings: (companyId: string, body: UpdateModelDirectorySettings) =>
     api.put<ModelDirectorySettings>(`/companies/${companyId}/model-directory/settings`, body),
+  /**
+   * The hosts that run one OpenRouter model and what each supports for it,
+   * read live from OpenRouter (cached about ten minutes; refresh skips that).
+   */
+  openrouterHosts: (companyId: string, model: string, opts: { refresh?: boolean } = {}) =>
+    api.get<OpenRouterHostsResult>(
+      `/companies/${companyId}/model-directory/openrouter-hosts?model=${encodeURIComponent(model)}${opts.refresh ? "&refresh=true" : ""}`,
+    ),
   /** Asks the local Ollama at one of the company's local addresses which models are installed and marks the setups there. */
   syncLocal: (companyId: string, baseUrl: string) =>
     api.post<LocalModelsSyncResult>(`/companies/${companyId}/model-directory/local-sync`, { baseUrl }),
