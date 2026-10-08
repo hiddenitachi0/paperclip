@@ -51,6 +51,65 @@ export const SHEET_FIELD_OPTIONS: Array<{ key: string; label: string; placeholde
   { key: "avoid", label: "Always avoid", placeholder: "text, watermarks, extra fingers" },
 ];
 const SHEET_FIELD_MAX = 300;
+
+/**
+ * "Ask Paperclip" (the host's helper) can put an answer into a field the
+ * person marked. An add-on cannot import the host's hook, so the host sends
+ * this event to the element carrying data-helper-apply; the listener below
+ * calls this page's own state setter (nothing is written to the DOM, nothing
+ * is saved -- the person still presses Save).
+ */
+export const HELPER_APPLY_EVENT = "paperclip:helper-apply";
+type HelperApplyDetail = { label: string; value: string; handled: boolean };
+
+/** Reads "Hair: long, blonde" lines into sheet keys (by label or key, case-insensitive). Unknown lines are ignored. */
+export function parseSheetText(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.replace(/^\s*(?:[-*]|\d+[.)])\s*/, "").replace(/\*\*/g, "");
+    const match = /^([^:]{1,40}):\s*(.+)$/.exec(line.trim());
+    if (!match) continue;
+    const name = match[1]!.trim().toLowerCase();
+    const option = SHEET_FIELD_OPTIONS.find(
+      (f) => f.key.toLowerCase() === name || f.label.toLowerCase() === name || f.label.toLowerCase().split("/")[0] === name,
+    );
+    if (option) out[option.key] = match[2]!.trim().slice(0, SHEET_FIELD_MAX);
+  }
+  return out;
+}
+
+/** Wraps an element so "Ask Paperclip" can apply an answer to it. */
+function HelperApplyTarget({
+  label,
+  onApply,
+  style,
+  children,
+}: {
+  label: string;
+  onApply: (value: string) => boolean;
+  style?: React.CSSProperties;
+  children: React.ReactNode;
+}) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const onApplyRef = useRef(onApply);
+  onApplyRef.current = onApply;
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const listener = (event: Event) => {
+      const detail = (event as CustomEvent<HelperApplyDetail>).detail;
+      if (!detail || typeof detail.value !== "string") return;
+      if (onApplyRef.current(detail.value)) detail.handled = true;
+    };
+    el.addEventListener(HELPER_APPLY_EVENT, listener);
+    return () => el.removeEventListener(HELPER_APPLY_EVENT, listener);
+  }, []);
+  return (
+    <div ref={ref} data-helper-apply={label} style={style}>
+      {children}
+    </div>
+  );
+}
 const DEFAULT_SAMPLE_REQUEST = "reading a book by the window";
 
 type GenerationResult = {
@@ -1794,7 +1853,7 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
       {!draft ? <AutomaticLooksSection looks={looks} defaults={defaults} /> : null}
 
       {draft ? (
-        <div style={{ ...card, gap: 10 }}>
+        <div style={{ ...card, gap: 10 }} data-helper-entity={`media-studio-look:${draft.id ?? "new"}`}>
           <div style={{ fontWeight: 600 }}>{draft.id ? "Edit look" : "New look"}</div>
           <label style={field}>
             <span>Name</span>
@@ -1977,21 +2036,39 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
               Short words for what should stay the same in every picture. When a request says otherwise (for example
               another outfit or place), the request wins.
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 8 }}>
+            <HelperApplyTarget
+              label="Character sheet (all fields)"
+              onApply={(text) => {
+                const parsed = parseSheetText(text);
+                if (Object.keys(parsed).length === 0) return false;
+                setDraft((d) => (d ? { ...d, sheet: { ...(d.sheet ?? {}), ...parsed } } : d));
+                return true;
+              }}
+              style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 8 }}
+            >
               {SHEET_FIELD_OPTIONS.map((f) => (
-                <label key={f.key} style={field}>
-                  <span>{f.label}</span>
-                  <input
-                    aria-label={f.label}
-                    value={draft.sheet?.[f.key] ?? ""}
-                    maxLength={SHEET_FIELD_MAX}
-                    onChange={(e) => setSheetField(f.key, e.target.value)}
-                    style={input}
-                    placeholder={f.placeholder}
-                  />
-                </label>
+                <HelperApplyTarget
+                  key={f.key}
+                  label={`Character sheet: ${f.label}`}
+                  onApply={(text) => {
+                    setSheetField(f.key, text.replace(/\s+/g, " ").trim().slice(0, SHEET_FIELD_MAX));
+                    return true;
+                  }}
+                >
+                  <label style={field}>
+                    <span>{f.label}</span>
+                    <input
+                      aria-label={f.label}
+                      value={draft.sheet?.[f.key] ?? ""}
+                      maxLength={SHEET_FIELD_MAX}
+                      onChange={(e) => setSheetField(f.key, e.target.value)}
+                      style={input}
+                      placeholder={f.placeholder}
+                    />
+                  </label>
+                </HelperApplyTarget>
               ))}
-            </div>
+            </HelperApplyTarget>
           </details>
 
           <div style={field}>

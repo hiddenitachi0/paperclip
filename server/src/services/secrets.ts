@@ -1673,6 +1673,18 @@ export function secretService(db: Db, rawDb: Db = db) {
       });
     }
 
+    // The "Ask Paperclip" helper's model keys (Company settings → General → Helper): one per provider.
+    for (const targetId of collectTargetIds(bindings, "helper")) {
+      if (targetId !== companyId) continue;
+      setTarget({
+        type: "helper",
+        id: targetId,
+        label: "Ask Paperclip helper (Company settings)",
+        href: "/company/settings",
+        status: null,
+      });
+    }
+
     return targetMap;
   }
 

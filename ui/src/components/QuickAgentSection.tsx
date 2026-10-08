@@ -75,6 +75,10 @@ import { ToggleSwitch } from "@/components/ui/toggle-switch";
 import { SecretBindingPicker, type SecretBindingValue } from "./SecretBindingPicker";
 import { QuickAgentBackupModels } from "./QuickAgentBackupModels";
 import { SettingsSection, SettingsSubsection } from "./SettingsSection";
+import { useHelperApplyTarget } from "../lib/helper-apply";
+
+/** The label "Ask Paperclip" shows on its "Apply to …" button for this field. */
+export const QUICK_AGENT_INSTRUCTIONS_APPLY_LABEL = "Quick agent instructions";
 
 /**
  * Quick agent settings: the on/off switch plus the instruction set the quick
@@ -193,6 +197,12 @@ export function QuickAgentSection({
 
   const instructions = draft ?? savedInstructions;
   const dirty = draft !== null && draft !== savedInstructions;
+  // "Ask Paperclip" may fill the instructions; the person still presses Save.
+  useHelperApplyTarget(
+    QUICK_AGENT_INSTRUCTIONS_APPLY_LABEL,
+    (value) => setDraft(value.slice(0, LANE_A_INSTRUCTIONS_MAX_LENGTH)),
+    savedEnabled || dirty || Boolean(instructions),
+  );
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agent.id) });
@@ -742,15 +752,18 @@ export function QuickAgentSection({
         storageKey="agent.quickAgent.instructions"
         data-testid="quick-agent-instructions-group"
       >
-        <Textarea
-          value={instructions}
-          onChange={(event) => setDraft(event.target.value)}
-          rows={8}
-          maxLength={LANE_A_INSTRUCTIONS_MAX_LENGTH}
-          placeholder="You are the front desk for this company. Route requests to the right colleague and keep answers short."
-          className="text-sm"
-          disabled={!savedEnabled && !dirty && !instructions}
-        />
+        <div data-helper-apply={QUICK_AGENT_INSTRUCTIONS_APPLY_LABEL}>
+          <Textarea
+            aria-label="Quick agent instructions"
+            value={instructions}
+            onChange={(event) => setDraft(event.target.value)}
+            rows={8}
+            maxLength={LANE_A_INSTRUCTIONS_MAX_LENGTH}
+            placeholder="You are the front desk for this company. Route requests to the right colleague and keep answers short."
+            className="text-sm"
+            disabled={!savedEnabled && !dirty && !instructions}
+          />
+        </div>
         <div className="flex items-center justify-between gap-2">
           <p className="text-xs text-muted-foreground">
             {instructions.length} / {LANE_A_INSTRUCTIONS_MAX_LENGTH}
