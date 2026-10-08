@@ -60,6 +60,12 @@ describe("detectLaneAPictureRequest", () => {
     expect(detectLaneAPictureRequest("Show me with an image how you would dress for this weather", { pictureEarlier: false })).toBe(true);
   });
 
+  it("recognises noun-led follow-ups such as 'And a short video of ...'", () => {
+    expect(detectLaneAPictureRequest("And a short video of the lighthouse beam sweeping over the sea at night.", { pictureEarlier: true })).toBe(true);
+    expect(detectLaneAPictureRequest("A picture of the fjord, please", { pictureEarlier: false })).toBe(true);
+    expect(detectLaneAPictureRequest("A video call later would be nice", { pictureEarlier: true })).toBe(false);
+  });
+
   it("recognises Norwegian requests", () => {
     expect(detectLaneAPictureRequest("Send meg et bilde av fjorden", { pictureEarlier: false })).toBe(true);
     expect(detectLaneAPictureRequest("Lag et nytt bilde", { pictureEarlier: false })).toBe(true);

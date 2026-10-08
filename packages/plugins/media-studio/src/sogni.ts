@@ -166,9 +166,12 @@ export const SOGNI_STORAGE_HOST_SUFFIXES = [".s3-accelerate.amazonaws.com"] as c
 /**
  * Exact Sogni hosts that also serve finished pictures. From 2 Oct 2026 Sogni
  * returns result addresses on media.sogni.ai (its own domain), which the
- * suffix list above refused, so every Sogni picture failed. Exact match only.
+ * suffix list above refused, so every Sogni picture failed. From 8 Oct 2026
+ * results also come from Sogni's S3 bucket artist-upload-production in
+ * us-east-1 (seen in the address Sogni's own API returned), with the same
+ * effect. Exact match only.
  */
-export const SOGNI_STORAGE_HOSTS = ["media.sogni.ai"] as const;
+export const SOGNI_STORAGE_HOSTS = ["media.sogni.ai", "artist-upload-production.s3.us-east-1.amazonaws.com"] as const;
 
 const SOGNI_MODEL_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,99}$/i;
 const MAX_SEED = 4_294_967_295;

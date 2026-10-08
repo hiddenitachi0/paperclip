@@ -227,6 +227,8 @@ export function detectLaneAPictureRequest(message: string, opts: { pictureEarlie
   const verb = "(?:send|show|make|create|generate|draw|paint|render|snap|share|post)";
   if (new RegExp(`\\b${verb}\\b(?:\\s+\\S+){0,8}?\\s+${noun}\\b`).test(text)) return true;
   if (new RegExp(`\\b(?:another|one more|a new|different)\\s+(?:\\S+\\s+){0,2}?${noun}\\b`).test(text)) return true;
+  // Noun-led follow-ups: "And a short video of the beam at night."
+  if (new RegExp(`^(?:and\\s+|now\\s+|then\\s+|also\\s+)?(?:a|an)\\s+(?:\\S+\\s+){0,2}?${noun}\\s+(?:of|from|with|showing)\\b`).test(text)) return true;
   const nounNo = "(?:bilde|bildet|bilder|bildene|foto|selfie|tegning|video|videoen)";
   const verbNo = "(?:send|vis|lag|tegn|generer|mal)";
   if (new RegExp(`\\b${verbNo}\\b(?:\\s+\\S+){0,8}?\\s+${nounNo}\\b`).test(text)) return true;

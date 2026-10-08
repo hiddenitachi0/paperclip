@@ -374,6 +374,8 @@ describe("Sogni provider", () => {
     expect(assertSogniStorageUrl("https://media.sogni.ai/results/abc/picture.png?sig=1").hostname).toBe("media.sogni.ai");
     expect(() => assertSogniStorageUrl("https://evil.media.sogni.ai/picture.png")).toThrow(/not Sogni's picture storage/);
     expect(() => assertSogniStorageUrl("https://media.sogni.ai.evil.example/picture.png")).toThrow(/not Sogni's picture storage/);
+    expect(assertSogniStorageUrl("https://artist-upload-production.s3.us-east-1.amazonaws.com/u/abc.png?X-Amz-Signature=1").hostname).toBe("artist-upload-production.s3.us-east-1.amazonaws.com");
+    expect(() => assertSogniStorageUrl("https://other-bucket.s3.us-east-1.amazonaws.com/abc.png")).toThrow(/not Sogni's picture storage/);
     expect(() => assertSogniStorageUrl("http://media.sogni.ai/picture.png")).toThrow(/not Sogni's picture storage/);
   });
 
