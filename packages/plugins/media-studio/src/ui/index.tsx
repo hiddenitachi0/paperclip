@@ -4,6 +4,8 @@ import { usePluginAction, useHostNavigation, PluginConfigForm } from "@paperclip
 import { MediaStudioEditTab } from "./edit-tab.js";
 import { StoryboardPanel, storyboardReadyToRender, type StoryboardSummary } from "./storyboard-panel.js";
 import { AdvancedFeaturesToggle, AiDirectorSection } from "./director-panel.js";
+import { errorText, storylineFetchJson } from "./storyline-api.js";
+import { ScriptImportDialog, ScriptInstructionsDialog } from "./script-import.js";
 
 // The plugin UI is served as a standalone ES module, so it must not import from
 // sibling plugin files (only bare specifiers resolve). Keep these in sync with
@@ -2188,7 +2190,7 @@ const UNKNOWN_MODEL: SogniModel = {
   variant: false,
 };
 
-const errorBox: React.CSSProperties = { background: "#fff0f6", color: "#a61e4d", padding: "8px 10px", borderRadius: 8 };
+const errorBox: React.CSSProperties = { background: "#fff0f6", color: "#a61e4d", padding: "8px 10px", borderRadius: 8, whiteSpace: "pre-line" };
 const card: React.CSSProperties = { border: "1px solid rgba(128,128,128,0.35)", borderRadius: 10, padding: 12, display: "flex", flexDirection: "column", gap: 6 };
 const field: React.CSSProperties = { display: "flex", flexDirection: "column", gap: 4 };
 const input: React.CSSProperties = { padding: 8, borderRadius: 8, border: "1px solid rgba(128,128,128,0.5)", fontFamily: "inherit", fontSize: 13, background: "transparent", color: "inherit" };
@@ -3079,7 +3081,9 @@ function storylineStatusLabel(status: string): string {
     case "failed":
       return "Failed";
     case "cancelled":
-      return "Cancelled";
+      return "Cancelled (you can change it and start again)";
+    case "needs_attention":
+      return "Finished, but the automatic check found problems";
     default:
       return status;
   }
@@ -3103,7 +3107,7 @@ function shotStatusLabel(status: string): string {
 }
 
 const RENDERING_STORYLINE_STATUSES = new Set(["rendering", "stitching"]);
-const EDITABLE_STORYLINE_STATUSES = new Set(["draft", "estimated", "paused", "failed"]);
+const EDITABLE_STORYLINE_STATUSES = new Set(["draft", "estimated", "paused", "failed", "cancelled"]);
 
 /** A small multi-select of the company's saved Looks, for picking character reference pictures. Reuses the Looks list already fetched for the Looks tab rather than building a new picker. */
 function LookReferencePicker(props: {
@@ -3161,6 +3165,8 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
   const listLooks = usePluginAction(ACTION_LOOKS_LIST);
 
   const [enabled, setEnabled] = useState<boolean | null>(null);
+  /** False when the server has no ffmpeg: clips render but can never be combined into one film. */
+  const [ffmpegAvailable, setFfmpegAvailable] = useState<boolean | null>(null);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [settingsBusy, setSettingsBusy] = useState(false);
 
@@ -3180,14 +3186,20 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
 
   const [newSceneTitle, setNewSceneTitle] = useState("");
   const [shotDrafts, setShotDrafts] = useState<Record<string, { prompt: string; cameraNotes: string; durationSeconds: number; lookReferenceAssetIds: string[] }>>({});
+  /** Which script-import panel is open: a new storyline from a script, or an import into the selected one. */
+  const [importFor, setImportFor] = useState<"new" | "selected" | null>(null);
+  const [showInstructions, setShowInstructions] = useState(false);
+  /** Set (to the suggested dollar amount) while the page asks for a budget cap before rendering. */
+  const [budgetAsk, setBudgetAsk] = useState<string | null>(null);
 
   const loadSettings = useCallback(async () => {
     if (!companyId) return;
     try {
-      const res = await hostFetchJson<{ enabled: boolean }>(`/api/companies/${companyId}/video-storylines/settings`);
+      const res = await storylineFetchJson<{ enabled: boolean; ffmpegAvailable?: boolean }>(`/api/companies/${companyId}/video-storylines/settings`);
       setEnabled(res.enabled);
+      setFfmpegAvailable(res.ffmpegAvailable ?? null);
     } catch (e) {
-      setSettingsError(e instanceof Error ? e.message : String(e));
+      setSettingsError(errorText(e));
     }
   }, [companyId]);
 
@@ -3201,9 +3213,9 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
 
   useEffect(() => {
     if (!companyId) return;
-    hostFetchJson<{ enabled: boolean }>(`/api/companies/${companyId}/video-storylines/settings/advanced`)
+    storylineFetchJson<{ enabled: boolean }>(`/api/companies/${companyId}/video-storylines/settings/advanced`)
       .then((res) => setAdvancedEnabled(res.enabled))
-      .catch((e) => setAdvancedError(e instanceof Error ? e.message : String(e)));
+      .catch((e) => setAdvancedError(errorText(e)));
   }, [companyId]);
 
   const toggleAdvanced = async (next: boolean) => {
@@ -3211,13 +3223,13 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
     setAdvancedBusy(true);
     setAdvancedError(null);
     try {
-      const res = await hostFetchJson<{ enabled: boolean }>(`/api/companies/${companyId}/video-storylines/settings/advanced`, {
+      const res = await storylineFetchJson<{ enabled: boolean }>(`/api/companies/${companyId}/video-storylines/settings/advanced`, {
         method: "PATCH",
         body: JSON.stringify({ enabled: next }),
       });
       setAdvancedEnabled(res.enabled);
     } catch (e) {
-      setAdvancedError(e instanceof Error ? e.message : String(e));
+      setAdvancedError(errorText(e));
     } finally {
       setAdvancedBusy(false);
     }
@@ -3234,13 +3246,13 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
     setSettingsBusy(true);
     setSettingsError(null);
     try {
-      const res = await hostFetchJson<{ enabled: boolean }>(`/api/companies/${companyId}/video-storylines/settings`, {
+      const res = await storylineFetchJson<{ enabled: boolean }>(`/api/companies/${companyId}/video-storylines/settings`, {
         method: "PATCH",
         body: JSON.stringify({ enabled: next }),
       });
       setEnabled(res.enabled);
     } catch (e) {
-      setSettingsError(e instanceof Error ? e.message : String(e));
+      setSettingsError(errorText(e));
     } finally {
       setSettingsBusy(false);
     }
@@ -3249,10 +3261,10 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
   const loadStorylines = useCallback(async () => {
     if (!companyId || !enabled) return;
     try {
-      const res = await hostFetchJson<VideoStorylineSummary[]>(`/api/companies/${companyId}/video-storylines`);
+      const res = await storylineFetchJson<VideoStorylineSummary[]>(`/api/companies/${companyId}/video-storylines`);
       setStorylines(res);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorText(e));
     }
   }, [companyId, enabled]);
 
@@ -3265,19 +3277,22 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
   useEffect(() => {
     setApprovalPending(false);
     setStoryboard(null);
+    setBudgetAsk(null);
+    if (importFor === "selected") setImportFor(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId]);
 
   const loadDetail = useCallback(async () => {
     if (!companyId || !selectedId) return;
     try {
       const [sceneRes, shotRes] = await Promise.all([
-        hostFetchJson<VideoSceneSummary[]>(`/api/companies/${companyId}/video-storylines/${selectedId}/scenes`),
-        hostFetchJson<VideoShotSummary[]>(`/api/companies/${companyId}/video-storylines/${selectedId}/shots`),
+        storylineFetchJson<VideoSceneSummary[]>(`/api/companies/${companyId}/video-storylines/${selectedId}/scenes`),
+        storylineFetchJson<VideoShotSummary[]>(`/api/companies/${companyId}/video-storylines/${selectedId}/shots`),
       ]);
       setScenes(sceneRes);
       setShots(shotRes);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorText(e));
     }
   }, [companyId, selectedId]);
 
@@ -3288,10 +3303,10 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
   const loadProgress = useCallback(async () => {
     if (!companyId || !selectedId) return;
     try {
-      const res = await hostFetchJson<VideoStorylineProgress>(`/api/companies/${companyId}/video-storylines/${selectedId}/progress`);
+      const res = await storylineFetchJson<VideoStorylineProgress>(`/api/companies/${companyId}/video-storylines/${selectedId}/progress`);
       setProgress(res);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorText(e));
     }
   }, [companyId, selectedId]);
 
@@ -3316,7 +3331,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
     setBusy(true);
     setError(null);
     try {
-      const row = await hostFetchJson<VideoStorylineSummary>(`/api/companies/${companyId}/video-storylines`, {
+      const row = await storylineFetchJson<VideoStorylineSummary>(`/api/companies/${companyId}/video-storylines`, {
         method: "POST",
         body: JSON.stringify({ title: newTitle.trim(), providerId: newProvider }),
       });
@@ -3324,7 +3339,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
       await loadStorylines();
       setSelectedId(row.id);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorText(e));
     } finally {
       setBusy(false);
     }
@@ -3336,11 +3351,11 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
     setBusy(true);
     setError(null);
     try {
-      await hostFetchJson(`/api/companies/${companyId}/video-storylines/${id}`, { method: "DELETE" });
+      await storylineFetchJson(`/api/companies/${companyId}/video-storylines/${id}`, { method: "DELETE" });
       if (selectedId === id) setSelectedId(null);
       await loadStorylines();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorText(e));
     } finally {
       setBusy(false);
     }
@@ -3353,13 +3368,56 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
     setBusy(true);
     setError(null);
     try {
-      await hostFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}`, {
+      await storylineFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}`, {
         method: "PATCH",
         body: JSON.stringify({ budgetCapCents: cents }),
       });
       await loadStorylines();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const updateStorylineFields = async (patch: Record<string, unknown>, action: string) => {
+    if (!companyId || !selectedId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await storylineFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}`, { method: "PATCH", body: JSON.stringify(patch) }, action);
+      await loadStorylines();
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Moves a shot to a storyline-wide position; the server keeps it inside its scene and renumbers everything. */
+  const moveShot = async (shotId: string, orderIndex: number) => {
+    if (!companyId || !selectedId || orderIndex < 0) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await storylineFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}/shots/${shotId}`, { method: "PATCH", body: JSON.stringify({ orderIndex }) }, "moving the shot");
+      await loadDetail();
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const retryStitch = async () => {
+    if (!companyId || !selectedId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await storylineFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}/stitch/retry`, { method: "POST" }, "combining the clips again");
+      await loadStorylines();
+    } catch (e) {
+      setError(errorText(e));
     } finally {
       setBusy(false);
     }
@@ -3370,14 +3428,15 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
     setBusy(true);
     setError(null);
     try {
-      await hostFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}/scenes`, {
+      await storylineFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}/scenes`, {
         method: "POST",
-        body: JSON.stringify({ title: newSceneTitle.trim(), orderIndex: scenes.length }),
+        // The next free position: scenes.length collides with an existing scene once an earlier one was deleted.
+        body: JSON.stringify({ title: newSceneTitle.trim(), orderIndex: scenes.reduce((max, sc) => Math.max(max, sc.orderIndex), -1) + 1 }),
       });
       setNewSceneTitle("");
       await loadDetail();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorText(e));
     } finally {
       setBusy(false);
     }
@@ -3389,10 +3448,10 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
     setBusy(true);
     setError(null);
     try {
-      await hostFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}/scenes/${sceneId}`, { method: "DELETE" });
+      await storylineFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}/scenes/${sceneId}`, { method: "DELETE" });
       await loadDetail();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorText(e));
     } finally {
       setBusy(false);
     }
@@ -3413,7 +3472,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
     setBusy(true);
     setError(null);
     try {
-      await hostFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}/shots`, {
+      await storylineFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}/shots`, {
         method: "POST",
         body: JSON.stringify({
           sceneId,
@@ -3427,7 +3486,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
       setShotDrafts((prev) => ({ ...prev, [sceneId]: { prompt: "", cameraNotes: "", durationSeconds: VIDEO_SHOT_DEFAULT_DURATION_SECONDS, lookReferenceAssetIds: [] } }));
       await loadDetail();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorText(e));
     } finally {
       setBusy(false);
     }
@@ -3438,10 +3497,10 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
     setBusy(true);
     setError(null);
     try {
-      await hostFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}/shots/${shotId}`, { method: "DELETE" });
+      await storylineFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}/shots/${shotId}`, { method: "DELETE" });
       await loadDetail();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorText(e));
     } finally {
       setBusy(false);
     }
@@ -3452,11 +3511,11 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
     setBusy(true);
     setError(null);
     try {
-      await hostFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}/shots/${shotId}/rerender`, { method: "POST" });
+      await storylineFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}/shots/${shotId}/rerender`, { method: "POST" });
       await loadProgress();
       await loadStorylines();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorText(e));
     } finally {
       setBusy(false);
     }
@@ -3468,42 +3527,49 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
     setBusy(true);
     setError(null);
     try {
-      const res = await hostFetchJson<VideoStorylineSummary>(`/api/companies/${companyId}/video-storylines/${selectedId}/estimate`, { method: "POST" });
+      const res = await storylineFetchJson<VideoStorylineSummary>(`/api/companies/${companyId}/video-storylines/${selectedId}/estimate`, { method: "POST" });
       setEstimate(res);
       await loadStorylines();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorText(e));
     } finally {
       setBusy(false);
     }
   };
 
-  const startRender = async () => {
+  const startRender = async (confirmBudgetCapCents?: number) => {
     if (!companyId || !selectedId || !selected) return;
-    const overBudget =
-      estimate?.estimatedTotalCents !== null &&
-      estimate?.estimatedTotalCents !== undefined &&
-      selected.budgetCapCents !== null &&
-      estimate.estimatedTotalCents > selected.budgetCapCents;
-    const costLine = estimate
-      ? `This will cost about ${formatMoney(estimate.estimatedTotalCents)} for ${estimate.estimatedTotalSeconds ?? 0} seconds of video.`
-      : "Get a cost estimate first so you know roughly what this will cost.";
+    const estimatedCents = estimate?.id === selected.id ? estimate.estimatedTotalCents : selected.estimatedTotalCents;
+    // No spending limit yet: ask for one here instead of a greyed-out button
+    // (the server refuses to render without a cap).
+    if (selected.budgetCapCents === null && confirmBudgetCapCents === undefined) {
+      setBudgetAsk(estimatedCents !== null ? String(Math.ceil((estimatedCents * 1.2) / 100)) : "");
+      return;
+    }
+    const capCents = confirmBudgetCapCents ?? selected.budgetCapCents;
+    const overBudget = estimatedCents !== null && capCents !== null && selected.spentCents + estimatedCents > capCents;
+    const costLine =
+      estimatedCents !== null
+        ? `This will cost about ${formatMoney(estimatedCents)} for ${(estimate?.id === selected.id ? estimate.estimatedTotalSeconds : selected.estimatedTotalSeconds) ?? 0} seconds of video.`
+        : "Get a cost estimate first so you know roughly what this will cost.";
     const budgetWarning = overBudget
-      ? `\n\nHeads up: that's more than your budget cap of ${formatMoney(selected.budgetCapCents)}. Rendering will stop partway through once it hits the cap.`
+      ? `\n\nHeads up: that's more than your budget cap of ${formatMoney(capCents)}. The server will refuse to start until the cap covers the estimate.`
       : "";
     if (!window.confirm(`Start rendering this storyline now?\n\n${costLine}${budgetWarning}\n\nIt renders clip by clip in the background; you can watch progress here.`)) return;
     setBusy(true);
     setError(null);
     try {
-      await hostFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}/render/start`, {
-        method: "POST",
-        body: JSON.stringify({}),
-      });
+      await storylineFetchJson(
+        `/api/companies/${companyId}/video-storylines/${selectedId}/render/start`,
+        { method: "POST", body: JSON.stringify(confirmBudgetCapCents !== undefined ? { confirmBudgetCapCents } : {}) },
+        "starting the render",
+      );
       setApprovalPending(false);
+      setBudgetAsk(null);
       await loadStorylines();
       await loadProgress();
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
+      const message = errorText(e);
       if (message.includes("Waiting on a board decision")) {
         // Not a failure: the request for the owner's go-ahead was sent; the storyboard panel explains the wait.
         setApprovalPending(true);
@@ -3515,17 +3581,26 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
     }
   };
 
+  const confirmBudgetAndStart = () => {
+    const cents = Math.round(Number(budgetAsk) * 100);
+    if (!budgetAsk?.trim() || !Number.isFinite(cents) || cents <= 0) {
+      setError("Enter the most this render may spend, in dollars (for example 25).");
+      return;
+    }
+    void startRender(cents);
+  };
+
   const cancelRender = async () => {
     if (!companyId || !selectedId) return;
     if (!window.confirm("Cancel this render? Shots already finished are kept; anything still in progress is stopped.")) return;
     setBusy(true);
     setError(null);
     try {
-      await hostFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}/render/cancel`, { method: "POST" });
+      await storylineFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}/render/cancel`, { method: "POST" });
       await loadStorylines();
       await loadProgress();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorText(e));
     } finally {
       setBusy(false);
     }
@@ -3551,6 +3626,12 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
           </label>
         </div>
         {settingsError && <div style={errorBox}>{settingsError}</div>}
+        {enabled && ffmpegAvailable === false && (
+          <div style={errorBox} data-testid="ffmpeg-missing">
+            This server can't combine clips into one video yet: the ffmpeg program is not installed. Shots can still be written and rendered (and are kept), but the
+            finished film needs ffmpeg -- ask your admin to install it before you pay for a full render.
+          </div>
+        )}
         {enabled && (
           <AdvancedFeaturesToggle enabled={advancedEnabled} busy={advancedBusy} error={advancedError} onChange={(v) => void toggleAdvanced(v)} />
         )}
@@ -3575,6 +3656,12 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
               </select>
               <button type="button" style={primaryBtn} disabled={busy || !newTitle.trim()} onClick={() => void createStoryline()}>
                 New storyline
+              </button>
+              <button type="button" style={secondaryBtn} disabled={busy} onClick={() => setImportFor("new")}>
+                New from script (JSON)
+              </button>
+              <button type="button" style={ghostBtn} onClick={() => setShowInstructions(true)}>
+                Script-writer instructions
               </button>
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 8 }}>
@@ -3601,7 +3688,20 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
           </div>
 
           <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
-            {error && <div style={errorBox}>{error}</div>}
+            {showInstructions && companyId && <ScriptInstructionsDialog companyId={companyId} onClose={() => setShowInstructions(false)} />}
+            {importFor === "new" && companyId && (
+              <ScriptImportDialog
+                companyId={companyId}
+                storylineId={null}
+                defaultProvider={newProvider}
+                onClose={() => setImportFor(null)}
+                onImported={async (id) => {
+                  await loadStorylines();
+                  if (id) setSelectedId(id);
+                }}
+              />
+            )}
+            {error && <div style={errorBox} role="alert">{error}</div>}
             {!selected ? (
               <div style={card}>
                 <p style={{ fontSize: 13, margin: 0 }}>Pick a storyline on the left, or start a new one.</p>
@@ -3614,11 +3714,90 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                       <strong style={{ fontSize: 14 }}>{selected.title}</strong>
                       <div style={{ fontSize: 12, color: "#868e96" }}>{storylineStatusLabel(selected.status)}</div>
                     </div>
-                    <button type="button" style={dangerBtn} disabled={busy} onClick={() => void deleteStoryline(selected.id)}>
-                      Delete
-                    </button>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                      <button
+                        type="button"
+                        style={secondaryBtn}
+                        disabled={busy || !EDITABLE_STORYLINE_STATUSES.has(selected.status)}
+                        title={EDITABLE_STORYLINE_STATUSES.has(selected.status) ? undefined : "Wait for the render to finish (or cancel it) first."}
+                        onClick={() => setImportFor("selected")}
+                      >
+                        Import script (JSON)
+                      </button>
+                      <button type="button" style={ghostBtn} onClick={() => setShowInstructions(true)}>
+                        Script-writer instructions
+                      </button>
+                      <button type="button" style={dangerBtn} disabled={busy} onClick={() => void deleteStoryline(selected.id)}>
+                        Delete
+                      </button>
+                    </div>
                   </div>
+                  {importFor === "selected" && companyId && (
+                    <ScriptImportDialog
+                      companyId={companyId}
+                      storylineId={selected.id}
+                      onClose={() => setImportFor(null)}
+                      onImported={async () => {
+                        await loadDetail();
+                        await loadStorylines();
+                      }}
+                    />
+                  )}
                   {selected.errorMessage && <div style={errorBox}>{selected.errorMessage}</div>}
+                  {selected.status === "needs_attention" && (
+                    <div>
+                      <button type="button" style={secondaryBtn} disabled={busy} onClick={() => void retryStitch()}>
+                        Combine the clips again
+                      </button>
+                    </div>
+                  )}
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
+                    <div style={field}>
+                      <label style={{ fontSize: 12, color: "#868e96" }}>Video service</label>
+                      <select
+                        style={input}
+                        aria-label="Video service"
+                        value={selected.providerId}
+                        disabled={busy || !EDITABLE_STORYLINE_STATUSES.has(selected.status)}
+                        onChange={(e) => void updateStorylineFields({ providerId: e.target.value }, "changing the video service")}
+                      >
+                        {VIDEO_STORYLINE_PROVIDER_OPTIONS.map((p) => (
+                          <option key={p.value} value={p.value}>{p.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div style={{ ...field, flex: 1, minWidth: 200 }}>
+                      <label style={{ fontSize: 12, color: "#868e96" }}>Video model (leave empty for the service's default)</label>
+                      <input
+                        key={`model-${selected.id}-${selected.model ?? ""}`}
+                        style={input}
+                        aria-label="Video model"
+                        placeholder={selected.providerId === "fal" ? "Default: Kling (picked per shot)" : "Default model"}
+                        defaultValue={selected.model ?? ""}
+                        disabled={busy || !EDITABLE_STORYLINE_STATUSES.has(selected.status)}
+                        onBlur={(e) => {
+                          const next = e.target.value.trim() || null;
+                          if (next !== selected.model) void updateStorylineFields({ model: next }, "changing the video model");
+                        }}
+                      />
+                    </div>
+                  </div>
+                  {selected.providerId === "fal" && (!selected.model || /kling/i.test(selected.model)) && (
+                    <p style={{ fontSize: 11, color: "#868e96", margin: 0 }}>
+                      Fal.ai's Kling models only make 5- or 10-second clips. Shots with other lengths are rendered (and charged) at the next allowed length, up to 10 seconds.
+                    </p>
+                  )}
+                  <div style={field}>
+                    <label style={{ fontSize: 12, color: "#868e96" }}>
+                      Character pictures (sent with every shot to keep faces the same; at most 4 pictures are used per shot, the shot's own first)
+                    </label>
+                    <LookReferencePicker
+                      looks={looks}
+                      selectedFileIds={selected.characterReferenceAssetIds}
+                      onChange={(ids) => void updateStorylineFields({ characterReferenceAssetIds: ids }, "saving the character pictures")}
+                      max={20}
+                    />
+                  </div>
                   <div style={field}>
                     <label style={{ fontSize: 12, color: "#868e96" }}>Budget cap (stops rendering once spend would go over this)</label>
                     <input
@@ -3627,6 +3806,8 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                       min={0}
                       step="0.01"
                       placeholder="e.g. 20.00"
+                      key={`budget-${selected.id}-${selected.budgetCapCents ?? "none"}`}
+                      aria-label="Budget cap in dollars"
                       defaultValue={selected.budgetCapCents !== null ? (selected.budgetCapCents / 100).toFixed(2) : ""}
                       disabled={!EDITABLE_STORYLINE_STATUSES.has(selected.status)}
                       onBlur={(e) => void updateBudgetCap(e.target.value)}
@@ -3642,7 +3823,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                     <button
                       type="button"
                       style={primaryBtn}
-                      disabled={busy || shots.length === 0 || selected.budgetCapCents === null || !EDITABLE_STORYLINE_STATUSES.has(selected.status) || !storyboardReadyToRender(storyboard)}
+                      disabled={busy || shots.length === 0 || !EDITABLE_STORYLINE_STATUSES.has(selected.status) || !storyboardReadyToRender(storyboard)}
                       title={storyboardReadyToRender(storyboard) ? undefined : "Approve every shot's picture in the storyboard first (or leave out the shots you don't want)."}
                       onClick={() => void startRender()}
                     >
@@ -3654,6 +3835,28 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                       </button>
                     )}
                   </div>
+                  {shots.length > 0 && EDITABLE_STORYLINE_STATUSES.has(selected.status) && !storyboardReadyToRender(storyboard) && (
+                    <p style={{ fontSize: 12, color: "#868e96", margin: 0 }}>
+                      To start the render, approve every shot in the storyboard below (make a picture and approve it, approve it without a picture, or leave it out).
+                    </p>
+                  )}
+                  {selected.budgetCapCents === null && budgetAsk === null && shots.length > 0 && (
+                    <p style={{ fontSize: 12, color: "#868e96", margin: 0 }}>No budget cap yet -- you'll be asked for one when you start the render.</p>
+                  )}
+                  {budgetAsk !== null && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6, background: "#fff9db", color: "#7f5f01", borderRadius: 8, padding: 10 }} data-testid="budget-ask">
+                      <span style={{ fontSize: 12 }}>
+                        Set a spending limit first: rendering never starts without one, and it stops if the limit would be passed.
+                        {selected.estimatedTotalCents !== null ? ` This render is estimated at about ${formatMoney(selected.estimatedTotalCents)}.` : ""}
+                      </span>
+                      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                        <span style={{ fontSize: 12 }}>At most $</span>
+                        <input style={{ ...input, width: 120 }} type="number" min={0} step="0.01" aria-label="Most this render may spend" value={budgetAsk} onChange={(e) => setBudgetAsk(e.target.value)} />
+                        <button type="button" style={primaryBtn} disabled={busy} onClick={confirmBudgetAndStart}>Set limit and start render</button>
+                        <button type="button" style={ghostBtn} disabled={busy} onClick={() => setBudgetAsk(null)}>Cancel</button>
+                      </div>
+                    </div>
+                  )}
                   {estimate && estimate.id === selected.id && (
                     <p style={{ fontSize: 12, margin: 0 }}>
                       Estimate: about {formatMoney(estimate.estimatedTotalCents)} for {estimate.estimatedTotalSeconds ?? 0} seconds of video
@@ -3669,7 +3872,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                     scenes={scenes}
                     shots={shots}
                     editable={EDITABLE_STORYLINE_STATUSES.has(selected.status)}
-                    fetchJson={hostFetchJson}
+                    fetchJson={storylineFetchJson}
                     onShotsChanged={loadDetail}
                   />
                 )}
@@ -3780,22 +3983,46 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                               Delete scene
                             </button>
                           </div>
-                          {sceneShots.map((shot) => (
+                          {sceneShots.map((shot, shotIdx) => (
                             <div key={shot.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 12, borderTop: "1px solid rgba(128,128,128,0.15)", paddingTop: 6 }}>
                               <div>
-                                <div>{shot.prompt}</div>
+                                <div>
+                                  <strong>Shot {shot.orderIndex + 1}.</strong> {shot.prompt}
+                                </div>
                                 <div style={{ color: "#868e96" }}>
-                                  {shot.durationSeconds}s{shot.cameraNotes ? ` · ${shot.cameraNotes}` : ""} · {shotStatusLabel(shot.status)}
+                                  {shot.durationSeconds}s{shot.transitionIn ? ` · ${shot.transitionIn} in` : ""}{shot.cameraNotes ? ` · ${shot.cameraNotes}` : ""} · {shotStatusLabel(shot.status)}
                                 </div>
                               </div>
-                              <button
-                                type="button"
-                                style={ghostBtn}
-                                disabled={busy || !EDITABLE_STORYLINE_STATUSES.has(selected.status)}
-                                onClick={() => void deleteShot(shot.id)}
-                              >
-                                Remove
-                              </button>
+                              <div style={{ display: "flex", gap: 4, alignItems: "flex-start" }}>
+                                <button
+                                  type="button"
+                                  style={ghostBtn}
+                                  aria-label="Move shot up"
+                                  title="Move up"
+                                  disabled={busy || shotIdx === 0 || !EDITABLE_STORYLINE_STATUSES.has(selected.status)}
+                                  onClick={() => void moveShot(shot.id, shot.orderIndex - 1)}
+                                >
+                                  ↑
+                                </button>
+                                <button
+                                  type="button"
+                                  style={ghostBtn}
+                                  aria-label="Move shot down"
+                                  title="Move down"
+                                  disabled={busy || shotIdx === sceneShots.length - 1 || !EDITABLE_STORYLINE_STATUSES.has(selected.status)}
+                                  onClick={() => void moveShot(shot.id, shot.orderIndex + 1)}
+                                >
+                                  ↓
+                                </button>
+                                <button
+                                  type="button"
+                                  style={ghostBtn}
+                                  disabled={busy || !EDITABLE_STORYLINE_STATUSES.has(selected.status)}
+                                  onClick={() => void deleteShot(shot.id)}
+                                >
+                                  Remove
+                                </button>
+                              </div>
                             </div>
                           ))}
                           {EDITABLE_STORYLINE_STATUSES.has(selected.status) && (

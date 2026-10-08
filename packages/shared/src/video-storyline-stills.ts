@@ -66,7 +66,17 @@ export function estimateStoryboardCostCents(
 export const generateStoryboardStillSchema = z.object({}).strict();
 export type GenerateStoryboardStillInput = z.infer<typeof generateStoryboardStillSchema>;
 
-export const approveStoryboardShotSchema = z.object({}).strict();
+export const approveStoryboardShotSchema = z
+  .object({
+    /**
+     * true = approve the shot on its written description alone, without a
+     * storyboard picture -- for when no picture can be made (no Fal.ai key)
+     * or the person simply does not want to pay for one. Still an explicit
+     * human OK before the paid video render.
+     */
+    withoutStill: z.boolean().optional(),
+  })
+  .strict();
 export type ApproveStoryboardShotInput = z.infer<typeof approveStoryboardShotSchema>;
 
 export const dropStoryboardShotSchema = z.object({}).strict();
