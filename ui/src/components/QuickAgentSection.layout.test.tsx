@@ -73,6 +73,14 @@ const ENTRY: ModelDirectoryEntry = {
   defaultMaxOutputTokens: 1024,
   backupEntryIds: [],
   note: null,
+  maker: "Mistral AI",
+  baseModel: "Mistral Small 3.2 24B",
+  lane: "quick",
+  availability: "cloud",
+  tags: [],
+  specs: null,
+  favorite: false,
+  archivedAt: null,
   createdByUserId: null,
   updatedByUserId: null,
   createdAt: "2026-10-01T00:00:00Z",
@@ -238,7 +246,7 @@ describe("QuickAgentSection layout", () => {
     const select = q("backup-saved-model-0") as HTMLSelectElement | null;
     expect(select).not.toBeNull();
     expect(Array.from(select!.options).map((o) => o.textContent)).toEqual([
-      "Custom (set it up below)",
+      "Type it myself",
       "Mistral via OpenRouter",
     ]);
   });

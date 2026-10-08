@@ -39,7 +39,15 @@ d("model directory starters and settings import", () => {
     const first = await svc.addStarters(a, undefined, actor);
     expect(first.length).toBe(MODEL_DIRECTORY_STARTERS.length);
     expect(first.every((e) => e.companyId === a)).toBe(true);
-    expect(first.find((e) => e.provider === "openrouter")).toMatchObject({ model: expect.stringContaining("mistral-small-3.2"), baseUrl: null });
+    expect(first.find((e) => e.model.includes("mistral-small-3.2"))).toMatchObject({ provider: "openrouter", baseUrl: null });
+    // Catalogue fields and defaults travel with the starter.
+    expect(first.find((e) => e.model === "qwen/qwen3.8-27b")).toMatchObject({
+      maker: "Alibaba Qwen",
+      lane: "both",
+      availability: "cloud",
+      providerRouting: { only: ["deepinfra", "parasail", "novita"] },
+      defaultTemperature: 0.7,
+    });
     expect(JSON.stringify(first)).not.toMatch(/apiKey|secret/i);
     expect(await svc.addStarters(a, undefined, actor)).toEqual([]);
     expect(await svc.list(b)).toEqual([]);
@@ -50,7 +58,10 @@ d("model directory starters and settings import", () => {
 
   it("ships tool-capable Hugging Face starters that pass entry validation", () => {
     const hf = MODEL_DIRECTORY_STARTERS.filter((s) => s.provider === "huggingface");
-    expect(hf.map((s) => s.model)).toEqual(["Qwen/Qwen3-14B:deepinfra", "google/gemma-3-27b-it:deepinfra"]);
+    expect(hf.map((s) => s.model)).toEqual([
+      "huihui-ai/Huihui-Qwen3-14B-abliterated-v2:featherless-ai",
+      "darkc0de/Qwen3.8-27B-heretic:featherless-ai",
+    ]);
     for (const s of hf) {
       expect(s.baseUrl).toBeNull();
       expect(modelDirectoryEntryIssue({ provider: s.provider, model: s.model, baseUrl: s.baseUrl })).toBeNull();

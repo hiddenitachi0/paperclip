@@ -1639,6 +1639,13 @@
       "when": 1791339200000,
       "tag": "0234_webhook_secret_template_names",
       "breakpoints": true
+    },
+    {
+      "idx": 235,
+      "version": "7",
+      "when": 1791414577865,
+      "tag": "0235_model_directory_catalogue",
+      "breakpoints": true
     }
   ]
 }

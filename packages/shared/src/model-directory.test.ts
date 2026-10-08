@@ -49,3 +49,15 @@ describe("model directory validators (DUR-4379)", () => {
     expect(modelDirectoryEntryIssue({ id: uuid, provider: "anthropic", model: "claude-sonnet-5", backupEntryIds: [uuid] })).toMatch(/own backup/);
   });
 });
+
+describe("curated starters (8 Oct 2026)", () => {
+  it("every starter is a valid saved model with catalogue fields and a unique id and name", async () => {
+    const { MODEL_DIRECTORY_STARTERS, createModelDirectoryEntrySchema } = await import("./validators/model-directory.js");
+    expect(new Set(MODEL_DIRECTORY_STARTERS.map((s) => s.id)).size).toBe(MODEL_DIRECTORY_STARTERS.length);
+    expect(new Set(MODEL_DIRECTORY_STARTERS.map((s) => s.name)).size).toBe(MODEL_DIRECTORY_STARTERS.length);
+    for (const { id: _id, ...starter } of MODEL_DIRECTORY_STARTERS) {
+      const parsed = createModelDirectoryEntrySchema.safeParse(starter);
+      expect(parsed.success, `${starter.name}: ${parsed.success ? "" : parsed.error.message}`).toBe(true);
+    }
+  });
+});

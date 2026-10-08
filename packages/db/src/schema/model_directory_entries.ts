@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, index, integer, jsonb, pgTable, real, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { boolean, check, index, integer, jsonb, pgTable, real, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 
 /**
@@ -23,6 +23,16 @@ import { companies } from "./companies.js";
  * and tolerates a dangling id on read, as agents.lane_a_no_answer_chain_ids
  * does for its pool.
  *
+ * Catalogue fields (a library of ~30 models needs more than a flat list):
+ * `maker` and `base_model` group entries ("Google" -> "Gemma 4 12B"), `lane`
+ * says what the model is good for (quick chat, full runs, both), `availability`
+ * says whether a local model is installed, still downloading or only planned
+ * (cloud models are "cloud"), `tags` are free labels ("uncensored", "vision"),
+ * `specs` holds the facts that help choose (size, quant, context, tool
+ * support), `favorite` pins an entry to the top and `archived_at` hides an
+ * entry from agent pickers without deleting it. None of them change how an
+ * agent calls the model.
+ *
  * Rollback: DROP TABLE "model_directory_entries". Nothing else references it.
  */
 export const modelDirectoryEntries = pgTable(
@@ -43,6 +53,16 @@ export const modelDirectoryEntries = pgTable(
     defaultMaxOutputTokens: integer("default_max_output_tokens"),
     backupEntryIds: jsonb("backup_entry_ids").$type<string[]>().notNull().default([]),
     note: text("note"),
+    maker: text("maker"),
+    baseModel: text("base_model"),
+    // "quick" | "full" | "both" | null (not said).
+    lane: text("lane"),
+    // "installed" | "downloading" | "planned" | "cloud" | null (not said).
+    availability: text("availability"),
+    tags: text("tags").array().notNull().default([]),
+    specs: jsonb("specs").$type<Record<string, unknown>>(),
+    favorite: boolean("favorite").notNull().default(false),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
     createdByUserId: text("created_by_user_id"),
     updatedByUserId: text("updated_by_user_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -51,6 +71,14 @@ export const modelDirectoryEntries = pgTable(
   (table) => ({
     companyIdx: index("model_directory_entries_company_idx").on(table.companyId, table.createdAt),
     companyNameUq: uniqueIndex("model_directory_entries_company_name_uq").on(table.companyId, table.name),
+    laneCheck: check(
+      "model_directory_entries_lane_check",
+      sql`${table.lane} IS NULL OR ${table.lane} IN ('quick', 'full', 'both')`,
+    ),
+    availabilityCheck: check(
+      "model_directory_entries_availability_check",
+      sql`${table.availability} IS NULL OR ${table.availability} IN ('installed', 'downloading', 'planned', 'cloud')`,
+    ),
     thinkingCheck: check(
       "model_directory_entries_thinking_check",
       sql`${table.defaultThinking} IS NULL OR ${table.defaultThinking} IN ('on', 'off')`,
