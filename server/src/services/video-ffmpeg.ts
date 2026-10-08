@@ -67,7 +67,12 @@ export async function extractLastFrameDataUri(clipBuffer: Buffer): Promise<strin
       await writeFile(input, clipBuffer);
       await execFileAsync(
         FFMPEG_BINARY,
-        ["-y", "-sseof", "-1", "-i", input, "-frames:v", "1", "-q:v", "2", output],
+        // Decode only the final half second and keep overwriting the one
+        // output picture, so what is left is the clip's real LAST frame --
+        // "-sseof -1 -frames:v 1" took the frame a whole second before the
+        // end, so every next shot started from a moment that never ended
+        // the previous one.
+        ["-y", "-sseof", "-0.5", "-i", input, "-update", "1", "-q:v", "2", output],
         { timeout: FRAME_EXTRACT_TIMEOUT_MS },
       );
       const frame = await readFile(output);
@@ -143,6 +148,76 @@ export function clampTransitionDurationMs(durationMs: number): number {
 export function clampMusicVolumeDb(volumeDb: number): number {
   if (!Number.isFinite(volumeDb)) return 0;
   return Math.min(0, Math.max(-60, Math.round(volumeDb)));
+}
+
+/** Normalized clip format for stitching: every clip gets the same size, frame rate, pixel format and codecs so concat (-c copy) and xfade never see mismatched inputs. */
+const NORMALIZED_FPS = 30;
+
+export interface NormalizedClips {
+  buffers: Buffer[];
+  /** Real duration of each normalized clip, via ffprobe. */
+  durationsSeconds: number[];
+}
+
+/** Width/height of a clip's first video stream (even numbers, as libx264 needs). */
+async function probeVideoSize(filePath: string): Promise<{ width: number; height: number }> {
+  const { stdout } = await execFileAsync(
+    FFPROBE_BINARY,
+    ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", filePath],
+    { timeout: PROBE_TIMEOUT_MS },
+  );
+  const [w, h] = stdout.trim().split("x").map((v) => Number.parseInt(v, 10));
+  if (!w || !h || !Number.isFinite(w) || !Number.isFinite(h)) throw new Error("ffprobe could not read the clip's picture size");
+  const even = (n: number) => Math.max(2, Math.min(4096, n - (n % 2)));
+  return { width: even(w), height: even(h) };
+}
+
+/**
+ * Re-encodes every rendered clip to one common format before stitching:
+ * the first clip's picture size (others are scaled and letterboxed to fit),
+ * a fixed frame rate, yuv420p H.264, and -- when any clip has sound --
+ * AAC stereo audio (silence is added to clips without any). Providers do
+ * not promise identical output across shots (a text-to-video first shot and
+ * image-to-video later shots can differ in size/frame rate/audio), and the
+ * concat demuxer (-c copy) and xfade both break on mismatched inputs.
+ * Returns each clip's real duration too, so the quality check compares the
+ * stitched film against what was actually rendered.
+ */
+export async function normalizeClipsForStitch(clipBuffers: readonly Buffer[]): Promise<NormalizedClips> {
+  if (clipBuffers.length === 0) throw new Error("No clips to stitch");
+  return withTempDir(async (dir) => {
+    const inputs: string[] = [];
+    for (const [index, buffer] of clipBuffers.entries()) {
+      const path = join(dir, `in-${String(index).padStart(6, "0")}.mp4`);
+      await writeFile(path, buffer);
+      inputs.push(path);
+    }
+    const { width, height } = await probeVideoSize(inputs[0]!);
+    const hasAudio = await Promise.all(inputs.map((path) => probeHasAudioStream(path)));
+    const anyAudio = hasAudio.some(Boolean);
+    const videoFilter =
+      `scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
+      `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${NORMALIZED_FPS},format=yuv420p`;
+    const buffers: Buffer[] = [];
+    const durationsSeconds: number[] = [];
+    for (const [index, input] of inputs.entries()) {
+      const output = join(dir, `norm-${String(index).padStart(6, "0")}.mp4`);
+      const args = ["-y", "-i", input];
+      if (anyAudio && !hasAudio[index]) {
+        args.push("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000");
+      }
+      args.push("-map", "0:v:0");
+      if (anyAudio) args.push("-map", hasAudio[index] ? "0:a:0" : "1:a:0");
+      args.push("-vf", videoFilter, "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-r", String(NORMALIZED_FPS));
+      if (anyAudio) args.push("-c:a", "aac", "-ar", "48000", "-ac", "2", "-shortest");
+      else args.push("-an");
+      args.push("-movflags", "+faststart", output);
+      await execFileAsync(FFMPEG_BINARY, args, { timeout: STITCH_TIMEOUT_MS, cwd: dir });
+      buffers.push(await readFile(output));
+      durationsSeconds.push(await probeDurationSeconds(output));
+    }
+    return { buffers, durationsSeconds };
+  });
 }
 
 /** The ffmpeg xfade+acrossfade filter_complex for merging two already-decoded inputs ([0] = everything so far, [1] = the next clip) with a crossfade. Pure string-building, no I/O -- see buildXfadeFilterComplexTests for the injection-safety coverage. */

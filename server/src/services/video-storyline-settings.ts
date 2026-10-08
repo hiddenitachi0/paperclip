@@ -52,7 +52,7 @@ export function videoStorylineSettingsService(db: Db) {
   async function assertEnabled(companyId: string): Promise<void> {
     if (!(await isEnabled(companyId))) {
       throw unprocessable(
-        "Video storylines are switched off for this company. An owner or admin can turn them on under Media Studio settings.",
+        "Video storylines are switched off for this company. An owner or admin can turn them on at the top of the Storylines tab in Media Studio.",
       );
     }
   }
@@ -77,7 +77,7 @@ export function videoStorylineSettingsService(db: Db) {
     await assertEnabled(companyId);
     if (!(await isAdvancedEnabled(companyId))) {
       throw unprocessable(
-        "Director AI, previews, transitions and music are switched off for this company. An owner or admin can turn them on under Media Studio settings.",
+        "Director AI, previews, transitions and music are switched off for this company. An owner or admin can turn them on at the top of the Storylines tab in Media Studio.",
       );
     }
   }

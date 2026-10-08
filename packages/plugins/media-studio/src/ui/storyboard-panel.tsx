@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { errorText, storylineFetchJson } from "./storyline-api.js";
 
 // Standalone ES module (see index.tsx's note): bare specifiers only outside
 // this ui/ folder, so the helpers and style palette below are small local
@@ -9,18 +10,12 @@ import { useCallback, useEffect, useState } from "react";
 // /video-storylines/:id/storyboard routes -- see
 // packages/shared/src/video-storyline-stills.ts for the response shape.
 
-function hostFetchJson<T>(path: string, init?: RequestInit): Promise<T> {
-  return fetch(path, { credentials: "include", headers: { "content-type": "application/json", ...(init?.headers ?? {}) }, ...init }).then(
-    async (res) => {
-      if (!res.ok) throw new Error((await res.text()) || `Request failed: ${res.status}`);
-      return (res.status === 204 ? (undefined as T) : ((await res.json()) as T));
-    },
-  );
-}
+/** Plain-English errors for every storyboard call -- see storyline-api.ts. */
+const hostFetchJson = storylineFetchJson;
 
 const card: React.CSSProperties = { border: "1px solid rgba(128,128,128,0.35)", borderRadius: 10, padding: 12, display: "flex", flexDirection: "column", gap: 6 };
 const input: React.CSSProperties = { padding: 8, borderRadius: 8, border: "1px solid rgba(128,128,128,0.5)", fontFamily: "inherit", fontSize: 13, background: "transparent", color: "inherit" };
-const errorBox: React.CSSProperties = { background: "#fff0f6", color: "#a61e4d", padding: "8px 10px", borderRadius: 8, fontSize: 13 };
+const errorBox: React.CSSProperties = { background: "#fff0f6", color: "#a61e4d", padding: "8px 10px", borderRadius: 8, fontSize: 13, whiteSpace: "pre-line" };
 const noticeBox: React.CSSProperties = { background: "#fff9db", color: "#7f5f01", padding: "8px 10px", borderRadius: 8, fontSize: 13 };
 const baseBtn: React.CSSProperties = { padding: "6px 12px", borderRadius: 8, border: "1px solid transparent", cursor: "pointer", fontSize: 12, fontWeight: 600 };
 const primaryBtn: React.CSSProperties = { ...baseBtn, background: "#1971c2", color: "#fff" };
@@ -116,7 +111,7 @@ export function StoryboardPanel(props: {
       setSummary(res);
       onSummary(res);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorText(e));
       onSummary(null);
     }
   }, [base, onSummary]);
@@ -140,7 +135,7 @@ export function StoryboardPanel(props: {
       await action();
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorText(e));
     } finally {
       setBusyShotId(null);
     }
@@ -154,7 +149,33 @@ export function StoryboardPanel(props: {
     });
     return run(shotId, () => hostFetchJson(`${base}/shots/${shotId}/still`, { method: "POST", body: JSON.stringify({}) }));
   };
-  const approve = (shotId: string) => run(shotId, () => hostFetchJson(`${base}/shots/${shotId}/approve`, { method: "POST", body: JSON.stringify({}) }));
+  const approve = (shotId: string) => run(shotId, () => hostFetchJson(`${base}/shots/${shotId}/approve`, { method: "POST", body: JSON.stringify({}) }, "approving the shot"));
+  /** Approves on the written description alone -- no picture is made or paid for. */
+  const approveWithoutPicture = (shotId: string) =>
+    run(shotId, () => hostFetchJson(`${base}/shots/${shotId}/approve`, { method: "POST", body: JSON.stringify({ withoutStill: true }) }, "approving the shot"));
+
+  const [bulk, setBulk] = useState<string | null>(null);
+  /** One shot after another (never in parallel, so a failure stops the batch with a clear message instead of a pile of them). */
+  const runForAll = async (label: string, shotIds: string[], action: (shotId: string) => Promise<unknown>) => {
+    setError(null);
+    for (const [index, shotId] of shotIds.entries()) {
+      setBulk(`${label} ${index + 1} of ${shotIds.length}...`);
+      setBusyShotId(shotId);
+      try {
+        await action(shotId);
+      } catch (e) {
+        setError(`Stopped at shot ${index + 1} of ${shotIds.length}: ${errorText(e)}`);
+        break;
+      }
+    }
+    setBusyShotId(null);
+    setBulk(null);
+    await load();
+  };
+  const makeAllMissingPictures = (shotIds: string[]) =>
+    runForAll("Making picture", shotIds, (id) => hostFetchJson(`${base}/shots/${id}/still`, { method: "POST", body: JSON.stringify({}) }, "making a picture"));
+  const approveAllPictured = (shotIds: string[]) =>
+    runForAll("Approving shot", shotIds, (id) => hostFetchJson(`${base}/shots/${id}/approve`, { method: "POST", body: JSON.stringify({}) }, "approving a shot"));
   const leaveOut = (shotId: string) => run(shotId, () => hostFetchJson(`${base}/shots/${shotId}/drop`, { method: "POST", body: JSON.stringify({}) }));
 
   const startEdit = (shot: StoryboardShotText) => {
@@ -181,6 +202,8 @@ export function StoryboardPanel(props: {
   const sorted = (summary?.shots ?? []).slice().sort((a, b) => a.orderIndex - b.orderIndex);
   const waitingOn = sorted.filter((s) => s.storyboardStatus === "pending").length;
   const over = overApprovalLimit(summary);
+  const missingPictures = sorted.filter((s) => s.storyboardStatus === "pending" && !s.stillObjectKey).map((s) => s.id);
+  const picturedPending = sorted.filter((s) => s.storyboardStatus === "pending" && s.stillObjectKey).map((s) => s.id);
 
   return (
     <div style={card} data-testid="storyboard-panel">
@@ -209,6 +232,22 @@ export function StoryboardPanel(props: {
       {props.approvalPending && (
         <div style={noticeBox} data-testid="storyboard-approval-pending">
           Waiting for the owner's go-ahead. This video costs more than your approval limit, so it will start once the owner approves the request.
+        </div>
+      )}
+
+      {props.editable && (missingPictures.length > 0 || picturedPending.length > 0) && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+          {missingPictures.length > 0 && (
+            <button type="button" style={secondaryBtn} disabled={busyShotId !== null} onClick={() => void makeAllMissingPictures(missingPictures)}>
+              Make the {missingPictures.length} missing picture{missingPictures.length === 1 ? "" : "s"}
+            </button>
+          )}
+          {picturedPending.length > 0 && (
+            <button type="button" style={approveBtn} disabled={busyShotId !== null} onClick={() => void approveAllPictured(picturedPending)}>
+              Approve all {picturedPending.length} with a picture
+            </button>
+          )}
+          {bulk && <span style={{ fontSize: 12, color: "#868e96" }}>{bulk}</span>}
         </div>
       )}
 
@@ -279,6 +318,11 @@ export function StoryboardPanel(props: {
                     )}
                     {shot.storyboardStatus === "pending" && shot.stillObjectKey && (
                       <button type="button" style={approveBtn} disabled={busy} onClick={() => void approve(shot.id)}>Approve</button>
+                    )}
+                    {shot.storyboardStatus === "pending" && !shot.stillObjectKey && (
+                      <button type="button" style={ghostBtn} disabled={busy} title="Approve this shot on its description alone, without paying for a picture." onClick={() => void approveWithoutPicture(shot.id)}>
+                        Approve without picture
+                      </button>
                     )}
                     {text && (
                       <button type="button" style={ghostBtn} disabled={busy} onClick={() => startEdit(text)}>

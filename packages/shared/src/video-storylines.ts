@@ -135,6 +135,36 @@ export const VIDEO_PROVIDER_COST_CENTS_PER_SECOND: Record<VideoStorylineProvider
   sogni: 40,
 };
 
+// ─── Clip lengths per provider/model ───────────────────────────────────────
+
+/** Kling (every Fal default video model in this codebase) only accepts these clip lengths; anything else makes Fal refuse the job. */
+export const FAL_KLING_ALLOWED_DURATIONS_SECONDS: readonly number[] = [5, 10];
+
+/**
+ * The clip lengths (seconds) a provider/model really accepts, when this
+ * codebase knows them; null means "any whole number of seconds in the 1-60
+ * range" (or simply unknown -- e.g. Sogni, whose video API is not
+ * confirmed). `model` null = the provider's default model.
+ */
+export function videoModelAllowedDurations(providerId: VideoStorylineProvider, model: string | null | undefined): readonly number[] | null {
+  if (providerId === "fal" && (!model || /kling/i.test(model))) return FAL_KLING_ALLOWED_DURATIONS_SECONDS;
+  return null;
+}
+
+/**
+ * The clip length actually requested from the provider for a shot written
+ * as `requestedSeconds`: unchanged when the model takes any length,
+ * otherwise the shortest allowed length at least as long as asked (so
+ * nothing written for the shot is cut short), or the longest allowed length
+ * when the shot asks for more than the model can do.
+ */
+export function videoRenderDurationSeconds(providerId: VideoStorylineProvider, model: string | null | undefined, requestedSeconds: number): number {
+  const allowed = videoModelAllowedDurations(providerId, model);
+  if (!allowed || allowed.length === 0) return requestedSeconds;
+  const sorted = [...allowed].sort((a, b) => a - b);
+  return sorted.find((value) => value >= requestedSeconds) ?? sorted[sorted.length - 1]!;
+}
+
 export interface VideoCostEstimateShotInput {
   durationSeconds: number;
 }
@@ -146,13 +176,24 @@ export interface VideoCostEstimateResult {
   costPerSecondCents: number;
 }
 
-/** Pure so it can be unit tested and reused by both the estimate route and the budget gate at render time. */
+/**
+ * Pure so it can be unit tested and reused by both the estimate route and the budget gate at render time.
+ *
+ * Pass `options.model` (null = the provider's default model) to count each
+ * shot at the clip length that is really rendered and billed -- e.g. Fal's
+ * Kling models only make 5- or 10-second clips, so a 7-second shot costs 10
+ * seconds (see videoRenderDurationSeconds). Without options the written
+ * durations are counted as-is.
+ */
 export function estimateVideoStorylineCostCents(
   shots: readonly VideoCostEstimateShotInput[],
   providerId: VideoStorylineProvider,
+  options?: { model: string | null | undefined },
 ): VideoCostEstimateResult {
   const costPerSecondCents = VIDEO_PROVIDER_COST_CENTS_PER_SECOND[providerId];
-  const totalSeconds = shots.reduce((sum, shot) => sum + Math.max(0, shot.durationSeconds), 0);
+  const secondsOf = (requested: number) =>
+    options ? videoRenderDurationSeconds(providerId, options.model, requested) : requested;
+  const totalSeconds = shots.reduce((sum, shot) => sum + Math.max(0, secondsOf(shot.durationSeconds)), 0);
   return {
     shotCount: shots.length,
     totalSeconds,
@@ -205,6 +246,9 @@ export const updateVideoStorylineSchema = z
   .object({
     title: storylineFields.title,
     projectId: storylineFields.projectId,
+    /** Switching provider/model is allowed while the storyline is editable; shots already rendered keep the provider they were made with. */
+    providerId: storylineFields.providerId,
+    model: storylineFields.model,
     budgetCapCents: storylineFields.budgetCapCents,
     characterReferenceAssetIds: storylineFields.characterReferenceAssetIds,
     defaultTransition: storylineFields.defaultTransition,

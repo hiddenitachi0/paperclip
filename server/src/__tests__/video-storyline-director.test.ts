@@ -195,6 +195,21 @@ d("videoStorylineDirectorService", () => {
     expect(run.errorMessage).toBeTruthy();
   });
 
+  it("stores a fixed plain message, never the raw upstream error text, when the AI call fails", async () => {
+    const { companyId, storylineId, sceneId } = await seedStorylineAndScene();
+    mockAnthropicCreate(() => {
+      throw new Error("upstream internals: request_id=req_123 org=secret-org");
+    });
+    const director = await freshDirectorService();
+    const { DIRECTOR_AI_GENERIC_FAILURE_MESSAGE } = await import("../services/video-storyline-director-ai-errors.ts");
+
+    const run = await director.draftShots(companyId, storylineId, { sceneId, idea: "Idea", shotCount: 1 }, ACTOR);
+
+    expect(run.status).toBe("failed");
+    expect(run.errorMessage).toBe(DIRECTOR_AI_GENERIC_FAILURE_MESSAGE);
+    expect(run.errorMessage).not.toContain("req_123");
+  });
+
   it("refuses to draft when the round-2 advanced flag is off", async () => {
     const { companyId, storylineId, sceneId } = await seedStorylineAndScene({ advanced: false });
     mockAnthropicCreate(() => draftedShotsResponse(1));
