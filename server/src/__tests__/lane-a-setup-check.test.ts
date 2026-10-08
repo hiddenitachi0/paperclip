@@ -7,6 +7,7 @@ import { eq } from "drizzle-orm";
 import {
   activityLog,
   agents,
+  budgetPolicies,
   companies,
   companyMemberships,
   companySecretBindings,
@@ -122,6 +123,7 @@ describeEmbeddedPostgres("lane A: Check this setup", () => {
     await db.delete(modelDirectoryEntries);
     await db.delete(activityLog);
     await db.delete(costEvents);
+    await db.delete(budgetPolicies);
     await db.delete(secretAccessEvents);
     await db.delete(companySecretBindings);
     await db.delete(companySecretVersions);
@@ -301,6 +303,154 @@ describeEmbeddedPostgres("lane A: Check this setup", () => {
     expect(stub.urls.every((u) => u.startsWith("https://openrouter.ai/"))).toBe(true);
     expect(stub.authHeaders[0]).toBe(`Bearer ${orValue}`);
     expect(result.costMicroUsd).toBe(30);
+  });
+
+  // DUR-3989 work gate (security review on DUR-4688): the check is a real,
+  // paid call, so it is refused exactly where a chat turn would be refused —
+  // before the key is read and before any model call.
+  describe("refused like a chat turn, with no model call", () => {
+    const OR_MODEL = "meta-llama/llama-3.3-70b-instruct";
+
+    async function seedPaidAgent(companyId: string) {
+      const binding = await seedKey(companyId, "sk-or-v1-check-gate-key-000000");
+      return seedAgent(companyId, { laneAProvider: "openrouter", laneAModel: OR_MODEL }, { apiKey: binding });
+    }
+
+    async function expectRefused(companyId: string, agentId: string, match: Record<string, unknown>) {
+      const stub = stubProvider([toolCallReply(), textReply("OK")]);
+      const error = await (await service(stub.providerFetch))
+        .checkSetup({ companyId, agentId, target: "main" })
+        .catch((err: unknown) => err);
+      expect(error).toMatchObject({ status: 403, ...match });
+      expect(stub.providerFetch).not.toHaveBeenCalled();
+      expect(await db.select().from(costEvents).where(eq(costEvents.agentId, agentId))).toHaveLength(0);
+      expect(await db.select().from(secretAccessEvents)).toHaveLength(0);
+      return error as Error;
+    }
+
+    it("a paused company", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedPaidAgent(companyId);
+      await db.update(companies).set({ status: "paused" }).where(eq(companies.id, companyId));
+      const error = await expectRefused(companyId, agentId, {});
+      expect(error.message).toBe("This company is paused in Paperclip, so its quick agents are not doing any work right now.");
+    });
+
+    it("a paused agent (for example paused by its budget)", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedPaidAgent(companyId);
+      await db.update(agents).set({ status: "paused", pauseReason: "budget", pausedAt: new Date() }).where(eq(agents.id, agentId));
+      const error = await expectRefused(companyId, agentId, {});
+      expect(error.message).toMatch(/^This quick agent is paused, so it cannot answer right now\./);
+    });
+
+    it("an agent over a hard-stop spending limit that nothing has paused yet", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedPaidAgent(companyId);
+      await db.insert(budgetPolicies).values({
+        companyId,
+        scopeType: "agent",
+        scopeId: agentId,
+        metric: "billed_cents",
+        windowKind: "calendar_month_utc",
+        amount: 100,
+        hardStopEnabled: true,
+        isActive: true,
+      });
+      await db.insert(costEvents).values({
+        companyId,
+        agentId,
+        provider: "openrouter",
+        biller: "openrouter",
+        billingType: "metered_api",
+        model: OR_MODEL,
+        inputTokens: 10,
+        outputTokens: 10,
+        costCents: 500,
+        occurredAt: new Date(),
+      });
+      const stub = stubProvider([toolCallReply(), textReply("OK")]);
+      const error = await (await service(stub.providerFetch))
+        .checkSetup({ companyId, agentId, target: "main" })
+        .catch((err: unknown) => err);
+      expect(error).toMatchObject({ status: 403, details: { reason: "spending_limit", scopeType: "agent" } });
+      expect(stub.providerFetch).not.toHaveBeenCalled();
+      expect(await db.select().from(costEvents).where(eq(costEvents.agentId, agentId))).toHaveLength(1);
+    });
+
+    it("a company over its hard-stop spending limit", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedPaidAgent(companyId);
+      await db.insert(budgetPolicies).values({
+        companyId,
+        scopeType: "company",
+        scopeId: companyId,
+        metric: "billed_cents",
+        windowKind: "calendar_month_utc",
+        amount: 100,
+        hardStopEnabled: true,
+        isActive: true,
+      });
+      await db.insert(costEvents).values({
+        companyId,
+        agentId,
+        provider: "openrouter",
+        biller: "openrouter",
+        billingType: "metered_api",
+        model: OR_MODEL,
+        inputTokens: 10,
+        outputTokens: 10,
+        costCents: 500,
+        occurredAt: new Date(),
+      });
+      const stub = stubProvider([toolCallReply(), textReply("OK")]);
+      const error = await (await service(stub.providerFetch))
+        .checkSetup({ companyId, agentId, target: "main" })
+        .catch((err: unknown) => err);
+      expect(error).toMatchObject({ status: 403, details: { reason: "spending_limit", scopeType: "company" } });
+      expect(stub.providerFetch).not.toHaveBeenCalled();
+    });
+
+    it("an agent with quick answers switched off", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedPaidAgent(companyId);
+      await db.update(agents).set({ laneAEnabled: false }).where(eq(agents.id, agentId));
+      const error = await expectRefused(companyId, agentId, {});
+      expect(error.message).toMatch(/is not a quick agent right now/);
+    });
+
+    it("a backup check is gated by the main agent's state too", async () => {
+      const companyId = await seedCompany();
+      const agentId = await seedPaidAgent(companyId);
+      await db
+        .update(agents)
+        .set({
+          status: "paused",
+          laneABackupModels: [{ id: "bk_local", provider: "local", model: "qwen3:8b", baseUrl: LOCAL_URL }] as LaneABackupModelConfig[],
+        })
+        .where(eq(agents.id, agentId));
+      const stub = stubProvider([toolCallReply(), textReply("OK")]);
+      await expect(
+        (await service(stub.providerFetch)).checkSetup({ companyId, agentId, target: { backupId: "bk_local" } }),
+      ).rejects.toMatchObject({ status: 403 });
+      expect(stub.providerFetch).not.toHaveBeenCalled();
+    });
+  });
+
+  it("provider error text is scrubbed before it is shown (the key, and other secret-shaped values)", async () => {
+    const companyId = await seedCompany();
+    const key = "sk-or-v1-echoed-key-123456789";
+    const leaked = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    const binding = await seedKey(companyId, key);
+    const agentId = await seedAgent(companyId, { laneAProvider: "openrouter", laneAModel: "meta-llama/llama-3.3-70b-instruct" }, { apiKey: binding });
+    const stub = stubProvider([
+      { status: 400, body: { error: { message: `bad request for key ${key}; upstream said "api_key": "${leaked}"` } } },
+    ]);
+    const result = await (await service(stub.providerFetch)).checkSetup({ companyId, agentId, target: "main" });
+    expect(result.ok).toBe(false);
+    expect(result.steps.find((s) => s.id === "answer")!.text).toMatch(/refused the request/);
+    expect(JSON.stringify(result)).not.toContain(key);
+    expect(JSON.stringify(result)).not.toContain(leaked);
   });
 
   it("an unknown backup or another company's agent is not found", async () => {

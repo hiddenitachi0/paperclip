@@ -130,6 +130,7 @@ import { documentsDataService, type DocumentsServiceDeps } from "./documents-dat
 import { agentMemoryService } from "./agent-memories.js";
 import { buildMemoryPromptSection, type LaneAMemoryPromptNote } from "./lane-a-memory.js";
 import { createLaneAWebSession } from "./lane-a-web-tools.js";
+import { redactKnownSecretValues, redactSensitiveText } from "../redaction.js";
 import { webSearchService, type WebSearchServiceDeps } from "./web-search.js";
 import {
   LANE_A_CONTINUE_LOOKBACK_MS,
@@ -4701,7 +4702,9 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
    * calling works. Nothing is stored as a conversation; the cost is recorded
    * like every other quick-agent call, and a local model's health is updated.
    * Every outcome comes back as plain-English steps, never as an error,
-   * except "no such agent / backup" (404).
+   * except "no such agent / backup" (404) and the DUR-3989 work gate (403:
+   * quick answers off, agent or company paused, spending limit reached), which
+   * refuses before any key lookup or model call, exactly like a chat turn.
    */
   async function checkSetup(params: {
     companyId: string;
@@ -4743,6 +4746,18 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       );
       keySlot = backupKeySlotFor(settings, mainSettings, row.adapterConfig);
     }
+    // DUR-3989 (security review on DUR-4688): the check is a real, paid model
+    // call, so it goes through the same gate as every chat turn. A quick agent
+    // that is switched off, paused, in a paused company or over a spending
+    // limit is refused with the same plain message (403) before anything —
+    // key lookup included — is spent.
+    if (!mainAgent.laneAEnabled) {
+      throw forbidden(
+        `${mainAgent.name} is not a quick agent right now (quick answers are switched off), so there is nothing to check. ` +
+          "Switch quick answers on and save, then check again.",
+      );
+    }
+    await assertAgentMayWork({ companyId: params.companyId, targetAgent: mainAgent, kind: "chat" });
     const provider = settings.provider;
     const label = laneAProviderLabel(provider);
     const steps: LaneASetupCheckStep[] = [];
@@ -4802,12 +4817,17 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         : `Uses this agent's saved ${label} key.`,
     });
 
+    // Error text from a provider or a local server is shown to the person;
+    // scrub it the way chat output is scrubbed, and never echo the key itself.
+    const scrub = (text: string): string =>
+      redactSensitiveText(credential.apiKey ? redactKnownSecretValues(text, [credential.apiKey]) : text);
+
     // 3. The call itself, with one harmless tool.
     let client: LaneAProviderClient;
     try {
       client = buildProviderClient({ companyId: params.companyId, provider, baseUrl: settings.baseUrl, credential });
     } catch (err) {
-      const text = `Could not set up the call: ${err instanceof Error ? err.message : String(err)}`;
+      const text = scrub(`Could not set up the call: ${err instanceof Error ? err.message : String(err)}`);
       steps.push({ id: "reachable", ok: false, text });
       return finish(false, text);
     }
@@ -4961,9 +4981,9 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
             : `${label} does not know the model "${model}". Check the spelling of the model id.`;
         await noteLocal("model_missing");
       } else if (err instanceof LaneAProviderError) {
-        text = `${where} refused the request: ${providerErrorDetail(err.message)}`;
+        text = scrub(`${where} refused the request: ${providerErrorDetail(err.message)}`);
       } else {
-        text = `The check failed: ${err instanceof Error ? err.message : String(err)}`;
+        text = scrub(`The check failed: ${err instanceof Error ? err.message : String(err)}`);
       }
       if (stepId !== "reachable") steps.push({ id: "reachable", ok: true, text: `Reached ${where}.` });
       if (stepId === "key") {
