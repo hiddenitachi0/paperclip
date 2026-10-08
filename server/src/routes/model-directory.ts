@@ -6,6 +6,8 @@ import {
   createModelDirectoryEntrySchema,
   duplicateModelDirectoryEntrySchema,
   importModelDirectoryCatalogueSchema,
+  syncLocalModelsSchema,
+  updateModelDirectorySettingsSchema,
   updateModelDirectoryEntrySchema,
   type ImportModelDirectoryCatalogue,
 } from "@paperclipai/shared";
@@ -102,15 +104,67 @@ export function modelDirectoryRoutes(rawDb: Db) {
     res.json(outcome.result);
   });
 
+  // Catalogue v2: per-company settings (graphics card memory of the computer
+  // that runs local models, and the company's local model server address).
+  // Same access as the list; saving is gated like saving a setup.
+  router.get("/companies/:companyId/model-directory/settings", scope(), async (req, res) => {
+    res.json(await svc.getSettings(req.params.companyId as string));
+  });
+
+  router.put("/companies/:companyId/model-directory/settings", scope(), validate(updateModelDirectorySettingsSchema), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const updated = await svc.updateSettings(companyId, req.body, actorUser(req));
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "model_directory.settings_updated",
+      entityType: "model_directory_settings",
+      entityId: companyId,
+      details: { localGpuVramGb: updated.localGpuVramGb, localBaseUrl: updated.localBaseUrl },
+    });
+    res.json(updated);
+  });
+
+  // Catalogue v2: ask the local Ollama which models are installed and mark the
+  // saved local setups at that address. Only an address this company already
+  // uses is called (422 otherwise).
+  router.post("/companies/:companyId/model-directory/local-sync", scope(), validate(syncLocalModelsSchema), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const result = await svc.syncLocalModels(companyId, (req.body as { baseUrl: string }).baseUrl);
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "model_directory.local_synced",
+      entityType: "model_directory_settings",
+      entityId: companyId,
+      details: {
+        baseUrl: result.baseUrl,
+        installedCount: result.installed.length,
+        markedInstalledEntryIds: result.markedInstalledEntryIds,
+        missingEntryIds: result.missingEntryIds,
+      },
+    });
+    res.json(result);
+  });
+
   router.get("/companies/:companyId/model-directory/starters", scope(), async (req, res) => {
     res.json(await svc.listStarters(req.params.companyId as string));
   });
 
   router.post("/companies/:companyId/model-directory/starters", scope(), validate(addModelDirectoryStartersSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
-    const created = await svc.addStarters(companyId, (req.body as { starterIds?: string[] }).starterIds, actorUser(req));
-    for (const entry of created) await audit(req, companyId, "model_directory_entry.created", entry, { source: "starter" });
-    res.status(201).json(created);
+    const result = await svc.addStarters(companyId, (req.body as { starterIds?: string[] }).starterIds, actorUser(req));
+    for (const entry of result.created) await audit(req, companyId, "model_directory_entry.created", entry, { source: "starter" });
+    // { created, skipped }: local ready-made models are skipped (with a plain reason) while no model server address is set.
+    res.status(201).json(result);
   });
 
   router.post("/companies/:companyId/model-directory/import-agent-settings", scope(), async (req, res) => {

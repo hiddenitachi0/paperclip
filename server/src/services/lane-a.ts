@@ -28,6 +28,8 @@ import {
   LANE_A_TRANSFORM_BILLING_CODE,
   LANE_A_TRANSFORM_MAX_CONCURRENCY,
   envBindingSchema,
+  laneABackupKeySlot,
+  laneAProviderKeyConfigPath,
   laneAProviderLabel,
   localModelOfflineNotice,
   laneAProviderModelCostCents,
@@ -44,6 +46,7 @@ import {
   type ChatHandedOverTask,
   type LaneAProvider,
   type LaneAProviderRouting,
+  type LaneABackupKeySlot,
   type LaneABackupModelConfig,
   type LaneAKeywordRoute,
 } from "@paperclipai/shared";
@@ -1818,17 +1821,17 @@ function providerErrorDetail(message: string): string {
 }
 
 /**
- * DUR-4347 (security): the agent's one bound key is for the main model's
- * provider and host. A backup may reuse it only when both match; anything
- * else gets no binding (instance key for Claude, none for a local server,
- * otherwise a missing-key refusal that skips the backup), so the key is never
- * sent to another vendor or an arbitrary base URL.
+ * DUR-4347 (security): the agent's main key is for the main model's provider
+ * and host. A backup may reuse it only when both match, so the main key is
+ * never sent to another vendor or an arbitrary base URL. A backup on another
+ * provider uses the agent's own key for THAT provider instead
+ * (laneABackupKeySlot, adapterConfig.laneA.apiKeyByProvider.<provider>).
  */
 export function backupMayUseMainBinding(
   backup: { provider: LaneAProvider; baseUrl: string | null },
   main: { provider: LaneAProvider; baseUrl: string | null },
 ): boolean {
-  return backup.provider === main.provider && (backup.baseUrl ?? null) === (main.baseUrl ?? null);
+  return laneABackupKeySlot(backup, main) === "main";
 }
 
 /**
@@ -2211,16 +2214,55 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     return row ?? null;
   }
 
-  /** The secret_ref bound at adapterConfig.laneA.apiKey, if any. */
-  function readLaneAKeyBinding(adapterConfig: unknown): { secretId: string; version: number | "latest" } | null {
+  /**
+   * The secret_ref a call should use, and the config path it is bound at:
+   * the main key (adapterConfig.laneA.apiKey) for slot "main", the agent's
+   * stashed key for `provider` (adapterConfig.laneA.apiKeyByProvider.<provider>)
+   * for slot "provider", nothing for slot "none".
+   */
+  function readLaneAKeyBinding(
+    adapterConfig: unknown,
+    slot: LaneABackupKeySlot = "main",
+    provider?: LaneAProvider,
+  ): { secretId: string; version: number | "latest"; configPath: string } | null {
+    if (slot === "none") return null;
     if (typeof adapterConfig !== "object" || adapterConfig === null) return null;
     const laneA = (adapterConfig as { laneA?: unknown }).laneA;
     if (typeof laneA !== "object" || laneA === null) return null;
-    const parsed = envBindingSchema.safeParse((laneA as { apiKey?: unknown }).apiKey);
+    let raw: unknown;
+    let configPath: string;
+    if (slot === "provider") {
+      if (!provider) return null;
+      const byProvider = (laneA as { apiKeyByProvider?: unknown }).apiKeyByProvider;
+      if (typeof byProvider !== "object" || byProvider === null) return null;
+      raw = (byProvider as Record<string, unknown>)[provider];
+      configPath = laneAProviderKeyConfigPath(provider);
+    } else {
+      raw = (laneA as { apiKey?: unknown }).apiKey;
+      configPath = LANE_A_API_KEY_CONFIG_PATH;
+    }
+    const parsed = envBindingSchema.safeParse(raw);
     if (!parsed.success) return null;
     const binding = parsed.data;
     if (typeof binding !== "object" || binding === null || binding.type !== "secret_ref") return null;
-    return { secretId: binding.secretId, version: binding.version ?? "latest" };
+    return { secretId: binding.secretId, version: binding.version ?? "latest", configPath };
+  }
+
+  /** The address the agent's stashed key for `provider` was saved with, if any (DUR-4395). */
+  function readStashedBaseUrl(adapterConfig: unknown, provider: LaneAProvider): string | null {
+    const laneA = (adapterConfig as { laneA?: unknown } | null | undefined)?.laneA;
+    const byProvider = (laneA as { baseUrlByProvider?: unknown } | null | undefined)?.baseUrlByProvider;
+    const value = (byProvider as Record<string, unknown> | null | undefined)?.[provider];
+    return typeof value === "string" ? value : null;
+  }
+
+  /** Which of the agent's keys a backup is called with (see laneABackupKeySlot). */
+  function backupKeySlotFor(
+    backup: { provider: LaneAProvider; baseUrl: string | null },
+    main: { provider: LaneAProvider; baseUrl: string | null },
+    adapterConfig: unknown,
+  ): LaneABackupKeySlot {
+    return laneABackupKeySlot(backup, main, readStashedBaseUrl(adapterConfig, backup.provider));
   }
 
   /**
@@ -2246,8 +2288,17 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     actor?: AuthorizationActor;
     /** When a Claude test client is injected, no key is required. */
     keyOptional: boolean;
+    /**
+     * Which of the agent's keys to use. Omitted = the main key (the main
+     * model). A backup passes its own slot (backupKeySlotFor): the main key
+     * only on the main model's own provider and address, else the agent's
+     * key for the backup's provider, else none.
+     */
+    keySlot?: LaneABackupKeySlot;
   }): Promise<LaneACredential> {
-    const binding = readLaneAKeyBinding(params.adapterConfig);
+    const slot = params.keySlot ?? "main";
+    const forBackup = params.keySlot !== undefined;
+    const binding = readLaneAKeyBinding(params.adapterConfig, slot, params.provider);
     const label = laneAProviderLabel(params.provider);
     if (binding) {
       try {
@@ -2258,7 +2309,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           {
             consumerType: "agent",
             consumerId: params.agentId,
-            configPath: LANE_A_API_KEY_CONFIG_PATH,
+            configPath: binding.configPath,
             actorType: params.actor?.type === "agent" ? "agent" : params.actor?.type === "board" ? "user" : "system",
             actorId:
               params.actor?.type === "agent"
@@ -2273,12 +2324,19 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         // Never the value, never the upstream message (which could name the
         // secret's material): the operator gets the one thing they can act on.
         logger.warn(
-          { err: err instanceof Error ? err.message : String(err), companyId: params.companyId, agentId: params.agentId },
+          {
+            err: err instanceof Error ? err.message : String(err),
+            companyId: params.companyId,
+            agentId: params.agentId,
+            configPath: binding.configPath,
+          },
           "lane A: the quick agent's bound key could not be resolved",
         );
         throw new HttpError(
           503,
-          `This quick agent's saved ${label} key could not be used. Pick the key again under its quick agent settings, or replace it under Connections.`,
+          forBackup && slot === "provider"
+            ? `The ${label} backup's key could not be used. Pick the ${label} key again on the backup under the quick agent's backup models, or replace it under Connections.`
+            : `This quick agent's saved ${label} key could not be used. Pick the key again under its quick agent settings, or replace it under Connections.`,
           { code: "LANE_A_KEY_UNRESOLVED", provider: params.provider },
         );
       }
@@ -2297,6 +2355,17 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       // A local server usually needs no key at all; one bound above is passed
       // through when present.
       return { apiKey: null, source: null };
+    }
+    if (forBackup) {
+      throw new HttpError(
+        503,
+        slot === "none"
+          ? `The ${label} backup was skipped: it uses a different ${label} address than the one its key was picked for, so no key is sent there.`
+          : slot === "main"
+            ? `The ${label} backup was skipped: it shares the main model's ${label} key, and none is picked yet.`
+            : `The ${label} backup was skipped: this quick agent has no ${label} key. Pick one on the backup under the quick agent's backup models.`,
+        { code: "LANE_A_KEY_MISSING", provider: params.provider },
+      );
     }
     throw new HttpError(503, `This quick agent has no ${label} key. Add one under Connections.`, {
       code: "LANE_A_KEY_MISSING",
@@ -3220,16 +3289,19 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
               companyId: params.companyId,
               agentId: params.targetAgent.id,
               provider: entrySettings.provider,
-              adapterConfig: backupMayUseMainBinding(entrySettings, chatSettings) ? agentRow?.adapterConfig : null,
+              adapterConfig: agentRow?.adapterConfig,
+              keySlot: backupKeySlotFor(entrySettings, chatSettings, agentRow?.adapterConfig),
               actor: params.actor,
               keyOptional: entrySettings.provider === "anthropic" && Boolean(options.createModelClient),
             });
             entryClient = buildProviderClient({ provider: entrySettings.provider, baseUrl: entrySettings.baseUrl, credential: backupCredential });
           } catch (err) {
             // A backup that cannot even be set up (bad model id, missing
-            // key) is skipped rather than ending the whole turn over it —
-            // the validators reject this at save time, so this is only
-            // reachable if a key/binding was removed after the fact.
+            // key) is skipped rather than ending the whole turn over it.
+            logger.warn(
+              { companyId: params.companyId, agentId: params.targetAgent.id, backupId: poolId, reason: err instanceof Error ? err.message : String(err) },
+              "lane A: a backup model was skipped because it could not be set up",
+            );
             attemptRecords.push({
               provider: entry.provider ?? "unknown",
               model: entry.model ?? "unknown",
@@ -3364,6 +3436,17 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         }
       }
       if (!loopResult.ok && offlineNotice) {
+        // A backup that could not step in for a missing or unusable key says
+        // why, after the offline notice, so the fix is in plain sight.
+        const backupKeyError =
+          loopResult.error instanceof HttpError &&
+          typeof (loopResult.error.details as { code?: unknown } | undefined)?.code === "string" &&
+          String((loopResult.error.details as { code: string }).code).startsWith("LANE_A_KEY_")
+            ? loopResult.error
+            : null;
+        if (backupKeyError) {
+          throw new HttpError(503, `${offlineNotice} ${backupKeyError.message}`, backupKeyError.details);
+        }
         throw new HttpError(503, offlineNotice, {});
       }
       if (!loopResult.ok) {
@@ -3847,10 +3930,9 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
               companyId: params.companyId,
               agentId: params.targetAgent.id,
               provider: entrySettings.provider,
-              adapterConfig:
-                poolId === LANE_A_MAIN_POOL_ID || backupMayUseMainBinding(entrySettings, settings)
-                  ? agentRow?.adapterConfig
-                  : null,
+              adapterConfig: agentRow?.adapterConfig,
+              keySlot:
+                poolId === LANE_A_MAIN_POOL_ID ? undefined : backupKeySlotFor(entrySettings, settings, agentRow?.adapterConfig),
               keyOptional: entrySettings.provider === "anthropic" && Boolean(options.createModelClient),
             });
             entryClient = buildProviderClient({ provider: entrySettings.provider, baseUrl: entrySettings.baseUrl, credential });
@@ -3858,6 +3940,12 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
             // The main model's setup failure is the caller's to see; a backup
             // that cannot be set up is just skipped.
             if (poolId === LANE_A_MAIN_POOL_ID && routing.noAnswerChain.length === 1) throw err;
+            if (poolId !== LANE_A_MAIN_POOL_ID) {
+              logger.warn(
+                { companyId: params.companyId, agentId: params.targetAgent.id, backupId: poolId, reason: err instanceof Error ? err.message : String(err) },
+                "lane A: a backup model was skipped because it could not be set up",
+              );
+            }
             return { outcome: "retryable_error", error: err };
           }
           try {
