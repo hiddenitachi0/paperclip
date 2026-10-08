@@ -77,6 +77,12 @@ export interface MailUrgencyOutboxItem {
   id: string;
   companyId: string;
   messageId: string;
+  /**
+   * The mailbox's personal assistant (its `paAgentId`), if one is linked. The
+   * Telegram bridge sends the alert from that agent's own bot, never from the
+   * company's default bot; with no assistant it falls back to the default.
+   */
+  agentId: string | null;
   text: string;
   createdAt: string;
 }
