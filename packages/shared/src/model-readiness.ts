@@ -416,10 +416,13 @@ export function modelReadiness(setup: ModelSetupForReadiness, ctx: ModelReadines
       status:
         option.kind === "installed" ? "ok"
         : option.kind === "downloading" ? "warn"
-        : option.kind === "not_installed" || option.kind === "broken" ? "fail"
+        : option.kind === "not_installed" ? "fail"
         : "unknown",
       label: "Installed on the model server",
-      reason: option.kind === "offline" ? "Unknown while the model server cannot be reached." : option.detail,
+      reason:
+        option.kind === "offline" ? "Unknown while the model server cannot be reached."
+        : option.kind === "broken" ? "Unknown until the setup can run (see below)."
+        : option.detail,
       fix: option.kind === "not_installed" || option.kind === "unknown" ? settingsFix : null,
     });
 

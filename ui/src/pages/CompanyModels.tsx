@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { CreateModelDirectoryEntry, ModelDirectoryEntry, UpdateModelDirectoryEntry } from "@paperclipai/shared";
+import { modelReadiness, type CreateModelDirectoryEntry, type ModelDirectoryEntry, type UpdateModelDirectoryEntry } from "@paperclipai/shared";
 import { AlertCircle, Cpu, Download, Plus, Search } from "lucide-react";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
@@ -36,6 +36,7 @@ import {
 import { ModelEntryDialog } from "../components/ModelEntryDialog";
 import { OpenRouterHostRules } from "../components/OpenRouterHostRules";
 import { ModelCatalogueRow } from "../components/ModelCatalogueRow";
+import { healthReading, setupFromEntry, useModelReadinessSources } from "../components/ModelReadiness";
 import { ModelCatalogueImport } from "../components/ModelCatalogueImport";
 import { ModelCatalogueTree } from "../components/ModelCatalogueTree";
 import {
@@ -140,6 +141,8 @@ export function CompanyModels() {
   const { pushToast } = useToastActions();
   const queryClient = useQueryClient();
   const role = useCompanyRole(selectedCompanyId);
+  // The "Ready?" checklist on each saved model: the company's model settings and the last model-server readings.
+  const readinessSources = useModelReadinessSources(selectedCompanyId);
   const canManage = role.canManageConnections;
   const [editing, setEditing] = useState<ModelDirectoryEntry | null>(null);
   /** For "Add this way to run it": the new setup starts from these values. */
@@ -389,6 +392,12 @@ export function CompanyModels() {
     <ModelCatalogueRow
       key={entry.id}
       entry={entry}
+      readiness={modelReadiness(setupFromEntry(entry), {
+        companyLocalBaseUrl: readinessSources.settings?.localBaseUrl ?? null,
+        gpuVramGb: readinessSources.settings?.localGpuVramGb ?? null,
+        blockedHosts: readinessSources.settings?.openrouterBlockedHosts ?? [],
+        health: healthReading(readinessSources.healthByEntryId.get(entry.id)),
+      })}
       companyId={selectedCompanyId}
       sameModelAs={duplicates.get(entry.id)}
       canManage={canManage}

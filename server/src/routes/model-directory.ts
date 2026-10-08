@@ -13,6 +13,7 @@ import {
 } from "@paperclipai/shared";
 import { HttpError, forbidden, notFound } from "../errors.js";
 import { validate } from "../middleware/validate.js";
+import { logger } from "../middleware/logger.js";
 import { companyScope } from "../middleware/company-scope.js";
 import { logActivity } from "../services/activity-log.js";
 import { LOCAL_SYNC_UNREADABLE_CODE, modelDirectoryService } from "../services/model-directory.js";
@@ -148,6 +149,16 @@ export function modelDirectoryRoutes(rawDb: Db, deps: { fetchImpl?: typeof fetch
   // Catalogue v2: ask the local Ollama which models are installed and mark the
   // saved local setups at that address. Only an address this company already
   // uses is called (422 otherwise).
+  // Best effort: the readings behind "Installed / Not installed / Offline" in
+  // the model pickers. A failure here never fails the resync itself.
+  async function recordSyncHealth(companyId: string, baseUrl: string, installed: string[] | null) {
+    try {
+      await health.recordLocalSync(companyId, baseUrl, installed);
+    } catch (err) {
+      logger.warn({ err, companyId }, "model directory: could not record local model readings after a resync");
+    }
+  }
+
   router.post("/companies/:companyId/model-directory/local-sync", scope(), validate(syncLocalModelsSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
     const baseUrl = (req.body as { baseUrl: string }).baseUrl;
@@ -157,12 +168,13 @@ export function modelDirectoryRoutes(rawDb: Db, deps: { fetchImpl?: typeof fetch
     } catch (err) {
       // The server could not be read: the models there are now "Offline".
       // (An address the company does not use records nothing.)
-      if (err instanceof HttpError && (err.details as { code?: string } | undefined)?.code === LOCAL_SYNC_UNREADABLE_CODE) {
-        await health.recordLocalSync(companyId, baseUrl, null).catch(() => undefined);
+      const code = err instanceof HttpError ? (err.details as { code?: unknown } | undefined)?.code : undefined;
+      if (typeof code === "string" && code === LOCAL_SYNC_UNREADABLE_CODE) {
+        await recordSyncHealth(companyId, baseUrl, null);
       }
       throw err;
     }
-    await health.recordLocalSync(companyId, result.baseUrl, result.installed.map((m) => m.name));
+    await recordSyncHealth(companyId, result.baseUrl, result.installed.map((m) => m.name));
     const actor = getActorInfo(req);
     await logActivity(db, {
       companyId,
