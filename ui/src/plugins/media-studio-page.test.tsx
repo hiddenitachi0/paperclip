@@ -170,6 +170,14 @@ describe("Media Studio main-menu link and page (DUR-4060)", () => {
     root = createRoot(container);
     root.render(<MediaStudioPage context={{ companyId: COMPANY } as never} />);
     await flush();
+    // The Settings tab mounts only after the access check resolves, and then
+    // each panel loads its own data, so wait for the loaded panels rather than
+    // counting flushes (the page grew; a fixed count raced on CI).
+    await vi.waitFor(() => {
+      expect(container.querySelector('[data-testid="key-source-sogni"]')).not.toBeNull();
+      expect(container.querySelector('select[aria-label="Sogni key"] option[value="s-sogni"]')).not.toBeNull();
+      expect(container.textContent).not.toContain("Loading settings");
+    });
     expect(container.querySelector('[data-testid="config-form"]')).toBeNull();
     expect(container.textContent).toContain("This company's service keys");
     expect(container.querySelector('[data-testid="key-source-sogni"]')?.textContent).toBe("Using the instance's key (set by the instance admin)");
