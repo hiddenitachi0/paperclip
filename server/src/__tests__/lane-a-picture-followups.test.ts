@@ -3,6 +3,7 @@ import {
   buildLaneAActionClaimRetryNote,
   detectLaneAActionClaim,
   detectLaneAPictureRequest,
+  laneAMediaToolAttempted,
   pickLaneAForcedToolName,
 } from "../services/lane-a-action-claims.ts";
 import { parseLaneATextToolCall } from "../services/lane-a-text-tool-calls.ts";
@@ -125,5 +126,14 @@ describe("parseLaneATextToolCall", () => {
     expect(parseLaneATextToolCall('{"name":"get_weather","arguments":[1,2]}', offered, "x")).toBeNull();
     expect(parseLaneATextToolCall('{"name":"generate","arguments":{}}', ["a__generate", "b__generate"], "x")).toBeNull();
     expect(parseLaneATextToolCall('{"name":"get_weather"}', [], "x")).toBeNull();
+  });
+});
+
+describe("laneAMediaToolAttempted", () => {
+  it("counts a refused picture call as tried, so a request never forces it again", () => {
+    expect(laneAMediaToolAttempted([{ tool: "paperclip_media-studio__generate-image", summary: "refused", ok: false }])).toBe(true);
+    expect(laneAMediaToolAttempted([{ tool: "acme_pictures__make-picture", summary: "refused", ok: false }])).toBe(true);
+    expect(laneAMediaToolAttempted([{ tool: "get_weather", summary: "Oslo", ok: true }])).toBe(false);
+    expect(laneAMediaToolAttempted([])).toBe(false);
   });
 });

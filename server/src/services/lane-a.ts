@@ -75,6 +75,7 @@ import {
   buildLaneAActionClaimRetryNote,
   detectLaneAActionClaim,
   detectLaneAPictureRequest,
+  laneAMediaToolAttempted,
   isLaneAActionClaimFulfilled,
   pickLaneAForcedToolName,
   type LaneAActionClaimFamily,
@@ -2547,7 +2548,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
             const claim: { family: LaneAActionClaimFamily; matchedPhrase: string; reason: "claim" | "request" } | null =
               detected && !isLaneAActionClaimFulfilled(detected.family, actions)
                 ? { ...detected, reason: "claim" }
-                : pictureRequested && !isLaneAActionClaimFulfilled("media", actions) && !toolsOff &&
+                : pictureRequested && !laneAMediaToolAttempted(actions) && !toolsOff &&
                     pickLaneAForcedToolName("media", tools.map((tool) => tool.name), message)
                   ? { family: "media", matchedPhrase: message.slice(0, 200), reason: "request" }
                   : null;

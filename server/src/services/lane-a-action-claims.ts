@@ -193,6 +193,20 @@ export function pickLaneAForcedToolName(
 }
 
 /**
+ * Was any media tool called this turn, whatever the outcome? A request-type
+ * retry is only for a reply that never tried: a call the picture service
+ * refused (content policy, limit, outage) must not be forced again.
+ */
+export function laneAMediaToolAttempted(actions: readonly LaneAAction[]): boolean {
+  return actions.some(
+    (action) =>
+      Boolean((action as { image?: unknown }).image) ||
+      MEDIA_GENERATOR_TOOL.test(action.tool) ||
+      toolNameMatchesFamily("media", action.tool),
+  );
+}
+
+/**
  * Does the person's message ask for a picture (or video/sound) to be made?
  * English and Norwegian. `pictureEarlier` is true when an earlier turn of
  * this conversation made a picture: then a short follow-up such as "another
