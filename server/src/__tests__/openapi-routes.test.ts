@@ -142,6 +142,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "security-review-settings.ts",
   // Brag launch-video routes (DUR-4520) are a new backend feature, off by default, and not yet in the public OpenAPI document.
   "brag.ts",
+  // Ask Paperclip helper routes (helper overlay, Phase 1) are board-only and not yet in the public OpenAPI document.
+  "helper.ts",
 ]);
 
 function createApp() {

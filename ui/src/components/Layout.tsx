@@ -13,6 +13,7 @@ import { NewGoalDialog } from "./NewGoalDialog";
 import { NewAgentDialog } from "./NewAgentDialog";
 import { KeyboardShortcutsCheatsheet } from "./KeyboardShortcutsCheatsheet";
 import { ToastViewport } from "./ToastViewport";
+import { HelperOverlay } from "./helper/HelperOverlay";
 import { MobileBottomNav } from "./MobileBottomNav";
 import { WorktreeBanner } from "./WorktreeBanner";
 import { DevRestartBanner } from "./DevRestartBanner";
@@ -634,6 +635,7 @@ export function Layout() {
       <NewGoalDialog />
       <NewAgentDialog />
       <KeyboardShortcutsCheatsheet open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
+      <HelperOverlay />
       <ToastViewport />
       </div>
       </PresentationModeProvider>

@@ -1,6 +1,6 @@
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { videoShots } from "@paperclipai/db";
+import { videoShots, withCompanyScope } from "@paperclipai/db";
 import {
   MEDIA_STUDIO_PLUGIN_KEY,
   estimateStoryboardCostCents,
@@ -19,7 +19,7 @@ import { secretService } from "./secrets.js";
 import { loadReferenceImages } from "./video-storyline-render.js";
 import { recordFalCostEvent } from "./fal-cost-events.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
-import { videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
+import { lockStorylineRow, videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
 import { mediaStudioKeyRef } from "./media-studio-company-keys.js";
 
 /**
@@ -86,19 +86,21 @@ export function videoStorylineStillsService(db: Db) {
   const registry = pluginRegistryService(db);
   const secrets = secretService(db);
 
-  async function resolveImageProvider(companyId: string, providerId: VideoStorylineProvider, actorId: string): Promise<{ provider: ImageGenerationProvider; apiKey: string }> {
-    if (providerId !== "fal") {
-      throw unprocessable(
-        "Storyboard stills currently only support the Fal provider. Switch this storyline's provider to Fal to generate stills (Sogni video rendering is unaffected).",
-      );
-    }
+  /**
+   * Storyboard pictures are always made with Fal.ai's image models, whatever
+   * provider renders the video -- a still is just a picture, and Sogni has
+   * no still path here. (Before, a Sogni storyline could never get a still,
+   * so it could never be approved, so it could never render.)
+   */
+  async function resolveImageProvider(companyId: string, actorId: string): Promise<{ provider: ImageGenerationProvider; apiKey: string }> {
+    const noKey = "Storyboard pictures are made with Fal.ai, and no Fal.ai API key is set up in Media Studio settings yet. Add one there, or approve this shot without a picture.";
     const plugin = await registry.getByKey(MEDIA_STUDIO_PLUGIN_KEY);
-    if (!plugin) throw unprocessable("The media-studio plugin is not installed, so there is no Fal key configured.");
+    if (!plugin) throw unprocessable(noKey);
     const config = await registry.getConfig(plugin.id);
     const cfg = (config?.configJson ?? {}) as Record<string, unknown>;
     // The company's own key (Media Studio's Settings tab), else the instance's.
     const ref = await mediaStudioKeyRef(db, plugin.id, companyId, "fal", cfg);
-    if (!ref) throw unprocessable("No Fal.ai API key is set for this company yet. The company's owner or an admin can pick one in Media Studio's Settings tab.");
+    if (!ref) throw unprocessable("Storyboard pictures are made with Fal.ai, and no Fal.ai API key is set for this company yet. The company's owner or an admin can pick one in Media Studio's Settings tab, or approve this shot without a picture.");
     const apiKey = await secrets.resolveSecretValueForVideoRender(companyId, ref, { actorId });
     return { provider: new FalImageProvider(apiKey, safeImageFetch), apiKey };
   }
@@ -111,10 +113,44 @@ export function videoStorylineStillsService(db: Db) {
       throw conflict("This shot is currently rendering. Wait for it to finish before regenerating its still.");
     }
 
-    const providerId = (shot.providerId ?? storyline.providerId) as VideoStorylineProvider;
-    const estimate = estimateStoryboardCostCents([{ storyboardStatus: shot.storyboardStatus as VideoShotStoryboardStatus }], providerId);
-    const { provider, apiKey } = await resolveImageProvider(companyId, providerId, actor.agentId ?? actor.actorId);
+    // Stills are always a Fal image call (see resolveImageProvider), so they are priced as one.
+    const estimate = estimateStoryboardCostCents([{ storyboardStatus: shot.storyboardStatus as VideoShotStoryboardStatus }], "fal");
+    const { provider, apiKey } = await resolveImageProvider(companyId, actor.agentId ?? actor.actorId);
 
+    // Security review (replace-import TOCTOU): under the storyline row lock a
+    // "replace" import also takes, re-check the shot is still there and
+    // idle, and mark the still as being paid for (stillEstimatedCostCents,
+    // which a replace counts as paid work) BEFORE the paid image call. Put
+    // back if the call fails, so a failed still does not block a replace.
+    const previousStillEstimate = await withCompanyScope(db, companyId, async (tx) => {
+      await lockStorylineRow(tx, companyId, storylineId);
+      const [current] = await tx.select().from(videoShots).where(and(eq(videoShots.id, shotId), eq(videoShots.storylineId, storylineId)));
+      if (!current) throw conflict("This shot was removed while its still was starting.");
+      if (current.status === "rendering" || current.status === "queued") {
+        throw conflict("This shot is currently rendering. Wait for it to finish before regenerating its still.");
+      }
+      await tx.update(videoShots).set({ stillEstimatedCostCents: estimate.estimatedTotalCents }).where(eq(videoShots.id, shotId));
+      return current.stillEstimatedCostCents;
+    });
+    try {
+      return await finishStill(companyId, storyline, shot, actor, provider, apiKey, estimate.estimatedTotalCents);
+    } catch (err) {
+      await db.update(videoShots).set({ stillEstimatedCostCents: previousStillEstimate }).where(eq(videoShots.id, shotId));
+      throw err;
+    }
+  }
+
+  async function finishStill(
+    companyId: string,
+    storyline: Awaited<ReturnType<typeof storylines.getStorylineRow>>,
+    shot: ShotRow,
+    actor: VideoStorylineActor,
+    provider: ImageGenerationProvider,
+    apiKey: string,
+    estimateCents: number,
+  ): Promise<VideoStoryboardShotSummary> {
+    const shotId = shot.id;
+    const estimate = { estimatedTotalCents: estimateCents };
     const referenceAssetIds = [...shot.lookReferenceAssetIds, ...storyline.characterReferenceAssetIds];
     const referenceImages = await loadReferenceImages(db, companyId, referenceAssetIds);
 
@@ -183,15 +219,21 @@ export function videoStorylineStillsService(db: Db) {
     return toStoryboardShotSummary(row);
   }
 
-  async function approveShot(companyId: string, storylineId: string, shotId: string, actor: VideoStorylineActor): Promise<VideoStoryboardShotSummary> {
+  async function approveShot(
+    companyId: string,
+    storylineId: string,
+    shotId: string,
+    actor: VideoStorylineActor,
+    options: { withoutStill?: boolean } = {},
+  ): Promise<VideoStoryboardShotSummary> {
     await settings.assertEnabled(companyId);
     await storylines.getStorylineRow(companyId, storylineId);
     const shot = await storylines.getShotRow(companyId, storylineId, shotId);
     if (shot.storyboardStatus === "dropped") {
       throw conflict("This shot has been dropped from the storyboard. Edit it to bring it back before approving it.");
     }
-    if (!shot.stillObjectKey) {
-      throw unprocessable("Generate a still for this shot before approving it.");
+    if (!shot.stillObjectKey && !options.withoutStill) {
+      throw unprocessable("Make a storyboard picture for this shot before approving it, or approve it without a picture.");
     }
     const now = new Date();
     const [row] = await db
@@ -208,7 +250,7 @@ export function videoStorylineStillsService(db: Db) {
       action: "video_shot.storyboard_approved",
       entityType: "video_shot",
       entityId: shotId,
-      details: { orderIndex: shot.orderIndex },
+      details: { orderIndex: shot.orderIndex, withoutStill: !shot.stillObjectKey },
     });
     return toStoryboardShotSummary(row);
   }

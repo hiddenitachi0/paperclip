@@ -865,6 +865,7 @@ function ApprovalRow({
 
   return (
     <div
+      data-helper-entity={`approval:${approval.id}`}
       className={cn(
         "flex flex-col gap-2 rounded-lg border px-2.5 py-2",
         isDuplicate || branchInfo?.mismatch || isRollback
@@ -1036,7 +1037,10 @@ function InteractionRow({
     interaction.kind === "request_confirmation" ? interaction.payload.rejectLabel ?? "Decline" : "Decline";
 
   return (
-    <div className="flex flex-col gap-2 rounded-lg border border-amber-500/40 bg-amber-500/[0.04] px-2.5 py-2">
+    <div
+      data-helper-entity={`interaction:${interaction.id}`}
+      className="flex flex-col gap-2 rounded-lg border border-amber-500/40 bg-amber-500/[0.04] px-2.5 py-2"
+    >
       <Link to={threadHref} className="group flex items-start gap-1.5">
         <MessageCircleQuestion className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
         <div className="min-w-0">

@@ -122,6 +122,7 @@ export {
   type CompanyWebSearchSettings,
 } from "./web-search.js";
 export { readLaneAConversationSearchSwitch } from "./lane-a-conversation-search.js";
+export * from "./helper.js";
 export {
   BROWSER_ACCESS_LEVELS,
   readLaneABrowserAccess,
@@ -2583,6 +2584,9 @@ export {
   createVideoStorylineSchema,
   draftVideoDirectorShotsSchema,
   estimateVideoStorylineCostCents,
+  FAL_KLING_ALLOWED_DURATIONS_SECONDS,
+  videoModelAllowedDurations,
+  videoRenderDurationSeconds,
   startVideoStorylineRenderSchema,
   updateVideoSceneSchema,
   updateVideoShotSchema,
@@ -2613,6 +2617,29 @@ export {
   type VideoQualityIssueCode,
   type VideoStorylineQualityIssue,
 } from "./video-storylines.js";
+export {
+  VIDEO_CLIP_LENGTH_NOTE,
+  VIDEO_SCRIPT_IMPORT_MODES,
+  VIDEO_SCRIPT_MAX_CHARACTERS,
+  VIDEO_SCRIPT_MAX_REPORTED_ERRORS,
+  VIDEO_SCRIPT_PROMPT_MAX_LENGTH,
+  VIDEO_SCRIPT_SCENE_NOTES_MAX_LENGTH,
+  VIDEO_STORYLINE_SCRIPT_EXAMPLE,
+  VIDEO_STORYLINE_SCRIPT_INSTRUCTIONS,
+  createVideoStorylineFromScriptSchema,
+  formatVideoScriptCharacters,
+  importVideoStorylineScriptSchema,
+  validateVideoStorylineScript,
+  type CreateVideoStorylineFromScriptInput,
+  type ImportVideoStorylineScriptInput,
+  type ParsedVideoStorylineScript,
+  type VideoScriptCharacter,
+  type VideoScriptImportMode,
+  type VideoScriptImportSummary,
+  type VideoScriptScene,
+  type VideoScriptShot,
+  type VideoStorylineScriptValidation,
+} from "./video-storyline-script.js";
 export {
   VIDEO_DIRECTOR_CONVERSATION_STATUSES,
   VIDEO_DIRECTOR_DIALOGUE_MAX_ANSWERS_PER_TURN,

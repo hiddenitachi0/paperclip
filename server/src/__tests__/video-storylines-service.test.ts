@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
+import { validateVideoStorylineScript } from "@paperclipai/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createDb, assets, companies, videoStorylines } from "@paperclipai/db";
+import { createDb, assets, companies, videoShots, videoStorylines } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { videoStorylineService, type VideoStorylineActor } from "../services/video-storylines.ts";
 
@@ -224,6 +225,89 @@ d("videoStorylineService", () => {
 
       const updated = await service().updateShot(companyId, storyline.id, shot.id, { transitionIn: null }, ACTOR);
       expect(updated.transitionIn).toBeNull();
+    });
+  });
+
+  describe("importScript replace (security review: check-then-write race)", () => {
+    function parsed(script: unknown) {
+      const result = validateVideoStorylineScript(script);
+      if (!result.ok) throw new Error(result.errors.join("; "));
+      return result.script;
+    }
+
+    async function seedWithShots() {
+      const companyId = await seedCompany();
+      const storyline = await service().createStoryline(companyId, { title: "T", projectId: null, providerId: "fal", model: null, budgetCapCents: null, characterReferenceAssetIds: [] }, ACTOR);
+      const scene = await service().createScene(companyId, storyline.id, { title: "S", notes: null, orderIndex: 0 }, ACTOR);
+      const shot = await service().createShot(
+        companyId,
+        storyline.id,
+        { sceneId: scene.id, orderIndex: 0, prompt: "keep me", cameraNotes: null, durationSeconds: 5, lookReferenceAssetIds: [] },
+        ACTOR,
+      );
+      return { companyId, storylineId: storyline.id, shotId: shot.id };
+    }
+
+    /**
+     * The service's db, except that right before the import's write
+     * transaction opens, `between` runs on the real db -- i.e. paid work
+     * starts after the import's up-front checks passed but before it writes.
+     */
+    function racingDb(between: () => Promise<void>) {
+      let fired = false;
+      return new Proxy(db, {
+        get(target, prop) {
+          const value = Reflect.get(target, prop, target);
+          if (prop === "transaction") {
+            return async (...args: unknown[]) => {
+              if (!fired) {
+                fired = true;
+                await between();
+              }
+              return (value as (...a: unknown[]) => unknown).apply(target, args);
+            };
+          }
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    }
+
+    const replacement = { scenes: [{ scene_title: "New", shots: [{ prompt: "replacement" }] }] };
+
+    it("refuses a replace when a render starts between the check and the write, and deletes nothing", async () => {
+      const { companyId, storylineId } = await seedWithShots();
+      const raced = videoStorylineService(
+        racingDb(async () => {
+          // What startRender's locked transaction does: flip the storyline to "rendering".
+          await db.update(videoStorylines).set({ status: "rendering" }).where(eq(videoStorylines.id, storylineId));
+        }),
+      );
+      await expect(raced.importScript(companyId, storylineId, parsed(replacement), "replace", ACTOR)).rejects.toMatchObject({ status: 409 });
+      const shots = await db.select().from(videoShots).where(eq(videoShots.storylineId, storylineId));
+      expect(shots.map((s) => s.prompt)).toEqual(["keep me"]);
+    });
+
+    it("refuses a replace when a still or re-render starts between the check and the write, and deletes nothing", async () => {
+      const { companyId, storylineId, shotId } = await seedWithShots();
+      const raced = videoStorylineService(
+        racingDb(async () => {
+          // What generateStill's locked transaction does before the paid image call.
+          await db.update(videoShots).set({ stillEstimatedCostCents: 1 }).where(eq(videoShots.id, shotId));
+        }),
+      );
+      await expect(raced.importScript(companyId, storylineId, parsed(replacement), "replace", ACTOR)).rejects.toMatchObject({
+        status: 409,
+        message: expect.stringContaining("can't be replaced"),
+      });
+      const shots = await db.select().from(videoShots).where(eq(videoShots.storylineId, storylineId));
+      expect(shots.map((s) => s.prompt)).toEqual(["keep me"]);
+    });
+
+    it("still replaces when nothing started in between", async () => {
+      const { companyId, storylineId } = await seedWithShots();
+      await service().importScript(companyId, storylineId, parsed(replacement), "replace", ACTOR);
+      const shots = await db.select().from(videoShots).where(eq(videoShots.storylineId, storylineId));
+      expect(shots.map((s) => s.prompt)).toEqual(["replacement"]);
     });
   });
 });

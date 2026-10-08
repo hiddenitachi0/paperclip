@@ -1625,7 +1625,7 @@ export function AgentConfigurePage({
   const revisionCount = configRevisions?.length ?? 0;
 
   return (
-    <div className="max-w-3xl space-y-6">
+    <div className="max-w-3xl space-y-6" data-helper-entity={`agent:${agent.id}`}>
       <ConfigurationTab
         agent={agent}
         onDirtyChange={onDirtyChange}
