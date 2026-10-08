@@ -25,6 +25,7 @@ const mockApi = vi.hoisted(() => ({
   getSettings: vi.fn(),
   updateSettings: vi.fn(),
   syncLocal: vi.fn(),
+  openrouterHosts: vi.fn(),
 }));
 const mockRole = vi.hoisted(() => vi.fn());
 const mockToast = vi.hoisted(() => vi.fn());
@@ -114,6 +115,7 @@ beforeEach(() => {
   ]);
   mockRole.mockReturnValue({ canManageConnections: true, isLoading: false });
   mockApi.getSettings.mockResolvedValue({ localGpuVramGb: 12, localBaseUrl: null });
+  mockApi.openrouterHosts.mockRejectedValue(new ApiError("Could not read the host list from OpenRouter just now.", 502, null));
 });
 afterEach(() => {
   act(() => root?.unmount());
@@ -484,7 +486,8 @@ describe("CompanyModels catalogue v2", () => {
         family: "Qwen3",
         variant: "32B",
         availability: "cloud",
-        providerRouting: expect.objectContaining({ only: expect.arrayContaining(["deepinfra"]) }),
+        // Paperclip never picks a host: the company's own rules and the host table do.
+        providerRouting: null,
       }),
     );
   });
@@ -734,9 +737,9 @@ describe("CompanyModels catalogue v2", () => {
     const dialog = () => byTestId("model-entry-dialog")!;
     const field = (id: string) => dialog().querySelector(`#${id}`) as HTMLInputElement;
     expect(field("model-hosts").value).toBe("deepinfra");
-    // Saving untouched keeps the saved routing exactly.
+    // Saving untouched leaves the saved routing alone (not sent, so the server keeps it).
     await click(buttonByText(dialog(), "Save changes"));
-    expect(mockApi.update.mock.calls.at(-1)![2].providerRouting).toEqual(ROUTED.providerRouting);
+    expect(mockApi.update.mock.calls.at(-1)![2].providerRouting).toBeUndefined();
 
     await click(buttonByText(byTestId(`model-card-${ROUTED.id}`)!, "Edit"));
     for (const [id, value] of [
@@ -754,7 +757,7 @@ describe("CompanyModels catalogue v2", () => {
       family: "Qwen3 tuned",
       variant: "32B fast",
       tags: ["tools", "fast"],
-      providerRouting: { only: ["together", "deepinfra"], order: ["deepinfra"], ignore: [] },
+      providerRouting: { only: ["together", "deepinfra"], order: ["deepinfra"] },
     });
     // Every field in the dialog explains itself.
     await click(buttonByText(byTestId(`model-card-${ROUTED.id}`)!, "Edit"));
@@ -844,7 +847,7 @@ describe("add dialog prefill", () => {
     );
   });
 
-  it("fills OpenRouter hosts with tool calling but keeps a maker the person typed", async () => {
+  it("never picks OpenRouter hosts by itself and keeps a maker the person typed", async () => {
     mockApi.create.mockResolvedValue(ENTRY);
     await render();
     await click(buttonByText(container, "Add a model"));
@@ -863,7 +866,8 @@ describe("add dialog prefill", () => {
     expect(dialogInput("model-maker").value).toBe("Qwen team");
     expect(dialogInput("model-family").value).toBe("Qwen3");
     expect(dialogInput("model-variant").value).toBe("32B");
-    expect(byTestId("model-entry-hosts")!.textContent).toContain("deepinfra");
+    expect(byTestId("model-entry-hosts")!.textContent).toContain("OpenRouter picks a host");
+    expect(byTestId("model-entry-hosts")!.textContent).not.toContain("deepinfra");
     await click(buttonByText(byTestId("model-entry-dialog")!, "Add model"));
     expect(mockApi.create).toHaveBeenCalledWith(
       COMPANY,
@@ -871,7 +875,7 @@ describe("add dialog prefill", () => {
         name: "Qwen3 32B via OpenRouter",
         maker: "Qwen team",
         availability: "cloud",
-        providerRouting: expect.objectContaining({ only: expect.arrayContaining(["deepinfra"]) }),
+        providerRouting: null,
       }),
     );
   });
@@ -894,6 +898,187 @@ describe("add dialog prefill", () => {
     expect((dialogInput("model-availability") as unknown as HTMLSelectElement).value).toBe("installed");
     expect(dialogInput("model-address").value).toBe("http://100.1.1.1:11434/v1");
     expect(dialogInput("model-name").value).toBe("mystery:7b (local)");
+  });
+});
+
+describe("OpenRouter hosts", () => {
+  const host = (slug: string, supportsTools: boolean, extra: Record<string, unknown> = {}) => ({
+    slug,
+    name: slug[0]!.toUpperCase() + slug.slice(1),
+    quantization: "fp8",
+    contextTokens: 262144,
+    maxOutputTokens: null,
+    priceInPerM: 0.15,
+    priceOutPerM: 1.88,
+    supportsTools,
+    supportsToolChoice: supportsTools,
+    supportsReasoning: true,
+    supportsImages: true,
+    status: "ok",
+    uptimeLast30m: null,
+    ...extra,
+  });
+  const HOSTS = {
+    model: "qwen/qwen3.8-27b",
+    fetchedAt: "2026-10-08T12:00:00.000Z",
+    hosts: [host("deepinfra", true), host("novita", true), host("venice", false)],
+  };
+  const RULES = {
+    localGpuVramGb: 12,
+    localBaseUrl: null,
+    openrouterPreferredHosts: ["novita"],
+    openrouterBlockedHosts: ["venice"],
+  };
+  const dialog = () => byTestId("model-entry-dialog")!;
+
+  async function openNewOpenRouter(model: string) {
+    await click(buttonByText(container, "Add a model"));
+    const provider = dialog().querySelector("#model-provider") as HTMLSelectElement;
+    await act(async () => {
+      provider.value = "openrouter";
+      provider.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await flush();
+    await typeInto(dialog().querySelector("#model-id") as HTMLInputElement, model);
+    await typeInto(dialog().querySelector("#model-name") as HTMLInputElement, "Qwen cloud");
+  }
+
+  it("lists each host with price, context, quantisation and support chips, and hides hosts without tools on request", async () => {
+    mockApi.openrouterHosts.mockResolvedValue(HOSTS);
+    await render();
+    await openNewOpenRouter("qwen/qwen3.8-27b");
+    expect(mockApi.openrouterHosts).toHaveBeenCalledWith(COMPANY, "qwen/qwen3.8-27b");
+    const row = byTestId("openrouter-host-row-deepinfra")!;
+    expect(row.textContent).toContain("$0.15 / $1.88");
+    expect(row.textContent).toContain("256K");
+    expect(row.textContent).toContain("fp8");
+    for (const chip of ["Tools", "Forced tool", "Pictures in", "Reasoning"]) expect(row.textContent).toContain(chip);
+    expect(byTestId("openrouter-host-no-tools-venice")!.textContent).toContain("No tool support for this model");
+    await click(byTestId("openrouter-hosts-hide-no-tools"));
+    expect(byTestId("openrouter-host-row-venice")).toBeNull();
+    expect(byTestId("openrouter-host-row-novita")).not.toBeNull();
+  });
+
+  it("applies the company's preferred and blocked hosts to a new setup and remembers the hosts seen", async () => {
+    mockApi.getSettings.mockResolvedValue(RULES);
+    mockApi.openrouterHosts.mockResolvedValue(HOSTS);
+    mockApi.create.mockResolvedValue(ENTRY);
+    await render();
+    await openNewOpenRouter("qwen/qwen3.8-27b");
+    // Default rows show the company's rule and the result.
+    expect(byTestId("openrouter-host-row-novita")!.textContent).toContain("Company prefers");
+    expect(byTestId("openrouter-host-result-novita")!.textContent).toBe("May be used");
+    expect(byTestId("openrouter-host-row-venice")!.textContent).toContain("Company blocks");
+    expect(byTestId("openrouter-host-result-venice")!.textContent).toBe("Not used");
+    expect(byTestId("openrouter-host-result-deepinfra")!.textContent).toBe("Not used");
+    await click(buttonByText(dialog(), "Add model"));
+    const body = mockApi.create.mock.calls.at(-1)![1];
+    expect(body.providerRouting).toEqual({ only: ["novita"], ignore: ["venice"] });
+    expect(body.specs).toMatchObject({
+      openrouterHostsSeen: [
+        { slug: "deepinfra", tools: true },
+        { slug: "novita", tools: true },
+        { slug: "venice", tools: false },
+      ],
+      openrouterHostsCheckedAt: "2026-10-08T12:00:00.000Z",
+    });
+  });
+
+  it("an explicit Use beats the company lists, and a choice that leaves no tool host is warned about", async () => {
+    mockApi.getSettings.mockResolvedValue(RULES);
+    mockApi.openrouterHosts.mockResolvedValue(HOSTS);
+    mockApi.create.mockResolvedValue(ENTRY);
+    await render();
+    await openNewOpenRouter("qwen/qwen3.8-27b");
+    expect(byTestId("openrouter-hosts-warning")).toBeNull();
+    await selectValue("openrouter-host-choice-venice", "use");
+    expect(byTestId("openrouter-hosts-warning")!.textContent).toBe(
+      "No host you allow supports tool calling for this model, so a quick agent cannot use pictures, weather or hand-overs with it.",
+    );
+    await click(buttonByText(dialog(), "Add model"));
+    expect(mockApi.create.mock.calls.at(-1)![1].providerRouting).toEqual({ only: ["venice"], allowFallbacks: false });
+  });
+
+  it("Refresh hosts says what changed since the last check", async () => {
+    const SEEN = {
+      ...BASE,
+      id: "66666666-6666-4666-8666-666666666666",
+      name: "Qwen seen",
+      provider: "openrouter",
+      model: "qwen/qwen3.8-27b",
+      baseUrl: null,
+      specs: {
+        openrouterHostsSeen: [
+          { slug: "deepinfra", tools: true },
+          { slug: "chutes", tools: true },
+          { slug: "venice", tools: true },
+        ],
+        openrouterHostsCheckedAt: "2026-10-01T12:00:00.000Z",
+      },
+    };
+    mockApi.list.mockResolvedValue([SEEN]);
+    mockApi.update.mockResolvedValue(SEEN);
+    mockApi.openrouterHosts.mockResolvedValue(HOSTS);
+    await render();
+    await click(buttonByText(byTestId(`model-card-${SEEN.id}`)!, "Edit"));
+    expect(byTestId("openrouter-hosts-change")!.textContent).toBe(
+      "What changed since last time: New host: novita. Gone: chutes. No longer supports tool calling: venice.",
+    );
+    mockApi.openrouterHosts.mockResolvedValue({ ...HOSTS, fetchedAt: "2026-10-08T12:05:00.000Z" });
+    await click(byTestId("openrouter-hosts-refresh"));
+    expect(mockApi.openrouterHosts).toHaveBeenLastCalledWith(COMPANY, "qwen/qwen3.8-27b", { refresh: true });
+    expect(byTestId("openrouter-hosts-change")!.textContent).toBe("What changed since last time: Nothing changed.");
+    await click(buttonByText(dialog(), "Save changes"));
+    expect(mockApi.update.mock.calls.at(-1)![2].specs).toMatchObject({
+      openrouterHostsSeen: [
+        { slug: "deepinfra", tools: true },
+        { slug: "novita", tools: true },
+        { slug: "venice", tools: false },
+      ],
+      openrouterHostsCheckedAt: "2026-10-08T12:05:00.000Z",
+    });
+  });
+
+  it("falls back to typed host names when the list cannot be read", async () => {
+    await render();
+    await openNewOpenRouter("qwen/qwen3.8-27b");
+    expect(byTestId("openrouter-hosts-error")!.textContent).toContain("You can still type host names below.");
+    mockApi.create.mockResolvedValue(ENTRY);
+    await typeInto(dialog().querySelector("#model-hosts-never") as HTMLInputElement, "Venice");
+    await click(buttonByText(dialog(), "Add model"));
+    expect(mockApi.create.mock.calls.at(-1)![1].providerRouting).toEqual({ ignore: ["venice"] });
+  });
+
+  it("lets an owner keep company preferred and blocked lists, and shows them read-only to others", async () => {
+    mockApi.getSettings.mockResolvedValue({ ...RULES, openrouterPreferredHosts: [], openrouterBlockedHosts: [] });
+    mockApi.updateSettings.mockResolvedValue({ ...RULES, openrouterPreferredHosts: [], openrouterBlockedHosts: ["venice"] });
+    await render();
+    const block = byTestId("models-openrouter-hosts")!;
+    expect(block.textContent).toContain("A host is a company that actually runs a model for OpenRouter");
+    expect(byTestId("models-hosts-precedence")!.textContent).toContain("A host marked Use on a setup is used even if it is on the blocked list");
+    expect(byTestId("models-hosts-precedence")!.textContent).toContain("also for setups saved before it was blocked");
+    await typeInto(byTestId("models-hosts-blocked-input") as HTMLInputElement, "Venice");
+    await click(byTestId("models-hosts-blocked-add"));
+    expect(mockApi.updateSettings).toHaveBeenCalledWith(COMPANY, { openrouterBlockedHosts: ["venice"] });
+    expect(byTestId("models-hosts-blocked-chips")!.textContent).toContain("venice");
+    // Not a host name: said plainly, nothing saved.
+    await typeInto(byTestId("models-hosts-preferred-input") as HTMLInputElement, "deep infra!");
+    await click(byTestId("models-hosts-preferred-add"));
+    expect(byTestId("models-hosts-preferred-problem")!.textContent).toContain("is not a host name");
+    // On both lists: refused before saving.
+    await typeInto(byTestId("models-hosts-preferred-input") as HTMLInputElement, "venice");
+    await click(byTestId("models-hosts-preferred-add"));
+    expect(byTestId("models-hosts-preferred-problem")!.textContent).toContain("already on the blocked hosts list");
+    expect(mockApi.updateSettings).toHaveBeenCalledTimes(1);
+
+    act(() => root?.unmount());
+    root = null;
+    mockRole.mockReturnValue({ canManageConnections: false, isLoading: false });
+    mockApi.getSettings.mockResolvedValue({ ...RULES });
+    await render();
+    expect(byTestId("models-hosts-blocked-chips")!.textContent).toContain("venice");
+    expect(byTestId("models-hosts-blocked-input")).toBeNull();
+    expect(byTestId("models-hosts-blocked-remove-venice")).toBeNull();
   });
 });
 

@@ -1657,6 +1657,13 @@
     {
       "idx": 237,
       "version": "7",
+      "when": 1791470873895,
+      "tag": "0237_openrouter_host_rules",
+      "breakpoints": true
+    },
+    {
+      "idx": 238,
+      "version": "7",
       "when": 1791480000000,
       "tag": "0238_company_helper_settings",
       "breakpoints": true

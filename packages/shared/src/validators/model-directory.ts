@@ -10,6 +10,11 @@ import {
   laneABackupModelEntryIssue,
   normalizeLaneAProvider,
 } from "../lane-a-models.js";
+import {
+  OPENROUTER_HOST_RULES_MAX,
+  OPENROUTER_HOST_SLUG_RE,
+  OPENROUTER_HOSTS_SEEN_MAX,
+} from "../openrouter-hosts.js";
 import { laneABaseUrlValueSchema, laneAProviderRoutingSchema } from "./agent.js";
 
 // DUR-4379: the company model directory -- saved model setups. These shapes
@@ -60,6 +65,25 @@ export const modelDirectorySpecsSchema = z
     sourceUrl: z.string().trim().url().max(500).nullable().optional(),
     /** The command that installs it on a local model server, e.g. "ollama pull qwen3:14b". */
     pullCommand: optionalLabel(300),
+    /**
+     * OpenRouter only: the hosts seen at the last "Refresh hosts" (host name
+     * and whether it supported tool calling for this model), so the next
+     * check can say what changed. Written by the Saved model dialog.
+     */
+    openrouterHostsSeen: z
+      .array(
+        z
+          .object({
+            slug: z.string().regex(OPENROUTER_HOST_SLUG_RE).max(64),
+            tools: z.boolean(),
+          })
+          .strict(),
+      )
+      .max(OPENROUTER_HOSTS_SEEN_MAX)
+      .nullable()
+      .optional(),
+    /** When the host list above was read (ISO time). */
+    openrouterHostsCheckedAt: z.string().datetime().max(40).nullable().optional(),
   })
   .strict();
 export type ModelDirectorySpecs = z.infer<typeof modelDirectorySpecsSchema>;
@@ -215,8 +239,11 @@ export interface ModelDirectoryEntry {
 }
 
 // DUR-4418: ready-made starter setups, replaced 8 Oct 2026 by the curated
-// catalogue from the model-library research (small local models, their bigger
-// tool-capable cloud versions, OpenRouter hosts checked for tool support).
+// catalogue from the model-library research (small local models and their bigger
+// tool-capable cloud versions). No starter picks an OpenRouter host: which
+// hosts to use is the company's choice (Settings > Models > OpenRouter hosts
+// and each setup's host table), and tool requests only ever go to a host that
+// supports tools (require_parameters).
 // Nothing here assumes one company's computer: local starters carry no
 // address (baseUrl null) and get the company's own model server address
 // (Settings > Models) when they are added; they start as "planned" until a
@@ -353,7 +380,7 @@ export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
     provider: "openrouter",
     model: "qwen/qwen3.8-27b",
     baseUrl: null,
-    providerRouting: {"only": ["deepinfra", "parasail", "novita"]},
+    providerRouting: null,
     defaultThinking: "off",
     defaultTemperature: 0.7,
     defaultMaxOutputTokens: 4096,
@@ -365,7 +392,7 @@ export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
     availability: "cloud",
     tags: ["tools", "vision", "coding", "agent", "default-cloud"],
     specs: {"params": "27B", "contextTokens": 262144, "tools": "yes", "vision": true, "thinking": "toggle"},
-    note: "Full-quality 27B with reliable tools. About $0.15 in / $1.88 out per million tokens on DeepInfra.",
+    note: "Full-quality 27B with reliable tools. Price and tool support differ per host: open the setup to see its hosts.",
   },
   {
     id: "openrouter-qwen3-8-flash-cloud",
@@ -473,7 +500,7 @@ export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
     provider: "openrouter",
     model: "google/gemma-4-26b-a4b-it",
     baseUrl: null,
-    providerRouting: {"only": ["deepinfra", "novita", "google-vertex", "cloudflare"]},
+    providerRouting: null,
     defaultThinking: "off",
     defaultTemperature: 0.7,
     defaultMaxOutputTokens: 2048,
@@ -485,7 +512,7 @@ export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
     availability: "cloud",
     tags: ["cheap", "fast", "tools", "vision"],
     specs: {"params": "26B MoE (3.8B active)", "tools": "yes", "vision": true, "thinking": "toggle"},
-    note: "Very cheap, fast cloud model for quick replies. Locked to hosts that support tools (three hosts do not).",
+    note: "Very cheap, fast cloud model for quick replies. Not every host supports its tools: open the setup to see which do.",
   },
   {
     id: "local-hermes-3-8b",
@@ -513,7 +540,7 @@ export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
     provider: "openrouter",
     model: "meta-llama/llama-4-maverick",
     baseUrl: null,
-    providerRouting: {"only": ["digitalocean", "parasail", "google-vertex"]},
+    providerRouting: null,
     defaultThinking: null,
     defaultTemperature: 0.4,
     defaultMaxOutputTokens: 2048,
@@ -593,7 +620,7 @@ export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
     provider: "openrouter",
     model: "mistralai/mistral-small-3.2-24b-instruct",
     baseUrl: null,
-    providerRouting: {"only": ["deepinfra"]},
+    providerRouting: null,
     defaultThinking: null,
     defaultTemperature: 0.7,
     defaultMaxOutputTokens: 2048,
@@ -605,7 +632,7 @@ export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
     availability: "cloud",
     tags: ["tools", "cheap", "eu-host-available"],
     specs: {"params": "24B", "tools": "yes", "vision": true, "thinking": "no"},
-    note: "A good cloud model for quick agents. DeepInfra supports its tools.",
+    note: "A good cloud model for quick agents. Not every host supports its tools: open the setup to see which do.",
   },
 ];
 
@@ -695,15 +722,45 @@ export interface ModelDirectoryCatalogueImportResult {
  *   another OpenAI-compatible server) as Paperclip's server reaches it, e.g.
  *   http://192.168.1.20:11434/v1. The default for new local setups and the
  *   address the ready-made local models get.
+ * - openrouterPreferredHosts / openrouterBlockedHosts: the company's
+ *   OpenRouter host rules (see packages/shared/src/openrouter-hosts.ts for
+ *   what they do and the precedence). Host names as OpenRouter writes them,
+ *   lower case, e.g. "novita"; at most 30 each; a host cannot be on both.
  */
+const openRouterHostRuleListSchema = z
+  .array(
+    z
+      .string()
+      .trim()
+      .toLowerCase()
+      .regex(
+        OPENROUTER_HOST_SLUG_RE,
+        "A host name is the short lower-case name OpenRouter shows, letters, digits and dashes only, e.g. novita.",
+      ),
+  )
+  .max(OPENROUTER_HOST_RULES_MAX, `List at most ${OPENROUTER_HOST_RULES_MAX} hosts.`)
+  .transform((hosts) => Array.from(new Set(hosts)));
+
 export const updateModelDirectorySettingsSchema = z
   .object({
     localGpuVramGb: z.number().min(0).max(1024).nullable().optional(),
     localBaseUrl: laneABaseUrlValueSchema.nullable().optional(),
+    openrouterPreferredHosts: openRouterHostRuleListSchema.optional(),
+    openrouterBlockedHosts: openRouterHostRuleListSchema.optional(),
   })
   .strict()
-  .refine((value) => value.localGpuVramGb !== undefined || value.localBaseUrl !== undefined, {
-    message: "Nothing to save: send localGpuVramGb, localBaseUrl or both.",
+  .refine((value) => Object.values(value).some((field) => field !== undefined), {
+    message: "Nothing to save: send at least one setting.",
+  })
+  .superRefine((value, ctx) => {
+    const preferred = value.openrouterPreferredHosts ?? [];
+    const both = (value.openrouterBlockedHosts ?? []).filter((host) => preferred.includes(host));
+    if (both.length > 0) {
+      ctx.addIssue({
+        code: "custom",
+        message: `${both.join(", ")} cannot be both preferred and blocked. Take it off one of the lists.`,
+      });
+    }
   });
 export type UpdateModelDirectorySettings = z.infer<typeof updateModelDirectorySettingsSchema>;
 
@@ -712,6 +769,10 @@ export interface ModelDirectorySettings {
   localGpuVramGb: number | null;
   /** This company's local model server address; null = not set (Paperclip asks for it). */
   localBaseUrl: string | null;
+  /** OpenRouter hosts to use for new model setups when they run the model with tool calling. */
+  openrouterPreferredHosts: string[];
+  /** OpenRouter hosts never to use (added to every OpenRouter setup's "never" list on save). */
+  openrouterBlockedHosts: string[];
 }
 
 /** Why a ready-made model was not added (e.g. a local one while no model server address is set). */
