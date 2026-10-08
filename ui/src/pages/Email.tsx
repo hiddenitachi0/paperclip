@@ -181,9 +181,9 @@ function AddMailboxForm({ companyId, ownerUserId }: { companyId: string; ownerUs
   const secrets = secretsQuery.data ?? [];
   // Radix's Select mirrors its value onto a hidden native <select> for form semantics; if the
   // value doesn't match a mounted <SelectItem> yet (e.g. a just-saved secret the list hasn't
-  // refetched), that sync fires onValueChange("") and silently clobbers the id. Only hand Radix
-  // a value once a matching item exists; the real id lives in imap/smtpCredentialSecretId and is
-  // what actually gets submitted.
+  // refetched), that sync still fires onValueChange("") even once the displayed value is guarded
+  // below. onValueChange ignores empty values so that spurious fire can't clobber the real id,
+  // which lives in imap/smtpCredentialSecretId and is what actually gets submitted.
   const imapSelectValue = secrets.some((secret) => secret.id === imapCredentialSecretId) ? imapCredentialSecretId : "";
   const smtpSelectValue = secrets.some((secret) => secret.id === smtpCredentialSecretId) ? smtpCredentialSecretId : "";
 
@@ -346,7 +346,7 @@ function AddMailboxForm({ companyId, ownerUserId }: { companyId: string; ownerUs
         </div>
         <div className="space-y-1.5">
           <Label>Password</Label>
-          <Select value={imapSelectValue} onValueChange={setImapCredentialSecretId}>
+          <Select value={imapSelectValue} onValueChange={(value) => { if (value) setImapCredentialSecretId(value); }}>
             <SelectTrigger>
               <SelectValue placeholder="Choose a saved password" />
             </SelectTrigger>
@@ -391,7 +391,7 @@ function AddMailboxForm({ companyId, ownerUserId }: { companyId: string; ownerUs
         {separateSendPassword ? (
           <div className="space-y-1.5">
             <Label>Password for sending</Label>
-            <Select value={smtpSelectValue} onValueChange={setSmtpCredentialSecretId}>
+            <Select value={smtpSelectValue} onValueChange={(value) => { if (value) setSmtpCredentialSecretId(value); }}>
               <SelectTrigger>
                 <SelectValue placeholder="Choose a saved password" />
               </SelectTrigger>
