@@ -485,7 +485,7 @@ describe("CompanyEnvironments — test provider button", () => {
     expect(buttonsAfter[0].disabled).toBe(true);
     expect(buttonsAfter[1].textContent?.trim()).toBe("Test provider");
     expect(buttonsAfter[1].disabled).toBe(false);
-    expect(mockEnvironmentsApi.probe).toHaveBeenCalledExactlyOnceWith("env-1");
+    expect(mockEnvironmentsApi.probe).toHaveBeenCalledExactlyOnceWith("env-1", "company-1");
   });
 
   it("keeps the second environment's testing state when an earlier probe settles", async () => {
@@ -602,6 +602,9 @@ describe("CompanyEnvironments — test provider button", () => {
         driver: "sandbox",
         envVars: { API_TOKEN: { type: "plain", value: "draft-token" } },
       }),
+      // The save must carry the company page's context; without it the server
+      // cannot resolve where env-var bindings live and rejects the save.
+      "company-1",
     );
     expect(getOpenDialog()).toBeNull();
   });
