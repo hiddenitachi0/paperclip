@@ -51,8 +51,10 @@ describe("HelperOverlay", () => {
       defaultDirectoryEntryId: null,
       investigationAgentId: null,
       keys: [],
-      models: [{ id: "m1", name: "Fast one", provider: "openrouter", providerLabel: "OpenRouter", model: "x/y", maker: "Acme AI", baseModel: null, lane: "quick", favorite: false, keyReady: false, keyHint: "needs key" }],
+      models: [{ id: "m1", name: "Fast one", provider: "openrouter", providerLabel: "OpenRouter", model: "x/y", maker: "Acme AI", baseModel: null, lane: "quick", favorite: false, keyReady: false, keyHint: "needs key", canSeePictures: null, picturesSource: "unknown", status: { kind: "needs_key", label: "Needs a key", detail: "needs key", tone: "fail" } }],
       builtInDefaultLabel: "Claude",
+      builtInDefaultCanSeePictures: true,
+      builtInDefaultStatus: { kind: "paperclip_key", label: "Paperclip's key", detail: "Runs on Paperclip's own Claude key.", tone: "ok" },
       canEdit: true,
       updatedAt: null,
     });
@@ -79,7 +81,8 @@ describe("HelperOverlay", () => {
     expect(document.querySelector("[data-testid=helper-panel]")).not.toBeNull();
     expect(document.querySelector("[data-testid=helper-sees]")?.textContent).toContain("/ACM/dashboard/now");
     const modelSelect = document.querySelector("[data-testid=helper-model]") as HTMLSelectElement;
-    expect(modelSelect.textContent).toContain("Fast one (needs a key)");
+    expect(modelSelect.textContent).toContain("Fast one — ❌ Needs a key");
+    expect(modelSelect.textContent).toContain("Use default (Claude) — ✅ Ready");
     expect(modelSelect.querySelector("optgroup")?.getAttribute("label")).toBe("Acme AI");
 
     const textarea = document.querySelector("textarea[aria-label='Your question']") as HTMLTextAreaElement;

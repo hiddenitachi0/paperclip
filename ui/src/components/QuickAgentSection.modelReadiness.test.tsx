@@ -211,13 +211,29 @@ describe("QuickAgentSection model readiness", () => {
   it("says per saved model whether it is ready for this agent", async () => {
     const root = await render(agent({ laneAProvider: "local", laneAModel: "qwen3:14b", laneABaseUrl: LOCAL_URL }));
     const options = [...container.querySelectorAll<HTMLOptionElement>('[data-testid="quick-agent-saved-model-select"] option')].map((o) => o.textContent);
-    expect(options).toContain("14B · Local (qwen3:14b) — Qwen at the office [Installed]");
-    expect(options).toContain("Local (llama9:70b) — Big one [Not installed]");
-    expect(options.some((o) => o?.includes("Mistral via OpenRouter [Needs a key]"))).toBe(true);
+    expect(options).toContain("✅ Ready · 14B · Local — installed (qwen3:14b) — Qwen at the office");
+    expect(options).toContain("⚠️ Not installed on office-pc · Local — not installed (llama9:70b) — Big one");
+    expect(options.some((o) => o?.startsWith("❌ Needs a key · ") && o.includes("Mistral via OpenRouter"))).toBe(true);
+    // Ready ones first: the installed model's group comes before the others.
+    expect(options[1]).toMatch(/^✅ Ready/);
+    // Never a bare "Local" any more.
+    expect(options.some((o) => /Local \(/.test(o ?? ""))).toBe(false);
     // The model in use: installed, read 5 minutes ago.
     const status = q("quick-agent-current-model-status")!;
-    expect(status.dataset.kind).toBe("installed");
-    expect(status.textContent).toContain("last checked 5 minutes ago");
+    expect(status.dataset.kind).toBe("ready");
+    expect(status.textContent).toContain("Installed on office-pc (checked 5 minutes ago)");
+    await act(async () => root.unmount());
+  });
+
+  it("a model in use that is not installed gets a plain warning with what to do and a link to the Models page", async () => {
+    const root = await render(agent({ laneAProvider: "local", laneAModel: "llama9:70b", laneABaseUrl: LOCAL_URL }));
+    const status = q("quick-agent-current-model-status")!;
+    expect(status.dataset.ready).toBe("false");
+    expect(status.dataset.kind).toBe("not_installed");
+    expect(status.textContent).toContain("Not installed on office-pc");
+    expect(status.textContent).toMatch(/Install it there.*Refresh status on the Models page/);
+    const link = [...status.querySelectorAll("a")].find((a) => a.textContent === "Open the Models page");
+    expect(link?.getAttribute("href")).toContain("/company/settings/models");
     await act(async () => root.unmount());
   });
 
@@ -226,7 +242,7 @@ describe("QuickAgentSection model readiness", () => {
       agent({ laneAProvider: "openrouter", laneAModel: "qwen/qwen3-14b", laneABaseUrl: null, adapterConfig: { laneA: { apiKey: OPENROUTER_KEY } } }),
     );
     const options = [...container.querySelectorAll<HTMLOptionElement>('[data-testid="quick-agent-saved-model-select"] option')].map((o) => o.textContent);
-    expect(options.some((o) => o?.includes("Mistral via OpenRouter [Key set]"))).toBe(true);
+    expect(options.some((o) => o?.startsWith("✅ Ready · ") && o.includes("Mistral via OpenRouter"))).toBe(true);
     expect(q("quick-agent-model-checklist-key")!.dataset.status).toBe("ok");
     await act(async () => root.unmount());
   });
@@ -281,8 +297,9 @@ describe("QuickAgentSection model readiness", () => {
     );
     // The backup picker carries statuses too.
     const backupOptions = [...container.querySelectorAll<HTMLOptionElement>('[data-testid="backup-saved-model-0"] option')].map((o) => o.textContent);
-    expect(backupOptions.some((o) => o?.includes("Mistral via OpenRouter [Key set]"))).toBe(true);
-    expect(backupOptions).toContain("14B · Local (qwen3:14b) — Qwen at the office [Installed]");
+    expect(backupOptions.some((o) => o?.startsWith("✅ Ready · ") && o.includes("Mistral via OpenRouter"))).toBe(true);
+    expect(backupOptions).toContain("✅ Ready · 14B · Local — installed (qwen3:14b) — Qwen at the office");
+    expect(backupOptions).toContain("⚠️ Not installed on office-pc · Local — not installed (llama9:70b) — Big one");
 
     await act(async () => q("backup-check-0-button")!.click());
     expect(q("backup-check-0-precheck")!.textContent).toContain('Ready. It uses the agent\'s OpenRouter key "OpenRouter".');

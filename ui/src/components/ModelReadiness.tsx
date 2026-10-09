@@ -1,8 +1,15 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, CheckCircle2, CircleHelp, RefreshCw, XCircle } from "lucide-react";
 import {
+  MODEL_PICKER_MODELS_PAGE,
+  modelPickerReadiness,
   modelReadinessSummary,
+  readinessHealthReading,
+  readinessSetupFromDirectoryEntry,
+  type ModelKeyState,
+  type ModelPickerReadiness,
+  type ModelReadinessContext,
   type LaneASetupCheckResult,
   type LaneASetupCheckTarget,
   type ModelDirectoryEntry,
@@ -102,7 +109,10 @@ export function ReadyBadge({ lines, testId }: { lines: readonly ModelReadinessLi
   );
 }
 
-/** One plain line under a model picker: "Installed on the model server (last checked 5 minutes ago)." */
+/**
+ * @deprecated Use ModelPickerNotice with modelPickerReadiness(). Kept so
+ * branches that still use it keep building.
+ */
 export function ModelStatusLine({ status, prefix, testId }: { status: ModelOptionStatus; prefix?: string; testId?: string }) {
   return (
     <span className="flex items-start gap-1.5 text-xs" data-testid={testId} data-kind={status.kind}>
@@ -116,31 +126,19 @@ export function ModelStatusLine({ status, prefix, testId }: { status: ModelOptio
   );
 }
 
+/** @deprecated Use modelPickerOptionText() with modelPickerReadiness() from @paperclipai/shared. */
+export function optionTextWithStatus(label: string, status: ModelOptionStatus | null | undefined): string {
+  return status ? `${label} [${status.label}]` : label;
+}
+
 /** A saved model as the readiness helpers see it. */
 export function setupFromEntry(entry: ModelDirectoryEntry): ModelSetupForReadiness {
-  return {
-    provider: entry.provider,
-    model: entry.model,
-    baseUrl: entry.baseUrl,
-    providerRouting: entry.providerRouting,
-    thinking: entry.defaultThinking,
-    temperature: entry.defaultTemperature,
-    lane: entry.lane,
-    availability: entry.availability,
-    specs: entry.specs,
-    archived: Boolean(entry.archivedAt),
-  };
+  return readinessSetupFromDirectoryEntry(entry);
 }
 
 /** A stored health report as the readiness helpers take it; "not checked" counts as no reading. */
 export function healthReading(report: Pick<ModelHealthReport, "status" | "lastCheckedAt"> | null | undefined) {
-  if (!report || report.status === "not_checked") return null;
-  return { status: report.status, lastCheckedAt: report.lastCheckedAt };
-}
-
-/** The option text for a saved model in a picker, with its status at the end. */
-export function optionTextWithStatus(label: string, status: ModelOptionStatus | null | undefined): string {
-  return status ? `${label} [${status.label}]` : label;
+  return readinessHealthReading(report);
 }
 
 export function modelHealthQueryKey(companyId: string) {
@@ -328,5 +326,94 @@ export function SetupCheck({
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Readiness for every saved model in a picker, from data Paperclip already
+ * has (the company's model settings and the last model-server readings,
+ * both cached by react-query): opening a dropdown never calls anything.
+ * `keyState` says whether the agent the picker belongs to has the key a
+ * hosted model needs; leave it out where no agent is involved.
+ *
+ * Usage (any picker):
+ *   const { readinessOf } = useSavedModelPickerReadiness(companyId);
+ *   const groups = pickerGroups(entries, undefined, (e) => readinessOf(byId.get(e.id)!));
+ *   <option>{modelPickerOptionText(option.label, option.readiness)}</option>
+ *   <ModelPickerNotice readiness={readinessOf(selected)} />
+ */
+export function useSavedModelPickerReadiness(
+  companyId: string | null | undefined,
+  options: { enabled?: boolean; keyState?: (entry: ModelDirectoryEntry) => ModelKeyState | undefined } = {},
+) {
+  const sources = useModelReadinessSources(companyId, options.enabled ?? true);
+  const { settings, healthByEntryId } = sources;
+  const keyState = options.keyState;
+  const readinessOf = useCallback(
+    (entry: ModelDirectoryEntry, extra: Partial<ModelReadinessContext> = {}): ModelPickerReadiness =>
+      modelPickerReadiness(setupFromEntry(entry), {
+        companyLocalBaseUrl: settings?.localBaseUrl ?? null,
+        gpuVramGb: settings?.localGpuVramGb ?? null,
+        blockedHosts: settings?.openrouterBlockedHosts ?? [],
+        key: keyState?.(entry),
+        health: healthReading(healthByEntryId.get(entry.id)),
+        ...extra,
+      }),
+    [settings, healthByEntryId, keyState],
+  );
+  return { readinessOf, sources };
+}
+
+/**
+ * The one line under a model picker. Not ready: what is wrong and what to do,
+ * with a link to the Models page (and Connections for a key). Ready: nothing,
+ * or a quiet "Ready" line when `showWhenReady`.
+ */
+export function ModelPickerNotice({
+  readiness,
+  prefix,
+  showWhenReady = false,
+  testId,
+}: {
+  readiness: ModelPickerReadiness | null | undefined;
+  /** For example "The model it uses now:". */
+  prefix?: string;
+  showWhenReady?: boolean;
+  testId?: string;
+}) {
+  if (!readiness) return null;
+  if (readiness.ready || !readiness.warning) {
+    if (!showWhenReady) return null;
+    return (
+      <span className="flex items-start gap-1.5 text-xs" data-testid={testId} data-kind={readiness.kind} data-ready="true">
+        <StatusIcon status={readiness.tone} className="mt-0.5" />
+        <span>
+          {prefix && <span className="text-muted-foreground">{prefix} </span>}
+          <span className={cn("font-medium", TONE_CLASS[readiness.tone])}>{readiness.ready ? "Ready." : readiness.badge.replace(/^\S+\s/, "") + "."}</span>{" "}
+          <span className="text-muted-foreground">{readiness.detail}</span>
+        </span>
+      </span>
+    );
+  }
+  return (
+    <span className="flex items-start gap-1.5 text-xs" role="status" data-testid={testId} data-kind={readiness.kind} data-ready="false">
+      <StatusIcon status={readiness.tone} className="mt-0.5" />
+      <span>
+        {prefix && <span className="text-muted-foreground">{prefix} </span>}
+        <span className={cn("font-medium", TONE_CLASS[readiness.tone])}>{readiness.badge.replace(/^\S+\s/, "")}.</span>{" "}
+        <span className="text-muted-foreground">{readiness.warning}</span>{" "}
+        {readiness.fix && (
+          <>
+            <Link to={readiness.fix.href} className="underline">
+              {readiness.fix.label}
+            </Link>
+            {" · "}
+          </>
+        )}
+        <Link to={MODEL_PICKER_MODELS_PAGE} className="underline">
+          Open the Models page
+        </Link>
+      </span>
+    </span>
   );
 }

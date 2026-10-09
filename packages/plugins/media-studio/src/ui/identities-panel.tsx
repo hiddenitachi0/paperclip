@@ -419,7 +419,33 @@ function PicturePicker(props: { companyId: string; onPick: (fileId: string) => v
 
 // ─── Settings ────────────────────────────────────────────────────────────────
 
-type SavedModel = { id: string; name: string; provider: string; model: string; baseUrl: string | null; specs?: { vision?: boolean | null } | null; archivedAt?: string | null };
+/**
+ * Whether a saved model is ready, as the host works it out for every model
+ * picker (GET /model-directory?withReadiness=1): "✅ Ready", "⚠️ Not installed
+ * on office-pc", "⚠️ Never checked", ... From stored readings only, no key.
+ */
+export type SavedModelReadiness = {
+  kind: string;
+  ready: boolean;
+  badge: string;
+  local: boolean;
+  /** "Local — installed" / "Local — not installed" / ...; null for a hosted model. */
+  runLabel: string | null;
+  detail: string;
+  warning: string | null;
+  rank: number;
+};
+type SavedModel = {
+  id: string;
+  name: string;
+  provider: string;
+  model: string;
+  baseUrl: string | null;
+  specs?: { vision?: boolean | null } | null;
+  archivedAt?: string | null;
+  /** Missing from an older host. */
+  readiness?: SavedModelReadiness | null;
+};
 type Secret = { id: string; name: string };
 type AnalysisSetting = { entryId: string; label: string | null; keySecretId: string | null };
 type Settings = { analysis: AnalysisSetting | null; hfTokenSecretId: string | null; hfNamespace: string | null };
@@ -432,6 +458,44 @@ const PROVIDER_NAMES: Record<string, string> = {
   huggingface: "Hugging Face",
   local: "own model server",
 };
+
+/** Where the host lists saved models, their status and "Refresh status". */
+export const MODELS_PAGE_PATH = "/company/settings/models";
+
+/**
+ * Saved models for the analysis picker: ones that can see pictures first,
+ * and within each, ready ones first (the host's readiness rank); the order
+ * is kept otherwise.
+ */
+export function analysisModelOrder(models: SavedModel[]): SavedModel[] {
+  const rank = (m: SavedModel) => m.readiness?.rank ?? 1.5;
+  return visionModelsFirst(models)
+    .map((m, index) => ({ m, index }))
+    .sort((a, b) => Number(b.m.specs?.vision === true) - Number(a.m.specs?.vision === true) || rank(a.m) - rank(b.m) || a.index - b.index)
+    .map((row) => row.m);
+}
+
+/** The option text: "✅ Ready · Llava (llava:13b, Local — installed), can see pictures". */
+export function analysisModelOptionText(m: SavedModel): string {
+  const where = m.readiness?.runLabel ?? PROVIDER_NAMES[m.provider] ?? m.provider;
+  const text = `${m.name} (${m.model}, ${where})${m.specs?.vision === true ? ", can see pictures" : ""}`;
+  return m.readiness ? `${m.readiness.badge} · ${text}` : text;
+}
+
+/**
+ * The line under the analysis picker when the picked model is not ready:
+ * what is wrong and what to do. A hosted model's key is picked right below,
+ * so that part is worked out here.
+ */
+export function analysisModelWarning(m: SavedModel | null, keySecretId: string | null): string | null {
+  if (!m) return null;
+  if (m.provider !== "local" && m.readiness?.kind === "key_per_use") {
+    if (keySecretId || m.provider === "anthropic") return null;
+    return `❌ Needs a key: pick the ${PROVIDER_NAMES[m.provider] ?? m.provider} key for this model below.`;
+  }
+  if (!m.readiness || m.readiness.ready || !m.readiness.warning) return null;
+  return `${m.readiness.badge}. ${m.readiness.warning}`;
+}
 
 export function IdentitySettingsPanel({ companyId, onSaved }: { companyId: string; onSaved?: () => void }) {
   const getSettings = usePluginAction(ACTION_IDENTITY_SETTINGS_GET);
@@ -450,7 +514,7 @@ export function IdentitySettingsPanel({ companyId, onSaved }: { companyId: strin
         setCanManage(res.canManage);
       })
       .catch((e) => setError(errText(e)));
-    hostFetchJson<SavedModel[]>(`/api/companies/${companyId}/model-directory`).then((m) => setModels(visionModelsFirst(m))).catch(() => setModels([]));
+    hostFetchJson<SavedModel[]>(`/api/companies/${companyId}/model-directory?withReadiness=1`).then((m) => setModels(analysisModelOrder(m))).catch(() => setModels([]));
     hostFetchJson<Secret[]>(`/api/companies/${companyId}/secrets`).then(setSecrets).catch(() => setSecrets([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [companyId]);
@@ -492,13 +556,24 @@ export function IdentitySettingsPanel({ companyId, onSaved }: { companyId: strin
           <option value="">{models.length === 0 ? "No saved models yet: add one in Settings > Models" : "Pick a saved model…"}</option>
           {models.map((m) => (
             <option key={m.id} value={m.id}>
-              {m.name} ({m.model}, {PROVIDER_NAMES[m.provider] ?? m.provider}){m.specs?.vision === true ? ", can see pictures" : ""}
+              {analysisModelOptionText(m)}
             </option>
           ))}
           {a && !picked && models.length > 0 ? <option value={a.entryId}>{a.label ?? "A saved model that no longer exists"}</option> : null}
         </select>
         {a && !picked && models.length > 0 ? (
           <span style={help}>The saved model picked here is gone from Settings &gt; Models. Pick another one.</span>
+        ) : null}
+        {analysisModelWarning(picked, a?.keySecretId ?? null) ? (
+          <span style={{ ...help, color: "#b35c00" }} role="status" data-testid="analysis-model-warning">
+            {analysisModelWarning(picked, a?.keySecretId ?? null)}{" "}
+            <a href={MODELS_PAGE_PATH} style={{ color: "#1971c2" }}>
+              Open the Models page
+            </a>
+          </span>
+        ) : null}
+        {models.some((m) => m.readiness) ? (
+          <span style={help}>Each model starts with whether it is ready (ready ones are listed first). A model on your own model server shows whether the last check found it installed there.</span>
         ) : null}
         <label style={field}>
           <span>Key for the analysis model</span>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { KnownModelFamily, ModelDirectoryEntry } from "@paperclipai/shared";
+import { modelPickerOptionText, modelPickerReadiness, type KnownModelFamily, type ModelDirectoryEntry } from "@paperclipai/shared";
 import {
   buildModelTree,
   claudeIdentity,
@@ -422,6 +422,19 @@ describe("labels", () => {
       "3B · Local (llama3.2:latest) — Maja local",
     ]);
     expect(groups[2]!.options[0]!.label).toBe("OpenRouter — Loose");
+  });
+
+  it("with readiness: says whether a local model is installed and puts ready ones (and their groups) first", () => {
+    const readinessOf = (item: { id: string }) =>
+      item.id === llamaLocal.id
+        ? modelPickerReadiness({ provider: "local", model: llamaLocal.model, baseUrl: "http://office-pc:11434" }, { health: { status: "ready", lastCheckedAt: new Date().toISOString() } })
+        : modelPickerReadiness({ provider: "openrouter", model: "meta-llama/llama-3.2-3b-instruct" }, { key: "missing" });
+    const groups = pickerGroups([llamaLocal, llamaCloud, custom, loose], KNOWN, readinessOf);
+    expect(groups[0]!.label).toBe("Meta · Llama 3.2");
+    expect(groups[0]!.options.map((o) => modelPickerOptionText(o.label, o.readiness))).toEqual([
+      "✅ Ready · 3B · Local — installed (llama3.2:latest) — Maja local",
+      "❌ Needs a key · 3B · OpenRouter",
+    ]);
   });
 
   it("adds the name when two options would read the same", () => {

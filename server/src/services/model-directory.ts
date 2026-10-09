@@ -468,9 +468,14 @@ export function modelDirectoryService(db: Db, deps: ModelDirectoryServiceDeps = 
      */
     async syncLocalModels(companyId: string, rawBaseUrl: string): Promise<LocalModelsSyncResult> {
       const key = localAddressKey(rawBaseUrl);
+      // A saved local model with no address of its own runs on the company's model server address.
+      const companyAddress = (await this.getSettings(companyId)).localBaseUrl?.trim() || null;
       const entries = (
         await db.select().from(modelDirectoryEntries).where(and(eq(modelDirectoryEntries.companyId, companyId), eq(modelDirectoryEntries.provider, "local")))
-      ).filter((e) => e.baseUrl && localAddressKey(e.baseUrl) === key);
+      ).filter((e) => {
+        const address = e.baseUrl?.trim() || companyAddress;
+        return Boolean(address) && localAddressKey(address) === key;
+      });
       const known = await findCompanyLocalAddress(db, companyId, rawBaseUrl);
       if (!key || !known) {
         throw unprocessable(
