@@ -109,6 +109,8 @@ describe("what the next storyboard picture is made with", () => {
     expect(sogniStepModel("some_other_model_v1", "generate_image")).toBe("some_other_model_v1");
     expect(sogniEditModelOrDefault("qwen_image_edit_2511_fp8")).toBe("qwen");
     expect(sogniEditModelOrDefault("z_image_turbo_bf16")).toBe("qwen-lightning");
+    // Sogni's v0.3 alpha has no tool key; it is sent by its catalog id.
+    expect(sogniEditModelOrDefault("krea2_identity_edit_sogni_v0_3_alpha")).toBe("krea2_identity_edit_sogni_v0_3_alpha");
     expect(sogniEditModelOrDefault(null)).toBe("qwen-lightning");
   });
 });

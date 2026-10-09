@@ -120,6 +120,13 @@ const SOGNI_EDIT_TOOL_KEYS: Record<string, string> = {
   "gpt-image-2.5-flare": "gpt-image-2.5-flare",
 };
 
+/**
+ * Edit models Sogni's catalog lists but its edit_image tool schema has no key
+ * for, so they are sent by catalog id (the plugin's sogni.ts
+ * SOGNI_EDIT_CATALOG_ONLY): Sogni's Krea 2 Identity Edit v0.3 alpha.
+ */
+const SOGNI_EDIT_CATALOG_ONLY = new Set(["krea2_identity_edit_sogni_v0_3_alpha"]);
+
 /** The Sogni workflow's `model` argument: the tool key when the model has one, else the catalog id (Sogni passes those through). */
 export function sogniStepModel(model: string, tool: "generate_image" | "edit_image"): string {
   const trimmed = model.trim();
@@ -133,7 +140,7 @@ export function sogniStepModel(model: string, tool: "generate_image" | "edit_ima
 export function sogniEditModelOrDefault(model: string | null): string {
   if (!model) return "qwen-lightning";
   const key = sogniStepModel(model, "edit_image");
-  return key in SOGNI_EDIT_TOOL_KEYS ? key : "qwen-lightning";
+  return key in SOGNI_EDIT_TOOL_KEYS || SOGNI_EDIT_CATALOG_ONLY.has(key) ? key : "qwen-lightning";
 }
 
 /** Which service a model name belongs to: Fal model ids are paths (fal-ai/...), Sogni's are not. */

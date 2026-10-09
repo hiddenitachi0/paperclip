@@ -55,6 +55,7 @@ import {
 // ─── Types (as the worker sends them; see src/identity.ts) ───────────────────
 
 export type IdentityCrop = { role: CropRole; fileId: string; sourceFileId: string | null; box: Box | null };
+export type IdentitySourcePicture = { fileId: string; addedAt: string };
 export type IdentityLora = {
   source: string;
   url: string;
@@ -101,6 +102,8 @@ export type Identity = {
   name: string;
   nickname: string | null;
   originalFileId: string | null;
+  /** Every picture of the person, the main one first (older workers send only originalFileId). */
+  sourcePictures?: IdentitySourcePicture[];
   sheet: Record<string, string>;
   crops: IdentityCrop[];
   canonicalFileId: string | null;
@@ -123,6 +126,8 @@ type ListResponse = {
   seedExplanation: string;
   training: { steps: number; costCents: number; minPictures: number; maxPictures: number; soulMin: number; soulMax: number; presets: string[] };
   editModels: string[];
+  /** Plain names of the edit models (older workers send none: the id is shown). */
+  editModelNames?: Record<string, string>;
   ageCheck?: { explanation: string; costNote: string; model: string | null };
 };
 
@@ -139,13 +144,19 @@ function ageLabel(verdict: AgeVerdict | null | undefined): string {
   return "Age not checked yet";
 }
 
-type Draft = {
+type DraftBox = { role: CropRole; box: Box };
+
+export type Draft = {
   id: string | null;
   name: string;
   nickname: string;
-  originalFileId: string | null;
+  /** The person's pictures, the main one first. */
+  sourceFileIds: string[];
+  /** The picture the crop editor shows. */
+  activeSource: string | null;
   sheet: Record<string, string>;
-  boxes: Array<{ role: CropRole; box: Box }>;
+  /** The boxes drawn on each source picture, by its file id. */
+  boxes: Record<string, DraftBox[]>;
   crops: IdentityCrop[];
   preferredSogni: string;
   preferredExtra: string;
@@ -154,13 +165,18 @@ type Draft = {
   consentAdult: boolean;
 };
 
+/** At most this many pictures of one person (the worker's MAX_SOURCE_PICTURES). */
+export const MAX_SOURCE_PICTURES = 8;
+export const SOURCE_PICTURES_HELP = "Use a close-up for the face and a full-body photo for the body. Each crop can come from any of the person's pictures.";
+
 const EMPTY: Draft = {
   id: null,
   name: "",
   nickname: "",
-  originalFileId: null,
+  sourceFileIds: [],
+  activeSource: null,
   sheet: {},
-  boxes: [],
+  boxes: {},
   crops: [],
   preferredSogni: "krea-identity-edit",
   preferredExtra: "qwen",
@@ -169,14 +185,28 @@ const EMPTY: Draft = {
   consentAdult: false,
 };
 
+/** The identity's source pictures; an identity saved before there could be several has its one picture. */
+export function sourceIdsOf(identity: Identity): string[] {
+  const ids = (identity.sourcePictures ?? []).map((p) => p.fileId);
+  if (identity.originalFileId && !ids.includes(identity.originalFileId)) ids.unshift(identity.originalFileId);
+  return ids;
+}
+
 export function identityToDraft(identity: Identity): Draft {
+  const sourceFileIds = sourceIdsOf(identity);
+  const boxes: Record<string, DraftBox[]> = {};
+  for (const c of identity.crops) {
+    if (!c.box || !c.sourceFileId || !sourceFileIds.includes(c.sourceFileId)) continue;
+    (boxes[c.sourceFileId] ??= []).push({ role: c.role, box: c.box });
+  }
   return {
     id: identity.id,
     name: identity.name,
     nickname: identity.nickname ?? "",
-    originalFileId: identity.originalFileId,
+    sourceFileIds,
+    activeSource: sourceFileIds[0] ?? null,
     sheet: { ...identity.sheet },
-    boxes: identity.crops.filter((c) => c.box && c.sourceFileId === identity.originalFileId).map((c) => ({ role: c.role, box: c.box! })),
+    boxes,
     crops: identity.crops.map((c) => ({ ...c })),
     preferredSogni: identity.preferredModels.sogni,
     preferredExtra: identity.preferredModels.sogniExtraSlot,
@@ -191,12 +221,44 @@ export function draftToParams(draft: Draft): Record<string, unknown> {
     id: draft.id,
     name: draft.name,
     nickname: draft.nickname || null,
-    originalFileId: draft.originalFileId,
+    // originalFileId too, for a worker that only knows one picture.
+    originalFileId: draft.sourceFileIds[0] ?? null,
+    sourceFileIds: draft.sourceFileIds,
     sheet: draft.sheet,
     crops: draft.crops,
     preferredModels: { sogni: draft.preferredSogni, sogniExtraSlot: draft.preferredExtra, fal: draft.preferredFal || null },
     ...(draft.id ? {} : { consentLikeness: draft.consentLikeness, consentAdult: draft.consentAdult }),
   };
+}
+
+/** Add a picture of the person (the first one becomes the main picture) and show it in the crop editor. */
+export function addSourcePicture(draft: Draft, fileId: string): Draft {
+  if (draft.sourceFileIds.includes(fileId)) return { ...draft, activeSource: fileId };
+  if (draft.sourceFileIds.length >= MAX_SOURCE_PICTURES) return draft;
+  return { ...draft, sourceFileIds: [...draft.sourceFileIds, fileId], activeSource: fileId };
+}
+
+/** Take a picture off the list; crops already cut from it stay (they are their own files). */
+export function removeSourcePicture(draft: Draft, fileId: string): Draft {
+  const sourceFileIds = draft.sourceFileIds.filter((id) => id !== fileId);
+  const boxes = { ...draft.boxes };
+  delete boxes[fileId];
+  return { ...draft, sourceFileIds, boxes, activeSource: draft.activeSource === fileId ? sourceFileIds[0] ?? null : draft.activeSource };
+}
+
+/** Make one picture the main one (first). */
+export function makeMainSource(draft: Draft, fileId: string): Draft {
+  if (!draft.sourceFileIds.includes(fileId)) return draft;
+  return { ...draft, sourceFileIds: [fileId, ...draft.sourceFileIds.filter((id) => id !== fileId)] };
+}
+
+/** New crops replace the crops of the same role, whichever picture those came from. */
+export function withNewCrops(draft: Draft, crops: IdentityCrop[]): Draft {
+  return { ...draft, crops: [...draft.crops.filter((x) => !crops.some((n) => n.role === x.role)), ...crops] };
+}
+
+function hasSheet(sheet: Record<string, string>): boolean {
+  return Object.values(sheet).some((v) => typeof v === "string" && v.trim() !== "");
 }
 
 // ─── Styles (a local copy, like edit-tab.tsx) ────────────────────────────────
@@ -483,6 +545,8 @@ type Service = "sogni" | "fal" | "higgsfield";
 export type GenerationOptions = {
   services: Record<Service, boolean>;
   models: Record<Service, string[]>;
+  /** Plain model names (older workers send none). */
+  modelNames?: Record<string, string>;
   priceCents: Record<string, number | null>;
   priceNotes: Record<Service, string>;
   reservedPerCallCents: number;
@@ -562,7 +626,7 @@ export function GenerateWith(props: { options: GenerationOptions; value: Generat
           <span>Model</span>
           <select style={input} disabled={props.disabled} value={value.model} onChange={(e) => props.onChange({ ...value, model: e.target.value, loras: value.service === "sogni" ? value.loras : [] })}>
             {options.models[value.service].map((m, i) => (
-              <option key={m} value={m}>{m}{i === 0 ? " (keeps faces best)" : ""}</option>
+              <option key={m} value={m}>{options.modelNames?.[m] ?? `${m}${i === 0 ? " (keeps faces best)" : ""}`}</option>
             ))}
           </select>
         </label>
@@ -1196,6 +1260,31 @@ export function IdentitiesPanel({ context }: { context: PluginHostContext }) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [conflicts, setConflicts] = useState<Array<{ key: string; label: string; current: string; suggested: string }>>([]);
+  const [sourceAges, setSourceAges] = useState<Record<string, AgeVerdict | null>>({});
+  const ageStatus = usePluginAction(ACTION_AGE_CHECK_STATUS);
+  const sourceKey = draft ? draft.sourceFileIds.join(",") : "";
+  // With more than one picture of the person, show each picture's age check
+  // (free: no model is called). Saving checks the ones not checked yet.
+  useEffect(() => {
+    const ids = sourceKey ? sourceKey.split(",") : [];
+    if (ids.length < 2) {
+      setSourceAges({});
+      return;
+    }
+    let stop = false;
+    Promise.resolve()
+      .then(() => ageStatus({ fileIds: ids }))
+      .then((r) => {
+        const rows = ((r ?? {}) as { pictures?: AgeRow[] }).pictures ?? [];
+        if (!stop) setSourceAges(Object.fromEntries(rows.map((p) => [p.fileId, p.verdict])));
+      })
+      .catch(() => !stop && setSourceAges({}));
+    return () => {
+      stop = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceKey]);
 
   const load = useCallback(async () => {
     try {
@@ -1231,28 +1320,53 @@ export function IdentitiesPanel({ context }: { context: PluginHostContext }) {
     }
   };
 
+  // Analyse the picture in the crop editor. When a description is already
+  // written (from another picture, or by hand), only the empty fields are
+  // filled; where the analysis says something else, the page asks.
   const onAnalyse = () =>
     step("analyse", async () => {
-      if (!draft?.originalFileId) return;
-      const res = (await analyse({ fileId: draft.originalFileId })) as
-        | { ok: true; sheet: Record<string, string>; crops: { face: Box; body: Box | null; outfit: Box | null }; model: string }
+      const source = draft?.activeSource;
+      if (!draft || !source) return;
+      setConflicts([]);
+      const merging = hasSheet(draft.sheet);
+      const res = (await analyse({ fileId: source, ...(merging ? { currentSheet: draft.sheet, merge: "fill-empty" } : {}) })) as
+        | {
+            ok: true;
+            sheet: Record<string, string>;
+            crops: { face: Box; body: Box | null; outfit: Box | null };
+            model: string;
+            merged?: Record<string, string>;
+            filled?: string[];
+            conflicts?: Array<{ key: string; label: string; current: string; suggested: string }>;
+          }
         | { ok: false; blocked: boolean; message: string };
       if (!res.ok) {
         setError(res.message);
-        if (res.blocked) setDraft((d) => (d ? { ...d, originalFileId: null, boxes: [], crops: [] } : d));
+        if (res.blocked) setDraft((d) => (d ? removeSourcePicture(d, source) : d));
         return;
       }
-      const boxes: Draft["boxes"] = [{ role: "face", box: res.crops.face }];
+      const boxes: DraftBox[] = [{ role: "face", box: res.crops.face }];
       if (res.crops.body) boxes.push({ role: "body", box: res.crops.body });
       if (res.crops.outfit) boxes.push({ role: "outfit", box: res.crops.outfit });
-      setDraft((d) => (d ? { ...d, sheet: { ...d.sheet, ...res.sheet }, boxes } : d));
-      setNotice(`Filled in by ${res.model}. Check every field and box: you can change them all.`);
+      const sheet = res.merged ?? (merging ? draft.sheet : { ...draft.sheet, ...res.sheet });
+      setDraft((d) => (d ? { ...d, sheet, boxes: { ...d.boxes, [source]: boxes } } : d));
+      const found = res.conflicts ?? [];
+      setConflicts(found);
+      if (!merging) setNotice(`Filled in by ${res.model}. Check every field and box: you can change them all.`);
+      else {
+        const filled = res.filled?.length ?? 0;
+        setNotice(
+          `${res.model} read this picture too. ${filled === 0 ? "No empty fields to fill." : `Filled ${filled} empty ${filled === 1 ? "field" : "fields"}.`}` +
+            (found.length > 0 ? " It sees some things differently: pick below what to keep." : " What you already wrote was kept."),
+        );
+      }
     });
 
   const onFindWithSogni = (role: CropRole) =>
     step(`find-${role}`, async () => {
-      if (!draft?.originalFileId) return;
-      const imageDataUrl = await pictureDataUrl(draft.originalFileId);
+      const source = draft?.activeSource;
+      if (!source) return;
+      const imageDataUrl = await pictureDataUrl(source);
       const text = role === "face" ? "the person's face and hair" : role === "body" ? "the whole person" : role === "outfit" ? "the person's clothing" : "the person";
       const res = (await segment({ imageDataUrl, text })) as { imageDataUrl: string };
       const img = new Image();
@@ -1267,19 +1381,21 @@ export function IdentitiesPanel({ context }: { context: PluginHostContext }) {
       const box = maskBox(c2d.getImageData(0, 0, canvas.width, canvas.height).data, canvas.width, canvas.height);
       if (!box) throw new Error("Sogni did not find that in the picture. Draw the box yourself.");
       const padded = role === "face" ? padBox(box) : box;
-      setDraft((d) => (d ? { ...d, boxes: [...d.boxes.filter((b) => b.role !== role), { role, box: padded }] } : d));
+      setDraft((d) => (d ? { ...d, boxes: { ...d.boxes, [source]: [...(d.boxes[source] ?? []).filter((b) => b.role !== role), { role, box: padded }] } } : d));
     });
 
   const onMakeCrops = () =>
     step("crop", async () => {
-      if (!draft?.originalFileId || draft.boxes.length === 0) return;
-      const res = (await crop({ fileId: draft.originalFileId, boxes: draft.boxes })) as { crops: Array<{ role: CropRole; box: Box; imageDataUrl: string }> };
+      const source = draft?.activeSource;
+      const boxes = source ? draft?.boxes[source] ?? [] : [];
+      if (!draft || !source || boxes.length === 0) return;
+      const res = (await crop({ fileId: source, boxes })) as { crops: Array<{ role: CropRole; box: Box; imageDataUrl: string }> };
       const crops: IdentityCrop[] = [];
       for (const c of res.crops) {
         const fileId = await uploadPicture(companyId, c.imageDataUrl, `${(draft.name || "person").replace(/[^A-Za-z0-9-]+/g, "-")}-${c.role}.png`);
-        crops.push({ role: c.role, fileId, sourceFileId: draft.originalFileId, box: c.box });
+        crops.push({ role: c.role, fileId, sourceFileId: source, box: c.box });
       }
-      setDraft((d) => (d ? { ...d, crops: [...d.crops.filter((x) => !crops.some((n) => n.role === x.role)), ...crops] } : d));
+      setDraft((d) => (d ? withNewCrops(d, crops) : d));
       setNotice("Crops saved to Files. Save the identity to keep them.");
     });
 
@@ -1289,6 +1405,7 @@ export function IdentitiesPanel({ context }: { context: PluginHostContext }) {
       const res = (await save(draftToParams(draft))) as { identity: Identity; identities: Identity[] };
       setInfo((i) => (i ? { ...i, identities: res.identities } : i));
       setDraft(null);
+      setConflicts([]);
       setOpen(res.identity);
     });
 
@@ -1307,66 +1424,166 @@ export function IdentitiesPanel({ context }: { context: PluginHostContext }) {
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }} aria-label="Identity editor">
         <div style={row}>
           <strong style={{ fontSize: 15 }}>{isNew ? "New identity" : `Edit ${draft.name}`}</strong>
-          <button type="button" style={ghostBtn} onClick={() => setDraft(null)}>Cancel</button>
+          <button type="button" style={ghostBtn} onClick={() => { setDraft(null); setConflicts([]); }}>Cancel</button>
         </div>
         <div style={card}>
-          <strong>1. The person's picture</strong>
-          <div style={help}>One clear picture of one person. The same picture can give several crops (face, body, outfit).</div>
-          <PicturePicker companyId={companyId} disabled={busy !== null} onPick={(fileId) => setDraft((d) => (d ? { ...d, originalFileId: fileId, boxes: [], crops: [] } : d))} />
-          {draft.originalFileId ? (
+          <strong>1. The person's pictures</strong>
+          <div style={help}>
+            {SOURCE_PICTURES_HELP} One person per picture. Up to {MAX_SOURCE_PICTURES} pictures; the first is the main picture.
+            {draft.sourceFileIds.length > 0 ? " Every extra picture is checked for apparent age before it is used (when you analyse it, or when you save)." : ""}
+          </div>
+          {draft.sourceFileIds.length > 0 ? (
+            <div style={row} aria-label="The person's pictures">
+              {draft.sourceFileIds.map((id, i) => {
+                const active = id === draft.activeSource;
+                const age = draft.sourceFileIds.length > 1 ? sourceAges[id] : undefined;
+                const cut = draft.crops.filter((c) => c.sourceFileId === id).map((c) => CROP_ROLE_OPTIONS.find((o) => o.value === c.role)?.label ?? c.role);
+                return (
+                  <div key={id} data-source={id} style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "center", fontSize: 12, maxWidth: 120 }}>
+                    <button
+                      type="button"
+                      aria-label={`Crop from picture ${i + 1}`}
+                      aria-pressed={active}
+                      style={{ padding: 0, background: "none", cursor: "pointer", border: active ? "3px solid #1971c2" : "3px solid transparent", borderRadius: 8 }}
+                      disabled={busy !== null}
+                      onClick={() => setDraft((d) => (d ? { ...d, activeSource: id } : d))}
+                    >
+                      <img src={fileContentPath(id)} alt={`Picture ${i + 1} of the person`} style={thumb} />
+                    </button>
+                    <span>{i === 0 ? "Picture 1 (main)" : `Picture ${i + 1}`}</span>
+                    {cut.length > 0 ? <span style={help}>Crops: {cut.join(", ")}</span> : null}
+                    {age !== undefined ? <span style={help} data-age={age ?? "unchecked"}>{ageLabel(age)}</span> : null}
+                    <span style={{ display: "inline-flex", gap: 4 }}>
+                      {i > 0 ? (
+                        <button type="button" style={ghostBtn} disabled={busy !== null} onClick={() => setDraft((d) => (d ? makeMainSource(d, id) : d))}>
+                          Make main
+                        </button>
+                      ) : null}
+                      <button type="button" style={ghostBtn} disabled={busy !== null} onClick={() => setDraft((d) => (d ? removeSourcePicture(d, id) : d))}>
+                        Remove
+                      </button>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
+          {draft.sourceFileIds.length < MAX_SOURCE_PICTURES ? (
+            <PicturePicker
+              companyId={companyId}
+              disabled={busy !== null}
+              label={draft.sourceFileIds.length === 0 ? "Upload a picture" : "Upload another picture"}
+              onPick={(fileId) => {
+                setConflicts([]);
+                setDraft((d) => (d ? addSourcePicture(d, fileId) : d));
+              }}
+            />
+          ) : (
+            <div style={help}>{MAX_SOURCE_PICTURES} pictures is the most. Remove one to add another.</div>
+          )}
+          {draft.activeSource ? (
             <>
+              <div style={help}>
+                Cropping from picture {draft.sourceFileIds.indexOf(draft.activeSource) + 1}. Click another picture above to crop from it instead.
+              </div>
               <div style={row}>
                 <button type="button" style={secondaryBtn} disabled={busy !== null || !info.analysisReady} onClick={() => void onAnalyse()}>
-                  {busy === "analyse" ? "Analysing…" : "Analyse picture"}
+                  {busy === "analyse" ? "Analysing…" : "Analyse this picture"}
                 </button>
                 {!info.analysisReady ? (
                   <span style={help}>Pick an analysis model in the identity settings first (or fill everything in yourself).</span>
+                ) : hasSheet(draft.sheet) ? (
+                  <span style={help}>Fills in only the empty fields of the description and suggests boxes for this picture. It never says who the person is.</span>
                 ) : (
                   <span style={help}>Fills in the description and suggests the boxes. It never says who the person is.</span>
                 )}
               </div>
-              <div style={row}>
-                {CROP_ROLE_OPTIONS.map((o) => (
-                  <span key={o.value} style={{ display: "inline-flex", gap: 4 }}>
-                    <button
-                      type="button"
-                      style={{ ...ghostBtn, borderColor: o.color }}
-                      title={o.help}
-                      disabled={busy !== null}
-                      onClick={() =>
-                        setDraft((d) =>
-                          d ? { ...d, boxes: d.boxes.some((b) => b.role === o.value) ? d.boxes.filter((b) => b.role !== o.value) : [...d.boxes, { role: o.value, box: defaultBox(o.value) }] } : d,
-                        )
-                      }
-                    >
-                      {draft.boxes.some((b) => b.role === o.value) ? `Remove ${o.label.toLowerCase()} box` : `Add ${o.label.toLowerCase()} box`}
-                    </button>
-                    {o.value !== "other" ? (
-                      <button type="button" style={ghostBtn} disabled={busy !== null} title="Let Sogni find it (a paid Sogni call)" onClick={() => void onFindWithSogni(o.value)}>
-                        {busy === `find-${o.value}` ? "Finding…" : "Find"}
+              {conflicts.length > 0 ? (
+                <div style={warnBox} aria-label="Different descriptions">
+                  <div>This picture suggests something else for these fields. What you wrote is kept unless you pick the new text.</div>
+                  {conflicts.map((c) => (
+                    <div key={c.key} style={{ ...row, marginTop: 4 }}>
+                      <span>
+                        <strong>{c.label}:</strong> now "{c.current}", this picture: "{c.suggested}"
+                      </span>
+                      <button
+                        type="button"
+                        style={ghostBtn}
+                        onClick={() => {
+                          setDraft((d) => (d ? { ...d, sheet: { ...d.sheet, [c.key]: c.suggested } } : d));
+                          setConflicts((list) => list.filter((x) => x.key !== c.key));
+                        }}
+                      >
+                        Use the new text
                       </button>
-                    ) : null}
-                  </span>
-                ))}
+                    </div>
+                  ))}
+                  <button type="button" style={{ ...ghostBtn, marginTop: 4 }} onClick={() => setConflicts([])}>
+                    Keep what I wrote
+                  </button>
+                </div>
+              ) : null}
+              <div style={row}>
+                {CROP_ROLE_OPTIONS.map((o) => {
+                  const source = draft.activeSource!;
+                  const here = draft.boxes[source] ?? [];
+                  return (
+                    <span key={o.value} style={{ display: "inline-flex", gap: 4 }}>
+                      <button
+                        type="button"
+                        style={{ ...ghostBtn, borderColor: o.color }}
+                        title={o.help}
+                        disabled={busy !== null}
+                        onClick={() =>
+                          setDraft((d) => {
+                            if (!d) return d;
+                            const list = d.boxes[source] ?? [];
+                            const next = list.some((b) => b.role === o.value) ? list.filter((b) => b.role !== o.value) : [...list, { role: o.value, box: defaultBox(o.value) }];
+                            return { ...d, boxes: { ...d.boxes, [source]: next } };
+                          })
+                        }
+                      >
+                        {here.some((b) => b.role === o.value) ? `Remove ${o.label.toLowerCase()} box` : `Add ${o.label.toLowerCase()} box`}
+                      </button>
+                      {o.value !== "other" ? (
+                        <button type="button" style={ghostBtn} disabled={busy !== null} title="Let Sogni find it (a paid Sogni call)" onClick={() => void onFindWithSogni(o.value)}>
+                          {busy === `find-${o.value}` ? "Finding…" : "Find"}
+                        </button>
+                      ) : null}
+                    </span>
+                  );
+                })}
               </div>
-              <CropEditor src={fileContentPath(draft.originalFileId)} boxes={draft.boxes} onChange={(boxes) => setDraft((d) => (d ? { ...d, boxes } : d))} disabled={busy !== null} />
-              <div style={help}>Drag a box to move it; drag its corner to resize it. Face is sent first, body second; outfit only for looks that keep the same outfit.</div>
+              <CropEditor
+                src={fileContentPath(draft.activeSource)}
+                boxes={draft.boxes[draft.activeSource] ?? []}
+                onChange={(boxes) => setDraft((d) => (d && d.activeSource ? { ...d, boxes: { ...d.boxes, [d.activeSource]: boxes } } : d))}
+                disabled={busy !== null}
+              />
+              <div style={help}>
+                Drag a box to move it; drag its corner to resize it. Face is sent first, body second; outfit only for looks that keep the same outfit. A new crop
+                replaces the crop of the same kind, even one cut from another picture.
+              </div>
               <div>
-                <button type="button" style={primaryBtn} disabled={busy !== null || draft.boxes.length === 0} onClick={() => void onMakeCrops()}>
+                <button type="button" style={primaryBtn} disabled={busy !== null || (draft.boxes[draft.activeSource] ?? []).length === 0} onClick={() => void onMakeCrops()}>
                   {busy === "crop" ? "Cutting…" : "Make crops"}
                 </button>
               </div>
-              {draft.crops.length > 0 ? (
-                <div style={row}>
-                  {draft.crops.map((c) => (
-                    <div key={c.fileId} style={{ textAlign: "center", fontSize: 12 }}>
-                      <img src={fileContentPath(c.fileId)} alt={`${c.role} crop`} style={thumb} />
-                      {CROP_ROLE_OPTIONS.find((o) => o.value === c.role)?.label}
-                    </div>
-                  ))}
-                </div>
-              ) : null}
             </>
+          ) : null}
+          {draft.crops.length > 0 ? (
+            <div style={row} aria-label="Crops">
+              {draft.crops.map((c) => {
+                const from = c.sourceFileId ? draft.sourceFileIds.indexOf(c.sourceFileId) : -1;
+                return (
+                  <div key={c.fileId} style={{ textAlign: "center", fontSize: 12 }}>
+                    <img src={fileContentPath(c.fileId)} alt={`${c.role} crop`} style={thumb} />
+                    {CROP_ROLE_OPTIONS.find((o) => o.value === c.role)?.label}
+                    {from >= 0 ? <div style={help}>from picture {from + 1}</div> : null}
+                  </div>
+                );
+              })}
+            </div>
           ) : null}
         </div>
 
@@ -1396,13 +1613,16 @@ export function IdentitiesPanel({ context }: { context: PluginHostContext }) {
 
         <details style={card}>
           <summary style={{ fontWeight: 600, cursor: "pointer" }}>Models (optional)</summary>
-          <div style={help}>Used when a look with this person picks no model. Krea Identity Edit keeps faces best (2 pictures); qwen takes 3 when a look needs an extra picture.</div>
+          <div style={help}>
+            Used when a look with this person picks no model. Krea 2 Identity Edit v1.2 keeps faces best (2 pictures). v0.3 is Sogni's own alpha (test)
+            version of it: try it, but it may change or go away. Qwen takes 3 pictures when a look needs an extra picture.
+          </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 8 }}>
             <label style={field}>
               <span>Sogni model</span>
               <select style={input} value={draft.preferredSogni} onChange={(e) => setDraft({ ...draft, preferredSogni: e.target.value })}>
                 {info.editModels.map((m) => (
-                  <option key={m} value={m}>{m}</option>
+                  <option key={m} value={m}>{info.editModelNames?.[m] ?? m}</option>
                 ))}
               </select>
             </label>
@@ -1410,7 +1630,7 @@ export function IdentitiesPanel({ context }: { context: PluginHostContext }) {
               <span>Sogni model when an extra picture is needed</span>
               <select style={input} value={draft.preferredExtra} onChange={(e) => setDraft({ ...draft, preferredExtra: e.target.value })}>
                 {info.editModels.map((m) => (
-                  <option key={m} value={m}>{m}</option>
+                  <option key={m} value={m}>{info.editModelNames?.[m] ?? m}</option>
                 ))}
               </select>
             </label>
@@ -1469,6 +1689,16 @@ export function IdentitiesPanel({ context }: { context: PluginHostContext }) {
         </div>
         {error ? <div style={errorBox}>{error}</div> : null}
         <div style={card}>
+          {sourceIdsOf(open).length > 1 ? (
+            <div style={row} aria-label="The person's pictures">
+              {sourceIdsOf(open).map((id, i) => (
+                <div key={id} style={{ textAlign: "center", fontSize: 12 }}>
+                  <img src={fileContentPath(id)} alt={`Picture ${i + 1} of the person`} style={{ ...thumb, width: 64, height: 64 }} />
+                  {i === 0 ? "Main picture" : `Picture ${i + 1}`}
+                </div>
+              ))}
+            </div>
+          ) : null}
           <div style={row}>
             {open.crops.map((c) => (
               <div key={c.fileId} style={{ textAlign: "center", fontSize: 12 }}>
