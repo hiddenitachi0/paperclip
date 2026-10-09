@@ -42,6 +42,12 @@ import {
   type LaneABackupModelConfig,
   type LaneAKeywordRoute,
   type ModelDirectoryEntry,
+  modelOptionStatus,
+  modelReadiness,
+  modelReadinessSummary,
+  type ModelLastCheck,
+  type ModelReadinessContext,
+  type ModelSetupForReadiness,
 } from "@paperclipai/shared";
 import { AlertCircle, CheckCircle2, Circle, Loader2 } from "lucide-react";
 import { Link } from "@/lib/router";
@@ -83,7 +89,19 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleSwitch } from "@/components/ui/toggle-switch";
 import { SecretBindingPicker, type SecretBindingValue } from "./SecretBindingPicker";
-import { QuickAgentBackupModels } from "./QuickAgentBackupModels";
+import { QuickAgentBackupModels, type BackupReadiness } from "./QuickAgentBackupModels";
+import {
+  ModelStatusLine,
+  ReadinessLines,
+  RefreshStatusButton,
+  SetupCheck,
+  healthReading,
+  lastCheckFromResult,
+  optionTextWithStatus,
+  setupFromEntry,
+  useModelReadinessSources,
+} from "./ModelReadiness";
+import { backupKeyState, mainModelKeyState, type AgentKeys } from "../lib/quick-agent-key-state";
 import { SettingsSection, SettingsSubsection } from "./SettingsSection";
 import { useHelperApplyTarget } from "../lib/helper-apply";
 
@@ -398,7 +416,7 @@ export function QuickAgentSection({
   // Paperclip's own key is only readable by an instance admin (the route is
   // assertInstanceAdmin), so it is only asked for as one; everyone else gets
   // "cannot see, assume it is there".
-  const { isInstanceAdmin } = useCompanyRole(effectiveCompanyId);
+  const { isInstanceAdmin, canManageConnections } = useCompanyRole(effectiveCompanyId);
   const instanceKeyQuery = useQuery({
     queryKey: queryKeys.instance.serverAnthropicKey,
     queryFn: () => instanceServerAnthropicKeyApi.get(),
@@ -501,6 +519,98 @@ export function QuickAgentSection({
   // allowed, so a key that stops working can never trap an agent in the "on"
   // state.
   const cannotSwitchOn = !savedEnabled && readinessBlocksSwitchOn(modelLine.state);
+
+  // ─── Model readiness: per-option status, the checklist, "Check this setup" ──
+  const readinessSources = useModelReadinessSources(effectiveCompanyId, Boolean(effectiveCompanyId));
+  const [lastChecks, setLastChecks] = useState<Record<string, ModelLastCheck>>({});
+  const agentKeys: AgentKeys = useMemo(
+    () => ({
+      main: { provider, baseUrl: agent.laneABaseUrl ?? null },
+      hasMainKey: Boolean(keyBinding) && !(secretsQuery.isSuccess && !boundSecret),
+      providerKeys: backupProviderKeys,
+      stashedBaseUrls,
+      instanceClaudeKey: isInstanceAdmin && instanceKeyQuery.data ? instanceKeyQuery.data.configured : null,
+    }),
+    [provider, agent.laneABaseUrl, keyBinding, secretsQuery.isSuccess, boundSecret, backupProviderKeys, stashedBaseUrls, isInstanceAdmin, instanceKeyQuery.data],
+  );
+  const readinessBase: ModelReadinessContext = {
+    companyLocalBaseUrl: readinessSources.settings?.localBaseUrl ?? null,
+    gpuVramGb: readinessSources.settings?.localGpuVramGb ?? null,
+    blockedHosts: readinessSources.settings?.openrouterBlockedHosts ?? [],
+  };
+  const sameLocalAddress = (a: string | null | undefined, b: string | null | undefined) =>
+    (a ?? "").trim().toLowerCase().replace(/\/+$/, "").replace(/\/v1$/, "") ===
+    (b ?? "").trim().toLowerCase().replace(/\/+$/, "").replace(/\/v1$/, "");
+  /** The saved model that is the very same model as a typed-in setup, so its readings can be shown. */
+  const savedTwin = (setup: { provider: string; model: string; baseUrl?: string | null }) =>
+    savedModels.find(
+      (entry) =>
+        normalizeLaneAProvider(entry.provider) === normalizeLaneAProvider(setup.provider) &&
+        entry.model === setup.model &&
+        (normalizeLaneAProvider(setup.provider) !== "local" || sameLocalAddress(entry.baseUrl, setup.baseUrl)),
+    );
+  const entryHealth = (entryId: string | null | undefined) =>
+    entryId ? healthReading(readinessSources.healthByEntryId.get(entryId)) : null;
+  const mainOptionStatus = (entryId: string) => {
+    const entry = savedModels.find((candidate) => candidate.id === entryId);
+    if (!entry) return null;
+    return modelOptionStatus(setupFromEntry(entry), {
+      ...readinessBase,
+      key: mainModelKeyState(entry.provider, agentKeys),
+      health: entryHealth(entry.id),
+    });
+  };
+  const currentModelId = agent.laneAModel ?? providerDescriptor.defaultModel ?? "";
+  const currentTwin = savedTwin({ provider, model: currentModelId, baseUrl: agent.laneABaseUrl ?? null });
+  const currentSetup: ModelSetupForReadiness = {
+    ...(currentTwin ? setupFromEntry(currentTwin) : {}),
+    provider,
+    model: currentModelId,
+    baseUrl: agent.laneABaseUrl ?? null,
+    providerRouting: agent.laneAProviderRouting ?? null,
+    thinking: agent.laneAThinking ?? null,
+    temperature: agent.laneATemperature ?? null,
+    archived: false,
+  };
+  const currentContext: ModelReadinessContext = {
+    ...readinessBase,
+    key: mainModelKeyState(provider, agentKeys),
+    health: entryHealth(currentTwin?.id) ?? healthReading(readinessSources.healthByAgentId.get(agent.id)),
+    lastCheck: lastChecks.main ?? null,
+  };
+  const currentStatus = modelOptionStatus(currentSetup, currentContext);
+  const currentLines = modelReadiness(currentSetup, currentContext);
+  const currentSummary = modelReadinessSummary(currentLines);
+  const localAddresses = Array.from(
+    new Set(
+      [
+        provider === "local" ? agent.laneABaseUrl : null,
+        readinessSources.settings?.localBaseUrl,
+        ...savedModels.filter((entry) => entry.provider === "local").map((entry) => entry.baseUrl),
+        ...(agent.laneABackupModels ?? []).filter((backup) => backup.provider === "local").map((backup) => backup.baseUrl),
+      ].filter((value): value is string => typeof value === "string" && value.trim() !== ""),
+    ),
+  );
+  const backupReadiness: BackupReadiness = {
+    agentId: agent.id,
+    companyId: effectiveCompanyId,
+    canCheck: canManageConnections,
+    optionStatus: (entry) =>
+      modelOptionStatus(setupFromEntry(entry), {
+        ...readinessBase,
+        key: backupKeyState(entry, agentKeys),
+        health: entryHealth(entry.id),
+      }),
+    lines: (setup, linkedEntryId, lastCheck) => {
+      const twin = linkedEntryId ? savedModels.find((entry) => entry.id === linkedEntryId) : savedTwin(setup);
+      return modelReadiness(
+        { ...(twin ? setupFromEntry(twin) : {}), ...setup, archived: twin ? Boolean(twin.archivedAt) : false },
+        { ...readinessBase, key: backupKeyState(setup, agentKeys), health: entryHealth(twin?.id), lastCheck },
+      );
+    },
+    refresh: readinessSources.refresh,
+    localAddresses,
+  };
 
   // ─── Short read-outs shown beside a group's heading while it is folded ──
   const modelText = agent.laneAModel
@@ -625,13 +735,16 @@ export function QuickAgentSection({
                 <optgroup key={group.key} label={group.label}>
                   {group.options.map((option) => (
                     <option key={option.id} value={option.id}>
-                      {option.label}
+                      {optionTextWithStatus(option.label, mainOptionStatus(option.id))}
                     </option>
                   ))}
                 </optgroup>
               ))}
             </select>
+            <ModelStatusLine status={currentStatus} prefix="The model it uses now:" testId="quick-agent-current-model-status" />
             <span className="block text-xs text-muted-foreground">
+              The word after each saved model says whether it is ready for this agent: Installed, Not installed,
+              Downloading, Offline or Unknown for a model on your own computer; Key set or Needs a key for a hosted one.{" "}
               Picking a saved model fills the fields below and clears the ones that don't apply to it.{" "}
               <Link to="/company/settings/models" className="underline">
                 Manage saved models
@@ -779,6 +892,32 @@ export function QuickAgentSection({
           disabled={settingMutation.isPending}
           onSave={(next) => settingMutation.mutate({ laneAMaxOutputTokens: next })}
         />
+
+        <div className="space-y-2 rounded-md border border-border p-3" data-testid="quick-agent-model-readiness">
+          <p className="text-xs font-medium">
+            Is it ready? <span className="font-normal text-muted-foreground">{currentSummary.label}</span>
+          </p>
+          {!savedModels.length && (
+            <ModelStatusLine status={currentStatus} prefix="The model it uses now:" testId="quick-agent-current-model-status" />
+          )}
+          <ReadinessLines lines={currentLines} testId="quick-agent-model-checklist" />
+          <div className="flex flex-wrap items-start gap-2">
+            <RefreshStatusButton
+              addresses={localAddresses}
+              refresh={readinessSources.refresh}
+              disabled={!canManageConnections}
+              testId="quick-agent-refresh-status"
+            />
+          </div>
+          <SetupCheck
+            agentId={agent.id}
+            companyId={effectiveCompanyId}
+            target="main"
+            canCheck={canManageConnections}
+            onResult={(result) => setLastChecks((current) => ({ ...current, main: lastCheckFromResult(result) }))}
+            testId="quick-agent-check-main"
+          />
+        </div>
       </SettingsSubsection>
 
       {/* 3. Other models to fall back on. Open by default only when there are some. */}
@@ -812,6 +951,7 @@ export function QuickAgentSection({
             />
           )}
           savedModels={modelDirectoryQuery.isSuccess ? savedModels : undefined}
+          readiness={backupReadiness}
           saving={settingMutation.isPending}
           onSave={(patch) => settingMutation.mutateAsync(patch)}
         />

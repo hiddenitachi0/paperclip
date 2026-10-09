@@ -1,3 +1,4 @@
+import type { LaneASetupCheckResult, LaneASetupCheckTarget } from "@paperclipai/shared";
 import { api } from "./client";
 
 /**
@@ -70,6 +71,9 @@ export const laneAApi = {
   ) => api.post<LaneASendMessageResult>(`/lane-a/${agentId}/messages`, body),
   continueConversation: (agentId: string, body: { companyId: string; spec?: string }) =>
     api.post<LaneAContinueResult>(`/lane-a/${agentId}/continue`, body),
+  /** "Check this setup": one tiny real call for the main model or a saved backup (owner/admin only, costs a fraction of a cent). */
+  checkSetup: (agentId: string, body: { companyId: string; target: LaneASetupCheckTarget }) =>
+    api.post<LaneASetupCheckResult>(`/agents/${agentId}/lane-a/check`, body),
   getConversation: (agentId: string, conversationId: string, companyId: string) =>
     api.get<LaneAConversationTranscript>(
       `/lane-a/${agentId}/conversations/${conversationId}?companyId=${encodeURIComponent(companyId)}`,

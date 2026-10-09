@@ -111,6 +111,7 @@ export {
 export * from "./prompt-cache.js";
 export * from "./known-models.js";
 export * from "./openrouter-hosts.js";
+export * from "./model-readiness.js";
 export {
   WEB_SEARCH_BINDING_TARGET_TYPE,
   WEB_SEARCH_KEY_CONFIG_PATH,

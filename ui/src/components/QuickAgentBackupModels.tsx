@@ -15,11 +15,25 @@ import {
   type LaneAKeywordRoute,
   type LaneAProvider,
   type ModelDirectoryEntry,
+  type ModelLastCheck,
+  type ModelOptionStatus,
+  type ModelReadinessLine,
+  type ModelSetupForReadiness,
+  modelReadinessSummary,
 } from "@paperclipai/shared";
 import { Link } from "@/lib/router";
 import { filterEntries, pickerGroups } from "@/lib/model-catalogue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  ModelStatusLine,
+  ReadinessLines,
+  RefreshStatusButton,
+  SetupCheck,
+  lastCheckFromResult,
+  optionTextWithStatus,
+  type useModelReadinessSources,
+} from "./ModelReadiness";
 
 /**
  * "Backups": up to five other models a quick agent can fall back on, two
@@ -173,6 +187,23 @@ function draftProblems(draft: Draft): string[] {
 export type BackupCheckResult = { ok: boolean; text: string };
 
 /**
+ * What the backups need to say whether each one is ready: the status word
+ * for a saved model in the picker, the checklist for one backup, "Refresh
+ * status" and the real "Check this setup" call. Built by the quick agent
+ * section, which knows the agent's keys and the company's model readings.
+ */
+export interface BackupReadiness {
+  agentId: string;
+  companyId: string;
+  /** The company's owner or admin: may run the real check. */
+  canCheck: boolean;
+  optionStatus: (entry: ModelDirectoryEntry) => ModelOptionStatus;
+  lines: (setup: ModelSetupForReadiness, linkedEntryId: string | null, lastCheck: ModelLastCheck | null) => ModelReadinessLine[];
+  refresh: ReturnType<typeof useModelReadinessSources>["refresh"];
+  localAddresses: readonly string[];
+}
+
+/**
  * The agent's own keys for providers other than the main model's
  * (adapterConfig.laneA.apiKeyByProvider), by provider. `name` is the saved
  * key's name, or null when it is not known (still loading, or deleted).
@@ -265,6 +296,7 @@ export function QuickAgentBackupModels({
   providerKeys,
   stashedBaseUrls,
   renderProviderKeyPicker,
+  readiness,
   disabled,
   saving,
   onSave,
@@ -283,6 +315,8 @@ export function QuickAgentBackupModels({
   renderProviderKeyPicker?: (provider: LaneAProvider) => ReactNode;
   /** Saved models from Settings > Models (archived ones are left out). */
   savedModels?: readonly ModelDirectoryEntry[];
+  /** Status words, checklists and the real check; without it the old settings-only test is shown. */
+  readiness?: BackupReadiness;
   /** True when the person looking cannot edit (the whole form's own permission bar). */
   disabled?: boolean;
   saving?: boolean;
@@ -292,6 +326,7 @@ export function QuickAgentBackupModels({
   const savedKey = JSON.stringify(savedDraft);
   const [draft, setDraft] = useState<Draft>(savedDraft);
   const [checks, setChecks] = useState<Record<string, BackupCheckResult>>({});
+  const [lastChecks, setLastChecks] = useState<Record<string, ModelLastCheck>>({});
   const [showProblems, setShowProblems] = useState(false);
 
   // A key picked or changed on any row makes earlier "Test this one" answers stale.
@@ -487,14 +522,20 @@ export function QuickAgentBackupModels({
                     )}
                     {pickableGroups.map((group) => (
                       <optgroup key={group.key} label={group.label}>
-                        {group.options.map((option) => (
-                          <option key={option.id} value={option.id}>
-                            {option.label}
-                          </option>
-                        ))}
+                        {group.options.map((option) => {
+                          const optionEntry = savedModelById.get(option.id);
+                          return (
+                            <option key={option.id} value={option.id}>
+                              {optionTextWithStatus(option.label, optionEntry ? readiness?.optionStatus(optionEntry) : null)}
+                            </option>
+                          );
+                        })}
                       </optgroup>
                     ))}
                   </select>
+                  {linkedModel && readiness && (
+                    <ModelStatusLine status={readiness.optionStatus(linkedModel)} testId={`backup-saved-model-status-${index}`} />
+                  )}
                   {linked ? (
                     <span className="block text-xs text-muted-foreground" data-testid={`backup-saved-model-summary-${index}`}>
                       {linkedModel
@@ -611,6 +652,18 @@ export function QuickAgentBackupModels({
                 </div>
               )}
 
+              {readiness ? (
+                <BackupReadinessBlock
+                  entry={entry}
+                  index={index}
+                  readiness={readiness}
+                  readOnly={readOnly}
+                  unsaved={JSON.stringify(savedDraft.pool.find((candidate) => candidate.id === entry.id) ?? null) !== JSON.stringify(entry)}
+                  lastCheck={lastChecks[entry.id] ?? null}
+                  preCheck={() => checkBackupEntry(entry, main, { providerKeys, stashedBaseUrls })}
+                  onResult={(result) => setLastChecks((current) => ({ ...current, [entry.id]: result }))}
+                />
+              ) : (
               <div className="flex flex-wrap items-center gap-2">
                 <Button
                   type="button"
@@ -637,6 +690,7 @@ export function QuickAgentBackupModels({
                   </span>
                 )}
               </div>
+              )}
             </li>
           );
         })}
@@ -815,6 +869,71 @@ export function QuickAgentBackupModels({
             </Button>
           )}
         </div>
+      )}
+    </div>
+  );
+}
+
+/** One backup's checklist, "Refresh status" and the real "Check this setup". */
+function BackupReadinessBlock({
+  entry,
+  index,
+  readiness,
+  readOnly,
+  unsaved,
+  lastCheck,
+  preCheck,
+  onResult,
+}: {
+  entry: PoolDraft;
+  index: number;
+  readiness: BackupReadiness;
+  readOnly: boolean;
+  unsaved: boolean;
+  lastCheck: ModelLastCheck | null;
+  preCheck: () => BackupCheckResult;
+  onResult: (result: ModelLastCheck) => void;
+}) {
+  const descriptor = LANE_A_PROVIDER_CATALOGUE[entry.provider];
+  const lines = readiness.lines(
+    {
+      provider: entry.provider,
+      model: entry.model.trim(),
+      baseUrl: descriptor.baseUrlEditable ? entry.baseUrl.trim() || null : null,
+      temperature: entry.temperature === "" ? null : Number(entry.temperature),
+    },
+    entry.directoryEntryId || null,
+    lastCheck,
+  );
+  const summary = modelReadinessSummary(lines);
+  const ownAddress = entry.provider === "local" && entry.baseUrl.trim() ? [entry.baseUrl.trim()] : [];
+  return (
+    <div className="space-y-2" data-testid={`backup-readiness-${index}`}>
+      <details className="text-xs">
+        <summary className="cursor-pointer" data-testid={`backup-readiness-summary-${index}`} data-status={summary.status}>
+          Is it ready? <span className="text-muted-foreground">{summary.label}</span>
+        </summary>
+        <div className="space-y-2 pt-1.5">
+          <ReadinessLines lines={lines} testId={`backup-checklist-${index}`} />
+          <RefreshStatusButton
+            addresses={ownAddress.length > 0 ? ownAddress : entry.provider === "local" ? readiness.localAddresses : []}
+            refresh={readiness.refresh}
+            disabled={!readiness.canCheck}
+            testId={`backup-refresh-status-${index}`}
+          />
+        </div>
+      </details>
+      {!readOnly && (
+        <SetupCheck
+          agentId={readiness.agentId}
+          companyId={readiness.companyId}
+          target={{ backupId: entry.id }}
+          canCheck={readiness.canCheck}
+          preCheck={preCheck}
+          blockedReason={unsaved ? "Save backups first: the real check uses the saved settings, exactly as a chat would." : null}
+          onResult={(result) => onResult(lastCheckFromResult(result))}
+          testId={`backup-check-${index}`}
+        />
       )}
     </div>
   );
