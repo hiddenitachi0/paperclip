@@ -1,6 +1,6 @@
 import { and, eq, isNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, localModelHealth, modelDirectoryEntries } from "@paperclipai/db";
+import { agents, localModelHealth, modelDirectoryEntries, modelDirectorySettings } from "@paperclipai/db";
 import {
   MODEL_TEST_PROMPT,
   laneAModelAcceptsReasoningEffort,
@@ -187,11 +187,22 @@ export function modelHealthService(db: Db, deps: ModelHealthDeps = {}) {
 
   const isLocalEntry = (e: { provider: string; baseUrl: string | null }) => e.provider === "local" && !!e.baseUrl?.trim();
 
+  /** The company's model server address (Settings > Models), used by a saved local model that has none of its own. */
+  async function companyLocalAddress(companyId: string): Promise<string | null> {
+    const [row] = await db.select().from(modelDirectorySettings).where(eq(modelDirectorySettings.companyId, companyId));
+    return row?.localBaseUrl?.trim() || null;
+  }
+
+  /** Where a saved local model runs: its own address, else the company's model server address. */
+  const entryAddress = (e: { provider: string; baseUrl: string | null }, companyAddress: string | null) =>
+    e.provider !== "local" ? null : e.baseUrl?.trim() || companyAddress;
+
   /** The Check button: probes now and stores the result. A hosted model has nothing to check. */
   async function checkEntry(companyId: string, entryId: string): Promise<ModelDirectoryEntryHealth> {
     const entry = await getEntry(companyId, entryId);
-    if (!isLocalEntry(entry)) return { entryId, applicable: false, ...modelHealthReport("not_checked") };
-    return { entryId, applicable: true, ...(await checkTarget(companyId, entry.baseUrl!, entry.model)) };
+    const address = entryAddress(entry, entry.provider === "local" && !entry.baseUrl?.trim() ? await companyLocalAddress(companyId) : null);
+    if (!address) return { entryId, applicable: false, ...modelHealthReport("not_checked") };
+    return { entryId, applicable: true, ...(await checkTarget(companyId, address, entry.model)) };
   }
 
   /** Stored state for every entry plus the agents that use a local model (for the agent-page banner). Reads only. */
@@ -199,9 +210,11 @@ export function modelHealthService(db: Db, deps: ModelHealthDeps = {}) {
     const entries = await db.select().from(modelDirectoryEntries).where(eq(modelDirectoryEntries.companyId, companyId));
     const states = await db.select().from(localModelHealth).where(eq(localModelHealth.companyId, companyId));
     const byKey = new Map(states.map((s) => [`${s.baseUrl}\n${s.model}`, s]));
+    const companyAddress = entries.some((e) => e.provider === "local" && !e.baseUrl?.trim()) ? await companyLocalAddress(companyId) : null;
     const entryHealth: ModelDirectoryEntryHealth[] = entries.map((e) => {
-      if (!isLocalEntry(e)) return { entryId: e.id, applicable: false, ...modelHealthReport("not_checked") };
-      return { entryId: e.id, applicable: true, ...reportOf(byKey.get(`${normalizeLocalModelAddress(e.baseUrl)}\n${e.model}`) ?? null, e.model) };
+      const address = entryAddress(e, companyAddress);
+      if (!address) return { entryId: e.id, applicable: false, ...modelHealthReport("not_checked") };
+      return { entryId: e.id, applicable: true, ...reportOf(byKey.get(`${normalizeLocalModelAddress(address)}\n${e.model}`) ?? null, e.model) };
     });
     const agentRows = await db
       .select({ id: agents.id, name: agents.name, provider: agents.laneAProvider, baseUrl: agents.laneABaseUrl, model: agents.laneAModel, entryId: agents.laneADirectoryEntryId })
@@ -281,8 +294,11 @@ export function modelHealthService(db: Db, deps: ModelHealthDeps = {}) {
       .select({ baseUrl: agents.laneABaseUrl, model: agents.laneAModel })
       .from(agents)
       .where(and(eq(agents.companyId, companyId), eq(agents.laneAProvider, "local")));
+    // A saved local model with no address of its own runs on the company's model server address.
+    const companyAddress = entries.some((e) => !e.baseUrl?.trim()) ? await companyLocalAddress(companyId) : null;
+    const entryTargets = entries.map((e) => ({ baseUrl: e.baseUrl?.trim() || companyAddress, model: e.model }));
     const targets = new Map<string, { baseUrl: string; model: string }>();
-    for (const t of [...entries, ...agentRows]) {
+    for (const t of [...entryTargets, ...agentRows]) {
       if (!t.baseUrl || !t.model || localAddressKey(t.baseUrl) !== key) continue;
       targets.set(`${normalizeLocalModelAddress(t.baseUrl)}\n${t.model}`, { baseUrl: t.baseUrl, model: t.model });
     }

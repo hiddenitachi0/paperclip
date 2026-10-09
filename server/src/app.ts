@@ -40,7 +40,7 @@ import { morningReportRoutes } from "./routes/morning-report.js";
 import { mailSecretaryRoutes } from "./routes/mail-secretary.js";
 import { mailAccountsRoutes } from "./routes/mail-accounts.js";
 import { modelDirectoryRoutes } from "./routes/model-directory.js";
-import { helperRoutes } from "./routes/helper.js";
+import { HELPER_ASK_API_PATH, HELPER_ASK_JSON_BODY_LIMIT, helperRoutes } from "./routes/helper.js";
 import { emailSettingsRoutes } from "./routes/email-settings.js";
 import { securityReviewSettingsRoutes } from "./routes/security-review-settings.js";
 import { videoStorylineRoutes } from "./routes/video-storylines.js";
@@ -248,6 +248,11 @@ export async function createApp(
   // which is larger than the default limit. Only this one route gets more.
   app.use(SPEECH_TRANSCRIBE_API_PATH, express.json({
     limit: SPEECH_TRANSCRIBE_JSON_BODY_LIMIT,
+    verify: captureRawBody,
+  }));
+  // "Ask Paperclip" with pictures: up to 4 pictures of 5 MB each as base64.
+  app.use(HELPER_ASK_API_PATH, express.json({
+    limit: HELPER_ASK_JSON_BODY_LIMIT,
     verify: captureRawBody,
   }));
   app.use(express.json({

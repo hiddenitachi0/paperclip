@@ -15,6 +15,9 @@ import { assertBoard, assertCompanyAccess } from "./authz.js";
  *   GET  /companies/:companyId/helper/settings  any board member (models + key status, never a key)
  *   PUT  /companies/:companyId/helper/settings  owner/admin only
  *
+ * Phase 2: a question may carry up to 4 pictures the person attached
+ * (upload, paste, or one of the company's Files). Same permission as asking.
+ *
  * Agents are refused everywhere: the helper is for people on the board. The
  * ask route offers the model no tools at all (see services/helper.ts).
  */
@@ -26,6 +29,10 @@ function isOwnerOrAdmin(req: Request, companyId: string): boolean {
   const role = membership?.status === "active" ? membership.membershipRole : null;
   return role === "owner" || role === "admin";
 }
+
+/** The ask route takes up to 4 pictures of 5 MB as base64 in JSON, more than the default body limit. */
+export const HELPER_ASK_API_PATH = "/api/companies/:companyId/helper/ask";
+export const HELPER_ASK_JSON_BODY_LIMIT = "30mb";
 
 export function helperRoutes(rawDb: Db, options: { helper?: HelperServiceOptions } = {}) {
   const router = Router();
@@ -71,6 +78,7 @@ export function helperRoutes(rawDb: Db, options: { helper?: HelperServiceOptions
       pageRoute: body.pageRoute ?? null,
       directoryEntryId: body.directoryEntryId ?? null,
       history: body.history,
+      pictures: body.pictures,
     });
     res.json(result);
   });

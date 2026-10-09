@@ -16,9 +16,10 @@ import {
   type LaneAProvider,
   type ModelDirectoryEntry,
   type ModelLastCheck,
-  type ModelOptionStatus,
+  type ModelPickerReadiness,
   type ModelReadinessLine,
   type ModelSetupForReadiness,
+  modelPickerOptionText,
   modelReadinessSummary,
 } from "@paperclipai/shared";
 import { Link } from "@/lib/router";
@@ -26,12 +27,11 @@ import { filterEntries, pickerGroups } from "@/lib/model-catalogue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
-  ModelStatusLine,
+  ModelPickerNotice,
   ReadinessLines,
   RefreshStatusButton,
   SetupCheck,
   lastCheckFromResult,
-  optionTextWithStatus,
   type useModelReadinessSources,
 } from "./ModelReadiness";
 
@@ -197,7 +197,8 @@ export interface BackupReadiness {
   companyId: string;
   /** The company's owner or admin: may run the real check. */
   canCheck: boolean;
-  optionStatus: (entry: ModelDirectoryEntry) => ModelOptionStatus;
+  /** The readiness shown on a saved model's option (shared with every other model picker). */
+  optionReadiness: (entry: ModelDirectoryEntry) => ModelPickerReadiness;
   lines: (setup: ModelSetupForReadiness, linkedEntryId: string | null, lastCheck: ModelLastCheck | null) => ModelReadinessLine[];
   refresh: ReturnType<typeof useModelReadinessSources>["refresh"];
   localAddresses: readonly string[];
@@ -345,8 +346,12 @@ export function QuickAgentBackupModels({
 
   const pickable = useMemo(() => filterEntries(savedModels, {}), [savedModels]);
   // "Meta · Llama 3.2" > "3B · Local (llama3.2:latest)", so two setups of one model can be told apart.
-  const pickableGroups = useMemo(() => pickerGroups(pickable), [pickable]);
   const savedModelById = useMemo(() => new Map(savedModels.map((entry) => [entry.id, entry])), [savedModels]);
+  // Ready ones first, each option starting with whether it is ready ("✅ Ready", "⚠️ Not installed on …").
+  const pickableGroups = pickerGroups(pickable, undefined, readiness ? (item) => {
+    const full = savedModelById.get(item.id);
+    return full ? readiness.optionReadiness(full) : null;
+  } : null);
 
   const dirty = JSON.stringify(draft) !== savedKey;
   const problems = draftProblems(draft);
@@ -522,19 +527,16 @@ export function QuickAgentBackupModels({
                     )}
                     {pickableGroups.map((group) => (
                       <optgroup key={group.key} label={group.label}>
-                        {group.options.map((option) => {
-                          const optionEntry = savedModelById.get(option.id);
-                          return (
-                            <option key={option.id} value={option.id}>
-                              {optionTextWithStatus(option.label, optionEntry ? readiness?.optionStatus(optionEntry) : null)}
-                            </option>
-                          );
-                        })}
+                        {group.options.map((option) => (
+                          <option key={option.id} value={option.id}>
+                            {modelPickerOptionText(option.label, option.readiness)}
+                          </option>
+                        ))}
                       </optgroup>
                     ))}
                   </select>
                   {linkedModel && readiness && (
-                    <ModelStatusLine status={readiness.optionStatus(linkedModel)} testId={`backup-saved-model-status-${index}`} />
+                    <ModelPickerNotice readiness={readiness.optionReadiness(linkedModel)} showWhenReady testId={`backup-saved-model-status-${index}`} />
                   )}
                   {linked ? (
                     <span className="block text-xs text-muted-foreground" data-testid={`backup-saved-model-summary-${index}`}>

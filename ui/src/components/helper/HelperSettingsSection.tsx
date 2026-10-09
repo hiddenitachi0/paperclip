@@ -9,6 +9,7 @@ import { useToastActions } from "../../context/ToastContext";
 import { Link } from "@/lib/router";
 import { SecretBindingPicker } from "../SecretBindingPicker";
 import { groupEntries, type CatalogueItem } from "../../lib/model-catalogue";
+import { helperStatusText, isHelperStatusReady, sortByReadiness } from "./helper-model-status";
 
 function toCatalogueItem(option: HelperModelOption): CatalogueItem {
   return {
@@ -93,18 +94,31 @@ export function HelperSettingsSection({ companyId }: { companyId: string }) {
                 onChange={(e) => mutation.mutate({ defaultDirectoryEntryId: e.target.value || null })}
                 data-testid="helper-default-model"
               >
-                <option value="">Paperclip's default — {settings.builtInDefaultLabel}</option>
+                <option value="">
+                  Paperclip's default — {settings.builtInDefaultLabel} — {helperStatusText(settings.builtInDefaultStatus)}
+                </option>
                 {groups.map((group) => (
                   <optgroup key={group.key} label={group.title}>
-                    {group.entries.map((entry) => (
-                      <option key={entry.id} value={entry.id}>
-                        {entry.name}
-                        {optionsById.get(entry.id)?.keyReady ? "" : " (needs a key)"}
-                      </option>
-                    ))}
+                    {sortByReadiness(group.entries.map((entry) => ({ entry, option: optionsById.get(entry.id)! })).filter((x) => x.option)).map(
+                      ({ entry, option }) => (
+                        <option key={entry.id} value={entry.id}>
+                          {entry.name} — {helperStatusText(option.status)}
+                          {option.canSeePictures === true ? " · sees pictures" : ""}
+                        </option>
+                      ),
+                    )}
                   </optgroup>
                 ))}
               </select>
+              {(() => {
+                const picked = settings.defaultDirectoryEntryId ? optionsById.get(settings.defaultDirectoryEntryId) : null;
+                const status = picked ? picked.status : settings.builtInDefaultStatus;
+                return status && !isHelperStatusReady(status) ? (
+                  <span className="block text-xs text-amber-600" data-testid="helper-default-model-warning">
+                    {helperStatusText(status)}: {status.detail}
+                  </span>
+                ) : null;
+              })()}
               <span className="block text-xs text-muted-foreground">
                 Used when the person asking leaves “Model” on “Use default”. A small, fast model is usually enough for
                 explanations. The list is your saved models from{" "}
@@ -112,6 +126,12 @@ export function HelperSettingsSection({ companyId }: { companyId: string }) {
                   Models
                 </Link>
                 .
+              </span>
+              <span className="block text-xs text-muted-foreground">
+                People can also attach pictures to a question (for example a screenshot or a photo). Only models that can
+                look at pictures answer those, and the Ask panel says which ones can. Whether a saved model can see
+                pictures is its “Pictures” setting under Models: Paperclip fills it in for models it knows, and you can
+                change it there.
               </span>
             </label>
 

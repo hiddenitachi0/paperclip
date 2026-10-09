@@ -1,5 +1,7 @@
 import { z } from "zod";
 import { LANE_A_PROVIDERS, type LaneAProvider } from "./lane-a-models.js";
+import { findKnownVariant } from "./known-models.js";
+import type { ModelOptionStatus } from "./model-readiness.js";
 
 /**
  * "Ask Paperclip" — the helper overlay (Phase 1).
@@ -40,6 +42,74 @@ export const HELPER_HISTORY_MAX_TURNS = 12;
 export const HELPER_HISTORY_TURN_MAX_CHARS = 6_000;
 export const HELPER_PAGE_ROUTE_MAX_CHARS = 500;
 export const HELPER_MAX_OUTPUT_TOKENS = 1_500;
+
+// ─── Pictures (Phase 2) ──────────────────────────────────────────────────────
+
+/**
+ * Pictures the person attached to one question (upload, paste, or one of the
+ * company's Files). Only pictures the person attached explicitly are sent;
+ * nothing captures the screen. Uploaded pictures live for the one request
+ * only: the server checks them, shrinks them, sends them to the model and
+ * keeps nothing. A picked company file is read from Files for the request
+ * and stays where it was.
+ */
+export const HELPER_PICTURES_MAX = 4;
+export const HELPER_PICTURE_MAX_BYTES = 5 * 1024 * 1024;
+export const HELPER_PICTURE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"] as const;
+export type HelperPictureType = (typeof HELPER_PICTURE_TYPES)[number];
+/** Base64 length of the largest picture allowed (4 characters per 3 bytes, padded). */
+export const HELPER_PICTURE_MAX_BASE64_CHARS = Math.ceil(HELPER_PICTURE_MAX_BYTES / 3) * 4;
+
+export type HelperVisionSource = "setting" | "known_model" | "model_name" | "unknown";
+
+/**
+ * Model names that are known to read pictures, for saved models whose
+ * "Pictures" field is not filled in and that are not in Paperclip's list of
+ * known models. Only a guess from the name: the owner's own "Pictures"
+ * setting on the saved model always wins.
+ */
+const VISION_NAME_PATTERNS: readonly RegExp[] = [
+  /claude-(?:3|sonnet|opus|haiku|[4-9])/,
+  /gpt-4o|gpt-4\.1|gpt-4-turbo|gpt-4-vision|gpt-5/,
+  /gemini/,
+  /gemma-?[34]/,
+  /llava|bakllava/,
+  /pixtral/,
+  /mistral-small-3\.[12]|mistral-medium-3/,
+  /llama-?4|llama3\.2-vision|llama-3\.2-\d+b-vision/,
+  /minicpm-v|moondream|internvl|qvq/,
+  /qwen[\d.]*-?vl/,
+  /(?:^|[-_/:.])vl(?:$|[-_/:.])/,
+  /vision/,
+  /grok-(?:2-vision|4)/,
+  /glm-4(?:\.\d)?v/,
+];
+const NO_VISION_NAME_PATTERNS: readonly RegExp[] = [/claude-(?:2|instant)/, /gemma-?3[:_-]?1b/, /embed/];
+
+/**
+ * Whether a model can look at pictures, and where that answer comes from:
+ * the saved model's own "Pictures" setting (Settings → Models), then
+ * Paperclip's list of known models, then a guess from the model's name.
+ * `canSee: null` means nobody knows; the helper then does not send pictures
+ * to it and says how to mark the model.
+ */
+export function helperModelCanSeePictures(input: {
+  provider: string;
+  model: string;
+  specs?: Record<string, unknown> | null;
+}): { canSee: boolean | null; source: HelperVisionSource } {
+  const own = input.specs?.vision;
+  if (typeof own === "boolean") return { canSee: own, source: "setting" };
+  const known = input.model.trim() ? findKnownVariant(input.provider, input.model) : null;
+  if (known && typeof known.variant.vision === "boolean") return { canSee: known.variant.vision, source: "known_model" };
+  const name = input.model.trim().toLowerCase();
+  if (!name) return { canSee: null, source: "unknown" };
+  if (NO_VISION_NAME_PATTERNS.some((re) => re.test(name))) return { canSee: false, source: "model_name" };
+  if (input.provider === "anthropic" || VISION_NAME_PATTERNS.some((re) => re.test(name))) {
+    return { canSee: true, source: "model_name" };
+  }
+  return { canSee: null, source: "unknown" };
+}
 
 /** What replaces anything that looks like a key, token, password or card number. */
 export const HELPER_MASK = "[hidden]";
@@ -131,6 +201,30 @@ export const helperAskTurnSchema = z.object({
   content: z.string().max(HELPER_HISTORY_TURN_MAX_CHARS),
 });
 
+export const helperPictureSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("upload"),
+      /** The file name, only to name the picture back to the person. */
+      name: z.string().max(200).optional().nullable(),
+      /** What the browser says it is; the server checks the bytes themselves. */
+      contentType: z.string().max(100).optional().nullable(),
+      dataBase64: z
+        .string()
+        .min(1)
+        .max(HELPER_PICTURE_MAX_BASE64_CHARS, `A picture can be at most ${HELPER_PICTURE_MAX_BYTES / (1024 * 1024)} MB.`),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("file"),
+      /** An attachment id from this company's Files. */
+      fileId: z.string().uuid(),
+    })
+    .strict(),
+]);
+export type HelperPictureInput = z.infer<typeof helperPictureSchema>;
+
 export const helperAskSchema = z
   .object({
     message: z.string().trim().min(1, "Type a question first.").max(HELPER_MESSAGE_MAX_CHARS),
@@ -141,6 +235,11 @@ export const helperAskSchema = z
     directoryEntryId: z.string().uuid().optional().nullable(),
     /** Earlier turns of this panel conversation (kept in the browser only). */
     history: z.array(helperAskTurnSchema).max(HELPER_HISTORY_MAX_TURNS * 2).optional(),
+    /** Pictures attached to this question only (Phase 2). Needs a model that can see pictures. */
+    pictures: z
+      .array(helperPictureSchema)
+      .max(HELPER_PICTURES_MAX, `Attach at most ${HELPER_PICTURES_MAX} pictures to one question.`)
+      .optional(),
   })
   .strict();
 export type HelperAskRequest = z.infer<typeof helperAskSchema>;
@@ -156,6 +255,8 @@ export interface HelperAskResponse {
   outputTokens: number;
   costCents: number;
   truncated: boolean;
+  /** How many pictures the model was shown with this question. */
+  pictureCount: number;
 }
 
 export const updateHelperSettingsSchema = z
@@ -194,6 +295,16 @@ export interface HelperModelOption {
   /** False when the helper has no key it could use for this model; `keyHint` says what to do. */
   keyReady: boolean;
   keyHint: string | null;
+  /** True: can look at pictures. False: cannot. Null: not known (treated as "cannot" for pictures). */
+  canSeePictures: boolean | null;
+  /** Where `canSeePictures` comes from: the saved model's own setting, Paperclip's known models, or its name. */
+  picturesSource: HelperVisionSource;
+  /**
+   * Is it ready to answer the helper? From what Paperclip already knows (the
+   * helper's keys, the last model-server reading for a local model); no
+   * model is called. Same shape as every other model picker's status.
+   */
+  status: ModelOptionStatus;
 }
 
 export interface HelperSettingsView {
@@ -204,6 +315,10 @@ export interface HelperSettingsView {
   models: HelperModelOption[];
   /** What answers when no model is picked and no default is set. */
   builtInDefaultLabel: string;
+  /** Whether the built-in default can look at pictures. */
+  builtInDefaultCanSeePictures: boolean;
+  /** Is the built-in default ready (Paperclip's own Claude key set, or a Claude key picked for the helper)? */
+  builtInDefaultStatus: ModelOptionStatus;
   /** True when the person asking may change these settings (owner/admin). */
   canEdit: boolean;
   updatedAt: string | null;

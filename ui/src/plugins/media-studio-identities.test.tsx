@@ -157,7 +157,7 @@ describe("Settings: analysis model and service keys", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (path: string) => {
-        const body = path.endsWith("/model-directory")
+        const body = path.includes("/model-directory")
           ? [
               { id: "e-local", name: "Llava on the office PC", provider: "local", model: "llava:13b", baseUrl: "http://100.64.0.5:11434/v1", specs: { vision: true } },
               { id: "e-claude", name: "Claude Sonnet", provider: "anthropic", model: "claude-sonnet-5", baseUrl: null, specs: { vision: true } },
@@ -178,6 +178,64 @@ describe("Settings: analysis model and service keys", () => {
     await flush();
     await click(buttonNamed(container, "Save settings"));
     expect(actions["identitySettings.save"]).toHaveBeenCalledWith({ analysis: { entryId: "e-local", label: "Llava on the office PC", keySecretId: null }, hfTokenSecretId: null, hfNamespace: null });
+  });
+});
+
+describe("analysis model readiness", () => {
+  const ready = { kind: "ready", ready: true, badge: "✅ Ready", local: true, runLabel: "Local — installed", detail: "Installed on office-pc.", warning: null, rank: 0 };
+  const missing = {
+    kind: "not_installed",
+    ready: false,
+    badge: "⚠️ Not installed on office-pc",
+    local: true,
+    runLabel: "Local — not installed",
+    detail: "Not installed on office-pc.",
+    warning: "This model is not installed on office-pc. Install it there (ollama pull llava:34b), then press Refresh status on the Models page.",
+    rank: 3,
+  };
+  const hostedKey = { kind: "key_per_use", ready: false, badge: "🔑 Needs its own key", local: false, runLabel: null, detail: "", warning: "Needs a key.", rank: 1 };
+
+  it("shows each saved model's readiness from the host, ready ones first, and says what to do for a model that is not installed", async () => {
+    actions["identitySettings.get"] = vi.fn(async () => ({ settings: { analysis: { entryId: "e-missing", label: "Big llava", keySecretId: null }, hfTokenSecretId: null, hfNamespace: null }, canManage: true }));
+    const fetchMock = vi.fn(async (path: string) => {
+      const body = path.includes("/model-directory")
+        ? [
+            { id: "e-missing", name: "Big llava", provider: "local", model: "llava:34b", baseUrl: null, specs: { vision: true }, readiness: missing },
+            { id: "e-or", name: "Qwen VL", provider: "openrouter", model: "qwen/qwen2.5-vl-72b-instruct", baseUrl: null, specs: { vision: true }, readiness: hostedKey },
+            { id: "e-ready", name: "Llava", provider: "local", model: "llava:13b", baseUrl: "http://office-pc:11434/v1", specs: { vision: true }, readiness: ready },
+          ]
+        : [{ id: "s-1", name: "OpenRouter key" }];
+      return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    root = createRoot(container);
+    await act(async () => root.render(<IdentitySettingsPanel companyId={COMPANY} />));
+    await flush();
+    expect(fetchMock.mock.calls.some(([path]) => String(path).includes("/model-directory?withReadiness=1"))).toBe(true);
+    const select = container.querySelector('select[aria-label="Analysis model"]') as HTMLSelectElement;
+    expect([...select.options].map((o) => o.textContent)).toEqual([
+      "Pick a saved model…",
+      "✅ Ready · Llava (llava:13b, Local — installed), can see pictures",
+      "🔑 Needs its own key · Qwen VL (qwen/qwen2.5-vl-72b-instruct, OpenRouter), can see pictures",
+      "⚠️ Not installed on office-pc · Big llava (llava:34b, Local — not installed), can see pictures",
+    ]);
+    const warning = container.querySelector('[data-testid="analysis-model-warning"]')!;
+    expect(warning.textContent).toContain("ollama pull llava:34b");
+    expect(warning.querySelector("a")!.getAttribute("href")).toBe("/company/settings/models");
+
+    // A hosted model with no key picked yet: the warning says to pick the key below; picking one clears it.
+    setValue(select, "e-or");
+    await flush();
+    expect(container.querySelector('[data-testid="analysis-model-warning"]')!.textContent).toMatch(/Needs a key: pick the OpenRouter key/);
+    const keySelect = [...container.querySelectorAll("select")].find((el) => [...(el as HTMLSelectElement).options].some((o) => o.value === "s-1")) as HTMLSelectElement;
+    setValue(keySelect, "s-1");
+    await flush();
+    expect(container.querySelector('[data-testid="analysis-model-warning"]')).toBeNull();
+
+    // A ready one: no warning.
+    setValue(select, "e-ready");
+    await flush();
+    expect(container.querySelector('[data-testid="analysis-model-warning"]')).toBeNull();
   });
 });
 
