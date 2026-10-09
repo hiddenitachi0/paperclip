@@ -1,8 +1,10 @@
 import { Router } from "express";
 import { z } from "zod";
 import type { Db } from "@paperclipai/db";
-import { laneATransformSchema, sendLaneAMessageSchema } from "@paperclipai/shared";
-import { badRequest, unauthorized } from "../errors.js";
+import { LANE_A_SETUP_CHECK_MIN_INTERVAL_MS, laneATransformSchema, sendLaneAMessageSchema } from "@paperclipai/shared";
+import { badRequest, tooManyRequests, unauthorized } from "../errors.js";
+import { logActivity } from "../services/activity-log.js";
+import { assertCompanyOwnerOrAdmin } from "./model-directory.js";
 import { validate } from "../middleware/validate.js";
 import { agentService, laneAService, secretService } from "../services/index.js";
 import {
@@ -58,6 +60,14 @@ function resolveTransformCompanyId(req: Parameters<typeof getActorInfo>[0]): str
   }
   return parsed.data.companyId;
 }
+
+/** "Check this setup": which model to check (the main one, or one saved backup by id). */
+const setupCheckSchema = z
+  .object({
+    companyId: z.string().uuid(),
+    target: z.union([z.literal("main"), z.object({ backupId: z.string().trim().min(1).max(100) }).strict()]),
+  })
+  .strict();
 
 export function laneARoutes(db: Db, options: { laneA?: LaneAServiceOptions; huggingFaceFetch?: HuggingFaceFetch } = {}) {
   const router = Router();
@@ -301,6 +311,58 @@ export function laneARoutes(db: Db, options: { laneA?: LaneAServiceOptions; hugg
     });
     // Same scrub the chat router gives a reply: the recap can quote earlier answers.
     res.json({ ...result, recap: redactKnownLeakedSecretPatterns(redactSensitiveText(result.recap)) });
+  });
+
+  /**
+   * "Check this setup": one real, tiny model call through exactly the path a
+   * chat turn would take for the agent's main model or one saved backup, with
+   * one harmless test tool. Board only, the company's owner or admin only (it
+   * costs a little), at most one per agent every ten seconds. The cost is
+   * recorded; no conversation is stored. Answers 200 with plain-English steps
+   * whatever the model did; 404 for an unknown agent or backup.
+   */
+  const lastSetupCheckAt = new Map<string, number>();
+  router.post("/agents/:agentId/lane-a/check", validate(setupCheckSchema), async (req, res) => {
+    assertBoard(req);
+    const targetAgentId = req.params.agentId as string;
+    const { companyId, target } = req.body as z.infer<typeof setupCheckSchema>;
+    assertCompanyOwnerOrAdmin(req, companyId, "check a quick agent's model");
+    const targetAgent = await agents.getById(targetAgentId);
+    if (!targetAgent || targetAgent.companyId !== companyId) {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+    const now = Date.now();
+    const last = lastSetupCheckAt.get(targetAgentId);
+    if (last !== undefined && now - last < LANE_A_SETUP_CHECK_MIN_INTERVAL_MS) {
+      const wait = Math.ceil((LANE_A_SETUP_CHECK_MIN_INTERVAL_MS - (now - last)) / 1000);
+      throw tooManyRequests(`Please wait ${wait} second${wait === 1 ? "" : "s"} before checking this agent again.`, {
+        code: "LANE_A_SETUP_CHECK_TOO_SOON",
+        retryAfterSeconds: wait,
+      });
+    }
+    lastSetupCheckAt.set(targetAgentId, now);
+    const result = await laneA.checkSetup({ companyId, agentId: targetAgentId, target, actor: req.actor });
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "agent.lane_a_setup_checked",
+      entityType: "agent",
+      entityId: targetAgentId,
+      details: {
+        target: target === "main" ? "main" : `backup:${target.backupId}`,
+        provider: result.provider,
+        model: result.model,
+        ok: result.ok,
+        toolCalling: result.toolCalling,
+        costCents: result.costCents,
+      },
+    });
+    res.json(result);
   });
 
   /** Telegram `/looks`: the saved looks, from the quick agent's ticked "List saved looks" tool. Board users only. */

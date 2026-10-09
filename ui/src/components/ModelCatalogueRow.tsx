@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { ModelDirectoryEntry } from "@paperclipai/shared";
+import type { ModelDirectoryEntry, ModelReadinessLine } from "@paperclipai/shared";
 import {
   AlertTriangle,
   Archive,
@@ -15,6 +15,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { ModelReviewPanel } from "./ModelReviewPanel";
+import { ReadyBadge } from "./ModelReadiness";
 import {
   availabilityLabel,
   describeSpecs,
@@ -84,8 +85,11 @@ export function ModelCatalogueRow({
   onToggleArchived,
   onDelete,
   onCopyText,
+  readiness,
 }: {
   entry: ModelDirectoryEntry;
+  /** The "Ready?" checklist for this saved model (worked out from what Paperclip knows; no model is called). */
+  readiness?: readonly ModelReadinessLine[];
   companyId: string;
   /** Names of other saved models that point at the very same model. */
   sameModelAs?: readonly string[];
@@ -173,6 +177,7 @@ export function ModelCatalogueRow({
                 Archived
               </Chip>
             )}
+            {readiness && readiness.length > 0 && <ReadyBadge lines={readiness} testId={`model-ready-${entry.id}`} />}
           </div>
 
           <div className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">

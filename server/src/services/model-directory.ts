@@ -297,6 +297,9 @@ export function withCompanyBlockedHosts(
   return resolveOpenRouterHostRouting({ choices, rules: { preferred: [], blocked }, base: current });
 }
 
+/** Marks a resync that reached no readable model server (as opposed to an address the company does not use). */
+export const LOCAL_SYNC_UNREADABLE_CODE = "LOCAL_MODELS_UNREADABLE";
+
 /** The one plain message for any failed local resync (unreachable, error status, not Ollama). */
 export function localSyncFailedMessage(address: string): string {
   return `Could not read the installed models from ${address}. Check that the computer is on and the model server is running.`;
@@ -479,7 +482,7 @@ export function modelDirectoryService(db: Db, deps: ModelDirectoryServiceDeps = 
       // One plain message for every failure; the detail goes to the server log only.
       const unreadable = (detail: string) => {
         logger.warn({ companyId, baseUrl: known, detail }, "model directory local sync failed");
-        return unprocessable(localSyncFailedMessage(known!));
+        return unprocessable(localSyncFailedMessage(known!), { code: LOCAL_SYNC_UNREADABLE_CODE });
       };
       let res: Response;
       try {
