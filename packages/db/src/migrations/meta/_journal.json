@@ -1681,6 +1681,13 @@
       "when": 1791551473173,
       "tag": "0240_report_scripts",
       "breakpoints": true
+    },
+    {
+      "idx": 241,
+      "version": "7",
+      "when": 1791555706546,
+      "tag": "0241_report_templates",
+      "breakpoints": true
     }
   ]
 }

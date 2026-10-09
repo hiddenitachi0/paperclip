@@ -59,6 +59,10 @@ import {
   requestReportScriptApprovalSchema,
   runReportScriptFixtureSchema,
   approveReportScriptVersionSchema,
+  createReportTemplateSchema,
+  updateReportTemplateSchema,
+  createReportRunSchema,
+  draftReportRunCommentarySchema,
   dataTrialCalculationSchema,
   setDatasetSourceSchema,
   updateDataConnectionSchema,
@@ -921,6 +925,8 @@ const CREATED_OPERATIONS = new Set([
   "POST /api/companies/{companyId}/report-scripts/{scriptId}/versions",
   "POST /api/companies/{companyId}/report-scripts/versions/{versionId}/fixtures",
   "POST /api/companies/{companyId}/report-scripts/versions/{versionId}/request-approval",
+  "POST /api/companies/{companyId}/report-templates",
+  "POST /api/companies/{companyId}/report-runs",
 ]);
 
 const ACCEPTED_OPERATIONS = new Set([
@@ -3397,6 +3403,29 @@ for (const route of [
     method: route[0],
     path: route[1],
     tags: ["report-scripts"],
+    summary: route[2],
+    ...(route[3] ? { body: route[3] } : {}),
+  });
+}
+
+// ─── Report templates and runs (DUR-4072 PR2) ───────────────────────────────
+// Same enableReporting switch. A template may only point at an APPROVED
+// script version; a run executes that approved version through the same
+// guarded path (digest re-check, concurrency and hourly limits).
+for (const route of [
+  ["get", "/api/companies/{companyId}/report-templates", "List this company's report templates", undefined],
+  ["post", "/api/companies/{companyId}/report-templates", "Create a report template (it must point at an approved calculation)", createReportTemplateSchema],
+  ["get", "/api/companies/{companyId}/report-templates/{templateId}", "Get one report template", undefined],
+  ["patch", "/api/companies/{companyId}/report-templates/{templateId}", "Change a report template", updateReportTemplateSchema],
+  ["get", "/api/companies/{companyId}/report-runs", "List report runs", undefined],
+  ["post", "/api/companies/{companyId}/report-runs", "Start a report run: fetch data and run the approved calculation", createReportRunSchema],
+  ["get", "/api/companies/{companyId}/report-runs/{runId}", "Get one report run", undefined],
+  ["post", "/api/companies/{companyId}/report-runs/{runId}/commentary", "Submit commentary; every number in it must come from the calculation's output", draftReportRunCommentarySchema],
+] as const) {
+  registerCurrentRoute({
+    method: route[0],
+    path: route[1],
+    tags: ["report-templates"],
     summary: route[2],
     ...(route[3] ? { body: route[3] } : {}),
   });

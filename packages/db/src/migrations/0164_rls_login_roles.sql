@@ -356,6 +356,11 @@ DECLARE
     'report_script_runs',
     'report_script_versions',
     'report_scripts',
+    -- DUR-4072. Created, granted on and policed in
+    -- 0241_report_templates.sql; listed here so the login-role lists match
+    -- the schema.
+    'report_runs',
+    'report_templates',
     -- DUR-4037. Created (and granted on) in 0187_payment_notices_and_settings.sql;
     -- listed here so the login-role lists match the schema, as for the tables above.
     'payment_notices',
@@ -682,6 +687,11 @@ DECLARE
     'report_script_runs',
     'report_script_versions',
     'report_scripts',
+    -- DUR-4072. Created, granted on and policed in
+    -- 0241_report_templates.sql; listed here so the login-role lists match
+    -- the schema.
+    'report_runs',
+    'report_templates',
     -- DUR-4037. Created (and granted on) in 0187_payment_notices_and_settings.sql;
     -- listed here so the login-role lists match the schema, as for the tables above.
     'payment_notices',

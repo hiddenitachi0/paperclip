@@ -806,9 +806,15 @@ export function reportScriptsService(db: Db, deps: ReportScriptsServiceDeps = {}
     listRuns,
     requestApproval,
     approveVersion,
-    /** Internal: for report runs (PR2). Approved versions only; holds a run slot. */
-    executeApproved: (companyId: string, versionId: string, input: unknown, trigger: "report_run", actor: Actor) =>
-      withRunSlot(companyId, 1, () => execute(companyId, versionId, input, { trigger, fixtureId: null, actor })).then(toRunSummary),
+    /**
+     * DUR-4072 PR2: runs an APPROVED version against a report run's fetched
+     * data. Goes through the same guarded path as everything else: the
+     * version is re-read from the database, its status must be 'approved',
+     * its digest is recomputed from the stored files, and the company's
+     * concurrency slot and hourly budget apply. A draft never runs here.
+     */
+    runForReport: (companyId: string, versionId: string, input: unknown, actor: Actor) =>
+      withRunSlot(companyId, 1, () => execute(companyId, versionId, input, { trigger: "report_run", fixtureId: null, actor })).then(toRunSummary),
   };
 }
 
