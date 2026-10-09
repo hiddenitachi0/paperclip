@@ -53,6 +53,12 @@ import {
   updateGoalSchema,
   // Business-data connections (DUR-3972)
   createDataConnectionSchema,
+  createReportScriptSchema,
+  createReportScriptVersionSchema,
+  createReportFixtureSchema,
+  requestReportScriptApprovalSchema,
+  runReportScriptFixtureSchema,
+  approveReportScriptVersionSchema,
   dataTrialCalculationSchema,
   setDatasetSourceSchema,
   updateDataConnectionSchema,
@@ -911,6 +917,10 @@ const CREATED_OPERATIONS = new Set([
   "POST /api/instance/claude-auth/sign-in",
   "POST /api/companies/{companyId}/telegram-bots",
   "POST /api/companies/{companyId}/data-connections",
+  "POST /api/companies/{companyId}/report-scripts",
+  "POST /api/companies/{companyId}/report-scripts/{scriptId}/versions",
+  "POST /api/companies/{companyId}/report-scripts/versions/{versionId}/fixtures",
+  "POST /api/companies/{companyId}/report-scripts/versions/{versionId}/request-approval",
 ]);
 
 const ACCEPTED_OPERATIONS = new Set([
@@ -3359,6 +3369,34 @@ for (const route of [
     method: route[0],
     path: route[1],
     tags: ["data-connections"],
+    summary: route[2],
+    ...(route[3] ? { body: route[3] } : {}),
+  });
+}
+
+// ─── Report calculation scripts (DUR-4072) ──────────────────────────────────
+// Switched off unless the instance flag enableReporting is on (404 with code
+// reporting_disabled). Agents and members may only DRAFT; no code runs before
+// a company owner/admin approves the exact digest shown on the approval card,
+// and that approval runs every saved example first. Approved scripts run with
+// the server's own privileges -- approving means trusting the code.
+for (const route of [
+  ["get", "/api/companies/{companyId}/report-scripts", "List this company's report calculation scripts", undefined],
+  ["post", "/api/companies/{companyId}/report-scripts", "Create a report calculation script (a name and key; no code yet)", createReportScriptSchema],
+  ["get", "/api/companies/{companyId}/report-scripts/{scriptId}/versions", "List a script's versions", undefined],
+  ["post", "/api/companies/{companyId}/report-scripts/{scriptId}/versions", "Draft a new version (Python standard library only; nothing runs)", createReportScriptVersionSchema],
+  ["get", "/api/companies/{companyId}/report-scripts/versions/{versionId}/fixtures", "List a version's saved examples", undefined],
+  ["post", "/api/companies/{companyId}/report-scripts/versions/{versionId}/fixtures", "Add a saved example (input and the numbers it must produce)", createReportFixtureSchema],
+  ["post", "/api/companies/{companyId}/report-scripts/versions/{versionId}/request-approval", "File the approval card showing this version's full source (runs nothing)", requestReportScriptApprovalSchema],
+  ["post", "/api/companies/{companyId}/report-scripts/versions/{versionId}/run-fixture", "Re-run one saved example of an APPROVED version", runReportScriptFixtureSchema],
+  ["get", "/api/companies/{companyId}/report-scripts/versions/{versionId}/runs", "List a version's runs", undefined],
+  ["get", "/api/companies/{companyId}/report-scripts/approval-cards/{approvalId}", "The stored code an approval card stands for (what the card shows)", undefined],
+  ["post", "/api/companies/{companyId}/report-scripts/versions/{versionId}/approve", "Owner/admin only: run every saved example and switch the version on only if all match", approveReportScriptVersionSchema],
+] as const) {
+  registerCurrentRoute({
+    method: route[0],
+    path: route[1],
+    tags: ["report-scripts"],
     summary: route[2],
     ...(route[3] ? { body: route[3] } : {}),
   });

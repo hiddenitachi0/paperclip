@@ -1552,6 +1552,45 @@ export {
   type UpdateDataConnectionInput,
   type WooCommerceCredentialInput,
 } from "./validators/data-connection.js";
+export type {
+  ReportScriptVersionStatus,
+  ReportScriptRunTrigger,
+  ReportScriptRunStatus,
+  ReportScript,
+  ReportScriptVersion,
+  ReportFixture,
+  ReportFixtureDiff,
+  ReportFixtureCheckResult,
+  ReportScriptRun,
+  ReportScriptApprovalFixtureResult,
+  ReportScriptApprovalOutcome,
+} from "./types/report.js";
+export {
+  REPORT_SCRIPT_VERSION_STATUSES,
+  REPORT_SCRIPT_RUN_TRIGGERS,
+  REPORT_SCRIPT_RUN_STATUSES,
+} from "./types/report.js";
+export {
+  REPORT_SCRIPT_KEY_MAX_LENGTH,
+  REPORT_SCRIPT_NAME_MAX_LENGTH,
+  REPORT_SCRIPT_MAX_FILES,
+  REPORT_SCRIPT_MAX_TOTAL_FILE_BYTES,
+  REPORT_SCRIPT_STDLIB_ONLY_MESSAGE,
+  isForbiddenReportScriptPackagingFile,
+  REPORT_FIXTURE_NAME_MAX_LENGTH,
+  createReportScriptSchema,
+  createReportScriptVersionSchema,
+  approveReportScriptVersionSchema,
+  createReportFixtureSchema,
+  runReportScriptFixtureSchema,
+  requestReportScriptApprovalSchema,
+  type RequestReportScriptApprovalInput,
+  type CreateReportScriptInput,
+  type CreateReportScriptVersionInput,
+  type ApproveReportScriptVersionInput,
+  type CreateReportFixtureInput,
+  type RunReportScriptFixtureInput,
+} from "./validators/report.js";
 export {
   CRM_ACTIVITY_TYPES,
   createCrmContactSchema,

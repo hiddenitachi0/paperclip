@@ -386,6 +386,12 @@ export interface InstanceExperimentalSettings {
    * routes answer "not switched on" and no agent can read any company data.
    */
   enableBusinessData: boolean;
+  /**
+   * DUR-4072: the reporting framework (calculation scripts, templates and
+   * runs). Off means the report-scripts routes answer "not switched on" and
+   * no script can ever run, drafted or approved.
+   */
+  enableReporting: boolean;
 }
 
 export interface InstanceSettings {

@@ -69,7 +69,9 @@ import {
 } from "../services/deploy-change-guard.js";
 import { isCompletedDeployOutcome } from "../services/deploy-completion-gate.js";
 import { readDeployRunnerStatus, type DeployRunnerStatusEntry } from "../services/deploy-runner-status.js";
-import { assertBoard, assertCompanyAccess, getActorInfo, isCompanyOwnerOrAdmin } from "./authz.js";
+import { assertBoard, assertCompanyAccess, assertCompanyOwnerAdminOrInstanceAdmin, getActorInfo, isCompanyOwnerOrAdmin } from "./authz.js";
+import { REPORT_SCRIPT_APPROVAL_KIND, reportScriptsService } from "../services/report-scripts.js";
+import { instanceSettingsService } from "../services/instance-settings.js";
 import { redactEventPayload } from "../redaction.js";
 import { HttpError, conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import { companyScope, companyScopeFromParam } from "../middleware/company-scope.js";
@@ -1630,6 +1632,35 @@ export function approvalRoutes(
   const escalationGrantsSvc = escalationGrantService(db);
   const personasSvc = personaService(db);
   const crossCompanyInstructionsSvc = crossCompanyInstructionService(db, { rawDb });
+  const reportScriptsSvc = reportScriptsService(db);
+  const reportingSettings = instanceSettingsService(rawDb);
+
+  /**
+   * DUR-4072: approving a report-calculation card is the owner's approve
+   * action -- it runs the version's saved examples first and switches the
+   * version on only if they all match (report-scripts.ts approveVersion).
+   * Only a person who is the company's owner/admin (or an instance admin)
+   * may do it. If any example fails, the card stays open with the results
+   * on it and the request is refused with a plain reason.
+   */
+  async function approveReportScriptCard(req: Request, card: { id: string; companyId: string; payload: unknown }) {
+    assertCompanyOwnerAdminOrInstanceAdmin(req, card.companyId, "report calculations");
+    const info = getActorInfo(req);
+    if (info.actorType !== "user") throw forbidden("Only a person can approve a report calculation.");
+    const experimental = await reportingSettings.getExperimental();
+    if (!experimental.enableReporting) {
+      throw unprocessable("Reports are switched off for this Paperclip instance, so this calculation cannot be approved now.");
+    }
+    // Never trust ids or code from the card payload: the service finds the
+    // version whose own approval card this is, and approves its stored code.
+    const outcome = await reportScriptsSvc.approveFromCard(card.companyId, card.id, info.actorId);
+    if (!outcome.approved) {
+      throw unprocessable(outcome.message ?? "The saved examples did not all match, so nothing was switched on.", {
+        code: "report_script_fixtures_failed",
+        fixtureResults: outcome.fixtureResults,
+      });
+    }
+  }
 
   /**
    * Guarded cross-company channel: the hooks approvalService runs INSIDE
@@ -1931,6 +1962,15 @@ export function approvalRoutes(
       const unknownKindMessage = describeUnknownDeployLikeKind((approvalInput.payload as Record<string, unknown>).kind);
       if (unknownKindMessage) {
         res.status(422).json({ error: unknownKindMessage });
+        return;
+      }
+      // DUR-4072: only the calculation's own "ask for approval" action may
+      // file this card, built from the stored code (see services/approvals.ts).
+      if ((approvalInput.payload as Record<string, unknown>).kind === REPORT_SCRIPT_APPROVAL_KIND) {
+        res.status(422).json({
+          error: "Report calculation approval cards can only be filed by asking for approval on the calculation itself.",
+          code: "report_script_card_filed_elsewhere",
+        });
         return;
       }
     }
@@ -2380,6 +2420,9 @@ export function approvalRoutes(
       if (unsupportedKind) {
         throw unprocessable(unsupportedKind, { kind });
       }
+      if (kind === REPORT_SCRIPT_APPROVAL_KIND && (existingForKindCheck.status === "pending" || existingForKindCheck.status === "revision_requested")) {
+        await approveReportScriptCard(req, existingForKindCheck);
+      }
     }
     // DUR-4568 finding #1: the security-review gate now lives inside
     // `approve()` itself (services/approvals.ts), so every caller is
@@ -2664,6 +2707,19 @@ export function approvalRoutes(
 
     if (req.actor.type === "agent" && req.actor.agentId !== existing.requestedByAgentId) {
       res.status(403).json({ error: "Only requesting agent can resubmit this approval" });
+      return;
+    }
+    // DUR-4072: a report-calculation card is rebuilt from the stored code by
+    // the calculation's own "ask for approval" action; it is never resubmitted
+    // (resubmit could swap the code the card shows).
+    if (
+      (existing.payload as Record<string, unknown> | null)?.kind === REPORT_SCRIPT_APPROVAL_KIND ||
+      (req.body.payload as Record<string, unknown> | undefined)?.kind === REPORT_SCRIPT_APPROVAL_KIND
+    ) {
+      res.status(422).json({
+        error: "This card cannot be resubmitted. Ask for approval again on the calculation; the card is rebuilt from the stored code.",
+        code: "report_script_card_filed_elsewhere",
+      });
       return;
     }
 

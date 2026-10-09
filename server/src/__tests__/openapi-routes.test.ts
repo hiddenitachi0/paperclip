@@ -63,6 +63,7 @@ const apiPrefixes: Record<string, string> = {
   "teams-catalog.ts": "/api",
   "telegram-bots.ts": "/api",
   "data-connections.ts": "/api",
+  "report-scripts.ts": "/api",
   "user-profiles.ts": "/api",
 };
 

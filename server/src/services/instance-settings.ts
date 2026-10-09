@@ -149,6 +149,7 @@ export function normalizeExperimentalSettings(raw: unknown): InstanceExperimenta
       enableWeeklyCheckup: parsed.data.enableWeeklyCheckup ?? false,
       enableCrossCompanyInstructions: parsed.data.enableCrossCompanyInstructions ?? false,
       enableBusinessData: parsed.data.enableBusinessData ?? false,
+      enableReporting: parsed.data.enableReporting ?? false,
     };
   }
   return {
@@ -170,6 +171,7 @@ export function normalizeExperimentalSettings(raw: unknown): InstanceExperimenta
     enableWeeklyCheckup: false,
     enableCrossCompanyInstructions: false,
     enableBusinessData: false,
+    enableReporting: false,
   };
 }
 
