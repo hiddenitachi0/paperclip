@@ -4,9 +4,10 @@ import { approvalService } from "./approvals.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { secretService } from "./secrets.js";
 import { logActivity } from "./activity-log.js";
+import { securityReviewService } from "./security-review.js";
 import { ghFetch, gitHubApiBase } from "./github-fetch.js";
 
-type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
+export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 
 /**
  * DUR-299 point 6 / DUR-314: the delegated, non-human, non-agent identity that
@@ -172,7 +173,7 @@ export function assertMergePrOnly(approval: {
   }
 }
 
-interface GitHubDeps {
+export interface GitHubDeps {
   fetchImpl: FetchLike;
   token: string | null;
 }
@@ -202,13 +203,13 @@ async function githubGetJson(url: string, deps: GitHubDeps): Promise<{ ok: true;
   }
 }
 
-interface PullRequestFacts {
+export interface PullRequestFacts {
   state: string;
   authorLogin: string | null;
   headSha: string | null;
 }
 
-async function fetchPullRequestFacts(ref: GitHubRef, deps: GitHubDeps): Promise<PullRequestFacts | null> {
+export async function fetchPullRequestFacts(ref: GitHubRef, deps: GitHubDeps): Promise<PullRequestFacts | null> {
   const result = await githubGetJson(
     `${gitHubApiBase("github.com")}/repos/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.name)}/pulls/${ref.prNumber}`,
     deps,
@@ -252,7 +253,7 @@ export function isRequiredCheckRun(name: string): boolean {
   return REQUIRED_CHECK_NAME_PATTERNS.some((pattern) => pattern.test(name.trim()));
 }
 
-async function fetchCiStatus(ref: GitHubRef, headSha: string, deps: GitHubDeps): Promise<ConditionStatus> {
+export async function fetchCiStatus(ref: GitHubRef, headSha: string, deps: GitHubDeps): Promise<ConditionStatus> {
   const base = `${gitHubApiBase("github.com")}/repos/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.name)}`;
   const [statusResult, checkRunsResult] = await Promise.all([
     githubGetJson(`${base}/commits/${encodeURIComponent(headSha)}/status`, deps),
@@ -395,6 +396,7 @@ export function mergePrAutomationService(
   options: {
     fetch?: FetchLike;
     approvalsSvc?: ReturnType<typeof approvalService>;
+    securityReviewSvc?: ReturnType<typeof securityReviewService>;
     instanceSettings?: ReturnType<typeof instanceSettingsService>;
     getGitHubToken?: (companyId: string) => Promise<string | null>;
     logActivityImpl?: typeof logActivity;
@@ -403,6 +405,7 @@ export function mergePrAutomationService(
 ) {
   const fetchImpl = options.fetch ?? ghFetch;
   const approvalsSvc = options.approvalsSvc ?? approvalService(db);
+  const securityReview = options.securityReviewSvc ?? securityReviewService(db);
   const instanceSettings = options.instanceSettings ?? instanceSettingsService(db);
   const secretsSvc = secretService(db);
   const getGitHubToken =
@@ -447,6 +450,19 @@ export function mergePrAutomationService(
       const token = await getGitHubToken(row.companyId);
       const evaluation = await evaluateMergePrApproval(payload, { fetchImpl, token });
       if (!evaluation.eligible) continue;
+
+      // DUR-4568 finding #1: DUR-299 rule 6 is about CI + an independent
+      // human reviewer on GitHub, not a security review -- it is not an
+      // exemption from the security-review gate. This automation carries no
+      // human-supplied bypass reason, so a merge_pr card with no `passed`
+      // review at its current head commit is left for a human to decide,
+      // same as every other `approve()` caller.
+      const reviewState = await securityReview.computeState({
+        id: row.id,
+        companyId: row.companyId,
+        payload: row.payload,
+      });
+      if (reviewState.state !== "passed") continue;
 
       const decidedByUserId = AUTOMATION_DECIDED_BY_PREFIX;
       const note =

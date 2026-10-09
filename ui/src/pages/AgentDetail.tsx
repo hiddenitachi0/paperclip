@@ -56,6 +56,7 @@ import { MorningReportSection } from "../components/MorningReportSection";
 import { QuickAgentChatPanel } from "../components/QuickAgentChatPanel";
 import { AgentAddOnToolsSection } from "../components/AgentAddOnToolsSection";
 import { TrustPresetSection } from "../components/TrustPresetSection";
+import { SettingsSection, SettingsSubsection } from "../components/SettingsSection";
 import { FileTree, buildFileTree } from "../components/FileTree";
 import { ScrollToBottom } from "../components/ScrollToBottom";
 import { SourceResolvedFoldCallout } from "../components/SourceResolvedFoldCallout";
@@ -84,7 +85,6 @@ import {
   EyeOff,
   Copy,
   ChevronRight,
-  ChevronDown,
   ArrowLeft,
   HelpCircle,
   FolderOpen,
@@ -128,6 +128,8 @@ import {
   arraysEqual,
   isReadOnlyUnmanagedSkillEntry,
 } from "../lib/agent-skills-state";
+import { AgentSkillsTab } from "./AgentSkillsTab";
+import { AgentToolsTab } from "./AgentToolsTab";
 
 const runStatusIcons: Record<string, { icon: typeof CheckCircle2; color: string }> = {
   succeeded: { icon: CheckCircle2, color: "text-green-600 dark:text-green-400" },
@@ -1362,7 +1364,7 @@ function LatestRunCard({ runs, agentId }: { runs: HeartbeatRun[]; agentId: strin
   return (
     <div className="space-y-3">
       <div className="flex w-full items-center justify-between">
-        <h3 className="flex items-center gap-2 text-sm font-medium">
+        <h3 className="section-title flex items-center gap-2">
           {isLive && (
             <span className="relative flex h-2 w-2">
               <span className="animate-pulse absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75" />
@@ -1453,7 +1455,7 @@ function AgentOverview({
       {/* Recent Issues */}
       <div className="space-y-3">
         <div className="flex items-center justify-between">
-          <h3 className="text-sm font-medium">Recent Tasks</h3>
+          <h3 className="section-title">Recent Tasks</h3>
           <Link
             to={`/issues?participantAgentId=${agentId}`}
             className="text-xs text-muted-foreground hover:text-foreground transition-colors"
@@ -1485,7 +1487,7 @@ function AgentOverview({
 
       {/* Costs */}
       <div className="space-y-3">
-        <h3 className="text-sm font-medium">Costs</h3>
+        <h3 className="section-title">Costs</h3>
         <CostsSection runtimeState={runtimeState} runs={runs} />
       </div>
     </div>
@@ -1572,7 +1574,7 @@ function CostsSection({
 
 /* ---- Agent Configure Page ---- */
 
-function AgentConfigurePage({
+export function AgentConfigurePage({
   agent,
   agentId,
   companyId,
@@ -1592,7 +1594,6 @@ function AgentConfigurePage({
   updatePermissions: { mutate: (permissions: AgentPermissionUpdate) => void; isPending: boolean };
 }) {
   const queryClient = useQueryClient();
-  const [revisionsOpen, setRevisionsOpen] = useState(false);
 
   const { data: configRevisions } = useQuery({
     queryKey: queryKeys.agents.configRevisions(agent.id),
@@ -1608,8 +1609,23 @@ function AgentConfigurePage({
     },
   });
 
+  // Quick agent settings always sit right under Identity. The block keeps one
+  // fixed place so flipping the quick agent switch does not remount it (which
+  // would drop its unsaved drafts and status) or move it off screen. While
+  // quick agent is off it is only the switch; memory and morning report show
+  // once it is on.
+  const quickAgentOn = Boolean(agent.laneAEnabled);
+  const quickAgentBlock = (
+    <>
+      <QuickAgentSection agent={agent} companyId={companyId} />
+      {quickAgentOn && <QuickAgentMemorySection agentId={agent.id} />}
+      {quickAgentOn && <MorningReportSection agent={agent} companyId={companyId} />}
+    </>
+  );
+  const revisionCount = configRevisions?.length ?? 0;
+
   return (
-    <div className="max-w-3xl space-y-6">
+    <div className="max-w-3xl space-y-6" data-helper-entity={`agent:${agent.id}`}>
       <ConfigurationTab
         agent={agent}
         onDirtyChange={onDirtyChange}
@@ -1620,67 +1636,60 @@ function AgentConfigurePage({
         companyId={companyId}
         hidePromptTemplate
         hideInstructionsFile
+        afterIdentity={quickAgentBlock}
       />
-      <QuickAgentSection agent={agent} companyId={companyId} />
-      {agent.laneAEnabled && <QuickAgentMemorySection agentId={agent.id} />}
-      {agent.laneAEnabled && (
-        <MorningReportSection agent={agent} companyId={companyId} />
-      )}
-      <div>
-        <h3 className="text-sm font-medium mb-3">API Keys</h3>
-        <KeysTab agentId={agentId} companyId={companyId} />
-      </div>
 
-      {/* Configuration Revisions — collapsible at the bottom */}
-      <div>
-        <button
-          className="flex items-center gap-2 text-sm font-medium hover:text-foreground transition-colors"
-          onClick={() => setRevisionsOpen((v) => !v)}
-        >
-          {revisionsOpen
-            ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
-            : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
-          }
-          Configuration Revisions
-          <span className="text-xs font-normal text-muted-foreground">{configRevisions?.length ?? 0}</span>
-        </button>
-        {revisionsOpen && (
-          <div className="mt-3">
-            {(configRevisions ?? []).length === 0 ? (
-              <p className="text-sm text-muted-foreground">No configuration revisions yet.</p>
-            ) : (
-              <div className="space-y-2">
-                {(configRevisions ?? []).slice(0, 10).map((revision) => (
-                  <div key={revision.id} className="border border-border/70 rounded-md p-3 space-y-2">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="text-xs text-muted-foreground">
-                        <span className="font-mono">{revision.id.slice(0, 8)}</span>
-                        <span className="mx-1">·</span>
-                        <span>{formatDate(revision.createdAt)}</span>
-                        <span className="mx-1">·</span>
-                        <span>{revision.source}</span>
-                      </div>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-7 px-2.5 text-xs"
-                        onClick={() => rollbackConfig.mutate(revision.id)}
-                        disabled={rollbackConfig.isPending}
-                      >
-                        Restore
-                      </Button>
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      Changed:{" "}
-                      {revision.changedKeys.length > 0 ? revision.changedKeys.join(", ") : "no tracked changes"}
-                    </p>
+      <SettingsSection
+        title="API keys"
+        description="Keys that let a program outside Paperclip act as this agent."
+        defaultOpen={false}
+        storageKey="agent.configuration.apiKeys"
+        data-testid="agent-config-api-keys"
+      >
+        <KeysTab agentId={agentId} companyId={companyId} />
+      </SettingsSection>
+
+      <SettingsSection
+        title="Configuration history"
+        description="Earlier versions of these settings. Restore one to undo a change."
+        summary={revisionCount === 1 ? "1 saved version" : `${revisionCount} saved versions`}
+        defaultOpen={false}
+        storageKey="agent.configuration.history"
+        data-testid="agent-config-history"
+      >
+        {(configRevisions ?? []).length === 0 ? (
+          <p className="text-sm text-muted-foreground">No configuration revisions yet.</p>
+        ) : (
+          <div className="space-y-2">
+            {(configRevisions ?? []).slice(0, 10).map((revision) => (
+              <div key={revision.id} className="border border-border/70 rounded-md p-3 space-y-2">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-xs text-muted-foreground">
+                    <span className="font-mono">{revision.id.slice(0, 8)}</span>
+                    <span className="mx-1">·</span>
+                    <span>{formatDate(revision.createdAt)}</span>
+                    <span className="mx-1">·</span>
+                    <span>{revision.source}</span>
                   </div>
-                ))}
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 px-2.5 text-xs"
+                    onClick={() => rollbackConfig.mutate(revision.id)}
+                    disabled={rollbackConfig.isPending}
+                  >
+                    Restore
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Changed:{" "}
+                  {revision.changedKeys.length > 0 ? revision.changedKeys.join(", ") : "no tracked changes"}
+                </p>
               </div>
-            )}
+            ))}
           </div>
         )}
-      </div>
+      </SettingsSection>
     </div>
   );
 }
@@ -1697,6 +1706,7 @@ function ConfigurationTab({
   updatePermissions,
   hidePromptTemplate,
   hideInstructionsFile,
+  afterIdentity,
 }: {
   agent: AgentDetailRecord;
   companyId?: string;
@@ -1707,6 +1717,8 @@ function ConfigurationTab({
   updatePermissions: { mutate: (permissions: AgentPermissionUpdate) => void; isPending: boolean };
   hidePromptTemplate?: boolean;
   hideInstructionsFile?: boolean;
+  /** Rendered right after Identity (see AgentConfigForm). */
+  afterIdentity?: React.ReactNode;
 }) {
   const queryClient = useQueryClient();
   const { pushToast } = useToastActions();
@@ -1802,99 +1814,115 @@ function ConfigurationTab({
         hideInlineSave
         hidePromptTemplate={hidePromptTemplate}
         hideInstructionsFile={hideInstructionsFile}
-        sectionLayout="cards"
-      />
-      <p className="text-xs text-muted-foreground">
-        Saved adapter config affects the next run. Active runs keep the config they started with, and config changes may start a fresh adapter session.
-      </p>
-
-      <TrustPresetSection
-        permissions={agent.permissions}
-        disabled={updatePermissions.isPending}
-        companyId={companyId}
-        projectCandidates={(boundaryProjects ?? []).map((project) => ({
-          id: project.id,
-          label: project.name,
-        }))}
-        issueCandidates={(boundaryIssues ?? []).map((issue) => ({
-          id: issue.id,
-          label: `${issue.identifier ?? issue.id.slice(0, 8)} · ${issue.title}`,
-        }))}
-        candidatesLoading={boundaryProjectsLoading || boundaryIssuesLoading}
-        onChange={(nextPermissions) =>
-          updatePermissions.mutate({
-            canCreateAgents,
-            canCreateSkills,
-            canAssignTasks,
-            ...buildPermissionsForTrustPreset(nextPermissions, nextPermissions.trustPreset === "low_trust_review" ? "low_trust_review" : "standard"),
-          })
-        }
+        sectionLayout="settings"
+        afterIdentity={afterIdentity}
       />
 
-      <div>
-        <h3 className="text-sm font-medium mb-3">Permissions</h3>
-        <div className="border border-border rounded-lg p-4 space-y-4">
-          <div className="flex items-center justify-between gap-4 text-sm">
-            <div className="space-y-1">
-              <div>Can create new agents</div>
-              <p className="text-xs text-muted-foreground">
-                Lets this agent create or hire agents. This also grants task assignment authority.
-              </p>
-            </div>
-            <ToggleSwitch
-              checked={canCreateAgents}
-              onCheckedChange={() =>
-                updatePermissions.mutate({
-                  canCreateAgents: !canCreateAgents,
-                  canCreateSkills,
-                  canAssignTasks: !canCreateAgents ? true : canAssignTasks,
-                })
-              }
-              disabled={updatePermissions.isPending}
-            />
-          </div>
-          <div className="flex items-center justify-between gap-4 text-sm">
-            <div className="space-y-1">
-              <div>Can create/import skills</div>
-              <p className="text-xs text-muted-foreground">
-                Lets this agent install, import, create, and scan company skills without creating agents.
-              </p>
-            </div>
-            <ToggleSwitch
-              checked={canCreateSkills}
-              onCheckedChange={() =>
-                updatePermissions.mutate({
-                  canCreateAgents,
-                  canCreateSkills: !canCreateSkills,
-                  canAssignTasks,
-                })
-              }
-              disabled={updatePermissions.isPending}
-            />
-          </div>
-          <div className="flex items-center justify-between gap-4 text-sm">
-            <div className="space-y-1">
-              <div>Can assign tasks</div>
-              <p className="text-xs text-muted-foreground">
-                {taskAssignHint}
-              </p>
-            </div>
-            <ToggleSwitch
-              checked={canAssignTasks}
-              onCheckedChange={() =>
-                updatePermissions.mutate({
-                  canCreateAgents,
-                  canCreateSkills,
-                  canAssignTasks: !canAssignTasks,
-                })
-              }
-              disabled={updatePermissions.isPending || taskAssignLocked}
-            />
-          </div>
-        </div>
-      </div>
+      <SettingsSection
+        title="Trust and permissions"
+        description="How far this agent is trusted, and what it may do on its own."
+        storageKey="agent.configuration.trust"
+        data-testid="agent-config-trust"
+      >
+        <TrustPresetSection
+          embedded
+          permissions={agent.permissions}
+          disabled={updatePermissions.isPending}
+          companyId={companyId}
+          projectCandidates={(boundaryProjects ?? []).map((project) => ({
+            id: project.id,
+            label: project.name,
+          }))}
+          issueCandidates={(boundaryIssues ?? []).map((issue) => ({
+            id: issue.id,
+            label: `${issue.identifier ?? issue.id.slice(0, 8)} · ${issue.title}`,
+          }))}
+          candidatesLoading={boundaryProjectsLoading || boundaryIssuesLoading}
+          onChange={(nextPermissions) =>
+            updatePermissions.mutate({
+              canCreateAgents,
+              canCreateSkills,
+              canAssignTasks,
+              ...buildPermissionsForTrustPreset(nextPermissions, nextPermissions.trustPreset === "low_trust_review" ? "low_trust_review" : "standard"),
+            })
+          }
+        />
 
-      <AgentJobSection agentId={agent.id} companyId={companyId} />
+        <SettingsSubsection
+          title="Permissions"
+          storageKey="agent.configuration.permissions"
+          data-testid="agent-config-permissions"
+        >
+          <div className="space-y-4">
+            <div className="flex items-center justify-between gap-4 text-sm">
+              <div className="space-y-1">
+                <div>Can create new agents</div>
+                <p className="text-xs text-muted-foreground">
+                  Lets this agent create or hire agents. This also grants task assignment authority.
+                </p>
+              </div>
+              <ToggleSwitch
+                checked={canCreateAgents}
+                onCheckedChange={() =>
+                  updatePermissions.mutate({
+                    canCreateAgents: !canCreateAgents,
+                    canCreateSkills,
+                    canAssignTasks: !canCreateAgents ? true : canAssignTasks,
+                  })
+                }
+                disabled={updatePermissions.isPending}
+              />
+            </div>
+            <div className="flex items-center justify-between gap-4 text-sm">
+              <div className="space-y-1">
+                <div>Can create/import skills</div>
+                <p className="text-xs text-muted-foreground">
+                  Lets this agent install, import, create, and scan company skills without creating agents.
+                </p>
+              </div>
+              <ToggleSwitch
+                checked={canCreateSkills}
+                onCheckedChange={() =>
+                  updatePermissions.mutate({
+                    canCreateAgents,
+                    canCreateSkills: !canCreateSkills,
+                    canAssignTasks,
+                  })
+                }
+                disabled={updatePermissions.isPending}
+              />
+            </div>
+            <div className="flex items-center justify-between gap-4 text-sm">
+              <div className="space-y-1">
+                <div>Can assign tasks</div>
+                <p className="text-xs text-muted-foreground">
+                  {taskAssignHint}
+                </p>
+              </div>
+              <ToggleSwitch
+                checked={canAssignTasks}
+                onCheckedChange={() =>
+                  updatePermissions.mutate({
+                    canCreateAgents,
+                    canCreateSkills,
+                    canAssignTasks: !canAssignTasks,
+                  })
+                }
+                disabled={updatePermissions.isPending || taskAssignLocked}
+              />
+            </div>
+          </div>
+        </SettingsSubsection>
+      </SettingsSection>
+
+      <SettingsSection
+        title="Job, tools and rights"
+        description="The position this agent holds, and the tools, rights and skills that come with it."
+        storageKey="agent.configuration.job"
+        data-testid="agent-config-job"
+      >
+        <AgentJobSection agentId={agent.id} companyId={companyId} embedded />
+      </SettingsSection>
     </div>
   );
 }
@@ -2738,513 +2766,6 @@ function PromptEditorSkeleton() {
     <div className="space-y-3">
       <Skeleton className="h-10 w-full" />
       <Skeleton className="h-[420px] w-full" />
-    </div>
-  );
-}
-
-export function AgentSkillsTab({
-  agent,
-  companyId,
-}: {
-  agent: Agent;
-  companyId?: string;
-}) {
-  type SkillRow = {
-    id: string;
-    key: string;
-    name: string;
-    description: string | null;
-    detail: string | null;
-    locationLabel: string | null;
-    originLabel: string | null;
-    linkTo: string | null;
-    readOnly: boolean;
-    adapterEntry: AgentSkillEntry | null;
-  };
-
-  const queryClient = useQueryClient();
-  const [skillDraft, setSkillDraft] = useState<string[]>([]);
-  const [lastSavedSkills, setLastSavedSkills] = useState<string[]>([]);
-  const [unmanagedOpen, setUnmanagedOpen] = useState(false);
-  const lastSavedSkillsRef = useRef<string[]>([]);
-  const hasHydratedSkillSnapshotRef = useRef(false);
-  const skipNextSkillAutosaveRef = useRef(true);
-
-  const { data: skillSnapshot, isLoading } = useQuery({
-    queryKey: queryKeys.agents.skills(agent.id),
-    queryFn: () => agentsApi.skills(agent.id, companyId),
-    enabled: Boolean(companyId),
-  });
-
-  const { data: companySkills } = useQuery({
-    queryKey: queryKeys.companySkills.list(companyId ?? ""),
-    queryFn: () => companySkillsApi.list(companyId!),
-    enabled: Boolean(companyId),
-  });
-
-  const syncSkills = useMutation({
-    mutationFn: (desiredSkills: string[]) => agentsApi.syncSkills(agent.id, desiredSkills, companyId),
-    onSuccess: async (snapshot) => {
-      queryClient.setQueryData(queryKeys.agents.skills(agent.id), snapshot);
-      lastSavedSkillsRef.current = snapshot.desiredSkills;
-      setLastSavedSkills(snapshot.desiredSkills);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agent.id) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agent.urlKey) }),
-      ]);
-    },
-  });
-
-  useEffect(() => {
-    setSkillDraft([]);
-    setLastSavedSkills([]);
-    lastSavedSkillsRef.current = [];
-    hasHydratedSkillSnapshotRef.current = false;
-    skipNextSkillAutosaveRef.current = true;
-  }, [agent.id]);
-
-  useEffect(() => {
-    if (!skillSnapshot) return;
-    const nextState = applyAgentSkillSnapshot(
-      {
-        draft: skillDraft,
-        lastSaved: lastSavedSkillsRef.current,
-        hasHydratedSnapshot: hasHydratedSkillSnapshotRef.current,
-      },
-      skillSnapshot.desiredSkills,
-    );
-    skipNextSkillAutosaveRef.current = nextState.shouldSkipAutosave;
-    hasHydratedSkillSnapshotRef.current = nextState.hasHydratedSnapshot;
-    setSkillDraft(nextState.draft);
-    lastSavedSkillsRef.current = nextState.lastSaved;
-    setLastSavedSkills(nextState.lastSaved);
-  }, [skillDraft, skillSnapshot]);
-
-  useEffect(() => {
-    if (!skillSnapshot) return;
-    if (skipNextSkillAutosaveRef.current) {
-      skipNextSkillAutosaveRef.current = false;
-      return;
-    }
-    if (syncSkills.isPending) return;
-    if (arraysEqual(skillDraft, lastSavedSkillsRef.current)) return;
-
-    const timeout = window.setTimeout(() => {
-      if (!arraysEqual(skillDraft, lastSavedSkillsRef.current)) {
-        syncSkills.mutate(skillDraft);
-      }
-    }, 250);
-
-    return () => window.clearTimeout(timeout);
-  }, [skillDraft, skillSnapshot, syncSkills.isPending, syncSkills.mutate]);
-
-  const companySkillByKey = useMemo(
-    () => new Map((companySkills ?? []).map((skill) => [skill.key, skill])),
-    [companySkills],
-  );
-  const companySkillKeys = useMemo(
-    () => new Set((companySkills ?? []).map((skill) => skill.key)),
-    [companySkills],
-  );
-  const adapterEntryByKey = useMemo(
-    () => new Map((skillSnapshot?.entries ?? []).map((entry) => [entry.key, entry])),
-    [skillSnapshot],
-  );
-  const optionalSkillRows = useMemo<SkillRow[]>(
-    () =>
-      (companySkills ?? []).map((skill) => ({
-        id: skill.id,
-        key: skill.key,
-        name: skill.name,
-        description: skill.description,
-        detail: adapterEntryByKey.get(skill.key)?.detail ?? null,
-        locationLabel: adapterEntryByKey.get(skill.key)?.locationLabel ?? null,
-        originLabel: adapterEntryByKey.get(skill.key)?.originLabel ?? null,
-        linkTo: `/skills/${skill.id}`,
-        readOnly: false,
-        adapterEntry: adapterEntryByKey.get(skill.key) ?? null,
-      })),
-    [adapterEntryByKey, companySkills],
-  );
-  const unmanagedSkillRows = useMemo<SkillRow[]>(
-    () =>
-      (skillSnapshot?.entries ?? [])
-        .filter((entry) => isReadOnlyUnmanagedSkillEntry(entry, companySkillKeys))
-        .map((entry) => ({
-          id: `external:${entry.key}`,
-          key: entry.key,
-          name: entry.runtimeName ?? entry.key,
-          description: null,
-          detail: entry.detail ?? null,
-          locationLabel: entry.locationLabel ?? null,
-          originLabel: entry.originLabel ?? null,
-          linkTo: null,
-          readOnly: true,
-          adapterEntry: entry,
-        })),
-    [companySkillKeys, skillSnapshot],
-  );
-  const installedSkillRows = useMemo(
-    () => optionalSkillRows.filter((skill) => skillDraft.includes(skill.key)),
-    [optionalSkillRows, skillDraft],
-  );
-  const otherSkillRows = useMemo(
-    () => optionalSkillRows.filter((skill) => !skillDraft.includes(skill.key)),
-    [optionalSkillRows, skillDraft],
-  );
-  const desiredOnlyMissingSkills = useMemo(
-    () => skillDraft.filter((key) => !companySkillByKey.has(key)),
-    [companySkillByKey, skillDraft],
-  );
-  const skillApplicationLabel = useMemo(() => {
-    switch (skillSnapshot?.mode) {
-      case "persistent":
-        return "Kept in the workspace";
-      case "ephemeral":
-        return "Applied when the agent runs";
-      case "unsupported":
-        return "Tracked only";
-      default:
-        return "Unknown";
-    }
-  }, [skillSnapshot?.mode]);
-  const unsupportedSkillMessage = useMemo(() => {
-    if (skillSnapshot?.mode !== "unsupported") return null;
-    if (
-      agent.adapterType === "acpx_local" &&
-      typeof agent.adapterConfig.agent === "string" &&
-      agent.adapterConfig.agent === "custom"
-    ) {
-      return "Paperclip cannot manage skills for custom ACP commands yet.";
-    }
-    if (agent.adapterType === "openclaw_gateway") {
-      return "Paperclip cannot manage OpenClaw skills here. Visit your OpenClaw instance to manage this agent's skills.";
-    }
-    return "Paperclip cannot manage skills for this adapter yet. Manage them in the adapter directly.";
-  }, [agent.adapterConfig.agent, agent.adapterType, skillSnapshot?.mode]);
-  const hasUnsavedChanges = !arraysEqual(skillDraft, lastSavedSkills);
-  const saveStatusLabel = syncSkills.isPending
-    ? "Saving changes..."
-    : hasUnsavedChanges
-      ? "Saving soon..."
-      : null;
-
-  return (
-    <div className="max-w-4xl space-y-5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <Link
-          to="/skills"
-          className="text-sm font-medium text-foreground underline-offset-4 no-underline transition-colors hover:text-foreground/70 hover:underline"
-        >
-          View company skills library
-        </Link>
-        {saveStatusLabel ? (
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            {syncSkills.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-            <span>{saveStatusLabel}</span>
-          </div>
-        ) : null}
-      </div>
-
-      {skillSnapshot?.warnings.length ? (
-        <div className="space-y-1 rounded-xl border border-amber-300/60 bg-amber-50/60 px-4 py-3 text-sm text-amber-800 dark:border-amber-500/30 dark:bg-amber-950/20 dark:text-amber-200">
-          {skillSnapshot.warnings.map((warning) => (
-            <div key={warning}>{warning}</div>
-          ))}
-        </div>
-      ) : null}
-
-      {unsupportedSkillMessage ? (
-        <div className="rounded-xl border border-border px-4 py-3 text-sm text-muted-foreground">
-          {unsupportedSkillMessage}
-        </div>
-      ) : null}
-
-      {isLoading ? (
-        <PageSkeleton variant="list" />
-      ) : (
-        <>
-          {(() => {
-            const renderSkillRow = (skill: SkillRow) => {
-              const summaryText = resolveSkillSummaryText(skill, { fallbackKey: true });
-              const rowClassName = cn(
-                "flex items-start gap-3 border-b border-border px-3 py-3 text-sm last:border-b-0",
-                skill.readOnly ? "bg-muted/20" : "hover:bg-accent/20",
-              );
-              const body = (
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="min-w-0">
-                      <span className="truncate font-medium">{skill.name}</span>
-                    </div>
-                    {skill.linkTo ? (
-                      <Link
-                        to={skill.linkTo}
-                        className="shrink-0 text-xs text-muted-foreground no-underline hover:text-foreground"
-                      >
-                        View
-                      </Link>
-                    ) : null}
-                  </div>
-                  {summaryText && (
-                    <MarkdownBody className="mt-1 text-xs text-muted-foreground prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
-                      {summaryText}
-                    </MarkdownBody>
-                  )}
-                  {skill.readOnly && skill.originLabel && (
-                    <p className="mt-1 text-xs text-muted-foreground">{skill.originLabel}</p>
-                  )}
-                  {skill.readOnly && skill.locationLabel && (
-                    <p className="mt-1 text-xs text-muted-foreground">Location: {skill.locationLabel}</p>
-                  )}
-                  {skill.detail && (
-                    <p className="mt-1 text-xs text-muted-foreground">{skill.detail}</p>
-                  )}
-                </div>
-              );
-
-              if (skill.readOnly) {
-                return (
-                  <div key={skill.id} className={rowClassName}>
-                    <span className="mt-1 h-2 w-2 rounded-full bg-muted-foreground/40" />
-                    {body}
-                  </div>
-                );
-              }
-
-              const checked = skillDraft.includes(skill.key);
-              const disabled = skillSnapshot?.mode === "unsupported";
-              const checkbox = (
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  disabled={disabled}
-                  onChange={(event) => {
-                    const next = event.target.checked
-                      ? Array.from(new Set([...skillDraft, skill.key]))
-                      : skillDraft.filter((value) => value !== skill.key);
-                    setSkillDraft(next);
-                  }}
-                  className="mt-0.5 disabled:cursor-not-allowed disabled:opacity-60"
-                />
-              );
-
-              return (
-                <label key={skill.id} className={rowClassName}>
-                  {skillSnapshot?.mode === "unsupported" ? (
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <span>{checkbox}</span>
-                      </TooltipTrigger>
-                      <TooltipContent side="top">
-                        {unsupportedSkillMessage ?? "Manage skills in the adapter directly."}
-                      </TooltipContent>
-                    </Tooltip>
-                  ) : (
-                    checkbox
-                  )}
-                  {body}
-                </label>
-              );
-            };
-
-            const renderSkillSection = (
-              title: string,
-              rows: SkillRow[],
-              emptyMessage?: string,
-            ) => {
-              if (rows.length === 0 && !emptyMessage) return null;
-              return (
-                <section className="border-y border-border">
-                  <div className="border-b border-border bg-muted/40 px-3 py-2">
-                    <span className="text-xs font-medium text-muted-foreground">
-                      {title}
-                    </span>
-                  </div>
-                  {rows.length > 0 ? (
-                    rows.map(renderSkillRow)
-                  ) : (
-                    <div className="px-3 py-3 text-sm text-muted-foreground">
-                      {emptyMessage}
-                    </div>
-                  )}
-                </section>
-              );
-            };
-
-            if (optionalSkillRows.length === 0 && unmanagedSkillRows.length === 0) {
-              return (
-                <section className="border-y border-border">
-                  <div className="px-3 py-6 text-sm text-muted-foreground">
-                    Import skills into the company library first, then attach them here.
-                  </div>
-                </section>
-              );
-            }
-
-            return (
-              <>
-                {optionalSkillRows.length > 0
-                  ? renderSkillSection(
-                      "Installed skills",
-                      installedSkillRows,
-                      "No company-library skills installed on this agent.",
-                    )
-                  : null}
-
-                {renderSkillSection("Other skills", otherSkillRows)}
-
-
-                {unmanagedSkillRows.length > 0 && (
-                  <section className="border-y border-border">
-                    <div
-                      role="button"
-                      tabIndex={0}
-                      className="flex cursor-pointer items-center gap-2 border-b border-border bg-muted/40 px-3 py-2 select-none"
-                      onClick={() => setUnmanagedOpen((v) => !v)}
-                      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setUnmanagedOpen((v) => !v); } }}
-                    >
-                      <span className="text-xs font-medium text-muted-foreground">
-                        ({unmanagedSkillRows.length}) User-installed skills, not managed by Paperclip
-                      </span>
-                      {unmanagedOpen ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />}
-                    </div>
-                    {unmanagedOpen && unmanagedSkillRows.map(renderSkillRow)}
-                  </section>
-                )}
-              </>
-            );
-          })()}
-
-          {desiredOnlyMissingSkills.length > 0 && (
-            <div className="rounded-xl border border-amber-300/60 bg-amber-50/60 px-4 py-3 text-sm text-amber-800 dark:border-amber-500/30 dark:bg-amber-950/20 dark:text-amber-200">
-              <div className="font-medium">Requested skills missing from the company library</div>
-              <div className="mt-1 text-xs">
-                {desiredOnlyMissingSkills.join(", ")}
-              </div>
-            </div>
-          )}
-
-          <section className="border-t border-border pt-4">
-            <div className="grid gap-2 text-sm sm:grid-cols-2">
-              <div className="flex items-center justify-between gap-3 border-b border-border/60 py-2">
-                <span className="text-muted-foreground">Adapter</span>
-                <span className="font-medium">{adapterLabels[agent.adapterType] ?? agent.adapterType}</span>
-              </div>
-              <div className="flex items-center justify-between gap-3 border-b border-border/60 py-2">
-                <span className="text-muted-foreground">Skills applied</span>
-                <span>{skillApplicationLabel}</span>
-              </div>
-              <div className="flex items-center justify-between gap-3 border-b border-border/60 py-2">
-                <span className="text-muted-foreground">Selected skills</span>
-                <span>{skillDraft.length}</span>
-              </div>
-            </div>
-
-            {syncSkills.isError && (
-              <p className="mt-3 text-xs text-destructive">
-                {syncSkills.error instanceof Error ? syncSkills.error.message : "Failed to update skills"}
-              </p>
-            )}
-          </section>
-        </>
-      )}
-    </div>
-  );
-}
-
-/* ---- Tools Tab ---- */
-
-// DUR-143: the checkbox side of the tool library — tick a tool on, it's
-// merged into this agent's mcpServers at every dispatch (with its credential
-// resolved from the secret it was created with); untick to revoke. No JSON,
-// no server name to remember — just the tools this agent has, in words.
-export function AgentToolsTab({
-  agent,
-  companyId,
-}: {
-  agent: Agent;
-  companyId?: string;
-}) {
-  const queryClient = useQueryClient();
-  const [pendingToolId, setPendingToolId] = useState<string | null>(null);
-
-  const { data: tools, isLoading, error } = useQuery({
-    queryKey: queryKeys.mcpTools.forAgent(agent.id),
-    queryFn: () => mcpToolLibraryApi.listForAgent(agent.id),
-    enabled: Boolean(companyId),
-  });
-
-  const syncTools = useMutation({
-    mutationFn: (desiredToolIds: string[]) => mcpToolLibraryApi.syncAgentSelection(agent.id, desiredToolIds),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: queryKeys.mcpTools.forAgent(agent.id) });
-    },
-    onSettled: () => setPendingToolId(null),
-  });
-
-  function toggleTool(tool: AgentMcpToolListItem, checked: boolean) {
-    if (!tools) return;
-    const current = tools.filter((t) => t.enabled).map((t) => t.id);
-    const next = checked ? [...current, tool.id] : current.filter((id) => id !== tool.id);
-    setPendingToolId(tool.id);
-    syncTools.mutate(next);
-  }
-
-  return (
-    <div className="space-y-4">
-      <div>
-        <p className="text-sm text-muted-foreground">
-          Tick a tool to give this agent access to it — connected in{" "}
-          <Link to="/tools" className="underline underline-offset-2">
-            Tools
-          </Link>
-          , picked here. Untick to remove it.
-        </p>
-      </div>
-
-      {isLoading ? (
-        <Skeleton className="h-32 w-full" />
-      ) : error ? (
-        <p className="text-sm text-destructive">Could not load tools.</p>
-      ) : !tools || tools.length === 0 ? (
-        <p className="text-sm text-muted-foreground" data-testid="library-tools-empty">
-          No tools in the library yet.{" "}
-          <Link to="/tools" className="underline underline-offset-2">
-            Add one in Tools
-          </Link>
-          , then come back here to give it to this agent. Tools from add-ons such as Media Studio are listed below.
-        </p>
-      ) : (
-        <ul className="divide-y divide-border border border-border rounded-lg">
-          {tools.map((tool) => (
-            <li key={tool.id} className="flex items-start gap-3 px-4 py-3">
-              <Checkbox
-                checked={tool.enabled}
-                disabled={syncTools.isPending && pendingToolId === tool.id}
-                onCheckedChange={(checked) => toggleTool(tool, checked === true)}
-                className="mt-0.5"
-              />
-              <div className="min-w-0">
-                <div className="font-medium">{tool.name}</div>
-                <p className="text-sm text-muted-foreground">{tool.description}</p>
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {syncTools.isError && (
-        <p className="text-xs text-destructive">
-          {syncTools.error instanceof Error ? syncTools.error.message : "Failed to update tools"}
-        </p>
-      )}
-
-      {/* Tools that installed add-ons (plugins) bring; ticks write agents.plugin_tool_grants. */}
-      <AgentAddOnToolsSection agentId={agent.id} quickAgent={agent.laneAEnabled === true} />
-
-      {/* DUR-4004: "API with a key" tools, ticked on the same way. */}
-      <AgentApiToolsSection agentId={agent.id} companyId={companyId} />
     </div>
   );
 }
@@ -4633,3 +4154,5 @@ function KeysTab({ agentId, companyId }: { agentId: string; companyId?: string }
     </div>
   );
 }
+
+export { AgentSkillsTab, AgentToolsTab };

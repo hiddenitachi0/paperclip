@@ -16,6 +16,7 @@ import {
 import { StatusIcon } from "./StatusIcon";
 import { productivityReviewTriggerLabel } from "./ProductivityReviewBadge";
 import { hasAssignedBacklogBlocker } from "../lib/issue-blockers";
+import { IssueProgressBar, readIssueProgress } from "./IssueProgressBar";
 import { ExternalObjectStatusSummary } from "./ExternalObjectStatusSummary";
 
 type UnreadState = "hidden" | "visible" | "fading";
@@ -90,6 +91,7 @@ export function IssueRow({
       <Eye className="h-2.5 w-2.5" aria-hidden />
     </span>
   ) : null;
+  const rowProgress = readIssueProgress(issue);
   const hasChecklistStep = checklistStepNumber !== null;
   const checklistStep = hasChecklistStep ? (
     <span className="shrink-0 font-mono text-xs text-muted-foreground" aria-hidden="true">
@@ -169,6 +171,9 @@ export function IssueRow({
           ) : null}
         </span>
       </span>
+      {rowProgress ? (
+        <IssueProgressBar progress={rowProgress} compact className="hidden shrink-0 sm:order-3 sm:ml-auto sm:flex" />
+      ) : null}
       {(desktopTrailing || trailingMeta || externalObjectSummary) ? (
         <span className="ml-auto hidden shrink-0 items-center gap-2 sm:order-3 sm:flex sm:gap-3">
           {externalObjectSummary ? (

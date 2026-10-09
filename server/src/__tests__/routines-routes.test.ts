@@ -557,6 +557,42 @@ describe("routine routes", () => {
     expect(mockRoutineService.createTrigger).not.toHaveBeenCalled();
   });
 
+  it("rejects an agent -- even the routine's assignee -- attaching an existing secret to a trigger", async () => {
+    const app = await createApp({ type: "agent", agentId, companyId, runId: "88888888-8888-4888-8888-888888888888" });
+    const secretId = "99999999-9999-4999-8999-999999999999";
+
+    const created = await request(app)
+      .post(`/api/routines/${routineId}/triggers`)
+      .send({ kind: "webhook", existingSecretId: secretId });
+    expect(created.status).toBe(403);
+    expect(mockRoutineService.createTrigger).not.toHaveBeenCalled();
+
+    const patched = await request(app)
+      .patch(`/api/routine-triggers/${trigger.id}`)
+      .send({ existingSecretId: secretId });
+    expect(patched.status).toBe(403);
+    expect(mockRoutineService.updateTrigger).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-admin board member attaching an existing secret to a trigger", async () => {
+    mockAccessService.canUser.mockResolvedValue(true);
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: [companyId],
+      memberships: [{ companyId, status: "active", membershipRole: "member" }],
+    });
+
+    const res = await request(app)
+      .post(`/api/routines/${routineId}/triggers`)
+      .send({ kind: "webhook", existingSecretId: "99999999-9999-4999-8999-999999999999" });
+
+    expect(res.status).toBe(403);
+    expect(mockRoutineService.createTrigger).not.toHaveBeenCalled();
+  });
+
   it("requires tasks:assign permission to update a trigger", async () => {
     const app = await createApp({
       type: "board",

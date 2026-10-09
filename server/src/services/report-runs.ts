@@ -121,7 +121,19 @@ export function reportRunsService(db: Db, deps: ReportRunsServiceDeps) {
 
     await db.update(reportRuns).set({ fetchedData, status: "calculating" }).where(eq(reportRuns.id, run.id));
 
-    const scriptRun = await deps.reportScripts.runForReport(companyId, template.scriptVersionId, fetchedData, actor);
+    let scriptRun: Awaited<ReturnType<ReportScriptsService["runForReport"]>>;
+    try {
+      scriptRun = await deps.reportScripts.runForReport(companyId, template.scriptVersionId, fetchedData, actor);
+    } catch (err) {
+      // Not approved, busy, or over the hourly budget: the calculation never
+      // ran. Record why on the run instead of leaving it stuck in 'calculating'.
+      const [failed] = await db
+        .update(reportRuns)
+        .set({ status: "failed", error: err instanceof Error ? err.message : String(err), finishedAt: new Date() })
+        .where(eq(reportRuns.id, run.id))
+        .returning();
+      return toSummary(failed!);
+    }
     if (scriptRun.status !== "succeeded") {
       const [failed] = await db
         .update(reportRuns)
@@ -168,7 +180,11 @@ export function reportRunsService(db: Db, deps: ReportRunsServiceDeps) {
       return toSummary(updated!);
     }
 
-    const [template] = await db.select().from(reportTemplates).where(eq(reportTemplates.id, run.templateId)).limit(1);
+    const [template] = await db
+      .select()
+      .from(reportTemplates)
+      .where(and(eq(reportTemplates.id, run.templateId), eq(reportTemplates.companyId, companyId)))
+      .limit(1);
     const documentId = await createOrReviseReportDocument(
       db,
       companyId,

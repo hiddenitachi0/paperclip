@@ -11,7 +11,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 
-function renderSection(permissions: Partial<AgentPermissions>) {
+function renderSection(permissions: Partial<AgentPermissions>, options: { embedded?: boolean } = {}) {
   container = document.createElement("div");
   document.body.appendChild(container);
   const onChange = vi.fn();
@@ -26,6 +26,7 @@ function renderSection(permissions: Partial<AgentPermissions>) {
           companyId="company-1"
           projectCandidates={[{ id: "project-1", label: "Paperclip App" }]}
           issueCandidates={[{ id: "issue-1", label: "PAP-1 · Review PR" }]}
+          embedded={options.embedded}
         />
       </TooltipProvider>,
     );
@@ -89,5 +90,21 @@ describe("TrustPresetSection", () => {
     expect(view.text()).toContain("Managed by EE/API");
     expect(view.text()).toContain("2 boundaries");
     expect(view.text()).not.toContain("Clear boundary");
+  });
+
+  it("drops its own heading and frame when embedded in a page section, keeping the fields", () => {
+    const view = renderSection({ canCreateAgents: false, trustPreset: "standard" }, { embedded: true });
+
+    expect(container?.querySelector("h3")).toBeNull();
+    expect(container?.querySelector(".rounded-lg.border")).toBeNull();
+    expect(view.text()).toContain("Trust preset");
+    expect(container?.querySelector('[data-testid="trust-preset-section"] select')).not.toBeNull();
+  });
+
+  it("keeps the Trust heading and frame by default", () => {
+    renderSection({ canCreateAgents: false, trustPreset: "standard" });
+
+    expect(container?.querySelector("h3")?.textContent).toBe("Trust");
+    expect(container?.querySelector(".rounded-lg.border")).not.toBeNull();
   });
 });

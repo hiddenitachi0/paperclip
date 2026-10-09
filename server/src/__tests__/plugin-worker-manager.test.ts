@@ -238,6 +238,34 @@ describe("plugin-worker-manager stderr failure context", () => {
     }
   });
 
+  it("a person's UI action carries that person (from the host's own actor context) in the invocation scope", async () => {
+    const companiesGet = vi.fn(async (params: { companyId: string }) => ({ id: params.companyId, scopedCompanyId: params.companyId }));
+    const handle = createPluginWorkerHandle("test.plugin", {
+      entrypointPath: INVOCATION_SCOPE_WORKER_ENTRYPOINT,
+      manifest: TEST_MANIFEST,
+      config: {},
+      instanceInfo: { instanceId: "instance-1", hostVersion: "1.0.0" },
+      apiVersion: 1,
+      hostHandlers: { "companies.get": companiesGet as never },
+    });
+    try {
+      await handle.start();
+      await handle.call("performAction", {
+        key: "probe",
+        companyId: "company-a",
+        params: { mode: "echo", requestedCompanyId: "company-a", userId: "someone-else" },
+        actorContext: { type: "user", userId: "owner-1", agentId: null, runId: null, companyId: "company-a", canManageCompany: true, isInstanceAdmin: false },
+        renderEnvironment: null,
+      } as never);
+      expect(companiesGet).toHaveBeenCalledWith(
+        { companyId: "company-a" },
+        { invocationScope: { companyId: "company-a", userId: "owner-1", canManageCompany: true } },
+      );
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
   it("passes echoed invocation scope to worker-to-host handlers", async () => {
     const companiesGet = vi.fn(async () => ({ id: "company-1" }));
     const handle = createPluginWorkerHandle("test.plugin", {

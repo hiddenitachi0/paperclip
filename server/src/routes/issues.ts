@@ -75,6 +75,7 @@ import {
 import { trackAgentTaskCompleted } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
 import type { StorageService } from "../storage/types.js";
+import { getOrCreateThumbnail, isThumbnailableContentType, thumbnailObjectKey } from "../services/attachment-thumbnail.js";
 import { validate } from "../middleware/validate.js";
 import * as serviceIndex from "../services/index.js";
 import {
@@ -166,6 +167,7 @@ import { evaluateFeatureLaunchDoneGate } from "../services/feature-launch-gate.j
 import { evaluateJobApprovalDoneGate } from "../services/job-approval-gate.js";
 import { evaluateBlockedNeedsAskGate } from "../services/blocked-needs-ask-gate.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
+import { issueOverlapDetectorService } from "../services/issue-overlap-detector.js";
 import { feedbackService } from "../services/feedback.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { readAcceptedPlanConfirmationTarget } from "../services/issues.js";
@@ -1336,6 +1338,7 @@ export function issueRoutes(
   const issueApprovalsSvc = issueApprovalService(db);
   const recoveryActionsSvc = issueRecoveryActionService(db);
   const executionWorkspacesSvc = executionWorkspaceServiceDirect(db);
+  const overlapsSvc = issueOverlapDetectorService(db);
   const workProductsSvc = workProductService(db, { rawDb });
   const documentsSvc = documentService(db, { rawDb });
   const documentAnnotationsSvc = documentAnnotationService(db, { rawDb });
@@ -3914,6 +3917,7 @@ export function issueRoutes(
       continuationSummary,
       currentExecutionWorkspace,
       activeRecoveryAction,
+      activeOverlapWarnings,
     ] =
       await Promise.all([
         resolveIssueProjectAndGoal(issue),
@@ -3928,6 +3932,7 @@ export function issueRoutes(
         documentsSvc.getIssueDocumentByKey(issue.id, ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY),
         currentExecutionWorkspacePromise,
         recoveryActionsSvc.getActiveForIssue(issue.companyId, issue.id),
+        overlapsSvc.listActiveWarningsForIssue(issue.companyId, issue.id),
       ]);
     const recoveryActionsByRelationIssue = await relationRecoveryActionMap(
       recoveryActionsSvc,
@@ -4034,7 +4039,28 @@ export function issueRoutes(
         : null,
       planReviewContext,
       currentExecutionWorkspace,
+      // DUR-4468: open overlaps another active task re-confirmed in the last 30 minutes.
+      // Titles are left out on purpose: the identifier is enough to go and look.
+      activeOverlapWarnings: activeOverlapWarnings.map((w) => ({
+        ...w,
+        otherIssue: {
+          id: w.otherIssue.id,
+          identifier: w.otherIssue.identifier,
+          status: w.otherIssue.status,
+          assigneeAgentId: w.otherIssue.assigneeAgentId,
+        },
+      })),
     });
+  });
+
+  router.get("/companies/:companyId/overlaps", companyScopeFromParam(rawDb, assertCompanyAccess), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    if (isTaskBridgeKeyActor(req)) {
+      res.status(403).json({ error: "Task bridge keys cannot use company-wide overlap APIs" });
+      return;
+    }
+    res.json(await overlapsSvc.listOpenOverlaps(companyId));
   });
 
   router.get("/issues/:id", scopeFromIssueParam(), async (req, res) => {
@@ -9736,6 +9762,33 @@ export function issueRoutes(
     object.stream.pipe(res);
   });
 
+  router.get("/attachments/:attachmentId/thumbnail", scopeFromAttachmentParam(), async (req, res, next) => {
+    try {
+      const attachment = await svc.getAttachmentById(req.params.attachmentId as string);
+      if (!attachment) {
+        res.status(404).json({ error: "Attachment not found" });
+        return;
+      }
+      assertCompanyAccess(req, attachment.companyId);
+      if (!isThumbnailableContentType(attachment.contentType)) {
+        res.status(415).json({ error: "Attachment is not a raster image" });
+        return;
+      }
+      const thumb = await getOrCreateThumbnail(storage, attachment);
+      if (!thumb) {
+        res.status(413).json({ error: "Image too large to thumbnail" });
+        return;
+      }
+      res.setHeader("Content-Type", "image/webp");
+      res.setHeader("Cache-Control", "private, max-age=86400");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Content-Length", String(thumb.length));
+      res.end(thumb);
+    } catch (err) {
+      next(err);
+    }
+  });
+
   router.delete("/attachments/:attachmentId", scopeFromAttachmentParam(), async (req, res) => {
     const attachmentId = req.params.attachmentId as string;
     const attachment = await svc.getAttachmentById(attachmentId);
@@ -9768,6 +9821,13 @@ export function issueRoutes(
       await storage.deleteObject(attachment.companyId, attachment.objectKey);
     } catch (err) {
       logger.warn({ err, attachmentId }, "storage delete failed while removing attachment");
+    }
+    // The cached picture thumbnail is a copy of the file; remove it too.
+    // Not-found / failure is non-fatal (most attachments never had one).
+    try {
+      await storage.deleteObject(attachment.companyId, thumbnailObjectKey(attachment.objectKey));
+    } catch (err) {
+      logger.warn({ err, attachmentId }, "storage delete failed while removing attachment thumbnail");
     }
 
     const removed = await svc.removeAttachment(attachmentId);

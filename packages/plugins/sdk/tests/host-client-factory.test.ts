@@ -270,3 +270,23 @@ describe("createHostClientHandlers invocation company scope", () => {
     expect(createCompanyFile).toHaveBeenCalledWith(params);
   });
 });
+
+describe("models.analyseImage", () => {
+  const input = { companyId: "company-a", entryId: "e1", fileId: "f1", systemPrompt: "s", userPrompt: "u" };
+
+  it("needs models.image_analysis.run", async () => {
+    const analyseImage = vi.fn();
+    const handlers = createHostClientHandlers({ pluginId: "paperclip.test", capabilities: ["http.outbound"], services: { models: { analyseImage } } as unknown as HostServices });
+    await expect(handlers["models.analyseImage"](input, { invocationScope: { companyId: "company-a", userId: "u1", canManageCompany: true } })).rejects.toBeInstanceOf(CapabilityDeniedError);
+    expect(analyseImage).not.toHaveBeenCalled();
+  });
+
+  it("passes the host's invocation scope through and refuses another company", async () => {
+    const analyseImage = vi.fn(async () => ({ text: "ok", entryName: "M", provider: "local", model: "llava", costCents: 0 }));
+    const handlers = createHostClientHandlers({ pluginId: "paperclip.test", capabilities: ["models.image_analysis.run"], services: { models: { analyseImage } } as unknown as HostServices });
+    const scope = { invocationScope: { companyId: "company-a", userId: "u1", canManageCompany: true } };
+    await expect(handlers["models.analyseImage"](input, scope)).resolves.toMatchObject({ text: "ok" });
+    expect(analyseImage).toHaveBeenCalledWith(input, scope);
+    await expect(handlers["models.analyseImage"]({ ...input, companyId: "company-b" }, scope)).rejects.toBeInstanceOf(InvocationScopeDeniedError);
+  });
+});

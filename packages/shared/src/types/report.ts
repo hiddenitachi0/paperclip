@@ -5,10 +5,10 @@
  * shapes and packages/db/src/schema/report_script*.ts for storage.
  */
 
-export const REPORT_SCRIPT_VERSION_STATUSES = ["draft", "tested", "approved", "retired"] as const;
+export const REPORT_SCRIPT_VERSION_STATUSES = ["draft", "awaiting_approval", "approved", "retired"] as const;
 export type ReportScriptVersionStatus = (typeof REPORT_SCRIPT_VERSION_STATUSES)[number];
 
-export const REPORT_SCRIPT_RUN_TRIGGERS = ["fixture_test", "manual", "report_run"] as const;
+export const REPORT_SCRIPT_RUN_TRIGGERS = ["fixture_test", "approval_check", "report_run"] as const;
 export type ReportScriptRunTrigger = (typeof REPORT_SCRIPT_RUN_TRIGGERS)[number];
 
 export const REPORT_SCRIPT_RUN_STATUSES = ["running", "succeeded", "failed", "timeout", "fingerprint_mismatch"] as const;
@@ -33,7 +33,6 @@ export interface ReportScriptVersion {
   versionNo: number;
   files: Record<string, string>;
   entrypoint: string;
-  lockfile: string | null;
   sha256: string;
   inputSchema: Record<string, unknown>;
   outputSchema: Record<string, unknown>;
@@ -41,6 +40,8 @@ export interface ReportScriptVersion {
   changeSummary: string | null;
   createdByAgentId: string | null;
   createdByUserId: string | null;
+  /** The approval card showing this version's full source, once one was filed. */
+  approvalId: string | null;
   approvedByUserId: string | null;
   approvedAt: string | null;
   createdAt: string;
@@ -143,4 +144,26 @@ export interface ReportRun {
   requestedByUserId: string | null;
   createdAt: string;
   finishedAt: string | null;
+}
+
+/** One fixture's outcome as the owner's approve action recorded it on the approval card. */
+export interface ReportScriptApprovalFixtureResult {
+  fixtureId: string;
+  fixtureName: string;
+  runId: string | null;
+  status: ReportScriptRunStatus;
+  ok: boolean;
+  /** Plain-language outcome, e.g. "Matched every number" or "3 numbers differ". */
+  summary: string;
+  error: string | null;
+  diffs: ReportFixtureDiff[];
+}
+
+/** What the owner's approve action answers: approved only if every fixture passed. */
+export interface ReportScriptApprovalOutcome {
+  approved: boolean;
+  version: ReportScriptVersion;
+  fixtureResults: ReportScriptApprovalFixtureResult[];
+  /** Plain-language reason when not approved. */
+  message: string | null;
 }

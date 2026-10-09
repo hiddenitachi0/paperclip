@@ -1,6 +1,6 @@
 import { and, asc, desc, eq, inArray, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agentInstructionsRevisions, agents, approvalComments, approvals, personaPosts } from "@paperclipai/db";
+import { agentInstructionsRevisions, agents, approvalComments, approvals, personaPosts, reportScriptVersions } from "@paperclipai/db";
 import {
   hireMonthlySpendingLimitCentsFromPayload,
   LANE_A_THINKING_MODES,
@@ -18,6 +18,8 @@ import { agentInstructionsService } from "./agent-instructions.js";
 import { agentService } from "./agents.js";
 import { budgetService } from "./budgets.js";
 import { escalationGrantService } from "./escalation-grants.js";
+import { logActivity } from "./activity-log.js";
+import { isMergePrApprovalPayload, securityReviewService } from "./security-review.js";
 import { notifyHireApproved } from "./hire-hook.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { describeToolCapability, summarizeMcpServer } from "./agent-tool-audit.js";
@@ -70,6 +72,24 @@ export function isCrossCompanyInstructionApproval(
 }
 
 /**
+ * `request_board_approval` approvals whose payload carries
+ * `kind:"report_script_version"` (DUR-4072): the card that shows a report
+ * calculation script's full source. Approving one must first RUN its saved
+ * examples (report-scripts.ts approveVersion); so this service refuses to
+ * mark such a card approved unless its script version is already approved
+ * with the very digest the card shows. Every approve path (route, thread
+ * interactions, automation) is covered because the check sits here.
+ */
+export function isReportScriptVersionApproval(
+  approval: Pick<typeof approvals.$inferSelect, "type" | "payload">,
+): boolean {
+  return approval.type === "request_board_approval" && approval.payload?.kind === "report_script_version";
+}
+
+const REPORT_SCRIPT_DECISION_ELSEWHERE =
+  "A report calculation can only be approved by a company owner or admin from its approval card: approving runs its saved examples first and switches it on only if they all match";
+
+/**
  * Hooks the approvals route passes so approving/rejecting a cross-company
  * instruction card and delivering/refusing the instruction happen as ONE
  * decision. If `deliverApproved` throws, the card is put back to where it was
@@ -81,8 +101,22 @@ export interface CrossCompanyInstructionDecisionHooks {
   markRejected: (approval: typeof approvals.$inferSelect) => Promise<unknown>;
 }
 
+/**
+ * Who is approving a merge card with no `passed` security review at its
+ * current head commit, and why. Required by every `approve()` caller --
+ * route, issue-thread-interaction auto-decision, merge-pr automation -- not
+ * just the `/approve` HTTP route, so the gate can't be skipped by going
+ * around it (DUR-4568 finding #1).
+ */
+export interface ApprovalSecurityReviewBypass {
+  reason: string;
+  actorType: "user" | "agent" | "system";
+  actorId: string;
+}
+
 export interface ApprovalDecisionOptions {
   crossCompanyInstruction?: CrossCompanyInstructionDecisionHooks;
+  securityReviewBypass?: ApprovalSecurityReviewBypass;
 }
 
 const CROSS_COMPANY_DECISION_ELSEWHERE =
@@ -108,6 +142,7 @@ export function approvalService(db: Db) {
   const budgets = budgetService(db);
   const escalationGrants = escalationGrantService(db);
   const instanceSettings = instanceSettingsService(db);
+  const securityReview = securityReviewService(db);
   const canResolveStatuses = new Set(["pending", "revision_requested"]);
   const resolvableStatuses = Array.from(canResolveStatuses);
   type ApprovalRecord = typeof approvals.$inferSelect;
@@ -159,6 +194,23 @@ export function approvalService(db: Db) {
     if (isCrossCompanyInstructionApproval(existing) && !options.crossCompanyInstruction) {
       throw unprocessable(CROSS_COMPANY_DECISION_ELSEWHERE, { kind: "cross_company_instruction" });
     }
+    if (targetStatus === "approved") {
+      await assertSecurityReviewClearedOrBypassed(existing, options);
+    }
+    if (targetStatus === "approved" && isReportScriptVersionApproval(existing)) {
+      const payload = (existing.payload ?? {}) as Record<string, unknown>;
+      const versionId = typeof payload.versionId === "string" ? payload.versionId : null;
+      const version = versionId && POSTGRES_UUID_TEXT_RE.test(versionId)
+        ? await db
+          .select({ status: reportScriptVersions.status, sha256: reportScriptVersions.sha256 })
+          .from(reportScriptVersions)
+          .where(and(eq(reportScriptVersions.id, versionId), eq(reportScriptVersions.companyId, existing.companyId)))
+          .then((rows) => rows[0] ?? null)
+        : null;
+      if (!version || version.status !== "approved" || version.sha256 !== payload.sha256) {
+        throw unprocessable(REPORT_SCRIPT_DECISION_ELSEWHERE, { kind: "report_script_version" });
+      }
+    }
 
     const now = new Date();
     const updated = await db
@@ -186,6 +238,45 @@ export function approvalService(db: Db) {
     throw unprocessable(
       `Only pending or revision requested approvals can be ${targetStatus === "approved" ? "approved" : "rejected"}`,
     );
+  }
+
+  /**
+   * DUR-4566 item 4 / DUR-4568 finding #1: every path that can move a
+   * merge_pr card to "approved" runs this, not just the `/approve` HTTP
+   * route -- `issue-thread-interactions.ts`'s linked-approval auto-decision
+   * and `merge-pr-automation.ts`'s rule-6 auto-approve both call `approve()`
+   * directly and used to skip the check entirely. Only runs when the card is
+   * actually about to be decided (not on an idempotent retry of an
+   * already-approved card), so a bypass reason is never required twice.
+   */
+  async function assertSecurityReviewClearedOrBypassed(
+    existing: ApprovalRecord,
+    options: ApprovalDecisionOptions,
+  ) {
+    if (!canResolveStatuses.has(existing.status)) return;
+    if (!isMergePrApprovalPayload(existing.payload)) return;
+    const reviewState = await securityReview.computeState(existing);
+    if (reviewState.state === "passed") return;
+    const bypass = options.securityReviewBypass;
+    if (!bypass?.reason) {
+      throw unprocessable(
+        "This merge card has no passed security review at its current commit -- approving it " +
+          "requires an explicit \"approve without security review\" reason.",
+        { securityReviewState: reviewState.state },
+      );
+    }
+    await logActivity(db, {
+      companyId: existing.companyId,
+      actorType: bypass.actorType,
+      actorId: bypass.actorId,
+      action: "approval.approved_without_security_review",
+      entityType: "approval",
+      entityId: existing.id,
+      details: {
+        securityReviewState: reviewState.state,
+        reason: bypass.reason,
+      },
+    });
   }
 
   /**

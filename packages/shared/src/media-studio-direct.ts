@@ -87,11 +87,60 @@ export function estimateMediaStudioDirectCostCents(input: MediaStudioDirectEstim
  * charges exactly that, from the same function, and the two can never
  * drift. If a per-action price ever differs, change it here, in one place.
  */
-export const MEDIA_STUDIO_EDIT_ACTIONS = ["segment", "inpaint", "remove-background", "upscale", "restore", "variation", "prompt-edit"] as const;
+export const MEDIA_STUDIO_EDIT_ACTIONS = [
+  "segment",
+  "inpaint",
+  "remove-background",
+  "upscale",
+  "restore",
+  "variation",
+  "prompt-edit",
+  // Identities and rooms (Media Studio "Identities" / "Rooms"): one Sogni
+  // picture call that makes up to 2 pictures of a saved person; placing a
+  // product into a room photo with Sogni or Fal; training a LoRA on Fal.
+  "identity-pictures",
+  "identity-pictures-fal",
+  "higgsfield-pictures",
+  "higgsfield-soul-id",
+  "room-place",
+  "room-place-fal",
+  "lora-training",
+] as const;
 export type MediaStudioEditAction = (typeof MEDIA_STUDIO_EDIT_ACTIONS)[number];
 export const MEDIA_STUDIO_EDIT_BILLING_CODE = MEDIA_STUDIO_DIRECT_BILLING_CODE;
 
-export function estimateMediaStudioEditCostCents(_action: MediaStudioEditAction, provider: MediaStudioDirectProvider = "fal"): number {
+/** Which service each paid edit action runs on (for the cost row). */
+export function mediaStudioEditActionProvider(action: MediaStudioEditAction): "fal" | "sogni" | "higgsfield" {
+  if (action === "higgsfield-pictures" || action === "higgsfield-soul-id") return "higgsfield";
+  return action === "variation" || action === "prompt-edit" || action === "inpaint" || action === "room-place-fal" || action === "lora-training" || action === "identity-pictures-fal"
+    ? "fal"
+    : "sogni";
+}
+
+/**
+ * Training a LoRA on fal-ai/krea-2-trainer: Fal's published price is $0.003
+ * per training step (minimum $0.30). Media Studio trains with this many
+ * steps, so the price shown before training starts and the amount reserved
+ * are the same number.
+ */
+export const MEDIA_STUDIO_LORA_TRAINING_STEPS = 1000;
+export const MEDIA_STUDIO_LORA_TRAINING_USD_PER_STEP = 0.003;
+export function estimateLoraTrainingCostCents(steps: number = MEDIA_STUDIO_LORA_TRAINING_STEPS): number {
+  return Math.max(30, Math.ceil(steps * MEDIA_STUDIO_LORA_TRAINING_USD_PER_STEP * 100));
+}
+
+/**
+ * Higgsfield publishes no per-picture API price (it bills in its own
+ * credits), so one Higgsfield Soul picture is charged at this ESTIMATE: the
+ * same amount a Higgsfield picture call on the Edit tab reserves. Agent-made
+ * Higgsfield pictures are recorded at this figure with cost_source
+ * "estimate", so budgets and Media Studio's shared cap see them.
+ */
+export const MEDIA_STUDIO_HIGGSFIELD_PICTURE_ESTIMATE_CENTS = 8;
+
+export function estimateMediaStudioEditCostCents(action: MediaStudioEditAction, provider: MediaStudioDirectProvider = "fal"): number {
+  if (action === "lora-training") return estimateLoraTrainingCostCents();
+  if (action === "higgsfield-pictures") return MEDIA_STUDIO_HIGGSFIELD_PICTURE_ESTIMATE_CENTS;
   return estimateMediaStudioDirectCostCents({ kind: "picture", provider }).estimatedCostCents;
 }
 

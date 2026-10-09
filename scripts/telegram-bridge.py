@@ -1036,6 +1036,69 @@ def handle_reaction(state, bot, update):
         # already agrees; anything else is worth a log line, never a message.
         if isinstance(res, dict) and res.get("ok") is False and res.get("status") not in (404, 409):
             print(f"reaction not recorded ({bot['name']}): {res.get('status')} {str(res.get('error'))[:200]}", flush=True)
+            continue
+        send_reaction_follow_up(state, bot, update, event, res)
+
+
+# DUR-4345: a disliked picture gets at most ONE short follow-up question. The
+# server decides (it answers a "negative" reaction with `followUp.text` the
+# first time only, however often the picture is reacted to again); the bridge
+# just sends it as a reply to the picture and remembers which message it was,
+# so that a Telegram reply to THAT message is taken as the answer. Nothing
+# else the person types is ever treated as an answer.
+REACTION_FOLLOW_UP_LIMIT = 200
+REACTION_FOLLOW_UP_TTL = 3 * 24 * 3600
+
+
+def send_reaction_follow_up(state, bot, update, event, res):
+    follow_up = res.get("followUp") if isinstance(res, dict) and res.get("ok") is not False else None
+    text = follow_up.get("text") if isinstance(follow_up, dict) else None
+    if event.get("action") != "added" or not isinstance(text, str) or not text.strip():
+        return
+    chat_id = (update.get("chat") or {}).get("id")
+    sent = tg(bot["token"], "sendMessage", chat_id=chat_id, text=text,
+              reply_to_message_id=update.get("message_id"), disable_web_page_preview=True)
+    question_id = sent.get("message_id") if isinstance(sent, dict) else None
+    if not isinstance(question_id, int):
+        return
+    with LOCK:
+        pending = _bot_entry(state, bot["token"]).setdefault("reactionFollowUps", {})
+        pending[f"{chat_id}:{question_id}"] = {
+            "agentId": event["agentId"],
+            "telegramUserId": event["telegramUserId"],
+            "telegramChatId": event["telegramChatId"],
+            "telegramMessageId": event["telegramMessageId"],
+            "at": time.time(),
+        }
+        while len(pending) > REACTION_FOLLOW_UP_LIMIT:
+            pending.pop(next(iter(pending)))
+        save_state(state)
+
+
+def take_follow_up_answer(state, bot, m, text):
+    """If this message is a reply to a follow-up question we asked, store it as
+    the answer (once). The message is still handled as a normal one afterwards."""
+    replied = m.get("reply_to_message")
+    chat_id = (m.get("chat") or {}).get("id")
+    if not isinstance(replied, dict) or not text or chat_id is None:
+        return
+    key = f"{chat_id}:{replied.get('message_id')}"
+    with LOCK:
+        pending = _bot_entry(state, bot["token"]).setdefault("reactionFollowUps", {})
+        entry = pending.get(key)
+        if not entry or time.time() - entry.get("at", 0) > REACTION_FOLLOW_UP_TTL:
+            pending.pop(key, None)
+            return
+        if str((m.get("from") or {}).get("id")) != entry["telegramUserId"]:
+            return
+        pending.pop(key, None)
+        save_state(state)
+    payload = {k: entry[k] for k in ("agentId", "telegramUserId", "telegramChatId", "telegramMessageId")}
+    payload["answer"] = text[:300]
+    res = cli_env({"TT": json.dumps(payload)}, "chat", "reaction", "-C", bot["companyId"],
+                  "--follow-up-answer", "--event", '"$TT"')
+    if isinstance(res, dict) and res.get("ok") is False and res.get("status") != 404:
+        print(f"follow-up answer not recorded ({bot['name']}): {res.get('status')} {str(res.get('error'))[:200]}", flush=True)
 
 
 def remember_task(state, token, chat_id, task_ref, text, colleague=False):
@@ -1866,6 +1929,72 @@ def notify_watcher_alerts(state, bots):
 
 
 
+def ack_mail_urgency_alert(company_id, alert_id, outcome="delivered"):
+    return cli("mail-urgency", "outbox:ack", alert_id, "-C", company_id, "--outcome", outcome) is not None
+
+
+def notify_mail_urgency_alerts(state, bots):
+    """Send every urgent-mail alert waiting in each company's outbox, once.
+    The text is built server-side (sender, subject, one-line summary, reason,
+    link) and never contains the mail body (DUR-4573)."""
+    by_company = defaultdict(list)
+    for b in bots:
+        by_company[b["companyId"]].append(b)
+    with LOCK:
+        remembered = list(state.get("sent_mail_urgency_alerts", []))
+    sent_before = set(remembered)
+    for company_id, cbots in by_company.items():
+        data = cli("mail-urgency", "outbox", "-C", company_id)
+        items = data.get("alerts") if isinstance(data, dict) else None
+        if not isinstance(items, list) or not items:
+            continue
+        reports_to, names, roles = fetch_org(company_id)
+        default_bot = company_notice_bot(cbots, roles)
+        bots_by_agent = {b["agentId"]: b for b in cbots}
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            # The mailbox's own assistant speaks for its mail. If the mailbox
+            # has an assistant but she has no bot yet, the alert waits (it is
+            # never sent from another agent's bot, e.g. Fork Lead's).
+            pa_agent = it.get("agentId")
+            if isinstance(pa_agent, str) and pa_agent:
+                bot = bots_by_agent.get(pa_agent)
+            else:
+                bot = default_bot
+            if bot is None:
+                continue
+            alert_id = it.get("id")
+            if not isinstance(alert_id, str) or not UUID_RE.match(alert_id):
+                continue
+            if it.get("companyId") not in (None, company_id):
+                continue
+            if alert_id in sent_before:
+                # Telegram already has it; only the acknowledgement was lost.
+                ack_mail_urgency_alert(company_id, alert_id)
+                continue
+            chats = deliverable_chats(state, bot["token"], allowed_users_for(bot))
+            if not chats:
+                continue  # nobody has started this bot yet: try again next pass
+            text = str(it.get("text") or "").strip()
+            if not text:
+                continue
+            delivered = False
+            for chat in chats:
+                if send_text_checked(bot["token"], chat, text):
+                    delivered = True
+            if not delivered:
+                continue  # Telegram refused; the next pass tries again
+            # Record as sent BEFORE acknowledging, so a crash between the two
+            # never double-sends on the next pass.
+            sent_before.add(alert_id)
+            remembered.append(alert_id)
+            with LOCK:
+                state["sent_mail_urgency_alerts"] = remembered[-WATCHER_ALERTS_REMEMBERED:]
+                save_state(state)
+            ack_mail_urgency_alert(company_id, alert_id)
+
+
 # ─── Disk warnings (DUR-4499) ─────────────────────────────────────────────────
 #
 # The instance disk report comes from `disk-health` (read-only). One message
@@ -2117,6 +2246,7 @@ def handle_message(state, bot, m):
         print(f"telegram-bridge: ignored a message to {bot['name']} from a Telegram user or chat that is not allowed", flush=True)
         return
     register_chat(state, bot["token"], chat_id)
+    take_follow_up_answer(state, bot, m, text)
     if isinstance(m.get("voice"), dict) or isinstance(m.get("audio"), dict):
         handle_voice_message(state, bot, chat_id, m)
         return
@@ -2354,6 +2484,10 @@ def main():
             notify_watcher_alerts(state, bots)
         except Exception as e:
             print(f"watcher-alert-notify error: {e}", flush=True)
+        try:
+            notify_mail_urgency_alerts(state, bots)
+        except Exception as e:
+            print(f"mail-urgency-alert-notify error: {e}", flush=True)
         try:
             notify_morning_reports(state, bots)
         except Exception as e:

@@ -1,6 +1,6 @@
 import { and, desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { documentRevisions, documents, reportScriptVersions, reportTemplates } from "@paperclipai/db";
+import { dataConnections, documentRevisions, documents, reportScriptVersions, reportTemplates } from "@paperclipai/db";
 import type { CreateReportTemplateInput, ReportTemplate, UpdateReportTemplateInput } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
 
@@ -49,6 +49,21 @@ export function reportTemplatesService(db: Db) {
     }
   }
 
+  /**
+   * A template may only name a data connection of ITS OWN company. The
+   * foreign key alone would accept another company's connection id, and
+   * once fetching is wired that would read another company's data.
+   */
+  async function assertOwnDataConnection(companyId: string, dataConnectionId: string | null | undefined): Promise<void> {
+    if (!dataConnectionId) return;
+    const rows = await db
+      .select({ id: dataConnections.id })
+      .from(dataConnections)
+      .where(and(eq(dataConnections.id, dataConnectionId), eq(dataConnections.companyId, companyId)))
+      .limit(1);
+    if (!rows[0]) throw notFound("Data connection not found");
+  }
+
   async function listTemplates(companyId: string): Promise<ReportTemplate[]> {
     const rows = await db.select().from(reportTemplates).where(eq(reportTemplates.companyId, companyId)).orderBy(desc(reportTemplates.createdAt));
     return rows.map(toSummary);
@@ -71,6 +86,7 @@ export function reportTemplatesService(db: Db) {
     actor: { agentId?: string; userId?: string },
   ): Promise<ReportTemplate> {
     await assertApprovedVersion(companyId, input.scriptVersionId);
+    await assertOwnDataConnection(companyId, input.dataConnectionId);
     const existing = await db
       .select({ id: reportTemplates.id })
       .from(reportTemplates)
@@ -97,6 +113,7 @@ export function reportTemplatesService(db: Db) {
   async function updateTemplate(companyId: string, templateId: string, input: UpdateReportTemplateInput): Promise<ReportTemplate> {
     await getTemplate(companyId, templateId);
     if (input.scriptVersionId) await assertApprovedVersion(companyId, input.scriptVersionId);
+    await assertOwnDataConnection(companyId, input.dataConnectionId);
     const [row] = await db
       .update(reportTemplates)
       .set({ ...input, updatedAt: new Date() })

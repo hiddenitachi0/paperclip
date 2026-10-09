@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDb, companies, videoStorylines } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { videoStorylineStitchService } from "../services/video-storyline-stitch.ts";
@@ -9,10 +9,14 @@ import { videoStorylineService, type VideoStorylineActor } from "../services/vid
 /**
  * DUR-4127: the ground rule the ticket is explicit about -- a host without
  * ffmpeg must never be installed into or blocked on; it parks the storyline
- * with stitchBlockedReason set and moves on. This sandbox genuinely has no
- * ffmpeg binary, so this test exercises the real "unavailable" branch rather
- * than a mocked one -- see checkFfmpegAvailable in video-ffmpeg.ts.
+ * with stitchBlockedReason set and moves on. ffmpeg availability is forced
+ * to "missing" here so the test means the same on a host that does have it
+ * (the real stitch path is covered by video-storyline-e2e-routes.test.ts).
  */
+vi.mock("../services/video-ffmpeg.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/video-ffmpeg.ts")>()),
+  checkFfmpegAvailable: async () => false,
+}));
 const support = await getEmbeddedPostgresTestSupport();
 const d = support.supported ? describe : describe.skip;
 if (!support.supported) {

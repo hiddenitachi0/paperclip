@@ -538,6 +538,63 @@ describe("issue attachment routes", () => {
     expect(storage.getObject).not.toHaveBeenCalled();
   });
 
+  it("serves a small cached webp thumbnail, generating it once", async () => {
+    const sharp = (await import("sharp")).default;
+    const big = await sharp({ create: { width: 1600, height: 1200, channels: 3, background: { r: 200, g: 30, b: 90 } } })
+      .png()
+      .toBuffer();
+    const storage = createStorageService(big);
+    const cache = new Map<string, Buffer>();
+    storage.headObject = vi.fn(async (_c: string, key: string) => ({ exists: cache.has(key) }));
+    storage.putObjectAt = vi.fn(async (_c: string, key: string, body: Buffer) => {
+      cache.set(key, body);
+    });
+    (storage.getObject as any).mockImplementation(async (_c: string, key: string) => ({
+      stream: Readable.from(cache.get(key) ?? big),
+    }));
+    mockIssueService.getAttachmentById.mockResolvedValue(makeAttachment("image/png", "big.png"));
+
+    const app = await createApp(storage);
+    const first = await request(app).get("/api/attachments/attachment-1/thumbnail").buffer(true).parse(parseBinaryResponse);
+    expect(first.status).toBe(200);
+    expect(first.headers["content-type"]).toContain("image/webp");
+    expect(first.body.length).toBeLessThan(big.length / 4);
+    const meta = await sharp(first.body).metadata();
+    expect(Math.max(meta.width ?? 0, meta.height ?? 0)).toBe(256);
+    expect(storage.putObjectAt).toHaveBeenCalledTimes(1);
+
+    const second = await request(app).get("/api/attachments/attachment-1/thumbnail").buffer(true).parse(parseBinaryResponse);
+    expect(second.status).toBe(200);
+    expect(second.body.equals(first.body)).toBe(true);
+    expect(storage.putObjectAt).toHaveBeenCalledTimes(1);
+  });
+
+  it("deletes the cached thumbnail along with the attachment", async () => {
+    const storage = createStorageService();
+    const attachment = makeAttachment("image/png", "big.png");
+    mockIssueService.getAttachmentById.mockResolvedValue(attachment);
+    mockIssueService.removeAttachment = vi.fn().mockResolvedValue(attachment);
+    (storage.deleteObject as any).mockResolvedValue(undefined);
+
+    const app = await createApp(storage);
+    const res = await request(app).delete("/api/attachments/attachment-1");
+
+    expect(res.status).toBe(200);
+    expect(storage.deleteObject).toHaveBeenCalledWith(attachment.companyId, attachment.objectKey);
+    expect(storage.deleteObject).toHaveBeenCalledWith(attachment.companyId, `${attachment.objectKey}.thumb256.webp`);
+  });
+
+  it("rejects cross-company thumbnail reads like /content", async () => {
+    const storage = createStorageService();
+    mockIssueService.getAttachmentById.mockResolvedValue(makeAttachment("image/png", "big.png"));
+
+    const app = await createApp(storage, { companyIds: ["88888888-8888-4888-8888-888888888888"], source: "session" });
+    const res = await request(app).get("/api/attachments/attachment-1/thumbnail");
+
+    expect(res.status).toBe(403);
+    expect(storage.getObject).not.toHaveBeenCalled();
+  });
+
   it("canonicalizes paperclip artifact metadata before creating a work product", async () => {
     const storage = createStorageService();
     const issue = {

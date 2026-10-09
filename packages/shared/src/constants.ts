@@ -736,6 +736,11 @@ export const SECRET_BINDING_TARGET_TYPES = [
   "project",
   "environment",
   "routine",
+  // DUR-4583: one routine_triggers row's webhook secret (config_path
+  // 'webhookSecret'). Pure "used by" bookkeeping: resolution still goes
+  // through the "routine" binding above. Not dedicated -- one secret may be
+  // shared by triggers on several routines.
+  "routine_trigger",
   // DUR-4182: webhook auth secret for a job_triggers row, same shape as
   // "routine" above (routineWebhookSecretConfigPath-style config path).
   "job",
@@ -812,6 +817,12 @@ export const SECRET_BINDING_TARGET_TYPES = [
   // mailbox's credential is that person's alone, never shared across two
   // mail accounts the way one watcher's price-check key might be.
   "mail_account",
+  // "Ask Paperclip" helper: the key the helper calls one provider with
+  // (target_id = the company id, config_path helperKeyConfigPath(provider),
+  // e.g. "helper.apiKey.openrouter"). Never resolved by any agent -- only by
+  // the server-side helper service, which makes the model call itself. Not
+  // dedicated: the same OpenRouter key may also be a quick agent's key.
+  "helper",
 ] as const;
 export type SecretBindingTargetType = (typeof SECRET_BINDING_TARGET_TYPES)[number];
 
@@ -1248,8 +1259,11 @@ export const PLUGIN_CAPABILITIES = [
   "external.objects.refresh",
   // Personas
   "personas.generation_cap.enforce",
+  "personas.picture_feedback.read",
   // Billing
   "billing.media_studio_direct.reserve",
+  // Models: picture analysis with a company's saved model, run by the host
+  "models.image_analysis.run",
   // Plugin State
   "plugin.state.read",
   "plugin.state.write",

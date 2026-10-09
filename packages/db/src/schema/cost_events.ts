@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, integer, bigint, index } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, integer, bigint, doublePrecision, index } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
 import { issues } from "./issues.js";
@@ -30,6 +30,11 @@ export const costEvents = pgTable(
     inputTokens: integer("input_tokens").notNull().default(0),
     cachedInputTokens: integer("cached_input_tokens").notNull().default(0),
     outputTokens: integer("output_tokens").notNull().default(0),
+    // DUR-4470: prompt-cache WRITES (billed 1.25x/2x input), distinct from
+    // cachedInputTokens which counts cache reads only.
+    cacheWriteInputTokens: integer("cache_write_input_tokens").notNull().default(0),
+    cacheWrite1hInputTokens: integer("cache_write_1h_input_tokens").notNull().default(0),
+    cacheWriteCostCents: doublePrecision("cache_write_cost_cents").notNull().default(0),
     costCents: integer("cost_cents").notNull(),
     // DUR-4453: exact sub-cent cost (1 USD = 1,000,000). Nullable: older rows
     // only carry cost_cents; readers fall back to cost_cents * 10000.

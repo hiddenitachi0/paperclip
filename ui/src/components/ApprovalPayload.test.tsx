@@ -380,6 +380,41 @@ describe("ApprovalPayloadRenderer", () => {
     });
   });
 
+  it("renders a report_script_version card with the full source, the trust warning and each example's result (DUR-4072)", () => {
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+      <ApprovalPayloadRenderer
+        type="request_board_approval"
+        payload={{
+          kind: "report_script_version",
+          title: 'Approve calculation "Sum" (version 1)',
+          summary: "It has not run yet.",
+          trustWarning: "Approved calculation scripts run on the Paperclip server with the server's own access.",
+          sha256: "a".repeat(64),
+          entrypoint: "main.py",
+          files: { "main.py": "import helpers\nprint(helpers.TOTAL)", "helpers.py": "TOTAL = 6" },
+          fixtures: [{ id: "f1", name: "q1" }],
+          fixtureResults: [
+            { fixtureId: "f1", fixtureName: "q1", ok: false, summary: "1 number did not match.", diffs: [{ path: "total", expected: 6, actual: 999 }] },
+          ],
+        }}
+      />,
+      );
+    });
+    const text = container.textContent ?? "";
+    expect(text).toContain("print(helpers.TOTAL)");
+    expect(text).toContain("TOTAL = 6");
+    expect(text).toContain("server's own access");
+    expect(text).toContain("Approving means trusting this code");
+    expect(text).toContain("Did not match");
+    expect(text).toContain("total: expected 6, got 999");
+    expect(text).toContain("a".repeat(64));
+    act(() => {
+      root.unmount();
+    });
+  });
+
   it("renders a persona_publish card as plain language: the post text, disclosure, why, and what approve does (DUR-134)", () => {
     const root = createRoot(container);
 

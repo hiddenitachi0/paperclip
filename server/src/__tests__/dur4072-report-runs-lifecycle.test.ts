@@ -1,8 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { eq, sql } from "drizzle-orm";
 import {
   companies,
+  companySecrets,
   createDb,
+  dataConnections,
   documentRevisions,
   documents,
   reportFixtures,
@@ -13,7 +16,7 @@ import {
   reportTemplates,
 } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
-import { reportScriptsService } from "../services/report-scripts.js";
+import { ReportScriptRunLimiter, reportScriptsService } from "../services/report-scripts.js";
 import { reportTemplatesService } from "../services/report-templates.js";
 import { reportRunsService } from "../services/report-runs.js";
 import type { ReportScriptRunner } from "../services/report-script-runner.js";
@@ -36,7 +39,6 @@ d("DUR-4072 report run lifecycle", () => {
   let companyId: string;
 
   const fakeRunner: ReportScriptRunner = {
-    ensureRuntime: async () => ({ runtimeDir: "/tmp/x", fingerprint: "fp", hasVenv: false }),
     run: async (_script, input) => {
       const rows = (input as { rows: Array<{ amount: number }> }).rows;
       return {
@@ -65,38 +67,48 @@ d("DUR-4072 report run lifecycle", () => {
     await db.delete(reportFixtures);
     await db.delete(reportScriptVersions);
     await db.delete(reportScripts);
-    await db.delete(companies);
+    await db.execute(sql`TRUNCATE TABLE companies CASCADE`);
   });
 
   afterAll(async () => {
     await stopDb?.();
   });
 
+  const scriptsFor = () => reportScriptsService(db, { runner: fakeRunner, limiter: new ReportScriptRunLimiter() });
+
+  async function insertCompany(id: string) {
+    await db.insert(companies).values({
+      id,
+      name: `Test Co ${id.slice(0, 8)}`,
+      issuePrefix: `Q${id.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+  }
+
   async function setUpApprovedTemplate() {
     companyId = randomUUID();
-    await db.insert(companies).values({ id: companyId, name: "Test Co", slug: `test-co-${companyId.slice(0, 8)}` });
+    await insertCompany(companyId);
 
-    const scriptsSvc = reportScriptsService(db, { runner: fakeRunner });
+    const scriptsSvc = scriptsFor();
     const script = await scriptsSvc.createScript(companyId, { key: "sales-sum", name: "Sales sum" }, {});
     const version = await scriptsSvc.createVersion(
       companyId,
       script.id,
-      { files: { "main.py": "x" }, entrypoint: "main.py", lockfile: null },
+      { files: { "main.py": "x" }, entrypoint: "main.py", inputSchema: {}, outputSchema: {} },
       {},
     );
-    // A version can only be approved once it is 'tested' -- pass a fixture
-    // first, the same prerequisite PR1's approval gate enforces.
-    const fixture = await scriptsSvc.createFixture(companyId, version.id, {
+    // Approval first: a saved example, the approval card, then the owner's
+    // approve action (which runs the example). The route-level owner check
+    // is covered in dur4072-report-script-approval-first.test.ts.
+    await scriptsSvc.createFixture(companyId, version.id, {
       name: "basic",
       input: { rows: [{ amount: 1 }] },
       expectedOutput: { total: 1, count: 1 },
       tolerance: 0,
     });
-    await scriptsSvc.runFixture(companyId, version.id, fixture.id, {});
-    // Approval is the ticket's "never live without Filip's approval" gate --
-    // bypass the route's board-owner check here since this test is about the
-    // run lifecycle, not that gate (PR1's tests cover the gate itself).
-    await scriptsSvc.approveVersion(companyId, version.id, { userId: "filip" });
+    await scriptsSvc.requestApproval(companyId, version.id, {});
+    const outcome = await scriptsSvc.approveVersion(companyId, version.id, { userId: "filip", sha256: version.sha256 });
+    expect(outcome.approved).toBe(true);
 
     const templatesSvc = reportTemplatesService(db);
     const template = await templatesSvc.createTemplate(
@@ -104,15 +116,15 @@ d("DUR-4072 report run lifecycle", () => {
       { key: "weekly-sales", name: "Weekly sales", instructions: "Summarise sales.", layout: {}, scriptVersionId: version.id },
       {},
     );
-    return { templatesSvc, scriptsSvc, template };
+    return { templatesSvc, scriptsSvc, template, version };
   }
 
   it("refuses to attach a template to a script version that is not approved", async () => {
     companyId = randomUUID();
-    await db.insert(companies).values({ id: companyId, name: "Test Co", slug: `test-co-${companyId.slice(0, 8)}` });
-    const scriptsSvc = reportScriptsService(db, { runner: fakeRunner });
+    await insertCompany(companyId);
+    const scriptsSvc = scriptsFor();
     const script = await scriptsSvc.createScript(companyId, { key: "draft-script", name: "Draft" }, {});
-    const version = await scriptsSvc.createVersion(companyId, script.id, { files: { "main.py": "x" }, entrypoint: "main.py", lockfile: null }, {});
+    const version = await scriptsSvc.createVersion(companyId, script.id, { files: { "main.py": "x" }, entrypoint: "main.py", inputSchema: {}, outputSchema: {} }, {});
     const templatesSvc = reportTemplatesService(db);
     await expect(
       templatesSvc.createTemplate(companyId, { key: "t", name: "T", instructions: "i", layout: {}, scriptVersionId: version.id }, {}),
@@ -121,7 +133,7 @@ d("DUR-4072 report run lifecycle", () => {
 
   it("fetches data, runs the pinned script, and stores the numbers verbatim", async () => {
     const { template } = await setUpApprovedTemplate();
-    const scriptsSvc = reportScriptsService(db, { runner: fakeRunner });
+    const scriptsSvc = scriptsFor();
     const runsSvc = reportRunsService(db, {
       reportScripts: scriptsSvc,
       fetchData: async () => ({ rows: [{ amount: 100 }, { amount: 50 }] }),
@@ -133,7 +145,7 @@ d("DUR-4072 report run lifecycle", () => {
 
   it("rejects commentary with a number not in the script output, and never writes a document for it", async () => {
     const { template } = await setUpApprovedTemplate();
-    const scriptsSvc = reportScriptsService(db, { runner: fakeRunner });
+    const scriptsSvc = scriptsFor();
     const runsSvc = reportRunsService(db, {
       reportScripts: scriptsSvc,
       fetchData: async () => ({ rows: [{ amount: 100 }, { amount: 50 }] }),
@@ -147,7 +159,7 @@ d("DUR-4072 report run lifecycle", () => {
 
   it("accepts grounded commentary and creates a report document with a revision", async () => {
     const { template } = await setUpApprovedTemplate();
-    const scriptsSvc = reportScriptsService(db, { runner: fakeRunner });
+    const scriptsSvc = scriptsFor();
     const runsSvc = reportRunsService(db, {
       reportScripts: scriptsSvc,
       fetchData: async () => ({ rows: [{ amount: 100 }, { amount: 50 }] }),
@@ -168,10 +180,78 @@ d("DUR-4072 report run lifecycle", () => {
 
   it("fails the run cleanly when no data source is wired for the template", async () => {
     const { template } = await setUpApprovedTemplate();
-    const scriptsSvc = reportScriptsService(db, { runner: fakeRunner });
+    const scriptsSvc = scriptsFor();
     const runsSvc = reportRunsService(db, { reportScripts: scriptsSvc });
     const run = await runsSvc.startRun(companyId, template.id, {});
     expect(run.status).toBe("failed");
     expect(run.error).toMatch(/data source/i);
+  });
+
+  it("never runs a version that is no longer approved: the run fails and the runner is not called", async () => {
+    const { template, version } = await setUpApprovedTemplate();
+    await db.update(reportScriptVersions).set({ status: "retired" }).where(eq(reportScriptVersions.id, version.id));
+    let calls = 0;
+    const scriptsSvc = reportScriptsService(db, {
+      runner: { run: async (...args) => { calls += 1; return fakeRunner.run(...args); } },
+      limiter: new ReportScriptRunLimiter(),
+    });
+    const runsSvc = reportRunsService(db, { reportScripts: scriptsSvc, fetchData: async () => ({ rows: [] }) });
+    const run = await runsSvc.startRun(companyId, template.id, {});
+    expect(run.status).toBe("failed");
+    expect(run.error).toMatch(/not been approved/);
+    expect(calls).toBe(0);
+  });
+
+  it("re-checks the approved code's digest from the database before a report run", async () => {
+    const { template, version } = await setUpApprovedTemplate();
+    await db.update(reportScriptVersions).set({ files: { "main.py": "print('tampered')" } }).where(eq(reportScriptVersions.id, version.id));
+    let calls = 0;
+    const scriptsSvc = reportScriptsService(db, {
+      runner: { run: async (...args) => { calls += 1; return fakeRunner.run(...args); } },
+      limiter: new ReportScriptRunLimiter(),
+    });
+    const runsSvc = reportRunsService(db, { reportScripts: scriptsSvc, fetchData: async () => ({ rows: [] }) });
+    const run = await runsSvc.startRun(companyId, template.id, {});
+    expect(run.status).toBe("failed");
+    expect(calls).toBe(0);
+    const [scriptRun] = await db.select().from(reportScriptRuns).where(eq(reportScriptRuns.trigger, "report_run"));
+    expect(scriptRun!.status).toBe("fingerprint_mismatch");
+  });
+
+  it("report runs count against the company's hourly calculation budget", async () => {
+    const { template } = await setUpApprovedTemplate();
+    const scriptsSvc = reportScriptsService(db, { runner: fakeRunner, limiter: new ReportScriptRunLimiter(), maxRunsPerHour: 2 });
+    const runsSvc = reportRunsService(db, { reportScripts: scriptsSvc, fetchData: async () => ({ rows: [{ amount: 1 }] }) });
+    // 1 run was the approval check; one more fits.
+    expect((await runsSvc.startRun(companyId, template.id, {})).status).toBe("drafting_commentary");
+    const over = await runsSvc.startRun(companyId, template.id, {});
+    expect(over.status).toBe("failed");
+    expect(over.error).toMatch(/calculation runs for the last hour/);
+  });
+
+  it("refuses a template that names another company's data connection", async () => {
+    const { templatesSvc, version } = await setUpApprovedTemplate();
+    const otherCompanyId = randomUUID();
+    await insertCompany(otherCompanyId);
+    const [secret] = await db.insert(companySecrets).values({ companyId: otherCompanyId, key: "shop-key", name: "Shop key" }).returning();
+    const [conn] = await db
+      .insert(dataConnections)
+      .values({
+        companyId: otherCompanyId,
+        kind: "shopify",
+        name: "Other shop",
+        shopDomain: "other.myshopify.com",
+        apiVersion: "2026-07",
+        credentialKind: "admin_access_token",
+        credentialSecretId: secret!.id,
+      })
+      .returning();
+    await expect(
+      templatesSvc.createTemplate(
+        companyId,
+        { key: "cross", name: "Cross", instructions: "i", layout: {}, scriptVersionId: version.id, dataConnectionId: conn!.id },
+        {},
+      ),
+    ).rejects.toThrow(/Data connection not found/);
   });
 });

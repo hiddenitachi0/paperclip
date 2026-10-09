@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { agents, companies, createDb } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
-import { MODEL_DIRECTORY_STARTERS } from "@paperclipai/shared";
+import { MODEL_DIRECTORY_STARTERS, modelDirectoryEntryIssue } from "@paperclipai/shared";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { modelDirectoryService, resolveBackupModelsThroughDirectory } from "../services/model-directory.ts";
 
@@ -36,16 +36,48 @@ d("model directory starters and settings import", () => {
   });
 
   it("creates the starters company-scoped, without a key, and is safe to repeat", async () => {
-    const first = await svc.addStarters(a, undefined, actor);
+    // Without the company's model server address, only the cloud starters are added.
+    const withoutAddress = await svc.addStarters(b, undefined, actor);
+    const localCount = MODEL_DIRECTORY_STARTERS.filter((s) => s.provider === "local").length;
+    expect(withoutAddress.created.length).toBe(MODEL_DIRECTORY_STARTERS.length - localCount);
+    expect(withoutAddress.created.every((e) => e.provider !== "local")).toBe(true);
+    expect(withoutAddress.skipped.length).toBe(localCount);
+    for (const entry of await svc.list(b)) await svc.remove(b, entry.id);
+
+    await svc.updateSettings(a, { localBaseUrl: "http://192.168.1.20:11434/v1" }, actor);
+    const { created: first, skipped } = await svc.addStarters(a, undefined, actor);
+    expect(skipped).toEqual([]);
     expect(first.length).toBe(MODEL_DIRECTORY_STARTERS.length);
+    expect(first.filter((e) => e.provider === "local").every((e) => e.baseUrl === "http://192.168.1.20:11434/v1")).toBe(true);
     expect(first.every((e) => e.companyId === a)).toBe(true);
-    expect(first.find((e) => e.provider === "openrouter")).toMatchObject({ model: expect.stringContaining("mistral-small-3.2"), baseUrl: null });
+    expect(first.find((e) => e.model.includes("mistral-small-3.2"))).toMatchObject({ provider: "openrouter", baseUrl: null });
+    // Catalogue fields and defaults travel with the starter.
+    expect(first.find((e) => e.model === "qwen/qwen3.8-27b")).toMatchObject({
+      maker: "Alibaba Qwen",
+      lane: "both",
+      availability: "cloud",
+      // No ready-made setup picks an OpenRouter host: that is the company's choice.
+      providerRouting: null,
+      defaultTemperature: 0.7,
+    });
     expect(JSON.stringify(first)).not.toMatch(/apiKey|secret/i);
-    expect(await svc.addStarters(a, undefined, actor)).toEqual([]);
+    expect(await svc.addStarters(a, undefined, actor)).toEqual({ created: [], skipped: [] });
     expect(await svc.list(b)).toEqual([]);
     expect((await svc.listStarters(a)).every((s) => s.alreadyAdded)).toBe(true);
     expect((await svc.listStarters(b)).every((s) => !s.alreadyAdded)).toBe(true);
     await expect(svc.addStarters(b, ["nope"], actor)).rejects.toMatchObject({ status: 422 });
+  });
+
+  it("ships tool-capable Hugging Face starters that pass entry validation", () => {
+    const hf = MODEL_DIRECTORY_STARTERS.filter((s) => s.provider === "huggingface");
+    expect(hf.map((s) => s.model)).toEqual([
+      "huihui-ai/Huihui-Qwen3-14B-abliterated-v2:featherless-ai",
+      "darkc0de/Qwen3.8-27B-heretic:featherless-ai",
+    ]);
+    for (const s of hf) {
+      expect(s.baseUrl).toBeNull();
+      expect(modelDirectoryEntryIssue({ provider: s.provider, model: s.model, baseUrl: s.baseUrl })).toBeNull();
+    }
   });
 
   it("de-duplicates identical manual setups, links agents, and leaves their live settings alone", async () => {

@@ -71,6 +71,8 @@ export interface RegisteredTool {
   description: string;
   /** JSON Schema describing the tool's input parameters. */
   parametersSchema: Record<string, unknown>;
+  /** Optional plain-English group label from the manifest, for the agent Tools tab. */
+  category?: string;
 }
 
 /**
@@ -272,6 +274,7 @@ export function createPluginToolRegistry(
       displayName: decl.displayName,
       description: decl.description,
       parametersSchema: decl.parametersSchema,
+      ...(decl.category ? { category: decl.category } : {}),
     };
 
     byNamespace.set(namespacedName, entry);

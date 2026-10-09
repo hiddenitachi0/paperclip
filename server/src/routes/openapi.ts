@@ -53,6 +53,16 @@ import {
   updateGoalSchema,
   // Business-data connections (DUR-3972)
   createDataConnectionSchema,
+  createReportScriptSchema,
+  createReportScriptVersionSchema,
+  createReportFixtureSchema,
+  requestReportScriptApprovalSchema,
+  runReportScriptFixtureSchema,
+  approveReportScriptVersionSchema,
+  createReportTemplateSchema,
+  updateReportTemplateSchema,
+  createReportRunSchema,
+  draftReportRunCommentarySchema,
   dataTrialCalculationSchema,
   setDatasetSourceSchema,
   updateDataConnectionSchema,
@@ -170,6 +180,11 @@ import {
   createModelDirectoryEntrySchema,
   updateModelDirectoryEntrySchema,
   duplicateModelDirectoryEntrySchema,
+  importModelDirectoryCatalogueSchema,
+  syncLocalModelsSchema,
+  updateModelDirectorySettingsSchema,
+  // Merge-card security review (DUR-4566)
+  recordSecurityReviewVerdictSchema,
 } from "@paperclipai/shared";
 
 type JsonSchema = Record<string, unknown>;
@@ -794,13 +809,32 @@ const BOARD_ONLY_OPERATIONS = new Set([
   // a saved model setup, so it cannot re-point itself or another agent.
   "GET /api/companies/{companyId}/model-directory",
   "POST /api/companies/{companyId}/model-directory",
+  "GET /api/companies/{companyId}/model-directory/export",
+  "GET /api/companies/{companyId}/model-directory/settings",
+  "PUT /api/companies/{companyId}/model-directory/settings",
+  "GET /api/companies/{companyId}/model-directory/openrouter-hosts",
+  "POST /api/companies/{companyId}/model-directory/local-sync",
+  "POST /api/companies/{companyId}/model-directory/import",
   "GET /api/companies/{companyId}/model-directory/starters",
   "POST /api/companies/{companyId}/model-directory/starters",
   "POST /api/companies/{companyId}/model-directory/import-agent-settings",
+  "GET /api/companies/{companyId}/model-directory/health",
   "GET /api/companies/{companyId}/model-directory/{entryId}",
+  "POST /api/companies/{companyId}/model-directory/{entryId}/check",
+  "POST /api/companies/{companyId}/model-directory/{entryId}/test",
+  "POST /api/companies/{companyId}/model-directory/{entryId}/probes",
+  "GET /api/companies/{companyId}/model-directory/{entryId}/capabilities",
+  "POST /api/companies/{companyId}/model-directory/{entryId}/reviews",
+  "GET /api/companies/{companyId}/model-directory/{entryId}/reviews",
+  "POST /api/companies/{companyId}/model-directory/{entryId}/reviews/{reviewId}/changes/{changeId}/apply",
+  "POST /api/companies/{companyId}/model-directory/{entryId}/reviews/{reviewId}/changes/{changeId}/decline",
+  "POST /api/companies/{companyId}/model-directory/{entryId}/reviews/{reviewId}/changes/{changeId}/undo",
   "PATCH /api/companies/{companyId}/model-directory/{entryId}",
   "DELETE /api/companies/{companyId}/model-directory/{entryId}",
   "POST /api/companies/{companyId}/model-directory/{entryId}/duplicate",
+  // "Check this setup": a real (tiny, paid) model call for one quick agent's
+  // main model or backup. Company owner/admin only; an agent never runs it.
+  "POST /api/agents/{agentId}/lane-a/check",
 ]);
 
 const INSTANCE_ADMIN_OPERATIONS = new Set([
@@ -887,6 +921,12 @@ const CREATED_OPERATIONS = new Set([
   "POST /api/instance/claude-auth/sign-in",
   "POST /api/companies/{companyId}/telegram-bots",
   "POST /api/companies/{companyId}/data-connections",
+  "POST /api/companies/{companyId}/report-scripts",
+  "POST /api/companies/{companyId}/report-scripts/{scriptId}/versions",
+  "POST /api/companies/{companyId}/report-scripts/versions/{versionId}/fixtures",
+  "POST /api/companies/{companyId}/report-scripts/versions/{versionId}/request-approval",
+  "POST /api/companies/{companyId}/report-templates",
+  "POST /api/companies/{companyId}/report-runs",
 ]);
 
 const ACCEPTED_OPERATIONS = new Set([
@@ -1371,6 +1411,15 @@ registry.registerPath({
   summary: "List company feedback traces",
   request: { params: z.object({ companyId: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/overlaps",
+  tags: ["companies"],
+  summary: "List open overlaps between issues in a company",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
 });
 
 registry.registerPath({
@@ -2795,6 +2844,27 @@ registry.registerPath({
 
 registry.registerPath({
   method: "post",
+  path: "/api/approvals/{id}/security-review/request",
+  tags: ["approvals"],
+  summary: "Request a security review for a merge card at its current head commit",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/approvals/{id}/security-review/verdict",
+  tags: ["approvals"],
+  summary: "Record a security review verdict for a merge card",
+  request: {
+    params: z.object({ id: z.string() }),
+    body: jsonBody(recordSecurityReviewVerdictSchema),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "post",
   path: "/api/approvals/{id}/boss-review",
   tags: ["approvals"],
   summary: "Boss answers a direct report's model boost request (decline, or forward to the operator)",
@@ -2832,6 +2902,7 @@ const costSummaryPaths = [
   "summary", "by-agent", "by-agent-model", "by-provider", "by-source",
   "by-biller", "by-project", "finance-summary", "finance-by-biller",
   "finance-by-kind", "finance-events", "window-spend", "quota-windows",
+  "cache-status",
 ] as const;
 
 for (const segment of costSummaryPaths) {
@@ -3309,6 +3380,56 @@ for (const route of [
   });
 }
 
+// ─── Report calculation scripts (DUR-4072) ──────────────────────────────────
+// Switched off unless the instance flag enableReporting is on (404 with code
+// reporting_disabled). Agents and members may only DRAFT; no code runs before
+// a company owner/admin approves the exact digest shown on the approval card,
+// and that approval runs every saved example first. Approved scripts run with
+// the server's own privileges -- approving means trusting the code.
+for (const route of [
+  ["get", "/api/companies/{companyId}/report-scripts", "List this company's report calculation scripts", undefined],
+  ["post", "/api/companies/{companyId}/report-scripts", "Create a report calculation script (a name and key; no code yet)", createReportScriptSchema],
+  ["get", "/api/companies/{companyId}/report-scripts/{scriptId}/versions", "List a script's versions", undefined],
+  ["post", "/api/companies/{companyId}/report-scripts/{scriptId}/versions", "Draft a new version (Python standard library only; nothing runs)", createReportScriptVersionSchema],
+  ["get", "/api/companies/{companyId}/report-scripts/versions/{versionId}/fixtures", "List a version's saved examples", undefined],
+  ["post", "/api/companies/{companyId}/report-scripts/versions/{versionId}/fixtures", "Add a saved example (input and the numbers it must produce)", createReportFixtureSchema],
+  ["post", "/api/companies/{companyId}/report-scripts/versions/{versionId}/request-approval", "File the approval card showing this version's full source (runs nothing)", requestReportScriptApprovalSchema],
+  ["post", "/api/companies/{companyId}/report-scripts/versions/{versionId}/run-fixture", "Re-run one saved example of an APPROVED version", runReportScriptFixtureSchema],
+  ["get", "/api/companies/{companyId}/report-scripts/versions/{versionId}/runs", "List a version's runs", undefined],
+  ["post", "/api/companies/{companyId}/report-scripts/versions/{versionId}/approve", "Owner/admin only: run every saved example and switch the version on only if all match", approveReportScriptVersionSchema],
+] as const) {
+  registerCurrentRoute({
+    method: route[0],
+    path: route[1],
+    tags: ["report-scripts"],
+    summary: route[2],
+    ...(route[3] ? { body: route[3] } : {}),
+  });
+}
+
+// ─── Report templates and runs (DUR-4072 PR2) ───────────────────────────────
+// Same enableReporting switch. A template may only point at an APPROVED
+// script version; a run executes that approved version through the same
+// guarded path (digest re-check, concurrency and hourly limits).
+for (const route of [
+  ["get", "/api/companies/{companyId}/report-templates", "List this company's report templates", undefined],
+  ["post", "/api/companies/{companyId}/report-templates", "Create a report template (it must point at an approved calculation)", createReportTemplateSchema],
+  ["get", "/api/companies/{companyId}/report-templates/{templateId}", "Get one report template", undefined],
+  ["patch", "/api/companies/{companyId}/report-templates/{templateId}", "Change a report template", updateReportTemplateSchema],
+  ["get", "/api/companies/{companyId}/report-runs", "List report runs", undefined],
+  ["post", "/api/companies/{companyId}/report-runs", "Start a report run: fetch data and run the approved calculation", createReportRunSchema],
+  ["get", "/api/companies/{companyId}/report-runs/{runId}", "Get one report run", undefined],
+  ["post", "/api/companies/{companyId}/report-runs/{runId}/commentary", "Submit commentary; every number in it must come from the calculation's output", draftReportRunCommentarySchema],
+] as const) {
+  registerCurrentRoute({
+    method: route[0],
+    path: route[1],
+    tags: ["report-templates"],
+    summary: route[2],
+    ...(route[3] ? { body: route[3] } : {}),
+  });
+}
+
 // ─── Telegram bots (DUR-3978) ───────────────────────────────────────────────
 // The bot token appears in exactly ONE of these operations — the
 // instance-admin-only bridge-token read. Every other response here carries a
@@ -3707,6 +3828,26 @@ registerCurrentRoute({
     401: r.unauthorized,
     403: r.forbidden,
     404: r.notFound,
+  },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/agents/{agentId}/lane-a/check",
+  tags: ["agents"],
+  summary:
+    "Check this setup: one tiny real call (with one harmless test tool) through exactly the path a chat turn takes for the agent's main model or one saved backup. Reports reachable, key, model found, answer time, tool calling, thinking setting and the cost in plain words. Company owner/admin only, one per agent every 10 seconds; the cost is recorded, no conversation is stored.",
+  body: z.object({
+    companyId: z.string().uuid(),
+    target: z.union([z.literal("main"), z.object({ backupId: z.string() })]),
+  }),
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    429: r.tooManyRequests,
   },
 });
 
@@ -4469,6 +4610,15 @@ registry.registerPath({
   summary: "Download attachment content",
   request: { params: z.object({ attachmentId: z.string() }) },
   responses: { 200: { description: "File content" }, 401: r.unauthorized, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/attachments/{attachmentId}/thumbnail",
+  tags: ["assets"],
+  summary: "Download a cached 256px thumbnail of an attachment, generated on first request",
+  request: { params: z.object({ attachmentId: z.string() }) },
+  responses: { 200: { description: "Thumbnail image content" }, 401: r.unauthorized, 404: r.notFound },
 });
 
 registry.registerPath({
@@ -6056,8 +6206,26 @@ registerCurrentRoute({
   method: "get",
   path: "/api/companies/{companyId}/model-directory",
   tags: ["model-directory"],
-  summary: "List a company's saved model setups (owner/admin only; never returns a key)",
+  summary: "List a company's saved model setups in catalogue order (owner/admin only; never returns a key). Archived setups are left out unless includeArchived is true.",
+  query: z.object({ includeArchived: z.enum(["true", "1", "false", "0"]).optional() }),
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/model-directory/export",
+  tags: ["model-directory"],
+  summary: "Export the company's model catalogue as a file: every saved setup (archived ones included), backups by name. No key, id, person or timestamp.",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/import",
+  tags: ["model-directory"],
+  summary: "Import a model catalogue file in one transaction. A setup whose name already exists is skipped (or updated with onExisting \"update\"); backups are matched by name. Owner/admin only; no key is accepted.",
+  body: importModelDirectoryCatalogueSchema,
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 409: r.conflict },
 });
 
 registerCurrentRoute({
@@ -6078,9 +6246,44 @@ registerCurrentRoute({
 
 registerCurrentRoute({
   method: "get",
+  path: "/api/companies/{companyId}/model-directory/settings",
+  tags: ["model-directory"],
+  summary: "Read the company's Settings > Models settings: localGpuVramGb (graphics card memory in GB of the computer that runs local models; null = not set, 0 = no graphics card), localBaseUrl (the company's local model server address; null = not set), openrouterPreferredHosts and openrouterBlockedHosts (the company's OpenRouter host rules; empty lists = none). Owner/admin only.",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "put",
+  path: "/api/companies/{companyId}/model-directory/settings",
+  tags: ["model-directory"],
+  summary: "Save the company's Settings > Models settings. Send any of localGpuVramGb, localBaseUrl, openrouterPreferredHosts, openrouterBlockedHosts; a field left out keeps its value, null clears it (an empty list clears a host list). The graphics memory is informational; the address is the default for new local setups and ready-made local models. Preferred hosts become a new OpenRouter setup's host list when one of them runs the model with tool calling; blocked hosts are added to every OpenRouter setup's never-use list when it is saved, and to every OpenRouter call at call time (so setups saved earlier are covered), unless that setup marks the host Use itself. A host cannot be on both lists (422). Owner/admin only.",
+  body: updateModelDirectorySettingsSchema,
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/model-directory/openrouter-hosts",
+  tags: ["model-directory"],
+  summary: "List the hosts that run one OpenRouter model and what each supports for THAT model: { model, fetchedAt, hosts: [{ slug, name, quantization, contextTokens, maxOutputTokens, priceInPerM, priceOutPerM (US dollars per million tokens), supportsTools, supportsToolChoice, supportsReasoning, supportsImages, status, uptimeLast30m }] }. Read live from OpenRouter's public endpoint list (openrouter.ai only, no key sent), cached about ten minutes; refresh=true skips the cache (at most every 30 seconds per model). 422 for an id that is not \"maker/model\", 404 when OpenRouter does not know the model, 502 when OpenRouter cannot be read. Owner/admin only.",
+  query: z.object({ model: z.string(), refresh: z.enum(["true", "1", "false", "0"]).optional() }),
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 422: r.unprocessable, 502: { description: "OpenRouter could not be read", content: { "application/json": { schema: ErrorSchema } } } },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/local-sync",
+  tags: ["model-directory"],
+  summary: "Ask the local Ollama at one of this company's local addresses (its model server address setting, a saved local setup's or a quick agent's) which models are installed, and mark the saved local setups there as installed or planned. An address the company does not already use is refused (422). Owner/admin only.",
+  body: syncLocalModelsSchema,
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 422: r.unprocessable },
+});
+
+registerCurrentRoute({
+  method: "get",
   path: "/api/companies/{companyId}/model-directory/starters",
   tags: ["model-directory"],
-  summary: "List the ready-made model setups (local Ollama models, Mistral Small 3.2 on OpenRouter) and whether each is already added",
+  summary: "List the ready-made model setups (local Ollama models and cloud models) and whether each is already added",
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
 });
 
@@ -6088,7 +6291,7 @@ registerCurrentRoute({
   method: "post",
   path: "/api/companies/{companyId}/model-directory/starters",
   tags: ["model-directory"],
-  summary: "Add ready-made model setups (all, or the chosen starterIds); ones already added are skipped. No key is stored.",
+  summary: "Add ready-made model setups (all, or the chosen starterIds); ones already added are skipped. Returns { created, skipped }: local ones get the company's model server address and are skipped with a reason while it is not set (422 when only local ones were asked for). No key is stored.",
   body: addModelDirectoryStartersSchema,
   responses: { 201: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 422: r.unprocessable },
 });
@@ -6099,6 +6302,86 @@ registerCurrentRoute({
   tags: ["model-directory"],
   summary: "Save each quick agent's current model setup (and backups) as de-duplicated directory entries and link the agent. Does not change what any agent does; safe to repeat.",
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/model-directory/health",
+  tags: ["model-directory"],
+  summary: "Stored health of each saved local model plus the agents using one (an agent with showBanner true gets the \"can't reach your PC\" banner). Reads only; messages are plain English.",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/{entryId}/check",
+  tags: ["model-directory"],
+  summary: "Check button: is the local address reachable and is the model present (Ollama /api/tags)? Stores and returns Ready / Can't reach your PC / model missing.",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/{entryId}/test",
+  tags: ["model-directory"],
+  summary: "Test button: sends \"Say hi in five words\" and returns the answer, time to first word and total time (thinking on and off when supported). A setup that cannot run returns a plain-English reason and makes no call.",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/{entryId}/probes",
+  tags: ["model-directory"],
+  summary: "Probe set for a local setup: clock tool call, picture-request dry run (nothing is made), empty-reply rate over several runs with thinking on/off, and an everyday-request refusal check. Capped calls, count returned.",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/model-directory/{entryId}/capabilities",
+  tags: ["model-directory"],
+  summary: "Host capabilities for one setup (Ollama /api/show or OpenRouter model info) compared with what Paperclip sends for it",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/{entryId}/reviews",
+  tags: ["model-directory"],
+  summary: "Run the model setup reviewer: reads host capabilities, probes the setup, applies allow-listed fixes that pass a no-worse rerun, and proposes the rest. Never edits keys, addresses, host limits or cost limits.",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/model-directory/{entryId}/reviews",
+  tags: ["model-directory"],
+  summary: "Recent reviewer reports and changes for one setup",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/{entryId}/reviews/{reviewId}/changes/{changeId}/apply",
+  tags: ["model-directory"],
+  summary: "Owner accepts a proposed reviewer change",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/{entryId}/reviews/{reviewId}/changes/{changeId}/decline",
+  tags: ["model-directory"],
+  summary: "Owner declines a proposed reviewer change",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/{entryId}/reviews/{reviewId}/changes/{changeId}/undo",
+  tags: ["model-directory"],
+  summary: "Undo an applied reviewer change; restores the exact earlier state",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
 });
 
 registerCurrentRoute({
