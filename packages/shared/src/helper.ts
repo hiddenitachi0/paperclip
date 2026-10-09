@@ -14,8 +14,8 @@ import type { ModelOptionStatus } from "./model-readiness.js";
  *
  * Where things live:
  *   - company_helper_settings (one lazy row per company): the default saved
- *     model and the full agent reserved for deeper investigations (Phase 3,
- *     stored but not used yet).
+ *     model, the full agent that takes deeper investigations (Phase 3) and
+ *     the per-person investigation limits.
  *   - The helper's model keys are ordinary company secrets. Each pick is a
  *     company_secret_bindings row: target_type HELPER_BINDING_TARGET_TYPE,
  *     target_id = the company id, config_path helperKeyConfigPath(provider),
@@ -194,6 +194,108 @@ export function capHelperText(text: string, max: number): { text: string; trunca
   return { text: text.slice(0, Math.max(0, max - note.length)) + note, truncated: true };
 }
 
+// ─── Investigations (Phase 3) ────────────────────────────────────────────────
+
+/**
+ * "Investigate deeper": the person hands a question to a full agent (the
+ * company's investigation agent, picked by an owner/admin under Company
+ * settings → General → Helper). It is an ordinary task in the company,
+ * assigned to that agent, marked with this origin kind and created by the
+ * person, so their own investigations can be listed back in the Ask panel.
+ * The agent is told to give advice only and finish with one plain answer.
+ */
+export const HELPER_INVESTIGATION_ORIGIN_KIND = "helper_investigation" as const;
+/** Billing code on the task, so its runs show up as helper investigations in Costs. */
+export const HELPER_INVESTIGATION_BILLING_CODE = "helper_investigation";
+/** Per person, per company. An owner/admin can change both under Helper settings. */
+export const HELPER_INVESTIGATION_DEFAULT_MAX_RUNNING = 3;
+export const HELPER_INVESTIGATION_DEFAULT_MAX_PER_DAY = 20;
+export const HELPER_INVESTIGATION_MAX_RUNNING_CAP = 20;
+export const HELPER_INVESTIGATION_MAX_PER_DAY_CAP = 200;
+/** How many of the person's own investigations the panel lists (newest first). */
+export const HELPER_INVESTIGATIONS_LIST_LIMIT = 20;
+export const HELPER_INVESTIGATION_REFERENCES_MAX = 20;
+export const HELPER_INVESTIGATION_QUICK_ANSWER_MAX_CHARS = 6_000;
+
+/**
+ * The line the quick model ends an answer with when it thinks an agent should
+ * take a closer look. The server removes it and sets `suggestInvestigation`.
+ */
+export const HELPER_SUGGEST_INVESTIGATION_MARKER = "[[suggest-investigation]]";
+const SUGGEST_MARKER_SOURCE = String.raw`\[\[\s*suggest[-_ ]investigation\s*\]\]`;
+
+/** Removes the suggestion marker from a quick answer and says whether it was there. */
+export function stripInvestigationSuggestion(answer: string): { text: string; suggested: boolean } {
+  if (!new RegExp(SUGGEST_MARKER_SOURCE, "i").test(answer)) return { text: answer, suggested: false };
+  const text = answer.replace(new RegExp(SUGGEST_MARKER_SOURCE, "gi"), "").replace(/\n{3,}/g, "\n\n").trim();
+  return { text, suggested: true };
+}
+
+/** A record the person marked, e.g. "approval:<id>" or "agent:<id>". */
+const HELPER_REFERENCE_RE = /^[a-z][a-z0-9_-]{0,39}:[A-Za-z0-9_.-]{1,120}$/;
+
+/** Plain status of an investigation, as the panel shows it. */
+export type HelperInvestigationStatus = "queued" | "working" | "done" | "failed";
+
+export interface HelperInvestigationView {
+  /** The task's id. */
+  id: string;
+  /** The task's identifier, e.g. "ACM-123" (null only for very old tasks). */
+  identifier: string | null;
+  title: string;
+  question: string;
+  status: HelperInvestigationStatus;
+  /** One or two words for the badge: "Waiting to start", "Working", "Done", "Stopped", "Stuck". */
+  statusLabel: string;
+  /** A plain sentence about the state, when there is something to say. */
+  statusDetail: string | null;
+  /** The agent's final answer (Markdown), once it has written one. */
+  answer: string | null;
+  answeredAt: string | null;
+  agentId: string | null;
+  agentName: string | null;
+  /** What the task's runs have cost so far, in cents (Costs view). */
+  costCents: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HelperInvestigationEstimate {
+  /** How many of the agent's recent finished tasks the numbers come from (0 = no history). */
+  basedOnTasks: number;
+  /** The middle (median) time those tasks took from start to done, in minutes. */
+  typicalMinutes: number | null;
+  /** The middle (median) cost of those tasks, in cents. */
+  typicalCostCents: number | null;
+}
+
+/** Whether "Investigate deeper" can start, and what it will cost, in plain words. */
+export interface HelperInvestigationAvailability {
+  agentId: string | null;
+  agentName: string | null;
+  /** True when a click would start it now. */
+  ready: boolean;
+  /** Why it cannot start, in plain words (null when ready). */
+  problem: string | null;
+  problemCode: "no_agent" | "agent_unavailable" | "budget" | "limit_running" | "limit_daily" | null;
+  estimate: HelperInvestigationEstimate;
+  /** The agent's monthly budget and what it has spent this month, in cents (budget 0 = no monthly budget set). */
+  agentBudgetMonthlyCents: number;
+  agentSpentMonthlyCents: number;
+  maxRunning: number;
+  maxPerDay: number;
+  /** The person's own investigations: running now, and started in the last 24 hours. */
+  runningCount: number;
+  startedLast24h: number;
+  /** True when the person may change the helper settings (owner/admin). */
+  canConfigure: boolean;
+}
+
+export interface HelperInvestigationList {
+  investigations: HelperInvestigationView[];
+  availability: HelperInvestigationAvailability;
+}
+
 // ─── API shapes ──────────────────────────────────────────────────────────────
 
 export const helperAskTurnSchema = z.object({
@@ -244,6 +346,29 @@ export const helperAskSchema = z
   .strict();
 export type HelperAskRequest = z.infer<typeof helperAskSchema>;
 
+/** "Investigate deeper": hand one question to the company's investigation agent. */
+export const startHelperInvestigationSchema = z
+  .object({
+    question: z.string().trim().min(1, "Type a question first.").max(HELPER_MESSAGE_MAX_CHARS),
+    /** The captured page context (masked again on the server). */
+    context: z.string().max(HELPER_CONTEXT_MAX_CHARS).optional().nullable(),
+    pageRoute: z.string().max(HELPER_PAGE_ROUTE_MAX_CHARS).optional().nullable(),
+    /** Records the person marked, e.g. "approval:<id>", "agent:<id>". */
+    references: z
+      .array(z.string().regex(HELPER_REFERENCE_RE, "A record reference looks like \"approval:<id>\"."))
+      .max(HELPER_INVESTIGATION_REFERENCES_MAX)
+      .optional(),
+    /** The quick helper's answer the person wants checked, if any (shown to the agent as "may be wrong"). */
+    quickAnswer: z.string().max(HELPER_INVESTIGATION_QUICK_ANSWER_MAX_CHARS).optional().nullable(),
+    /** Pictures, same rules as a question; kept on the task as attachments. */
+    pictures: z
+      .array(helperPictureSchema)
+      .max(HELPER_PICTURES_MAX, `Attach at most ${HELPER_PICTURES_MAX} pictures to one question.`)
+      .optional(),
+  })
+  .strict();
+export type StartHelperInvestigationRequest = z.infer<typeof startHelperInvestigationSchema>;
+
 export interface HelperAskResponse {
   answer: string;
   /** Which saved model answered (null = Paperclip's built-in default). */
@@ -257,12 +382,22 @@ export interface HelperAskResponse {
   truncated: boolean;
   /** How many pictures the model was shown with this question. */
   pictureCount: number;
+  /**
+   * Phase 3: the quick model said a good answer needs a closer look than it
+   * can give (code, reviews, logs, data). The panel then offers "Investigate
+   * deeper"; nothing starts until the person clicks.
+   */
+  suggestInvestigation: boolean;
 }
 
 export const updateHelperSettingsSchema = z
   .object({
     defaultDirectoryEntryId: z.string().uuid().nullable().optional(),
     investigationAgentId: z.string().uuid().nullable().optional(),
+    /** Most investigations one person may have running at once (null = Paperclip's default). */
+    investigationMaxRunning: z.number().int().min(1).max(HELPER_INVESTIGATION_MAX_RUNNING_CAP).nullable().optional(),
+    /** Most investigations one person may start in 24 hours (null = Paperclip's default). */
+    investigationMaxPerDay: z.number().int().min(1).max(HELPER_INVESTIGATION_MAX_PER_DAY_CAP).nullable().optional(),
     /** provider → company secret id (null removes the pick). Providers left out are unchanged. */
     keys: z
       .record(z.enum(LANE_A_PROVIDERS), z.string().uuid().nullable())
@@ -309,8 +444,12 @@ export interface HelperModelOption {
 
 export interface HelperSettingsView {
   defaultDirectoryEntryId: string | null;
-  /** Reserved for Phase 3 (deeper investigations by a full agent). Stored, not used yet. */
+  /** The full agent that takes "Investigate deeper" requests (Phase 3). Null = investigations are off. */
   investigationAgentId: string | null;
+  /** Most investigations one person may have running at once (the company's pick, or Paperclip's default). */
+  investigationMaxRunning: number;
+  /** Most investigations one person may start in 24 hours (the company's pick, or Paperclip's default). */
+  investigationMaxPerDay: number;
   keys: HelperKeyStatus[];
   models: HelperModelOption[];
   /** What answers when no model is picked and no default is set. */

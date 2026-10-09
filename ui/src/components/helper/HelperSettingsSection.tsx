@@ -34,11 +34,18 @@ function toCatalogueItem(option: HelperModelOption): CatalogueItem {
   };
 }
 
+const RUNNING_CHOICES = [1, 2, 3, 5, 10, 20];
+const PER_DAY_CHOICES = [5, 10, 20, 50, 100, 200];
+
+function withCurrent(choices: number[], current: number): number[] {
+  return choices.includes(current) ? choices : [...choices, current].sort((a, b) => a - b);
+}
+
 /**
  * Company settings → General → Helper: which saved model "Ask Paperclip"
- * answers with by default, the keys it may use, and (reserved for a later
- * phase) which full agent takes deeper investigations. Everyone in the
- * company can see this; only an owner or admin can change it.
+ * answers with by default, the keys it may use, which full agent takes
+ * "Investigate deeper" requests, and how many of those each person may run.
+ * Everyone in the company can see this; only an owner or admin can change it.
  */
 export function HelperSettingsSection({ companyId }: { companyId: string }) {
   const queryClient = useQueryClient();
@@ -75,7 +82,8 @@ export function HelperSettingsSection({ companyId }: { companyId: string }) {
         <p className="text-xs text-muted-foreground">
           The “Ask” button at the bottom right of every page (or Ctrl/Cmd+Shift+H) opens a helper that explains what is
           on the page. You can mark part of the page and ask about it. It only reads the text you choose to send, it
-          cannot change anything, and each answer is counted in Costs like any other model call.
+          cannot change anything, and each answer is counted in Costs like any other model call. For harder questions
+          it can hand over to an agent (see “Agent for deeper investigations” below).
         </p>
         {settingsQuery.isLoading ? <p className="text-xs text-muted-foreground">Loading…</p> : null}
         {settingsQuery.error ? (
@@ -162,29 +170,83 @@ export function HelperSettingsSection({ companyId }: { companyId: string }) {
               ))}
             </div>
 
-            <label className="block space-y-1">
-              <span className="text-xs font-medium">Agent for deeper investigations (coming later)</span>
-              <select
-                className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm"
-                value={settings.investigationAgentId ?? ""}
-                disabled={readOnly || mutation.isPending}
-                onChange={(e) => mutation.mutate({ investigationAgentId: e.target.value || null })}
-              >
-                <option value="">None</option>
-                {(agentsQuery.data ?? []).map((agent) => (
-                  <option key={agent.id} value={agent.id}>
-                    {agent.name}
-                  </option>
-                ))}
-                {settings.investigationAgentId && !(agentsQuery.data ?? []).some((a) => a.id === settings.investigationAgentId) ? (
-                  <option value={settings.investigationAgentId}>Saved agent</option>
-                ) : null}
-              </select>
+            <div className="space-y-2" id="helper-investigations" data-testid="helper-investigation-settings">
+              <label className="block space-y-1">
+                <span className="text-xs font-medium">Agent for deeper investigations</span>
+                <select
+                  className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm"
+                  value={settings.investigationAgentId ?? ""}
+                  disabled={readOnly || mutation.isPending}
+                  onChange={(e) => mutation.mutate({ investigationAgentId: e.target.value || null })}
+                  data-testid="helper-investigation-agent"
+                >
+                  <option value="">None — “Investigate deeper” is off</option>
+                  {(agentsQuery.data ?? [])
+                    .filter((agent) => agent.status !== "terminated" || agent.id === settings.investigationAgentId)
+                    .map((agent) => (
+                      <option key={agent.id} value={agent.id}>
+                        {agent.name}
+                        {agent.status === "paused" ? " (paused)" : agent.status === "terminated" ? " (let go)" : ""}
+                      </option>
+                    ))}
+                  {settings.investigationAgentId && !(agentsQuery.data ?? []).some((a) => a.id === settings.investigationAgentId) ? (
+                    <option value={settings.investigationAgentId}>Saved agent</option>
+                  ) : null}
+                </select>
+                <span className="block text-xs text-muted-foreground">
+                  Some questions need real digging, like “Should I approve this?” on a deploy card, which means reading the
+                  change, its reviews and its code. In the Ask panel people can press “Investigate deeper”: the question
+                  goes to this agent as a normal task, and its answer comes back into the panel. It usually takes a few
+                  minutes and is paid from this agent's budget; the panel shows the usual time and cost before anyone
+                  starts one.
+                </span>
+                <span className="block text-xs text-muted-foreground">
+                  Recommended: a dedicated “Investigator” agent that can only read — no right to merge, deploy or change
+                  settings, and no write access to code or servers. Paperclip tells the agent to give advice only and
+                  never lets an agent approve or reject a card, but it cannot stop an agent that has write access from
+                  changing things.
+                </span>
+              </label>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="block space-y-1">
+                  <span className="text-xs font-medium">Running at once, per person</span>
+                  <select
+                    className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm"
+                    value={settings.investigationMaxRunning}
+                    disabled={readOnly || mutation.isPending}
+                    onChange={(e) => mutation.mutate({ investigationMaxRunning: Number(e.target.value) })}
+                    data-testid="helper-investigation-max-running"
+                  >
+                    {withCurrent(RUNNING_CHOICES, settings.investigationMaxRunning).map((n) => (
+                      <option key={n} value={n}>
+                        At most {n}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="block space-y-1">
+                  <span className="text-xs font-medium">Started per person in 24 hours</span>
+                  <select
+                    className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm"
+                    value={settings.investigationMaxPerDay}
+                    disabled={readOnly || mutation.isPending}
+                    onChange={(e) => mutation.mutate({ investigationMaxPerDay: Number(e.target.value) })}
+                    data-testid="helper-investigation-max-per-day"
+                  >
+                    {withCurrent(PER_DAY_CHOICES, settings.investigationMaxPerDay).map((n) => (
+                      <option key={n} value={n}>
+                        At most {n}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
               <span className="block text-xs text-muted-foreground">
-                Not used yet. Later, when a question needs real digging (reading tasks, runs or data), the helper will
-                offer to hand it to this full agent as a task.
+                Each investigation is a real agent run that costs money, so each person can only have a few running and
+                start a limited number per day. The limits count per person; changing them does not stop anything already
+                running.
               </span>
-            </label>
+            </div>
             {readOnly ? (
               <p className="text-xs text-muted-foreground">Only a company owner or admin can change these settings.</p>
             ) : null}
