@@ -78,6 +78,8 @@ export const CAST_SOGNI_EDIT_SLOTS: Record<string, number> = {
   "qwen-lightning": 3,
   qwen: 3,
   "krea-identity-edit": 2,
+  // Sogni's own alpha of Krea 2 Identity Edit (v0.3): no tool key, sent by its catalog id.
+  krea2_identity_edit_sogni_v0_3_alpha: 2,
   "dark-beast-krea2-identity-edit": 2,
   "gpt-image-2": 16,
   "gpt-image-2.5-sunburst": 16,

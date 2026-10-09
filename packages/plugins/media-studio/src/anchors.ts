@@ -36,6 +36,8 @@ import { compositeMaskedEdit } from "./mask-composite.js";
 import {
   SOGNI_DEFAULT_MODEL,
   SOGNI_EDIT_MODELS,
+  SOGNI_EDIT_MODEL_NAMES,
+  SOGNI_KREA_IDENTITY_EDIT_ALPHA,
   SOGNI_TOKEN_TYPES,
   SogniProvider,
   guardedTransferFetch,
@@ -76,8 +78,11 @@ import {
   readIdentitySheet,
   readLoraInput,
   readRepoName,
+  readSourcePictures,
   readTriggerWord,
   isCropRole,
+  mergeAnalysedSheet,
+  SOURCE_PICTURES_EXPLANATION,
   type CandidateKind,
   type Identity,
   type IdentityTraining,
@@ -499,6 +504,7 @@ function identityView(identity: Identity) {
     ...identity,
     consentText: { likeness: CONSENT_LIKENESS_TEXT, adult: CONSENT_ADULT_TEXT },
     seedExplanation: SEED_EXPLANATION,
+    sourcePicturesExplanation: SOURCE_PICTURES_EXPLANATION,
   };
 }
 
@@ -538,12 +544,20 @@ export async function saveIdentityAction(ctx: PluginContext, params: Record<stri
   const sheet = readIdentitySheet(params.sheet);
   const crops = readCrops(params.crops);
   if (crops.filter((c) => c.role === "face").length > 1) throw new Error("Keep one face crop.");
-  const originalFileId = typeof params.originalFileId === "string" && params.originalFileId.trim() ? params.originalFileId.trim() : null;
+  const sourcePictures = readSourcePictures(params, existing, now);
+  const sourceIds = sourcePictures.map((p) => p.fileId);
+  const originalFileId = sourceIds[0] ?? null;
   const canonicalFileId = typeof params.canonicalFileId === "string" && params.canonicalFileId.trim() ? params.canonicalFileId.trim() : existing?.canonicalFileId ?? null;
   const blocks = await loadAgeBlocks(ctx, companyId);
-  const files = [originalFileId, canonicalFileId, ...crops.flatMap((c) => [c.fileId, c.sourceFileId])].filter((f): f is string => Boolean(f));
+  const files = [...sourceIds, canonicalFileId, ...crops.flatMap((c) => [c.fileId, c.sourceFileId])].filter((f): f is string => Boolean(f));
   await validateIdentityFiles(ctx, companyId, Array.from(new Set(files)), blocks);
   if (!originalFileId && !crops.some((c) => c.role === "face")) throw new Error("Add the person's picture (or a face crop) first.");
+  // More than one picture of the person: every one of them must have passed
+  // the age check (kept by the hash of its bytes, so a picture checked before
+  // costs nothing; one not checked yet is checked now). One picture keeps the
+  // rules it always had (refused when flagged), so an identity can still be
+  // made by hand without an analysis model.
+  if (sourceIds.length > 1) await requireAdultPictures(ctx, companyId, sourceIds, "A picture of the person");
   const models = (params.preferredModels ?? {}) as Record<string, unknown>;
   const preferredModels = {
     sogni: readEditModel(models.sogni, existing?.preferredModels.sogni ?? IDENTITY_DEFAULT_SOGNI_MODEL, "The Sogni model"),
@@ -557,6 +571,7 @@ export async function saveIdentityAction(ctx: PluginContext, params: Record<stri
     name,
     nickname,
     originalFileId,
+    sourcePictures,
     sheet,
     crops,
     canonicalFileId,
@@ -643,7 +658,15 @@ export async function analyseAction(ctx: PluginContext, params: Record<string, u
   if (stored.verdict !== "adult") {
     return { ok: false, blocked: true, message: "This picture was found not to be clearly of an adult (18 or older), so it cannot be used for an identity." };
   }
-  return { ok: true, sheet: outcome.result.sheet, crops: outcome.result.crops, model: settings.analysis.label ?? answer.entryName };
+  // Another picture of a person who already has a description: only empty
+  // fields are filled ("fill-empty", the default when a description is sent),
+  // and the fields where the analysis says something else are listed so the
+  // page can ask; "replace" takes the analysis wherever it says something.
+  const base = { ok: true as const, fileId, sheet: outcome.result.sheet, crops: outcome.result.crops, model: settings.analysis.label ?? answer.entryName };
+  if (params.currentSheet === undefined || params.currentSheet === null) return base;
+  const current = readIdentitySheet(params.currentSheet);
+  const merged = mergeAnalysedSheet(current, outcome.result.sheet, params.merge === "replace" ? "replace" : "fill-empty");
+  return { ...base, merged: merged.sheet, filled: merged.filled, conflicts: merged.conflicts };
 }
 
 /** Cut crops out of one picture (several boxes from the same picture). Returns the pictures; the page saves them to Files. */
@@ -672,7 +695,7 @@ async function cropAction(ctx: PluginContext, params: Record<string, unknown>, c
 
 /** The models offered per service for pictures of a person; the identity-keeping ones first. */
 export const IDENTITY_PICTURE_MODELS: Record<"sogni" | "fal" | "higgsfield", string[]> = {
-  sogni: ["krea-identity-edit", "qwen", "qwen-lightning", "dark-beast-krea2-identity-edit", "gpt-image-2", "gpt-image-2.5-sunburst", "gpt-image-2.5-flare"],
+  sogni: ["krea-identity-edit", SOGNI_KREA_IDENTITY_EDIT_ALPHA, "qwen", "qwen-lightning", "dark-beast-krea2-identity-edit", "gpt-image-2", "gpt-image-2.5-sunburst", "gpt-image-2.5-flare"],
   fal: ["fal-ai/flux-2-pro/edit", "fal-ai/nano-banana-2/edit", FAL_REFERENCE_MODEL],
   higgsfield: [...HIGGSFIELD_MODELS],
 };
@@ -1444,6 +1467,7 @@ async function generationOptionsAction(ctx: PluginContext, _params: Record<strin
   return {
     services: { sogni: has("sogniKeySecretRef"), fal: has("falKeySecretRef"), higgsfield: has("higgsfieldKeySecretRef") },
     models: IDENTITY_PICTURE_MODELS,
+    modelNames: SOGNI_EDIT_MODEL_NAMES,
     priceCents: PICTURE_PRICE_CENTS,
     priceNotes: PRICE_NOTES,
     reservedPerCallCents: 8,
@@ -1485,6 +1509,7 @@ export function registerAnchorActions(ctx: PluginContext, seams: AnchorSeams = a
         presets: TRAINING_REQUESTS,
       },
       editModels: Object.keys(SOGNI_EDIT_MODELS),
+      editModelNames: SOGNI_EDIT_MODEL_NAMES,
       ageCheck: { explanation: AGE_CHECK_EXPLANATION, costNote: AGE_CHECK_COST_NOTE, model: settings.analysis?.label ?? null },
     };
   });

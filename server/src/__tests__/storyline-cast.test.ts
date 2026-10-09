@@ -176,6 +176,20 @@ describe("storyboard pictures with cast", () => {
     expect(plan.notes.join(" ")).toMatch(/1 other picture was left out/);
   });
 
+  it("Sogni's Krea 2 Identity Edit v0.3 alpha: the identity's preferred model, or picked, takes face and body (2 pictures)", () => {
+    const alpha = "krea2_identity_edit_sogni_v0_3_alpha";
+    const preferred = planCastStill({
+      ...basePlan,
+      people: [person("maja", "Maja", { preferredModels: { sogni: alpha, sogniExtraSlot: "qwen", fal: null } })],
+      service: "sogni",
+    });
+    expect(preferred.model).toBe(alpha);
+    expect(preferred.ids).toEqual(["maja-face", "maja-body"]);
+    const picked = planCastStill({ ...basePlan, people: [person("maja", "Maja")], service: "sogni", pickedModel: alpha, lookIds: ["look-bg"], lookRoles: ["background"] });
+    expect(picked.model).toBe(alpha);
+    expect(picked.ids).toEqual(["maja-face", "maja-body"]);
+  });
+
   it("Sogni with a picked 3-slot model: face, body, then the look's picture after the identity's", () => {
     const plan = planCastStill({ ...basePlan, people: [person("maja", "Maja")], service: "sogni", pickedModel: "qwen", lookIds: ["look-bg"], lookRoles: ["background"], extraIds: ["storyline-pic"] });
     expect(plan.model).toBe("qwen");

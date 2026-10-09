@@ -8,7 +8,10 @@ import manifest from "../../../packages/plugins/media-studio/src/manifest.js";
 import { anchorSeams } from "../../../packages/plugins/media-studio/src/anchors.js";
 import {
   CONSENT_ADULT_TEXT,
+  IDENTITY_DEFAULT_SOGNI_MODEL,
   LORA_TRAINING_STEPS,
+  MAX_SOURCE_PICTURES,
+  mergeAnalysedSheet,
   assertTrainingMove,
   identitiesMentionedIn,
   loraTrainingCostCents,
@@ -21,6 +24,15 @@ import { ANALYSIS_SYSTEM_PROMPT, parseAnalysis } from "../../../packages/plugins
 import { crc32, zipStore } from "../../../packages/plugins/media-studio/src/lora-training.js";
 import { AGE_CHECK_SYSTEM_PROMPT, parseAgeCheck, recordAgeCheck, runAgeCheck, sha256Of } from "../../../packages/plugins/media-studio/src/age-check.js";
 import { HiggsfieldClient, HiggsfieldProvider, readHiggsfieldCredentials, soulSize } from "../../../packages/plugins/media-studio/src/higgsfield.js";
+import {
+  SOGNI_EDIT_CATALOG_ONLY,
+  SOGNI_EDIT_MODELS,
+  SOGNI_EDIT_MODEL_NAMES,
+  isKnownSogniModel,
+  sogniMaxReferences,
+  sogniWorkflowModel,
+} from "../../../packages/plugins/media-studio/src/sogni.js";
+import { SOGNI_OFFLINE_MODELS, lorasForModel, parseSogniLoraCatalog } from "../../../packages/plugins/media-studio/src/sogni-catalog.js";
 
 /**
  * Identity anchors (people), rooms and LoRA training in Media Studio. Every
@@ -52,6 +64,13 @@ const otherOwner = { actor: { type: "user" as const, userId: "owner-2", canManag
 
 const CATALOG = JSON.parse(readFileSync(new URL("./fixtures/sogni/model-catalog-image.json", import.meta.url), "utf8"));
 CATALOG.data.models.push({ ...CATALOG.data.models.find((m: { id: string }) => m.id === "qwen_image_edit_2511_fp8_lightning"), id: "qwen_image_edit_2511_fp8", name: "Qwen Image Edit 2511" });
+// Sogni's own alpha of Krea 2 Identity Edit, as the live catalog listed it on
+// 9 Oct 2026 (same parameters as v1.2 apart from the id, name and refBoost).
+const KREA_ALPHA = "krea2_identity_edit_sogni_v0_3_alpha";
+{
+  const v12 = CATALOG.data.models.find((m: { id: string }) => m.id === "krea2_identity_edit_v1_2");
+  CATALOG.data.models.push({ ...v12, id: KREA_ALPHA, name: "Sogni Krea 2 Identity Edit v0.3 Alpha", tierId: KREA_ALPHA, sid: 473 });
+}
 const LORA_CATALOG = JSON.parse(readFileSync(new URL("./fixtures/sogni/loras-comfy.json", import.meta.url), "utf8"));
 
 function json(status: number, body: unknown) {
@@ -1419,5 +1438,215 @@ describe("age check: every picture must be clearly of an adult before it leaves 
     expect(analyse.mock.calls.at(-1)![0]).toBe(OTHER);
     expect(((await harness.ctx.state.get(ageKey(COMPANY))) as Record<string, any>)[sha256Of(BYTES[0]!)].verdict).toBe("under18");
     expect(((await harness.ctx.state.get(ageKey(OTHER))) as Record<string, any>)[sha256Of(BYTES[0]!)].verdict).toBe("adult");
+  });
+});
+
+// ─── Sogni's Krea 2 Identity Edit v0.3 alpha ──────────────────────────────────
+
+describe("Sogni's Krea 2 Identity Edit v0.3 alpha", () => {
+  it("is in the edit-model table by its catalog id, takes 2 pictures, is labelled alpha, and is not the default", () => {
+    expect(SOGNI_EDIT_MODELS[KREA_ALPHA]).toBe(2);
+    expect(SOGNI_EDIT_CATALOG_ONLY).toContain(KREA_ALPHA);
+    // Sogni's edit_image tool has no key for it, so the workflow gets the catalog id.
+    expect(sogniWorkflowModel(KREA_ALPHA, "edit_image")).toBe(KREA_ALPHA);
+    expect(sogniMaxReferences(KREA_ALPHA)).toBe(2);
+    expect(isKnownSogniModel(KREA_ALPHA)).toBe(true);
+    expect(SOGNI_EDIT_MODEL_NAMES[KREA_ALPHA]).toMatch(/v0\.3.*alpha/);
+    expect(SOGNI_EDIT_MODEL_NAMES["krea-identity-edit"]).toMatch(/v1\.2/);
+    expect(IDENTITY_DEFAULT_SOGNI_MODEL).toBe("krea-identity-edit");
+    // With Sogni unreachable the built-in list still offers it as a picture editor.
+    expect(SOGNI_OFFLINE_MODELS.find((m) => m.id === KREA_ALPHA)).toMatchObject({ takesReferences: true, generates: false });
+    // Sogni's own LoRA catalogue lists it as a Krea 2 model.
+    expect(lorasForModel(parseSogniLoraCatalog(LORA_CATALOG), KREA_ALPHA).map((l) => l.id)).toContain("krea2-detail-enhancer");
+  });
+
+  it("is offered for the identity's preferred model and for candidates and training pictures, with plain names", async () => {
+    const { harness } = await setup();
+    const list = await harness.performAction<any>("identities.list", {}, owner);
+    expect(list.editModels).toContain(KREA_ALPHA);
+    expect(list.editModelNames[KREA_ALPHA]).toMatch(/alpha/);
+    const options = await harness.performAction<any>("identities.generationOptions", {}, owner);
+    expect(options.models.sogni[0]).toBe("krea-identity-edit");
+    expect(options.models.sogni).toContain(KREA_ALPHA);
+    expect(options.modelNames[KREA_ALPHA]).toMatch(/alpha/);
+    const identity = await makeIdentity(harness, { preferredModels: { sogni: KREA_ALPHA } });
+    expect(identity.preferredModels.sogni).toBe(KREA_ALPHA);
+    await expect(makeIdentity(harness, { name: "Other", nickname: null, preferredModels: { sogni: "krea2_identity_edit_v9_9" } })).rejects.toThrow(/picture-editing models/);
+  });
+
+  it("candidates and a training batch run on it (sent by catalog id, face and body crops)", async () => {
+    const { harness, fake } = await setup();
+    const identity = await makeIdentity(harness, { preferredModels: { sogni: KREA_ALPHA } });
+    const res = await harness.performAction<any>("identities.candidates", { identityId: identity.id, kind: "portrait" }, owner);
+    expect(res.candidates).toHaveLength(2);
+    const starts = () => fake.calls.filter((c) => c.url.endsWith("/v1/creative-agent/workflows") && c.method === "POST");
+    expect(starts()[0]!.body.input.steps[0].arguments).toMatchObject({ model: KREA_ALPHA, numberOfVariations: 2 });
+    expect(starts()[0]!.body.media_references).toHaveLength(2);
+    const batch = await harness.performAction<any>("trainingSet.generate", { identityId: identity.id, service: "sogni", model: KREA_ALPHA, prompt: "profile view", count: 2 }, owner);
+    expect(batch.pictures[0]).toMatchObject({ service: "sogni", model: KREA_ALPHA });
+    expect(starts()[1]!.body.input.steps[0].arguments.model).toBe(KREA_ALPHA);
+  });
+
+  it("a look (or a request naming the person) uses it when it is the identity's preferred model", async () => {
+    const { harness } = await setup();
+    await makeIdentity(harness, { preferredModels: { sogni: KREA_ALPHA } });
+    const prepared = await prepareGeneration(harness.ctx, COMPANY, { prompt: "Maja reading a book" });
+    if ("error" in prepared) throw new Error(prepared.error);
+    expect(prepared.referenceFileIds).toEqual([FACE, BODY]);
+    expect(prepared.input.model).toBe(KREA_ALPHA);
+  });
+});
+
+// ─── Several pictures of one person ───────────────────────────────────────────
+
+describe("several source pictures per identity", () => {
+  const CLOSE = "c1c1c1c1-0000-4000-8000-0000000000c1";
+  const FULL = "c2c2c2c2-0000-4000-8000-0000000000c2";
+  const YOUNG = "c3c3c3c3-0000-4000-8000-0000000000c3";
+  const FULL_COPY = "c4c4c4c4-0000-4000-8000-0000000000c4";
+  let SRC_BYTES: Buffer[];
+
+  async function people(config: Record<string, unknown> = {}) {
+    const { harness, fake } = await setup(config);
+    SRC_BYTES ??= await Promise.all([solid(30, 30, [1, 2, 3]), solid(30, 30, [4, 5, 6]), solid(30, 30, [7, 8, 9])]);
+    harness.seed({
+      companyFiles: [
+        { ...(file(CLOSE, SRC_BYTES[0]!) as object), originalFilename: "close-up.png" } as never,
+        { ...(file(FULL, SRC_BYTES[1]!) as object), originalFilename: "full-body.png" } as never,
+        { ...(file(YOUNG, SRC_BYTES[2]!) as object), originalFilename: "young.png" } as never,
+        file(FULL_COPY, SRC_BYTES[1]!),
+      ],
+    });
+    return { harness, fake };
+  }
+
+  /** The analysis model: an age answer per picture, and the full analysis for "Analyse". */
+  async function vision(harness: TestHarness, opts: { young?: string[]; analysis?: unknown } = {}) {
+    await harness.performAction("identitySettings.save", { analysis: { entryId: AGE_ENTRY, label: "Vision model", keySecretId: SECRET } }, owner);
+    const fn = vi.fn(async (_companyId: string, input: { fileId: string; systemPrompt: string }) => {
+      const young = opts.young?.includes(input.fileId) ?? false;
+      const text =
+        input.systemPrompt === AGE_CHECK_SYSTEM_PROMPT
+          ? JSON.stringify({ apparentAdult: !young })
+          : JSON.stringify(young ? { ...GOOD_ANALYSIS, apparentAdult: "no" } : opts.analysis ?? GOOD_ANALYSIS);
+      return { text, entryName: "Vision model", provider: "anthropic", model: "claude-sonnet-5", costCents: 1 };
+    });
+    harness.ctx.models.analyseImage = fn as never;
+    return fn;
+  }
+  const ageCallsOf = (fn: ReturnType<typeof vi.fn>) => fn.mock.calls.filter((c) => (c[1] as { systemPrompt: string }).systemPrompt === AGE_CHECK_SYSTEM_PROMPT);
+
+  const twoPictures = {
+    sourceFileIds: [CLOSE, FULL],
+    crops: [
+      { role: "face", fileId: FACE, sourceFileId: CLOSE, box: { x: 0.2, y: 0.1, w: 0.5, h: 0.5 } },
+      { role: "body", fileId: BODY, sourceFileId: FULL, box: { x: 0.1, y: 0, w: 0.8, h: 1 } },
+    ],
+  };
+
+  it("keeps several pictures, the main one first, and each crop says which picture it was cut from", async () => {
+    const { harness } = await people();
+    await vision(harness);
+    const identity = await makeIdentity(harness, { originalFileId: undefined, ...twoPictures });
+    expect(identity.sourcePictures.map((p) => p.fileId)).toEqual([CLOSE, FULL]);
+    expect(identity.originalFileId).toBe(CLOSE);
+    expect(identity.crops.map((c) => [c.role, c.sourceFileId])).toEqual([
+      ["face", CLOSE],
+      ["body", FULL],
+    ]);
+    // The face crop (from the close-up) goes first, the body crop (from the full-body photo) second.
+    const plan = planIdentityReferences({ identity, lookFileIds: [], lookRoles: [], sameOutfit: false, service: "sogni", fixedModel: null, fixedSlots: 3 });
+    expect(plan.fileIds).toEqual([FACE, BODY]);
+    // Saving again keeps when each picture was added; making another one the main picture moves it first.
+    const again = await harness.performAction<{ identity: Identity }>("identities.save", { id: identity.id, name: "Maja Berg", sourceFileIds: [FULL, CLOSE], crops: twoPictures.crops }, owner);
+    expect(again.identity.originalFileId).toBe(FULL);
+    expect(again.identity.sourcePictures.find((p) => p.fileId === CLOSE)!.addedAt).toBe(identity.sourcePictures[0]!.addedAt);
+    expect(((await harness.ctx.state.get(identitiesKey)) as any[])[0].sourcePictures).toHaveLength(2);
+  });
+
+  it("refuses more than the limit and pictures from another company", async () => {
+    const { harness } = await people();
+    await vision(harness);
+    const many = Array.from({ length: MAX_SOURCE_PICTURES + 1 }, (_, i) => `f${i}f${i}f${i}f${i}-0000-4000-8000-000000000000`);
+    await expect(makeIdentity(harness, { sourceFileIds: many })).rejects.toThrow(new RegExp(`at most ${MAX_SOURCE_PICTURES} pictures`));
+    await expect(makeIdentity(harness, { sourceFileIds: [CLOSE, FOREIGN] })).rejects.toThrow(/not in this company's Files/);
+    expect(harness.getState(identitiesKey)).toBeUndefined();
+  });
+
+  it("every added picture must pass the age check (by content), and one not clearly adult is refused before it is used", async () => {
+    const { harness } = await people();
+    // No analysis model: one picture keeps the old rules, a second one cannot be checked, so nothing is saved.
+    const single = await makeIdentity(harness, { originalFileId: CLOSE, crops: [] });
+    await expect(
+      harness.performAction("identities.save", { id: single.id, name: "Maja Berg", sourceFileIds: [CLOSE, FULL] }, owner),
+    ).rejects.toThrow(/Pick an analysis model/);
+    const fn = await vision(harness, { young: [YOUNG] });
+    const saved = await harness.performAction<{ identity: Identity }>("identities.save", { id: single.id, name: "Maja Berg", sourceFileIds: [CLOSE, FULL] }, owner);
+    expect(saved.identity.sourcePictures.map((p) => p.fileId)).toEqual([CLOSE, FULL]);
+    expect(ageCallsOf(fn).map((c) => (c[1] as { fileId: string }).fileId).sort()).toEqual([CLOSE, FULL].sort());
+    // Saving again, or adding a copy of a checked picture, asks no model.
+    await harness.performAction("identities.save", { id: single.id, name: "Maja Berg", sourceFileIds: [CLOSE, FULL, FULL_COPY] }, owner);
+    expect(ageCallsOf(fn)).toHaveLength(2);
+    // A picture that is not clearly of an adult is refused, named, and the identity keeps its pictures.
+    await expect(
+      harness.performAction("identities.save", { id: single.id, name: "Maja Berg", sourceFileIds: [CLOSE, FULL, YOUNG] }, owner),
+    ).rejects.toThrow(/young\.png/);
+    expect(((await harness.ctx.state.get(identitiesKey)) as Identity[])[0]!.sourcePictures.map((p) => p.fileId)).toEqual([CLOSE, FULL, FULL_COPY]);
+    // An older flag by file id still refuses it without a call.
+    await harness.ctx.state.set({ scopeKind: "company", scopeId: COMPANY, stateKey: "identityAgeBlocks" }, [FULL]);
+    await expect(harness.performAction("identities.save", { id: single.id, name: "Maja Berg", sourceFileIds: [CLOSE, FULL] }, owner)).rejects.toThrow(/under 18/);
+  });
+
+  it("analysing another picture fills only the empty fields and lists the ones it sees differently (or replaces, when asked)", async () => {
+    const { harness } = await people();
+    const fn = await vision(harness);
+    const current = { hair: "short brown hair", face: "oval face, high cheekbones" };
+    const res = await harness.performAction<any>("identities.analyse", { fileId: FULL, currentSheet: current }, owner);
+    expect(res.ok).toBe(true);
+    expect(res.fileId).toBe(FULL);
+    expect(res.merged).toMatchObject({ hair: "short brown hair", face: "oval face, high cheekbones", eyes: "blue almond eyes", body: "slim, tall", skin: "fair" });
+    expect(res.filled).toEqual(["eyes", "body", "skin"]);
+    expect(res.conflicts).toEqual([{ key: "hair", label: "Hair", current: "short brown hair", suggested: "long straight blonde hair" }]);
+    // The analysis is this picture's age check too.
+    expect(fn).toHaveBeenCalledTimes(1);
+    const replaced = await harness.performAction<any>("identities.analyse", { fileId: FULL, currentSheet: current, merge: "replace" }, owner);
+    expect(replaced.merged.hair).toBe("long straight blonde hair");
+    expect(replaced.conflicts).toEqual([]);
+    // Without a description the answer is as before (no merge fields).
+    const first = await harness.performAction<any>("identities.analyse", { fileId: CLOSE }, owner);
+    expect(first).not.toHaveProperty("merged");
+    expect(first.sheet.hair).toBe("long straight blonde hair");
+    // A picture that is not clearly an adult is refused, also as an extra picture.
+    const fn2 = await vision(harness, { young: [YOUNG] });
+    expect(await harness.performAction<any>("identities.analyse", { fileId: YOUNG, currentSheet: current }, owner)).toMatchObject({ ok: false, blocked: true });
+    expect(fn2).toHaveBeenCalledTimes(1);
+  });
+
+  it("mergeAnalysedSheet: same text in other case is no conflict, empty answers change nothing", () => {
+    const merged = mergeAnalysedSheet({ hair: "Blonde", eyes: "  " }, { hair: "blonde", eyes: "green", face: "" });
+    expect(merged).toEqual({ sheet: { hair: "Blonde", eyes: "green" }, filled: ["eyes"], conflicts: [] });
+  });
+
+  it("an identity saved before there could be several pictures reads back with its one picture first, and an older page can still save it", async () => {
+    const old = normalizeIdentity({
+      id: "old-1",
+      name: "Maja",
+      originalFileId: ORIGINAL,
+      crops: [{ role: "face", fileId: FACE, sourceFileId: ORIGINAL, box: null }],
+      consent: { likeness: true, adult: true, confirmedBy: "u", confirmedAt: "t" },
+      createdAt: "2026-10-01T00:00:00.000Z",
+    })!;
+    expect(old.sourcePictures).toEqual([{ fileId: ORIGINAL, addedAt: "2026-10-01T00:00:00.000Z" }]);
+    expect(old.originalFileId).toBe(ORIGINAL);
+    // Stored by an older version, read through the page's list.
+    const { harness } = await setup();
+    await harness.ctx.state.set(identitiesKey, [{ ...old, sourcePictures: undefined }]);
+    const list = await harness.performAction<any>("identities.list", {}, owner);
+    expect(list.identities[0].sourcePictures).toEqual([{ fileId: ORIGINAL, addedAt: "2026-10-01T00:00:00.000Z" }]);
+    expect(list.identities[0].sourcePicturesExplanation).toMatch(/close-up for the face and a full-body photo for the body/);
+    // An older page sends only originalFileId: it becomes the one source picture, no age check needed.
+    const saved = await harness.performAction<{ identity: Identity }>("identities.save", { id: "old-1", name: "Maja", originalFileId: EXTRA }, owner);
+    expect(saved.identity.sourcePictures.map((p) => p.fileId)).toEqual([EXTRA]);
+    expect(saved.identity.originalFileId).toBe(EXTRA);
   });
 });

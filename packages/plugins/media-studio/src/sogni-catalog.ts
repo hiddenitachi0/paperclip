@@ -22,8 +22,10 @@ import type { FetchImpl } from "./providers.js";
 import {
   SOGNI_API_BASE,
   SOGNI_DEFAULT_SIZE_BOUNDS,
+  SOGNI_EDIT_CATALOG_ONLY,
   SOGNI_EDIT_TOOL_KEYS,
   SOGNI_GENERATE_TOOL_KEYS,
+  SOGNI_KREA_IDENTITY_EDIT_ALPHA,
   SOGNI_MAX_LORAS,
   sogniCanonicalModelId,
   sogniSize,
@@ -141,7 +143,7 @@ function range(value: unknown): SogniRange | null {
   return out;
 }
 
-const EDIT_MODEL_IDS = new Set(Object.values(SOGNI_EDIT_TOOL_KEYS));
+const EDIT_MODEL_IDS = new Set([...Object.values(SOGNI_EDIT_TOOL_KEYS), ...SOGNI_EDIT_CATALOG_ONLY]);
 const DARK_BEAST = /^dark[_-]?beast/i;
 
 function contentFilterNeed(id: string, tags: string[]): SogniModelInfo["contentFilter"] {
@@ -300,6 +302,7 @@ const OFFLINE_NAMES: Record<string, string> = {
   qwen: "Qwen Image Edit 2511",
   "krea-identity-edit": "Krea 2 Identity Edit",
   "dark-beast-krea2-identity-edit": "Dark Beast Krea 2 Identity Edit",
+  [SOGNI_KREA_IDENTITY_EDIT_ALPHA]: "Sogni Krea 2 Identity Edit v0.3 Alpha",
 };
 
 /**
@@ -308,7 +311,7 @@ const OFFLINE_NAMES: Record<string, string> = {
  */
 export const SOGNI_OFFLINE_MODELS: SogniModelInfo[] = Object.entries(OFFLINE_NAMES).map(([key, name]) => {
   const id = SOGNI_GENERATE_TOOL_KEYS[key] ?? SOGNI_EDIT_TOOL_KEYS[key] ?? key;
-  const editOnly = key in SOGNI_EDIT_TOOL_KEYS && !(key in SOGNI_GENERATE_TOOL_KEYS);
+  const editOnly = (key in SOGNI_EDIT_TOOL_KEYS || SOGNI_EDIT_CATALOG_ONLY.includes(key)) && !(key in SOGNI_GENERATE_TOOL_KEYS);
   return {
     id,
     name,

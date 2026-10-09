@@ -53,10 +53,27 @@ export interface IdentityCrop {
   role: CropRole;
   /** The cropped picture, a file in the company's Files. */
   fileId: string;
-  /** Where it was cut from (null when a separate picture was picked). */
+  /** Which of the identity's source pictures it was cut from (null when a separate picture was picked). */
   sourceFileId: string | null;
   box: CropBox | null;
 }
+
+/** At most this many source pictures per identity. */
+export const MAX_SOURCE_PICTURES = 8;
+
+/**
+ * One picture of the person the identity's crops are cut from. An identity
+ * can have several (a close-up for the face, a full-body photo for the body);
+ * each crop says which one it came from. The first one is the identity's
+ * main picture (`originalFileId`, kept for older readers).
+ */
+export interface IdentitySourcePicture {
+  fileId: string;
+  addedAt: string;
+}
+
+export const SOURCE_PICTURES_EXPLANATION =
+  "Use a close-up for the face and a full-body photo for the body. Each crop can come from any of the person's pictures.";
 
 export const LORA_SOURCES = ["huggingface", "fal", "civitai", "other"] as const;
 export type LoraSource = (typeof LORA_SOURCES)[number];
@@ -199,8 +216,10 @@ export interface Identity {
   name: string;
   /** Another name people use for this person in requests ("Maja" for "Maja Berg"). */
   nickname: string | null;
-  /** The picture the identity was made from. */
+  /** The first source picture (kept so older readers still find the main picture). */
   originalFileId: string | null;
+  /** Every picture of the person the crops are cut from, the main one first. */
+  sourcePictures: IdentitySourcePicture[];
   sheet: IdentitySheet;
   crops: IdentityCrop[];
   /** The chosen canonical picture (a front portrait or full body made from the crops). */
@@ -287,6 +306,81 @@ export function readCrops(value: unknown): IdentityCrop[] {
   });
 }
 
+/**
+ * The source pictures from a save: `sourceFileIds` (the main one first), or
+ * an older page's single `originalFileId`. Keeps when each was added.
+ */
+export function readSourcePictures(params: Record<string, unknown>, existing: Identity | null, now: string): IdentitySourcePicture[] {
+  let ids: string[];
+  if (params.sourceFileIds !== undefined && params.sourceFileIds !== null) {
+    if (!Array.isArray(params.sourceFileIds)) throw new Error("The person's pictures could not be read. Add them again.");
+    ids = params.sourceFileIds.filter((x): x is string => typeof x === "string").map((x) => x.trim()).filter(Boolean);
+  } else {
+    const single = typeof params.originalFileId === "string" ? params.originalFileId.trim() : "";
+    ids = single ? [single] : [];
+  }
+  ids = Array.from(new Set(ids));
+  if (ids.length > MAX_SOURCE_PICTURES) throw new Error(`Keep at most ${MAX_SOURCE_PICTURES} pictures of the person.`);
+  const before = new Map((existing?.sourcePictures ?? []).map((p) => [p.fileId, p]));
+  return ids.map((fileId) => before.get(fileId) ?? { fileId, addedAt: now });
+}
+
+/** Stored source pictures; an identity saved before there could be several gets its one picture as the first. */
+export function normalizeSourcePictures(raw: Record<string, unknown>, fallbackDate: string): IdentitySourcePicture[] {
+  const out: IdentitySourcePicture[] = [];
+  const seen = new Set<string>();
+  const add = (fileId: unknown, addedAt: unknown) => {
+    if (typeof fileId !== "string" || !fileId || seen.has(fileId) || out.length >= MAX_SOURCE_PICTURES) return;
+    seen.add(fileId);
+    out.push({ fileId, addedAt: typeof addedAt === "string" && addedAt ? addedAt : fallbackDate });
+  };
+  // The main picture always comes first, also when only the old field was stored.
+  add(raw.originalFileId, null);
+  if (Array.isArray(raw.sourcePictures)) {
+    for (const item of raw.sourcePictures) {
+      const row = item as Record<string, unknown> | null;
+      add(row?.fileId, row?.addedAt);
+    }
+  }
+  if (out.length > 0 && typeof raw.originalFileId === "string") {
+    const stored = Array.isArray(raw.sourcePictures) ? (raw.sourcePictures as Array<Record<string, unknown> | null>).find((p) => p?.fileId === raw.originalFileId) : null;
+    if (stored && typeof stored.addedAt === "string") out[0] = { ...out[0]!, addedAt: stored.addedAt };
+  }
+  return out;
+}
+
+export interface SheetMerge {
+  sheet: IdentitySheet;
+  /** Fields the analysis filled in (they were empty). */
+  filled: IdentitySheetKey[];
+  /** Fields where the analysis says something else than what is written; nothing changed there unless `replace`. */
+  conflicts: Array<{ key: IdentitySheetKey; label: string; current: string; suggested: string }>;
+}
+
+/**
+ * The analysis of one more picture over the description already written.
+ * "fill-empty" only fills empty fields and lists the differing ones so the
+ * page can ask; "replace" takes the analysis wherever it says something.
+ */
+export function mergeAnalysedSheet(current: IdentitySheet, analysed: IdentitySheet, mode: "fill-empty" | "replace" = "fill-empty"): SheetMerge {
+  const sheet: IdentitySheet = { ...current };
+  const filled: IdentitySheetKey[] = [];
+  const conflicts: SheetMerge["conflicts"] = [];
+  for (const field of IDENTITY_SHEET_FIELDS) {
+    const suggested = analysed[field.key]?.trim();
+    if (!suggested) continue;
+    const now = current[field.key]?.trim();
+    if (!now) {
+      sheet[field.key] = suggested;
+      filled.push(field.key);
+    } else if (now.toLowerCase() !== suggested.toLowerCase()) {
+      if (mode === "replace") sheet[field.key] = suggested;
+      else conflicts.push({ key: field.key, label: field.label, current: now, suggested });
+    }
+  }
+  return { sheet, filled, conflicts };
+}
+
 export function readLoraInput(value: unknown, existing: IdentityLora | null): IdentityLora | null {
   if (value === undefined) return existing;
   if (value === null) return null;
@@ -350,11 +444,13 @@ export function normalizeIdentity(value: unknown): Identity | null {
     lora = null;
   }
   const str = (v: unknown) => (typeof v === "string" && v ? v : null);
+  const sourcePictures = normalizeSourcePictures(raw, str(raw.createdAt) ?? new Date(0).toISOString());
   return {
     id: raw.id,
     name: raw.name,
     nickname: str(raw.nickname),
-    originalFileId: str(raw.originalFileId),
+    originalFileId: sourcePictures[0]?.fileId ?? null,
+    sourcePictures,
     sheet,
     crops,
     canonicalFileId: str(raw.canonicalFileId),

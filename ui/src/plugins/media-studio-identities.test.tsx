@@ -3,7 +3,17 @@
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { IdentitiesPanel, IdentitySettingsPanel, draftToParams, identityToDraft, type Identity } from "../../../packages/plugins/media-studio/src/ui/identities-panel";
+import {
+  IdentitiesPanel,
+  IdentitySettingsPanel,
+  addSourcePicture,
+  draftToParams,
+  identityToDraft,
+  makeMainSource,
+  removeSourcePicture,
+  withNewCrops,
+  type Identity,
+} from "../../../packages/plugins/media-studio/src/ui/identities-panel";
 import * as settingsPanel from "../../../packages/plugins/media-studio/src/ui/settings-panel";
 import * as companySettings from "../../../packages/plugins/media-studio/src/company-settings";
 import { RoomsPanel } from "../../../packages/plugins/media-studio/src/ui/rooms-panel";
@@ -347,5 +357,144 @@ describe("Rooms tab", () => {
     await click(buttonNamed(container, "Place product"));
     expect(actions["rooms.place"]).toHaveBeenCalledWith(expect.objectContaining({ roomId: "r1", zoneId: "z1", productIds: ["p1"], service: "sogni" }));
     expect(container.querySelector('img[alt="Room with product"]')).not.toBeNull();
+  });
+});
+
+// ─── Several pictures of one person, and Sogni's v0.3 alpha ──────────────────
+
+const ALPHA = "krea2_identity_edit_sogni_v0_3_alpha";
+const NAMES = {
+  "krea-identity-edit": "Krea 2 Identity Edit v1.2 (keeps faces best)",
+  [ALPHA]: "Krea 2 Identity Edit v0.3 (alpha, Sogni's own test version)",
+  qwen: "Qwen Image Edit 2511 (3 pictures)",
+};
+
+function twoPictureIdentity(): Identity {
+  return identity({
+    sourcePictures: [
+      { fileId: "orig", addedAt: "a" },
+      { fileId: "full", addedAt: "b" },
+    ],
+    crops: [
+      { role: "face", fileId: "face-1", sourceFileId: "orig", box: { x: 0.3, y: 0, w: 0.3, h: 0.3 } },
+      { role: "body", fileId: "body-1", sourceFileId: "full", box: { x: 0.1, y: 0, w: 0.8, h: 1 } },
+    ],
+  });
+}
+
+async function openEditor(item: Identity, list: Record<string, unknown> = {}) {
+  actions["identities.list"] = vi.fn(async () => ({ ...LIST_BASE, ...list, identities: [item] }));
+  root = createRoot(container);
+  await act(async () => root.render(<IdentitiesPanel context={{ companyId: COMPANY } as never} />));
+  await flush();
+  await click(buttonNamed(container, /Maja/));
+  await click(buttonNamed(container, "Edit"));
+}
+
+describe("Identities tab: several pictures of the person", () => {
+  it("an identity saved with one picture (no sourcePictures) opens with that picture and its boxes, and saves both fields", () => {
+    const draft = identityToDraft(identity());
+    expect(draft.sourceFileIds).toEqual(["orig"]);
+    expect(draft.activeSource).toBe("orig");
+    expect(draft.boxes).toEqual({ orig: [{ role: "face", box: { x: 0.3, y: 0, w: 0.3, h: 0.3 } }] });
+    expect(draftToParams(draft)).toMatchObject({ originalFileId: "orig", sourceFileIds: ["orig"] });
+  });
+
+  it("adds, removes and reorders pictures; a new crop replaces the same kind from any picture", () => {
+    let draft = identityToDraft(twoPictureIdentity());
+    expect(draft.boxes).toEqual({ orig: [{ role: "face", box: expect.any(Object) }], full: [{ role: "body", box: expect.any(Object) }] });
+    draft = addSourcePicture(draft, "third");
+    expect(draft).toMatchObject({ sourceFileIds: ["orig", "full", "third"], activeSource: "third" });
+    expect(addSourcePicture(draft, "orig").sourceFileIds).toHaveLength(3);
+    draft = makeMainSource(draft, "full");
+    expect(draftToParams(draft)).toMatchObject({ originalFileId: "full", sourceFileIds: ["full", "orig", "third"] });
+    draft = removeSourcePicture(draft, "third");
+    expect(draft.activeSource).toBe("full");
+    draft = withNewCrops(draft, [{ role: "face", fileId: "face-2", sourceFileId: "full", box: null }]);
+    expect(draft.crops.map((c) => [c.role, c.fileId, c.sourceFileId])).toEqual([
+      ["body", "body-1", "full"],
+      ["face", "face-2", "full"],
+    ]);
+  });
+
+  it("the crop editor crops from the picked picture, explains which picture to use, and shows each picture's age check", async () => {
+    actions["ageCheck.status"] = vi.fn(async (p: { fileIds: string[] }) => ({ pictures: p.fileIds.map((fileId) => ({ fileId, name: null, verdict: fileId === "full" ? "adult" : null })) }));
+    actions["identities.crop"] = vi.fn(async () => ({ crops: [{ role: "body", box: { x: 0.1, y: 0, w: 0.8, h: 1 }, imageDataUrl: "data:image/png;base64,AAAA" }] }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (path: string) =>
+        String(path).endsWith("/files")
+          ? new Response(JSON.stringify({ id: "body-2" }), { status: 200, headers: { "Content-Type": "application/json" } })
+          : // The page's Blob (jsdom), so FormData takes it.
+            { ok: true, blob: async () => new Blob(["x"], { type: "image/png" }) },
+      ),
+    );
+    actions["identities.save"] = vi.fn(async () => ({ identity: twoPictureIdentity(), identities: [twoPictureIdentity()] }));
+    await openEditor(twoPictureIdentity());
+    expect(container.textContent).toContain("Use a close-up for the face and a full-body photo for the body.");
+    const pictures = container.querySelector('[aria-label="The person\'s pictures"]')!;
+    expect(pictures.textContent).toContain("Picture 1 (main)");
+    expect(pictures.textContent).toContain("Crops: Body");
+    expect(actions["ageCheck.status"]).toHaveBeenCalledWith({ fileIds: ["orig", "full"] });
+    expect(container.querySelector('[data-source="full"] [data-age="adult"]')!.textContent).toBe("Age checked: adult");
+    expect(container.querySelector('[data-source="orig"] [data-age="unchecked"]')!.textContent).toBe("Age not checked yet");
+    expect(buttonNamed(container, "Upload another picture")).toBeTruthy();
+    const editor = () => container.querySelector('[aria-label="Crop editor"] img') as HTMLImageElement;
+    expect(editor().getAttribute("src")).toContain("orig");
+    await click(container.querySelector('[aria-label="Crop from picture 2"]') as HTMLButtonElement);
+    expect(editor().getAttribute("src")).toContain("full");
+    expect(container.querySelector('[aria-label="Crop editor"] [aria-label="body box"]')).not.toBeNull();
+    expect(container.textContent).toContain("Cropping from picture 2");
+    await click(buttonNamed(container, "Make crops"));
+    expect(actions["identities.crop"]).toHaveBeenCalledWith({ fileId: "full", boxes: [{ role: "body", box: { x: 0.1, y: 0, w: 0.8, h: 1 } }] });
+    await click(buttonNamed(container, "Save identity"));
+    expect(actions["identities.save"]).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceFileIds: ["orig", "full"], crops: expect.arrayContaining([expect.objectContaining({ role: "body", fileId: "body-2", sourceFileId: "full" })]) }),
+    );
+  });
+
+  it("analysing another picture fills only empty fields and asks about the differing ones", async () => {
+    actions["identities.analyse"] = vi.fn(async () => ({
+      ok: true,
+      fileId: "full",
+      sheet: { hair: "short red hair", body: "tall" },
+      crops: { face: { x: 0.4, y: 0, w: 0.2, h: 0.2 }, body: { x: 0, y: 0, w: 1, h: 1 }, outfit: null },
+      model: "Vision model",
+      merged: { hair: "blonde", body: "tall" },
+      filled: ["body"],
+      conflicts: [{ key: "hair", label: "Hair", current: "blonde", suggested: "short red hair" }],
+    }));
+    await openEditor(twoPictureIdentity());
+    await click(container.querySelector('[aria-label="Crop from picture 2"]') as HTMLButtonElement);
+    await click(buttonNamed(container, "Analyse this picture"));
+    expect(actions["identities.analyse"]).toHaveBeenCalledWith({ fileId: "full", currentSheet: { hair: "blonde" }, merge: "fill-empty" });
+    expect(container.textContent).toContain("Filled 1 empty field.");
+    const hair = () => [...container.querySelectorAll("label")].find((l) => l.textContent?.startsWith("Hair"))!.querySelector("input")!;
+    const body = [...container.querySelectorAll("label")].find((l) => l.textContent?.startsWith("Body and proportions"))!.querySelector("input")!;
+    expect(hair().value).toBe("blonde");
+    expect(body.value).toBe("tall");
+    const ask = container.querySelector('[aria-label="Different descriptions"]')!;
+    expect(ask.textContent).toContain('now "blonde", this picture: "short red hair"');
+    await click(buttonNamed(container, "Use the new text"));
+    expect(hair().value).toBe("short red hair");
+    expect(container.querySelector('[aria-label="Different descriptions"]')).toBeNull();
+  });
+
+  it("offers Sogni's v0.3 alpha by a plain name for the identity's model and in Generate with", async () => {
+    actions["identities.generationOptions"] = vi.fn(async () => ({ ...OPTIONS, models: { ...OPTIONS.models, sogni: ["krea-identity-edit", ALPHA, "qwen"] }, modelNames: NAMES }));
+    actions["identities.save"] = vi.fn(async () => ({ identity: identity(), identities: [identity()] }));
+    await openEditor(identity(), { editModels: ["krea-identity-edit", ALPHA, "qwen"], editModelNames: NAMES });
+    expect(container.textContent).toContain("v0.3 is Sogni's own alpha");
+    const select = [...container.querySelectorAll("label")].find((l) => l.textContent?.startsWith("Sogni model") && !l.textContent?.includes("extra"))!.querySelector("select")!;
+    expect([...select.options].map((o) => o.textContent)).toEqual([NAMES["krea-identity-edit"], NAMES[ALPHA], NAMES.qwen]);
+    expect(select.value).toBe("krea-identity-edit");
+    await act(async () => setValue(select, ALPHA));
+    await click(buttonNamed(container, "Save identity"));
+    expect(actions["identities.save"]).toHaveBeenCalledWith(expect.objectContaining({ preferredModels: expect.objectContaining({ sogni: ALPHA }) }));
+    // Candidates and training batches: the same plain names.
+    await flush();
+    const generate = container.querySelector('[aria-label="Candidates"] [aria-label="Generate with"]')!;
+    const model = [...generate.querySelectorAll("select")][1] as HTMLSelectElement;
+    expect([...model.options].map((o) => o.textContent)).toContain(NAMES[ALPHA]);
   });
 });

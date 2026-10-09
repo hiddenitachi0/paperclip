@@ -70,16 +70,59 @@ export const SOGNI_IMAGE_MODELS = [
   "gpt-image-2.5-flare",
 ] as const;
 
-/** edit_image models, with how many reference pictures each takes. */
+/**
+ * Sogni's own alpha of Krea 2 Identity Edit, v0.3 (catalog name "Sogni Krea 2
+ * Identity Edit v0.3 Alpha"). Checked 9 Oct 2026 against:
+ *   - the live public catalog GET /v1/model-catalog?mediaType=image&include=parameters:
+ *     id krea2_identity_edit_sogni_v0_3_alpha, requiresContextImage true,
+ *     benchmark secContext1/secContext2 (2 reference pictures), width/height
+ *     512-2048 step 16, steps 8-12 (default 10), guidance fixed at 1,
+ *     refBoost default 2 (v1.2: 4), same price as v1.2;
+ *   - @sogni-ai/sogni-intelligence-client 4.11.0 utils/helpers.js
+ *     getMaxContextImages: 2 (the same as v1.2);
+ *   - the same package's edit_image tool schema: its `model` list has no key
+ *     for it (only "krea-identity-edit" = v1.2, the default Sogni recommends),
+ *     so it is sent by its catalog id, which Sogni passes through unchanged
+ *     (sogni-client 5.61.0 Chat/modelRouting.js resolveHostedToolModelSelector).
+ * An alpha: offered as a choice, never the default.
+ */
+export const SOGNI_KREA_IDENTITY_EDIT_ALPHA = "krea2_identity_edit_sogni_v0_3_alpha";
+
+/**
+ * edit_image models, with how many reference pictures each takes. Keyed by
+ * the tool key, or by the catalog id for a model the published tool schema
+ * has no key for (SOGNI_EDIT_CATALOG_ONLY).
+ */
 export const SOGNI_EDIT_MODELS: Record<string, number> = {
   "qwen-lightning": 3,
   qwen: 3,
   "krea-identity-edit": 2,
+  [SOGNI_KREA_IDENTITY_EDIT_ALPHA]: 2,
   "dark-beast-krea2-identity-edit": 2,
   "gpt-image-2": 16,
   "gpt-image-2.5-sunburst": 16,
   "gpt-image-2.5-flare": 16,
 };
+
+/** Edit models sent by catalog id: Sogni's catalog lists them, its edit_image tool schema has no key for them. */
+export const SOGNI_EDIT_CATALOG_ONLY: readonly string[] = [SOGNI_KREA_IDENTITY_EDIT_ALPHA];
+
+/** Plain names for the edit models, for pickers (the stored value stays the key or id). */
+export const SOGNI_EDIT_MODEL_NAMES: Record<string, string> = {
+  "krea-identity-edit": "Krea 2 Identity Edit v1.2 (keeps faces best)",
+  [SOGNI_KREA_IDENTITY_EDIT_ALPHA]: "Krea 2 Identity Edit v0.3 (alpha, Sogni's own test version)",
+  "dark-beast-krea2-identity-edit": "Dark Beast Krea 2 Identity Edit v1.2",
+  qwen: "Qwen Image Edit 2511 (3 pictures)",
+  "qwen-lightning": "Qwen Image Edit 2511 Lightning (fast, 3 pictures)",
+  "gpt-image-2": "GPT Image 2 (paid, Premium Spark)",
+  "gpt-image-2.5-sunburst": "GPT Image 2.5 Sunburst (paid, Premium Spark)",
+  "gpt-image-2.5-flare": "GPT Image 2.5 Flare (paid, Premium Spark)",
+};
+
+/** The plain name of an edit model, else the value itself. */
+export function sogniEditModelName(model: string): string {
+  return SOGNI_EDIT_MODEL_NAMES[model.trim()] ?? SOGNI_EDIT_MODEL_NAMES[model.trim().toLowerCase()] ?? model;
+}
 
 /**
  * generate_image tool keys and the catalog model each one runs, from Sogni's
@@ -181,7 +224,7 @@ const MAX_SEED = 4_294_967_295;
 const MAX_PICTURE_BYTES = 50 * 1024 * 1024;
 const REFERENCE_CONTENT_TYPES = new Set(["image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"]);
 
-const KNOWN_CANONICAL_IDS = new Set([...Object.values(SOGNI_GENERATE_TOOL_KEYS), ...Object.values(SOGNI_EDIT_TOOL_KEYS)]);
+const KNOWN_CANONICAL_IDS = new Set([...Object.values(SOGNI_GENERATE_TOOL_KEYS), ...Object.values(SOGNI_EDIT_TOOL_KEYS), ...SOGNI_EDIT_CATALOG_ONLY]);
 
 /** A Sogni tool key, or the catalog id of one (the live catalog knows many more; see sogni-catalog.ts). */
 export function isKnownSogniModel(model: string): boolean {
