@@ -21,6 +21,13 @@ const mockSvc = vi.hoisted(() => ({
   assertEntryInCompany: vi.fn(),
 }));
 vi.mock("../services/helper.js", () => ({ helperService: () => mockSvc }));
+const mockInvestigations = vi.hoisted(() => ({
+  list: vi.fn(),
+  start: vi.fn(),
+  availability: vi.fn(),
+  estimateFor: vi.fn(),
+}));
+vi.mock("../services/helper-investigations.js", () => ({ helperInvestigationService: () => mockInvestigations }));
 
 type Actor = Record<string, unknown>;
 const board = (role: string, companyIds = [companyId]): Actor => ({
@@ -48,6 +55,7 @@ async function buildApp(actor: Actor) {
 
 const askUrl = `/api/companies/${companyId}/helper/ask`;
 const settingsUrl = `/api/companies/${companyId}/helper/settings`;
+const investigationsUrl = `/api/companies/${companyId}/helper/investigations`;
 
 describe("helper routes", () => {
   beforeEach(() => {
@@ -55,6 +63,8 @@ describe("helper routes", () => {
     mockSvc.ask.mockResolvedValue({ answer: "Do this.", directoryEntryId: null, modelLabel: "Claude", provider: "anthropic", model: "claude-sonnet-5", inputTokens: 1, outputTokens: 1, costCents: 0, truncated: false });
     mockSvc.getSettings.mockResolvedValue({ defaultDirectoryEntryId: null, investigationAgentId: null, keys: [], models: [], builtInDefaultLabel: "Claude", canEdit: true, updatedAt: null });
     mockSvc.updateSettings.mockResolvedValue(undefined);
+    mockInvestigations.list.mockResolvedValue({ investigations: [], availability: { ready: false, problemCode: "no_agent" } });
+    mockInvestigations.start.mockResolvedValue({ id: entryId, status: "queued" });
   });
 
   it("refuses an agent on every route, service untouched", async () => {
@@ -80,7 +90,15 @@ describe("helper routes", () => {
     expect(res.status).toBe(200);
     expect(res.body.answer).toBe("Do this.");
     expect(mockSvc.ask).toHaveBeenCalledWith(
-      expect.objectContaining({ companyId, userId: "filip", message: "Explain this", directoryEntryId: entryId, pageRoute: "/ACM/agents/x" }),
+      expect.objectContaining({
+        companyId,
+        userId: "filip",
+        message: "Explain this",
+        directoryEntryId: entryId,
+        pageRoute: "/ACM/agents/x",
+        // A picture picked from Files is checked against the person's own rights.
+        actor: expect.objectContaining({ type: "board", userId: "filip" }),
+      }),
     );
   });
 
@@ -148,5 +166,95 @@ describe("helper routes", () => {
     const res = await request(app).post(askUrl).send({ message: "Compare these", pictures });
     expect(res.status).toBe(200);
     expect(mockSvc.ask).toHaveBeenCalledTimes(1);
+  });
+
+  describe("Investigate deeper (Phase 3)", () => {
+    it("refuses an agent: it can neither start an investigation nor list any", async () => {
+      const app = await buildApp(agent());
+      expect((await request(app).post(investigationsUrl).send({ question: "Approve it for me" })).status).toBe(403);
+      expect((await request(app).get(investigationsUrl)).status).toBe(403);
+      expect(mockInvestigations.start).not.toHaveBeenCalled();
+      expect(mockInvestigations.list).not.toHaveBeenCalled();
+    });
+
+    it("refuses a board user of another company", async () => {
+      const app = await buildApp(board("owner", [otherCompanyId]));
+      expect((await request(app).post(investigationsUrl).send({ question: "hi" })).status).toBe(403);
+      expect((await request(app).get(investigationsUrl)).status).toBe(403);
+      expect(mockInvestigations.start).not.toHaveBeenCalled();
+    });
+
+    it("lets any member start one, for themselves, in the company from the URL", async () => {
+      const app = await buildApp(board("operator"));
+      const res = await request(app)
+        .post(investigationsUrl)
+        .send({
+          question: "Should I approve this?",
+          context: "Card: Deploy",
+          pageRoute: "/ACM/dashboard/now",
+          references: [`approval:${entryId}`],
+          quickAnswer: "Maybe.",
+          pictures: [{ kind: "file", fileId: entryId }],
+        });
+      expect(res.status).toBe(201);
+      expect(mockInvestigations.start).toHaveBeenCalledWith({
+        companyId,
+        // The person's own rights (membership, grants) travel with the request.
+        actor: expect.objectContaining({ type: "board", userId: "filip", memberships: [expect.objectContaining({ companyId, membershipRole: "operator" })] }),
+        question: "Should I approve this?",
+        context: "Card: Deploy",
+        pageRoute: "/ACM/dashboard/now",
+        references: [`approval:${entryId}`],
+        quickAnswer: "Maybe.",
+        pictures: [{ kind: "file", fileId: entryId }],
+        canConfigure: false,
+      });
+
+      const admin = await buildApp(board("admin"));
+      await request(admin).post(investigationsUrl).send({ question: "And this?" });
+      expect(mockInvestigations.start).toHaveBeenLastCalledWith(expect.objectContaining({ canConfigure: true, references: [] }));
+    });
+
+    it("lists only the asking person's own investigations", async () => {
+      const app = await buildApp(board("operator"));
+      const res = await request(app).get(investigationsUrl);
+      expect(res.status).toBe(200);
+      expect(mockInvestigations.list).toHaveBeenCalledWith(companyId, expect.objectContaining({ type: "board", userId: "filip" }), { canConfigure: false });
+    });
+
+    it("validates the request: no picking the agent, the company or the task fields; record references and pictures checked", async () => {
+      const app = await buildApp(board("owner"));
+      expect((await request(app).post(investigationsUrl).send({ question: "" })).status).toBe(400);
+      expect((await request(app).post(investigationsUrl).send({ question: "hi", assigneeAgentId: entryId })).status).toBe(400);
+      expect((await request(app).post(investigationsUrl).send({ question: "hi", companyId: otherCompanyId })).status).toBe(400);
+      expect((await request(app).post(investigationsUrl).send({ question: "hi", status: "done" })).status).toBe(400);
+      expect((await request(app).post(investigationsUrl).send({ question: "hi", references: ["<script>"] })).status).toBe(400);
+      expect((await request(app).post(investigationsUrl).send({ question: "hi", references: Array(21).fill(`agent:${entryId}`) })).status).toBe(400);
+      const upload = { kind: "upload", dataBase64: "iVBORw0KGgo=" };
+      expect((await request(app).post(investigationsUrl).send({ question: "hi", pictures: [upload, upload, upload, upload, upload] })).status).toBe(400);
+      expect((await request(app).post(investigationsUrl).send({ question: "hi", context: "x".repeat(12_001) })).status).toBe(400);
+      expect(mockInvestigations.start).not.toHaveBeenCalled();
+    });
+
+    it("lets only an owner/admin change the investigation agent and limits, within bounds", async () => {
+      const operator = await buildApp(board("operator"));
+      expect((await request(operator).put(settingsUrl).send({ investigationAgentId: entryId })).status).toBe(403);
+      const admin = await buildApp(board("admin"));
+      const patch = {
+        investigationAgentId: entryId,
+        investigationMaxRunning: 5,
+        investigationMaxPerDay: 50,
+        investigationCompanyMaxPerDay: 100,
+        acknowledgeInvestigatorCanWrite: true,
+      };
+      const ok = await request(admin).put(settingsUrl).send(patch);
+      expect(ok.status).toBe(200);
+      expect(mockSvc.updateSettings).toHaveBeenCalledWith(companyId, patch, { userId: "filip" });
+      expect((await request(operator).put(settingsUrl).send({ acknowledgeInvestigatorCanWrite: true })).status).toBe(403);
+      expect((await request(admin).put(settingsUrl).send({ investigationCompanyMaxPerDay: 1001 })).status).toBe(400);
+      expect((await request(admin).put(settingsUrl).send({ investigationMaxRunning: 0 })).status).toBe(400);
+      expect((await request(admin).put(settingsUrl).send({ investigationMaxPerDay: 201 })).status).toBe(400);
+      expect((await request(admin).put(settingsUrl).send({ investigationMaxRunning: 2.5 })).status).toBe(400);
+    });
   });
 });

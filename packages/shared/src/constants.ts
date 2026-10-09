@@ -300,6 +300,10 @@ export const ISSUE_ORIGIN_KINDS = [
   // DUR-62: the weekly check-up report. Written for the operator, deliberately
   // unassigned, and refused to every agent-authenticated mutation.
   "organization_checkup",
+  // "Ask Paperclip" Phase 3: a question a person handed from the Ask panel to
+  // the company's investigation agent (advice only). Created by that person
+  // (created_by_user_id), so the panel lists each person's own.
+  "helper_investigation",
 ] as const;
 export type BuiltInIssueOriginKind = (typeof ISSUE_ORIGIN_KINDS)[number];
 export type PluginIssueOriginKind = `plugin:${string}`;

@@ -1688,6 +1688,13 @@
       "when": 1791555706546,
       "tag": "0241_report_templates",
       "breakpoints": true
+    },
+    {
+      "idx": 242,
+      "version": "7",
+      "when": 1791583071889,
+      "tag": "0242_helper_investigation_limits",
+      "breakpoints": true
     }
   ]
 }

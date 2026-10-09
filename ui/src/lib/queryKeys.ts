@@ -16,6 +16,7 @@ export const queryKeys = {
     modelStarters: (id: string) => ["companies", id, "model-directory", "starters"] as const,
     webSearch: (id: string) => ["companies", id, "web-search"] as const,
     helperSettings: (id: string) => ["companies", id, "helper-settings"] as const,
+    helperInvestigations: (id: string) => ["companies", id, "helper-investigations"] as const,
     dataReads: (id: string) => ["companies", id, "data-reads"] as const,
   },
   companySkills: {

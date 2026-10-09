@@ -1,7 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { HelpCircle, Crop, X, Send, Eye, RotateCcw, Loader2, ImagePlus, FolderOpen } from "lucide-react";
-import { HELPER_MESSAGE_MAX_CHARS, HELPER_PICTURES_MAX, type HelperAskResponse, type HelperModelOption } from "@paperclipai/shared";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { HelpCircle, Crop, X, Send, Eye, RotateCcw, Loader2, ImagePlus, FolderOpen, Search } from "lucide-react";
+import {
+  HELPER_INVESTIGATIONS_LIST_LIMIT,
+  HELPER_MESSAGE_MAX_CHARS,
+  HELPER_PICTURES_MAX,
+  type HelperAskResponse,
+  type HelperDroppedReference,
+  type HelperInvestigationList,
+  type HelperModelOption,
+  type HelperPictureInput,
+} from "@paperclipai/shared";
 import { useLocation } from "@/lib/router";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -21,6 +30,14 @@ import {
   type HelperAttachedPicture,
 } from "./helper-pictures";
 import { effectiveHelperModel, helperStatusText, isHelperStatusReady, sortByReadiness } from "./helper-model-status";
+import {
+  DroppedReferencesNotice,
+  HELPER_INVESTIGATION_POLL_MS,
+  InvestigateConfirm,
+  MyInvestigations,
+  isInvestigationActive,
+  type InvestigationDraft,
+} from "./HelperInvestigations";
 
 /**
  * "Ask Paperclip" — the floating helper (Phase 1).
@@ -39,6 +56,13 @@ import { effectiveHelperModel, helperStatusText, isHelperStatusReady, sortByRead
  * The panel and the marking layer carry data-helper-ignore so they are never
  * part of what is captured. Conversation turns live in this component only
  * (gone on reload); nothing is remembered on the server.
+ *
+ * Phase 3: "Investigate deeper" hands a question (typed, or one already
+ * answered) to the company's investigation agent as a normal task, after the
+ * person sees who will look, what it usually takes and costs, and that it is
+ * advice only. The quick helper may suggest it; it never starts by itself.
+ * "My investigations" is fetched from the server (so it survives a reload)
+ * and polled while any is running.
  */
 
 interface Turn {
@@ -49,6 +73,13 @@ interface Turn {
   applyTargets?: string[];
   /** Pictures attached to this question (previews only; not sent again with later questions). */
   pictures?: Array<{ key: string; name: string; previewUrl: string }>;
+  /** What was sent with this question, so "Investigate deeper" can hand the same to an agent. */
+  context?: string | null;
+  pageRoute?: string | null;
+  references?: string[];
+  pictureInputs?: HelperPictureInput[];
+  /** The quick model said this needs a closer look (Phase 3). */
+  suggestInvestigation?: boolean;
 }
 
 /** History text for an earlier question that had pictures: the model knows they existed, they are not resent. */
@@ -111,6 +142,11 @@ export function HelperOverlay() {
   const [pictures, setPictures] = useState<HelperAttachedPicture[]>([]);
   const [pictureProblems, setPictureProblems] = useState<string[]>([]);
   const [filePickerOpen, setFilePickerOpen] = useState(false);
+  const [draft, setDraft] = useState<(InvestigationDraft & { fromComposer: boolean }) | null>(null);
+  const [startError, setStartError] = useState<string | null>(null);
+  const [startedIds, setStartedIds] = useState<string[]>([]);
+  const [droppedNotice, setDroppedNotice] = useState<HelperDroppedReference[]>([]);
+  const queryClient = useQueryClient();
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const registeredTargets = useHelperApplyTargets();
@@ -124,6 +160,53 @@ export function HelperOverlay() {
     staleTime: 60_000,
   });
   const settings = settingsQuery.data;
+  const investigationsKey = queryKeys.companies.helperInvestigations(selectedCompanyId ?? "");
+  const investigationsQuery = useQuery({
+    queryKey: investigationsKey,
+    queryFn: () => helperApi.listInvestigations(selectedCompanyId!),
+    enabled: open && Boolean(selectedCompanyId),
+    // Live while any is waiting or working, and only while the panel is open.
+    refetchInterval: (query) =>
+      query.state.data?.investigations.some(isInvestigationActive) ? HELPER_INVESTIGATION_POLL_MS : false,
+    refetchOnWindowFocus: true,
+  });
+  const investigations = investigationsQuery.data?.investigations ?? [];
+  const openInvestigationIds = useMemo(
+    () => new Set([...startedIds, ...(investigations[0] ? [investigations[0].id] : [])]),
+    [startedIds, investigations],
+  );
+  const startInvestigation = useMutation({
+    mutationFn: (input: InvestigationDraft) =>
+      helperApi.startInvestigation(selectedCompanyId!, {
+        question: input.question,
+        context: input.context,
+        pageRoute: input.pageRoute,
+        references: input.references,
+        quickAnswer: input.quickAnswer,
+        ...(input.pictures.length > 0 ? { pictures: input.pictures } : {}),
+      }),
+    onSuccess: (view) => {
+      queryClient.setQueryData<HelperInvestigationList>(investigationsKey, (prev) =>
+        prev
+          ? { ...prev, investigations: [view, ...prev.investigations.filter((i) => i.id !== view.id)].slice(0, HELPER_INVESTIGATIONS_LIST_LIMIT) }
+          : prev,
+      );
+      void queryClient.invalidateQueries({ queryKey: investigationsKey });
+      setStartedIds((prev) => [view.id, ...prev]);
+      setDroppedNotice(view.droppedReferences ?? []);
+      if (draft?.fromComposer) {
+        setMessage("");
+        setPictures([]);
+        setPictureProblems([]);
+      }
+      setDraft(null);
+      setStartError(null);
+    },
+    onError: (err) => {
+      setStartError(describeError(err));
+      void queryClient.invalidateQueries({ queryKey: investigationsKey });
+    },
+  });
   // Ready models first: groups with a ready model first, and ready models first inside each group.
   const groups = useMemo(() => {
     const grouped = groupEntries((settings?.models ?? []).map(toCatalogueItem), "maker").map((group) => ({
@@ -224,6 +307,10 @@ export function HelperOverlay() {
       content: text,
       applyTargets: capture?.applyTargets ?? [],
       pictures: sentPictures.map(({ key, name, previewUrl }) => ({ key, name, previewUrl })),
+      context: capture?.text ? capture.text : null,
+      pageRoute: route,
+      references: capture?.entities ?? [],
+      pictureInputs: sentPictures.map((p) => p.input),
     };
     setTurns((prev) => [...prev, asked]);
     setMessage("");
@@ -245,6 +332,7 @@ export function HelperOverlay() {
           content: result.answer,
           meta: { modelLabel: result.modelLabel, costCents: result.costCents, truncated: result.truncated },
           applyTargets: asked.applyTargets,
+          suggestInvestigation: result.suggestInvestigation === true,
         },
       ]);
     } catch (err) {
@@ -255,6 +343,43 @@ export function HelperOverlay() {
     } finally {
       setPending(false);
     }
+  };
+
+  /** Opens the confirm step; nothing starts until the person presses "Start investigation". */
+  const openInvestigation = (next: InvestigationDraft & { fromComposer: boolean }) => {
+    setDraft(next);
+    setStartError(null);
+    void investigationsQuery.refetch();
+  };
+
+  const investigateComposer = () => {
+    const text = message.trim();
+    if (!text) return;
+    openInvestigation({
+      question: text,
+      context: capture?.text ? capture.text : null,
+      pageRoute: route,
+      references: capture?.entities ?? [],
+      pictures: pictures.map((p) => p.input),
+      quickAnswer: null,
+      fromComposer: true,
+    });
+  };
+
+  /** "Investigate deeper" on an answer: the question that got it, with what was sent then. */
+  const investigateTurn = (index: number) => {
+    const answer = turns[index];
+    const asked = turns[index - 1];
+    if (!answer || !asked || asked.role !== "user") return;
+    openInvestigation({
+      question: asked.content,
+      context: asked.context ?? null,
+      pageRoute: asked.pageRoute ?? route,
+      references: asked.references ?? [],
+      pictures: asked.pictureInputs ?? [],
+      quickAnswer: answer.content,
+      fromComposer: false,
+    });
   };
 
   const apply = (label: string, answer: string) => {
@@ -356,6 +481,10 @@ export function HelperOverlay() {
                   <li>Mark a card on Now and ask “Should I approve this?”</li>
                   <li>Mark a text field and ask the helper to write it, then press “Apply”.</li>
                   <li>Attach or paste a picture and ask “What's wrong in this screenshot?” or “Write a character sheet from this photo”.</li>
+                  <li>
+                    When a question needs real digging (the code, reviews or logs behind a card), press “Investigate deeper”
+                    to hand it to an agent. You see what it costs before it starts.
+                  </li>
                 </ul>
               </div>
             ) : null}
@@ -374,6 +503,17 @@ export function HelperOverlay() {
               ) : (
                 <div key={index} className="space-y-2" data-testid="helper-answer">
                   <MarkdownBody className="text-sm">{turn.content}</MarkdownBody>
+                  {turn.suggestInvestigation ? (
+                    <div className="space-y-1.5 rounded-md border border-primary/40 bg-primary/5 px-2.5 py-2 text-xs" data-testid="helper-suggest-investigation">
+                      <p>
+                        This needs a closer look than the quick helper can give. An agent can investigate it: that takes
+                        a few minutes and is paid from that agent's budget. Nothing starts until you press the button.
+                      </p>
+                      <Button size="xs" variant="outline" onClick={() => investigateTurn(index)} data-testid="helper-investigate-suggested">
+                        <Search className="h-3.5 w-3.5" /> Investigate deeper
+                      </Button>
+                    </div>
+                  ) : null}
                   <div className="flex flex-wrap items-center gap-2">
                     {(turn.applyTargets ?? [])
                       .filter((label) => registeredTargets.includes(label) || canApplyHelperAnswer(label))
@@ -382,6 +522,17 @@ export function HelperOverlay() {
                           Apply to {label}
                         </Button>
                       ))}
+                    {!turn.suggestInvestigation ? (
+                      <Button
+                        size="xs"
+                        variant="ghost"
+                        onClick={() => investigateTurn(index)}
+                        title="Hand this question to an agent that can look things up (takes a few minutes and costs money)"
+                        data-testid="helper-investigate-answer"
+                      >
+                        <Search className="h-3.5 w-3.5" /> Investigate deeper
+                      </Button>
+                    ) : null}
                     {turn.meta ? (
                       <span className="text-[11px] text-muted-foreground">
                         {turn.meta.modelLabel}
@@ -404,6 +555,22 @@ export function HelperOverlay() {
                 {error}
               </p>
             ) : null}
+            {draft ? (
+              <InvestigateConfirm
+                draft={draft}
+                availability={investigationsQuery.data?.availability ?? null}
+                loading={investigationsQuery.isFetching}
+                starting={startInvestigation.isPending}
+                error={startError ?? (investigationsQuery.error ? describeError(investigationsQuery.error) : null)}
+                onStart={() => startInvestigation.mutate(draft)}
+                onCancel={() => {
+                  setDraft(null);
+                  setStartError(null);
+                }}
+              />
+            ) : null}
+            <DroppedReferencesNotice dropped={droppedNotice} onClose={() => setDroppedNotice([])} />
+            <MyInvestigations investigations={investigations} openIds={openInvestigationIds} />
           </div>
 
           <footer className="space-y-2 border-t border-border px-4 py-3">
@@ -608,9 +775,22 @@ export function HelperOverlay() {
                 className="min-h-[64px] flex-1 text-sm"
                 aria-label="Your question"
               />
-              <Button size="icon-sm" onClick={() => void send()} disabled={pending || !message.trim() || blindWithPictures} aria-label="Send">
-                <Send className="h-4 w-4" />
-              </Button>
+              <div className="flex flex-col gap-1.5">
+                <Button
+                  size="icon-sm"
+                  variant="outline"
+                  onClick={investigateComposer}
+                  disabled={!message.trim() || startInvestigation.isPending}
+                  aria-label="Investigate deeper"
+                  title="Hand this question straight to an agent that can look things up (takes a few minutes and costs money). You confirm first."
+                  data-testid="helper-investigate-composer"
+                >
+                  <Search className="h-4 w-4" />
+                </Button>
+                <Button size="icon-sm" onClick={() => void send()} disabled={pending || !message.trim() || blindWithPictures} aria-label="Send">
+                  <Send className="h-4 w-4" />
+                </Button>
+              </div>
             </div>
           </footer>
         </aside>

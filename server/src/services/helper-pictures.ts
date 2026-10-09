@@ -6,7 +6,7 @@ import {
   type HelperPictureInput,
   type HelperPictureType,
 } from "@paperclipai/shared";
-import { unprocessable } from "../errors.js";
+import { forbidden, unprocessable } from "../errors.js";
 import { getStorageService } from "../storage/index.js";
 import type { StorageService } from "../storage/types.js";
 import { issueService } from "./issues.js";
@@ -39,6 +39,16 @@ export interface HelperPictureDeps {
 export interface PreparedHelperPicture extends LaneAImage {
   /** "picture 1", or the file name the person gave. */
   label: string;
+}
+
+export interface HelperPicturePrepareOptions {
+  /**
+   * May the person see the task this company file is attached to (issueId
+   * null = a company file with no task)? A picture they may not see is
+   * refused, never silently dropped, so nobody reads a task through the
+   * helper that they could not open themselves.
+   */
+  canReadFile?: (file: { issueId: string | null }) => Promise<boolean>;
 }
 
 const PNG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
@@ -109,11 +119,21 @@ export function helperPictureService(db: Db, deps: HelperPictureDeps = {}) {
   const storage = deps.storage ?? (() => getStorageService());
   const issues = issueService(db);
 
-  async function readCompanyFile(companyId: string, fileId: string, label: string): Promise<Buffer> {
+  async function readCompanyFile(
+    companyId: string,
+    fileId: string,
+    label: string,
+    options: HelperPicturePrepareOptions,
+  ): Promise<Buffer> {
     const file = await issues.getAttachmentById(fileId);
     // Another company's file reads exactly like a missing one.
     if (!file || file.companyId !== companyId) {
       throw unprocessable(`${label} is not in this company's Files. Pick it again.`, { code: "HELPER_PICTURE_NOT_FOUND" });
+    }
+    if (options.canReadFile && !(await options.canReadFile({ issueId: file.issueId ?? null }))) {
+      throw forbidden(`${label} belongs to a task you do not have access to, so it cannot be used. Remove it and try again.`, {
+        code: "HELPER_PICTURE_NOT_VISIBLE",
+      });
     }
     if (file.byteSize > HELPER_PICTURE_MAX_BYTES) {
       throw unprocessable(`${label} is larger than ${MAX_MB} MB. Pick a smaller picture.`, { code: "HELPER_PICTURE_TOO_LARGE" });
@@ -123,7 +143,11 @@ export function helperPictureService(db: Db, deps: HelperPictureDeps = {}) {
   }
 
   /** Reads, checks and shrinks the attached pictures, in order. Nothing is written anywhere. */
-  async function prepare(companyId: string, pictures: HelperPictureInput[] | undefined): Promise<PreparedHelperPicture[]> {
+  async function prepare(
+    companyId: string,
+    pictures: HelperPictureInput[] | undefined,
+    options: HelperPicturePrepareOptions = {},
+  ): Promise<PreparedHelperPicture[]> {
     const list = pictures ?? [];
     if (list.length > HELPER_PICTURES_MAX) {
       throw unprocessable(`Attach at most ${HELPER_PICTURES_MAX} pictures to one question.`, { code: "HELPER_PICTURE_COUNT" });
@@ -136,7 +160,7 @@ export function helperPictureService(db: Db, deps: HelperPictureDeps = {}) {
         const bytes = decodeUpload(picture.dataBase64, label);
         out.push({ ...(await normalizeHelperPicture(bytes, label)), label });
       } else {
-        const bytes = await readCompanyFile(companyId, picture.fileId, fallback);
+        const bytes = await readCompanyFile(companyId, picture.fileId, fallback, options);
         out.push({ ...(await normalizeHelperPicture(bytes, fallback)), label: fallback });
       }
     }

@@ -15,7 +15,13 @@ import type { HelperModelOption, HelperSettingsView } from "@paperclipai/shared"
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const mockHelperApi = vi.hoisted(() => ({ ask: vi.fn(), getSettings: vi.fn(), updateSettings: vi.fn() }));
+const mockHelperApi = vi.hoisted(() => ({
+  ask: vi.fn(),
+  getSettings: vi.fn(),
+  updateSettings: vi.fn(),
+  listInvestigations: vi.fn(async () => ({ investigations: [], availability: null })),
+  startInvestigation: vi.fn(),
+}));
 const mockArtifactsApi = vi.hoisted(() => ({ list: vi.fn(), listAgents: vi.fn() }));
 vi.mock("../../api/helper", () => ({ helperApi: mockHelperApi }));
 vi.mock("../../api/artifacts", () => ({ artifactsApi: mockArtifactsApi }));
@@ -60,6 +66,10 @@ function settings(overrides: Partial<HelperSettingsView> = {}): HelperSettingsVi
   return {
     defaultDirectoryEntryId: null,
     investigationAgentId: null,
+    investigationMaxRunning: 3,
+    investigationMaxPerDay: 20,
+    investigationCompanyMaxPerDay: 50,
+    investigationAgent: null,
     keys: [],
     models: [
       model("m-blind", "Text only", { canSeePictures: false, status: needsKey, keyReady: false, keyHint: "The helper has no OpenRouter key yet." }),

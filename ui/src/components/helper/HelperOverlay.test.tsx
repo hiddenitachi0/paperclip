@@ -11,6 +11,8 @@ const mockHelperApi = vi.hoisted(() => ({
   ask: vi.fn(),
   getSettings: vi.fn(),
   updateSettings: vi.fn(),
+  listInvestigations: vi.fn(async () => ({ investigations: [], availability: null })),
+  startInvestigation: vi.fn(),
 }));
 vi.mock("../../api/helper", () => ({ helperApi: mockHelperApi }));
 vi.mock("../../context/CompanyContext", () => ({

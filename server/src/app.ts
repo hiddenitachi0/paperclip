@@ -40,7 +40,7 @@ import { morningReportRoutes } from "./routes/morning-report.js";
 import { mailSecretaryRoutes } from "./routes/mail-secretary.js";
 import { mailAccountsRoutes } from "./routes/mail-accounts.js";
 import { modelDirectoryRoutes } from "./routes/model-directory.js";
-import { HELPER_ASK_API_PATH, HELPER_ASK_JSON_BODY_LIMIT, helperRoutes } from "./routes/helper.js";
+import { HELPER_ASK_API_PATH, HELPER_ASK_JSON_BODY_LIMIT, HELPER_INVESTIGATIONS_API_PATH, helperRoutes } from "./routes/helper.js";
 import { emailSettingsRoutes } from "./routes/email-settings.js";
 import { securityReviewSettingsRoutes } from "./routes/security-review-settings.js";
 import { videoStorylineRoutes } from "./routes/video-storylines.js";
@@ -256,6 +256,11 @@ export async function createApp(
     limit: HELPER_ASK_JSON_BODY_LIMIT,
     verify: captureRawBody,
   }));
+  // "Investigate deeper" takes the same pictures.
+  app.use(HELPER_INVESTIGATIONS_API_PATH, express.json({
+    limit: HELPER_ASK_JSON_BODY_LIMIT,
+    verify: captureRawBody,
+  }));
   app.use(express.json({
     limit: DEFAULT_JSON_BODY_LIMIT,
     verify: captureRawBody,
@@ -344,7 +349,12 @@ export async function createApp(
   api.use(mailSecretaryRoutes(db));
   api.use(mailAccountsRoutes(db));
   api.use(modelDirectoryRoutes(db));
-  api.use(helperRoutes(db));
+  api.use(helperRoutes(db, {
+    investigations: {
+      pluginWorkerManager: workerManager,
+      storage: () => opts.storageService,
+    },
+  }));
   api.use(emailSettingsRoutes(db));
   api.use(securityReviewSettingsRoutes(db));
   api.use(videoStorylineRoutes(db));
