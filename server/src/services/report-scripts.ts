@@ -564,7 +564,7 @@ export function reportScriptsService(db: Db, deps: ReportScriptsServiceDeps = {}
     if (version.status === "approved") throw conflict("This script version is already approved.");
     if (version.status === "retired") throw unprocessable("This script version is retired.");
     const existingCard = await getCard(companyId, version.approvalId);
-    if (existingCard && (existingCard.status === "pending" || existingCard.status === "revision_requested")) {
+    if (existingCard && existingCard.status === "pending") {
       return { version: toVersionSummary(version), approvalId: existingCard.id };
     }
     const fixtures = await listFixtureRows(companyId, versionId);
@@ -601,6 +601,15 @@ export function reportScriptsService(db: Db, deps: ReportScriptsServiceDeps = {}
       fixtureResults: null,
       fixtureCheckedAt: null,
     };
+    if (existingCard && existingCard.status === "revision_requested") {
+      // Sent back: reopen the SAME card with a payload rebuilt from the
+      // stored version (never from anything the requester sends).
+      await db
+        .update(approvals)
+        .set({ status: "pending", payload, decisionNote: null, decidedByUserId: null, decidedAt: null, updatedAt: new Date() })
+        .where(eq(approvals.id, existingCard.id));
+      return { version: toVersionSummary(version), approvalId: existingCard.id };
+    }
     // No explicit transaction: routes run on the request-scoped db, which
     // does not allow one. A card left behind by a failed second step is
     // harmless -- it cannot be approved unless its version is.
@@ -728,7 +737,63 @@ export function reportScriptsService(db: Db, deps: ReportScriptsServiceDeps = {}
     return { approved: true, version: toVersionSummary(row), fixtureResults, message: null };
   }
 
+  /** The version whose OWN approval card `approvalId` is (found via the version's link, not the card payload). */
+  async function versionForCard(companyId: string, approvalId: string) {
+    const rows = await db
+      .select()
+      .from(reportScriptVersions)
+      .where(and(eq(reportScriptVersions.approvalId, approvalId), eq(reportScriptVersions.companyId, companyId)))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  /**
+   * Approve from an approval card. The card is only the button: the version
+   * is the one whose own approval_id is this card, and the digest approved
+   * is the stored version's -- nothing from the card payload is trusted.
+   */
+  async function approveFromCard(companyId: string, approvalId: string, userId: string): Promise<ReportScriptApprovalOutcome> {
+    const version = await versionForCard(companyId, approvalId);
+    if (!version) {
+      throw unprocessable(
+        "This card is not the approval card of any calculation version, so it cannot approve anything. Do not trust the code it shows.",
+        { code: "report_script_card_not_linked" },
+      );
+    }
+    return approveVersion(companyId, version.id, { userId, sha256: version.sha256 });
+  }
+
+  /**
+   * The code an approval card stands for, read from the stored version (the
+   * card UI shows this, never the payload's copy). `matchesCard` is false if
+   * the payload's digest differs from the stored one.
+   */
+  async function getCardSource(companyId: string, approvalId: string) {
+    const card = await getCard(companyId, approvalId);
+    const version = card ? await versionForCard(companyId, approvalId) : null;
+    if (!card || !version) {
+      throw notFound("This card is not linked to any calculation version. Do not approve it.");
+    }
+    const script = await getScript(companyId, version.scriptId);
+    const recomputed = computeScriptFingerprint({ files: version.files, entrypoint: version.entrypoint });
+    const cardSha = (card.payload as Record<string, unknown> | null)?.sha256;
+    return {
+      approvalId,
+      versionId: version.id,
+      versionNo: version.versionNo,
+      scriptName: script.name,
+      status: version.status,
+      entrypoint: version.entrypoint,
+      files: version.files,
+      sha256: version.sha256,
+      storedCodeMatchesDigest: recomputed === version.sha256,
+      matchesCard: cardSha === version.sha256,
+    };
+  }
+
   return {
+    approveFromCard,
+    getCardSource,
     listScripts,
     createScript,
     getScript: (companyId: string, scriptId: string) => getScript(companyId, scriptId).then(toScriptSummary),

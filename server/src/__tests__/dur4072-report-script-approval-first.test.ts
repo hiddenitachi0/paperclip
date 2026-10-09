@@ -420,4 +420,90 @@ d("DUR-4072 report scripts: approval first", () => {
     expect((await request(app).post(`${base}/versions/${version.id}/run-fixture`).send({ fixtureId })).status).toBe(404);
     expect(spy.calls).toHaveLength(0);
   });
+
+  describe("forged approval cards (DUR-4698 re-review)", () => {
+    function forgedPayload(version: { id: string; sha256: string }) {
+      return {
+        kind: REPORT_SCRIPT_APPROVAL_KIND,
+        title: "Approve calculation (looks harmless)",
+        versionId: version.id,
+        sha256: version.sha256,
+        entrypoint: "main.py",
+        files: { "main.py": "print('{\"total\": 6}')" },
+      };
+    }
+
+    it("an agent cannot file a report_script_version card through the generic approvals route (422)", async () => {
+      const spy = spyRunner();
+      const { companyId, app, base, version } = await agentDrafts({ runner: spy.runner, limiter: new ReportScriptRunLimiter() });
+      await request(app).post(`${base}/versions/${version.id}/request-approval`).send({});
+      const forged = await request(app)
+        .post(`/api/companies/${companyId}/approvals`)
+        .send({ type: "request_board_approval", payload: forgedPayload(version) });
+      expect(forged.status).toBe(422);
+      const cards = await db.select().from(approvals);
+      expect(cards).toHaveLength(1);
+      // The service refuses it too, for any other caller.
+      await expect(
+        approvalService(db).create(companyId, { type: "request_board_approval", payload: forgedPayload(version) }),
+      ).rejects.toThrow(/asking for approval on the calculation/);
+      expect(spy.calls).toHaveLength(0);
+    });
+
+    it("resubmitting a report_script_version card is refused, so its code cannot be swapped (422)", async () => {
+      const spy = spyRunner();
+      const deps = { runner: spy.runner, limiter: new ReportScriptRunLimiter() };
+      const { companyId, app, base, version } = await agentDrafts(deps);
+      const asked = await request(app).post(`${base}/versions/${version.id}/request-approval`).send({});
+      const owner = createApp(boardActor(companyId, "owner"), deps);
+      const sentBack = await request(owner).post(`/api/approvals/${asked.body.approvalId}/request-revision`).send({ decisionNote: "explain" });
+      expect(sentBack.status).toBe(200);
+      const resubmit = await request(app)
+        .post(`/api/approvals/${asked.body.approvalId}/resubmit`)
+        .send({ payload: forgedPayload(version) });
+      expect(resubmit.status).toBe(422);
+      await expect(approvalService(db).resubmit(asked.body.approvalId, forgedPayload(version))).rejects.toThrow(/asking for approval/);
+      const [card] = await db.select().from(approvals).where(eq(approvals.id, asked.body.approvalId));
+      expect((card!.payload as { files: unknown }).files).toEqual({ "main.py": SUM_SCRIPT });
+
+      // The supported way back: ask for approval again -> same card reopened, rebuilt from the stored code.
+      const again = await request(app).post(`${base}/versions/${version.id}/request-approval`).send({});
+      expect(again.status).toBe(201);
+      expect(again.body.approvalId).toBe(asked.body.approvalId);
+      const [reopened] = await db.select().from(approvals).where(eq(approvals.id, asked.body.approvalId));
+      expect(reopened!.status).toBe("pending");
+      expect((reopened!.payload as { files: unknown }).files).toEqual({ "main.py": SUM_SCRIPT });
+      expect(spy.calls).toHaveLength(0);
+    });
+
+    it("approving a card that is not the version's own approval card is refused and runs nothing", async () => {
+      const spy = spyRunner();
+      const deps = { runner: spy.runner, limiter: new ReportScriptRunLimiter() };
+      const { companyId, app, base, version } = await agentDrafts(deps);
+      const asked = await request(app).post(`${base}/versions/${version.id}/request-approval`).send({});
+      // A forged card that slipped in some other way (e.g. a direct row).
+      const [forged] = await db
+        .insert(approvals)
+        .values({ companyId, type: "request_board_approval", status: "pending", payload: forgedPayload(version) })
+        .returning();
+      const owner = createApp(boardActor(companyId, "owner"), deps);
+      const res = await request(owner).post(`/api/approvals/${forged!.id}/approve`).send({});
+      expect(res.status).toBe(422);
+      expect(res.body.error).toMatch(/not the approval card of any calculation version/);
+      await expect(approvalService(db).approve(forged!.id, "owner")).rejects.toThrow(/owner or admin/);
+      expect(spy.calls).toHaveLength(0);
+      const [v] = await db.select().from(reportScriptVersions).where(eq(reportScriptVersions.id, version.id));
+      expect(v!.status).toBe("awaiting_approval");
+
+      // The card UI reads the code from the stored version: the forged card has none,
+      // the genuine card returns the stored code.
+      const forgedSource = await request(owner).get(`${base}/approval-cards/${forged!.id}`);
+      expect(forgedSource.status).toBe(404);
+      const realSource = await request(owner).get(`${base}/approval-cards/${asked.body.approvalId}`);
+      expect(realSource.status).toBe(200);
+      expect(realSource.body.files).toEqual({ "main.py": SUM_SCRIPT });
+      expect(realSource.body.matchesCard).toBe(true);
+      expect(realSource.body.storedCodeMatchesDigest).toBe(true);
+    });
+  });
 });

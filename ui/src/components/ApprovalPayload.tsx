@@ -11,7 +11,9 @@ import {
   prettyBoostModel,
   type ModelBoostBossReview,
 } from "@paperclipai/shared";
+import { useEffect, useState } from "react";
 import { cn, formatCents } from "../lib/utils";
+import { api } from "../api/client";
 import {
   NO_SPENDING_LIMIT_WARNING,
   SPENDING_LIMIT_EXPLANATION,
@@ -486,9 +488,14 @@ export function BudgetOverridePayload({ payload }: { payload: Record<string, unk
 export function BoardApprovalPayload({
   payload,
   hideTitle = false,
+  approvalId,
+  companyId,
 }: {
   payload: Record<string, unknown>;
   hideTitle?: boolean;
+  /** Needed by cards whose content must be read from the server, not the payload (report_script_version). */
+  approvalId?: string;
+  companyId?: string;
 }) {
   const nextPayload = hideTitle ? { ...payload, title: undefined } : payload;
   if (firstNonEmptyString(payload.kind) === "feature_launch") {
@@ -501,7 +508,7 @@ export function BoardApprovalPayload({
     return <ModelBoostPayloadContent payload={nextPayload} />;
   }
   if (firstNonEmptyString(payload.kind) === "report_script_version") {
-    return <ReportScriptVersionPayloadContent payload={nextPayload} />;
+    return <ReportScriptVersionPayloadContent payload={nextPayload} approvalId={approvalId} companyId={companyId} />;
   }
   return (
     <BoardApprovalPayloadContent payload={nextPayload} />
@@ -673,18 +680,70 @@ function FeatureLaunchPayloadContent({ payload }: { payload: Record<string, unkn
  * run with the server's own access), and after an approve attempt it shows
  * each saved example's result -- not just "passed".
  */
-function ReportScriptVersionPayloadContent({ payload }: { payload: Record<string, unknown> }) {
+interface ReportScriptCardSource {
+  entrypoint: string;
+  files: Record<string, string>;
+  sha256: string;
+  storedCodeMatchesDigest: boolean;
+  matchesCard: boolean;
+}
+
+/**
+ * The code is read from the STORED calculation version this card belongs to
+ * (server: GET .../report-scripts/approval-cards/:approvalId), never from the
+ * card's payload -- a payload can be written by whoever filed the card.
+ */
+function useReportScriptCardSource(companyId: string | undefined, approvalId: string | undefined) {
+  const [state, setState] = useState<{ source: ReportScriptCardSource | null; error: string | null; loading: boolean }>({
+    source: null,
+    error: null,
+    loading: Boolean(companyId && approvalId),
+  });
+  useEffect(() => {
+    if (!companyId || !approvalId) {
+      setState({ source: null, error: null, loading: false });
+      return;
+    }
+    let cancelled = false;
+    setState({ source: null, error: null, loading: true });
+    api
+      .get<ReportScriptCardSource>(
+        `/companies/${encodeURIComponent(companyId)}/report-scripts/approval-cards/${encodeURIComponent(approvalId)}`,
+      )
+      .then((source) => {
+        if (!cancelled) setState({ source, error: null, loading: false });
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setState({ source: null, error: err instanceof Error ? err.message : String(err), loading: false });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [companyId, approvalId]);
+  return state;
+}
+
+function ReportScriptVersionPayloadContent({
+  payload,
+  approvalId,
+  companyId,
+}: {
+  payload: Record<string, unknown>;
+  approvalId?: string;
+  companyId?: string;
+}) {
   const title = firstNonEmptyString(payload.title);
   const summary = firstNonEmptyString(payload.summary);
   const trustWarning = firstNonEmptyString(payload.trustWarning);
-  const sha256 = firstNonEmptyString(payload.sha256);
-  const entrypoint = firstNonEmptyString(payload.entrypoint);
-  const files =
-    payload.files && typeof payload.files === "object" && !Array.isArray(payload.files)
-      ? Object.entries(payload.files as Record<string, unknown>)
-          .filter((entry): entry is [string, string] => typeof entry[1] === "string")
-          .sort(([a], [b]) => (a === entrypoint ? -1 : b === entrypoint ? 1 : a.localeCompare(b)))
-      : [];
+  const { source, error: sourceError, loading: sourceLoading } = useReportScriptCardSource(companyId, approvalId);
+  const sha256 = source?.sha256 ?? null;
+  const entrypoint = source?.entrypoint ?? null;
+  const mismatch = source !== null && (!source.matchesCard || !source.storedCodeMatchesDigest);
+  const files = source
+    ? Object.entries(source.files)
+        .filter((entry): entry is [string, string] => typeof entry[1] === "string")
+        .sort(([a], [b]) => (a === entrypoint ? -1 : b === entrypoint ? 1 : a.localeCompare(b)))
+    : [];
   const fixtures = Array.isArray(payload.fixtures)
     ? (payload.fixtures as Array<Record<string, unknown>>).filter((f) => f && typeof f === "object")
     : [];
@@ -753,8 +812,19 @@ function ReportScriptVersionPayloadContent({ payload }: { payload: Record<string
       </div>
       <div className="space-y-1.5">
         <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
-          Full code ({files.length} file{files.length === 1 ? "" : "s"})
+          Full code{source ? ` (${files.length} file${files.length === 1 ? "" : "s"})` : ""}
         </p>
+        {sourceLoading && <p className="text-muted-foreground">Loading the code from the stored calculation...</p>}
+        {!sourceLoading && !source && (
+          <p className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-destructive" data-testid="report-script-source-error">
+            Could not load the code from the stored calculation{sourceError ? `: ${sourceError}` : ""}. Do not approve this card.
+          </p>
+        )}
+        {mismatch && (
+          <p className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-destructive" data-testid="report-script-source-mismatch">
+            Warning: the code stored for this calculation does not match what this card was filed for. Do not approve it.
+          </p>
+        )}
         {files.map(([name, content]) => (
           <div key={name} className="space-y-1">
             <p className="font-mono text-xs text-foreground">
@@ -915,15 +985,19 @@ export function ApprovalPayloadRenderer({
   type,
   payload,
   hidePrimaryTitle = false,
+  approvalId,
+  companyId,
 }: {
   type: string;
   payload: Record<string, unknown>;
   hidePrimaryTitle?: boolean;
+  approvalId?: string;
+  companyId?: string;
 }) {
   if (type === "hire_agent") return <HireAgentPayload payload={payload} />;
   if (type === "budget_override_required") return <BudgetOverridePayload payload={payload} />;
   if (type === "request_board_approval") {
-    return <BoardApprovalPayload payload={payload} hideTitle={hidePrimaryTitle} />;
+    return <BoardApprovalPayload payload={payload} hideTitle={hidePrimaryTitle} approvalId={approvalId} companyId={companyId} />;
   }
   if (type === "credential_request") return <CredentialRequestPayload payload={payload} />;
   return <CeoStrategyPayload payload={payload} />;

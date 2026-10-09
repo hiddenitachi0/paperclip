@@ -138,6 +138,12 @@ export function reportScriptRoutes(rawDb: Db, deps: ReportScriptsServiceDeps = {
     res.json(await svc.listRuns(req.params.companyId as string, req.params.versionId as string));
   });
 
+  // The code an approval card stands for, from the stored version -- what
+  // the card UI shows (never the card payload's own copy).
+  router.get("/companies/:companyId/report-scripts/approval-cards/:approvalId", draftScope(), requireFeatureOn, async (req, res) => {
+    res.json(await svc.getCardSource(req.params.companyId as string, req.params.approvalId as string));
+  });
+
   router.post("/companies/:companyId/report-scripts/versions/:versionId/request-approval",
     validate(requestReportScriptApprovalSchema),
     draftScope(),

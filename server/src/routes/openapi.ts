@@ -3390,6 +3390,7 @@ for (const route of [
   ["post", "/api/companies/{companyId}/report-scripts/versions/{versionId}/request-approval", "File the approval card showing this version's full source (runs nothing)", requestReportScriptApprovalSchema],
   ["post", "/api/companies/{companyId}/report-scripts/versions/{versionId}/run-fixture", "Re-run one saved example of an APPROVED version", runReportScriptFixtureSchema],
   ["get", "/api/companies/{companyId}/report-scripts/versions/{versionId}/runs", "List a version's runs", undefined],
+  ["get", "/api/companies/{companyId}/report-scripts/approval-cards/{approvalId}", "The stored code an approval card stands for (what the card shows)", undefined],
   ["post", "/api/companies/{companyId}/report-scripts/versions/{versionId}/approve", "Owner/admin only: run every saved example and switch the version on only if all match", approveReportScriptVersionSchema],
 ] as const) {
   registerCurrentRoute({
