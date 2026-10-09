@@ -90,7 +90,15 @@ describe("helper routes", () => {
     expect(res.status).toBe(200);
     expect(res.body.answer).toBe("Do this.");
     expect(mockSvc.ask).toHaveBeenCalledWith(
-      expect.objectContaining({ companyId, userId: "filip", message: "Explain this", directoryEntryId: entryId, pageRoute: "/ACM/agents/x" }),
+      expect.objectContaining({
+        companyId,
+        userId: "filip",
+        message: "Explain this",
+        directoryEntryId: entryId,
+        pageRoute: "/ACM/agents/x",
+        // A picture picked from Files is checked against the person's own rights.
+        actor: expect.objectContaining({ type: "board", userId: "filip" }),
+      }),
     );
   });
 
@@ -191,7 +199,8 @@ describe("helper routes", () => {
       expect(res.status).toBe(201);
       expect(mockInvestigations.start).toHaveBeenCalledWith({
         companyId,
-        userId: "filip",
+        // The person's own rights (membership, grants) travel with the request.
+        actor: expect.objectContaining({ type: "board", userId: "filip", memberships: [expect.objectContaining({ companyId, membershipRole: "operator" })] }),
         question: "Should I approve this?",
         context: "Card: Deploy",
         pageRoute: "/ACM/dashboard/now",
@@ -210,7 +219,7 @@ describe("helper routes", () => {
       const app = await buildApp(board("operator"));
       const res = await request(app).get(investigationsUrl);
       expect(res.status).toBe(200);
-      expect(mockInvestigations.list).toHaveBeenCalledWith(companyId, "filip", { canConfigure: false });
+      expect(mockInvestigations.list).toHaveBeenCalledWith(companyId, expect.objectContaining({ type: "board", userId: "filip" }), { canConfigure: false });
     });
 
     it("validates the request: no picking the agent, the company or the task fields; record references and pictures checked", async () => {
@@ -231,13 +240,18 @@ describe("helper routes", () => {
       const operator = await buildApp(board("operator"));
       expect((await request(operator).put(settingsUrl).send({ investigationAgentId: entryId })).status).toBe(403);
       const admin = await buildApp(board("admin"));
-      const ok = await request(admin).put(settingsUrl).send({ investigationAgentId: entryId, investigationMaxRunning: 5, investigationMaxPerDay: 50 });
+      const patch = {
+        investigationAgentId: entryId,
+        investigationMaxRunning: 5,
+        investigationMaxPerDay: 50,
+        investigationCompanyMaxPerDay: 100,
+        acknowledgeInvestigatorCanWrite: true,
+      };
+      const ok = await request(admin).put(settingsUrl).send(patch);
       expect(ok.status).toBe(200);
-      expect(mockSvc.updateSettings).toHaveBeenCalledWith(
-        companyId,
-        { investigationAgentId: entryId, investigationMaxRunning: 5, investigationMaxPerDay: 50 },
-        { userId: "filip" },
-      );
+      expect(mockSvc.updateSettings).toHaveBeenCalledWith(companyId, patch, { userId: "filip" });
+      expect((await request(operator).put(settingsUrl).send({ acknowledgeInvestigatorCanWrite: true })).status).toBe(403);
+      expect((await request(admin).put(settingsUrl).send({ investigationCompanyMaxPerDay: 1001 })).status).toBe(400);
       expect((await request(admin).put(settingsUrl).send({ investigationMaxRunning: 0 })).status).toBe(400);
       expect((await request(admin).put(settingsUrl).send({ investigationMaxPerDay: 201 })).status).toBe(400);
       expect((await request(admin).put(settingsUrl).send({ investigationMaxRunning: 2.5 })).status).toBe(400);

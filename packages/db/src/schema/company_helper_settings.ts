@@ -1,4 +1,4 @@
-import { integer, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { integer, jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import { agents } from "./agents.js";
 import { companies } from "./companies.js";
 import { modelDirectoryEntries } from "./model_directory_entries.js";
@@ -30,6 +30,20 @@ export const companyHelperSettings = pgTable("company_helper_settings", {
   investigationMaxRunning: integer("investigation_max_running"),
   /** Most investigations one person may start in 24 hours. Null = HELPER_INVESTIGATION_DEFAULT_MAX_PER_DAY. */
   investigationMaxPerDay: integer("investigation_max_per_day"),
+  /** Most investigations the whole company may start in 24 hours. Null = HELPER_INVESTIGATION_DEFAULT_COMPANY_MAX_PER_DAY. */
+  investigationCompanyMaxPerDay: integer("investigation_company_max_per_day"),
+  /**
+   * An owner/admin's confirmation that the investigation agent can change
+   * things: which agent, which of its rights/secrets they saw, who, when.
+   * Checked again at every start; a new right or another agent needs a new
+   * confirmation. Null = none given.
+   */
+  investigationAgentWriteAck: jsonb("investigation_agent_write_ack").$type<{
+    agentId: string;
+    capabilities: string[];
+    userId: string | null;
+    at: string;
+  } | null>(),
   updatedByUserId: text("updated_by_user_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

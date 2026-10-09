@@ -15,14 +15,16 @@ import type { HelperSettingsView } from "@paperclipai/shared";
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const mockHelperApi = vi.hoisted(() => ({ getSettings: vi.fn(), updateSettings: vi.fn() }));
+const toast = vi.hoisted(() => vi.fn());
 const mockAgentsApi = vi.hoisted(() => ({ list: vi.fn() }));
 vi.mock("../../api/helper", () => ({ helperApi: mockHelperApi }));
 vi.mock("../../api/agents", () => ({ agentsApi: mockAgentsApi }));
-vi.mock("../../context/ToastContext", () => ({ useToastActions: () => ({ pushToast: vi.fn() }) }));
+vi.mock("../../context/ToastContext", () => ({ useToastActions: () => ({ pushToast: toast }) }));
 vi.mock("../../context/CompanyContext", () => ({ useCompany: () => ({ selectedCompanyId: "c1", selectedCompany: { id: "c1", issuePrefix: "ACM" } }) }));
 vi.mock("../SecretBindingPicker", () => ({ SecretBindingPicker: () => <div /> }));
 
-import { HelperSettingsSection } from "./HelperSettingsSection";
+import { ApiError } from "../../api/client";
+import { HelperSettingsSection, INVESTIGATOR_CAN_WRITE_ACK } from "./HelperSettingsSection";
 
 function view(overrides: Partial<HelperSettingsView> = {}): HelperSettingsView {
   return {
@@ -30,6 +32,8 @@ function view(overrides: Partial<HelperSettingsView> = {}): HelperSettingsView {
     investigationAgentId: null,
     investigationMaxRunning: 3,
     investigationMaxPerDay: 20,
+    investigationCompanyMaxPerDay: 50,
+    investigationAgent: null,
     keys: [],
     models: [],
     builtInDefaultLabel: "Claude",
@@ -99,6 +103,7 @@ describe("HelperSettingsSection — investigations", () => {
     const section = document.querySelector("[data-testid=helper-investigation-settings]")!;
     expect(section.textContent).toContain("Recommended: a dedicated “Investigator” agent that can only read");
     expect(section.textContent).toContain("is paid from this agent's budget");
+    expect(section.textContent).toContain("The investigator can see everything in the company, and its answer goes to whoever asked.");
     const agentSelect = document.querySelector("[data-testid=helper-investigation-agent]") as HTMLSelectElement;
     const options = [...agentSelect.options].map((o) => o.textContent);
     expect(options).toEqual(["None — “Investigate deeper” is off", "Investigator", "Sleepy (paused)"]);
@@ -109,15 +114,99 @@ describe("HelperSettingsSection — investigations", () => {
     expect(mockHelperApi.updateSettings).toHaveBeenLastCalledWith("c1", { investigationMaxRunning: 5 });
     await choose(document.querySelector("[data-testid=helper-investigation-max-per-day]") as HTMLSelectElement, "50");
     expect(mockHelperApi.updateSettings).toHaveBeenLastCalledWith("c1", { investigationMaxPerDay: 50 });
+    await choose(document.querySelector("[data-testid=helper-investigation-company-max-per-day]") as HTMLSelectElement, "200");
+    expect(mockHelperApi.updateSettings).toHaveBeenLastCalledWith("c1", { investigationCompanyMaxPerDay: 200 });
+  });
+
+  it("asks for the explicit confirmation when the picked agent can change things, and only then saves it", async () => {
+    mockHelperApi.getSettings.mockResolvedValue(view());
+    mockAgentsApi.list.mockResolvedValue([{ id: "a9", name: "Builder", status: "idle" }]);
+    mockHelperApi.updateSettings.mockImplementation(async (_c: string, patch: Record<string, unknown>) => {
+      if (!patch.acknowledgeInvestigatorCanWrite) {
+        throw new ApiError("\"Builder\" can change things", 422, {
+          error: "\"Builder\" can change things",
+          code: "HELPER_INVESTIGATOR_CAN_WRITE",
+          details: { agentId: "a9", agentName: "Builder", capabilities: ["can ask for deploys", "has secrets besides its model login (GITHUB_TOKEN)"] },
+        });
+      }
+      return view({
+        investigationAgentId: "a9",
+        investigationAgent: {
+          id: "a9",
+          name: "Builder",
+          status: "idle",
+          budgetMonthlyCents: 0,
+          writeCapabilities: ["can ask for deploys", "has secrets besides its model login (GITHUB_TOKEN)"],
+          writeAcknowledged: true,
+        },
+      });
+    });
+    await render();
+    await choose(document.querySelector("[data-testid=helper-investigation-agent]") as HTMLSelectElement, "a9");
+    const box = document.querySelector("[data-testid=helper-investigator-can-write]")!;
+    expect(box.textContent).toContain("It can ask for deploys.");
+    expect(box.textContent).toContain("It has secrets besides its model login (GITHUB_TOKEN).");
+    expect(box.textContent).toContain(INVESTIGATOR_CAN_WRITE_ACK);
+    expect(INVESTIGATOR_CAN_WRITE_ACK).toBe("I understand this agent can change things and text on screen could try to make it do so.");
+    expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ tone: "error" }));
+    const confirm = document.querySelector("[data-testid=helper-investigator-can-write-confirm]") as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);
+    act(() => (document.querySelector("[data-testid=helper-investigator-can-write-ack]") as HTMLInputElement).click());
+    expect(confirm.disabled).toBe(false);
+    await act(async () => {
+      confirm.click();
+    });
+    for (let i = 0; i < 4; i += 1) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+    }
+    expect(mockHelperApi.updateSettings).toHaveBeenLastCalledWith("c1", { investigationAgentId: "a9", acknowledgeInvestigatorCanWrite: true });
+    expect(document.querySelector("[data-testid=helper-investigator-can-write]")).toBeNull();
+    expect(document.querySelector("[data-testid=helper-investigator-confirmed]")?.textContent).toContain("can ask for deploys");
+    expect(document.querySelector("[data-testid=helper-investigator-no-budget]")?.textContent).toContain("“Builder” has no monthly budget");
+  });
+
+  it("asks an owner/admin to confirm again when the saved agent gained rights", async () => {
+    mockHelperApi.getSettings.mockResolvedValue(
+      view({
+        investigationAgentId: "a9",
+        investigationAgent: { id: "a9", name: "Builder", status: "idle", budgetMonthlyCents: 500, writeCapabilities: ["can ask for merges"], writeAcknowledged: false },
+      }),
+    );
+    mockHelperApi.updateSettings.mockResolvedValue(view());
+    mockAgentsApi.list.mockResolvedValue([{ id: "a9", name: "Builder", status: "idle" }]);
+    await render();
+    expect(document.querySelector("[data-testid=helper-investigator-no-budget]")).toBeNull();
+    act(() => (document.querySelector("[data-testid=helper-investigator-can-write-ack]") as HTMLInputElement).click());
+    await act(async () => {
+      (document.querySelector("[data-testid=helper-investigator-can-write-confirm]") as HTMLButtonElement).click();
+    });
+    for (let i = 0; i < 4; i += 1) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+    }
+    expect(mockHelperApi.updateSettings).toHaveBeenLastCalledWith("c1", { acknowledgeInvestigatorCanWrite: true });
   });
 
   it("shows the settings read-only to everyone else", async () => {
-    mockHelperApi.getSettings.mockResolvedValue(view({ canEdit: false, investigationMaxRunning: 7 }));
+    mockHelperApi.getSettings.mockResolvedValue(
+      view({
+        canEdit: false,
+        investigationMaxRunning: 7,
+        investigationAgentId: "a9",
+        investigationAgent: { id: "a9", name: "Builder", status: "idle", budgetMonthlyCents: 0, writeCapabilities: ["can ask for merges"], writeAcknowledged: false },
+      }),
+    );
     await render();
     expect((document.querySelector("[data-testid=helper-investigation-agent]") as HTMLSelectElement).disabled).toBe(true);
     const running = document.querySelector("[data-testid=helper-investigation-max-running]") as HTMLSelectElement;
     expect(running.disabled).toBe(true);
     expect(running.value).toBe("7");
     expect(mockAgentsApi.list).not.toHaveBeenCalled();
+    expect(document.querySelector("[data-testid=helper-investigator-unconfirmed]")?.textContent).toContain("investigations are off");
+    expect(document.querySelector("[data-testid=helper-investigator-can-write-ack]")).toBeNull();
+    expect(document.querySelector("[data-testid=helper-investigator-no-budget]")).toBeNull();
   });
 });

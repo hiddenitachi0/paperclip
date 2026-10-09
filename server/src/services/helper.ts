@@ -14,6 +14,7 @@ import {
   HELPER_CONTEXT_MAX_CHARS,
   HELPER_HISTORY_MAX_TURNS,
   HELPER_HISTORY_TURN_MAX_CHARS,
+  HELPER_INVESTIGATION_DEFAULT_COMPANY_MAX_PER_DAY,
   HELPER_INVESTIGATION_DEFAULT_MAX_PER_DAY,
   HELPER_INVESTIGATION_DEFAULT_MAX_RUNNING,
   HELPER_MAX_OUTPUT_TOKENS,
@@ -32,6 +33,7 @@ import {
   type ModelKeyState,
   type ModelOptionStatus,
   type HelperAskResponse,
+  type HelperInvestigationAgentSummary,
   type HelperKeyStatus,
   type HelperModelOption,
   type HelperPictureInput,
@@ -56,6 +58,8 @@ import {
 import { isLaneATemperatureUnsupportedError, priceLaneACall, resolveLaneASettings } from "./lane-a.js";
 import { secretService } from "./secrets.js";
 import { helperPictureService } from "./helper-pictures.js";
+import { helperAccessService, writeCapabilitiesAcknowledged } from "./helper-access.js";
+import type { AuthorizationActor } from "./authorization.js";
 import { modelHealthService } from "./model-health.js";
 import type { StorageService } from "../storage/types.js";
 
@@ -99,6 +103,8 @@ export interface HelperAskInput {
   history?: Array<{ role: "user" | "assistant"; content: string }>;
   /** Pictures attached to this question only (Phase 2). */
   pictures?: HelperPictureInput[];
+  /** The person asking: a picture from Files must belong to a task they may open. */
+  actor?: AuthorizationActor;
 }
 
 /** The answer model's standing orders. Exported so a test can pin the rules. */
@@ -180,6 +186,12 @@ export function normalizeHelperHistory(
 
 type EntryRow = typeof modelDirectoryEntries.$inferSelect;
 
+/** "a, b and c". */
+function joinPlain(items: string[]): string {
+  if (items.length <= 1) return items[0] ?? "";
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
 function builtInDefaultCanSeePictures(): boolean {
   return helperModelCanSeePictures({ provider: "anthropic", model: LANE_A_DEFAULT_MODEL }).canSee === true;
 }
@@ -188,6 +200,7 @@ export function helperService(db: Db, options: HelperServiceOptions = {}) {
   const secrets = secretService(db);
   const budgets = budgetService(db);
   const pictureService = helperPictureService(db, { storage: options.pictureStorage });
+  const access = helperAccessService(db);
 
   /**
    * Pictures go only to a model that can see them. A model that cannot, or
@@ -345,6 +358,25 @@ export function helperService(db: Db, options: HelperServiceOptions = {}) {
     };
   }
 
+  /** The investigation agent's budget and what it could change (rights, extra secrets), for the settings. */
+  async function investigationAgentSummary(
+    companyId: string,
+    agentId: string,
+    ack: { agentId: string; capabilities: string[] } | null,
+  ): Promise<HelperInvestigationAgentSummary | null> {
+    const [agent] = await db
+      .select({ id: agents.id, name: agents.name, status: agents.status, budgetMonthlyCents: agents.budgetMonthlyCents })
+      .from(agents)
+      .where(and(eq(agents.id, agentId), eq(agents.companyId, companyId)));
+    if (!agent) return null;
+    const writeCapabilities = await access.writeCapabilities(companyId, agent.id);
+    return {
+      ...agent,
+      writeCapabilities,
+      writeAcknowledged: writeCapabilitiesAcknowledged(ack, agent.id, writeCapabilities),
+    };
+  }
+
   async function getSettings(companyId: string, opts: { canEdit: boolean }): Promise<HelperSettingsView> {
     const [row, keys, entries, healthOverview] = await Promise.all([
       getRow(companyId),
@@ -383,6 +415,10 @@ export function helperService(db: Db, options: HelperServiceOptions = {}) {
       investigationAgentId: row?.investigationAgentId ?? null,
       investigationMaxRunning: row?.investigationMaxRunning ?? HELPER_INVESTIGATION_DEFAULT_MAX_RUNNING,
       investigationMaxPerDay: row?.investigationMaxPerDay ?? HELPER_INVESTIGATION_DEFAULT_MAX_PER_DAY,
+      investigationCompanyMaxPerDay: row?.investigationCompanyMaxPerDay ?? HELPER_INVESTIGATION_DEFAULT_COMPANY_MAX_PER_DAY,
+      investigationAgent: row?.investigationAgentId
+        ? await investigationAgentSummary(companyId, row.investigationAgentId, row.investigationAgentWriteAck ?? null)
+        : null,
       keys: keyRows,
       models,
       builtInDefaultLabel: `${laneAProviderLabel("anthropic")} (${LANE_A_DEFAULT_MODEL}) on Paperclip's own key`,
@@ -417,6 +453,35 @@ export function helperService(db: Db, options: HelperServiceOptions = {}) {
       if (!agent) throw notFound("That agent is not in this company.");
       if (agent.status === "terminated") {
         throw unprocessable(`"${agent.name}" has been let go, so it cannot take investigations. Pick another agent.`);
+      }
+    }
+    // An investigation agent that can change things (rights, secrets beyond
+    // its model login) needs an owner/admin's explicit confirmation, kept with
+    // exactly what they saw; every start checks it again.
+    let writeAck: typeof companyHelperSettings.$inferInsert["investigationAgentWriteAck"] | undefined;
+    if (patch.investigationAgentId !== undefined || patch.acknowledgeInvestigatorCanWrite === true) {
+      const current = await getRow(companyId);
+      const agentId = patch.investigationAgentId !== undefined ? patch.investigationAgentId : current?.investigationAgentId ?? null;
+      if (!agentId) {
+        writeAck = null;
+      } else {
+        const [agent] = await db
+          .select({ name: agents.name })
+          .from(agents)
+          .where(and(eq(agents.id, agentId), eq(agents.companyId, companyId)));
+        const capabilities = await access.writeCapabilities(companyId, agentId);
+        if (capabilities.length === 0) {
+          writeAck = null;
+        } else if (patch.acknowledgeInvestigatorCanWrite === true) {
+          writeAck = { agentId, capabilities, userId: actor.userId, at: new Date().toISOString() };
+        } else if (writeCapabilitiesAcknowledged(current?.investigationAgentWriteAck ?? null, agentId, capabilities)) {
+          writeAck = undefined; // the same agent, already confirmed for all of this
+        } else {
+          throw unprocessable(
+            `"${agent?.name ?? "That agent"}" can change things: it ${joinPlain(capabilities)}. Text on screen could try to make it do so. To use it anyway, tick "I understand this agent can change things and text on screen could try to make it do so." Or pick an agent without these rights.`,
+            { code: "HELPER_INVESTIGATOR_CAN_WRITE", agentId, agentName: agent?.name ?? null, capabilities },
+          );
+        }
       }
     }
     if (patch.keys) {
@@ -457,6 +522,8 @@ export function helperService(db: Db, options: HelperServiceOptions = {}) {
     if (patch.investigationAgentId !== undefined) columns.investigationAgentId = patch.investigationAgentId;
     if (patch.investigationMaxRunning !== undefined) columns.investigationMaxRunning = patch.investigationMaxRunning;
     if (patch.investigationMaxPerDay !== undefined) columns.investigationMaxPerDay = patch.investigationMaxPerDay;
+    if (patch.investigationCompanyMaxPerDay !== undefined) columns.investigationCompanyMaxPerDay = patch.investigationCompanyMaxPerDay;
+    if (writeAck !== undefined) columns.investigationAgentWriteAck = writeAck;
     const now = new Date();
     await db
       .insert(companyHelperSettings)
@@ -477,6 +544,8 @@ export function helperService(db: Db, options: HelperServiceOptions = {}) {
         ...(patch.investigationAgentId !== undefined ? { investigationAgentId: patch.investigationAgentId } : {}),
         ...(patch.investigationMaxRunning !== undefined ? { investigationMaxRunning: patch.investigationMaxRunning } : {}),
         ...(patch.investigationMaxPerDay !== undefined ? { investigationMaxPerDay: patch.investigationMaxPerDay } : {}),
+        ...(patch.investigationCompanyMaxPerDay !== undefined ? { investigationCompanyMaxPerDay: patch.investigationCompanyMaxPerDay } : {}),
+        ...(writeAck ? { investigatorCanWriteConfirmed: writeAck.capabilities } : {}),
         ...(patch.keys ? { keyProviders: Object.keys(patch.keys) } : {}),
       },
     });
@@ -600,7 +669,12 @@ export function helperService(db: Db, options: HelperServiceOptions = {}) {
     let pictures: Awaited<ReturnType<typeof pictureService.prepare>> = [];
     if (input.pictures && input.pictures.length > 0) {
       await assertCanSeePictures(input.companyId, entry, modelLabel);
-      pictures = await pictureService.prepare(input.companyId, input.pictures);
+      const actor = input.actor;
+      pictures = await pictureService.prepare(
+        input.companyId,
+        input.pictures,
+        actor ? { canReadFile: (file) => access.canReadAttachment(actor, input.companyId, file.issueId) } : {},
+      );
     }
 
     const apiKey = await resolveKey(input.companyId, settings.provider, modelLabel, input.userId);

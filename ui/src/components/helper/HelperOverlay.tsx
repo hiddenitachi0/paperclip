@@ -6,6 +6,7 @@ import {
   HELPER_MESSAGE_MAX_CHARS,
   HELPER_PICTURES_MAX,
   type HelperAskResponse,
+  type HelperDroppedReference,
   type HelperInvestigationList,
   type HelperModelOption,
   type HelperPictureInput,
@@ -30,6 +31,7 @@ import {
 } from "./helper-pictures";
 import { effectiveHelperModel, helperStatusText, isHelperStatusReady, sortByReadiness } from "./helper-model-status";
 import {
+  DroppedReferencesNotice,
   HELPER_INVESTIGATION_POLL_MS,
   InvestigateConfirm,
   MyInvestigations,
@@ -143,6 +145,7 @@ export function HelperOverlay() {
   const [draft, setDraft] = useState<(InvestigationDraft & { fromComposer: boolean }) | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
   const [startedIds, setStartedIds] = useState<string[]>([]);
+  const [droppedNotice, setDroppedNotice] = useState<HelperDroppedReference[]>([]);
   const queryClient = useQueryClient();
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -190,6 +193,7 @@ export function HelperOverlay() {
       );
       void queryClient.invalidateQueries({ queryKey: investigationsKey });
       setStartedIds((prev) => [view.id, ...prev]);
+      setDroppedNotice(view.droppedReferences ?? []);
       if (draft?.fromComposer) {
         setMessage("");
         setPictures([]);
@@ -565,6 +569,7 @@ export function HelperOverlay() {
                 }}
               />
             ) : null}
+            <DroppedReferencesNotice dropped={droppedNotice} onClose={() => setDroppedNotice([])} />
             <MyInvestigations investigations={investigations} openIds={openInvestigationIds} />
           </div>
 

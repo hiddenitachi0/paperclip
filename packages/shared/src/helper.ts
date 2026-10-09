@@ -212,6 +212,9 @@ export const HELPER_INVESTIGATION_DEFAULT_MAX_RUNNING = 3;
 export const HELPER_INVESTIGATION_DEFAULT_MAX_PER_DAY = 20;
 export const HELPER_INVESTIGATION_MAX_RUNNING_CAP = 20;
 export const HELPER_INVESTIGATION_MAX_PER_DAY_CAP = 200;
+/** For the whole company together, in 24 hours (owner/admin can change it). */
+export const HELPER_INVESTIGATION_DEFAULT_COMPANY_MAX_PER_DAY = 50;
+export const HELPER_INVESTIGATION_COMPANY_MAX_PER_DAY_CAP = 1000;
 /** How many of the person's own investigations the panel lists (newest first). */
 export const HELPER_INVESTIGATIONS_LIST_LIMIT = 20;
 export const HELPER_INVESTIGATION_REFERENCES_MAX = 20;
@@ -277,16 +280,28 @@ export interface HelperInvestigationAvailability {
   ready: boolean;
   /** Why it cannot start, in plain words (null when ready). */
   problem: string | null;
-  problemCode: "no_agent" | "agent_unavailable" | "budget" | "limit_running" | "limit_daily" | null;
+  problemCode:
+    | "no_agent"
+    | "agent_unavailable"
+    | "agent_can_write"
+    | "assign_denied"
+    | "budget"
+    | "limit_running"
+    | "limit_daily"
+    | "limit_company_daily"
+    | null;
   estimate: HelperInvestigationEstimate;
   /** The agent's monthly budget and what it has spent this month, in cents (budget 0 = no monthly budget set). */
   agentBudgetMonthlyCents: number;
   agentSpentMonthlyCents: number;
   maxRunning: number;
   maxPerDay: number;
-  /** The person's own investigations: running now, and started in the last 24 hours. */
+  /** The person's own investigations: running now (blocked ones count too), and started in the last 24 hours. */
   runningCount: number;
   startedLast24h: number;
+  /** The whole company: the most allowed in 24 hours, and how many were started in the last 24 hours. */
+  companyMaxPerDay: number;
+  companyStartedLast24h: number;
   /** True when the person may change the helper settings (owner/admin). */
   canConfigure: boolean;
 }
@@ -294,6 +309,30 @@ export interface HelperInvestigationAvailability {
 export interface HelperInvestigationList {
   investigations: HelperInvestigationView[];
   availability: HelperInvestigationAvailability;
+}
+
+/** A record the person marked that was NOT handed to the agent, and why (plain words). */
+export interface HelperDroppedReference {
+  reference: string;
+  reason: string;
+}
+
+export interface HelperInvestigationStartResponse extends HelperInvestigationView {
+  /** Marked records left out because the person may not see them (or they are not in this company). */
+  droppedReferences: HelperDroppedReference[];
+}
+
+/** What the investigation agent could change, in plain words (empty = nothing Paperclip knows of). */
+export interface HelperInvestigationAgentSummary {
+  id: string;
+  name: string;
+  status: string;
+  /** 0 = no monthly budget set, so nothing caps what its investigations cost. */
+  budgetMonthlyCents: number;
+  /** E.g. "can ask for deploys", "has secrets besides its model login (GITHUB_TOKEN)". */
+  writeCapabilities: string[];
+  /** True when an owner/admin confirmed every one of writeCapabilities for this agent. */
+  writeAcknowledged: boolean;
 }
 
 // ─── API shapes ──────────────────────────────────────────────────────────────
@@ -398,6 +437,20 @@ export const updateHelperSettingsSchema = z
     investigationMaxRunning: z.number().int().min(1).max(HELPER_INVESTIGATION_MAX_RUNNING_CAP).nullable().optional(),
     /** Most investigations one person may start in 24 hours (null = Paperclip's default). */
     investigationMaxPerDay: z.number().int().min(1).max(HELPER_INVESTIGATION_MAX_PER_DAY_CAP).nullable().optional(),
+    /** Most investigations the whole company may start in 24 hours (null = Paperclip's default). */
+    investigationCompanyMaxPerDay: z
+      .number()
+      .int()
+      .min(1)
+      .max(HELPER_INVESTIGATION_COMPANY_MAX_PER_DAY_CAP)
+      .nullable()
+      .optional(),
+    /**
+     * The owner/admin confirms that the investigation agent can change things
+     * (rights or secrets beyond reading) and that text on screen could try to
+     * make it do so. Without it, such an agent is refused.
+     */
+    acknowledgeInvestigatorCanWrite: z.boolean().optional(),
     /** provider → company secret id (null removes the pick). Providers left out are unchanged. */
     keys: z
       .record(z.enum(LANE_A_PROVIDERS), z.string().uuid().nullable())
@@ -450,6 +503,10 @@ export interface HelperSettingsView {
   investigationMaxRunning: number;
   /** Most investigations one person may start in 24 hours (the company's pick, or Paperclip's default). */
   investigationMaxPerDay: number;
+  /** Most investigations the whole company may start in 24 hours (the company's pick, or Paperclip's default). */
+  investigationCompanyMaxPerDay: number;
+  /** The picked investigation agent: its budget and what it could change (null = none picked). */
+  investigationAgent: HelperInvestigationAgentSummary | null;
   keys: HelperKeyStatus[];
   models: HelperModelOption[];
   /** What answers when no model is picked and no default is set. */

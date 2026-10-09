@@ -5,6 +5,7 @@ import { agents, companies, companyHelperSettings, costEvents, issueComments, is
 import {
   HELPER_CONTEXT_MAX_CHARS,
   HELPER_INVESTIGATION_BILLING_CODE,
+  HELPER_INVESTIGATION_DEFAULT_COMPANY_MAX_PER_DAY,
   HELPER_INVESTIGATION_DEFAULT_MAX_PER_DAY,
   HELPER_INVESTIGATION_DEFAULT_MAX_RUNNING,
   HELPER_INVESTIGATION_ORIGIN_KIND,
@@ -16,7 +17,9 @@ import {
   maskSecretLikeText,
   type HelperInvestigationAvailability,
   type HelperInvestigationEstimate,
+  type HelperDroppedReference,
   type HelperInvestigationList,
+  type HelperInvestigationStartResponse,
   type HelperInvestigationStatus,
   type HelperInvestigationView,
   type HelperPictureInput,
@@ -27,6 +30,8 @@ import { getStorageService } from "../storage/index.js";
 import type { StorageService } from "../storage/types.js";
 import { logActivity } from "./activity-log.js";
 import { assertAssignableAgent } from "./agent-assignability.js";
+import type { AuthorizationActor } from "./authorization.js";
+import { helperAccessService, writeCapabilitiesAcknowledged } from "./helper-access.js";
 import { budgetService } from "./budgets.js";
 import { helperPictureService } from "./helper-pictures.js";
 import { queueIssueAssignmentWakeup, type IssueAssignmentWakeupDeps } from "./issue-assignment-wakeup.js";
@@ -56,17 +61,27 @@ import type { PluginWorkerManager } from "./plugin-worker-manager.js";
  *     at most 4 x 5 MB, shrunk to a JPEG without its hidden data) and are
  *     kept as attachments of THIS task in this company's storage.
  *
+ * The PERSON's rights are checked first (services/helper-access.ts), because
+ * the agent can read the whole company: they must be allowed to give that
+ * agent work (the same "tasks:assign" decision as the task routes), every
+ * record they marked must be one they may see (others are left out, and
+ * scrubbed from the text, and the person is told which), and every picture
+ * from Files must belong to a task they may see (otherwise refused).
+ *
  * What Paperclip itself enforces, whatever the agent does: approving or
  * rejecting cards is board-only (agents get 403), and an agent cannot start an
  * investigation. What it CANNOT enforce: there is no per-task read-only mode
- * for a run, so an agent with write access (git, shell, its own API rights)
- * could still change things against its instructions. That is why the
- * settings recommend a dedicated "Investigator" agent without those rights.
+ * for a run that still lets it read the company (the low_trust_review preset
+ * also cuts its reads to a boundary), so an agent with write access (git,
+ * shell, its own rights and secrets) could still change things against its
+ * instructions. So an agent with write rights or extra secrets is refused
+ * unless an owner/admin confirmed exactly those (re-checked at every start).
  *
- * Limits (per person, per company, owner/admin can change them): at most
- * N running at once and M started in 24 hours. A start is refused in plain
- * words when the agent is missing, let go, paused, waiting for approval or
- * over budget, so nothing silently waits forever.
+ * Limits: per person (at most N running at once, blocked ones included, and
+ * M started in 24 hours) and for the whole company (K started in 24 hours);
+ * an owner/admin can change all three. A start is refused in plain words when
+ * the agent is missing, let go, paused, waiting for approval or over budget,
+ * so nothing silently waits forever.
  */
 
 export interface HelperInvestigationServiceOptions {
@@ -82,7 +97,8 @@ export interface HelperInvestigationServiceOptions {
 
 export interface StartHelperInvestigationInput {
   companyId: string;
-  userId: string;
+  /** The person (a board actor with a user id). Their own rights decide what may be handed over. */
+  actor: AuthorizationActor & { userId: string };
   question: string;
   context?: string | null;
   pageRoute?: string | null;
@@ -93,7 +109,10 @@ export interface StartHelperInvestigationInput {
   canConfigure?: boolean;
 }
 
-const RUNNING_STATUSES = ["backlog", "todo", "in_progress", "in_review"] as const;
+// "blocked" counts as running: a stuck investigation can be woken again (and
+// cost money) by any comment, so it keeps its slot until it is done or
+// cancelled. The limit message says to cancel a stuck one to free the slot.
+const RUNNING_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked"] as const;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const ESTIMATE_WINDOW_MS = 60 * DAY_MS;
 const ESTIMATE_SAMPLE = 20;
@@ -103,7 +122,9 @@ const QUESTION_HEADING = "## The question";
 const SETTINGS_PLACE = "Company settings → General → Helper";
 
 // One start at a time per person and company, so two quick clicks cannot both
-// pass the "at most N" check. Paperclip runs one server process.
+// pass the "at most N" check. This assumes ONE server process (how Paperclip
+// is deployed today): with several processes the lock would have to move to
+// the database (e.g. a pg advisory lock on company+user) to stay exact.
 const startLocks = new Map<string, Promise<void>>();
 async function withStartLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const previous = startLocks.get(key) ?? Promise.resolve();
@@ -285,12 +306,44 @@ type IssueRow = Pick<
   "id" | "identifier" | "title" | "description" | "status" | "executionRunId" | "assigneeAgentId" | "createdAt" | "updatedAt"
 >;
 
+/** "a, b and c". */
+function joinPlain(items: string[]): string {
+  if (items.length <= 1) return items[0] ?? "";
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+/** Why the person may not give the investigation agent work, in plain words. */
+function assignRefusal(agentName: string, decision: { reason: string; explanation: string }, pickAnother: string): string {
+  if (decision.reason === "deny_policy_restricted") {
+    if (/requires approval/i.test(decision.explanation)) {
+      return `"${agentName}" is protected: giving it new work needs an approval first, so the helper cannot hand it a question. ${pickAnother}`;
+    }
+    return `"${agentName}" only takes work from people with a special right, and you do not have it. Ask a company owner or admin. ${pickAnother}`;
+  }
+  if (decision.reason === "deny_missing_grant" || decision.reason === "deny_missing_membership") {
+    return `You do not have the right to give work to agents in this company, so you cannot start an investigation. A company owner or admin can give you that right.`;
+  }
+  return `You cannot give work to "${agentName}" right now (${decision.explanation}).`;
+}
+
+/** Replaces the ids of records the person may not see, wherever they appear in the text. */
+export function scrubDroppedReferences(text: string, dropped: HelperDroppedReference[]): string {
+  let out = text;
+  for (const d of dropped) {
+    const id = d.reference.slice(d.reference.indexOf(":") + 1);
+    if (id.length < 3) continue;
+    out = out.split(d.reference).join("[a record left out]").split(id).join("[a record left out]");
+  }
+  return out;
+}
+
 export function helperInvestigationService(db: Db, options: HelperInvestigationServiceOptions = {}) {
   const now = options.now ?? (() => new Date());
   const storage = options.storage ?? (() => getStorageService());
   const budgets = budgetService(db);
   const issueSvc = issueService(db);
   const pictureService = helperPictureService(db, { storage });
+  const access = helperAccessService(db);
   let heartbeat = options.heartbeat ?? null;
   async function getHeartbeat(): Promise<IssueAssignmentWakeupDeps> {
     if (!heartbeat) {
@@ -307,11 +360,9 @@ export function helperInvestigationService(db: Db, options: HelperInvestigationS
   }
 
   async function countsFor(companyId: string, userId: string) {
-    const mine = and(
-      eq(issues.companyId, companyId),
-      eq(issues.originKind, HELPER_INVESTIGATION_ORIGIN_KIND),
-      eq(issues.createdByUserId, userId),
-    );
+    const company = and(eq(issues.companyId, companyId), eq(issues.originKind, HELPER_INVESTIGATION_ORIGIN_KIND));
+    const mine = and(company, eq(issues.createdByUserId, userId));
+    const since = new Date(now().getTime() - DAY_MS);
     const [running] = await db
       .select({ n: sql<number>`count(*)::int` })
       .from(issues)
@@ -319,8 +370,16 @@ export function helperInvestigationService(db: Db, options: HelperInvestigationS
     const [recent] = await db
       .select({ n: sql<number>`count(*)::int` })
       .from(issues)
-      .where(and(mine, gte(issues.createdAt, new Date(now().getTime() - DAY_MS))));
-    return { running: Number(running?.n ?? 0), last24h: Number(recent?.n ?? 0) };
+      .where(and(mine, gte(issues.createdAt, since)));
+    const [companyRecent] = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(issues)
+      .where(and(company, gte(issues.createdAt, since)));
+    return {
+      running: Number(running?.n ?? 0),
+      last24h: Number(recent?.n ?? 0),
+      companyLast24h: Number(companyRecent?.n ?? 0),
+    };
   }
 
   /** The middle time and cost of the agent's recent finished tasks. Nothing is called. */
@@ -360,13 +419,14 @@ export function helperInvestigationService(db: Db, options: HelperInvestigationS
 
   async function availability(
     companyId: string,
-    userId: string,
+    actor: AuthorizationActor & { userId: string },
     opts: { canConfigure: boolean },
   ): Promise<HelperInvestigationAvailability> {
     const row = await getSettingsRow(companyId);
     const maxRunning = row?.investigationMaxRunning ?? HELPER_INVESTIGATION_DEFAULT_MAX_RUNNING;
     const maxPerDay = row?.investigationMaxPerDay ?? HELPER_INVESTIGATION_DEFAULT_MAX_PER_DAY;
-    const counts = await countsFor(companyId, userId);
+    const companyMaxPerDay = row?.investigationCompanyMaxPerDay ?? HELPER_INVESTIGATION_DEFAULT_COMPANY_MAX_PER_DAY;
+    const counts = await countsFor(companyId, actor.userId);
     const base: HelperInvestigationAvailability = {
       agentId: null,
       agentName: null,
@@ -380,6 +440,8 @@ export function helperInvestigationService(db: Db, options: HelperInvestigationS
       maxPerDay,
       runningCount: counts.running,
       startedLast24h: counts.last24h,
+      companyMaxPerDay,
+      companyStartedLast24h: counts.companyLast24h,
       canConfigure: opts.canConfigure,
     };
     const notSetUp = opts.canConfigure
@@ -436,10 +498,36 @@ export function helperInvestigationService(db: Db, options: HelperInvestigationS
         problemCode: "agent_unavailable",
       };
     }
+    // The agent's rights may have changed since an owner/admin picked it.
+    const capabilities = await access.writeCapabilities(companyId, agent.id);
+    if (!writeCapabilitiesAcknowledged(row.investigationAgentWriteAck, agent.id, capabilities)) {
+      const ackedBefore = row.investigationAgentWriteAck?.agentId === agent.id;
+      return {
+        ...withAgent,
+        problem: `"${agent.name}" can change things (it ${joinPlain(capabilities)})${ackedBefore ? ", more than when it was picked" : ""}, and no owner or admin has confirmed that. ${
+          opts.canConfigure
+            ? `Confirm it under ${SETTINGS_PLACE}, or pick an agent without these rights.`
+            : `A company owner or admin can confirm it under ${SETTINGS_PLACE}, or pick another agent.`
+        }`,
+        problemCode: "agent_can_write",
+      };
+    }
+    // The same decision as giving that agent any other task.
+    const assign = await access.decideAssign(actor, companyId, agent.id);
+    if (!assign.allowed) {
+      return { ...withAgent, problem: assignRefusal(agent.name, assign, pickAnother), problemCode: "assign_denied" };
+    }
+    if (counts.companyLast24h >= companyMaxPerDay) {
+      return {
+        ...withAgent,
+        problem: `This company has started ${counts.companyLast24h} investigations in the last 24 hours, the most it allows (${companyMaxPerDay}). Try again later${opts.canConfigure ? `, or raise the limit under ${SETTINGS_PLACE}` : ""}.`,
+        problemCode: "limit_company_daily",
+      };
+    }
     if (counts.running >= maxRunning) {
       return {
         ...withAgent,
-        problem: `You already have ${counts.running} investigation${counts.running === 1 ? "" : "s"} running, the most this company allows at once (${maxRunning}). Wait for one to finish, then try again.`,
+        problem: `You already have ${counts.running} investigation${counts.running === 1 ? "" : "s"} running or stuck, the most this company allows at once (${maxRunning}). Wait for one to finish, or cancel a stuck one in its task, then try again.`,
         problemCode: "limit_running",
       };
     }
@@ -507,7 +595,8 @@ export function helperInvestigationService(db: Db, options: HelperInvestigationS
         title: row.title,
         question: extractHelperInvestigationQuestion(row.description ?? null, row.title),
         ...state,
-        answer: showAnswer ? capHelperText(latest.body, ANSWER_MAX_CHARS).text : null,
+        // The agent read the company with its own rights; mask anything key-like before it reaches the panel.
+        answer: showAnswer ? capHelperText(maskSecretLikeText(latest.body), ANSWER_MAX_CHARS).text : null,
         answeredAt: showAnswer ? latest.createdAt.toISOString() : null,
         agentId: row.assigneeAgentId ?? null,
         agentName: row.assigneeAgentId ? agentName.get(row.assigneeAgentId) ?? null : null,
@@ -531,7 +620,12 @@ export function helperInvestigationService(db: Db, options: HelperInvestigationS
   };
 
   /** The person's own investigations in this company, newest first, plus whether a new one can start. */
-  async function list(companyId: string, userId: string, opts: { canConfigure: boolean }): Promise<HelperInvestigationList> {
+  async function list(
+    companyId: string,
+    actor: AuthorizationActor & { userId: string },
+    opts: { canConfigure: boolean },
+  ): Promise<HelperInvestigationList> {
+    const userId = actor.userId;
     const rows = await db
       .select(issueColumns)
       .from(issues)
@@ -545,18 +639,42 @@ export function helperInvestigationService(db: Db, options: HelperInvestigationS
       )
       .orderBy(desc(issues.createdAt))
       .limit(HELPER_INVESTIGATIONS_LIST_LIMIT);
-    const [investigations, avail] = await Promise.all([toViews(companyId, rows), availability(companyId, userId, opts)]);
+    const [investigations, avail] = await Promise.all([toViews(companyId, rows), availability(companyId, actor, opts)]);
     return { investigations, availability: avail };
   }
 
-  async function start(input: StartHelperInvestigationInput): Promise<HelperInvestigationView> {
-    return withStartLock(`${input.companyId}:${input.userId}`, async () => {
-      const avail = await availability(input.companyId, input.userId, { canConfigure: input.canConfigure === true });
+  /** Undo a start that failed half-way: delete orphan pictures, cancel a task that was made. Best effort. */
+  async function cleanUpFailedStart(
+    companyId: string,
+    orphans: Array<{ objectKey: string }>,
+    issueId: string | null,
+    userId: string,
+  ) {
+    for (const file of orphans) {
+      await storage()
+        .deleteObject(companyId, file.objectKey)
+        .catch((err: unknown) => logger.warn({ err, companyId, objectKey: file.objectKey }, "helper: could not delete a picture of a failed investigation"));
+    }
+    if (issueId) {
+      await issueSvc
+        .update(issueId, { status: "cancelled", actorUserId: userId })
+        .catch((err: unknown) => logger.warn({ err, companyId, issueId }, "helper: could not cancel the task of a failed investigation"));
+    }
+  }
+
+  async function start(input: StartHelperInvestigationInput): Promise<HelperInvestigationStartResponse> {
+    const userId = input.actor.userId;
+    return withStartLock(`${input.companyId}:${userId}`, async () => {
+      // Agent set up and able to work, its rights confirmed, the person allowed
+      // to give it work, and within the limits: one decision, same as the panel shows.
+      const avail = await availability(input.companyId, input.actor, { canConfigure: input.canConfigure === true });
       if (!avail.ready || !avail.agentId) {
         const details = { code: `HELPER_INVESTIGATION_${(avail.problemCode ?? "unavailable").toUpperCase()}`, problemCode: avail.problemCode };
         const message = avail.problem ?? "An investigation cannot start right now.";
-        if (avail.problemCode === "limit_running" || avail.problemCode === "limit_daily") throw tooManyRequests(message, details);
-        if (avail.problemCode === "budget") throw forbidden(message, details);
+        if (avail.problemCode === "limit_running" || avail.problemCode === "limit_daily" || avail.problemCode === "limit_company_daily") {
+          throw tooManyRequests(message, details);
+        }
+        if (avail.problemCode === "budget" || avail.problemCode === "assign_denied") throw forbidden(message, details);
         throw unprocessable(message, details);
       }
       const agentId = avail.agentId;
@@ -572,82 +690,102 @@ export function helperInvestigationService(db: Db, options: HelperInvestigationS
         throw err;
       }
 
-      // Checked and shrunk before anything is stored or created.
-      const prepared = await pictureService.prepare(input.companyId, input.pictures);
+      // Checked and shrunk before anything is stored or created. A picture from
+      // Files must belong to a task the person may open themselves.
+      const prepared = await pictureService.prepare(input.companyId, input.pictures, {
+        canReadFile: (file) => access.canReadAttachment(input.actor, input.companyId, file.issueId),
+      });
 
-      // The browser masked all of this already; it is not trusted to have done it.
-      const question = maskSecretLikeText(input.question.trim());
-      const context = input.context?.trim()
-        ? capHelperText(maskSecretLikeText(input.context), HELPER_CONTEXT_MAX_CHARS).text
-        : null;
-      const pageRoute = input.pageRoute?.trim()
-        ? maskSecretLikeText(input.pageRoute.trim()).slice(0, HELPER_PAGE_ROUTE_MAX_CHARS)
-        : null;
-      const references = [...new Set((input.references ?? []).map((r) => maskSecretLikeText(r.trim())).filter(Boolean))].slice(
+      // Only records the person may see are handed over; the rest are left
+      // out (and scrubbed from the text) and the person is told which.
+      const requested = [...new Set((input.references ?? []).map((r) => r.trim()).filter(Boolean))].slice(
         0,
         HELPER_INVESTIGATION_REFERENCES_MAX,
       );
+      const { kept, dropped } = await access.filterReferences(input.actor, input.companyId, requested);
+      const scrub = (text: string) => scrubDroppedReferences(text, dropped);
+
+      // The browser masked all of this already; it is not trusted to have done it.
+      const question = scrub(maskSecretLikeText(input.question.trim()));
+      const context = input.context?.trim()
+        ? capHelperText(scrub(maskSecretLikeText(input.context)), HELPER_CONTEXT_MAX_CHARS).text
+        : null;
+      const pageRoute = input.pageRoute?.trim()
+        ? scrub(maskSecretLikeText(input.pageRoute.trim())).slice(0, HELPER_PAGE_ROUTE_MAX_CHARS)
+        : null;
+      const references = kept.map((r) => maskSecretLikeText(r));
       const quickAnswer = input.quickAnswer?.trim()
-        ? capHelperText(maskSecretLikeText(input.quickAnswer), HELPER_INVESTIGATION_QUICK_ANSWER_MAX_CHARS).text
+        ? capHelperText(scrub(maskSecretLikeText(input.quickAnswer)), HELPER_INVESTIGATION_QUICK_ANSWER_MAX_CHARS).text
         : null;
 
       const [company] = await db.select({ name: companies.name }).from(companies).where(eq(companies.id, input.companyId));
       const issueId = randomUUID();
       const pictureNames = prepared.map((_, i) => `helper-picture-${i + 1}.jpg`);
 
-      // Pictures are stored under this task, in this company's storage.
-      const stored = [];
-      for (const [i, picture] of prepared.entries()) {
-        stored.push(
-          await storage().putFile({
-            companyId: input.companyId,
-            namespace: `issues/${issueId}`,
-            originalFilename: pictureNames[i]!,
-            contentType: "image/jpeg",
-            body: Buffer.from(picture.base64, "base64"),
+      // Pictures are stored under this task, in this company's storage. If
+      // anything after this fails, the stored files that no attachment row
+      // points to are deleted again, and a task already made is cancelled
+      // (it is never woken).
+      const stored: Array<Awaited<ReturnType<StorageService["putFile"]>>> = [];
+      const attached = new Set<string>();
+      let issue: Awaited<ReturnType<typeof issueSvc.create>> | null = null;
+      try {
+        for (const [i, picture] of prepared.entries()) {
+          stored.push(
+            await storage().putFile({
+              companyId: input.companyId,
+              namespace: `issues/${issueId}`,
+              originalFilename: pictureNames[i]!,
+              contentType: "image/jpeg",
+              body: Buffer.from(picture.base64, "base64"),
+            }),
+          );
+        }
+
+        issue = await issueSvc.create(input.companyId, {
+          id: issueId,
+          title: `${TITLE_PREFIX}${oneLine(question, 100)}`,
+          description: buildHelperInvestigationDescription({
+            question,
+            context,
+            pageRoute,
+            references,
+            quickAnswer,
+            pictureNames,
+            companyName: company?.name ?? null,
           }),
-        );
-      }
-
-      const issue = await issueSvc.create(input.companyId, {
-        id: issueId,
-        title: `${TITLE_PREFIX}${oneLine(question, 100)}`,
-        description: buildHelperInvestigationDescription({
-          question,
-          context,
-          pageRoute,
-          references,
-          quickAnswer,
-          pictureNames,
-          companyName: company?.name ?? null,
-        }),
-        status: "todo",
-        priority: "medium",
-        workMode: "ask",
-        assigneeAgentId: agentId,
-        createdByAgentId: null,
-        createdByUserId: input.userId,
-        originKind: HELPER_INVESTIGATION_ORIGIN_KIND,
-        billingCode: HELPER_INVESTIGATION_BILLING_CODE,
-      });
-
-      for (const file of stored) {
-        await issueSvc.createAttachment({
-          issueId: issue.id,
-          provider: file.provider,
-          objectKey: file.objectKey,
-          contentType: file.contentType,
-          byteSize: file.byteSize,
-          sha256: file.sha256,
-          originalFilename: file.originalFilename,
-          createdByUserId: input.userId,
+          status: "todo",
+          priority: "medium",
+          workMode: "ask",
+          assigneeAgentId: agentId,
+          createdByAgentId: null,
+          createdByUserId: userId,
+          originKind: HELPER_INVESTIGATION_ORIGIN_KIND,
+          billingCode: HELPER_INVESTIGATION_BILLING_CODE,
         });
+
+        for (const file of stored) {
+          await issueSvc.createAttachment({
+            issueId: issue.id,
+            provider: file.provider,
+            objectKey: file.objectKey,
+            contentType: file.contentType,
+            byteSize: file.byteSize,
+            sha256: file.sha256,
+            originalFilename: file.originalFilename,
+            createdByUserId: userId,
+          });
+          attached.add(file.objectKey);
+        }
+      } catch (err) {
+        await cleanUpFailedStart(input.companyId, stored.filter((f) => !attached.has(f.objectKey)), issue?.id ?? null, userId);
+        throw err;
       }
 
       await logActivity(db, {
         companyId: input.companyId,
         actorType: "user",
-        actorId: input.userId,
+        actorId: userId,
         action: "issue.created",
         entityType: "issue",
         entityId: issue.id,
@@ -658,6 +796,7 @@ export function helperInvestigationService(db: Db, options: HelperInvestigationS
           assigneeAgentId: agentId,
           pageRoute,
           referenceCount: references.length,
+          droppedReferences: dropped.map((d) => d.reference),
           pictureCount: stored.length,
           withQuickAnswer: Boolean(quickAnswer),
         },
@@ -670,7 +809,7 @@ export function helperInvestigationService(db: Db, options: HelperInvestigationS
         mutation: "create",
         contextSource: "helper.investigation",
         requestedByActorType: "user",
-        requestedByActorId: input.userId,
+        requestedByActorId: userId,
       });
 
       const [view] = await toViews(input.companyId, [
@@ -686,7 +825,7 @@ export function helperInvestigationService(db: Db, options: HelperInvestigationS
           updatedAt: issue.updatedAt,
         },
       ]);
-      return view!;
+      return { ...view!, droppedReferences: dropped };
     }).catch((err) => {
       if (!(err instanceof HttpError)) {
         logger.error({ err, companyId: input.companyId }, "helper: could not start an investigation");

@@ -68,6 +68,8 @@ function settings(overrides: Partial<HelperSettingsView> = {}): HelperSettingsVi
     investigationAgentId: null,
     investigationMaxRunning: 3,
     investigationMaxPerDay: 20,
+    investigationCompanyMaxPerDay: 50,
+    investigationAgent: null,
     keys: [],
     models: [
       model("m-blind", "Text only", { canSeePictures: false, status: needsKey, keyReady: false, keyHint: "The helper has no OpenRouter key yet." }),

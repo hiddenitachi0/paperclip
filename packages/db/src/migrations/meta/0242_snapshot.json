@@ -1,5 +1,5 @@
 {
-  "id": "71155307-52d0-4e2a-b7eb-d9224b34e6e8",
+  "id": "ca9327af-0b81-4b63-805f-0e81a1fc0ba3",
   "prevId": "7bda935a-9053-4dca-9cee-154081fd1f19",
   "version": "7",
   "dialect": "postgresql",
@@ -6022,6 +6022,18 @@
         "investigation_max_per_day": {
           "name": "investigation_max_per_day",
           "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "investigation_company_max_per_day": {
+          "name": "investigation_company_max_per_day",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "investigation_agent_write_ack": {
+          "name": "investigation_agent_write_ack",
+          "type": "jsonb",
           "primaryKey": false,
           "notNull": false
         },

@@ -2,7 +2,7 @@ import type {
   HelperAskRequest,
   HelperAskResponse,
   HelperInvestigationList,
-  HelperInvestigationView,
+  HelperInvestigationStartResponse,
   HelperSettingsView,
   StartHelperInvestigationRequest,
   UpdateHelperSettings,
@@ -24,5 +24,5 @@ export const helperApi = {
   listInvestigations: (companyId: string) =>
     api.get<HelperInvestigationList>(`/companies/${encodeURIComponent(companyId)}/helper/investigations`),
   startInvestigation: (companyId: string, body: StartHelperInvestigationRequest) =>
-    api.post<HelperInvestigationView>(`/companies/${encodeURIComponent(companyId)}/helper/investigations`, body),
+    api.post<HelperInvestigationStartResponse>(`/companies/${encodeURIComponent(companyId)}/helper/investigations`, body),
 };

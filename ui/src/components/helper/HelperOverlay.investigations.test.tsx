@@ -49,6 +49,8 @@ function settings(): HelperSettingsView {
     investigationAgentId: "agent-1",
     investigationMaxRunning: 3,
     investigationMaxPerDay: 20,
+    investigationCompanyMaxPerDay: 50,
+    investigationAgent: null,
     keys: [],
     models: [],
     builtInDefaultLabel: "Claude",
@@ -73,6 +75,8 @@ function availability(overrides: Partial<HelperInvestigationAvailability> = {}):
     maxPerDay: 20,
     runningCount: 0,
     startedLast24h: 1,
+    companyMaxPerDay: 50,
+    companyStartedLast24h: 4,
     canConfigure: false,
     ...overrides,
   };
@@ -198,7 +202,10 @@ describe("HelperOverlay — Investigate deeper", () => {
       "It usually takes about 4 minutes and costs about $0.35, going by the middle of “Investigator”'s last 12 finished tasks.",
     );
     expect(confirm.textContent).toContain("$38.00 of its $50.00 monthly budget is left.");
-    expect(confirm.textContent).toContain("You have 0 of 3 running, and started 1 of 20 in the last 24 hours.");
+    expect(confirm.textContent).toContain("You have 0 of 3 running, and started 1 of 20 in the last 24 hours (4 of 50 for the whole company).");
+    expect(confirm.textContent).toContain("The question, the page text shown under “What the helper sees” and the records you marked go into a normal task");
+    // A member who cannot change the settings is not told about the agent's budget setup.
+    expect(document.querySelector("[data-testid=helper-investigate-no-budget]")).toBeNull();
     expect(mockHelperApi.startInvestigation).not.toHaveBeenCalled();
 
     // From now on the server lists it too.
@@ -269,6 +276,47 @@ describe("HelperOverlay — Investigate deeper", () => {
     await click("[data-testid=helper-investigate-start]");
     expect(document.querySelector("[data-testid=helper-investigate-confirm]")?.textContent).toContain("You already have 3 investigations running");
     expect((document.querySelector("textarea[aria-label='Your question']") as HTMLTextAreaElement).value).toBe("One more?");
+  });
+
+  it("tells the person which marked records were left out, and warns an owner/admin when the agent has no budget", async () => {
+    mockHelperApi.getSettings.mockResolvedValue(settings());
+    mockHelperApi.listInvestigations.mockResolvedValue({
+      investigations: [],
+      availability: availability({ canConfigure: true, agentBudgetMonthlyCents: 0, agentSpentMonthlyCents: 0 }),
+    });
+    mockHelperApi.startInvestigation.mockResolvedValue({
+      ...investigation(),
+      droppedReferences: [{ reference: "approval:a1", reason: "you do not have access to it" }],
+    });
+    await renderOpen();
+    typeQuestion("Is this safe?");
+    await click("[data-testid=helper-investigate-composer]");
+    expect(document.querySelector("[data-testid=helper-investigate-no-budget]")?.textContent).toContain(
+      "“Investigator” has no monthly budget, so only the helper's limits cap what investigations cost.",
+    );
+    await click("[data-testid=helper-investigate-start]");
+    expect(document.querySelector("[data-testid=helper-investigation-dropped]")?.textContent).toContain(
+      "approval:a1: you do not have access to it.",
+    );
+  });
+
+  it("explains in plain words when the person may not give the agent work, with no start button", async () => {
+    mockHelperApi.getSettings.mockResolvedValue(settings());
+    mockHelperApi.listInvestigations.mockResolvedValue({
+      investigations: [],
+      availability: availability({
+        ready: false,
+        problemCode: "assign_denied",
+        problem: "You do not have the right to give work to agents in this company, so you cannot start an investigation.",
+      }),
+    });
+    await renderOpen();
+    typeQuestion("Why?");
+    await click("[data-testid=helper-investigate-composer]");
+    expect(document.querySelector("[data-testid=helper-investigate-problem]")?.textContent).toContain(
+      "You do not have the right to give work to agents in this company",
+    );
+    expect(document.querySelector("[data-testid=helper-investigate-start]")).toBeNull();
   });
 
   it("lists my investigations from the server with status and the rendered answer, and they are still there after a reload", async () => {

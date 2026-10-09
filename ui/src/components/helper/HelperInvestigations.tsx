@@ -1,6 +1,11 @@
 import { useState } from "react";
 import { Loader2, Search, ExternalLink } from "lucide-react";
-import type { HelperInvestigationAvailability, HelperInvestigationView, HelperPictureInput } from "@paperclipai/shared";
+import type {
+  HelperDroppedReference,
+  HelperInvestigationAvailability,
+  HelperInvestigationView,
+  HelperPictureInput,
+} from "@paperclipai/shared";
 import { Link } from "@/lib/router";
 import { Button } from "@/components/ui/button";
 import { formatCents } from "../../lib/utils";
@@ -72,6 +77,15 @@ export function investigationEstimateText(availability: HelperInvestigationAvail
   return parts.join(" ");
 }
 
+/** "The question, the page text … and your 2 pictures". */
+function sentParts(draft: InvestigationDraft): string {
+  const parts = ["The question"];
+  if (draft.context) parts.push("the page text shown under “What the helper sees”");
+  if (draft.references.length > 0) parts.push("the records you marked");
+  if (draft.pictures.length > 0) parts.push(draft.pictures.length === 1 ? "your picture" : `your ${draft.pictures.length} pictures`);
+  return parts.length === 1 ? parts[0]! : `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+}
+
 export function InvestigateConfirm({
   draft,
   availability,
@@ -104,7 +118,9 @@ export function InvestigateConfirm({
       {availability && !availability.ready ? (
         <div className="space-y-1.5" role="alert" data-testid="helper-investigate-problem">
           <p className="text-amber-700 dark:text-amber-500">{availability.problem}</p>
-          {availability.problemCode === "no_agent" || availability.problemCode === "agent_unavailable" ? (
+          {availability.problemCode === "no_agent" ||
+          availability.problemCode === "agent_unavailable" ||
+          availability.problemCode === "agent_can_write" ? (
             <p className="text-muted-foreground">
               {availability.canConfigure
                 ? "Tip: a dedicated “Investigator” agent that can only read is the safest choice."
@@ -123,15 +139,21 @@ export function InvestigateConfirm({
             answer back here. It gives advice only: it does not approve, merge, deploy or change anything.
           </p>
           <p data-testid="helper-investigate-estimate">{investigationEstimateText(availability)}</p>
+          {availability.canConfigure && availability.agentBudgetMonthlyCents === 0 ? (
+            <p className="text-amber-700 dark:text-amber-500" data-testid="helper-investigate-no-budget">
+              “{availability.agentName}” has no monthly budget, so only the helper's limits cap what investigations cost.
+              You can set one on the agent's page.
+            </p>
+          ) : null}
           <p className="text-muted-foreground">
-            The question{draft.context ? ", the page text shown under “What the helper sees”" : ""}
-            {draft.references.length > 0 ? ", the records you marked" : ""}
-            {pictures > 0 ? ` and your ${pictures === 1 ? "picture" : `${pictures} pictures`}` : ""} go into a normal task
+            {sentParts(draft)} go{sentParts(draft) === "The question" ? "es" : ""} into a normal task
             {pictures > 0 ? " (pictures are shrunk and stripped of hidden data)" : ""}. You can open it any time.
           </p>
           <p className="text-muted-foreground">
             You have {availability.runningCount} of {availability.maxRunning} running, and started {availability.startedLast24h}{" "}
-            of {availability.maxPerDay} in the last 24 hours.
+            of {availability.maxPerDay} in the last 24 hours ({availability.companyStartedLast24h} of{" "}
+            {availability.companyMaxPerDay} for the whole company). Records or pictures you do not have access to are left
+            out.
           </p>
         </div>
       ) : null}
@@ -234,5 +256,25 @@ export function MyInvestigations({
         ))}
       </ul>
     </section>
+  );
+}
+
+/** After a start: which marked records were left out, and why. */
+export function DroppedReferencesNotice({ dropped, onClose }: { dropped: HelperDroppedReference[]; onClose: () => void }) {
+  if (dropped.length === 0) return null;
+  return (
+    <div className="space-y-1 rounded-md border border-amber-500/50 px-2.5 py-2 text-xs" role="status" data-testid="helper-investigation-dropped">
+      <p>The investigation started, but {dropped.length === 1 ? "one marked record was" : `${dropped.length} marked records were`} left out:</p>
+      <ul className="list-disc pl-5">
+        {dropped.map((d) => (
+          <li key={d.reference}>
+            {d.reference}: {d.reason}.
+          </li>
+        ))}
+      </ul>
+      <Button size="xs" variant="ghost" onClick={onClose}>
+        OK
+      </Button>
+    </div>
   );
 }
