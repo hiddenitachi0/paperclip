@@ -6,6 +6,9 @@ import {
   createModelDirectoryEntrySchema,
   duplicateModelDirectoryEntrySchema,
   importModelDirectoryCatalogueSchema,
+  modelPickerReadiness,
+  readinessHealthReading,
+  readinessSetupFromDirectoryEntry,
   syncLocalModelsSchema,
   updateModelDirectorySettingsSchema,
   updateModelDirectoryEntrySchema,
@@ -75,10 +78,35 @@ export function modelDirectoryRoutes(rawDb: Db, deps: { fetchImpl?: typeof fetch
   }
 
   // Archived setups are left out unless ?includeArchived=true (or 1).
+  // ?withReadiness=true (or 1) adds `readiness` to each setup: the same
+  // "✅ Ready / ⚠️ Not installed on … / ⚠️ Never checked" reading the core
+  // pickers show, worked out from the company's stored model-server readings
+  // and settings (no model or network call, no key). Add-on pickers (which
+  // cannot import the core UI) use it. Keys are per use, so a hosted model
+  // reads "Needs its own key" here; the add-on knows whether one is picked.
   router.get("/companies/:companyId/model-directory", scope(), async (req, res) => {
+    const companyId = req.params.companyId as string;
     const flag = req.query.includeArchived;
     const includeArchived = flag === "true" || flag === "1";
-    res.json(await svc.list(req.params.companyId as string, { includeArchived }));
+    const entries = await svc.list(companyId, { includeArchived });
+    const withReadiness = req.query.withReadiness === "true" || req.query.withReadiness === "1";
+    if (!withReadiness) {
+      res.json(entries);
+      return;
+    }
+    const [settings, overview] = await Promise.all([svc.getSettings(companyId), health.overview(companyId)]);
+    const healthById = new Map(overview.entries.map((h) => [h.entryId, h]));
+    res.json(
+      entries.map((entry) => ({
+        ...entry,
+        readiness: modelPickerReadiness(readinessSetupFromDirectoryEntry(entry), {
+          companyLocalBaseUrl: settings.localBaseUrl,
+          gpuVramGb: settings.localGpuVramGb,
+          blockedHosts: settings.openrouterBlockedHosts,
+          health: readinessHealthReading(healthById.get(entry.id)),
+        }),
+      })),
+    );
   });
 
   router.post("/companies/:companyId/model-directory", scope(), validate(createModelDirectoryEntrySchema), async (req, res) => {

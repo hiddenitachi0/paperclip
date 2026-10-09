@@ -250,7 +250,7 @@ describe("QuickAgentSection layout", () => {
     expect(select).not.toBeNull();
     expect(Array.from(select!.options).map((o) => o.textContent)).toEqual([
       "Type it myself",
-      "24B · OpenRouter — Mistral via OpenRouter [Needs a key]",
+      "❌ Needs a key · 24B · OpenRouter — Mistral via OpenRouter",
     ]);
     expect(Array.from(select!.querySelectorAll("optgroup")).map((g) => g.label)).toEqual(["Mistral AI · Mistral Small 3.2"]);
   });
