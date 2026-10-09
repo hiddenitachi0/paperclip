@@ -42,7 +42,7 @@ const laneAProviderSlugSchema = z
   .toLowerCase()
   .regex(
     LANE_A_PROVIDER_SLUG_RE,
-    "A model host must be a short OpenRouter host name in lower case letters, digits, dots, dashes or underscores, for example deepinfra.",
+    "A model host must be the short name OpenRouter shows for it, in lower case letters, digits, dots, dashes or underscores.",
   );
 
 /**

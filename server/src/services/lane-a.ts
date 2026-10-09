@@ -28,6 +28,8 @@ import {
   LANE_A_TRANSFORM_BILLING_CODE,
   LANE_A_TRANSFORM_MAX_CONCURRENCY,
   envBindingSchema,
+  laneABackupKeySlot,
+  laneAProviderKeyConfigPath,
   laneAProviderLabel,
   localModelOfflineNotice,
   laneAProviderModelCostCents,
@@ -44,8 +46,14 @@ import {
   type ChatHandedOverTask,
   type LaneAProvider,
   type LaneAProviderRouting,
+  type LaneABackupKeySlot,
   type LaneABackupModelConfig,
   type LaneAKeywordRoute,
+  withOpenRouterBlockedHostsForCall,
+  type LaneASetupCheckResult,
+  type LaneASetupCheckStep,
+  type LaneASetupCheckTarget,
+  type LaneASetupCheckToolCalling,
 } from "@paperclipai/shared";
 import { HttpError, conflict, forbidden, notFound, tooManyRequests, unprocessable } from "../errors.js";
 import {
@@ -54,6 +62,7 @@ import {
   fromAnthropicTool,
   resolveLaneABaseUrl,
   type LaneAChatMessage,
+  type LaneACompletion,
   type LaneAModelClient,
   type LaneAProviderClient,
   type LaneATool,
@@ -67,12 +76,15 @@ import { logger } from "../middleware/logger.js";
 import { openRouterCataloguePrice } from "./lane-a-openrouter-catalogue.js";
 import { logActivity } from "./activity-log.js";
 import { resolveAgentMcpToolLibraryServers } from "./mcp-tool-library.js";
-import { resolveBackupModelsThroughDirectory } from "./model-directory.js";
+import { modelDirectoryService, resolveBackupModelsThroughDirectory } from "./model-directory.js";
 import { classifyLocalFailure, modelHealthService } from "./model-health.js";
+import { cleanLaneAAddonToolInput, parseLaneATextToolCall } from "./lane-a-text-tool-calls.js";
 import {
   buildLaneAActionClaimFallbackLine,
   buildLaneAActionClaimRetryNote,
   detectLaneAActionClaim,
+  detectLaneAPictureRequest,
+  laneAMediaToolAttempted,
   isLaneAActionClaimFulfilled,
   pickLaneAForcedToolName,
   type LaneAActionClaimFamily,
@@ -118,6 +130,7 @@ import { documentsDataService, type DocumentsServiceDeps } from "./documents-dat
 import { agentMemoryService } from "./agent-memories.js";
 import { buildMemoryPromptSection, type LaneAMemoryPromptNote } from "./lane-a-memory.js";
 import { createLaneAWebSession } from "./lane-a-web-tools.js";
+import { redactKnownSecretValues, redactSensitiveText } from "../redaction.js";
 import { webSearchService, type WebSearchServiceDeps } from "./web-search.js";
 import {
   LANE_A_CONTINUE_LOOKBACK_MS,
@@ -867,6 +880,9 @@ export function resolveTransformMaxTokens(input: {
  * the resolved OpenAI-compatible endpoint (null for Claude, and for a local
  * model whose address has not been set).
  */
+/** How long a company's blocked OpenRouter hosts are kept between reads (lane A calls). */
+export const LANE_A_BLOCKED_HOSTS_TTL_MS = 30_000;
+
 export function resolveLaneASettings(agent: LaneATargetAgent) {
   const provider = normalizeLaneAProvider(agent.laneAProvider);
   const model = resolveLaneAModelForProvider(provider, agent.laneAModel);
@@ -1211,6 +1227,13 @@ const PICTURE_NOTE_PATTERN = /\[\s*Picture made in this turn:[^\]]*\]/gi;
  * person is told so plainly.
  */
 export function guardLaneAPictureClaims(text: string, actions: LaneAAction[]): string {
+  // The tools note is Paperclip's own replay marker; a model that copies it
+  // into a reply has it removed (it never reaches the person).
+  if (TOOLS_NOTE_PATTERN.test(text)) {
+    TOOLS_NOTE_PATTERN.lastIndex = 0;
+    text = text.replace(TOOLS_NOTE_PATTERN, "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  }
+  TOOLS_NOTE_PATTERN.lastIndex = 0;
   if (!PICTURE_NOTE_PATTERN.test(text)) return text;
   PICTURE_NOTE_PATTERN.lastIndex = 0;
   const cleaned = text.replace(PICTURE_NOTE_PATTERN, "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
@@ -1219,15 +1242,43 @@ export function guardLaneAPictureClaims(text: string, actions: LaneAAction[]): s
   return cleaned ? `${cleaned}\n\n${LANE_A_NO_PICTURE_MADE_NOTE}` : LANE_A_NO_PICTURE_MADE_NOTE;
 }
 
+/**
+ * Appended to the replayed note for non-picture tool calls. Without it the
+ * replay shows only the earlier answer's text, so the model reads "I answered
+ * the weather" and, on the next question, writes made-up figures instead of
+ * calling the tool again (7 Oct: qwen3.8-27b looked up Trondheim and Tromsø
+ * with get_weather, then answered "and Bergen?" with no tool call).
+ */
+export const LANE_A_TOOL_REPLAY_REMINDER =
+  "Those results were looked up at that moment by tool calls; a new question about live facts (weather, task status, anything that changes) needs a new tool call, never figures from earlier messages";
+
+const TOOLS_NOTE_PATTERN = /\[\s*Tools used in this turn:[^\]]*\]/gi;
+
 export function withImageReplayNote(content: string, toolCalls: LaneAStoredToolCall[] | null | undefined): string {
-  const images = (Array.isArray(toolCalls) ? toolCalls : [])
+  const calls = Array.isArray(toolCalls) ? toolCalls : [];
+  const images = calls
     .map((call) => call?.image)
     .filter((image): image is LaneAToolImage => Boolean(image && typeof image.fileId === "string"));
-  if (images.length === 0) return content;
   const lines = images.map(
     (image) =>
       `[Picture made in this turn: file id ${image.fileId}${image.seed !== null && image.seed !== undefined ? `, seed ${image.seed}` : ""}. ${LANE_A_PICTURE_REPLAY_REMINDER}]`,
   );
+  // action_claim_check is Paperclip's own bookkeeping, not a tool the model called.
+  const otherCalls = calls.filter((call) => call && typeof call.tool === "string" && !call.image && call.tool !== "action_claim_check");
+  if (otherCalls.length > 0) {
+    const described = otherCalls
+      .slice(0, 8)
+      .map((call) => {
+        // Tool names come from the model (refused unknown names are stored too),
+        // so they get the same bracket/newline stripping as the summary.
+        const name = call.tool.replace(/[\[\]\r\n]/g, " ").trim().slice(0, 64) || "tool";
+        const summary = typeof call.summary === "string" ? call.summary.replace(/[\[\]\r\n]/g, " ").trim().slice(0, 160) : "";
+        return summary ? `${name} (${summary})` : name;
+      })
+      .join("; ");
+    lines.push(`[Tools used in this turn: ${described}. ${LANE_A_TOOL_REPLAY_REMINDER}]`);
+  }
+  if (lines.length === 0) return content;
   return `${content}\n\n${lines.join("\n")}`;
 }
 
@@ -1780,17 +1831,17 @@ function providerErrorDetail(message: string): string {
 }
 
 /**
- * DUR-4347 (security): the agent's one bound key is for the main model's
- * provider and host. A backup may reuse it only when both match; anything
- * else gets no binding (instance key for Claude, none for a local server,
- * otherwise a missing-key refusal that skips the backup), so the key is never
- * sent to another vendor or an arbitrary base URL.
+ * DUR-4347 (security): the agent's main key is for the main model's provider
+ * and host. A backup may reuse it only when both match, so the main key is
+ * never sent to another vendor or an arbitrary base URL. A backup on another
+ * provider uses the agent's own key for THAT provider instead
+ * (laneABackupKeySlot, adapterConfig.laneA.apiKeyByProvider.<provider>).
  */
 export function backupMayUseMainBinding(
   backup: { provider: LaneAProvider; baseUrl: string | null },
   main: { provider: LaneAProvider; baseUrl: string | null },
 ): boolean {
-  return backup.provider === main.provider && (backup.baseUrl ?? null) === (main.baseUrl ?? null);
+  return laneABackupKeySlot(backup, main) === "main";
 }
 
 /**
@@ -2173,16 +2224,55 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     return row ?? null;
   }
 
-  /** The secret_ref bound at adapterConfig.laneA.apiKey, if any. */
-  function readLaneAKeyBinding(adapterConfig: unknown): { secretId: string; version: number | "latest" } | null {
+  /**
+   * The secret_ref a call should use, and the config path it is bound at:
+   * the main key (adapterConfig.laneA.apiKey) for slot "main", the agent's
+   * stashed key for `provider` (adapterConfig.laneA.apiKeyByProvider.<provider>)
+   * for slot "provider", nothing for slot "none".
+   */
+  function readLaneAKeyBinding(
+    adapterConfig: unknown,
+    slot: LaneABackupKeySlot = "main",
+    provider?: LaneAProvider,
+  ): { secretId: string; version: number | "latest"; configPath: string } | null {
+    if (slot === "none") return null;
     if (typeof adapterConfig !== "object" || adapterConfig === null) return null;
     const laneA = (adapterConfig as { laneA?: unknown }).laneA;
     if (typeof laneA !== "object" || laneA === null) return null;
-    const parsed = envBindingSchema.safeParse((laneA as { apiKey?: unknown }).apiKey);
+    let raw: unknown;
+    let configPath: string;
+    if (slot === "provider") {
+      if (!provider) return null;
+      const byProvider = (laneA as { apiKeyByProvider?: unknown }).apiKeyByProvider;
+      if (typeof byProvider !== "object" || byProvider === null) return null;
+      raw = (byProvider as Record<string, unknown>)[provider];
+      configPath = laneAProviderKeyConfigPath(provider);
+    } else {
+      raw = (laneA as { apiKey?: unknown }).apiKey;
+      configPath = LANE_A_API_KEY_CONFIG_PATH;
+    }
+    const parsed = envBindingSchema.safeParse(raw);
     if (!parsed.success) return null;
     const binding = parsed.data;
     if (typeof binding !== "object" || binding === null || binding.type !== "secret_ref") return null;
-    return { secretId: binding.secretId, version: binding.version ?? "latest" };
+    return { secretId: binding.secretId, version: binding.version ?? "latest", configPath };
+  }
+
+  /** The address the agent's stashed key for `provider` was saved with, if any (DUR-4395). */
+  function readStashedBaseUrl(adapterConfig: unknown, provider: LaneAProvider): string | null {
+    const laneA = (adapterConfig as { laneA?: unknown } | null | undefined)?.laneA;
+    const byProvider = (laneA as { baseUrlByProvider?: unknown } | null | undefined)?.baseUrlByProvider;
+    const value = (byProvider as Record<string, unknown> | null | undefined)?.[provider];
+    return typeof value === "string" ? value : null;
+  }
+
+  /** Which of the agent's keys a backup is called with (see laneABackupKeySlot). */
+  function backupKeySlotFor(
+    backup: { provider: LaneAProvider; baseUrl: string | null },
+    main: { provider: LaneAProvider; baseUrl: string | null },
+    adapterConfig: unknown,
+  ): LaneABackupKeySlot {
+    return laneABackupKeySlot(backup, main, readStashedBaseUrl(adapterConfig, backup.provider));
   }
 
   /**
@@ -2208,8 +2298,17 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     actor?: AuthorizationActor;
     /** When a Claude test client is injected, no key is required. */
     keyOptional: boolean;
+    /**
+     * Which of the agent's keys to use. Omitted = the main key (the main
+     * model). A backup passes its own slot (backupKeySlotFor): the main key
+     * only on the main model's own provider and address, else the agent's
+     * key for the backup's provider, else none.
+     */
+    keySlot?: LaneABackupKeySlot;
   }): Promise<LaneACredential> {
-    const binding = readLaneAKeyBinding(params.adapterConfig);
+    const slot = params.keySlot ?? "main";
+    const forBackup = params.keySlot !== undefined;
+    const binding = readLaneAKeyBinding(params.adapterConfig, slot, params.provider);
     const label = laneAProviderLabel(params.provider);
     if (binding) {
       try {
@@ -2220,7 +2319,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           {
             consumerType: "agent",
             consumerId: params.agentId,
-            configPath: LANE_A_API_KEY_CONFIG_PATH,
+            configPath: binding.configPath,
             actorType: params.actor?.type === "agent" ? "agent" : params.actor?.type === "board" ? "user" : "system",
             actorId:
               params.actor?.type === "agent"
@@ -2235,12 +2334,19 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         // Never the value, never the upstream message (which could name the
         // secret's material): the operator gets the one thing they can act on.
         logger.warn(
-          { err: err instanceof Error ? err.message : String(err), companyId: params.companyId, agentId: params.agentId },
+          {
+            err: err instanceof Error ? err.message : String(err),
+            companyId: params.companyId,
+            agentId: params.agentId,
+            configPath: binding.configPath,
+          },
           "lane A: the quick agent's bound key could not be resolved",
         );
         throw new HttpError(
           503,
-          `This quick agent's saved ${label} key could not be used. Pick the key again under its quick agent settings, or replace it under Connections.`,
+          forBackup && slot === "provider"
+            ? `The ${label} backup's key could not be used. Pick the ${label} key again on the backup under the quick agent's backup models, or replace it under Connections.`
+            : `This quick agent's saved ${label} key could not be used. Pick the key again under its quick agent settings, or replace it under Connections.`,
           { code: "LANE_A_KEY_UNRESOLVED", provider: params.provider },
         );
       }
@@ -2260,19 +2366,59 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       // through when present.
       return { apiKey: null, source: null };
     }
+    if (forBackup) {
+      throw new HttpError(
+        503,
+        slot === "none"
+          ? `The ${label} backup was skipped: it uses a different ${label} address than the one its key was picked for, so no key is sent there.`
+          : slot === "main"
+            ? `The ${label} backup was skipped: it shares the main model's ${label} key, and none is picked yet.`
+            : `The ${label} backup was skipped: this quick agent has no ${label} key. Pick one on the backup under the quick agent's backup models.`,
+        { code: "LANE_A_KEY_MISSING", provider: params.provider },
+      );
+    }
     throw new HttpError(503, `This quick agent has no ${label} key. Add one under Connections.`, {
       code: "LANE_A_KEY_MISSING",
       provider: params.provider,
     });
   }
 
-  /** One provider client for one call. The key lives in its closure and nowhere else. */
+  // The company's OpenRouter blocked hosts (Settings > Models), read at call
+  // time so a setup saved before a host was blocked is covered too. Kept for
+  // a short while per company: one quick-agent turn makes several calls, and
+  // a changed list is picked up within LANE_A_BLOCKED_HOSTS_TTL_MS.
+  const blockedHostsCache = new Map<string, { at: number; hosts: Promise<string[]> }>();
+  const modelDirectory = modelDirectoryService(db);
+  function companyBlockedOpenRouterHosts(companyId: string): Promise<string[]> {
+    const now = Date.now();
+    const cached = blockedHostsCache.get(companyId);
+    if (cached && now - cached.at < LANE_A_BLOCKED_HOSTS_TTL_MS) return cached.hosts;
+    const hosts = modelDirectory.getSettings(companyId).then(
+      (settings) => settings.openrouterBlockedHosts,
+      (err: unknown) => {
+        // Not cached: the next call asks again.
+        blockedHostsCache.delete(companyId);
+        logger.warn({ err, companyId }, "lane A: could not read the company's blocked OpenRouter hosts; calling without them");
+        return [] as string[];
+      },
+    );
+    blockedHostsCache.set(companyId, { at: now, hosts });
+    return hosts;
+  }
+
+  /**
+   * One provider client for one call. The key lives in its closure and
+   * nowhere else. For OpenRouter every request also gets the company's
+   * blocked hosts in its "ignore" list (except hosts the setup explicitly
+   * marks "Use"), whatever routing the caller passes.
+   */
   function buildProviderClient(input: {
+    companyId: string;
     provider: LaneAProvider;
     baseUrl: string | null;
     credential: LaneACredential;
   }): LaneAProviderClient {
-    return createLaneAProviderClient({
+    const client = createLaneAProviderClient({
       provider: input.provider,
       apiKey: input.credential.apiKey,
       baseUrl: input.baseUrl,
@@ -2280,6 +2426,15 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         input.provider === "anthropic" && options.createModelClient ? options.createModelClient() : undefined,
       fetch: options.providerFetch,
     });
+    if (input.provider !== "openrouter") return client;
+    return {
+      provider: client.provider,
+      async complete(request) {
+        const blocked = await companyBlockedOpenRouterHosts(input.companyId);
+        const providerRouting = withOpenRouterBlockedHostsForCall(request.providerRouting ?? null, blocked);
+        return client.complete(providerRouting ? { ...request, providerRouting } : request);
+      },
+    };
   }
 
   /**
@@ -2366,6 +2521,12 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     const businessDataOutputs: BusinessDataTurnOutput[] = [];
     const messages: LaneAChatMessage[] = [...history, { role: "user", content: message }];
     const actions: LaneAAction[] = [];
+    // 8 Oct: the person asked for a picture (or "another one" right after
+    // one). If the reply then makes none, the one corrective retry forces the
+    // picture tool, exactly as for a reply that claims a picture it never made.
+    const pictureRequested = detectLaneAPictureRequest(message, {
+      pictureEarlier: history.some((turn) => turn.role === "assistant" && /\[\s*Picture made in this turn\b/i.test(turn.content)),
+    });
     let inputTokens = 0;
     let outputTokens = 0;
     let costUsd = 0;
@@ -2468,7 +2629,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     // tool-only action it did not back up with a successful call. Guards
     // against retrying more than once, and carries the family through to the
     // post-loop fallback/logging.
-    let claimRetry: { family: LaneAActionClaimFamily; matchedPhrase: string } | null = null;
+    let claimRetry: { family: LaneAActionClaimFamily; matchedPhrase: string; reason: "claim" | "request" } | null = null;
     let claimRetryOutcome: "recovered" | "failed" | null = null;
     // DUR-4371/DUR-4355: the claim-retry round and the empty-reply retry both
     // spend the turn's one allowed corrective model call. Once either has
@@ -2482,19 +2643,44 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         forcedToolName = undefined;
         addUsage(response.usage);
 
-        const toolUseBlocks = response.toolCalls;
+        let toolUseBlocks = response.toolCalls;
+        // 8 Oct: some models (small local ones, or a host without native
+        // tools) write the call as text -- {"name": "generate-image",
+        // "parameters": {...}} -- instead of making it. When the whole reply
+        // is such a call to a tool offered this turn, it is made for real,
+        // through exactly the same checks as a native call.
+        if ((response.stop !== "tool_use" || toolUseBlocks.length === 0) && !toolsOff && !finalRound) {
+          const textCall = parseLaneATextToolCall(response.text, tools.map((tool) => tool.name), `text_call_${round}`);
+          if (textCall) {
+            toolUseBlocks = [textCall];
+            response = { ...response, text: "", toolCalls: toolUseBlocks, stop: "tool_use" };
+          }
+        }
         if (response.stop !== "tool_use" || toolUseBlocks.length === 0) {
           // DUR-4355: the reply looks final -- before accepting it, check it
           // is not claiming an action (picture/video/audio, memory, task,
           // weather/price) that no tool actually performed this turn.
           if (!claimRetry && !finalRound) {
-            const claim = detectLaneAActionClaim(response.text);
-            if (claim && !isLaneAActionClaimFulfilled(claim.family, actions)) {
-              const forced = toolsOff ? null : pickLaneAForcedToolName(claim.family, tools.map((tool) => tool.name));
+            const detected = detectLaneAActionClaim(response.text);
+            const claim: { family: LaneAActionClaimFamily; matchedPhrase: string; reason: "claim" | "request" } | null =
+              detected && !isLaneAActionClaimFulfilled(detected.family, actions)
+                ? { ...detected, reason: "claim" }
+                : pictureRequested && !laneAMediaToolAttempted(actions) && !toolsOff &&
+                    pickLaneAForcedToolName("media", tools.map((tool) => tool.name), message)
+                  ? { family: "media", matchedPhrase: message.slice(0, 200), reason: "request" }
+                  : null;
+            if (claim) {
+              const forced = toolsOff
+                ? null
+                : pickLaneAForcedToolName(
+                    claim.family,
+                    tools.map((tool) => tool.name),
+                    claim.reason === "request" ? message : `${message}\n${response.text}`,
+                  );
               claimRetry = claim;
               if (forced) {
                 messages.push({ role: "assistant", content: response.text });
-                messages.push({ role: "user", content: buildLaneAActionClaimRetryNote(claim.family) });
+                messages.push({ role: "user", content: buildLaneAActionClaimRetryNote(claim.family, claim.reason) });
                 forcedToolName = forced;
                 correctiveRetryUsed = true;
                 continue;
@@ -2613,7 +2799,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
               try {
                 const executed = await execution.execute({
                   tool: pluginTool.namespacedName,
-                  parameters: input,
+                  parameters: cleanLaneAAddonToolInput(input),
                   runContext: {
                     agentId: ctx.agent.id,
                     runId: pluginRun.run.runId,
@@ -2771,15 +2957,22 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       if (claimRetryOutcome !== "failed") {
         claimRetryOutcome = isLaneAActionClaimFulfilled(claimRetry.family, actions) ? "recovered" : "failed";
       }
-      if (claimRetryOutcome === "failed") {
+      // A request-type retry (the person asked; the reply claimed nothing)
+      // keeps the model's own words when the retry still made nothing: it
+      // may be a fair question back ("which angle?"), not a false claim.
+      if (claimRetryOutcome === "failed" && claimRetry.reason === "claim") {
         finalText = buildLaneAActionClaimFallbackLine(claimRetry.family);
       }
       actions.push({
         tool: "action_claim_check",
         summary:
-          claimRetryOutcome === "recovered"
-            ? `Said it had done something (${claimRetry.family}) before calling the tool; the automatic retry called it.`
-            : `Said it had done something (${claimRetry.family}) without calling the tool, and the retry still did not call it; the person was told plainly instead.`,
+          claimRetry.reason === "request"
+            ? claimRetryOutcome === "recovered"
+              ? `Was asked for a picture and answered without making one; the automatic retry made it.`
+              : `Was asked for a picture and answered without making one; the retry still made none.`
+            : claimRetryOutcome === "recovered"
+              ? `Said it had done something (${claimRetry.family}) before calling the tool; the automatic retry called it.`
+              : `Said it had done something (${claimRetry.family}) without calling the tool, and the retry still did not call it; the person was told plainly instead.`,
         ok: claimRetryOutcome === "recovered",
       });
       try {
@@ -2796,6 +2989,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
             model: modelId,
             family: claimRetry.family,
             matchedPhrase: claimRetry.matchedPhrase.slice(0, 200),
+            reason: claimRetry.reason,
             retryOutcome: claimRetryOutcome,
           },
         });
@@ -2910,6 +3104,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     // already committed to opening tools (so there is nothing left to leak
     // by resolving a backup's credential a little later).
     const mainClient = buildProviderClient({
+      companyId: params.companyId,
       provider: chatSettings.provider,
       baseUrl: chatSettings.baseUrl,
       credential,
@@ -3143,16 +3338,19 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
               companyId: params.companyId,
               agentId: params.targetAgent.id,
               provider: entrySettings.provider,
-              adapterConfig: backupMayUseMainBinding(entrySettings, chatSettings) ? agentRow?.adapterConfig : null,
+              adapterConfig: agentRow?.adapterConfig,
+              keySlot: backupKeySlotFor(entrySettings, chatSettings, agentRow?.adapterConfig),
               actor: params.actor,
               keyOptional: entrySettings.provider === "anthropic" && Boolean(options.createModelClient),
             });
-            entryClient = buildProviderClient({ provider: entrySettings.provider, baseUrl: entrySettings.baseUrl, credential: backupCredential });
+            entryClient = buildProviderClient({ companyId: params.companyId, provider: entrySettings.provider, baseUrl: entrySettings.baseUrl, credential: backupCredential });
           } catch (err) {
             // A backup that cannot even be set up (bad model id, missing
-            // key) is skipped rather than ending the whole turn over it —
-            // the validators reject this at save time, so this is only
-            // reachable if a key/binding was removed after the fact.
+            // key) is skipped rather than ending the whole turn over it.
+            logger.warn(
+              { companyId: params.companyId, agentId: params.targetAgent.id, backupId: poolId, reason: err instanceof Error ? err.message : String(err) },
+              "lane A: a backup model was skipped because it could not be set up",
+            );
             attemptRecords.push({
               provider: entry.provider ?? "unknown",
               model: entry.model ?? "unknown",
@@ -3287,6 +3485,17 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         }
       }
       if (!loopResult.ok && offlineNotice) {
+        // A backup that could not step in for a missing or unusable key says
+        // why, after the offline notice, so the fix is in plain sight.
+        const backupKeyError =
+          loopResult.error instanceof HttpError &&
+          typeof (loopResult.error.details as { code?: unknown } | undefined)?.code === "string" &&
+          String((loopResult.error.details as { code: string }).code).startsWith("LANE_A_KEY_")
+            ? loopResult.error
+            : null;
+        if (backupKeyError) {
+          throw new HttpError(503, `${offlineNotice} ${backupKeyError.message}`, backupKeyError.details);
+        }
         throw new HttpError(503, offlineNotice, {});
       }
       if (!loopResult.ok) {
@@ -3770,17 +3979,22 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
               companyId: params.companyId,
               agentId: params.targetAgent.id,
               provider: entrySettings.provider,
-              adapterConfig:
-                poolId === LANE_A_MAIN_POOL_ID || backupMayUseMainBinding(entrySettings, settings)
-                  ? agentRow?.adapterConfig
-                  : null,
+              adapterConfig: agentRow?.adapterConfig,
+              keySlot:
+                poolId === LANE_A_MAIN_POOL_ID ? undefined : backupKeySlotFor(entrySettings, settings, agentRow?.adapterConfig),
               keyOptional: entrySettings.provider === "anthropic" && Boolean(options.createModelClient),
             });
-            entryClient = buildProviderClient({ provider: entrySettings.provider, baseUrl: entrySettings.baseUrl, credential });
+            entryClient = buildProviderClient({ companyId: params.companyId, provider: entrySettings.provider, baseUrl: entrySettings.baseUrl, credential });
           } catch (err) {
             // The main model's setup failure is the caller's to see; a backup
             // that cannot be set up is just skipped.
             if (poolId === LANE_A_MAIN_POOL_ID && routing.noAnswerChain.length === 1) throw err;
+            if (poolId !== LANE_A_MAIN_POOL_ID) {
+              logger.warn(
+                { companyId: params.companyId, agentId: params.targetAgent.id, backupId: poolId, reason: err instanceof Error ? err.message : String(err) },
+                "lane A: a backup model was skipped because it could not be set up",
+              );
+            }
             return { outcome: "retryable_error", error: err };
           }
           try {
@@ -4193,7 +4407,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         actor: params.actor,
         keyOptional: settings.provider === "anthropic" && Boolean(options.createModelClient),
       });
-      const client = buildProviderClient({ provider: settings.provider, baseUrl: settings.baseUrl, credential });
+      const client = buildProviderClient({ companyId, provider: settings.provider, baseUrl: settings.baseUrl, credential });
       const candidates = boundCandidates(considered);
       const request = buildTopicSelectionRequest({
         spec: plan.topic,
@@ -4477,6 +4691,356 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     }
   }
 
+  // ─── "Check this setup": one real, tiny call through the chat path ──────
+
+  /**
+   * Runs ONE minimal call (two at most: the tool round and the answer after
+   * it) through exactly the path a chat turn would take for the agent's main
+   * model or one of its backups: the same provider, model, address, key slot,
+   * OpenRouter host rules (company blocked hosts included), thinking and
+   * creativity settings. Offers one harmless test tool to see whether tool
+   * calling works. Nothing is stored as a conversation; the cost is recorded
+   * like every other quick-agent call, and a local model's health is updated.
+   * Every outcome comes back as plain-English steps, never as an error,
+   * except "no such agent / backup" (404) and the DUR-3989 work gate (403:
+   * quick answers off, agent or company paused, spending limit reached), which
+   * refuses before any key lookup or model call, exactly like a chat turn.
+   */
+  async function checkSetup(params: {
+    companyId: string;
+    agentId: string;
+    target: LaneASetupCheckTarget;
+    actor?: AuthorizationActor;
+  }): Promise<LaneASetupCheckResult> {
+    const checkedAt = new Date();
+    const [agentBase] = await db
+      .select({ id: agents.id, name: agents.name, laneAMaxOutputTokens: agents.laneAMaxOutputTokens })
+      .from(agents)
+      .where(and(eq(agents.id, params.agentId), eq(agents.companyId, params.companyId)));
+    const row = agentBase ? await loadLaneAAgentRow(params.companyId, params.agentId) : null;
+    if (!agentBase || !row) throw notFound("Agent not found");
+    const mainAgent: LaneATargetAgent = {
+      id: agentBase.id,
+      companyId: params.companyId,
+      name: agentBase.name,
+      laneAEnabled: row.laneAEnabled,
+      laneAProvider: row.laneAProvider,
+      laneABaseUrl: row.laneABaseUrl,
+      laneAModel: row.laneAModel,
+      laneATemperature: row.laneATemperature,
+      laneAThinking: row.laneAThinking,
+      laneAProviderRouting: (row.laneAProviderRouting as LaneAProviderRouting | null) ?? null,
+      laneAMaxOutputTokens: agentBase.laneAMaxOutputTokens,
+    };
+    const mainSettings = resolveLaneASettings(mainAgent);
+    let settings = mainSettings;
+    let keySlot: LaneABackupKeySlot | undefined;
+    if (params.target !== "main") {
+      const backupId = params.target.backupId;
+      const backups = await resolveBackupModelsThroughDirectory(db, params.companyId, (row.laneABackupModels as LaneABackupModelConfig[] | null) ?? []);
+      const backup = backups.find((b) => b.id === backupId);
+      if (!backup) throw notFound("That backup model is not saved on this agent. Save the backups first, then check again.");
+      settings = resolveLaneAPoolEntrySettings(
+        { id: backup.id, provider: backup.provider, model: backup.model, baseUrl: backup.baseUrl ?? null, temperature: backup.temperature ?? null },
+        mainAgent,
+      );
+      keySlot = backupKeySlotFor(settings, mainSettings, row.adapterConfig);
+    }
+    // DUR-3989 (security review on DUR-4688): the check is a real, paid model
+    // call, so it goes through the same gate as every chat turn. A quick agent
+    // that is switched off, paused, in a paused company or over a spending
+    // limit is refused with the same plain message (403) before anything —
+    // key lookup included — is spent.
+    if (!mainAgent.laneAEnabled) {
+      throw forbidden(
+        `${mainAgent.name} is not a quick agent right now (quick answers are switched off), so there is nothing to check. ` +
+          "Switch quick answers on and save, then check again.",
+      );
+    }
+    await assertAgentMayWork({ companyId: params.companyId, targetAgent: mainAgent, kind: "chat" });
+    const provider = settings.provider;
+    const label = laneAProviderLabel(provider);
+    const steps: LaneASetupCheckStep[] = [];
+    let toolCalling: LaneASetupCheckToolCalling = "not_tested";
+    let thinkingAccepted: boolean | null = null;
+    const base = { target: params.target, provider, model: settings.model, checkedAt: checkedAt.toISOString() };
+    const finish = (ok: boolean, summary: string, extra: { answerMs?: number | null; costCents?: number; costMicroUsd?: number } = {}): LaneASetupCheckResult => ({
+      ...base,
+      ok,
+      summary,
+      steps,
+      answerMs: extra.answerMs ?? null,
+      toolCalling,
+      thinkingAccepted,
+      costCents: extra.costCents ?? 0,
+      costMicroUsd: extra.costMicroUsd ?? 0,
+    });
+
+    // 1. Settings that can be judged without a call.
+    let model: string;
+    try {
+      model = assertLaneASettingsRunnable(settings);
+    } catch (err) {
+      const text = err instanceof Error ? err.message : String(err);
+      steps.push({ id: "settings", ok: false, text });
+      return finish(false, text);
+    }
+    steps.push({
+      id: "settings",
+      ok: true,
+      text: `${label}, model "${model}"${settings.baseUrl && provider !== "anthropic" ? ` at ${settings.baseUrl}` : ""}.`,
+    });
+
+    // 2. The key, from the same slot a chat turn would use.
+    let credential: LaneACredential;
+    try {
+      credential = await resolveLaneACredential({
+        companyId: params.companyId,
+        agentId: params.agentId,
+        provider,
+        adapterConfig: row.adapterConfig,
+        actor: params.actor,
+        keyOptional: provider === "anthropic" && Boolean(options.createModelClient),
+        ...(keySlot ? { keySlot } : {}),
+      });
+    } catch (err) {
+      const text = err instanceof Error ? err.message : String(err);
+      steps.push({ id: "key", ok: false, text });
+      return finish(false, text);
+    }
+    steps.push({
+      id: "key",
+      ok: true,
+      text:
+        provider === "local" && !credential.apiKey ? "No key needed for a local model."
+        : credential.source === "instance" ? "Uses Paperclip's own Claude key."
+        : `Uses this agent's saved ${label} key.`,
+    });
+
+    // Error text from a provider or a local server is shown to the person;
+    // scrub it the way chat output is scrubbed, and never echo the key itself.
+    const scrub = (text: string): string =>
+      redactSensitiveText(credential.apiKey ? redactKnownSecretValues(text, [credential.apiKey]) : text);
+
+    // 3. The call itself, with one harmless tool.
+    let client: LaneAProviderClient;
+    try {
+      client = buildProviderClient({ companyId: params.companyId, provider, baseUrl: settings.baseUrl, credential });
+    } catch (err) {
+      const text = scrub(`Could not set up the call: ${err instanceof Error ? err.message : String(err)}`);
+      steps.push({ id: "reachable", ok: false, text });
+      return finish(false, text);
+    }
+    const tool: LaneATool = {
+      name: LANE_A_SETUP_CHECK_TOOL,
+      description: "Setup check. Call this once with the word \"ready\".",
+      inputSchema: { type: "object", properties: { word: { type: "string" } }, required: ["word"] },
+    };
+    const system = "This is an automatic setup check, not a real conversation. Follow the instruction exactly and keep the answer to one word.";
+    const messages: LaneAChatMessage[] = [{ role: "user", content: `Call the ${LANE_A_SETUP_CHECK_TOOL} tool with the word "ready". When it answers, reply with the single word OK.` }];
+    const maxTokens = Math.min(settings.maxOutputTokens, LANE_A_SETUP_CHECK_MAX_OUTPUT_TOKENS);
+    let temperatureOff = typeof settings.temperature !== "number";
+    let reasoningOff = settings.reasoningEffort == null;
+    let toolsOff = false;
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let providerCost = 0;
+    let providerCostComplete = true;
+    const send = async (msgs: LaneAChatMessage[]): Promise<LaneACompletion> => {
+      for (;;) {
+        try {
+          const completion = await client.complete({
+            model,
+            system,
+            messages: msgs,
+            maxTokens,
+            ...(toolsOff ? {} : { tools: [tool] }),
+            ...(temperatureOff ? {} : { temperature: settings.temperature }),
+            ...(reasoningOff ? {} : { reasoningEffort: settings.reasoningEffort }),
+            ...(settings.providerRouting ? { providerRouting: settings.providerRouting } : {}),
+          });
+          inputTokens += completion.usage.inputTokens;
+          outputTokens += completion.usage.outputTokens;
+          if (typeof completion.usage.costUsd === "number") providerCost += completion.usage.costUsd;
+          else providerCostComplete = false;
+          return completion;
+        } catch (err) {
+          // The same fall-backs a chat turn uses, in the same order.
+          if (isLaneATemperatureUnsupportedError(err) && !reasoningOff) {
+            reasoningOff = true;
+            thinkingAccepted = false;
+            continue;
+          }
+          if (isLaneATemperatureUnsupportedError(err) && !temperatureOff) {
+            temperatureOff = true;
+            continue;
+          }
+          if (!toolsOff && (isLaneAToolsUnsupportedError(err) || isLaneAOpenRouterNoHostForParametersError(err))) {
+            toolsOff = true;
+            toolCalling = "not_supported";
+            continue;
+          }
+          throw err;
+        }
+      }
+    };
+    const started = Date.now();
+    let answer = "";
+    let failure: unknown = null;
+    try {
+      const first = await send(messages);
+      let calls = first.toolCalls;
+      if (calls.length === 0 && !toolsOff) {
+        const textCall = parseLaneATextToolCall(first.text, [tool.name], "setup_check_text_call");
+        if (textCall) calls = [textCall];
+      }
+      const ping = calls.find((c) => c.name === tool.name);
+      if (ping) {
+        toolCalling = "works";
+        const second = await send([
+          ...messages,
+          { role: "assistant", content: first.text, toolCalls: calls },
+          { role: "tool", results: calls.map((c) => ({ toolCallId: c.id, name: c.name, content: c.name === tool.name ? "pong" : "Unknown tool.", isError: c.name !== tool.name })) },
+        ]);
+        answer = second.text.trim();
+      } else {
+        if (!toolsOff) toolCalling = "not_used";
+        answer = first.text.trim();
+      }
+    } catch (err) {
+      failure = err;
+    }
+    const answerMs = Date.now() - started;
+    if (thinkingAccepted === null && settings.reasoningEffort && !reasoningOff) thinkingAccepted = true;
+
+    // Cost, recorded like any other quick-agent call (no conversation is stored).
+    let costCents = 0;
+    let costMicroUsd = 0;
+    if (inputTokens > 0 || outputTokens > 0) {
+      const cost = await priceLaneACall({ provider, model, inputTokens, outputTokens, providerCostUsd: providerCostComplete ? providerCost : null });
+      costCents = cost.costCents;
+      costMicroUsd = cost.costMicroUsd;
+      await costService(db).createEvent(params.companyId, {
+        agentId: params.agentId,
+        provider,
+        biller: provider,
+        billingType: "metered_api",
+        model,
+        inputTokens,
+        outputTokens,
+        costCents: cost.costCents,
+        costMicroUsd: cost.costMicroUsd,
+        costSource: cost.costSource,
+        occurredAt: new Date(),
+      });
+    }
+    const costText = (): string => {
+      if (inputTokens === 0 && outputTokens === 0) return "Cost: nothing was charged.";
+      if (provider === "local") return "Cost: nothing (a local model).";
+      const usd = costMicroUsd / 1_000_000;
+      return `Cost of this check: about $${usd < 0.0001 ? "0.0001 or less" : usd.toFixed(4)} (${inputTokens + outputTokens} tokens).`;
+    };
+
+    // A local model's health follows what the check found.
+    const noteLocal = async (status: "ready" | "unreachable" | "model_missing") => {
+      if (provider !== "local" || !settings.baseUrl) return;
+      try {
+        await modelHealthService(db).record(params.companyId, settings.baseUrl, model, status);
+      } catch (err) {
+        logger.warn({ err, companyId: params.companyId }, "lane A: could not record local model health after a setup check");
+      }
+    };
+
+    if (failure) {
+      const err = failure;
+      const where = provider === "anthropic" ? label : `${label} at ${settings.baseUrl}`;
+      let text: string;
+      let stepId: LaneASetupCheckStep["id"] = "answer";
+      if (err instanceof LaneAProviderError && err.kind === "network") {
+        stepId = "reachable";
+        text =
+          provider === "local"
+            ? `Could not reach the model server at ${settings.baseUrl}. Is the computer on and the model server (for example Ollama) running?`
+            : `Could not reach ${label}. Try again in a minute.`;
+        await noteLocal("unreachable");
+      } else if (err instanceof LaneAProviderError && err.kind === "auth") {
+        stepId = "key";
+        text = `${label} refused the key. Pick the right key, or replace it under Connections.`;
+      } else if (err instanceof LaneAProviderError && err.kind === "rate_limit") {
+        stepId = "answer";
+        text = `${label} is busy right now (rate limited). Everything else looked fine; try again in a minute.`;
+      } else if (
+        err instanceof LaneAProviderError &&
+        err.kind === "upstream" &&
+        (LANE_A_SETUP_CHECK_MODEL_MISSING.test(err.message) || err.status === 404)
+      ) {
+        stepId = "model";
+        text =
+          provider === "local"
+            ? `The model server answered, but it does not have "${model}". Install it there first (for example: ollama pull ${model}).`
+            : `${label} does not know the model "${model}". Check the spelling of the model id.`;
+        await noteLocal("model_missing");
+      } else if (err instanceof LaneAProviderError) {
+        text = scrub(`${where} refused the request: ${providerErrorDetail(err.message)}`);
+      } else {
+        text = scrub(`The check failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      if (stepId !== "reachable") steps.push({ id: "reachable", ok: true, text: `Reached ${where}.` });
+      if (stepId === "key") {
+        const keyStep = steps.find((s) => s.id === "key");
+        if (keyStep) {
+          keyStep.ok = false;
+          keyStep.text = text;
+        }
+      } else {
+        steps.push({ id: stepId, ok: false, text });
+      }
+      steps.push({ id: "cost", ok: null, text: costText() });
+      return finish(false, text, { answerMs: null, costCents, costMicroUsd });
+    }
+
+    await noteLocal("ready");
+    const seconds = (answerMs / 1000).toFixed(1);
+    steps.push({ id: "reachable", ok: true, text: provider === "anthropic" ? `Reached ${label}.` : `Reached ${settings.baseUrl}.` });
+    steps.push({ id: "model", ok: true, text: `Model "${model}" found.` });
+    steps.push(
+      answer
+        ? { id: "answer", ok: true, text: `Answered in ${seconds} s.` }
+        : { id: "answer", ok: false, text: `Answered in ${seconds} s, but with no words. It may be spending all its room on thinking; try thinking "off" or a larger longest answer.` },
+    );
+    const toolResult = toolCalling as LaneASetupCheckToolCalling;
+    const thinkingResult = thinkingAccepted as boolean | null;
+    steps.push(
+      toolResult === "works" ? { id: "tools", ok: true, text: "Tool calling works." }
+      : toolResult === "not_supported" ? { id: "tools", ok: false, text: "Tool calling does not work here: it was refused, so this model can chat but cannot make pictures, check the weather or hand work over." }
+      : { id: "tools", ok: false, text: "It answered without using the test tool, so tool calling may not work reliably with this model." },
+    );
+    if (settings.reasoningEffort) {
+      steps.push(
+        thinkingResult === false
+          ? { id: "thinking", ok: false, text: 'The thinking "off" setting was refused here; Paperclip leaves it out, so the model decides.' }
+          : { id: "thinking", ok: true, text: 'The thinking "off" setting was accepted.' },
+      );
+    } else {
+      steps.push({ id: "thinking", ok: null, text: "No thinking setting is sent for this model (model default)." });
+    }
+    if (typeof settings.temperature === "number") {
+      steps.push(
+        temperatureOff
+          ? { id: "temperature", ok: false, text: "The creativity setting was refused here; Paperclip leaves it out." }
+          : { id: "temperature", ok: true, text: `Creativity ${settings.temperature} was accepted.` },
+      );
+    }
+    steps.push({ id: "cost", ok: null, text: costText() });
+    const ok = Boolean(answer) && toolResult === "works";
+    const summary = ok
+      ? `Everything works: it answered in ${seconds} s and tool calling works.`
+      : !answer
+        ? "It was reached, but gave no answer."
+        : "It answers, but tool calling does not work with it.";
+    return finish(ok, summary, { answerMs, costCents, costMicroUsd });
+  }
+
   return {
     sendMessage,
     getConversation,
@@ -4486,8 +5050,15 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     continueConversation,
     listLooks,
     makePicture,
+    checkSetup,
   };
 }
+
+/** The one harmless tool "Check this setup" offers, to see whether tool calling works. */
+export const LANE_A_SETUP_CHECK_TOOL = "setup_check_ping";
+/** Room for a short answer, plus a little thinking. */
+export const LANE_A_SETUP_CHECK_MAX_OUTPUT_TOKENS = 512;
+const LANE_A_SETUP_CHECK_MODEL_MISSING = /model[^.]*(not loaded|not found|does not exist|is not available|unknown)|no such model|invalid model/i;
 
 /** The bare name of Media Studio's "List saved looks" tool (its grant is `<plugin>:list-looks`). */
 export const LANE_A_LIST_LOOKS_TOOL = "list-looks";

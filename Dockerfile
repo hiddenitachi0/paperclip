@@ -122,7 +122,7 @@ WORKDIR /app
 # re-fetching over the network every time.
 RUN npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest opencode-ai @google/gemini-cli@latest \
   && apt-get update \
-  && apt-get install -y --no-install-recommends openssh-client jq postgresql-client \
+  && apt-get install -y --no-install-recommends openssh-client jq postgresql-client ffmpeg \
   && rm -rf /var/lib/apt/lists/* \
   && mkdir -p /paperclip \
   && chown node:node /paperclip

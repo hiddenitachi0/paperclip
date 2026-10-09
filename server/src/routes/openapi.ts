@@ -170,6 +170,9 @@ import {
   createModelDirectoryEntrySchema,
   updateModelDirectoryEntrySchema,
   duplicateModelDirectoryEntrySchema,
+  importModelDirectoryCatalogueSchema,
+  syncLocalModelsSchema,
+  updateModelDirectorySettingsSchema,
   // Merge-card security review (DUR-4566)
   recordSecurityReviewVerdictSchema,
 } from "@paperclipai/shared";
@@ -796,6 +799,12 @@ const BOARD_ONLY_OPERATIONS = new Set([
   // a saved model setup, so it cannot re-point itself or another agent.
   "GET /api/companies/{companyId}/model-directory",
   "POST /api/companies/{companyId}/model-directory",
+  "GET /api/companies/{companyId}/model-directory/export",
+  "GET /api/companies/{companyId}/model-directory/settings",
+  "PUT /api/companies/{companyId}/model-directory/settings",
+  "GET /api/companies/{companyId}/model-directory/openrouter-hosts",
+  "POST /api/companies/{companyId}/model-directory/local-sync",
+  "POST /api/companies/{companyId}/model-directory/import",
   "GET /api/companies/{companyId}/model-directory/starters",
   "POST /api/companies/{companyId}/model-directory/starters",
   "POST /api/companies/{companyId}/model-directory/import-agent-settings",
@@ -813,6 +822,9 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "PATCH /api/companies/{companyId}/model-directory/{entryId}",
   "DELETE /api/companies/{companyId}/model-directory/{entryId}",
   "POST /api/companies/{companyId}/model-directory/{entryId}/duplicate",
+  // "Check this setup": a real (tiny, paid) model call for one quick agent's
+  // main model or backup. Company owner/admin only; an agent never runs it.
+  "POST /api/agents/{agentId}/lane-a/check",
 ]);
 
 const INSTANCE_ADMIN_OPERATIONS = new Set([
@@ -3753,6 +3765,26 @@ registerCurrentRoute({
   },
 });
 
+registerCurrentRoute({
+  method: "post",
+  path: "/api/agents/{agentId}/lane-a/check",
+  tags: ["agents"],
+  summary:
+    "Check this setup: one tiny real call (with one harmless test tool) through exactly the path a chat turn takes for the agent's main model or one saved backup. Reports reachable, key, model found, answer time, tool calling, thinking setting and the cost in plain words. Company owner/admin only, one per agent every 10 seconds; the cost is recorded, no conversation is stored.",
+  body: z.object({
+    companyId: z.string().uuid(),
+    target: z.union([z.literal("main"), z.object({ backupId: z.string() })]),
+  }),
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    429: r.tooManyRequests,
+  },
+});
+
 // ─── Cross-company instruction channel (guarded, feature-flagged) ─────────────
 
 registerCurrentRoute({
@@ -6108,8 +6140,26 @@ registerCurrentRoute({
   method: "get",
   path: "/api/companies/{companyId}/model-directory",
   tags: ["model-directory"],
-  summary: "List a company's saved model setups (owner/admin only; never returns a key)",
+  summary: "List a company's saved model setups in catalogue order (owner/admin only; never returns a key). Archived setups are left out unless includeArchived is true.",
+  query: z.object({ includeArchived: z.enum(["true", "1", "false", "0"]).optional() }),
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/model-directory/export",
+  tags: ["model-directory"],
+  summary: "Export the company's model catalogue as a file: every saved setup (archived ones included), backups by name. No key, id, person or timestamp.",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/import",
+  tags: ["model-directory"],
+  summary: "Import a model catalogue file in one transaction. A setup whose name already exists is skipped (or updated with onExisting \"update\"); backups are matched by name. Owner/admin only; no key is accepted.",
+  body: importModelDirectoryCatalogueSchema,
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 409: r.conflict },
 });
 
 registerCurrentRoute({
@@ -6130,9 +6180,44 @@ registerCurrentRoute({
 
 registerCurrentRoute({
   method: "get",
+  path: "/api/companies/{companyId}/model-directory/settings",
+  tags: ["model-directory"],
+  summary: "Read the company's Settings > Models settings: localGpuVramGb (graphics card memory in GB of the computer that runs local models; null = not set, 0 = no graphics card), localBaseUrl (the company's local model server address; null = not set), openrouterPreferredHosts and openrouterBlockedHosts (the company's OpenRouter host rules; empty lists = none). Owner/admin only.",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "put",
+  path: "/api/companies/{companyId}/model-directory/settings",
+  tags: ["model-directory"],
+  summary: "Save the company's Settings > Models settings. Send any of localGpuVramGb, localBaseUrl, openrouterPreferredHosts, openrouterBlockedHosts; a field left out keeps its value, null clears it (an empty list clears a host list). The graphics memory is informational; the address is the default for new local setups and ready-made local models. Preferred hosts become a new OpenRouter setup's host list when one of them runs the model with tool calling; blocked hosts are added to every OpenRouter setup's never-use list when it is saved, and to every OpenRouter call at call time (so setups saved earlier are covered), unless that setup marks the host Use itself. A host cannot be on both lists (422). Owner/admin only.",
+  body: updateModelDirectorySettingsSchema,
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/model-directory/openrouter-hosts",
+  tags: ["model-directory"],
+  summary: "List the hosts that run one OpenRouter model and what each supports for THAT model: { model, fetchedAt, hosts: [{ slug, name, quantization, contextTokens, maxOutputTokens, priceInPerM, priceOutPerM (US dollars per million tokens), supportsTools, supportsToolChoice, supportsReasoning, supportsImages, status, uptimeLast30m }] }. Read live from OpenRouter's public endpoint list (openrouter.ai only, no key sent), cached about ten minutes; refresh=true skips the cache (at most every 30 seconds per model). 422 for an id that is not \"maker/model\", 404 when OpenRouter does not know the model, 502 when OpenRouter cannot be read. Owner/admin only.",
+  query: z.object({ model: z.string(), refresh: z.enum(["true", "1", "false", "0"]).optional() }),
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 422: r.unprocessable, 502: { description: "OpenRouter could not be read", content: { "application/json": { schema: ErrorSchema } } } },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/model-directory/local-sync",
+  tags: ["model-directory"],
+  summary: "Ask the local Ollama at one of this company's local addresses (its model server address setting, a saved local setup's or a quick agent's) which models are installed, and mark the saved local setups there as installed or planned. An address the company does not already use is refused (422). Owner/admin only.",
+  body: syncLocalModelsSchema,
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 422: r.unprocessable },
+});
+
+registerCurrentRoute({
+  method: "get",
   path: "/api/companies/{companyId}/model-directory/starters",
   tags: ["model-directory"],
-  summary: "List the ready-made model setups (local Ollama models, Mistral Small 3.2 on OpenRouter) and whether each is already added",
+  summary: "List the ready-made model setups (local Ollama models and cloud models) and whether each is already added",
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
 });
 
@@ -6140,7 +6225,7 @@ registerCurrentRoute({
   method: "post",
   path: "/api/companies/{companyId}/model-directory/starters",
   tags: ["model-directory"],
-  summary: "Add ready-made model setups (all, or the chosen starterIds); ones already added are skipped. No key is stored.",
+  summary: "Add ready-made model setups (all, or the chosen starterIds); ones already added are skipped. Returns { created, skipped }: local ones get the company's model server address and are skipped with a reason while it is not set (422 when only local ones were asked for). No key is stored.",
   body: addModelDirectoryStartersSchema,
   responses: { 201: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 422: r.unprocessable },
 });

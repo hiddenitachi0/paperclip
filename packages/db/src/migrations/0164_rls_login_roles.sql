@@ -320,10 +320,18 @@ DECLARE
     -- 0216_model_directory_entries.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'model_directory_entries',
+    -- "Ask Paperclip" helper settings. Created, granted on and policed in
+    -- 0238_company_helper_settings.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'company_helper_settings',
     -- DUR-4392. Created, granted on and policed in
     -- 0229_model_directory_converters.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'model_directory_converters',
+    -- Catalogue v2 (Settings > Models settings). Created, granted on and
+    -- policed in 0236_model_catalogue_v2.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'model_directory_settings',
     'model_setup_reviews',
     -- DUR-4419. Created, granted on and policed in
     -- 0223_local_model_health.sql; listed here so the login-role
@@ -632,10 +640,18 @@ DECLARE
     -- 0216_model_directory_entries.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'model_directory_entries',
+    -- "Ask Paperclip" helper settings. Created, granted on and policed in
+    -- 0238_company_helper_settings.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'company_helper_settings',
     -- DUR-4392. Created, granted on and policed in
     -- 0229_model_directory_converters.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'model_directory_converters',
+    -- Catalogue v2 (Settings > Models settings). Created, granted on and
+    -- policed in 0236_model_catalogue_v2.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'model_directory_settings',
     'model_setup_reviews',
     -- DUR-4419. Created, granted on and policed in
     -- 0223_local_model_health.sql; listed here so the login-role

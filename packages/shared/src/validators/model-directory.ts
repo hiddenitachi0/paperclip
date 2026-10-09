@@ -10,6 +10,11 @@ import {
   laneABackupModelEntryIssue,
   normalizeLaneAProvider,
 } from "../lane-a-models.js";
+import {
+  OPENROUTER_HOST_RULES_MAX,
+  OPENROUTER_HOST_SLUG_RE,
+  OPENROUTER_HOSTS_SEEN_MAX,
+} from "../openrouter-hosts.js";
 import { laneABaseUrlValueSchema, laneAProviderRoutingSchema } from "./agent.js";
 
 // DUR-4379: the company model directory -- saved model setups. These shapes
@@ -18,7 +23,88 @@ import { laneABaseUrlValueSchema, laneAProviderRoutingSchema } from "./agent.js"
 // secrets and are bound to the agent, never to a directory entry.
 
 export const MODEL_DIRECTORY_NAME_MAX_LENGTH = 80;
-export const MODEL_DIRECTORY_NOTE_MAX_LENGTH = 500;
+export const MODEL_DIRECTORY_NOTE_MAX_LENGTH = 2000;
+export const MODEL_DIRECTORY_MAKER_MAX_LENGTH = 60;
+export const MODEL_DIRECTORY_BASE_MODEL_MAX_LENGTH = 80;
+export const MODEL_DIRECTORY_TAG_MAX_LENGTH = 32;
+export const MODEL_DIRECTORY_TAGS_MAX = 12;
+/** How many entries one catalogue import may carry. */
+export const MODEL_DIRECTORY_IMPORT_MAX = 200;
+
+// Catalogue fields: what a model is good for and whether it is ready to use.
+// None of them change how an agent calls the model.
+export const MODEL_DIRECTORY_LANES = ["quick", "full", "both"] as const;
+export type ModelDirectoryLane = (typeof MODEL_DIRECTORY_LANES)[number];
+export const MODEL_DIRECTORY_AVAILABILITY = ["installed", "downloading", "planned", "cloud"] as const;
+export type ModelDirectoryAvailability = (typeof MODEL_DIRECTORY_AVAILABILITY)[number];
+
+const optionalLabel = (max: number) => z.string().trim().max(max).nullable().optional();
+
+/**
+ * Facts that help pick a model. Every field is optional and informational:
+ * Paperclip does not enforce any of them.
+ */
+export const modelDirectorySpecsSchema = z
+  .object({
+    /** Parameter count in words, e.g. "27B" or "26B (4B active)". */
+    params: optionalLabel(40),
+    /** Quantisation of the local file, e.g. "Q4_K_M". */
+    quant: optionalLabel(40),
+    /** Download size in GB. */
+    sizeGb: z.number().min(0).max(2000).nullable().optional(),
+    /** Context window in tokens. */
+    contextTokens: z.number().int().min(0).max(10_000_000).nullable().optional(),
+    /** Whether it fits the graphics card of the computer that runs local models (as the person saving it judged). */
+    fitsLocalGpu: z.enum(["yes", "tight", "no"]).nullable().optional(),
+    /** Whether tool calling works with it. */
+    tools: z.enum(["yes", "partial", "no"]).nullable().optional(),
+    vision: z.boolean().nullable().optional(),
+    thinking: z.enum(["yes", "no", "toggle"]).nullable().optional(),
+    license: optionalLabel(80),
+    /** Where the model is described (model page). */
+    sourceUrl: z.string().trim().url().max(500).nullable().optional(),
+    /** The command that installs it on a local model server, e.g. "ollama pull qwen3:14b". */
+    pullCommand: optionalLabel(300),
+    /**
+     * OpenRouter only: the hosts seen at the last "Refresh hosts" (host name
+     * and whether it supported tool calling for this model), so the next
+     * check can say what changed. Written by the Saved model dialog.
+     */
+    openrouterHostsSeen: z
+      .array(
+        z
+          .object({
+            slug: z.string().regex(OPENROUTER_HOST_SLUG_RE).max(64),
+            tools: z.boolean(),
+          })
+          .strict(),
+      )
+      .max(OPENROUTER_HOSTS_SEEN_MAX)
+      .nullable()
+      .optional(),
+    /** When the host list above was read (ISO time). */
+    openrouterHostsCheckedAt: z.string().datetime().max(40).nullable().optional(),
+  })
+  .strict();
+export type ModelDirectorySpecs = z.infer<typeof modelDirectorySpecsSchema>;
+
+// Catalogue v2: the company's own test scores, one per criterion they choose
+// ("Tool calling", "Responsiveness", "Long conversations", "Coding", ...).
+export const MODEL_DIRECTORY_RATINGS_MAX = 20;
+export const modelDirectoryRatingSchema = z
+  .object({
+    criterion: z.string().trim().min(1).max(40),
+    score: z.number().int().min(0).max(10),
+    note: z.string().trim().max(300).nullable().optional(),
+    updatedAt: z.string().max(40).optional(),
+  })
+  .strict();
+export type ModelDirectoryRating = z.infer<typeof modelDirectoryRatingSchema>;
+
+const tagsSchema = z
+  .array(z.string().trim().toLowerCase().min(1).max(MODEL_DIRECTORY_TAG_MAX_LENGTH))
+  .max(MODEL_DIRECTORY_TAGS_MAX)
+  .transform((tags) => Array.from(new Set(tags)));
 
 const nameSchema = z.string().trim().min(1, "Give this model setup a name.").max(MODEL_DIRECTORY_NAME_MAX_LENGTH);
 
@@ -39,6 +125,16 @@ const modelDirectoryFieldShape = {
     .optional(),
   backupEntryIds: z.array(z.string().uuid()).max(LANE_A_BACKUP_MODELS_MAX).optional(),
   note: z.string().trim().max(MODEL_DIRECTORY_NOTE_MAX_LENGTH).nullable().optional(),
+  maker: optionalLabel(MODEL_DIRECTORY_MAKER_MAX_LENGTH),
+  baseModel: optionalLabel(MODEL_DIRECTORY_BASE_MODEL_MAX_LENGTH),
+  lane: z.enum(MODEL_DIRECTORY_LANES).nullable().optional(),
+  availability: z.enum(MODEL_DIRECTORY_AVAILABILITY).nullable().optional(),
+  tags: tagsSchema.optional(),
+  specs: modelDirectorySpecsSchema.nullable().optional(),
+  favorite: z.boolean().optional(),
+  family: optionalLabel(MODEL_DIRECTORY_BASE_MODEL_MAX_LENGTH),
+  variant: optionalLabel(40),
+  ratings: z.array(modelDirectoryRatingSchema).max(MODEL_DIRECTORY_RATINGS_MAX).optional(),
 };
 
 /**
@@ -88,6 +184,18 @@ export const updateModelDirectoryEntrySchema = z
     defaultMaxOutputTokens: modelDirectoryFieldShape.defaultMaxOutputTokens,
     backupEntryIds: modelDirectoryFieldShape.backupEntryIds,
     note: modelDirectoryFieldShape.note,
+    maker: modelDirectoryFieldShape.maker,
+    baseModel: modelDirectoryFieldShape.baseModel,
+    lane: modelDirectoryFieldShape.lane,
+    availability: modelDirectoryFieldShape.availability,
+    tags: modelDirectoryFieldShape.tags,
+    specs: modelDirectoryFieldShape.specs,
+    favorite: modelDirectoryFieldShape.favorite,
+    family: modelDirectoryFieldShape.family,
+    variant: modelDirectoryFieldShape.variant,
+    ratings: modelDirectoryFieldShape.ratings,
+    /** true hides the entry from agent pickers (kept, restorable); false brings it back. */
+    archived: z.boolean().optional(),
   })
   .strict();
 export type UpdateModelDirectoryEntry = z.infer<typeof updateModelDirectoryEntrySchema>;
@@ -110,19 +218,36 @@ export interface ModelDirectoryEntry {
   defaultMaxOutputTokens: number | null;
   backupEntryIds: string[];
   note: string | null;
+  maker: string | null;
+  baseModel: string | null;
+  lane: ModelDirectoryLane | null;
+  availability: ModelDirectoryAvailability | null;
+  tags: string[];
+  specs: ModelDirectorySpecs | null;
+  favorite: boolean;
+  /** Set when archived: hidden from agent pickers, kept in Settings > Models. */
+  archivedAt: string | null;
+  /** Model family, e.g. "Llama 3.2" (falls back to baseModel on older rows). */
+  family: string | null;
+  /** Size or variant within the family, e.g. "3B" or "14B uncensored". */
+  variant: string | null;
+  ratings: ModelDirectoryRating[];
   createdByUserId: string | null;
   updatedByUserId: string | null;
   createdAt: string;
   updatedAt: string;
 }
 
-// DUR-4418: ready-made starter setups. Local models are the ones in the
-// DUR-4357 Ollama runbook, reached over Tailscale (never "localhost", which
-// for Paperclip is the server itself). No key is part of a starter.
-
-export const MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS = "http://100.124.232.68:11434/v1";
-const HUGGINGFACE_NOTE = "Tool-capable on the DeepInfra host. Needs a Hugging Face token on the agent.";
-const LOCAL_NOTE = "Needs your PC switched on, with Ollama and Tailscale running.";
+// DUR-4418: ready-made starter setups, replaced 8 Oct 2026 by the curated
+// catalogue from the model-library research (small local models and their bigger
+// tool-capable cloud versions). No starter picks an OpenRouter host: which
+// hosts to use is the company's choice (Settings > Models > OpenRouter hosts
+// and each setup's host table), and tool requests only ever go to a host that
+// supports tools (require_parameters).
+// Nothing here assumes one company's computer: local starters carry no
+// address (baseUrl null) and get the company's own model server address
+// (Settings > Models) when they are added; they start as "planned" until a
+// resync finds them installed. No key is part of a starter.
 
 export interface ModelDirectoryStarter {
   /** Stable slug, used to pick which starters to add. */
@@ -130,74 +255,384 @@ export interface ModelDirectoryStarter {
   name: string;
   provider: (typeof LANE_A_PROVIDERS)[number];
   model: string;
+  /** Always null for a local starter: the company's model server address is used when it is added. */
   baseUrl: string | null;
+  providerRouting: { only?: string[]; ignore?: string[] } | null;
   defaultThinking: (typeof LANE_A_THINKING_MODES)[number] | null;
+  defaultTemperature: number | null;
+  defaultMaxOutputTokens: number | null;
+  maker: string;
+  baseModel: string;
+  /** Catalogue v2: model family ("Llama 3.2") and size/variant ("3B"). */
+  family: string;
+  variant: string;
+  lane: ModelDirectoryLane;
+  availability: ModelDirectoryAvailability;
+  tags: string[];
+  specs: ModelDirectorySpecs | null;
   note: string;
 }
 
 export const MODEL_DIRECTORY_STARTERS: readonly ModelDirectoryStarter[] = [
   {
-    id: "local-forgotten-safeword-12b",
-    name: "Local: Forgotten-Safeword 12B",
+    id: "local-llama-3-2-3b",
+    name: "Llama 3.2 3B",
     provider: "local",
-    model: "hf.co/mradermacher/Forgotten-Safeword-12B-v4.0-i1-GGUF:Q4_K_M",
-    baseUrl: MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS,
+    model: "llama3.2:latest",
+    baseUrl: null,
+    providerRouting: null,
     defaultThinking: null,
-    note: `${LOCAL_NOTE} Uncensored: use it for a separate persona, not for company work.`,
+    defaultTemperature: 0.3,
+    defaultMaxOutputTokens: 1024,
+    maker: "Meta",
+    baseModel: "Llama 3.2 3B",
+    family: "Llama 3.2",
+    variant: "3B",
+    lane: "quick",
+    availability: "planned",
+    tags: ["small", "fast", "tools", "fallback", "censored", "private"],
+    specs: {"params": "3B", "quant": "Q4_K_M", "sizeGb": 2.0, "tools": "partial", "vision": false, "thinking": "no", "pullCommand": "ollama pull llama3.2"},
+    note: "Tiny and quick. Good as a backup or a simple router, but it gets facts wrong and its Norwegian is weak.",
   },
   {
-    id: "local-satyr-4b",
-    name: "Local: Satyr 4B",
+    id: "local-qwen3-14b",
+    name: "Qwen3 14B",
     provider: "local",
-    model: "hf.co/PantheonUnbound/Satyr-V0.1-4B:Q8_0",
-    baseUrl: MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS,
+    model: "qwen3:14b",
+    baseUrl: null,
+    providerRouting: null,
     defaultThinking: "off",
-    note: `${LOCAL_NOTE} A thinking model, so Thinking starts switched off. Uncensored.`,
+    defaultTemperature: 0.7,
+    defaultMaxOutputTokens: 2048,
+    maker: "Alibaba Qwen",
+    baseModel: "Qwen3 14B",
+    family: "Qwen3",
+    variant: "14B",
+    lane: "quick",
+    availability: "planned",
+    tags: ["tools", "private", "norwegian-ok", "default-local", "censored"],
+    specs: {"params": "14B", "quant": "Q4_K_M", "sizeGb": 9.3, "tools": "yes", "vision": false, "thinking": "toggle", "pullCommand": "ollama pull qwen3:14b"},
+    note: "Best local model for a normal assistant: the most reliable tool use that fits a 12 GB graphics card. Use this for company-facing quick agents.",
   },
   {
-    id: "local-deepseek-r1-8b",
-    name: "Local: DeepSeek R1 8B",
+    id: "local-qwen3-14b-uncensored",
+    name: "Qwen3 14B uncensored",
     provider: "local",
-    model: "deepseek-r1:8b",
-    baseUrl: MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS,
-    defaultThinking: null,
-    note: LOCAL_NOTE,
+    model: "huihui_ai/qwen3-abliterated:14b",
+    baseUrl: null,
+    providerRouting: null,
+    defaultThinking: "off",
+    defaultTemperature: 0.7,
+    defaultMaxOutputTokens: 2048,
+    maker: "Alibaba Qwen",
+    baseModel: "Qwen3 14B",
+    family: "Qwen3",
+    variant: "14B uncensored",
+    lane: "quick",
+    availability: "planned",
+    tags: ["uncensored", "persona", "private", "tools-untested"],
+    specs: {"params": "14B", "quant": "Q4_K_M", "sizeGb": 9.0, "tools": "yes", "vision": false, "thinking": "toggle", "pullCommand": "ollama pull huihui_ai/qwen3-abliterated:14b"},
+    note: "Same 14B with refusals removed. Only for a separate private persona; never on agents that touch company data. Test tools once first.",
   },
   {
-    id: "local-llama-3-2",
-    name: "Local: Llama 3.2",
+    id: "local-qwen3-8b-uncensored",
+    name: "Qwen3 8B uncensored",
     provider: "local",
-    model: "llama3.2",
-    baseUrl: MODEL_DIRECTORY_LOCAL_STARTER_ADDRESS,
-    defaultThinking: null,
-    note: LOCAL_NOTE,
+    model: "huihui_ai/qwen3-abliterated:8b-v2",
+    baseUrl: null,
+    providerRouting: null,
+    defaultThinking: "off",
+    defaultTemperature: 0.7,
+    defaultMaxOutputTokens: 2048,
+    maker: "Alibaba Qwen",
+    baseModel: "Qwen3 8B",
+    family: "Qwen3",
+    variant: "8B uncensored",
+    lane: "quick",
+    availability: "planned",
+    tags: ["uncensored", "persona", "private", "fast", "tools-untested"],
+    specs: {"params": "8B", "quant": "Q4_K_M", "sizeGb": 5.0, "tools": "yes", "vision": false, "thinking": "toggle", "pullCommand": "ollama pull huihui_ai/qwen3-abliterated:8b-v2"},
+    note: "Lighter, faster uncensored Qwen with room for long chats. Same rule: separate persona only.",
   },
   {
-    id: "openrouter-mistral-small-3-2",
-    name: "Mistral Small 3.2 (OpenRouter)",
+    id: "local-qwen3-8-27b-uncensored-2-bit-local",
+    name: "Qwen3.8 27B uncensored (2-bit, local)",
+    provider: "local",
+    model: "qwen38-27b-unc-8k",
+    baseUrl: null,
+    providerRouting: null,
+    defaultThinking: "off",
+    defaultTemperature: 0.7,
+    defaultMaxOutputTokens: 1536,
+    maker: "Alibaba Qwen",
+    baseModel: "Qwen3.8 27B",
+    family: "Qwen3.8",
+    variant: "27B uncensored (2-bit)",
+    lane: "quick",
+    availability: "planned",
+    tags: ["uncensored", "persona", "vision", "experimental", "private"],
+    specs: {"params": "27B", "quant": "IQ2_XXS", "sizeGb": 9.8, "contextTokens": 8192, "tools": "yes", "vision": true, "thinking": "toggle", "pullCommand": "ollama pull orcarouter/Qwen3.8-27B-Uncensored:iq2_xxs"},
+    note: "Strongest uncensored model that fits a 12 GB graphics card, but heavily shrunk with short memory. Pull orcarouter/Qwen3.8-27B-Uncensored:iq2_xxs and create this name with num_ctx 8192.",
+  },
+  {
+    id: "openrouter-qwen3-8-27b-cloud",
+    name: "Qwen3.8 27B (cloud)",
+    provider: "openrouter",
+    model: "qwen/qwen3.8-27b",
+    baseUrl: null,
+    providerRouting: null,
+    defaultThinking: "off",
+    defaultTemperature: 0.7,
+    defaultMaxOutputTokens: 4096,
+    maker: "Alibaba Qwen",
+    baseModel: "Qwen3.8 27B",
+    family: "Qwen3.8",
+    variant: "27B",
+    lane: "both",
+    availability: "cloud",
+    tags: ["tools", "vision", "coding", "agent", "default-cloud"],
+    specs: {"params": "27B", "contextTokens": 262144, "tools": "yes", "vision": true, "thinking": "toggle"},
+    note: "Full-quality 27B with reliable tools. Price and tool support differ per host: open the setup to see its hosts.",
+  },
+  {
+    id: "openrouter-qwen3-8-flash-cloud",
+    name: "Qwen3.8 Flash (cloud)",
+    provider: "openrouter",
+    model: "qwen/qwen3.8-flash",
+    baseUrl: null,
+    providerRouting: null,
+    defaultThinking: "off",
+    defaultTemperature: 0.7,
+    defaultMaxOutputTokens: 2048,
+    maker: "Alibaba Qwen",
+    baseModel: "Qwen3.8 Flash",
+    family: "Qwen3.8",
+    variant: "Flash",
+    lane: "both",
+    availability: "cloud",
+    tags: ["cheap", "fast", "tools", "vision", "long-context"],
+    specs: {"params": "~180B MoE (6B active)", "contextTokens": 1000000, "tools": "yes", "vision": true, "thinking": "toggle"},
+    note: "Very cheap, fast big model from the same family. Only one host (Alibaba), so give agents a backup such as Qwen3.8 27B.",
+  },
+  {
+    id: "local-gemma-4-12b",
+    name: "Gemma 4 12B",
+    provider: "local",
+    model: "gemma4:12b",
+    baseUrl: null,
+    providerRouting: null,
+    defaultThinking: "off",
+    defaultTemperature: 0.7,
+    defaultMaxOutputTokens: 2048,
+    maker: "Google",
+    baseModel: "Gemma 4 12B",
+    family: "Gemma 4",
+    variant: "12B",
+    lane: "quick",
+    availability: "planned",
+    tags: ["tools", "vision", "private", "norwegian-ok", "censored"],
+    specs: {"params": "12B", "quant": "Q4_K_M", "sizeGb": 8.0, "tools": "yes", "vision": true, "thinking": "toggle", "pullCommand": "ollama pull gemma4:12b"},
+    note: "Google's 12B: good tools, reads pictures, decent Norwegian. Replaces Gemma 3 12B. Needs Ollama 0.30.9 or newer.",
+  },
+  {
+    id: "local-gemma-4-12b-uncensored",
+    name: "Gemma 4 12B uncensored",
+    provider: "local",
+    model: "huihui_ai/gemma-4-abliterated:12b-qat",
+    baseUrl: null,
+    providerRouting: null,
+    defaultThinking: "off",
+    defaultTemperature: 0.7,
+    defaultMaxOutputTokens: 2048,
+    maker: "Google",
+    baseModel: "Gemma 4 12B",
+    family: "Gemma 4",
+    variant: "12B uncensored",
+    lane: "quick",
+    availability: "planned",
+    tags: ["uncensored", "persona", "vision", "private", "tools-untested"],
+    specs: {"params": "12B", "quant": "QAT Q4", "sizeGb": 7.6, "tools": "yes", "vision": true, "thinking": "toggle", "pullCommand": "ollama pull huihui_ai/gemma-4-abliterated:12b-qat"},
+    note: "Uncensored Gemma 12B. Use this :12b-qat tag rather than :12b: same size, better quality. Separate persona only.",
+  },
+  {
+    id: "local-gemma-4-e4b-small",
+    name: "Gemma 4 E4B (small)",
+    provider: "local",
+    model: "gemma4:e4b",
+    baseUrl: null,
+    providerRouting: null,
+    defaultThinking: "off",
+    defaultTemperature: 0.7,
+    defaultMaxOutputTokens: 1024,
+    maker: "Google",
+    baseModel: "Gemma 4 E4B",
+    family: "Gemma 4",
+    variant: "E4B",
+    lane: "quick",
+    availability: "planned",
+    tags: ["small", "fast", "vision", "audio", "private", "censored"],
+    specs: {"params": "4.5B effective", "quant": "Q4_K_M", "sizeGb": 6.6, "tools": "yes", "vision": true, "thinking": "toggle", "pullCommand": "ollama pull gemma4:e4b"},
+    note: "What 'ollama pull gemma4' actually gives you: a small, fast model that reads pictures and audio. Fine for one simple tool call, weak at more.",
+  },
+  {
+    id: "openrouter-gemma-4-31b-cloud",
+    name: "Gemma 4 31B (cloud)",
+    provider: "openrouter",
+    model: "google/gemma-4-31b-it",
+    baseUrl: null,
+    providerRouting: null,
+    defaultThinking: "off",
+    defaultTemperature: 0.7,
+    defaultMaxOutputTokens: 4096,
+    maker: "Google",
+    baseModel: "Gemma 4 31B",
+    family: "Gemma 4",
+    variant: "31B",
+    lane: "both",
+    availability: "cloud",
+    tags: ["tools", "vision", "norwegian-best", "writing", "cheap"],
+    specs: {"params": "31B", "tools": "yes", "vision": true, "thinking": "toggle"},
+    note: "Best Norwegian writer here and cheap (about $0.09-0.14 in / $0.34-0.40 out per million tokens). Every host supports tools.",
+  },
+  {
+    id: "openrouter-gemma-4-26b-a4b-cloud",
+    name: "Gemma 4 26B A4B (cloud)",
+    provider: "openrouter",
+    model: "google/gemma-4-26b-a4b-it",
+    baseUrl: null,
+    providerRouting: null,
+    defaultThinking: "off",
+    defaultTemperature: 0.7,
+    defaultMaxOutputTokens: 2048,
+    maker: "Google",
+    baseModel: "Gemma 4 26B A4B",
+    family: "Gemma 4",
+    variant: "26B A4B",
+    lane: "quick",
+    availability: "cloud",
+    tags: ["cheap", "fast", "tools", "vision"],
+    specs: {"params": "26B MoE (3.8B active)", "tools": "yes", "vision": true, "thinking": "toggle"},
+    note: "Very cheap, fast cloud model for quick replies. Not every host supports its tools: open the setup to see which do.",
+  },
+  {
+    id: "local-hermes-3-8b",
+    name: "Hermes 3 8B",
+    provider: "local",
+    model: "hermes3:8b",
+    baseUrl: null,
+    providerRouting: null,
+    defaultThinking: null,
+    defaultTemperature: 0.6,
+    defaultMaxOutputTokens: 1536,
+    maker: "Nous Research",
+    baseModel: "Llama 3.1 8B",
+    family: "Hermes 3",
+    variant: "8B",
+    lane: "quick",
+    availability: "planned",
+    tags: ["persona", "roleplay", "private", "tools-fragile"],
+    specs: {"params": "8B", "quant": "Q4_0", "sizeGb": 4.7, "tools": "partial", "vision": false, "thinking": "no", "pullCommand": "ollama pull hermes3:8b"},
+    note: "Good at staying in character. Tool calls can break when many tools are offered, so test first. Weak Norwegian. Better copy: hermes3:8b-llama3.1-q6_K.",
+  },
+  {
+    id: "openrouter-llama-4-maverick-cloud",
+    name: "Llama 4 Maverick (cloud)",
+    provider: "openrouter",
+    model: "meta-llama/llama-4-maverick",
+    baseUrl: null,
+    providerRouting: null,
+    defaultThinking: null,
+    defaultTemperature: 0.4,
+    defaultMaxOutputTokens: 2048,
+    maker: "Meta",
+    baseModel: "Llama 4 Maverick",
+    family: "Llama 4",
+    variant: "Maverick",
+    lane: "quick",
+    availability: "cloud",
+    tags: ["cheap", "vision", "tools"],
+    specs: {"params": "400B MoE (17B active)", "tools": "yes", "vision": true, "thinking": "no"},
+    note: "Llama 4, run in the cloud (far too big for an ordinary computer). Cheap, reads images, fine for single tool calls; weak at long tasks and Norwegian.",
+  },
+  {
+    id: "openrouter-deepseek-v4-flash-cloud",
+    name: "DeepSeek V4 Flash (cloud)",
+    provider: "openrouter",
+    model: "deepseek/deepseek-v4-flash",
+    baseUrl: null,
+    providerRouting: null,
+    defaultThinking: "off",
+    defaultTemperature: 0.7,
+    defaultMaxOutputTokens: 4096,
+    maker: "DeepSeek",
+    baseModel: "DeepSeek V4 Flash",
+    family: "DeepSeek V4",
+    variant: "Flash",
+    lane: "both",
+    availability: "cloud",
+    tags: ["cheap", "tools", "agent", "coding", "long-context"],
+    specs: {"tools": "yes", "vision": false, "thinking": "toggle"},
+    note: "Cheap, strong all-rounder with tools on every host. Good cheap Full-task worker. Replaces the DeepSeek R1 8B, which cannot use tools.",
+  },
+  {
+    id: "huggingface-qwen3-14b-uncensored-cloud",
+    name: "Qwen3 14B uncensored (cloud)",
+    provider: "huggingface",
+    model: "huihui-ai/Huihui-Qwen3-14B-abliterated-v2:featherless-ai",
+    baseUrl: null,
+    providerRouting: null,
+    defaultThinking: "off",
+    defaultTemperature: 0.7,
+    defaultMaxOutputTokens: 2048,
+    maker: "Alibaba Qwen",
+    baseModel: "Qwen3 14B",
+    family: "Qwen3",
+    variant: "14B uncensored",
+    lane: "quick",
+    availability: "planned",
+    tags: ["uncensored", "persona", "cloud", "tools-untested"],
+    specs: {"params": "14B", "contextTokens": 32768, "thinking": "toggle"},
+    note: "Cloud copy of the local uncensored Qwen3 14B, for when your own computer is off. Needs Hugging Face set up; about $0.48 in / $0.96 out per million tokens. Test tools first.",
+  },
+  {
+    id: "huggingface-qwen3-8-27b-uncensored-cloud",
+    name: "Qwen3.8 27B uncensored (cloud)",
+    provider: "huggingface",
+    model: "darkc0de/Qwen3.8-27B-heretic:featherless-ai",
+    baseUrl: null,
+    providerRouting: null,
+    defaultThinking: "off",
+    defaultTemperature: 0.7,
+    defaultMaxOutputTokens: 2048,
+    maker: "Alibaba Qwen",
+    baseModel: "Qwen3.8 27B",
+    family: "Qwen3.8",
+    variant: "27B uncensored",
+    lane: "quick",
+    availability: "planned",
+    tags: ["uncensored", "persona", "cloud", "expensive", "tools-untested"],
+    specs: {"params": "27B", "contextTokens": 32768, "thinking": "toggle"},
+    note: "Full-quality uncensored 27B. Needs Hugging Face set up. Pricey (likely about $1.60 in / $12 out per million tokens), short memory (32k), tools untested.",
+  },
+  {
+    id: "openrouter-mistral-small-3-2-cloud",
+    name: "Mistral Small 3.2 (cloud)",
     provider: "openrouter",
     model: "mistralai/mistral-small-3.2-24b-instruct",
     baseUrl: null,
+    providerRouting: null,
     defaultThinking: null,
-    note: "A good cloud backup for local models. Needs an OpenRouter key on the agent.",
-  },
-  {
-    id: "huggingface-qwen3-14b",
-    name: "Qwen3 14B (Hugging Face)",
-    provider: "huggingface",
-    model: "Qwen/Qwen3-14B:deepinfra",
-    baseUrl: null,
-    defaultThinking: null,
-    note: HUGGINGFACE_NOTE,
-  },
-  {
-    id: "huggingface-gemma-3-27b",
-    name: "Gemma 3 27B (Hugging Face)",
-    provider: "huggingface",
-    model: "google/gemma-3-27b-it:deepinfra",
-    baseUrl: null,
-    defaultThinking: null,
-    note: HUGGINGFACE_NOTE,
+    defaultTemperature: 0.7,
+    defaultMaxOutputTokens: 2048,
+    maker: "Mistral AI",
+    baseModel: "Mistral Small 3.2 24B",
+    family: "Mistral Small 3.2",
+    variant: "24B",
+    lane: "quick",
+    availability: "cloud",
+    tags: ["tools", "cheap", "eu-host-available"],
+    specs: {"params": "24B", "tools": "yes", "vision": true, "thinking": "no"},
+    note: "A good cloud model for quick agents. Not every host supports its tools: open the setup to see which do.",
   },
 ];
 
@@ -218,4 +653,173 @@ export interface ModelDirectoryImportResult {
   agentsLinked: number;
   /** Agents whose current setup could not be saved, with a plain-English reason. */
   skipped: { agentId: string; agentName: string; reason: string }[];
+}
+
+// Catalogue export / import (Settings > Models). An export is a plain JSON
+// file of setups -- never a key -- that can be imported into this or another
+// company. Backups are written as entry NAMES (ids differ between companies).
+
+export const MODEL_DIRECTORY_EXPORT_VERSION = 1;
+
+const catalogueEntryShape = {
+  ...modelDirectoryFieldShape,
+  backupEntryIds: z.never().optional(),
+  /** Names of other entries in the same file or company, in order. */
+  backupNames: z.array(nameSchema).max(LANE_A_BACKUP_MODELS_MAX).optional(),
+  archived: z.boolean().optional(),
+};
+
+export const modelDirectoryCatalogueEntrySchema = z
+  .object(catalogueEntryShape)
+  .strict()
+  .superRefine((value, ctx) => {
+    const issue = modelDirectoryEntryIssue({ ...value, backupEntryIds: [] });
+    if (issue) ctx.addIssue({ code: "custom", message: `${value.name}: ${issue}` });
+  });
+export type ModelDirectoryCatalogueEntry = z.infer<typeof modelDirectoryCatalogueEntrySchema>;
+
+export const importModelDirectoryCatalogueSchema = z
+  .object({
+    version: z.literal(MODEL_DIRECTORY_EXPORT_VERSION).optional(),
+    /** Written by an export; accepted (and ignored) so an exported file imports as-is. */
+    exportedAt: z.string().max(64).optional(),
+    entries: z.array(modelDirectoryCatalogueEntrySchema).min(1).max(MODEL_DIRECTORY_IMPORT_MAX),
+    /** What to do when a setup with the same name already exists. Default: skip it. */
+    onExisting: z.enum(["skip", "update"]).optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    const seen = new Set<string>();
+    for (const entry of value.entries) {
+      const key = entry.name.trim().toLowerCase();
+      if (seen.has(key)) ctx.addIssue({ code: "custom", message: `"${entry.name}" is listed twice in the file.` });
+      seen.add(key);
+    }
+  });
+export type ImportModelDirectoryCatalogue = z.infer<typeof importModelDirectoryCatalogueSchema>;
+
+export interface ModelDirectoryCatalogueExport {
+  version: typeof MODEL_DIRECTORY_EXPORT_VERSION;
+  exportedAt: string;
+  entries: ModelDirectoryCatalogueEntry[];
+}
+
+export interface ModelDirectoryCatalogueImportResult {
+  created: string[];
+  updated: string[];
+  skipped: { name: string; reason: string }[];
+}
+
+// ─── Catalogue v2: settings, local Ollama resync ─────────────────────────────
+
+/**
+ * Per-company Settings > Models settings. Send only the fields to change; a
+ * field left out keeps its saved value, null clears it.
+ * - localGpuVramGb: graphics card memory (GB) of the computer that runs this
+ *   company's local models; 0 = no graphics card (runs on the processor).
+ *   Only used for "fits / too big" advice.
+ * - localBaseUrl: the address of the company's local model server (Ollama or
+ *   another OpenAI-compatible server) as Paperclip's server reaches it, e.g.
+ *   http://192.168.1.20:11434/v1. The default for new local setups and the
+ *   address the ready-made local models get.
+ * - openrouterPreferredHosts / openrouterBlockedHosts: the company's
+ *   OpenRouter host rules (see packages/shared/src/openrouter-hosts.ts for
+ *   what they do and the precedence). Host names as OpenRouter writes them,
+ *   lower case, e.g. "novita"; at most 30 each; a host cannot be on both.
+ */
+const openRouterHostRuleListSchema = z
+  .array(
+    z
+      .string()
+      .trim()
+      .toLowerCase()
+      .regex(
+        OPENROUTER_HOST_SLUG_RE,
+        "A host name is the short lower-case name OpenRouter shows, letters, digits and dashes only, e.g. novita.",
+      ),
+  )
+  .max(OPENROUTER_HOST_RULES_MAX, `List at most ${OPENROUTER_HOST_RULES_MAX} hosts.`)
+  .transform((hosts) => Array.from(new Set(hosts)));
+
+export const updateModelDirectorySettingsSchema = z
+  .object({
+    localGpuVramGb: z.number().min(0).max(1024).nullable().optional(),
+    localBaseUrl: laneABaseUrlValueSchema.nullable().optional(),
+    openrouterPreferredHosts: openRouterHostRuleListSchema.optional(),
+    openrouterBlockedHosts: openRouterHostRuleListSchema.optional(),
+  })
+  .strict()
+  .refine((value) => Object.values(value).some((field) => field !== undefined), {
+    message: "Nothing to save: send at least one setting.",
+  })
+  .superRefine((value, ctx) => {
+    const preferred = value.openrouterPreferredHosts ?? [];
+    const both = (value.openrouterBlockedHosts ?? []).filter((host) => preferred.includes(host));
+    if (both.length > 0) {
+      ctx.addIssue({
+        code: "custom",
+        message: `${both.join(", ")} cannot be both preferred and blocked. Take it off one of the lists.`,
+      });
+    }
+  });
+export type UpdateModelDirectorySettings = z.infer<typeof updateModelDirectorySettingsSchema>;
+
+export interface ModelDirectorySettings {
+  /** Graphics card memory in GB; null = not set (no fit advice), 0 = no graphics card. */
+  localGpuVramGb: number | null;
+  /** This company's local model server address; null = not set (Paperclip asks for it). */
+  localBaseUrl: string | null;
+  /** OpenRouter hosts to use for new model setups when they run the model with tool calling. */
+  openrouterPreferredHosts: string[];
+  /** OpenRouter hosts never to use (added to every OpenRouter setup's "never" list on save). */
+  openrouterBlockedHosts: string[];
+}
+
+/** Why a ready-made model was not added (e.g. a local one while no model server address is set). */
+export interface ModelDirectoryStarterSkip {
+  starterId: string;
+  name: string;
+  reason: string;
+}
+
+export interface ModelDirectoryStartersResult {
+  created: ModelDirectoryEntry[];
+  skipped: ModelDirectoryStarterSkip[];
+}
+
+/** The plain message for a local ready-made model while the company has no model server address. */
+export const MODEL_DIRECTORY_NEEDS_LOCAL_ADDRESS_MESSAGE =
+  "Set this company's model server address at the top of Settings > Models first. Local models need it, and Paperclip does not guess it.";
+
+/**
+ * Ask a local Ollama which models are installed. The address must be one this
+ * company already uses (its model server address setting, a saved local
+ * model's address or a quick agent's), so the server never calls an arbitrary
+ * host on someone's say-so.
+ */
+export const syncLocalModelsSchema = z.object({ baseUrl: z.string().trim().url().max(500) }).strict();
+export type SyncLocalModels = z.infer<typeof syncLocalModelsSchema>;
+
+export interface LocalInstalledModel {
+  /** Ollama tag, e.g. "llama3.2:latest". */
+  name: string;
+  sizeGb: number | null;
+  /** From Ollama's details, e.g. "3.2B". */
+  parameterSize: string | null;
+  /** From Ollama's details, e.g. "Q4_K_M". */
+  quantization: string | null;
+  /** From Ollama's details, e.g. "llama". */
+  family: string | null;
+  /** Saved entries (this address) that run this tag. */
+  entryIds: string[];
+}
+
+export interface LocalModelsSyncResult {
+  baseUrl: string;
+  checkedAt: string;
+  installed: LocalInstalledModel[];
+  /** Saved local entries at this address whose tag is no longer installed (now marked "planned"). */
+  missingEntryIds: string[];
+  /** Saved local entries marked "installed" by this sync. */
+  markedInstalledEntryIds: string[];
 }

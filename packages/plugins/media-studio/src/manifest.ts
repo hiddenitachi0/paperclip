@@ -1,5 +1,5 @@
 import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
-import { sogniToolDeclarations } from "./sogni-tools.js";
+import { sogniToolDeclarations, TOOL_CATEGORY_PICTURES, TOOL_CATEGORY_VIDEO_AND_SOUND } from "./sogni-tools.js";
 import { JOB_KEY_MEDIA_POLL, MEDIA_POLL_SCHEDULE } from "./media-jobs.js";
 
 export const PLUGIN_ID = "paperclip.media-studio";
@@ -17,6 +17,8 @@ export const ACTION_LOOKS_LIST = "looks.list";
 export const ACTION_SETTINGS_ACCESS = "settings.access";
 export const ACTION_LOOKS_SAVE = "looks.save";
 export const ACTION_LOOKS_DELETE = "looks.delete";
+/** "Make a copy" on the looks page: the same look under a new name. Owner/admin only. */
+export const ACTION_LOOKS_COPY = "looks.copy";
 /** The company's agents and each one's default look, for the looks page. */
 export const ACTION_LOOK_DEFAULTS_LIST = "looks.defaults.list";
 /** Set (or clear) one agent's default look. Owner/admin only. */
@@ -31,6 +33,8 @@ export const ACTION_LOOK_PROMPT_PREVIEW = "looks.previewPrompt";
 export const ACTION_LOOK_RULES_PREVIEW = "lookRules.preview";
 /** Sogni's live list of picture models, for the looks page's model picker. */
 export const ACTION_SOGNI_MODELS = "sogni.models";
+/** Sogni's video models, for the Storylines video model picker (public catalog, no key). */
+export const ACTION_SOGNI_VIDEO_MODELS = "sogni.videoModels";
 /** The LoRAs that work with one Sogni model, for the looks page. */
 export const ACTION_SOGNI_LORAS = "sogni.loras";
 /** Which AI edit services (Sogni/Fal) are configured, for the Edit tab. */
@@ -108,8 +112,9 @@ export const GENERATE_IMAGE_PARAMETERS = {
     },
     provider: {
       type: "string",
-      enum: ["fal", "sogni"],
-      description: "Optional. Which picture service to use for this one picture: fal (Fal.ai) or sogni (Sogni). Leave it out to use the one in Media Studio settings.",
+      enum: ["fal", "sogni", "higgsfield"],
+      description:
+        "Optional. Which picture service to use for this one picture: fal (Fal.ai), sogni (Sogni) or higgsfield (Higgsfield Soul; no reference pictures). Leave it out to use the one in Media Studio settings.",
     },
   },
   required: ["prompt"],
@@ -262,6 +267,9 @@ const manifest: PaperclipPluginManifestV1 = {
     "issues.checkout",
     // DUR-4360: read the attached task's title/description to see whether a person named a model.
     "issues.read",
+    // "Analyse picture" on Identities: the server sends the picture to one of
+    // the company's saved models (it can reach the company's own model server).
+    "models.image_analysis.run",
   ],
   entrypoints: {
     worker: "./dist/worker.js",
@@ -271,18 +279,21 @@ const manifest: PaperclipPluginManifestV1 = {
     {
       name: TOOL_GENERATE,
       displayName: "Generate image",
+      category: TOOL_CATEGORY_PICTURES,
       description: GENERATE_IMAGE_DESCRIPTION,
       parametersSchema: GENERATE_IMAGE_PARAMETERS as unknown as Record<string, unknown>,
     },
     {
       name: TOOL_QUICK_PICTURE,
       displayName: "Quick picture",
+      category: TOOL_CATEGORY_PICTURES,
       description: QUICK_PICTURE_DESCRIPTION,
       parametersSchema: QUICK_PICTURE_PARAMETERS as unknown as Record<string, unknown>,
     },
     {
       name: TOOL_LIST_LOOKS,
       displayName: "List saved looks",
+      category: TOOL_CATEGORY_PICTURES,
       description: LIST_LOOKS_DESCRIPTION,
       parametersSchema: { type: "object", properties: {} },
     },
@@ -290,18 +301,21 @@ const manifest: PaperclipPluginManifestV1 = {
     {
       name: TOOL_GENERATE_VIDEO,
       displayName: "Generate video",
+      category: TOOL_CATEGORY_VIDEO_AND_SOUND,
       description: GENERATE_VIDEO_DESCRIPTION,
       parametersSchema: GENERATE_VIDEO_PARAMETERS as unknown as Record<string, unknown>,
     },
     {
       name: TOOL_GENERATE_AUDIO,
       displayName: "Generate audio",
+      category: TOOL_CATEGORY_VIDEO_AND_SOUND,
       description: GENERATE_AUDIO_DESCRIPTION,
       parametersSchema: GENERATE_AUDIO_PARAMETERS as unknown as Record<string, unknown>,
     },
     {
       name: TOOL_CHECK_MEDIA_JOB,
       displayName: "Check video/audio job",
+      category: TOOL_CATEGORY_VIDEO_AND_SOUND,
       description: CHECK_MEDIA_JOB_DESCRIPTION,
       parametersSchema: CHECK_MEDIA_JOB_PARAMETERS as unknown as Record<string, unknown>,
     },
@@ -350,14 +364,14 @@ const manifest: PaperclipPluginManifestV1 = {
         type: "string",
         title: "Picture service",
         description:
-          "Which service makes the pictures: mock (a free placeholder picture, for trying things out), fal (Fal.ai), sogni (Sogni), or comfyui (your own ComfyUI server).",
-        enum: ["mock", "fal", "sogni", "comfyui"],
+          "Which service makes the pictures: mock (a free placeholder picture, for trying things out), fal (Fal.ai), sogni (Sogni), higgsfield (Higgsfield Soul: text to picture, keeps a person through a Soul ID, takes no reference pictures), or comfyui (your own ComfyUI server).",
+        enum: ["mock", "fal", "sogni", "higgsfield", "comfyui"],
         default: "mock",
       },
       falKeySecretRef: {
         type: "string",
         title: "Fal.ai API key (secret ref)",
-        description: "A Paperclip secret reference resolved at call time to the FAL key.",
+        description: "A Paperclip secret reference resolved at call time to the FAL key. This is the instance's default: a company's owner or admin can pick the company's own key in Media Studio's Settings tab, and that one is used for that company instead.",
         format: "secret-ref",
         default: "",
       },
@@ -378,7 +392,15 @@ const manifest: PaperclipPluginManifestV1 = {
         type: "string",
         title: "Sogni API key",
         description:
-          "Pick the Sogni key from the company's Secrets (create the key at dashboard.sogni.ai/api-key and save it as a secret first). It is looked up each time a picture is made and never shown here.",
+          "Pick the Sogni key from the company's Secrets (create the key at dashboard.sogni.ai/api-key and save it as a secret first). It is looked up each time a picture is made and never shown here. This is the instance's default: a company's owner or admin can pick the company's own key in Media Studio's Settings tab, and that one is used for that company instead.",
+        format: "secret-ref",
+        default: "",
+      },
+      higgsfieldKeySecretRef: {
+        type: "string",
+        title: "Higgsfield API key",
+        description:
+          "Pick the Higgsfield key from the company's Secrets. Save it there as key id and key secret joined by a colon (id:secret), from Higgsfield's console (API keys). It is looked up each time and never shown here. This is the instance's default: a company's owner or admin can pick the company's own key in Media Studio's Settings tab, and that one is used for that company instead.",
         format: "secret-ref",
         default: "",
       },
@@ -429,7 +451,7 @@ const manifest: PaperclipPluginManifestV1 = {
       sogniVideoModel: {
         type: "string",
         title: "Sogni video model",
-        description: "Assumption, unverified against Sogni's own docs for video — see the DUR-4062 PR. Leave empty for the built-in default.",
+        description: "A Sogni video model, such as ltx25, wan22 or seedance2-mini (or a model id from Sogni's catalogue). Leave empty for Sogni's default (LTX 2.5).",
         default: "",
       },
       falMusicModel: {

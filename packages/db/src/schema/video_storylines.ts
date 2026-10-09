@@ -54,6 +54,21 @@ export const videoStorylines = pgTable(
     // Attachment ids for the character/Look reference pictures shared by
     // every shot in the storyline (a shot may add its own on top).
     characterReferenceAssetIds: jsonb("character_reference_asset_ids").$type<string[]>().notNull().default([]),
+    // How the storyboard pictures are made: picture service, model and an
+    // optional Media Studio look id ({} = Fal.ai, its cheapest model, no
+    // look). See VideoStorylinePictureSettings in packages/shared. Also
+    // holds the storyline's Cast (cast, shotCast; see video-storyline-cast.ts
+    // in packages/shared) -- no column of its own, so no migration.
+    pictureSettings: jsonb("picture_settings")
+      .$type<{
+        providerId?: string | null;
+        model?: string | null;
+        lookId?: string | null;
+        cast?: Array<{ id: string; name: string; nickname: string | null; description: string | null; identityId: string | null }>;
+        shotCast?: Record<string, string[]>;
+      }>()
+      .notNull()
+      .default({}),
     // Direct-storage pointer for the final stitched film -- deliberately NOT
     // an attachments-table row: a multi-hour concatenated film routinely
     // exceeds the 25MB company-attachment cap (attachment-types.ts), and
@@ -228,6 +243,9 @@ export const videoShots = pgTable(
     // by this gate) and from `still*` below (a cheap storyboard still, not a
     // video-clip-derived frame).
     storyboardStatus: text("storyboard_status").notNull().default("pending"),
+    // This shot's own look for its storyboard picture: a Media Studio look
+    // id, "none" (no look for this shot), or null (use the storyline's).
+    pictureLookId: text("picture_look_id"),
     // Direct-storage pointer for the cheap storyboard still -- same
     // reasoning as resultObjectKey/previewObjectKey above (never an
     // `assets` row). Overwritten on every re-request, same as preview*;

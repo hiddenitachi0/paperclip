@@ -73,6 +73,7 @@ export { routines, routineRevisions, routineTriggers, routineRuns } from "./rout
 export { jobs, jobPositions, jobTriggers, jobRuns } from "./jobs.js";
 export { companyJobSettings } from "./company_job_settings.js";
 export { companyCacheSettings } from "./company_cache_settings.js";
+export { companyHelperSettings } from "./company_helper_settings.js";
 export { pipelines, pipelineStages, pipelineTransitions } from "./pipelines.js";
 export {
   pipelineCases,
@@ -158,6 +159,7 @@ export { mailAccounts, mailMessages } from "./mail_accounts.js";
 export { mailMessageClassifications, mailUrgencyAlerts } from "./mail_urgency.js";
 export { modelDirectoryEntries } from "./model_directory_entries.js";
 export { modelDirectoryConverters } from "./model_directory_converters.js";
+export { modelDirectorySettings } from "./model_directory_settings.js";
 export { localModelHealth } from "./local_model_health.js";
 export { paymentNotices } from "./payment_notices.js";
 export { companyPaymentSettings } from "./company_payment_settings.js";

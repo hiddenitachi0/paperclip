@@ -13,6 +13,7 @@ import {
 } from "@paperclipai/shared";
 import { badRequest, conflict, notFound } from "../errors.js";
 import { readAnthropicApiKey } from "../env-values.js";
+import { DIRECTOR_AI_NOT_CONFIGURED_MESSAGE, directorAiFailure } from "./video-storyline-director-ai-errors.js";
 import { logActivity } from "./activity-log.js";
 import { videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
@@ -212,7 +213,7 @@ export function videoStorylineDirectorService(db: Db) {
           idea: input.idea,
           status: "failed",
           draftedShots: [],
-          errorMessage: "Director AI is not configured on this instance (ANTHROPIC_API_KEY unset).",
+          errorMessage: DIRECTOR_AI_NOT_CONFIGURED_MESSAGE,
           createdByAgentId: actor.agentId,
           createdByUserId: actor.actorType === "user" ? actor.actorId : null,
           createdAt: now,
@@ -250,15 +251,7 @@ export function videoStorylineDirectorService(db: Db) {
       draftedShots = parseDraftedShots(text, input.shotCount);
     } catch (err) {
       draftedShots = [];
-      if (err instanceof Anthropic.AuthenticationError) {
-        errorMessage = "Director AI credentials are invalid.";
-      } else if (err instanceof Anthropic.RateLimitError) {
-        errorMessage = "Director AI is rate limited upstream — retry shortly.";
-      } else if (err instanceof Anthropic.APIError) {
-        errorMessage = `Director AI call failed: ${err.message}`;
-      } else {
-        errorMessage = err instanceof Error ? err.message : "Director AI call failed.";
-      }
+      errorMessage = directorAiFailure(err).message;
     }
 
     const [row] = await db

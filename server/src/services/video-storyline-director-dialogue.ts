@@ -17,6 +17,7 @@ import {
 } from "@paperclipai/shared";
 import { conflict, HttpError } from "../errors.js";
 import { readAnthropicApiKey } from "../env-values.js";
+import { callDirectorModel, directorAiNotConfigured } from "./video-storyline-director-ai-errors.js";
 import { logActivity } from "./activity-log.js";
 import { videoStorylineService, type VideoStorylineActor, type VideoShotSummary } from "./video-storylines.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
@@ -156,15 +157,15 @@ export function videoStorylineDirectorDialogueService(db: Db) {
   ): Promise<VideoDirectorQuestionBatchPayload> {
     const apiKey = readAnthropicApiKey();
     if (!apiKey) {
-      throw new HttpError(503, "Director AI is not configured on this instance (ANTHROPIC_API_KEY unset).");
+      throw directorAiNotConfigured();
     }
     const client = new Anthropic({ apiKey });
-    const response = await client.messages.create({
+    const response = await callDirectorModel(() => client.messages.create({
       model: VIDEO_DIRECTOR_DIALOGUE_MODEL,
       max_tokens: VIDEO_DIRECTOR_DIALOGUE_MAX_OUTPUT_TOKENS,
       system: buildSystemPrompt(),
       messages: [{ role: "user", content: buildUserMessage({ review, shots, priorTurns }) }],
-    });
+    }));
     const text = response.content
       .filter((block): block is Anthropic.TextBlock => block.type === "text")
       .map((block) => block.text)

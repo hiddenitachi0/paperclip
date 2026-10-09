@@ -9,10 +9,13 @@ import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { companiesApi } from "../api/companies";
 import { assetsApi } from "../api/assets";
 import { instanceSettingsApi } from "../api/instanceSettings";
+import { emailSettingsApi } from "../api/emailSettings";
+import { useCompanyRole } from "../hooks/useCompanyRole";
 import { queryKeys } from "../lib/queryKeys";
 import { Button } from "@/components/ui/button";
 import { Link } from "@/lib/router";
 import { CacheSettingsSection } from "../components/CacheSettingsSection";
+import { HelperSettingsSection } from "../components/helper/HelperSettingsSection";
 import { SecurityReviewSettingsSection } from "../components/SecurityReviewSettingsSection";
 import { Settings, CloudUpload, Download, Plug, Upload, Image } from "lucide-react";
 import { CompanyPatternIcon } from "../components/CompanyPatternIcon";
@@ -34,6 +37,12 @@ export function CompanySettings() {
   } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
+  const companyRole = useCompanyRole(selectedCompanyId);
+  const { data: emailSettings } = useQuery({
+    queryKey: selectedCompanyId ? queryKeys.email.settings(selectedCompanyId) : ["email", "__none__"],
+    queryFn: () => emailSettingsApi.getSettings(selectedCompanyId!),
+    enabled: Boolean(selectedCompanyId) && companyRole.canManageConnections,
+  });
   const { data: experimentalSettings } = useQuery({
     queryKey: queryKeys.instance.experimentalSettings,
     queryFn: () => instanceSettingsApi.getExperimental(),
@@ -208,8 +217,20 @@ export function CompanySettings() {
               onChange={(e) => setDescription(e.target.value)}
             />
           </Field>
+          {companyRole.canManageConnections ? (
+            <Field label="Email" hint="Read and write email from inside the app.">
+              <div className="flex items-center gap-3">
+                <span className="text-sm">{emailSettings?.enabled ? "On" : "Off"}</span>
+                <Button asChild size="sm" variant="outline">
+                  <Link to="/email">{emailSettings?.enabled ? "Open email" : "Turn on"}</Link>
+                </Button>
+              </div>
+            </Field>
+          ) : null}
         </div>
       </div>
+
+      {selectedCompanyId ? <HelperSettingsSection companyId={selectedCompanyId} /> : null}
 
       {/* Appearance */}
       <div className="space-y-4">

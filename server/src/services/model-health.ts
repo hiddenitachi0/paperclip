@@ -16,6 +16,7 @@ import {
 } from "@paperclipai/shared";
 import { notFound } from "../errors.js";
 import { createModelSetupProbes } from "./model-setup-probes.js";
+import { localAddressKey } from "./model-directory.js";
 
 /**
  * DUR-4419: local-model health, the once-per-outage reminder state, and the
@@ -26,7 +27,7 @@ import { createModelSetupProbes } from "./model-setup-probes.js";
 
 export const MODEL_HEALTH_PROBE_TIMEOUT_MS = 5_000;
 export const MODEL_TEST_TIMEOUT_MS = 60_000;
-/** How long the PC must have been unreachable before the evening warning goes out. */
+/** How long the local model server must have been unreachable before the evening warning goes out. */
 export const MODEL_OUTAGE_WARN_AFTER_MS = 60 * 60_000;
 /** One evening warning per outage, and never twice within this window. */
 export const MODEL_EVENING_WARNING_WINDOW_MS = 18 * 3_600_000;
@@ -263,6 +264,35 @@ export function modelHealthService(db: Db, deps: ModelHealthDeps = {}) {
     return claimed.length > 0;
   }
 
+  /**
+   * After a "Refresh status" / local resync: records what the model server
+   * said for every saved local setup and every quick agent's local model at
+   * that address, so pickers can say Installed / Not installed / Offline with
+   * a time. `installed` is null when the server could not be read (offline).
+   */
+  async function recordLocalSync(companyId: string, rawBaseUrl: string, installed: readonly string[] | null): Promise<{ recorded: number }> {
+    // Same address however it was typed (case, trailing slash, the "/v1" suffix).
+    const key = localAddressKey(rawBaseUrl);
+    const entries = await db
+      .select({ baseUrl: modelDirectoryEntries.baseUrl, model: modelDirectoryEntries.model })
+      .from(modelDirectoryEntries)
+      .where(and(eq(modelDirectoryEntries.companyId, companyId), eq(modelDirectoryEntries.provider, "local")));
+    const agentRows = await db
+      .select({ baseUrl: agents.laneABaseUrl, model: agents.laneAModel })
+      .from(agents)
+      .where(and(eq(agents.companyId, companyId), eq(agents.laneAProvider, "local")));
+    const targets = new Map<string, { baseUrl: string; model: string }>();
+    for (const t of [...entries, ...agentRows]) {
+      if (!t.baseUrl || !t.model || localAddressKey(t.baseUrl) !== key) continue;
+      targets.set(`${normalizeLocalModelAddress(t.baseUrl)}\n${t.model}`, { baseUrl: t.baseUrl, model: t.model });
+    }
+    for (const t of targets.values()) {
+      const status = installed === null ? "unreachable" : modelListed(t.model, [...installed]) ? "ready" : "model_missing";
+      await record(companyId, t.baseUrl, t.model, status);
+    }
+    return { recorded: targets.size };
+  }
+
   // ─── Test button ───────────────────────────────────────────────────────
 
   async function oneTestRun(baseUrl: string, model: string, thinking: ModelTestRun["thinking"]): Promise<ModelTestRun> {
@@ -322,7 +352,7 @@ export function modelHealthService(db: Db, deps: ModelHealthDeps = {}) {
         answer: null,
         firstWordMs,
         totalMs: Date.now() - started,
-        error: timedOut ? "The model took too long to answer." : "Couldn't reach the model. Is your PC on, and is Ollama running?",
+        error: timedOut ? "The model took too long to answer." : "Couldn't reach the model. Is the computer that runs it switched on, and is Ollama (or the model server) running?",
       };
     }
   }
@@ -358,7 +388,7 @@ export function modelHealthService(db: Db, deps: ModelHealthDeps = {}) {
     return createModelSetupProbes(fetchImpl).fetchHostCapabilities(await getEntry(companyId, entryId), opts);
   }
 
-  return { probeEntry, capabilitiesForEntry, probe: (b: string, m: string) => probeLocalModel(b, m, fetchImpl), record, noteLocalAttempt, claimOutageNotice, claimEveningWarning, checkEntry, overview, checkInUse, testEntry };
+  return { recordLocalSync, probeEntry, capabilitiesForEntry, probe: (b: string, m: string) => probeLocalModel(b, m, fetchImpl), record, noteLocalAttempt, claimOutageNotice, claimEveningWarning, checkEntry, overview, checkInUse, testEntry };
 }
 
 const MODEL_UNAVAILABLE_PATTERN = /model[^.]*(not loaded|not found|does not exist|is not available|unknown)/i;

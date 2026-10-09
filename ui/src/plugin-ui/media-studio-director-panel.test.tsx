@@ -162,21 +162,27 @@ describe("AI director section", () => {
     expect(text).toContain("A tired man walks down a rainy street at night");
     expect(text).toContain("8 seconds");
     expect(text).toContain("Fade");
-    await click(byText("Accept"));
+    // Labelled as an AI suggestion -- never as a picture approval.
+    expect(text).toContain("AI suggestion");
+    expect(text).toContain("Its picture is checked separately in step 2");
+    expect(byText("Approve")).toBeUndefined();
+    expect(byText("Approve picture")).toBeUndefined();
+    await click(byText("Accept suggestion"));
     expect(callsTo(fetchJson, "/director/proposals/sh1/accept")).toHaveLength(1);
+    expect(fetchJson.mock.calls.some((c) => /\/(approve|still)$/.test(String(c[0])))).toBe(false);
   });
 
   it("rejects a shot and accepts all", async () => {
     const fetchJson = await mount({ conversation: convo("proposing"), shots: [pendingShot] });
-    await click(byText("Keep mine"));
+    await click(byText("Reject (keep mine)"));
     expect(callsTo(fetchJson, "/director/proposals/sh1/reject")).toHaveLength(1);
-    await click(byText("Accept all"));
+    await click(byText("Accept all suggestions"));
     expect(callsTo(fetchJson, "/director/proposals/accept-all")).toHaveLength(1);
   });
 
   it("edits a proposal before using it", async () => {
     const fetchJson = await mount({ conversation: convo("proposing"), shots: [pendingShot] });
-    await click(byText("Edit"));
+    await click(byText("Edit suggestion"));
     const ta = host.querySelector("textarea")!;
     await act(async () => {
       const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
