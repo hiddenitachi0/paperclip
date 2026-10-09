@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { PluginCompanySettingsPageProps, PluginDetailTabProps, PluginHostContext, PluginPageProps, PluginSidebarProps } from "@paperclipai/plugin-sdk/ui";
 import { usePluginAction, useHostNavigation, PluginConfigForm } from "@paperclipai/plugin-sdk/ui";
 import { MediaStudioEditTab } from "./edit-tab.js";
+import { CAST_IDENTITIES_ACTION, EMPTY_CAST, StorylineCastSection, castIdentityOptions, shotCastLabels, type CastIdentityOption, type StorylineCast } from "./storyline-cast.js";
 import { BulkProgressBar, StoryboardPanel, overApprovalLimit, useStoryboardActions, type StoryboardSummary } from "./storyboard-panel.js";
 import { AdvancedFeaturesToggle, AiDirectorSection } from "./director-panel.js";
 import { IdentitiesPanel } from "./identities-panel.js";
@@ -3285,6 +3286,8 @@ interface VideoStorylineSummary {
   characterReferenceAssetIds: string[];
   /** Storyboard picture service / model / look (newer servers). */
   pictureSettings?: StoryboardPictureSettingsValue;
+  /** The script's characters and the saved people they are linked to (newer servers). */
+  cast?: StorylineCast;
   finalObjectKey: string | null;
   finalByteSize: number | null;
   finalDurationSeconds: number | null;
@@ -3768,6 +3771,28 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
     };
   }, [needsSogniModels, listSogniVideoModels]);
   const base = companyId && selectedId ? `/api/companies/${companyId}/video-storylines/${selectedId}` : "";
+  // The company's saved people (Media Studio identities), for the Cast section and step 2's "In this shot" labels.
+  const listCastIdentities = usePluginAction(CAST_IDENTITIES_ACTION);
+  const [castIdentities, setCastIdentities] = useState<CastIdentityOption[]>([]);
+  const [castIdentityError, setCastIdentityError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!companyId || !selectedId) return;
+    let cancelled = false;
+    Promise.resolve()
+      .then(() => listCastIdentities({}))
+      .then((r) => {
+        if (cancelled) return;
+        setCastIdentities(castIdentityOptions(r));
+        setCastIdentityError(null);
+      })
+      .catch((e) => {
+        if (!cancelled) setCastIdentityError(`The saved people could not be loaded: ${errorText(e)}`);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [companyId, selectedId]);
   // Never show the previous storyline's pictures while the new one loads.
   const storyboard = storyboardRaw && storyboardRaw.storylineId === selectedId ? storyboardRaw : null;
 
@@ -4476,10 +4501,24 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                       })}
                     </div>
 
+                    <StorylineCastSection
+                      base={base}
+                      cast={selected.cast ?? EMPTY_CAST}
+                      shots={shots}
+                      sceneNotes={sortedScenes.map((sc) => sc.notes)}
+                      editable={editable}
+                      identities={castIdentities}
+                      identityError={castIdentityError}
+                      onSaved={async () => {
+                        await loadStorylines();
+                      }}
+                    />
+
                     <div style={card}>
-                      <strong style={{ fontSize: 13 }}>Characters</strong>
+                      <strong style={{ fontSize: 13 }}>Extra character pictures</strong>
                       <p style={{ fontSize: 12, color: "#868e96", margin: 0 }}>
-                        Pictures of your characters, sent with every picture and every video clip to keep faces the same (at most 4 are used per shot, the shot's own first).
+                        Pictures sent with every picture and every video clip (at most 4 are used per shot: the cast's saved people first, then the shot's own, then
+                        these). For a person who should look the same everywhere, link them to a saved person in Cast above instead.
                       </p>
                       <LookReferencePicker
                         looks={looks}
@@ -4502,6 +4541,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                     onNext={() => setActiveStep("render")}
                     looks={looks.map((l) => ({ id: l.id, name: l.name }))}
                     storylineLookName={looks.find((l) => l.id === selected.pictureSettings?.lookId)?.name ?? null}
+                    shotCast={shotCastLabels(detailFor === selectedId ? shots : [], selected.cast ?? EMPTY_CAST, castIdentities)}
                     onShotLook={(shotId, pictureLookId) =>
                       void (async () => {
                         setError(null);

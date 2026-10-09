@@ -8,7 +8,9 @@ import {
   VIDEO_RENDER_TICK_BATCH,
   VIDEO_SHOT_MIN_DURATION_SECONDS,
   estimateVideoStorylineCostCents,
+  readVideoStorylineCast,
   videoRenderDurationSeconds,
+  videoShotCast,
   videoRenderRequestPayloadSchema,
   type StartVideoStorylineRenderInput,
   type VideoStorylineProvider,
@@ -31,6 +33,14 @@ import { videoStorylineSettingsService } from "./video-storyline-settings.js";
 import { lockStorylineRow, videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
 import { executePinnedHttpRequest, validateAndResolveFetchUrl } from "./safe-outbound-fetch.js";
 import { mediaStudioKeyRef } from "./media-studio-company-keys.js";
+import {
+  castIdentityNames,
+  castPeople,
+  castPictureRefusal,
+  castVideoPictures,
+  loadCastAgeRefusals,
+  loadLinkedCastIdentities,
+} from "./storyline-cast.js";
 
 /**
  * DUR-4127: render orchestration for a video storyline. Reuses the Fal/Sogni
@@ -213,6 +223,59 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
   }
 
   /**
+   * The shot's linked cast members' pictures for the video call: per person
+   * the face crop, the canonical render and the body crop (the approved
+   * storyboard picture stays the start frame). Whether a video model really
+   * uses them is the provider client's call (video-provider-clients.ts:
+   * Fal's Kling v3 takes them as one "element" per person; Sogni's
+   * reference-to-video models as loose references; Sogni's image-to-video
+   * models take only the start frame). Pictures the age check refused are
+   * never sent: the render is refused with a plain message instead.
+   */
+  async function castVideoInput(
+    companyId: string,
+    storyline: typeof videoStorylines.$inferSelect,
+    shot: typeof videoShots.$inferSelect,
+  ): Promise<{ characters: Array<{ name: string; images: string[] }>; flat: string[]; startFallback: string | undefined }> {
+    const empty = { characters: [], flat: [], startFallback: undefined };
+    const cast = readVideoStorylineCast(storyline.pictureSettings);
+    if (!cast.members.some((m) => m.identityId)) return empty;
+    const plugin = await registry.getByKey(MEDIA_STUDIO_PLUGIN_KEY);
+    const pluginId = plugin?.id ?? null;
+    const identities = await loadLinkedCastIdentities(db, pluginId, companyId, cast.members);
+    const { castIds } = videoShotCast(shot, cast, castIdentityNames(identities));
+    const { people } = castPeople(castIds, cast.members, identities);
+    if (people.length === 0) return empty;
+    const wanted = castVideoPictures(people);
+    const loaded: Array<{ name: string; pictures: Array<{ fileId: string; dataUri: string | null }> }> = [];
+    for (const person of wanted) {
+      const pictures: Array<{ fileId: string; dataUri: string | null }> = [];
+      for (const fileId of person.fileIds) {
+        const [dataUri] = await loadReferenceImages(db, companyId, [fileId]);
+        pictures.push({ fileId, dataUri: dataUri ?? null });
+      }
+      loaded.push({ name: person.name, pictures });
+    }
+    const refusal = castPictureRefusal(
+      loaded.flatMap((p) => p.pictures.map((x) => ({ fileId: x.fileId, dataUri: x.dataUri, personName: p.name }))),
+      await loadCastAgeRefusals(db, pluginId, companyId),
+    );
+    if (refusal) throw unprocessable(refusal);
+    const characters = loaded
+      .map((p) => ({ name: p.name, images: p.pictures.map((x) => x.dataUri).filter((x): x is string => !!x) }))
+      .filter((c) => c.images.length > 0);
+    // Everyone's first picture (the face) first, then everyone's second, ...: a model that only takes a few still gets every face.
+    const flat: string[] = [];
+    for (let k = 0; k < 3; k += 1) for (const c of characters) if (c.images[k]) flat.push(c.images[k]!);
+    // Without an approved picture or a previous clip, the first person's canonical render (else face) is a better first frame than a look picture.
+    const first = people[0]!.identity;
+    const startFallback = first.canonicalFileId
+      ? loaded[0]?.pictures.find((x) => x.fileId === first.canonicalFileId)?.dataUri ?? characters[0]?.images[0]
+      : characters[0]?.images[0];
+    return { characters, flat, startFallback: startFallback ?? undefined };
+  }
+
+  /**
    * DUR-4317/DUR-4320: this is the "no video provider call before approval"
    * enforcement point -- the storyboardStatus check below runs before
    * resolveProviderApiKey/provider.start, i.e. before any real, paid
@@ -250,11 +313,13 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       }
     }
     const referenceAssetIds = [...shot.lookReferenceAssetIds, ...storyline.characterReferenceAssetIds];
-    const referenceImages = await loadReferenceImages(db, companyId, referenceAssetIds);
+    const cast = await castVideoInput(companyId, storyline, shot);
+    // The cast's pictures first (faces first), then the shot's and storyline's pictures.
+    const referenceImages = [...cast.flat, ...(await loadReferenceImages(db, companyId, referenceAssetIds))].slice(0, MAX_REFERENCE_IMAGES);
     // See media-jobs-types.ts's MediaJobInput.referenceImages doc comment: neither provider confirms
     // combining a continuity frame with separate character pictures in one call, so we pick ONE image
     // to actually drive continuity/likeness -- the approved still wins, then the continuity frame.
-    const startImage = approvedStillImage ?? continuityImage ?? referenceImages[0];
+    const startImage = approvedStillImage ?? continuityImage ?? cast.startFallback ?? referenceImages[0];
 
     const input: MediaJobInput = {
       kind: "video",
@@ -262,6 +327,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       model: model ?? undefined,
       startImage,
       referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
+      ...(cast.characters.length > 0 ? { characters: cast.characters } : {}),
       // Snapped to a length the model accepts (Fal's Kling models only take
       // 5 or 10 seconds and refuse anything else) -- see
       // videoRenderDurationSeconds; the estimate bills the same length.
@@ -583,8 +649,9 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       if (clip) continuityImage = (await extractLastFrameDataUri(clip)) ?? undefined;
     }
     const referenceAssetIds = [...shot.lookReferenceAssetIds, ...storyline.characterReferenceAssetIds];
-    const referenceImages = await loadReferenceImages(db, companyId, referenceAssetIds);
-    const startImage = continuityImage ?? referenceImages[0];
+    const cast = await castVideoInput(companyId, storyline, shot);
+    const referenceImages = [...cast.flat, ...(await loadReferenceImages(db, companyId, referenceAssetIds))].slice(0, MAX_REFERENCE_IMAGES);
+    const startImage = continuityImage ?? cast.startFallback ?? referenceImages[0];
 
     const handle = await provider.start({
       kind: "video",
@@ -592,6 +659,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       model: model ?? undefined,
       startImage,
       referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
+      ...(cast.characters.length > 0 ? { characters: cast.characters } : {}),
       durationSeconds: previewDurationSeconds,
     });
 

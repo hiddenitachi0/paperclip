@@ -2705,6 +2705,25 @@ export {
 } from "./video-storyline-stills.js";
 
 export {
+  VIDEO_STORYLINE_MAX_CAST,
+  VIDEO_CAST_NAME_MAX_LENGTH,
+  VIDEO_CAST_DESCRIPTION_MAX_LENGTH,
+  videoStorylineCastMemberSchema,
+  updateVideoStorylineCastSchema,
+  updateVideoShotCastSchema,
+  readVideoStorylineCast,
+  assignVideoCastIds,
+  mergeScriptCharactersIntoCast,
+  videoCastNameMentioned,
+  detectVideoShotCast,
+  videoShotCast,
+  type VideoStorylineCastMember,
+  type VideoStorylineCast,
+  type UpdateVideoStorylineCastInput,
+  type UpdateVideoShotCastInput,
+} from "./video-storyline-cast.js";
+
+export {
   createMediaStudioDirectAudioSchema,
   createMediaStudioDirectPictureSchema,
   createMediaStudioDirectVideoSchema,
