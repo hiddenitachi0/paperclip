@@ -10,7 +10,7 @@ import {
 import { HttpError, forbidden } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
-import { assertCompanyAccess, getActorInfo } from "./authz.js";
+import { assertCompanyAccess, getActorInfo, isCompanyOwnerOrAdmin } from "./authz.js";
 import { logActivity } from "../services/index.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { reportTemplatesService } from "../services/report-templates.js";
@@ -20,7 +20,8 @@ import { reportScriptsService } from "../services/report-scripts.js";
 /**
  * DUR-4072 PR2: report templates and report runs. Same actor rule as PR1's
  * report-scripts routes -- any agent or board member of the company can
- * draft a template, start a run and draft its commentary; nothing here can
+ * draft a template, start a run and draft its commentary; only a company
+ * owner/admin (a person) can switch a template ON (drafts start off); nothing here can
  * approve a script version (that stays PR1's board-owner-only route).
  * Switched off behind the same `enableReporting` flag as PR1.
  */
@@ -50,6 +51,11 @@ export function reportTemplateRoutes(rawDb: Db, deps: Partial<ReportRunsServiceD
     next();
   }
 
+  /** Switching a template on is for a person who is the company's owner/admin (or an instance admin). */
+  function canEnableTemplates(req: Request, companyId: string): boolean {
+    return getActorInfo(req).actorType === "user" && isCompanyOwnerOrAdmin(req, companyId);
+  }
+
   function actorOf(req: Request) {
     const info = getActorInfo(req);
     return info.actorType === "agent"
@@ -68,7 +74,7 @@ export function reportTemplateRoutes(rawDb: Db, deps: Partial<ReportRunsServiceD
 
   router.post("/companies/:companyId/report-templates", validate(createReportTemplateSchema), memberScope(), requireFeatureOn, async (req, res) => {
     const companyId = req.params.companyId as string;
-    const created = await templatesSvc.createTemplate(companyId, req.body, actorOf(req));
+    const created = await templatesSvc.createTemplate(companyId, req.body, { ...actorOf(req), canEnable: canEnableTemplates(req, companyId) });
     await audit(req, companyId, "report_template.created", "report_template", created.id, { key: created.key, name: created.name });
     res.status(201).json(created);
   });
@@ -79,7 +85,9 @@ export function reportTemplateRoutes(rawDb: Db, deps: Partial<ReportRunsServiceD
 
   router.patch("/companies/:companyId/report-templates/:templateId", validate(updateReportTemplateSchema), memberScope(), requireFeatureOn, async (req, res) => {
     const companyId = req.params.companyId as string;
-    const updated = await templatesSvc.updateTemplate(companyId, req.params.templateId as string, req.body);
+    const updated = await templatesSvc.updateTemplate(companyId, req.params.templateId as string, req.body, {
+      canEnable: canEnableTemplates(req, companyId),
+    });
     await audit(req, companyId, "report_template.updated", "report_template", updated.id, { fields: Object.keys(req.body) });
     res.json(updated);
   });

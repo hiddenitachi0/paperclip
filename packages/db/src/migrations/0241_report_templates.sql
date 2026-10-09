@@ -27,7 +27,7 @@ CREATE TABLE "report_templates" (
 	"layout" jsonb DEFAULT '{}'::jsonb NOT NULL,
 	"data_connection_id" uuid,
 	"script_version_id" uuid NOT NULL,
-	"is_active" boolean DEFAULT true NOT NULL,
+	"is_active" boolean DEFAULT false NOT NULL,
 	"created_by_agent_id" uuid,
 	"created_by_user_id" text,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,

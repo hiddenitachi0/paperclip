@@ -29,7 +29,8 @@ export const reportTemplates = pgTable(
     layout: jsonb("layout").$type<Record<string, unknown>>().notNull().default({}),
     dataConnectionId: uuid("data_connection_id").references(() => dataConnections.id, { onDelete: "set null" }),
     scriptVersionId: uuid("script_version_id").notNull().references(() => reportScriptVersions.id, { onDelete: "restrict" }),
-    isActive: boolean("is_active").notNull().default(true),
+    /** Off until a company owner/admin switches it on (agents may draft templates, never enable them). */
+    isActive: boolean("is_active").notNull().default(false),
     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     createdByUserId: text("created_by_user_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

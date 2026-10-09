@@ -114,7 +114,7 @@ d("DUR-4072 report run lifecycle", () => {
     const template = await templatesSvc.createTemplate(
       companyId,
       { key: "weekly-sales", name: "Weekly sales", instructions: "Summarise sales.", layout: {}, scriptVersionId: version.id },
-      {},
+      { userId: "filip", canEnable: true },
     );
     return { templatesSvc, scriptsSvc, template, version };
   }
@@ -253,5 +253,43 @@ d("DUR-4072 report run lifecycle", () => {
         {},
       ),
     ).rejects.toThrow(/Data connection not found/);
+  });
+
+  it("only an owner/admin can switch a template on: drafts by others start off, and re-pointing switches it off", async () => {
+    const { templatesSvc, template, version } = await setUpApprovedTemplate();
+    expect(template.isActive).toBe(true);
+
+    const drafted = await templatesSvc.createTemplate(
+      companyId,
+      { key: "agent-draft", name: "Agent draft", instructions: "i", layout: {}, scriptVersionId: version.id },
+      { agentId: undefined },
+    );
+    expect(drafted.isActive).toBe(false);
+    await expect(templatesSvc.updateTemplate(companyId, drafted.id, { isActive: true }, {})).rejects.toThrow(/owner or an admin/);
+    const runsSvc = reportRunsService(db, { reportScripts: scriptsFor(), fetchData: async () => ({ rows: [] }) });
+    await expect(runsSvc.startRun(companyId, drafted.id, {})).rejects.toThrow(/switched off/);
+
+    const enabled = await templatesSvc.updateTemplate(companyId, drafted.id, { isActive: true }, { canEnable: true });
+    expect(enabled.isActive).toBe(true);
+
+    // Harmless edits by a non-owner leave it on...
+    const renamed = await templatesSvc.updateTemplate(companyId, template.id, { name: "Renamed" }, {});
+    expect(renamed.isActive).toBe(true);
+    // ...but re-pointing it at different data switches it off until an owner/admin re-enables it.
+    const [secret] = await db.insert(companySecrets).values({ companyId, key: "own-shop-key", name: "Own shop key" }).returning();
+    const [conn] = await db
+      .insert(dataConnections)
+      .values({
+        companyId,
+        kind: "shopify",
+        name: "Own shop",
+        shopDomain: "own.myshopify.com",
+        apiVersion: "2026-07",
+        credentialKind: "admin_access_token",
+        credentialSecretId: secret!.id,
+      })
+      .returning();
+    const repointed = await templatesSvc.updateTemplate(companyId, template.id, { dataConnectionId: conn!.id }, {});
+    expect(repointed.isActive).toBe(false);
   });
 });

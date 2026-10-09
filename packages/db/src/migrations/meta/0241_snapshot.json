@@ -1,5 +1,5 @@
 {
-  "id": "c453627f-b1b4-4704-a1dd-33f1ce6135fb",
+  "id": "7bda935a-9053-4dca-9cee-154081fd1f19",
   "prevId": "ff83f0e4-07eb-4b7b-840c-028f12fb6d43",
   "version": "7",
   "dialect": "postgresql",
@@ -35878,7 +35878,7 @@
           "type": "boolean",
           "primaryKey": false,
           "notNull": true,
-          "default": true
+          "default": false
         },
         "created_by_agent_id": {
           "name": "created_by_agent_id",

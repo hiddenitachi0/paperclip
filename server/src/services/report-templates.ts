@@ -2,7 +2,7 @@ import { and, desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { dataConnections, documentRevisions, documents, reportScriptVersions, reportTemplates } from "@paperclipai/db";
 import type { CreateReportTemplateInput, ReportTemplate, UpdateReportTemplateInput } from "@paperclipai/shared";
-import { conflict, notFound, unprocessable } from "../errors.js";
+import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
 
 /**
  * DUR-4072 PR2: report templates. Every query filters on the caller's
@@ -80,10 +80,15 @@ export function reportTemplatesService(db: Db) {
     return row;
   }
 
+  /**
+   * `canEnable`: the caller is a person who is the company's owner/admin (or
+   * an instance admin). Only they may switch a template on. Templates drafted
+   * by anyone else start switched off.
+   */
   async function createTemplate(
     companyId: string,
     input: CreateReportTemplateInput,
-    actor: { agentId?: string; userId?: string },
+    actor: { agentId?: string; userId?: string; canEnable?: boolean },
   ): Promise<ReportTemplate> {
     await assertApprovedVersion(companyId, input.scriptVersionId);
     await assertOwnDataConnection(companyId, input.dataConnectionId);
@@ -103,6 +108,7 @@ export function reportTemplatesService(db: Db) {
         layout: input.layout,
         dataConnectionId: input.dataConnectionId ?? null,
         scriptVersionId: input.scriptVersionId,
+        isActive: actor.canEnable === true,
         createdByAgentId: actor.agentId ?? null,
         createdByUserId: actor.userId ?? null,
       })
@@ -110,13 +116,30 @@ export function reportTemplatesService(db: Db) {
     return toSummary(row!);
   }
 
-  async function updateTemplate(companyId: string, templateId: string, input: UpdateReportTemplateInput): Promise<ReportTemplate> {
-    await getTemplate(companyId, templateId);
+  async function updateTemplate(
+    companyId: string,
+    templateId: string,
+    input: UpdateReportTemplateInput,
+    actor: { canEnable?: boolean } = {},
+  ): Promise<ReportTemplate> {
+    const current = await getTemplate(companyId, templateId);
+    const canEnable = actor.canEnable === true;
+    if (input.isActive === true && !canEnable) {
+      throw forbidden("Only the company's owner or an admin can switch a report template on.");
+    }
+    const changes: UpdateReportTemplateInput = { ...input };
+    // Re-pointing an active template at different code or data is a new
+    // decision: when someone who may not enable templates does it, the
+    // template is switched off until an owner/admin switches it on again.
+    const repointed =
+      (input.scriptVersionId !== undefined && input.scriptVersionId !== current.scriptVersionId) ||
+      (input.dataConnectionId !== undefined && input.dataConnectionId !== current.dataConnectionId);
+    if (repointed && !canEnable) changes.isActive = false;
     if (input.scriptVersionId) await assertApprovedVersion(companyId, input.scriptVersionId);
     await assertOwnDataConnection(companyId, input.dataConnectionId);
     const [row] = await db
       .update(reportTemplates)
-      .set({ ...input, updatedAt: new Date() })
+      .set({ ...changes, updatedAt: new Date() })
       .where(and(eq(reportTemplates.id, templateId), eq(reportTemplates.companyId, companyId)))
       .returning();
     if (!row) throw notFound("Report template not found");
