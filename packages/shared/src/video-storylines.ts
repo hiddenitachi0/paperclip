@@ -202,6 +202,32 @@ export function estimateVideoStorylineCostCents(
   };
 }
 
+// ─── Storyboard picture settings ─────────────────────────────────────────
+
+/**
+ * How the cheap storyboard pictures (step 2) are made for one storyline:
+ * which picture service and model, and an optional Media Studio look (its
+ * style words, character sheet, reference pictures and, on Sogni, LoRAs) put
+ * on every picture. Every field is optional: unset = the default (Fal.ai, its
+ * cheapest picture model, no look). Stored in video_storylines.picture_settings.
+ */
+export interface VideoStorylinePictureSettings {
+  providerId?: VideoStorylineProvider | null;
+  model?: string | null;
+  lookId?: string | null;
+}
+
+/** A shot's own look for its storyboard picture: null = use the storyline's look; this value = no look for this shot. */
+export const VIDEO_SHOT_PICTURE_LOOK_NONE = "none";
+
+export const videoStorylinePictureSettingsSchema = z
+  .object({
+    providerId: z.enum(VIDEO_STORYLINE_PROVIDERS).nullable().optional(),
+    model: z.string().trim().min(1).max(200).nullable().optional(),
+    lookId: z.string().trim().min(1).max(100).nullable().optional(),
+  })
+  .strict();
+
 // ─── Validators ──────────────────────────────────────────────────────────
 
 const assetIdArray = (max: number) => z.array(z.string().uuid()).max(max);
@@ -256,6 +282,8 @@ export const updateVideoStorylineSchema = z
     musicAssetId: storylineFields.musicAssetId,
     musicSourceKey: storylineFields.musicSourceKey,
     musicVolumeDb: storylineFields.musicVolumeDb,
+    /** Storyboard picture service / model / look (replaces the stored settings as a whole). */
+    pictureSettings: videoStorylinePictureSettingsSchema,
   })
   .partial()
   .strict()
@@ -326,6 +354,8 @@ export const updateVideoShotSchema = z
     durationSeconds: shotFields.durationSeconds,
     lookReferenceAssetIds: shotFields.lookReferenceAssetIds,
     transitionIn: shotFields.transitionIn,
+    /** This shot's own look for its storyboard picture (a look id, "none", or null to use the storyline's). */
+    pictureLookId: z.string().trim().min(1).max(100).nullable(),
   })
   .partial()
   .strict();

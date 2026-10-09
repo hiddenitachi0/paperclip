@@ -64,6 +64,7 @@ import {
   ACTION_LOOKS_SAVE,
   ACTION_SOGNI_LORAS,
   ACTION_SOGNI_MODELS,
+  ACTION_SOGNI_VIDEO_MODELS,
   CHECK_MEDIA_JOB_DESCRIPTION,
   CHECK_MEDIA_JOB_PARAMETERS,
   GENERATE_AUDIO_DESCRIPTION,
@@ -2023,6 +2024,22 @@ const plugin = definePlugin({
         updatedAt: list.updatedAt,
         maxLoras: loras?.maxPerRequest ?? SOGNI_MAX_LORAS,
         note: list.live ? null : "Sogni's model list could not be reached just now, so only a few well-known models are shown. Try again in a minute.",
+      };
+    });
+
+    // Sogni's video models, for the Storylines video model picker. Public
+    // information read through the host's gated fetch (no key is sent) and
+    // kept for 10 minutes; anyone in the company may read it.
+    ctx.actions.register(ACTION_SOGNI_VIDEO_MODELS, async (_params, context) => {
+      if (!context.companyId) throw new Error("Open this page from inside a company.");
+      const list = await sogniCatalogFor(ctx).videoModels();
+      return {
+        models: list.models,
+        live: list.live,
+        updatedAt: list.updatedAt,
+        note: list.live
+          ? null
+          : `Sogni's video model list could not be reached just now, so a short built-in list (copied from Sogni on ${list.updatedAt}) is shown. Try again in a minute.`,
       };
     });
 

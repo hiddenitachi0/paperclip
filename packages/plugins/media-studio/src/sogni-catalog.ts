@@ -354,6 +354,8 @@ export class SogniCatalog {
   private modelCache: { at: number; updatedAt: string | null; models: SogniModelInfo[] } | null = null;
   private modelFailedAt = -Infinity;
   private loraCache: { at: number; catalog: SogniLoraCatalog } | null = null;
+  private videoCache: { at: number; updatedAt: string | null; models: SogniVideoModelInfo[] } | null = null;
+  private videoFailedAt = -Infinity;
   private loraFailedAt = -Infinity;
 
   constructor(
@@ -401,6 +403,27 @@ export class SogniCatalog {
     }
     if (cached) return { models: cached.models, live: true, updatedAt: cached.updatedAt };
     return { models: SOGNI_OFFLINE_MODELS, live: false, updatedAt: null };
+  }
+
+  /** The video models (Storylines' video model picker): Sogni's list (fresh, or the last one read), else the built-in list. */
+  async videoModels(): Promise<SogniVideoModelList> {
+    const cached = this.videoCache;
+    if (cached && this.fresh(cached.at)) return { models: cached.models, live: true, updatedAt: cached.updatedAt };
+    if (this.now() - this.videoFailedAt >= RETRY_AFTER_FAILURE_MS) {
+      try {
+        const { status, body } = await this.getJson("/v1/model-catalog?mediaType=video&include=parameters");
+        const parsed = status === 200 ? parseSogniVideoCatalog(body) : null;
+        if (parsed && parsed.models.length > 0) {
+          this.videoCache = { at: this.now(), ...parsed };
+          return { models: parsed.models, live: true, updatedAt: parsed.updatedAt };
+        }
+      } catch {
+        // Unreachable: fall through to the last list.
+      }
+      this.videoFailedAt = this.now();
+    }
+    if (cached) return { models: cached.models, live: true, updatedAt: cached.updatedAt };
+    return { models: SOGNI_OFFLINE_VIDEO_MODELS, live: false, updatedAt: SOGNI_OFFLINE_VIDEO_MODELS_DATE };
   }
 
   /** One model by catalog id or tool key. `live` false: Sogni's list could not be read, so the answer is unknown. */
@@ -452,6 +475,149 @@ export class SogniCatalog {
       return { loras: [], status: "unavailable" };
     }
   }
+}
+
+// ─── Video models (for the Storylines video model picker) ─────────────────────
+//
+//   GET /v1/model-catalog?mediaType=video&include=parameters   (public, no key)
+//   Same envelope as the image catalog. Per model, parameters may carry:
+//     durations: [4, 5, ...]                    exact clip lengths (seconds), or
+//     frames {min,max,default} + fps {default|allowed}   a range of lengths;
+//     acceptInputImage / supports.imageToVideo  takes a start picture;
+//     referenceLimits.images                    how many reference pictures;
+//     costPerBaseRenderInUSD                    Sogni's own list price per base render;
+//     task / requiresReferenceVideo             upscalers and video-to-video tools.
+//
+// Only models that make a clip from a description (optionally with a start or
+// reference picture) are offered: upscalers, video-to-video, audio-to-video and
+// animate tools need inputs a storyline shot does not have.
+
+export interface SogniVideoModelInfo {
+  id: string;
+  name: string;
+  tags: string[];
+  /** Sogni marks it premium (paid tier only). */
+  premium: boolean;
+  workersOnline: number | null;
+  /** Clip lengths it makes: an exact list, or a min-max range in whole seconds. Null: not published. */
+  clipSeconds: { values: number[] } | { min: number; max: number } | null;
+  /** Can start from a picture (the shot's approved picture, or the previous clip's last frame). */
+  takesStartImage: boolean;
+  /** Needs a start picture: without one the shot cannot be made with this model. */
+  needsStartImage: boolean;
+  /** How many reference (character) pictures it takes; 0 = none. */
+  maxReferences: number;
+  /** Sogni's own list price per base render, in US dollars (directional; real cost depends on length and size). */
+  usdPerBaseRender: number | null;
+  creator: string | null;
+}
+
+const VIDEO_UNUSABLE = /(^|[_-])(v2v|a2v|ia2v|s2v|flfa2v)($|[_-])|animate-|upscale/i;
+
+function parseVideoModel(value: unknown): SogniVideoModelInfo | null {
+  const row = asRecord(value);
+  const id = str(row?.id);
+  if (!row || !id) return null;
+  if (str(row.mediaType) && str(row.mediaType) !== "video") return null;
+  const parameters = asRecord(row.parameters) ?? {};
+  if (str(parameters.task) || parameters.requiresReferenceVideo === true || VIDEO_UNUSABLE.test(id)) return null;
+  const tags = Array.isArray(row.tags) ? row.tags.filter((t): t is string => typeof t === "string") : [];
+
+  let clipSeconds: SogniVideoModelInfo["clipSeconds"] = null;
+  const durations = Array.isArray(parameters.durations) ? parameters.durations.filter((d): d is number => typeof d === "number" && d > 0) : [];
+  if (durations.length > 0) {
+    clipSeconds = { values: [...new Set(durations)].sort((a, b) => a - b) };
+  } else {
+    const frames = asRecord(parameters.frames);
+    const fps = asRecord(parameters.fps);
+    const fpsValue = num(fps?.default) ?? (Array.isArray(fps?.allowed) ? num(fps!.allowed[0]) : null);
+    const minFrames = num(frames?.min);
+    const maxFrames = num(frames?.max);
+    if (fpsValue && fpsValue > 0 && minFrames !== null && maxFrames !== null && maxFrames >= minFrames) {
+      const min = Math.max(1, Math.ceil(minFrames / fpsValue));
+      const max = Math.max(min, Math.floor(maxFrames / fpsValue));
+      clipSeconds = { min, max };
+    }
+  }
+
+  const supports = asRecord(parameters.supports);
+  const referenceImages = num(asRecord(parameters.referenceLimits)?.images) ?? 0;
+  const imageInId = /(^|[_-])(i2v|flf2v)($|[_-])/i.test(id) || /-i2v$/i.test(id);
+  const referenceInId = /(^|[_-])r2v($|[_-])/i.test(id);
+  const takesStartImage = imageInId || parameters.acceptInputImage === true || supports?.imageToVideo === true;
+  const textOnlyInId = /(^|[_-])t2v($|[_-])/i.test(id);
+  const needsStartImage = imageInId && !textOnlyInId && supports?.textToVideo !== true;
+  const maxReferences = referenceInId || str(parameters.inputMode) === "multi-reference" ? Math.max(1, referenceImages) : referenceImages > 1 ? referenceImages : 0;
+  const price = Number(parameters.costPerBaseRenderInUSD);
+  const workerCounts = asRecord(row.workerCounts);
+  const workers = workerCounts ? Object.values(workerCounts).reduce<number>((sum, n) => sum + (num(n) ?? 0), 0) : null;
+  return {
+    id,
+    name: str(row.name) ?? id,
+    tags,
+    premium: tags.includes("premium") || parameters.premiumOnly === true,
+    workersOnline: workers,
+    clipSeconds,
+    takesStartImage,
+    needsStartImage,
+    maxReferences,
+    usdPerBaseRender: Number.isFinite(price) && price > 0 ? price : null,
+    creator: str(asRecord(row.attribution)?.creator),
+  };
+}
+
+function videoByUsefulness(a: SogniVideoModelInfo, b: SogniVideoModelInfo): number {
+  const aOnline = (a.workersOnline ?? 1) > 0;
+  const bOnline = (b.workersOnline ?? 1) > 0;
+  if (aOnline !== bOnline) return aOnline ? -1 : 1;
+  const aPopular = a.tags.includes("popular");
+  const bPopular = b.tags.includes("popular");
+  if (aPopular !== bPopular) return aPopular ? -1 : 1;
+  return a.name.localeCompare(b.name);
+}
+
+/** Parse GET /v1/model-catalog?mediaType=video; null when the answer is not a catalog. */
+export function parseSogniVideoCatalog(json: unknown): { updatedAt: string | null; models: SogniVideoModelInfo[] } | null {
+  const data = asRecord(asRecord(json)?.data);
+  if (!data || !Array.isArray(data.models)) return null;
+  const models = data.models.map(parseVideoModel).filter((m): m is SogniVideoModelInfo => m !== null);
+  return { updatedAt: str(data.updatedAt), models: models.sort(videoByUsefulness) };
+}
+
+/** When the built-in video list below was copied from Sogni's live catalog. */
+export const SOGNI_OFFLINE_VIDEO_MODELS_DATE = "2026-10-08";
+
+/**
+ * Offered when Sogni's catalog cannot be reached and none was read before: a
+ * few of the video models Sogni's live catalog listed on
+ * SOGNI_OFFLINE_VIDEO_MODELS_DATE, with no prices or worker counts.
+ */
+export const SOGNI_OFFLINE_VIDEO_MODELS: SogniVideoModelInfo[] = [
+  { id: "seedance-2-0-fast", name: "Seedance 2.0 Fast", premium: true, clip: { values: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] }, start: true, needs: false, refs: 9 },
+  { id: "seedance-2-0", name: "Seedance 2.0", premium: true, clip: { values: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] }, start: true, needs: false, refs: 9 },
+  { id: "ltx23-22b-fp8_t2v_distilled", name: "LTX-2.3 22B T2V Distilled", premium: false, clip: { min: 2, max: 21 }, start: false, needs: false, refs: 0 },
+  { id: "ltx23-22b-fp8_i2v_distilled", name: "LTX-2.3 22B I2V Distilled", premium: false, clip: { min: 2, max: 21 }, start: true, needs: true, refs: 0 },
+  { id: "wan_v2.2-14b-fp8_t2v_lightx2v", name: "WAN2.2 14B FP8 t2v LightX2V", premium: false, clip: { min: 2, max: 10 }, start: false, needs: false, refs: 0 },
+  { id: "wan_v2.2-14b-fp8_i2v_lightx2v", name: "WAN2.2 14B FP8 i2v LightX2V", premium: false, clip: { min: 2, max: 10 }, start: true, needs: true, refs: 0 },
+  { id: "minimax-h3-ref2va-fp8_r2v_turbo", name: "MiniMax H3 Turbo Reference", premium: false, clip: { min: 6, max: 15 }, start: false, needs: false, refs: 9 },
+].map((m) => ({
+  id: m.id,
+  name: m.name,
+  tags: m.premium ? ["premium"] : [],
+  premium: m.premium,
+  workersOnline: null,
+  clipSeconds: m.clip,
+  takesStartImage: m.start,
+  needsStartImage: m.needs,
+  maxReferences: m.refs,
+  usdPerBaseRender: null,
+  creator: null,
+}));
+
+export interface SogniVideoModelList {
+  models: SogniVideoModelInfo[];
+  live: boolean;
+  updatedAt: string | null;
 }
 
 // ─── Checks (run by the worker on save and again before every picture) ────────

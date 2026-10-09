@@ -25,6 +25,7 @@ import { pluginRegistryService } from "./plugin-registry.js";
 import { approvalService } from "./approvals.js";
 import { secretService } from "./secrets.js";
 import { extractLastFrameDataUri } from "./video-ffmpeg.js";
+import { sogniStorageFetch } from "./image-provider-clients.js";
 import { loadApprovedStillDataUri } from "./video-storyline-still-frame.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
 import { lockStorylineRow, videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
@@ -75,7 +76,8 @@ function buildProvider(providerId: VideoStorylineProvider, apiKey: string, model
   if (providerId === "fal") {
     return new FalVideoProvider(apiKey, safeFetch, model ?? undefined);
   }
-  return new SogniVideoProvider({ apiKey, apiFetch: safeFetch, transferFetch: safeFetch, defaultModel: model ?? undefined });
+  // Uploads go to Sogni's storage as real multipart bytes through the same pinned fetch (see sogniStorageFetch).
+  return new SogniVideoProvider({ apiKey, apiFetch: safeFetch, transferFetch: sogniStorageFetch(safeFetch), defaultModel: model ?? undefined });
 }
 
 async function dataUriFromObject(companyId: string, provider: string, objectKey: string, contentType: string): Promise<string> {

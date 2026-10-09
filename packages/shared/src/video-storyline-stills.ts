@@ -117,4 +117,8 @@ export interface VideoStoryboardSummary {
   videoSpentCents: number;
   /** The company's configured kind:"video_render" approval threshold, or null if not configured (that extra gate is off). */
   approvalThresholdCents: number | null;
+  /** Which picture services have an API key set up, so the editor only offers those. */
+  pictureServices: { fal: boolean; sogni: boolean };
+  /** What the next storyboard picture is made with, after defaults: service, model (null = the service's default) and look. */
+  picture: { providerId: VideoStorylineProvider; model: string | null; lookId: string | null; costPerPictureCents: number };
 }

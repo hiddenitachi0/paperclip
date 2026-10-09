@@ -1667,6 +1667,13 @@
       "when": 1791480000000,
       "tag": "0238_company_helper_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 239,
+      "version": "7",
+      "when": 1791496613928,
+      "tag": "0239_storyline_picture_settings",
+      "breakpoints": true
     }
   ]
 }

@@ -58,6 +58,8 @@ export interface VideoStorylineSummary {
   estimatedTotalCents: number | null;
   estimatedTotalSeconds: number | null;
   characterReferenceAssetIds: string[];
+  /** Storyboard picture service / model / look (see VideoStorylinePictureSettings). */
+  pictureSettings: { providerId?: string | null; model?: string | null; lookId?: string | null };
   finalObjectKey: string | null;
   finalByteSize: number | null;
   finalDurationSeconds: number | null;
@@ -115,6 +117,8 @@ export interface VideoShotSummary {
   proposalConversationId: string | null;
   promptHistory: Array<{ prompt: string; cameraNotes: string | null; durationSeconds: number; transitionIn: string | null; replacedAt: string }>;
   storyboardStatus: string;
+  /** This shot's own look for its storyboard picture: a look id, "none", or null (the storyline's). */
+  pictureLookId: string | null;
   stillObjectKey: string | null;
   stillContentType: string | null;
   stillByteSize: number | null;
@@ -138,6 +142,7 @@ function toStorylineSummary(row: StorylineRow): VideoStorylineSummary {
     estimatedTotalCents: row.estimatedTotalCents,
     estimatedTotalSeconds: row.estimatedTotalSeconds,
     characterReferenceAssetIds: row.characterReferenceAssetIds,
+    pictureSettings: row.pictureSettings ?? {},
     finalObjectKey: row.finalObjectKey,
     finalByteSize: row.finalByteSize,
     finalDurationSeconds: row.finalDurationSeconds,
@@ -198,6 +203,7 @@ function toShotSummary(row: ShotRow): VideoShotSummary {
     proposalConversationId: row.proposalConversationId,
     promptHistory: row.promptHistory,
     storyboardStatus: row.storyboardStatus,
+    pictureLookId: row.pictureLookId,
     stillObjectKey: row.stillObjectKey,
     stillContentType: row.stillContentType,
     stillByteSize: row.stillByteSize,
@@ -501,6 +507,7 @@ export function videoStorylineService(db: Db) {
         ...(settingMusicAssetId && input.musicSourceKey === undefined ? { musicSourceKey: null } : {}),
         ...(settingMusicSourceKey && input.musicAssetId === undefined ? { musicAssetId: null } : {}),
         ...(input.musicVolumeDb !== undefined ? { musicVolumeDb: input.musicVolumeDb } : {}),
+        ...(input.pictureSettings !== undefined ? { pictureSettings: input.pictureSettings } : {}),
         updatedAt: new Date(),
       })
       .where(eq(videoStorylines.id, storylineId))
@@ -723,6 +730,9 @@ export function videoStorylineService(db: Db) {
       ...(input.durationSeconds !== undefined ? { durationSeconds: input.durationSeconds } : {}),
       ...(input.lookReferenceAssetIds !== undefined ? { lookReferenceAssetIds: input.lookReferenceAssetIds } : {}),
       ...(input.transitionIn !== undefined ? { transitionIn: input.transitionIn } : {}),
+      // A different look only changes the NEXT picture made for this shot; the
+      // current picture and its approval stay until the person remakes it.
+      ...(input.pictureLookId !== undefined ? { pictureLookId: input.pictureLookId } : {}),
       ...(touchesStillContent
         ? {
             storyboardStatus: "pending" as const,

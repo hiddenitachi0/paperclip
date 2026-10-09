@@ -151,41 +151,49 @@ describe("Storylines storyboard (DUR-4321)", () => {
     vi.unstubAllGlobals();
   });
 
-  it("shows a tile per shot with cost lines and keeps Start render off until everything is approved", async () => {
-    expect(container.querySelector('[data-testid="storyboard-tile-sh-1"]')?.textContent).toContain("No picture yet");
-    expect(container.querySelector('[data-testid="storyboard-tile-sh-2"]')?.textContent).toContain("Picture cost: $0.02");
+  const tile1 = () => container.querySelector('[data-testid="storyboard-tile-sh-1"]')!;
+  const tile2 = () => container.querySelector('[data-testid="storyboard-tile-sh-2"]')!;
+  const startBtn = () => container.querySelector('[data-testid="start-render"]') as HTMLButtonElement;
+  const goStep = (key: string) => click(container.querySelector(`[data-testid="step-${key}"]`) as HTMLButtonElement);
+
+  it("opens on step 2, shows a tile per shot with cost lines, and step 3 lists what is missing", async () => {
+    expect(container.querySelector('[data-testid="storyboard-panel"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="step-pictures-status"]')?.textContent).toBe("0 of 2 pictures approved");
+    expect(tile1().textContent).toContain("No picture yet");
+    expect(tile2().textContent).toContain("Picture cost: $0.02");
     const costs = container.querySelector('[data-testid="storyboard-costs"]')?.textContent ?? "";
     expect(costs).toContain("Pictures so far: $0.02");
     expect(costs).toContain("Video will cost about $5.00");
-    expect(button(container, "Start render").disabled).toBe(true);
     // Only a shot that has a picture can be approved.
-    const tile1 = container.querySelector('[data-testid="storyboard-tile-sh-1"]')!;
-    expect(Array.from(tile1.querySelectorAll("button")).some((b) => b.textContent === "Approve")).toBe(false);
+    expect(Array.from(tile1().querySelectorAll("button")).some((b) => b.textContent === "Approve picture")).toBe(false);
+    expect(container.querySelector('[data-testid="pictures-primary-make"]')?.textContent).toBe("Make all 1 missing picture");
+
+    await goStep("render");
+    expect(startBtn().disabled).toBe(true);
+    expect(container.querySelector('[data-testid="readiness-pictures-missing"]')?.textContent).toContain("1 shot has no approved picture yet");
+    expect(container.querySelector('[data-testid="readiness-pictures-waiting"]')?.textContent).toContain("1 picture is made but not approved yet");
   });
 
-  it("make picture, approve and leave out walk the shots to ready, then Start render unlocks", async () => {
-    const tile1 = () => container.querySelector('[data-testid="storyboard-tile-sh-1"]')!;
-    const tile2 = () => container.querySelector('[data-testid="storyboard-tile-sh-2"]')!;
+  it("make picture, approve and drop walk the shots to ready, then Start render unlocks", async () => {
     await click(button(container, "Make picture", tile1()));
     expect(calls.some((c) => c.method === "POST" && c.path.endsWith("/shots/sh-1/still"))).toBe(true);
-    await click(button(container, "Approve", tile1()));
-    expect(tile1().textContent).toContain("Approved");
-    expect(button(container, "Start render").disabled).toBe(true);
-    await click(button(container, "Leave out", tile2()));
+    await click(button(container, "Approve picture", tile1()));
+    expect(tile1().textContent).toContain("Picture approved");
+    await click(button(container, "Drop shot", tile2()));
     expect(tile2().textContent).toContain("Left out");
     expect(tile2().textContent).toContain("Not charged");
-    expect(container.querySelector('[data-testid="storyboard-progress"]')?.textContent).toContain("You can start the render");
-    expect(button(container, "Start render").disabled).toBe(false);
+    expect(container.querySelector('[data-testid="storyboard-progress"]')?.textContent).toContain("All 1 shot approved");
+    expect(container.querySelector('[data-testid="step-pictures-status"]')?.textContent).toBe("1 of 1 pictures approved (1 left out)");
+    await click(container.querySelector('[data-testid="pictures-primary-next"]') as HTMLButtonElement);
+    expect(container.querySelector('[data-testid="readiness-ready"]')).toBeTruthy();
+    expect(startBtn().disabled).toBe(false);
   });
 
   it("editing a shot clears its picture and approval, so Start render locks again", async () => {
-    const tile1 = () => container.querySelector('[data-testid="storyboard-tile-sh-1"]')!;
     await click(button(container, "Make picture", tile1()));
-    await click(button(container, "Approve", tile1()));
-    await click(button(container, "Leave out", container.querySelector('[data-testid="storyboard-tile-sh-2"]')!));
-    expect(button(container, "Start render").disabled).toBe(false);
-
-    await click(button(container, "Edit", tile1()));
+    await click(button(container, "Approve picture", tile1()));
+    await click(button(container, "Drop shot", tile2()));
+    await click(button(container, "Edit text", tile1()));
     expect(tile1().textContent).toContain("clears the current picture and approval");
     const prompt = tile1().querySelector("textarea") as HTMLTextAreaElement;
     await act(async () => {
@@ -197,28 +205,29 @@ describe("Storylines storyboard (DUR-4321)", () => {
 
     const patch = calls.find((c) => c.method === "PATCH" && c.path.endsWith("/shots/sh-1"));
     expect(JSON.parse(patch!.body!)).toEqual({ prompt: "A brand new prompt", cameraNotes: null });
-    expect(tile1().textContent).toContain("Needs your OK");
     expect(tile1().textContent).toContain("No picture yet");
-    expect(button(container, "Start render").disabled).toBe(true);
+    await goStep("render");
+    expect(startBtn().disabled).toBe(true);
   });
 
   it("warns up front when the cost is over the approval limit", async () => {
-    // Re-open with a threshold below the estimate.
     threshold = 300;
-    await click(button(container, "Make a new picture", container.querySelector('[data-testid="storyboard-tile-sh-2"]')!));
+    await click(button(container, "Remake picture", tile2()));
+    await goStep("render");
     expect(container.querySelector('[data-testid="storyboard-over-limit"]')?.textContent).toContain("approval limit of $3.00");
   });
 
   it("explains the wait, not an error, when the owner's go-ahead is pending", async () => {
     threshold = 300;
-    const tile1 = () => container.querySelector('[data-testid="storyboard-tile-sh-1"]')!;
     await click(button(container, "Make picture", tile1()));
-    await click(button(container, "Approve", tile1()));
-    await click(button(container, "Leave out", container.querySelector('[data-testid="storyboard-tile-sh-2"]')!));
+    await click(button(container, "Approve picture", tile1()));
+    await click(button(container, "Drop shot", tile2()));
+    await goStep("render");
     startResponse = { ok: false, body: "Waiting on a board decision before it can start." };
     vi.spyOn(window, "confirm").mockReturnValue(true);
-    await click(button(container, "Start render"));
+    await click(startBtn());
     expect(container.querySelector('[data-testid="storyboard-approval-pending"]')?.textContent).toContain("Waiting for the owner's go-ahead");
     expect(container.textContent).not.toContain("board decision");
+    expect(container.querySelector('[data-testid="step-render-status"]')?.textContent).toBe("Waiting for the owner's go-ahead");
   });
 });
