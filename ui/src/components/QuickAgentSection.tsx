@@ -42,7 +42,8 @@ import {
   type LaneABackupModelConfig,
   type LaneAKeywordRoute,
   type ModelDirectoryEntry,
-  modelOptionStatus,
+  modelPickerOptionText,
+  modelPickerReadiness,
   modelReadiness,
   modelReadinessSummary,
   type ModelLastCheck,
@@ -91,13 +92,12 @@ import { ToggleSwitch } from "@/components/ui/toggle-switch";
 import { SecretBindingPicker, type SecretBindingValue } from "./SecretBindingPicker";
 import { QuickAgentBackupModels, type BackupReadiness } from "./QuickAgentBackupModels";
 import {
-  ModelStatusLine,
+  ModelPickerNotice,
   ReadinessLines,
   RefreshStatusButton,
   SetupCheck,
   healthReading,
   lastCheckFromResult,
-  optionTextWithStatus,
   setupFromEntry,
   useModelReadinessSources,
 } from "./ModelReadiness";
@@ -304,8 +304,6 @@ export function QuickAgentSection({
     enabled: Boolean(effectiveCompanyId),
   });
   const savedModels = modelDirectoryQuery.data ?? [];
-  // "Meta · Llama 3.2" > "3B · Local (llama3.2:latest)", so two setups of one model can be told apart.
-  const savedModelGroups = useMemo(() => pickerGroups(savedModels), [savedModels]);
   const applySavedModel = (entryId: string) => {
     const entry = savedModels.find((candidate) => candidate.id === entryId);
     if (entry) settingMutation.mutate(patchFromDirectoryEntry(entry));
@@ -551,15 +549,19 @@ export function QuickAgentSection({
     );
   const entryHealth = (entryId: string | null | undefined) =>
     entryId ? healthReading(readinessSources.healthByEntryId.get(entryId)) : null;
-  const mainOptionStatus = (entryId: string) => {
+  /** Readiness of a saved model as this agent's main model (its key, the last model-server reading). */
+  const mainPickerReadiness = (entryId: string) => {
     const entry = savedModels.find((candidate) => candidate.id === entryId);
     if (!entry) return null;
-    return modelOptionStatus(setupFromEntry(entry), {
+    return modelPickerReadiness(setupFromEntry(entry), {
       ...readinessBase,
       key: mainModelKeyState(entry.provider, agentKeys),
       health: entryHealth(entry.id),
     });
   };
+  // "Meta · Llama 3.2" > "✅ Ready · 3B · Local — installed (llama3.2:latest)": ready ones first,
+  // and two setups of one model can be told apart.
+  const savedModelGroups = pickerGroups(savedModels, undefined, (entry) => mainPickerReadiness(entry.id));
   const currentModelId = agent.laneAModel ?? providerDescriptor.defaultModel ?? "";
   const currentTwin = savedTwin({ provider, model: currentModelId, baseUrl: agent.laneABaseUrl ?? null });
   const currentSetup: ModelSetupForReadiness = {
@@ -578,7 +580,7 @@ export function QuickAgentSection({
     health: entryHealth(currentTwin?.id) ?? healthReading(readinessSources.healthByAgentId.get(agent.id)),
     lastCheck: lastChecks.main ?? null,
   };
-  const currentStatus = modelOptionStatus(currentSetup, currentContext);
+  const currentReadiness = modelPickerReadiness(currentSetup, currentContext);
   const currentLines = modelReadiness(currentSetup, currentContext);
   const currentSummary = modelReadinessSummary(currentLines);
   const localAddresses = Array.from(
@@ -595,8 +597,8 @@ export function QuickAgentSection({
     agentId: agent.id,
     companyId: effectiveCompanyId,
     canCheck: canManageConnections,
-    optionStatus: (entry) =>
-      modelOptionStatus(setupFromEntry(entry), {
+    optionReadiness: (entry) =>
+      modelPickerReadiness(setupFromEntry(entry), {
         ...readinessBase,
         key: backupKeyState(entry, agentKeys),
         health: entryHealth(entry.id),
@@ -735,16 +737,17 @@ export function QuickAgentSection({
                 <optgroup key={group.key} label={group.label}>
                   {group.options.map((option) => (
                     <option key={option.id} value={option.id}>
-                      {optionTextWithStatus(option.label, mainOptionStatus(option.id))}
+                      {modelPickerOptionText(option.label, option.readiness)}
                     </option>
                   ))}
                 </optgroup>
               ))}
             </select>
-            <ModelStatusLine status={currentStatus} prefix="The model it uses now:" testId="quick-agent-current-model-status" />
+            <ModelPickerNotice readiness={currentReadiness} showWhenReady prefix="The model it uses now:" testId="quick-agent-current-model-status" />
             <span className="block text-xs text-muted-foreground">
-              The word after each saved model says whether it is ready for this agent: Installed, Not installed,
-              Downloading, Offline or Unknown for a model on your own computer; Key set or Needs a key for a hosted one.{" "}
+              Each saved model starts with whether it is ready for this agent (ready ones are listed first): for a model
+              on your own model server, whether the last check found it installed there; for a hosted one, whether this
+              agent has the key it needs.{" "}
               Picking a saved model fills the fields below and clears the ones that don't apply to it.{" "}
               <Link to="/company/settings/models" className="underline">
                 Manage saved models
@@ -898,7 +901,7 @@ export function QuickAgentSection({
             Is it ready? <span className="font-normal text-muted-foreground">{currentSummary.label}</span>
           </p>
           {!savedModels.length && (
-            <ModelStatusLine status={currentStatus} prefix="The model it uses now:" testId="quick-agent-current-model-status" />
+            <ModelPickerNotice readiness={currentReadiness} showWhenReady prefix="The model it uses now:" testId="quick-agent-current-model-status" />
           )}
           <ReadinessLines lines={currentLines} testId="quick-agent-model-checklist" />
           <div className="flex flex-wrap items-start gap-2">

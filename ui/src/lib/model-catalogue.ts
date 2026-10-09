@@ -24,6 +24,8 @@ import {
   GPU_FIT_HEADROOM,
   KNOWN_MODEL_FAMILIES,
   MODEL_DIRECTORY_RATINGS_MAX,
+  sortByModelReadiness,
+  type ModelPickerReadiness,
 } from "@paperclipai/shared";
 
 /**
@@ -1432,6 +1434,8 @@ export function buildModelTree<T extends CatalogueItem>(entries: readonly T[], o
 export interface PickerOption {
   id: string;
   label: string;
+  /** Set when pickerGroups() was given a readiness reader. */
+  readiness?: ModelPickerReadiness | null;
 }
 export interface PickerGroup {
   key: string;
@@ -1440,9 +1444,16 @@ export interface PickerGroup {
   options: PickerOption[];
 }
 
-/** How an entry runs, for a picker: "Local (llama3.2:latest)", "OpenRouter", "Hugging Face". */
-export function pickerRunLabel(entry: Pick<CatalogueItem, "provider" | "model">): string {
-  if (entry.provider === "local") return `Local (${entry.model})`;
+/**
+ * How an entry runs, for a picker: "Local (llama3.2:latest)", "OpenRouter",
+ * "Hugging Face". With a readiness reading a local model says whether it is
+ * installed: "Local — installed (llama3.2:latest)", "Local — not installed (…)".
+ */
+export function pickerRunLabel(
+  entry: Pick<CatalogueItem, "provider" | "model">,
+  readiness?: Pick<ModelPickerReadiness, "runLabel"> | null,
+): string {
+  if (entry.provider === "local") return `${readiness?.runLabel ?? "Local"} (${entry.model})`;
   return whereLabel(entry.provider);
 }
 
@@ -1453,19 +1464,27 @@ export function pickerRunLabel(entry: Pick<CatalogueItem, "provider" | "model">)
 export function pickerOptionLabel(
   entry: CatalogueItem,
   known: readonly KnownModelFamily[] = KNOWN_MODEL_FAMILIES,
+  readiness?: Pick<ModelPickerReadiness, "runLabel"> | null,
 ): string {
   const identity = entryIdentity(entry, known);
-  const parts = [identity.variant, pickerRunLabel(entry)].filter(Boolean).join(" · ");
+  const parts = [identity.variant, pickerRunLabel(entry, readiness)].filter(Boolean).join(" · ");
   const auto = [identity.family, identity.variant].filter(Boolean).join(" ");
   const name = entry.name.trim();
   const redundant = sameKnownLabel(name, auto) || sameKnownLabel(name, identity.family);
   return redundant || !name ? parts : `${parts} — ${name}`;
 }
 
-/** Saved models for a picker, grouped as "Maker · Family", each option distinguishable. */
+/**
+ * Saved models for a picker, grouped as "Maker · Family", each option
+ * distinguishable. With `readinessOf` each option carries its readiness
+ * (render it with modelPickerOptionText), a local model's text says whether
+ * it is installed, and ready models come first: within each group, and the
+ * groups that have a ready model before the ones that do not.
+ */
 export function pickerGroups(
   entries: readonly CatalogueItem[],
   known: readonly KnownModelFamily[] = KNOWN_MODEL_FAMILIES,
+  readinessOf?: ((entry: CatalogueItem) => ModelPickerReadiness | null | undefined) | null,
 ): PickerGroup[] {
   const tree = buildModelTree(entries, { known, includeKnown: false });
   const groups: PickerGroup[] = [];
@@ -1478,7 +1497,10 @@ export function pickerGroups(
         : maker.key === "maker-other"
           ? family.title
           : `${maker.title} · ${family.title}`;
-      const options = family.entries.map((entry) => ({ id: entry.id, label: pickerOptionLabel(entry, known) }));
+      const options: PickerOption[] = family.entries.map((entry) => {
+        const readiness = readinessOf ? readinessOf(entry) ?? null : undefined;
+        return { id: entry.id, label: pickerOptionLabel(entry, known, readiness), ...(readinessOf ? { readiness } : {}) };
+      });
       // Same text twice (same size, same way to run): add the name so they differ.
       const counts = new Map<string, number>();
       for (const option of options) counts.set(option.label, (counts.get(option.label) ?? 0) + 1);
@@ -1488,10 +1510,12 @@ export function pickerGroups(
           option.label = `${option.label} — ${entry.name}`;
         }
       }
-      groups.push({ key: family.key, label, options });
+      groups.push({ key: family.key, label, options: readinessOf ? sortByModelReadiness(options, (o) => o.readiness) : options });
     }
   }
-  return groups;
+  if (!readinessOf) return groups;
+  const bestRank = (group: PickerGroup) => Math.min(...group.options.map((o) => o.readiness?.rank ?? 1.5));
+  return sortByModelReadiness(groups, (group) => ({ rank: bestRank(group) }));
 }
 
 // ---------------------------------------------------------------- add dialog: model id choices and prefill
