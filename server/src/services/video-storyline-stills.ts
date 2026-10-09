@@ -3,16 +3,37 @@ import type { Db } from "@paperclipai/db";
 import { videoShots, withCompanyScope } from "@paperclipai/db";
 import {
   MEDIA_STUDIO_PLUGIN_KEY,
+  STILL_IMAGE_PROVIDER_COST_CENTS_PER_IMAGE,
   estimateStoryboardCostCents,
   type VideoShotStoryboardStatus,
   type VideoStorylineProvider,
   type VideoStoryboardShotSummary,
   type VideoStoryboardSummary,
+  readVideoStorylineCast,
+  videoShotCast,
 } from "@paperclipai/shared";
 import { conflict, unprocessable } from "../errors.js";
 import { getStorageService } from "../storage/index.js";
 import { logActivity } from "./activity-log.js";
-import { FalImageProvider, type ImageFetchImpl, type ImageGenerationProvider, type ImageGenerationResult } from "./image-provider-clients.js";
+import {
+  FalImageProvider,
+  SogniImageProvider,
+  sogniStorageFetch,
+  type ImageFetchImpl,
+  type ImageGenerationInput,
+  type ImageGenerationProvider,
+  type ImageGenerationResult,
+} from "./image-provider-clients.js";
+import {
+  loadStoryboardLooks,
+  resolveStoryboardPictureTarget,
+  sogniEditModelOrDefault,
+  sogniStepModel,
+  storyboardPrompt,
+  storyboardReferences,
+  type StoryboardPictureTarget,
+} from "./storyboard-picture-look.js";
+import { recordSogniCost, SOGNI_CREDIT_PRICE_CONFIG_KEY } from "./sogni-cost.js";
 import { pluginRegistryService } from "./plugin-registry.js";
 import { executePinnedHttpRequest, validateAndResolveFetchUrl } from "./safe-outbound-fetch.js";
 import { secretService } from "./secrets.js";
@@ -20,6 +41,19 @@ import { loadReferenceImages } from "./video-storyline-render.js";
 import { recordFalCostEvent } from "./fal-cost-events.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
 import { lockStorylineRow, videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
+import { mediaStudioKeyRef } from "./media-studio-company-keys.js";
+import { assemblePrompt, SHEET_FIELDS, type CharacterSheet } from "./media-studio-look-prompt.js";
+import {
+  castIdentityNames,
+  castPeople,
+  castPictureRefusal,
+  castPromptLine,
+  loadCastAgeRefusals,
+  loadLinkedCastIdentities,
+  planCastStill,
+  sheetWithCastIdentity,
+  type CastPerson,
+} from "./storyline-cast.js";
 
 /**
  * DUR-4317/DUR-4320 (backend half, storyboard-of-stills approval gate):
@@ -34,6 +68,14 @@ import { lockStorylineRow, videoStorylineService, type VideoStorylineActor } fro
  */
 
 type ShotRow = typeof videoShots.$inferSelect;
+
+/** The linked cast members in one shot (see storyline-cast.ts). */
+interface ShotCastPeople {
+  castIds: string[];
+  people: CastPerson[];
+  notes: string[];
+  pluginId?: string | null;
+}
 
 const IMAGE_FETCH_TIMEOUT_MS = 30_000;
 const IMAGE_MAX_BYTES = 15 * 1024 * 1024;
@@ -50,6 +92,13 @@ const safeImageFetch: ImageFetchImpl = async (url, init) => {
     clearTimeout(timeout);
   }
 };
+
+/** Sogni storage transfers: Sogni's storage hosts only, through the pinned fetch above, multipart encoded to bytes. */
+const sogniTransferFetch: ImageFetchImpl = sogniStorageFetch(safeImageFetch);
+
+const SERVICE_NAME: Record<VideoStorylineProvider, string> = { fal: "Fal.ai", sogni: "Sogni" };
+/** At most this many reference pictures go with one storyboard picture (the render's own limit). */
+const MAX_STILL_REFERENCES = 4;
 
 function toStoryboardShotSummary(row: ShotRow): VideoStoryboardShotSummary {
   return {
@@ -85,21 +134,59 @@ export function videoStorylineStillsService(db: Db) {
   const registry = pluginRegistryService(db);
   const secrets = secretService(db);
 
-  /**
-   * Storyboard pictures are always made with Fal.ai's image models, whatever
-   * provider renders the video -- a still is just a picture, and Sogni has
-   * no still path here. (Before, a Sogni storyline could never get a still,
-   * so it could never be approved, so it could never render.)
-   */
-  async function resolveImageProvider(companyId: string, actorId: string): Promise<{ provider: ImageGenerationProvider; apiKey: string }> {
-    const noKey = "Storyboard pictures are made with Fal.ai, and no Fal.ai API key is set up in Media Studio settings yet. Add one there, or approve this shot without a picture.";
+  async function mediaStudioConfig(): Promise<{ pluginId: string | null; cfg: Record<string, unknown> }> {
     const plugin = await registry.getByKey(MEDIA_STUDIO_PLUGIN_KEY);
-    if (!plugin) throw unprocessable(noKey);
+    if (!plugin) return { pluginId: null, cfg: {} };
     const config = await registry.getConfig(plugin.id);
-    const cfg = (config?.configJson ?? {}) as Record<string, unknown>;
-    const ref = typeof cfg.falKeySecretRef === "string" ? cfg.falKeySecretRef.trim() : "";
+    return { pluginId: plugin.id, cfg: (config?.configJson ?? {}) as Record<string, unknown> };
+  }
+
+  /** The secret id for one picture service: the company's own key (Media Studio's Settings tab), else the instance's, else "". */
+  async function keyRef(pluginId: string | null, companyId: string, cfg: Record<string, unknown>, providerId: VideoStorylineProvider): Promise<string> {
+    if (!pluginId) return "";
+    return mediaStudioKeyRef(db, pluginId, companyId, providerId === "fal" ? "fal" : "sogni", cfg);
+  }
+
+  /** Which picture services this company has a key for (the editor only offers those). */
+  async function pictureServices(companyId: string): Promise<{ fal: boolean; sogni: boolean }> {
+    const { pluginId, cfg } = await mediaStudioConfig();
+    const [fal, sogni] = await Promise.all([keyRef(pluginId, companyId, cfg, "fal"), keyRef(pluginId, companyId, cfg, "sogni")]);
+    return { fal: fal !== "", sogni: sogni !== "" };
+  }
+
+  /** What the shot's next storyboard picture is made with: the storyline's picture settings, the shot's own look, the company's looks. */
+  async function pictureTarget(
+    companyId: string,
+    storyline: { pictureSettings: Record<string, unknown> | null },
+    shot: Pick<ShotRow, "pictureLookId">,
+  ): Promise<{ target: StoryboardPictureTarget; pluginId: string | null; cfg: Record<string, unknown> }> {
+    const { pluginId, cfg } = await mediaStudioConfig();
+    const settingsJson = (storyline.pictureSettings ?? {}) as { providerId?: string | null; model?: string | null; lookId?: string | null };
+    const looks = settingsJson.lookId || shot.pictureLookId ? await loadStoryboardLooks(db, pluginId, companyId) : [];
+    return { target: resolveStoryboardPictureTarget(settingsJson, shot.pictureLookId, looks), pluginId, cfg };
+  }
+
+  /**
+   * The picture client for the chosen service, with the company's key for it
+   * (the company's own pick in Media Studio's Settings tab, else the
+   * instance's; resolved company-scoped, same as the video render). Fal.ai
+   * unless the storyline's picture settings or its look pick Sogni.
+   */
+  async function resolveImageProvider(
+    companyId: string,
+    actorId: string,
+    target: StoryboardPictureTarget,
+    cfg: Record<string, unknown>,
+    pluginId: string | null,
+  ): Promise<{ provider: ImageGenerationProvider; apiKey: string }> {
+    const name = SERVICE_NAME[target.providerId];
+    const noKey = `Storyboard pictures for this storyline are made with ${name}, and no ${name} API key is set for this company yet. The company's owner or an admin can pick one in Media Studio's Settings tab. Or pick another picture service in step 2, or approve this shot without a picture.`;
+    const ref = await keyRef(pluginId, companyId, cfg, target.providerId);
     if (!ref) throw unprocessable(noKey);
     const apiKey = await secrets.resolveSecretValueForVideoRender(companyId, ref, { actorId });
+    if (target.providerId === "sogni") {
+      return { provider: new SogniImageProvider({ apiKey, apiFetch: safeImageFetch, transferFetch: sogniTransferFetch }), apiKey };
+    }
     return { provider: new FalImageProvider(apiKey, safeImageFetch), apiKey };
   }
 
@@ -111,9 +198,17 @@ export function videoStorylineStillsService(db: Db) {
       throw conflict("This shot is currently rendering. Wait for it to finish before regenerating its still.");
     }
 
-    // Stills are always a Fal image call (see resolveImageProvider), so they are priced as one.
-    const estimate = estimateStoryboardCostCents([{ storyboardStatus: shot.storyboardStatus as VideoShotStoryboardStatus }], "fal");
-    const { provider, apiKey } = await resolveImageProvider(companyId, actor.agentId ?? actor.actorId);
+    // Priced as one picture on the service that makes it (see pictureTarget).
+    const { target, pluginId, cfg } = await pictureTarget(companyId, storyline, shot);
+    if (target.lookId && !target.look) {
+      throw unprocessable(
+        "The look picked for this shot's picture no longer exists (it was deleted on the Looks tab). Pick another look, or none, in step 2's picture settings.",
+      );
+    }
+    const estimate = estimateStoryboardCostCents([{ storyboardStatus: shot.storyboardStatus as VideoShotStoryboardStatus }], target.providerId);
+    const { provider, apiKey } = await resolveImageProvider(companyId, actor.agentId ?? actor.actorId, target, cfg, pluginId);
+    // Who is in this shot, and the saved people (identities) they are linked to.
+    const cast = await shotCastPeople(companyId, pluginId, storyline, shot);
 
     // Security review (replace-import TOCTOU): under the storyline row lock a
     // "replace" import also takes, re-check the shot is still there and
@@ -131,7 +226,7 @@ export function videoStorylineStillsService(db: Db) {
       return current.stillEstimatedCostCents;
     });
     try {
-      return await finishStill(companyId, storyline, shot, actor, provider, apiKey, estimate.estimatedTotalCents);
+      return await finishStill(companyId, storyline, shot, actor, provider, apiKey, estimate.estimatedTotalCents, target, cfg, cast);
     } catch (err) {
       await db.update(videoShots).set({ stillEstimatedCostCents: previousStillEstimate }).where(eq(videoShots.id, shotId));
       throw err;
@@ -146,34 +241,88 @@ export function videoStorylineStillsService(db: Db) {
     provider: ImageGenerationProvider,
     apiKey: string,
     estimateCents: number,
+    target: StoryboardPictureTarget,
+    cfg: Record<string, unknown>,
+    cast: ShotCastPeople,
+  ): Promise<VideoStoryboardShotSummary> {
+    const look = target.look;
+    if (cast.people.length > 0) {
+      return finishCastStill(companyId, storyline, shot, actor, provider, apiKey, estimateCents, target, cfg, cast);
+    }
+    // The look's own pictures first (with their roles), then the shot's and the storyline's character pictures.
+    const refs = storyboardReferences(look, shot.lookReferenceAssetIds, storyline.characterReferenceAssetIds, MAX_STILL_REFERENCES);
+    const referenceImages = await loadReferenceImages(db, companyId, refs.ids);
+    // A picture that could not be read is skipped; then the numbering would be off, so roles are only described when all arrived.
+    const roles = referenceImages.length === refs.ids.length ? refs.roles : [];
+    const input: ImageGenerationInput = {
+      prompt: storyboardPrompt(shot.prompt, look, referenceImages.length > 0 ? roles : [], target.providerId),
+      referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
+    };
+    if (target.providerId === "sogni") {
+      input.model = referenceImages.length > 0 ? sogniEditModelOrDefault(target.model) : target.model ? sogniStepModel(target.model, "generate_image") : undefined;
+      if (look) {
+        if (look.loras.length > 0) input.loras = look.loras;
+        if (look.seed !== null) input.seed = look.seed;
+        if (look.guidance !== null) input.guidance = look.guidance;
+        if (look.negativePrompt) input.negativePrompt = look.negativePrompt;
+        input.safeContentFilter = look.safeContentFilter;
+      }
+    } else if (target.model && referenceImages.length === 0) {
+      // With reference pictures Fal always uses FLUX Kontext (multi), which is what carries faces over.
+      input.model = target.model;
+    }
+
+    return makeAndStoreStill(companyId, storyline, shot, actor, provider, apiKey, estimateCents, target, cfg, input, { castIds: [], notes: cast.notes });
+  }
+
+  /** Makes the picture, records its cost, stores it and marks the shot's picture as waiting for review. */
+  async function makeAndStoreStill(
+    companyId: string,
+    storyline: Awaited<ReturnType<typeof storylines.getStorylineRow>>,
+    shot: ShotRow,
+    actor: VideoStorylineActor,
+    provider: ImageGenerationProvider,
+    apiKey: string,
+    estimateCents: number,
+    target: StoryboardPictureTarget,
+    cfg: Record<string, unknown>,
+    input: ImageGenerationInput,
+    castInfo: { castIds: string[]; notes: string[] },
   ): Promise<VideoStoryboardShotSummary> {
     const shotId = shot.id;
     const estimate = { estimatedTotalCents: estimateCents };
-    const referenceAssetIds = [...shot.lookReferenceAssetIds, ...storyline.characterReferenceAssetIds];
-    const referenceImages = await loadReferenceImages(db, companyId, referenceAssetIds);
-
+    const look = target.look;
     let imageResult: ImageGenerationResult;
     try {
-      imageResult = await provider.generate({
-        prompt: shot.prompt,
-        referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
-      });
+      imageResult = await provider.generate(input);
     } catch (err) {
       throw unprocessable(`Still generation failed: ${err instanceof Error ? err.message : String(err)}`);
     }
     const { buffer, contentType } = await downloadImageBytes(imageResult);
 
-    // DUR-4455: the still is a paid Fal call -- record its actual cost as a cost event (agent-made pictures were uncounted before).
-    await recordFalCostEvent(db, safeImageFetch, {
-      companyId,
-      apiKey,
-      agentId: actor.agentId,
-      createdByUserId: actor.agentId ? null : actor.actorId,
-      model: imageResult.model,
-      usage: { images: 1, ...(imageResult.megapixels != null ? { megapixels: imageResult.megapixels } : {}) },
-      estimateCents: estimate.estimatedTotalCents,
-      billingCode: "video-storyline-still",
-    });
+    if (target.providerId === "sogni") {
+      // Sogni reports credits; converted with the instance's credit price, once per shot picture.
+      await recordSogniCost(db, {
+        companyId,
+        agentId: actor.agentId,
+        credits: imageResult.sogniCredits ?? null,
+        creditPriceUsd: cfg[SOGNI_CREDIT_PRICE_CONFIG_KEY],
+        model: imageResult.model,
+        billingCode: "video-storyline-still",
+      }).catch(() => undefined);
+    } else {
+      // DUR-4455: the still is a paid Fal call -- record its actual cost as a cost event (agent-made pictures were uncounted before).
+      await recordFalCostEvent(db, safeImageFetch, {
+        companyId,
+        apiKey,
+        agentId: actor.agentId,
+        createdByUserId: actor.agentId ? null : actor.actorId,
+        model: imageResult.model,
+        usage: { images: 1, ...(imageResult.megapixels != null ? { megapixels: imageResult.megapixels } : {}) },
+        estimateCents: estimate.estimatedTotalCents,
+        billingCode: "video-storyline-still",
+      });
+    }
 
     const stored = await getStorageService().putFile({
       companyId,
@@ -212,9 +361,119 @@ export function videoStorylineStillsService(db: Db) {
       action: "video_shot.still_generated",
       entityType: "video_shot",
       entityId: shotId,
-      details: { orderIndex: shot.orderIndex, costCents: estimate.estimatedTotalCents },
+      details: {
+        orderIndex: shot.orderIndex,
+        costCents: estimate.estimatedTotalCents,
+        provider: target.providerId,
+        model: imageResult.model,
+        lookId: look?.id ?? null,
+        ...(castInfo.castIds.length > 0 ? { castIds: castInfo.castIds } : {}),
+      },
     });
-    return toStoryboardShotSummary(row);
+    return castInfo.notes.length > 0 ? { ...toStoryboardShotSummary(row), notes: castInfo.notes } : toStoryboardShotSummary(row);
+  }
+
+  /** The shot's cast and the saved people they are linked to (company-scoped). */
+  async function shotCastPeople(
+    companyId: string,
+    pluginId: string | null,
+    storyline: { pictureSettings: Record<string, unknown> | null },
+    shot: Pick<ShotRow, "id" | "prompt" | "cameraNotes">,
+  ): Promise<ShotCastPeople> {
+    const cast = readVideoStorylineCast(storyline.pictureSettings);
+    if (cast.members.length === 0) return { castIds: [], people: [], notes: [] };
+    const identities = await loadLinkedCastIdentities(db, pluginId, companyId, cast.members);
+    const { castIds } = videoShotCast(shot, cast, castIdentityNames(identities));
+    const { people, notes } = castPeople(castIds, cast.members, identities);
+    return { castIds, people, notes, pluginId };
+  }
+
+  /**
+   * A storyboard picture of a shot with linked cast members: each person's
+   * face crop first, then body crops and the look's pictures within the
+   * model's slots, the identity-lock wording with each person named, the
+   * identity's preferred editing model, and (Sogni, under the plugin's own
+   * rules) the identity's LoRA. Pictures the age check refused are never sent.
+   */
+  async function finishCastStill(
+    companyId: string,
+    storyline: Awaited<ReturnType<typeof storylines.getStorylineRow>>,
+    shot: ShotRow,
+    actor: VideoStorylineActor,
+    provider: ImageGenerationProvider,
+    apiKey: string,
+    estimateCents: number,
+    target: StoryboardPictureTarget,
+    cfg: Record<string, unknown>,
+    cast: ShotCastPeople,
+  ): Promise<VideoStoryboardShotSummary> {
+    const look = target.look;
+    const plan = planCastStill({
+      people: cast.people,
+      service: target.providerId,
+      pickedModel: target.model,
+      lookIds: look?.referenceFileIds ?? [],
+      lookRoles: look?.referenceRoles ?? [],
+      extraIds: [...shot.lookReferenceAssetIds, ...storyline.characterReferenceAssetIds],
+      cap: MAX_STILL_REFERENCES,
+      safeContentFilter: look ? look.safeContentFilter : true,
+    });
+    const notes = [...cast.notes, ...plan.notes];
+    // One at a time so each picture keeps its place (and its person).
+    const loaded: Array<{ id: string; dataUri: string | null; owner: string | null; role: (typeof plan.roles)[number] }> = [];
+    for (const [i, id] of plan.ids.entries()) {
+      const [dataUri] = await loadReferenceImages(db, companyId, [id]);
+      loaded.push({ id, dataUri: dataUri ?? null, owner: plan.owners[i] ?? null, role: plan.roles[i]! });
+    }
+    const refusal = castPictureRefusal(
+      loaded.filter((p) => p.owner).map((p) => ({ fileId: p.id, dataUri: p.dataUri, personName: p.owner! })),
+      await loadCastAgeRefusals(db, cast.pluginId ?? null, companyId),
+    );
+    if (refusal) throw unprocessable(refusal);
+    const missing = loaded.filter((p) => !p.dataUri);
+    if (missing.some((p) => p.owner && p.role === "face")) {
+      const names = Array.from(new Set(missing.filter((p) => p.owner && p.role === "face").map((p) => p.owner!)));
+      throw unprocessable(`${names.join(" and ")}'s face picture could not be read from the company's Files, so the picture was not made. Check the saved person on Media Studio's Identities tab.`);
+    }
+    const sent = loaded.filter((p) => p.dataUri);
+    if (missing.length > 0) notes.push(`${missing.length} reference ${missing.length === 1 ? "picture" : "pictures"} could not be read and ${missing.length === 1 ? "was" : "were"} left out.`);
+    const roles = sent.map((p) => p.role);
+    const castLine = castPromptLine({ roles, owners: sent.map((p) => p.owner) }, target.providerId);
+
+    // One person: their locked description over the look's. More than one: only the look's setting and style (its character lines describe one person).
+    const people = cast.people.filter((p) => sent.some((x) => x.owner === p.member.name));
+    let sheet: CharacterSheet | undefined = look?.sheet;
+    if (people.length === 1) sheet = sheetWithCastIdentity(look?.sheet, people[0]!.identity);
+    else if (people.length > 1 && look) {
+      sheet = Object.fromEntries(
+        SHEET_FIELDS.filter((f) => f.group !== "character" && look.sheet[f.key]).map((f) => [f.key, look.sheet[f.key]]),
+      ) as CharacterSheet;
+    }
+    let prompt = assemblePrompt({
+      request: castLine ? `${shot.prompt}\n\n${castLine}` : shot.prompt,
+      style: look?.style,
+      sheet,
+      roles,
+      service: target.providerId,
+    }).prompt;
+
+    const input: ImageGenerationInput = { prompt, referenceImages: sent.map((p) => p.dataUri!), model: plan.model };
+    if (target.providerId === "sogni") {
+      const loras = [...(look?.loras ?? [])];
+      if (plan.lora && !loras.some((l) => l.id === plan.lora!.id) && loras.length < 8) {
+        loras.push({ id: plan.lora.id, strength: plan.lora.strength });
+        if (plan.lora.triggerWord && !prompt.includes(plan.lora.triggerWord)) prompt = `${plan.lora.triggerWord}, ${prompt}`;
+        input.prompt = prompt;
+        notes.push(`${people[0]?.member.name ?? "The person"}'s own LoRA was used to keep them the same.`);
+      }
+      if (loras.length > 0) input.loras = loras;
+      if (look) {
+        if (look.guidance !== null) input.guidance = look.guidance;
+        if (look.negativePrompt) input.negativePrompt = look.negativePrompt;
+        input.safeContentFilter = look.safeContentFilter;
+      }
+    }
+    return makeAndStoreStill(companyId, storyline, shot, actor, provider, apiKey, estimateCents, target, cfg, input, { castIds: people.map((p) => p.member.id), notes });
   }
 
   async function approveShot(
@@ -288,6 +547,7 @@ export function videoStorylineStillsService(db: Db) {
     const stillTotalCents = nonDropped.reduce((sum, s) => sum + (s.stillActualCostCents ?? s.stillEstimatedCostCents ?? 0), 0);
     const allApproved = nonDropped.length > 0 && nonDropped.every((s) => s.storyboardStatus === "approved");
     const approvalThresholdCents = await settings.getApprovalThresholdCents(companyId);
+    const { target } = await pictureTarget(companyId, storyline, { pictureLookId: null });
     return {
       storylineId,
       providerId,
@@ -297,6 +557,13 @@ export function videoStorylineStillsService(db: Db) {
       videoEstimatedTotalCents: storyline.estimatedTotalCents,
       videoSpentCents: storyline.spentCents,
       approvalThresholdCents,
+      pictureServices: await pictureServices(companyId),
+      picture: {
+        providerId: target.providerId,
+        model: target.model,
+        lookId: target.lookId,
+        costPerPictureCents: STILL_IMAGE_PROVIDER_COST_CENTS_PER_IMAGE[target.providerId],
+      },
     };
   }
 

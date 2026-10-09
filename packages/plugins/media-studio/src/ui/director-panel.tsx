@@ -107,10 +107,14 @@ const inputStyle: React.CSSProperties = { padding: 8, borderRadius: 8, border: "
 const baseBtn: React.CSSProperties = { padding: "6px 12px", borderRadius: 8, border: "1px solid transparent", cursor: "pointer", fontSize: 12, fontWeight: 600 };
 const primaryBtn: React.CSSProperties = { ...baseBtn, background: "#1971c2", color: "#fff" };
 const secondaryBtn: React.CSSProperties = { ...baseBtn, background: "#e7f5ff", color: "#1971c2", borderColor: "#a5d8ff" };
-const approveBtn: React.CSSProperties = { ...baseBtn, background: "#087f5b", color: "#fff" };
 const ghostBtn: React.CSSProperties = { ...baseBtn, background: "transparent", color: "#495057", borderColor: "#ced4da" };
 const errorBox: React.CSSProperties = { background: "#fff0f6", color: "#a61e4d", padding: "8px 10px", borderRadius: 8, fontSize: 12 };
 const muted: React.CSSProperties = { fontSize: 12, color: "#868e96", margin: 0 };
+// AI suggestions are purple on purpose: picture approval (step 2) is green, so
+// accepting a suggestion never looks like approving a picture.
+const suggestionBadge: React.CSSProperties = { padding: "2px 8px", borderRadius: 10, fontSize: 11, fontWeight: 700, color: "#5f3dc4", background: "#f3f0ff", border: "1px solid #d0bfff" };
+const suggestionBtn: React.CSSProperties = { ...baseBtn, background: "#7048e8", color: "#fff" };
+const suggestionCard: React.CSSProperties = { border: "1px solid #d0bfff", background: "rgba(243,240,255,0.35)", borderRadius: 8, padding: 10, display: "flex", flexDirection: "column", gap: 8 };
 
 export function directorStatusLabel(status: DirectorConversation["status"]): string {
   switch (status) {
@@ -312,7 +316,7 @@ interface EditDraft {
 function SideBySide(props: { label: string; before: string; after: string }) {
   const changed = props.before !== props.after;
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "110px 1fr 1fr", gap: 8, fontSize: 12, alignItems: "start" }}>
+    <div style={{ display: "grid", gridTemplateColumns: "minmax(70px, 110px) 1fr 1fr", gap: 8, fontSize: 12, alignItems: "start", overflowWrap: "anywhere" }}>
       <div style={{ color: "#868e96" }}>{props.label}</div>
       <div>{props.before || <span style={{ color: "#868e96" }}>None</span>}</div>
       <div style={changed ? { background: "#ebfbee", borderRadius: 6, padding: "0 4px" } : undefined}>{props.after || <span style={{ color: "#868e96" }}>None</span>}</div>
@@ -344,10 +348,13 @@ export function ProposalCard(props: {
   const [draft, setDraft] = useState<EditDraft>(proposed);
 
   return (
-    <div style={{ border: "1px solid rgba(128,128,128,0.25)", borderRadius: 8, padding: 10, display: "flex", flexDirection: "column", gap: 8 }} data-testid={`proposal-${shot.id}`}>
-      <strong style={{ fontSize: 12 }}>{label}</strong>
+    <div style={suggestionCard} data-testid={`proposal-${shot.id}`}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <span style={suggestionBadge}>AI suggestion</span>
+        <strong style={{ fontSize: 12 }}>{label}</strong>
+      </div>
       {rationale && <p style={muted}>{rationale}</p>}
-      <div style={{ display: "grid", gridTemplateColumns: "110px 1fr 1fr", gap: 8, fontSize: 11, fontWeight: 600 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(70px, 110px) 1fr 1fr", gap: 8, fontSize: 11, fontWeight: 600 }}>
         <div />
         <div>What you wrote</div>
         <div>What the director suggests</div>
@@ -396,7 +403,7 @@ export function ProposalCard(props: {
           <div style={{ display: "flex", gap: 8 }}>
             <button
               type="button"
-              style={approveBtn}
+              style={suggestionBtn}
               disabled={busy || !draft.prompt.trim()}
               onClick={() =>
                 props.onEdit({
@@ -413,20 +420,23 @@ export function ProposalCard(props: {
           </div>
         </div>
       ) : (
-        <div style={{ display: "flex", gap: 8 }}>
-          <button type="button" style={approveBtn} disabled={busy} onClick={props.onAccept}>Accept</button>
-          <button
-            type="button"
-            style={secondaryBtn}
-            disabled={busy}
-            onClick={() => {
-              setDraft(proposed);
-              setEditing(true);
-            }}
-          >
-            Edit
-          </button>
-          <button type="button" style={ghostBtn} disabled={busy} onClick={props.onReject}>Keep mine</button>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button type="button" style={suggestionBtn} disabled={busy} onClick={props.onAccept}>Accept suggestion</button>
+            <button
+              type="button"
+              style={secondaryBtn}
+              disabled={busy}
+              onClick={() => {
+                setDraft(proposed);
+                setEditing(true);
+              }}
+            >
+              Edit suggestion
+            </button>
+            <button type="button" style={ghostBtn} disabled={busy} onClick={props.onReject}>Reject (keep mine)</button>
+          </div>
+          <p style={{ ...muted, fontSize: 11 }}>Accepting only changes this shot's written description. Its picture is checked separately in step 2.</p>
         </div>
       )}
     </div>
@@ -531,9 +541,9 @@ export function AiDirectorSection(props: {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }} data-testid="director-section">
       <div style={card}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-          <div>
-            <strong style={{ fontSize: 13 }}>AI director</strong>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <div style={{ flex: "1 1 220px" }}>
+            <strong style={{ fontSize: 13 }}>AI director (optional)</strong>
             <p style={muted}>
               The director reads your whole storyline, asks a few questions, and suggests clearer shot descriptions. Nothing changes until you accept it.
             </p>
@@ -551,11 +561,14 @@ export function AiDirectorSection(props: {
       {questions.length > 0 && <DirectorChatPanel key={questions.map((q) => q.id).join(",")} questions={questions} labelFor={labelFor} busy={busy} onSubmit={(b) => void sendAnswers(b)} />}
 
       {pending.length > 0 && (
-        <div style={card} data-testid="director-proposals">
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <strong style={{ fontSize: 13 }}>Suggested improvements ({pending.length})</strong>
-            <button type="button" style={approveBtn} disabled={busy || !editable} onClick={() => void acceptAll()}>
-              Accept all
+        <div style={{ ...card, borderColor: "#d0bfff" }} data-testid="director-proposals">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span style={suggestionBadge}>AI suggestions</span>
+              <strong style={{ fontSize: 13 }}>{pending.length} waiting for you</strong>
+            </div>
+            <button type="button" style={suggestionBtn} disabled={busy || !editable} onClick={() => void acceptAll()}>
+              Accept all suggestions
             </button>
           </div>
           {pending.map((shot) => (
@@ -594,7 +607,7 @@ export function AiDirectorSection(props: {
       {conversation?.status === "done" && pending.length === 0 && (
         <div style={card} data-testid="director-done">
           <strong style={{ fontSize: 13 }}>All done with the director</strong>
-          <p style={muted}>Your shots are up to date. Next, check the cost estimate, then start the render.</p>
+          <p style={muted}>Your shot descriptions are up to date. Next, make and approve a picture for each shot (step 2).</p>
         </div>
       )}
     </div>

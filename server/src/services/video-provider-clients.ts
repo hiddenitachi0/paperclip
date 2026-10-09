@@ -32,6 +32,13 @@ export interface MediaJobInput {
   startImage?: string;
   /** Additional character/Look reference pictures (data: URIs); see media-jobs-types.ts's doc comment -- neither provider consumes this today. */
   referenceImages?: string[];
+  /**
+   * The storyline's cast in this shot: per person, their pictures (face crop
+   * first). Their pictures are also at the front of referenceImages; a
+   * provider that can tell people apart (Fal's Kling v3: one "element" per
+   * person) uses this instead.
+   */
+  characters?: Array<{ name: string; images: string[] }>;
   seed?: number;
   durationSeconds?: number;
   aspectRatio?: string;
@@ -170,6 +177,33 @@ function buildFalElement(referenceImages: readonly string[]): { frontal_image_ur
   return { frontal_image_url: frontal!, reference_image_urls: rest.length > 0 ? rest.slice(0, 3) : [frontal!] };
 }
 
+/** At most this many elements go with one Kling v3 call (one per cast member, then one for the other pictures). */
+export const FAL_MAX_ELEMENTS = 3;
+
+/**
+ * The Kling v3 elements for a shot: one per cast member (their face crop as
+ * the frontal picture, their other pictures as extra angles), then -- when
+ * there is room -- one for the remaining character/look pictures. Without a
+ * cast: one element from all reference pictures, as before.
+ */
+export function buildFalElements(input: Pick<MediaJobInput, "characters" | "referenceImages">): Array<{ frontal_image_url: string; reference_image_urls: string[] }> {
+  const characters = (input.characters ?? []).filter((c) => c.images.length > 0);
+  if (characters.length === 0) {
+    const single = buildFalElement(input.referenceImages ?? []);
+    return single ? [single] : [];
+  }
+  const elements = characters.slice(0, FAL_MAX_ELEMENTS).map((c) => buildFalElement(c.images)!);
+  const castPictures = new Set(characters.flatMap((c) => c.images));
+  const rest = (input.referenceImages ?? []).filter((img) => !castPictures.has(img));
+  if (rest.length > 0 && elements.length < FAL_MAX_ELEMENTS) elements.push(buildFalElement(rest)!);
+  return elements;
+}
+
+/** A pinned Fal model that takes Kling v3's start frame + elements (the image-to-video endpoints of Kling v3). */
+export function falVideoModelTakesElements(model: string | null | undefined): boolean {
+  return !!model && /^fal-ai\/kling-video\/v3\/[a-z0-9._-]+\/image-to-video$/i.test(model.trim());
+}
+
 export class FalVideoProvider implements MediaJobProvider {
   readonly name = "fal";
   constructor(
@@ -181,11 +215,12 @@ export class FalVideoProvider implements MediaJobProvider {
   ) {}
 
   async start(input: MediaJobInput): Promise<MediaJobHandle> {
-    const element = buildFalElement(input.referenceImages ?? []);
+    const elements = buildFalElements(input);
     // Only switch to the combined model when the caller did not pin an exact
     // model themselves -- an explicit input.model always wins, same as the
-    // other two defaults below.
-    const useCombined = !input.model && element !== null;
+    // other two defaults below. A pinned Kling v3 image-to-video model gets
+    // the same start frame + elements shape.
+    const useCombined = elements.length > 0 && (!input.model || falVideoModelTakesElements(input.model));
     const model = input.model ?? (useCombined ? this.defaultCombinedModel : input.startImage ? this.defaultImageToVideoModel : this.defaultModel);
     const body: Record<string, unknown> = { prompt: input.prompt };
     if (useCombined) {
@@ -193,8 +228,8 @@ export class FalVideoProvider implements MediaJobProvider {
       // continuity frame yet (the storyline's first shot), fall back to the
       // character's own frontal picture so likeness still drives the model
       // rather than silently losing it to a bare text-to-video call.
-      body.start_image_url = input.startImage ?? element!.frontal_image_url;
-      body.elements = [element];
+      body.start_image_url = input.startImage ?? elements[0]!.frontal_image_url;
+      body.elements = elements;
     } else if (input.startImage) {
       body.image_url = input.startImage;
     }
@@ -214,26 +249,110 @@ export class FalVideoProvider implements MediaJobProvider {
   }
 }
 
-// ─── Sogni video (assumption — see the DUR-4062/DUR-4127 PRs' "Questions for Filip") ──
+// ─── Sogni video ───────────────────────────────────────────────────────────
 //
-// Sogni's documented API is the creative-agent workflow contract: start a
-// one-step workflow (POST /v1/creative-agent/workflows), poll it, download
-// the artifact from Sogni's presigned storage. No video tool name is
-// confirmed in this codebase or its vendored docs comments. This class
-// assumes Sogni exposes video the same way, under a "generate_video" step
-// whose arguments take a `prompt` and `model`, and that image-to-video /
-// continue-from-last-frame is the same media_references upload edit_image
-// already uses, with the frame at sourceImageIndex -1.
+// Sogni's creative-agent workflow API: start a one-step workflow (POST
+// /v1/creative-agent/workflows), poll it, download the artifact from Sogni's
+// storage. The step shapes below follow Sogni's published tool schemas
+// (@sogni-ai/sogni-intelligence-client 4.11.0, schema version 2026-07-18.1):
 //
-// DUR-4196: the same face-drift fix as FalVideoProvider, under the same
-// "unconfirmed, flagged for Filip" banner -- Sogni's own docs describe a
-// reference-to-video mode taking 1-9 reference images tagged [Image 1]..
-// [Image 9] in the prompt, separate from start/end frame control. This class
-// now uploads the continuity frame (if any) AND every character reference
-// picture as media_references, rather than only the continuity frame.
-// sourceImageIndex still marks which uploaded image is the continuity frame;
-// the rest ride along as plain context pictures the same way edit_image's
-// other reference pictures already do.
+//   generate_video  {prompt, duration, videoModel?, referenceImageIndices?}
+//     text-to-video; Seedance / MiniMax H3 r2v / HappyHorse r2v / Wan 3 also
+//     take loose reference pictures by upload index (-1 = first upload).
+//   animate_photo   {prompt, duration, videoModel?, sourceImageIndex}
+//     image-to-video: the uploaded picture is the START frame (LTX, WAN 2.2,
+//     MiniMax H3 i2v, HappyHorse i2v, Wan 3; not Seedance).
+//
+// Both schemas have additionalProperties: false, so only those names are
+// sent (no `model`, `seed` or `durationSeconds`). `videoModel` takes Sogni's
+// tool keys ("ltx25", "seedance2-mini", "minimax-h3-i2v-turbo"); a catalogue
+// id from the video model picker is mapped to its key by sogniVideoModelKey
+// (the SDK's utils/videoModelIds.js and seedanceModelIds.js aliases).
+//
+// NOT verified against a live call: the artifact shape of a finished video
+// (steps[0].artifacts[0].url), and whether the server accepts catalogue ids
+// it does not list in the enum (an unknown/custom id is sent unchanged).
+
+export type SogniVideoTool = "generate_video" | "animate_photo";
+
+/** Tool keys per published schema (videoModel enums). */
+const GENERATE_VIDEO_KEYS = new Set([
+  "ltx25", "ltx23", "wan22", "seedance2", "seedance2-mini", "seedance2-5", "seedance2-5-uncensored",
+  "minimax-h3-t2v", "minimax-h3-t2v-turbo", "minimax-h3-fasth3-t2v-turbo", "minimax-h3-fasth3-t2v-turbo-2stage",
+  "happyhorse-1.1-t2v", "happyhorse-1.1-i2v", "happyhorse-1.1-r2v",
+  "minimax-h3-r2v", "minimax-h3-r2v-turbo", "minimax-h3-r2v-2stage", "minimax-h3-r2v-balanced-2stage",
+  "wan3.0-video", "wan3.0-spicy-video",
+]);
+const ANIMATE_PHOTO_KEYS = new Set([
+  "ltx25", "ltx23", "wan22", "happyhorse-1.1-i2v", "happyhorse-1.1-r2v",
+  "minimax-h3-i2v", "minimax-h3-i2v-turbo", "minimax-h3-fasth3-i2v-turbo", "minimax-h3-fasth3-i2v-turbo-2stage",
+  "minimax-h3-flf2v", "minimax-h3-flf2v-turbo", "minimax-h3-fasth3-flf2v-turbo", "minimax-h3-fasth3-flf2v-turbo-2stage",
+  "wan3.0-video", "wan3.0-spicy-video",
+]);
+/** Models whose generate_video takes loose reference pictures (referenceImageIndices). */
+const LOOSE_REFERENCE_KEYS = new Set([
+  "seedance2", "seedance2-mini", "seedance2-5", "seedance2-5-uncensored",
+  "minimax-h3-r2v", "minimax-h3-r2v-turbo", "minimax-h3-r2v-2stage", "minimax-h3-r2v-balanced-2stage",
+  "happyhorse-1.1-r2v", "wan3.0-video", "wan3.0-spicy-video",
+]);
+const SEEDANCE_KEYS: Record<string, string> = {
+  "seedance-2-0": "seedance2",
+  "seedance-2-0-fast": "seedance2-mini",
+  "seedance-2-0-mini": "seedance2-mini",
+  "seedance-2-5": "seedance2-5",
+  "seedance-2-5-uncensored": "seedance2-5-uncensored",
+};
+
+/**
+ * The videoModel key for a model name (a tool key, or a catalogue id from the
+ * picker) and the job: with a start picture the image-to-video variant,
+ * without one the text-to-video variant. null = Sogni's default; an unknown
+ * name is returned unchanged.
+ */
+export function sogniVideoModelKey(model: string | null | undefined, withStartImage: boolean): string | null {
+  const raw = model?.trim();
+  if (!raw) return null;
+  const id = raw.toLowerCase();
+  if (SEEDANCE_KEYS[id]) return SEEDANCE_KEYS[id]!;
+  if (id.startsWith("seedance")) return id;
+  if (/^ltx-?2\.?5|^ltx25/.test(id)) return "ltx25";
+  if (/^ltx-?2\.?3|^ltx23|10eros/.test(id)) return "ltx23";
+  if (/^wan_v2\.2|^wan-?2\.?2|^wan22/.test(id)) return "wan22";
+  if (/^wan3/.test(id)) return id.includes("spicy") ? "wan3.0-spicy-video" : "wan3.0-video";
+  if (id.startsWith("happyhorse-1.1")) {
+    if (id.endsWith("r2v")) return "happyhorse-1.1-r2v";
+    return withStartImage ? "happyhorse-1.1-i2v" : "happyhorse-1.1-t2v";
+  }
+  if (id.startsWith("minimax-h3")) {
+    const twoStage = id.includes("2stage");
+    if (id.includes("r2v")) {
+      if (twoStage) return id.includes("balanced") ? "minimax-h3-r2v-balanced-2stage" : "minimax-h3-r2v-2stage";
+      return id.includes("turbo") ? "minimax-h3-r2v-turbo" : "minimax-h3-r2v";
+    }
+    const flf = id.includes("flf2v");
+    const workflow = withStartImage ? (flf ? "flf2v" : "i2v") : "t2v";
+    if (id.includes("fastvideo") || id.includes("fasth3")) return `minimax-h3-fasth3-${workflow}-turbo${twoStage ? "-2stage" : ""}`;
+    return `minimax-h3-${workflow}${id.includes("turbo") ? "-turbo" : ""}`;
+  }
+  return raw;
+}
+
+/** Which tool a shot uses, and whether its pictures go along as a start frame or as loose references. */
+export function sogniVideoStep(model: string | null | undefined, hasStartImage: boolean): { tool: SogniVideoTool; videoModel: string | null; pictures: "start" | "references" | "none" } {
+  const startKey = sogniVideoModelKey(model, true);
+  // Image-to-video when there is a start frame and the model can take one (Seedance and r2v models use loose references instead).
+  if (hasStartImage && (startKey === null || ANIMATE_PHOTO_KEYS.has(startKey)) && !(startKey && startKey.endsWith("r2v"))) {
+    return { tool: "animate_photo", videoModel: startKey, pictures: "start" };
+  }
+  const key = sogniVideoModelKey(model, false);
+  const known = key === null || GENERATE_VIDEO_KEYS.has(key);
+  const loose = key !== null && LOOSE_REFERENCE_KEYS.has(key);
+  if (hasStartImage && !known && startKey !== null) {
+    // A custom id we cannot classify: send the start frame the image-to-video way.
+    return { tool: "animate_photo", videoModel: startKey, pictures: "start" };
+  }
+  return { tool: "generate_video", videoModel: key, pictures: loose ? "references" : "none" };
+}
 
 const SOGNI_API_BASE = "https://api.sogni.ai";
 
@@ -259,27 +378,27 @@ export class SogniVideoProvider implements MediaJobProvider {
   }
 
   async start(input: MediaJobInput): Promise<MediaJobHandle> {
-    const model = input.model ?? this.options.defaultModel ?? "sogni-video";
+    const requested = input.model ?? this.options.defaultModel ?? null;
+    const plan = sogniVideoStep(requested, Boolean(input.startImage));
     const mediaReferences: Array<{ kind: "image"; url: string }> = [];
-    let sourceImageIndex: number | undefined;
-    if (input.startImage) {
-      mediaReferences.push({ kind: "image", url: await this.uploadReferenceImage(input.startImage) });
-      sourceImageIndex = mediaReferences.length - 1;
-    }
-    for (const reference of (input.referenceImages ?? []).slice(0, 3)) {
-      mediaReferences.push({ kind: "image", url: await this.uploadReferenceImage(reference) });
-    }
-    const step: Json = {
-      id: "video",
-      toolName: "generate_video",
-      arguments: {
-        prompt: input.prompt,
-        model,
-        ...(sourceImageIndex !== undefined ? { sourceImageIndex } : {}),
-        ...(typeof input.seed === "number" ? { seed: input.seed } : {}),
-        ...(typeof input.durationSeconds === "number" ? { durationSeconds: input.durationSeconds } : {}),
-      },
+    const args: Json = {
+      prompt: input.prompt,
+      ...(typeof input.durationSeconds === "number" ? { duration: input.durationSeconds } : {}),
+      ...(plan.videoModel ? { videoModel: plan.videoModel } : {}),
     };
+    if (plan.pictures === "start" && input.startImage) {
+      mediaReferences.push({ kind: "image", url: await this.uploadReferenceImage(input.startImage, 0) });
+      // -1 = the first uploaded picture, used as the START frame.
+      args.sourceImageIndex = -1;
+    } else if (plan.pictures === "references") {
+      const pictures = [...(input.startImage ? [input.startImage] : []), ...(input.referenceImages ?? [])].slice(0, 4);
+      for (const [index, picture] of pictures.entries()) {
+        mediaReferences.push({ kind: "image", url: await this.uploadReferenceImage(picture, index) });
+      }
+      // Negative indices point at uploads: -1 is the first, -2 the second, ...
+      if (pictures.length > 0) args.referenceImageIndices = pictures.map((_, index) => -(index + 1));
+    }
+    const step: Json = { id: "video", toolName: plan.tool, arguments: args };
     const body: Json = {
       input: { title: "Paperclip video", steps: [step] },
       token_type: this.options.tokenType ?? "auto",
@@ -296,7 +415,7 @@ export class SogniVideoProvider implements MediaJobProvider {
     const parsed = asRecord(JSON.parse(await res.text()));
     const workflowId = asRecord(asRecord(parsed?.data)?.workflow)?.workflowId;
     if (typeof workflowId !== "string" || !workflowId) throw new Error("Sogni did not say which job it started.");
-    return { externalId: workflowId, model, provider: this.name };
+    return { externalId: workflowId, model: plan.videoModel ?? "sogni-video", provider: this.name };
   }
 
   async poll(handle: MediaJobHandle): Promise<MediaPollOutcome> {
@@ -348,14 +467,14 @@ export class SogniVideoProvider implements MediaJobProvider {
   }
 
   /** Upload a continuity frame or a character reference picture (same upload mechanics for both), the same way SogniProvider uploads reference pictures. */
-  private async uploadReferenceImage(dataUri: string): Promise<string> {
+  private async uploadReferenceImage(dataUri: string, index = 0): Promise<string> {
     const match = /^data:([^;,]+);base64,(.*)$/s.exec(dataUri);
     const contentType = match?.[1]?.toLowerCase() === "image/jpg" ? "image/jpeg" : match?.[1]?.toLowerCase();
     if (!match || !contentType || !["image/png", "image/jpeg", "image/webp", "image/gif"].includes(contentType)) {
       throw new Error("The starting frame must be a PNG, JPEG, WebP or GIF picture.");
     }
     const bytes = Buffer.from(match[2]!, "base64");
-    const slot = new URLSearchParams({ jobId: `paperclip-${crypto.randomUUID()}`, type: "contextImage1", contentType }).toString();
+    const slot = new URLSearchParams({ jobId: `paperclip-${crypto.randomUUID()}`, type: `contextImage${Math.min(index + 1, 16)}`, contentType }).toString();
     const upload = await this.options.apiFetch(`${SOGNI_API_BASE}/v2/image/uploadUrl?${slot}`, { headers: this.headers() });
     if (!upload.ok) throw new Error(`Sogni did not give a place to upload the starting frame (${upload.status}).`);
     const form = asRecord(asRecord(JSON.parse(await upload.text()))?.data);

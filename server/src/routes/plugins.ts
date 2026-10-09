@@ -381,6 +381,14 @@ async function resolvePlugin(
  * When provided, job-related routes (list jobs, list runs, trigger job) are
  * mounted. When omitted, the routes return 501 Not Implemented.
  */
+/**
+ * A person-started plugin action (a button on a plugin page) may wait on a
+ * slow outside service: a picture service making two pictures, or a file
+ * being published. The worker's default 30-second call limit cut those off
+ * mid-way, so actions get 5 minutes; every other worker call keeps the default.
+ */
+export const PLUGIN_ACTION_TIMEOUT_MS = 5 * 60_000;
+
 export interface PluginRouteJobDeps {
   /** The job scheduler instance. */
   scheduler: PluginJobScheduler;
@@ -1708,6 +1716,7 @@ export function pluginRoutes(
           actorContext,
           renderEnvironment: body.renderEnvironment ?? null,
         },
+        PLUGIN_ACTION_TIMEOUT_MS,
       );
       res.json({ data: result });
     } catch (err) {
@@ -1894,6 +1903,7 @@ export function pluginRoutes(
           actorContext,
           renderEnvironment: body?.renderEnvironment ?? null,
         },
+        PLUGIN_ACTION_TIMEOUT_MS,
       );
       res.json({ data: result });
     } catch (err) {

@@ -6,7 +6,13 @@ import {
   VIDEO_STORYLINE_MAX_SCENES,
   VIDEO_STORYLINE_MAX_SHOTS,
   estimateVideoStorylineCostCents,
+  MEDIA_STUDIO_PLUGIN_KEY,
+  assignVideoCastIds,
   formatVideoScriptCharacters,
+  mergeScriptCharactersIntoCast,
+  readVideoStorylineCast,
+  type UpdateVideoStorylineCastInput,
+  type VideoStorylineCast,
   type ParsedVideoStorylineScript,
   type VideoScriptImportMode,
   type VideoScriptImportSummary,
@@ -21,6 +27,8 @@ import {
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
+import { pluginRegistryService } from "./plugin-registry.js";
+import { loadCastIdentities } from "./storyline-cast.js";
 
 /**
  * DUR-4127: CRUD for a video storyline's project/scene/shot tree. Render
@@ -58,6 +66,10 @@ export interface VideoStorylineSummary {
   estimatedTotalCents: number | null;
   estimatedTotalSeconds: number | null;
   characterReferenceAssetIds: string[];
+  /** Storyboard picture service / model / look (see VideoStorylinePictureSettings). */
+  pictureSettings: { providerId?: string | null; model?: string | null; lookId?: string | null };
+  /** The script's characters and the saved people (Media Studio identities) they are linked to; see video-storyline-cast.ts. */
+  cast: VideoStorylineCast;
   finalObjectKey: string | null;
   finalByteSize: number | null;
   finalDurationSeconds: number | null;
@@ -115,6 +127,8 @@ export interface VideoShotSummary {
   proposalConversationId: string | null;
   promptHistory: Array<{ prompt: string; cameraNotes: string | null; durationSeconds: number; transitionIn: string | null; replacedAt: string }>;
   storyboardStatus: string;
+  /** This shot's own look for its storyboard picture: a look id, "none", or null (the storyline's). */
+  pictureLookId: string | null;
   stillObjectKey: string | null;
   stillContentType: string | null;
   stillByteSize: number | null;
@@ -122,6 +136,20 @@ export interface VideoShotSummary {
   stillEstimatedCostCents: number | null;
   stillActualCostCents: number | null;
   createdAt: string;
+}
+
+/** Only the picture service/model/look of picture_settings (the cast is returned on its own). */
+function pictureFields(value: StorylineRow["pictureSettings"] | null | undefined): VideoStorylineSummary["pictureSettings"] {
+  const raw = (value ?? {}) as Record<string, unknown>;
+  const out: VideoStorylineSummary["pictureSettings"] = {};
+  for (const key of ["providerId", "model", "lookId"] as const) {
+    if (key in raw) out[key] = (raw[key] as string | null | undefined) ?? null;
+  }
+  return out;
+}
+
+function withCast(current: StorylineRow["pictureSettings"] | null | undefined, cast: VideoStorylineCast): StorylineRow["pictureSettings"] {
+  return { ...((current ?? {}) as Record<string, unknown>), cast: cast.members, shotCast: cast.shotCast } as StorylineRow["pictureSettings"];
 }
 
 function toStorylineSummary(row: StorylineRow): VideoStorylineSummary {
@@ -138,6 +166,8 @@ function toStorylineSummary(row: StorylineRow): VideoStorylineSummary {
     estimatedTotalCents: row.estimatedTotalCents,
     estimatedTotalSeconds: row.estimatedTotalSeconds,
     characterReferenceAssetIds: row.characterReferenceAssetIds,
+    pictureSettings: pictureFields(row.pictureSettings),
+    cast: readVideoStorylineCast(row.pictureSettings),
     finalObjectKey: row.finalObjectKey,
     finalByteSize: row.finalByteSize,
     finalDurationSeconds: row.finalDurationSeconds,
@@ -198,6 +228,7 @@ function toShotSummary(row: ShotRow): VideoShotSummary {
     proposalConversationId: row.proposalConversationId,
     promptHistory: row.promptHistory,
     storyboardStatus: row.storyboardStatus,
+    pictureLookId: row.pictureLookId,
     stillObjectKey: row.stillObjectKey,
     stillContentType: row.stillContentType,
     stillByteSize: row.stillByteSize,
@@ -501,6 +532,12 @@ export function videoStorylineService(db: Db) {
         ...(settingMusicAssetId && input.musicSourceKey === undefined ? { musicSourceKey: null } : {}),
         ...(settingMusicSourceKey && input.musicAssetId === undefined ? { musicAssetId: null } : {}),
         ...(input.musicVolumeDb !== undefined ? { musicVolumeDb: input.musicVolumeDb } : {}),
+        // Only the picture service/model/look are replaced; the cast kept in the same column stays.
+        ...(input.pictureSettings !== undefined
+          ? {
+              pictureSettings: sql`(coalesce(${videoStorylines.pictureSettings}, '{}'::jsonb) - 'providerId' - 'model' - 'lookId') || ${JSON.stringify(input.pictureSettings)}::jsonb`,
+            }
+          : {}),
         updatedAt: new Date(),
       })
       .where(eq(videoStorylines.id, storylineId))
@@ -723,6 +760,9 @@ export function videoStorylineService(db: Db) {
       ...(input.durationSeconds !== undefined ? { durationSeconds: input.durationSeconds } : {}),
       ...(input.lookReferenceAssetIds !== undefined ? { lookReferenceAssetIds: input.lookReferenceAssetIds } : {}),
       ...(input.transitionIn !== undefined ? { transitionIn: input.transitionIn } : {}),
+      // A different look only changes the NEXT picture made for this shot; the
+      // current picture and its approval stay until the person remakes it.
+      ...(input.pictureLookId !== undefined ? { pictureLookId: input.pictureLookId } : {}),
       ...(touchesStillContent
         ? {
             storyboardStatus: "pending" as const,
@@ -905,6 +945,118 @@ export function videoStorylineService(db: Db) {
   }
 
   /**
+   * The script's characters join the storyline's Cast (unlinked; a person
+   * links them to saved people in step 1). A "replace" import also forgets
+   * the per-shot cast picks, since those shots are gone.
+   */
+  async function addScriptCharactersToCast(tx: ScopedTx, row: StorylineRow, script: ParsedVideoStorylineScript, mode: VideoScriptImportMode): Promise<void> {
+    const current = readVideoStorylineCast(row.pictureSettings);
+    const members = mergeScriptCharactersIntoCast(current.members, script.characters);
+    const shotCast = mode === "replace" ? {} : current.shotCast;
+    if (members.length === current.members.length && shotCast === current.shotCast) return;
+    await tx
+      .update(videoStorylines)
+      .set({ pictureSettings: withCast(row.pictureSettings, { members, shotCast }) })
+      .where(eq(videoStorylines.id, row.id));
+  }
+
+  /** The company's saved people (Media Studio identities), by id -- never another company's. */
+  async function companyIdentityIds(companyId: string): Promise<Set<string>> {
+    const plugin = await pluginRegistryService(db).getByKey(MEDIA_STUDIO_PLUGIN_KEY);
+    const identities = await loadCastIdentities(db, plugin?.id ?? null, companyId);
+    return new Set(identities.map((i) => i.id));
+  }
+
+  /**
+   * PUT .../video-storylines/:storylineId/cast: the storyline's cast list.
+   * Every linked identity must be one of THIS company's saved people with
+   * both confirmations (consent and adult); anything else is refused.
+   */
+  async function setCast(companyId: string, storylineId: string, input: UpdateVideoStorylineCastInput, actor: VideoStorylineActor): Promise<VideoStorylineSummary> {
+    const existing = await getStorylineRow(companyId, storylineId);
+    assertStorylineEditable(existing);
+    let members: VideoStorylineCast["members"];
+    try {
+      members = assignVideoCastIds(input.members);
+    } catch (err) {
+      throw unprocessable(err instanceof Error ? err.message : String(err));
+    }
+    const linked = members.filter((m) => m.identityId);
+    if (linked.length > 0) {
+      const known = await companyIdentityIds(companyId);
+      const unknown = linked.find((m) => !known.has(m.identityId!));
+      if (unknown) {
+        throw unprocessable(
+          `${unknown.name} is linked to a saved person that is not one of this company's identities (or is missing its consent and adult confirmations). Pick one from the list, or add the person on Media Studio's Identities tab first.`,
+        );
+      }
+    }
+    const row = await withCompanyScope(db, companyId, async (tx) => {
+      const locked = await lockStorylineRow(tx, companyId, storylineId);
+      assertStorylineEditable(locked);
+      const current = readVideoStorylineCast(locked.pictureSettings);
+      const ids = new Set(members.map((m) => m.id));
+      const shotCast = Object.fromEntries(Object.entries(current.shotCast).map(([shotId, list]) => [shotId, list.filter((id) => ids.has(id))]));
+      const [updated] = await tx
+        .update(videoStorylines)
+        .set({ pictureSettings: withCast(locked.pictureSettings, { members, shotCast }), updatedAt: new Date() })
+        .where(eq(videoStorylines.id, storylineId))
+        .returning();
+      if (!updated) throw new Error("Video storyline cast update returned no row");
+      return updated;
+    });
+    await logActivity(db, {
+      companyId,
+      ...activityActor(actor),
+      action: "video_storyline.cast_updated",
+      entityType: "video_storyline",
+      entityId: storylineId,
+      details: { castCount: members.length, linkedCount: linked.length },
+    });
+    return toStorylineSummary(row);
+  }
+
+  /** PUT .../shots/:shotId/cast: who is in this shot (null: find them from the shot's description again). */
+  async function setShotCast(
+    companyId: string,
+    storylineId: string,
+    shotId: string,
+    castIds: string[] | null,
+    actor: VideoStorylineActor,
+  ): Promise<VideoStorylineSummary> {
+    const existing = await getStorylineRow(companyId, storylineId);
+    assertStorylineEditable(existing);
+    await getShotRow(companyId, storylineId, shotId);
+    const row = await withCompanyScope(db, companyId, async (tx) => {
+      const locked = await lockStorylineRow(tx, companyId, storylineId);
+      assertStorylineEditable(locked);
+      const current = readVideoStorylineCast(locked.pictureSettings);
+      const known = new Set(current.members.map((m) => m.id));
+      const unknown = (castIds ?? []).find((id) => !known.has(id));
+      if (unknown) throw unprocessable("That character is not in this storyline's cast any more. Refresh the page and pick again.");
+      const shotCast = { ...current.shotCast };
+      if (castIds === null) delete shotCast[shotId];
+      else shotCast[shotId] = Array.from(new Set(castIds));
+      const [updated] = await tx
+        .update(videoStorylines)
+        .set({ pictureSettings: withCast(locked.pictureSettings, { members: current.members, shotCast }), updatedAt: new Date() })
+        .where(eq(videoStorylines.id, storylineId))
+        .returning();
+      if (!updated) throw new Error("Video storyline shot cast update returned no row");
+      return updated;
+    });
+    await logActivity(db, {
+      companyId,
+      ...activityActor(actor),
+      action: "video_shot.cast_updated",
+      entityType: "video_shot",
+      entityId: shotId,
+      details: { castIds, automatic: castIds === null },
+    });
+    return toStorylineSummary(row);
+  }
+
+  /**
    * POST .../video-storylines/:storylineId/import. "append" adds the
    * script's scenes after the existing ones; "replace" swaps the whole
    * scene/shot tree, and is refused once anything has been rendered or
@@ -959,6 +1111,7 @@ export function videoStorylineService(db: Db) {
       assertStorylineEditable(locked);
       if (mode === "replace") await assertNothingPaidToReplace(tx, locked);
       await writeScript(tx, companyId, storylineId, script, mode);
+      await addScriptCharactersToCast(tx, locked, script, mode);
     });
     await recomputeEstimate(companyId, storylineId);
     await logActivity(db, {
@@ -1002,6 +1155,7 @@ export function videoStorylineService(db: Db) {
         .returning();
       if (!row) throw new Error("Video storyline insert returned no row");
       await writeScript(tx, companyId, row.id, script, "append");
+      await addScriptCharactersToCast(tx, row, script, "append");
       return row.id;
     });
     const storyline = await recomputeEstimate(companyId, storylineId);
@@ -1077,6 +1231,8 @@ export function videoStorylineService(db: Db) {
     recomputeEstimate,
     importScript,
     createStorylineFromScript,
+    setCast,
+    setShotCast,
     getProgress,
     listRenderJobsForShot,
     toStorylineSummary,

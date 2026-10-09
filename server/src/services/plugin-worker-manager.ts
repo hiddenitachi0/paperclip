@@ -552,13 +552,20 @@ export function createPluginWorkerHandle(
       return runId ? { companyId, runId } : { companyId };
     }
 
+    // A UI action also carries the board user the host's own session
+    // resolved (routes/plugins.ts performActionActorContext), so a host
+    // service that acts for a person (models.analyseImage) never has to take
+    // the worker's word for who that is.
+    if (method === "performAction") {
+      const actor = isRecord(params.actorContext) ? params.actorContext : null;
+      const companyId = readNonEmptyString(params.companyId) ?? (actor ? readNonEmptyString(actor.companyId) : null);
+      if (!companyId) return null;
+      const userId = actor && actor.type === "user" ? readNonEmptyString(actor.userId) : null;
+      return userId ? { companyId, userId, canManageCompany: actor?.canManageCompany === true } : { companyId };
+    }
+
     const directCompanyId = readNonEmptyString(params.companyId);
     if (directCompanyId) return { companyId: directCompanyId };
-
-    if (method === "performAction" && isRecord(params.actorContext)) {
-      const companyId = readNonEmptyString(params.actorContext.companyId);
-      return companyId ? { companyId } : null;
-    }
 
     if (method === "onEvent" && isRecord(params.event)) {
       const companyId = readNonEmptyString(params.event.companyId);

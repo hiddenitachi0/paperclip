@@ -2592,6 +2592,9 @@ export {
   updateVideoSceneSchema,
   updateVideoShotSchema,
   updateVideoStorylineSchema,
+  videoStorylinePictureSettingsSchema,
+  VIDEO_SHOT_PICTURE_LOOK_NONE,
+  type VideoStorylinePictureSettings,
   updateVideoStorylineSettingsSchema,
   type ApproveVideoDirectorRunInput,
   type CreateVideoSceneInput,
@@ -2703,6 +2706,25 @@ export {
 } from "./video-storyline-stills.js";
 
 export {
+  VIDEO_STORYLINE_MAX_CAST,
+  VIDEO_CAST_NAME_MAX_LENGTH,
+  VIDEO_CAST_DESCRIPTION_MAX_LENGTH,
+  videoStorylineCastMemberSchema,
+  updateVideoStorylineCastSchema,
+  updateVideoShotCastSchema,
+  readVideoStorylineCast,
+  assignVideoCastIds,
+  mergeScriptCharactersIntoCast,
+  videoCastNameMentioned,
+  detectVideoShotCast,
+  videoShotCast,
+  type VideoStorylineCastMember,
+  type VideoStorylineCast,
+  type UpdateVideoStorylineCastInput,
+  type UpdateVideoShotCastInput,
+} from "./video-storyline-cast.js";
+
+export {
   createMediaStudioDirectAudioSchema,
   createMediaStudioDirectPictureSchema,
   createMediaStudioDirectVideoSchema,
@@ -2724,6 +2746,11 @@ export {
   MEDIA_STUDIO_DIRECT_VIDEO_MIN_DURATION_SECONDS,
   estimateMediaStudioEditCostCents,
   MEDIA_STUDIO_EDIT_ACTIONS,
+  mediaStudioEditActionProvider,
+  MEDIA_STUDIO_LORA_TRAINING_STEPS,
+  MEDIA_STUDIO_LORA_TRAINING_USD_PER_STEP,
+  estimateLoraTrainingCostCents,
+  MEDIA_STUDIO_HIGGSFIELD_PICTURE_ESTIMATE_CENTS,
   MEDIA_STUDIO_EDIT_BILLING_CODE,
   type MediaStudioEditAction,
   mediaStudioDirectEstimateSchema,

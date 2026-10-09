@@ -102,6 +102,8 @@ export interface VideoStoryboardShotSummary {
   stillGeneratedAt: string | null;
   stillEstimatedCostCents: number | null;
   stillActualCostCents: number | null;
+  /** Only right after a picture is made: plain notes about how the cast's saved people were used (pictures left out, LoRA not used, ...). */
+  notes?: string[];
 }
 
 export interface VideoStoryboardSummary {
@@ -117,4 +119,8 @@ export interface VideoStoryboardSummary {
   videoSpentCents: number;
   /** The company's configured kind:"video_render" approval threshold, or null if not configured (that extra gate is off). */
   approvalThresholdCents: number | null;
+  /** Which picture services have an API key set up, so the editor only offers those. */
+  pictureServices: { fal: boolean; sogni: boolean };
+  /** What the next storyboard picture is made with, after defaults: service, model (null = the service's default) and look. */
+  picture: { providerId: VideoStorylineProvider; model: string | null; lookId: string | null; costPerPictureCents: number };
 }
