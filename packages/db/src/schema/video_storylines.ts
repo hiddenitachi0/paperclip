@@ -56,9 +56,17 @@ export const videoStorylines = pgTable(
     characterReferenceAssetIds: jsonb("character_reference_asset_ids").$type<string[]>().notNull().default([]),
     // How the storyboard pictures are made: picture service, model and an
     // optional Media Studio look id ({} = Fal.ai, its cheapest model, no
-    // look). See VideoStorylinePictureSettings in packages/shared.
+    // look). See VideoStorylinePictureSettings in packages/shared. Also
+    // holds the storyline's Cast (cast, shotCast; see video-storyline-cast.ts
+    // in packages/shared) -- no column of its own, so no migration.
     pictureSettings: jsonb("picture_settings")
-      .$type<{ providerId?: string | null; model?: string | null; lookId?: string | null }>()
+      .$type<{
+        providerId?: string | null;
+        model?: string | null;
+        lookId?: string | null;
+        cast?: Array<{ id: string; name: string; nickname: string | null; description: string | null; identityId: string | null }>;
+        shotCast?: Record<string, string[]>;
+      }>()
       .notNull()
       .default({}),
     // Direct-storage pointer for the final stitched film -- deliberately NOT

@@ -9,6 +9,8 @@ import {
   type VideoStorylineProvider,
   type VideoStoryboardShotSummary,
   type VideoStoryboardSummary,
+  readVideoStorylineCast,
+  videoShotCast,
 } from "@paperclipai/shared";
 import { conflict, unprocessable } from "../errors.js";
 import { getStorageService } from "../storage/index.js";
@@ -40,6 +42,18 @@ import { recordFalCostEvent } from "./fal-cost-events.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
 import { lockStorylineRow, videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
 import { mediaStudioKeyRef } from "./media-studio-company-keys.js";
+import { assemblePrompt, SHEET_FIELDS, type CharacterSheet } from "./media-studio-look-prompt.js";
+import {
+  castIdentityNames,
+  castPeople,
+  castPictureRefusal,
+  castPromptLine,
+  loadCastAgeRefusals,
+  loadLinkedCastIdentities,
+  planCastStill,
+  sheetWithCastIdentity,
+  type CastPerson,
+} from "./storyline-cast.js";
 
 /**
  * DUR-4317/DUR-4320 (backend half, storyboard-of-stills approval gate):
@@ -54,6 +68,14 @@ import { mediaStudioKeyRef } from "./media-studio-company-keys.js";
  */
 
 type ShotRow = typeof videoShots.$inferSelect;
+
+/** The linked cast members in one shot (see storyline-cast.ts). */
+interface ShotCastPeople {
+  castIds: string[];
+  people: CastPerson[];
+  notes: string[];
+  pluginId?: string | null;
+}
 
 const IMAGE_FETCH_TIMEOUT_MS = 30_000;
 const IMAGE_MAX_BYTES = 15 * 1024 * 1024;
@@ -185,6 +207,8 @@ export function videoStorylineStillsService(db: Db) {
     }
     const estimate = estimateStoryboardCostCents([{ storyboardStatus: shot.storyboardStatus as VideoShotStoryboardStatus }], target.providerId);
     const { provider, apiKey } = await resolveImageProvider(companyId, actor.agentId ?? actor.actorId, target, cfg, pluginId);
+    // Who is in this shot, and the saved people (identities) they are linked to.
+    const cast = await shotCastPeople(companyId, pluginId, storyline, shot);
 
     // Security review (replace-import TOCTOU): under the storyline row lock a
     // "replace" import also takes, re-check the shot is still there and
@@ -202,7 +226,7 @@ export function videoStorylineStillsService(db: Db) {
       return current.stillEstimatedCostCents;
     });
     try {
-      return await finishStill(companyId, storyline, shot, actor, provider, apiKey, estimate.estimatedTotalCents, target, cfg);
+      return await finishStill(companyId, storyline, shot, actor, provider, apiKey, estimate.estimatedTotalCents, target, cfg, cast);
     } catch (err) {
       await db.update(videoShots).set({ stillEstimatedCostCents: previousStillEstimate }).where(eq(videoShots.id, shotId));
       throw err;
@@ -219,10 +243,12 @@ export function videoStorylineStillsService(db: Db) {
     estimateCents: number,
     target: StoryboardPictureTarget,
     cfg: Record<string, unknown>,
+    cast: ShotCastPeople,
   ): Promise<VideoStoryboardShotSummary> {
-    const shotId = shot.id;
-    const estimate = { estimatedTotalCents: estimateCents };
     const look = target.look;
+    if (cast.people.length > 0) {
+      return finishCastStill(companyId, storyline, shot, actor, provider, apiKey, estimateCents, target, cfg, cast);
+    }
     // The look's own pictures first (with their roles), then the shot's and the storyline's character pictures.
     const refs = storyboardReferences(look, shot.lookReferenceAssetIds, storyline.characterReferenceAssetIds, MAX_STILL_REFERENCES);
     const referenceImages = await loadReferenceImages(db, companyId, refs.ids);
@@ -246,6 +272,26 @@ export function videoStorylineStillsService(db: Db) {
       input.model = target.model;
     }
 
+    return makeAndStoreStill(companyId, storyline, shot, actor, provider, apiKey, estimateCents, target, cfg, input, { castIds: [], notes: cast.notes });
+  }
+
+  /** Makes the picture, records its cost, stores it and marks the shot's picture as waiting for review. */
+  async function makeAndStoreStill(
+    companyId: string,
+    storyline: Awaited<ReturnType<typeof storylines.getStorylineRow>>,
+    shot: ShotRow,
+    actor: VideoStorylineActor,
+    provider: ImageGenerationProvider,
+    apiKey: string,
+    estimateCents: number,
+    target: StoryboardPictureTarget,
+    cfg: Record<string, unknown>,
+    input: ImageGenerationInput,
+    castInfo: { castIds: string[]; notes: string[] },
+  ): Promise<VideoStoryboardShotSummary> {
+    const shotId = shot.id;
+    const estimate = { estimatedTotalCents: estimateCents };
+    const look = target.look;
     let imageResult: ImageGenerationResult;
     try {
       imageResult = await provider.generate(input);
@@ -315,9 +361,119 @@ export function videoStorylineStillsService(db: Db) {
       action: "video_shot.still_generated",
       entityType: "video_shot",
       entityId: shotId,
-      details: { orderIndex: shot.orderIndex, costCents: estimate.estimatedTotalCents, provider: target.providerId, model: imageResult.model, lookId: look?.id ?? null },
+      details: {
+        orderIndex: shot.orderIndex,
+        costCents: estimate.estimatedTotalCents,
+        provider: target.providerId,
+        model: imageResult.model,
+        lookId: look?.id ?? null,
+        ...(castInfo.castIds.length > 0 ? { castIds: castInfo.castIds } : {}),
+      },
     });
-    return toStoryboardShotSummary(row);
+    return castInfo.notes.length > 0 ? { ...toStoryboardShotSummary(row), notes: castInfo.notes } : toStoryboardShotSummary(row);
+  }
+
+  /** The shot's cast and the saved people they are linked to (company-scoped). */
+  async function shotCastPeople(
+    companyId: string,
+    pluginId: string | null,
+    storyline: { pictureSettings: Record<string, unknown> | null },
+    shot: Pick<ShotRow, "id" | "prompt" | "cameraNotes">,
+  ): Promise<ShotCastPeople> {
+    const cast = readVideoStorylineCast(storyline.pictureSettings);
+    if (cast.members.length === 0) return { castIds: [], people: [], notes: [] };
+    const identities = await loadLinkedCastIdentities(db, pluginId, companyId, cast.members);
+    const { castIds } = videoShotCast(shot, cast, castIdentityNames(identities));
+    const { people, notes } = castPeople(castIds, cast.members, identities);
+    return { castIds, people, notes, pluginId };
+  }
+
+  /**
+   * A storyboard picture of a shot with linked cast members: each person's
+   * face crop first, then body crops and the look's pictures within the
+   * model's slots, the identity-lock wording with each person named, the
+   * identity's preferred editing model, and (Sogni, under the plugin's own
+   * rules) the identity's LoRA. Pictures the age check refused are never sent.
+   */
+  async function finishCastStill(
+    companyId: string,
+    storyline: Awaited<ReturnType<typeof storylines.getStorylineRow>>,
+    shot: ShotRow,
+    actor: VideoStorylineActor,
+    provider: ImageGenerationProvider,
+    apiKey: string,
+    estimateCents: number,
+    target: StoryboardPictureTarget,
+    cfg: Record<string, unknown>,
+    cast: ShotCastPeople,
+  ): Promise<VideoStoryboardShotSummary> {
+    const look = target.look;
+    const plan = planCastStill({
+      people: cast.people,
+      service: target.providerId,
+      pickedModel: target.model,
+      lookIds: look?.referenceFileIds ?? [],
+      lookRoles: look?.referenceRoles ?? [],
+      extraIds: [...shot.lookReferenceAssetIds, ...storyline.characterReferenceAssetIds],
+      cap: MAX_STILL_REFERENCES,
+      safeContentFilter: look ? look.safeContentFilter : true,
+    });
+    const notes = [...cast.notes, ...plan.notes];
+    // One at a time so each picture keeps its place (and its person).
+    const loaded: Array<{ id: string; dataUri: string | null; owner: string | null; role: (typeof plan.roles)[number] }> = [];
+    for (const [i, id] of plan.ids.entries()) {
+      const [dataUri] = await loadReferenceImages(db, companyId, [id]);
+      loaded.push({ id, dataUri: dataUri ?? null, owner: plan.owners[i] ?? null, role: plan.roles[i]! });
+    }
+    const refusal = castPictureRefusal(
+      loaded.filter((p) => p.owner).map((p) => ({ fileId: p.id, dataUri: p.dataUri, personName: p.owner! })),
+      await loadCastAgeRefusals(db, cast.pluginId ?? null, companyId),
+    );
+    if (refusal) throw unprocessable(refusal);
+    const missing = loaded.filter((p) => !p.dataUri);
+    if (missing.some((p) => p.owner && p.role === "face")) {
+      const names = Array.from(new Set(missing.filter((p) => p.owner && p.role === "face").map((p) => p.owner!)));
+      throw unprocessable(`${names.join(" and ")}'s face picture could not be read from the company's Files, so the picture was not made. Check the saved person on Media Studio's Identities tab.`);
+    }
+    const sent = loaded.filter((p) => p.dataUri);
+    if (missing.length > 0) notes.push(`${missing.length} reference ${missing.length === 1 ? "picture" : "pictures"} could not be read and ${missing.length === 1 ? "was" : "were"} left out.`);
+    const roles = sent.map((p) => p.role);
+    const castLine = castPromptLine({ roles, owners: sent.map((p) => p.owner) }, target.providerId);
+
+    // One person: their locked description over the look's. More than one: only the look's setting and style (its character lines describe one person).
+    const people = cast.people.filter((p) => sent.some((x) => x.owner === p.member.name));
+    let sheet: CharacterSheet | undefined = look?.sheet;
+    if (people.length === 1) sheet = sheetWithCastIdentity(look?.sheet, people[0]!.identity);
+    else if (people.length > 1 && look) {
+      sheet = Object.fromEntries(
+        SHEET_FIELDS.filter((f) => f.group !== "character" && look.sheet[f.key]).map((f) => [f.key, look.sheet[f.key]]),
+      ) as CharacterSheet;
+    }
+    let prompt = assemblePrompt({
+      request: castLine ? `${shot.prompt}\n\n${castLine}` : shot.prompt,
+      style: look?.style,
+      sheet,
+      roles,
+      service: target.providerId,
+    }).prompt;
+
+    const input: ImageGenerationInput = { prompt, referenceImages: sent.map((p) => p.dataUri!), model: plan.model };
+    if (target.providerId === "sogni") {
+      const loras = [...(look?.loras ?? [])];
+      if (plan.lora && !loras.some((l) => l.id === plan.lora!.id) && loras.length < 8) {
+        loras.push({ id: plan.lora.id, strength: plan.lora.strength });
+        if (plan.lora.triggerWord && !prompt.includes(plan.lora.triggerWord)) prompt = `${plan.lora.triggerWord}, ${prompt}`;
+        input.prompt = prompt;
+        notes.push(`${people[0]?.member.name ?? "The person"}'s own LoRA was used to keep them the same.`);
+      }
+      if (loras.length > 0) input.loras = loras;
+      if (look) {
+        if (look.guidance !== null) input.guidance = look.guidance;
+        if (look.negativePrompt) input.negativePrompt = look.negativePrompt;
+        input.safeContentFilter = look.safeContentFilter;
+      }
+    }
+    return makeAndStoreStill(companyId, storyline, shot, actor, provider, apiKey, estimateCents, target, cfg, input, { castIds: people.map((p) => p.member.id), notes });
   }
 
   async function approveShot(

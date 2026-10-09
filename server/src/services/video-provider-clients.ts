@@ -32,6 +32,13 @@ export interface MediaJobInput {
   startImage?: string;
   /** Additional character/Look reference pictures (data: URIs); see media-jobs-types.ts's doc comment -- neither provider consumes this today. */
   referenceImages?: string[];
+  /**
+   * The storyline's cast in this shot: per person, their pictures (face crop
+   * first). Their pictures are also at the front of referenceImages; a
+   * provider that can tell people apart (Fal's Kling v3: one "element" per
+   * person) uses this instead.
+   */
+  characters?: Array<{ name: string; images: string[] }>;
   seed?: number;
   durationSeconds?: number;
   aspectRatio?: string;
@@ -170,6 +177,33 @@ function buildFalElement(referenceImages: readonly string[]): { frontal_image_ur
   return { frontal_image_url: frontal!, reference_image_urls: rest.length > 0 ? rest.slice(0, 3) : [frontal!] };
 }
 
+/** At most this many elements go with one Kling v3 call (one per cast member, then one for the other pictures). */
+export const FAL_MAX_ELEMENTS = 3;
+
+/**
+ * The Kling v3 elements for a shot: one per cast member (their face crop as
+ * the frontal picture, their other pictures as extra angles), then -- when
+ * there is room -- one for the remaining character/look pictures. Without a
+ * cast: one element from all reference pictures, as before.
+ */
+export function buildFalElements(input: Pick<MediaJobInput, "characters" | "referenceImages">): Array<{ frontal_image_url: string; reference_image_urls: string[] }> {
+  const characters = (input.characters ?? []).filter((c) => c.images.length > 0);
+  if (characters.length === 0) {
+    const single = buildFalElement(input.referenceImages ?? []);
+    return single ? [single] : [];
+  }
+  const elements = characters.slice(0, FAL_MAX_ELEMENTS).map((c) => buildFalElement(c.images)!);
+  const castPictures = new Set(characters.flatMap((c) => c.images));
+  const rest = (input.referenceImages ?? []).filter((img) => !castPictures.has(img));
+  if (rest.length > 0 && elements.length < FAL_MAX_ELEMENTS) elements.push(buildFalElement(rest)!);
+  return elements;
+}
+
+/** A pinned Fal model that takes Kling v3's start frame + elements (the image-to-video endpoints of Kling v3). */
+export function falVideoModelTakesElements(model: string | null | undefined): boolean {
+  return !!model && /^fal-ai\/kling-video\/v3\/[a-z0-9._-]+\/image-to-video$/i.test(model.trim());
+}
+
 export class FalVideoProvider implements MediaJobProvider {
   readonly name = "fal";
   constructor(
@@ -181,11 +215,12 @@ export class FalVideoProvider implements MediaJobProvider {
   ) {}
 
   async start(input: MediaJobInput): Promise<MediaJobHandle> {
-    const element = buildFalElement(input.referenceImages ?? []);
+    const elements = buildFalElements(input);
     // Only switch to the combined model when the caller did not pin an exact
     // model themselves -- an explicit input.model always wins, same as the
-    // other two defaults below.
-    const useCombined = !input.model && element !== null;
+    // other two defaults below. A pinned Kling v3 image-to-video model gets
+    // the same start frame + elements shape.
+    const useCombined = elements.length > 0 && (!input.model || falVideoModelTakesElements(input.model));
     const model = input.model ?? (useCombined ? this.defaultCombinedModel : input.startImage ? this.defaultImageToVideoModel : this.defaultModel);
     const body: Record<string, unknown> = { prompt: input.prompt };
     if (useCombined) {
@@ -193,8 +228,8 @@ export class FalVideoProvider implements MediaJobProvider {
       // continuity frame yet (the storyline's first shot), fall back to the
       // character's own frontal picture so likeness still drives the model
       // rather than silently losing it to a bare text-to-video call.
-      body.start_image_url = input.startImage ?? element!.frontal_image_url;
-      body.elements = [element];
+      body.start_image_url = input.startImage ?? elements[0]!.frontal_image_url;
+      body.elements = elements;
     } else if (input.startImage) {
       body.image_url = input.startImage;
     }
