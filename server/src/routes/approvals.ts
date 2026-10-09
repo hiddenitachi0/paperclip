@@ -1651,10 +1651,9 @@ export function approvalRoutes(
     if (!experimental.enableReporting) {
       throw unprocessable("Reports are switched off for this Paperclip instance, so this calculation cannot be approved now.");
     }
-    const payload = (card.payload ?? {}) as Record<string, unknown>;
-    const versionId = typeof payload.versionId === "string" ? payload.versionId : "";
-    const sha256 = typeof payload.sha256 === "string" ? payload.sha256 : "";
-    const outcome = await reportScriptsSvc.approveVersion(card.companyId, versionId, { userId: info.actorId, sha256 });
+    // Never trust ids or code from the card payload: the service finds the
+    // version whose own approval card this is, and approves its stored code.
+    const outcome = await reportScriptsSvc.approveFromCard(card.companyId, card.id, info.actorId);
     if (!outcome.approved) {
       throw unprocessable(outcome.message ?? "The saved examples did not all match, so nothing was switched on.", {
         code: "report_script_fixtures_failed",
@@ -1963,6 +1962,15 @@ export function approvalRoutes(
       const unknownKindMessage = describeUnknownDeployLikeKind((approvalInput.payload as Record<string, unknown>).kind);
       if (unknownKindMessage) {
         res.status(422).json({ error: unknownKindMessage });
+        return;
+      }
+      // DUR-4072: only the calculation's own "ask for approval" action may
+      // file this card, built from the stored code (see services/approvals.ts).
+      if ((approvalInput.payload as Record<string, unknown>).kind === REPORT_SCRIPT_APPROVAL_KIND) {
+        res.status(422).json({
+          error: "Report calculation approval cards can only be filed by asking for approval on the calculation itself.",
+          code: "report_script_card_filed_elsewhere",
+        });
         return;
       }
     }
@@ -2699,6 +2707,19 @@ export function approvalRoutes(
 
     if (req.actor.type === "agent" && req.actor.agentId !== existing.requestedByAgentId) {
       res.status(403).json({ error: "Only requesting agent can resubmit this approval" });
+      return;
+    }
+    // DUR-4072: a report-calculation card is rebuilt from the stored code by
+    // the calculation's own "ask for approval" action; it is never resubmitted
+    // (resubmit could swap the code the card shows).
+    if (
+      (existing.payload as Record<string, unknown> | null)?.kind === REPORT_SCRIPT_APPROVAL_KIND ||
+      (req.body.payload as Record<string, unknown> | undefined)?.kind === REPORT_SCRIPT_APPROVAL_KIND
+    ) {
+      res.status(422).json({
+        error: "This card cannot be resubmitted. Ask for approval again on the calculation; the card is rebuilt from the stored code.",
+        code: "report_script_card_filed_elsewhere",
+      });
       return;
     }
 

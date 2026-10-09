@@ -225,6 +225,8 @@ export function ApprovalCard({
           type={approval.type}
           payload={approval.payload}
           hidePrimaryTitle={Boolean(subject)}
+          approvalId={approval.id}
+          companyId={approval.companyId}
         />
       </div>
 

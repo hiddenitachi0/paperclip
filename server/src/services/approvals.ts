@@ -86,6 +86,10 @@ export function isReportScriptVersionApproval(
   return approval.type === "request_board_approval" && approval.payload?.kind === "report_script_version";
 }
 
+const REPORT_SCRIPT_CARD_FILED_ELSEWHERE =
+  "Report calculation approval cards can only be filed by asking for approval on the calculation itself " +
+  "(the card is built from the stored code). To change the code, draft a new version and ask for approval again";
+
 const REPORT_SCRIPT_DECISION_ELSEWHERE =
   "A report calculation can only be approved by a company owner or admin from its approval card: approving runs its saved examples first and switches it on only if they all match";
 
@@ -198,15 +202,15 @@ export function approvalService(db: Db) {
       await assertSecurityReviewClearedOrBypassed(existing, options);
     }
     if (targetStatus === "approved" && isReportScriptVersionApproval(existing)) {
+      // Found through the VERSION's own approval_id link, never through
+      // ids in the card payload: a card that is not the version's own card
+      // (e.g. one forged with someone else's version id) never matches.
       const payload = (existing.payload ?? {}) as Record<string, unknown>;
-      const versionId = typeof payload.versionId === "string" ? payload.versionId : null;
-      const version = versionId && POSTGRES_UUID_TEXT_RE.test(versionId)
-        ? await db
-          .select({ status: reportScriptVersions.status, sha256: reportScriptVersions.sha256 })
-          .from(reportScriptVersions)
-          .where(and(eq(reportScriptVersions.id, versionId), eq(reportScriptVersions.companyId, existing.companyId)))
-          .then((rows) => rows[0] ?? null)
-        : null;
+      const version = await db
+        .select({ status: reportScriptVersions.status, sha256: reportScriptVersions.sha256 })
+        .from(reportScriptVersions)
+        .where(and(eq(reportScriptVersions.approvalId, existing.id), eq(reportScriptVersions.companyId, existing.companyId)))
+        .then((rows) => rows[0] ?? null);
       if (!version || version.status !== "approved" || version.sha256 !== payload.sha256) {
         throw unprocessable(REPORT_SCRIPT_DECISION_ELSEWHERE, { kind: "report_script_version" });
       }
@@ -511,12 +515,20 @@ export function approvalService(db: Db) {
       return rows[0] ?? null;
     },
 
-    create: (companyId: string, data: Omit<typeof approvals.$inferInsert, "companyId">) =>
-      db
+    create: async (companyId: string, data: Omit<typeof approvals.$inferInsert, "companyId">) => {
+      // DUR-4072: report-calculation cards show code the owner approves; only
+      // report-scripts.ts requestApproval may mint them (from the stored
+      // version). Anyone filing one here could show code that is not the code
+      // that would run.
+      if (isReportScriptVersionApproval({ type: data.type, payload: data.payload })) {
+        throw unprocessable(REPORT_SCRIPT_CARD_FILED_ELSEWHERE, { kind: "report_script_version" });
+      }
+      return db
         .insert(approvals)
         .values({ ...data, companyId })
         .returning()
-        .then((rows) => rows[0]),
+        .then((rows) => rows[0]);
+    },
 
     approve: async (
       id: string,
@@ -852,6 +864,9 @@ export function approvalService(db: Db) {
       const existing = await getExistingApproval(id);
       if (existing.status !== "revision_requested") {
         throw unprocessable("Only revision requested approvals can be resubmitted");
+      }
+      if (isReportScriptVersionApproval(existing) || (payload && isReportScriptVersionApproval({ type: existing.type, payload }))) {
+        throw unprocessable(REPORT_SCRIPT_CARD_FILED_ELSEWHERE, { kind: "report_script_version" });
       }
 
       const now = new Date();

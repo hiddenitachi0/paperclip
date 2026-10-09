@@ -324,7 +324,7 @@ export function ApprovalDetail() {
               />
             </div>
           )}
-          <ApprovalPayloadRenderer type={approval.type} payload={payload} />
+          <ApprovalPayloadRenderer type={approval.type} payload={payload} approvalId={approval.id} companyId={approval.companyId} />
           <ApprovalPreviewPanel
             approvalId={approval.id}
             approvalType={approval.type}

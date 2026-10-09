@@ -24,10 +24,14 @@
  *         `python3 -E -s -S -B`: environment variables, user site-packages
  *         and site-packages are ignored, so only the standard library loads;
  *       - no package install step of any kind;
- *       - `ulimit -u 1`: the script cannot start any other process or
- *         thread. That also means it cannot fork and `setsid` a child to
- *         outlive the run -- there is no child to escape. (Process limits
- *         are ignored for root, so the runner refuses to run as root.);
+ *       - `ulimit -u 1` (RLIMIT_NPROC). This is NOT a per-run process
+ *         count: the kernel counts every process of the user id across the
+ *         whole host. The server's user always has far more than one, so a
+ *         limit of 1 simply makes every fork/thread creation by the script
+ *         fail. The effect is that it cannot start any other program or
+ *         thread, and so cannot fork + `setsid` a child that outlives the
+ *         run. (RLIMIT_NPROC is ignored for root, so the runner refuses to
+ *         run as root.);
  *       - CPU time (`ulimit -t`), virtual memory (`ulimit -v`), the size
  *         of any single file it writes (`ulimit -f`), no core dumps;
  *       - a wall-clock timeout that SIGKILLs the whole process group;
@@ -224,7 +228,9 @@ export function reportScriptRunner(options: ReportScriptRunnerOptions = {}): Rep
         `ulimit -v ${Math.floor(memoryLimitMb * 1024)}`,
         // bash's ulimit -f counts 1024-byte blocks.
         `ulimit -f ${Math.floor(maxFileMb * 1024)}`,
-        // Last, so the limits above are set before forking is switched off.
+        // Last, so the limits above are set first. RLIMIT_NPROC counts the
+        // whole uid's processes host-wide (not this run's), so 1 means "no
+        // new process or thread at all" for the script.
         `ulimit -u 1`,
         netns ? `exec unshare --net --map-root-user -- ${python}` : `exec ${python}`,
       ].join(" && ");
