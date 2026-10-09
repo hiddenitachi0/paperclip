@@ -5,10 +5,12 @@ import {
   MAIL_MESSAGE_FOLDERS,
   MAIL_SEARCH_MAX_QUERY_LENGTH,
   MAIL_SEARCH_MIN_QUERY_LENGTH,
+  ackMailUrgencyOutboxSchema,
   composeMailDraftSchema,
   createMailAccountSchema,
   mailAccountEmergencyAccessSchema,
   moveMailMessageSchema,
+  setMailUrgencyFeedbackSchema,
   updateMailAccountSchema,
   updateMailDraftSchema,
   type MailMessageFolder,
@@ -268,6 +270,44 @@ export function mailAccountsRoutes(rawDb: Db, deps: MailAccountServiceDeps = {})
       const accountId = idParam(req, "accountId", "mail account");
       const draftId = idParam(req, "draftId", "draft");
       res.json(await svc.sendDraft(companyId, accountId, draftId, resolveActor(req, companyId)));
+    },
+  );
+
+  // ─── Urgency triage (DUR-4573) ─────────────────────────────────────────────
+
+  // Practice-mode "mark right/wrong": the mailbox's owner only (service-enforced).
+  router.post(
+    "/companies/:companyId/mail-accounts/:accountId/messages/:messageId/urgency-feedback",
+    memberScope(),
+    validate(setMailUrgencyFeedbackSchema),
+    async (req, res) => {
+      assertBoard(req);
+      const companyId = req.params.companyId as string;
+      const accountId = idParam(req, "accountId", "mail account");
+      const messageId = idParam(req, "messageId", "message");
+      res.json(
+        await svc.setUrgencyFeedback(companyId, accountId, messageId, req.body.feedback, resolveActor(req, companyId)),
+      );
+    },
+  );
+
+  // The Telegram bridge's outbox. Alerts carry a sender and subject from a
+  // personal inbox, so this is company owner/admin only (the bridge signs in
+  // with the operator's board credential) -- agents are refused.
+  router.get("/companies/:companyId/mail-urgency-outbox", memberScope(), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyOwnerOrAdmin(req, companyId);
+    res.json({ alerts: await svc.urgencyOutbox(companyId) });
+  });
+
+  router.post(
+    "/companies/:companyId/mail-urgency-outbox/:alertId/ack",
+    memberScope(),
+    validate(ackMailUrgencyOutboxSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      assertCompanyOwnerOrAdmin(req, companyId);
+      res.json(await svc.urgencyAck(companyId, idParam(req, "alertId", "alert"), req.body));
     },
   );
 

@@ -28,9 +28,10 @@ import type {
   WorkerHostCallContext,
 } from "@paperclipai/plugin-sdk";
 import type { CreateIssueThreadInteraction, InviteJoinType, IssueDocumentSummary, PermissionKey, PrincipalType } from "@paperclipai/shared";
-import { MEDIA_STUDIO_DIRECT_BILLING_CODE, MEDIA_STUDIO_EDIT_ACTIONS, MEDIA_STUDIO_EDIT_BILLING_CODE, estimateMediaStudioEditCostCents, pluginOperationIssueOriginKind, type MediaStudioEditAction } from "@paperclipai/shared";
+import { MEDIA_STUDIO_DIRECT_BILLING_CODE, MEDIA_STUDIO_EDIT_ACTIONS, MEDIA_STUDIO_EDIT_BILLING_CODE, estimateMediaStudioEditCostCents, mediaStudioEditActionProvider, pluginOperationIssueOriginKind, type MediaStudioEditAction } from "@paperclipai/shared";
 import { HttpError } from "../errors.js";
 import { mediaStudioDirectService } from "./media-studio-direct.js";
+import { pluginImageAnalysisService, type ImageAnalysisDeps } from "./plugin-image-analysis.js";
 import { companyService } from "./companies.js";
 import { agentService } from "./agents.js";
 import { projectService } from "./projects.js";
@@ -43,6 +44,7 @@ import { heartbeatService } from "./heartbeat.js";
 import { budgetService } from "./budgets.js";
 import { issueApprovalService } from "./issue-approvals.js";
 import { agentDailyLimitService } from "./agent-daily-limits.js";
+import { reactionLearningService } from "./reaction-learning.js";
 import { findLaneAPluginRun, laneAPluginRunNamesIssue } from "./lane-a-plugin-runs.js";
 import { subscribeCompanyLiveEvents } from "./live-events.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -345,6 +347,8 @@ export function buildHostServices(
     pluginWorkerManager?: PluginWorkerManager;
     manifest?: import("@paperclipai/shared").PaperclipPluginManifestV1;
     storage?: import("../storage/types.js").StorageService;
+    /** Test seams for models.analyseImage (the model call, the public-address check, Paperclip's own Claude key). */
+    imageAnalysis?: Omit<ImageAnalysisDeps, "storage">;
   } = {},
 ): HostServices & { dispose(): void } {
   const getStorage = () => options.storage ?? getStorageService();
@@ -397,7 +401,9 @@ export function buildHostServices(
   const budgets = budgetService(db);
   const issueApprovals = issueApprovalService(db);
   const agentDailyLimits = agentDailyLimitService(db);
+  const reactionLearning = reactionLearningService(db);
   const mediaStudioDirect = mediaStudioDirectService(db);
+  const imageAnalysis = pluginImageAnalysisService(db, { ...options.imageAnalysis, storage: getStorage });
   const scopedBus = eventBus.forPlugin(pluginKey);
 
   // Track active session event subscriptions for cleanup
@@ -2694,6 +2700,35 @@ export function buildHostServices(
       },
     },
 
+    models: {
+      async analyseImage(params, context) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        // Only inside a UI action: the company and the person come from the
+        // host's own invocation scope (routes/plugins.ts resolved both from
+        // the session), never from what the worker sends. A tool call, job
+        // or webhook has no person, so it is refused.
+        const scope = context?.invalidInvocationScope ? null : context?.invocationScope ?? null;
+        if (!scope || scope.companyId !== companyId || !scope.userId) {
+          throw new Error("Picture analysis only works from a person's action on Paperclip's own pages, for the company they have open.");
+        }
+        const { companyId: _ignored, ...input } = params;
+        const result = await imageAnalysis.analyseImage(
+          { companyId, userId: scope.userId, canManageCompany: scope.canManageCompany, pluginId },
+          input,
+        );
+        await logPluginActivity({
+          companyId,
+          action: "plugin.image_analysis.run",
+          entityType: "attachment",
+          entityId: input.fileId,
+          actor: { actorUserId: scope.userId },
+          details: { modelDirectoryEntryId: input.entryId, provider: result.provider, model: result.model, costCents: result.costCents },
+        });
+        return result;
+      },
+    },
+
     billing: {
       async reserveMediaStudioDirectSpend(params) {
         const companyId = ensureCompanyId(params.companyId);
@@ -2704,7 +2739,7 @@ export function buildHostServices(
         if (params.confirmBudgetCapCents != null && !(Number.isInteger(params.confirmBudgetCapCents) && params.confirmBudgetCapCents >= 0)) {
           throw new Error("confirmBudgetCapCents must be a non-negative integer");
         }
-        const provider = action === "variation" || action === "prompt-edit" || action === "inpaint" ? "fal" : "sogni";
+        const provider = mediaStudioEditActionProvider(action);
         // Admin status is decided here from real instance/company roles for
         // this user id -- never from anything the worker says about itself.
         // Anyone who is not an active member of this company (and not an
@@ -2779,6 +2814,25 @@ export function buildHostServices(
           issueId: params.issueId ?? null,
         });
       },
+      async checkAgentMediaSpend(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        // Same rule as recordAgentMediaCost: the agent is the run's own, resolved here.
+        if (!params.runId) throw new Error("runId is required");
+        const callingAgentId = await callingAgentIdForRun(companyId, params.runId);
+        if (!callingAgentId) throw new Error("Run not found in this company");
+        if (!["image", "video", "audio"].includes(params.kind)) throw new Error("Unknown media kind");
+        const usage = params.usage ?? {};
+        for (const value of [usage.images, usage.megapixels, usage.seconds, usage.units]) {
+          if (value !== undefined && !(typeof value === "number" && Number.isFinite(value) && value >= 0)) throw new Error("usage values must be non-negative numbers");
+        }
+        return mediaStudioDirect.checkAgentMediaSpend(companyId, {
+          agentId: callingAgentId,
+          kind: params.kind,
+          provider: params.provider,
+          usage,
+        });
+      },
     },
 
     personas: {
@@ -2807,6 +2861,22 @@ export function buildHostServices(
         // method keeps its name and result shape so plugins built against
         // the SDK (media-studio) need no change.
         return agentDailyLimits.reserve(callingAgentId, "image_generation");
+      },
+
+      // DUR-4345: read-only, run-scoped like reserveDailyGeneration -- the
+      // agent is the run's own, never a plugin-supplied id, so a plugin cannot
+      // read another person's learned preferences.
+      async getPictureFeedbackRules(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        if (!params.runId) {
+          throw new Error("runId is required");
+        }
+        const callingAgentId = await callingAgentIdForRun(companyId, params.runId);
+        if (!callingAgentId) {
+          throw new Error("Run not found in this company");
+        }
+        return reactionLearning.pictureRules(companyId, callingAgentId);
       },
     },
 

@@ -2356,6 +2356,14 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         },
       },
     },
+    models: {
+      // No model is called in the harness; a test replaces this with its own stub.
+      async analyseImage(companyId) {
+        requireCapability(manifest, capabilitySet, "models.image_analysis.run");
+        requireCompanyId(companyId);
+        throw new Error("The test harness has no analysis model; replace harness.ctx.models.analyseImage with a stub.");
+      },
+    },
     billing: {
       async reserveMediaStudioDirectSpend(companyId) {
         requireCapability(manifest, capabilitySet, "billing.media_studio_direct.reserve");
@@ -2376,6 +2384,11 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         requireCompanyId(companyId);
         return { recorded: false, reason: "test_harness" };
       },
+      async checkAgentMediaSpend(companyId) {
+        requireCapability(manifest, capabilitySet, "billing.media_studio_direct.reserve");
+        requireCompanyId(companyId);
+        return { allowed: true, estimateCents: 0 };
+      },
     },
     personas: {
       async reserveDailyGeneration(companyId, options) {
@@ -2383,6 +2396,12 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         requireCompanyId(companyId);
         if (!options?.runId) throw new Error("reserveDailyGeneration requires options.runId");
         return { allowed: true, cap: null, usedToday: 0 };
+      },
+      async getPictureFeedbackRules(companyId, options) {
+        requireCapability(manifest, capabilitySet, "personas.picture_feedback.read");
+        requireCompanyId(companyId);
+        if (!options?.runId) throw new Error("getPictureFeedbackRules requires options.runId");
+        return { doMore: [], avoid: [] };
       },
     },
     files: {

@@ -1,5 +1,5 @@
 import { createHmac, randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -674,6 +674,285 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     expect(serialized).not.toContain(rotated.secretMaterial.webhookSecret);
     expect(serialized).not.toContain(created.trigger.secretId!);
     expect(revisions[0]?.snapshot.triggers).toHaveLength(0);
+  });
+
+  describe("shared webhook secrets (DUR-4583)", () => {
+    async function sharedFixture() {
+      const fx = await seedFixture();
+      const secrets = secretService(db);
+      const second = await fx.svc.create(
+        fx.companyId,
+        {
+          projectId: fx.projectId,
+          goalId: null,
+          parentIssueId: null,
+          title: "second routine",
+          description: "other",
+          assigneeAgentId: fx.agentId,
+          priority: "medium",
+          status: "active",
+          concurrencyPolicy: "coalesce_if_active",
+          catchUpPolicy: "skip_missed",
+        },
+        {},
+      );
+      const first = await fx.svc.createTrigger(
+        fx.routine.id,
+        { kind: "webhook", signingMode: "bearer", replayWindowSec: 300, label: "alpha" },
+        { userId: "board-user" },
+      );
+      const sharedSecretId = first.trigger.secretId!;
+      const attached = await fx.svc.createTrigger(
+        second.id,
+        { kind: "webhook", signingMode: "bearer", replayWindowSec: 300, existingSecretId: sharedSecretId },
+        { userId: "board-user" },
+      );
+      return { ...fx, secrets, second, first, attached, sharedSecretId };
+    }
+
+    it("authenticates two triggers against one shared secret and never reveals it for the attached one", async () => {
+      const { svc, first, attached, sharedSecretId } = await sharedFixture();
+      expect(attached.trigger.secretId).toBe(sharedSecretId);
+      expect(attached.secretMaterial).toBeNull();
+      const value = first.secretMaterial!.webhookSecret;
+      for (const trigger of [first.trigger, attached.trigger]) {
+        const run = await svc.firePublicTrigger(trigger.publicId!, {
+          authorizationHeader: `Bearer ${value}`,
+          payload: {},
+        });
+        expect(run.source).toBe("webhook");
+      }
+      const bindings = await db
+        .select()
+        .from(companySecretBindings)
+        .where(eq(companySecretBindings.secretId, sharedSecretId));
+      expect(bindings.filter((b) => b.targetType === "routine_trigger").map((b) => b.targetId).sort()).toEqual(
+        [first.trigger.id, attached.trigger.id].sort(),
+      );
+    });
+
+    it("rotating a shared secret updates both triggers", async () => {
+      const { svc, first, attached } = await sharedFixture();
+      const oldValue = first.secretMaterial!.webhookSecret;
+      const rotated = await svc.rotateTriggerSecret(first.trigger.id, {});
+      const newValue = rotated.secretMaterial.webhookSecret;
+      for (const trigger of [first.trigger, attached.trigger]) {
+        await expect(
+          svc.firePublicTrigger(trigger.publicId!, { authorizationHeader: `Bearer ${oldValue}`, payload: {} }),
+        ).rejects.toMatchObject({ status: 401 });
+        const run = await svc.firePublicTrigger(trigger.publicId!, {
+          authorizationHeader: `Bearer ${newValue}`,
+          payload: {},
+        });
+        expect(run.source).toBe("webhook");
+      }
+    });
+
+    it("refuses an agent rotating a shared secret, even the routine's own assignee", async () => {
+      const { svc, first, attached, agentId } = await sharedFixture();
+      const oldValue = first.secretMaterial!.webhookSecret;
+      await expect(svc.rotateTriggerSecret(first.trigger.id, { agentId })).rejects.toMatchObject({ status: 403 });
+      const run = await svc.firePublicTrigger(attached.trigger.publicId!, {
+        authorizationHeader: `Bearer ${oldValue}`,
+        payload: {},
+      });
+      expect(run.source).toBe("webhook");
+    });
+
+    it("deleting one trigger keeps the shared secret and the other trigger working", async () => {
+      const { svc, first, attached, sharedSecretId } = await sharedFixture();
+      await svc.deleteTrigger(first.trigger.id, {});
+      await expect(db.select().from(companySecrets).where(eq(companySecrets.id, sharedSecretId))).resolves.toHaveLength(1);
+      const run = await svc.firePublicTrigger(attached.trigger.publicId!, {
+        authorizationHeader: `Bearer ${first.secretMaterial!.webhookSecret}`,
+        payload: {},
+      });
+      expect(run.source).toBe("webhook");
+      await svc.deleteTrigger(attached.trigger.id, {});
+      await expect(db.select().from(companySecrets).where(eq(companySecrets.id, sharedSecretId))).resolves.toHaveLength(0);
+    });
+
+    it("refuses an agent actor or a foreign/deleted secret when attaching", async () => {
+      const { svc, routine, agentId, sharedSecretId, secrets } = await sharedFixture();
+      await expect(
+        svc.createTrigger(
+          routine.id,
+          { kind: "webhook", signingMode: "bearer", replayWindowSec: 300, existingSecretId: sharedSecretId },
+          { agentId },
+        ),
+      ).rejects.toMatchObject({ status: 403 });
+      await expect(
+        svc.createTrigger(
+          routine.id,
+          { kind: "webhook", signingMode: "bearer", replayWindowSec: 300, existingSecretId: randomUUID() },
+          { userId: "board-user" },
+        ),
+      ).rejects.toMatchObject({ status: 422 });
+      const other = await seedFixture();
+      const foreign = await secretService(db).create(other.companyId, {
+        name: `foreign-${randomUUID()}`,
+        provider: "local_encrypted",
+        value: "x".repeat(12),
+      }, {});
+      await expect(
+        svc.createTrigger(
+          routine.id,
+          { kind: "webhook", signingMode: "bearer", replayWindowSec: 300, existingSecretId: foreign.id },
+          { userId: "board-user" },
+        ),
+      ).rejects.toMatchObject({ status: 422 });
+      void secrets;
+    });
+
+    it("names generated secrets readably and never leaks the value into the secret row or revisions", async () => {
+      const { first, sharedSecretId, svc, routine } = await sharedFixture();
+      const [row] = await db.select().from(companySecrets).where(eq(companySecrets.id, sharedSecretId));
+      expect(row.name).toBe("Webhook password — routine: ascii frog (CodexCoder)");
+      expect(row.key).toMatch(/^routine-/);
+      expect(row.description).toContain("'alpha'");
+      expect(row.description).toContain(`/routines/${routine.id}`);
+      expect(JSON.stringify(row)).not.toContain(first.secretMaterial!.webhookSecret);
+      const revisions = await svc.listRevisions(routine.id);
+      expect(JSON.stringify(revisions)).not.toContain(first.secretMaterial!.webhookSecret);
+    });
+
+    it("names the secret from the assignee agent, not the raw title, when the routine title is an unrendered template", async () => {
+      const { svc, companyId, projectId, agentId } = await seedFixture();
+      const templated = await svc.create(
+        companyId,
+        {
+          projectId,
+          goalId: null,
+          parentIssueId: null,
+          title: "{{title}}",
+          description: "Nordstrand report",
+          assigneeAgentId: agentId,
+          priority: "medium",
+          status: "active",
+          concurrencyPolicy: "coalesce_if_active",
+          catchUpPolicy: "skip_missed",
+        },
+        {},
+      );
+      const created = await svc.createTrigger(
+        templated.id,
+        { kind: "webhook", signingMode: "bearer", replayWindowSec: 300, label: "report" },
+        { userId: "board-user" },
+      );
+      const [row] = await db.select().from(companySecrets).where(eq(companySecrets.id, created.trigger.secretId!));
+      expect(row.name).toBe("Webhook password — CodexCoder's routine");
+      expect(row.name).not.toContain("{{");
+    });
+
+    it("falls back to a generic name when a templated routine has no assignee", async () => {
+      const { svc, companyId, projectId } = await seedFixture();
+      const templated = await svc.create(
+        companyId,
+        {
+          projectId,
+          goalId: null,
+          parentIssueId: null,
+          title: "{{title}}",
+          description: "Unassigned report",
+          assigneeAgentId: null,
+          priority: "medium",
+          status: "active",
+          concurrencyPolicy: "coalesce_if_active",
+          catchUpPolicy: "skip_missed",
+        },
+        {},
+      );
+      const created = await svc.createTrigger(
+        templated.id,
+        { kind: "webhook", signingMode: "bearer", replayWindowSec: 300, label: "report" },
+        { userId: "board-user" },
+      );
+      const [row] = await db.select().from(companySecrets).where(eq(companySecrets.id, created.trigger.secretId!));
+      expect(row.name).toBe("Webhook password — routine");
+    });
+
+    it("backfill migration renames legacy machine-named secrets and adds used-by bindings idempotently", async () => {
+      const { svc, routine, companyId, agentId } = await seedFixture();
+      const legacy = await svc.createTrigger(routine.id, { kind: "webhook", signingMode: "bearer", replayWindowSec: 300, label: "legacy" }, { agentId });
+      const legacySecretId = legacy.trigger.secretId!;
+      const legacyKey = `routine-${routine.id}-aabbccddeeff`;
+      await db.update(companySecrets).set({ key: legacyKey, name: legacyKey, description: "Webhook auth for routine x" }).where(eq(companySecrets.id, legacySecretId));
+      await db.delete(companySecretBindings).where(eq(companySecretBindings.targetType, "routine_trigger"));
+
+      const { readFileSync } = await import("node:fs");
+      const migration = readFileSync(
+        new URL("../../../packages/db/src/migrations/0233_webhook_secret_readable_names.sql", import.meta.url),
+        "utf8",
+      );
+      for (let pass = 0; pass < 2; pass += 1) {
+        for (const statement of migration.split("--> statement-breakpoint")) {
+          await db.execute(sql.raw(statement));
+        }
+      }
+      const [row] = await db.select().from(companySecrets).where(eq(companySecrets.id, legacySecretId));
+      expect(row.name).toBe("Webhook password — routine: ascii frog (CodexCoder)");
+      expect(row.description).toContain("'legacy'");
+      const used = await db
+        .select()
+        .from(companySecretBindings)
+        .where(eq(companySecretBindings.targetType, "routine_trigger"));
+      expect(used.filter((b) => b.companyId === companyId)).toHaveLength(1);
+    });
+
+    it("backfill migration renames secrets still carrying a raw {{title}} template, idempotently", async () => {
+      const { svc, companyId, projectId, agentId } = await seedFixture();
+      const templated = await svc.create(
+        companyId,
+        {
+          projectId,
+          goalId: null,
+          parentIssueId: null,
+          title: "{{title}}",
+          description: "Nordstrand report",
+          assigneeAgentId: agentId,
+          priority: "medium",
+          status: "active",
+          concurrencyPolicy: "coalesce_if_active",
+          catchUpPolicy: "skip_missed",
+        },
+        {},
+      );
+      const created = await svc.createTrigger(
+        templated.id,
+        { kind: "webhook", signingMode: "bearer", replayWindowSec: 300, label: "report" },
+        { agentId },
+      );
+      const secretId = created.trigger.secretId!;
+      const staleName = "Webhook password — routine: {{title}} (a human)";
+      await db.update(companySecrets).set({ name: staleName }).where(eq(companySecrets.id, secretId));
+
+      const { readFileSync } = await import("node:fs");
+      const migration = readFileSync(
+        new URL("../../../packages/db/src/migrations/0234_webhook_secret_template_names.sql", import.meta.url),
+        "utf8",
+      );
+      for (let pass = 0; pass < 2; pass += 1) {
+        for (const statement of migration.split("--> statement-breakpoint")) {
+          await db.execute(sql.raw(statement));
+        }
+      }
+      const [row] = await db.select().from(companySecrets).where(eq(companySecrets.id, secretId));
+      expect(row.name).toBe("Webhook password — CodexCoder's routine");
+      expect(row.name).not.toContain("{{");
+    });
+
+    it("swaps a trigger onto an existing secret and removes its orphaned generated secret", async () => {
+      const { svc, routine, sharedSecretId } = await sharedFixture();
+      const own = await svc.createTrigger(
+        routine.id,
+        { kind: "webhook", signingMode: "bearer", replayWindowSec: 300 },
+        { userId: "board-user" },
+      );
+      const ownSecretId = own.trigger.secretId!;
+      const updated = await svc.updateTrigger(own.trigger.id, { existingSecretId: sharedSecretId }, { userId: "board-user" });
+      expect(updated?.trigger.secretId).toBe(sharedSecretId);
+      await expect(db.select().from(companySecrets).where(eq(companySecrets.id, ownSecretId))).resolves.toHaveLength(0);
+    });
   });
 
   it("wakes the assignee when a routine creates a fresh execution issue", async () => {

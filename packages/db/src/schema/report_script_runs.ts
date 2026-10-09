@@ -6,7 +6,7 @@ import { heartbeatRuns } from "./heartbeat_runs.js";
 import { reportScriptVersions } from "./report_script_versions.js";
 import { reportFixtures } from "./report_fixtures.js";
 
-export const REPORT_SCRIPT_RUN_TRIGGER_VALUES = ["fixture_test", "manual", "report_run"] as const;
+export const REPORT_SCRIPT_RUN_TRIGGER_VALUES = ["fixture_test", "approval_check", "report_run"] as const;
 export type ReportScriptRunTrigger = (typeof REPORT_SCRIPT_RUN_TRIGGER_VALUES)[number];
 
 export const REPORT_SCRIPT_RUN_STATUS_VALUES = [
@@ -24,11 +24,13 @@ export type ReportScriptRunStatus = (typeof REPORT_SCRIPT_RUN_STATUS_VALUES)[num
  * version, whether it was a fixture test or (once PR2 lands) a real report
  * run. Rows are append-only; a run is never edited after it finishes.
  *
- * `scriptSha256` is copied from the script version at run time (not just
- * joined live) so a run's record of what ran survives even if the version
- * row were ever retired/changed later. `runtimeFingerprint` is the
- * trusted-code-style digest of the built `uv` venv directory the run
- * actually executed in, re-checked immediately before every run.
+ * `scriptSha256` is the digest recomputed from the version row's files
+ * right before the run (not copied from a marker on disk), so a run's
+ * record of what ran survives even if the version is retired later.
+ * `runtimeFingerprint` is kept for the record and equals scriptSha256: the
+ * runner writes the files from the database into a fresh directory per run.
+ * Status 'fingerprint_mismatch' means the recomputed digest did not match
+ * the approved one and nothing was executed.
  */
 export const reportScriptRuns = pgTable(
   "report_script_runs",
@@ -61,7 +63,7 @@ export const reportScriptRuns = pgTable(
     scriptVersionIdx: index("report_script_runs_script_version_idx").on(table.scriptVersionId),
     triggerCheck: check(
       "report_script_runs_trigger_check",
-      sql`${table.trigger} IN ('fixture_test', 'manual', 'report_run')`,
+      sql`${table.trigger} IN ('fixture_test', 'approval_check', 'report_run')`,
     ),
     statusCheck: check(
       "report_script_runs_status_check",

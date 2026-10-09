@@ -588,3 +588,17 @@ describe("helpers", () => {
     expect(resolveLaneABaseUrl("local", "http://localhost:11434/v1")).toBe("http://localhost:11434/v1");
   });
 });
+
+describe("toOpenAiMessages: no null content Ollama would refuse", () => {
+  it("sends an empty assistant reply as \"\" and keeps null only beside tool calls (8 Oct, Ollama: invalid message content type <nil>)", () => {
+    const out = toOpenAiMessages("sys", [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "" },
+      { role: "assistant", content: "", toolCalls: [{ id: "c1", name: "get_weather", input: { location: "Oslo" } }] },
+      { role: "tool", results: [{ toolCallId: "c1", content: undefined as unknown as string }] },
+    ]);
+    expect(out[2]).toEqual({ role: "assistant", content: "" });
+    expect(out[3]).toMatchObject({ role: "assistant", content: null });
+    expect(out[4]).toEqual({ role: "tool", tool_call_id: "c1", content: "" });
+  });
+});

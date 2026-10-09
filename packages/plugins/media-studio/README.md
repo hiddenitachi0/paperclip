@@ -64,6 +64,15 @@ Generation runs behind a `GenerationProvider` interface, selected in the plugin'
 | `sogni` | a Sogni key (as a Paperclip **secret ref** set in settings) | durable workflow at `https://api.sogni.ai` — see below |
 | `comfyui` | a `comfyUrl` (over Tailscale) | self-hosted, swappable GPU endpoint |
 
+**Keys per company.** The Sogni, Fal.ai and Higgsfield keys can be set per company: in Media Studio's
+**Settings** tab the company's owner or an admin picks the company's own key for each service from the
+company's Secrets (`src/company-settings.ts`, plugin state `serviceKeys`). A service without the company's own
+key uses the instance's key from the plugin's instance settings, which only the instance admin sees and changes
+(at the bottom of the same tab). The tab says which one each service uses ("This company's own key" /
+"Using the instance's key (set by the instance admin)"). Only secret ids are stored; values are read on the
+server for each call and never reach the browser. The server's own Media Studio paths (Create tab, storylines)
+read the same picks (`server/src/services/media-studio-company-keys.ts`).
+
 ## Keeping a character consistent
 
 A look can describe one person (or product) in detail, so every picture of them looks alike over time. All of it is
@@ -126,6 +135,16 @@ Under **Company settings → Media Studio looks**, an owner or admin can make a 
   default, with the maker's recommended range and a link to the LoRA's page. **Sogni does not add a LoRA's trigger
   words**: if the LoRA's page names one, put it in the look's style words. Not every model has LoRAs (in September
   2026 only the Krea 2 family had public ones; Dark Beast Z-Image Turbo v9 had none).
+- **Changing the model (or service) keeps the LoRAs.** Sogni's catalog lists, for each LoRA, the models it is made for
+  (there is no separate "family" field, so the page names those models). A LoRA made for other models than the chosen
+  one stays on the look with a plain warning ("Made for Krea 2 Turbo, ...; Z-Image Turbo may ignore it or give odd
+  results"), its own Remove button and a **Remove all that don't fit** button; when Sogni does not list a LoRA (any
+  more) or the list cannot be read, the page says it can't tell. Such a look can still be saved. Each picture then
+  leaves out only the LoRAs Sogni does not list for its model (sending them could fail the whole picture) and says
+  which in the result. A look switched to Fal.ai keeps its Sogni LoRAs unused (Fal is sent nothing for them).
+- **Make a copy** (next to Edit) duplicates a look with everything in it (style words, character sheet, reference
+  pictures and their roles, service, model, LoRAs, settings, seed, content filter) as "<name> (copy)" and opens the
+  copy for editing, for example to try the same look on another model. Owner/admin only, within the company.
 - **Model settings** the model allows: guidance (only where the model lets it change), "things to keep out of the
   picture" (only models that use it), and the picture size (inside the model's width and height range). Steps cannot
   be set: Sogni's workflow step has no steps setting.
@@ -135,8 +154,9 @@ Under **Company settings → Media Studio looks**, an owner or admin can make a 
   also checks that the account may make such pictures (a subscription, Premium Spark, or paying with SOGNI).
 
 Everything in a look is checked again in the worker when it is saved and before every picture: the model must be in
-Sogni's catalog, each LoRA must work with that model at a strength inside its range, at most 8, and a LoRA Sogni marks
-as needing the filter off needs a look with the filter off. A problem is reported in a plain sentence before the
+Sogni's catalog, each LoRA must be one Sogni lists at a strength inside its range, at most 8, and a LoRA Sogni marks
+as needing the filter off needs a look with the filter off. LoRAs made for other models are allowed on save and left
+out of each picture (see above). A problem is reported in a plain sentence before the
 agent's daily picture limit is touched. When Sogni's catalog cannot be reached, a look keeps working with the model and
 LoRAs it was saved with, but new models cannot be picked.
 
@@ -219,6 +239,38 @@ using JSON Schema features the plugin's checker does not understand. To add a So
 
 The approval it files is a normal `request_board_approval`, so it also shows up in the
 **Now view → Needs you** lane.
+
+## Identities, rooms and training (Identities and Rooms tabs)
+
+- **Identity** (`src/identity.ts`, stored per company in plugin state `identities`): a saved person, separate
+  from looks. Creating one requires two ticked confirmations (fictional/AI-made or written consent; adult 18+).
+  "Analyse picture" sends the upload to the company's analysis model (identity settings: one of the company's
+  saved models from Settings > Models, key from company Secrets). The Paperclip server makes that call
+  (`ctx.models.analyseImage`, capability `models.image_analysis.run`), not the worker: it reads the saved model's
+  provider, model and address itself, reaches a company's own model server (Ollama on a tailnet address) the same
+  way quick agents do, sends no tools and records the cost. The plugin never names an address. The answer is
+  still checked here as strict JSON; anything that does not clearly say "adult" blocks the picture. Crops (face,
+  body, outfit, other) are cut on the server with sharp.
+- A look with an identity sends the face crop as picture 1, the body crop as picture 2 when the model has room,
+  the outfit crop only with "same outfit", then the look's own pictures. On Sogni with no model on the look, the
+  identity's model is used (krea-identity-edit; qwen when a third picture is needed). Seeds never keep a person.
+- **Training set**: batches generated with Sogni, Fal.ai or Higgsfield (model, LoRAs, variations chosen per batch,
+  each picture keeps its provenance) plus own photos; tick the best. **Train with**: a Krea 2 LoRA on Fal.ai
+  (published PUBLIC to Hugging Face, imported into Sogni personal LoRAs), a Higgsfield Soul ID, or download the
+  set as a zip with captions. Results are kept as `trainedIdentities` per service; a look can pick one.
+- **Age check** (`src/age-check.ts`): every picture is checked for apparent age before it leaves Paperclip for
+  training or identity (Fal LoRA training, Higgsfield Soul ID, Hugging Face publish of a LoRA, training-set zip).
+  The result is kept per company by the sha256 of the picture's bytes (`pictureAgeChecks`:
+  `{sha256, verdict: adult|under18|unclear, modelEntryId, checkedAt}`), so a re-uploaded copy keeps it. Pictures
+  not checked yet are checked automatically with one call each to the company's analysis model (strict JSON
+  `{"apparentAdult": true|false|null}`); only `true` passes, an unreadable answer is not stored, a stored refusal
+  never gets milder, and the action does not start (nothing is paid for or sent) unless every picture passes.
+  "Analyse picture" stores its adult/not-adult answer the same way.
+- **Higgsfield** (`src/higgsfield.ts`) is a picture service: Soul text-to-picture with an optional Soul ID. It takes
+  no reference pictures, so looks' outfit/style pictures and rooms go through Sogni or Fal.
+- **Rooms** (`src/rooms.ts`): a room photo, named areas (masks from Sogni's selection or painted), products (with
+  background removal). "Place product" sends the room as picture 1 and products as 2.., then puts the result back
+  only inside the area (`mask-composite.ts`), so the rest of the room is pixel-identical.
 
 ## How it fits together (zero core edits)
 

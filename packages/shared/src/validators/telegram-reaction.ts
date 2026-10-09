@@ -65,6 +65,25 @@ export const recordTelegramReactionSchema = z
   .strict();
 export type RecordTelegramReactionInput = z.infer<typeof recordTelegramReactionSchema>;
 
+/** DUR-4345: the longest follow-up answer kept (plain text, treated as data). */
+export const REACTION_FOLLOW_UP_ANSWER_MAX = 300;
+
+/** The person's reply to the one follow-up question asked about a disliked picture. */
+export const recordReactionFollowUpAnswerSchema = z
+  .object({
+    agentId: z.string().uuid(),
+    telegramUserId: z.string().trim().regex(/^[1-9]\d{0,18}$/, "Not a Telegram user id."),
+    telegramChatId: z.string().trim().regex(TELEGRAM_CHAT_ID_PATTERN, "Not a Telegram chat id."),
+    /** The picture's own Telegram message id (not the follow-up question's). */
+    telegramMessageId: z.number().int().positive().max(2_147_483_647),
+    answer: z
+      .string()
+      .transform((value) => value.replace(/\s+/g, " ").trim())
+      .pipe(z.string().min(1).max(REACTION_FOLLOW_UP_ANSWER_MAX)),
+  })
+  .strict();
+export type RecordReactionFollowUpAnswerInput = z.infer<typeof recordReactionFollowUpAnswerSchema>;
+
 export const updateReactionEmojiConfigSchema = z
   .object({
     positive: z.array(emojiSchema).max(MAX_REACTION_EMOJI_PER_MEANING),

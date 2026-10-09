@@ -8,13 +8,13 @@ import { queryKeys } from "../lib/queryKeys";
 import { useToastActions } from "../context/ToastContext";
 import { Link } from "@/lib/router";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ToggleSwitch } from "@/components/ui/toggle-switch";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type { MorningReportOutboxItem } from "@paperclipai/shared";
+import { SettingsSection, SettingsSubsection } from "./SettingsSection";
 
 /**
  * DUR-4138: picture source choice for one report picture (weather or mood) —
@@ -288,6 +288,11 @@ function PictureSourcePicker({
  * migration 0183 by the Backend Engineer. Until that ships, this card is
  * rendered but the field will come back as undefined from the API, which the
  * parser handles by returning defaults.
+ *
+ * Shown as a foldable "Morning report" block, closed by default (it says
+ * "On · sends at 07:00 (Europe/Oslo)" or "Off" while folded); the on/off
+ * switch sits in the heading row so it works without opening the block.
+ * Inside, the settings are grouped: when and where, news, prices, pictures.
  */
 export function MorningReportSection({
   agent,
@@ -395,27 +400,48 @@ export function MorningReportSection({
     },
   });
 
-  return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-center justify-between">
-          <div>
-            <CardTitle className="text-base">Morning report</CardTitle>
-            <CardDescription>
-              Send a daily briefing to this agent's Telegram chat at a set time each morning.
-            </CardDescription>
-          </div>
-          <ToggleSwitch
-            checked={settings.enabled}
-            onCheckedChange={(v) => toggleMutation.mutate(v)}
-            disabled={saving}
-            aria-label="Enable morning report"
-          />
-        </div>
-      </CardHeader>
+  // One-line read-outs shown beside a heading while that block is folded.
+  const sectionSummary = saved.enabled ? `On · sends at ${saved.time} (${saved.timezone})` : "Off";
+  const whenSummary = `${settings.time} (${settings.timezone})${
+    settings.placeOverride ? ` · weather for ${settings.placeOverride}` : ""
+  }`;
+  const newsSummary = `Up to ${settings.maxHeadlines} headlines from ${settings.sources.length} ${
+    settings.sources.length === 1 ? "source" : "sources"
+  }`;
+  const pricesSummary =
+    settings.priceSymbols.length > 0 ? settings.priceSymbols.join(", ") : "No prices";
+  const pictureText = (source: MorningReportPictureSource) =>
+    source.kind === "look"
+      ? (looks.find((look) => look.id === source.lookId)?.name ?? "a saved look")
+      : source.kind === "model"
+        ? `${source.provider === "fal" ? "Fal.ai" : "Sogni"} ${source.model}`.trim()
+        : "default look";
+  const picturesSummary = `Weather: ${pictureText(settings.weatherPicture)} · Mood: ${pictureText(settings.moodPicture)}`;
 
-      {settings.enabled && (
-        <CardContent className="space-y-6">
+  return (
+    <SettingsSection
+      title="Morning report"
+      description="Send a daily briefing to this agent's Telegram chat at a set time each morning."
+      summary={sectionSummary}
+      defaultOpen={false}
+      storageKey="agent.morningReport.section"
+      data-testid="morning-report-section"
+      contentClassName="space-y-4"
+      actions={
+        <ToggleSwitch
+          checked={settings.enabled}
+          onCheckedChange={(v) => toggleMutation.mutate(v)}
+          disabled={saving}
+          aria-label="Enable morning report"
+        />
+      }
+    >
+      {!settings.enabled ? (
+        <p className="text-sm text-muted-foreground" data-testid="morning-report-off">
+          The morning report is off. Switch it on to choose when it is sent and what goes in it.
+        </p>
+      ) : (
+        <>
           {/* Send a test report now (DUR-4075): try changes without waiting for the scheduled time */}
           <div className="space-y-2">
             <div className="flex flex-wrap gap-2">
@@ -448,165 +474,187 @@ export function MorningReportSection({
             )}
           </div>
 
-          {/* Delivery time */}
-          <div className="grid grid-cols-2 gap-4">
+          <SettingsSubsection
+            title="When and where"
+            summary={whenSummary}
+            storageKey="agent.morningReport.when"
+            data-testid="morning-report-when"
+          >
+            {/* Delivery time */}
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label htmlFor="mr-time">Send at</Label>
+                <Input
+                  id="mr-time"
+                  type="time"
+                  value={settings.time}
+                  onChange={(e) => update({ time: e.target.value })}
+                  disabled={saving}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="mr-timezone">Time zone</Label>
+                <Input
+                  id="mr-timezone"
+                  value={settings.timezone}
+                  onChange={(e) => update({ timezone: e.target.value })}
+                  placeholder="Europe/Oslo"
+                  disabled={saving}
+                />
+                <p className="text-xs text-muted-foreground">IANA name, e.g. Europe/Oslo, America/New_York</p>
+              </div>
+            </div>
+
+            {/* Place override */}
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label htmlFor="mr-place">Location for weather</Label>
+                <Input
+                  id="mr-place"
+                  value={settings.placeOverride ?? ""}
+                  onChange={(e) => update({ placeOverride: e.target.value || null })}
+                  placeholder="Drøbak"
+                  disabled={saving}
+                />
+                <p className="text-xs text-muted-foreground">Leave empty to use the default from instructions</p>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="mr-place-until">Use this location until</Label>
+                <Input
+                  id="mr-place-until"
+                  type="date"
+                  value={settings.placeOverrideUntil ?? ""}
+                  onChange={(e) => update({ placeOverrideUntil: e.target.value || null })}
+                  disabled={saving || !settings.placeOverride}
+                />
+                <p className="text-xs text-muted-foreground">After this date the override is ignored</p>
+              </div>
+            </div>
+          </SettingsSubsection>
+
+          <SettingsSubsection
+            title="News"
+            summary={newsSummary}
+            storageKey="agent.morningReport.news"
+            data-testid="morning-report-news"
+          >
+            {/* Headlines */}
             <div className="space-y-1.5">
-              <Label htmlFor="mr-time">Send at</Label>
+              <Label htmlFor="mr-max-headlines">Max headlines per day</Label>
               <Input
-                id="mr-time"
-                type="time"
-                value={settings.time}
-                onChange={(e) => update({ time: e.target.value })}
+                id="mr-max-headlines"
+                type="number"
+                min={1}
+                max={10}
+                value={settings.maxHeadlines}
+                onChange={(e) => update({ maxHeadlines: Math.min(10, Math.max(1, Number(e.target.value))) })}
+                disabled={saving}
+                className="w-24"
+              />
+            </div>
+
+            {/* News sources */}
+            <div className="space-y-2">
+              <Label>News sources</Label>
+              <p className="text-xs text-muted-foreground">
+                Headlines are pulled from RSS feeds where available, search otherwise. Tick the sources to include.
+              </p>
+              <CheckboxGroup
+                items={NEWS_SOURCES}
+                selected={settings.sources}
+                onChange={(v) => update({ sources: v })}
                 disabled={saving}
               />
             </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="mr-timezone">Time zone</Label>
-              <Input
-                id="mr-timezone"
-                value={settings.timezone}
-                onChange={(e) => update({ timezone: e.target.value })}
-                placeholder="Europe/Oslo"
+
+            {/* Topics */}
+            <div className="space-y-2">
+              <Label>Topics for news</Label>
+              <p className="text-xs text-muted-foreground">
+                Headlines are filtered to these topics. Untick to skip that category.
+              </p>
+              <CheckboxGroup
+                items={NEWS_TOPICS}
+                selected={settings.topics}
+                onChange={(v) => update({ topics: v })}
                 disabled={saving}
               />
-              <p className="text-xs text-muted-foreground">IANA name, e.g. Europe/Oslo, America/New_York</p>
             </div>
-          </div>
 
-          {/* Place override */}
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-1.5">
-              <Label htmlFor="mr-place">Location for weather</Label>
-              <Input
-                id="mr-place"
-                value={settings.placeOverride ?? ""}
-                onChange={(e) => update({ placeOverride: e.target.value || null })}
-                placeholder="Drøbak"
+            {/* Hobby topics */}
+            <div className="space-y-2">
+              <Label>Hobby news</Label>
+              <p className="text-xs text-muted-foreground">
+                New releases only — no rumours or speculation.
+              </p>
+              <CheckboxGroup
+                items={HOBBY_TOPICS}
+                selected={settings.hobbyTopics}
+                onChange={(v) => update({ hobbyTopics: v })}
                 disabled={saving}
               />
-              <p className="text-xs text-muted-foreground">Leave empty to use the default from instructions</p>
             </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="mr-place-until">Use this location until</Label>
-              <Input
-                id="mr-place-until"
-                type="date"
-                value={settings.placeOverrideUntil ?? ""}
-                onChange={(e) => update({ placeOverrideUntil: e.target.value || null })}
-                disabled={saving || !settings.placeOverride}
+
+            {/* Sport */}
+            <div className="space-y-2">
+              <Label>Sport</Label>
+              <CheckboxGroup
+                items={SPORT_FOLLOWS}
+                selected={settings.sportFollows}
+                onChange={(v) => update({ sportFollows: v })}
+                disabled={saving}
               />
-              <p className="text-xs text-muted-foreground">After this date the override is ignored</p>
             </div>
-          </div>
+          </SettingsSubsection>
 
-          {/* Headlines */}
-          <div className="space-y-1.5">
-            <Label htmlFor="mr-max-headlines">Max headlines per day</Label>
-            <Input
-              id="mr-max-headlines"
-              type="number"
-              min={1}
-              max={10}
-              value={settings.maxHeadlines}
-              onChange={(e) => update({ maxHeadlines: Math.min(10, Math.max(1, Number(e.target.value))) })}
-              disabled={saving}
-              className="w-24"
-            />
-          </div>
-
-          {/* News sources */}
-          <div className="space-y-2">
-            <Label>News sources</Label>
-            <p className="text-xs text-muted-foreground">
-              Headlines are pulled from RSS feeds where available, search otherwise. Tick the sources to include.
-            </p>
-            <CheckboxGroup
-              items={NEWS_SOURCES}
-              selected={settings.sources}
-              onChange={(v) => update({ sources: v })}
-              disabled={saving}
-            />
-          </div>
-
-          {/* Topics */}
-          <div className="space-y-2">
-            <Label>Topics for news</Label>
-            <p className="text-xs text-muted-foreground">
-              Headlines are filtered to these topics. Untick to skip that category.
-            </p>
-            <CheckboxGroup
-              items={NEWS_TOPICS}
-              selected={settings.topics}
-              onChange={(v) => update({ topics: v })}
-              disabled={saving}
-            />
-          </div>
-
-          {/* Hobby topics */}
-          <div className="space-y-2">
-            <Label>Hobby news</Label>
-            <p className="text-xs text-muted-foreground">
-              New releases only — no rumours or speculation.
-            </p>
-            <CheckboxGroup
-              items={HOBBY_TOPICS}
-              selected={settings.hobbyTopics}
-              onChange={(v) => update({ hobbyTopics: v })}
-              disabled={saving}
-            />
-          </div>
-
-          {/* Sport */}
-          <div className="space-y-2">
-            <Label>Sport</Label>
-            <CheckboxGroup
-              items={SPORT_FOLLOWS}
-              selected={settings.sportFollows}
-              onChange={(v) => update({ sportFollows: v })}
-              disabled={saving}
-            />
-          </div>
-
-          {/* Prices */}
-          <div className="space-y-2">
-            <Label>Prices</Label>
-            <p className="text-xs text-muted-foreground">
-              Shows each price with the change since yesterday. Uses the price watchers service.
-            </p>
+          <SettingsSubsection
+            title="Prices"
+            description="Shows each price with the change since yesterday. Uses the price watchers service."
+            summary={pricesSummary}
+            storageKey="agent.morningReport.prices"
+            data-testid="morning-report-prices"
+          >
             <CheckboxGroup
               items={PRICE_SYMBOLS}
               selected={settings.priceSymbols}
               onChange={(v) => update({ priceSymbols: v })}
               disabled={saving}
             />
-          </div>
+          </SettingsSubsection>
 
           {/* DUR-4138: per-picture look/model choice */}
-          <div className="space-y-2">
-            <Label>Weather picture</Label>
-            <PictureSourcePicker
-              value={settings.weatherPicture}
-              onChange={(v) => update({ weatherPicture: v })}
-              looks={looks}
-              looksLoading={looksQuery.isLoading}
-              disabled={saving}
-            />
-          </div>
+          <SettingsSubsection
+            title="Pictures"
+            summary={picturesSummary}
+            storageKey="agent.morningReport.pictures"
+            data-testid="morning-report-pictures"
+          >
+            <div className="space-y-2">
+              <Label>Weather picture</Label>
+              <PictureSourcePicker
+                value={settings.weatherPicture}
+                onChange={(v) => update({ weatherPicture: v })}
+                looks={looks}
+                looksLoading={looksQuery.isLoading}
+                disabled={saving}
+              />
+            </div>
 
-          <div className="space-y-2">
-            <Label>Mood picture</Label>
-            <PictureSourcePicker
-              value={settings.moodPicture}
-              onChange={(v) => update({ moodPicture: v })}
-              looks={looks}
-              looksLoading={looksQuery.isLoading}
-              disabled={saving}
-            />
-          </div>
+            <div className="space-y-2">
+              <Label>Mood picture</Label>
+              <PictureSourcePicker
+                value={settings.moodPicture}
+                onChange={(v) => update({ moodPicture: v })}
+                looks={looks}
+                looksLoading={looksQuery.isLoading}
+                disabled={saving}
+              />
+            </div>
+          </SettingsSubsection>
 
           {/* Save */}
           {dirty && (
-            <div className="flex gap-2">
+            <div className="flex gap-2 border-t border-border pt-4">
               <Button
                 size="sm"
                 onClick={() => saveMutation.mutate(settings)}
@@ -624,8 +672,8 @@ export function MorningReportSection({
               </Button>
             </div>
           )}
-        </CardContent>
+        </>
       )}
-    </Card>
+    </SettingsSection>
   );
 }

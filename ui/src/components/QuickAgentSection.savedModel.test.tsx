@@ -92,6 +92,17 @@ const ENTRY: ModelDirectoryEntry = {
   defaultMaxOutputTokens: 1024,
   backupEntryIds: [],
   note: null,
+  maker: null,
+  baseModel: null,
+  lane: null,
+  availability: null,
+  tags: [],
+  specs: null,
+  favorite: false,
+  archivedAt: null,
+  family: null,
+  variant: null,
+  ratings: [],
   createdByUserId: null,
   updatedByUserId: null,
   createdAt: "2026-10-01T00:00:00Z",
@@ -154,6 +165,40 @@ describe("QuickAgentSection saved-model dropdown", () => {
     const root2 = await render(agent());
     expect(container.querySelector('[data-testid="quick-agent-saved-model-select"]')).toBeNull();
     await act(async () => root2.unmount());
+  });
+
+  it("groups saved models by maker and model, and tells two setups of one model apart", async () => {
+    const local = {
+      ...ENTRY,
+      id: "44444444-4444-4444-8444-444444444444",
+      name: "Maja local",
+      provider: "local" as const,
+      model: "llama3.2:latest",
+      baseUrl: "http://pc:11434/v1",
+      providerRouting: null,
+      maker: "Meta",
+      family: "Llama 3.2",
+      variant: "3B",
+    };
+    const cloud = {
+      ...ENTRY,
+      id: "55555555-5555-4555-8555-555555555555",
+      name: "Llama 3.2 3B",
+      model: "meta-llama/llama-3.2-3b-instruct",
+      maker: "Meta",
+      family: "Llama 3.2",
+      variant: "3B",
+    };
+    mockModelDirectoryApi.list.mockResolvedValue([local, cloud]);
+    const root = await render(agent());
+    const select = container.querySelector<HTMLSelectElement>('[data-testid="quick-agent-saved-model-select"]')!;
+    const groups = [...select.querySelectorAll("optgroup")];
+    expect(groups.map((g) => g.label)).toEqual(["Meta · Llama 3.2"]);
+    expect([...groups[0]!.querySelectorAll("option")].map((o) => o.textContent)).toEqual([
+      "3B · OpenRouter [Needs a key]",
+      "3B · Local (llama3.2:latest) — Maja local [Unknown]",
+    ]);
+    await act(async () => root.unmount());
   });
 
   it("fills every field and clears the stale local address when picking an OpenRouter setup", async () => {

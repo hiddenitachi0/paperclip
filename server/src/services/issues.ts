@@ -1,4 +1,6 @@
 import { Buffer } from "node:buffer";
+import { progressMapForParents } from "./issue-progress.js";
+import type { IssueProgress } from "@paperclipai/shared";
 import { createHash } from "node:crypto";
 import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lt, ne, notInArray, or, sql, type SQL } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -367,6 +369,8 @@ type IssueWithLabels = IssueRow & {
   labels: IssueLabelRow[];
   labelIds: string[];
   watchdog?: IssueWatchdogSummary | null;
+  /** Derived from direct children (DUR-4467); null when the issue has no sub-tasks. */
+  progress?: IssueProgress | null;
 };
 type IssueWithLabelsAndRun = IssueWithLabels & { activeRun: IssueActiveRunRow | null };
 type IssueUserCommentStats = {
@@ -1442,9 +1446,10 @@ async function labelMapForIssues(dbOrTx: any, issueIds: string[]): Promise<Map<s
 async function withIssueLabels(dbOrTx: any, rows: IssueRow[]): Promise<IssueWithLabels[]> {
   if (rows.length === 0) return [];
   const issueIds = rows.map((row) => row.id);
-  const [labelsByIssueId, watchdogByIssueId] = await Promise.all([
+  const [labelsByIssueId, watchdogByIssueId, progressByIssueId] = await Promise.all([
     labelMapForIssues(dbOrTx, issueIds),
     watchdogMapForIssues(dbOrTx, rows),
+    progressMapForParents(dbOrTx, rows),
   ]);
   return rows.map((row) => {
     const issueLabels = labelsByIssueId.get(row.id) ?? [];
@@ -1453,6 +1458,7 @@ async function withIssueLabels(dbOrTx: any, rows: IssueRow[]): Promise<IssueWith
       labels: issueLabels,
       labelIds: issueLabels.map((label) => label.id),
       watchdog: watchdogByIssueId.get(row.id) ?? null,
+      progress: progressByIssueId.get(row.id) ?? null,
     };
   });
 }
@@ -2339,6 +2345,7 @@ const issueListSelect = {
   status: issues.status,
   workMode: issues.workMode,
   priority: issues.priority,
+  sizeLabel: issues.sizeLabel,
   assigneeAgentId: issues.assigneeAgentId,
   assigneeUserId: issues.assigneeUserId,
   checkoutRunId: issues.checkoutRunId,

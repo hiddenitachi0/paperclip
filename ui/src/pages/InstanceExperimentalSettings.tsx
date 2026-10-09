@@ -321,10 +321,10 @@ export function InstanceExperimentalSettings() {
         </div>
       )}
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Enable Environments</h2>
+            <h2 className="section-title">Enable Environments</h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               Show environment management in company settings and allow project and agent environment assignment
               controls.
@@ -339,10 +339,10 @@ export function InstanceExperimentalSettings() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Experimental File Viewer</h2>
+            <h2 className="section-title">Experimental File Viewer</h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               Show task detail controls for browsing and previewing workspace files relative to a task.
             </p>
@@ -360,10 +360,10 @@ export function InstanceExperimentalSettings() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Enable External Objects</h2>
+            <h2 className="section-title">Enable External Objects</h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               Detect external URLs in issues and show resolved status for pull requests, tickets, and other referenced
               work objects.
@@ -378,10 +378,10 @@ export function InstanceExperimentalSettings() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Enable Isolated Workspaces</h2>
+            <h2 className="section-title">Enable Isolated Workspaces</h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               Show execution workspace controls in project configuration and allow isolated workspace behavior for new
               and existing task runs.
@@ -396,10 +396,10 @@ export function InstanceExperimentalSettings() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Streamlined Left Navigation Bar</h2>
+            <h2 className="section-title">Streamlined Left Navigation Bar</h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               Reduces the maximum number of items in the left navigation bar — nests Projects under Work with a
               dedicated Projects page, and shows only active agents (max 5 recently-active) in the sidebar.
@@ -419,10 +419,10 @@ export function InstanceExperimentalSettings() {
       </section>
 
       {SHOW_CONFERENCE_ROOM_EXPERIMENTAL_SETTING ? (
-        <section className="rounded-xl border border-border bg-card p-5">
+        <section className="rounded-xl section-box bg-card p-5">
           <div className="flex items-start justify-between gap-4">
             <div className="space-y-1.5">
-              <h2 className="text-sm font-semibold">Conference Room Chat</h2>
+              <h2 className="section-title">Conference Room Chat</h2>
               <p className="max-w-2xl text-sm text-muted-foreground">
                 Adds a Conference Room — one chat where you and your whole team work together — plus the live activity
                 feed and the redesigned onboarding. Also restyles task threads as chat bubbles. Turn off anytime to
@@ -443,10 +443,10 @@ export function InstanceExperimentalSettings() {
         </section>
       ) : null}
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Task Plan Decomposition Panel</h2>
+            <h2 className="section-title">Task Plan Decomposition Panel</h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               Show accepted-plan decomposition history on task detail pages. Intended for debugging and validating
               subtask creation behavior while the presentation is still being refined.
@@ -465,10 +465,10 @@ export function InstanceExperimentalSettings() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Task Watchdogs</h2>
+            <h2 className="section-title">Task Watchdogs</h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               Show task detail controls for configuring watchdog agents that verify stopped task subtrees and restore
               live paths when work should continue.
@@ -487,10 +487,10 @@ export function InstanceExperimentalSettings() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Weekly check-up</h2>
+            <h2 className="section-title">Weekly check-up</h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               Once a week, look over every company and write one short report: what looks wrong and what to do about it.
               Each suggestion is a tick-box you can accept. The check-up itself never changes anything, and you can run
@@ -510,10 +510,10 @@ export function InstanceExperimentalSettings() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Instructions between companies</h2>
+            <h2 className="section-title">Instructions between companies</h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               Lets an agent in one company send a short written instruction to another company&apos;s liaison agent
               (the agent with the role &quot;tech_boss&quot;). Nothing happens until that company&apos;s board approves the
@@ -534,10 +534,10 @@ export function InstanceExperimentalSettings() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Business data sources</h2>
+            <h2 className="section-title">Business data sources</h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               Lets a board member connect a company to its own shop data (Shopify first) under the company&apos;s
               settings, with a read-only key. Paperclip keeps the key and makes every lookup itself; agents never see
@@ -558,10 +558,10 @@ export function InstanceExperimentalSettings() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Cloud Sync</h2>
+            <h2 className="section-title">Cloud Sync</h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               Show local Paperclip Cloud upstream connection, preview, push, retry, and activation review surfaces.
               Saved connections and run history are preserved when this is disabled.
@@ -576,10 +576,10 @@ export function InstanceExperimentalSettings() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Server Info Debug View</h2>
+            <h2 className="section-title">Server Info Debug View</h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               Show a "Server" section in the account drawer with the current server restart time and running commit.
             </p>
@@ -597,10 +597,10 @@ export function InstanceExperimentalSettings() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Auto-Restart Dev Server When Idle</h2>
+            <h2 className="section-title">Auto-Restart Dev Server When Idle</h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               In `pnpm dev:once`, wait for all queued and running local agent runs to finish, then restart the server
               automatically when backend changes or migrations make the current boot stale.
@@ -615,11 +615,11 @@ export function InstanceExperimentalSettings() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="flex flex-col gap-5">
           <div className="flex items-start justify-between gap-4">
             <div className="space-y-1.5">
-              <h2 className="text-sm font-semibold">Auto-Create Recovery Tasks</h2>
+              <h2 className="section-title">Auto-Create Recovery Tasks</h2>
               <p className="max-w-2xl text-sm text-muted-foreground">
                 Let the heartbeat scheduler create recovery tasks for task dependency chains found inside the
                 configured lookback window.

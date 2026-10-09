@@ -72,6 +72,8 @@ export { issueRelations } from "./issue_relations.js";
 export { routines, routineRevisions, routineTriggers, routineRuns } from "./routines.js";
 export { jobs, jobPositions, jobTriggers, jobRuns } from "./jobs.js";
 export { companyJobSettings } from "./company_job_settings.js";
+export { companyCacheSettings } from "./company_cache_settings.js";
+export { companyHelperSettings } from "./company_helper_settings.js";
 export { pipelines, pipelineStages, pipelineTransitions } from "./pipelines.js";
 export {
   pipelineCases,
@@ -154,7 +156,11 @@ export { watchers, watcherPricePoints, watcherAlerts, watcherWebPageSnapshots } 
 export { morningReportOutbox } from "./morning_report.js";
 export { mailInboxes, mailInboxFilters, mailSecretaryItems } from "./mail_secretary.js";
 export { mailAccounts, mailMessages } from "./mail_accounts.js";
+export { mailMessageClassifications, mailUrgencyAlerts } from "./mail_urgency.js";
 export { modelDirectoryEntries } from "./model_directory_entries.js";
+export { modelDirectoryConverters } from "./model_directory_converters.js";
+export { modelDirectorySettings } from "./model_directory_settings.js";
+export { localModelHealth } from "./local_model_health.js";
 export { paymentNotices } from "./payment_notices.js";
 export { companyPaymentSettings } from "./company_payment_settings.js";
 export { companyProductGrabberSettings, productGrabberStagedItems } from "./product_grabber.js";
@@ -170,7 +176,12 @@ export { crmContactOrgRoles } from "./crm_contact_org_roles.js";
 export { crmActivities } from "./crm_activities.js";
 export { crmFacts } from "./crm_facts.js";
 export { crmExternalRefs } from "./crm_external_refs.js";
+export { issueOverlaps } from "./issue_overlaps.js";
 export { costReconciliationRuns, sogniBalanceSnapshots } from "./cost_reconciliation.js";
+export { bragJobs, bragScenes } from "./brag_jobs.js";
+export { modelSetupReviews } from "./model_setup_reviews.js";
+export { companySecurityReviewSettings } from "./company_security_review_settings.js";
+export { mergeSecurityReviews } from "./merge_security_reviews.js";
 export { reportScripts } from "./report_scripts.js";
 export {
   reportScriptVersions,

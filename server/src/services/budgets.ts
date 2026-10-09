@@ -977,6 +977,41 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
       }
     },
 
+    /**
+     * The company half of getInvocationBlock, for work that has no agent
+     * (the "Ask Paperclip" helper): a paused company or an exceeded
+     * company-wide hard stop refuses it, exactly as it refuses an agent run.
+     */
+    getCompanyInvocationBlock: async (companyId: string) => {
+      const company = await db
+        .select({ status: companies.status, pauseReason: companies.pauseReason, name: companies.name })
+        .from(companies)
+        .where(eq(companies.id, companyId))
+        .then((rows) => rows[0] ?? null);
+      if (!company) throw notFound("Company not found");
+      if (company.status === "paused") {
+        return {
+          scopeType: "company" as const,
+          scopeId: companyId,
+          scopeName: company.name,
+          reason:
+            company.pauseReason === "budget"
+              ? "Company is paused because its budget hard-stop was reached."
+              : "Company is paused and cannot start new work.",
+        };
+      }
+      const companyPolicy = await findExceededHardStopPolicy(companyId, "company", companyId);
+      if (companyPolicy) {
+        return {
+          scopeType: "company" as const,
+          scopeId: companyId,
+          scopeName: company.name,
+          reason: "Company cannot start new work because its budget hard-stop is exceeded.",
+        };
+      }
+      return null;
+    },
+
     getInvocationBlock: async (
       companyId: string,
       agentId: string,

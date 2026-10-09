@@ -104,13 +104,22 @@ export function ApprovalDetail() {
   };
 
   const approveMutation = useMutation({
-    mutationFn: () => approvalsApi.approve(approvalId!),
+    mutationFn: (reason?: string) => approvalsApi.approve(approvalId!, undefined, reason ? { reason } : undefined),
     onSuccess: () => {
       setError(null);
       refresh();
       navigate(`/approvals/${approvalId}?resolved=approved`, { replace: true });
     },
     onError: (err) => setError(err instanceof Error ? err.message : "Approve failed"),
+  });
+
+  const requestSecurityReviewMutation = useMutation({
+    mutationFn: () => approvalsApi.requestSecurityReview(approvalId!),
+    onSuccess: () => {
+      setError(null);
+      refresh();
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : "Failed to request a security review"),
   });
 
   const rejectMutation = useMutation({
@@ -208,6 +217,14 @@ export function ApprovalDetail() {
   const branchInfo = approvalDeployBranchInfo(payload);
   const unsupportedDeployKindWarning = approvalUnsupportedDeployKindWarning(approval.type, payload);
   const showApprovedBanner = searchParams.get("resolved") === "approved" && approval.status === "approved";
+  const securityReview = approval.securityReview ?? null;
+  const approveGatedBySecurityReview = securityReview !== null && securityReview.state !== "passed";
+  const showRequestSecurityReviewButton =
+    securityReview !== null &&
+    (securityReview.state === "not_requested" ||
+      securityReview.state === "failed" ||
+      securityReview.state === "out_of_date" ||
+      securityReview.state === "no_reviewer_configured");
   const primaryLinkedIssue = linkedIssues?.[0] ?? null;
   const resolvedCta =
     primaryLinkedIssue
@@ -387,17 +404,49 @@ export function ApprovalDetail() {
             </div>
           </div>
         )}
+        {securityReview && (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border/60 bg-muted/30 px-3.5 py-2.5 text-xs leading-5">
+            <span className="font-medium text-foreground">
+              {securityReview.state === "not_requested" && "Security review: not requested"}
+              {securityReview.state === "no_reviewer_configured" &&
+                "Security review: no reviewer chosen yet for this company"}
+              {securityReview.state === "in_progress" && "Security review: in progress"}
+              {securityReview.state === "passed" && "Security review: passed"}
+              {securityReview.state === "failed" && "Security review: found problems"}
+              {securityReview.state === "out_of_date" &&
+                "Security review: out of date — code changed after the review"}
+            </span>
+            {showRequestSecurityReviewButton && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 px-2.5 text-xs"
+                onClick={() => requestSecurityReviewMutation.mutate()}
+                disabled={requestSecurityReviewMutation.isPending}
+              >
+                {requestSecurityReviewMutation.isPending ? "Requesting…" : "Request security review"}
+              </Button>
+            )}
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-2">
           {isActionable && !isBudgetApproval && !isCredentialRequest && (
             <>
               <Button
                 size="sm"
-                className="bg-green-700 hover:bg-green-600 text-white"
-                onClick={() => approveMutation.mutate()}
+                className={
+                  approveGatedBySecurityReview
+                    ? "border border-amber-600/50 bg-transparent text-amber-700 hover:bg-amber-500/10 dark:text-amber-400"
+                    : "bg-green-700 hover:bg-green-600 text-white"
+                }
+                variant={approveGatedBySecurityReview ? "outline" : "default"}
+                onClick={() =>
+                  approveGatedBySecurityReview ? setDecisionDialogAction("approve_without_review") : approveMutation.mutate(undefined)
+                }
                 disabled={approveMutation.isPending || Boolean(unsupportedDeployKindWarning)}
                 title={unsupportedDeployKindWarning ?? undefined}
               >
-                Approve
+                {approveGatedBySecurityReview ? "Approve without security review" : "Approve"}
               </Button>
               <Button
                 variant="destructive"
@@ -502,9 +551,17 @@ export function ApprovalDetail() {
           open={Boolean(decisionDialogAction)}
           onOpenChange={(open) => !open && setDecisionDialogAction(null)}
           action={decisionDialogAction}
-          isPending={decisionDialogAction === "reject" ? rejectMutation.isPending : revisionMutation.isPending}
+          isPending={
+            decisionDialogAction === "reject"
+              ? rejectMutation.isPending
+              : decisionDialogAction === "approve_without_review"
+                ? approveMutation.isPending
+                : revisionMutation.isPending
+          }
           onSubmit={(note) => {
+            setDecisionDialogAction(null);
             if (decisionDialogAction === "reject") rejectMutation.mutate(note);
+            else if (decisionDialogAction === "approve_without_review") approveMutation.mutate(note);
             else revisionMutation.mutate(note);
           }}
         />

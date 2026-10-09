@@ -1,4 +1,4 @@
-import type { MailMessageFolder } from "@paperclipai/shared";
+import type { MailMessageFolder, MailUrgencySummary } from "@paperclipai/shared";
 
 /**
  * DUR-4195: response shapes for the mail-accounts API added in DUR-4194
@@ -53,6 +53,8 @@ export interface MailMessageSummary {
   receivedAt: string | null;
   sentAt: string | null;
   createdAt: string;
+  /** Urgency check result; missing/null for mail that was never checked. */
+  urgency?: MailUrgencySummary | null;
 }
 
 /**

@@ -279,6 +279,8 @@ export interface MorningReportFacts {
   briefingPageLive: boolean;
   /** Plain-language notes about anything that degraded (a source down, no key configured, a model call failing or truncating, …). */
   notes: string[];
+  /** DUR-4467: "DUR-4378 is 60% done, about 1 day left" lines for in-progress parents with sub-tasks (>=2 done). */
+  progressLines?: string[];
 }
 
 /** One report waiting in the outbox for the Telegram bridge. */

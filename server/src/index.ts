@@ -47,6 +47,7 @@ import { setupLiveEventsWebSocketServer } from "./realtime/live-events-ws.js";
 import {
   feedbackService,
   backfillPrincipalAccessCompatibility,
+  backfillOpenMergeCardHeadCommits,
   seedDurStarterJobs,
   bootstrapExecutionPolicyFromEnv,
   environmentCustomImageService,
@@ -55,6 +56,7 @@ import {
   deployCarriedIssuesService,
   deployApprovalFeedbackService,
   mergePrAutomationService,
+  issueOverlapDetectorService,
   agentErrorAlertsService,
   untrackedWriteAlertsService,
   quietModeAlertsService,
@@ -76,6 +78,8 @@ import {
 import { schedulerLiveness } from "./services/scheduler-liveness.js";
 import { watcherService } from "./services/watchers.js";
 import { morningReportService } from "./services/morning-report.js";
+import { modelHealthService } from "./services/model-health.js";
+import { modelSetupReviewerService } from "./services/model-setup-reviewer.js";
 import { paymentCardService } from "./services/payment-cards.js";
 import { mailSecretaryService } from "./services/mail-secretary.js";
 import { mailAccountsService } from "./services/mail-accounts.js";
@@ -126,6 +130,13 @@ import type {
   InstanceDatabaseBackupRunResult,
   InstanceDatabaseBackupTrigger,
 } from "./routes/instance-database-backups.js";
+
+const LOCAL_MODEL_HEALTH_INTERVAL_MS = 3 * 60_000;
+let lastLocalModelHealthCheckAt = 0;
+// DUR-4560: the weekly model setup review is gated by each entry's last review row; this only
+// limits how often the scheduler asks the question.
+const MODEL_SETUP_REVIEW_CHECK_INTERVAL_MS = 60 * 60_000;
+let lastModelSetupReviewCheckAt = 0;
 
 type BetterAuthSessionUser = {
   id: string;
@@ -674,6 +685,16 @@ export async function startServer(): Promise<StartedServer> {
   ) {
     logger.info(accessBackfill, "Backfilled principal access compatibility records");
   }
+  // DUR-4601: open merge_pr cards filed before head-commit resolution existed are otherwise
+  // permanently stuck unable to ever request/record a security review -- idempotent, so safe
+  // to run on every boot.
+  const mergeCardHeadCommitBackfill = await backfillOpenMergeCardHeadCommits(db as any).catch((err) => {
+    logger.error({ err }, "merge card head-commit backfill failed");
+    return { checked: 0, resolved: 0 };
+  });
+  if (mergeCardHeadCommitBackfill.checked > 0) {
+    logger.info(mergeCardHeadCommitBackfill, "Backfilled merge card head commits");
+  }
   const durStarterJobsSeeded = await seedDurStarterJobs(db as any);
   if (durStarterJobsSeeded.created.length > 0) {
     logger.info(durStarterJobsSeeded, "Seeded DUR starter jobs");
@@ -1046,6 +1067,7 @@ export async function startServer(): Promise<StartedServer> {
     const deployCarriedIssues = deployCarriedIssuesService(schedulerDb as any);
     const deployApprovalFeedback = deployApprovalFeedbackService(schedulerDb as any);
     const mergePrAutomation = config.mergePrAutomationEnabled ? mergePrAutomationService(schedulerDb as any) : null;
+    const issueOverlapDetector = issueOverlapDetectorService(schedulerDb as any);
     const agentErrorAlerts = agentErrorAlertsService(schedulerDb as any);
     const marketWatchers = watcherService(schedulerDb as any);
     const morningReports = morningReportService(schedulerDb as any);
@@ -1389,6 +1411,30 @@ export async function startServer(): Promise<StartedServer> {
         );
       }
 
+      // DUR-4468: warn-only overlap detection between open tasks' workspaces
+      // (same file, same migration number, behind the base branch).
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.issueOverlapDetection, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: issueOverlapDetection",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:issueOverlapDetection",
+          },
+          async () => {
+            const companyRows = await schedulerDb.select({ id: companies.id }).from(companies);
+            for (const company of companyRows) {
+              const result = await issueOverlapDetector.runOverlapDetection(company.id);
+              if (result.opened > 0 || result.commentsPosted > 0) {
+                logger.info({ companyId: company.id, ...result }, "issue overlap detection found new overlaps");
+              }
+            }
+          },
+        ).catch((err) => {
+          logger.error({ err }, "issue overlap detection tick failed");
+        }),
+      );
+
       // DUR-128: an agent left sitting in "error" is invisible until someone
       // happens to look. Raise it as soon as it crosses the stall threshold
       // (see agent-error-alerts.ts) instead of waiting to be discovered.
@@ -1459,6 +1505,54 @@ export async function startServer(): Promise<StartedServer> {
             logger.error({ err }, "morning-report tick failed");
           }),
       );
+
+      // DUR-4419: local-model health. Probes every local model an agent is
+      // using (Ollama /api/tags), at most every few minutes however often the
+      // scheduler ticks, and keeps the outage state the offline reminder and
+      // the agent-page banner read. Each probe is bounded to 5s.
+      if (Date.now() - lastLocalModelHealthCheckAt >= LOCAL_MODEL_HEALTH_INTERVAL_MS) {
+        lastLocalModelHealthCheckAt = Date.now();
+        void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.localModelHealth, () =>
+          runInCompanyScopeBypass(
+            bypassDb,
+            {
+              reason: "heartbeat scheduler tick: localModelHealth",
+              actorType: "scheduler",
+              route: "heartbeat-scheduler:localModelHealth",
+            },
+            () => modelHealthService(schedulerDb as any).checkInUse(),
+          ).catch((err) => {
+            logger.error({ err }, "local-model health check failed");
+          }),
+        );
+      }
+
+      // DUR-4560: weekly model setup review (local models only, free probes).
+      if (Date.now() - lastModelSetupReviewCheckAt >= MODEL_SETUP_REVIEW_CHECK_INTERVAL_MS) {
+        lastModelSetupReviewCheckAt = Date.now();
+        void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.modelSetupReview, () =>
+          runInCompanyScopeBypass(
+            bypassDb,
+            {
+              reason: "heartbeat scheduler tick: modelSetupReview",
+              actorType: "scheduler",
+              route: "heartbeat-scheduler:modelSetupReview",
+            },
+            async () => {
+              const reviewer = modelSetupReviewerService(schedulerDb as any);
+              const companyRows = await schedulerDb.select({ id: companies.id }).from(companies);
+              for (const company of companyRows) {
+                const result = await reviewer.reviewDue(company.id, new Date());
+                if (result.reviewed > 0 || result.failed > 0) {
+                  logger.info({ companyId: company.id, ...result }, "weekly model setup review ran");
+                }
+              }
+            },
+          ).catch((err) => {
+            logger.error({ err }, "weekly model setup review failed");
+          }),
+        );
+      }
 
       // Payment cards: sweep available/reserved cards whose expiresOn has
       // passed to expired (see services/payment-cards.ts). Ships behind the

@@ -1,13 +1,16 @@
 import { buffer as streamToBuffer } from "node:stream/consumers";
-import { and, asc, eq, inArray, lt, ne } from "drizzle-orm";
+import { and, asc, eq, inArray, lt, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { assets, videoShotRenderJobs, videoShots, videoStorylines } from "@paperclipai/db";
+import { assets, issueAttachments, videoShotRenderJobs, videoShots, videoStorylines, withCompanyScope } from "@paperclipai/db";
 import {
   MEDIA_STUDIO_PLUGIN_KEY,
   VIDEO_RENDER_JOB_MAX_AGE_MS,
   VIDEO_RENDER_TICK_BATCH,
   VIDEO_SHOT_MIN_DURATION_SECONDS,
   estimateVideoStorylineCostCents,
+  readVideoStorylineCast,
+  videoRenderDurationSeconds,
+  videoShotCast,
   videoRenderRequestPayloadSchema,
   type StartVideoStorylineRenderInput,
   type VideoStorylineProvider,
@@ -24,10 +27,20 @@ import { pluginRegistryService } from "./plugin-registry.js";
 import { approvalService } from "./approvals.js";
 import { secretService } from "./secrets.js";
 import { extractLastFrameDataUri } from "./video-ffmpeg.js";
+import { sogniStorageFetch } from "./image-provider-clients.js";
 import { loadApprovedStillDataUri } from "./video-storyline-still-frame.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
-import { videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
+import { lockStorylineRow, videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
 import { executePinnedHttpRequest, validateAndResolveFetchUrl } from "./safe-outbound-fetch.js";
+import { mediaStudioKeyRef } from "./media-studio-company-keys.js";
+import {
+  castIdentityNames,
+  castPeople,
+  castPictureRefusal,
+  castVideoPictures,
+  loadCastAgeRefusals,
+  loadLinkedCastIdentities,
+} from "./storyline-cast.js";
 
 /**
  * DUR-4127: render orchestration for a video storyline. Reuses the Fal/Sogni
@@ -73,7 +86,8 @@ function buildProvider(providerId: VideoStorylineProvider, apiKey: string, model
   if (providerId === "fal") {
     return new FalVideoProvider(apiKey, safeFetch, model ?? undefined);
   }
-  return new SogniVideoProvider({ apiKey, apiFetch: safeFetch, transferFetch: safeFetch, defaultModel: model ?? undefined });
+  // Uploads go to Sogni's storage as real multipart bytes through the same pinned fetch (see sogniStorageFetch).
+  return new SogniVideoProvider({ apiKey, apiFetch: safeFetch, transferFetch: sogniStorageFetch(safeFetch), defaultModel: model ?? undefined });
 }
 
 async function dataUriFromObject(companyId: string, provider: string, objectKey: string, contentType: string): Promise<string> {
@@ -88,7 +102,21 @@ export async function loadReferenceImages(db: Db, companyId: string, assetIds: r
   const ids = assetIds.slice(0, MAX_REFERENCE_IMAGES);
   if (ids.length === 0) return [];
   const rows = await db.select().from(assets).where(and(eq(assets.companyId, companyId), inArray(assets.id, ids)));
-  const byId = new Map(rows.map((r) => [r.id, r]));
+  const byId = new Map<string, { provider: string; objectKey: string; contentType: string }>(rows.map((r) => [r.id, r]));
+  // The editor picks character/look pictures from Media Studio's saved
+  // Looks, whose reference ids are company FILE ids (issue_attachments.id,
+  // what the plugin file API hands out) -- not assets.id. Looking those up
+  // only in `assets` found nothing, so every character picture was silently
+  // dropped from stills and renders. Resolve either kind of id.
+  const unresolved = ids.filter((id) => !byId.has(id));
+  if (unresolved.length > 0) {
+    const fileRows = await db
+      .select({ fileId: issueAttachments.id, provider: assets.provider, objectKey: assets.objectKey, contentType: assets.contentType })
+      .from(issueAttachments)
+      .innerJoin(assets, eq(issueAttachments.assetId, assets.id))
+      .where(and(eq(issueAttachments.companyId, companyId), inArray(issueAttachments.id, unresolved)));
+    for (const row of fileRows) byId.set(row.fileId, row);
+  }
   const out: string[] = [];
   for (const id of ids) {
     const row = byId.get(id);
@@ -100,6 +128,47 @@ export async function loadReferenceImages(db: Db, companyId: string, assetIds: r
     }
   }
   return out;
+}
+
+type StorylineRow = typeof videoStorylines.$inferSelect;
+type ShotRow = typeof videoShots.$inferSelect;
+
+/**
+ * Security review: the ONE provider/model resolution every render-cost
+ * estimate and the actual render call share -- a shot's own provider/model
+ * (set from the last real render job) wins over the storyline's. Before,
+ * beginShotRender billed with the shot's values while the budget gates
+ * estimated with the storyline's, so a shot re-rendered on a pricier model
+ * could pass a budget check it should have failed.
+ */
+export function resolveShotRenderTarget(
+  storyline: Pick<StorylineRow, "providerId" | "model">,
+  shot: Pick<ShotRow, "providerId" | "model">,
+): { providerId: VideoStorylineProvider; model: string | null } {
+  return {
+    providerId: (shot.providerId ?? storyline.providerId) as VideoStorylineProvider,
+    model: shot.model ?? storyline.model,
+  };
+}
+
+/** Render-cost estimate for a set of shots, each priced with resolveShotRenderTarget (shots on different providers/models are summed). */
+export function estimateShotRenderCents(
+  storyline: Pick<StorylineRow, "providerId" | "model">,
+  shots: ReadonlyArray<Pick<ShotRow, "providerId" | "model" | "durationSeconds">>,
+): { shotCount: number; totalSeconds: number; estimatedTotalCents: number } {
+  let totalSeconds = 0;
+  let estimatedTotalCents = 0;
+  for (const shot of shots) {
+    const { providerId, model } = resolveShotRenderTarget(storyline, shot);
+    const one = estimateVideoStorylineCostCents([{ durationSeconds: shot.durationSeconds }], providerId, { model });
+    totalSeconds += one.totalSeconds;
+    estimatedTotalCents += one.estimatedTotalCents;
+  }
+  return { shotCount: shots.length, totalSeconds, estimatedTotalCents };
+}
+
+function formatDollars(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`;
 }
 
 export interface VideoStorylineRenderDeps {
@@ -119,11 +188,11 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     if (!plugin) throw unprocessable("The media-studio plugin is not installed, so there is no Fal/Sogni key configured.");
     const config = await registry.getConfig(plugin.id);
     const cfg = (config?.configJson ?? {}) as Record<string, unknown>;
-    const refKey = providerId === "fal" ? "falKeySecretRef" : "sogniKeySecretRef";
-    const ref = typeof cfg[refKey] === "string" ? (cfg[refKey] as string).trim() : "";
+    // The company's own key (Media Studio's Settings tab), else the instance's.
+    const ref = await mediaStudioKeyRef(db, plugin.id, companyId, providerId === "fal" ? "fal" : "sogni", cfg);
     if (!ref) {
       throw unprocessable(
-        `No ${providerId === "fal" ? "Fal.ai" : "Sogni"} API key is configured in Media Studio settings yet.`,
+        `No ${providerId === "fal" ? "Fal.ai" : "Sogni"} API key is set for this company yet. The company's owner or an admin can pick one in Media Studio's Settings tab.`,
       );
     }
     return secrets.resolveSecretValueForVideoRender(companyId, ref, { actorId });
@@ -154,6 +223,59 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
   }
 
   /**
+   * The shot's linked cast members' pictures for the video call: per person
+   * the face crop, the canonical render and the body crop (the approved
+   * storyboard picture stays the start frame). Whether a video model really
+   * uses them is the provider client's call (video-provider-clients.ts:
+   * Fal's Kling v3 takes them as one "element" per person; Sogni's
+   * reference-to-video models as loose references; Sogni's image-to-video
+   * models take only the start frame). Pictures the age check refused are
+   * never sent: the render is refused with a plain message instead.
+   */
+  async function castVideoInput(
+    companyId: string,
+    storyline: typeof videoStorylines.$inferSelect,
+    shot: typeof videoShots.$inferSelect,
+  ): Promise<{ characters: Array<{ name: string; images: string[] }>; flat: string[]; startFallback: string | undefined }> {
+    const empty = { characters: [], flat: [], startFallback: undefined };
+    const cast = readVideoStorylineCast(storyline.pictureSettings);
+    if (!cast.members.some((m) => m.identityId)) return empty;
+    const plugin = await registry.getByKey(MEDIA_STUDIO_PLUGIN_KEY);
+    const pluginId = plugin?.id ?? null;
+    const identities = await loadLinkedCastIdentities(db, pluginId, companyId, cast.members);
+    const { castIds } = videoShotCast(shot, cast, castIdentityNames(identities));
+    const { people } = castPeople(castIds, cast.members, identities);
+    if (people.length === 0) return empty;
+    const wanted = castVideoPictures(people);
+    const loaded: Array<{ name: string; pictures: Array<{ fileId: string; dataUri: string | null }> }> = [];
+    for (const person of wanted) {
+      const pictures: Array<{ fileId: string; dataUri: string | null }> = [];
+      for (const fileId of person.fileIds) {
+        const [dataUri] = await loadReferenceImages(db, companyId, [fileId]);
+        pictures.push({ fileId, dataUri: dataUri ?? null });
+      }
+      loaded.push({ name: person.name, pictures });
+    }
+    const refusal = castPictureRefusal(
+      loaded.flatMap((p) => p.pictures.map((x) => ({ fileId: x.fileId, dataUri: x.dataUri, personName: p.name }))),
+      await loadCastAgeRefusals(db, pluginId, companyId),
+    );
+    if (refusal) throw unprocessable(refusal);
+    const characters = loaded
+      .map((p) => ({ name: p.name, images: p.pictures.map((x) => x.dataUri).filter((x): x is string => !!x) }))
+      .filter((c) => c.images.length > 0);
+    // Everyone's first picture (the face) first, then everyone's second, ...: a model that only takes a few still gets every face.
+    const flat: string[] = [];
+    for (let k = 0; k < 3; k += 1) for (const c of characters) if (c.images[k]) flat.push(c.images[k]!);
+    // Without an approved picture or a previous clip, the first person's canonical render (else face) is a better first frame than a look picture.
+    const first = people[0]!.identity;
+    const startFallback = first.canonicalFileId
+      ? loaded[0]?.pictures.find((x) => x.fileId === first.canonicalFileId)?.dataUri ?? characters[0]?.images[0]
+      : characters[0]?.images[0];
+    return { characters, flat, startFallback: startFallback ?? undefined };
+  }
+
+  /**
    * DUR-4317/DUR-4320: this is the "no video provider call before approval"
    * enforcement point -- the storyboardStatus check below runs before
    * resolveProviderApiKey/provider.start, i.e. before any real, paid
@@ -167,11 +289,10 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
   async function beginShotRender(companyId: string, storyline: typeof videoStorylines.$inferSelect, shot: typeof videoShots.$inferSelect, actorId: string) {
     if (shot.storyboardStatus !== "approved") {
       throw unprocessable(
-        `Shot ${shot.orderIndex}'s storyboard still has not been approved yet. Generate and approve a still for it (or drop it) before rendering.`,
+        `Shot ${shot.orderIndex + 1}'s storyboard still has not been approved yet. Generate and approve a still for it (or drop it) before rendering.`,
       );
     }
-    const providerId = (shot.providerId ?? storyline.providerId) as VideoStorylineProvider;
-    const model = shot.model ?? storyline.model;
+    const { providerId, model } = resolveShotRenderTarget(storyline, shot);
     const apiKey = await resolveProviderApiKey(companyId, providerId, actorId);
     const provider = buildProvider(providerId, apiKey, model);
 
@@ -192,11 +313,13 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       }
     }
     const referenceAssetIds = [...shot.lookReferenceAssetIds, ...storyline.characterReferenceAssetIds];
-    const referenceImages = await loadReferenceImages(db, companyId, referenceAssetIds);
+    const cast = await castVideoInput(companyId, storyline, shot);
+    // The cast's pictures first (faces first), then the shot's and storyline's pictures.
+    const referenceImages = [...cast.flat, ...(await loadReferenceImages(db, companyId, referenceAssetIds))].slice(0, MAX_REFERENCE_IMAGES);
     // See media-jobs-types.ts's MediaJobInput.referenceImages doc comment: neither provider confirms
     // combining a continuity frame with separate character pictures in one call, so we pick ONE image
     // to actually drive continuity/likeness -- the approved still wins, then the continuity frame.
-    const startImage = approvedStillImage ?? continuityImage ?? referenceImages[0];
+    const startImage = approvedStillImage ?? continuityImage ?? cast.startFallback ?? referenceImages[0];
 
     const input: MediaJobInput = {
       kind: "video",
@@ -204,7 +327,11 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       model: model ?? undefined,
       startImage,
       referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
-      durationSeconds: shot.durationSeconds,
+      ...(cast.characters.length > 0 ? { characters: cast.characters } : {}),
+      // Snapped to a length the model accepts (Fal's Kling models only take
+      // 5 or 10 seconds and refuse anything else) -- see
+      // videoRenderDurationSeconds; the estimate bills the same length.
+      durationSeconds: videoRenderDurationSeconds(providerId, model, shot.durationSeconds),
     };
     const handle = await provider.start(input);
     const attempt = shot.attempt + 1;
@@ -240,7 +367,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
   async function startRender(companyId: string, storylineId: string, actor: VideoStorylineActor, input: StartVideoStorylineRenderInput) {
     await settings.assertEnabled(companyId);
     const storyline = await storylines.getStorylineRow(companyId, storylineId);
-    if (!["draft", "estimated", "paused", "failed"].includes(storyline.status)) {
+    if (!["draft", "estimated", "paused", "failed", "cancelled"].includes(storyline.status)) {
       throw conflict(`This storyline is already ${storyline.status.replace(/_/g, " ")}.`);
     }
     const shots = await db.select().from(videoShots).where(eq(videoShots.storylineId, storylineId)).orderBy(asc(videoShots.orderIndex));
@@ -259,18 +386,27 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     const unapproved = renderableShots.find((s) => s.status !== "done" && s.storyboardStatus !== "approved");
     if (unapproved) {
       throw unprocessable(
-        `Shot ${unapproved.orderIndex}'s storyboard still has not been approved yet. Approve every shot's still before starting the render (or drop shots you don't want to render).`,
+        `Shot ${unapproved.orderIndex + 1}'s storyboard still has not been approved yet. Approve every shot's still before starting the render (or drop shots you don't want to render).`,
       );
     }
 
-    const estimateResult = estimateVideoStorylineCostCents(renderableShots, storyline.providerId as VideoStorylineProvider);
+    const estimateResult = estimateShotRenderCents(storyline, renderableShots);
     const effectiveBudgetCapCents = input.confirmBudgetCapCents ?? storyline.budgetCapCents;
     if (effectiveBudgetCapCents === null || effectiveBudgetCapCents === undefined) {
-      throw badRequest("Set a budget cap before starting a render (or pass confirmBudgetCapCents to set one now).");
+      throw badRequest(
+        `Set a budget cap before starting a render, so spending stops at a limit you chose. This render is estimated at ${formatDollars(estimateResult.estimatedTotalCents)}.`,
+      );
     }
-    if (storyline.spentCents + estimateResult.estimatedTotalCents > effectiveBudgetCapCents) {
+    // Only shots still to render cost anything from here on -- counting
+    // already-finished shots again (their cost is in spentCents) made a
+    // storyline paused at its cap impossible to resume.
+    const remainingEstimate = estimateShotRenderCents(
+      storyline,
+      renderableShots.filter((s) => s.status !== "done"),
+    );
+    if (storyline.spentCents + remainingEstimate.estimatedTotalCents > effectiveBudgetCapCents) {
       throw unprocessable(
-        `Estimated cost (${estimateResult.estimatedTotalCents} cents) plus what's already spent (${storyline.spentCents} cents) would exceed the budget cap (${effectiveBudgetCapCents} cents). Raise the cap or pass a higher confirmBudgetCapCents to proceed anyway.`,
+        `This render is estimated at ${formatDollars(remainingEstimate.estimatedTotalCents)}, and ${formatDollars(storyline.spentCents)} is already spent -- together that is over the budget cap of ${formatDollars(effectiveBudgetCapCents)}. Raise the budget cap to at least ${formatDollars(storyline.spentCents + remainingEstimate.estimatedTotalCents)} to go ahead.`,
       );
     }
 
@@ -311,19 +447,35 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       return storylines.getStoryline(companyId, storylineId);
     }
 
-    await db
-      .update(videoStorylines)
-      .set({
-        status: "rendering",
-        budgetCapCents: effectiveBudgetCapCents,
-        estimatedTotalCents: estimateResult.estimatedTotalCents,
-        estimatedTotalSeconds: estimateResult.totalSeconds,
-        errorMessage: null,
-        updatedAt: nowOf(),
-      })
-      .where(eq(videoStorylines.id, storylineId));
+    // Security review (replace-import TOCTOU): flip to "rendering" under the
+    // storyline row lock a "replace" import also takes, after re-checking
+    // nothing moved since the reads above -- a replace that committed in
+    // between has deleted `pending`, and one that comes after sees
+    // "rendering" and is refused.
+    const lockedPending = await withCompanyScope(db, companyId, async (tx) => {
+      const locked = await lockStorylineRow(tx, companyId, storylineId);
+      if (!["draft", "estimated", "paused", "failed", "cancelled"].includes(locked.status)) {
+        throw conflict(`This storyline is already ${locked.status.replace(/_/g, " ")}.`);
+      }
+      const [current] = await tx.select().from(videoShots).where(and(eq(videoShots.id, pending.id), eq(videoShots.storylineId, storylineId)));
+      if (!current || current.storyboardStatus !== "approved" || current.status === "done") {
+        throw conflict("This storyline's shots changed while the render was starting. Check them and start the render again.");
+      }
+      await tx
+        .update(videoStorylines)
+        .set({
+          status: "rendering",
+          budgetCapCents: effectiveBudgetCapCents,
+          estimatedTotalCents: estimateResult.estimatedTotalCents,
+          estimatedTotalSeconds: estimateResult.totalSeconds,
+          errorMessage: null,
+          updatedAt: nowOf(),
+        })
+        .where(eq(videoStorylines.id, storylineId));
+      return current;
+    });
     const refreshed = await storylines.getStorylineRow(companyId, storylineId);
-    await beginShotRender(companyId, refreshed, pending, actor.agentId ?? actor.actorId);
+    await beginShotRender(companyId, refreshed, lockedPending, actor.agentId ?? actor.actorId);
 
     await logActivity(db, {
       companyId,
@@ -352,30 +504,41 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       throw conflict("This shot has been dropped from the storyboard. Edit it to bring it back before re-rendering it.");
     }
     if (shot.storyboardStatus !== "approved") {
-      throw unprocessable(`Shot ${shot.orderIndex}'s storyboard still has not been approved yet. Approve it before re-rendering.`);
+      throw unprocessable(`Shot ${shot.orderIndex + 1}'s storyboard still has not been approved yet. Approve it before re-rendering.`);
     }
     const refundCents = shot.actualCostCents ?? 0;
     const spentAfterRefund = Math.max(0, storyline.spentCents - refundCents);
-    const shotEstimate = estimateVideoStorylineCostCents([{ durationSeconds: shot.durationSeconds }], storyline.providerId as VideoStorylineProvider);
+    const shotEstimate = estimateShotRenderCents(storyline, [shot]);
     if (storyline.budgetCapCents !== null && spentAfterRefund + shotEstimate.estimatedTotalCents > storyline.budgetCapCents) {
       throw unprocessable(
         `Re-rendering this shot (estimated ${shotEstimate.estimatedTotalCents} cents) would push spend to ${spentAfterRefund + shotEstimate.estimatedTotalCents} cents, over the budget cap (${storyline.budgetCapCents} cents). Raise the cap first.`,
       );
     }
-    await db
-      .update(videoShots)
-      .set({ status: "queued", errorMessage: null, resultProvider: null, resultObjectKey: null, resultContentType: null, resultByteSize: null, resultSha256: null, actualCostCents: null, updatedAt: nowOf() })
-      .where(eq(videoShots.id, shotId));
-    if (refundCents > 0) {
-      await db
+    // Security review (replace-import TOCTOU): queue the shot and flip the
+    // storyline to "rendering" under the storyline row lock a "replace"
+    // import also takes, re-checking the shot is still there and idle.
+    await withCompanyScope(db, companyId, async (tx) => {
+      const locked = await lockStorylineRow(tx, companyId, storylineId);
+      if (locked.status === "stitching") {
+        throw conflict("A stitch is currently running for this storyline. Wait for it to finish before re-rendering a shot.");
+      }
+      const [current] = await tx.select().from(videoShots).where(and(eq(videoShots.id, shotId), eq(videoShots.storylineId, storylineId)));
+      if (!current) throw conflict("This shot was removed while the re-render was starting.");
+      if (current.status === "queued" || current.status === "rendering") throw conflict("This shot is already rendering.");
+      const lockedRefund = current.actualCostCents ?? 0;
+      await tx
+        .update(videoShots)
+        .set({ status: "queued", errorMessage: null, resultProvider: null, resultObjectKey: null, resultContentType: null, resultByteSize: null, resultSha256: null, actualCostCents: null, updatedAt: nowOf() })
+        .where(eq(videoShots.id, shotId));
+      await tx
         .update(videoStorylines)
-        .set({ spentCents: Math.max(0, storyline.spentCents - refundCents), updatedAt: nowOf() })
+        .set({
+          ...(lockedRefund > 0 ? { spentCents: Math.max(0, locked.spentCents - lockedRefund) } : {}),
+          ...(locked.status !== "rendering" ? { status: "rendering", errorMessage: null } : {}),
+          updatedAt: nowOf(),
+        })
         .where(eq(videoStorylines.id, storylineId));
-    }
-    const refreshedStoryline = await storylines.getStorylineRow(companyId, storylineId);
-    if (!["rendering"].includes(refreshedStoryline.status)) {
-      await db.update(videoStorylines).set({ status: "rendering", errorMessage: null, updatedAt: nowOf() }).where(eq(videoStorylines.id, storylineId));
-    }
+    });
     const refreshedShot = await storylines.getShotRow(companyId, storylineId, shotId);
     const finalStoryline = await storylines.getStorylineRow(companyId, storylineId);
     await beginShotRender(companyId, finalStoryline, refreshedShot, actor.agentId ?? actor.actorId);
@@ -419,15 +582,63 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       throw conflict("This shot is currently rendering. Wait for it to finish before rendering a preview.");
     }
 
-    const providerId = (shot.providerId ?? storyline.providerId) as VideoStorylineProvider;
-    const model = shot.model ?? storyline.model;
-    const previewEstimate = estimateVideoStorylineCostCents([{ durationSeconds: PREVIEW_DURATION_SECONDS }], providerId);
-    if (storyline.budgetCapCents !== null && storyline.spentCents + previewEstimate.estimatedTotalCents > storyline.budgetCapCents) {
+    const { providerId, model } = resolveShotRenderTarget(storyline, shot);
+    // The shortest clip this model will actually make (1s for a model that
+    // takes any length, 5s for Fal's Kling models, which refuse 1s).
+    const previewDurationSeconds = videoRenderDurationSeconds(providerId, model, PREVIEW_DURATION_SECONDS);
+    const previewEstimate = estimateVideoStorylineCostCents([{ durationSeconds: previewDurationSeconds }], providerId);
+    const previewCents = previewEstimate.estimatedTotalCents;
+    const overCap = (row: { budgetCapCents: number | null; spentCents: number }) =>
+      row.budgetCapCents !== null && row.spentCents + previewCents > row.budgetCapCents;
+    if (overCap(storyline)) {
       throw unprocessable(
-        `Rendering a preview (estimated ${previewEstimate.estimatedTotalCents} cents) would exceed the budget cap (${storyline.budgetCapCents} cents). Raise the cap first.`,
+        `Rendering a preview (estimated ${previewCents} cents) would exceed the budget cap (${storyline.budgetCapCents} cents). Raise the cap first.`,
       );
     }
 
+    // Security review (replace-import TOCTOU): reserve the preview's cost
+    // under the storyline row lock a "replace" import also takes, before the
+    // paid provider call -- spentCents > 0 makes a replace refuse while this
+    // preview is in flight. Refunded below if the preview fails.
+    await withCompanyScope(db, companyId, async (tx) => {
+      const locked = await lockStorylineRow(tx, companyId, storylineId);
+      if (locked.status === "stitching") {
+        throw conflict("A stitch is currently running for this storyline. Wait for it to finish before rendering a preview.");
+      }
+      const [current] = await tx.select({ id: videoShots.id }).from(videoShots).where(and(eq(videoShots.id, shotId), eq(videoShots.storylineId, storylineId)));
+      if (!current) throw conflict("This shot was removed while the preview was starting.");
+      if (overCap(locked)) {
+        throw unprocessable(
+          `Rendering a preview (estimated ${previewCents} cents) would exceed the budget cap (${locked.budgetCapCents} cents). Raise the cap first.`,
+        );
+      }
+      await tx
+        .update(videoStorylines)
+        .set({ spentCents: sql`${videoStorylines.spentCents} + ${previewCents}`, updatedAt: nowOf() })
+        .where(eq(videoStorylines.id, storylineId));
+    });
+    try {
+      return await finishPreview(companyId, storyline, shot, providerId, model, previewDurationSeconds, previewCents, actor);
+    } catch (err) {
+      await db
+        .update(videoStorylines)
+        .set({ spentCents: sql`greatest(0, ${videoStorylines.spentCents} - ${previewCents})`, updatedAt: nowOf() })
+        .where(eq(videoStorylines.id, storylineId));
+      throw err;
+    }
+  }
+
+  async function finishPreview(
+    companyId: string,
+    storyline: StorylineRow,
+    shot: ShotRow,
+    providerId: VideoStorylineProvider,
+    model: string | null,
+    previewDurationSeconds: number,
+    previewCents: number,
+    actor: VideoStorylineActor,
+  ) {
+    const shotId = shot.id;
     const apiKey = await resolveProviderApiKey(companyId, providerId, actor.agentId ?? actor.actorId);
     const provider = buildProvider(providerId, apiKey, model);
 
@@ -438,8 +649,9 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       if (clip) continuityImage = (await extractLastFrameDataUri(clip)) ?? undefined;
     }
     const referenceAssetIds = [...shot.lookReferenceAssetIds, ...storyline.characterReferenceAssetIds];
-    const referenceImages = await loadReferenceImages(db, companyId, referenceAssetIds);
-    const startImage = continuityImage ?? referenceImages[0];
+    const cast = await castVideoInput(companyId, storyline, shot);
+    const referenceImages = [...cast.flat, ...(await loadReferenceImages(db, companyId, referenceAssetIds))].slice(0, MAX_REFERENCE_IMAGES);
+    const startImage = continuityImage ?? cast.startFallback ?? referenceImages[0];
 
     const handle = await provider.start({
       kind: "video",
@@ -447,7 +659,8 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       model: model ?? undefined,
       startImage,
       referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
-      durationSeconds: PREVIEW_DURATION_SECONDS,
+      ...(cast.characters.length > 0 ? { characters: cast.characters } : {}),
+      durationSeconds: previewDurationSeconds,
     });
 
     const deadline = nowOf().getTime() + PREVIEW_POLL_TIMEOUT_MS;
@@ -503,11 +716,6 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       .returning();
     if (!row) throw new Error("Video shot preview update returned no row");
 
-    await db
-      .update(videoStorylines)
-      .set({ spentCents: storyline.spentCents + previewEstimate.estimatedTotalCents, updatedAt: generatedAt })
-      .where(eq(videoStorylines.id, storylineId));
-
     await logActivity(db, {
       companyId,
       actorType: actor.actorType,
@@ -516,7 +724,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       action: "video_shot.preview_rendered",
       entityType: "video_shot",
       entityId: shotId,
-      details: { orderIndex: shot.orderIndex, costCents: previewEstimate.estimatedTotalCents },
+      details: { orderIndex: shot.orderIndex, costCents: previewCents },
     });
     return storylines.toShotSummary(row);
   }
@@ -632,17 +840,18 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       contentType,
       body: buffer,
     });
-    const estimateForShot = estimateVideoStorylineCostCents([{ durationSeconds: shot.durationSeconds }], storyline.providerId as VideoStorylineProvider);
+    const target = resolveShotRenderTarget(storyline, shot);
+    const estimateForShot = estimateShotRenderCents(storyline, [shot]);
     let actualCostCents = estimateForShot.estimatedTotalCents;
     // DUR-4455: Fal video is priced per its published unit (usually seconds); Sogni has no Fal price and keeps the static estimate.
-    if (storyline.providerId === "fal" && fal) {
+    if (target.providerId === "fal" && fal) {
       const recorded = await recordFalCostEvent(db, safeFetch, {
         companyId,
         apiKey: fal.apiKey,
         agentId: storyline.createdByAgentId,
         createdByUserId: storyline.createdByAgentId ? null : storyline.createdByUserId,
         model: fal.model,
-        usage: { seconds: shot.durationSeconds },
+        usage: { seconds: videoRenderDurationSeconds("fal", target.model, shot.durationSeconds) },
         estimateCents: estimateForShot.estimatedTotalCents,
         billingCode: "video-storyline-shot",
       });
@@ -654,7 +863,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     // Sogni reported actual credits for this job -- tagged
     // converted_from_credits, never silently recorded as 0 when the owner
     // hasn't set a credit price yet.
-    if (storyline.providerId === "sogni") {
+    if (target.providerId === "sogni") {
       const sogniCredits = typeof result.meta?.sogniCredits === "number" ? result.meta.sogniCredits : null;
       if (sogniCredits !== null) {
         const plugin = await registry.getByKey(MEDIA_STUDIO_PLUGIN_KEY);
@@ -665,7 +874,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
           agentId: storyline.createdByAgentId ?? null,
           credits: sogniCredits,
           creditPriceUsd: cfg[SOGNI_CREDIT_PRICE_CONFIG_KEY],
-          model: shot.model ?? storyline.model ?? "sogni-video",
+          model: target.model ?? "sogni-video",
           // Per-shot key so a retried tick after a crash does not write a second row.
           billingCode: `video_storyline_render:${shot.id}`,
           idempotent: true,
@@ -708,17 +917,17 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
         .set({
           spentCents,
           status: "paused",
-          errorMessage: `Shot ${next.orderIndex}'s storyboard still needs approval before rendering can continue. Approve it and start the render again.`,
+          errorMessage: `Shot ${next.orderIndex + 1}'s storyboard still needs approval before rendering can continue. Approve it and start the render again.`,
           updatedAt: nowOf(),
         })
         .where(eq(videoStorylines.id, storyline.id));
       return;
     }
-    const nextEstimate = estimateVideoStorylineCostCents([{ durationSeconds: next.durationSeconds }], storyline.providerId as VideoStorylineProvider);
+    const nextEstimate = estimateShotRenderCents(storyline, [next]);
     if (storyline.budgetCapCents !== null && spentCents + nextEstimate.estimatedTotalCents > storyline.budgetCapCents) {
       await db
         .update(videoStorylines)
-        .set({ spentCents, status: "paused", errorMessage: `Budget cap reached before shot ${next.orderIndex}. Raise the cap and start the render again to continue.`, updatedAt: nowOf() })
+        .set({ spentCents, status: "paused", errorMessage: `Budget cap reached before shot ${next.orderIndex + 1}. Raise the cap and start the render again to continue.`, updatedAt: nowOf() })
         .where(eq(videoStorylines.id, storyline.id));
       return;
     }

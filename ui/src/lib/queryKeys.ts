@@ -4,14 +4,18 @@ export const queryKeys = {
     detail: (id: string) => ["companies", id] as const,
     stats: ["companies", "stats"] as const,
     instructions: (id: string) => ["companies", id, "instructions"] as const,
+    cacheSettings: (id: string) => ["companies", id, "cache-settings"] as const,
+    securityReviewSettings: (id: string) => ["companies", id, "security-review-settings"] as const,
     serviceTokens: (id: string) => ["companies", id, "service-tokens"] as const,
     telegramBots: (id: string) => ["companies", id, "telegram-bots"] as const,
     speechSettings: (id: string) => ["companies", id, "speech-settings"] as const,
     dataConnections: (id: string) => ["companies", id, "data-connections"] as const,
     datasetSources: (id: string) => ["companies", id, "dataset-sources"] as const,
     modelDirectory: (id: string) => ["companies", id, "model-directory"] as const,
+    modelReviews: (id: string, entryId: string) => ["companies", id, "model-directory", entryId, "reviews"] as const,
     modelStarters: (id: string) => ["companies", id, "model-directory", "starters"] as const,
     webSearch: (id: string) => ["companies", id, "web-search"] as const,
+    helperSettings: (id: string) => ["companies", id, "helper-settings"] as const,
     dataReads: (id: string) => ["companies", id, "data-reads"] as const,
   },
   companySkills: {
@@ -306,6 +310,10 @@ export const queryKeys = {
   agentMemories: {
     list: (agentId: string) => ["agent-memories", agentId] as const,
   },
+  // Overlapping work between open tasks.
+  overlaps: {
+    list: (companyId: string) => ["overlaps", companyId] as const,
+  },
   // Market-price watchers.
   watchers: {
     list: (companyId: string) => ["watchers", companyId] as const,
@@ -373,6 +381,8 @@ export const queryKeys = {
     ["finance-by-kind", companyId, from, to] as const,
   financeEvents: (companyId: string, from?: string, to?: string, limit: number = 100) =>
     ["finance-events", companyId, from, to, limit] as const,
+  usageCacheStatus: (companyId: string) =>
+    ["usage-cache-status", companyId] as const,
   usageWindowSpend: (companyId: string) =>
     ["usage-window-spend", companyId] as const,
   usageQuotaWindows: (companyId: string) =>

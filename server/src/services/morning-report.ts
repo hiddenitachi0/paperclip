@@ -2,6 +2,7 @@ import { and, desc, eq, gte, isNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
+  issues,
   companyMemberships,
   laneAConversations,
   laneAMessages,
@@ -12,6 +13,7 @@ import {
 } from "@paperclipai/db";
 import {
   MORNING_REPORT_DEFAULT_PLACES,
+  localModelEveningWarning,
   MORNING_REPORT_RSS_FEEDS,
   parseMorningReportSettings,
   resolveMorningReportPictureSource,
@@ -35,10 +37,12 @@ import {
 } from "@paperclipai/shared";
 import { notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
+import { formatProgressReportLine, progressMapForParents } from "./issue-progress.js";
 import { logActivity } from "./activity-log.js";
 import { formatWeatherReport } from "./lane-a-tools.js";
 import { laneAService } from "./lane-a.js";
 import { personaService } from "./personas.js";
+import { modelHealthService } from "./model-health.js";
 import { secretService } from "./secrets.js";
 import { webSearchService, type WebSearchServiceDeps } from "./web-search.js";
 import { WATCHER_PRICE_SOURCES, isWatcherQuoteError } from "./watcher-sources.js";
@@ -687,8 +691,25 @@ function formatPriceLine(fact: MorningReportPriceFact): string {
  * only used to tell "not configured" (omit the section) apart from
  * "configured but nothing found" (say so in one line).
  */
+/** DUR-4467: one line per in-progress parent task with sub-tasks and an ETA (>=2 done). Company-scoped, capped. */
+export async function collectProgressLines(db: Db, companyId: string, now: Date): Promise<string[]> {
+  const parents = await db
+    .select({ id: issues.id, companyId: issues.companyId, identifier: issues.identifier, startedAt: issues.startedAt })
+    .from(issues)
+    .where(and(eq(issues.companyId, companyId), eq(issues.status, "in_progress")))
+    .limit(200);
+  const progress = await progressMapForParents(db, parents, now);
+  const lines: string[] = [];
+  for (const p of parents) {
+    const pr = progress.get(p.id);
+    const line = pr && p.identifier ? formatProgressReportLine(p.identifier, pr) : null;
+    if (line) lines.push(line);
+  }
+  return lines.slice(0, 10);
+}
+
 function renderFullReportText(
-  facts: Pick<MorningReportFacts, "opening" | "weather" | "headlines" | "hobby" | "sport" | "prices" | "stats">,
+  facts: Pick<MorningReportFacts, "opening" | "weather" | "headlines" | "hobby" | "sport" | "prices" | "stats"> & { progressLines?: string[] },
   settings: Pick<MorningReportSettings, "sources" | "hobbyTopics" | "sportFollows" | "priceSymbols">,
 ): string {
   const parts: string[] = [facts.opening];
@@ -718,6 +739,9 @@ function renderFullReportText(
     parts.push(
       facts.prices.length > 0 ? `Prices:\n${facts.prices.map(formatPriceLine).join("\n")}` : "Prices: unavailable today.",
     );
+  }
+  if (facts.progressLines && facts.progressLines.length > 0) {
+    parts.push(`Big tasks:\n${facts.progressLines.map((l) => `- ${l}`).join("\n")}`);
   }
   if (settings.sources.length > 0) {
     parts.push(`Sources checked: ${facts.stats.sourcesChecked}, headlines found: ${facts.stats.itemsFound}.`);
@@ -1035,6 +1059,7 @@ function conversationMessageForReport(text: string, facts: MorningReportFacts): 
 
 export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}) {
   const laneA = deps.laneA ?? laneAService(db);
+  const modelHealth = modelHealthService(db);
   const webSearch = deps.webSearch ?? webSearchService(db, deps);
   const secrets = deps.secrets ?? secretService(db);
   const personas = deps.personas ?? personaService(db);
@@ -1342,7 +1367,14 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
     const pictures = await collectImages(agentRow, settings, places, weather.conditionsSummary, mood, modelThemeKeywords, direction, localDate);
     notes.push(...pictures.notes);
 
+    let progressLines: string[] = [];
+    try {
+      progressLines = await collectProgressLines(db, agentRow.companyId, now);
+    } catch (err) {
+      logger.warn({ err }, "morning report: progress lines unavailable");
+    }
     const facts: MorningReportFacts = {
+      progressLines,
       places,
       weather: weather.items,
       headlines: headlineItems,
@@ -1423,8 +1455,49 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
     return toOutboxItem(outboxRow);
   }
 
+  /**
+   * DUR-4419: from 20:00 the evening before (agent-local), a report that runs
+   * on a local model whose PC has been unreachable for the last hour gets a
+   * plain-text heads-up in the SAME outbox the report itself uses (facts
+   * null, so the Telegram bridge sends the text as-is). The health service
+   * claims it atomically, so it goes once per outage however often this runs.
+   */
+  async function eveningModelWarnings(now: Date): Promise<number> {
+    const candidates = await db
+      .select()
+      .from(agents)
+      .where(and(sql`${agents.morningReportSettings} ->> 'enabled' = 'true'`, eq(agents.laneAEnabled, true), eq(agents.laneAProvider, "local")))
+      .limit(MORNING_REPORT_TICK_BATCH);
+    let sent = 0;
+    for (const agentRow of candidates) {
+      if (!agentRow.laneABaseUrl?.trim() || !agentRow.laneAModel) continue;
+      const settings = parseMorningReportSettings(agentRow.morningReportSettings);
+      if (!settings.enabled) continue;
+      const { time } = localDateTimeParts(now, settings.timezone);
+      if (time < "20:00") continue;
+      if (!(await modelHealth.claimEveningWarning(agentRow.companyId, agentRow.laneABaseUrl, agentRow.laneAModel))) continue;
+      const persona = agentRow.personaId ? await personas.getPersonaByAgentId(agentRow.id) : null;
+      await db.insert(morningReportOutbox).values({
+        companyId: agentRow.companyId,
+        agentId: agentRow.id,
+        status: "ready",
+        text: localModelEveningWarning({ agentName: persona?.displayName?.trim() || agentRow.name, jobName: "morning report", time: settings.time }),
+        note: "Evening warning: the local model was unreachable for the last hour.",
+        createdAt: now,
+        readyAt: now,
+      });
+      sent += 1;
+    }
+    return sent;
+  }
+
   async function tick(now: Date = nowOf()) {
     const expired = await expireStaleOutbox(now);
+    try {
+      await eveningModelWarnings(now);
+    } catch (err) {
+      logger.warn({ err }, "morning-report: evening local-model warning pass failed");
+    }
     const due = await claimDueAgents(now);
     for (const { row, localDate } of due) {
       dispatchCompose(row, parseMorningReportSettings(row.morningReportSettings), localDate, now);

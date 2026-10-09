@@ -500,6 +500,9 @@ export function BoardApprovalPayload({
   if (firstNonEmptyString(payload.kind) === "model_boost") {
     return <ModelBoostPayloadContent payload={nextPayload} />;
   }
+  if (firstNonEmptyString(payload.kind) === "report_script_version") {
+    return <ReportScriptVersionPayloadContent payload={nextPayload} />;
+  }
   return (
     <BoardApprovalPayloadContent payload={nextPayload} />
   );
@@ -660,6 +663,114 @@ function FeatureLaunchPayloadContent({ payload }: { payload: Record<string, unkn
           <p className="mt-1 leading-6 text-foreground">{whatIfItFails}</p>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * DUR-4072: a report calculation script waiting for approval. The card must
+ * let the owner read EVERY line of code before approving (approved scripts
+ * run with the server's own access), and after an approve attempt it shows
+ * each saved example's result -- not just "passed".
+ */
+function ReportScriptVersionPayloadContent({ payload }: { payload: Record<string, unknown> }) {
+  const title = firstNonEmptyString(payload.title);
+  const summary = firstNonEmptyString(payload.summary);
+  const trustWarning = firstNonEmptyString(payload.trustWarning);
+  const sha256 = firstNonEmptyString(payload.sha256);
+  const entrypoint = firstNonEmptyString(payload.entrypoint);
+  const files =
+    payload.files && typeof payload.files === "object" && !Array.isArray(payload.files)
+      ? Object.entries(payload.files as Record<string, unknown>)
+          .filter((entry): entry is [string, string] => typeof entry[1] === "string")
+          .sort(([a], [b]) => (a === entrypoint ? -1 : b === entrypoint ? 1 : a.localeCompare(b)))
+      : [];
+  const fixtures = Array.isArray(payload.fixtures)
+    ? (payload.fixtures as Array<Record<string, unknown>>).filter((f) => f && typeof f === "object")
+    : [];
+  const results = Array.isArray(payload.fixtureResults)
+    ? (payload.fixtureResults as Array<Record<string, unknown>>).filter((r) => r && typeof r === "object")
+    : null;
+  const checkedAt = firstNonEmptyString(payload.fixtureCheckedAt);
+
+  return (
+    <div className="mt-4 space-y-3.5 text-sm">
+      {title && (
+        <div className="space-y-1">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Title</p>
+          <p className="font-medium leading-6 text-foreground">{title}</p>
+        </div>
+      )}
+      {summary && (
+        <div className="space-y-1">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Summary</p>
+          <p className="whitespace-pre-line leading-6 text-foreground/90">{summary}</p>
+        </div>
+      )}
+      {trustWarning && (
+        <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3.5 py-3">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-amber-700 dark:text-amber-300">
+            Approving means trusting this code
+          </p>
+          <p className="mt-1 leading-6 text-foreground">{trustWarning}</p>
+        </div>
+      )}
+      <div className="space-y-1.5">
+        <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
+          Saved examples {results ? "(results)" : "(not run yet -- they run when you approve)"}
+        </p>
+        {results ? (
+          <ul className="space-y-1.5" data-testid="report-script-fixture-results">
+            {results.map((result, index) => {
+              const ok = result.ok === true;
+              const diffs = Array.isArray(result.diffs) ? (result.diffs as Array<Record<string, unknown>>) : [];
+              return (
+                <li key={String(result.fixtureId ?? index)} className="rounded-md border border-border/60 px-3 py-2">
+                  <p className={ok ? "text-foreground" : "text-destructive"}>
+                    {ok ? "Matched" : "Did not match"}: {String(result.fixtureName ?? "example")} -- {String(result.summary ?? "")}
+                  </p>
+                  {diffs.length > 0 && (
+                    <ul className="mt-1 space-y-0.5 font-mono text-xs text-muted-foreground">
+                      {diffs.map((diff, i) => (
+                        <li key={i}>
+                          {String(diff.path || "(whole output)")}: expected {JSON.stringify(diff.expected)}, got {JSON.stringify(diff.actual)}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </li>
+              );
+            })}
+            {checkedAt && <li className="text-xs text-muted-foreground">Checked {checkedAt}</li>}
+          </ul>
+        ) : (
+          <ul className="space-y-1 text-muted-foreground">
+            {fixtures.map((fixture, index) => (
+              <li key={String(fixture.id ?? index)}>{String(fixture.name ?? "example")}</li>
+            ))}
+          </ul>
+        )}
+      </div>
+      <div className="space-y-1.5">
+        <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
+          Full code ({files.length} file{files.length === 1 ? "" : "s"})
+        </p>
+        {files.map(([name, content]) => (
+          <div key={name} className="space-y-1">
+            <p className="font-mono text-xs text-foreground">
+              {name}
+              {name === entrypoint ? " (runs first)" : ""}
+            </p>
+            <pre
+              className="max-h-[32rem] overflow-auto rounded-lg border border-border/60 bg-muted/50 px-3.5 py-3 font-mono text-xs leading-5 text-foreground whitespace-pre"
+              data-testid="report-script-source"
+            >
+              {content}
+            </pre>
+          </div>
+        ))}
+        {sha256 && <p className="break-all font-mono text-[11px] text-muted-foreground">Code fingerprint: {sha256}</p>}
+      </div>
     </div>
   );
 }

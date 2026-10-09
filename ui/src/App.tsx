@@ -25,6 +25,7 @@ import { IssueDetail } from "./pages/IssueDetail";
 import { IssueChatLongThreadPerf } from "./pages/IssueChatLongThreadPerf";
 import { Routines } from "./pages/Routines";
 import { Watchers } from "./pages/Watchers";
+import { Overlaps } from "./pages/Overlaps";
 import { Trading } from "./pages/Trading";
 import { TradingStrategyDetail } from "./pages/TradingStrategyDetail";
 import { ProductGrabber } from "./pages/ProductGrabber";
@@ -189,6 +190,7 @@ function boardRoutes() {
       <Route path="routines/:routineId/:section" element={<LegacyRoutinesRedirect />} />
       <Route path="workflow-map" element={<WorkflowMap />} />
       <Route path="watchers" element={<Watchers />} />
+      <Route path="overlaps" element={<Overlaps />} />
       <Route path="trading" element={<Trading />} />
       <Route path="trading/:strategyId" element={<TradingStrategyDetail />} />
       <Route path="product-grabber" element={<ProductGrabber />} />
@@ -501,6 +503,7 @@ export function App() {
           <Route path="issues/:issueId" element={<UnprefixedBoardRedirect />} />
           <Route path="routines" element={<UnprefixedBoardRedirect />} />
           <Route path="watchers" element={<UnprefixedBoardRedirect />} />
+          <Route path="overlaps" element={<UnprefixedBoardRedirect />} />
           <Route path="routines/:routineId" element={<UnprefixedBoardRedirect />} />
           <Route path="review-queue" element={<UnprefixedBoardRedirect />} />
           <Route path="learnings" element={<UnprefixedBoardRedirect />} />

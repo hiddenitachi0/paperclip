@@ -26,6 +26,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { AddIntegrationTokenDialog } from "../components/AddIntegrationTokenDialog";
+import { HuggingFaceConnectDialog } from "../components/HuggingFaceConnectDialog";
 import { DataSourcesSection } from "../components/DataSourcesSection";
 import { PaymentsAndLoginsSection } from "../components/PaymentsAndLoginsSection";
 import { ServiceTokensSection } from "../components/ServiceTokensSection";
@@ -51,7 +52,7 @@ import { WebSearchSection } from "../components/WebSearchSection";
  * test results only.
  */
 
-/** The five provider cards, in the order the design names them. */
+/** The provider cards, in the order the design names them. */
 export const AI_PROVIDER_CARDS: ReadonlyArray<{
   provider: SecretKindProvider;
   label: string;
@@ -83,6 +84,12 @@ export const AI_PROVIDER_CARDS: ReadonlyArray<{
     addKind: "openrouter_api_key",
   },
   {
+    provider: "huggingface",
+    label: "Hugging Face",
+    blurb: "Thousands of open models through one account at huggingface.co.",
+    addKind: "huggingface_api_key",
+  },
+  {
     provider: "local",
     label: "Local model",
     blurb: "A model server you run yourself, such as Ollama, LM Studio or vLLM.",
@@ -100,7 +107,7 @@ export function secretsForProvider(secrets: CompanySecret[], provider: SecretKin
 }
 
 function SectionHeading({ children }: { children: React.ReactNode }) {
-  return <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">{children}</div>;
+  return <div className="section-title">{children}</div>;
 }
 
 function LastTest({ secret }: { secret: CompanySecret }) {
@@ -386,7 +393,7 @@ export function CompanyConnections() {
       {/* All secrets + Tools */}
       <div className="space-y-4" data-testid="connections-all-secrets">
         <SectionHeading>All secrets</SectionHeading>
-        <div className="space-y-3 rounded-md border border-border px-4 py-4">
+        <div className="space-y-3 rounded-md section-box px-4 py-4">
           <div className="flex items-center justify-between gap-3">
             <div className="space-y-0.5">
               <p className="text-sm font-medium">
@@ -423,8 +430,18 @@ export function CompanyConnections() {
       </div>
 
       {canManage && (
+        <HuggingFaceConnectDialog
+          open={addKind === "huggingface_api_key"}
+          onOpenChange={(open) => {
+            if (!open) setAddKind(null);
+          }}
+          companyId={selectedCompanyId}
+          existing={secretsForProvider(secrets, "huggingface")[0] ?? null}
+        />
+      )}
+      {canManage && (
         <AddIntegrationTokenDialog
-          open={addKind !== null}
+          open={addKind !== null && addKind !== "huggingface_api_key"}
           onOpenChange={(open) => {
             if (!open) setAddKind(null);
           }}
