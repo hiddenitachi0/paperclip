@@ -108,4 +108,45 @@ describe("helper routes", () => {
     expect(mockSvc.updateSettings).toHaveBeenCalledWith(companyId, { defaultDirectoryEntryId: entryId, keys: { openrouter: entryId } }, { userId: "filip" });
     expect((await request(admin).put(settingsUrl).send({ keys: { notaprovider: entryId } })).status).toBe(400);
   });
+
+  it("lets any member attach pictures (upload or a company file), and refuses more than 4 or any other kind", async () => {
+    const app = await buildApp(board("operator"));
+    const upload = { kind: "upload", name: "shot.png", contentType: "image/png", dataBase64: "iVBORw0KGgo=" };
+    const file = { kind: "file", fileId: entryId };
+    const res = await request(app).post(askUrl).send({ message: "What's wrong here?", pictures: [upload, file] });
+    expect(res.status).toBe(200);
+    expect(mockSvc.ask).toHaveBeenCalledWith(expect.objectContaining({ companyId, pictures: [upload, file] }));
+
+    mockSvc.ask.mockClear();
+    expect((await request(app).post(askUrl).send({ message: "hi", pictures: [upload, upload, upload, upload, upload] })).status).toBe(400);
+    expect((await request(app).post(askUrl).send({ message: "hi", pictures: [{ kind: "file", fileId: "../../etc" }] })).status).toBe(400);
+    expect((await request(app).post(askUrl).send({ message: "hi", pictures: [{ kind: "screen" }] })).status).toBe(400);
+    expect((await request(app).post(askUrl).send({ message: "hi", pictures: [{ ...upload, url: "http://evil" }] })).status).toBe(400);
+    expect(mockSvc.ask).not.toHaveBeenCalled();
+  });
+
+  it("refuses pictures from an agent or another company's member just like a question", async () => {
+    const pictures = [{ kind: "upload", dataBase64: "iVBORw0KGgo=" }];
+    expect((await request(await buildApp(agent())).post(askUrl).send({ message: "hi", pictures })).status).toBe(403);
+    expect((await request(await buildApp(board("owner", [otherCompanyId]))).post(askUrl).send({ message: "hi", pictures })).status).toBe(403);
+    expect(mockSvc.ask).not.toHaveBeenCalled();
+  });
+
+  it("takes 4 full-size pictures in one question on its own body limit (the default 10 MB would refuse them)", async () => {
+    const { helperRoutes, HELPER_ASK_API_PATH, HELPER_ASK_JSON_BODY_LIMIT } = await import("../routes/helper.js");
+    const app = express();
+    app.use(HELPER_ASK_API_PATH, express.json({ limit: HELPER_ASK_JSON_BODY_LIMIT }));
+    app.use(express.json({ limit: "10mb" }));
+    app.use((req, _res, next) => {
+      (req as express.Request & { actor: unknown }).actor = board("operator");
+      next();
+    });
+    app.use("/api", helperRoutes(withFakeCompanyScopeReserve({}) as never));
+    app.use(errorHandler);
+    const big = "A".repeat(6_990_000);
+    const pictures = [0, 1, 2, 3].map(() => ({ kind: "upload", dataBase64: big }));
+    const res = await request(app).post(askUrl).send({ message: "Compare these", pictures });
+    expect(res.status).toBe(200);
+    expect(mockSvc.ask).toHaveBeenCalledTimes(1);
+  });
 });

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { HelpCircle, Crop, X, Send, Eye, RotateCcw, Loader2 } from "lucide-react";
-import { HELPER_MESSAGE_MAX_CHARS, type HelperAskResponse, type HelperModelOption } from "@paperclipai/shared";
+import { HelpCircle, Crop, X, Send, Eye, RotateCcw, Loader2, ImagePlus, FolderOpen } from "lucide-react";
+import { HELPER_MESSAGE_MAX_CHARS, HELPER_PICTURES_MAX, type HelperAskResponse, type HelperModelOption } from "@paperclipai/shared";
 import { useLocation } from "@/lib/router";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -12,9 +12,23 @@ import { captureHelperContext, rectFromPoints, viewportRect, type HelperCapture,
 import { applyHelperAnswer, canApplyHelperAnswer, extractApplicableText, useHelperApplyTargets } from "../../lib/helper-apply";
 import { groupEntries, type CatalogueItem } from "../../lib/model-catalogue";
 import { MarkdownBody } from "../MarkdownBody";
+import { HelperFilePicker } from "./HelperFilePicker";
+import {
+  HELPER_PICTURE_ACCEPT,
+  companyFilePicture,
+  filesToHelperPictures,
+  picturesFromClipboard,
+  type HelperAttachedPicture,
+} from "./helper-pictures";
+import { effectiveHelperModel, helperStatusText, isHelperStatusReady, sortByReadiness } from "./helper-model-status";
 
 /**
  * "Ask Paperclip" — the floating helper (Phase 1).
+ *
+ * Phase 2: the person can attach up to 4 pictures (upload, paste, or pick
+ * one from the company's Files) to a question. Only a model that can see
+ * pictures may answer it; otherwise the panel says so and offers those that
+ * can. Each model in the picker shows whether it is ready.
  *
  * A small "Ask" button (and Ctrl/Cmd+Shift+H) opens a side panel. The
  * person can mark an area of the page (drag a rectangle, like a snipping
@@ -33,6 +47,15 @@ interface Turn {
   meta?: Pick<HelperAskResponse, "modelLabel" | "costCents" | "truncated">;
   /** Fields the person marked when asking this question. */
   applyTargets?: string[];
+  /** Pictures attached to this question (previews only; not sent again with later questions). */
+  pictures?: Array<{ key: string; name: string; previewUrl: string }>;
+}
+
+/** History text for an earlier question that had pictures: the model knows they existed, they are not resent. */
+export function historyContentOf(turn: Pick<Turn, "content" | "pictures">): string {
+  const n = turn.pictures?.length ?? 0;
+  if (n === 0) return turn.content;
+  return `${turn.content}\n\n[${n === 1 ? "1 picture was" : `${n} pictures were`} attached to this question; they are not sent again.]`;
 }
 
 const SHORTCUT_LABEL = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘⇧H" : "Ctrl+Shift+H";
@@ -85,7 +108,11 @@ export function HelperOverlay() {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [appliedNote, setAppliedNote] = useState<string | null>(null);
+  const [pictures, setPictures] = useState<HelperAttachedPicture[]>([]);
+  const [pictureProblems, setPictureProblems] = useState<string[]>([]);
+  const [filePickerOpen, setFilePickerOpen] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const registeredTargets = useHelperApplyTargets();
 
   const route = `${location.pathname}${location.search}`;
@@ -97,9 +124,25 @@ export function HelperOverlay() {
     staleTime: 60_000,
   });
   const settings = settingsQuery.data;
-  const groups = useMemo(() => groupEntries((settings?.models ?? []).map(toCatalogueItem), "maker"), [settings?.models]);
+  // Ready models first: groups with a ready model first, and ready models first inside each group.
+  const groups = useMemo(() => {
+    const grouped = groupEntries((settings?.models ?? []).map(toCatalogueItem), "maker").map((group) => ({
+      ...group,
+      entries: sortByReadiness(group.entries),
+    }));
+    return grouped
+      .map((group, index) => ({ group, index, ready: group.entries.some((e) => isHelperStatusReady(e.option.status)) }))
+      .sort((a, b) => Number(b.ready) - Number(a.ready) || a.index - b.index)
+      .map(({ group }) => group);
+  }, [settings?.models]);
   const chosen = settings?.models.find((m) => m.id === entryId) ?? null;
   const defaultModel = settings?.models.find((m) => m.id === settings.defaultDirectoryEntryId) ?? null;
+  const effective = effectiveHelperModel(settings, entryId);
+  const hasPictures = pictures.length > 0;
+  const blindWithPictures = hasPictures && Boolean(settings) && effective.canSeePictures !== true;
+  const visionModels = sortByReadiness(
+    (settings?.models ?? []).filter((m) => m.canSeePictures === true).map((option) => ({ option })),
+  ).map(({ option }) => option);
 
   const captureNow = useCallback(
     (rect: HelperRect | null) => {
@@ -161,16 +204,31 @@ export function HelperOverlay() {
     }
   };
 
+  const addFiles = async (files: readonly File[]) => {
+    if (files.length === 0) return;
+    const { pictures: added, problems } = await filesToHelperPictures(files, pictures.length);
+    setPictureProblems(problems);
+    if (added.length > 0) setPictures((prev) => [...prev, ...added].slice(0, HELPER_PICTURES_MAX));
+  };
+
   const send = async () => {
     const text = message.trim();
-    if (!text || pending) return;
+    if (!text || pending || blindWithPictures) return;
     setPending(true);
     setError(null);
     setAppliedNote(null);
-    const history = turns.map((t) => ({ role: t.role, content: t.content }));
-    const asked: Turn = { role: "user", content: text, applyTargets: capture?.applyTargets ?? [] };
+    const history = turns.map((t) => ({ role: t.role, content: historyContentOf(t) }));
+    const sentPictures = pictures;
+    const asked: Turn = {
+      role: "user",
+      content: text,
+      applyTargets: capture?.applyTargets ?? [],
+      pictures: sentPictures.map(({ key, name, previewUrl }) => ({ key, name, previewUrl })),
+    };
     setTurns((prev) => [...prev, asked]);
     setMessage("");
+    setPictures([]);
+    setPictureProblems([]);
     try {
       const result = await helperApi.ask(selectedCompanyId, {
         message: text,
@@ -178,6 +236,7 @@ export function HelperOverlay() {
         pageRoute: route,
         directoryEntryId: entryId || null,
         history,
+        ...(sentPictures.length > 0 ? { pictures: sentPictures.map((p) => p.input) } : {}),
       });
       setTurns((prev) => [
         ...prev,
@@ -192,6 +251,7 @@ export function HelperOverlay() {
       setError(describeError(err));
       setTurns((prev) => prev.slice(0, -1));
       setMessage(text);
+      setPictures(sentPictures);
     } finally {
       setPending(false);
     }
@@ -295,12 +355,20 @@ export function HelperOverlay() {
                   <li>Mark a setting and ask “What should I put here, step by step?”</li>
                   <li>Mark a card on Now and ask “Should I approve this?”</li>
                   <li>Mark a text field and ask the helper to write it, then press “Apply”.</li>
+                  <li>Attach or paste a picture and ask “What's wrong in this screenshot?” or “Write a character sheet from this photo”.</li>
                 </ul>
               </div>
             ) : null}
             {turns.map((turn, index) =>
               turn.role === "user" ? (
-                <div key={index} className="ml-8 rounded-lg bg-muted px-3 py-2 text-sm whitespace-pre-wrap">
+                <div key={index} className="ml-8 space-y-1.5 rounded-lg bg-muted px-3 py-2 text-sm whitespace-pre-wrap">
+                  {turn.pictures && turn.pictures.length > 0 ? (
+                    <div className="flex flex-wrap gap-1" data-testid="helper-turn-pictures">
+                      {turn.pictures.map((p) => (
+                        <img key={p.key} src={p.previewUrl} alt={p.name} title={p.name} className="h-12 w-12 rounded object-cover" />
+                      ))}
+                    </div>
+                  ) : null}
                   {turn.content}
                 </div>
               ) : (
@@ -381,6 +449,86 @@ export function HelperOverlay() {
               </pre>
             </details>
 
+            <div className="space-y-1.5" data-testid="helper-pictures">
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  size="xs"
+                  variant="outline"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={pictures.length >= HELPER_PICTURES_MAX}
+                  data-testid="helper-attach"
+                >
+                  <ImagePlus className="h-3.5 w-3.5" /> Attach picture
+                </Button>
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  onClick={() => setFilePickerOpen((v) => !v)}
+                  disabled={pictures.length >= HELPER_PICTURES_MAX}
+                  data-testid="helper-from-files"
+                >
+                  <FolderOpen className="h-3.5 w-3.5" /> From Files
+                </Button>
+                <span className="text-[11px] text-muted-foreground">
+                  or paste one. Up to {HELPER_PICTURES_MAX}, 5 MB each.
+                </span>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept={HELPER_PICTURE_ACCEPT}
+                  multiple
+                  hidden
+                  data-testid="helper-file-input"
+                  onChange={(e) => {
+                    const files = Array.from(e.currentTarget.files ?? []);
+                    e.currentTarget.value = "";
+                    void addFiles(files);
+                  }}
+                />
+              </div>
+              {filePickerOpen ? (
+                <HelperFilePicker
+                  companyId={selectedCompanyId}
+                  onClose={() => setFilePickerOpen(false)}
+                  onPick={(file) => {
+                    setFilePickerOpen(false);
+                    setPictures((prev) =>
+                      prev.length >= HELPER_PICTURES_MAX || prev.some((p) => p.input.kind === "file" && p.input.fileId === file.attachmentId)
+                        ? prev
+                        : [...prev, companyFilePicture(file.attachmentId, file.name, file.thumbnailPath)],
+                    );
+                  }}
+                />
+              ) : null}
+              {pictures.length > 0 ? (
+                <div className="flex flex-wrap gap-1.5">
+                  {pictures.map((p) => (
+                    <div key={p.key} className="relative" data-testid="helper-picture">
+                      <img src={p.previewUrl} alt={p.name} title={p.name} className="h-14 w-14 rounded border border-border object-cover" />
+                      <button
+                        type="button"
+                        aria-label={`Remove ${p.name}`}
+                        className="absolute -right-1.5 -top-1.5 rounded-full border border-border bg-background p-0.5 shadow"
+                        onClick={() => setPictures((prev) => prev.filter((x) => x.key !== p.key))}
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+              {hasPictures ? (
+                <p className="text-[11px] text-muted-foreground">
+                  Only these pictures are sent, with this question only. They are not saved.
+                </p>
+              ) : null}
+              {pictureProblems.map((problem) => (
+                <p key={problem} role="alert" className="text-xs text-destructive">
+                  {problem}
+                </p>
+              ))}
+            </div>
+
             <label className="block text-xs">
               <span className="text-muted-foreground">Model</span>
               <select
@@ -391,20 +539,51 @@ export function HelperOverlay() {
               >
                 <option value="">
                   Use default ({defaultModel ? defaultModel.name : settings?.builtInDefaultLabel ?? "Paperclip's default"})
+                  {settings ? ` — ${helperStatusText(defaultModel ? defaultModel.status : settings.builtInDefaultStatus)}` : ""}
                 </option>
                 {groups.map((group) => (
                   <optgroup key={group.key} label={group.title}>
                     {group.entries.map((item) => (
                       <option key={item.id} value={item.id}>
-                        {item.name}
-                        {item.option.keyReady ? "" : " (needs a key)"}
+                        {item.name} — {helperStatusText(item.option.status)}
+                        {hasPictures && item.option.canSeePictures !== true ? " · can't see pictures" : ""}
                       </option>
                     ))}
                   </optgroup>
                 ))}
               </select>
             </label>
-            {chosen && !chosen.keyReady && chosen.keyHint ? <p className="text-xs text-amber-600">{chosen.keyHint}</p> : null}
+            {settings && effective.status && !isHelperStatusReady(effective.status) ? (
+              <p className="text-xs text-amber-600" data-testid="helper-model-warning">
+                {helperStatusText(effective.status)}: {chosen && !chosen.keyReady && chosen.keyHint ? chosen.keyHint : effective.status.detail}
+              </p>
+            ) : null}
+            {blindWithPictures ? (
+              <div className="space-y-1 rounded-md border border-amber-500/50 px-2 py-1.5 text-xs" role="alert" data-testid="helper-vision-gate">
+                <p>
+                  {effective.canSeePictures === false
+                    ? `“${effective.name}” cannot look at pictures, so it cannot answer about the ones you attached.`
+                    : `Paperclip does not know whether “${effective.name}” can look at pictures, so they are not sent to it.`}{" "}
+                  Pick a model that can, or remove the pictures.
+                </p>
+                <div className="flex flex-wrap gap-1">
+                  {settings?.builtInDefaultCanSeePictures && !defaultModel && entryId ? (
+                    <Button size="xs" variant="outline" onClick={() => setEntryId("")} data-testid="helper-vision-option">
+                      Paperclip's default
+                    </Button>
+                  ) : null}
+                  {visionModels.map((m) => (
+                    <Button key={m.id} size="xs" variant="outline" onClick={() => setEntryId(m.id)} data-testid="helper-vision-option">
+                      {m.name}
+                    </Button>
+                  ))}
+                </div>
+                <p className="text-muted-foreground">
+                  Whether a saved model can see pictures is its “Pictures” setting under Company settings → Models. Models
+                  Paperclip already knows are filled in for you; an owner or admin can change it.
+                </p>
+              </div>
+            ) : null}
 
             <div className="flex items-end gap-2">
               <Textarea
@@ -412,8 +591,14 @@ export function HelperOverlay() {
                 value={message}
                 maxLength={HELPER_MESSAGE_MAX_CHARS}
                 rows={3}
-                placeholder="Ask about this page…"
+                placeholder={hasPictures ? "Ask about the pictures…" : "Ask about this page…"}
                 onChange={(e) => setMessage(e.target.value)}
+                onPaste={(e) => {
+                  const files = picturesFromClipboard(e.clipboardData);
+                  if (files.length === 0) return;
+                  e.preventDefault();
+                  void addFiles(files);
+                }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
@@ -423,7 +608,7 @@ export function HelperOverlay() {
                 className="min-h-[64px] flex-1 text-sm"
                 aria-label="Your question"
               />
-              <Button size="icon-sm" onClick={() => void send()} disabled={pending || !message.trim()} aria-label="Send">
+              <Button size="icon-sm" onClick={() => void send()} disabled={pending || !message.trim() || blindWithPictures} aria-label="Send">
                 <Send className="h-4 w-4" />
               </Button>
             </div>

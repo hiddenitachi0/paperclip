@@ -55,8 +55,20 @@ export interface LaneAToolResult {
   isError: boolean;
 }
 
+/**
+ * A picture handed to the model with a user turn (base64, no data: prefix).
+ * Each provider gets it in its own shape: an Anthropic `image` block, or an
+ * OpenAI-compatible `image_url` part with a data URI (OpenAI, Google's shim,
+ * OpenRouter, and Ollama/LM Studio through their OpenAI-compatible /v1
+ * endpoint, which takes base64 data URIs).
+ */
+export interface LaneAImage {
+  contentType: "image/jpeg" | "image/png" | "image/webp" | "image/gif";
+  base64: string;
+}
+
 export type LaneAChatMessage =
-  | { role: "user"; content: string }
+  | { role: "user"; content: string; images?: LaneAImage[] }
   | { role: "assistant"; content: string; toolCalls?: LaneAToolCall[] }
   | { role: "tool"; results: LaneAToolResult[] };
 
@@ -315,7 +327,22 @@ export function fromAnthropicTool(tool: Anthropic.Tool): LaneATool {
 
 export function toAnthropicMessages(messages: LaneAChatMessage[]): Anthropic.MessageParam[] {
   return messages.map((message): Anthropic.MessageParam => {
-    if (message.role === "user") return { role: "user", content: message.content };
+    if (message.role === "user") {
+      if (!message.images || message.images.length === 0) return { role: "user", content: message.content };
+      // Pictures first, then the question: Anthropic's own advice for image prompts.
+      return {
+        role: "user",
+        content: [
+          ...message.images.map(
+            (image): Anthropic.ImageBlockParam => ({
+              type: "image",
+              source: { type: "base64", media_type: image.contentType, data: image.base64 },
+            }),
+          ),
+          { type: "text", text: message.content },
+        ],
+      };
+    }
     if (message.role === "assistant") {
       if (!message.toolCalls || message.toolCalls.length === 0) {
         return { role: "assistant", content: message.content };
@@ -429,7 +456,12 @@ type OpenAiToolCallParam = {
 
 type OpenAiMessageParam =
   | { role: "system"; content: string }
-  | { role: "user"; content: string }
+  | {
+      role: "user";
+      content:
+        | string
+        | Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }>;
+    }
   | { role: "assistant"; content: string | null; tool_calls?: OpenAiToolCallParam[] }
   | { role: "tool"; tool_call_id: string; content: string };
 
@@ -447,7 +479,20 @@ export function toOpenAiMessages(system: string, messages: LaneAChatMessage[]): 
   const out: OpenAiMessageParam[] = [{ role: "system", content: system }];
   for (const message of messages) {
     if (message.role === "user") {
-      out.push({ role: "user", content: message.content });
+      if (message.images && message.images.length > 0) {
+        out.push({
+          role: "user",
+          content: [
+            { type: "text", text: message.content },
+            ...message.images.map((image) => ({
+              type: "image_url" as const,
+              image_url: { url: `data:${image.contentType};base64,${image.base64}` },
+            })),
+          ],
+        });
+      } else {
+        out.push({ role: "user", content: message.content });
+      }
     } else if (message.role === "assistant") {
       const toolCalls = message.toolCalls ?? [];
       out.push({
