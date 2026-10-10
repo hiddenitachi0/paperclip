@@ -473,3 +473,83 @@ export const videoRenderRequestPayloadSchema = z
   .strict();
 
 export type VideoRenderRequestPayload = z.infer<typeof videoRenderRequestPayloadSchema>;
+
+/**
+ * One-click privileged host actions ("operator actions"). An agent asks for
+ * ONE action from a short, fixed list, against a target the instance admin
+ * configured on the box (scripts/operator-action-runner.py reads
+ * /etc/paperclip/operator-actions.json). The owner/admin approves the card
+ * and the on-box runner performs exactly that action -- never a command from
+ * the card. See doc/operator-actions.md.
+ */
+export const OPERATOR_ACTION_TYPES = ["restart_service", "recreate_container", "set_env_var"] as const;
+export type OperatorActionType = (typeof OPERATOR_ACTION_TYPES)[number];
+
+/** A name from the box's catalogue ("telegram-bridge", "dashboard"). Never a path or a unit name. */
+export const operatorActionTargetNameSchema = z
+  .string()
+  .regex(/^[a-z0-9][a-z0-9_-]{0,62}$/, "must be a name from the host actions list (lowercase letters, digits, - and _)");
+
+/** An env var name. Upper case only, so it can never be confused with anything else in an env file. */
+export const operatorActionEnvKeySchema = z
+  .string()
+  .regex(/^[A-Z_][A-Z0-9_]{0,127}$/, "must be an upper-case setting name such as FEATURE_FLAG");
+
+/**
+ * The fields an agent (or a person) fills in. Everything else on the stored
+ * card is stamped by the server from the box's published catalogue.
+ */
+export const operatorActionRequestInputSchema = z
+  .object({
+    kind: z.literal("operator_action"),
+    action: z.enum(OPERATOR_ACTION_TYPES),
+    target: operatorActionTargetNameSchema,
+    envKey: operatorActionEnvKeySchema.optional(),
+    secretId: z.string().uuid().optional(),
+    reason: multilineTextSchema.pipe(z.string().trim().min(1).max(2000)),
+    acknowledgedDuplicateOfApprovalId: z.string().uuid().optional(),
+  })
+  .strict()
+  .superRefine((data, ctx) => {
+    if (data.action === "set_env_var") {
+      if (!data.envKey) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["envKey"], message: "set_env_var needs envKey" });
+      if (!data.secretId) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["secretId"],
+          message: "set_env_var needs secretId (the company secret holding the value; the value itself never goes on the card)",
+        });
+      }
+    } else {
+      if (data.envKey !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["envKey"], message: `${data.action} takes no envKey` });
+      if (data.secretId !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["secretId"], message: `${data.action} takes no secretId` });
+    }
+  });
+
+export type OperatorActionRequestInput = z.infer<typeof operatorActionRequestInputSchema>;
+
+/** Stored card: the input plus the server-stamped, plain-language fields. */
+export const operatorActionRequestPayloadSchema = z
+  .object({
+    kind: z.literal("operator_action"),
+    action: z.enum(OPERATOR_ACTION_TYPES),
+    target: operatorActionTargetNameSchema,
+    envKey: operatorActionEnvKeySchema.optional(),
+    secretId: z.string().uuid().optional(),
+    reason: multilineTextSchema.pipe(z.string().trim().min(1).max(2000)),
+    acknowledgedDuplicateOfApprovalId: z.string().uuid().optional(),
+    // Server-stamped (never trusted from the filer):
+    title: z.string().min(1),
+    summary: z.string().min(1),
+    targetLabel: z.string().min(1),
+    willRun: z.string().min(1),
+    nextActionOnApproval: z.string().min(1),
+    secretName: z.string().min(1).optional(),
+    // Added by normalizeRequestBoardApprovalPayload for every board card.
+    originalIssueIds: z.array(z.string().uuid()).optional(),
+    relatedApprovalId: z.string().uuid().optional(),
+    technicalReference: z.string().optional(),
+  })
+  .strict();
+
+export type OperatorActionRequestPayload = z.infer<typeof operatorActionRequestPayloadSchema>;
