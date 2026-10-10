@@ -325,7 +325,7 @@ DECLARE
     -- lists match the schema, as for the tables above.
     'company_helper_settings',
     -- Agent quality loops. Created, granted on and policed in
-    -- 0244_company_quality_loop_settings.sql; listed here so the login-role
+    -- 0243_company_quality_loop_settings.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'company_quality_loop_settings',
     -- DUR-4392. Created, granted on and policed in
@@ -660,7 +660,7 @@ DECLARE
     -- lists match the schema, as for the tables above.
     'company_helper_settings',
     -- Agent quality loops. Created, granted on and policed in
-    -- 0244_company_quality_loop_settings.sql; listed here so the login-role
+    -- 0243_company_quality_loop_settings.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'company_quality_loop_settings',
     -- DUR-4392. Created, granted on and policed in

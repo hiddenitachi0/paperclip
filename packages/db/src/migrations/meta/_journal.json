@@ -1697,10 +1697,10 @@
       "breakpoints": true
     },
     {
-      "idx": 244,
+      "idx": 243,
       "version": "7",
-      "when": 1791660000000,
-      "tag": "0244_company_quality_loop_settings",
+      "when": 1791651404703,
+      "tag": "0243_company_quality_loop_settings",
       "breakpoints": true
     }
   ]
