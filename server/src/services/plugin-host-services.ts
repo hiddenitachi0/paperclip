@@ -2719,7 +2719,9 @@ export function buildHostServices(
           // host's own short-lived one for THIS company, and the call runs as
           // the signed-in person talking to the quick agent.
           const run = findLaneAPluginRun(params.runId);
-          if (run && run.companyId === companyId && run.requestedByUserId) {
+          // The run must belong to THIS plugin's own tool call: a run id
+          // handed to one plugin cannot be used by another.
+          if (run && run.companyId === companyId && run.requestedByUserId && run.pluginKey === pluginKey) {
             caller = { companyId, userId: run.requestedByUserId, canManageCompany: false, quickAgentRun: true, pluginId };
           }
         }
