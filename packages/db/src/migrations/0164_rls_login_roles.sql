@@ -425,7 +425,7 @@ DECLARE
     -- company_service_tokens is, above.
     'telegram_bots',
     -- Hermes parity slice 1 (two-way Telegram chat for linked people).
-    -- Created, granted on and policed in 0246_telegram_two_way_chat.sql;
+    -- Created, granted on and policed in 0243_telegram_two_way_chat.sql;
     -- telegram_person_links is per person (no company_id), so it is in this
     -- list only, not in the company-scoped one below.
     'telegram_chat_requests',
@@ -752,7 +752,7 @@ DECLARE
     -- DUR-3978 slice 2, created in 0166_telegram_bots.sql; company-scoped, so
     -- it belongs in this list too.
     'telegram_bots',
-    -- Hermes parity slice 1, created in 0246_telegram_two_way_chat.sql;
+    -- Hermes parity slice 1, created in 0243_telegram_two_way_chat.sql;
     -- company-scoped, so they belong in this list too.
     'telegram_chat_requests',
     'telegram_chat_settings',
