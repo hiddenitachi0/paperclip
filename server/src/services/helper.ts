@@ -797,15 +797,15 @@ export function helperService(db: Db, options: HelperServiceOptions = {}) {
 
   /**
    * Storylines (AI director, transition writer, clip-frame reader): one
-   * tool-less call on a saved model of THIS company, paid with THIS
-   * company's key. Unlike ask(), there is never a fallback on Paperclip's own
-   * Claude key: the instance owner must not pay for every company's writing
-   * (design 2.11). No model or no key = a plain 503 the editor shows as is.
-   *
-   * The model is `entryId` when given (e.g. Media Studio's picture-reading
-   * model), else the company's helper default. The key is `keySecretId` when
-   * given (a company secret, read through the plugin path with the company
-   * check), else the helper's key for that service.
+   * tool-less call that mirrors ask() exactly. The model is `entryId` when
+   * given (e.g. Media Studio's picture-reading model), else the company's
+   * helper default, else the helper's built-in default. The key is
+   * `keySecretId` when given (a company secret, read through the plugin path
+   * with the company check), else ask()'s own resolveKey(): the helper's key
+   * for that service, else Paperclip's own Claude key where the helper allows
+   * it (Claude only -- instanceFallback in the helper settings), else a plain
+   * 503. The system and user text are masked (maskSecretLikeText) like ask()
+   * masks its question and context. The cost is recorded on the company.
    */
   async function callCompanyModel(input: CompanyModelCallInput): Promise<CompanyModelCallResult> {
     const block = await budgets.getCompanyInvocationBlock(input.companyId);
@@ -891,9 +891,11 @@ export function helperService(db: Db, options: HelperServiceOptions = {}) {
       throw new HttpError(503, `Could not reach "${modelLabel}": ${scrubLaneASecrets(String(err instanceof Error ? err.message : err), apiKey)}`);
     }
     const maxTokens = Math.min(settings.maxOutputTokens, input.maxTokens);
+    // Masked like ask() masks the question and context: no secret-looking text leaves in a prompt.
     const messages: LaneAChatMessage[] = [
-      { role: "user", content: input.user, ...(input.images && input.images.length > 0 ? { images: input.images } : {}) },
+      { role: "user", content: maskSecretLikeText(input.user), ...(input.images && input.images.length > 0 ? { images: input.images } : {}) },
     ];
+    const system = maskSecretLikeText(input.system);
     let withTemperature = typeof settings.temperature === "number";
     let withReasoningEffort = settings.reasoningEffort != null;
     const send = async (): Promise<Awaited<ReturnType<LaneAProviderClient["complete"]>>> => {
@@ -902,7 +904,7 @@ export function helperService(db: Db, options: HelperServiceOptions = {}) {
         return await client.complete({
           model: settings.model!,
           maxTokens,
-          system: input.system,
+          system,
           messages,
           ...(withTemperature ? { temperature: settings.temperature } : {}),
           ...(withReasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}),

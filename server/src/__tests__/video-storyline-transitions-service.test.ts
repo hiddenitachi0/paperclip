@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 import { eq } from "drizzle-orm";
+import express from "express";
+import request from "supertest";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDb, companies, pluginConfig, pluginState, plugins, videoShots, videoStorylines, videoTransitionTakes, videoTransitions } from "@paperclipai/db";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
@@ -91,6 +93,9 @@ const { videoStorylineSettingsService } = await import("../services/video-storyl
 const { videoStorylineService } = await import("../services/video-storylines.ts");
 const { videoStorylineStitchService } = await import("../services/video-storyline-stitch.ts");
 const { secretService } = await import("../services/secrets.ts");
+const { storylineCompanyModel } = await import("../services/video-storyline-company-model.ts");
+const { videoStorylineRoutes } = await import("../routes/video-storylines.ts");
+const { errorHandler } = await import("../middleware/index.ts");
 
 const ACTOR = { actorType: "user" as const, actorId: "filip", agentId: null };
 
@@ -394,5 +399,103 @@ d("storyline strip transitions", () => {
     expect(transitionAnchorHash(storyline, shot("a", "9"), shot("b", "2"))).not.toBe(base);
     expect(transitionAnchorHash(storyline, shot("a", "1"), shot("c", "2"))).not.toBe(base);
     expect(transitionAnchorHash(storyline, shot("b", "2"), shot("a", "1"))).not.toBe(base);
+  });
+  it("only an owner or admin may change the spend controls: a plain member gets 403 on all three (DUR-4711)", async () => {
+    const film = await seedFilm();
+    const member = { type: "board", source: "session", userId: "member-1", isInstanceAdmin: false, companyIds: [film.companyId], memberships: [{ companyId: film.companyId, status: "active", membershipRole: "member" }] };
+    const owner = { ...member, userId: "owner-1", memberships: [{ companyId: film.companyId, status: "active", membershipRole: "owner" }] };
+    const appFor = (actor: unknown) => {
+      const app = express();
+      app.use(express.json());
+      app.use((req, _res, next) => {
+        req.actor = actor as typeof req.actor;
+        next();
+      });
+      app.use("/api", videoStorylineRoutes(db));
+      app.use(errorHandler);
+      return app;
+    };
+    const base = `/api/companies/${film.companyId}/video-storylines/settings`;
+    const calls: Array<[string, Record<string, unknown>]> = [
+      ["media-cap", { capCents: 10_000_000 }],
+      ["approval-threshold", { thresholdCents: null }],
+      ["advanced", { enabled: false }],
+    ];
+    for (const [path, body] of calls) {
+      const res = await request(appFor(member)).patch(`${base}/${path}`).send(body);
+      expect(res.status, path).toBe(403);
+      expect(res.body.error).toContain("owner or an admin");
+    }
+    expect(await videoStorylineSettingsService(db).getMediaMonthlyCapCents(film.companyId)).toBe(2_000);
+    expect(await videoStorylineSettingsService(db).isAdvancedEnabled(film.companyId)).toBe(true);
+    const ok = await request(appFor(owner)).patch(`${base}/media-cap`).send({ capCents: 3_000 });
+    expect(ok.status).toBe(200);
+    expect(ok.body.capCents).toBe(3_000);
+  });
+
+  it("two simultaneous generates make one take, and the monthly cap can't be overshot across two storylines (DUR-4711)", async () => {
+    const film = await seedFilm();
+    const svc = videoStorylineTransitionsService(db);
+    const gap = await svc.upsert(film.companyId, film.storylineId, { fromShotId: film.a, toShotId: film.b, kind: "ai" }, ACTOR);
+    const both = await Promise.allSettled([svc.generate(film.companyId, film.storylineId, gap.id!, {}, ACTOR), svc.generate(film.companyId, film.storylineId, gap.id!, {}, ACTOR)]);
+    expect(both.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(await db.select().from(videoTransitionTakes).where(eq(videoTransitionTakes.transitionId, gap.id!))).toHaveLength(1);
+
+    // A second film in another company-wide race: cap = exactly one take (26 cents).
+    const one = await seedFilm();
+    const svc2 = videoStorylineTransitionsService(db);
+    const second = await videoStorylineService(db).createStoryline(
+      one.companyId,
+      { title: "Second", projectId: null, providerId: "fal", model: null, budgetCapCents: 1_000, characterReferenceAssetIds: [], defaultTransition: "cut", defaultTransitionDurationMs: 500, musicAssetId: null, musicSourceKey: null, musicVolumeDb: -18 },
+      ACTOR,
+    );
+    const scene = await videoStorylineService(db).createScene(one.companyId, second.id, { title: "S", notes: null, orderIndex: 0 }, ACTOR);
+    const ids: string[] = [];
+    for (const i of [0, 1]) {
+      const shot = await videoStorylineService(db).createShot(one.companyId, second.id, { sceneId: scene.id, orderIndex: i, prompt: `P${i}`, cameraNotes: null, durationSeconds: 5, lookReferenceAssetIds: [], transitionIn: null }, ACTOR);
+      const key = `${one.companyId}/clips2/${shot.id}.mp4`;
+      storedObjects.set(key, { body: Buffer.from(`c${i}`), contentType: "video/mp4" });
+      await db.update(videoShots).set({ status: "done", storyboardStatus: "approved", resultProvider: "local_disk", resultObjectKey: key, resultContentType: "video/mp4", resultSha256: `s2-${i}` }).where(eq(videoShots.id, shot.id));
+      ids.push(shot.id);
+    }
+    await videoStorylineSettingsService(db).setMediaMonthlyCapCents(one.companyId, Math.ceil(3 * 8.4));
+    const g1 = await svc2.upsert(one.companyId, one.storylineId, { fromShotId: one.a, toShotId: one.b, kind: "ai" }, ACTOR);
+    const g2 = await svc2.upsert(one.companyId, second.id, { fromShotId: ids[0]!, toShotId: ids[1]!, kind: "ai" }, ACTOR);
+    const race = await Promise.allSettled([
+      svc2.generate(one.companyId, one.storylineId, g1.id!, {}, ACTOR),
+      svc2.generate(one.companyId, second.id, g2.id!, {}, ACTOR),
+    ]);
+    expect(race.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const rejected = race.find((r) => r.status === "rejected") as PromiseRejectedResult;
+    expect(String(rejected.reason?.message)).toContain("monthly limit");
+    expect(await svc2.monthlySpentCents(one.companyId)).toBe(Math.ceil(3 * 8.4));
+  });
+
+  it("a take that timed out with a provider job keeps its cost counted; the writer's prompts are masked (DUR-4711)", async () => {
+    const film = await seedFilm();
+    let now = new Date();
+    const svc = videoStorylineTransitionsService(db, { now: () => now });
+    const gap = await svc.upsert(film.companyId, film.storylineId, { fromShotId: film.a, toShotId: film.b, kind: "ai" }, ACTOR);
+    await svc.generate(film.companyId, film.storylineId, gap.id!, {}, ACTOR);
+    video.outcome = { status: "running" };
+    now = new Date(now.getTime() + 31 * 60_000);
+    await svc.tick();
+    const [take] = await db.select().from(videoTransitionTakes).where(eq(videoTransitionTakes.transitionId, gap.id!));
+    expect(take).toMatchObject({ status: "failed", costCents: 26, reservedCents: 26 });
+    expect(take!.error).toContain("may still charge");
+    const [storyline] = await db.select().from(videoStorylines).where(eq(videoStorylines.id, film.storylineId));
+    expect(storyline!.spentCents).toBe(26);
+    expect(await svc.monthlySpentCents(film.companyId)).toBe(26);
+
+    const model = fakeModel();
+    await storylineCompanyModel(db, { createModelClient: model.createModelClient }).write(film.companyId, ACTOR, {
+      system: "Rules. Never echo sk-ant-api03-SYSTEMSECRET123456.",
+      user: "Shot text: the key is sk-proj-USERSECRET987654321 ok",
+      maxTokens: 50,
+    });
+    const sent = model.create.mock.calls[0]![0] as { system: string; messages: Array<{ content: unknown }> };
+    expect(sent.system).not.toContain("SYSTEMSECRET");
+    expect(JSON.stringify(sent.messages)).not.toContain("USERSECRET");
+    expect(JSON.stringify(sent.messages)).toContain("[hidden]");
   });
 });

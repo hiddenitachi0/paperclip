@@ -35,8 +35,11 @@ import {
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
-import { assertBoardOrAgent, assertBoardOrgAccess, assertCompanyAccess } from "./authz.js";
-import { badRequest, notFound, unprocessable } from "../errors.js";
+import { assertBoardOrAgent, assertBoardOrgAccess, assertCompanyAccess, assertCompanyOwnerAdminOrInstanceAdmin } from "./authz.js";
+import { HttpError, badRequest, notFound, unprocessable } from "../errors.js";
+
+/** The largest clip the poster route reads into memory to cut a picture from. */
+const POSTER_MAX_CLIP_BYTES = 100 * 1024 * 1024;
 import { logActivity } from "../services/activity-log.js";
 import { getStorageService } from "../storage/index.js";
 import { videoStorylineService, type VideoStorylineActor } from "../services/video-storylines.js";
@@ -53,7 +56,6 @@ import { videoStorylineDirectorProposalsService } from "../services/video-storyl
 import { videoStorylineTransitionsService } from "../services/video-storyline-transitions.js";
 import { extractPosterJpeg } from "../services/video-ffmpeg.js";
 import { runMediaJob } from "../services/media-job-queue.js";
-import { buffer as streamToBuffer } from "node:stream/consumers";
 import type { NextFunction, Response } from "express";
 
 /**
@@ -220,8 +222,8 @@ export function videoStorylineRoutes(rawDb: Db) {
     "/companies/:companyId/video-storylines/settings/advanced",
     validate(updateVideoStorylineSettingsSchema),
     companyScopeFromParam(rawDb, (req, companyId) => {
-      assertBoardOrgAccess(req);
-      assertCompanyAccess(req, companyId);
+      // A spend control: owners and admins only (security review DUR-4711).
+      assertCompanyOwnerAdminOrInstanceAdmin(req, companyId, "the advanced storyline features (they can spend money)");
     }),
     async (req, res) => {
       const companyId = req.params.companyId as string;
@@ -255,8 +257,8 @@ export function videoStorylineRoutes(rawDb: Db) {
     "/companies/:companyId/video-storylines/settings/approval-threshold",
     validate(updateVideoStorylineApprovalThresholdSchema),
     companyScopeFromParam(rawDb, (req, companyId) => {
-      assertBoardOrgAccess(req);
-      assertCompanyAccess(req, companyId);
+      // A spend control: owners and admins only (security review DUR-4711).
+      assertCompanyOwnerAdminOrInstanceAdmin(req, companyId, "the approval limit for video renders");
     }),
     async (req, res) => {
       const companyId = req.params.companyId as string;
@@ -287,8 +289,8 @@ export function videoStorylineRoutes(rawDb: Db) {
     "/companies/:companyId/video-storylines/settings/media-cap",
     validate(updateMediaMonthlyCapSchema),
     companyScopeFromParam(rawDb, (req, companyId) => {
-      assertBoardOrgAccess(req);
-      assertCompanyAccess(req, companyId);
+      // A spend control: owners and admins only (security review DUR-4711).
+      assertCompanyOwnerAdminOrInstanceAdmin(req, companyId, "the monthly limit for AI transitions");
     }),
     async (req, res) => {
       const companyId = req.params.companyId as string;
@@ -396,8 +398,23 @@ export function videoStorylineRoutes(rawDb: Db) {
         return;
       }
       if (!shot.resultObjectKey) throw notFound("This shot has no picture yet.");
+      // The clip is read into memory to cut a poster from it: refuse very large clips (security review DUR-4711).
+      const tooLarge = () => new HttpError(413, "This shot's clip is too large to make a picture from on the server. Play the clip instead.");
+      if ((shot.resultByteSize ?? 0) > POSTER_MAX_CLIP_BYTES) throw tooLarge();
       const object = await getStorageService().getObject(companyId, shot.resultObjectKey);
-      const clip = await streamToBuffer(object.stream);
+      if ((object.contentLength ?? 0) > POSTER_MAX_CLIP_BYTES) {
+        object.stream.resume();
+        throw tooLarge();
+      }
+      const chunks: Buffer[] = [];
+      let total = 0;
+      for await (const chunk of object.stream) {
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+        total += buf.length;
+        if (total > POSTER_MAX_CLIP_BYTES) throw tooLarge();
+        chunks.push(buf);
+      }
+      const clip = Buffer.concat(chunks);
       const poster = await runMediaJob("poster", () => extractPosterJpeg(clip));
       if (!poster) throw notFound("This shot's picture could not be made (ffmpeg is not available on this server).");
       res.setHeader("Content-Type", "image/jpeg");

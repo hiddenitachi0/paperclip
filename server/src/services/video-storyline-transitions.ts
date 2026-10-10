@@ -461,7 +461,7 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
   async function monthlySpentCents(companyId: string): Promise<number> {
     const [row] = await db
       .select({
-        total: sql<number>`coalesce(sum(case when ${videoTransitionTakes.status} = 'failed' then 0 else coalesce(${videoTransitionTakes.costCents}, ${videoTransitionTakes.reservedCents}) end), 0)::int`,
+        total: sql<number>`coalesce(sum(case when ${videoTransitionTakes.status} = 'failed' then coalesce(${videoTransitionTakes.costCents}, 0) else coalesce(${videoTransitionTakes.costCents}, ${videoTransitionTakes.reservedCents}) end), 0)::int`,
       })
       .from(videoTransitionTakes)
       .where(and(eq(videoTransitionTakes.companyId, companyId), gte(videoTransitionTakes.createdAt, startOfMonthUtc(nowOf()))));
@@ -879,6 +879,16 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
 
     // Reserve under the storyline lock: storyline budget, then the company's monthly cap.
     const take = await withCompanyScope(db, companyId, async (tx) => {
+      // One reservation at a time per company (security review DUR-4711): the
+      // monthly sum and the "already being made" check below are only safe
+      // when no other generate() for this company is between its check and
+      // its insert -- across all of the company's storylines.
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`video_transition_spend:${companyId}`}, 0))`);
+      const [alreadyRunning] = await tx
+        .select({ id: videoTransitionTakes.id })
+        .from(videoTransitionTakes)
+        .where(and(eq(videoTransitionTakes.transitionId, row.id), eq(videoTransitionTakes.status, "generating")));
+      if (alreadyRunning) throw conflict("A version of this transition is already being made. Wait for it to finish.");
       const locked = await lockStorylineRow(tx, companyId, storylineId);
       if (locked.status === "stitching") throw conflict("The film is being combined right now. Wait for it to finish before making a transition.");
       if (locked.budgetCapCents === null) {
@@ -891,7 +901,7 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
       }
       const [month] = await tx
         .select({
-          total: sql<number>`coalesce(sum(case when ${videoTransitionTakes.status} = 'failed' then 0 else coalesce(${videoTransitionTakes.costCents}, ${videoTransitionTakes.reservedCents}) end), 0)::int`,
+          total: sql<number>`coalesce(sum(case when ${videoTransitionTakes.status} = 'failed' then coalesce(${videoTransitionTakes.costCents}, 0) else coalesce(${videoTransitionTakes.costCents}, ${videoTransitionTakes.reservedCents}) end), 0)::int`,
         })
         .from(videoTransitionTakes)
         .where(and(eq(videoTransitionTakes.companyId, companyId), gte(videoTransitionTakes.createdAt, startOfMonthUtc(nowOf()))));
@@ -984,11 +994,24 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
     return gapFor(companyId, storylineId, row.fromShotId, row.toShotId);
   }
 
-  /** A failed take gives its reservation back to the storyline (and, being "failed", stops counting for the month). */
-  async function failTake(take: TakeRow, message: string): Promise<void> {
+  /**
+   * A failed take gives its reservation back to the storyline (and, being
+   * "failed", stops counting for the month) -- unless keepReservation: a
+   * provider job exists and we could not confirm it was stopped, so the
+   * service may still charge for it. Then the reservation stays counted
+   * (cost_cents = reserved) on the storyline and the month, with a plain note.
+   */
+  async function failTake(take: TakeRow, message: string, opts: { keepReservation?: boolean } = {}): Promise<void> {
     await withCompanyScope(db, take.companyId, async (tx) => {
       const [current] = await tx.select().from(videoTransitionTakes).where(eq(videoTransitionTakes.id, take.id)).for("update");
       if (!current || current.status !== "generating") return;
+      if (opts.keepReservation) {
+        await tx
+          .update(videoTransitionTakes)
+          .set({ status: "failed", error: message.slice(0, 1_000), costCents: current.reservedCents, completedAt: nowOf(), updatedAt: nowOf() })
+          .where(eq(videoTransitionTakes.id, take.id));
+        return;
+      }
       await tx
         .update(videoTransitionTakes)
         .set({ status: "failed", error: message.slice(0, 1_000), reservedCents: 0, costCents: 0, completedAt: nowOf(), updatedAt: nowOf() })
@@ -1155,7 +1178,13 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
         const handle: MediaJobHandle = { externalId: take.externalId, model: take.model, provider: take.provider };
         if (age > VIDEO_RENDER_JOB_MAX_AGE_MS) {
           await provider.cancel(handle).catch(() => undefined);
-          await failTake(take, `Gave up after ${Math.round(VIDEO_RENDER_JOB_MAX_AGE_MS / 60_000)} minutes without a result. Nothing was charged.`);
+          // The provider clients' cancel is best effort and never confirms, so the
+          // service may still finish (and charge for) this job: keep it counted.
+          await failTake(
+            take,
+            `Gave up after ${Math.round(VIDEO_RENDER_JOB_MAX_AGE_MS / 60_000)} minutes without a result. The video service may still charge for it, so its cost (about ${dollars(take.reservedCents)}) stays counted against the budget.`,
+            { keepReservation: true },
+          );
           failed += 1;
           continue;
         }
