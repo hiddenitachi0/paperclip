@@ -165,6 +165,23 @@ function pickQuality(source: Record<string, unknown>): Record<string, unknown> {
   return out;
 }
 
+/**
+ * True when the task has a review or approval stage with someone in it ("Reviewers" /
+ * "Approvers" on the task). That stage IS the quality check: the worker's "done" becomes
+ * a hand-off to the reviewer, and the reviewer's/approver's own "done" is their verdict,
+ * so neither the self-check nor the finish check may stand in the way of it.
+ */
+export function issueHasReviewOrApprovalStage(executionPolicy: unknown): boolean {
+  if (!executionPolicy || typeof executionPolicy !== "object" || Array.isArray(executionPolicy)) return false;
+  const stages = (executionPolicy as { stages?: unknown }).stages;
+  if (!Array.isArray(stages)) return false;
+  return stages.some((stage) => {
+    if (!stage || typeof stage !== "object") return false;
+    const { type, participants } = stage as { type?: unknown; participants?: unknown };
+    return (type === "review" || type === "approval") && Array.isArray(participants) && participants.length > 0;
+  });
+}
+
 export async function readQualityLoopSettingsRow(db: Db, companyId: string): Promise<SettingsRow | null> {
   const [row] = await db
     .select()
@@ -388,6 +405,8 @@ export async function evaluateQualitySelfReviewGate(input: QualitySelfReviewGate
   }
   const effective = resolveEffectiveQualityLoops(row, issue.executionPolicy);
   if (effective.selfReviewPasses <= 0) return null;
+  // A reviewer/approver stage is the check; never block the hand-off to it.
+  if (issueHasReviewOrApprovalStage(issue.executionPolicy)) return null;
   if (!input.actor.runId) return { message: MISSING_RUN_ID_GATE_MESSAGE };
   const sourceRunId = input.actor.runId;
 
@@ -580,6 +599,30 @@ export async function evaluateQualityDoneCheck(input: QualityDoneCheckInput): Pr
   }
   const effective = resolveEffectiveQualityLoops(row, issue.executionPolicy);
   if (!effective.doneCheckEnabled) return { applies: false };
+
+  // A task with reviewers/approvers is checked by them. The worker's "done" is only a
+  // hand-off to the reviewer, and the final move to done is the last approver's verdict
+  // (a cheap model would be judging the approver's note, not the work). So the company's
+  // finish check stands aside for the whole stage flow -- it owns the decision (applies),
+  // so the instance-wide reviewer does not step in either.
+  if (issueHasReviewOrApprovalStage(issue.executionPolicy)) {
+    try {
+      await logActivity(db, {
+        companyId: issue.companyId,
+        actorType: "system",
+        actorId: "quality_check",
+        action: "issue.quality_check_ran",
+        entityType: "issue",
+        entityId: issue.id,
+        agentId,
+        runId: input.actor.runId ?? null,
+        details: { outcome: "skipped_reviewer_stage", findings: [] },
+      });
+    } catch {
+      // best-effort
+    }
+    return { applies: true, result: null };
+  }
 
   const noteSkipped = async (reason: string) => {
     let since: Date | null = null;

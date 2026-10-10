@@ -189,6 +189,7 @@ import {
   updateModelDirectorySettingsSchema,
   // Merge-card security review (DUR-4566)
   recordSecurityReviewVerdictSchema,
+  updateCompanyQualityLoopSettingsSchema,
 } from "@paperclipai/shared";
 
 type JsonSchema = Record<string, unknown>;
@@ -814,6 +815,8 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "GET /api/companies/{companyId}/model-directory",
   "POST /api/companies/{companyId}/model-directory",
   "GET /api/companies/{companyId}/model-directory/export",
+  "GET /api/companies/{companyId}/quality-loops/settings",
+  "PATCH /api/companies/{companyId}/quality-loops/settings",
   "GET /api/companies/{companyId}/model-directory/settings",
   "PUT /api/companies/{companyId}/model-directory/settings",
   "GET /api/companies/{companyId}/model-directory/openrouter-hosts",
@@ -6276,6 +6279,23 @@ registerCurrentRoute({
     409: r.conflict,
     422: r.unprocessable,
   },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/quality-loops/settings",
+  tags: ["quality-loops"],
+  summary: "Read the company's quality checks (Company settings > Quality checks): selfReviewPasses (0-3 self-check passes per task before review/done; 0 = off), doneCheckEnabled and doneCheckMaxRounds (the independent finish check by a cheap saved model, and how many 'not done' rounds before the person is asked), doneCheckDirectoryEntryId (the saved model it uses; null = the helper's default model), effectiveDoneCheckModel (what it will actually use, or null = no model, checks are skipped with a note), defaultReviewerAgentId (agent that reviews new code tasks). configured = false means the company never chose, and everything is off. Any active member; not agents.",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "patch",
+  path: "/api/companies/{companyId}/quality-loops/settings",
+  tags: ["quality-loops"],
+  summary: "Change the company's quality checks. Send any of selfReviewPasses (0-3), doneCheckEnabled, doneCheckMaxRounds (1-3), doneCheckDirectoryEntryId (a saved model of this company, not archived; null = the helper's default), defaultReviewerAgentId (an agent of this company; null = none). A field left out keeps its value. Owner/admin only; agents are refused.",
+  body: updateCompanyQualityLoopSettingsSchema,
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 422: r.unprocessable },
 });
 
 registerCurrentRoute({

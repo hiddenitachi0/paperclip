@@ -417,6 +417,48 @@ describeEmbeddedPostgres("agent quality loops (DB-backed)", () => {
     ).not.toBeNull();
   });
 
+  it("reviewer/approver stage: neither check stands in the way of the hand-off or the verdicts", async () => {
+    const f = await seed({ settings: { selfReviewPasses: 1, doneCheckEnabled: true } });
+    const w = recordingWakeup();
+    const c = critic("needs_work", ["should never be asked"]);
+    for (const stageType of ["review", "approval"] as const) {
+      const executionPolicy = normalizeIssueExecutionPolicy({
+        stages: [{ type: stageType, participants: [{ type: "agent", agentId: f.reviewerId }] }],
+      });
+      const issue = { ...f.issue, executionPolicy };
+      // The worker's "done" (turned into a hand-off to the reviewer by the stage flow) ...
+      for (const [actor, currentStatus] of [
+        [agentActor(f), "in_progress"],
+        // ... and the reviewer's/approver's own "done" (their verdict, the final move).
+        [{ actorType: "agent", agentId: f.reviewerId, runId: await newRun({ companyId: f.companyId, agentId: f.reviewerId }) }, "in_review"],
+      ] as const) {
+        expect(
+          await evaluateQualitySelfReviewGate({ db, wakeup: w.wakeup, issue, actor, requestedStatus: "done", currentStatus }),
+        ).toBeNull();
+        expect(
+          await evaluateQualityDoneCheck({ db, issue, actor, requestedStatus: "done", currentStatus, critic: c }),
+        ).toEqual({ applies: true, result: null });
+      }
+    }
+    expect(w.calls).toHaveLength(0);
+    expect(c).not.toHaveBeenCalled();
+    expect(await qualityComments(f.issueId)).toHaveLength(0);
+    const ran = (await activityActions(f.issueId)).filter((a) => a.action === "issue.quality_check_ran");
+    expect(ran.length).toBeGreaterThan(0);
+    expect(ran.every((a) => (a.details as { outcome?: string }).outcome === "skipped_reviewer_stage")).toBe(true);
+    // An empty stage list (no one in it) is not a reviewer: the checks still apply.
+    expect(
+      await evaluateQualitySelfReviewGate({
+        db,
+        wakeup: w.wakeup,
+        issue: { ...f.issue, executionPolicy: { stages: [{ type: "review", participants: [] }] } },
+        actor: agentActor(f),
+        requestedStatus: "done",
+        currentStatus: "in_progress",
+      }),
+    ).not.toBeNull();
+  });
+
   // -------------------------------------------------------------------------
   // Opt-out: unchanged behaviour
   // -------------------------------------------------------------------------
