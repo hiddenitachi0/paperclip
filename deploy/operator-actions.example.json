@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "companies": {
+    "00000000-0000-4000-8000-000000000000": {
+      "services": {
+        "telegram-bridge": {
+          "label": "the Telegram bridge",
+          "systemdUnit": "paperclip-telegram-bridge.service",
+          "actions": ["restart_service"]
+        },
+        "dashboard-web": {
+          "label": "the dashboard website",
+          "compose": {
+            "directory": "/root/nordstrand-dashboard",
+            "files": ["docker-compose.yml"],
+            "envFile": ".env",
+            "service": "web"
+          },
+          "actions": ["restart_service", "recreate_container"]
+        },
+        "crawler": {
+          "label": "the web crawler",
+          "container": "crawl4ai",
+          "actions": ["restart_service"]
+        }
+      },
+      "envFiles": {
+        "dashboard": {
+          "label": "the dashboard settings file",
+          "path": "/root/nordstrand-dashboard/.env",
+          "keys": ["FEATURE_NEW_CHECKOUT", "SHOPIFY_API_VERSION"],
+          "secrets": {
+            "FEATURE_NEW_CHECKOUT": ["dashboard-new-checkout"],
+            "SHOPIFY_API_VERSION": ["shopify-api-version"]
+          }
+        }
+      }
+    }
+  }
+}

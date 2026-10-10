@@ -420,6 +420,29 @@ build + swap + health-check behaved identically to the old hardcoded command; (4
 `deployCommand` from `deployPolicy` entirely, so the fork's deploy config now matches the generic
 `compose_build_swap` shape with no project-specific escape hatch.
 
+### Feature 13 — One-click host actions (`kind:"operator_action"`)
+
+Agents can ask for an allow-listed host action (restart a service, recreate a compose
+container, set one `.env` key from a company secret) on a `request_board_approval` card; the
+company owner/admin approves; `scripts/operator-action-runner.py` (systemd timer, sibling of
+the deploy runner) runs exactly that action from a fixed argv template and posts the result.
+The allow-list lives on the box (`/etc/paperclip/operator-actions.json`), never in the DB; the
+runner re-checks every card against it. No migration. Full design, config format and install
+steps: `doc/operator-actions.md`.
+
+| File | Change | Type |
+|---|---|---|
+| `packages/shared/src/validators/approval.ts` | `operatorActionRequestInputSchema` / `operatorActionRequestPayloadSchema` | Surgical edit |
+| `server/src/services/operator-actions.ts` | Reads the runner-published catalogue, stamps the plain-language card | **New file** |
+| `server/src/routes/approvals.ts` | Filing/resubmit stamping, owner/admin-only approve, catalogue read + runner secret read routes | Surgical edit |
+| `server/src/services/secrets.ts` | `resolveSecretValueForOperatorAction` | Surgical edit |
+| `server/src/services/confirmation-approval-references.ts` | Host action cards must be decided on the card | Surgical edit |
+| `server/src/services/approvals.ts`, `server/src/services/issue-thread-interactions.ts` | `approve()` refuses host-action/deploy cards unless called by the approve route (`decidedOnApprovalCard`); confirmation cards can't be linked to card-only approvals for any actor, and accepting a legacy link never approves one (PR #625 security review) | Surgical edit |
+| `cli/src/commands/client/approval.ts` | `approval operator-actions`, `approval operator-action-secret` | Surgical edit |
+| `ui/src/components/ApprovalPayload.tsx` | Host action card ("Will run exactly") | Surgical edit |
+| `scripts/operator-action-runner.py` (+ `.test.mjs`), `deploy/systemd/paperclip-operator-action-runner.*`, `deploy/operator-actions.example.json` | Runner, tests, units, example | **New files** |
+| `skills/paperclip/SKILL.md` | "Asking for a Host Action" | Surgical edit |
+
 ### `opencode_local` → Ollama adapter config
 
 Documented how to point an agent on the `opencode_local` adapter at a self-hosted Ollama model,

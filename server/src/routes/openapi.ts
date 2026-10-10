@@ -843,6 +843,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
 
 const INSTANCE_ADMIN_OPERATIONS = new Set([
   "GET /api/companies/{companyId}/deploy-github-token",
+  "GET /api/approvals/{id}/operator-action-secret",
   "POST /api/companies",
   "POST /api/plugins/install",
   "POST /api/instance/database-backups",
@@ -2781,6 +2782,24 @@ registry.registerPath({
   summary: "Get an approval",
   request: { params: z.object({ id: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/operator-actions",
+  tags: ["approvals"],
+  summary: "List the host actions (restart/recreate/set setting) this company may ask the on-box runner for",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/approvals/{id}/operator-action-secret",
+  tags: ["approvals"],
+  summary: "Resolve the secret value for an approved set_env_var host action (instance admin only; on-box runner)",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 422: r.unprocessable },
 });
 
 registry.registerPath({
