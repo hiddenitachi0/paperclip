@@ -596,3 +596,23 @@ describe("acceptIssueThreadInteractionSchema note field", () => {
     });
   });
 });
+
+describe("issue sizeLabel validation (DUR-4525)", () => {
+  it("accepts S/M/L and null on create and update", () => {
+    for (const sizeLabel of ["S", "M", "L", null]) {
+      expect(createIssueSchema.parse({ title: "T", sizeLabel }).sizeLabel).toBe(sizeLabel);
+      expect(updateIssueSchema.parse({ sizeLabel }).sizeLabel).toBe(sizeLabel);
+    }
+  });
+
+  it("keeps sizeLabel absent when omitted", () => {
+    expect(updateIssueSchema.parse({}).sizeLabel).toBeUndefined();
+  });
+
+  it("rejects values outside S/M/L", () => {
+    for (const sizeLabel of ["XL", "s", "", 1]) {
+      expect(createIssueSchema.safeParse({ title: "T", sizeLabel }).success).toBe(false);
+      expect(updateIssueSchema.safeParse({ sizeLabel }).success).toBe(false);
+    }
+  });
+});

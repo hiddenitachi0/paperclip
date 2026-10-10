@@ -998,6 +998,28 @@ describe("agent issue mutation checkout ownership", () => {
     expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 
+  it("refuses sizeLabel updates from agents in another company (DUR-4525)", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue({ status: "todo", assigneeAgentId: ownerAgentId }));
+
+    const res = await request(await createApp(peerActor({ companyId: "99999999-9999-4999-8999-999999999999" })))
+      .patch(`/api/issues/${issueId}`)
+      .send({ sizeLabel: "L" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects an invalid sizeLabel on update before writing (DUR-4525)", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue({ status: "todo", assigneeAgentId: ownerAgentId }));
+
+    const res = await request(await createApp(boardActor()))
+      .patch(`/api/issues/${issueId}`)
+      .send({ sizeLabel: "XL" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(400);
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
   it("denies cross-company agents before comment authorization is evaluated", async () => {
     const res = await request(await createApp(peerActor({ companyId: "99999999-9999-4999-8999-999999999999" })))
       .post(`/api/issues/${issueId}/comments`)
