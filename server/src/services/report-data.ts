@@ -126,6 +126,21 @@ export function sha256OfJson(value: unknown): string {
 
 export type ReportDataServiceDeps = DataConnectionServiceDeps;
 
+/**
+ * DUR-4717: at most ONE report data fetch (run or preview) per company at a
+ * time, in this server process. Without it, parallel starts could each pass
+ * the daily-cap count before any of them wrote its audit rows (overshooting
+ * `dailyLookupCap`) and hit Fiken in parallel, which Fiken does not allow.
+ * A second fetch while one is running is refused with a plain sentence, not
+ * queued. Module-level on purpose: every route builds its own service.
+ * Paperclip runs one server process per instance; a second process would
+ * need a database lock instead.
+ */
+const companiesFetching = new Set<string>();
+
+export const REPORT_DATA_BUSY_MESSAGE =
+  "Another report is reading this company's data right now. Try again when it has finished (usually within a minute or two).";
+
 export function reportDataService(db: Db, deps: ReportDataServiceDeps = {}) {
   const connections = dataConnectionService(db, deps);
   const nowMs = deps.now ?? Date.now;
@@ -184,12 +199,41 @@ export function reportDataService(db: Db, deps: ReportDataServiceDeps = {}) {
    * Throws ReportDataFetchError (plain sentence, with what was read so far)
    * on any refusal; every read and refusal has its audit row first.
    */
-  async function fetch(
+  type FetchResult = { snapshot: ReportDataSnapshot; sha256: string; bytes: number; items: FetchedItem[] };
+
+  async function fetch(caller: ReportDataCaller, connectionId: string, rawQuery: unknown, periodOverride?: string | null): Promise<FetchResult> {
+    if (companiesFetching.has(caller.companyId)) {
+      try {
+        await audit(caller, {
+          connectionId: null,
+          item: null,
+          period: null,
+          outcome: "rate_limited",
+          refusalCode: "fetch_in_progress",
+          facts: { answer: REPORT_DATA_BUSY_MESSAGE },
+          upstreamRequests: 0,
+          startedAt: nowMs(),
+          scrubValues: [],
+        });
+      } catch (error) {
+        logger.warn({ companyId: caller.companyId, err: error instanceof Error ? error.message : String(error) }, "report data: could not audit a busy refusal");
+      }
+      throw new ReportDataFetchError("fetch_in_progress", REPORT_DATA_BUSY_MESSAGE);
+    }
+    companiesFetching.add(caller.companyId);
+    try {
+      return await fetchLocked(caller, connectionId, rawQuery, periodOverride);
+    } finally {
+      companiesFetching.delete(caller.companyId);
+    }
+  }
+
+  async function fetchLocked(
     caller: ReportDataCaller,
     connectionId: string,
     rawQuery: unknown,
     periodOverride?: string | null,
-  ): Promise<{ snapshot: ReportDataSnapshot; sha256: string; bytes: number; items: FetchedItem[] }> {
+  ): Promise<FetchResult> {
     const startedAt = nowMs();
     const parsedQuery = reportDataQuerySchema.safeParse(rawQuery);
     if (!parsedQuery.success) {

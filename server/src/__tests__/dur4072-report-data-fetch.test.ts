@@ -29,6 +29,7 @@ import {
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import { reportTemplateRoutes } from "../routes/report-templates.js";
+import { agentService } from "../services/agents.js";
 import { dataConnectionService } from "../services/data-connections.js";
 import { ReportScriptRunLimiter, reportScriptsService } from "../services/report-scripts.js";
 import { reportTemplatesService } from "../services/report-templates.js";
@@ -323,6 +324,103 @@ d("DUR-4072 report data fetch", () => {
     expect(events).toHaveLength(1);
     expect(events[0]!.outcome).not.toBe("ok");
     expect(runnerInputs).toHaveLength(0);
+  });
+
+  it("allows one data fetch per company at a time, so parallel starts cannot overshoot the daily cap or hit Fiken in parallel", async () => {
+    const { companyId, template } = await setUp();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered!: () => void;
+    const firstCallMade = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gatedFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      entered();
+      await gate;
+      return fetchImpl(input, init);
+    }) as typeof fetch;
+    const runsSvc = reportRunsService(db, { reportScripts: scriptsFor(), dataDeps: { ...dataDeps, fetchImpl: gatedFetch } });
+    const first = runsSvc.startRun(companyId, template.id, { userId: "owner" });
+    await firstCallMade;
+    const second = await runsSvc.startRun(companyId, template.id, { userId: "owner" });
+    expect(second.status).toBe("failed");
+    expect(second.error).toMatch(/Another report is reading this company's data right now/);
+    release();
+    const done = await first;
+    expect(done.status, done.error ?? "").toBe("drafting_commentary");
+    // Only the first run's three Fiken requests were made.
+    expect(fikenCalls).toHaveLength(3);
+    const busy = await db.select().from(dataReadEvents).where(eq(dataReadEvents.refusalCode, "fetch_in_progress"));
+    expect(busy).toHaveLength(1);
+    expect(busy[0]!.outcome).toBe("rate_limited");
+    // Once it is done, the next run may fetch again.
+    expect((await runsSvc.startRun(companyId, template.id, { userId: "owner" })).status).toBe("drafting_commentary");
+  });
+
+  describe("Report run routes", () => {
+    const boardActor = (companyId: string, role: "owner" | "admin" | "operator" | "viewer") => ({
+      type: "board",
+      source: "session",
+      userId: `user-${role}`,
+      isInstanceAdmin: false,
+      companyIds: [companyId],
+      memberships: [{ companyId, status: "active", membershipRole: role }],
+    });
+    const agentActor = (companyId: string, agentId: string) => ({ type: "agent", agentId, companyId, source: "agent_key", runId: null });
+
+    function createApp(actor: Record<string, unknown>) {
+      const app = express();
+      app.use(express.json());
+      app.use((req, _res, next) => {
+        (req as express.Request & { actor: unknown }).actor = actor;
+        next();
+      });
+      app.use("/api", reportTemplateRoutes(db, { reportScripts: scriptsFor(), dataDeps }));
+      app.use(errorHandler);
+      return app;
+    }
+
+    it("only an owner/admin sees a run's fetched data; agents and viewers get status, numbers and the digest", async () => {
+      const { companyId, template } = await setUp();
+      const agent = await agentService(db).create(companyId, {
+        name: `A-${randomUUID().slice(0, 6)}`,
+        role: "engineer",
+        status: "idle",
+        adapterType: "process",
+        adapterConfig: { command: "echo" },
+        runtimeConfig: {},
+        spentMonthlyCents: 0,
+        lastHeartbeatAt: null,
+      });
+      const started = await request(createApp(agentActor(companyId, agent.id))).post(`/api/companies/${companyId}/report-runs`).send({ templateId: template.id });
+      expect(started.status, JSON.stringify(started.body)).toBe(201);
+      expect(started.body.status).toBe("drafting_commentary");
+      expect(started.body.fetchedData).toBeNull();
+      const runId = started.body.id as string;
+
+      for (const actor of [agentActor(companyId, agent.id), boardActor(companyId, "viewer"), boardActor(companyId, "operator")]) {
+        const app = createApp(actor);
+        const one = await request(app).get(`/api/companies/${companyId}/report-runs/${runId}`);
+        expect(one.status).toBe(200);
+        expect(one.body.fetchedData).toBeNull();
+        expect(one.body.numbers).toEqual({ bankChange: 250 });
+        expect(one.body.fetchedDataSha256).toMatch(/^[0-9a-f]{64}$/);
+        const list = await request(app).get(`/api/companies/${companyId}/report-runs`);
+        expect(list.status).toBe(200);
+        expect(list.body.map((run: { fetchedData: unknown }) => run.fetchedData)).toEqual([null]);
+        expect(JSON.stringify([one.body, list.body])).not.toContain("journalEntryId");
+      }
+
+      for (const role of ["owner", "admin"] as const) {
+        const app = createApp(boardActor(companyId, role));
+        const one = await request(app).get(`/api/companies/${companyId}/report-runs/${runId}`);
+        expect(one.body.fetchedData).toMatchObject({ data: { journal: { entries: [expect.objectContaining({ journalEntryId: 1 })] } } });
+        const list = await request(app).get(`/api/companies/${companyId}/report-runs`);
+        expect(list.body[0].fetchedData).not.toBeNull();
+      }
+    });
   });
 
   describe("Preview data route", () => {
