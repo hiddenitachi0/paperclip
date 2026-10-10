@@ -1702,6 +1702,13 @@
       "when": 1791655438727,
       "tag": "0243_telegram_two_way_chat",
       "breakpoints": true
+    },
+    {
+      "idx": 244,
+      "version": "7",
+      "when": 1791656704387,
+      "tag": "0244_company_quality_loop_settings",
+      "breakpoints": true
     }
   ]
 }
