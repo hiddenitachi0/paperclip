@@ -4,6 +4,7 @@ import {
   projects,
   projectGoals,
   goals,
+  agents,
   issues,
   budgetPolicies,
   pluginManagedResources,
@@ -36,6 +37,7 @@ import { parseProjectExecutionWorkspacePolicy } from "./execution-workspace-poli
 import { parseProjectDeployPolicy } from "./deploy-policy.js";
 import { mergeProjectWorkspaceRuntimeConfig, readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
 import { resolveManagedProjectWorkspaceDir } from "../home-paths.js";
+import { unprocessable } from "../errors.js";
 
 type ProjectRow = typeof projects.$inferSelect;
 type ProjectWorkspaceRow = typeof projectWorkspaces.$inferSelect;
@@ -419,6 +421,39 @@ async function syncGoalLinks(db: Db, projectId: string, companyId: string, goalI
   }
 }
 
+/**
+ * Cross-company isolation (docs/security/cross-company-isolation.md): a
+ * project may only link goals and a lead agent from its OWN company. Without
+ * this, a member of company A could attach company B's goal to an A project
+ * (the goal_id / project_goals foreign keys do not carry the company) and then
+ * read the goal's title back through A's project list.
+ */
+async function assertProjectReferencesInCompany(
+  db: Db,
+  companyId: string,
+  refs: { goalIds?: string[]; leadAgentId?: string | null },
+) {
+  const goalIds = [...new Set((refs.goalIds ?? []).filter((id): id is string => typeof id === "string" && id.length > 0))];
+  if (goalIds.length > 0) {
+    const found = await db
+      .select({ id: goals.id })
+      .from(goals)
+      .where(and(eq(goals.companyId, companyId), inArray(goals.id, goalIds)));
+    if (found.length !== goalIds.length) {
+      throw unprocessable("Goal must belong to the same company as the project");
+    }
+  }
+  if (typeof refs.leadAgentId === "string" && refs.leadAgentId.length > 0) {
+    const found = await db
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(eq(agents.companyId, companyId), eq(agents.id, refs.leadAgentId)));
+    if (found.length === 0) {
+      throw unprocessable("Lead agent must belong to the same company as the project");
+    }
+  }
+}
+
 /** Resolve goalIds from input, handling the legacy goalId field. */
 function resolveGoalIds(data: { goalIds?: string[]; goalId?: string | null }): string[] | undefined {
   if (data.goalIds !== undefined) return data.goalIds;
@@ -561,6 +596,10 @@ export function projectService(db: Db, rawDb: Db = db) {
   ): Promise<ProjectWithGoals> => {
     const { goalIds: inputGoalIds, ...projectData } = data;
     const ids = resolveGoalIds({ goalIds: inputGoalIds, goalId: projectData.goalId });
+    await assertProjectReferencesInCompany(db, companyId, {
+      goalIds: [...(ids ?? []), ...(projectData.goalId ? [projectData.goalId] : [])],
+      leadAgentId: projectData.leadAgentId,
+    });
 
     // Note: color is intentionally NOT auto-assigned. New projects default to
     // `color = null` (neutral gray) unless an explicit color is supplied. See PAP-68.
@@ -799,6 +838,10 @@ export function projectService(db: Db, rawDb: Db = db) {
         .where(eq(projects.id, id))
         .then((rows) => rows[0] ?? null);
       if (!existingProject) return null;
+      await assertProjectReferencesInCompany(db, existingProject.companyId, {
+        goalIds: [...(ids ?? []), ...(projectData.goalId ? [projectData.goalId] : [])],
+        leadAgentId: projectData.leadAgentId,
+      });
 
       if (projectData.name !== undefined) {
         const existingShortname = normalizeProjectUrlKey(existingProject.name);
