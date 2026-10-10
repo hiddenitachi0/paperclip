@@ -6,6 +6,7 @@ import {
   companyMemberships,
   laneAConversations,
   laneAMessages,
+  telegramChatRequests,
   telegramMessageReactions,
   type LaneAStoredToolCall,
 } from "@paperclipai/db";
@@ -74,7 +75,11 @@ export interface ConversationLogToolUse {
 export interface ConversationLogRow {
   id: string;
   person: ConversationLogPerson | null;
-  /** Where the chat happened, when Paperclip recorded it ("telegram"); null when not recorded. */
+  /**
+   * Where the chat happened, when Paperclip recorded it: "telegram" when a
+   * Telegram question or reaction points at it; null when not recorded (web
+   * chat, or Telegram before either existed). There is no channel column yet.
+   */
   channel: "telegram" | null;
   startedAt: string;
   lastMessageAt: string;
@@ -244,7 +249,7 @@ export function laneAConversationLogService(db: Db) {
   async function buildRows(heads: ConversationHead[], viewer: ConversationLogViewer): Promise<ConversationLogRow[]> {
     if (heads.length === 0) return [];
     const ids = heads.map((head) => head.id);
-    const [counts, firstQuestions, toolRows, telegramRows, names] = await Promise.all([
+    const [counts, firstQuestions, toolRows, telegramRows, telegramChatRows, names] = await Promise.all([
       db
         .select({ conversationId: laneAMessages.conversationId, count: sql<number>`count(*)::int` })
         .from(laneAMessages)
@@ -272,6 +277,11 @@ export function laneAConversationLogService(db: Db) {
         .selectDistinct({ conversationId: telegramMessageReactions.conversationId })
         .from(telegramMessageReactions)
         .where(inArray(telegramMessageReactions.conversationId, ids)),
+      // Two-way Telegram chat for linked people (migration 0246) records the conversation per question.
+      db
+        .selectDistinct({ conversationId: telegramChatRequests.conversationId })
+        .from(telegramChatRequests)
+        .where(inArray(telegramChatRequests.conversationId, ids)),
       namesFor(
         [...new Set(heads.map((head) => head.requestedByUserId).filter((id): id is string => Boolean(id)))],
         [...new Set(heads.map((head) => head.requestedByAgentId).filter((id): id is string => Boolean(id)))],
@@ -280,7 +290,7 @@ export function laneAConversationLogService(db: Db) {
 
     const countBy = new Map(counts.map((row) => [row.conversationId, Number(row.count)]));
     const firstBy = new Map(firstQuestions.map((row) => [row.conversationId, row.content]));
-    const telegram = new Set(telegramRows.map((row) => row.conversationId));
+    const telegram = new Set([...telegramRows, ...telegramChatRows].map((row) => row.conversationId));
     const toolsBy = new Map<string, { labels: Map<string, number>; handoffs: number }>();
     for (const row of toolRows) {
       const calls = Array.isArray(row.toolCalls) ? row.toolCalls : [];
