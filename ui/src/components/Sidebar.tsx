@@ -24,6 +24,7 @@ import {
   Pin,
   MessagesSquare,
   RadioTower,
+  Building2,
   Sparkles,
   ScrollText,
   ShoppingCart,
@@ -251,6 +252,7 @@ export function Sidebar() {
 
         <SidebarSection label="Company">
           <SidebarNavItem to="/org" label="Org" icon={Network} />
+          <SidebarNavItem to="/tower" label="Tower" icon={Building2} />
           <SidebarNavItem to="/positions" label="Positions" icon={IdCard} />
           <SidebarNavItem to="/costs" label="Costs" icon={DollarSign} />
           <SidebarNavItem to="/goal-adoption" label="Goal Adoption" icon={TrendingUp} />

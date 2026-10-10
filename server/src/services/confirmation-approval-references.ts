@@ -197,6 +197,11 @@ export function mustBeDecidedOnApprovalCard(approval: Pick<NamedApproval, "type"
   return kind === "deploy"
     || kind === "merge_pr"
     || kind === "cross_company_instruction"
+    // One-click host actions: only the company's owner/admin may approve, and
+    // that check lives on the approve route -- never decide it through a card.
+    || kind === "operator_action"
+    // Approving runs the calculation's saved examples first (owner/admin only).
+    || kind === "report_script_version"
     || isUnsupportedDeployLikeKind(kind);
 }
 
@@ -206,6 +211,8 @@ export function describeApprovalForAgent(approval: Pick<NamedApproval, "type" | 
     if (kind === "deploy" || isUnsupportedDeployLikeKind(kind)) return "a deploy approval";
     if (kind === "merge_pr") return "a merge approval";
     if (kind === "cross_company_instruction") return "a cross-company instruction approval";
+    if (kind === "operator_action") return "a host action approval";
+    if (kind === "report_script_version") return "a report calculation approval";
   }
   return `a ${approval.type.replace(/_/g, " ")} approval`;
 }

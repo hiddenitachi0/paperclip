@@ -58,6 +58,7 @@ const ACTIVITY_ROW_VERBS: Record<string, string> = {
   "issue.recovery_action_opened": "opened a recovery action on",
   "issue.recovery_action_resolved": "resolved the recovery action on",
   "issue.recovery_action_escalated": "escalated the recovery action on",
+  "issue.model_effort_inherited": "copied the parent task's model/effort to",
   "agent.created": "created",
   "agent.updated": "updated",
   "agent.paused": "paused",

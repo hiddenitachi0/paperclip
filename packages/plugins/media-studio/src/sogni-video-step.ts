@@ -50,7 +50,7 @@ const SEEDANCE_KEYS: Record<string, string> = {
  * without one the text-to-video variant. null = Sogni's default; an unknown
  * name is returned unchanged.
  */
-export function sogniVideoModelKey(model: string | null | undefined, withStartImage: boolean): string | null {
+export function sogniVideoModelKey(model: string | null | undefined, withStartImage: boolean, withEndImage = false): string | null {
   const raw = model?.trim();
   if (!raw) return null;
   const id = raw.toLowerCase();
@@ -70,7 +70,8 @@ export function sogniVideoModelKey(model: string | null | undefined, withStartIm
       if (twoStage) return id.includes("balanced") ? "minimax-h3-r2v-balanced-2stage" : "minimax-h3-r2v-2stage";
       return id.includes("turbo") ? "minimax-h3-r2v-turbo" : "minimax-h3-r2v";
     }
-    const flf = id.includes("flf2v");
+    // A start AND an end picture (a transition) needs H3's first/last-frame variant, never plain i2v.
+    const flf = id.includes("flf2v") || (withStartImage && withEndImage);
     const workflow = withStartImage ? (flf ? "flf2v" : "i2v") : "t2v";
     if (id.includes("fastvideo") || id.includes("fasth3")) return `minimax-h3-fasth3-${workflow}-turbo${twoStage ? "-2stage" : ""}`;
     return `minimax-h3-${workflow}${id.includes("turbo") ? "-turbo" : ""}`;
@@ -79,8 +80,8 @@ export function sogniVideoModelKey(model: string | null | undefined, withStartIm
 }
 
 /** Which tool a shot uses, and whether its pictures go along as a start frame or as loose references. */
-export function sogniVideoStep(model: string | null | undefined, hasStartImage: boolean): { tool: SogniVideoTool; videoModel: string | null; pictures: "start" | "references" | "none" } {
-  const startKey = sogniVideoModelKey(model, true);
+export function sogniVideoStep(model: string | null | undefined, hasStartImage: boolean, hasEndImage = false): { tool: SogniVideoTool; videoModel: string | null; pictures: "start" | "references" | "none" } {
+  const startKey = sogniVideoModelKey(model, true, hasEndImage);
   // Image-to-video when there is a start frame and the model can take one (Seedance and r2v models use loose references instead).
   if (hasStartImage && (startKey === null || ANIMATE_PHOTO_KEYS.has(startKey)) && !(startKey && startKey.endsWith("r2v"))) {
     return { tool: "animate_photo", videoModel: startKey, pictures: "start" };

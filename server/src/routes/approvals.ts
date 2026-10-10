@@ -18,6 +18,8 @@ import {
   type ModelBoostRequestPayload,
   modelBoostBossReviewDecisionSchema,
   modelBoostRequestPayloadSchema,
+  operatorActionRequestInputSchema,
+  operatorActionRequestPayloadSchema,
   recordSecurityReviewVerdictSchema,
   requestApprovalRevisionSchema,
   resolveApprovalSchema,
@@ -69,7 +71,13 @@ import {
 } from "../services/deploy-change-guard.js";
 import { isCompletedDeployOutcome } from "../services/deploy-completion-gate.js";
 import { readDeployRunnerStatus, type DeployRunnerStatusEntry } from "../services/deploy-runner-status.js";
-import { assertBoard, assertCompanyAccess, assertCompanyOwnerAdminOrInstanceAdmin, getActorInfo, isCompanyOwnerOrAdmin } from "./authz.js";
+import {
+  buildOperatorActionCard,
+  describeCompanyOperatorActions,
+  isOperatorActionApproval,
+  readOperatorActionCatalog,
+} from "../services/operator-actions.js";
+import { assertBoard, assertCompanyAccess, assertCompanyOwnerAdminOrInstanceAdmin, assertInstanceAdmin, getActorInfo, isCompanyOwnerOrAdmin } from "./authz.js";
 import { REPORT_SCRIPT_APPROVAL_KIND, reportScriptsService } from "../services/report-scripts.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { redactEventPayload } from "../redaction.js";
@@ -1710,6 +1718,48 @@ export function approvalRoutes(
   const rawSvc = approvalService(rawDb);
   const rawAccess = accessService(rawDb);
 
+  /**
+   * One-click host actions: turn a filer's operator_action request into the
+   * stored card. Only the filer's own fields are read (anything stamped on an
+   * earlier version of the card is dropped and re-stamped); every word the
+   * operator reads, and the exact command, comes from the box's published
+   * catalogue. Throws a plain-language 422 when the request is not allowed.
+   */
+  async function stampOperatorActionCard(companyId: string, rawPayload: Record<string, unknown>) {
+    const {
+      title: _title,
+      summary: _summary,
+      targetLabel: _targetLabel,
+      willRun: _willRun,
+      nextActionOnApproval: _next,
+      secretName: _secretName,
+      originalIssueIds: _originalIssueIds,
+      relatedApprovalId: _relatedApprovalId,
+      technicalReference: _technicalReference,
+      ...filerFields
+    } = rawPayload;
+    const parsed = operatorActionRequestInputSchema.safeParse(filerFields);
+    if (!parsed.success) {
+      const problems = parsed.error.issues
+        .map((issue) => (issue.path.length ? `${issue.path.join(".")}: ${issue.message}` : issue.message))
+        .join("; ");
+      throw unprocessable(`This host action request is not valid: ${problems}`, { code: "operator_action_invalid" });
+    }
+    let secretName: string | null = null;
+    if (parsed.data.action === "set_env_var" && parsed.data.secretId) {
+      const secret = await secretsSvc.getById(parsed.data.secretId).catch(() => null);
+      if (secret && secret.companyId === companyId && secret.status === "active") {
+        secretName = secret.name;
+      }
+    }
+    return buildOperatorActionCard({
+      companyId,
+      request: parsed.data,
+      catalog: readOperatorActionCatalog(),
+      secretName,
+    });
+  }
+
   /** Pre-scope companyId resolution (b): look up the approval by :id, 404 if missing. */
   async function resolveApprovalCompanyId(req: Request): Promise<string> {
     const id = req.params.id as string;
@@ -2154,6 +2204,17 @@ export function approvalRoutes(
         return;
       }
     }
+    if (isOperatorActionApproval(approvalInput.type, approvalInput.payload)) {
+      // An agent's host action must be tied to a task, so the result has
+      // somewhere to land and the operator can see what it is for.
+      if (actor.actorType === "agent" && uniqueIssueIds.length === 0) {
+        res.status(422).json({
+          error: "A host action request must be linked to the task it is for (issueIds), so the result can be posted there.",
+        });
+        return;
+      }
+      approvalInput.payload = await stampOperatorActionCard(companyId, approvalInput.payload as Record<string, unknown>);
+    }
     let mergePrDeployBranches: ProjectDeployBranches | null = null;
     if (isMergePrRequestApproval(approvalInput.type, approvalInput.payload)) {
       const base =
@@ -2397,6 +2458,58 @@ export function approvalRoutes(
     },
   );
 
+  // One-click host actions: what this company may ask the on-box runner to
+  // do -- names, plain-language labels and the exact command for each. Read
+  // from the catalogue the runner publishes; empty when nothing is set up.
+  router.get(
+    "/companies/:companyId/operator-actions",
+    scopeFromCompanyIdParam(checkApprovalReadAccess),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      res.json(describeCompanyOperatorActions(readOperatorActionCatalog(), companyId));
+    },
+  );
+
+  // One-click host actions: the on-box runner's ONLY way to read the value
+  // for an approved set_env_var card. Instance-admin only (the runner's own
+  // credential), and only for a card that is approved, is a set_env_var, and
+  // names a secret of the card's own company -- never a general secret read.
+  // Recorded in the secret's access trail like every other credential read.
+  router.get(
+    "/approvals/:id/operator-action-secret",
+    scopeFromApprovalIdParam((req) => assertInstanceAdmin(req)),
+    async (req, res) => {
+      const approval = await svc.getById(req.params.id as string);
+      if (!approval) throw notFound("Approval not found");
+      if (!isOperatorActionApproval(approval.type, approval.payload)) {
+        throw unprocessable("This approval is not a host action card.");
+      }
+      if (approval.status !== "approved") {
+        throw unprocessable("This host action has not been approved.");
+      }
+      // Same window the runner acts in: an old approval no longer unlocks the value.
+      const decidedAtMs = approval.decidedAt ? new Date(approval.decidedAt).getTime() : NaN;
+      if (!Number.isFinite(decidedAtMs) || Date.now() - decidedAtMs > 24 * 60 * 60 * 1000) {
+        throw unprocessable("This host action was approved more than 24 hours ago.");
+      }
+      const parsed = operatorActionRequestPayloadSchema.safeParse(approval.payload);
+      if (!parsed.success || parsed.data.action !== "set_env_var" || !parsed.data.secretId) {
+        throw unprocessable("This host action does not use a secret.");
+      }
+      // The secret's real name goes back with the value, so the runner can
+      // check it against its own per-key allow-list (doc/operator-actions.md).
+      const secret = await secretsSvc.getById(parsed.data.secretId);
+      if (!secret || secret.companyId !== approval.companyId) {
+        throw unprocessable("The secret named on this card no longer exists in this company.");
+      }
+      const value = await secretsSvc.resolveSecretValueForOperatorAction(approval.companyId, parsed.data.secretId, {
+        approvalId: approval.id,
+        actorId: req.actor.userId ?? "board",
+      });
+      res.json({ value, name: secret.name });
+    },
+  );
+
   router.get("/approvals/:id/issues", scopeFromApprovalIdParam(checkApprovalReadAccess), async (req, res) => {
     const id = req.params.id as string;
     const issues = await issueApprovalsSvc.listIssuesForApproval(id);
@@ -2423,6 +2536,19 @@ export function approvalRoutes(
       if (kind === REPORT_SCRIPT_APPROVAL_KIND && (existingForKindCheck.status === "pending" || existingForKindCheck.status === "revision_requested")) {
         await approveReportScriptCard(req, existingForKindCheck);
       }
+      // One-click host actions: only a person who is this company's owner or
+      // admin (or an instance admin) may say yes, and only to a card that is
+      // still exactly the shape the server stamped.
+      if (isOperatorActionApproval(existingForKindCheck.type, existingForKindCheck.payload)) {
+        assertCompanyOwnerAdminOrInstanceAdmin(req, existingForKindCheck.companyId, "whether a host action runs");
+        if (getActorInfo(req).actorType !== "user") throw forbidden("Only a person can approve a host action.");
+        if (!operatorActionRequestPayloadSchema.safeParse(existingForKindCheck.payload).success) {
+          throw unprocessable(
+            "This host action card is not in the expected shape, so it cannot be approved. Reject it and ask for a new one.",
+            { code: "operator_action_invalid" },
+          );
+        }
+      }
     }
     // DUR-4568 finding #1: the security-review gate now lives inside
     // `approve()` itself (services/approvals.ts), so every caller is
@@ -2436,6 +2562,9 @@ export function approvalRoutes(
       req.body.decisionNote,
       {
         crossCompanyInstruction: crossCompanyDecisionHooks(decidedByUserId, req.body.decisionNote),
+        // This route ran the per-kind approve checks above (host-action
+        // owner/admin + shape, unsupported deploy kinds).
+        decidedOnApprovalCard: true,
         securityReviewBypass: securityReviewBypass
           ? { reason: securityReviewBypass.reason, actorType: "user", actorId: req.actor.userId ?? "board" }
           : undefined,
@@ -2766,6 +2895,17 @@ export function approvalRoutes(
             ? resubmitDeployPolicyDecision.askFirstActions
             : undefined,
       });
+    }
+    if (
+      isOperatorActionApproval(existing.type, existing.payload) &&
+      req.body.payload &&
+      typeof req.body.payload === "object"
+    ) {
+      if ((req.body.payload as Record<string, unknown>).kind !== "operator_action") {
+        res.status(422).json({ error: "Cannot change an approval's payload kind on resubmit" });
+        return;
+      }
+      req.body.payload = await stampOperatorActionCard(existing.companyId, req.body.payload as Record<string, unknown>);
     }
     let normalizedPayload = req.body.payload
       ? existing.type === "hire_agent"

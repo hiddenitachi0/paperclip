@@ -264,6 +264,31 @@ describe("ApprovalPayloadRenderer", () => {
     container.remove();
   });
 
+  it("shows a host action card's exact command before the requester's reason", () => {
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="request_board_approval"
+          payload={{
+            kind: "operator_action",
+            action: "restart_service",
+            target: "telegram-bridge",
+            title: "Paperclip — Restart the Telegram bridge",
+            reason: "so the new code is used",
+            willRun: "systemctl restart paperclip-telegram-bridge.service",
+            nextActionOnApproval: "When you approve, the server restarts the Telegram bridge.",
+          }}
+        />,
+      );
+    });
+    const text = container.textContent ?? "";
+    expect(text).toContain("Will run exactly this on the server");
+    expect(text).toContain("systemctl restart paperclip-telegram-bridge.service");
+    expect(text.indexOf("systemctl restart")).toBeLessThan(text.indexOf("so the new code is used"));
+    act(() => root.unmount());
+  });
+
   it("renders request_board_approval payload fields without falling back to raw JSON", () => {
     const root = createRoot(container);
 

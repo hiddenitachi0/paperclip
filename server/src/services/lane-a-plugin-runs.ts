@@ -27,6 +27,12 @@ export interface LaneAPluginRun {
    * the agent read this turn named it" (see laneAPluginRunNamesIssue).
    */
   requesterMessage: string;
+  /**
+   * The plugin whose tool this run was opened for. Host services that act
+   * on a quick agent's behalf (picture analysis) accept the run only from
+   * that same plugin, so another plugin cannot reuse a run id it was handed.
+   */
+  pluginKey: string | null;
   startedAt: Date;
 }
 
@@ -50,10 +56,10 @@ function sweepStale(now: number): void {
  * worker has answered; the id stops resolving from then on.
  */
 export function openLaneAPluginRun(
-  input: Omit<LaneAPluginRun, "runId" | "startedAt">,
+  input: Omit<LaneAPluginRun, "runId" | "startedAt" | "pluginKey"> & { pluginKey?: string | null },
 ): { run: LaneAPluginRun; close: () => void } {
   sweepStale(Date.now());
-  const run: LaneAPluginRun = { ...input, runId: randomUUID(), startedAt: new Date() };
+  const run: LaneAPluginRun = { ...input, pluginKey: input.pluginKey ?? null, runId: randomUUID(), startedAt: new Date() };
   activeRuns.set(run.runId, run);
   let closed = false;
   return {

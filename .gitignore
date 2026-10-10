@@ -59,6 +59,13 @@ __pycache__/
 /deploy-runner.log
 /deploy-failure-logs/
 
+# operator-action-runner.py local runtime state (default paths, see doc/operator-actions.md)
+/.operator-action-runner-processed
+/.operator-action-runner-unsent.jsonl
+/.operator-action-runner-published
+/operator-action-runner.log
+/operator-actions-audit.log
+
 # scripts/deploy-runner-recreate-acceptance.sh (DUR-297) diagnostics
 /.dur297-recreate-acceptance-logs/
 /.dur3994-isolation-acceptance-logs/

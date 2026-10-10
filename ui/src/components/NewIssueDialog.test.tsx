@@ -1462,7 +1462,7 @@ describe("NewIssueDialog", () => {
       await waitForAssertion(() => {
         expect(container.querySelector('[data-testid="assignee-model-options"]')).not.toBeNull();
         expect(container.textContent).toContain("Claude options");
-        expect(pressedEffort()).toEqual(["High"]);
+        expect(pressedEffort()).toEqual(["Agent default (High)"]);
       });
       // Model selector shows the agent's saved model (the mock renders the value as text).
       expect(container.querySelector('[data-testid="assignee-model-options"]')?.textContent).toContain("claude-opus-4-1");
@@ -1484,7 +1484,7 @@ describe("NewIssueDialog", () => {
       dialogState.newIssueDefaults = { title: "Boosted task", assigneeAgentId: "agent-1" };
       const { root } = renderDialog(container);
       await waitForAssertion(() => {
-        expect(pressedEffort()).toEqual(["High"]);
+        expect(pressedEffort()).toEqual(["Agent default (High)"]);
       });
 
       await act(async () => {
@@ -1497,24 +1497,24 @@ describe("NewIssueDialog", () => {
       expect(mockIssuesApi.create).toHaveBeenCalledWith(
         "company-1",
         expect.objectContaining({
-          assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-4-1", effort: "max" } },
+          assigneeAdapterOverrides: { adapterConfig: { effort: "max" } },
         }),
       );
       act(() => root.unmount());
 
-      // Setting the value back to the seeded default means "no override" again.
+      // Setting the value back to "Agent default (…)" means "no override" again.
       mockIssuesApi.create.mockClear();
       dialogState.newIssueDefaults = { title: "Boosted then reverted", assigneeAgentId: "agent-1" };
       const again = renderDialog(container);
       await waitForAssertion(() => {
-        expect(pressedEffort()).toEqual(["High"]);
+        expect(pressedEffort()).toEqual(["Agent default (High)"]);
       });
       await act(async () => {
         effortButton("Max")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       });
       await flush();
       await act(async () => {
-        effortButton("High")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        effortButton("Agent default (High)")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       });
       await flush();
       await submit();
@@ -1528,7 +1528,7 @@ describe("NewIssueDialog", () => {
       const { root } = renderDialog(container);
       await waitForAssertion(() => {
         expect(container.textContent).toContain("Claude options");
-        expect(pressedEffort()).toEqual(["High"]);
+        expect(pressedEffort()).toEqual(["Agent default (High)"]);
       });
 
       const codexOption = container.querySelector('[data-inline-option="agent:agent-2"]');
@@ -1540,7 +1540,7 @@ describe("NewIssueDialog", () => {
 
       await waitForAssertion(() => {
         expect(container.textContent).toContain("Codex options");
-        expect(pressedEffort()).toEqual(["Minimal"]);
+        expect(pressedEffort()).toEqual(["Agent default (Minimal)"]);
       });
       expect(container.querySelector('[data-testid="assignee-model-options"]')?.textContent).toContain("gpt-5-codex");
       // Codex has no "Max" level; the list follows the adapter.
@@ -1595,7 +1595,7 @@ describe("NewIssueDialog", () => {
       // A primary-lane draft carries no override, so the stale "low" must not survive:
       // the block shows the agent's real saved setting again.
       await waitForAssertion(() => {
-        expect(pressedEffort()).toEqual(["High"]);
+        expect(pressedEffort()).toEqual(["Agent default (High)"]);
       });
       await submit();
       const payload = mockIssuesApi.create.mock.calls[0][1] as Record<string, unknown>;
@@ -1618,7 +1618,7 @@ describe("NewIssueDialog", () => {
 
       await waitForAssertion(() => {
         expect(container.textContent).toContain("Claude options");
-        expect(pressedEffort()).toEqual(["High"]);
+        expect(pressedEffort()).toEqual(["Agent default (High)"]);
       });
       expect(container.querySelector('[data-testid="assignee-model-options"]')?.textContent).toContain("claude-opus-4-1");
 
@@ -1642,7 +1642,7 @@ describe("NewIssueDialog", () => {
       rerenderDialog(rendered);
       await waitForAssertion(() => {
         expect(container.textContent).toContain("Claude options");
-        expect(pressedEffort()).toEqual(["High"]);
+        expect(pressedEffort()).toEqual(["Agent default (High)"]);
       });
 
       // Close (the dialog stays mounted, as in Layout.tsx).
@@ -1657,7 +1657,7 @@ describe("NewIssueDialog", () => {
       rerenderDialog(rendered);
       await waitForAssertion(() => {
         expect(container.textContent).toContain("Codex options");
-        expect(pressedEffort()).toEqual(["Minimal"]);
+        expect(pressedEffort()).toEqual(["Agent default (Minimal)"]);
       });
       expect(container.querySelector('[data-testid="assignee-model-options"]')?.textContent).toContain("gpt-5-codex");
 
@@ -1672,7 +1672,7 @@ describe("NewIssueDialog", () => {
         "company-1",
         expect.objectContaining({
           assigneeAgentId: "agent-2",
-          assigneeAdapterOverrides: { adapterConfig: { model: "gpt-5-codex", modelReasoningEffort: "high" } },
+          assigneeAdapterOverrides: { adapterConfig: { modelReasoningEffort: "high" } },
         }),
       );
 
@@ -1684,7 +1684,7 @@ describe("NewIssueDialog", () => {
       const rendered = renderDialog(container);
       await waitForAssertion(() => {
         expect(container.textContent).toContain("Codex options");
-        expect(pressedEffort()).toEqual(["Minimal"]);
+        expect(pressedEffort()).toEqual(["Agent default (Minimal)"]);
       });
 
       act(() => {
@@ -1708,11 +1708,24 @@ describe("NewIssueDialog", () => {
         "company-1",
         expect.objectContaining({
           assigneeAgentId: "agent-2",
-          assigneeAdapterOverrides: { adapterConfig: { model: "gpt-5-codex", modelReasoningEffort: "high" } },
+          assigneeAdapterOverrides: { adapterConfig: { modelReasoningEffort: "high" } },
         }),
       );
 
       act(() => rendered.root.unmount());
+    });
+
+    it("labels the defaults with the agent's own model and effort, and lists only that adapter's levels", async () => {
+      dialogState.newIssueDefaults = { title: "Labelled task", assigneeAgentId: "agent-2" };
+      const { root } = renderDialog(container);
+      await waitForAssertion(() => {
+        expect(pressedEffort()).toEqual(["Agent default (Minimal)"]);
+      });
+      const block = container.querySelector('[data-testid="assignee-model-options"]');
+      expect(block?.textContent).toContain("Agent default (gpt-5-codex)");
+      const levels = Array.from(block?.querySelectorAll("button[aria-pressed]") ?? []).map((b) => b.textContent);
+      expect(levels).toEqual(["Agent default (Minimal)", "Minimal", "Low", "Medium", "High", "X-High"]);
+      act(() => root.unmount());
     });
 
     it("starts a new dialog session from the assignee's settings, not the last session's override", async () => {
@@ -1726,7 +1739,7 @@ describe("NewIssueDialog", () => {
       dialogState.newIssueOpen = true;
       rerenderDialog(rendered);
       await waitForAssertion(() => {
-        expect(pressedEffort()).toEqual(["High"]);
+        expect(pressedEffort()).toEqual(["Agent default (High)"]);
       });
       await act(async () => {
         effortButton("Max")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -1744,7 +1757,7 @@ describe("NewIssueDialog", () => {
       dialogState.newIssueOpen = true;
       rerenderDialog(rendered);
       await waitForAssertion(() => {
-        expect(pressedEffort()).toEqual(["High"]);
+        expect(pressedEffort()).toEqual(["Agent default (High)"]);
       });
       expect(container.querySelector('[data-testid="assignee-model-options"]')?.textContent).toContain("claude-opus-4-1");
 

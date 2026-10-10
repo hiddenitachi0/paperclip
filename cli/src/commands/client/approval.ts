@@ -151,6 +151,38 @@ export function registerApprovalCommands(program: Command): void {
 
   addCommonClientOptions(
     approval
+      .command("operator-actions")
+      .description("List the host actions this company may ask for (restart/recreate a service, change a setting)")
+      .requiredOption("-C, --company-id <id>", "Company ID")
+      .action(async (opts: BaseClientOptions & { companyId?: string }) => {
+        try {
+          const ctx = resolveCommandContext(opts, { requireCompany: true });
+          const result = await ctx.api.get(apiPath`/api/companies/${ctx.companyId}/operator-actions`);
+          printOutput(result, { json: ctx.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+  );
+
+  addCommonClientOptions(
+    approval
+      .command("operator-action-secret")
+      .description("Resolve the secret value of an approved set_env_var host action (instance admin; on-box runner only)")
+      .argument("<approvalId>", "Approval ID")
+      .action(async (approvalId: string, opts: BaseClientOptions) => {
+        try {
+          const ctx = resolveCommandContext(opts);
+          const result = await ctx.api.get<{ value: string }>(apiPath`/api/approvals/${approvalId}/operator-action-secret`);
+          printOutput(result, { json: ctx.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+  );
+
+  addCommonClientOptions(
+    approval
       .command("create")
       .description("Create an approval request")
       .requiredOption("-C, --company-id <id>", "Company ID")

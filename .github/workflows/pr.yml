@@ -59,6 +59,9 @@ jobs:
       - name: Test deploy runner comment guarantee
         run: node --test ./scripts/deploy-runner.test.mjs
 
+      - name: Test host action runner allow-list and run-once guarantees
+        run: node --test ./scripts/operator-action-runner.test.mjs
+
       # DUR-3975: the pre-push guard that stops one agent's push discarding
       # another agent's commits, plus the wiring that installs it.
       - name: Test push-clobber guards

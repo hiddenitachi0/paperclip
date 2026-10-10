@@ -1,0 +1,19 @@
+[Unit]
+Description=Paperclip one-click host actions runner (restart/recreate/set setting, allow-listed)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Path to the checkout of THIS repo on the box, same as
+# paperclip-deploy-runner.service. Override with a drop-in if it lives
+# elsewhere:
+#   systemctl edit paperclip-operator-action-runner.service
+ExecStart=/usr/bin/python3 -I /root/paperclip/scripts/operator-action-runner.py
+User=root
+# The allow-list the runner obeys. It must be owned by root and not writable
+# by group/others, or the runner refuses to act on anything.
+Environment=PAPERCLIP_OPERATOR_ACTIONS_CONFIG=/etc/paperclip/operator-actions.json
+# The runner shells out to `docker exec` (CLI in the server container),
+# `docker compose`/`docker restart` and `systemctl restart` -- only with the
+# fixed argv templates in the script, for targets on the allow-list.
