@@ -65,6 +65,9 @@ const catalogEnvFileSchema = z.object({
   label: labelSchema,
   path: z.string().min(1).max(500),
   keys: z.array(operatorActionEnvKeySchema).max(200),
+  // Optional, from the box config: which company secrets (by name) may be
+  // written into which key. Absent = any secret of the company.
+  secrets: z.record(operatorActionEnvKeySchema, z.array(z.string().min(1).max(200)).max(50)).optional(),
 });
 
 const catalogCompanySchema = z.object({
@@ -117,6 +120,7 @@ export function describeCompanyOperatorActions(catalog: OperatorActionCatalog | 
       name,
       label: envFile.label,
       keys: envFile.keys,
+      ...(envFile.secrets ? { allowedSecrets: envFile.secrets } : {}),
     })),
   };
 }
@@ -180,6 +184,15 @@ export function buildOperatorActionCard(input: {
       throw unprocessable("The secret named on the card does not exist in this company.", {
         code: "operator_action_secret_not_found",
       });
+    }
+    if (envFile.secrets) {
+      const allowedSecrets = envFile.secrets[envKey] ?? [];
+      if (!allowedSecrets.includes(secretName)) {
+        throw unprocessable(
+          `The secret "${secretName}" may not be written into ${envKey}. Allowed: ${allowedSecrets.map((n) => `"${n}"`).join(", ") || "(none)"}.`,
+          { code: "operator_action_secret_not_allowed" },
+        );
+      }
     }
     const title = `Change the setting ${envKey} in ${envFile.label}`;
     return operatorActionRequestPayloadSchema.parse({

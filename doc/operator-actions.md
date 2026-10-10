@@ -67,7 +67,8 @@ An example is in `deploy/operator-actions.example.json`.
         "<name>": {
           "label": "the dashboard settings file",
           "path": "/root/nordstrand-dashboard/.env",
-          "keys": ["FEATURE_NEW_CHECKOUT"]
+          "keys": ["FEATURE_NEW_CHECKOUT"],
+          "secrets": { "FEATURE_NEW_CHECKOUT": ["dashboard-new-checkout"] }
         }
       }
     }
@@ -90,6 +91,15 @@ written to `operator-action-runner.log`):
   to it (no `..`). `recreate_container` is only allowed for compose services.
 - `envFiles.*.path` is absolute and must already exist (the runner never
   creates files). `keys` are upper-case setting names.
+- `envFiles.*.secrets` (optional, recommended): for each key, the names of the
+  company secrets that may be written into it. When it is present, a key with
+  no entry here cannot be set at all, and any other secret is refused — both
+  when the card is filed and again by the runner, which checks the real name
+  of the secret the server hands over. Without it, any secret of the company
+  may be written into an allowed key.
+- Settings files may contain quoted values that run over several lines (a
+  PEM key, say). The runner treats such a value as one unit and never edits
+  inside it; a file with a quote that is never closed is refused, not edited.
 
 ## How the pieces fit
 
@@ -102,11 +112,17 @@ written to `operator-action-runner.log`):
   `GET /api/companies/:companyId/operator-actions`.
 - The published copy is a convenience, not the boundary. The runner checks
   every approved card against its OWN file again, for the card's own company,
-  and refuses the card if the command stamped on it is not exactly what it
-  would run. So a tampered copy can at worst produce a card that is refused.
+  and refuses the card if the command stamped on it (`willRun`) is not exactly
+  what it would run, or if the card's wording (title, target label, "on
+  approval" text) is not its own wording for that target. So an edited copy
+  cannot put a harmless-sounding label on a real command; at worst it
+  produces a card that is refused.
 - Approval: only a person who is the company's owner or admin, or an instance
-  admin (`/approvals/:id/approve`). The card cannot be decided through a
-  linked confirmation card. Agents can ask but never approve.
+  admin, on the approval card itself (`/approvals/:id/approve`). The approvals
+  service refuses every other way of approving a host action or a deploy (for
+  example accepting a linked confirmation card), whoever does it, and a
+  confirmation card cannot be linked to such an approval in the first place.
+  Agents can ask but never approve.
 - The runner only acts on cards approved within the last 24 hours
   (`PAPERCLIP_OPERATOR_ACTION_RUNNER_MAX_AGE_SECONDS`); older ones are answered
   "not run". Unapproved cards follow the normal card expiry rules.
@@ -121,6 +137,59 @@ written to `operator-action-runner.log`):
   `GET /api/approvals/:id/operator-action-secret`: instance admin only, only
   for an approved `set_env_var` card, only the secret named on it, recorded in
   the secret's access trail.
+
+## Keep the published catalogue read-only for agents
+
+Agents run inside the server container, and the default publish location
+(`/paperclip/operator-actions/`) is inside a volume the container's `node`
+user can write. The runner does not trust that copy (see above), but an
+edited copy can still make the server stamp confusing cards that then get
+refused. To rule that out, publish from the host into a folder that the
+container sees read-only:
+
+1. In the service unit (`systemctl edit paperclip-operator-action-runner.service`):
+
+   ```ini
+   [Service]
+   Environment=PAPERCLIP_OPERATOR_ACTION_RUNNER_PUBLISH_HOST_DIR=/var/lib/paperclip-operator-actions
+   ```
+
+2. In the server's compose override (for this fork: `docker/docker-compose.prod.yml`
+   or a local override), mount it read-only and point the server at it:
+
+   ```yaml
+   services:
+     server:
+       volumes:
+         - /var/lib/paperclip-operator-actions:/run/paperclip-operator-actions:ro
+       environment:
+         PAPERCLIP_OPERATOR_ACTIONS_CATALOG_PATH: /run/paperclip-operator-actions/catalog.json
+   ```
+
+3. Recreate the server container once so the mount and the setting apply.
+
+## What a compromised Paperclip server could still do
+
+The runner trusts the server only to say "this card was approved". If the
+server itself (or its database, or the instance-admin CLI credential inside
+the container) were taken over, an attacker could mark cards approved without
+a person. What they could then trigger is still bounded by the root-owned
+allow-list on the box, because the runner checks every card against it:
+
+- restart, or recreate, only the services listed for that company, and only
+  with the actions listed for each one — repeatedly, so a service could be
+  kept restarting (an outage, not a takeover);
+- write only the listed keys into the listed settings files, with values from
+  that company's secrets (only the listed secret names when a `secrets` list
+  is set). That can change how the app behaves — choose keys with that in
+  mind, and keep powerful ones (database URLs, credentials, anything that
+  names a command or image) off the list;
+- nothing else: no other command, file, unit, container or company, no shell,
+  no new files. Every run leaves a line in `operator-actions-audit.log` on the
+  box and a comment on the card.
+
+Keep the list short, prefer `restart_service` over `set_env_var`, and use the
+`secrets` lists.
 
 ## Install on the box (as root)
 

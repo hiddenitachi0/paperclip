@@ -28,7 +28,11 @@
         "dashboard": {
           "label": "the dashboard settings file",
           "path": "/root/nordstrand-dashboard/.env",
-          "keys": ["FEATURE_NEW_CHECKOUT", "SHOPIFY_API_VERSION"]
+          "keys": ["FEATURE_NEW_CHECKOUT", "SHOPIFY_API_VERSION"],
+          "secrets": {
+            "FEATURE_NEW_CHECKOUT": ["dashboard-new-checkout"],
+            "SHOPIFY_API_VERSION": ["shopify-api-version"]
+          }
         }
       }
     }

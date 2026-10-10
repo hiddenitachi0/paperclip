@@ -51,7 +51,9 @@ import { issueService, runWorkspaceIsFinalized } from "./issues.js";
 import {
   decideConfirmationCreate,
   extractApprovalReferences,
+  describeApprovalForAgent,
   hasAnyApprovalReference,
+  mustBeDecidedOnApprovalCard,
   pickNamedApprovalForDisplay,
   refusalMessageForAgent,
   resolveNamedApprovals,
@@ -881,6 +883,19 @@ async function decideLinkedApprovalForInteractionDecision(dbOrTx: Db | any, args
     const svc = approvalService(dbOrTx as Db);
     const decidedByUserId = args.actor.userId ?? "system";
     if (args.targetStatus === "approved") {
+      // Security review of PR #625: kinds that must be decided on their own
+      // card (deploy, merge, host actions, report calculations, cross-company
+      // instructions) are never approved by accepting a linked confirmation,
+      // whoever accepts it. approvalService.approve() refuses most of them
+      // itself too; checking here keeps the refusal quiet and explicit.
+      const linked = await svc.getById(args.linkedApprovalId);
+      if (linked && mustBeDecidedOnApprovalCard({ type: linked.type, payload: (linked.payload ?? {}) as Record<string, unknown> })) {
+        console.warn(
+          "[paperclip] Not approving a linked approval through an issue-thread confirmation: it must be decided on its own card",
+          { linkedApprovalId: args.linkedApprovalId, kind: (linked.payload as Record<string, unknown> | null)?.kind },
+        );
+        return;
+      }
       await svc.approve(args.linkedApprovalId, decidedByUserId, args.reason);
     } else {
       await svc.reject(args.linkedApprovalId, decidedByUserId, args.reason);
@@ -1402,12 +1417,27 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
 
         if (data.linkedApprovalId) {
           const linkedApproval = await db
-            .select({ companyId: approvals.companyId })
+            .select({ companyId: approvals.companyId, type: approvals.type, payload: approvals.payload })
             .from(approvals)
             .where(eq(approvals.id, data.linkedApprovalId))
             .then((rows) => rows[0] ?? null);
           if (!linkedApproval || linkedApproval.companyId !== issue.companyId) {
             throw unprocessable("linkedApprovalId must reference an approval in the same company");
+          }
+          // Security review of PR #625: for ANY actor (not only agents), a
+          // confirmation card may not be linked to an approval that must be
+          // decided on its own card -- accepting the confirmation would
+          // otherwise approve it without the approval page's checks.
+          const linkedNamed = {
+            type: linkedApproval.type,
+            payload: (linkedApproval.payload ?? {}) as Record<string, unknown>,
+          };
+          if (mustBeDecidedOnApprovalCard(linkedNamed)) {
+            const what = describeApprovalForAgent(linkedNamed);
+            throw conflict(
+              `${what.charAt(0).toUpperCase()}${what.slice(1)} can only be decided on its own approval card, so a confirmation card cannot be linked to it. Leave linkedApprovalId out; the approval card already asks the operator.`,
+              { code: "confirmation_links_card_only_approval", approvalId: data.linkedApprovalId },
+            );
           }
         }
       }

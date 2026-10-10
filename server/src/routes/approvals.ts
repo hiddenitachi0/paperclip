@@ -2496,11 +2496,17 @@ export function approvalRoutes(
       if (!parsed.success || parsed.data.action !== "set_env_var" || !parsed.data.secretId) {
         throw unprocessable("This host action does not use a secret.");
       }
+      // The secret's real name goes back with the value, so the runner can
+      // check it against its own per-key allow-list (doc/operator-actions.md).
+      const secret = await secretsSvc.getById(parsed.data.secretId);
+      if (!secret || secret.companyId !== approval.companyId) {
+        throw unprocessable("The secret named on this card no longer exists in this company.");
+      }
       const value = await secretsSvc.resolveSecretValueForOperatorAction(approval.companyId, parsed.data.secretId, {
         approvalId: approval.id,
         actorId: req.actor.userId ?? "board",
       });
-      res.json({ value });
+      res.json({ value, name: secret.name });
     },
   );
 
@@ -2556,6 +2562,9 @@ export function approvalRoutes(
       req.body.decisionNote,
       {
         crossCompanyInstruction: crossCompanyDecisionHooks(decidedByUserId, req.body.decisionNote),
+        // This route ran the per-kind approve checks above (host-action
+        // owner/admin + shape, unsupported deploy kinds).
+        decidedOnApprovalCard: true,
         securityReviewBypass: securityReviewBypass
           ? { reason: securityReviewBypass.reason, actorType: "user", actorId: req.actor.userId ?? "board" }
           : undefined,

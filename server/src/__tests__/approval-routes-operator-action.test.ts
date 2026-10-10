@@ -303,6 +303,18 @@ describe("operator_action approvals", () => {
       expect(res.body.error).toContain("DATABASE_URL is not one of the settings");
     }, TEST_TIMEOUT);
 
+    it("refuses a secret that the box's per-key secrets list does not allow", async () => {
+      const withSecrets = structuredClone(CATALOG) as any;
+      withSecrets.companies[COMPANY_A].envFiles.dashboard.secrets = { FEATURE_FLAG: ["other-secret"] };
+      writeFileSync(catalogPath, JSON.stringify(withSecrets));
+      const res = await request(await createApp(agentActor))
+        .post(`/api/companies/${COMPANY_A}/approvals`)
+        .send(setEnvBody());
+      expect(res.status).toBe(422);
+      expect(res.body.error).toContain('"checkout-flag" may not be written into FEATURE_FLAG');
+      expect(mockApprovalService.create).not.toHaveBeenCalled();
+    }, TEST_TIMEOUT);
+
     it("refuses a secret from another company", async () => {
       mockSecretService.getById.mockResolvedValue({ id: SECRET_ID, companyId: COMPANY_B, name: "theirs", status: "active" });
       const res = await request(await createApp(agentActor))
@@ -446,7 +458,7 @@ describe("operator_action approvals", () => {
       mockApprovalService.getById.mockResolvedValue(setEnvCard);
       const res = await request(await createApp(instanceAdminActor)).get(`/api/approvals/${APPROVAL_ID}/operator-action-secret`);
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ value: "on" });
+      expect(res.body).toEqual({ value: "on", name: "checkout-flag" });
       expect(mockSecretService.resolveSecretValueForOperatorAction).toHaveBeenCalledWith(COMPANY_A, SECRET_ID, {
         approvalId: APPROVAL_ID,
         actorId: "user-admin",

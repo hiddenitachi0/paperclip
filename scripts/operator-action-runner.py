@@ -75,6 +75,11 @@ CONTAINER = _env(
 # Keep in step with OPERATOR_ACTIONS_CATALOG_PATH_DEFAULT in
 # server/src/services/operator-actions.ts.
 CATALOG_PATH_IN_CONTAINER = _env("PAPERCLIP_OPERATOR_ACTIONS_CATALOG_PATH", "/paperclip/operator-actions/catalog.json")
+# Recommended (doc/operator-actions.md): a host folder that is bind-mounted
+# READ-ONLY into the server container, so nothing inside the container
+# (agents run there) can edit the published catalogue. When set, the runner
+# writes catalog.json into this folder directly instead of via docker exec.
+PUBLISH_HOST_DIR = os.environ.get("PAPERCLIP_OPERATOR_ACTION_RUNNER_PUBLISH_HOST_DIR", "").strip()
 # A card approved longer ago than this is answered "not run" instead of acted
 # on: an approval is a decision about the situation at the time.
 MAX_AGE_SECONDS = int(_env("PAPERCLIP_OPERATOR_ACTION_RUNNER_MAX_AGE_SECONDS", "86400"))
@@ -289,7 +294,27 @@ def validate_env_file(name: Any, env_file: Any, where: str) -> dict[str, Any]:
     keys = env_file.get("keys")
     if not isinstance(keys, list) or any(not isinstance(k, str) or not ENV_KEY_RE.match(k) for k in keys):
         raise ConfigError(f"{where}.keys must be a list of upper-case setting names")
-    return {"label": label, "path": path, "keys": sorted(set(keys))}
+    result: dict[str, Any] = {"label": label, "path": path, "keys": sorted(set(keys))}
+    # Optional: which company secrets (by name) may be written into which key.
+    # When present, a key that is not listed here, or a secret name not listed
+    # for it, is refused.
+    secrets = env_file.get("secrets")
+    if secrets is not None:
+        if not isinstance(secrets, dict):
+            raise ConfigError(f"{where}.secrets must map a setting name to a list of secret names")
+        cleaned: dict[str, list[str]] = {}
+        for key, names in secrets.items():
+            if key not in result["keys"]:
+                raise ConfigError(f"{where}.secrets.{key}: {key} is not in keys")
+            if not isinstance(names, list) or not names or any(not is_secret_name(n) for n in names):
+                raise ConfigError(f"{where}.secrets.{key} must be a non-empty list of secret names")
+            cleaned[key] = sorted(set(names))
+        result["secrets"] = cleaned
+    return result
+
+
+def is_secret_name(value: Any) -> bool:
+    return isinstance(value, str) and 0 < len(value) <= 200 and value == value.strip() and not any(ord(ch) < 32 for ch in value)
 
 
 # --------------------------------------------------------------------------- command templates
@@ -338,7 +363,12 @@ def build_catalog(config: dict[str, Any]) -> dict[str, Any]:
                 "actions": {action: render_command(*service_command(service, action)) for action in service["actions"]},
             }
         env_files = {
-            name: {"label": env["label"], "path": env["path"], "keys": env["keys"]}
+            name: {
+                "label": env["label"],
+                "path": env["path"],
+                "keys": env["keys"],
+                **({"secrets": env["secrets"]} if "secrets" in env else {}),
+            }
             for name, env in company["envFiles"].items()
         }
         companies[company_id] = {"services": services, "envFiles": env_files}
@@ -381,18 +411,31 @@ def publish_catalog(config: dict[str, Any]) -> None:
             return
     except (OSError, ValueError):
         pass
-    argv = [
-        "docker", "exec", "-i", "-e", f"CATALOG_PATH={CATALOG_PATH_IN_CONTAINER}", CONTAINER, "sh", "-c",
-        'umask 022 && mkdir -p "$(dirname "$CATALOG_PATH")" && cat > "$CATALOG_PATH.tmp" && mv "$CATALOG_PATH.tmp" "$CATALOG_PATH"',
-    ]
-    try:
-        done = subprocess.run(argv, input=body.encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60, check=False)
-    except (OSError, subprocess.TimeoutExpired) as err:
-        log(f"could not publish the host actions list: {err}")
-        return
-    if done.returncode != 0:
-        log(f"could not publish the host actions list (exit {done.returncode}): {tail_output(done.stderr)[-300:]}")
-        return
+    if PUBLISH_HOST_DIR:
+        try:
+            os.makedirs(PUBLISH_HOST_DIR, mode=0o755, exist_ok=True)
+            target = os.path.join(PUBLISH_HOST_DIR, "catalog.json")
+            fd, tmp = tempfile.mkstemp(prefix=".catalog-", dir=PUBLISH_HOST_DIR)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(body)
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, target)
+        except OSError as err:
+            log(f"could not publish the host actions list to {PUBLISH_HOST_DIR}: {err}")
+            return
+    else:
+        argv = [
+            "docker", "exec", "-i", "-e", f"CATALOG_PATH={CATALOG_PATH_IN_CONTAINER}", CONTAINER, "sh", "-c",
+            'umask 022 && mkdir -p "$(dirname "$CATALOG_PATH")" && cat > "$CATALOG_PATH.tmp" && mv "$CATALOG_PATH.tmp" "$CATALOG_PATH"',
+        ]
+        try:
+            done = subprocess.run(argv, input=body.encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60, check=False)
+        except (OSError, subprocess.TimeoutExpired) as err:
+            log(f"could not publish the host actions list: {err}")
+            return
+        if done.returncode != 0:
+            log(f"could not publish the host actions list (exit {done.returncode}): {tail_output(done.stderr)[-300:]}")
+            return
     try:
         with open(PUBLISHED_PATH, "w", encoding="utf-8") as handle:
             handle.write(f"{digest} {time.time()}\n")
@@ -488,6 +531,21 @@ def plan(card: dict[str, Any], company_id: str, config: dict[str, Any]) -> dict[
         raise Refusal("no host actions are set up for this company on this server")
     stamped = payload.get("willRun")
 
+    def check_wording(label: str, expected_title: str) -> None:
+        # The words the approver read must be this server's own words for
+        # this target, not just the command: otherwise an edited catalogue
+        # could put a harmless-sounding label on a real command.
+        title = payload.get("title")
+        next_action = payload.get("nextActionOnApproval")
+        if (
+            payload.get("targetLabel") != label
+            or not isinstance(title, str)
+            or not (title == expected_title or title.endswith(" — " + expected_title))
+            or not isinstance(next_action, str)
+            or label not in next_action
+        ):
+            raise Refusal("the wording on the card does not match this server's own description of the action, so it was not run")
+
     if action == "set_env_var":
         env_file = company["envFiles"].get(target)
         if env_file is None:
@@ -495,10 +553,23 @@ def plan(card: dict[str, Any], company_id: str, config: dict[str, Any]) -> dict[
         env_key = payload.get("envKey")
         if not isinstance(env_key, str) or not ENV_KEY_RE.match(env_key) or env_key not in env_file["keys"]:
             raise Refusal(f"that setting may not be changed in {env_file['label']} on this server")
+        allowed_secrets = env_file.get("secrets")
+        if allowed_secrets is not None and env_key not in allowed_secrets:
+            raise Refusal(f"no secret may be written into {env_key} in {env_file['label']} on this server")
         will_run = render_set_env_will_run(env_key, env_file["path"])
         if stamped != will_run:
             raise Refusal("the command shown on the card is not what this server would run, so it was not run")
-        return {"action": action, "target": target, "label": env_file["label"], "envKey": env_key, "path": env_file["path"], "willRun": will_run}
+        check_wording(env_file["label"], f"Change the setting {env_key} in {env_file['label']}")
+        return {
+            "action": action,
+            "target": target,
+            "label": env_file["label"],
+            "envKey": env_key,
+            "path": env_file["path"],
+            "willRun": will_run,
+            "allowedSecrets": allowed_secrets.get(env_key) if allowed_secrets is not None else None,
+            "cardSecretName": payload.get("secretName"),
+        }
 
     service = company["services"].get(target)
     if service is None:
@@ -507,6 +578,8 @@ def plan(card: dict[str, Any], company_id: str, config: dict[str, Any]) -> dict[
     will_run = render_command(argv, cwd)
     if stamped != will_run:
         raise Refusal("the command shown on the card is not what this server would run, so it was not run")
+    verb = "Restart" if action == "restart_service" else "Recreate"
+    check_wording(service["label"], f"{verb} {service['label']}")
     return {"action": action, "target": target, "label": service["label"], "argv": argv, "cwd": cwd, "willRun": will_run}
 
 
@@ -540,6 +613,55 @@ def format_env_line(key: str, value: str) -> str:
     return f"{key}='{value}'"
 
 
+ENV_ASSIGNMENT_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*=\s*(.*)$")
+
+
+def _closing_quote_index(text: str, quote: str) -> int:
+    """Index of the quote that closes a value opened by `quote`, or -1. Double quotes honour backslash escapes."""
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if quote == '"' and ch == "\\":
+            i += 2
+            continue
+        if ch == quote:
+            return i
+        i += 1
+    return -1
+
+
+def parse_env_entries(lines: list[str]) -> list[tuple[str | None, list[str]]]:
+    """Group an env file's lines into entries: (key, raw lines) for an assignment, (None, [line]) otherwise.
+
+    A quoted value that runs over several lines (KEY="line 1 / line 2") is ONE
+    entry, so nothing inside it is ever mistaken for an assignment of its own.
+    A quote that is never closed makes the file unsafe to edit: Refusal.
+    """
+    entries: list[tuple[str | None, list[str]]] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        match = ENV_ASSIGNMENT_RE.match(line)
+        if not match or line.lstrip().startswith("#"):
+            entries.append((None, [line]))
+            i += 1
+            continue
+        key, rest = match.group(1), match.group(2)
+        block = [line]
+        if rest[:1] in ("'", '"'):
+            quote = rest[0]
+            remaining = rest[1:]
+            while _closing_quote_index(remaining, quote) < 0:
+                i += 1
+                if i >= len(lines):
+                    raise Refusal("the settings file has a quoted value that is never closed, so it was left as it was")
+                block.append(lines[i])
+                remaining = lines[i]
+        entries.append((key, block))
+        i += 1
+    return entries
+
+
 def write_env_var(path: str, key: str, value: str) -> str:
     """Set KEY in an existing env file, atomically, keeping its owner and mode. Returns 'replaced' or 'added'."""
     st = os.lstat(path)  # raises FileNotFoundError: we never create settings files
@@ -547,17 +669,16 @@ def write_env_var(path: str, key: str, value: str) -> str:
         raise Refusal(f"{path} is not a plain file on this server")
     with open(path, encoding="utf-8") as handle:
         lines = handle.read().splitlines()
-    pattern = re.compile(r"^\s*(?:export\s+)?" + re.escape(key) + r"\s*=")
     new_line = format_env_line(key, value)
     out: list[str] = []
     replaced = False
-    for line in lines:
-        if pattern.match(line):
+    for entry_key, block in parse_env_entries(lines):
+        if entry_key == key:
             if not replaced:
                 out.append(new_line)
                 replaced = True
             continue  # drop later duplicates so there is exactly one value
-        out.append(line)
+        out.extend(block)
     if not replaced:
         out.append(new_line)
     directory = os.path.dirname(path)
@@ -582,11 +703,17 @@ def write_env_var(path: str, key: str, value: str) -> str:
     return "replaced" if replaced else "added"
 
 
-def fetch_secret_value(approval_id: str) -> str:
+def fetch_secret_value(approval_id: str, step: dict[str, Any]) -> str:
     result = cli_json("approval", "operator-action-secret", approval_id)
     value = result.get("value") if isinstance(result, dict) else None
+    name = result.get("name") if isinstance(result, dict) else None
     if not isinstance(value, str):
         raise Refusal("the secret named on the card could not be read")
+    if step.get("cardSecretName") is not None and name != step["cardSecretName"]:
+        raise Refusal("the secret named on the card is not the secret the server would hand over")
+    allowed = step.get("allowedSecrets")
+    if allowed is not None and name not in allowed:
+        raise Refusal(f"the secret \"{name}\" may not be written into {step['envKey']} on this server")
     if len(value) > MAX_SECRET_VALUE_LENGTH:
         raise Refusal("the secret's value is too long for a settings file")
     if any(ch in value for ch in ("\n", "\r", "\0")):
@@ -617,7 +744,7 @@ def execute(card: dict[str, Any], company_id: str, config: dict[str, Any]) -> tu
     if step["action"] == "set_env_var":
         secret_value = ""
         try:
-            secret_value = fetch_secret_value(approval_id)
+            secret_value = fetch_secret_value(approval_id, step)
             how = write_env_var(step["path"], step["envKey"], secret_value)
         except Refusal as refusal:
             return f"Not run: {refusal}. Nothing was changed on the server.", {**base, "outcome": "refused", "reason": str(refusal)}

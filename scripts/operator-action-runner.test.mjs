@@ -125,6 +125,27 @@ function writeConfig(config = baseConfig()) {
   writeFileSync(path.join(dir, "operator-actions.json"), JSON.stringify(config));
 }
 
+// The plain-language wording the server stamps (server/src/services/operator-actions.ts),
+// with the project prefix normalizeRequestBoardApprovalPayload adds.
+const LABELS = {
+  "telegram-bridge": "the Telegram bridge",
+  "dashboard-web": "the dashboard website",
+  dashboard: "the dashboard settings file",
+};
+function wording(payload) {
+  const label = LABELS[payload.target] ?? "something";
+  const title =
+    payload.action === "set_env_var"
+      ? `Change the setting ${payload.envKey} in ${label}`
+      : `${payload.action === "recreate_container" ? "Recreate" : "Restart"} ${label}`;
+  return {
+    title: `Paperclip — ${title}`,
+    targetLabel: label,
+    nextActionOnApproval: `When you approve, the server acts on ${label}.`,
+    ...(payload.action === "set_env_var" ? { secretName: "checkout-flag" } : {}),
+  };
+}
+
 let cardCounter = 0;
 function card(payload, overrides = {}) {
   cardCounter += 1;
@@ -136,7 +157,7 @@ function card(payload, overrides = {}) {
     decidedByUserId: "user-filip",
     decidedAt: new Date().toISOString(),
     requestedByAgentId: "agent-1",
-    payload: { kind: "operator_action", reason: "new code needs a restart", ...payload },
+    payload: { kind: "operator_action", reason: "new code needs a restart", ...wording(payload), ...payload },
     ...overrides,
   };
 }
@@ -348,7 +369,7 @@ describe("operator-action-runner.py", () => {
     const willRun = `write FEATURE_FLAG=<secret value> into ${envPath}`;
     const c = card({ action: "set_env_var", target: "dashboard", envKey: "FEATURE_FLAG", secretId: SECRET_ID, willRun });
     setCards(COMPANY_A, [c]);
-    writeJson(`secret-${c.id}.json`, { value: "s3cr3t value $HOME" });
+    writeJson(`secret-${c.id}.json`, { value: "s3cr3t value $HOME", name: "checkout-flag" });
     runRunner();
     assert.equal(
       readFileSync(envPath, "utf8"),
@@ -377,7 +398,7 @@ describe("operator-action-runner.py", () => {
       willRun: `write SHOP_MODE=<secret value> into ${envPath}`,
     });
     setCards(COMPANY_A, [notAllowed, multiline]);
-    writeJson(`secret-${multiline.id}.json`, { value: "live\nDATABASE_URL=evil" });
+    writeJson(`secret-${multiline.id}.json`, { value: "live\nDATABASE_URL=evil", name: "checkout-flag" });
     const before = readFileSync(envPath, "utf8");
     runRunner();
     assert.equal(readFileSync(envPath, "utf8"), before);
@@ -428,6 +449,86 @@ describe("operator-action-runner.py", () => {
     );
     assert.deepEqual(catalog.companies[COMPANY_A].envFiles.dashboard.keys, ["FEATURE_FLAG", "SHOP_MODE"]);
     assert.deepEqual(catalog.companies[COMPANY_B], { services: {}, envFiles: {} });
+  });
+
+  it("refuses a card whose label was changed (edited catalogue) even though the command matches", () => {
+    const c = card({
+      action: "restart_service",
+      target: "telegram-bridge",
+      willRun: BRIDGE_RESTART,
+      title: "Paperclip — Restart the harmless test service",
+      targetLabel: "the harmless test service",
+      nextActionOnApproval: "When you approve, the server restarts the harmless test service.",
+    });
+    setCards(COMPANY_A, [c]);
+    runRunner();
+    assert.deepEqual(hostCalls(), []);
+    assert.match(comments()[0].body, /wording on the card does not match/);
+  });
+
+  it("only writes secrets allow-listed for that key when the env file has a secrets list", () => {
+    const config = baseConfig();
+    config.companies[COMPANY_A].envFiles.dashboard.secrets = { FEATURE_FLAG: ["checkout-flag"] };
+    writeConfig(config);
+    const willRunFlag = `write FEATURE_FLAG=<secret value> into ${envPath}`;
+    const willRunMode = `write SHOP_MODE=<secret value> into ${envPath}`;
+    const wrongSecret = card({ action: "set_env_var", target: "dashboard", envKey: "FEATURE_FLAG", secretId: SECRET_ID, willRun: willRunFlag, secretName: "db-password" });
+    const unlistedKey = card({ action: "set_env_var", target: "dashboard", envKey: "SHOP_MODE", secretId: SECRET_ID, willRun: willRunMode });
+    const ok = card({ action: "set_env_var", target: "dashboard", envKey: "FEATURE_FLAG", secretId: SECRET_ID, willRun: willRunFlag });
+    setCards(COMPANY_A, [wrongSecret, unlistedKey, ok]);
+    writeJson(`secret-${wrongSecret.id}.json`, { value: "hunter2", name: "db-password" });
+    writeJson(`secret-${unlistedKey.id}.json`, { value: "test", name: "checkout-flag" });
+    writeJson(`secret-${ok.id}.json`, { value: "on", name: "checkout-flag" });
+    runRunner();
+    const bodies = comments().map((x) => x.body);
+    assert.match(bodies[0], /^Not run: the secret "db-password" may not be written into FEATURE_FLAG/);
+    assert.match(bodies[1], /^Not run: no secret may be written into SHOP_MODE/);
+    assert.match(bodies[2], /^Done:/);
+    assert.match(readFileSync(envPath, "utf8"), /^FEATURE_FLAG=on$/m);
+    assert.doesNotMatch(readFileSync(envPath, "utf8"), /hunter2/);
+  });
+
+  it("refuses when the server hands over a different secret than the card names", () => {
+    const c = card({ action: "set_env_var", target: "dashboard", envKey: "FEATURE_FLAG", secretId: SECRET_ID, willRun: `write FEATURE_FLAG=<secret value> into ${envPath}` });
+    setCards(COMPANY_A, [c]);
+    writeJson(`secret-${c.id}.json`, { value: "x", name: "something-else" });
+    const before = readFileSync(envPath, "utf8");
+    runRunner();
+    assert.equal(readFileSync(envPath, "utf8"), before);
+    assert.match(comments()[0].body, /not the secret the server would hand over/);
+  });
+
+  it("never touches lines inside a multi-line quoted value", () => {
+    writeFileSync(
+      envPath,
+      'A=1\nPRIVATE_KEY="-----BEGIN KEY-----\nFEATURE_FLAG=inside-the-key\n-----END KEY-----"\nFEATURE_FLAG=old\nB=\'x\'\n',
+    );
+    const c = card({ action: "set_env_var", target: "dashboard", envKey: "FEATURE_FLAG", secretId: SECRET_ID, willRun: `write FEATURE_FLAG=<secret value> into ${envPath}` });
+    setCards(COMPANY_A, [c]);
+    writeJson(`secret-${c.id}.json`, { value: "new", name: "checkout-flag" });
+    runRunner();
+    assert.equal(
+      readFileSync(envPath, "utf8"),
+      'A=1\nPRIVATE_KEY="-----BEGIN KEY-----\nFEATURE_FLAG=inside-the-key\n-----END KEY-----"\nFEATURE_FLAG=new\nB=\'x\'\n',
+    );
+  });
+
+  it("refuses to edit a settings file with a quoted value that never closes", () => {
+    writeFileSync(envPath, 'A="never closed\nFEATURE_FLAG=old\n');
+    const c = card({ action: "set_env_var", target: "dashboard", envKey: "FEATURE_FLAG", secretId: SECRET_ID, willRun: `write FEATURE_FLAG=<secret value> into ${envPath}` });
+    setCards(COMPANY_A, [c]);
+    writeJson(`secret-${c.id}.json`, { value: "new", name: "checkout-flag" });
+    runRunner();
+    assert.equal(readFileSync(envPath, "utf8"), 'A="never closed\nFEATURE_FLAG=old\n');
+    assert.match(comments()[0].body, /quoted value that is never closed/);
+  });
+
+  it("can publish the catalogue to a host folder (mounted read-only into the container)", () => {
+    const hostDir = path.join(dir, "published-ro");
+    runRunner({ PAPERCLIP_OPERATOR_ACTION_RUNNER_PUBLISH_HOST_DIR: hostDir });
+    const catalog = JSON.parse(readFileSync(path.join(hostDir, "catalog.json"), "utf8"));
+    assert.equal(catalog.companies[COMPANY_A].services["telegram-bridge"].label, "the Telegram bridge");
+    assert.equal(existsSync(path.join(scenario, "published-catalog.json")), false, "no docker exec publish");
   });
 
   it("ignores cards that are not operator actions", () => {

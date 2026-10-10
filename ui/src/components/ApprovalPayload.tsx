@@ -934,6 +934,16 @@ function OperatorActionPayloadContent({ payload }: { payload: Record<string, unk
           <p className="font-medium leading-6 text-foreground">{title}</p>
         </div>
       )}
+      {willRun && (
+        <div className="rounded-lg border-2 border-amber-500/40 bg-amber-500/5 px-3.5 py-3">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-amber-700 dark:text-amber-300">
+            Will run exactly this on the server
+          </p>
+          <pre className="mt-1.5 overflow-auto font-mono text-sm font-medium leading-6 text-foreground whitespace-pre-wrap break-all">
+            {willRun}
+          </pre>
+        </div>
+      )}
       {why && (
         <div className="space-y-1">
           <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Why</p>
@@ -949,14 +959,6 @@ function OperatorActionPayloadContent({ payload }: { payload: Record<string, unk
         </div>
       )}
       {secretName && <PayloadField label="Value from" value={`secret "${secretName}"`} />}
-      {willRun && (
-        <div className="space-y-1.5">
-          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Will run exactly</p>
-          <pre className="overflow-auto rounded-lg border border-border/60 bg-muted/50 px-3.5 py-3 font-mono text-xs leading-5 text-muted-foreground whitespace-pre-wrap">
-            {willRun}
-          </pre>
-        </div>
-      )}
     </div>
   );
 }

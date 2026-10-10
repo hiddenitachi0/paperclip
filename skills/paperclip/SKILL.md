@@ -298,7 +298,7 @@ Only the instance admin decides which services and settings can be asked for. Se
 GET /api/companies/{companyId}/operator-actions
 ```
 
-It returns `services` (each with a `name`, a plain `label`, the `actions` it allows and the exact command each runs) and `envFiles` (each with a `name`, a `label` and the setting `keys` that may be changed). If `configured` is `false`, or what you need is not on the list, nothing can be asked for: tell the operator in plain words what is needed and why, and stop.
+It returns `services` (each with a `name`, a plain `label`, the `actions` it allows and the exact command each runs) and `envFiles` (each with a `name`, a `label`, the setting `keys` that may be changed and, when set, `allowedSecrets`: which secret names may be used for which key). If `configured` is `false`, or what you need is not on the list, nothing can be asked for: tell the operator in plain words what is needed and why, and stop.
 
 To ask, file one `request_board_approval`, linked to your task:
 
