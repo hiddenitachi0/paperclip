@@ -1023,6 +1023,14 @@ export interface PluginImageAnalysisInput {
   userPrompt: string;
   /** At most this many tokens in the answer (the host caps it). */
   maxOutputTokens?: number;
+  /**
+   * Only for a safety check during a quick agent's tool call (Media Studio's
+   * age check of a photo someone sent in a chat): the run id from the tool's
+   * run context. Outside a page action the host refuses the call unless this
+   * names a quick agent's tool call that is running right now, for this
+   * company, on behalf of a signed-in person; the call then runs as them.
+   */
+  runId?: string;
 }
 
 /** Result of `models.analyseImage`: the model's text answer, unchecked (the plugin checks it). */

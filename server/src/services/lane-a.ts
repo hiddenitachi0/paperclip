@@ -43,6 +43,8 @@ import {
   readLaneAWebSearchSwitch,
   readLaneAConversationSearchSwitch,
   isLaneATrustLimited,
+  helperModelCanSeePictures,
+  CHAT_ATTACHMENTS_MAX,
   type ChatHandedOverTask,
   type LaneAProvider,
   type LaneAProviderRouting,
@@ -63,6 +65,7 @@ import {
   resolveLaneABaseUrl,
   type LaneAChatMessage,
   type LaneACompletion,
+  type LaneAImage,
   type LaneAModelClient,
   type LaneAProviderClient,
   type LaneATool,
@@ -84,6 +87,7 @@ import {
   buildLaneAActionClaimRetryNote,
   detectLaneAActionClaim,
   detectLaneAPictureRequest,
+  detectLaneAPictureEditRequest,
   laneAMediaToolAttempted,
   isLaneAActionClaimFulfilled,
   pickLaneAForcedToolName,
@@ -94,6 +98,8 @@ import type { ApiToolServiceDeps } from "./api-tools.js";
 import { getPluginToolDispatcher, type PluginToolDispatcher } from "./plugin-tool-dispatcher.js";
 import { pluginToolExecutionService, type PluginToolExecutionService } from "./plugin-tool-execution.js";
 import { openLaneAPluginRun } from "./lane-a-plugin-runs.js";
+import { helperPictureService } from "./helper-pictures.js";
+import type { StorageService } from "../storage/types.js";
 import type { ToolResult as PluginToolResult } from "@paperclipai/plugin-sdk";
 import type { AuthorizationActor } from "./authorization.js";
 import { secretService } from "./secrets.js";
@@ -1199,6 +1205,35 @@ export const LANE_A_PICTURE_TOOL_NAME = "generate-image";
 const LANE_A_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
+ * The note the model reads under a message that came with pictures (a photo
+ * sent to a quick agent's Telegram bot). It names each picture's file id, so
+ * the model can hand it to Media Studio's picture tool as a reference, and it
+ * stays in the stored message, so "make it darker" in the next message still
+ * finds the picture. `pictureToolName` is the name the model knows Media
+ * Studio's "Generate image" by, or null when the agent has no such tool.
+ */
+export function buildLaneAAttachmentNote(input: {
+  fileIds: string[];
+  pictureToolName: string | null;
+  shownToModel: boolean;
+}): string {
+  const n = input.fileIds.length;
+  const ids = input.fileIds.join(", ");
+  const parts = [
+    n === 1
+      ? `The person attached a picture to this message: file id ${ids}. It is saved in the company's Files.`
+      : `The person attached ${n} pictures to this message: file ids ${ids}. They are saved in the company's Files.`,
+    input.shownToModel
+      ? n === 1 ? "You can see it with this message." : "You can see them with this message."
+      : "You cannot see pictures; if you need to know what it shows, ask the person.",
+    input.pictureToolName
+      ? `To change it or make a new picture from it, call ${input.pictureToolName} with ${n === 1 ? "this file id" : "these file ids"} in referenceFileIds and describe the change in the prompt.`
+      : "You have no picture tool, so you cannot change pictures; say so if you are asked to.",
+  ];
+  return `[${parts.join(" ")}]`;
+}
+
+/**
  * An earlier turn's pictures, as a line the model sees when the conversation
  * is replayed (the person does not see it). Without it, "same as the last
  * one but with a blue sofa, same seed" would find no seed to reuse: only
@@ -1584,6 +1619,8 @@ export interface LaneAServiceOptions {
    * time; tests pass their own, or null for "no add-on tools".
    */
   pluginToolDispatcher?: PluginToolDispatcher | null;
+  /** Test seam: where an attached picture's bytes are read from (to show it to a model that can see). */
+  attachmentStorage?: () => StorageService;
 }
 
 /** Where a quick agent's key came from — shown to the operator, never the value. */
@@ -2081,6 +2118,36 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
   }
 
   /**
+   * The pictures a person sent with a chat message: each must be a picture
+   * in THIS company's Files with no task (where the Telegram bridge stores a
+   * photo). Another company's file reads exactly like a missing one. Returns
+   * the ids in order, each once.
+   */
+  async function checkChatAttachments(companyId: string, fileIds: string[]): Promise<string[]> {
+    const ids = Array.from(new Set(fileIds));
+    if (ids.length === 0) return [];
+    if (ids.length > CHAT_ATTACHMENTS_MAX) {
+      throw unprocessable(`Attach at most ${CHAT_ATTACHMENTS_MAX} pictures to one message.`, { code: "LANE_A_ATTACHMENT_COUNT" });
+    }
+    const notFound = () =>
+      unprocessable("An attached picture is not in this company's Files. Send it again.", { code: "LANE_A_ATTACHMENT_NOT_FOUND" });
+    if (ids.some((id) => !LANE_A_UUID_PATTERN.test(id))) throw notFound();
+    const rows = await db
+      .select({ id: issueAttachments.id, issueId: issueAttachments.issueId, contentType: assets.contentType })
+      .from(issueAttachments)
+      .innerJoin(assets, eq(issueAttachments.assetId, assets.id))
+      .where(and(inArray(issueAttachments.id, ids), eq(issueAttachments.companyId, companyId)));
+    for (const id of ids) {
+      const row = rows.find((r) => r.id === id);
+      if (!row || row.issueId !== null) throw notFound();
+      if (!row.contentType.toLowerCase().startsWith("image/")) {
+        throw unprocessable("An attached file is not a picture. Send a photo instead.", { code: "LANE_A_ATTACHMENT_NOT_PICTURE" });
+      }
+    }
+    return ids;
+  }
+
+  /**
    * The picture an add-on tool says it made, if the claim holds: a file id
    * that is a stored picture in THIS conversation's company. Anything else
    * (no file, another company's file, not a picture) shows no picture, so an
@@ -2457,6 +2524,13 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     systemPrompt: string;
     history: LaneAChatMessage[];
     message: string;
+    /**
+     * Pictures the person attached to this message: the note naming them
+     * (added to what the model reads; `message` stays the person's own words
+     * for keyword looks and picture detection) and, for a model that can see
+     * pictures, the pictures themselves.
+     */
+    attachments?: { note: string; images: LaneAImage[] } | null;
     toolset: LaneAToolset;
     ctx: LaneAToolContext;
     /** DUR-3997: the provider client for this one call, key already inside it. */
@@ -2519,14 +2593,27 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     );
     const tools: LaneATool[] = [...builtins, ...toolset.anthropicTools].map(fromAnthropicTool);
     const businessDataOutputs: BusinessDataTurnOutput[] = [];
-    const messages: LaneAChatMessage[] = [...history, { role: "user", content: message }];
+    const attachments = params.attachments ?? null;
+    const messages: LaneAChatMessage[] = [
+      ...history,
+      attachments
+        ? {
+            role: "user",
+            content: `${message}\n\n${attachments.note}`,
+            ...(attachments.images.length > 0 ? { images: attachments.images } : {}),
+          }
+        : { role: "user", content: message },
+    ];
     const actions: LaneAAction[] = [];
     // 8 Oct: the person asked for a picture (or "another one" right after
     // one). If the reply then makes none, the one corrective retry forces the
     // picture tool, exactly as for a reply that claims a picture it never made.
-    const pictureRequested = detectLaneAPictureRequest(message, {
-      pictureEarlier: history.some((turn) => turn.role === "assistant" && /\[\s*Picture made in this turn\b/i.test(turn.content)),
-    });
+    // A message that came with a picture and asks to change it ("alter this
+    // image to show you helping him") counts too.
+    const pictureRequested =
+      detectLaneAPictureRequest(message, {
+        pictureEarlier: history.some((turn) => turn.role === "assistant" && /\[\s*Picture made in this turn\b/i.test(turn.content)),
+      }) || (attachments !== null && detectLaneAPictureEditRequest(message));
     let inputTokens = 0;
     let outputTokens = 0;
     let costUsd = 0;
@@ -3031,6 +3118,12 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     message: string;
     context?: string;
     conversationId?: string;
+    /**
+     * Pictures the person sent with the message: file ids of pictures in
+     * this company's Files with no task (the Telegram bridge stores a photo
+     * there first). Anything else is refused before the model is called.
+     */
+    attachmentFileIds?: string[];
   }) {
     if (!params.targetAgent.laneAEnabled) {
       throw forbidden("Lane A is not enabled for this agent");
@@ -3048,6 +3141,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     // exactly as in transform. Checked before anything else can spend.
     await assertAgentMayWork({ companyId: params.companyId, targetAgent: params.targetAgent, kind: "chat" });
     await assertUnderDailyCap(params.companyId, params.requester);
+    const attachedFileIds = await checkChatAttachments(params.companyId, params.attachmentFileIds ?? []);
     const conversation = await resolveConversation({
       companyId: params.companyId,
       targetAgentId: params.targetAgent.id,
@@ -3136,6 +3230,37 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       toolIndex: mcpToolset.toolIndex,
       pluginTools: pluginToolset.pluginTools,
       clients: mcpToolset.clients,
+    };
+    // Pictures the person attached: the name the model knows Media Studio's
+    // picture tool by (null when it is not ticked for this agent), and the
+    // pictures themselves for a model that can see them, read once and only
+    // when an attempt's model can use them.
+    const pictureToolName =
+      [...pluginToolset.pluginTools.entries()].find(
+        ([, tool]) => tool.namespacedName === `${LANE_A_PICTURE_PLUGIN_KEY}:${LANE_A_PICTURE_TOOL_NAME}`,
+      )?.[0] ?? null;
+    let attachedPictures: Promise<LaneAImage[]> | null = null;
+    const attachmentsFor = async (provider: LaneAProvider, model: string) => {
+      if (attachedFileIds.length === 0) return null;
+      let images: LaneAImage[] = [];
+      if (helperModelCanSeePictures({ provider, model }).canSee === true) {
+        attachedPictures ??= helperPictureService(db, options.attachmentStorage ? { storage: options.attachmentStorage } : {})
+          .prepare(params.companyId, attachedFileIds.map((fileId) => ({ kind: "file" as const, fileId })))
+          .then(
+            (pictures) => pictures.map(({ contentType, base64 }) => ({ contentType, base64 })),
+            (err: unknown) => {
+              // Seeing the picture is a nicety (too large, unreadable): the
+              // model still gets its file id and can use it as a reference.
+              logger.warn(
+                { companyId: params.companyId, agentId: params.targetAgent.id, reason: err instanceof Error ? err.message : String(err) },
+                "lane A: an attached picture could not be shown to the model",
+              );
+              return [] as LaneAImage[];
+            },
+          );
+        images = await attachedPictures;
+      }
+      return { note: buildLaneAAttachmentNote({ fileIds: attachedFileIds, pictureToolName, shownToModel: images.length > 0 }), images };
     };
     const ctx: LaneAToolContext = {
       companyId: params.companyId,
@@ -3367,6 +3492,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
             systemPrompt,
             history,
             message: params.message,
+            attachments: await attachmentsFor(entrySettings.provider, entryModel),
             toolset,
             ctx,
             client: entryClient,
@@ -3609,7 +3735,12 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         conversationId: conversation.id,
         agentId: params.targetAgent.id,
         role: "user",
-        content: params.message,
+        // The attachment note stays with the message, so a later "make it
+        // darker" still finds the picture's file id in the replayed history.
+        content:
+          attachedFileIds.length > 0
+            ? `${params.message}\n\n${buildLaneAAttachmentNote({ fileIds: attachedFileIds, pictureToolName, shownToModel: false })}`
+            : params.message,
         createdAt: now,
       },
       {

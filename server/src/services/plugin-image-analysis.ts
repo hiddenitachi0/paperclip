@@ -67,6 +67,12 @@ export interface ImageAnalysisCaller {
   userId: string | null | undefined;
   /** Whether the host decided that user manages the company. */
   canManageCompany: boolean | undefined;
+  /**
+   * The host resolved the call to a quick agent's running tool call for this
+   * company (a safety check of a photo sent in a chat); `userId` is the
+   * person talking to the quick agent.
+   */
+  quickAgentRun?: boolean;
   pluginId: string;
 }
 
@@ -249,7 +255,7 @@ export function pluginImageAnalysisService(db: Db, deps: ImageAnalysisDeps = {})
   return {
     async analyseImage(caller: ImageAnalysisCaller, input: PluginImageAnalysisInput): Promise<PluginImageAnalysisResult> {
       const companyId = caller.companyId;
-      if (!caller.userId || caller.canManageCompany !== true) {
+      if (!caller.userId || (caller.canManageCompany !== true && caller.quickAgentRun !== true)) {
         throw fail("Only the company's owner or an admin can analyse pictures with the company's models, from Paperclip's own pages.");
       }
       const system = typeof input.systemPrompt === "string" ? input.systemPrompt : "";

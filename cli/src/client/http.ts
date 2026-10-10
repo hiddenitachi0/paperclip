@@ -118,6 +118,26 @@ export class PaperclipApiClient {
     };
   }
 
+  /**
+   * POST a multipart form (a file upload) with the same credentials as every
+   * other call. The browser-style boundary header is set by fetch itself.
+   */
+  async postForm<T>(path: string, form: FormData): Promise<T | null> {
+    const url = buildUrl(this.apiBase, path);
+    const headers: Record<string, string> = { accept: "application/json" };
+    if (this.apiKey) headers.authorization = `Bearer ${this.apiKey}`;
+    if (this.runId) headers["x-paperclip-run-id"] = this.runId;
+    let response: Response;
+    try {
+      response = await fetch(url, { method: "POST", headers, body: form });
+    } catch (error) {
+      throw new ApiConnectionError({ apiBase: this.apiBase, path, method: "POST", cause: error });
+    }
+    if (!response.ok) throw await toApiError(response);
+    const text = await response.text();
+    return text.trim() ? (JSON.parse(text) as T) : null;
+  }
+
   setApiKey(apiKey: string | undefined) {
     this.apiKey = apiKey?.trim() || undefined;
   }

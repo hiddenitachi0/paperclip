@@ -353,7 +353,13 @@ function throwIfRefused(checked: AgeCheckedPicture[], fileIds: string[]): void {
  * Throws, naming the refused pictures, unless every picture is clearly of an
  * adult; callers call this before anything is paid for or sent.
  */
-export async function requireAdultPictures(ctx: PluginContext, companyId: string, fileIds: string[], what = "A ticked picture"): Promise<void> {
+export async function requireAdultPictures(
+  ctx: PluginContext,
+  companyId: string,
+  fileIds: string[],
+  what = "A ticked picture",
+  options: { runId?: string | null } = {},
+): Promise<void> {
   const ids = Array.from(new Set(fileIds));
   await assertNoneAgeBlocked(ctx, companyId, ids);
   let checked = await ageStatus(ctx, companyId, ids, what);
@@ -364,7 +370,7 @@ export async function requireAdultPictures(ctx: PluginContext, companyId: string
     const settings = await loadIdentitySettings(ctx, companyId);
     if (!settings.analysis) throw new Error(AGE_CHECK_NO_MODEL_MESSAGE);
     for (const p of missing) {
-      const rec = await runAgeCheck(ctx, companyId, settings.analysis, p);
+      const rec = await runAgeCheck(ctx, companyId, settings.analysis, p, options.runId);
       checked = checked.map((c) => (c.sha256 === rec.sha256 ? { ...c, verdict: rec.verdict, checkedAt: rec.checkedAt } : c));
     }
   }
