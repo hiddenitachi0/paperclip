@@ -23,6 +23,7 @@ import { logActivity } from "./activity-log.js";
 import { budgetService } from "./budgets.js";
 import {
   DONE_GATE_NEEDS_WORK_PREFIX,
+  DoneGateUnreadableReplyError,
   buildDoneGateCriticSystemPrompt,
   buildDoneGateCriticUserMessage,
   evaluateDoneGateCritic,
@@ -121,6 +122,45 @@ export function resolveEffectiveQualityLoops(
       QUALITY_DONE_CHECK_DEFAULT_ROUNDS,
     ),
   };
+}
+
+/**
+ * The task-level fields that switch quality checks on or off. Only a person (a board
+ * user) may change them: an agent must not be able to switch off the checks on its own
+ * work, nor switch on paid checks in a company that has not opted in.
+ */
+export const QUALITY_LOOP_POLICY_FIELDS = ["selfReview", "selfReviewPasses", "doneCheck"] as const;
+
+/**
+ * For a non-person writer: returns `next` with the quality-check fields reset to what is
+ * stored on the task (`previous`; nothing for a new task), whatever the writer sent.
+ * Returns null when nothing else is left in the policy.
+ */
+export function pinQualityLoopPolicyFields<P extends object>(next: P | null, previous: unknown): P | null {
+  const prev =
+    previous && typeof previous === "object" && !Array.isArray(previous) ? (previous as Record<string, unknown>) : {};
+  const pinned: Record<string, unknown> = { ...((next ?? {}) as Record<string, unknown>) };
+  for (const field of QUALITY_LOOP_POLICY_FIELDS) {
+    if (prev[field] !== undefined) pinned[field] = prev[field];
+    else delete pinned[field];
+  }
+  const stages = Array.isArray(pinned.stages) ? pinned.stages : [];
+  const hasQuality = QUALITY_LOOP_POLICY_FIELDS.some((field) => pinned[field] !== undefined);
+  if (!next && !hasQuality) return null;
+  if (stages.length === 0 && !pinned.monitor && !pinned.reviewPreset && !pinned.authorizationPolicy && !hasQuality) {
+    return null;
+  }
+  if (!next) {
+    // An agent cleared the policy: keep only the person-set quality fields.
+    return { mode: "normal", commentRequired: true, stages: [], ...pickQuality(pinned) } as unknown as P;
+  }
+  return pinned as P;
+}
+
+function pickQuality(source: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const field of QUALITY_LOOP_POLICY_FIELDS) if (source[field] !== undefined) out[field] = source[field];
+  return out;
 }
 
 export async function readQualityLoopSettingsRow(db: Db, companyId: string): Promise<SettingsRow | null> {
@@ -228,7 +268,7 @@ export function qualityLoopSettingsService(db: Db) {
     return get(companyId);
   }
 
-  /** A brand-new company starts with the suggested checks on. Never overwrites a choice. */
+  /** A brand-new company starts with the self-check on and the (paid) finish check off. Never overwrites a choice. */
   async function applyNewCompanyDefaults(companyId: string): Promise<void> {
     await db
       .insert(companyQualityLoopSettings)
@@ -495,7 +535,7 @@ export function createSavedModelDoneCheckCritic(
         timeout,
       ]);
       const parsed = parseDoneGateCriticReply(completion.text);
-      if (!parsed) throw new Error("the finish check's model returned no readable verdict");
+      if (!parsed) throw new DoneGateUnreadableReplyError();
       // Cost is already in the ledger (completeWithSavedModel), so no usage here.
       return { ...parsed, usage: null };
     } finally {
@@ -584,6 +624,19 @@ export async function evaluateQualityDoneCheck(input: QualityDoneCheckInput): Pr
     logger.warn({ err, issueId: issue.id }, "quality finish check: could not read the spending limits; running the check");
   }
 
+  // Watch the reviewer so a failed or unreadable check is recorded as "not checked",
+  // never as a pass.
+  let checkFailure: unknown = null;
+  const reviewer = critic;
+  const watchedCritic: DoneGateCritic = async (criticInput) => {
+    try {
+      return await reviewer(criticInput);
+    } catch (err) {
+      checkFailure = err ?? new Error("unknown failure");
+      throw err;
+    }
+  };
+
   const result = await evaluateDoneGateCritic({
     db,
     issue: {
@@ -599,9 +652,11 @@ export async function evaluateQualityDoneCheck(input: QualityDoneCheckInput): Pr
     patchComment: input.patchComment ?? null,
     readGeneralSettings: async () => ({}) as never,
     configOverride: { mode: "enforce", maxRounds: effective.doneCheckMaxRounds },
-    critic,
-    unavailableReason: () =>
-      "The company's saved model for the finish check could not be reached, or answered with something that could not be read. This is usually temporary; the next task will be checked again.",
+    critic: watchedCritic,
+    unavailableReason: (err) =>
+      err instanceof DoneGateUnreadableReplyError
+        ? "The company's saved model for the finish check answered with something that could not be read as a verdict, so this task was NOT checked. If this keeps happening, pick a different (more capable) model for the check."
+        : "The company's saved model for the finish check could not be reached, so this task was NOT checked. This is usually temporary; the next task will be checked again.",
     settingsPath: QUALITY_SETTINGS_PATH,
   });
   try {
@@ -615,7 +670,15 @@ export async function evaluateQualityDoneCheck(input: QualityDoneCheckInput): Pr
       agentId,
       runId: input.actor.runId ?? null,
       details: {
-        outcome: result ? (result.escalated ? "asked_the_person" : "not_done") : "passed_or_skipped",
+        outcome: result
+          ? result.escalated
+            ? "asked_the_person"
+            : "not_done"
+          : checkFailure
+            ? checkFailure instanceof DoneGateUnreadableReplyError
+              ? "not_checked_unreadable_answer"
+              : "not_checked_model_unreachable"
+            : "passed",
         findings: result?.findings ?? [],
       },
     });

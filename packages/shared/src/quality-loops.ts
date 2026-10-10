@@ -14,7 +14,8 @@ import { z } from "zod";
  *    done" set up automatically (the existing review-stage machinery).
  *
  * A company with no settings row has all three OFF (existing companies keep today's
- * behaviour). A newly created company gets QUALITY_LOOPS_NEW_COMPANY_DEFAULTS.
+ * behaviour). A newly created company gets QUALITY_LOOPS_NEW_COMPANY_DEFAULTS (self-check
+ * on, finish check off until an owner turns it on).
  */
 
 /** cost_events.billing_code for the independent finish check's model calls. */
@@ -45,9 +46,10 @@ export interface CompanyQualityLoopSettings {
   defaultReviewerAgentId: string | null;
 }
 
+// The finish check spends money on a model, so it stays off until an owner turns it on.
 export const QUALITY_LOOPS_NEW_COMPANY_DEFAULTS = {
   selfReviewPasses: 1,
-  doneCheckEnabled: true,
+  doneCheckEnabled: false,
   doneCheckMaxRounds: QUALITY_DONE_CHECK_DEFAULT_ROUNDS,
 } as const;
 

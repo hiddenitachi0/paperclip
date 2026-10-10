@@ -502,7 +502,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
       entityId: company.id,
       details: { name: company.name },
     });
-    // Agent quality loops: a new company starts with the suggested checks on (existing
+    // Agent quality loops: a new company starts with the self-check on, finish check off (existing
     // companies have no row, which reads as everything off). Best-effort.
     try {
       await qualityLoopSettingsService(db).applyNewCompanyDefaults(company.id);

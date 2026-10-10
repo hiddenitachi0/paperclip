@@ -17,7 +17,7 @@ const selectClass =
 /**
  * Agent quality loops: checks that run when an agent says a task is finished, so work
  * is not closed as "done" when it is not. All off for companies that existed before
- * this setting; new companies start with the self-check and finish check on.
+ * this setting; new companies start with the self-check on and the finish check off.
  */
 export function QualityLoopSettingsSection({ companyId }: { companyId: string }) {
   const queryClient = useQueryClient();

@@ -857,19 +857,28 @@ export function helperService(db: Db, options: HelperServiceOptions = {}) {
     }
     const model = settings.model;
     const apiKey = await resolveKey(input.companyId, settings.provider, entry.name, null);
-    const client = createLaneAProviderClient({
-      provider: settings.provider,
-      apiKey,
-      baseUrl: settings.baseUrl,
-      anthropicClient: settings.provider === "anthropic" && options.createModelClient ? options.createModelClient() : undefined,
-      fetch: options.providerFetch,
-    });
-    const response = await completeWithSettingsFallback(client, settings, {
-      model,
-      maxTokens: Math.min(input.maxTokens, 4_096),
-      system: input.system,
-      messages: [{ role: "user", content: input.user }],
-    });
+    let response: Awaited<ReturnType<LaneAProviderClient["complete"]>>;
+    try {
+      const client = createLaneAProviderClient({
+        provider: settings.provider,
+        apiKey,
+        baseUrl: settings.baseUrl,
+        anthropicClient: settings.provider === "anthropic" && options.createModelClient ? options.createModelClient() : undefined,
+        fetch: options.providerFetch,
+      });
+      // Same masking as the helper's own questions: nothing key-shaped leaves for the provider.
+      response = await completeWithSettingsFallback(client, settings, {
+        model,
+        maxTokens: Math.min(input.maxTokens, 4_096),
+        system: maskSecretLikeText(input.system),
+        messages: [{ role: "user", content: maskSecretLikeText(input.user) }],
+      });
+    } catch (err) {
+      // Re-thrown as a plain, scrubbed error: provider errors can echo keys or headers,
+      // and callers log what they get.
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`"${entry.name}" did not answer: ${scrubLaneASecrets(message, apiKey)}`);
+    }
     const cost = await priceLaneACall({
       provider: settings.provider,
       model,

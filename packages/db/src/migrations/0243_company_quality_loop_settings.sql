@@ -2,7 +2,7 @@
 -- settings for the self-check pass, the independent finish check (a cheap call to one
 -- of the company's own saved models) and the default reviewer for new code tasks.
 --
--- Numbered 0244 on purpose: another branch uses 0243 (storyline transitions).
+-- Numbered 0243 (renumbered from 0244 at merge time).
 --
 -- Strictly additive: one new table, no existing row touched. No row for a company =
 -- every quality loop OFF, so every company that exists today keeps its behaviour.

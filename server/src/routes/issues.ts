@@ -166,6 +166,7 @@ import {
   applyDefaultReviewerPolicy,
   evaluateQualityDoneCheck,
   evaluateQualitySelfReviewGate,
+  pinQualityLoopPolicyFields,
 } from "../services/quality-loops.js";
 import { evaluateOriginCommitDoneGate } from "../services/origin-commit-gate.js";
 import { evaluateFeatureLaunchDoneGate } from "../services/feature-launch-gate.js";
@@ -606,6 +607,15 @@ async function buildIssueWorkspaceChangeActivityDetails(
     from: summarizeIssueWorkspaceForActivity(previousIssue, names),
     to: summarizeIssueWorkspaceForActivity(nextIssue, names),
   };
+}
+
+/**
+ * Agent quality loops: only a person may switch a task's quality checks on or off. For
+ * any other writer the task keeps what is stored (nothing on a new task), whatever was sent.
+ */
+function pinQualityLoopFieldsForActor<P extends object>(req: Request, next: P | null, previous: unknown): P | null {
+  if (req.actor.type === "board") return next;
+  return pinQualityLoopPolicyFields(next, previous);
 }
 
 function hasExecutionParticipant(value: unknown) {
@@ -5812,9 +5822,10 @@ export function issueRoutes(
       projectId: createAssignmentScope.projectId,
       assigneeAgentId: createBody.assigneeAgentId ?? null,
       requestedPolicy: createBody.executionPolicy,
-      normalizedPolicy: applyActorMonitorScheduledBy(
-        normalizeIssueExecutionPolicy(createBody.executionPolicy),
-        actor.actorType,
+      normalizedPolicy: pinQualityLoopFieldsForActor(
+        req,
+        applyActorMonitorScheduledBy(normalizeIssueExecutionPolicy(createBody.executionPolicy), actor.actorType),
+        null,
       ),
       normalize: normalizeIssueExecutionPolicy,
     });
@@ -6077,9 +6088,10 @@ export function issueRoutes(
       projectId: createBody.projectId ?? parent.projectId ?? null,
       assigneeAgentId: createBody.assigneeAgentId ?? null,
       requestedPolicy: createBody.executionPolicy,
-      normalizedPolicy: applyActorMonitorScheduledBy(
-        normalizeIssueExecutionPolicy(createBody.executionPolicy),
-        actor.actorType,
+      normalizedPolicy: pinQualityLoopFieldsForActor(
+        req,
+        applyActorMonitorScheduledBy(normalizeIssueExecutionPolicy(createBody.executionPolicy), actor.actorType),
+        null,
       ),
       normalize: normalizeIssueExecutionPolicy,
     });
@@ -6253,9 +6265,10 @@ export function issueRoutes(
     const actor = getActorInfo(req);
     const normalizedChildren = [];
     for (const child of requestedChildren) {
-      const executionPolicy = applyActorMonitorScheduledBy(
-        normalizeIssueExecutionPolicy(child.executionPolicy),
-        actor.actorType,
+      const executionPolicy = pinQualityLoopFieldsForActor(
+        req,
+        applyActorMonitorScheduledBy(normalizeIssueExecutionPolicy(child.executionPolicy), actor.actorType),
+        null,
       );
       await assertCanManageIssueMonitor(access, req, sourceIssue.companyId, child.assigneeAgentId ?? null, Boolean(executionPolicy?.monitor));
       const childIssueId = randomUUID();
@@ -6910,9 +6923,10 @@ export function issueRoutes(
       });
     }
     if (req.body.executionPolicy !== undefined) {
-      updateFields.executionPolicy = applyActorMonitorScheduledBy(
-        normalizeIssueExecutionPolicy(req.body.executionPolicy),
-        actor.actorType,
+      updateFields.executionPolicy = pinQualityLoopFieldsForActor(
+        req,
+        applyActorMonitorScheduledBy(normalizeIssueExecutionPolicy(req.body.executionPolicy), actor.actorType),
+        existing.executionPolicy ?? null,
       );
     }
     const previousExecutionPolicy = normalizeIssueExecutionPolicy(existing.executionPolicy ?? null);
