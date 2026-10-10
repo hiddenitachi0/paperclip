@@ -43,6 +43,20 @@ approvals/tasks still live in Paperclip and the web UI.
   followed the same way, and a task with a result page (its "result"
   document) is linked straight to that page.
 
+- Inbound, linked people (Hermes parity slice 1): on the ONE bot a company
+  chose in Paperclip to answer people's questions, someone who is not on the
+  bot's allowlist is no longer simply ignored. If they have linked their
+  Telegram to their Paperclip account (a one-time code from their own profile
+  page, sent as `/link CODE`), their message is answered AS THEM: the
+  company's chosen quick agent first, otherwise a task for the chosen full
+  agent whose answer is posted back here once done (Paperclip's people outbox,
+  polled like the morning reports). The company is always the bot's own; the
+  sender is Telegram's own user id; Paperclip checks that person's rights.
+  Anyone who has not linked gets one polite "link your account first" line
+  (at most every ten minutes) and nothing else, and can never tap a button:
+  callbacks still only work for the allowlist. Allowlisted people keep
+  everything they had, plus `/ask <question>` to ask as their linked account.
+
 Config (DUR-3978 slice 2): the bots come from Paperclip itself — the operator
 connects them in company settings, and this service reads them through the
 same `docker exec` CLI path it already uses for everything else
@@ -69,7 +83,10 @@ import urllib.request
 import uuid
 from collections import defaultdict
 
-DEFAULT_COMPANY_ID = os.environ.get("PAPERCLIP_COMPANY_ID", "7600f03c-c836-4326-8d48-c801813c3a87")
+# The company for an old file bot that does not name its own. There is no
+# built-in default any more (it used to be one hard-coded company): a bot with
+# no company from Paperclip, its file entry or this setting does not start.
+DEFAULT_COMPANY_ID = (os.environ.get("PAPERCLIP_COMPANY_ID") or "").strip() or None
 CONTAINER = os.environ.get("PAPERCLIP_CONTAINER", "docker-server-1")
 API_BASE = os.environ.get("PAPERCLIP_API_BASE", "http://127.0.0.1:3100")
 DATA_DIR = os.environ.get("PAPERCLIP_CLI_DATA_DIR", "/paperclip/cli-state")
@@ -163,8 +180,14 @@ SPOKEN_TEXT_SEND_MAX = 6000
 
 LOCK = threading.Lock()
 
-# Telegram user ids allowed to use the bots; set in main(). Empty means nobody.
-ALLOWED_USER_IDS = set()
+# Per bot (by token): the people the one-time move to per-bot lists kept for a
+# bot that had no list of its own -- only people who had already used THAT
+# bot. Set in main() from the state file (see migrate_legacy_allowlists).
+# There is no instance-wide list any more: a person allowed on one company's
+# bot is never allowed on another's because of it.
+LEGACY_ALLOWED_BY_TOKEN = {}
+# Bots already reported as "no company, not started", so the line is logged once.
+REFUSED_NO_COMPANY = set()
 
 # The bots that should be running right now, keyed by token. Replaced wholesale
 # on every refresh, so a bot removed in Paperclip disappears from here and its
@@ -204,11 +227,15 @@ def fetch_bots_from_api():
         agent_id = b.get("agentId")
         if not token or not agent_id:
             continue
+        company_id = b.get("companyId") if isinstance(b.get("companyId"), str) and b.get("companyId").strip() else None
+        if not company_id:
+            refuse_without_company(b.get("name") or "a bot")
+            continue
         bots.append({
             "agentId": agent_id,
             "name": b.get("name") or "Paperclip",
             "token": token,
-            "companyId": b.get("companyId") or DEFAULT_COMPANY_ID,
+            "companyId": company_id,
             "uiBase": b.get("uiBase") or UI_HOST,
             "allowedUserIds": _normalized_user_ids(b.get("allowedUserIds")),
             # How company_notice_bot picks the company's notice bot.
@@ -220,6 +247,9 @@ def fetch_bots_from_api():
             "botId": b.get("id") if isinstance(b.get("id"), str) and UUID_RE.match(b.get("id")) else None,
             "voiceReplyMode": b.get("voiceReplyMode") if b.get("voiceReplyMode") in VOICE_REPLY_MODES else "when_voice",
             "voice": b.get("voice") if isinstance(b.get("voice"), str) and VOICE_NAME_RE.match(b.get("voice")) else None,
+            # Hermes parity slice 1: the one bot per company that answers
+            # linked people (not just the people on its allowlist).
+            "answersLinkedPeople": b.get("answersLinkedPeople") is True,
             "source": "paperclip",
         })
     return bots
@@ -249,14 +279,19 @@ def load_file_bots():
         token = str(b.get("token") or "").strip()
         if not token or not b.get("agentId"):
             continue
+        company_id = b.get("companyId") or DEFAULT_COMPANY_ID
+        if not company_id:
+            refuse_without_company(b.get("name") or "a bot in the bot file")
+            continue
         bots.append({
             "agentId": b["agentId"],
             "name": b.get("name") or "Paperclip",
             "token": token,
-            "companyId": b.get("companyId") or DEFAULT_COMPANY_ID,
+            "companyId": company_id,
             "uiBase": b.get("uiBase") or UI_HOST,
-            # The file has never carried a per-bot allowlist; those bots keep
-            # using the instance-wide list, exactly as before.
+            # The file has never carried a per-bot allowlist; such a bot is
+            # used only by the people the one-time move kept for it
+            # (migrate_legacy_allowlists).
             "allowedUserIds": set(),
             # A file bot cannot be marked as the company's notice bot, and it
             # counts as older than any bot connected in the app; among file
@@ -298,16 +333,73 @@ def load_bots():
     return merge_bots(api_bots, load_file_bots())
 
 
-def allowed_users_for(bot):
-    """Who may use THIS bot.
+def refuse_without_company(name):
+    """A bot with no company is not started; said once per bot, not every pass."""
+    if name in REFUSED_NO_COMPANY:
+        return
+    REFUSED_NO_COMPANY.add(name)
+    print(f"telegram-bridge: not starting {name}: no company is configured for it "
+          "(connect it in Paperclip, or give its entry in the bot file a companyId)", flush=True)
 
-    A bot configured in the app carries its own list, and that list is the
-    whole answer for that bot. A bot with an empty list — a newly connected one
-    the operator has not filled in yet, or an old file bot — falls back to the
-    instance-wide list that was the only rule before this existed. Never wider
-    than one of those two, and never "everybody": with neither set, nobody.
+
+def legacy_allowed(token):
+    """The people the one-time move kept for this bot (see migrate_legacy_allowlists)."""
+    return set(LEGACY_ALLOWED_BY_TOKEN.get(token) or ())
+
+
+def allowed_users_for(bot):
+    """Who may use THIS bot as its operator (board rights: tasks, Approve).
+
+    Per bot only. A bot configured in the app carries its own list, and that
+    list is the whole answer. A bot with an empty list -- one connected before
+    per-bot lists, or an old file bot -- is used only by the people the
+    one-time move kept for THAT bot: those who had already used it. There is
+    no instance-wide fallback any more, so being allowed on one company's bot
+    never lets anyone use another company's bot (isolation audit, Oct 2026).
+    Everyone else reaches a bot only as a linked Paperclip person, on the bot
+    the company chose for that, with that person's own rights.
     """
-    return set(bot.get("allowedUserIds") or ()) or ALLOWED_USER_IDS
+    return set(bot.get("allowedUserIds") or ()) or legacy_allowed(bot["token"])
+
+
+def migrate_legacy_allowlists(state, bots, env_value, persist=True):
+    """One-time move from the instance-wide list to per-bot lists.
+
+    Before, a bot with an empty list fell back to TELEGRAM_ALLOWED_USER_IDS
+    or, without it, to every private chat that had ever written to ANY bot.
+    On the first start after the change, each such bot keeps only the people
+    from that old list who had already used that specific bot (their private
+    chat is in that bot's chats), so the bots that work today keep working for
+    the people who use them. What was kept is logged and stored in the state
+    file; later starts just read it back. Bots with their own list are not
+    touched. Returns the kept lists, by bot token.
+
+    `persist` is False while Paperclip has not said which bots it has (it is
+    restarting): the move is then worked out for the bots known so far but
+    not stored, and main() does it again, for good, once Paperclip answers.
+    """
+    stored = state.get("legacy_allowed")
+    if isinstance(stored, dict):
+        return {token: {int(u) for u in ids if str(u).isdigit()} for token, ids in stored.items() if isinstance(ids, list)}
+    instance_wide, source = resolve_allowed_user_ids(state, env_value)
+    kept = {}
+    for bot in bots:
+        if bot.get("allowedUserIds"):
+            continue
+        token = bot["token"]
+        used = {c for c in ((state.get("bots") or {}).get(token) or {}).get("chats") or []
+                if isinstance(c, int) and c > 0}
+        keep = sorted(instance_wide & used)
+        kept[token] = set(keep)
+        dropped = len(instance_wide - used)
+        print(f"telegram-bridge: allow-list move: {bot.get('name')} ({str(bot.get('companyId'))[:8]}) keeps "
+              f"{len(keep)} person(s) who already used this bot {keep} (from {source}); "
+              f"{dropped} other(s) on the old instance-wide list are no longer allowed on it", flush=True)
+    if persist:
+        with LOCK:
+            state["legacy_allowed"] = {token: sorted(ids) for token, ids in kept.items()}
+            save_state(state)
+    return kept
 
 
 def load_state():
@@ -905,11 +997,10 @@ def resolve_allowed_user_ids(state, env_value):
 def deliverable_chats(state, token, allowed=None):
     """The chats a bot may send cards to: allowed people's private chats only.
 
-    `allowed` is this bot's own list when it has one (see allowed_users_for).
-    With nothing given it falls back to the instance-wide list, which is what
-    every caller did before per-bot lists existed.
+    `allowed` is who may use this bot (allowed_users_for). With nothing given,
+    nobody: there is no instance-wide list to fall back to any more.
     """
-    permitted = ALLOWED_USER_IDS if allowed is None else allowed
+    permitted = set() if allowed is None else allowed
     return [chat for chat in bots_state(state, token)["chats"] if chat in permitted]
 
 
@@ -1646,6 +1737,8 @@ HELP_TEXT = (
     "• A voice message → {name} hears it and answers the same way; the answer can be read "
     "aloud too (Company settings → Connections → Telegram)\n"
     "• `/task <text>` → always make it a task\n"
+    "• `/ask <question>` → ask as your own linked Paperclip account (only on the bot the company "
+    "chose for people's questions; link first with `/link <code>` from your Paperclip profile)\n"
     "• `/new` → start a fresh conversation\n"
     "• `/cont` → carry on from the last conversation (a conversation ends after 30 quiet minutes)\n"
     "• `/cont last 45 minutes`, `/cont this morning`, `/cont yesterday` → carry on from that time\n"
@@ -2197,6 +2290,201 @@ def notify_morning_reports(state, bots):
                 save_state(state)
             ack_morning_report(company_id, report_id)
 
+# ─── Hermes parity slice 1: linked people ──────────────────────────────────────
+#
+# On the bot a company chose for it (answersLinkedPeople), people who are not
+# on the allowlist can ask questions once they have linked their Telegram to
+# their Paperclip account. Everything that matters is decided in Paperclip
+# (telegram people-ask / people-link): who the sender is, whether they may use
+# this company, what they may see, the daily limit, and the wording of every
+# refusal. The bridge only passes the bot's own id and company (from its
+# config), Telegram's sender id, and the text (as data, in an environment
+# variable), then sends back what Paperclip said.
+
+PEOPLE_HELP_TEXT = (
+    "Hi! I'm {name}. I answer questions about the company for people with a Paperclip account.\n\n"
+    "1. In Paperclip, open your profile and press \"Link Telegram\".\n"
+    "2. Send me /link followed by the code it shows.\n"
+    "3. Then just ask, for example: How did sales go last week?\n\n"
+    "/new starts a fresh conversation. /help shows this again."
+)
+# An unlinked sender gets the "link first" line at most this often; in
+# between, their messages cost nothing (no call into Paperclip at all).
+PEOPLE_UNLINKED_QUIET_SECONDS = 10 * 60
+# At most this many /link tries per sender in the window (Paperclip has its own
+# limit too); a guess at a code is not worth a call into Paperclip after that.
+PEOPLE_LINK_TRIES = 5
+PEOPLE_LINK_WINDOW_SECONDS = 15 * 60
+PEOPLE_MESSAGE_MAX_CHARS = 4000
+PEOPLE_ANSWERS_REMEMBERED = 500
+LINK_CODE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 -]{0,39}$")
+TELEGRAM_USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
+TASK_IDENTIFIER_RE = re.compile(r"^[A-Z][A-Z0-9]{0,15}-\d{1,9}$")
+# Per (bot token, sender): until when an unlinked sender is not answered again,
+# their recent /link tries, and whether their next question starts fresh.
+PEOPLE_UNLINKED_UNTIL = {}
+PEOPLE_LINK_ATTEMPTS = {}
+PEOPLE_FRESH = set()
+
+
+def answers_linked_people(bot):
+    """This bot answers linked people (the company chose it in Paperclip)."""
+    return bot.get("answersLinkedPeople") is True and isinstance(bot.get("botId"), str) and bool(UUID_RE.match(bot["botId"]))
+
+
+def handle_person_message(state, bot, chat_id, sender, m, text):
+    """A private message from someone not on the allowlist, on a people bot."""
+    token = bot["token"]
+    key = (token, sender)
+    command = text.lower().split(maxsplit=1)[0] if text else ""
+    if command == "/link":
+        words = text.split(maxsplit=1)
+        link_person(bot, chat_id, sender, m, words[1] if len(words) > 1 else "")
+        return
+    if time.time() < PEOPLE_UNLINKED_UNTIL.get(key, 0):
+        return  # told them how to link a moment ago; stay quiet
+    if command in ("/start", "/help"):
+        send_plain(token, chat_id, PEOPLE_HELP_TEXT.format(name=bot.get("name") or "Paperclip"))
+        return
+    if command == "/new":
+        PEOPLE_FRESH.add(key)
+        send_plain(token, chat_id, "🆕 Fresh start. Your next question begins a new conversation.")
+        return
+    if not text or command.startswith("/"):
+        if not text and not (isinstance(m.get("voice"), dict) or isinstance(m.get("audio"), dict)):
+            return  # a sticker, a photo, ...: nothing to answer
+        send_plain(token, chat_id, (
+            "I can only read typed questions here. /link, /new and /help are the only commands; "
+            "anything else, just write it as a question."))
+        return
+    fresh = key in PEOPLE_FRESH
+    PEOPLE_FRESH.discard(key)
+    ask_as_person(state, bot, chat_id, sender, text, fresh=fresh)
+
+
+def link_person(bot, chat_id, sender, m, code):
+    """`/link CODE`: link the sender's Telegram to the Paperclip person whose code it is."""
+    token = bot["token"]
+    key = (token, sender)
+    code = (code or "").strip()
+    if not code:
+        send_plain(token, chat_id, "Send /link followed by the code from your Paperclip profile page, for example: /link ABCD2345")
+        return
+    now = time.time()
+    tries = [t for t in PEOPLE_LINK_ATTEMPTS.get(key, []) if now - t < PEOPLE_LINK_WINDOW_SECONDS]
+    if len(tries) >= PEOPLE_LINK_TRIES:
+        PEOPLE_LINK_ATTEMPTS[key] = tries
+        send_plain(token, chat_id, "Too many tries. Wait 15 minutes, make a new code on your Paperclip profile page, and try again.")
+        return
+    PEOPLE_LINK_ATTEMPTS[key] = tries + [now]
+    if not LINK_CODE_RE.match(code):
+        send_plain(token, chat_id, "That doesn't look like a code. Copy it from your Paperclip profile page.")
+        return
+    env = {"CD": code}
+    parts = ["telegram", "people-link", bot["botId"], "-C", bot["companyId"],
+             "--telegram-user-id", str(sender), "--code", '"$CD"']
+    username = str((m.get("from") or {}).get("username") or "")
+    if TELEGRAM_USERNAME_RE.match(username):
+        env["TU"] = username
+        parts += ["--telegram-username", '"$TU"']
+    res = cli_env(env, *parts)
+    if not isinstance(res, dict) or res.get("ok") is False:
+        send_plain(token, chat_id, "I couldn't reach Paperclip to link your account. Please try again in a few minutes.")
+        return
+    if res.get("outcome") == "linked":
+        PEOPLE_UNLINKED_UNTIL.pop(key, None)
+        PEOPLE_LINK_ATTEMPTS.pop(key, None)
+    reply = str(res.get("reply") or "").strip()
+    if reply:
+        send_plain(token, chat_id, reply)
+
+
+def ask_as_person(state, bot, chat_id, sender, text, fresh=False):
+    """Ask Paperclip as the linked person and send back what it said."""
+    token = bot["token"]
+    if len(text) > PEOPLE_MESSAGE_MAX_CHARS:
+        send_plain(token, chat_id, f"That message is too long. Please keep a question under {PEOPLE_MESSAGE_MAX_CHARS} characters.")
+        return
+    with TypingIndicator(token, chat_id):
+        if not paperclip_ready():
+            send_plain(token, chat_id, "Paperclip is restarting. I'll ask as soon as it's back, usually within a minute.")
+            if not wait_for_paperclip():
+                send_plain(token, chat_id, "Paperclip is still not back, so nothing was asked. Please send it again in a few minutes.")
+                return
+        parts = ["telegram", "people-ask", bot["botId"], "-C", bot["companyId"],
+                 "--telegram-user-id", str(sender), "--chat-id", str(chat_id), "--message", '"$TT"']
+        if fresh:
+            parts.append("--fresh")
+        res = cli_env({"TT": text}, *parts, timeout=CHAT_SEND_TIMEOUT_SECONDS)
+    if res is None:
+        send_plain(token, chat_id, "I didn't hear back from Paperclip, so I can't tell whether that was asked. Check Paperclip before sending it again.")
+        return
+    if not isinstance(res, dict) or res.get("ok") is False:
+        send_plain(token, chat_id, "Paperclip could not take that question right now. Please try again in a few minutes.")
+        return
+    if res.get("outcome") == "not_linked":
+        PEOPLE_UNLINKED_UNTIL[(token, sender)] = time.time() + PEOPLE_UNLINKED_QUIET_SECONDS
+    reply = str(res.get("reply") or "").strip()
+    if reply:
+        send_plain(token, chat_id, reply)
+
+
+def ack_people_answer(company_id, answer_id, outcome="delivered"):
+    res = cli("telegram", "people-ack", answer_id, "-C", company_id, "--outcome", outcome)
+    return isinstance(res, dict) and res.get("ok") is not False
+
+
+def notify_people_answers(state, bots):
+    """Send each answer waiting in a company's people outbox, once.
+
+    Only through the bot the question came in on (by its Paperclip id), only if
+    that bot still answers linked people in that company, and only into the chat
+    Paperclip recorded (the asker's own private chat). Remembered in the state
+    file the moment Telegram took it, before the acknowledgement, so a lost
+    acknowledgement never sends it twice.
+    """
+    people_bots = {b["botId"]: b for b in bots if answers_linked_people(b)}
+    if not people_bots:
+        return
+    with LOCK:
+        remembered = list(state.get("sent_people_answers", []))
+    sent_before = set(remembered)
+    for company_id in sorted({b["companyId"] for b in people_bots.values()}):
+        data = cli("telegram", "people-outbox", "-C", company_id)
+        items = data.get("answers") if isinstance(data, dict) and data.get("ok") is not False else None
+        for it in items if isinstance(items, list) else []:
+            if not isinstance(it, dict):
+                continue
+            answer_id = it.get("id")
+            if not isinstance(answer_id, str) or not UUID_RE.match(answer_id):
+                continue
+            if answer_id in sent_before:
+                ack_people_answer(company_id, answer_id)
+                continue
+            bot = people_bots.get(it.get("botId"))
+            if bot is None or bot["companyId"] != company_id:
+                continue  # that bot is not running (or no longer answers people); Paperclip retires it after a day
+            chat = str(it.get("chatId") or "")
+            if not chat.isdigit():
+                ack_people_answer(company_id, answer_id, "failed")
+                continue
+            text = str(it.get("text") or "").strip()
+            if not text:
+                ack_people_answer(company_id, answer_id, "failed")
+                continue
+            ident = it.get("taskIdentifier")
+            if isinstance(ident, str) and TASK_IDENTIFIER_RE.match(ident):
+                text += f"\n\nOpen the task: {bot['uiBase']}/issues/{ident}"
+            if not send_text_checked(bot["token"], int(chat), text):
+                continue  # Telegram refused; the next pass tries again
+            sent_before.add(answer_id)
+            remembered.append(answer_id)
+            with LOCK:
+                state["sent_people_answers"] = remembered[-PEOPLE_ANSWERS_REMEMBERED:]
+                save_state(state)
+            ack_people_answer(company_id, answer_id)
+
+
 # Telegram limit for an inline button's callback_data.
 CALLBACK_DATA_MAX_BYTES = 64
 
@@ -2204,9 +2492,9 @@ def handle_callback(cq):
     data = cq.get("data", "")
     action, _, rest = data.partition(":")
     tgtoken = cq["_token"]
-    # This bot's own list when the caller supplied one, otherwise the
-    # instance-wide list — same rule as before for a bot that has no list.
-    if (cq.get("from") or {}).get("id") not in (cq.get("_allowed") or ALLOWED_USER_IDS):
+    # Who may use THIS bot (allowed_users_for, supplied by handle_updates).
+    # Nothing supplied means nobody: there is no instance-wide fallback.
+    if (cq.get("from") or {}).get("id") not in (cq.get("_allowed") or set()):
         print("telegram-bridge: refused a button tap from a Telegram user who is not allowed", flush=True)
         tg(tgtoken, "answerCallbackQuery", callback_query_id=cq.get("id"), text="Not allowed")
         return
@@ -2242,7 +2530,17 @@ def handle_message(state, bot, m):
         return
     # Anyone can find a bot and write to it. A stranger gets no reply, so the
     # bot does not even confirm it is alive, and is never added to its chats.
-    if (m.get("chat") or {}).get("type") != "private" or (m.get("from") or {}).get("id") not in allowed_users_for(bot):
+    # The one exception is the bot a company chose to answer linked people:
+    # there a private message from someone not on the allowlist goes to
+    # handle_person_message, which answers only people Paperclip knows (and a
+    # stranger gets one "link your account first" line). Never a group chat,
+    # and never added to the bot's chats (cards and approvals never go there).
+    sender = (m.get("from") or {}).get("id")
+    is_private = (m.get("chat") or {}).get("type") == "private"
+    if not is_private or sender not in allowed_users_for(bot):
+        if is_private and answers_linked_people(bot) and isinstance(sender, int) and sender == chat_id:
+            handle_person_message(state, bot, chat_id, sender, m, text)
+            return
         print(f"telegram-bridge: ignored a message to {bot['name']} from a Telegram user or chat that is not allowed", flush=True)
         return
     register_chat(state, bot["token"], chat_id)
@@ -2267,6 +2565,17 @@ def handle_message(state, bot, m):
         return
     if low == "/looks":
         show_looks(bot, chat_id)
+        return
+    if answers_linked_people(bot) and command == "/link":
+        words = text.split(maxsplit=1)
+        link_person(bot, chat_id, sender, m, words[1] if len(words) > 1 else "")
+        return
+    if answers_linked_people(bot) and command == "/ask":
+        words = text.split(maxsplit=1)
+        if len(words) < 2 or not words[1].strip():
+            send_plain(token, chat_id, "Write your question after /ask, for example: /ask How did sales go last week?")
+            return
+        ask_as_person(state, bot, chat_id, sender, words[1].strip())
         return
     if low == "/new":
         set_conversation(state, token, chat_id, None)
@@ -2440,13 +2749,13 @@ def refresh_bots(state):
 
 def main():
     state = load_state()
-    global ALLOWED_USER_IDS
-    ALLOWED_USER_IDS, source = resolve_allowed_user_ids(state, os.environ.get("TELEGRAM_ALLOWED_USER_IDS", ""))
-    if ALLOWED_USER_IDS:
-        print(f"telegram-bridge: {len(ALLOWED_USER_IDS)} Telegram user(s) allowed by default ({source})", flush=True)
-    else:
-        print("telegram-bridge: nobody is allowed to use the bots by default; set TELEGRAM_ALLOWED_USER_IDS "
-              "or add people to each bot in Paperclip", flush=True)
+    global LEGACY_ALLOWED_BY_TOKEN
+    # Before any bot thread starts: who may use a bot is decided per bot.
+    env_allowed = os.environ.get("TELEGRAM_ALLOWED_USER_IDS", "")
+    if "legacy_allowed" not in state:
+        wait_for_paperclip()
+    first = load_bots()
+    LEGACY_ALLOWED_BY_TOKEN = migrate_legacy_allowlists(state, first, env_allowed, persist=LAST_API_BOTS is not None)
     bots = refresh_bots(state)
     if bots:
         companies = len({b["companyId"] for b in bots})
@@ -2458,6 +2767,9 @@ def main():
     while True:
         try:
             bots = refresh_bots(state)
+            if "legacy_allowed" not in state and LAST_API_BOTS is not None:
+                # Paperclip was down at start; finish the one-time move now.
+                LEGACY_ALLOWED_BY_TOKEN = migrate_legacy_allowlists(state, bots, env_allowed)
         except Exception as e:
             print(f"config-refresh error: {e}", flush=True)
         try:
@@ -2492,6 +2804,10 @@ def main():
             notify_morning_reports(state, bots)
         except Exception as e:
             print(f"morning-report-notify error: {e}", flush=True)
+        try:
+            notify_people_answers(state, bots)
+        except Exception as e:
+            print(f"people-answer-notify error: {e}", flush=True)
         try:
             if time.time() - state.get("disk_checked_at", 0) > 600:
                 state["disk_checked_at"] = time.time()

@@ -154,6 +154,7 @@ export { dataReadEvents } from "./data_read_events.js";
 export { trustedCodeFingerprints } from "./trusted_code_fingerprints.js";
 export { watchers, watcherPricePoints, watcherAlerts, watcherWebPageSnapshots } from "./watchers.js";
 export { morningReportOutbox } from "./morning_report.js";
+export { telegramChatRequests, telegramChatSettings, telegramPersonLinks } from "./telegram_chat.js";
 export { mailInboxes, mailInboxFilters, mailSecretaryItems } from "./mail_secretary.js";
 export { mailAccounts, mailMessages } from "./mail_accounts.js";
 export { mailMessageClassifications, mailUrgencyAlerts } from "./mail_urgency.js";
