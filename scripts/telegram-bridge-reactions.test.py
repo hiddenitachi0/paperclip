@@ -70,7 +70,8 @@ class ParsingTests(unittest.TestCase):
 class DispatchTests(unittest.TestCase):
     def setUp(self):
         self.state = {"bots": {BOT["token"]: {"offset": 0, "chats": [OPERATOR]}}, "notified": []}
-        bridge.ALLOWED_USER_IDS = {OPERATOR}
+        # Per bot now (no instance-wide list): every test bot keeps these people.
+        bridge.legacy_allowed = lambda token: {OPERATOR}
         self.patches = [mock.patch.object(bridge, "save_state"),
                         mock.patch.object(bridge, "cli_env", return_value={"ok": True})]
         _, self.cli_env = [p.start() for p in self.patches]
@@ -110,7 +111,8 @@ class FollowUpTests(unittest.TestCase):
 
     def setUp(self):
         self.state = {"bots": {BOT["token"]: {"offset": 0, "chats": [OPERATOR]}}, "notified": []}
-        bridge.ALLOWED_USER_IDS = {OPERATOR}
+        # Per bot now (no instance-wide list): every test bot keeps these people.
+        bridge.legacy_allowed = lambda token: {OPERATOR}
         self.save = mock.patch.object(bridge, "save_state")
         self.save.start()
 
