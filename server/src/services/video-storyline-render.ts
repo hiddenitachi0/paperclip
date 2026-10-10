@@ -33,7 +33,7 @@ import { loadApprovedStillDataUri } from "./video-storyline-still-frame.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
 import { lockStorylineRow, videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
 import { executePinnedHttpRequest, validateAndResolveFetchUrl } from "./safe-outbound-fetch.js";
-import { mediaStudioKeyRef } from "./media-studio-company-keys.js";
+import { companyMediaStudioKeyRef, mediaStudioKeyRef } from "./media-studio-company-keys.js";
 import {
   castIdentityNames,
   castPeople,
@@ -83,7 +83,10 @@ async function safeFetch(url: string, init?: RequestInit, maxResponseBytes = 8 *
   }
 }
 
-function buildProvider(providerId: VideoStorylineProvider, apiKey: string, model: string | null): MediaJobProvider {
+/** Storyline strip: AI transitions use the same guarded fetch and provider clients as shot renders. */
+export { safeFetch as storylineSafeFetch };
+
+export function buildProvider(providerId: VideoStorylineProvider, apiKey: string, model: string | null): MediaJobProvider {
   if (providerId === "fal") {
     return new FalVideoProvider(apiKey, safeFetch, model ?? undefined);
   }
@@ -184,13 +187,38 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
   const approvals = approvalService(db);
   const nowOf = () => deps.now?.() ?? new Date();
 
-  async function resolveProviderApiKey(companyId: string, providerId: VideoStorylineProvider, actorId: string): Promise<string> {
+  /**
+   * The Fal/Sogni key for one company's render: the company's own pick, else
+   * the instance's key. That instance key is a secret OWNED by one company
+   * (the instance owner's); secrets.resolveSecretValueForVideoRender refuses
+   * a secret of any other company ("Secret must belong to same company"), so
+   * this fallback can only ever reach this company's own secret -- never
+   * another company's (Phase 0 check, tested in
+   * video-storyline-transitions-service.test.ts). AI transitions pass
+   * companyKeyOnly: they never fall back on the instance key (decision 15).
+   */
+  async function resolveProviderApiKey(
+    companyId: string,
+    providerId: VideoStorylineProvider,
+    actorId: string,
+    opts: { companyKeyOnly?: boolean } = {},
+  ): Promise<string> {
     const plugin = await registry.getByKey(MEDIA_STUDIO_PLUGIN_KEY);
     if (!plugin) throw unprocessable("The media-studio plugin is not installed, so there is no Fal/Sogni key configured.");
     const config = await registry.getConfig(plugin.id);
     const cfg = (config?.configJson ?? {}) as Record<string, unknown>;
+    const service = providerId === "fal" ? "fal" : "sogni";
+    if (opts.companyKeyOnly) {
+      const own = await companyMediaStudioKeyRef(db, plugin.id, companyId, service);
+      if (!own) {
+        throw unprocessable(
+          `AI transitions use this company's own ${providerId === "fal" ? "Fal.ai" : "Sogni"} key, and none is picked yet. The company's owner or an admin can pick one in Media Studio's Settings tab.`,
+        );
+      }
+      return secrets.resolveSecretValueForVideoRender(companyId, own, { actorId });
+    }
     // The company's own key (Media Studio's Settings tab), else the instance's.
-    const ref = await mediaStudioKeyRef(db, plugin.id, companyId, providerId === "fal" ? "fal" : "sogni", cfg);
+    const ref = await mediaStudioKeyRef(db, plugin.id, companyId, service, cfg);
     if (!ref) {
       throw unprocessable(
         `No ${providerId === "fal" ? "Fal.ai" : "Sogni"} API key is set for this company yet. The company's owner or an admin can pick one in Media Studio's Settings tab.`,
@@ -1001,5 +1029,17 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     return { advanced, failed };
   }
 
-  return { estimate, startRender, reRenderShot, renderPreview, cancelRender, tick };
+  return {
+    estimate,
+    startRender,
+    reRenderShot,
+    renderPreview,
+    cancelRender,
+    tick,
+    // Storyline strip (AI transitions) reuses these.
+    resolveProviderApiKey,
+    castVideoInput,
+    downloadResultBytes,
+    downloadClipFromStorage,
+  };
 }

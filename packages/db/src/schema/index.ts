@@ -166,7 +166,7 @@ export { companyPaymentSettings } from "./company_payment_settings.js";
 export { companyProductGrabberSettings, productGrabberStagedItems } from "./product_grabber.js";
 export { emailCompanySettings } from "./email_company_settings.js";
 export { paymentCards } from "./payment_cards.js";
-export { videoStorylines, videoScenes, videoShots, videoShotRenderJobs, videoStorylineDirectorRuns } from "./video_storylines.js";
+export { videoStorylines, videoScenes, videoShots, videoShotRenderJobs, videoStorylineDirectorRuns, videoTransitions, videoTransitionTakes } from "./video_storylines.js";
 export { videoStorylineDirectorConversations } from "./video_storyline_director_conversations.js";
 export { videoStorylineDirectorMessages } from "./video_storyline_director_messages.js";
 export { tradingStrategies, tradingOrders, tradingFifoLots, tradingLedgerEntries, tradingDailyStats } from "./trading.js";
