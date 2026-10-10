@@ -7,6 +7,10 @@ import type {
   CompanyPortabilityImportResult,
   CompanyPortabilityPreviewRequest,
   CompanyPortabilityPreviewResult,
+  CompanyMarkMigratedResult,
+  CompanyMigrationVerifyReport,
+  CompanyUndoMigratedResult,
+  MarkCompanyMigrated,
   UpdateCompanyBranding,
 } from "@paperclipai/shared";
 import { api } from "./client";
@@ -58,4 +62,11 @@ export const companiesApi = {
     api.post<CompanyPortabilityPreviewResult>("/companies/import/preview", data),
   importBundle: (data: CompanyPortabilityImportRequest) =>
     api.post<CompanyPortabilityImportResult>("/companies/import", data),
+  // Franchise migration cutover (server/src/routes/company-migration.ts).
+  verifyMigration: (companyId: string) =>
+    api.get<CompanyMigrationVerifyReport>(`/companies/${companyId}/migration/verify`),
+  markMigrated: (companyId: string, data: MarkCompanyMigrated) =>
+    api.post<CompanyMarkMigratedResult>(`/companies/${companyId}/migration/mark-migrated`, data),
+  undoMigrated: (companyId: string) =>
+    api.post<CompanyUndoMigratedResult>(`/companies/${companyId}/migration/undo`, {}),
 };

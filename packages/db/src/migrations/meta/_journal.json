@@ -1695,6 +1695,13 @@
       "when": 1791583071889,
       "tag": "0242_helper_investigation_limits",
       "breakpoints": true
+    },
+    {
+      "idx": 243,
+      "version": "7",
+      "when": 1791656745982,
+      "tag": "0243_company_migrated_to",
+      "breakpoints": true
     }
   ]
 }

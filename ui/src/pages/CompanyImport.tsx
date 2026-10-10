@@ -6,7 +6,16 @@ import type {
   CompanyPortabilityPreviewResult,
   CompanyPortabilitySource,
   CompanyPortabilityAdapterOverride,
+  CompanyPortabilityImportResult,
 } from "@paperclipai/shared";
+import { useCompanyRole } from "../hooks/useCompanyRole";
+import {
+  EMPTY_IMPORT_SECRETS_STATE,
+  ImportSecretsFields,
+  importSecretsBlocker,
+  type ImportSecretsState,
+} from "../components/company-migration/ImportSecretsFields";
+import { ImportResultView } from "../components/company-migration/ImportResultView";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useToastActions } from "../context/ToastContext";
@@ -691,6 +700,17 @@ export function CompanyImport() {
   const [targetMode, setTargetMode] = useState<"existing" | "new">("new");
   const [newCompanyName, setNewCompanyName] = useState("");
 
+  // Franchise migration: the sealed secrets file and the result screen.
+  const [importSecrets, setImportSecrets] = useState<ImportSecretsState>(EMPTY_IMPORT_SECRETS_STATE);
+  const [importResult, setImportResult] = useState<{
+    result: CompanyPortabilityImportResult;
+    issuePrefix: string;
+  } | null>(null);
+  const companyRole = useCompanyRole(selectedCompanyId);
+  // A new company is an instance-admin import anyway; an existing one needs
+  // its owner or an admin (routes/companies.ts assertMayImportSecrets).
+  const canBringSecrets = targetMode === "new" ? companyRole.isInstanceAdmin : companyRole.canManageConnections;
+
   // Preview state
   const [importPreview, setImportPreview] =
     useState<CompanyPortabilityPreviewResult | null>(null);
@@ -861,6 +881,9 @@ export function CompanyImport() {
         nameOverrides: buildFinalNameOverrides(),
         selectedFiles: buildSelectedFiles(),
         adapterOverrides: buildFinalAdapterOverrides(),
+        ...(importSecrets.file && canBringSecrets
+          ? { encryptedSecretsBundle: importSecrets.file.content, secretsPassphrase: importSecrets.passphrase }
+          : {}),
       });
     },
     onSuccess: async (result) => {
@@ -878,14 +901,15 @@ export function CompanyImport() {
         ?? refreshedSession?.session?.userId
         ?? null;
       await applyImportedSidebarOrder(importPreview, result, sidebarOrderUserId);
-      setSelectedCompanyId(importedCompany.id);
       pushToast({
         tone: "success",
         title: "Import complete",
         body: `${result.company.name}: ${result.agents.length} agent${result.agents.length === 1 ? "" : "s"} processed.`,
       });
-      // Force a fresh dashboard load so newly imported agents are immediately visible.
-      window.location.assign(`/${importedCompany.issuePrefix}/dashboard`);
+      setImportSecrets(EMPTY_IMPORT_SECRETS_STATE);
+      // Show what arrived and the "Verify destination" checklist first; the
+      // person opens the company from there.
+      setImportResult({ result, issuePrefix: importedCompany.issuePrefix });
     },
     onError: (err) => {
       pushToast({
@@ -1109,6 +1133,21 @@ export function CompanyImport() {
     return <EmptyState icon={Download} message="Select a company to import into." />;
   }
 
+  if (importResult) {
+    return (
+      <ImportResultView
+        result={importResult.result}
+        onOpenCompany={() => {
+          setSelectedCompanyId(importResult.result.company.id);
+          // Force a fresh dashboard load so newly imported agents are immediately visible.
+          window.location.assign(`/${importResult.issuePrefix}/dashboard`);
+        }}
+      />
+    );
+  }
+
+  const secretsBlocker = canBringSecrets ? importSecretsBlocker(importSecrets) : null;
+
   return (
     <div>
       {/* Source form section */}
@@ -1247,6 +1286,13 @@ export function CompanyImport() {
           </select>
         </Field>
 
+        <ImportSecretsFields
+          canBringSecrets={canBringSecrets}
+          state={importSecrets}
+          onChange={setImportSecrets}
+          onReadError={(message) => pushToast({ tone: "error", title: "Secrets file", body: message })}
+        />
+
         <div className="flex flex-wrap items-center gap-2">
           <Button
             size="sm"
@@ -1307,11 +1353,15 @@ export function CompanyImport() {
           />
 
           {/* Import button — below renames */}
-          <div className="mx-5 mt-3 flex flex-wrap justify-end gap-2">
+          <div className="mx-5 mt-3 flex flex-wrap items-center justify-end gap-2">
+            {secretsBlocker && (
+              <span className="text-xs text-destructive" data-testid="import-secrets-blocker">{secretsBlocker}</span>
+            )}
             <Button
               size="sm"
               onClick={() => importMutation.mutate()}
-              disabled={importMutation.isPending || hasErrors || selectedCount === 0}
+              disabled={importMutation.isPending || hasErrors || selectedCount === 0 || Boolean(secretsBlocker)}
+              title={secretsBlocker ?? undefined}
             >
               <Download className="mr-1.5 h-3.5 w-3.5" />
               {importMutation.isPending

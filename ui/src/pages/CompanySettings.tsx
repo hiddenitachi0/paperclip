@@ -17,6 +17,7 @@ import { Link } from "@/lib/router";
 import { CacheSettingsSection } from "../components/CacheSettingsSection";
 import { HelperSettingsSection } from "../components/helper/HelperSettingsSection";
 import { SecurityReviewSettingsSection } from "../components/SecurityReviewSettingsSection";
+import { MoveCompanySection } from "../components/company-migration/MoveCompanySection";
 import { Settings, CloudUpload, Download, Plug, Upload, Image } from "lucide-react";
 import { CompanyPatternIcon } from "../components/CompanyPatternIcon";
 import { isDefaultSkin, setDefaultSkin } from "../lib/company-branding";
@@ -482,6 +483,9 @@ export function CompanySettings() {
           </div>
         </div>
       </div>
+
+      {/* Franchise migration: verify after import, mark the old copy as moved. */}
+      <MoveCompanySection company={selectedCompany} />
 
       {/* Danger Zone */}
       <div className="space-y-4">

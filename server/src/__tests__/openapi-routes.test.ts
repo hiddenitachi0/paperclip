@@ -146,6 +146,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "brag.ts",
   // Ask Paperclip helper routes (helper overlay, Phase 1) are board-only and not yet in the public OpenAPI document.
   "helper.ts",
+  // Franchise migration cutover routes (verify destination, mark as migrated, undo) are board-only and not yet in the public OpenAPI document.
+  "company-migration.ts",
 ]);
 
 function createApp() {

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { openSecretBundle } from "../services/portable-secret-bundle.js";
+import { openSecretBundle, sealSecretBundle } from "../services/portable-secret-bundle.js";
 import type { CompanyPortabilityFileEntry } from "@paperclipai/shared";
 
 const companySvc = {
@@ -1238,6 +1238,57 @@ describe("company portability", () => {
       projectWorkspaceId: "workspace-imported",
       title: "Write launch task",
     }));
+  });
+
+  it("reports which secrets arrived from a sealed secrets file and which still need a value", async () => {
+    const portability = companyPortabilityService({} as any);
+    companySvc.create.mockResolvedValue({ id: "company-imported", name: "Imported Paperclip" });
+    accessSvc.ensureMembership.mockResolvedValue(undefined);
+    agentSvc.list.mockResolvedValue([]);
+    projectSvc.list.mockResolvedValue([]);
+    projectSvc.create.mockResolvedValue({ id: "project-imported", name: "Launch", urlKey: "launch" });
+
+    const files = {
+      "COMPANY.md": ["---", 'schema: "agentcompanies/v1"', 'name: "Imported Paperclip"', "---", ""].join("\n"),
+      "projects/launch/PROJECT.md": ["---", 'name: "Launch"', "---", ""].join("\n"),
+      ".paperclip.yaml": [
+        'schema: "paperclip/v1"',
+        "projects:",
+        "  launch:",
+        "    inputs:",
+        "      env:",
+        "        SHOP_TOKEN:",
+        '          kind: "secret"',
+        '          requirement: "optional"',
+        "        MAIL_PASSWORD:",
+        '          kind: "secret"',
+        '          requirement: "optional"',
+        "",
+      ].join("\n"),
+    };
+    const bundle = sealSecretBundle({ "project:launch:SHOP_TOKEN": "shpat_value" }, "correct horse battery");
+
+    const result = await portability.importBundle({
+      source: { type: "inline", rootPath: "paperclip-demo", files },
+      include: { company: true, agents: false, projects: true, issues: false },
+      target: { mode: "new_company", newCompanyName: "Imported Paperclip" },
+      collisionStrategy: "rename",
+      encryptedSecretsBundle: bundle,
+      secretsPassphrase: "correct horse battery",
+    }, "user-1");
+
+    expect(result.secretsReport).toEqual({
+      carried: true,
+      arrived: ["project:launch:SHOP_TOKEN"],
+      notArrived: ["project:launch:MAIL_PASSWORD"],
+    });
+    // Keys only, never the value.
+    expect(JSON.stringify(result)).not.toContain("shpat_value");
+    expect(secretSvc.create).toHaveBeenCalledWith(
+      "company-imported",
+      expect.objectContaining({ value: "shpat_value" }),
+      expect.anything(),
+    );
   });
 
   it("normalizes invalid imported project icon names to null", async () => {
