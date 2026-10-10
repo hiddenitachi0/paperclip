@@ -4556,6 +4556,44 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     expect(childWithExplicitNull.assigneeAdapterOverrides).toBeNull();
   });
 
+  it("never stores an inherited-from marker a caller sent; only the server writes it", async () => {
+    const companyId = randomUUID();
+    const parentIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: false });
+
+    const forgedMarker = { issueId: randomUUID(), identifier: "FAKE-1" };
+    const standalone = await svc.create(companyId, {
+      title: "Not a sub-task",
+      assigneeAdapterOverrides: { adapterConfig: { effort: "low" }, inheritedFrom: forgedMarker },
+    });
+    expect(standalone.assigneeAdapterOverrides).toEqual({ adapterConfig: { effort: "low" } });
+
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      title: "Parent issue",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAdapterOverrides: { adapterConfig: { effort: "max" } },
+    });
+    const child = await svc.create(companyId, {
+      parentId: parentIssueId,
+      title: "Child with only a forged marker",
+      assigneeAdapterOverrides: { inheritedFrom: forgedMarker },
+    });
+    expect(child.assigneeAdapterOverrides).toEqual({
+      adapterConfig: { effort: "max" },
+      inheritedFrom: { issueId: parentIssueId },
+    });
+  });
+
   it("keeps an explicit child model/effort override on the createChild helper route too", async () => {
     const companyId = randomUUID();
     const parentIssueId = randomUUID();

@@ -1415,6 +1415,127 @@ describe("agent issue mutation checkout ownership", () => {
       .expect(200);
   });
 
+  // Security: only a person may set a task's model/effort or any adapter setting.
+  // A task override is applied last at dispatch (over an approved boost grant),
+  // so an agent setting it would be an unapproved model boost.
+  it("keeps the stored model/effort when an agent PATCHes its own task's override", async () => {
+    const stored = { adapterConfig: { model: "claude-sonnet-5", effort: "medium" } };
+    mockIssueService.getById.mockResolvedValue(
+      makeIssue({ assigneeAgentId: ownerAgentId, assigneeAdapterOverrides: stored }),
+    );
+    const app = await createApp(ownerActor());
+
+    const res = await request(app)
+      .patch(`/api/issues/${issueId}`)
+      .send({
+        title: "Still my task",
+        assigneeAdapterOverrides: {
+          adapterConfig: { model: "claude-opus-5", effort: "max", extraArgs: ["--dangerously-skip-permissions"] },
+        },
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockIssueService.update).toHaveBeenCalledTimes(1);
+    const [, persistedPatch] = mockIssueService.update.mock.calls[0];
+    expect(persistedPatch).not.toHaveProperty("assigneeAdapterOverrides");
+  });
+
+  it("lets an agent only switch its task to the cheap preset, keeping the stored setting", async () => {
+    const stored = { adapterConfig: { model: "claude-sonnet-5" } };
+    mockIssueService.getById.mockResolvedValue(
+      makeIssue({ assigneeAgentId: ownerAgentId, assigneeAdapterOverrides: stored }),
+    );
+    const app = await createApp(ownerActor());
+
+    await request(app)
+      .patch(`/api/issues/${issueId}`)
+      .send({ assigneeAdapterOverrides: { modelProfile: "cheap", adapterConfig: { model: "claude-opus-5" } } })
+      .expect(200);
+
+    const [, persistedPatch] = mockIssueService.update.mock.calls[0];
+    expect(persistedPatch.assigneeAdapterOverrides).toEqual({
+      adapterConfig: { model: "claude-sonnet-5" },
+      modelProfile: "cheap",
+    });
+  });
+
+  it("ignores an agent's model/effort on a new sub-task so the parent's setting flows down", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue({ assigneeAgentId: ownerAgentId }));
+    const app = await createApp(ownerActor());
+
+    const res = await request(app)
+      .post(`/api/issues/${issueId}/children`)
+      .send({
+        title: "Sub-task",
+        status: "todo",
+        assigneeAdapterOverrides: {
+          adapterConfig: { model: "claude-opus-5", effort: "max" },
+          inheritedFrom: { issueId: "11111111-1111-4111-8111-111111111111", identifier: "PAP-1" },
+        },
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockIssueService.createChild).toHaveBeenCalledTimes(1);
+    const [, childInput] = mockIssueService.createChild.mock.calls[0];
+    // Left out entirely: the service then copies the parent's model/effort.
+    expect(childInput).not.toHaveProperty("assigneeAdapterOverrides");
+  });
+
+  it("ignores an agent's model/effort on a new task but keeps an explicit opt-out", async () => {
+    const app = await createApp(ownerActor());
+
+    await request(app)
+      .post(`/api/companies/${companyId}/issues`)
+      .send({ title: "Agent task", assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-5" } } });
+    await request(app)
+      .post(`/api/companies/${companyId}/issues`)
+      .send({ title: "Agent task 2", assigneeAdapterOverrides: null });
+
+    const calls = mockIssueService.create.mock.calls.map(([, input]) => input as Record<string, unknown>);
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).not.toHaveProperty("assigneeAdapterOverrides");
+    expect(calls[1].assigneeAdapterOverrides).toBeNull();
+  });
+
+  it("refuses an adapter setting other than model/effort on a task, in plain words", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) =>
+      id === ownerAgentId
+        ? makeAgent(ownerAgentId, { adapterType: "claude_local", adapterConfig: { model: "claude-sonnet-5" } })
+        : null,
+    );
+    const app = await createApp(boardActor());
+
+    const res = await request(app)
+      .patch(`/api/issues/${issueId}`)
+      .send({ assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-5", extraArgs: ["--yolo"] } } });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(String(res.body.error ?? "")).toContain('"extraArgs" is an agent setting');
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("never takes an inherited-from marker from a person's request", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) =>
+      id === ownerAgentId
+        ? makeAgent(ownerAgentId, { adapterType: "claude_local", adapterConfig: { model: "claude-sonnet-5" } })
+        : null,
+    );
+    const app = await createApp(boardActor());
+
+    await request(app)
+      .patch(`/api/issues/${issueId}`)
+      .send({
+        assigneeAdapterOverrides: {
+          adapterConfig: { effort: "high" },
+          inheritedFrom: { issueId: "11111111-1111-4111-8111-111111111111", identifier: "PAP-1" },
+        },
+      })
+      .expect(200);
+
+    const [, persistedPatch] = mockIssueService.update.mock.calls[0];
+    expect(persistedPatch.assigneeAdapterOverrides).toEqual({ adapterConfig: { effort: "high" } });
+  });
+
   it("rejects a Codex-only level in a per-task override even before the assignee is looked up", async () => {
     const app = await createApp(boardActor());
 

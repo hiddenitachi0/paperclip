@@ -5848,6 +5848,15 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
         // what makes flow-down real regardless of which route created the
         // child. Explicit child settings win key by key; an explicit null opts
         // out (see deriveChildModelEffortInheritance).
+        // `inheritedFrom` is only ever written here; never trust one a caller sent.
+        if (
+          issueData.assigneeAdapterOverrides &&
+          typeof issueData.assigneeAdapterOverrides === "object" &&
+          "inheritedFrom" in issueData.assigneeAdapterOverrides
+        ) {
+          const { inheritedFrom: _forged, ...rest } = issueData.assigneeAdapterOverrides as Record<string, unknown>;
+          issueData.assigneeAdapterOverrides = Object.keys(rest).length > 0 ? rest : undefined;
+        }
         if (issueData.parentId && issueData.assigneeAdapterOverrides !== null) {
           const inheritance = await resolveChildModelEffortInheritance(tx, companyId, {
             parentId: issueData.parentId,
