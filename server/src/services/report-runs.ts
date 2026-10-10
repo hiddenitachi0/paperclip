@@ -197,7 +197,19 @@ export function reportRunsService(db: Db, deps: ReportRunsServiceDeps) {
     if (scriptRun.status !== "succeeded") {
       const [failed] = await db
         .update(reportRuns)
-        .set({ status: "failed", scriptRunId: scriptRun.id, error: scriptRun.error ?? `The calculation script did not succeed (${scriptRun.status}).`, finishedAt: new Date() })
+        // DUR-4727: the script's own error can echo the company's data (its
+        // stderr), and a report run is readable by every member and agent.
+        // The run keeps a plain status sentence; the details stay on the
+        // script run, where only an owner/admin sees them.
+        .set({
+          status: "failed",
+          scriptRunId: scriptRun.id,
+          error:
+            scriptRun.status === "fingerprint_mismatch"
+              ? "The stored calculation does not match the approved code, so nothing was run."
+              : `The calculation did not succeed (${scriptRun.status}). The company's owner or an admin can see the details on the calculation run.`,
+          finishedAt: new Date(),
+        })
         .where(eq(reportRuns.id, run.id))
         .returning();
       return toSummary(failed!);

@@ -29,6 +29,7 @@ import {
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import { reportTemplateRoutes } from "../routes/report-templates.js";
+import { reportScriptRoutes } from "../routes/report-scripts.js";
 import { agentService } from "../services/agents.js";
 import { dataConnectionService } from "../services/data-connections.js";
 import { ReportScriptRunLimiter, reportScriptsService } from "../services/report-scripts.js";
@@ -370,21 +371,22 @@ d("DUR-4072 report data fetch", () => {
     });
     const agentActor = (companyId: string, agentId: string) => ({ type: "agent", agentId, companyId, source: "agent_key", runId: null });
 
-    function createApp(actor: Record<string, unknown>) {
+    function createApp(actor: Record<string, unknown>, runner: ReportScriptRunner = fakeRunner) {
       const app = express();
       app.use(express.json());
       app.use((req, _res, next) => {
         (req as express.Request & { actor: unknown }).actor = actor;
         next();
       });
-      app.use("/api", reportTemplateRoutes(db, { reportScripts: scriptsFor(), dataDeps }));
+      const limiter = new ReportScriptRunLimiter();
+      app.use("/api", reportTemplateRoutes(db, { reportScripts: reportScriptsService(db, { runner, limiter }), dataDeps }));
+      app.use("/api", reportScriptRoutes(db, { runner, limiter }));
       app.use(errorHandler);
       return app;
     }
 
-    it("only an owner/admin sees a run's fetched data; agents and viewers get status, numbers and the digest", async () => {
-      const { companyId, template } = await setUp();
-      const agent = await agentService(db).create(companyId, {
+    async function seedAgent(companyId: string) {
+      return agentService(db).create(companyId, {
         name: `A-${randomUUID().slice(0, 6)}`,
         role: "engineer",
         status: "idle",
@@ -394,6 +396,63 @@ d("DUR-4072 report data fetch", () => {
         spentMonthlyCents: 0,
         lastHeartbeatAt: null,
       });
+    }
+
+    it("a report's calculation run keeps its input (the ledger) from agents and viewers on the script-run routes; the owner sees it", async () => {
+      const { companyId, template, version } = await setUp();
+      const agent = await seedAgent(companyId);
+      const started = await request(createApp(agentActor(companyId, agent.id))).post(`/api/companies/${companyId}/report-runs`).send({ templateId: template.id });
+      expect(started.body.status).toBe("drafting_commentary");
+
+      for (const actor of [agentActor(companyId, agent.id), boardActor(companyId, "viewer"), boardActor(companyId, "operator")]) {
+        const runs = await request(createApp(actor)).get(`/api/companies/${companyId}/report-scripts/versions/${version.id}/runs`);
+        expect(runs.status, JSON.stringify(runs.body)).toBe(200);
+        const reportRun = runs.body.find((run: { trigger: string }) => run.trigger === "report_run");
+        expect(reportRun.input).toBeNull();
+        expect(reportRun.inputSha256).toMatch(/^[0-9a-f]{64}$/);
+        expect(reportRun.output).toEqual({ bankChange: 250 });
+        // The saved example's run is drafting data and stays visible.
+        const exampleRun = runs.body.find((run: { trigger: string }) => run.trigger === "approval_check");
+        expect(exampleRun.input).toEqual({});
+        expect(JSON.stringify(runs.body)).not.toContain("journalEntryId");
+      }
+      for (const role of ["owner", "admin"] as const) {
+        const runs = await request(createApp(boardActor(companyId, role))).get(`/api/companies/${companyId}/report-scripts/versions/${version.id}/runs`);
+        const reportRun = runs.body.find((run: { trigger: string }) => run.trigger === "report_run");
+        expect(reportRun.input).toMatchObject({ data: { journal: { entries: [expect.objectContaining({ journalEntryId: 1 })] } } });
+      }
+    });
+
+    it("a failed calculation's error (which can echo the data) is withheld from agents, and never copied onto the report run", async () => {
+      const { companyId, template, version } = await setUp();
+      const agent = await seedAgent(companyId);
+      const leakyRunner: ReportScriptRunner = {
+        run: async (_script, input) => ({
+          status: "failed",
+          error: `Traceback ... KeyError while reading ${JSON.stringify(input).slice(0, 200)}`,
+          runtimeFingerprint: "fp",
+          durationMs: 1,
+          stderrTail: "",
+        }),
+      };
+      const started = await request(createApp(agentActor(companyId, agent.id), leakyRunner)).post(`/api/companies/${companyId}/report-runs`).send({ templateId: template.id });
+      expect(started.body.status).toBe("failed");
+      expect(started.body.error).toMatch(/did not succeed \(failed\)/);
+      expect(started.body.error).not.toContain("openingDate");
+
+      const agentRuns = await request(createApp(agentActor(companyId, agent.id))).get(`/api/companies/${companyId}/report-scripts/versions/${version.id}/runs`);
+      const masked = agentRuns.body.find((run: { trigger: string }) => run.trigger === "report_run");
+      expect(masked.input).toBeNull();
+      expect(masked.error).toMatch(/only the company's owner or an admin/);
+      expect(JSON.stringify(agentRuns.body)).not.toContain("openingDate");
+
+      const ownerRuns = await request(createApp(boardActor(companyId, "owner"))).get(`/api/companies/${companyId}/report-scripts/versions/${version.id}/runs`);
+      expect(ownerRuns.body.find((run: { trigger: string }) => run.trigger === "report_run").error).toContain("openingDate");
+    });
+
+    it("only an owner/admin sees a run's fetched data; agents and viewers get status, numbers and the digest", async () => {
+      const { companyId, template } = await setUp();
+      const agent = await seedAgent(companyId);
       const started = await request(createApp(agentActor(companyId, agent.id))).post(`/api/companies/${companyId}/report-runs`).send({ templateId: template.id });
       expect(started.status, JSON.stringify(started.body)).toBe(201);
       expect(started.body.status).toBe("drafting_commentary");
