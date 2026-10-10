@@ -1,15 +1,18 @@
 import { createHash, randomUUID } from "node:crypto";
+import { Readable } from "node:stream";
 import express from "express";
 import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import {
   agents,
+  assets,
   authUsers,
   companies,
   companyMemberships,
   companySecrets,
   createDb,
+  issueAttachments,
   issueComments,
   issues,
   telegramBots,
@@ -23,6 +26,7 @@ import { telegramChatRoutes } from "../routes/telegram-chat.js";
 import { telegramBotRoutes } from "../routes/telegram-bots.js";
 import { agentService } from "../services/agents.js";
 import { hashTelegramLinkCode, shouldTryQuickAnswer, type TelegramChatLaneA } from "../services/telegram-chat.js";
+import type { StorageService } from "../storage/types.js";
 
 /**
  * Hermes parity slice 1: two-way Telegram chat for linked people.
@@ -82,14 +86,27 @@ d("telegram chat (linked people)", () => {
     memberships: [{ companyId, status: "active", membershipRole }],
   });
 
+  const stored: Array<{ companyId: string; originalFilename: string | null; contentType: string; body: Buffer }> = [];
+  const memoryStorage = (): StorageService =>
+    ({
+      provider: "local_disk",
+      putFile: vi.fn(async (input: { companyId: string; namespace: string; originalFilename: string | null; contentType: string; body: Buffer }) => {
+        stored.push({ companyId: input.companyId, originalFilename: input.originalFilename, contentType: input.contentType, body: input.body });
+        return { provider: "local_disk", objectKey: `mem/${randomUUID()}`, contentType: input.contentType, byteSize: input.body.length, sha256: "x", originalFilename: input.originalFilename };
+      }),
+      getObject: vi.fn(async () => ({ stream: Readable.from([Buffer.alloc(0)]) })),
+      headObject: vi.fn(),
+      deleteObject: vi.fn(),
+    }) as unknown as StorageService;
+
   function createApp(actor: Record<string, unknown>, laneA: TelegramChatLaneA, now?: () => Date) {
     const app = express();
-    app.use(express.json());
+    app.use(express.json({ limit: "16mb" }));
     app.use((req, _res, next) => {
       (req as express.Request & { actor: unknown }).actor = actor;
       next();
     });
-    app.use("/api", telegramChatRoutes(db, { laneA, heartbeat: { wakeup: vi.fn(async () => null) }, now }));
+    app.use("/api", telegramChatRoutes(db, { laneA, heartbeat: { wakeup: vi.fn(async () => null) }, now, storage: memoryStorage }));
     app.use(errorHandler);
     return app;
   }
@@ -338,6 +355,66 @@ d("telegram chat (linked people)", () => {
     expect(call.actor.memberships).toEqual([expect.objectContaining({ companyId, membershipRole: "operator" })]);
     const [row] = await db.select().from(telegramChatRequests).where(eq(telegramChatRequests.userId, kari));
     expect(row).toMatchObject({ route: "quick", status: "answered", botId: bot.id });
+  });
+
+  it("a linked person's photo is stored only after the checks, goes to the quick agent as an attachment, and the made picture comes back", async () => {
+    const { companyId, bot } = await seedSetup();
+    const kari = await seedUser(companyId, "operator");
+    await link(companyId, bot.id, kari, "700000611");
+    const madeId = randomUUID();
+    const laneA = {
+      sendMessage: vi.fn(async () => ({
+        response: "Here we are at the counter.",
+        conversationId: null,
+        actions: [{ ok: true, tool: "paperclip_media-studio__generate-image", image: { fileId: madeId, seed: 9 } }],
+      })),
+    };
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4, 5, 6]);
+    const caption = "alter this image to show you helping him prepare the meat on the counter";
+    const before = stored.length;
+    const res = await request(createApp(bridgeActor(), laneA))
+      .post(`/api/companies/${companyId}/telegram-chat/ask`)
+      .send({ botId: bot.id, telegramUserId: "700000611", chatId: "700000611", message: caption, picture: { dataBase64: jpeg.toString("base64") } });
+
+    expect(res.body).toMatchObject({ outcome: "answered", reply: "Here we are at the counter.", images: [{ fileId: madeId, seed: 9 }] });
+    expect(stored.length).toBe(before + 1);
+    expect(stored.at(-1)).toMatchObject({ companyId, contentType: "image/jpeg" });
+    expect(stored.at(-1)!.originalFilename).toMatch(/^chat-photo-\d{8}-\d{6}\.jpg$/);
+    const call = laneA.sendMessage.mock.calls[0]![0] as Record<string, any>;
+    expect(call.message).toBe(caption);
+    expect(call.attachmentFileIds).toHaveLength(1);
+    const [file] = await db
+      .select({ companyId: issueAttachments.companyId, issueId: issueAttachments.issueId, createdByUserId: assets.createdByUserId })
+      .from(issueAttachments)
+      .innerJoin(assets, eq(issueAttachments.assetId, assets.id))
+      .where(eq(issueAttachments.id, call.attachmentFileIds[0]));
+    expect(file).toEqual({ companyId, issueId: null, createdByUserId: kari });
+  });
+
+  it("a photo from someone who has not linked is never stored", async () => {
+    const { companyId, bot } = await seedSetup();
+    const before = stored.length;
+    const laneA = noLaneA();
+    const res = await request(createApp(bridgeActor(), laneA))
+      .post(`/api/companies/${companyId}/telegram-chat/ask`)
+      .send({ botId: bot.id, telegramUserId: "700000612", chatId: "700000612", message: "edit this", picture: { dataBase64: Buffer.from([0xff, 0xd8, 0xff, 1]).toString("base64") } });
+    expect(res.body.outcome).toBe("not_linked");
+    expect(stored.length).toBe(before);
+    expect(laneA.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("a file that is not a JPEG, PNG or WebP picture is refused in plain words, and nothing is stored", async () => {
+    const { companyId, bot } = await seedSetup();
+    const kari = await seedUser(companyId, "operator");
+    await link(companyId, bot.id, kari, "700000613");
+    const before = stored.length;
+    const laneA = noLaneA();
+    const res = await request(createApp(bridgeActor(), laneA))
+      .post(`/api/companies/${companyId}/telegram-chat/ask`)
+      .send({ botId: bot.id, telegramUserId: "700000613", chatId: "700000613", message: "edit this", picture: { dataBase64: Buffer.from("%PDF-1.7 not a picture").toString("base64") } });
+    expect(res.body).toMatchObject({ outcome: "refused", reply: "I can only open JPEG, PNG or WebP pictures. Send it as a photo instead." });
+    expect(stored.length).toBe(before);
+    expect(laneA.sendMessage).not.toHaveBeenCalled();
   });
 
   it("a refusal from the quick agent is passed on, and the question is NOT handed to the full agent", async () => {

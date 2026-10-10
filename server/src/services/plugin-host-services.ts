@@ -31,7 +31,7 @@ import type { CreateIssueThreadInteraction, InviteJoinType, IssueDocumentSummary
 import { MEDIA_STUDIO_DIRECT_BILLING_CODE, MEDIA_STUDIO_EDIT_ACTIONS, MEDIA_STUDIO_EDIT_BILLING_CODE, estimateMediaStudioEditCostCents, mediaStudioEditActionProvider, pluginOperationIssueOriginKind, type MediaStudioEditAction } from "@paperclipai/shared";
 import { HttpError } from "../errors.js";
 import { mediaStudioDirectService } from "./media-studio-direct.js";
-import { pluginImageAnalysisService, type ImageAnalysisDeps } from "./plugin-image-analysis.js";
+import { pluginImageAnalysisService, type ImageAnalysisCaller, type ImageAnalysisDeps } from "./plugin-image-analysis.js";
 import { companyService } from "./companies.js";
 import { agentService } from "./agents.js";
 import { projectService } from "./projects.js";
@@ -2709,21 +2709,38 @@ export function buildHostServices(
         // the session), never from what the worker sends. A tool call, job
         // or webhook has no person, so it is refused.
         const scope = context?.invalidInvocationScope ? null : context?.invocationScope ?? null;
-        if (!scope || scope.companyId !== companyId || !scope.userId) {
+        let caller: ImageAnalysisCaller | null =
+          scope && scope.companyId === companyId && scope.userId
+            ? { companyId, userId: scope.userId, canManageCompany: scope.canManageCompany, pluginId }
+            : null;
+        if (!caller && typeof params.runId === "string") {
+          // A quick agent's tool call (a photo someone sent in a chat is
+          // age-checked before Media Studio sends it anywhere): the run is the
+          // host's own short-lived one for THIS company, and the call runs as
+          // the signed-in person talking to the quick agent.
+          const run = findLaneAPluginRun(params.runId);
+          if (run && run.companyId === companyId && run.requestedByUserId) {
+            caller = { companyId, userId: run.requestedByUserId, canManageCompany: false, quickAgentRun: true, pluginId };
+          }
+        }
+        if (!caller) {
           throw new Error("Picture analysis only works from a person's action on Paperclip's own pages, for the company they have open.");
         }
-        const { companyId: _ignored, ...input } = params;
-        const result = await imageAnalysis.analyseImage(
-          { companyId, userId: scope.userId, canManageCompany: scope.canManageCompany, pluginId },
-          input,
-        );
+        const { companyId: _ignored, runId: _runId, ...input } = params;
+        const result = await imageAnalysis.analyseImage(caller, input);
         await logPluginActivity({
           companyId,
           action: "plugin.image_analysis.run",
           entityType: "attachment",
           entityId: input.fileId,
-          actor: { actorUserId: scope.userId },
-          details: { modelDirectoryEntryId: input.entryId, provider: result.provider, model: result.model, costCents: result.costCents },
+          actor: { actorUserId: caller.userId ?? null },
+          details: {
+            modelDirectoryEntryId: input.entryId,
+            provider: result.provider,
+            model: result.model,
+            costCents: result.costCents,
+            ...(caller.quickAgentRun ? { quickAgentRun: true } : {}),
+          },
         });
         return result;
       },

@@ -636,6 +636,11 @@ export {
   bookingRequestPayloadSchema,
   purchaseRequestPayloadSchema,
   videoRenderRequestPayloadSchema,
+  OPERATOR_ACTION_TYPES,
+  operatorActionTargetNameSchema,
+  operatorActionEnvKeySchema,
+  operatorActionRequestInputSchema,
+  operatorActionRequestPayloadSchema,
   type CreateApproval,
   type ResolveApproval,
   type RequestApprovalRevision,
@@ -654,6 +659,9 @@ export {
   type BookingRequestPayload,
   type PurchaseRequestPayload,
   type VideoRenderRequestPayload,
+  type OperatorActionType,
+  type OperatorActionRequestInput,
+  type OperatorActionRequestPayload,
 } from "./approval.js";
 
 export {

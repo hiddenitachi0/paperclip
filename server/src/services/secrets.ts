@@ -1006,6 +1006,29 @@ export function secretService(db: Db, rawDb: Db = db) {
   }
 
   /**
+   * One-click host actions: the value for an APPROVED set_env_var card, read
+   * by the on-box runner (instance admin) through
+   * GET /approvals/:id/operator-action-secret. Same shape as
+   * resolveSecretValueForVideoRender: no per-consumer binding, the
+   * company-match check inside resolveSecretValueInternal keeps it inside the
+   * card's own company, and the access event names the approval.
+   */
+  async function resolveSecretValueForOperatorAction(
+    companyId: string,
+    secretId: string,
+    context: { approvalId: string; actorId: string },
+  ): Promise<string> {
+    return (await resolveSecretValueInternal(companyId, secretId, "latest", {
+      accessContext: {
+        consumerType: "system",
+        consumerId: `operator_action:${context.approvalId}`,
+        actorType: "user",
+        actorId: context.actorId,
+      },
+    })).value;
+  }
+
+  /**
    * DUR-4329: same shape as resolveSecretValueForVideoRender above, for
    * Media Studio's Create tab direct generation -- a board user, not an
    * agent or a run, so the audit trail's actorId is the board user's own id
@@ -2399,6 +2422,7 @@ export function secretService(db: Db, rawDb: Db = db) {
     resolveSecretValueForPlugin,
     resolveSecretValueForBrowserFill,
     resolveSecretValueForVideoRender,
+    resolveSecretValueForOperatorAction,
     resolveSecretValueForMediaStudioDirect,
     resolveSecretValueForMediaStudioAgentPricing,
     resolveSecretValueForCostReconciliation,

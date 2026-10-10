@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { TELEGRAM_USER_ID_PATTERN } from "./telegram-bot.js";
+import { CHAT_PHOTO_MAX_BASE64_CHARS, CHAT_PHOTO_MAX_BYTES } from "../chat-attachments.js";
 
 /**
  * Hermes parity, slice 1: two-way Telegram chat about company data for
@@ -41,6 +42,21 @@ export const telegramChatAskSchema = z
     message: z.string().trim().min(1).max(TELEGRAM_CHAT_MESSAGE_MAX_CHARS),
     /** Start a fresh conversation with the quick agent (Telegram /new). */
     fresh: z.boolean().optional(),
+    /**
+     * A photo the person sent with the message (its caption is `message`).
+     * The server stores it in the company's Files only after the person's
+     * link, access and daily limit are checked, so someone who may not ask
+     * can never put a file into the company.
+     */
+    picture: z
+      .object({
+        dataBase64: z
+          .string()
+          .min(1)
+          .max(CHAT_PHOTO_MAX_BASE64_CHARS, `A picture can be at most ${CHAT_PHOTO_MAX_BYTES / (1024 * 1024)} MB.`),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 export type TelegramChatAskInput = z.infer<typeof telegramChatAskSchema>;
@@ -94,11 +110,19 @@ export type TelegramChatAskOutcome =
   | "over_cap"
   | "refused";
 
+/** A picture the quick agent made for the answer (a file in the bot's company). */
+export type TelegramChatAskImage = {
+  fileId: string;
+  seed: number | null;
+};
+
 export type TelegramChatAskResult = {
   outcome: TelegramChatAskOutcome;
   /** What the bridge sends back into the chat, as plain text. */
   reply: string;
   requestId: string | null;
+  /** Pictures the quick agent made while answering; the bridge sends each one. */
+  images?: TelegramChatAskImage[];
 };
 
 export type TelegramChatLinkResult = {

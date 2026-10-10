@@ -1462,6 +1462,7 @@ export {
   type TelegramChatAskInput,
   type TelegramChatAskOutcome,
   type TelegramChatAskResult,
+  type TelegramChatAskImage,
   type TelegramChatLinkInput,
   type TelegramChatLinkResult,
   type TelegramChatOutboxItem,
@@ -1470,6 +1471,16 @@ export {
   type TelegramLinkStatus,
   type UpdateTelegramChatSettingsInput,
 } from "./validators/telegram-chat.js";
+export {
+  CHAT_ATTACHMENTS_MAX,
+  CHAT_PHOTO_FILENAME_PREFIX,
+  CHAT_PHOTO_MAX_BASE64_CHARS,
+  CHAT_PHOTO_MAX_BYTES,
+  CHAT_PHOTO_TYPES,
+  chatPhotoFilename,
+  sniffChatPhotoType,
+  type ChatPhotoType,
+} from "./chat-attachments.js";
 export type { SpeechSettings, SpeechSpeakResult, SpeechTranscribeResult } from "./types/speech.js";
 export {
   SPEECH_DEFAULT_DAILY_SPEAK_CHARACTERS,
@@ -2125,6 +2136,11 @@ export {
   bookingRequestPayloadSchema,
   purchaseRequestPayloadSchema,
   videoRenderRequestPayloadSchema,
+  OPERATOR_ACTION_TYPES,
+  operatorActionTargetNameSchema,
+  operatorActionEnvKeySchema,
+  operatorActionRequestInputSchema,
+  operatorActionRequestPayloadSchema,
   type CreateApproval,
   type UpsertBudgetPolicy,
   type ResolveBudgetIncident,
@@ -2145,6 +2161,9 @@ export {
   type BookingRequestPayload,
   type PurchaseRequestPayload,
   type VideoRenderRequestPayload,
+  type OperatorActionType,
+  type OperatorActionRequestInput,
+  type OperatorActionRequestPayload,
   envBindingPlainSchema,
   envBindingSecretRefSchema,
   envBindingSchema,

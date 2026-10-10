@@ -11,9 +11,13 @@ import {
   telegramPersonLinks,
 } from "@paperclipai/db";
 import {
+  CHAT_PHOTO_MAX_BYTES,
+  chatPhotoFilename,
+  sniffChatPhotoType,
   TELEGRAM_CHAT_DAILY_CAP_DEFAULT,
   TELEGRAM_LINK_CODE_ALPHABET,
   TELEGRAM_LINK_CODE_LENGTH,
+  type TelegramChatAskImage,
   type TelegramChatAskInput,
   type TelegramChatAskResult,
   type TelegramChatLinkInput,
@@ -36,6 +40,8 @@ import { zonedDayStart, zonedParts } from "./data-sources/zoned-time.js";
 import { queueIssueAssignmentWakeup, type IssueAssignmentWakeupDeps } from "./issue-assignment-wakeup.js";
 import { issueService } from "./issues.js";
 import type { LaneARequester, LaneATargetAgent } from "./lane-a.js";
+import { getStorageService } from "../storage/index.js";
+import type { StorageService } from "../storage/types.js";
 
 /**
  * Hermes parity, slice 1: a linked person asks the company's Telegram bot a
@@ -103,6 +109,7 @@ export type TelegramChatLaneA = {
     actor?: AuthorizationActor;
     message: string;
     conversationId?: string;
+    attachmentFileIds?: string[];
   }): Promise<unknown>;
 };
 
@@ -112,6 +119,8 @@ export interface TelegramChatServiceDeps {
   /** Wakes the full agent when a task is handed to it. */
   heartbeat?: IssueAssignmentWakeupDeps;
   now?: () => Date;
+  /** Where a photo the person sent is stored; tests pass a fake. */
+  storage?: () => StorageService;
 }
 
 /**
@@ -180,8 +189,28 @@ function httpCode(err: HttpError): string | null {
 type LaneAResultShape = {
   response?: unknown;
   conversationId?: unknown;
-  actions?: Array<{ ok?: unknown; tool?: unknown; task?: { issueId?: unknown; identifier?: unknown } | null } | null>;
+  actions?: Array<{
+    ok?: unknown;
+    tool?: unknown;
+    task?: { issueId?: unknown; identifier?: unknown } | null;
+    image?: { fileId?: unknown; seed?: unknown } | null;
+  } | null>;
 };
+
+const FILE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
+
+/** The pictures a quick answer made (Lane A already checked each is a picture in this company). */
+function answerImages(result: LaneAResultShape): TelegramChatAskImage[] {
+  const images: TelegramChatAskImage[] = [];
+  for (const action of result.actions ?? []) {
+    const fileId = action?.image?.fileId;
+    if (typeof fileId !== "string" || !FILE_ID_RE.test(fileId) || images.some((i) => i.fileId === fileId)) continue;
+    const seed = action?.image?.seed;
+    images.push({ fileId, seed: typeof seed === "number" && Number.isInteger(seed) ? seed : null });
+  }
+  return images.slice(0, 4);
+}
 
 type PersonContext = {
   userId: string;
@@ -194,7 +223,58 @@ export function telegramChatService(db: Db, deps: TelegramChatServiceDeps = {}) 
   const access = accessService(db);
   const boardAuth = boardAuthService(db);
   const issues = issueService(db);
+  const storage = deps.storage ?? (() => getStorageService());
   const failedLinkAttempts = new Map<string, number[]>();
+
+  /**
+   * A photo the person sent, stored in the company's Files (no task) under a
+   * "chat-photo-" name, so Media Studio checks it for apparent age before it
+   * is sent to any picture service. Only JPEG, PNG or WebP, decided from the
+   * bytes. Returns the file id, or a plain sentence for the person.
+   */
+  async function storePersonPhoto(
+    companyId: string,
+    userId: string,
+    dataBase64: string,
+  ): Promise<{ fileId: string } | { refusal: string }> {
+    const raw = dataBase64.replace(/\s+/g, "");
+    if (!raw || raw.length % 4 !== 0 || !BASE64_RE.test(raw)) return { refusal: "I couldn't read that picture. Please send it again." };
+    const bytes = Buffer.from(raw, "base64");
+    if (bytes.length === 0) return { refusal: "I couldn't read that picture. Please send it again." };
+    if (bytes.length > CHAT_PHOTO_MAX_BYTES) {
+      return { refusal: `That picture is larger than ${CHAT_PHOTO_MAX_BYTES / (1024 * 1024)} MB. Please send a smaller one.` };
+    }
+    const type = sniffChatPhotoType(bytes);
+    if (!type) return { refusal: "I can only open JPEG, PNG or WebP pictures. Send it as a photo instead." };
+    const stored = await storage().putFile({
+      companyId,
+      namespace: "company-files",
+      originalFilename: chatPhotoFilename(type, nowOf()),
+      contentType: type,
+      body: bytes,
+    });
+    const created = await issues.createCompanyFile({
+      companyId,
+      provider: stored.provider,
+      objectKey: stored.objectKey,
+      contentType: stored.contentType,
+      byteSize: stored.byteSize,
+      sha256: stored.sha256,
+      originalFilename: stored.originalFilename,
+      createdByAgentId: null,
+      createdByUserId: userId,
+    });
+    await logActivity(db, {
+      companyId,
+      actorType: "user",
+      actorId: userId,
+      action: "company_file.created",
+      entityType: "company_file",
+      entityId: created.id,
+      details: { attachmentId: created.id, originalFilename: created.originalFilename, contentType: created.contentType, byteSize: created.byteSize, source: "telegram_chat" },
+    }).catch(() => undefined);
+    return { fileId: created.id };
+  }
 
   // ─── Settings (owner/admin) ────────────────────────────────────────────────
 
@@ -570,7 +650,19 @@ export function telegramChatService(db: Db, deps: TelegramChatServiceDeps = {}) 
       .returning();
     const requestId = request!.id;
 
-    if (quickUsable && shouldTryQuickAnswer(input.message) && deps.laneA) {
+    // The photo is stored only now: the person is linked, may use this
+    // company, and is under the daily limit.
+    let pictureFileId: string | null = null;
+    if (input.picture) {
+      const stored = await storePersonPhoto(companyId, person.userId, input.picture.dataBase64);
+      if ("refusal" in stored) {
+        await finish(requestId, "failed", { note: "picture refused" });
+        return { outcome: "refused", reply: stored.refusal, requestId };
+      }
+      pictureFileId = stored.fileId;
+    }
+
+    if (quickUsable && (pictureFileId !== null || shouldTryQuickAnswer(input.message)) && deps.laneA) {
       const conversationId = input.fresh ? undefined : await recentConversation(companyId, person.userId, quickAgent!.id, now);
       const send = (conversation?: string) =>
         deps.laneA!.sendMessage({
@@ -580,6 +672,7 @@ export function telegramChatService(db: Db, deps: TelegramChatServiceDeps = {}) 
           actor: person.actor,
           message: input.message,
           conversationId: conversation,
+          ...(pictureFileId ? { attachmentFileIds: [pictureFileId] } : {}),
         });
       let result: LaneAResultShape | null = null;
       try {
@@ -634,11 +727,22 @@ export function telegramChatService(db: Db, deps: TelegramChatServiceDeps = {}) 
             readyAt: handedIssue ? null : nowOf(),
           })
           .where(eq(telegramChatRequests.id, requestId));
-        return { outcome: "answered", reply: answer, requestId };
+        const images = answerImages(result);
+        return { outcome: "answered", reply: answer, requestId, ...(images.length > 0 ? { images } : {}) };
       }
     }
 
-    return handOver({ companyId, bot, settings, person, input, requestId, notes, quickAgentName: quickUsable ? quickAgent!.name : null });
+    return handOver({
+      companyId,
+      bot,
+      settings,
+      person,
+      input,
+      requestId,
+      notes,
+      quickAgentName: quickUsable ? quickAgent!.name : null,
+      pictureFileId,
+    });
   }
 
   async function handOver(params: {
@@ -650,6 +754,7 @@ export function telegramChatService(db: Db, deps: TelegramChatServiceDeps = {}) 
     requestId: string;
     notes: string[];
     quickAgentName: string | null;
+    pictureFileId?: string | null;
   }): Promise<TelegramChatAskResult> {
     const { companyId, settings, person, input, requestId, notes } = params;
     const fullAgent = settings.fullAgentId ? await companyAgent(companyId, settings.fullAgentId) : null;
@@ -691,6 +796,7 @@ export function telegramChatService(db: Db, deps: TelegramChatServiceDeps = {}) 
       "---",
       `Asked on Telegram by ${person.name}. When you are done, write your answer as your last comment on this task: ` +
         "it is sent back to them in Telegram as plain text, so keep it short (no tables), and give the period and the source for every number.",
+      ...(params.pictureFileId ? [`They sent a picture with the question, saved in the company's Files: file id ${params.pictureFileId}.`] : []),
     ].join("\n");
     const issue = await issues.create(companyId, {
       id: randomUUID(),

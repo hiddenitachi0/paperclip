@@ -73,6 +73,15 @@ interface PeopleAskOptions extends BaseClientOptions {
   chatId: string;
   message: string;
   fresh?: boolean;
+  pictureStdin?: boolean;
+}
+
+async function readStdinText(stream: NodeJS.ReadableStream = process.stdin): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) {
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk as Uint8Array));
+  }
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 interface PeopleLinkOptions extends BaseClientOptions {
@@ -135,8 +144,11 @@ export function registerTelegramCommands(program: Command): void {
       .requiredOption("--chat-id <id>", "The chat the message came from")
       .requiredOption("--message <text>", "The message")
       .option("--fresh", "Start a fresh conversation with the quick agent")
+      .option("--picture-stdin", "A photo sent with the message, as base64 on standard input (stored only if the person may ask)")
       .action(async (botId: string, opts: PeopleAskOptions) => {
         try {
+          const pictureBase64 = opts.pictureStdin ? (await readStdinText()).replace(/\s+/g, "") : "";
+          if (opts.pictureStdin && !pictureBase64) throw new Error("The picture on standard input is empty");
           const outcome = await peopleCall(opts, (ctx) =>
             ctx.api.post<Record<string, unknown>>(apiPath`/api/companies/${ctx.companyId!}/telegram-chat/ask`, {
               botId,
@@ -144,6 +156,7 @@ export function registerTelegramCommands(program: Command): void {
               chatId: String(opts.chatId),
               message: opts.message,
               ...(opts.fresh ? { fresh: true } : {}),
+              ...(pictureBase64 ? { picture: { dataBase64: pictureBase64 } } : {}),
             }),
           );
           printOutput(outcome, { json: opts.json });
