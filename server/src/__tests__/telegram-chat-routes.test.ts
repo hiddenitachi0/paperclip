@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -14,6 +14,7 @@ import {
   issues,
   telegramBots,
   telegramChatRequests,
+  telegramPersonLinks,
 } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/error-handler.js";
@@ -21,7 +22,7 @@ import { HttpError } from "../errors.js";
 import { telegramChatRoutes } from "../routes/telegram-chat.js";
 import { telegramBotRoutes } from "../routes/telegram-bots.js";
 import { agentService } from "../services/agents.js";
-import { shouldTryQuickAnswer, type TelegramChatLaneA } from "../services/telegram-chat.js";
+import { hashTelegramLinkCode, shouldTryQuickAnswer, type TelegramChatLaneA } from "../services/telegram-chat.js";
 
 /**
  * Hermes parity slice 1: two-way Telegram chat for linked people.
@@ -46,12 +47,18 @@ if (!support.supported) {
 }
 
 const TG_USER = "700000001";
+const SECRET_NAMES = ["PAPERCLIP_AGENT_JWT_SECRET", "BETTER_AUTH_SECRET"] as const;
+const TEST_SECRET = "telegram-chat-test-master-secret";
 
 d("telegram chat (linked people)", () => {
   let db!: ReturnType<typeof createDb>;
   let stopDb: (() => Promise<void>) | null = null;
+  const previousSecrets = Object.fromEntries(SECRET_NAMES.map((name) => [name, process.env[name]]));
 
   beforeAll(async () => {
+    // Link codes are HMACed with a key derived from the server's master secret.
+    process.env.PAPERCLIP_AGENT_JWT_SECRET = TEST_SECRET;
+    delete process.env.BETTER_AUTH_SECRET;
     const started = await startEmbeddedPostgresTestDatabase("telegram-chat");
     stopDb = started.cleanup;
     db = createDb(started.connectionString);
@@ -59,6 +66,10 @@ d("telegram chat (linked people)", () => {
 
   afterAll(async () => {
     await stopDb?.();
+    for (const name of SECRET_NAMES) {
+      if (previousSecrets[name] === undefined) delete process.env[name];
+      else process.env[name] = previousSecrets[name];
+    }
   });
 
   const bridgeActor = () => ({ type: "board", source: "local_implicit", userId: "operator", isInstanceAdmin: true });
@@ -214,6 +225,39 @@ d("telegram chat (linked people)", () => {
     await request(personApp).delete("/api/me/telegram-link").expect(200);
     const asked = await ask(bridge, companyId, bot.id, "Hvordan gikk salget i går?", tgUser);
     expect(asked.body.outcome).toBe("not_linked");
+  });
+
+  it("stores the code as an HMAC under the server's secret, never a plain hash", async () => {
+    const companyId = await seedCompany();
+    const kari = await seedUser(companyId);
+    const code = await request(createApp(personActor(kari, companyId), noLaneA())).post("/api/me/telegram-link/code");
+    const [row] = await db.select().from(telegramPersonLinks).where(eq(telegramPersonLinks.userId, kari));
+    expect(row!.linkCodeHash).toBe(hashTelegramLinkCode(code.body.code, TEST_SECRET));
+    expect(row!.linkCodeHash).not.toBe(createHash("sha256").update(code.body.code).digest("hex"));
+    expect(row!.linkCodeHash).not.toContain(code.body.code);
+    // Another server secret gives another hash: the database alone cannot test guesses.
+    expect(hashTelegramLinkCode(code.body.code, "another-secret")).not.toBe(row!.linkCodeHash);
+    // Same code however it is typed.
+    expect(hashTelegramLinkCode(` ${code.body.code.toLowerCase()} `, TEST_SECRET)).toBe(row!.linkCodeHash);
+  });
+
+  it("refuses to make or accept codes when the server has no secret", async () => {
+    const { companyId, bot } = await seedSetup();
+    const kari = await seedUser(companyId);
+    const issued = await request(createApp(personActor(kari, companyId), noLaneA())).post("/api/me/telegram-link/code");
+    expect(hashTelegramLinkCode("ABCD2345", null)).toBeNull();
+    delete process.env.PAPERCLIP_AGENT_JWT_SECRET;
+    try {
+      const refused = await request(createApp(personActor(kari, companyId), noLaneA())).post("/api/me/telegram-link/code");
+      expect(refused.status).toBe(503);
+      const claim = await request(createApp(bridgeActor(), noLaneA()))
+        .post(`/api/companies/${companyId}/telegram-chat/link`)
+        .send({ botId: bot.id, telegramUserId: "700000251", code: issued.body.code });
+      expect(claim.body.outcome).toBe("bad_code");
+      expect(claim.body.reply).toMatch(/not available/);
+    } finally {
+      process.env.PAPERCLIP_AGENT_JWT_SECRET = TEST_SECRET;
+    }
   });
 
   it("an expired code does not link", async () => {
@@ -402,6 +446,45 @@ d("telegram chat (linked people)", () => {
     const [row] = await db.select().from(telegramChatRequests).where(eq(telegramChatRequests.userId, kari));
     expect(row!.status).toBe("failed");
     expect(row!.answerText).toBeNull();
+  });
+
+  it("re-checks a ready answer on every outbox read, and drops it when the person lost access", async () => {
+    const { companyId, bot, full } = await seedSetup({ quick: false });
+    const kari = await seedUser(companyId);
+    const ola = await seedUser(companyId);
+    await link(companyId, bot.id, kari, "700001251");
+    await link(companyId, bot.id, ola, "700001252");
+    const bridge = createApp(bridgeActor(), noLaneA());
+    await ask(bridge, companyId, bot.id, "Research the sales trend for chairs", "700001251");
+    await ask(bridge, companyId, bot.id, "Research the sales trend for tables", "700001252");
+    for (const task of await db.select().from(issues).where(eq(issues.companyId, companyId))) {
+      await db.insert(issueComments).values({ companyId, issueId: task.id, authorAgentId: full.id, authorType: "agent", body: "Numbers." });
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, task.id));
+    }
+
+    // Both answers become ready, but the bridge does not send them yet
+    // (Paperclip restarting, the bot offline...).
+    expect((await request(bridge).get(`/api/companies/${companyId}/telegram-chat/outbox`)).body.answers).toHaveLength(2);
+
+    // Meanwhile Kari leaves the company and Ola unlinks.
+    await db
+      .update(companyMemberships)
+      .set({ status: "suspended" })
+      .where(and(eq(companyMemberships.companyId, companyId), eq(companyMemberships.principalId, kari)));
+    await request(createApp(personActor(ola, companyId), noLaneA())).delete("/api/me/telegram-link").expect(200);
+
+    const again = await request(bridge).get(`/api/companies/${companyId}/telegram-chat/outbox`);
+    expect(again.body.answers).toEqual([]);
+    const rows = await db.select().from(telegramChatRequests).where(eq(telegramChatRequests.companyId, companyId));
+    expect(rows.map((row) => row.status).sort()).toEqual(["failed", "failed"]);
+    expect(rows.every((row) => row.answerText === null)).toBe(true);
+    expect(rows.find((row) => row.userId === kari)!.note).toMatch(/no longer use this company/);
+    expect(rows.find((row) => row.userId === ola)!.note).toMatch(/unlinked/);
+    // A late acknowledgement for it cannot bring it back.
+    const ack = await request(bridge)
+      .post(`/api/companies/${companyId}/telegram-chat/outbox/${rows[0]!.id}/ack`)
+      .send({ outcome: "delivered" });
+    expect(ack.body.status).toBe("failed");
   });
 
   // ── Limits ─────────────────────────────────────────────────────────────────

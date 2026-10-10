@@ -1,4 +1,4 @@
-import { createHash, randomInt, randomUUID } from "node:crypto";
+import { createHmac, randomInt, randomUUID } from "node:crypto";
 import { and, asc, count, eq, gte, inArray, lt, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
@@ -25,6 +25,7 @@ import {
   type UpdateTelegramChatSettingsInput,
 } from "@paperclipai/shared";
 import { HttpError, notFound, unprocessable } from "../errors.js";
+import { readServerSecret } from "../server-secrets.js";
 import { logger } from "../middleware/logger.js";
 import { redactKnownLeakedSecretPatterns, redactSensitiveText } from "../redaction.js";
 import { accessService } from "./access.js";
@@ -113,9 +114,32 @@ export interface TelegramChatServiceDeps {
   now?: () => Date;
 }
 
-export function hashTelegramLinkCode(code: string): string {
-  return createHash("sha256").update(normalizeTelegramLinkCode(code)).digest("hex");
+/**
+ * The server's own secret the link-code key is derived from: the same master
+ * secret the agent JWTs and document download links are signed with
+ * (documents-download-token.ts), so there is no new setting to configure.
+ * Null when neither is set; linking is then refused rather than done with a
+ * guessable key.
+ */
+function linkCodeMasterSecret(): string | null {
+  return readServerSecret("PAPERCLIP_AGENT_JWT_SECRET")?.trim() || readServerSecret("BETTER_AUTH_SECRET")?.trim() || null;
 }
+
+/**
+ * HMAC-SHA256 of the normalized code under a key derived from the server's
+ * master secret ("telegram-link-code" purpose), so a copy of the database
+ * alone is not enough to test guesses against a stored code. Null when the
+ * server has no master secret.
+ */
+export function hashTelegramLinkCode(code: string, masterSecret: string | null = linkCodeMasterSecret()): string | null {
+  if (!masterSecret) return null;
+  const key = createHmac("sha256", masterSecret).update("telegram-link-code").digest();
+  return createHmac("sha256", key).update(normalizeTelegramLinkCode(code)).digest("hex");
+}
+
+const LINKING_UNAVAILABLE =
+  "Linking Telegram is not available on this server yet: it needs the server's signing secret " +
+  "(PAPERCLIP_AGENT_JWT_SECRET or BETTER_AUTH_SECRET). Ask whoever runs Paperclip.";
 
 /** "abcd-2345", " ABCD 2345 " and "ABCD2345" are the same code. */
 export function normalizeTelegramLinkCode(raw: string): string {
@@ -280,7 +304,9 @@ export function telegramChatService(db: Db, deps: TelegramChatServiceDeps = {}) 
     const code = generateTelegramLinkCode();
     const now = nowOf();
     const expiresAt = new Date(now.getTime() + TELEGRAM_LINK_CODE_TTL_MS);
-    const set = { linkCodeHash: hashTelegramLinkCode(code), linkCodeExpiresAt: expiresAt, updatedAt: now };
+    const hash = hashTelegramLinkCode(code);
+    if (!hash) throw new HttpError(503, LINKING_UNAVAILABLE, { code: "TELEGRAM_LINK_UNAVAILABLE" });
+    const set = { linkCodeHash: hash, linkCodeExpiresAt: expiresAt, updatedAt: now };
     await db
       .insert(telegramPersonLinks)
       .values({ userId, ...set })
@@ -338,6 +364,7 @@ export function telegramChatService(db: Db, deps: TelegramChatServiceDeps = {}) 
       };
     }
     const hash = hashTelegramLinkCode(input.code);
+    if (!hash) return { outcome: "bad_code", reply: LINKING_UNAVAILABLE };
     const [row] = await db
       .select()
       .from(telegramPersonLinks)
@@ -707,11 +734,19 @@ export function telegramChatService(db: Db, deps: TelegramChatServiceDeps = {}) 
     };
   }
 
-  async function finish(requestId: string, status: "failed" | "expired", extra: { note?: string } = {}) {
+  async function finish(
+    requestId: string,
+    status: "failed" | "expired",
+    extra: { note?: string; clearAnswer?: boolean; onlyFrom?: "ready" } = {},
+  ) {
     await db
       .update(telegramChatRequests)
-      .set({ status, note: extra.note ?? null })
-      .where(eq(telegramChatRequests.id, requestId));
+      .set({ status, note: extra.note ?? null, ...(extra.clearAnswer ? { answerText: null } : {}) })
+      .where(
+        extra.onlyFrom
+          ? and(eq(telegramChatRequests.id, requestId), eq(telegramChatRequests.status, extra.onlyFrom))
+          : eq(telegramChatRequests.id, requestId),
+      );
   }
 
   // ─── Bridge: the outbox ────────────────────────────────────────────────────
@@ -759,27 +794,85 @@ export function telegramChatService(db: Db, deps: TelegramChatServiceDeps = {}) 
     }
 
     const ready = await db
-      .select({
-        id: telegramChatRequests.id,
-        botId: telegramChatRequests.botId,
-        chatId: telegramChatRequests.chatId,
-        text: telegramChatRequests.answerText,
-        createdAt: telegramChatRequests.createdAt,
-        identifier: issuesTable.identifier,
-      })
+      .select()
       .from(telegramChatRequests)
-      .leftJoin(issuesTable, eq(issuesTable.id, telegramChatRequests.issueId))
       .where(and(eq(telegramChatRequests.companyId, companyId), eq(telegramChatRequests.status, "ready")))
       .orderBy(asc(telegramChatRequests.createdAt))
       .limit(TELEGRAM_CHAT_OUTBOX_BATCH);
-    return ready.map((row) => ({
-      id: row.id,
-      botId: row.botId,
-      chatId: row.chatId,
-      text: row.text ?? "",
-      taskIdentifier: row.identifier ?? null,
-      createdAt: row.createdAt.toISOString(),
-    }));
+    const items: TelegramChatOutboxItem[] = [];
+    for (const row of ready) {
+      // Checked again on every read, not only when the answer was written: a
+      // ready answer can wait for the bridge (Paperclip restarting, the bot
+      // offline) while the person unlinks, leaves the company or loses
+      // access to the task.
+      let issue: typeof issuesTable.$inferSelect | null = null;
+      let refusal: string | null;
+      try {
+        issue = row.issueId ? await loadIssue(row.companyId, row.issueId) : null;
+        refusal = issue ? await deliveryRefusal(row, issue) : "the task is gone";
+      } catch (err) {
+        logger.warn({ err, companyId, requestId: row.id }, "telegram chat: could not re-check a ready answer");
+        continue; // not sent this pass; checked again on the next
+      }
+      if (refusal) {
+        await finish(row.id, "failed", { note: refusal, clearAnswer: true, onlyFrom: "ready" });
+        continue;
+      }
+      items.push({
+        id: row.id,
+        botId: row.botId,
+        chatId: row.chatId,
+        text: row.answerText ?? "",
+        taskIdentifier: issue?.identifier ?? null,
+        createdAt: row.createdAt.toISOString(),
+      });
+    }
+    return items;
+  }
+
+  async function loadIssue(companyId: string, issueId: string) {
+    const [issue] = await db
+      .select()
+      .from(issuesTable)
+      .where(and(eq(issuesTable.id, issueId), eq(issuesTable.companyId, companyId)));
+    return issue ?? null;
+  }
+
+  /**
+   * Why this answer may not go to this person any more, or null when it may:
+   * they must still be linked to the same Telegram account, still be able to
+   * use the company, and still be allowed to see the task.
+   */
+  async function deliveryRefusal(
+    row: typeof telegramChatRequests.$inferSelect,
+    issue: typeof issuesTable.$inferSelect,
+  ): Promise<string | null> {
+    const link = await linkRow(row.userId);
+    if (!link || link.telegramUserId !== row.telegramUserId) return "the person unlinked this Telegram account";
+    const person = await personContext(row.userId, row.companyId);
+    if (!person) return "the person may no longer use this company";
+    const decision = await access.decide({
+      actor: person.actor,
+      action: "issue:read",
+      resource: {
+        type: "issue",
+        companyId: issue.companyId,
+        issueId: issue.id,
+        projectId: issue.projectId,
+        parentIssueId: issue.parentId,
+        assigneeAgentId: issue.assigneeAgentId,
+        assigneeUserId: issue.assigneeUserId,
+        status: issue.status,
+      },
+      scope: {
+        issueId: issue.id,
+        projectId: issue.projectId,
+        parentIssueId: issue.parentId,
+        assigneeAgentId: issue.assigneeAgentId,
+        assigneeUserId: issue.assigneeUserId,
+      },
+    });
+    return decision.allowed ? null : "the person may no longer see this task";
   }
 
   async function promote(row: typeof telegramChatRequests.$inferSelect, now: Date) {
@@ -787,52 +880,18 @@ export function telegramChatService(db: Db, deps: TelegramChatServiceDeps = {}) 
       await finish(row.id, "failed", { note: "the task is gone" });
       return;
     }
-    const [issue] = await db
-      .select()
-      .from(issuesTable)
-      .where(and(eq(issuesTable.id, row.issueId), eq(issuesTable.companyId, row.companyId)));
+    const issue = await loadIssue(row.companyId, row.issueId);
     if (!issue) {
       await finish(row.id, "failed", { note: "the task is gone" });
       return;
     }
     if (!ANSWERED_TASK_STATUSES.has(issue.status)) return;
 
-    // Checked again now, not when the question was asked: the person must
-    // still be linked to the same Telegram account, still have access to the
-    // company, and still be allowed to see this task.
-    const link = await linkRow(row.userId);
-    if (!link || link.telegramUserId !== row.telegramUserId) {
-      await finish(row.id, "failed", { note: "the person unlinked this Telegram account" });
-      return;
-    }
-    const person = await personContext(row.userId, row.companyId);
-    const canRead = person
-      ? (
-          await access.decide({
-            actor: person.actor,
-            action: "issue:read",
-            resource: {
-              type: "issue",
-              companyId: issue.companyId,
-              issueId: issue.id,
-              projectId: issue.projectId,
-              parentIssueId: issue.parentId,
-              assigneeAgentId: issue.assigneeAgentId,
-              assigneeUserId: issue.assigneeUserId,
-              status: issue.status,
-            },
-            scope: {
-              issueId: issue.id,
-              projectId: issue.projectId,
-              parentIssueId: issue.parentId,
-              assigneeAgentId: issue.assigneeAgentId,
-              assigneeUserId: issue.assigneeUserId,
-            },
-          })
-        ).allowed
-      : false;
-    if (!canRead) {
-      await finish(row.id, "failed", { note: "the person may no longer see this task" });
+    // Checked again now, not when the question was asked (and again on every
+    // outbox read after this, see outbox()).
+    const refusal = await deliveryRefusal(row, issue);
+    if (refusal) {
+      await finish(row.id, "failed", { note: refusal });
       return;
     }
 
