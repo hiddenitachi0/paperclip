@@ -132,6 +132,7 @@ d("host picture analysis for plugins (models.analyseImage)", () => {
     ]);
     const { services } = host();
     const picture = await services.files.createCompanyFile({ companyId, contentBase64: PNG.toString("base64"), contentType: "image/png", filename: "maja.png", runId });
+    const chatPhoto = await services.files.createCompanyFile({ companyId, contentBase64: PNG.toString("base64"), contentType: "image/png", filename: "chat-photo-20261010-120000.png", runId });
     const document = await services.files.createCompanyFile({ companyId, contentBase64: Buffer.from("hello").toString("base64"), contentType: "text/plain", filename: "notes.txt", runId });
     const foreignPicture = await services.files.createCompanyFile({ companyId: otherCompanyId, contentBase64: PNG.toString("base64"), contentType: "image/png", filename: "other.png", runId: otherRunId });
     const entry = async (company: string, values: Partial<typeof modelDirectoryEntries.$inferInsert>) => {
@@ -149,7 +150,7 @@ d("host picture analysis for plugins (models.analyseImage)", () => {
     const archived = await entry(companyId, { name: "Old", provider: "local", model: "llava", baseUrl: "http://100.64.0.5:11434/v1", archivedAt: new Date() });
     const foreignEntry = await entry(otherCompanyId, { name: "Their model", provider: "local", model: "llava", baseUrl: "http://100.64.0.99:11434/v1" });
     const scope = { invocationScope: { companyId, userId: "owner-1", canManageCompany: true } };
-    return { companyId, otherCompanyId, picture: picture.id, document: document.id, foreignPicture: foreignPicture.id, local, localNoAddress, claude, openrouter, openrouterPrivate, archived, foreignEntry, scope };
+    return { companyId, otherCompanyId, picture: picture.id, chatPhoto: chatPhoto.id, document: document.id, foreignPicture: foreignPicture.id, local, localNoAddress, claude, openrouter, openrouterPrivate, archived, foreignEntry, scope };
   }
 
   const prompts = { systemPrompt: "Describe the person. JSON only.", userPrompt: "Describe this picture." };
@@ -240,7 +241,7 @@ d("host picture analysis for plugins (models.analyseImage)", () => {
   it("during a quick agent's tool call (a chat photo's age check) it runs as the person talking to the quick agent, and only then", async () => {
     const s = await seed();
     const { services, calls } = host();
-    const input = { companyId: s.companyId, entryId: s.local, fileId: s.picture, ...prompts };
+    const input = { companyId: s.companyId, entryId: s.local, fileId: s.chatPhoto, ...prompts };
     const run = openLaneAPluginRun({
       agentId: randomUUID(),
       companyId: s.companyId,
@@ -248,6 +249,7 @@ d("host picture analysis for plugins (models.analyseImage)", () => {
       requestedByUserId: "member-1",
       requestedByAgentId: null,
       requesterMessage: "alter this image",
+      pluginKey: KEY,
     });
     const otherRun = openLaneAPluginRun({
       agentId: randomUUID(),
@@ -256,6 +258,7 @@ d("host picture analysis for plugins (models.analyseImage)", () => {
       requestedByUserId: "member-2",
       requestedByAgentId: null,
       requesterMessage: "x",
+      pluginKey: KEY,
     });
     const agentRun = openLaneAPluginRun({
       agentId: randomUUID(),
@@ -264,12 +267,32 @@ d("host picture analysis for plugins (models.analyseImage)", () => {
       requestedByUserId: null,
       requestedByAgentId: randomUUID(),
       requesterMessage: "x",
+      pluginKey: KEY,
     });
     try {
       // Another company's run, a run with no person, an unknown run: refused.
       await expect(services.models.analyseImage({ ...input, runId: otherRun.run.runId })).rejects.toThrow(/only works from a person's action/);
       await expect(services.models.analyseImage({ ...input, runId: agentRun.run.runId })).rejects.toThrow(/only works from a person's action/);
       await expect(services.models.analyseImage({ ...input, runId: randomUUID() })).rejects.toThrow(/only works from a person's action/);
+      expect(calls).toHaveLength(0);
+
+      // A run opened for another plugin's tool, or a picture that is not a
+      // chat photo, is refused even for the right person and company.
+      const foreignPluginRun = openLaneAPluginRun({
+        agentId: randomUUID(),
+        companyId: s.companyId,
+        conversationId: randomUUID(),
+        requestedByUserId: "member-1",
+        requestedByAgentId: null,
+        requesterMessage: "x",
+        pluginKey: "someone.else",
+      });
+      try {
+        await expect(services.models.analyseImage({ ...input, runId: foreignPluginRun.run.runId })).rejects.toThrow(/only works from a person's action/);
+      } finally {
+        foreignPluginRun.close();
+      }
+      await expect(services.models.analyseImage({ ...input, fileId: s.picture, runId: run.run.runId })).rejects.toThrow(/not in this company's Files/);
       expect(calls).toHaveLength(0);
 
       const res = await services.models.analyseImage({ ...input, runId: run.run.runId });
