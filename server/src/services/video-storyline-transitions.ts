@@ -468,8 +468,12 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
     return Number(row?.total ?? 0);
   }
 
-  /** Media Studio's picture-reading model, else the helper's default if it can see pictures, else a plain reason. */
-  async function readerFor(companyId: string): Promise<{ entryId: string; keySecretId: string | null; label: string; provider: string } | { problem: string }> {
+  /**
+   * Media Studio's picture-reading model, else the helper's default if it can
+   * see pictures, else (no helper default) the helper's built-in default
+   * under the helper's own key rule, else a plain reason.
+   */
+  async function readerFor(companyId: string): Promise<{ entryId: string | null; keySecretId: string | null; label: string; provider: string } | { problem: string }> {
     const plugin = await registry.getByKey(MEDIA_STUDIO_PLUGIN_KEY);
     const raw = plugin ? ((await readPluginState(db, plugin.id, companyId, "identitySettings")) as Record<string, unknown> | null) : null;
     const analysis = raw && typeof raw.analysis === "object" && raw.analysis ? (raw.analysis as Record<string, unknown>) : null;
@@ -486,15 +490,20 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
       }
     }
     const helperDefault = await models.canSeePictures(companyId, null);
-    if (helperDefault?.canSee === true) {
-      const entry = await models.resolveEntry(companyId, helperDefault.entryId);
-      if (entry) return { entryId: entry.id, keySecretId: null, label: entry.name, provider: entry.provider };
+    if (helperDefault) {
+      if (helperDefault.canSee === true) {
+        const entry = await models.resolveEntry(companyId, helperDefault.entryId);
+        if (entry) return { entryId: entry.id, keySecretId: null, label: entry.name, provider: entry.provider };
+      }
+      return { problem: NO_READER_MESSAGE };
     }
+    const builtIn = await models.builtInDefault(companyId);
+    if (builtIn?.canSeePictures) return { entryId: null, keySecretId: null, label: builtIn.label, provider: "anthropic" };
     return { problem: NO_READER_MESSAGE };
   }
 
   async function writerProblem(companyId: string): Promise<string | null> {
-    return (await models.resolveEntry(companyId, null)) ? null : STORYLINE_WRITER_NO_MODEL_MESSAGE;
+    return (await models.writerAvailable(companyId)) ? null : STORYLINE_WRITER_NO_MODEL_MESSAGE;
   }
 
   // ─── Strip ───
@@ -626,7 +635,7 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
     companyId: string,
     shot: ShotRow,
     side: "start" | "end",
-    reader: { entryId: string; keySecretId: string | null; provider: string },
+    reader: { entryId: string | null; keySecretId: string | null; provider: string },
     actor: VideoStorylineActor,
   ): Promise<{ text: string | null; refused: boolean }> {
     const fromClip = Boolean(shot.resultObjectKey);

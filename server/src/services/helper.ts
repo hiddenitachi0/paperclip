@@ -816,9 +816,13 @@ export function helperService(db: Db, options: HelperServiceOptions = {}) {
       });
     }
     const entry = await resolveCompanyModelEntry(input.companyId, input.entryId ?? null);
-    if (!entry) throw new HttpError(503, input.noModelMessage, { code: "COMPANY_MODEL_MISSING" });
-    if (input.images && input.images.length > 0 && picturesOf(entry).canSeePictures !== true) {
-      throw new HttpError(503, `"${entry.name}" cannot look at pictures, so ${input.purpose.toLowerCase()} cannot use it.`, {
+    // A model named on purpose (e.g. Media Studio's picture reader) that is gone is a real problem.
+    if (!entry && input.entryId) throw new HttpError(503, input.noModelMessage, { code: "COMPANY_MODEL_MISSING" });
+    // No helper default = the helper's built-in default, exactly like ask().
+    const canSee = entry ? picturesOf(entry).canSeePictures === true : builtInDefaultCanSeePictures();
+    const modelLabel = entry?.name ?? `${laneAProviderLabel("anthropic")} (${LANE_A_DEFAULT_MODEL})`;
+    if (input.images && input.images.length > 0 && !canSee) {
+      throw new HttpError(503, `"${modelLabel}" cannot look at pictures, so ${input.purpose.toLowerCase()} cannot use it.`, {
         code: "COMPANY_MODEL_CANNOT_SEE_PICTURES",
       });
     }
@@ -827,25 +831,23 @@ export function helperService(db: Db, options: HelperServiceOptions = {}) {
       companyId: input.companyId,
       name: input.purpose,
       laneAEnabled: true,
-      laneAProvider: entry.provider,
-      laneAModel: entry.model,
-      laneABaseUrl: entry.baseUrl ?? null,
-      laneATemperature: entry.defaultTemperature ?? null,
-      laneAThinking: entry.defaultThinking ?? null,
-      laneAProviderRouting: (entry.providerRouting as never) ?? null,
-      laneAMaxOutputTokens: entry.defaultMaxOutputTokens ?? input.maxTokens,
+      laneAProvider: entry?.provider ?? "anthropic",
+      laneAModel: entry?.model ?? LANE_A_DEFAULT_MODEL,
+      laneABaseUrl: entry?.baseUrl ?? null,
+      laneATemperature: entry?.defaultTemperature ?? null,
+      laneAThinking: entry?.defaultThinking ?? null,
+      laneAProviderRouting: (entry?.providerRouting as never) ?? null,
+      laneAMaxOutputTokens: entry?.defaultMaxOutputTokens ?? input.maxTokens,
     });
     if (!settings.model) {
-      throw new HttpError(503, `The saved model "${entry.name}" has no model id. Fix it under Company settings → Models.`, { code: "COMPANY_MODEL_MISSING" });
+      throw new HttpError(503, `The saved model "${modelLabel}" has no model id. Fix it under Company settings → Models.`, { code: "COMPANY_MODEL_MISSING" });
     }
     if (settings.provider !== "anthropic" && settings.provider !== "local" && !settings.baseUrl) {
-      throw new HttpError(503, `The saved model "${entry.name}" has no address. Fix it under Company settings → Models.`, { code: "COMPANY_MODEL_MISSING" });
+      throw new HttpError(503, `The saved model "${modelLabel}" has no address. Fix it under Company settings → Models.`, { code: "COMPANY_MODEL_MISSING" });
     }
     const label = laneAProviderLabel(settings.provider);
     let apiKey: string | null = null;
-    if (settings.provider === "anthropic" && options.createModelClient) {
-      apiKey = null;
-    } else if (input.keySecretId) {
+    if (input.keySecretId && !(settings.provider === "anthropic" && options.createModelClient)) {
       try {
         apiKey = (
           await secrets.resolveSecretValueForPlugin(input.companyId, input.keySecretId, "latest", {
@@ -859,35 +861,21 @@ export function helperService(db: Db, options: HelperServiceOptions = {}) {
         apiKey = null;
       }
       if (!apiKey && settings.provider !== "local") {
-        throw new HttpError(503, `The ${label} key picked for "${entry.name}" could not be read. Pick it again from this company's Secrets.`, {
+        throw new HttpError(503, `The ${label} key picked for "${modelLabel}" could not be read. Pick it again from this company's Secrets.`, {
           code: "COMPANY_MODEL_KEY_MISSING",
         });
       }
-    } else if (settings.provider !== "local") {
-      const keys = await listKeyBindings(input.companyId);
-      const key = keys.get(settings.provider);
-      if (key) {
-        try {
-          apiKey = (
-            await secrets.resolveSecretValue(input.companyId, key.secretId, "latest", {
-              consumerType: HELPER_BINDING_TARGET_TYPE,
-              consumerId: input.companyId,
-              configPath: helperKeyConfigPath(settings.provider),
-              actorType: input.actorUserId ? "user" : "system",
-              actorId: input.actorUserId,
-            })
-          ).trim();
-        } catch (err) {
-          logger.warn({ err: err instanceof Error ? err.message : String(err), companyId: input.companyId }, "company model: key could not be resolved");
-          apiKey = null;
+    } else {
+      // The same key rule as ask(): the helper's key for this service, else
+      // Paperclip's own Claude key where the helper allows it (Claude only,
+      // shown as instanceFallback in the helper settings), else a plain 503.
+      try {
+        apiKey = await resolveKey(input.companyId, settings.provider, modelLabel, input.actorUserId);
+      } catch (err) {
+        if (!entry && err instanceof HttpError && err.status === 503) {
+          throw new HttpError(503, input.noModelMessage, { code: "COMPANY_MODEL_MISSING" });
         }
-      }
-      if (!apiKey) {
-        throw new HttpError(
-          503,
-          `"${entry.name}" runs on ${label}, and this company has no ${label} key for it yet. A company owner or admin can pick one under Company settings → General → Helper. (Paperclip's own key is never used for this.)`,
-          { code: "COMPANY_MODEL_KEY_MISSING", provider: settings.provider },
-        );
+        throw err;
       }
     }
     let client: LaneAProviderClient;
@@ -900,7 +888,7 @@ export function helperService(db: Db, options: HelperServiceOptions = {}) {
         fetch: options.providerFetch,
       });
     } catch (err) {
-      throw new HttpError(503, `Could not reach "${entry.name}": ${scrubLaneASecrets(String(err instanceof Error ? err.message : err), apiKey)}`);
+      throw new HttpError(503, `Could not reach "${modelLabel}": ${scrubLaneASecrets(String(err instanceof Error ? err.message : err), apiKey)}`);
     }
     const maxTokens = Math.min(settings.maxOutputTokens, input.maxTokens);
     const messages: LaneAChatMessage[] = [
@@ -937,7 +925,7 @@ export function helperService(db: Db, options: HelperServiceOptions = {}) {
     try {
       response = await send();
     } catch (err) {
-      throw toHttpError(err, entry.name);
+      throw toHttpError(err, modelLabel);
     }
     const cost = await priceLaneACall({
       provider: settings.provider,
@@ -968,8 +956,8 @@ export function helperService(db: Db, options: HelperServiceOptions = {}) {
       text: response.text,
       truncated: response.stop === "max_tokens",
       costCents: cost.costCents,
-      modelLabel: entry.name,
-      entryId: entry.id,
+      modelLabel,
+      entryId: entry?.id ?? null,
       provider: settings.provider,
       model: settings.model,
     };
@@ -983,6 +971,19 @@ export function helperService(db: Db, options: HelperServiceOptions = {}) {
     return assertEntryInCompany(companyId, row.defaultDirectoryEntryId).catch(() => null);
   }
 
+  /**
+   * Whether a storyline writer call can run for this company without a
+   * saved model: the helper's built-in default on Paperclip's own Claude key,
+   * under the same rule ask() follows (instanceFallback in the settings).
+   */
+  async function builtInDefaultUsable(companyId: string): Promise<{ label: string; canSeePictures: boolean } | null> {
+    const ownKey = (await listKeyBindings(companyId)).get("anthropic")?.status === "ok";
+    if (ownKey || options.createModelClient || readAnthropicApiKey()) {
+      return { label: `${laneAProviderLabel("anthropic")} (${LANE_A_DEFAULT_MODEL}) on Paperclip's own key`, canSeePictures: builtInDefaultCanSeePictures() };
+    }
+    return null;
+  }
+
   /** Whether a saved model of this company can look at pictures (true / false / null = unknown). */
   async function companyModelCanSeePictures(companyId: string, entryId: string | null): Promise<{ entryId: string; name: string; canSee: boolean | null } | null> {
     const entry = await resolveCompanyModelEntry(companyId, entryId);
@@ -990,7 +991,7 @@ export function helperService(db: Db, options: HelperServiceOptions = {}) {
     return { entryId: entry.id, name: entry.name, canSee: picturesOf(entry).canSeePictures };
   }
 
-  return { getSettings, updateSettings, ask, assertEntryInCompany, callCompanyModel, resolveCompanyModelEntry, companyModelCanSeePictures };
+  return { getSettings, updateSettings, ask, assertEntryInCompany, callCompanyModel, resolveCompanyModelEntry, companyModelCanSeePictures, builtInDefaultUsable };
 }
 
 export interface CompanyModelCallInput {
@@ -1016,7 +1017,8 @@ export interface CompanyModelCallResult {
   truncated: boolean;
   costCents: number;
   modelLabel: string;
-  entryId: string;
+  /** null = the helper's built-in default (Claude on Paperclip's own key, where the helper allows it). */
+  entryId: string | null;
   provider: LaneAProvider;
   model: string;
 }

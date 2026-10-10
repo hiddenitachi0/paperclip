@@ -200,8 +200,7 @@ export function videoStorylineDirectorService(db: Db) {
     const recentShots = recentShotRows.reverse();
 
     const now = new Date();
-    const writerEntry = await storylineCompanyModel(db).resolveEntry(companyId, null);
-    if (!writerEntry) {
+    if (!(await storylineCompanyModel(db).writerAvailable(companyId))) {
       const [row] = await db
         .insert(videoStorylineDirectorRuns)
         .values({

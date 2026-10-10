@@ -5,14 +5,17 @@ import type { VideoStorylineActor } from "./video-storylines.js";
 
 /**
  * Storyline Phase 0 (design 2.11): the AI director and the transition writer
- * run on the company's OWN model -- the helper's default saved model
- * (Company settings → General → Helper) with the company's own key -- never
- * on the server-wide Anthropic key. A company without a usable model gets a
- * plain sentence saying so (HttpError 503), which the editor shows as is.
+ * run on the company's model exactly the way the helper's ask() does: the
+ * helper's default saved model (Company settings → General → Helper) with the
+ * company's own key, else the helper's built-in default. Paperclip's own
+ * Claude key is used only where the helper itself would use it (Claude, no
+ * company Claude key, shown as instanceFallback in the helper settings). A
+ * company with neither gets a plain sentence (HttpError 503) the editor
+ * shows as is. Every call is recorded on the company's costs.
  */
 
 export const STORYLINE_WRITER_NO_MODEL_MESSAGE =
-  "The AI director writes with this company's own AI model, and none is set up yet. A company owner or admin can pick one under Company settings → General → Helper (the helper's default model is used). Paperclip's own key is never used for this.";
+  "The AI director writes with this company's AI model, and none is set up yet. A company owner or admin can pick one (and its key) under Company settings → General → Helper; the helper's default model is used.";
 
 export const STORYLINE_DIRECTOR_BILLING_CODE = "video_storyline_director";
 export const STORYLINE_TRANSITION_BILLING_CODE = "video_storyline_transition_writer";
@@ -58,6 +61,12 @@ export function storylineCompanyModel(db: Db, options: HelperServiceOptions = {}
       return (await write(companyId, actor, input)).text;
     },
     resolveEntry: helper.resolveCompanyModelEntry,
+    /** The helper's built-in default, when this company may use it (same rule as ask()). */
+    builtInDefault: helper.builtInDefaultUsable,
+    /** Whether the writer can run at all: a helper default model, or the built-in default under the helper's rule. */
+    async writerAvailable(companyId: string): Promise<boolean> {
+      return Boolean((await helper.resolveCompanyModelEntry(companyId, null)) || (await helper.builtInDefaultUsable(companyId)));
+    },
     canSeePictures: helper.companyModelCanSeePictures,
   };
 }
