@@ -1,3 +1,4 @@
+import { HuggingFaceModelPicker } from "./HuggingFaceModelPicker";
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -813,7 +814,14 @@ export function QuickAgentSection({
           />
         )}
 
-        {providerDescriptor.freeForm ? (
+        {provider === "huggingface" ? (
+          <HuggingFaceModelPicker
+            companyId={effectiveCompanyId}
+            value={agent.laneAModel ?? null}
+            disabled={settingMutation.isPending}
+            onSave={(next) => settingMutation.mutateAsync({ laneAModel: next })}
+          />
+        ) : providerDescriptor.freeForm ? (
           <>
             {!agent.laneAModel && (
               <p className="text-xs text-amber-600 dark:text-amber-400" data-testid="quick-agent-model-missing-notice">
