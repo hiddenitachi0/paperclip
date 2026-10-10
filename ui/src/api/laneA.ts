@@ -64,6 +64,82 @@ export interface LaneAContinueResult {
   fromConversations: number;
 }
 
+/** Conversations review: who a quick agent talked to and what it did (owners/admins: all; others: their own). */
+export interface LaneAConversationLogPerson {
+  kind: "user" | "agent";
+  id: string;
+  name: string;
+}
+
+export interface LaneAConversationLogRow {
+  id: string;
+  person: LaneAConversationLogPerson | null;
+  /** "telegram" when Paperclip recorded it; null when not recorded. */
+  channel: "telegram" | null;
+  startedAt: string;
+  lastMessageAt: string;
+  messageCount: number;
+  firstQuestion: string | null;
+  toolUse: Array<{ label: string; count: number }>;
+  handoffCount: number;
+  /** An Employee (light) member's private chat: listed, but nothing from inside it. */
+  private: boolean;
+  mine: boolean;
+}
+
+export interface LaneAConversationLogPage {
+  conversations: LaneAConversationLogRow[];
+  nextCursor: string | null;
+  people: LaneAConversationLogPerson[];
+  canSeeAll: boolean;
+}
+
+export interface LaneAConversationLogAction {
+  tool: string;
+  label: string;
+  summary: string;
+  ok: boolean;
+  image: { contentPath: string; contentType: string } | null;
+  task: { issueId: string; identifier: string | null; title: string } | null;
+}
+
+export interface LaneAConversationLogTranscript {
+  conversation: LaneAConversationLogRow;
+  continuedFrom: string | null;
+  messages: Array<{
+    id: string;
+    role: "user" | "assistant";
+    content: string;
+    createdAt: string;
+    actions: LaneAConversationLogAction[];
+  }>;
+}
+
+export interface LaneAConversationLogFilters {
+  userId?: string;
+  /** YYYY-MM-DD */
+  from?: string;
+  /** YYYY-MM-DD */
+  to?: string;
+  hasHandoffs?: boolean;
+  q?: string;
+  limit?: number;
+  cursor?: string | null;
+}
+
+function conversationLogQuery(filters: LaneAConversationLogFilters): string {
+  const params = new URLSearchParams();
+  if (filters.userId) params.set("userId", filters.userId);
+  if (filters.from) params.set("from", filters.from);
+  if (filters.to) params.set("to", filters.to);
+  if (filters.hasHandoffs) params.set("hasHandoffs", "true");
+  if (filters.q?.trim()) params.set("q", filters.q.trim());
+  if (filters.limit) params.set("limit", String(filters.limit));
+  if (filters.cursor) params.set("cursor", filters.cursor);
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
 export const laneAApi = {
   sendMessage: (
     agentId: string,
@@ -77,5 +153,13 @@ export const laneAApi = {
   getConversation: (agentId: string, conversationId: string, companyId: string) =>
     api.get<LaneAConversationTranscript>(
       `/lane-a/${agentId}/conversations/${conversationId}?companyId=${encodeURIComponent(companyId)}`,
+    ),
+  listConversationLog: (companyId: string, agentId: string, filters: LaneAConversationLogFilters = {}) =>
+    api.get<LaneAConversationLogPage>(
+      `/companies/${companyId}/lane-a/agents/${agentId}/conversations${conversationLogQuery(filters)}`,
+    ),
+  getConversationLog: (companyId: string, agentId: string, conversationId: string) =>
+    api.get<LaneAConversationLogTranscript>(
+      `/companies/${companyId}/lane-a/agents/${agentId}/conversations/${conversationId}`,
     ),
 };

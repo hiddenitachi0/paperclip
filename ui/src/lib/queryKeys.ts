@@ -313,6 +313,13 @@ export const queryKeys = {
   agentMemories: {
     list: (agentId: string) => ["agent-memories", agentId] as const,
   },
+  // Quick-agent Conversations review (list + one transcript).
+  laneAConversationLog: {
+    list: (companyId: string, agentId: string, filters: Record<string, unknown>) =>
+      ["lane-a-conversation-log", companyId, agentId, filters] as const,
+    detail: (companyId: string, agentId: string, conversationId: string) =>
+      ["lane-a-conversation-log", companyId, agentId, "detail", conversationId] as const,
+  },
   // Overlapping work between open tasks.
   overlaps: {
     list: (companyId: string) => ["overlaps", companyId] as const,
