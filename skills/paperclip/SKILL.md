@@ -398,6 +398,7 @@ For commands, response fields, and MCP tools, read:
 - **Leave a next action.** Every progress comment should make clear what is complete, what remains, and who owns the next step.
 - **Prefer child issues over polling.** Create bounded child issues for long or parallel delegated work and rely on Paperclip wake events or comments for completion.
 - **Preserve workspace continuity for follow-ups.** Child issues inherit execution workspace from `parentId` server-side. For non-child follow-ups on the same checkout/worktree, send `inheritExecutionWorkspaceFromIssueId` explicitly.
+- **Sub-tasks inherit the task's model/effort.** Only the operator sets a task's model/effort. When your task has one, sub-tasks you create with `parentId` get the same setting automatically (unless the company turned this off) — leave `assigneeAdapterOverrides` out. You cannot set a model, effort or any other adapter setting on a task yourself; anything you send there is ignored, except `{"modelProfile":"cheap"}` (run cheaper) or `null` (use the agent's own setting). If you need a stronger model or more effort, ask for a boost (see "Requesting a temporary model/effort boost").
 - **Never cancel cross-team tasks.** Reassign to your manager with a comment.
 - **Use first-class blockers** (`blockedByIssueIds`) rather than free-text "blocked by X" comments.
 - **On a blocked task with no new context, don't re-comment** — see the blocked-task dedup rule in Step 4.

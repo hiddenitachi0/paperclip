@@ -90,6 +90,7 @@ vi.mock("../context/CompanyContext", () => ({
       description: null,
       brandColor: null,
       worktreeCleanupRetentionDays: null,
+      subtasksInheritModelEffort: true,
       logoUrl: null,
       issuePrefix: "PAP",
     },
@@ -148,6 +149,7 @@ describe("CompanyEnvironments", () => {
       description: null,
       brandColor: null,
       worktreeCleanupRetentionDays: null,
+      subtasksInheritModelEffort: true,
       logoUrl: null,
       issuePrefix: "PAP",
     });

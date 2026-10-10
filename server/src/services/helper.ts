@@ -52,6 +52,7 @@ import {
   createLaneAProviderClient,
   scrubLaneASecrets,
   type LaneAChatMessage,
+  type LaneAImage,
   type LaneAModelClient,
   type LaneAProviderClient,
 } from "./lane-a-providers.js";
@@ -794,5 +795,232 @@ export function helperService(db: Db, options: HelperServiceOptions = {}) {
     };
   }
 
-  return { getSettings, updateSettings, ask, assertEntryInCompany };
+  /**
+   * Storylines (AI director, transition writer, clip-frame reader): one
+   * tool-less call that mirrors ask() exactly. The model is `entryId` when
+   * given (e.g. Media Studio's picture-reading model), else the company's
+   * helper default, else the helper's built-in default. The key is
+   * `keySecretId` when given (a company secret, read through the plugin path
+   * with the company check), else ask()'s own resolveKey(): the helper's key
+   * for that service, else Paperclip's own Claude key where the helper allows
+   * it (Claude only -- instanceFallback in the helper settings), else a plain
+   * 503. The system and user text are masked (maskSecretLikeText) like ask()
+   * masks its question and context. The cost is recorded on the company.
+   */
+  async function callCompanyModel(input: CompanyModelCallInput): Promise<CompanyModelCallResult> {
+    const block = await budgets.getCompanyInvocationBlock(input.companyId);
+    if (block) {
+      throw forbidden(`${input.purpose} cannot run right now: ${block.reason} An owner can raise or lift the limit under Costs.`, {
+        reason: "spending_limit",
+        scopeType: block.scopeType,
+      });
+    }
+    const entry = await resolveCompanyModelEntry(input.companyId, input.entryId ?? null);
+    // A model named on purpose (e.g. Media Studio's picture reader) that is gone is a real problem.
+    if (!entry && input.entryId) throw new HttpError(503, input.noModelMessage, { code: "COMPANY_MODEL_MISSING" });
+    // No helper default = the helper's built-in default, exactly like ask().
+    const canSee = entry ? picturesOf(entry).canSeePictures === true : builtInDefaultCanSeePictures();
+    const modelLabel = entry?.name ?? `${laneAProviderLabel("anthropic")} (${LANE_A_DEFAULT_MODEL})`;
+    if (input.images && input.images.length > 0 && !canSee) {
+      throw new HttpError(503, `"${modelLabel}" cannot look at pictures, so ${input.purpose.toLowerCase()} cannot use it.`, {
+        code: "COMPANY_MODEL_CANNOT_SEE_PICTURES",
+      });
+    }
+    const settings = resolveLaneASettings({
+      id: "storyline-writer",
+      companyId: input.companyId,
+      name: input.purpose,
+      laneAEnabled: true,
+      laneAProvider: entry?.provider ?? "anthropic",
+      laneAModel: entry?.model ?? LANE_A_DEFAULT_MODEL,
+      laneABaseUrl: entry?.baseUrl ?? null,
+      laneATemperature: entry?.defaultTemperature ?? null,
+      laneAThinking: entry?.defaultThinking ?? null,
+      laneAProviderRouting: (entry?.providerRouting as never) ?? null,
+      laneAMaxOutputTokens: entry?.defaultMaxOutputTokens ?? input.maxTokens,
+    });
+    if (!settings.model) {
+      throw new HttpError(503, `The saved model "${modelLabel}" has no model id. Fix it under Company settings → Models.`, { code: "COMPANY_MODEL_MISSING" });
+    }
+    if (settings.provider !== "anthropic" && settings.provider !== "local" && !settings.baseUrl) {
+      throw new HttpError(503, `The saved model "${modelLabel}" has no address. Fix it under Company settings → Models.`, { code: "COMPANY_MODEL_MISSING" });
+    }
+    const label = laneAProviderLabel(settings.provider);
+    let apiKey: string | null = null;
+    if (input.keySecretId && !(settings.provider === "anthropic" && options.createModelClient)) {
+      try {
+        apiKey = (
+          await secrets.resolveSecretValueForPlugin(input.companyId, input.keySecretId, "latest", {
+            consumerType: "plugin",
+            consumerId: input.keyConsumerId ?? "media-studio",
+            actorType: "plugin",
+            pluginId: input.keyConsumerId ?? "media-studio",
+          })
+        ).trim();
+      } catch {
+        apiKey = null;
+      }
+      if (!apiKey && settings.provider !== "local") {
+        throw new HttpError(503, `The ${label} key picked for "${modelLabel}" could not be read. Pick it again from this company's Secrets.`, {
+          code: "COMPANY_MODEL_KEY_MISSING",
+        });
+      }
+    } else {
+      // The same key rule as ask(): the helper's key for this service, else
+      // Paperclip's own Claude key where the helper allows it (Claude only,
+      // shown as instanceFallback in the helper settings), else a plain 503.
+      try {
+        apiKey = await resolveKey(input.companyId, settings.provider, modelLabel, input.actorUserId);
+      } catch (err) {
+        if (!entry && err instanceof HttpError && err.status === 503) {
+          throw new HttpError(503, input.noModelMessage, { code: "COMPANY_MODEL_MISSING" });
+        }
+        throw err;
+      }
+    }
+    let client: LaneAProviderClient;
+    try {
+      client = createLaneAProviderClient({
+        provider: settings.provider,
+        apiKey,
+        baseUrl: settings.baseUrl,
+        anthropicClient: settings.provider === "anthropic" && options.createModelClient ? options.createModelClient() : undefined,
+        fetch: options.providerFetch,
+      });
+    } catch (err) {
+      throw new HttpError(503, `Could not reach "${modelLabel}": ${scrubLaneASecrets(String(err instanceof Error ? err.message : err), apiKey)}`);
+    }
+    const maxTokens = Math.min(settings.maxOutputTokens, input.maxTokens);
+    // Masked like ask() masks the question and context: no secret-looking text leaves in a prompt.
+    const messages: LaneAChatMessage[] = [
+      { role: "user", content: maskSecretLikeText(input.user), ...(input.images && input.images.length > 0 ? { images: input.images } : {}) },
+    ];
+    const system = maskSecretLikeText(input.system);
+    let withTemperature = typeof settings.temperature === "number";
+    let withReasoningEffort = settings.reasoningEffort != null;
+    const send = async (): Promise<Awaited<ReturnType<LaneAProviderClient["complete"]>>> => {
+      try {
+        // No `tools` key, ever: these calls only write text.
+        return await client.complete({
+          model: settings.model!,
+          maxTokens,
+          system,
+          messages,
+          ...(withTemperature ? { temperature: settings.temperature } : {}),
+          ...(withReasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}),
+          ...(settings.providerRouting ? { providerRouting: settings.providerRouting } : {}),
+        });
+      } catch (err) {
+        if (!isLaneATemperatureUnsupportedError(err)) throw err;
+        if (withReasoningEffort) {
+          withReasoningEffort = false;
+          return send();
+        }
+        if (withTemperature) {
+          withTemperature = false;
+          return send();
+        }
+        throw err;
+      }
+    };
+    let response: Awaited<ReturnType<LaneAProviderClient["complete"]>>;
+    try {
+      response = await send();
+    } catch (err) {
+      throw toHttpError(err, modelLabel);
+    }
+    const cost = await priceLaneACall({
+      provider: settings.provider,
+      model: settings.model,
+      inputTokens: response.usage.inputTokens,
+      outputTokens: response.usage.outputTokens,
+      providerCostUsd: response.usage.costUsd ?? null,
+    });
+    try {
+      await costService(db).createEvent(input.companyId, {
+        agentId: null,
+        provider: settings.provider,
+        biller: settings.provider,
+        billingType: "metered_api",
+        billingCode: input.billingCode,
+        model: settings.model,
+        inputTokens: response.usage.inputTokens,
+        outputTokens: response.usage.outputTokens,
+        costCents: cost.costCents,
+        costMicroUsd: cost.costMicroUsd,
+        costSource: cost.costSource,
+        occurredAt: new Date(),
+      });
+    } catch (err) {
+      logger.error({ err, companyId: input.companyId }, "company model: could not record the cost event");
+    }
+    return {
+      text: response.text,
+      truncated: response.stop === "max_tokens",
+      costCents: cost.costCents,
+      modelLabel,
+      entryId: entry?.id ?? null,
+      provider: settings.provider,
+      model: settings.model,
+    };
+  }
+
+  /** The saved model a storyline call uses: the given one (must be this company's, not archived), else the helper default. */
+  async function resolveCompanyModelEntry(companyId: string, entryId: string | null): Promise<EntryRow | null> {
+    if (entryId) return assertEntryInCompany(companyId, entryId).catch(() => null);
+    const row = await getRow(companyId);
+    if (!row?.defaultDirectoryEntryId) return null;
+    return assertEntryInCompany(companyId, row.defaultDirectoryEntryId).catch(() => null);
+  }
+
+  /**
+   * Whether a storyline writer call can run for this company without a
+   * saved model: the helper's built-in default on Paperclip's own Claude key,
+   * under the same rule ask() follows (instanceFallback in the settings).
+   */
+  async function builtInDefaultUsable(companyId: string): Promise<{ label: string; canSeePictures: boolean } | null> {
+    const ownKey = (await listKeyBindings(companyId)).get("anthropic")?.status === "ok";
+    if (ownKey || options.createModelClient || readAnthropicApiKey()) {
+      return { label: `${laneAProviderLabel("anthropic")} (${LANE_A_DEFAULT_MODEL}) on Paperclip's own key`, canSeePictures: builtInDefaultCanSeePictures() };
+    }
+    return null;
+  }
+
+  /** Whether a saved model of this company can look at pictures (true / false / null = unknown). */
+  async function companyModelCanSeePictures(companyId: string, entryId: string | null): Promise<{ entryId: string; name: string; canSee: boolean | null } | null> {
+    const entry = await resolveCompanyModelEntry(companyId, entryId);
+    if (!entry) return null;
+    return { entryId: entry.id, name: entry.name, canSee: picturesOf(entry).canSeePictures };
+  }
+
+  return { getSettings, updateSettings, ask, assertEntryInCompany, callCompanyModel, resolveCompanyModelEntry, companyModelCanSeePictures, builtInDefaultUsable };
+}
+
+export interface CompanyModelCallInput {
+  companyId: string;
+  /** Plain name of what is calling, e.g. "The AI director". */
+  purpose: string;
+  /** Shown as is when the company has no usable saved model. */
+  noModelMessage: string;
+  billingCode: string;
+  system: string;
+  user: string;
+  images?: LaneAImage[];
+  maxTokens: number;
+  actorUserId: string | null;
+  entryId?: string | null;
+  keySecretId?: string | null;
+  /** Who reads keySecretId (the audit trail's consumer), e.g. the Media Studio plugin id. */
+  keyConsumerId?: string | null;
+}
+
+export interface CompanyModelCallResult {
+  text: string;
+  truncated: boolean;
+  costCents: number;
+  modelLabel: string;
+  /** null = the helper's built-in default (Claude on Paperclip's own key, where the helper allows it). */
+  entryId: string | null;
+  provider: LaneAProvider;
+  model: string;
 }

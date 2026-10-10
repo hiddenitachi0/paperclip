@@ -83,6 +83,88 @@ export async function extractLastFrameDataUri(clipBuffer: Buffer): Promise<strin
   }
 }
 
+/**
+ * Storyline strip: a clip's FIRST frame (data: URI JPEG) -- shot B's real
+ * opening picture, the end frame an AI transition must arrive at. Null on
+ * any failure, like extractLastFrameDataUri.
+ */
+export async function extractFirstFrameDataUri(clipBuffer: Buffer): Promise<string | null> {
+  if (!(await checkFfmpegAvailable())) return null;
+  try {
+    return await withTempDir(async (dir) => {
+      const input = join(dir, "in.mp4");
+      const output = join(dir, "frame.jpg");
+      await writeFile(input, clipBuffer);
+      await execFileAsync(FFMPEG_BINARY, ["-y", "-i", input, "-frames:v", "1", "-q:v", "2", output], { timeout: FRAME_EXTRACT_TIMEOUT_MS });
+      const frame = await readFile(output);
+      return `data:image/jpeg;base64,${frame.toString("base64")}`;
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Storyline strip (design 2.3, "keeping the context cheap"): 4 frames from a
+ * clip's last second ("end") or first second ("start") on ONE picture side
+ * by side, so the picture-reading model reads one image per side, not four.
+ * Returns JPEG bytes, or null when ffmpeg is missing or the clip can't be read.
+ */
+export async function buildClipContactSheet(clipBuffer: Buffer, side: "start" | "end"): Promise<Buffer | null> {
+  if (!(await checkFfmpegAvailable())) return null;
+  try {
+    return await withTempDir(async (dir) => {
+      const input = join(dir, "in.mp4");
+      const output = join(dir, "sheet.jpg");
+      await writeFile(input, clipBuffer);
+      const window = side === "end" ? ["-sseof", "-1", "-i", input] : ["-t", "1", "-i", input];
+      await execFileAsync(
+        FFMPEG_BINARY,
+        ["-y", ...window, "-vf", "fps=4,scale=384:-2,tile=4x1", "-frames:v", "1", "-q:v", "3", output],
+        { timeout: FRAME_EXTRACT_TIMEOUT_MS },
+      );
+      return await readFile(output);
+    });
+  } catch {
+    return null;
+  }
+}
+
+/** A poster picture for a clip card: the first frame, scaled down (JPEG bytes), or null. */
+export async function extractPosterJpeg(clipBuffer: Buffer): Promise<Buffer | null> {
+  if (!(await checkFfmpegAvailable())) return null;
+  try {
+    return await withTempDir(async (dir) => {
+      const input = join(dir, "in.mp4");
+      const output = join(dir, "poster.jpg");
+      await writeFile(input, clipBuffer);
+      await execFileAsync(FFMPEG_BINARY, ["-y", "-i", input, "-vf", "scale=480:-2", "-frames:v", "1", "-q:v", "4", output], { timeout: FRAME_EXTRACT_TIMEOUT_MS });
+      return await readFile(output);
+    });
+  } catch {
+    return null;
+  }
+}
+
+/** Frame rate and frame count of a clip's first video stream (counted, not guessed). */
+async function probeFrames(filePath: string): Promise<{ fps: number; frames: number } | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      FFPROBE_BINARY,
+      ["-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries", "stream=r_frame_rate,nb_read_frames", "-of", "csv=p=0", filePath],
+      { timeout: PROBE_TIMEOUT_MS },
+    );
+    const [rate, count] = stdout.trim().split(",");
+    const [num, den] = (rate ?? "").split("/").map((v) => Number.parseFloat(v));
+    const fps = num && den ? num / den : Number.NaN;
+    const frames = Number.parseInt(count ?? "", 10);
+    if (!Number.isFinite(fps) || fps <= 0 || !Number.isFinite(frames) || frames <= 0) return null;
+    return { fps, frames };
+  } catch {
+    return null;
+  }
+}
+
 export interface StitchResult {
   buffer: Buffer;
   contentType: string;
@@ -183,7 +265,18 @@ async function probeVideoSize(filePath: string): Promise<{ width: number; height
  * Returns each clip's real duration too, so the quality check compares the
  * stitched film against what was actually rendered.
  */
-export async function normalizeClipsForStitch(clipBuffers: readonly Buffer[]): Promise<NormalizedClips> {
+export interface NormalizeClipOptions {
+  /**
+   * An inserted AI transition: its first frame repeats shot A's last frame
+   * and its last frame repeats shot B's first frame, so both are dropped and
+   * each picture is shown once (design 2.3, "making the joins invisible").
+   */
+  trimEdgeFrames?: boolean;
+  /** "strip" = replaced by silence (a provider that ignored "no sound" can't leak noise in); a number = gain in dB. */
+  audio?: "keep" | "strip" | { gainDb: number };
+}
+
+export async function normalizeClipsForStitch(clipBuffers: readonly Buffer[], clipOptions: ReadonlyArray<NormalizeClipOptions | undefined> = []): Promise<NormalizedClips> {
   if (clipBuffers.length === 0) throw new Error("No clips to stitch");
   return withTempDir(async (dir) => {
     const inputs: string[] = [];
@@ -193,7 +286,8 @@ export async function normalizeClipsForStitch(clipBuffers: readonly Buffer[]): P
       inputs.push(path);
     }
     const { width, height } = await probeVideoSize(inputs[0]!);
-    const hasAudio = await Promise.all(inputs.map((path) => probeHasAudioStream(path)));
+    const probedAudio = await Promise.all(inputs.map((path) => probeHasAudioStream(path)));
+    const hasAudio = probedAudio.map((has, index) => has && clipOptions[index]?.audio !== "strip");
     const anyAudio = hasAudio.some(Boolean);
     const videoFilter =
       `scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
@@ -202,13 +296,28 @@ export async function normalizeClipsForStitch(clipBuffers: readonly Buffer[]): P
     const durationsSeconds: number[] = [];
     for (const [index, input] of inputs.entries()) {
       const output = join(dir, `norm-${String(index).padStart(6, "0")}.mp4`);
+      const opts = clipOptions[index];
       const args = ["-y", "-i", input];
       if (anyAudio && !hasAudio[index]) {
         args.push("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000");
       }
       args.push("-map", "0:v:0");
       if (anyAudio) args.push("-map", hasAudio[index] ? "0:a:0" : "1:a:0");
-      args.push("-vf", videoFilter, "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-r", String(NORMALIZED_FPS));
+      let clipVideoFilter = videoFilter;
+      const audioFilters: string[] = [];
+      if (opts?.trimEdgeFrames) {
+        const probe = await probeFrames(input);
+        if (probe && probe.frames >= 3) {
+          // Integers only, from ffprobe's own count -- never caller text.
+          clipVideoFilter = `trim=start_frame=1:end_frame=${Math.floor(probe.frames) - 1},setpts=PTS-STARTPTS,${videoFilter}`;
+          if (hasAudio[index]) audioFilters.push(`atrim=start=${(1 / probe.fps).toFixed(4)},asetpts=PTS-STARTPTS`);
+        }
+      }
+      if (hasAudio[index] && opts?.audio && typeof opts.audio === "object") {
+        audioFilters.push(`volume=${clampMusicVolumeDb(opts.audio.gainDb)}dB`);
+      }
+      args.push("-vf", clipVideoFilter, "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-r", String(NORMALIZED_FPS));
+      if (anyAudio && audioFilters.length > 0) args.push("-af", audioFilters.join(","));
       if (anyAudio) args.push("-c:a", "aac", "-ar", "48000", "-ac", "2", "-shortest");
       else args.push("-an");
       args.push("-movflags", "+faststart", output);
