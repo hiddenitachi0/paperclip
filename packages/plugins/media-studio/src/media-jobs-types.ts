@@ -33,6 +33,27 @@ export interface MediaJobInput {
   mode?: "music" | "speech";
   /** Text-to-speech only: which voice, when the model takes one. */
   voice?: string;
+  /**
+   * The END frame (data: URI): the clip must finish on exactly this picture.
+   * Used by AI transitions (start = shot A's real last frame, end = shot B's
+   * real first frame). Mapped per model: Fal Kling v3/O3 `end_image_url`,
+   * Kling 1.6/2.1 pro `tail_image_url`, Wan 2.2 `end_image_url`; Sogni
+   * animate_photo `endImageIndex` + `frameRole: "both"`. A model that cannot
+   * take one is refused, never silently ignored.
+   */
+  endImage?: string;
+  /**
+   * Whether the clip should carry the model's own sound. Kling v3 makes
+   * sound by default and charges 50% more for it, so Fal Kling gets
+   * `generate_audio: false` unless this is true.
+   */
+  generateAudio?: boolean;
+  /**
+   * false = send our prompt to Sogni as written (`skipPromptProcessing`, and
+   * `expandPrompt: false` for Wan 3) instead of letting Sogni rewrite it from
+   * the pictures. Storyline shots and transitions send false.
+   */
+  promptRewrite?: boolean;
   seed?: number;
   durationSeconds?: number;
   aspectRatio?: string;

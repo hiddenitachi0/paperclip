@@ -27,6 +27,8 @@ export interface Company {
   migratedToUrl?: string | null;
   migratedAt?: Date | null;
   migratedByUserId?: string | null;
+  /** Sub-tasks get their parent task's model/effort setting unless they set their own. Default true. */
+  subtasksInheritModelEffort: boolean;
   logoAssetId: string | null;
   logoUrl: string | null;
   createdAt: Date;

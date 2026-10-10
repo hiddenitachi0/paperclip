@@ -240,6 +240,25 @@ export function detectLaneAPictureRequest(message: string, opts: { pictureEarlie
 }
 
 /**
+ * A message sent WITH a picture that asks to change it or use it: "alter
+ * this image to show you helping him", "put a hat on him", "make it darker",
+ * "legg til en hund". Only asked when the message came with a picture, so a
+ * plain "change of plans" without one never counts. A question about the
+ * picture ("what do you think of this?") is not a request.
+ */
+export function detectLaneAPictureEditRequest(message: string): boolean {
+  const text = message.toLowerCase().trim();
+  if (!text) return false;
+  if (/^(?:what|why|how|do|does|did|is|are|was|were|which|who|where|hva|hvorfor|hvordan|hvem|hvor|liker|er)\b/.test(text) && text.includes("?")) {
+    return false;
+  }
+  const verbs =
+    "(?:alter|change|edit|modify|adjust|retouch|fix|replace|swap|remove|erase|add|put|place|insert|turn|make|show|draw|paint|render|recolou?r|colou?r|restyle|transform|use|include)";
+  const verbsNo = "(?:endre|endr|rediger|fjern|bytt|erstatt|legg|sett|plasser|gjør|gjor|lag|vis|tegn|bruk|fiks)";
+  return new RegExp(`(?:^|[^\\p{L}])${verbs}(?![\\p{L}])`, "u").test(text) || new RegExp(`(?:^|[^\\p{L}])${verbsNo}(?![\\p{L}])`, "u").test(text);
+}
+
+/**
  * The short system note for the one automatic retry, forcing the model to
  * either call the tool or say plainly that it cannot. `reason` "request" is
  * used when the person asked for a picture and the reply made none (no claim

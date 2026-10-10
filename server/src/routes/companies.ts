@@ -33,7 +33,14 @@ import {
   workTimelineService,
 } from "../services/index.js";
 import type { StorageService } from "../storage/types.js";
-import { assertBoard, assertCompanyAccess, assertInstanceAdmin, getActorInfo, isCompanyOwnerOrAdmin } from "./authz.js";
+import {
+  assertBoard,
+  assertCompanyAccess,
+  assertCompanyOwnerAdminOrInstanceAdmin,
+  assertInstanceAdmin,
+  getActorInfo,
+  isCompanyOwnerOrAdmin,
+} from "./authz.js";
 import { COMPANY_IMPORT_ROUTE_PATH } from "./company-import-paths.js";
 
 /**
@@ -566,6 +573,12 @@ export function companyRoutes(db: Db, storage?: StorageService) {
     if (!existingCompany) {
       res.status(404).json({ error: "Company not found" });
       return;
+    }
+
+    // "Sub-tasks inherit model/effort" decides what agents spend on sub-tasks,
+    // so only the owner or an admin may change it (not every member).
+    if (body.subtasksInheritModelEffort !== undefined) {
+      assertCompanyOwnerAdminOrInstanceAdmin(req, companyId, "whether sub-tasks inherit model/effort");
     }
 
     if (req.actor.type !== "agent") {

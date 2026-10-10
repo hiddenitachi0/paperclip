@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeAll, afterAll, describe, expect, it, vi } from "vitest";
-import { createDb, companies, plugins, videoShots } from "@paperclipai/db";
-import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
+import { createDb, companies, costEvents, plugins, videoShots } from "@paperclipai/db";
+import { LANE_A_DEFAULT_MODEL, type PaperclipPluginManifestV1 } from "@paperclipai/shared";
 import { eq } from "drizzle-orm";
+import { seedCompanyWriterModel } from "./helpers/storyline-writer-model.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { videoStorylineSettingsService } from "../services/video-storyline-settings.ts";
 import { videoStorylineService, type VideoStorylineActor } from "../services/video-storylines.ts";
@@ -105,7 +106,7 @@ d("videoStorylineDirectorService", () => {
     return videoStorylineDirectorService(db);
   }
 
-  async function seedStorylineAndScene(opts: { advanced?: boolean } = {}) {
+  async function seedStorylineAndScene(opts: { advanced?: boolean; writer?: boolean } = {}) {
     process.env.ANTHROPIC_API_KEY = "test-key";
     const companyId = randomUUID();
     await db.insert(companies).values({
@@ -114,6 +115,7 @@ d("videoStorylineDirectorService", () => {
       issuePrefix: `S${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
       requireBoardApprovalForNewAgents: false,
     });
+    if (opts.writer !== false) await seedCompanyWriterModel(db, companyId);
     const settings = videoStorylineSettingsService(db);
     await settings.setEnabled(companyId, true);
     if (opts.advanced !== false) await settings.setAdvancedEnabled(companyId, true);
@@ -161,6 +163,37 @@ d("videoStorylineDirectorService", () => {
     expect(run.draftedShots).toHaveLength(2);
     expect(run.draftedShots[0]).toMatchObject({ prompt: "Shot 1", durationSeconds: 5, castInView: ["Hero"] });
     expect(run.errorMessage).toBeNull();
+  });
+
+  it("follows the helper's key rule: no company model and no instance fallback = a plain message, nothing called", async () => {
+    const { companyId, storylineId, sceneId } = await seedStorylineAndScene({ writer: false });
+    delete process.env.ANTHROPIC_API_KEY;
+    const mockCreate = mockAnthropicCreate(() => draftedShotsResponse(1));
+    const { helperService } = await import("../services/helper.ts");
+    const view = await helperService(db).getSettings(companyId, { canEdit: true });
+    expect(view.keys.find((k) => k.provider === "anthropic")?.instanceFallback).toBe(false);
+    const director = await freshDirectorService();
+    const run = await director.draftShots(companyId, storylineId, { sceneId, idea: "A storm rolls in", shotCount: 1 }, ACTOR);
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(run.status).toBe("failed");
+    expect(run.errorMessage).toContain("none is set up yet");
+    expect(run.errorMessage).toContain("Company settings → General → Helper");
+  });
+
+  it("follows the helper's key rule: no company model but instanceFallback = the built-in default on Paperclip's key, cost recorded on the company", async () => {
+    const { companyId, storylineId, sceneId } = await seedStorylineAndScene({ writer: false });
+    process.env.ANTHROPIC_API_KEY = "server-wide-key";
+    const mockCreate = mockAnthropicCreate(() => ({ ...draftedShotsResponse(1), usage: { input_tokens: 100, output_tokens: 50 } }));
+    const { helperService } = await import("../services/helper.ts");
+    const view = await helperService(db).getSettings(companyId, { canEdit: true });
+    expect(view.keys.find((k) => k.provider === "anthropic")?.instanceFallback).toBe(true);
+    const director = await freshDirectorService();
+    const run = await director.draftShots(companyId, storylineId, { sceneId, idea: "A storm rolls in", shotCount: 1 }, ACTOR);
+    expect(mockCreate).toHaveBeenCalledOnce();
+    expect((mockCreate.mock.calls[0]![0] as { model: string }).model).toBe(LANE_A_DEFAULT_MODEL);
+    expect(run.status).toBe("ready_for_review");
+    const events = await db.select().from(costEvents).where(eq(costEvents.companyId, companyId));
+    expect(events.map((e) => e.billingCode)).toContain("video_storyline_director");
   });
 
   it("includes recent shots as continuity context", async () => {

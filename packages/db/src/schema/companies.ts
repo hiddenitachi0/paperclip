@@ -45,6 +45,10 @@ export const companies = pgTable(
     migratedAt: timestamp("migrated_at", { withTimezone: true }),
     migratedByUserId: text("migrated_by_user_id"),
     migrationPausedRoutineIds: jsonb("migration_paused_routine_ids").$type<string[]>(),
+    // Sub-task flow-down: when an agent working a task that has its own
+    // model/effort setting creates sub-tasks, they get the same setting unless
+    // the sub-task sets its own. On by default; an owner can turn it off.
+    subtasksInheritModelEffort: boolean("subtasks_inherit_model_effort").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

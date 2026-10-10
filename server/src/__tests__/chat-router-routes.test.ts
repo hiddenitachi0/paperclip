@@ -26,6 +26,7 @@ const mockSecretaryClassifierService = vi.hoisted(() => ({
 
 const mockIssueService = vi.hoisted(() => ({
   create: vi.fn(),
+  getAttachmentById: vi.fn(),
 }));
 
 const mockAccessService = vi.hoisted(() => ({
@@ -477,5 +478,71 @@ describe("POST /chat/classify", () => {
     expect(mockLaneAService.sendMessage.mock.calls[0][0].targetAgent).toMatchObject({
       laneAAssignedUserIds: [],
     });
+  });
+});
+
+describe("chat router: pictures sent with a message (a Telegram photo)", () => {
+  const photoId = "33333333-3333-4333-8333-333333333333";
+  const caption = "I have a friend helping us in his kitchen, alter this image to show you helping him prepare the meat on the counter";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockAccessService.decide.mockResolvedValue({ allowed: true, action: "tasks:assign", explanation: "ok" });
+  });
+
+  it("goes to the quick agent with the picture, even when the caption has a work word like 'create'", async () => {
+    mockAgentService.getById.mockResolvedValue(makeAgent());
+    mockLaneAService.sendMessage.mockResolvedValue({ conversationId: "conv-1", response: "Done.", actions: [] });
+    const app = await createApp(boardActor());
+
+    const res = await request(app)
+      .post(`/api/chat/${targetAgentId}/messages`)
+      .send({ companyId, message: `create a version where ${caption}`, attachmentFileIds: [photoId] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.lane).toBe("a");
+    expect(mockLaneAService.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ message: `create a version where ${caption}`, attachmentFileIds: [photoId] }),
+    );
+    expect(mockIssueService.create).not.toHaveBeenCalled();
+  });
+
+  it("an agent without quick answers gets a task naming the picture's file id (a file of this company only)", async () => {
+    mockAgentService.getById.mockResolvedValue(makeAgent({ laneAEnabled: false }));
+    mockIssueService.getAttachmentById.mockResolvedValue({ id: photoId, companyId });
+    mockIssueService.create.mockResolvedValue({ id: "issue-1", identifier: "PAP-7", status: "todo", assigneeAgentId: targetAgentId });
+    const app = await createApp(boardActor());
+
+    const res = await request(app)
+      .post(`/api/chat/${targetAgentId}/messages`)
+      .send({ companyId, message: caption, attachmentFileIds: [photoId] });
+
+    expect(res.status).toBe(201);
+    expect(mockIssueService.create).toHaveBeenCalledWith(
+      companyId,
+      expect.objectContaining({ description: expect.stringContaining(`file id ${photoId}`) }),
+    );
+
+    mockIssueService.create.mockClear();
+    mockIssueService.getAttachmentById.mockResolvedValue({ id: photoId, companyId: otherCompanyId });
+    const foreign = await request(app)
+      .post(`/api/chat/${targetAgentId}/messages`)
+      .send({ companyId, message: caption, attachmentFileIds: [photoId] });
+    expect(foreign.status).toBe(422);
+    expect(mockIssueService.create).not.toHaveBeenCalled();
+  });
+
+  it("refuses more than four pictures, or something that is not a file id", async () => {
+    mockAgentService.getById.mockResolvedValue(makeAgent());
+    const app = await createApp(boardActor());
+    const many = await request(app)
+      .post(`/api/chat/${targetAgentId}/messages`)
+      .send({ companyId, message: caption, attachmentFileIds: [photoId, photoId, photoId, photoId, photoId] });
+    expect(many.status).toBe(400);
+    const bad = await request(app)
+      .post(`/api/chat/${targetAgentId}/messages`)
+      .send({ companyId, message: caption, attachmentFileIds: ["../../etc/passwd"] });
+    expect(bad.status).toBe(400);
+    expect(mockLaneAService.sendMessage).not.toHaveBeenCalled();
   });
 });

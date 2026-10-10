@@ -1706,8 +1706,22 @@
     {
       "idx": 244,
       "version": "7",
-      "when": 1791657882288,
-      "tag": "0244_company_migrated_to",
+      "when": 1791657999490,
+      "tag": "0244_storyline_transitions",
+      "breakpoints": true
+    },
+    {
+      "idx": 245,
+      "version": "7",
+      "when": 1791658809381,
+      "tag": "0245_subtasks_inherit_model_effort",
+      "breakpoints": true
+    },
+    {
+      "idx": 246,
+      "version": "7",
+      "when": 1791675101951,
+      "tag": "0246_company_migrated_to",
       "breakpoints": true
     }
   ]

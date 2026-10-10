@@ -149,6 +149,7 @@ export function companyService(db: Db, rawDb: Db = db) {
     migratedToUrl: companies.migratedToUrl,
     migratedAt: companies.migratedAt,
     migratedByUserId: companies.migratedByUserId,
+    subtasksInheritModelEffort: companies.subtasksInheritModelEffort,
     logoAssetId: companyLogos.assetId,
     createdAt: companies.createdAt,
     updatedAt: companies.updatedAt,
