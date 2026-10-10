@@ -61,7 +61,8 @@ def answer_item(issue_id, status, body, result_page=True, identifier="DUR-31", c
 class ResearchBridgeTestCase(unittest.TestCase):
     def setUp(self):
         self.state = {"bots": {BOT["token"]: {"offset": 0, "chats": [OPERATOR, OPERATOR2]}}, "notified": []}
-        bridge.ALLOWED_USER_IDS = {OPERATOR, OPERATOR2}
+        # Per bot now (no instance-wide list): every test bot keeps these people.
+        bridge.legacy_allowed = lambda token: {OPERATOR, OPERATOR2}
         self.patches = [
             mock.patch.object(bridge, "tg", return_value={}),
             mock.patch.object(bridge, "cli", return_value=None),

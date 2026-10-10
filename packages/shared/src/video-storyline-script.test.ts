@@ -93,7 +93,11 @@ describe("import request schema", () => {
 describe("clip lengths", () => {
   it("snaps Fal's Kling models to 5 or 10 seconds and leaves other models alone", () => {
     expect([1, 3, 5, 6, 10, 12, 60].map((s) => videoRenderDurationSeconds("fal", null, s))).toEqual([5, 5, 5, 10, 10, 10, 10]);
-    expect(videoRenderDurationSeconds("fal", "fal-ai/kling-video/v3/pro/image-to-video", 7)).toBe(10);
+    // Kling 3.0 takes any whole length from 3 to 15 seconds (Phase 0 fix: it used to be snapped to 5/10).
+    expect(videoRenderDurationSeconds("fal", "fal-ai/kling-video/v3/pro/image-to-video", 7)).toBe(7);
+    expect(videoRenderDurationSeconds("fal", "fal-ai/kling-video/v3/standard/image-to-video", 1)).toBe(3);
+    expect(videoRenderDurationSeconds("fal", "fal-ai/kling-video/v3/standard/image-to-video", 20)).toBe(15);
+    expect(videoRenderDurationSeconds("fal", "fal-ai/kling-video/v2.1/pro/image-to-video", 7)).toBe(10);
     expect(videoRenderDurationSeconds("fal", "fal-ai/some-other-model", 7)).toBe(7);
     expect(videoRenderDurationSeconds("sogni", null, 7)).toBe(7);
   });

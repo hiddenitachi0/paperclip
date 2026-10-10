@@ -74,8 +74,11 @@ describe("video model details (pure)", () => {
     expect(priceText({ ...FAL_VIDEO_MODELS[0]!, centsPerSecond: null, usdPerBaseRender: 0.194 })).toContain("Sogni list price about $0.194");
     expect(pictureSupportText(FAL_VIDEO_MODELS[1]!)).toContain("Needs a start picture");
     expect(pictureSupportText(FAL_VIDEO_MODELS[2]!)).toContain("Text only");
-    // Every Fal model the server can drive is a Kling model: 5- or 10-second clips.
-    expect(FAL_VIDEO_MODELS.every((m) => m.clipSeconds && "values" in m.clipSeconds && m.clipSeconds.values.join() === "5,10")).toBe(true);
+    // Kling 1.6/2.1 make 5- or 10-second clips; Kling 3 any length from 3 to 15 seconds.
+    for (const m of FAL_VIDEO_MODELS) {
+      if (m.id && /kling-video\/v3\//.test(m.id)) expect(m.clipSeconds).toEqual({ min: 3, max: 15 });
+      else expect(m.clipSeconds && "values" in m.clipSeconds && m.clipSeconds.values.join()).toBe("5,10");
+    }
   });
 });
 

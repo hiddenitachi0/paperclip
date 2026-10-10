@@ -68,6 +68,10 @@ import {
   updateDataConnectionSchema,
   // Telegram bots (DUR-3978)
   createTelegramBotSchema,
+  ackTelegramChatAnswerSchema,
+  telegramChatAskSchema,
+  telegramChatLinkSchema,
+  updateTelegramChatSettingsSchema,
   rotateTelegramBotTokenSchema,
   updateTelegramBotAllowedUsersSchema,
   updateTelegramBotCompanyNoticesSchema,
@@ -869,9 +873,15 @@ const INSTANCE_ADMIN_OPERATIONS = new Set([
   // secret_access_events like every other credential read.
   "GET /api/instance/telegram-bridge-config",
   "GET /api/companies/{companyId}/telegram-bots/{botId}/bridge-token",
+  // Hermes parity slice 1: the bridge's calls for linked people.
+  "POST /api/companies/{companyId}/telegram-chat/link",
+  "POST /api/companies/{companyId}/telegram-chat/ask",
+  "GET /api/companies/{companyId}/telegram-chat/outbox",
+  "POST /api/companies/{companyId}/telegram-chat/outbox/{requestId}/ack",
 ]);
 
 const CREATED_OPERATIONS = new Set([
+  "POST /api/me/telegram-link/code",
   "POST /api/adapters/install",
   "POST /api/companies/{companyId}/agent-hires",
   "POST /api/companies/{companyId}/agents",
@@ -3465,6 +3475,29 @@ for (const route of [
   ["delete", "/api/companies/{companyId}/telegram-bots/{botId}", "Disconnect a Telegram bot and delete its saved token", undefined],
   ["get", "/api/instance/telegram-bridge-config", "Every enabled Telegram bot on this instance, without tokens, for the host-side bridge", undefined],
   ["get", "/api/companies/{companyId}/telegram-bots/{botId}/bridge-token", "Resolve one bot's token for the host-side bridge (instance admin only)", undefined],
+] as const) {
+  registerCurrentRoute({
+    method: route[0],
+    path: route[1],
+    tags: ["telegram"],
+    summary: route[2],
+    ...(route[3] ? { body: route[3] } : {}),
+  });
+}
+
+// ─── Telegram questions from linked people (Hermes parity slice 1) ──────────
+// The person's own link (always the signed-in person's), the company setting
+// (owner/admin to change), and the bridge's calls (instance admin only).
+for (const route of [
+  ["get", "/api/me/telegram-link", "Whether your own Telegram account is linked", undefined],
+  ["post", "/api/me/telegram-link/code", "Make a one-time code (15 minutes) to link your own Telegram account", undefined],
+  ["delete", "/api/me/telegram-link", "Unlink your own Telegram account", undefined],
+  ["get", "/api/companies/{companyId}/telegram-chat/settings", "Which bot answers linked people, which agents answer, and the daily limit", undefined],
+  ["put", "/api/companies/{companyId}/telegram-chat/settings", "Change who answers linked people's questions on Telegram (owner or admin)", updateTelegramChatSettingsSchema],
+  ["post", "/api/companies/{companyId}/telegram-chat/link", "Link a Telegram sender to the person whose one-time code it is (bridge)", telegramChatLinkSchema],
+  ["post", "/api/companies/{companyId}/telegram-chat/ask", "A linked person's question to the company bot, answered as that person (bridge)", telegramChatAskSchema],
+  ["get", "/api/companies/{companyId}/telegram-chat/outbox", "Answers to linked people's questions ready to send (bridge)", undefined],
+  ["post", "/api/companies/{companyId}/telegram-chat/outbox/{requestId}/ack", "Mark one answer as sent or not sendable (bridge)", ackTelegramChatAnswerSchema],
 ] as const) {
   registerCurrentRoute({
     method: route[0],

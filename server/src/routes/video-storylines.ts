@@ -27,11 +27,19 @@ import {
   updateVideoStorylineApprovalThresholdSchema,
   updateVideoStorylineSchema,
   updateVideoStorylineSettingsSchema,
+  upsertVideoTransitionSchema,
+  suggestVideoTransitionSchema,
+  generateVideoTransitionSchema,
+  updateMediaMonthlyCapSchema,
+  MEDIA_MONTHLY_CAP_EXPLANATION,
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
-import { assertBoardOrAgent, assertBoardOrgAccess, assertCompanyAccess } from "./authz.js";
-import { badRequest, notFound, unprocessable } from "../errors.js";
+import { assertBoardOrAgent, assertBoardOrgAccess, assertCompanyAccess, assertCompanyOwnerAdminOrInstanceAdmin } from "./authz.js";
+import { HttpError, badRequest, notFound, unprocessable } from "../errors.js";
+
+/** The largest clip the poster route reads into memory to cut a picture from. */
+const POSTER_MAX_CLIP_BYTES = 100 * 1024 * 1024;
 import { logActivity } from "../services/activity-log.js";
 import { getStorageService } from "../storage/index.js";
 import { videoStorylineService, type VideoStorylineActor } from "../services/video-storylines.js";
@@ -45,6 +53,10 @@ import { videoStorylineDirectorConversationStore } from "../services/video-story
 import { videoStorylineDirectorReviewService } from "../services/video-storyline-director-review.js";
 import { videoStorylineDirectorDialogueService } from "../services/video-storyline-director-dialogue.js";
 import { videoStorylineDirectorProposalsService } from "../services/video-storyline-director-proposals.js";
+import { videoStorylineTransitionsService } from "../services/video-storyline-transitions.js";
+import { extractPosterJpeg } from "../services/video-ffmpeg.js";
+import { runMediaJob } from "../services/media-job-queue.js";
+import type { NextFunction, Response } from "express";
 
 /**
  * DUR-4127: company-scoped CRUD + render orchestration for video
@@ -76,6 +88,19 @@ export function videoStorylineRoutes(rawDb: Db) {
   const directorDialogue = videoStorylineDirectorDialogueService(db);
   const directorProposals = videoStorylineDirectorProposalsService(db);
   const stills = videoStorylineStillsService(db);
+  const transitions = videoStorylineTransitionsService(db);
+
+  /** Streams one stored object of THIS company (the key always comes from a stored row, never the request). */
+  async function streamStored(res: Response, next: NextFunction, companyId: string, objectKey: string, contentType: string, byteSize: number | null) {
+    const object = await getStorageService().getObject(companyId, objectKey);
+    res.setHeader("Content-Type", contentType || object.contentType || "application/octet-stream");
+    res.setHeader("Content-Length", String(byteSize || object.contentLength || 0));
+    res.setHeader("Cache-Control", "private, max-age=60");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Content-Disposition", "inline");
+    object.stream.on("error", (err) => next(err));
+    object.stream.pipe(res);
+  }
 
   function scope() {
     return companyScopeFromParam(rawDb, (req, companyId) => {
@@ -197,8 +222,8 @@ export function videoStorylineRoutes(rawDb: Db) {
     "/companies/:companyId/video-storylines/settings/advanced",
     validate(updateVideoStorylineSettingsSchema),
     companyScopeFromParam(rawDb, (req, companyId) => {
-      assertBoardOrgAccess(req);
-      assertCompanyAccess(req, companyId);
+      // A spend control: owners and admins only (security review DUR-4711).
+      assertCompanyOwnerAdminOrInstanceAdmin(req, companyId, "the advanced storyline features (they can spend money)");
     }),
     async (req, res) => {
       const companyId = req.params.companyId as string;
@@ -232,8 +257,8 @@ export function videoStorylineRoutes(rawDb: Db) {
     "/companies/:companyId/video-storylines/settings/approval-threshold",
     validate(updateVideoStorylineApprovalThresholdSchema),
     companyScopeFromParam(rawDb, (req, companyId) => {
-      assertBoardOrgAccess(req);
-      assertCompanyAccess(req, companyId);
+      // A spend control: owners and admins only (security review DUR-4711).
+      assertCompanyOwnerAdminOrInstanceAdmin(req, companyId, "the approval limit for video renders");
     }),
     async (req, res) => {
       const companyId = req.params.companyId as string;
@@ -248,6 +273,155 @@ export function videoStorylineRoutes(rawDb: Db) {
         details: { thresholdCents },
       });
       res.json({ thresholdCents });
+    },
+  );
+
+  /**
+   * Storyline strip: the company's monthly limit for AI transitions (design
+   * 2.11). Anyone in the company sees it; only an owner/admin changes it.
+   */
+  router.get("/companies/:companyId/video-storylines/settings/media-cap", scope(), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    res.json({ capCents: await settings.getMediaMonthlyCapCents(companyId), spentCents: await transitions.monthlySpentCents(companyId), explanation: MEDIA_MONTHLY_CAP_EXPLANATION });
+  });
+
+  router.patch(
+    "/companies/:companyId/video-storylines/settings/media-cap",
+    validate(updateMediaMonthlyCapSchema),
+    companyScopeFromParam(rawDb, (req, companyId) => {
+      // A spend control: owners and admins only (security review DUR-4711).
+      assertCompanyOwnerAdminOrInstanceAdmin(req, companyId, "the monthly limit for AI transitions");
+    }),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const capCents = await settings.setMediaMonthlyCapCents(companyId, req.body.capCents);
+      await logActivity(db, {
+        companyId,
+        actorType: "user",
+        actorId: req.actor.userId ?? "board",
+        action: "video_storylines.media_cap_updated",
+        entityType: "company",
+        entityId: companyId,
+        details: { capCents },
+      });
+      res.json({ capCents, spentCents: await transitions.monthlySpentCents(companyId), explanation: MEDIA_MONTHLY_CAP_EXPLANATION });
+    },
+  );
+
+  // ─── Strip (Simple editor): clips, transitions, versions ─────────────
+
+  router.get("/companies/:companyId/video-storylines/:storylineId/strip", ...gatedScope(), async (req, res) => {
+    res.json(await transitions.strip(req.params.companyId as string, req.params.storylineId as string));
+  });
+
+  router.put(
+    "/companies/:companyId/video-storylines/:storylineId/transitions",
+    validate(upsertVideoTransitionSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      res.json(await transitions.upsert(req.params.companyId as string, req.params.storylineId as string, req.body, actorOf(req)));
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/transitions/suggest",
+    validate(suggestVideoTransitionSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      res.json(await transitions.suggest(req.params.companyId as string, req.params.storylineId as string, req.body, actorOf(req)));
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/transitions/:transitionId/generate",
+    validate(generateVideoTransitionSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      res.status(202).json(
+        await transitions.generate(req.params.companyId as string, req.params.storylineId as string, req.params.transitionId as string, req.body, actorOf(req)),
+      );
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/transitions/:transitionId/takes/:takeId/use",
+    ...gatedScope(),
+    async (req, res) => {
+      res.json(
+        await transitions.useTake(
+          req.params.companyId as string,
+          req.params.storylineId as string,
+          req.params.transitionId as string,
+          req.params.takeId as string,
+          actorOf(req),
+        ),
+      );
+    },
+  );
+
+  router.get(
+    "/companies/:companyId/video-storylines/:storylineId/transitions/:transitionId/takes/:takeId/content",
+    ...gatedScope(),
+    async (req, res, next) => {
+      const companyId = req.params.companyId as string;
+      const take = await transitions.getTake(companyId, req.params.storylineId as string, req.params.transitionId as string, req.params.takeId as string);
+      if (!take.resultObjectKey) throw notFound("This version has no video yet.");
+      await streamStored(res, next, companyId, take.resultObjectKey, take.resultContentType || "video/mp4", take.resultByteSize);
+    },
+  );
+
+  /** A shot's own rendered clip, for the strip's play button. Company-scoped like final/content. */
+  router.get(
+    "/companies/:companyId/video-storylines/:storylineId/shots/:shotId/clip",
+    ...gatedScope(),
+    async (req, res, next) => {
+      const companyId = req.params.companyId as string;
+      const shot = await storylines.getShotRow(companyId, req.params.storylineId as string, req.params.shotId as string);
+      if (!shot.resultObjectKey) throw notFound("This shot has no rendered clip yet.");
+      await streamStored(res, next, companyId, shot.resultObjectKey, shot.resultContentType || "video/mp4", shot.resultByteSize);
+    },
+  );
+
+  /** A shot's poster picture: its approved still, else its preview, else the first frame of its clip. */
+  router.get(
+    "/companies/:companyId/video-storylines/:storylineId/shots/:shotId/poster",
+    ...gatedScope(),
+    async (req, res, next) => {
+      const companyId = req.params.companyId as string;
+      const shot = await storylines.getShotRow(companyId, req.params.storylineId as string, req.params.shotId as string);
+      if (shot.stillObjectKey) {
+        await streamStored(res, next, companyId, shot.stillObjectKey, shot.stillContentType || "image/png", shot.stillByteSize);
+        return;
+      }
+      if (shot.previewObjectKey) {
+        await streamStored(res, next, companyId, shot.previewObjectKey, shot.previewContentType || "image/jpeg", shot.previewByteSize);
+        return;
+      }
+      if (!shot.resultObjectKey) throw notFound("This shot has no picture yet.");
+      // The clip is read into memory to cut a poster from it: refuse very large clips (security review DUR-4711).
+      const tooLarge = () => new HttpError(413, "This shot's clip is too large to make a picture from on the server. Play the clip instead.");
+      if ((shot.resultByteSize ?? 0) > POSTER_MAX_CLIP_BYTES) throw tooLarge();
+      const object = await getStorageService().getObject(companyId, shot.resultObjectKey);
+      if ((object.contentLength ?? 0) > POSTER_MAX_CLIP_BYTES) {
+        object.stream.resume();
+        throw tooLarge();
+      }
+      const chunks: Buffer[] = [];
+      let total = 0;
+      for await (const chunk of object.stream) {
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+        total += buf.length;
+        if (total > POSTER_MAX_CLIP_BYTES) throw tooLarge();
+        chunks.push(buf);
+      }
+      const clip = Buffer.concat(chunks);
+      const poster = await runMediaJob("poster", () => extractPosterJpeg(clip));
+      if (!poster) throw notFound("This shot's picture could not be made (ffmpeg is not available on this server).");
+      res.setHeader("Content-Type", "image/jpeg");
+      res.setHeader("Content-Length", String(poster.length));
+      res.setHeader("Cache-Control", "private, max-age=300");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.end(poster);
     },
   );
 

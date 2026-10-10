@@ -418,4 +418,42 @@ describe("PATCH /api/companies/:companyId", () => {
       actorId: "user-1",
     }));
   });
+  it("lets only the owner or an admin change whether sub-tasks inherit model/effort", async () => {
+    const company = createCompany();
+    mockCompanyService.getById.mockResolvedValue(company);
+    mockCompanyService.update.mockResolvedValue({ ...company, subtasksInheritModelEffort: false });
+
+    const memberApp = await createApp({
+      type: "board",
+      userId: "user-2",
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: ["company-1"],
+      memberships: [{ companyId: "company-1", membershipRole: "operator", status: "active" }],
+    });
+    const denied = await request(memberApp)
+      .patch("/api/companies/company-1")
+      .send({ subtasksInheritModelEffort: false });
+    expect(denied.status).toBe(403);
+    expect(String(denied.body.error ?? "")).toContain("owner or an admin");
+    expect(mockCompanyService.update).not.toHaveBeenCalled();
+
+    const ownerApp = await createApp({
+      type: "board",
+      userId: "user-1",
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: ["company-1"],
+      memberships: [{ companyId: "company-1", membershipRole: "owner", status: "active" }],
+    });
+    const allowed = await request(ownerApp)
+      .patch("/api/companies/company-1")
+      .send({ subtasksInheritModelEffort: false });
+    expect(allowed.status).toBe(200);
+    expect(mockCompanyService.update).toHaveBeenCalledWith(
+      "company-1",
+      { subtasksInheritModelEffort: false },
+      expect.anything(),
+    );
+  });
 });

@@ -1695,6 +1695,27 @@
       "when": 1791583071889,
       "tag": "0242_helper_investigation_limits",
       "breakpoints": true
+    },
+    {
+      "idx": 243,
+      "version": "7",
+      "when": 1791655438727,
+      "tag": "0243_telegram_two_way_chat",
+      "breakpoints": true
+    },
+    {
+      "idx": 244,
+      "version": "7",
+      "when": 1791657999490,
+      "tag": "0244_storyline_transitions",
+      "breakpoints": true
+    },
+    {
+      "idx": 245,
+      "version": "7",
+      "when": 1791658809381,
+      "tag": "0245_subtasks_inherit_model_effort",
+      "breakpoints": true
     }
   ]
 }

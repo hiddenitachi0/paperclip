@@ -19,6 +19,8 @@ export interface Company {
   feedbackDataSharingTermsVersion: string | null;
   brandColor: string | null;
   worktreeCleanupRetentionDays: number | null;
+  /** Sub-tasks get their parent task's model/effort setting unless they set their own. Default true. */
+  subtasksInheritModelEffort: boolean;
   logoAssetId: string | null;
   logoUrl: string | null;
   createdAt: Date;

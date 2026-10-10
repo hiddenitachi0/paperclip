@@ -33,7 +33,8 @@ def message(user_id, text="hello", chat_type="private", chat_id=None):
 class BridgeTestCase(unittest.TestCase):
     def setUp(self):
         self.state = {"bots": {BOT["token"]: {"offset": 0, "chats": [OPERATOR]}}, "notified": []}
-        bridge.ALLOWED_USER_IDS = {OPERATOR}
+        # Per bot now (no instance-wide list): every test bot keeps these people.
+        bridge.legacy_allowed = lambda token: {OPERATOR}
         self.patches = [
             mock.patch.object(bridge, "tg", return_value={}),
             mock.patch.object(bridge, "cli", return_value={"ok": True}),
@@ -79,7 +80,9 @@ class StrangerTests(BridgeTestCase):
     def test_cards_are_only_sent_to_allowed_private_chats(self):
         self.state["bots"][BOT["token"]]["chats"] = [OPERATOR, STRANGER, -100200]
 
-        self.assertEqual(bridge.deliverable_chats(self.state, BOT["token"]), [OPERATOR])
+        self.assertEqual(bridge.deliverable_chats(self.state, BOT["token"], bridge.allowed_users_for(BOT)), [OPERATOR])
+        # With no list given: nobody (no instance-wide fallback any more).
+        self.assertEqual(bridge.deliverable_chats(self.state, BOT["token"]), [])
 
 
 class OperatorTests(BridgeTestCase):
@@ -90,6 +93,7 @@ class OperatorTests(BridgeTestCase):
 
     def test_the_operator_can_still_approve_from_telegram(self):
         bridge.handle_callback({"id": "cq-2", "_token": BOT["token"], "from": {"id": OPERATOR},
+                                "_allowed": bridge.allowed_users_for(BOT),
                                 "data": "approve:9abd6c8e-4c1d-40e7-a81e-73d1481c25ef",
                                 "message": {"message_id": 6, "chat": {"id": OPERATOR}, "text": "Deploy"}})
 

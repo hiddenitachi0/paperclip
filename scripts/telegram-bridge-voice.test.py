@@ -52,7 +52,8 @@ class FakeDownload(io.BytesIO):
 class VoiceTests(unittest.TestCase):
     def setUp(self):
         self.state = {"bots": {"bot-token": {"offset": 0, "chats": [OPERATOR]}}, "notified": []}
-        bridge.ALLOWED_USER_IDS = {OPERATOR}
+        # Per bot now (no instance-wide list): every test bot keeps these people.
+        bridge.legacy_allowed = lambda token: {OPERATOR}
         self.transcript = "hvor mange sofaer solgte vi i går?"
         self.answer = "Vi solgte 12 sofaer i går."
         self.speak_result = {"ok": True, "audioBase64": base64.b64encode(SPOKEN).decode(), "contentType": "audio/ogg",
