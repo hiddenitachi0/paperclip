@@ -1695,6 +1695,13 @@
       "when": 1791583071889,
       "tag": "0242_helper_investigation_limits",
       "breakpoints": true
+    },
+    {
+      "idx": 243,
+      "version": "7",
+      "when": 1791655438727,
+      "tag": "0243_telegram_two_way_chat",
+      "breakpoints": true
     }
   ]
 }
