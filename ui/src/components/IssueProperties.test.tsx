@@ -1501,7 +1501,8 @@ describe("IssueProperties", () => {
     act(() => root.unmount());
   });
 
-  it("hides model options when the issue uses the assignee default", async () => {
+  it("shows the agent's own model/effort as the default on the Model row when the task has no setting", async () => {
+    const onUpdate = vi.fn();
     mockAgentsApi.list.mockResolvedValue([
       {
         id: "agent-1",
@@ -1510,6 +1511,7 @@ describe("IssueProperties", () => {
         title: null,
         status: "active",
         adapterType: "codex_local",
+        adapterConfig: { model: "gpt-5.4", modelReasoningEffort: "minimal" },
         icon: null,
       },
     ]);
@@ -1520,12 +1522,84 @@ describe("IssueProperties", () => {
         assigneeAdapterOverrides: null,
       }),
       childIssues: [],
-      onUpdate: vi.fn(),
+      onUpdate,
     });
     await flush();
 
-    expect(container.textContent).not.toContain("Model lane");
-    expect(container.textContent).not.toContain("Codex options");
+    // The row is always there, so the setting can be changed after creation.
+    await waitForAssertion(() => {
+      expect(container.textContent).toContain("Agent default (gpt-5.4 · Minimal effort)");
+    });
+    expect(container.textContent).toContain("Model lane");
+
+    // The effort row is offered straight away, with the agent's level as the default.
+    const pressed = Array.from(container.querySelectorAll('button[aria-pressed="true"]')).map((b) => b.textContent);
+    expect(pressed).toEqual(["Agent default (Minimal)"]);
+    const maxEffort = Array.from(container.querySelectorAll("button[aria-pressed]"))
+      .find((button) => button.textContent === "X-High");
+    await act(async () => {
+      maxEffort!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(onUpdate).toHaveBeenCalledWith({
+      assigneeAdapterOverrides: { adapterConfig: { modelReasoningEffort: "xhigh" } },
+    });
+
+    act(() => root.unmount());
+  });
+
+  it("shows where an inherited setting came from, lists only the adapter's levels, and drops the marker on edit", async () => {
+    const onUpdate = vi.fn();
+    mockAgentsApi.list.mockResolvedValue([
+      {
+        id: "agent-1",
+        name: "Senior Product Engineer",
+        role: "engineer",
+        title: null,
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: { model: "gpt-5.4", modelReasoningEffort: "minimal" },
+        icon: null,
+      },
+    ]);
+
+    const root = renderProperties(container, {
+      issue: createIssue({
+        assigneeAgentId: "agent-1",
+        assigneeAdapterOverrides: {
+          adapterConfig: { modelReasoningEffort: "high" },
+          inheritedFrom: { issueId: "11111111-1111-4111-8111-111111111111", identifier: "PAP-7" },
+        },
+      }),
+      childIssues: [],
+      onUpdate,
+    });
+    await flush();
+
+    await waitForAssertion(() => {
+      expect(container.textContent).toContain("Inherited · high");
+    });
+    const optionsTrigger = findRowTrigger(container, "Model");
+    expect(optionsTrigger).toBeTruthy();
+    await act(async () => {
+      optionsTrigger!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    const inheritedNote = container.querySelector('[data-testid="assignee-override-inherited-from"]');
+    expect(inheritedNote?.textContent).toContain("Inherited from PAP-7");
+    expect(container.textContent).toContain("Changes apply from the next run.");
+
+    const effortButtons = Array.from(container.querySelectorAll("button[aria-pressed]")).map((b) => b.textContent);
+    expect(effortButtons).toEqual(["Agent default (Minimal)", "Minimal", "Low", "Medium", "High", "X-High"]);
+
+    const lowButton = Array.from(container.querySelectorAll("button[aria-pressed]"))
+      .find((button) => button.textContent === "Low");
+    await act(async () => {
+      lowButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(onUpdate).toHaveBeenCalledWith({
+      assigneeAdapterOverrides: { adapterConfig: { modelReasoningEffort: "low" } },
+    });
 
     act(() => root.unmount());
   });

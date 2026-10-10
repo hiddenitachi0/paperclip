@@ -2,8 +2,10 @@ import { memo, useState, useEffect, useRef, useCallback, useMemo, type ChangeEve
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   MODEL_PROFILE_KEYS,
-  getThinkingEffortKey,
+  agentDefaultLabel,
   getThinkingEffortOptions,
+  getThinkingEffortValue,
+  thinkingEffortLabel,
   type IssueWorkMode,
   type ModelProfileKey,
 } from "@paperclipai/shared";
@@ -136,8 +138,16 @@ import {
 const STAGED_FILE_ACCEPT = "image/*,application/pdf,text/plain,text/markdown,application/json,text/csv,text/html,.md,.markdown";
 
 /** Per-task effort choices come from the one shared per-adapter list; "" = the agent's own setting. */
+/**
+ * Effort choices for the assignee's adapter (one shared per-adapter list). The
+ * first entry ("") means "no override" and is labelled with the agent's own
+ * level, e.g. "Agent default (High)".
+ */
 function issueThinkingEffortOptionsFor(adapterType: string | null | undefined, adapterConfig?: Record<string, unknown>) {
-  return getThinkingEffortOptions(adapterType, adapterConfig, { autoLabel: "Default" });
+  const agentEffort = getThinkingEffortValue(adapterType, adapterConfig ?? null);
+  return getThinkingEffortOptions(adapterType, adapterConfig, {
+    autoLabel: agentDefaultLabel(agentEffort ? thinkingEffortLabel(agentEffort) : null),
+  });
 }
 
 function loadDraft(): IssueDraft | null {
@@ -994,14 +1004,13 @@ export function NewIssueDialog() {
 
     const config = (currentAssignee?.adapterConfig ?? {}) as Record<string, unknown>;
     const validThinkingValues = issueThinkingEffortOptionsFor(assigneeAdapterType, config);
-    const effortField = getThinkingEffortKey(assigneeAdapterType, config);
 
-    const seededModel = typeof config.model === "string" ? config.model : "";
-    const rawEffort = config[effortField];
-    const seededEffort =
-      typeof rawEffort === "string" && validThinkingValues.some((option) => option.id === rawEffort)
-        ? rawEffort
-        : "";
+    // Pre-fill = "Agent default (…)": the empty choice, labelled with the
+    // agent's own model/effort (see agentModelDefaultLabel and
+    // issueThinkingEffortOptionsFor). Nothing is pinned until the operator
+    // picks a different value.
+    const seededModel = "";
+    const seededEffort = "";
     const seededChrome = assigneeAdapterType === "claude_local" && config.chrome === true;
     seededAssigneeDefaultsRef.current = { model: seededModel, effort: seededEffort, chrome: seededChrome };
 
@@ -1299,6 +1308,8 @@ export function NewIssueDialog() {
     assigneeAdapterType,
     (currentAssignee?.adapterConfig ?? undefined) as Record<string, unknown> | undefined,
   );
+  const assigneeSavedModel = (currentAssignee?.adapterConfig as Record<string, unknown> | undefined)?.model;
+  const agentModelDefaultLabel = agentDefaultLabel(typeof assigneeSavedModel === "string" ? assigneeSavedModel : null);
   const recentAssigneeIds = useMemo(() => getRecentAssigneeIds(), [newIssueOpen]);
   const recentAssigneeOptionIds = useMemo(
     () => recentAssigneeIds.map((id) => assigneeValueFromSelection({ assigneeAgentId: id })),
@@ -2209,7 +2220,11 @@ export function NewIssueDialog() {
                     </p>
                   )}
                   {assigneeModelLane === "primary" && (
-                    <p className="text-[11px] text-muted-foreground">Runs on the agent's primary model.</p>
+                    <p className="text-[11px] text-muted-foreground">
+                      {isSubIssueMode && dialogCompany?.subtasksInheritModelEffort !== false
+                        ? `Uses ${parentIssueLabel || "the parent task"}'s model/effort if it has its own, otherwise the agent's.`
+                        : "Runs on the agent's primary model."}
+                    </p>
                   )}
                   {assigneeModelLane === "custom" && (
                     <p className="text-[11px] text-muted-foreground">Override the model and effort for this task only.</p>
@@ -2237,9 +2252,9 @@ export function NewIssueDialog() {
                     <InlineEntitySelector
                       value={assigneeModelOverride}
                       options={modelOverrideOptions}
-                      placeholder="Default model"
+                      placeholder={agentModelDefaultLabel}
                       disablePortal
-                      noneLabel="Default model"
+                      noneLabel={agentModelDefaultLabel}
                       searchPlaceholder="Search models..."
                       emptyMessage="No models found."
                       onChange={handleAssigneeModelOverrideChange}
