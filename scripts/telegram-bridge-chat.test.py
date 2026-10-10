@@ -82,7 +82,8 @@ class BridgeChatTestCase(unittest.TestCase):
             },
             "notified": [],
         }
-        bridge.ALLOWED_USER_IDS = {OPERATOR, OPERATOR2}
+        # Per bot now (no instance-wide list): every test bot keeps these people.
+        bridge.legacy_allowed = lambda token: {OPERATOR, OPERATOR2}
         self.patches = [
             mock.patch.object(bridge, "tg", return_value={}),
             mock.patch.object(bridge, "cli", return_value=None),

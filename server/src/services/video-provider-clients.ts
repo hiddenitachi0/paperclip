@@ -39,6 +39,27 @@ export interface MediaJobInput {
    * person) uses this instead.
    */
   characters?: Array<{ name: string; images: string[] }>;
+  /**
+   * The END frame (data: URI): the clip must finish on exactly this picture.
+   * Used by AI transitions (start = shot A's real last frame, end = shot B's
+   * real first frame). Mapped per model: Fal Kling v3/O3 `end_image_url`,
+   * Kling 1.6/2.1 pro `tail_image_url`, Wan 2.2 `end_image_url`; Sogni
+   * animate_photo `endImageIndex` + `frameRole: "both"`. A model that cannot
+   * take one is refused, never silently ignored.
+   */
+  endImage?: string;
+  /**
+   * Whether the clip should carry the model's own sound. Kling v3 makes
+   * sound by default and charges 50% more for it, so Fal Kling gets
+   * `generate_audio: false` unless this is true.
+   */
+  generateAudio?: boolean;
+  /**
+   * false = send our prompt to Sogni as written (`skipPromptProcessing`, and
+   * `expandPrompt: false` for Wan 3) instead of letting Sogni rewrite it from
+   * the pictures. Storyline shots and transitions send false.
+   */
+  promptRewrite?: boolean;
   seed?: number;
   durationSeconds?: number;
   aspectRatio?: string;
@@ -204,6 +225,29 @@ export function falVideoModelTakesElements(model: string | null | undefined): bo
   return !!model && /^fal-ai\/kling-video\/v3\/[a-z0-9._-]+\/image-to-video$/i.test(model.trim());
 }
 
+/** A pinned Fal Kling v3 / O3 model: they take `start_image_url` (never `image_url`). */
+function falKlingV3(model: string): boolean {
+  return /^fal-ai\/kling-video\/(v3|o3)\//i.test(model.trim());
+}
+
+/**
+ * The request field a Fal model takes its END frame in, or null when it has
+ * none (design 7.2): Kling v3/O3 `end_image_url`, Kling 1.6 / 2.1 pro
+ * image-to-video `tail_image_url`, Wan 2.2 A14B image-to-video `end_image_url`.
+ */
+export function falEndImageField(model: string): "end_image_url" | "tail_image_url" | null {
+  const id = model.trim().toLowerCase();
+  if (falKlingV3(id)) return "end_image_url";
+  if (/^fal-ai\/kling-video\/v(1\.6|2\.1)\/pro\/image-to-video$/.test(id)) return "tail_image_url";
+  if (/^fal-ai\/wan\/v2\.2-a14b\/image-to-video$/.test(id)) return "end_image_url";
+  return null;
+}
+
+/** Fal models that make their own sound unless told not to (and charge more for it). */
+export function falModelMakesSound(model: string): boolean {
+  return /^fal-ai\/kling-video\/(v3|o3|v2\.6)\//i.test(model.trim());
+}
+
 export class FalVideoProvider implements MediaJobProvider {
   readonly name = "fal";
   constructor(
@@ -231,8 +275,19 @@ export class FalVideoProvider implements MediaJobProvider {
       body.start_image_url = input.startImage ?? elements[0]!.frontal_image_url;
       body.elements = elements;
     } else if (input.startImage) {
-      body.image_url = input.startImage;
+      // Kling v3/O3 name the start picture start_image_url; older models image_url.
+      if (falKlingV3(model)) body.start_image_url = input.startImage;
+      else body.image_url = input.startImage;
     }
+    if (input.endImage) {
+      const field = falEndImageField(model);
+      if (!field) {
+        throw new Error(`The Fal model ${model} cannot finish on a chosen end picture. Use Kling 3.0 (fal-ai/kling-video/v3/standard/image-to-video).`);
+      }
+      body[field] = input.endImage;
+    }
+    // Kling v3 makes sound by default at +50% cost: off unless asked for (design 2.4).
+    if (falModelMakesSound(model)) body.generate_audio = input.generateAudio === true;
     if (input.aspectRatio) body.aspect_ratio = input.aspectRatio;
     if (typeof input.durationSeconds === "number") body.duration = String(input.durationSeconds);
     if (typeof input.seed === "number") body.seed = input.seed;
@@ -309,7 +364,7 @@ const SEEDANCE_KEYS: Record<string, string> = {
  * without one the text-to-video variant. null = Sogni's default; an unknown
  * name is returned unchanged.
  */
-export function sogniVideoModelKey(model: string | null | undefined, withStartImage: boolean): string | null {
+export function sogniVideoModelKey(model: string | null | undefined, withStartImage: boolean, withEndImage = false): string | null {
   const raw = model?.trim();
   if (!raw) return null;
   const id = raw.toLowerCase();
@@ -329,7 +384,8 @@ export function sogniVideoModelKey(model: string | null | undefined, withStartIm
       if (twoStage) return id.includes("balanced") ? "minimax-h3-r2v-balanced-2stage" : "minimax-h3-r2v-2stage";
       return id.includes("turbo") ? "minimax-h3-r2v-turbo" : "minimax-h3-r2v";
     }
-    const flf = id.includes("flf2v");
+    // A start AND an end picture (a transition) needs H3's first/last-frame variant, never plain i2v.
+    const flf = id.includes("flf2v") || (withStartImage && withEndImage);
     const workflow = withStartImage ? (flf ? "flf2v" : "i2v") : "t2v";
     if (id.includes("fastvideo") || id.includes("fasth3")) return `minimax-h3-fasth3-${workflow}-turbo${twoStage ? "-2stage" : ""}`;
     return `minimax-h3-${workflow}${id.includes("turbo") ? "-turbo" : ""}`;
@@ -338,8 +394,8 @@ export function sogniVideoModelKey(model: string | null | undefined, withStartIm
 }
 
 /** Which tool a shot uses, and whether its pictures go along as a start frame or as loose references. */
-export function sogniVideoStep(model: string | null | undefined, hasStartImage: boolean): { tool: SogniVideoTool; videoModel: string | null; pictures: "start" | "references" | "none" } {
-  const startKey = sogniVideoModelKey(model, true);
+export function sogniVideoStep(model: string | null | undefined, hasStartImage: boolean, hasEndImage = false): { tool: SogniVideoTool; videoModel: string | null; pictures: "start" | "references" | "none" } {
+  const startKey = sogniVideoModelKey(model, true, hasEndImage);
   // Image-to-video when there is a start frame and the model can take one (Seedance and r2v models use loose references instead).
   if (hasStartImage && (startKey === null || ANIMATE_PHOTO_KEYS.has(startKey)) && !(startKey && startKey.endsWith("r2v"))) {
     return { tool: "animate_photo", videoModel: startKey, pictures: "start" };
@@ -379,7 +435,10 @@ export class SogniVideoProvider implements MediaJobProvider {
 
   async start(input: MediaJobInput): Promise<MediaJobHandle> {
     const requested = input.model ?? this.options.defaultModel ?? null;
-    const plan = sogniVideoStep(requested, Boolean(input.startImage));
+    const plan = sogniVideoStep(requested, Boolean(input.startImage), Boolean(input.endImage));
+    if (input.endImage && (plan.tool !== "animate_photo" || !input.startImage)) {
+      throw new Error("This Sogni video model cannot finish on a chosen end picture. Pick LTX-2.5, MiniMax H3 (first/last frame) or Wan 3.");
+    }
     const mediaReferences: Array<{ kind: "image"; url: string }> = [];
     const args: Json = {
       prompt: input.prompt,
@@ -390,6 +449,17 @@ export class SogniVideoProvider implements MediaJobProvider {
       mediaReferences.push({ kind: "image", url: await this.uploadReferenceImage(input.startImage, 0) });
       // -1 = the first uploaded picture, used as the START frame.
       args.sourceImageIndex = -1;
+      if (input.endImage) {
+        mediaReferences.push({ kind: "image", url: await this.uploadReferenceImage(input.endImage, 1) });
+        // -2 = the second upload, the END frame; "both" = the clip runs from one to the other.
+        args.endImageIndex = -2;
+        args.frameRole = "both";
+      }
+      if (input.promptRewrite === false) {
+        // Our prompt as written: Sogni otherwise rewrites it from the pictures alone.
+        args.skipPromptProcessing = true;
+        if (plan.videoModel?.startsWith("wan3")) args.expandPrompt = false;
+      }
     } else if (plan.pictures === "references") {
       const pictures = [...(input.startImage ? [input.startImage] : []), ...(input.referenceImages ?? [])].slice(0, 4);
       for (const [index, picture] of pictures.entries()) {
