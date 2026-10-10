@@ -34,7 +34,9 @@ import {
   type DoneGateEvaluationInput,
   type DoneGateEvaluationResult,
 } from "./done-gate-critic.js";
-import { helperService, type HelperServiceOptions } from "./helper.js";
+// Type-only: helper.ts pulls in the picture pipeline (sharp, storage), which is loaded
+// lazily below so the issue routes and heartbeat that import this module stay light.
+import type { HelperServiceOptions } from "./helper.js";
 import {
   MISSING_RUN_ID_GATE_MESSAGE,
   SELF_REVIEW_PASS_CONTEXT_KEY,
@@ -514,8 +516,9 @@ export function createSavedModelDoneCheckCritic(
   input: { companyId: string; directoryEntryId: string; agentId: string; issueId: string },
   options: HelperServiceOptions = {},
 ): DoneGateCritic {
-  const helper = helperService(db, options);
   return async (criticInput) => {
+    const { helperService } = await import("./helper.js");
+    const helper = helperService(db, options);
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new Error("the finish check's model did not answer in time")), QUALITY_CHECK_TIMEOUT_MS);

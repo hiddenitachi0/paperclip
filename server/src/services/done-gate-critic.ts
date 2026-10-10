@@ -5,6 +5,7 @@ import { activityLog, approvals, companies, issueApprovals, issueComments, issue
 import {
   DEFAULT_DONE_GATE_SETTINGS,
   formatApprovalTitle,
+  maskSecretLikeText,
   type DoneGateMode,
   type DoneGateSettings,
   type DoneGateStatus,
@@ -20,7 +21,6 @@ import {
 } from "./self-review-gate.js";
 import { approvalPayloadKind, approvalPayloadOriginalIssueIds } from "./deploy-completion-gate.js";
 import { readAnthropicApiKey } from "../env-values.js";
-import { scrubLaneASecrets } from "./lane-a-providers.js";
 
 /** The reviewer answered, but not with a verdict that could be read: the task was NOT checked. */
 export class DoneGateUnreadableReplyError extends Error {
@@ -757,7 +757,9 @@ export async function evaluateDoneGateCritic(input: DoneGateEvaluationInput): Pr
     // The critic not running must never hold real work hostage -- but it must not look
     // like a passing check either, or a switched-on gate silently degrades to no gate.
     logger.warn(
-      { err: scrubLaneASecrets(err instanceof Error ? err.message : String(err)), issueId, round },
+      // Masked, not the raw error: provider errors can echo keys or headers. (The saved-model
+      // path already scrubs its own errors with the key it used; this covers the rest.)
+      { err: maskSecretLikeText(err instanceof Error ? err.message : String(err)), issueId, round },
       "done-gate critic could not run; letting the transition through",
     );
     await noteDoneGateCouldNotRun({
