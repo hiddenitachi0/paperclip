@@ -3100,10 +3100,11 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
 
       expect(child.assigneeAdapterOverrides).toEqual({
         adapterConfig: { model: "claude-opus-5", effort: "high" },
+        inheritedFrom: { issueId: parentIssueId },
       });
     });
 
-    it("keeps the creator's explicit child override instead of the parent's", async () => {
+    it("keeps the creator's explicit child setting key by key and fills the rest from the parent", async () => {
       const { parentIssueId } = await seedParent({
         adapterConfig: { model: "claude-opus-5", effort: "high" },
       });
@@ -3115,7 +3116,8 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       });
 
       expect(child.assigneeAdapterOverrides).toEqual({
-        adapterConfig: { model: "claude-haiku-4-5" },
+        adapterConfig: { model: "claude-haiku-4-5", effort: "high" },
+        inheritedFrom: { issueId: parentIssueId },
       });
     });
 
@@ -3156,6 +3158,84 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
 
       const [agentRow] = await db.select().from(agents).where(eq(agents.id, agentId));
       expect(agentRow?.adapterConfig).toEqual({ model: "saved-agent-model", effort: "medium" });
+    });
+
+    it("records the inheritance in the activity log with the parent task", async () => {
+      const { companyId, agentId, parentIssueId } = await seedParent({
+        adapterConfig: { model: "claude-opus-5", effort: "high" },
+      });
+
+      const { issue: child } = await svc.createChild(parentIssueId, {
+        title: "Child helper",
+        status: "todo",
+        actorAgentId: agentId,
+        createdByAgentId: agentId,
+      });
+
+      const rows = await db
+        .select()
+        .from(activityLog)
+        .where(eq(activityLog.entityId, child.id));
+      const inheritedRow = rows.find((row) => row.action === "issue.model_effort_inherited");
+      expect(inheritedRow).toBeDefined();
+      expect(inheritedRow?.companyId).toBe(companyId);
+      expect(inheritedRow?.actorType).toBe("agent");
+      expect(inheritedRow?.actorId).toBe(agentId);
+      expect(inheritedRow?.details).toMatchObject({
+        parentIssueId,
+        inherited: { model: "claude-opus-5", effort: "high" },
+        skipped: [],
+      });
+    });
+
+    it("inherits nothing when the company turned 'Sub-tasks inherit model/effort' off", async () => {
+      const { companyId, parentIssueId } = await seedParent({
+        adapterConfig: { model: "claude-opus-5", effort: "high" },
+      });
+      await db.update(companies).set({ subtasksInheritModelEffort: false }).where(eq(companies.id, companyId));
+
+      const { issue: child } = await svc.createChild(parentIssueId, {
+        title: "Child helper",
+        status: "todo",
+      });
+
+      expect(child.assigneeAdapterOverrides).toBeNull();
+      const rows = await db.select().from(activityLog).where(eq(activityLog.entityId, child.id));
+      expect(rows.some((row) => row.action === "issue.model_effort_inherited")).toBe(false);
+    });
+
+    it("does not hand the parent's Claude model to a Codex sub-task, and logs why", async () => {
+      const { companyId, parentIssueId } = await seedParent({
+        adapterConfig: { model: "claude-opus-5", effort: "high" },
+      });
+      const codexAgentId = randomUUID();
+      await db.insert(agents).values({
+        id: codexAgentId,
+        companyId,
+        name: "Codex worker",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: { model: "gpt-5-codex" },
+        runtimeConfig: {},
+        permissions: {},
+      });
+
+      const { issue: child } = await svc.createChild(parentIssueId, {
+        title: "Codex child",
+        status: "todo",
+        assigneeAgentId: codexAgentId,
+      });
+
+      expect(child.assigneeAdapterOverrides).toEqual({
+        adapterConfig: { modelReasoningEffort: "high" },
+        inheritedFrom: { issueId: parentIssueId },
+      });
+      const rows = await db.select().from(activityLog).where(eq(activityLog.entityId, child.id));
+      const inheritedRow = rows.find((row) => row.action === "issue.model_effort_inherited");
+      expect((inheritedRow?.details as { skipped?: Array<{ key: string }> })?.skipped?.map((entry) => entry.key)).toEqual([
+        "model",
+      ]);
     });
   });
 });
@@ -4399,7 +4479,10 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     });
 
     expect(child.parentId).toBe(parentIssueId);
-    expect(child.assigneeAdapterOverrides).toEqual({ adapterConfig: { effort: "max" } });
+    expect(child.assigneeAdapterOverrides).toEqual({
+      adapterConfig: { effort: "max" },
+      inheritedFrom: { issueId: parentIssueId },
+    });
   });
 
   it("only inherits the model/effort keys, never other adapterConfig fields the parent happens to carry", async () => {
@@ -4431,7 +4514,10 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       title: "Generic child issue",
     });
 
-    expect(child.assigneeAdapterOverrides).toEqual({ adapterConfig: { effort: "max" } });
+    expect(child.assigneeAdapterOverrides).toEqual({
+      adapterConfig: { effort: "max" },
+      inheritedFrom: { issueId: parentIssueId },
+    });
   });
 
   it("keeps an explicit child model/effort override instead of inheriting the parent's, including explicit null", async () => {
@@ -4470,6 +4556,44 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     expect(childWithExplicitNull.assigneeAdapterOverrides).toBeNull();
   });
 
+  it("never stores an inherited-from marker a caller sent; only the server writes it", async () => {
+    const companyId = randomUUID();
+    const parentIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: false });
+
+    const forgedMarker = { issueId: randomUUID(), identifier: "FAKE-1" };
+    const standalone = await svc.create(companyId, {
+      title: "Not a sub-task",
+      assigneeAdapterOverrides: { adapterConfig: { effort: "low" }, inheritedFrom: forgedMarker },
+    });
+    expect(standalone.assigneeAdapterOverrides).toEqual({ adapterConfig: { effort: "low" } });
+
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      title: "Parent issue",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAdapterOverrides: { adapterConfig: { effort: "max" } },
+    });
+    const child = await svc.create(companyId, {
+      parentId: parentIssueId,
+      title: "Child with only a forged marker",
+      assigneeAdapterOverrides: { inheritedFrom: forgedMarker },
+    });
+    expect(child.assigneeAdapterOverrides).toEqual({
+      adapterConfig: { effort: "max" },
+      inheritedFrom: { issueId: parentIssueId },
+    });
+  });
+
   it("keeps an explicit child model/effort override on the createChild helper route too", async () => {
     const companyId = randomUUID();
     const parentIssueId = randomUUID();
@@ -4495,7 +4619,10 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       title: "Child helper without its own override",
       status: "todo",
     });
-    expect(inheritingChild.assigneeAdapterOverrides).toEqual({ adapterConfig: { effort: "max" } });
+    expect(inheritingChild.assigneeAdapterOverrides).toEqual({
+      adapterConfig: { effort: "max" },
+      inheritedFrom: { issueId: parentIssueId },
+    });
 
     const { issue: overridingChild } = await svc.createChild(parentIssueId, {
       title: "Child helper with its own override",

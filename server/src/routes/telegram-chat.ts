@@ -39,6 +39,10 @@ import {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** The bridge's "ask" can carry one photo of up to 10 MB as base64, more than the default JSON limit. */
+export const TELEGRAM_CHAT_ASK_API_PATH = "/api/companies/:companyId/telegram-chat/ask";
+export const TELEGRAM_CHAT_ASK_JSON_BODY_LIMIT = "16mb";
+
 function ownUserId(req: Request): string {
   assertBoard(req);
   const userId = req.actor.type === "board" ? req.actor.userId : null;
@@ -55,6 +59,7 @@ export function telegramChatRoutes(
     laneA: deps.laneA ?? laneAService(rawDb, deps.laneAOptions),
     heartbeat: deps.heartbeat ?? heartbeatService(rawDb),
     now: deps.now,
+    storage: deps.storage,
   });
 
   // ─── (a) The person's own link ─────────────────────────────────────────────

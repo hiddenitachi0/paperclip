@@ -361,6 +361,11 @@ DECLARE
     -- the schema.
     'report_runs',
     'report_templates',
+    -- Storyline strip (Simple editor, Phase 1). Created, granted on and
+    -- policed in 0244_storyline_transitions.sql; listed here so the
+    -- login-role lists match the schema.
+    'video_transition_takes',
+    'video_transitions',
     -- DUR-4037. Created (and granted on) in 0187_payment_notices_and_settings.sql;
     -- listed here so the login-role lists match the schema, as for the tables above.
     'payment_notices',
@@ -699,6 +704,11 @@ DECLARE
     -- the schema.
     'report_runs',
     'report_templates',
+    -- Storyline strip (Simple editor, Phase 1). Created, granted on and
+    -- policed in 0244_storyline_transitions.sql; listed here so the
+    -- login-role lists match the schema.
+    'video_transition_takes',
+    'video_transitions',
     -- DUR-4037. Created (and granted on) in 0187_payment_notices_and_settings.sql;
     -- listed here so the login-role lists match the schema, as for the tables above.
     'payment_notices',

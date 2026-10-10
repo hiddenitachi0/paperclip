@@ -85,7 +85,7 @@ import { crossCompanyInstructionRoutes } from "./routes/cross-company-instructio
 import { instanceSecurityRoutes } from "./routes/instance-security.js";
 import { crossCompanyAccessLogRoutes } from "./routes/cross-company-access-log.js";
 import { telegramBotRoutes } from "./routes/telegram-bots.js";
-import { telegramChatRoutes } from "./routes/telegram-chat.js";
+import { TELEGRAM_CHAT_ASK_API_PATH, TELEGRAM_CHAT_ASK_JSON_BODY_LIMIT, telegramChatRoutes } from "./routes/telegram-chat.js";
 import { telegramReactionRoutes } from "./routes/telegram-reactions.js";
 import { SPEECH_TRANSCRIBE_API_PATH, SPEECH_TRANSCRIBE_JSON_BODY_LIMIT, speechRoutes } from "./routes/speech.js";
 import { dataConnectionRoutes } from "./routes/data-connections.js";
@@ -250,6 +250,11 @@ export async function createApp(
   // which is larger than the default limit. Only this one route gets more.
   app.use(SPEECH_TRANSCRIBE_API_PATH, express.json({
     limit: SPEECH_TRANSCRIBE_JSON_BODY_LIMIT,
+    verify: captureRawBody,
+  }));
+  // A linked person's Telegram question can carry one photo (up to 10 MB).
+  app.use(TELEGRAM_CHAT_ASK_API_PATH, express.json({
+    limit: TELEGRAM_CHAT_ASK_JSON_BODY_LIMIT,
     verify: captureRawBody,
   }));
   // "Ask Paperclip" with pictures: up to 4 pictures of 5 MB each as base64.

@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { HttpError } from "../errors.js";
 import { logger } from "../middleware/logger.js";
+import { STORYLINE_WRITER_NO_MODEL_MESSAGE } from "./video-storyline-company-model.js";
 
 /**
  * The AI director (review, follow-up questions, rewrite proposals) makes
@@ -10,8 +11,8 @@ import { logger } from "../middleware/logger.js";
  * a plain sentence with a non-500 status the editor can show as-is.
  */
 
-export const DIRECTOR_AI_NOT_CONFIGURED_MESSAGE =
-  "The AI director isn't set up on this server yet: an Anthropic API key is needed (Instance settings, server Anthropic key).";
+/** Storyline Phase 0: the director runs on the company's own model, never the server-wide key. */
+export const DIRECTOR_AI_NOT_CONFIGURED_MESSAGE = STORYLINE_WRITER_NO_MODEL_MESSAGE;
 
 /**
  * Security review: shown (and stored on a failed director run) for any
@@ -34,7 +35,7 @@ export function directorAiFailure(err: unknown): HttpError {
   if (err instanceof HttpError) return err;
   logger.warn({ err }, "video-storyline-director: AI call failed");
   if (isInstance(err, Anthropic.AuthenticationError) || isInstance(err, Anthropic.PermissionDeniedError)) {
-    return new HttpError(502, "The AI director's Anthropic key was refused. Check the server Anthropic key in Instance settings.");
+    return new HttpError(502, "The AI director's key was refused. A company owner or admin can check it under Company settings → General → Helper.");
   }
   if (isInstance(err, Anthropic.RateLimitError)) {
     return new HttpError(503, "The AI director is busy right now (rate limited). Try again in a minute.");

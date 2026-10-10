@@ -103,6 +103,14 @@ export function CompanySettings() {
     }
   });
 
+  const subtaskInheritMutation = useMutation({
+    mutationFn: (inherit: boolean) =>
+      companiesApi.update(selectedCompanyId!, { subtasksInheritModelEffort: inherit }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
+    }
+  });
+
   const syncLogoState = (nextLogoUrl: string | null) => {
     setLogoUrl(nextLogoUrl ?? "");
     void queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
@@ -398,6 +406,22 @@ export function CompanySettings() {
             checked={!!selectedCompany.requireBoardApprovalForNewAgents}
             onChange={(v) => settingsMutation.mutate(v)}
             toggleTestId="company-settings-team-approval-toggle"
+          />
+        </div>
+      </div>
+
+      {/* Task model/effort flow-down */}
+      <div className="space-y-4" data-testid="company-settings-model-effort-section">
+        <div className="section-title">
+          Model and effort
+        </div>
+        <div className="rounded-md section-box px-4 py-3">
+          <ToggleField
+            label="Sub-tasks inherit model/effort"
+            hint="When a task has its own model or thinking effort and the agent working on it splits the work into sub-tasks, the sub-tasks use the same setting, unless a sub-task sets its own. Turn off to let every sub-task run on its agent's usual model and effort."
+            checked={selectedCompany.subtasksInheritModelEffort !== false}
+            onChange={(v) => subtaskInheritMutation.mutate(v)}
+            toggleTestId="company-settings-subtasks-inherit-toggle"
           />
         </div>
       </div>

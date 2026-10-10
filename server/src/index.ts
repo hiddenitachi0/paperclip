@@ -86,6 +86,7 @@ import { mailAccountsService } from "./services/mail-accounts.js";
 import { videoStorylineRenderService } from "./services/video-storyline-render.js";
 import { tradingService } from "./services/trading.js";
 import { videoStorylineStitchService } from "./services/video-storyline-stitch.js";
+import { videoStorylineTransitionsService } from "./services/video-storyline-transitions.js";
 import { describeTickPhases } from "./services/scheduler-tick-phases.js";
 import { runDailyCostReconciliation } from "./services/cost-reconciliation.js";
 import { pluginRegistryService } from "./services/plugin-registry.js";
@@ -1076,6 +1077,7 @@ export async function startServer(): Promise<StartedServer> {
     const mailAccounts = mailAccountsService(schedulerDb as any);
     const videoStorylineRender = videoStorylineRenderService(schedulerDb as any);
     const videoStorylineStitch = videoStorylineStitchService(schedulerDb as any);
+    const videoStorylineTransitions = videoStorylineTransitionsService(schedulerDb as any);
     const tradingAgent = tradingService(schedulerDb as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(schedulerDb as any);
     const quietModeAlerts = quietModeAlertsService(schedulerDb as any);
@@ -1641,10 +1643,18 @@ export async function startServer(): Promise<StartedServer> {
             actorType: "scheduler",
             route: "heartbeat-scheduler:videoStorylineRender",
           },
-          () => videoStorylineRender.tick(),
+          // Storyline strip: AI transition takes are polled in the same chain.
+          async () => {
+            const result = await videoStorylineRender.tick();
+            const transitionResult = await videoStorylineTransitions.tick().catch((err: unknown) => {
+              logger.error({ err }, "video-storyline-transitions tick failed");
+              return { finished: 0, failed: 0 };
+            });
+            return { ...result, transitionsFinished: transitionResult.finished, transitionsFailed: transitionResult.failed };
+          },
         )
           .then((result) => {
-            if (result.advanced > 0 || result.failed > 0) {
+            if (result.advanced > 0 || result.failed > 0 || result.transitionsFinished > 0 || result.transitionsFailed > 0) {
               logger.info({ ...result }, "video-storyline-render tick");
             }
           })

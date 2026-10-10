@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { CHAT_ATTACHMENTS_MAX, CHAT_PHOTO_MAX_BYTES, chatPhotoFilename, sniffChatPhotoType } from "@paperclipai/shared";
 import { ApiRequestError } from "../../client/http.js";
 import {
   addCommonClientOptions,
@@ -17,6 +18,10 @@ import {
  *                 straight back, real work becomes a task.
  *   chat answers  the agent's latest answer for tasks started from a chat
  *                 (GET /api/companies/:companyId/issue-answers).
+ *   chat attach   store a photo someone sent (base64 on standard input) in the
+ *                 company's Files under a "chat-photo-" name
+ *                 (POST /api/companies/:companyId/files); `chat send
+ *                 --attachment <fileId>` then hands it to the agent.
  *   chat image    the bytes of a picture a quick agent's reply carried
  *                 (GET /api/attachments/:id/content), base64 in JSON, so the
  *                 bridge can upload it to Telegram without handing Telegram
@@ -48,6 +53,15 @@ interface ChatSendOptions extends BaseClientOptions {
   message: string;
   conversationId?: string;
   lane?: string;
+  attachment?: string[];
+}
+
+interface ChatAttachOptions extends BaseClientOptions {
+  stdin?: boolean;
+}
+
+function collect(value: string, previous: string[] = []): string[] {
+  return [...previous, value];
 }
 
 interface ChatReactionOptions extends BaseClientOptions {
@@ -78,6 +92,7 @@ export function registerChatCommands(program: Command): void {
       .requiredOption("--message <text>", "The message")
       .option("--conversation-id <id>", "Continue this quick-answer conversation")
       .option("--lane <lane>", "Force 'a' (quick answer) or 'b' (task) instead of letting the router decide")
+      .option("--attachment <fileId>", "A picture in the company's Files sent with the message (repeat for more)", collect, [])
       .action(async (agentId: string, opts: ChatSendOptions) => {
         try {
           const outcome = await runChatSend(agentId, opts);
@@ -150,6 +165,28 @@ export function registerChatCommands(program: Command): void {
           const ctx = resolveCommandContext(opts, { requireCompany: true });
           const query = new URLSearchParams({ companyId: ctx.companyId! });
           const outcome = await runChatGet(`${apiPath`/api/lane-a/${agentId}/looks`}?${query.toString()}`, opts);
+          if (!outcome.ok && !opts.json) {
+            throw new ApiRequestError(outcome.status, outcome.error);
+          }
+          printOutput(outcome, { json: opts.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+    { includeCompany: false },
+  );
+
+  addCommonClientOptions(
+    chat
+      .command("attach")
+      .description(
+        "Store a photo someone sent with a chat message in the company's Files (JPEG, PNG or WebP, at most 10 MB), read as base64 from standard input. Prints its file id for `chat send --attachment`. With --json a refusal is printed as {ok:false,...} and exits 0.",
+      )
+      .requiredOption("-C, --company-id <id>", "Company ID")
+      .option("--stdin", "Read the photo as base64 from standard input")
+      .action(async (opts: ChatAttachOptions) => {
+        try {
+          const outcome = await runChatAttach(opts);
           if (!outcome.ok && !opts.json) {
             throw new ApiRequestError(outcome.status, outcome.error);
           }
@@ -328,6 +365,51 @@ export async function runChatMedia(fileId: string, opts: BaseClientOptions): Pro
   }
 }
 
+export type ChatAttachOutcome =
+  | { ok: true; fileId: string; contentType: string; byteSize: number }
+  | { ok: false; status: number; error: string };
+
+async function readStdinText(stream: NodeJS.ReadableStream = process.stdin): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) {
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk as Uint8Array));
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+/**
+ * Store a photo a person sent in the company's Files, with no task. The type
+ * is decided from the bytes; the name is the server-wide "chat-photo-" name,
+ * which tells Media Studio to check it for apparent age before it is sent to
+ * any picture service.
+ */
+export async function runChatAttach(
+  opts: ChatAttachOptions,
+  deps: { stdin?: NodeJS.ReadableStream; now?: Date } = {},
+): Promise<ChatAttachOutcome> {
+  const ctx = resolveCommandContext(opts, { requireCompany: true });
+  if (!opts.stdin) throw new Error("Give the photo as base64 on standard input with --stdin");
+  const raw = (await readStdinText(deps.stdin)).replace(/\s+/g, "");
+  if (!raw || raw.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(raw)) {
+    return { ok: false, status: 400, error: "That picture could not be read." };
+  }
+  const bytes = Buffer.from(raw, "base64");
+  if (bytes.length > CHAT_PHOTO_MAX_BYTES) return { ok: false, status: 413, error: "That picture is too large." };
+  const type = sniffChatPhotoType(bytes);
+  if (!type) return { ok: false, status: 415, error: "That file is not a JPEG, PNG or WebP picture." };
+  const form = new FormData();
+  form.set("file", new Blob([bytes], { type }), chatPhotoFilename(type, deps.now));
+  try {
+    const created = await ctx.api.postForm<{ id?: unknown }>(apiPath`/api/companies/${ctx.companyId}/files`, form);
+    const fileId = typeof created?.id === "string" ? created.id : null;
+    if (!fileId || !FILE_ID_PATTERN.test(fileId)) return { ok: false, status: 502, error: "Paperclip did not say where the picture was saved." };
+    return { ok: true, fileId, contentType: type, byteSize: bytes.length };
+  } catch (err) {
+    if (err instanceof ApiRequestError) return { ok: false, status: err.status, error: err.message };
+    throw err;
+  }
+}
+
 export async function runChatSend(agentId: string, opts: ChatSendOptions): Promise<ChatSendOutcome> {
   const ctx = resolveCommandContext(opts, { requireCompany: true });
   const message = opts.message?.trim();
@@ -339,6 +421,10 @@ export async function runChatSend(agentId: string, opts: ChatSendOptions): Promi
   const body: Record<string, unknown> = { companyId: ctx.companyId, message };
   if (opts.conversationId?.trim()) body.conversationId = opts.conversationId.trim();
   if (opts.lane) body.laneHint = opts.lane;
+  const attachments = Array.from(new Set((opts.attachment ?? []).map((id) => id.trim()).filter(Boolean)));
+  if (attachments.some((id) => !FILE_ID_PATTERN.test(id))) throw new Error("--attachment must be a file id");
+  if (attachments.length > CHAT_ATTACHMENTS_MAX) throw new Error(`At most ${CHAT_ATTACHMENTS_MAX} attachments`);
+  if (attachments.length > 0) body.attachmentFileIds = attachments;
 
   try {
     const result = await ctx.api.post<Record<string, unknown>>(apiPath`/api/chat/${agentId}/messages`, body);

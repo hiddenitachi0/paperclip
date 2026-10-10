@@ -36,6 +36,10 @@ export const companies = pgTable(
     // worktree-cleanup job may remove its agent worktree. NULL = use the
     // server default (7).
     worktreeCleanupRetentionDays: integer("worktree_cleanup_retention_days"),
+    // Sub-task flow-down: when an agent working a task that has its own
+    // model/effort setting creates sub-tasks, they get the same setting unless
+    // the sub-task sets its own. On by default; an owner can turn it off.
+    subtasksInheritModelEffort: boolean("subtasks_inherit_model_effort").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

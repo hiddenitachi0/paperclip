@@ -60,6 +60,8 @@ import {
   upsertIssueDocumentSchema,
   updateIssueSchema,
   validateAdapterModelEffort,
+  validateModelAgainstList,
+  getThinkingEffortKey,
   getClosedIsolatedExecutionWorkspaceMessage,
   isClosedIsolatedExecutionWorkspace,
   isUuidLike,
@@ -114,6 +116,7 @@ import type { TaskWatchdogServiceDeps, taskWatchdogService } from "../services/t
 import { logger } from "../middleware/logger.js";
 import { flagAgentBoardDecisionClaim } from "../services/board-decision-claims.js";
 import { conflict, forbidden, HttpError, notFound, unauthorized, unprocessable } from "../errors.js";
+import { listAdapterModels } from "../adapters/index.js";
 import { assertBoard, assertBoardOrDelegate, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { companyScope, companyScopeFromParam } from "../middleware/company-scope.js";
 
@@ -1263,6 +1266,113 @@ class AutoApprovalIssueMissingError extends Error {
     super("Issue not found during auto-approval transaction");
     this.name = "AutoApprovalIssueMissingError";
   }
+}
+
+/**
+ * The adapterConfig keys a task may carry: the model, the assignee adapter's
+ * thinking-effort key, and Chrome (Claude). Anything else (extraArgs, env,
+ * command, mcpServers, permission switches...) is agent configuration and is
+ * changed on the agent, never per task.
+ */
+const TASK_OVERRIDE_EFFORT_KEYS = ["effort", "modelReasoningEffort", "variant"] as const;
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function sameJson(a: unknown, b: unknown) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+export function findDisallowedTaskOverrideKeys(
+  adapterConfig: Record<string, unknown>,
+  input: {
+    adapterType: string | null;
+    agentAdapterConfig?: Record<string, unknown> | null;
+    previousAdapterConfig?: Record<string, unknown> | null;
+  },
+): string[] {
+  const allowed = new Set<string>(["model", "chrome"]);
+  if (input.adapterType) {
+    allowed.add(getThinkingEffortKey(input.adapterType, input.agentAdapterConfig ?? undefined));
+  } else {
+    for (const key of TASK_OVERRIDE_EFFORT_KEYS) allowed.add(key);
+  }
+  const previous = input.previousAdapterConfig ?? {};
+  return Object.keys(adapterConfig).filter((key) => {
+    if (allowed.has(key)) return false;
+    // A value already stored on the task (older data) may be sent back unchanged.
+    return !(key in previous && sameJson(previous[key], adapterConfig[key]));
+  });
+}
+
+/**
+ * Who may set a task's model/effort. Only a person (board actor) may set the
+ * model, effort or any adapter setting on a task; for agents and other
+ * non-board writers the stored value is kept and the only accepted change is
+ * the cheaper preset (`modelProfile: "cheap"`) or clearing it (`null`) --
+ * otherwise a task-level override would beat an approved boost grant and let
+ * an agent run itself on Opus/max (see mergeModelProfileAdapterConfig).
+ * `inheritedFrom` is written by the server only and is never taken from a
+ * request; a board edit that leaves the inherited model/effort as it was
+ * keeps the stored marker.
+ *
+ * Returns `undefined` when the field must be left out of the write (create:
+ * so server-side sub-task flow-down still applies; update: keep what is
+ * stored).
+ */
+export function pinAssigneeAdapterOverridesForActor(
+  actorType: string,
+  next: unknown,
+  previous: unknown,
+  mode: "create" | "update",
+): Record<string, unknown> | null | undefined {
+  if (next === undefined) return undefined;
+  if (next === null) return null;
+  if (!isPlainObject(next)) return undefined;
+  const previousRecord = isPlainObject(previous) ? previous : null;
+  const { inheritedFrom: _ignoredMarker, ...requested } = next;
+
+  if (actorType !== "board") {
+    if (requested.modelProfile !== "cheap") return undefined;
+    if (mode === "create") return { modelProfile: "cheap" };
+    return { ...(previousRecord ?? {}), modelProfile: "cheap" };
+  }
+
+  if (mode === "update" && previousRecord?.inheritedFrom && isPlainObject(previousRecord.adapterConfig)) {
+    const before = previousRecord.adapterConfig;
+    const after = isPlainObject(requested.adapterConfig) ? requested.adapterConfig : {};
+    const modelEffortKeys = ["model", ...TASK_OVERRIDE_EFFORT_KEYS];
+    const unchanged = modelEffortKeys.every((key) => sameJson(before[key], after[key]));
+    if (unchanged && requested.modelProfile === previousRecord.modelProfile) {
+      return { ...requested, inheritedFrom: previousRecord.inheritedFrom };
+    }
+  }
+  return requested;
+}
+
+/** The adapter's model list for the model typo guard; a discovery failure means "unknown" (nothing rejected). */
+async function listAdapterModelsSafely(adapterType: string): Promise<Array<{ id: string }>> {
+  try {
+    return await listAdapterModels(adapterType);
+  } catch {
+    return [];
+  }
+}
+
+/** Models the agent already uses (its own model + its model-profile models) -- never a typo. */
+function agentKnownModels(agent: { adapterConfig?: unknown; runtimeConfig?: unknown }): string[] {
+  const known: string[] = [];
+  const own = (agent.adapterConfig as Record<string, unknown> | null | undefined)?.model;
+  if (typeof own === "string") known.push(own);
+  const profiles = (agent.runtimeConfig as { modelProfiles?: unknown } | null | undefined)?.modelProfiles;
+  if (profiles && typeof profiles === "object") {
+    for (const profile of Object.values(profiles as Record<string, unknown>)) {
+      const model = (profile as { adapterConfig?: { model?: unknown } } | null | undefined)?.adapterConfig?.model;
+      if (typeof model === "string") known.push(model);
+    }
+  }
+  return known;
 }
 
 export function issueRoutes(
@@ -3242,6 +3352,22 @@ export function issueRoutes(
     };
   }
 
+  /** Rewrites `body.assigneeAdapterOverrides` in place per pinAssigneeAdapterOverridesForActor. */
+  function applyPinnedAssigneeAdapterOverrides(
+    req: Request,
+    body: { assigneeAdapterOverrides?: unknown },
+    previous: unknown,
+    mode: "create" | "update" = "create",
+  ) {
+    if (body.assigneeAdapterOverrides === undefined) return;
+    const pinned = pinAssigneeAdapterOverridesForActor(req.actor.type, body.assigneeAdapterOverrides, previous, mode);
+    if (pinned === undefined) {
+      delete body.assigneeAdapterOverrides;
+    } else {
+      body.assigneeAdapterOverrides = pinned;
+    }
+  }
+
   /**
    * Adapter-aware typo guard for a task's model/effort override. The shared
    * schema already rejects Codex/OpenCode-keyed typos; this covers the `effort`
@@ -3252,13 +3378,28 @@ export function issueRoutes(
     companyId: string,
     assigneeAgentId: string | null | undefined,
     overrides: unknown,
+    previousOverrides?: unknown,
   ) {
     if (!overrides || typeof overrides !== "object" || Array.isArray(overrides)) return;
     const adapterConfig = (overrides as { adapterConfig?: unknown }).adapterConfig;
-    if (!adapterConfig || typeof adapterConfig !== "object") return;
-    if (!assigneeAgentId) return;
-    const agent = await agentsSvc.getById(assigneeAgentId);
-    if (!agent || agent.companyId !== companyId) return;
+    if (!adapterConfig || typeof adapterConfig !== "object" || Array.isArray(adapterConfig)) return;
+    const agentRow = assigneeAgentId ? await agentsSvc.getById(assigneeAgentId) : null;
+    const agent = agentRow && agentRow.companyId === companyId ? agentRow : null;
+    const previousAdapterConfig = isPlainObject(previousOverrides) && isPlainObject(previousOverrides.adapterConfig)
+      ? previousOverrides.adapterConfig
+      : null;
+    const disallowed = findDisallowedTaskOverrideKeys(adapterConfig as Record<string, unknown>, {
+      adapterType: agent?.adapterType ?? null,
+      agentAdapterConfig: (agent?.adapterConfig as Record<string, unknown> | null | undefined) ?? null,
+      previousAdapterConfig,
+    });
+    if (disallowed.length > 0) {
+      throw unprocessable(
+        `This task's model/effort setting can't be saved. A task can only set its model and thinking effort; ` +
+          `${disallowed.map((key) => `"${key}"`).join(", ")} ${disallowed.length === 1 ? "is an agent setting" : "are agent settings"} -- change ${disallowed.length === 1 ? "it" : "them"} on the agent instead.`,
+      );
+    }
+    if (!agent) return;
     const error = validateAdapterModelEffort({
       adapterType: agent.adapterType,
       adapterConfig,
@@ -3266,6 +3407,18 @@ export function issueRoutes(
     });
     if (error) {
       throw unprocessable(`This task's model/effort setting can't be saved. ${error}`);
+    }
+    const model = (adapterConfig as Record<string, unknown>).model;
+    if (typeof model === "string" && model.length > 0) {
+      const modelError = validateModelAgainstList({
+        adapterType: agent.adapterType,
+        model,
+        models: await listAdapterModelsSafely(agent.adapterType),
+        alsoAllowed: agentKnownModels(agent),
+      });
+      if (modelError) {
+        throw unprocessable(`This task's model/effort setting can't be saved. ${modelError}`);
+      }
     }
   }
 
@@ -5785,6 +5938,7 @@ export function issueRoutes(
         : {}),
     };
     if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, { companyId }, createBody))) return;
+    applyPinnedAssigneeAdapterOverrides(req, createBody, null);
     await assertIssueAssigneeOverridesValid(companyId, createBody.assigneeAgentId, createBody.assigneeAdapterOverrides);
     const createAssignmentScope = {
       projectId: await resolveAssignmentProjectId({
@@ -6043,6 +6197,8 @@ export function issueRoutes(
       ...(normalizedAssigneeAgentId !== undefined ? { assigneeAgentId: normalizedAssigneeAgentId } : {}),
     };
     if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, parent, createBody))) return;
+    applyPinnedAssigneeAdapterOverrides(req, createBody, null);
+    await assertIssueAssigneeOverridesValid(parent.companyId, createBody.assigneeAgentId, createBody.assigneeAdapterOverrides);
     const childAssignmentScope = {
       projectId: createBody.projectId ?? parent.projectId ?? null,
       parentIssueId: parent.id,
@@ -6220,6 +6376,12 @@ export function issueRoutes(
       if (!assertFeatureLaunchFieldAllowedOnCreate(req, res, childBody)) return;
       assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(childBody));
       if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, sourceIssue, childBody))) return;
+      applyPinnedAssigneeAdapterOverrides(req, childBody, null);
+      await assertIssueAssigneeOverridesValid(
+        sourceIssue.companyId,
+        childBody.assigneeAgentId,
+        childBody.assigneeAdapterOverrides,
+      );
       if (childBody.assigneeAgentId || childBody.assigneeUserId) {
         await assertCanAssignTasks(req, sourceIssue.companyId, {
           projectId: childBody.projectId ?? sourceIssue.projectId ?? null,
@@ -6484,10 +6646,12 @@ export function issueRoutes(
       req.body.assigneeAgentId as string | null | undefined,
     );
     if (req.body.assigneeAdapterOverrides !== undefined) {
+      applyPinnedAssigneeAdapterOverrides(req, req.body, existing.assigneeAdapterOverrides, "update");
       await assertIssueAssigneeOverridesValid(
         existing.companyId,
         normalizedAssigneeAgentId === undefined ? existing.assigneeAgentId : normalizedAssigneeAgentId,
         req.body.assigneeAdapterOverrides,
+        existing.assigneeAdapterOverrides,
       );
     }
     const titleOrDescriptionChanged = req.body.title !== undefined || req.body.description !== undefined;
