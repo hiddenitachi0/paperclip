@@ -55,6 +55,11 @@ import type {
   SuccessfulRunHandoffState,
 } from "@paperclipai/shared";
 import {
+  deriveChildModelEffortInheritance,
+  type ChildModelEffortInheritance,
+} from "@paperclipai/shared";
+import { logActivity } from "./activity-log.js";
+import {
   clampIssueRequestDepth,
   extractAgentMentionIds,
   extractProjectMentionIds,
@@ -552,38 +557,60 @@ function appendAcceptanceCriteriaToDescription(description: string | null | unde
   return base ? `${base}\n\n${criteriaMarkdown}` : criteriaMarkdown;
 }
 
-const CHILD_INHERITABLE_ADAPTER_CONFIG_KEYS = ["model", "effort", "modelReasoningEffort", "variant"] as const;
-
 /**
- * Derives the assigneeAdapterOverrides a child issue should default to when its
- * creator didn't set its own. Only carries forward the parent's model/effort
- * override (adapterConfig.model|effort|modelReasoningEffort|variant) -- never
- * `useProjectWorkspace`, and never resolves a `modelProfile` preset (e.g.
- * "cheap") into concrete values, since that resolution is agent/adapter
- * dependent and happens at run time, not at issue-creation time.
+ * Sub-task flow-down of the parent task's model/effort override. The rule
+ * itself (what flows, explicit-wins, cross-adapter safety) lives in
+ * deriveChildModelEffortInheritance in packages/shared/src/model-effort.ts;
+ * this loads what it needs: the parent task, the company switch
+ * "Sub-tasks inherit model/effort", and both assignees' adapter kinds.
  */
-function deriveChildAssigneeAdapterOverridesFromParent(
-  parentAssigneeAdapterOverrides: unknown,
-): Record<string, unknown> | null {
-  if (
-    !parentAssigneeAdapterOverrides ||
-    typeof parentAssigneeAdapterOverrides !== "object" ||
-    Array.isArray(parentAssigneeAdapterOverrides)
-  ) {
-    return null;
-  }
-  const parentAdapterConfig = (parentAssigneeAdapterOverrides as Record<string, unknown>).adapterConfig;
-  if (!parentAdapterConfig || typeof parentAdapterConfig !== "object" || Array.isArray(parentAdapterConfig)) {
-    return null;
-  }
-  const config = parentAdapterConfig as Record<string, unknown>;
-  const inheritedConfig: Record<string, unknown> = {};
-  for (const key of CHILD_INHERITABLE_ADAPTER_CONFIG_KEYS) {
-    const value = config[key];
-    if (typeof value === "string" && value.length > 0) inheritedConfig[key] = value;
-  }
-  if (Object.keys(inheritedConfig).length === 0) return null;
-  return { adapterConfig: inheritedConfig };
+async function resolveChildModelEffortInheritance(
+  db: DbReader,
+  companyId: string,
+  input: { parentId: string; childAssigneeAgentId: string | null; childOverrides: unknown },
+): Promise<
+  | (ChildModelEffortInheritance & { parent: { id: string; identifier: string | null } })
+  | null
+> {
+  const parent = await db
+    .select({
+      id: issues.id,
+      identifier: issues.identifier,
+      assigneeAgentId: issues.assigneeAgentId,
+      assigneeAdapterOverrides: issues.assigneeAdapterOverrides,
+    })
+    .from(issues)
+    .where(and(eq(issues.id, input.parentId), eq(issues.companyId, companyId)))
+    .then((rows) => rows[0] ?? null);
+  if (!parent?.assigneeAdapterOverrides) return null;
+  const company = await db
+    .select({ subtasksInheritModelEffort: companies.subtasksInheritModelEffort })
+    .from(companies)
+    .where(eq(companies.id, companyId))
+    .then((rows) => rows[0] ?? null);
+  if (company && company.subtasksInheritModelEffort === false) return null;
+  const agentIds = [parent.assigneeAgentId, input.childAssigneeAgentId].filter(
+    (id): id is string => typeof id === "string" && id.length > 0,
+  );
+  const agentRows = agentIds.length > 0
+    ? await db
+      .select({ id: agents.id, adapterType: agents.adapterType, adapterConfig: agents.adapterConfig })
+      .from(agents)
+      .where(and(inArray(agents.id, agentIds), eq(agents.companyId, companyId)))
+    : [];
+  const agentById = new Map(agentRows.map((row) => [row.id, row]));
+  const parentAgent = parent.assigneeAgentId ? agentById.get(parent.assigneeAgentId) ?? null : null;
+  const childAgent = input.childAssigneeAgentId ? agentById.get(input.childAssigneeAgentId) ?? null : null;
+  const result = deriveChildModelEffortInheritance({
+    parentOverrides: parent.assigneeAdapterOverrides,
+    parentAdapterType: parentAgent?.adapterType ?? null,
+    childAdapterType: childAgent?.adapterType ?? null,
+    childAgentAdapterConfig: (childAgent?.adapterConfig as Record<string, unknown> | null | undefined) ?? null,
+    childOverrides: input.childOverrides,
+    parentIssue: { issueId: parent.id, identifier: parent.identifier },
+  });
+  if (!result) return null;
+  return { ...result, parent: { id: parent.id, identifier: parent.identifier } };
 }
 
 function normalizeAcceptedPlanDecompositionFingerprintValue(value: unknown): unknown {
@@ -3646,6 +3673,48 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
   const instanceSettings = instanceSettingsService(db);
   const treeControlSvc = issueTreeControlService(db);
 
+  /**
+   * One activity row per sub-task whose model/effort came from its parent (or
+   * whose parent setting could not be carried over), so "why did this run on
+   * Opus?" is answerable from the task's activity.
+   */
+  async function logModelEffortInheritance(
+    companyId: string,
+    child: { id: string; identifier?: string | null },
+    inheritance: ChildModelEffortInheritance & { parent: { id: string; identifier: string | null } },
+    actor: { agentId: string | null; userId: string | null },
+  ) {
+    const parentLabel = inheritance.parent.identifier ?? "the parent task";
+    const inheritedParts = [inheritance.inherited.model, inheritance.inherited.effort && `${inheritance.inherited.effort} effort`]
+      .filter(Boolean)
+      .join(" at ");
+    const summary = inheritedParts
+      ? `Uses ${inheritedParts}, inherited from ${parentLabel}.`
+      : `Did not inherit ${parentLabel}'s model/effort.`;
+    try {
+      await logActivity(db, {
+        companyId,
+        actorType: actor.agentId ? "agent" : actor.userId ? "user" : "system",
+        actorId: actor.agentId ?? actor.userId ?? "system",
+        agentId: actor.agentId,
+        action: "issue.model_effort_inherited",
+        entityType: "issue",
+        entityId: child.id,
+        details: {
+          identifier: child.identifier ?? null,
+          parentIssueId: inheritance.parent.id,
+          parentIdentifier: inheritance.parent.identifier,
+          inherited: inheritance.inherited,
+          skipped: inheritance.skipped,
+          summary,
+        },
+      });
+    } catch (err) {
+      // Never fail a task create over its audit note.
+      logger.warn({ err, issueId: child.id }, "failed to log model/effort inheritance");
+    }
+  }
+
   // DUR-379: a handful of mutation methods below (lock-adoption,
   // release/force-release, comment/attachment removal) only take a narrow
   // entity id, not a companyId -- by the time any of them run through a
@@ -5360,9 +5429,7 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
       } = data;
       // Model/effort inheritance (task-scoped only, never agents.adapterConfig)
       // is handled centrally by create() based on the parentId set below --
-      // it defaults the child's override only when this call left
-      // assigneeAdapterOverrides unset entirely (explicit values, including
-      // explicit null, always win).
+      // explicit child values win key by key, and an explicit null opts out.
       let child = await issueService(db, { rawDb }).create(parent.companyId, {
         ...issueData,
         parentId: parent.id,
@@ -5732,7 +5799,8 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
           titleSimilarityDuplicate = duplicate.ticket;
         }
       }
-      return withCompanyScope(rawDb, companyId, async (tx) => {
+      let modelEffortInheritance: Awaited<ReturnType<typeof resolveChildModelEffortInheritance>> = null;
+      const created = await withCompanyScope(rawDb, companyId, async (tx) => {
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, companyId);
         let projectWorkspaceId = issueData.projectWorkspaceId ?? null;
         let executionWorkspaceId = issueData.executionWorkspaceId ?? null;
@@ -5744,17 +5812,8 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
           issueData.executionWorkspaceId !== undefined ||
           issueData.executionWorkspacePreference !== undefined ||
           issueData.executionWorkspaceSettings !== undefined;
-        // Every child-creation path funnels through this insert, so deriving the
-        // inherited model/effort override here (rather than in each caller) is
-        // what makes flow-down real regardless of which route created the child.
-        // An explicit assigneeAdapterOverrides key on the request -- including
-        // explicit null -- always wins over the parent's.
-        let parentRowForAdapterInheritance: { assigneeAdapterOverrides: Record<string, unknown> | null } | null = null;
         if (workspaceInheritanceIssueId) {
           const workspaceSource = await getWorkspaceInheritanceIssue(tx, companyId, workspaceInheritanceIssueId);
-          if (workspaceInheritanceIssueId === issueData.parentId) {
-            parentRowForAdapterInheritance = workspaceSource;
-          }
           if (issueData.projectId == null && workspaceSource.projectId) {
             issueData.projectId = workspaceSource.projectId;
           }
@@ -5784,17 +5843,22 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
             }
           }
         }
-        if (!("assigneeAdapterOverrides" in issueData) && issueData.parentId) {
-          const parentRow = parentRowForAdapterInheritance ?? await tx
-            .select({ assigneeAdapterOverrides: issues.assigneeAdapterOverrides })
-            .from(issues)
-            .where(and(eq(issues.id, issueData.parentId), eq(issues.companyId, companyId)))
-            .then((rows) => rows[0] ?? null);
-          const inheritedAssigneeAdapterOverrides = deriveChildAssigneeAdapterOverridesFromParent(
-            parentRow?.assigneeAdapterOverrides,
-          );
-          if (inheritedAssigneeAdapterOverrides) {
-            issueData.assigneeAdapterOverrides = inheritedAssigneeAdapterOverrides;
+        // Every child-creation path funnels through this insert, so deriving the
+        // inherited model/effort override here (rather than in each caller) is
+        // what makes flow-down real regardless of which route created the
+        // child. Explicit child settings win key by key; an explicit null opts
+        // out (see deriveChildModelEffortInheritance).
+        if (issueData.parentId && issueData.assigneeAdapterOverrides !== null) {
+          const inheritance = await resolveChildModelEffortInheritance(tx, companyId, {
+            parentId: issueData.parentId,
+            childAssigneeAgentId: issueData.assigneeAgentId ?? null,
+            childOverrides: issueData.assigneeAdapterOverrides,
+          });
+          if (inheritance) {
+            modelEffortInheritance = inheritance;
+            if (Object.keys(inheritance.inherited).length > 0) {
+              issueData.assigneeAdapterOverrides = inheritance.overrides;
+            }
           }
         }
         if (issueData.projectId == null && projectWorkspaceId) {
@@ -5956,6 +6020,13 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
         const [withRelations] = await withIssueRelationSummaries(companyId, [enriched], tx);
         return withRelations;
       });
+      if (modelEffortInheritance) {
+        await logModelEffortInheritance(companyId, created, modelEffortInheritance, {
+          agentId: issueData.createdByAgentId ?? null,
+          userId: issueData.createdByUserId ?? null,
+        });
+      }
+      return created;
     },
 
     update: async (

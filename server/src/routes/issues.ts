@@ -60,6 +60,7 @@ import {
   upsertIssueDocumentSchema,
   updateIssueSchema,
   validateAdapterModelEffort,
+  validateModelAgainstList,
   getClosedIsolatedExecutionWorkspaceMessage,
   isClosedIsolatedExecutionWorkspace,
   isUuidLike,
@@ -114,6 +115,7 @@ import type { TaskWatchdogServiceDeps, taskWatchdogService } from "../services/t
 import { logger } from "../middleware/logger.js";
 import { flagAgentBoardDecisionClaim } from "../services/board-decision-claims.js";
 import { conflict, forbidden, HttpError, notFound, unauthorized, unprocessable } from "../errors.js";
+import { listAdapterModels } from "../adapters/index.js";
 import { assertBoard, assertBoardOrDelegate, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { companyScope, companyScopeFromParam } from "../middleware/company-scope.js";
 
@@ -1263,6 +1265,30 @@ class AutoApprovalIssueMissingError extends Error {
     super("Issue not found during auto-approval transaction");
     this.name = "AutoApprovalIssueMissingError";
   }
+}
+
+/** The adapter's model list for the model typo guard; a discovery failure means "unknown" (nothing rejected). */
+async function listAdapterModelsSafely(adapterType: string): Promise<Array<{ id: string }>> {
+  try {
+    return await listAdapterModels(adapterType);
+  } catch {
+    return [];
+  }
+}
+
+/** Models the agent already uses (its own model + its model-profile models) -- never a typo. */
+function agentKnownModels(agent: { adapterConfig?: unknown; runtimeConfig?: unknown }): string[] {
+  const known: string[] = [];
+  const own = (agent.adapterConfig as Record<string, unknown> | null | undefined)?.model;
+  if (typeof own === "string") known.push(own);
+  const profiles = (agent.runtimeConfig as { modelProfiles?: unknown } | null | undefined)?.modelProfiles;
+  if (profiles && typeof profiles === "object") {
+    for (const profile of Object.values(profiles as Record<string, unknown>)) {
+      const model = (profile as { adapterConfig?: { model?: unknown } } | null | undefined)?.adapterConfig?.model;
+      if (typeof model === "string") known.push(model);
+    }
+  }
+  return known;
 }
 
 export function issueRoutes(
@@ -3266,6 +3292,18 @@ export function issueRoutes(
     });
     if (error) {
       throw unprocessable(`This task's model/effort setting can't be saved. ${error}`);
+    }
+    const model = (adapterConfig as Record<string, unknown>).model;
+    if (typeof model === "string" && model.length > 0) {
+      const modelError = validateModelAgainstList({
+        adapterType: agent.adapterType,
+        model,
+        models: await listAdapterModelsSafely(agent.adapterType),
+        alsoAllowed: agentKnownModels(agent),
+      });
+      if (modelError) {
+        throw unprocessable(`This task's model/effort setting can't be saved. ${modelError}`);
+      }
     }
   }
 

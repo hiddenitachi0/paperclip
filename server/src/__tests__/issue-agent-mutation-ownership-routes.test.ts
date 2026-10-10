@@ -1376,6 +1376,45 @@ describe("agent issue mutation checkout ownership", () => {
     );
   });
 
+  // Model typo guard: a per-task model must be one the assignee's adapter offers
+  // (or one the agent already uses), so a misspelt name is refused up front
+  // instead of failing the next run.
+  it("rejects a misspelled per-task model with a 'did you mean' hint", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) =>
+      id === ownerAgentId
+        ? makeAgent(ownerAgentId, { adapterType: "claude_local", adapterConfig: { model: "claude-sonnet-5", effort: "high" } })
+        : null,
+    );
+    const app = await createApp(boardActor());
+
+    const res = await request(app)
+      .patch(`/api/issues/${issueId}`)
+      .send({ assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-55" } } });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(String(res.body.error ?? "")).toContain("This task's model/effort setting can't be saved.");
+    expect(String(res.body.error ?? "")).toContain('Did you mean "claude-opus-5"?');
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("accepts a listed model and a Claude short name for a per-task override", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) =>
+      id === ownerAgentId
+        ? makeAgent(ownerAgentId, { adapterType: "claude_local", adapterConfig: { model: "claude-sonnet-5" } })
+        : null,
+    );
+    const app = await createApp(boardActor());
+
+    await request(app)
+      .patch(`/api/issues/${issueId}`)
+      .send({ assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-5", effort: "max" } } })
+      .expect(200);
+    await request(app)
+      .patch(`/api/issues/${issueId}`)
+      .send({ assigneeAdapterOverrides: { adapterConfig: { model: "opus" } } })
+      .expect(200);
+  });
+
   it("rejects a Codex-only level in a per-task override even before the assignee is looked up", async () => {
     const app = await createApp(boardActor());
 

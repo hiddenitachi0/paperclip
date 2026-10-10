@@ -139,6 +139,12 @@ export const issueAssigneeAdapterOverridesSchema = z
     // document; once the plan is accepted the server clears this flag so the
     // following fresh-session run falls back to the normal/cheap model.
     planFirstOnOpus: z.boolean().optional(),
+    // Sub-task flow-down marker (see deriveChildModelEffortInheritance). Accepted
+    // so a client echoing the stored value back is not refused.
+    inheritedFrom: z
+      .object({ issueId: z.string().uuid(), identifier: z.string().nullable().optional() })
+      .strict()
+      .optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
