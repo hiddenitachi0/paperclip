@@ -130,6 +130,7 @@ import { HIGGSFIELD_MODELS, readHiggsfieldCredentials } from "./higgsfield.js";
 import { guardedBytesFetch } from "./lora-training.js";
 import { identitiesMentionedIn, loraFitsModel, pickTrained, planIdentityReferences, sheetWithIdentity, sogniSlots, type Identity } from "./identity.js";
 import { loadIdentities, registerAnchorActions } from "./anchors.js";
+import { requireAdultChatPhotos } from "./chat-photos.js";
 import { companyConfig, registerServiceKeyActions } from "./company-settings.js";
 import { SOGNI_TOOLS, findSogniTool, prepareSogniCall, sogniToolDescription, sogniToolParameters, type SogniToolDef } from "./sogni-tools.js";
 
@@ -667,8 +668,8 @@ function describeLook(look: Look, isYourDefault = false): string {
  * company's file, and that is refused with a plain sentence. The bytes travel
  * as data URIs so no private Paperclip address ever leaves the box.
  */
-async function loadReferenceImages(ctx: PluginContext, companyId: string, fileIds: string[]): Promise<string[]> {
-  const images: string[] = [];
+async function loadReferenceImages(ctx: PluginContext, companyId: string, fileIds: string[], runId?: string | null): Promise<string[]> {
+  const files = [];
   for (const fileId of fileIds) {
     const file = await ctx.files.get(fileId, companyId);
     if (!file) {
@@ -679,6 +680,13 @@ async function loadReferenceImages(ctx: PluginContext, companyId: string, fileId
     if (!file.contentType.toLowerCase().startsWith("image/")) {
       throw new Error(`The file "${file.originalFilename ?? fileId}" is not a picture, so it cannot be used as a reference.`);
     }
+    files.push(file);
+  }
+  // A photo someone sent in a chat must pass the age check before it is
+  // sent anywhere (chat-photos.ts); `runId` is the tool call's own run.
+  await requireAdultChatPhotos(ctx, companyId, files, runId);
+  const images: string[] = [];
+  for (const fileId of fileIds) {
     const content = await ctx.files.readContent(fileId, companyId);
     images.push(`data:${content.contentType.toLowerCase()};base64,${content.contentBase64}`);
   }
@@ -1308,7 +1316,7 @@ export async function prepareGeneration(
   if (input.seed === undefined && look?.seed !== null && look?.seed !== undefined) input.seed = look.seed;
 
   try {
-    if (referenceFileIds.length > 0) input.referenceImages = await loadReferenceImages(ctx, companyId, referenceFileIds);
+    if (referenceFileIds.length > 0) input.referenceImages = await loadReferenceImages(ctx, companyId, referenceFileIds, options.runId);
   } catch (err) {
     return { error: err instanceof Error ? err.message : String(err) };
   }
@@ -2473,7 +2481,7 @@ function registerMediaJobTools(ctx: PluginContext): void {
       const startImageFileId = typeof rawParams.startImageFileId === "string" ? rawParams.startImageFileId.trim() : "";
       if (startImageFileId) {
         try {
-          [startImage] = await loadReferenceImages(ctx, runCtx.companyId, [startImageFileId]);
+          [startImage] = await loadReferenceImages(ctx, runCtx.companyId, [startImageFileId], runCtx.runId);
         } catch (err) {
           return { error: err instanceof Error ? err.message : String(err) };
         }
@@ -2696,6 +2704,11 @@ ${text}`,
   if (!file.contentType.toLowerCase().startsWith("image/")) return { error: `The file "${name}" is not a picture.` };
   if (!isSogniUploadType(file.contentType)) {
     return { error: `Sogni takes PNG, JPEG, WebP or GIF pictures, and "${name}" is ${file.contentType}.` };
+  }
+  try {
+    await requireAdultChatPhotos(ctx, runCtx.companyId, [file], runCtx.runId);
+  } catch (err) {
+    return { error: errorText(err) };
   }
   let picture: string;
   try {
