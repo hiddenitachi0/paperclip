@@ -1,6 +1,6 @@
 {
-  "id": "527686b3-0c33-4111-9639-08a6a6eb93d0",
-  "prevId": "ca9327af-0b81-4b63-805f-0e81a1fc0ba3",
+  "id": "61cd1aee-5e12-4482-a39c-d31fd2caacbc",
+  "prevId": "dc8889cf-02d6-4b6b-a7b8-3fc24c6a5070",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -5363,6 +5363,13 @@
           "primaryKey": false,
           "notNull": false
         },
+        "subtasks_inherit_model_effort": {
+          "name": "subtasks_inherit_model_effort",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -5376,13 +5383,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
-        },
-        "subtasks_inherit_model_effort": {
-          "name": "subtasks_inherit_model_effort",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": true
         }
       },
       "indexes": {
@@ -38033,6 +38033,382 @@
       },
       "isRLSEnabled": false
     },
+    "public.telegram_chat_requests": {
+      "name": "telegram_chat_requests",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "bot_id": {
+          "name": "bot_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "telegram_user_id": {
+          "name": "telegram_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "chat_id": {
+          "name": "chat_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "question": {
+          "name": "question",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "route": {
+          "name": "route",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "quick_agent_id": {
+          "name": "quick_agent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "conversation_id": {
+          "name": "conversation_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "issue_id": {
+          "name": "issue_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "answer_text": {
+          "name": "answer_text",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "note": {
+          "name": "note",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "ready_at": {
+          "name": "ready_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "delivered_at": {
+          "name": "delivered_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "telegram_chat_requests_company_user_created_idx": {
+          "name": "telegram_chat_requests_company_user_created_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "telegram_chat_requests_company_status_idx": {
+          "name": "telegram_chat_requests_company_status_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "telegram_chat_requests_company_id_companies_id_fk": {
+          "name": "telegram_chat_requests_company_id_companies_id_fk",
+          "tableFrom": "telegram_chat_requests",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "telegram_chat_requests_bot_id_telegram_bots_id_fk": {
+          "name": "telegram_chat_requests_bot_id_telegram_bots_id_fk",
+          "tableFrom": "telegram_chat_requests",
+          "tableTo": "telegram_bots",
+          "columnsFrom": [
+            "bot_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "telegram_chat_requests_quick_agent_id_agents_id_fk": {
+          "name": "telegram_chat_requests_quick_agent_id_agents_id_fk",
+          "tableFrom": "telegram_chat_requests",
+          "tableTo": "agents",
+          "columnsFrom": [
+            "quick_agent_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "telegram_chat_requests_conversation_id_lane_a_conversations_id_fk": {
+          "name": "telegram_chat_requests_conversation_id_lane_a_conversations_id_fk",
+          "tableFrom": "telegram_chat_requests",
+          "tableTo": "lane_a_conversations",
+          "columnsFrom": [
+            "conversation_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "telegram_chat_requests_issue_id_issues_id_fk": {
+          "name": "telegram_chat_requests_issue_id_issues_id_fk",
+          "tableFrom": "telegram_chat_requests",
+          "tableTo": "issues",
+          "columnsFrom": [
+            "issue_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "telegram_chat_requests_route_check": {
+          "name": "telegram_chat_requests_route_check",
+          "value": "\"telegram_chat_requests\".\"route\" IN ('quick', 'task')"
+        },
+        "telegram_chat_requests_status_check": {
+          "name": "telegram_chat_requests_status_check",
+          "value": "\"telegram_chat_requests\".\"status\" IN ('asking', 'answered', 'waiting', 'ready', 'delivered', 'failed', 'expired')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.telegram_chat_settings": {
+      "name": "telegram_chat_settings",
+      "schema": "",
+      "columns": {
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "enabled": {
+          "name": "enabled",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "bot_id": {
+          "name": "bot_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "quick_agent_id": {
+          "name": "quick_agent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "full_agent_id": {
+          "name": "full_agent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "daily_questions_per_person": {
+          "name": "daily_questions_per_person",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 30
+        },
+        "updated_by_user_id": {
+          "name": "updated_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "telegram_chat_settings_company_id_companies_id_fk": {
+          "name": "telegram_chat_settings_company_id_companies_id_fk",
+          "tableFrom": "telegram_chat_settings",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "telegram_chat_settings_bot_id_telegram_bots_id_fk": {
+          "name": "telegram_chat_settings_bot_id_telegram_bots_id_fk",
+          "tableFrom": "telegram_chat_settings",
+          "tableTo": "telegram_bots",
+          "columnsFrom": [
+            "bot_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "telegram_chat_settings_quick_agent_id_agents_id_fk": {
+          "name": "telegram_chat_settings_quick_agent_id_agents_id_fk",
+          "tableFrom": "telegram_chat_settings",
+          "tableTo": "agents",
+          "columnsFrom": [
+            "quick_agent_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "telegram_chat_settings_full_agent_id_agents_id_fk": {
+          "name": "telegram_chat_settings_full_agent_id_agents_id_fk",
+          "tableFrom": "telegram_chat_settings",
+          "tableTo": "agents",
+          "columnsFrom": [
+            "full_agent_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "telegram_chat_settings_daily_cap_check": {
+          "name": "telegram_chat_settings_daily_cap_check",
+          "value": "\"telegram_chat_settings\".\"daily_questions_per_person\" BETWEEN 1 AND 500"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.telegram_message_reactions": {
       "name": "telegram_message_reactions",
       "schema": "",
@@ -38312,6 +38688,101 @@
           "onUpdate": "no action"
         }
       },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.telegram_person_links": {
+      "name": "telegram_person_links",
+      "schema": "",
+      "columns": {
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "telegram_user_id": {
+          "name": "telegram_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "telegram_username": {
+          "name": "telegram_username",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "linked_at": {
+          "name": "linked_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "link_code_hash": {
+          "name": "link_code_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "link_code_expires_at": {
+          "name": "link_code_expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "telegram_person_links_telegram_user_uq": {
+          "name": "telegram_person_links_telegram_user_uq",
+          "columns": [
+            {
+              "expression": "telegram_user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"telegram_person_links\".\"telegram_user_id\" IS NOT NULL",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "telegram_person_links_code_hash_idx": {
+          "name": "telegram_person_links_code_hash_idx",
+          "columns": [
+            {
+              "expression": "link_code_hash",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
@@ -40031,6 +40502,13 @@
           "primaryKey": false,
           "notNull": false
         },
+        "frame_notes": {
+          "name": "frame_notes",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
         "still_estimated_cost_cents": {
           "name": "still_estimated_cost_cents",
           "type": "integer",
@@ -41054,6 +41532,617 @@
         "video_storylines_music_source_exclusive_check": {
           "name": "video_storylines_music_source_exclusive_check",
           "value": "\"video_storylines\".\"music_asset_id\" IS NULL OR \"video_storylines\".\"music_source_key\" IS NULL"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.video_transition_takes": {
+      "name": "video_transition_takes",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "storyline_id": {
+          "name": "storyline_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "transition_id": {
+          "name": "transition_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'generating'"
+        },
+        "provider": {
+          "name": "provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "model": {
+          "name": "model",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "external_id": {
+          "name": "external_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "anchor_hash": {
+          "name": "anchor_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "prompt": {
+          "name": "prompt",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "note": {
+          "name": "note",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "duration_ms": {
+          "name": "duration_ms",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "audio_mode": {
+          "name": "audio_mode",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'bed_only'"
+        },
+        "result_provider": {
+          "name": "result_provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "result_object_key": {
+          "name": "result_object_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "result_content_type": {
+          "name": "result_content_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "result_byte_size": {
+          "name": "result_byte_size",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "result_sha256": {
+          "name": "result_sha256",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reserved_cents": {
+          "name": "reserved_cents",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "cost_cents": {
+          "name": "cost_cents",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "qc": {
+          "name": "qc",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "error": {
+          "name": "error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_by_user_id": {
+          "name": "created_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "started_at": {
+          "name": "started_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "completed_at": {
+          "name": "completed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "video_transition_takes_transition_idx": {
+          "name": "video_transition_takes_transition_idx",
+          "columns": [
+            {
+              "expression": "transition_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "video_transition_takes_poll_queue_idx": {
+          "name": "video_transition_takes_poll_queue_idx",
+          "columns": [
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "started_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "video_transition_takes_company_created_idx": {
+          "name": "video_transition_takes_company_created_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "video_transition_takes_company_id_companies_id_fk": {
+          "name": "video_transition_takes_company_id_companies_id_fk",
+          "tableFrom": "video_transition_takes",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "video_transition_takes_storyline_id_video_storylines_id_fk": {
+          "name": "video_transition_takes_storyline_id_video_storylines_id_fk",
+          "tableFrom": "video_transition_takes",
+          "tableTo": "video_storylines",
+          "columnsFrom": [
+            "storyline_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "video_transition_takes_transition_id_video_transitions_id_fk": {
+          "name": "video_transition_takes_transition_id_video_transitions_id_fk",
+          "tableFrom": "video_transition_takes",
+          "tableTo": "video_transitions",
+          "columnsFrom": [
+            "transition_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "video_transition_takes_status_check": {
+          "name": "video_transition_takes_status_check",
+          "value": "\"video_transition_takes\".\"status\" IN ('generating', 'ready', 'failed')"
+        },
+        "video_transition_takes_provider_check": {
+          "name": "video_transition_takes_provider_check",
+          "value": "\"video_transition_takes\".\"provider\" IN ('fal', 'sogni')"
+        },
+        "video_transition_takes_audio_mode_check": {
+          "name": "video_transition_takes_audio_mode_check",
+          "value": "\"video_transition_takes\".\"audio_mode\" IN ('ambient', 'silent', 'bed_only')"
+        },
+        "video_transition_takes_reserved_check": {
+          "name": "video_transition_takes_reserved_check",
+          "value": "\"video_transition_takes\".\"reserved_cents\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.video_transitions": {
+      "name": "video_transitions",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "storyline_id": {
+          "name": "storyline_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "from_shot_id": {
+          "name": "from_shot_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "to_shot_id": {
+          "name": "to_shot_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'cut'"
+        },
+        "ai_style": {
+          "name": "ai_style",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "duration_ms": {
+          "name": "duration_ms",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 500
+        },
+        "placement": {
+          "name": "placement",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'insert'"
+        },
+        "context": {
+          "name": "context",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "context_hash": {
+          "name": "context_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "plain_line": {
+          "name": "plain_line",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "prompt": {
+          "name": "prompt",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "user_note": {
+          "name": "user_note",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "suggested_kind": {
+          "name": "suggested_kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "suggest_reason": {
+          "name": "suggest_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "keep_same": {
+          "name": "keep_same",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{\"face\":true,\"clothes\":true,\"location\":true}'::jsonb"
+        },
+        "audio_mode": {
+          "name": "audio_mode",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'bed_only'"
+        },
+        "provider": {
+          "name": "provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "model": {
+          "name": "model",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "chosen_take_id": {
+          "name": "chosen_take_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "locked": {
+          "name": "locked",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "created_by_user_id": {
+          "name": "created_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_by_agent_id": {
+          "name": "created_by_agent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "video_transitions_pair_uq": {
+          "name": "video_transitions_pair_uq",
+          "columns": [
+            {
+              "expression": "storyline_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "from_shot_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "to_shot_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "video_transitions_company_idx": {
+          "name": "video_transitions_company_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "video_transitions_company_id_companies_id_fk": {
+          "name": "video_transitions_company_id_companies_id_fk",
+          "tableFrom": "video_transitions",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "video_transitions_storyline_id_video_storylines_id_fk": {
+          "name": "video_transitions_storyline_id_video_storylines_id_fk",
+          "tableFrom": "video_transitions",
+          "tableTo": "video_storylines",
+          "columnsFrom": [
+            "storyline_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "video_transitions_from_shot_id_video_shots_id_fk": {
+          "name": "video_transitions_from_shot_id_video_shots_id_fk",
+          "tableFrom": "video_transitions",
+          "tableTo": "video_shots",
+          "columnsFrom": [
+            "from_shot_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "video_transitions_to_shot_id_video_shots_id_fk": {
+          "name": "video_transitions_to_shot_id_video_shots_id_fk",
+          "tableFrom": "video_transitions",
+          "tableTo": "video_shots",
+          "columnsFrom": [
+            "to_shot_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "video_transitions_created_by_agent_id_agents_id_fk": {
+          "name": "video_transitions_created_by_agent_id_agents_id_fk",
+          "tableFrom": "video_transitions",
+          "tableTo": "agents",
+          "columnsFrom": [
+            "created_by_agent_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "video_transitions_kind_check": {
+          "name": "video_transitions_kind_check",
+          "value": "\"video_transitions\".\"kind\" IN ('cut', 'blend', 'dissolve', 'fade', 'ai')"
+        },
+        "video_transitions_placement_check": {
+          "name": "video_transitions_placement_check",
+          "value": "\"video_transitions\".\"placement\" IN ('insert', 'overlap')"
+        },
+        "video_transitions_audio_mode_check": {
+          "name": "video_transitions_audio_mode_check",
+          "value": "\"video_transitions\".\"audio_mode\" IN ('ambient', 'silent', 'bed_only')"
+        },
+        "video_transitions_duration_check": {
+          "name": "video_transitions_duration_check",
+          "value": "\"video_transitions\".\"duration_ms\" >= 0 AND \"video_transitions\".\"duration_ms\" <= 30000"
+        },
+        "video_transitions_suggested_kind_check": {
+          "name": "video_transitions_suggested_kind_check",
+          "value": "\"video_transitions\".\"suggested_kind\" IS NULL OR \"video_transitions\".\"suggested_kind\" IN ('cut', 'blend', 'dissolve', 'fade', 'ai')"
         }
       },
       "isRLSEnabled": false
