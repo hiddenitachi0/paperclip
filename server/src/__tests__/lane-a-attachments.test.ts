@@ -304,6 +304,8 @@ describeEmbeddedPostgres("lane A: pictures attached to a message", () => {
     const maja = await seedMaja(companyId);
     const foreign = await seedFile(otherCompanyId);
     const text = await seedFile(companyId, "text/plain", "notes.txt");
+    // A company picture that is not a chat photo (no server-set name) would skip the age check.
+    const plainPicture = await seedFile(companyId, "image/jpeg", "holiday.jpg");
     const { dispatcher } = await seedMediaStudio({ content: "x" });
     const mockCreate = vi.fn();
     mockAnthropic(mockCreate);
@@ -315,6 +317,7 @@ describeEmbeddedPostgres("lane A: pictures attached to a message", () => {
 
     await expect(send([foreign])).rejects.toMatchObject({ status: 422, details: { code: "LANE_A_ATTACHMENT_NOT_FOUND" } });
     await expect(send([randomUUID()])).rejects.toMatchObject({ status: 422, details: { code: "LANE_A_ATTACHMENT_NOT_FOUND" } });
+    await expect(send([plainPicture])).rejects.toMatchObject({ status: 422, details: { code: "LANE_A_ATTACHMENT_NOT_FOUND" } });
     await expect(send([text])).rejects.toMatchObject({ status: 422, details: { code: "LANE_A_ATTACHMENT_NOT_PICTURE" } });
     await expect(send([1, 2, 3, 4, 5].map(() => randomUUID()))).rejects.toMatchObject({ status: 422, details: { code: "LANE_A_ATTACHMENT_COUNT" } });
     expect(mockCreate).not.toHaveBeenCalled();

@@ -45,6 +45,7 @@ import {
   isLaneATrustLimited,
   helperModelCanSeePictures,
   CHAT_ATTACHMENTS_MAX,
+  CHAT_PHOTO_FILENAME_PREFIX,
   type ChatHandedOverTask,
   type LaneAProvider,
   type LaneAProviderRouting,
@@ -2133,7 +2134,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       unprocessable("An attached picture is not in this company's Files. Send it again.", { code: "LANE_A_ATTACHMENT_NOT_FOUND" });
     if (ids.some((id) => !LANE_A_UUID_PATTERN.test(id))) throw notFound();
     const rows = await db
-      .select({ id: issueAttachments.id, issueId: issueAttachments.issueId, contentType: assets.contentType })
+      .select({ id: issueAttachments.id, issueId: issueAttachments.issueId, contentType: assets.contentType, originalFilename: assets.originalFilename })
       .from(issueAttachments)
       .innerJoin(assets, eq(issueAttachments.assetId, assets.id))
       .where(and(inArray(issueAttachments.id, ids), eq(issueAttachments.companyId, companyId)));
@@ -2143,6 +2144,10 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       if (!row.contentType.toLowerCase().startsWith("image/")) {
         throw unprocessable("An attached file is not a picture. Send a photo instead.", { code: "LANE_A_ATTACHMENT_NOT_PICTURE" });
       }
+      // Only a picture the chat bridge stored itself (server-set name): that
+      // name is what makes Media Studio age-check the photo before it is sent
+      // anywhere, so any other company file is refused here.
+      if (!(row.originalFilename ?? "").toLowerCase().startsWith(CHAT_PHOTO_FILENAME_PREFIX)) throw notFound();
     }
     return ids;
   }
@@ -2882,6 +2887,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
                 // The person's own words this turn, so the host can tell a
                 // task they named from one a file or a lookup mentioned.
                 requesterMessage: message,
+                pluginKey: pluginTool.pluginKey,
               });
               try {
                 const executed = await execution.execute({
@@ -4691,6 +4697,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       requestedByUserId: params.requester.userId,
       requestedByAgentId: null,
       requesterMessage: "",
+      pluginKey: LANE_A_PICTURE_PLUGIN_KEY,
     });
     try {
       const executed = await execution.execute({
@@ -4795,6 +4802,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       requestedByUserId: null,
       requestedByAgentId: null,
       requesterMessage: "",
+      pluginKey: tool.pluginKey,
     });
     try {
       const executed = await execution.execute({
