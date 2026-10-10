@@ -32,7 +32,7 @@ import { and, eq } from "drizzle-orm";
 import sharp from "sharp";
 import type { Db } from "@paperclipai/db";
 import { companies, modelDirectoryEntries, modelDirectorySettings } from "@paperclipai/db";
-import { LANE_A_PROVIDER_CATALOGUE, isLaneAProvider, laneAProviderLabel, type LaneAProvider } from "@paperclipai/shared";
+import { CHAT_PHOTO_FILENAME_PREFIX, LANE_A_PROVIDER_CATALOGUE, isLaneAProvider, laneAProviderLabel, type LaneAProvider } from "@paperclipai/shared";
 import type { PluginImageAnalysisInput, PluginImageAnalysisResult } from "@paperclipai/plugin-sdk";
 import { costService } from "./costs.js";
 import { issueService } from "./issues.js";
@@ -234,11 +234,16 @@ export function pluginImageAnalysisService(db: Db, deps: ImageAnalysisDeps = {})
     throw fail(`Pick the ${label} key (a company secret) for picture analysis.`);
   }
 
-  async function readPicture(companyId: string, fileId: string): Promise<{ contentType: string; base64: string }> {
+  async function readPicture(companyId: string, fileId: string, quickAgentRun: boolean): Promise<{ contentType: string; base64: string }> {
     if (!UUID.test(fileId)) throw fail("That picture is not in this company's Files. Pick it again.");
     const file = await issues.getAttachmentById(fileId);
     // A file of another company reads exactly like a missing one.
     if (!file || file.companyId !== companyId) throw fail("That picture is not in this company's Files. Pick it again.");
+    // A quick agent's run may only look at a photo someone sent in the chat
+    // (the server-set name), never at other company pictures.
+    if (quickAgentRun && !String(file.originalFilename ?? "").toLowerCase().startsWith(CHAT_PHOTO_FILENAME_PREFIX)) {
+      throw fail("That picture is not in this company's Files. Pick it again.");
+    }
     if (!String(file.contentType).toLowerCase().startsWith("image/")) throw fail("That file is not a picture.");
     if (file.byteSize > IMAGE_ANALYSIS_MAX_FILE_BYTES) throw fail("That picture is too large to analyse (over 10 MB).");
     const object = await storage().getObject(companyId, file.objectKey);
@@ -286,7 +291,7 @@ export function pluginImageAnalysisService(db: Db, deps: ImageAnalysisDeps = {})
 
       const base = await addressFor(companyId, provider, entry.baseUrl ?? null);
       const apiKey = await keyFor(caller, provider, typeof input.keySecretId === "string" && input.keySecretId.trim() ? input.keySecretId.trim() : null);
-      const picture = await readPicture(companyId, typeof input.fileId === "string" ? input.fileId.trim() : "");
+      const picture = await readPicture(companyId, typeof input.fileId === "string" ? input.fileId.trim() : "", caller.quickAgentRun === true);
       const scrub = (t: string) => scrubLaneASecrets(t, apiKey).slice(0, 200);
 
       const url = provider === "anthropic" ? `${base}/messages` : `${base}/chat/completions`;
