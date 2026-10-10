@@ -507,6 +507,9 @@ export function BoardApprovalPayload({
   if (firstNonEmptyString(payload.kind) === "model_boost") {
     return <ModelBoostPayloadContent payload={nextPayload} />;
   }
+  if (firstNonEmptyString(payload.kind) === "operator_action") {
+    return <OperatorActionPayloadContent payload={nextPayload} />;
+  }
   if (firstNonEmptyString(payload.kind) === "report_script_version") {
     return <ReportScriptVersionPayloadContent payload={nextPayload} approvalId={approvalId} companyId={companyId} />;
   }
@@ -906,6 +909,54 @@ function PersonaPublishPayloadContent({ payload }: { payload: Record<string, unk
           used up. If you reject, it is never posted.
         </p>
       </div>
+    </div>
+  );
+}
+
+/**
+ * One-click host action (restart a service, recreate a container, change one
+ * setting). Every line here is stamped by the server from the box's own list
+ * of allowed actions; "Will run" is the exact command the on-box runner runs
+ * after approval, and the runner refuses the card if it would run anything
+ * else. The agent's own words appear only under "Why".
+ */
+function OperatorActionPayloadContent({ payload }: { payload: Record<string, unknown> }) {
+  const title = firstNonEmptyString(payload.title);
+  const why = firstNonEmptyString(payload.reason);
+  const willRun = firstNonEmptyString(payload.willRun);
+  const onApproval = firstNonEmptyString(payload.nextActionOnApproval);
+  const secretName = firstNonEmptyString(payload.secretName);
+  return (
+    <div className="mt-4 space-y-3.5 text-sm">
+      {title && (
+        <div className="space-y-1">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Host action</p>
+          <p className="font-medium leading-6 text-foreground">{title}</p>
+        </div>
+      )}
+      {why && (
+        <div className="space-y-1">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Why</p>
+          <p className="whitespace-pre-line leading-6 text-foreground/90">{why}</p>
+        </div>
+      )}
+      {onApproval && (
+        <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3.5 py-3">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-amber-700 dark:text-amber-300">
+            On approval
+          </p>
+          <p className="mt-1 leading-6 text-foreground">{onApproval}</p>
+        </div>
+      )}
+      {secretName && <PayloadField label="Value from" value={`secret "${secretName}"`} />}
+      {willRun && (
+        <div className="space-y-1.5">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Will run exactly</p>
+          <pre className="overflow-auto rounded-lg border border-border/60 bg-muted/50 px-3.5 py-3 font-mono text-xs leading-5 text-muted-foreground whitespace-pre-wrap">
+            {willRun}
+          </pre>
+        </div>
+      )}
     </div>
   );
 }

@@ -284,6 +284,45 @@ At least one of `requestedModel`/`requestedEffort` is required. `maxSpendCents` 
 
 **Answering a direct report's boost request (bosses).** When you are woken with `wakeReason: "model_boost_boss_review"`, the wake context carries `approvalId`, the requester's name, the plain title of the ask and your deadline. Read the request (`GET /api/approvals/{approvalId}`), look at the task, then answer once with `POST /api/approvals/{approvalId}/boss-review` and a body of `{"decision": "decline" | "forward", "note": "..."}`. Use `decline` when the task doesn't need it (the report is told and keeps working on its normal setting; the operator never sees it). Use `forward` when you think the operator should consider spending the money — put your recommendation in `note` in plain words, it is shown on the card. Only the boss named on the request can answer, and only while it is still waiting on them; the operator can decide the card at any point regardless.
 
+## Asking for a Host Action (restart, recreate, change a setting)
+
+You have no access to the server itself, and you should not ask for it. When you have found that something on the server needs one of these, ask for it with a host action card instead:
+
+- **restart a service** (for example the Telegram bridge after its code changed),
+- **recreate a container** (stop it and start it again, so a changed settings file is used),
+- **change one setting** in a settings (`.env`) file. The value is never written on the card: save it as a company secret first, then name that secret.
+
+Only the instance admin decides which services and settings can be asked for. See the list for your company first:
+
+```
+GET /api/companies/{companyId}/operator-actions
+```
+
+It returns `services` (each with a `name`, a plain `label`, the `actions` it allows and the exact command each runs) and `envFiles` (each with a `name`, a `label` and the setting `keys` that may be changed). If `configured` is `false`, or what you need is not on the list, nothing can be asked for: tell the operator in plain words what is needed and why, and stop.
+
+To ask, file one `request_board_approval`, linked to your task:
+
+```json
+POST /api/companies/{companyId}/approvals
+{
+  "type": "request_board_approval",
+  "issueIds": ["{your-task-id}"],
+  "payload": {
+    "kind": "operator_action",
+    "action": "restart_service",
+    "target": "telegram-bridge",
+    "reason": "so the bridge uses the new code that was deployed an hour ago"
+  }
+}
+```
+
+- `action` is `restart_service`, `recreate_container` or `set_env_var`.
+- `target` is a `name` from the list: a service for restart/recreate, a settings file for `set_env_var`.
+- For `set_env_var` also send `envKey` (one of that file's `keys`) and `secretId` (the id of the company secret that holds the value). Never put the value itself anywhere on the card or in a comment.
+- `reason` is one or two plain sentences: what is wrong and why this fixes it. That is the only text of yours the operator sees. Do not write a title, a command or a summary: the server writes the card from the list, including the exact command, so the operator sees exactly what will run.
+
+The company owner or an admin approves it. A runner on the server then does exactly that one action and posts the result (done, failed or not run, with the last lines of output) on the card and on your task. One card per action: do not file it twice, and do not ask again on later heartbeats while it waits. A setting change is used only after the app is recreated, so if it should take effect now, ask for the recreate as a second card after the first one is done.
+
 ## Issue-Thread Interactions
 
 Issue-thread interactions are first-class cards that render in the issue thread and capture a typed board/user response. Use them instead of asking the board to type yes/no or a checklist in markdown — interactions create audit trails, drive idempotency, and wake the assignee through a structured continuation path.
