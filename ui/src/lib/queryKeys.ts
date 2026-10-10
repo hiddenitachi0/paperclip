@@ -9,6 +9,7 @@ export const queryKeys = {
     qualityLoopSettings: (id: string) => ["companies", id, "quality-loop-settings"] as const,
     serviceTokens: (id: string) => ["companies", id, "service-tokens"] as const,
     telegramBots: (id: string) => ["companies", id, "telegram-bots"] as const,
+    telegramChatSettings: (id: string) => ["companies", id, "telegram-chat-settings"] as const,
     speechSettings: (id: string) => ["companies", id, "speech-settings"] as const,
     dataConnections: (id: string) => ["companies", id, "data-connections"] as const,
     datasetSources: (id: string) => ["companies", id, "dataset-sources"] as const,
@@ -268,6 +269,7 @@ export const queryKeys = {
   },
   auth: {
     session: ["auth", "session"] as const,
+    telegramLink: ["auth", "telegram-link"] as const,
   },
   sidebarPreferences: {
     companyOrder: (userId: string) => ["sidebar-preferences", "company-order", userId] as const,

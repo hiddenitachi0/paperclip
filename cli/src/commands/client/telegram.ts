@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { ApiRequestError } from "../../client/http.js";
 import {
   addCommonClientOptions,
   apiPath,
@@ -40,7 +41,49 @@ type BridgeRosterBot = {
   // Voice messages: when the bridge reads an answer aloud, and the voice.
   voiceReplyMode?: string;
   voice?: string | null;
+  // Hermes parity slice 1: this bot answers linked people. Passed through unchanged.
+  answersLinkedPeople?: boolean;
 };
+
+/**
+ * Hermes parity slice 1: the bridge's calls for linked people (see
+ * server/src/routes/telegram-chat.ts). The message, the code and the Telegram
+ * username travel as option values the bridge fills from environment
+ * variables, never as part of the command text. A refusal the server answered
+ * is printed as {ok:false,status,error} and exits 0, like `chat send --json`,
+ * so the bridge can tell "Paperclip said no" from "Paperclip did not answer".
+ */
+type PeopleOutcome = ({ ok: true } & Record<string, unknown>) | { ok: false; status: number; error: string };
+
+async function peopleCall(
+  opts: BaseClientOptions,
+  call: (ctx: ReturnType<typeof resolveCommandContext>) => Promise<Record<string, unknown> | null>,
+): Promise<PeopleOutcome> {
+  const ctx = resolveCommandContext(opts, { requireCompany: true });
+  try {
+    return { ok: true, ...((await call(ctx)) ?? {}) };
+  } catch (err) {
+    if (err instanceof ApiRequestError) return { ok: false, status: err.status, error: err.message };
+    throw err;
+  }
+}
+
+interface PeopleAskOptions extends BaseClientOptions {
+  telegramUserId: string;
+  chatId: string;
+  message: string;
+  fresh?: boolean;
+}
+
+interface PeopleLinkOptions extends BaseClientOptions {
+  telegramUserId: string;
+  code: string;
+  telegramUsername?: string;
+}
+
+interface PeopleAckOptions extends BaseClientOptions {
+  outcome: string;
+}
 
 export function registerTelegramCommands(program: Command): void {
   const telegram = program
@@ -75,6 +118,106 @@ export function registerTelegramCommands(program: Command): void {
             }
           }
           printOutput({ bots }, { json: opts.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+    { includeCompany: false },
+  );
+
+  addCommonClientOptions(
+    telegram
+      .command("people-ask")
+      .description("A linked person's question to the company bot: answered by the quick agent, or handed to the full agent. Instance admin only.")
+      .argument("<botId>", "The bot the message came in on")
+      .requiredOption("-C, --company-id <id>", "The bot's company")
+      .requiredOption("--telegram-user-id <id>", "The sender's Telegram user id")
+      .requiredOption("--chat-id <id>", "The chat the message came from")
+      .requiredOption("--message <text>", "The message")
+      .option("--fresh", "Start a fresh conversation with the quick agent")
+      .action(async (botId: string, opts: PeopleAskOptions) => {
+        try {
+          const outcome = await peopleCall(opts, (ctx) =>
+            ctx.api.post<Record<string, unknown>>(apiPath`/api/companies/${ctx.companyId!}/telegram-chat/ask`, {
+              botId,
+              telegramUserId: String(opts.telegramUserId),
+              chatId: String(opts.chatId),
+              message: opts.message,
+              ...(opts.fresh ? { fresh: true } : {}),
+            }),
+          );
+          printOutput(outcome, { json: opts.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+    { includeCompany: false },
+  );
+
+  addCommonClientOptions(
+    telegram
+      .command("people-link")
+      .description("Link the sender's Telegram account to the Paperclip person whose one-time code this is. Instance admin only.")
+      .argument("<botId>", "The bot the code was sent to")
+      .requiredOption("-C, --company-id <id>", "The bot's company")
+      .requiredOption("--telegram-user-id <id>", "The sender's Telegram user id")
+      .requiredOption("--code <code>", "The one-time code from the person's profile page")
+      .option("--telegram-username <name>", "The sender's @username, shown on their profile page")
+      .action(async (botId: string, opts: PeopleLinkOptions) => {
+        try {
+          const outcome = await peopleCall(opts, (ctx) =>
+            ctx.api.post<Record<string, unknown>>(apiPath`/api/companies/${ctx.companyId!}/telegram-chat/link`, {
+              botId,
+              telegramUserId: String(opts.telegramUserId),
+              code: opts.code,
+              telegramUsername: opts.telegramUsername?.trim() || null,
+            }),
+          );
+          printOutput(outcome, { json: opts.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+    { includeCompany: false },
+  );
+
+  addCommonClientOptions(
+    telegram
+      .command("people-outbox")
+      .description("Answers to linked people's questions that are ready to send. Instance admin only.")
+      .requiredOption("-C, --company-id <id>", "Company ID")
+      .action(async (opts: BaseClientOptions) => {
+        try {
+          const outcome = await peopleCall(opts, (ctx) =>
+            ctx.api.get<Record<string, unknown>>(apiPath`/api/companies/${ctx.companyId!}/telegram-chat/outbox`),
+          );
+          printOutput(outcome, { json: opts.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+    { includeCompany: false },
+  );
+
+  addCommonClientOptions(
+    telegram
+      .command("people-ack")
+      .description("Mark one answer as sent (delivered) or not sendable (failed). Instance admin only.")
+      .argument("<requestId>", "The answer's id from people-outbox")
+      .requiredOption("-C, --company-id <id>", "Company ID")
+      .requiredOption("--outcome <outcome>", "delivered or failed")
+      .action(async (requestId: string, opts: PeopleAckOptions) => {
+        try {
+          if (opts.outcome !== "delivered" && opts.outcome !== "failed") {
+            throw new Error("--outcome must be 'delivered' or 'failed'");
+          }
+          const outcome = await peopleCall(opts, (ctx) =>
+            ctx.api.post<Record<string, unknown>>(
+              apiPath`/api/companies/${ctx.companyId!}/telegram-chat/outbox/${requestId}/ack`,
+              { outcome: opts.outcome },
+            ),
+          );
+          printOutput(outcome, { json: opts.json });
         } catch (err) {
           handleCommandError(err);
         }
