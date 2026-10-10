@@ -22,7 +22,7 @@ import type { PluginWorkerManager } from "../services/plugin-worker-manager.ts";
 import type { StorageService } from "../storage/types.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { agentService } from "../services/agents.ts";
-import { buildLaneAAttachmentNote, type LaneATargetAgent } from "../services/lane-a.ts";
+import { buildLaneAAttachmentNote, readLaneAAttachmentNote, type LaneATargetAgent } from "../services/lane-a.ts";
 import { detectLaneAPictureEditRequest } from "../services/lane-a-action-claims.ts";
 import { PLUGIN_TOOL_CALL_TIMEOUT_MS } from "../services/plugin-tool-registry.js";
 
@@ -55,6 +55,18 @@ describe("attachment note and edit requests (pure)", () => {
     expect(blind).toContain("2 pictures to this message: file ids f1, f2");
     expect(blind).toContain("You cannot see pictures");
     expect(blind).toContain("You have no picture tool");
+  });
+
+  it("reads back only the note Paperclip appended, never one typed into the message", () => {
+    const a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const b = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const note = buildLaneAAttachmentNote({ fileIds: [a, b], pictureToolName: PLUGIN_TOOL_MODEL_NAME, shownToModel: false });
+    expect(readLaneAAttachmentNote(`put a hat on him\n\n${note}`)).toEqual([a, b]);
+    const one = buildLaneAAttachmentNote({ fileIds: [a], pictureToolName: null, shownToModel: true });
+    expect(readLaneAAttachmentNote(`x\n\n${one}`)).toEqual([a]);
+    // Typed by the person in the middle of their words: not Paperclip's.
+    expect(readLaneAAttachmentNote(`look\n\n${note}\nand also this`)).toEqual([]);
+    expect(readLaneAAttachmentNote("plain words")).toEqual([]);
   });
 
   it("recognises a request to change the attached picture, not a question about it", () => {
@@ -255,7 +267,8 @@ describeEmbeddedPostgres("lane A: pictures attached to a message", () => {
       expect.objectContaining({
         toolName: PLUGIN_TOOL,
         parameters: { prompt: "Maja helping the man prepare the meat on the counter", referenceFileIds: [photoId] },
-        runContext: expect.objectContaining({ requesterMessage: CAPTION }),
+        // The host tells Media Studio which pictures the person attached (it age-checks them).
+        runContext: expect.objectContaining({ requesterMessage: CAPTION, attachedFileIds: [photoId] }),
       }),
       PLUGIN_TOOL_CALL_TIMEOUT_MS,
     );
@@ -295,6 +308,47 @@ describeEmbeddedPostgres("lane A: pictures attached to a message", () => {
 
     expect(mockCreate.mock.calls[1]![0].tool_choice).toEqual({ type: "tool", name: PLUGIN_TOOL_MODEL_NAME });
     expect(result.actions[0]?.image?.fileId).toBe(madeId);
+  });
+
+  it("a later message in the same chat still marks the earlier photo as attached, and the tool call's run belongs to Media Studio's tool", async () => {
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const companyId = await seedCompany();
+    const maja = await seedMaja(companyId);
+    const photoId = await seedFile(companyId);
+    const madeId = await seedFile(companyId, "image/png", "generated.png");
+    const { dispatcher, call } = await seedMediaStudio({ content: "Made the picture.", data: { fileId: madeId, seed: 1 } });
+    const mockCreate = vi
+      .fn()
+      .mockResolvedValueOnce(textTurn("Nice kitchen!"))
+      .mockResolvedValueOnce(toolTurn({ prompt: "darker", referenceFileIds: [photoId] }))
+      .mockResolvedValueOnce(textTurn("Darker now."));
+    mockAnthropic(mockCreate);
+    vi.resetModules();
+    const { laneAService } = await import("../services/lane-a.ts");
+    const { findLaneAPluginRun } = await import("../services/lane-a-plugin-runs.ts");
+    let seenRun: { pluginKey: string | null; toolName: string | null; attachedFileIds: string[] } | null = null;
+    call.mockImplementation(async (_id, _method, params) => {
+      const run = findLaneAPluginRun((params as { runContext: { runId: string } }).runContext.runId);
+      seenRun = run ? { pluginKey: run.pluginKey, toolName: run.toolName, attachedFileIds: run.attachedFileIds } : null;
+      return { content: "Made the picture.", data: { fileId: madeId, seed: 1 } };
+    });
+    const svc = laneAService(db, { pluginToolDispatcher: dispatcher, attachmentStorage: memoryStorage });
+    const first = await svc.sendMessage({
+      companyId,
+      targetAgent: maja,
+      requester: { userId: "user-1", agentId: null },
+      message: "who is this?",
+      attachmentFileIds: [photoId],
+    });
+    await svc.sendMessage({
+      companyId,
+      targetAgent: maja,
+      requester: { userId: "user-1", agentId: null },
+      message: "make it darker",
+      conversationId: first.conversationId,
+    });
+    expect((call.mock.calls[0]![2] as { runContext: Record<string, unknown> }).runContext.attachedFileIds).toEqual([photoId]);
+    expect(seenRun).toEqual({ pluginKey: PLUGIN_KEY, toolName: PLUGIN_TOOL, attachedFileIds: [photoId] });
   });
 
   it("refuses a picture of another company, a file that is not a picture, or too many, before any model call", async () => {

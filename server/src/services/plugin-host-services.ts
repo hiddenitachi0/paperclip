@@ -28,6 +28,12 @@ import type {
   WorkerHostCallContext,
 } from "@paperclipai/plugin-sdk";
 import type { CreateIssueThreadInteraction, InviteJoinType, IssueDocumentSummary, PermissionKey, PrincipalType } from "@paperclipai/shared";
+import {
+  CHAT_PHOTO_AGE_CHECK_MAX_OUTPUT_TOKENS,
+  CHAT_PHOTO_AGE_CHECK_PURPOSE,
+  CHAT_PHOTO_AGE_CHECK_SYSTEM_PROMPT,
+  CHAT_PHOTO_AGE_CHECK_USER_PROMPT,
+} from "@paperclipai/shared";
 import { MEDIA_STUDIO_DIRECT_BILLING_CODE, MEDIA_STUDIO_EDIT_ACTIONS, MEDIA_STUDIO_EDIT_BILLING_CODE, estimateMediaStudioEditCostCents, mediaStudioEditActionProvider, pluginOperationIssueOriginKind, type MediaStudioEditAction } from "@paperclipai/shared";
 import { HttpError } from "../errors.js";
 import { mediaStudioDirectService } from "./media-studio-direct.js";
@@ -45,7 +51,7 @@ import { budgetService } from "./budgets.js";
 import { issueApprovalService } from "./issue-approvals.js";
 import { agentDailyLimitService } from "./agent-daily-limits.js";
 import { reactionLearningService } from "./reaction-learning.js";
-import { findLaneAPluginRun, laneAPluginRunNamesIssue } from "./lane-a-plugin-runs.js";
+import { LANE_A_RUN_IMAGE_ANALYSES_MAX, findLaneAPluginRun, laneAPluginRunNamesIssue } from "./lane-a-plugin-runs.js";
 import { subscribeCompanyLiveEvents } from "./live-events.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import path from "node:path";
@@ -2713,22 +2719,45 @@ export function buildHostServices(
           scope && scope.companyId === companyId && scope.userId
             ? { companyId, userId: scope.userId, canManageCompany: scope.canManageCompany, pluginId }
             : null;
+        const { companyId: _ignored, runId: _runId, purpose: _purpose, ...requested } = params;
+        let input = requested;
         if (!caller && typeof params.runId === "string") {
-          // A quick agent's tool call (a photo someone sent in a chat is
-          // age-checked before Media Studio sends it anywhere): the run is the
-          // host's own short-lived one for THIS company, and the call runs as
-          // the signed-in person talking to the quick agent.
+          // A quick agent's tool call: the age check of a photo the person
+          // attached in the chat, before Media Studio sends it anywhere. This
+          // path is narrow on purpose (DUR-4731): the host's own short-lived
+          // run for THIS company and THIS plugin's tool call, a signed-in
+          // person talking to the quick agent, only the age check (the host
+          // sends its own fixed instructions), only a picture the person
+          // attached in that chat, and only a few per tool call.
           const run = findLaneAPluginRun(params.runId);
-          // The run must belong to THIS plugin's own tool call: a run id
-          // handed to one plugin cannot be used by another.
-          if (run && run.companyId === companyId && run.requestedByUserId && run.pluginKey === pluginKey) {
+          if (
+            run &&
+            run.companyId === companyId &&
+            run.requestedByUserId &&
+            run.pluginKey === pluginKey &&
+            params.purpose === CHAT_PHOTO_AGE_CHECK_PURPOSE
+          ) {
+            if (!run.attachedFileIds.includes(String(params.fileId ?? "").toLowerCase())) {
+              throw new Error("Only photos attached in this chat can be age-checked here, so this picture was not sent anywhere.");
+            }
+            if (run.imageAnalyses >= LANE_A_RUN_IMAGE_ANALYSES_MAX) {
+              throw new Error(`Too many photos to check in one step, so nothing was sent. Use at most ${LANE_A_RUN_IMAGE_ANALYSES_MAX} photos at a time.`);
+            }
+            run.imageAnalyses += 1;
             caller = { companyId, userId: run.requestedByUserId, canManageCompany: false, quickAgentRun: true, pluginId };
+            input = {
+              entryId: requested.entryId,
+              fileId: requested.fileId,
+              keySecretId: requested.keySecretId,
+              systemPrompt: CHAT_PHOTO_AGE_CHECK_SYSTEM_PROMPT,
+              userPrompt: CHAT_PHOTO_AGE_CHECK_USER_PROMPT,
+              maxOutputTokens: CHAT_PHOTO_AGE_CHECK_MAX_OUTPUT_TOKENS,
+            };
           }
         }
         if (!caller) {
           throw new Error("Picture analysis only works from a person's action on Paperclip's own pages, for the company they have open.");
         }
-        const { companyId: _ignored, runId: _runId, ...input } = params;
         const result = await imageAnalysis.analyseImage(caller, input);
         await logPluginActivity({
           companyId,
@@ -2741,7 +2770,7 @@ export function buildHostServices(
             provider: result.provider,
             model: result.model,
             costCents: result.costCents,
-            ...(caller.quickAgentRun ? { quickAgentRun: true } : {}),
+            ...(caller.quickAgentRun ? { quickAgentRun: true, purpose: CHAT_PHOTO_AGE_CHECK_PURPOSE } : {}),
           },
         });
         return result;

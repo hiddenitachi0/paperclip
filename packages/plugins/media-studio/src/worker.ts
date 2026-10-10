@@ -668,7 +668,13 @@ function describeLook(look: Look, isYourDefault = false): string {
  * company's file, and that is refused with a plain sentence. The bytes travel
  * as data URIs so no private Paperclip address ever leaves the box.
  */
-async function loadReferenceImages(ctx: PluginContext, companyId: string, fileIds: string[], runId?: string | null): Promise<string[]> {
+async function loadReferenceImages(
+  ctx: PluginContext,
+  companyId: string,
+  fileIds: string[],
+  runId?: string | null,
+  attachedFileIds?: readonly string[] | null,
+): Promise<string[]> {
   const files = [];
   for (const fileId of fileIds) {
     const file = await ctx.files.get(fileId, companyId);
@@ -684,7 +690,7 @@ async function loadReferenceImages(ctx: PluginContext, companyId: string, fileId
   }
   // A photo someone sent in a chat must pass the age check before it is
   // sent anywhere (chat-photos.ts); `runId` is the tool call's own run.
-  await requireAdultChatPhotos(ctx, companyId, files, runId);
+  await requireAdultChatPhotos(ctx, companyId, files, runId, attachedFileIds);
   const images: string[] = [];
   for (const fileId of fileIds) {
     const content = await ctx.files.readContent(fileId, companyId);
@@ -1034,7 +1040,14 @@ export async function prepareGeneration(
    * own message for this turn when the host provides it (quick-agent chats).
    * Neither ever comes from the tool input.
    */
-  options: { agentId?: string | null; requesterMessage?: string | null; now?: Date; runId?: string | null } = {},
+  options: {
+    agentId?: string | null;
+    requesterMessage?: string | null;
+    now?: Date;
+    runId?: string | null;
+    /** Pictures the person attached in this chat (host-set run context): each is age-checked before it is sent. */
+    attachedFileIds?: readonly string[] | null;
+  } = {},
 ): Promise<PreparedGeneration | { error: string }> {
   const input = toInput(params);
   if (!input.prompt) return { error: "prompt is required" };
@@ -1316,7 +1329,7 @@ export async function prepareGeneration(
   if (input.seed === undefined && look?.seed !== null && look?.seed !== undefined) input.seed = look.seed;
 
   try {
-    if (referenceFileIds.length > 0) input.referenceImages = await loadReferenceImages(ctx, companyId, referenceFileIds, options.runId);
+    if (referenceFileIds.length > 0) input.referenceImages = await loadReferenceImages(ctx, companyId, referenceFileIds, options.runId, options.attachedFileIds);
   } catch (err) {
     return { error: err instanceof Error ? err.message : String(err) };
   }
@@ -1657,6 +1670,7 @@ const plugin = definePlugin({
           agentId: runCtx.agentId,
           runId: runCtx.runId,
           requesterMessage: typeof runCtx.requesterMessage === "string" ? runCtx.requesterMessage : null,
+          attachedFileIds: Array.isArray(runCtx.attachedFileIds) ? runCtx.attachedFileIds : null,
         });
         if ("error" in prepared) return { error: prepared.error };
         const { input, look, lookReason, lookReasonText: reasonText, referenceFileIds, notes } = prepared;
@@ -2481,7 +2495,7 @@ function registerMediaJobTools(ctx: PluginContext): void {
       const startImageFileId = typeof rawParams.startImageFileId === "string" ? rawParams.startImageFileId.trim() : "";
       if (startImageFileId) {
         try {
-          [startImage] = await loadReferenceImages(ctx, runCtx.companyId, [startImageFileId], runCtx.runId);
+          [startImage] = await loadReferenceImages(ctx, runCtx.companyId, [startImageFileId], runCtx.runId, runCtx.attachedFileIds);
         } catch (err) {
           return { error: err instanceof Error ? err.message : String(err) };
         }
@@ -2651,7 +2665,7 @@ async function runSogniTool(
   ctx: PluginContext,
   def: SogniToolDef,
   params: unknown,
-  runCtx: { companyId: string; runId: string; agentId: string },
+  runCtx: { companyId: string; runId: string; agentId: string; attachedFileIds?: string[] },
 ): Promise<ToolResult> {
   const cfg = await companyConfig(ctx, runCtx.companyId);
   const defaultModel = textOrNull(cfg.sogniModel) ?? SOGNI_DEFAULT_MODEL;
@@ -2706,7 +2720,7 @@ ${text}`,
     return { error: `Sogni takes PNG, JPEG, WebP or GIF pictures, and "${name}" is ${file.contentType}.` };
   }
   try {
-    await requireAdultChatPhotos(ctx, runCtx.companyId, [file], runCtx.runId);
+    await requireAdultChatPhotos(ctx, runCtx.companyId, [file], runCtx.runId, runCtx.attachedFileIds);
   } catch (err) {
     return { error: errorText(err) };
   }

@@ -1,7 +1,13 @@
 import sharp from "sharp";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestHarness, type TestHarness } from "@paperclipai/plugin-sdk/testing";
-import { CHAT_PHOTO_FILENAME_PREFIX as SHARED_PREFIX, chatPhotoFilename } from "@paperclipai/shared";
+import {
+  CHAT_PHOTO_AGE_CHECK_MAX_OUTPUT_TOKENS,
+  CHAT_PHOTO_AGE_CHECK_SYSTEM_PROMPT,
+  CHAT_PHOTO_AGE_CHECK_USER_PROMPT,
+  CHAT_PHOTO_FILENAME_PREFIX as SHARED_PREFIX,
+  chatPhotoFilename,
+} from "@paperclipai/shared";
 import plugin, { prepareGeneration } from "../../../packages/plugins/media-studio/src/worker.js";
 import manifest, { TOOL_GENERATE } from "../../../packages/plugins/media-studio/src/manifest.js";
 import {
@@ -10,7 +16,7 @@ import {
   CHAT_PHOTO_REFUSED_MESSAGE,
   isChatPhoto,
 } from "../../../packages/plugins/media-studio/src/chat-photos.js";
-import { AGE_CHECK_SYSTEM_PROMPT } from "../../../packages/plugins/media-studio/src/age-check.js";
+import { AGE_CHECK_SYSTEM_PROMPT, AGE_CHECK_USER_PROMPT } from "../../../packages/plugins/media-studio/src/age-check.js";
 
 /**
  * A photo someone sent a quick agent in Telegram ("alter this image to show
@@ -108,6 +114,12 @@ describe("chat photos are recognised by their stored name", () => {
     expect(isChatPhoto({ originalFilename: "sofa.jpg" })).toBe(false);
     expect(isChatPhoto({ originalFilename: null })).toBe(false);
   });
+
+  it("the host's fixed age-check instructions are Media Studio's own (DUR-4731)", () => {
+    expect(CHAT_PHOTO_AGE_CHECK_SYSTEM_PROMPT).toBe(AGE_CHECK_SYSTEM_PROMPT);
+    expect(CHAT_PHOTO_AGE_CHECK_USER_PROMPT).toBe(AGE_CHECK_USER_PROMPT);
+    expect(CHAT_PHOTO_AGE_CHECK_MAX_OUTPUT_TOKENS).toBe(60);
+  });
 });
 
 describe("Generate image with a chat photo as the reference", () => {
@@ -123,7 +135,12 @@ describe("Generate image with a chat photo as the reference", () => {
 
     expect(result.error).toBeUndefined();
     expect(analyseImage).toHaveBeenCalledTimes(1);
-    expect(analyseImage.mock.calls[0]![1]).toMatchObject({ fileId: PHOTO, systemPrompt: AGE_CHECK_SYSTEM_PROMPT, runId: RUN });
+    expect(analyseImage.mock.calls[0]![1]).toMatchObject({
+      fileId: PHOTO,
+      systemPrompt: AGE_CHECK_SYSTEM_PROMPT,
+      runId: RUN,
+      purpose: "chat_photo_age_check",
+    });
     expect(falCalls).toHaveLength(1);
     expect(JSON.stringify(falCalls[0]!.body)).toContain(`data:image/jpeg;base64,${JPEG.toString("base64").slice(0, 40)}`);
 
@@ -171,6 +188,29 @@ describe("Generate image with a chat photo as the reference", () => {
     expect(result.error).toBeUndefined();
     expect(analyseImage).not.toHaveBeenCalled();
     expect(falCalls).toHaveLength(1);
+  });
+
+  it("a picture the person attached in the chat is age-checked whatever it is called (DUR-4731)", async () => {
+    const { harness, falCalls } = await setup();
+    const analyseImage = await ageModel(harness, '{"apparentAdult": null}');
+    // sofa.jpg has no chat-photo name, but the host says the person attached it in this chat.
+    const attachedRun = { ...majaRun, attachedFileIds: [PRODUCT] };
+
+    const result = await harness.executeTool<any>(TOOL_GENERATE, { prompt: "put him on the sofa", referenceFileIds: [PRODUCT] }, attachedRun as never);
+
+    expect(result.error).toBe(CHAT_PHOTO_REFUSED_MESSAGE);
+    expect(analyseImage).toHaveBeenCalledTimes(1);
+    expect(analyseImage.mock.calls[0]![1]).toMatchObject({ fileId: PRODUCT, runId: RUN, purpose: "chat_photo_age_check" });
+    expect(falCalls).toHaveLength(0);
+
+    // The same for a Sogni picture tool and a video's start picture.
+    const sogni = await setup({ provider: "fal", falKeySecretRef: "fal-ref", sogniKeySecretRef: "sogni-key-ref" });
+    await ageModel(sogni.harness, '{"apparentAdult": null}');
+    const fetch = vi.fn();
+    sogni.harness.ctx.http.fetch = fetch as never;
+    const upscale = await sogni.harness.executeTool<any>("sogni-upscale-image", { fileId: PRODUCT, scale: 4 }, attachedRun as never);
+    expect(upscale.error).toBe(CHAT_PHOTO_REFUSED_MESSAGE);
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("with Maja's look the photo goes after her own reference pictures, and only the photo is age-checked", async () => {
