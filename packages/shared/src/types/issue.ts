@@ -509,6 +509,10 @@ export interface IssueExecutionPolicy {
   authorizationPolicy?: TrustAuthorizationPolicy;
   /** Opt-out for the automatic self-review pass gate (default on for code issues). */
   selfReview?: boolean;
+  /** Per-task override of the company's self-check passes (0-3). Unset = company setting. */
+  selfReviewPasses?: number;
+  /** Per-task override of the company's independent finish check. Unset = company setting. */
+  doneCheck?: boolean;
 }
 
 export interface IssueExecutionMonitorState {

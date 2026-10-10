@@ -26,7 +26,16 @@ import {
 import { getRecentProjectIds, trackRecentProject } from "../../lib/recent-projects";
 import { orderItemsBySelectedAndRecent } from "../../lib/recent-selections";
 import { formatAssigneeUserLabel } from "../../lib/assignees";
-import { buildExecutionPolicy, buildGoalConditionMonitor, stageParticipantValues } from "../../lib/issue-execution-policy";
+import {
+  TASK_QUALITY_CHECK_CHOICES,
+  applyTaskQualityCheckChoice,
+  buildExecutionPolicy,
+  buildGoalConditionMonitor,
+  pickQualityLoopFields,
+  readTaskQualityCheckChoice,
+  stageParticipantValues,
+  type TaskQualityCheckChoice,
+} from "../../lib/issue-execution-policy";
 import { formatMonitorOffset } from "../../lib/issue-monitor";
 import { extractProviderIdWithFallback } from "../../lib/model-utils";
 import { formatRetryReason } from "../../lib/runRetryState";
@@ -1010,6 +1019,7 @@ export function IssueProperties({
         commentRequired: true,
         stages: basePolicy?.stages ?? [],
         ...(nextMonitor ? { monitor: nextMonitor } : {}),
+        ...pickQualityLoopFields(issue.executionPolicy ?? null),
       },
     });
   };
@@ -2392,6 +2402,29 @@ export function IssueProperties({
           )}
         </PropertyPicker>
         {nextRunnableExecutionStage === "approval" && approverValues.length > 0 ? runExecutionButton("approval") : null}
+
+        <PropertyRow label="Quality checks">
+          <select
+            className="min-w-0 max-w-full rounded-md border border-border bg-transparent px-1.5 py-0.5 text-sm outline-none focus:ring-2 focus:ring-ring"
+            value={readTaskQualityCheckChoice(issue.executionPolicy ?? null)}
+            onChange={(e) =>
+              onUpdate({
+                executionPolicy: applyTaskQualityCheckChoice(
+                  issue.executionPolicy ?? null,
+                  e.target.value as TaskQualityCheckChoice,
+                ),
+              })
+            }
+            title="Self-check: the agent re-checks its work against the task once before finishing. Finish check: a cheap model compares the task with the agent's final note and sends it back if something is missing."
+            data-testid="issue-quality-checks-select"
+          >
+            {TASK_QUALITY_CHECK_CHOICES.map((choice) => (
+              <option key={choice.value} value={choice.value}>
+                {choice.label}
+              </option>
+            ))}
+          </select>
+        </PropertyRow>
 
         {currentExecutionLabel && (
           <PropertyRow label="Execution">

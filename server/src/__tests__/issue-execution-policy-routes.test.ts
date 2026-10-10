@@ -670,4 +670,86 @@ describe("issue execution policy routes", () => {
       }),
     );
   });
+
+  describe("quality-check fields (security review DUR-4708)", () => {
+    const issueId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const agentActor = {
+      type: "agent" as const,
+      agentId: "33333333-3333-4333-8333-333333333333",
+      companyId: "99999999-9999-4999-8999-999999999999",
+      runId: "run-1",
+    };
+    function storedIssue(executionPolicy: unknown) {
+      return {
+        id: issueId,
+        companyId: "99999999-9999-4999-8999-999999999999",
+        status: "in_progress",
+        assigneeAgentId: "33333333-3333-4333-8333-333333333333",
+        assigneeUserId: null,
+        createdByUserId: "local-board",
+        identifier: "PAP-1010",
+        title: "Quality checks",
+        executionPolicy,
+        executionState: null,
+      };
+    }
+    function patchedPolicy() {
+      const call = mockIssueService.update.mock.calls.find(
+        (c: unknown[]) => (c[1] as Record<string, unknown>)?.executionPolicy !== undefined,
+      );
+      return (call?.[1] as { executionPolicy: Record<string, unknown> | null } | undefined)?.executionPolicy;
+    }
+
+    it("an agent cannot switch off the checks on its own task (repro)", async () => {
+      const issue = storedIssue(normalizeIssueExecutionPolicy({ doneCheck: true, selfReviewPasses: 1 }));
+      mockIssueService.getById.mockResolvedValue(issue);
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({ ...issue, ...patch }));
+      const res = await request(await createApp(agentActor))
+        .patch(`/api/issues/${issueId}`)
+        .send({ executionPolicy: { doneCheck: false, selfReviewPasses: 0 } });
+      expect(res.status).toBe(200);
+      expect(patchedPolicy()).toMatchObject({ doneCheck: true, selfReviewPasses: 1 });
+    });
+
+    it("an agent cannot switch paid checks on in a company that did not opt in", async () => {
+      const issue = storedIssue(null);
+      mockIssueService.getById.mockResolvedValue(issue);
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({ ...issue, ...patch }));
+      const res = await request(await createApp(agentActor))
+        .patch(`/api/issues/${issueId}`)
+        .send({ executionPolicy: { doneCheck: true, selfReviewPasses: 3 } });
+      expect(res.status).toBe(200);
+      expect(
+        mockIssueService.update.mock.calls.some((c: unknown[]) => "executionPolicy" in ((c[1] as object) ?? {})),
+      ).toBe(true);
+      expect(patchedPolicy()).toBeNull();
+    });
+
+    it("a board user can change them", async () => {
+      const issue = storedIssue(normalizeIssueExecutionPolicy({ doneCheck: true }));
+      mockIssueService.getById.mockResolvedValue(issue);
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({ ...issue, ...patch }));
+      const res = await request(await createApp())
+        .patch(`/api/issues/${issueId}`)
+        .send({ executionPolicy: { doneCheck: false, selfReviewPasses: 0 } });
+      expect(res.status).toBe(200);
+      expect(patchedPolicy()).toMatchObject({ doneCheck: false, selfReviewPasses: 0 });
+    });
+
+    it("an agent creating a child task cannot set them", async () => {
+      mockAccessService.hasPermission.mockResolvedValue(true);
+      mockIssueService.getById.mockResolvedValue({ ...storedIssue(null), title: "Parent" });
+      const res = await request(await createApp(agentActor))
+        .post(`/api/issues/${issueId}/children`)
+        .send({
+          title: "Child",
+          assigneeAgentId: "33333333-3333-4333-8333-333333333333",
+          executionPolicy: { doneCheck: true, selfReviewPasses: 0 },
+        });
+      expect(res.status).toBe(201);
+      expect(mockIssueService.createChild).toHaveBeenCalledTimes(1);
+      const createPayload = mockIssueService.createChild.mock.calls[0]?.[1] as { executionPolicy: unknown };
+      expect(createPayload.executionPolicy ?? null).toBeNull();
+    });
+  });
 });
