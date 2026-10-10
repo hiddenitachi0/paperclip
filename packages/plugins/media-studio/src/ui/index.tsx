@@ -25,6 +25,7 @@ import {
   type ReadinessItem,
 } from "./storyline-flow.js";
 import { FilmPanel, ReadinessChecklist, StepBar, SuggestionsBanner } from "./storyline-steps.js";
+import { StripPanel } from "./strip-panel.js";
 import { VideoModelPicker, type SogniVideoModelRow } from "./video-model-picker.js";
 
 // The plugin UI is served as a standalone ES module, so it must not import from
@@ -4708,6 +4709,19 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                     onCancel={() => void cancelRender()}
                     onGoRender={() => setActiveStep("render")}
                     onRefresh={() => void refreshAll()}
+                  />
+                )}
+
+                {/* Storyline strip (Simple editor): clips and the joins between them. */}
+                {step === "film" && companyId && advancedEnabled && base && (
+                  <StripPanel
+                    key={`strip-${selected.id}`}
+                    apiBase={base}
+                    editable={editable}
+                    onCombineAgain={async () => {
+                      await storylineFetchJson(`${base}/stitch/retry`, { method: "POST" }, "combining the film again");
+                      await loadStorylines();
+                    }}
                   />
                 )}
               </>
