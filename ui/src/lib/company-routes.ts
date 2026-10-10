@@ -56,6 +56,7 @@ const BOARD_ROUTE_ROOTS = new Set([
   "settings",
   "media-studio",
   "overlaps",
+  "tower",
 ]);
 
 const GLOBAL_ROUTE_ROOTS = new Set(["auth", "invite", "board-claim", "cli-auth", "docs", "instance"]);
