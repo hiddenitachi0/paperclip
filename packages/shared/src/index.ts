@@ -2665,6 +2665,9 @@ export {
   estimateVideoStorylineCostCents,
   FAL_KLING_ALLOWED_DURATIONS_SECONDS,
   videoModelAllowedDurations,
+  videoShotVideoPrompt,
+  isFalKlingV3Model,
+  FAL_KLING_V3_ALLOWED_DURATIONS_SECONDS,
   videoRenderDurationSeconds,
   startVideoStorylineRenderSchema,
   updateVideoSceneSchema,
@@ -3097,3 +3100,4 @@ export {
   type MailUrgencySummary,
   type SetMailUrgencyFeedbackInput,
 } from "./mail-urgency.js";
+export * from "./video-storyline-transitions.js";

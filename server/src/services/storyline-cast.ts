@@ -160,7 +160,7 @@ export function normalizeCastIdentity(value: unknown): CastIdentity | null {
   };
 }
 
-async function readPluginState(db: Db, pluginId: string, companyId: string, stateKey: string): Promise<unknown> {
+export async function readPluginState(db: Db, pluginId: string, companyId: string, stateKey: string): Promise<unknown> {
   const [row] = await db
     .select({ value: pluginState.valueJson })
     .from(pluginState)
