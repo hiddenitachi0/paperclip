@@ -130,6 +130,7 @@ import {
 } from "../lib/agent-skills-state";
 import { AgentSkillsTab } from "./AgentSkillsTab";
 import { AgentToolsTab } from "./AgentToolsTab";
+import { QuickAgentConversations } from "../components/QuickAgentConversations";
 
 const runStatusIcons: Record<string, { icon: typeof CheckCircle2; color: string }> = {
   succeeded: { icon: CheckCircle2, color: "text-green-600 dark:text-green-400" },
@@ -274,7 +275,7 @@ function scrollToContainerBottom(container: ScrollContainer, behavior: ScrollBeh
   container.scrollTo({ top: container.scrollHeight, behavior });
 }
 
-type AgentDetailView = "dashboard" | "instructions" | "configuration" | "skills" | "tools" | "runs" | "files" | "budget";
+type AgentDetailView = "dashboard" | "instructions" | "configuration" | "skills" | "tools" | "runs" | "files" | "budget" | "conversations";
 
 function parseAgentDetailView(value: string | null): AgentDetailView {
   if (value === "instructions" || value === "prompts") return "instructions";
@@ -283,6 +284,7 @@ function parseAgentDetailView(value: string | null): AgentDetailView {
   if (value === "tools") return "tools";
   if (value === "files") return "files";
   if (value === "budget") return "budget";
+  if (value === "conversations") return "conversations";
   if (value === "runs") return value;
   return "dashboard";
 }
@@ -838,6 +840,10 @@ export function AgentDetail() {
               ? "runs"
               : activeView === "budget"
                 ? "budget"
+              : activeView === "conversations"
+                ? "conversations"
+              : activeView === "files"
+                ? "files"
               : "dashboard";
     if (routeAgentRef !== canonicalAgentRef || urlTab !== canonicalTab) {
       navigate(`/agents/${canonicalAgentRef}/${canonicalTab}`, { replace: true });
@@ -1152,6 +1158,10 @@ export function AgentDetail() {
               { value: "runs", label: "Runs" },
               { value: "files", label: "Files" },
               { value: "budget", label: "Budget" },
+              // Quick agents: what the agent told people (owners/admins: everyone's; others: their own).
+              ...(agent.laneAEnabled || activeView === "conversations"
+                ? [{ value: "conversations", label: "Conversations" }]
+                : []),
             ]}
             value={activeView}
             onValueChange={(value) => navigate(`/agents/${canonicalAgentRef}/${value}`)}
@@ -1300,6 +1310,14 @@ export function AgentDetail() {
 
       {activeView === "files" && resolvedCompanyId && (
         <AgentFilesTab agent={agent} companyId={resolvedCompanyId} />
+      )}
+
+      {activeView === "conversations" && resolvedCompanyId && (
+        <QuickAgentConversations
+          companyId={resolvedCompanyId}
+          agentId={agent.id}
+          agentName={formatAgentDisplayName(agent, agent.persona)}
+        />
       )}
 
       {activeView === "budget" && resolvedCompanyId ? (
