@@ -1187,6 +1187,8 @@ interface LaneAPluginTool {
   /** For the operator: "Generate image" and "Media Studio". */
   displayName: string;
   pluginDisplayName: string;
+  /** The plugin's manifest key; a tool call's run is bound to it. */
+  pluginKey: string;
 }
 
 interface LaneAToolset {
@@ -1412,6 +1414,7 @@ async function loadLaneAPluginTools(
       namespacedName: tool.name,
       displayName: tool.displayName,
       pluginDisplayName: tool.pluginDisplayName,
+      pluginKey: tool.pluginKey,
     });
   }
   return { anthropicTools, pluginTools };
