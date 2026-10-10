@@ -4688,9 +4688,9 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                           />
                         </div>
                       </div>
-                      {selected.providerId === "fal" && (!selected.model || /kling/i.test(selected.model)) && (
+                      {selected.providerId === "fal" && (!selected.model || /kling/i.test(selected.model)) && !/kling-video\/(v3|o3)\//i.test(selected.model ?? "") && (
                         <p style={{ fontSize: 11, color: "#868e96", margin: "6px 0 0" }}>
-                          Fal.ai's Kling models only make 5- or 10-second clips. Shots with other lengths are rendered (and charged) at the next allowed length, up to 10 seconds.
+                          Fal.ai's Kling 1.6 and 2.1 models only make 5- or 10-second clips. Shots with other lengths are rendered (and charged) at the next allowed length, up to 10 seconds. Kling 3 makes any length from 3 to 15 seconds.
                         </p>
                       )}
                     </details>

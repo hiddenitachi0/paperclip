@@ -11,6 +11,7 @@ import {
   readVideoStorylineCast,
   videoRenderDurationSeconds,
   videoShotCast,
+  videoShotVideoPrompt,
   videoRenderRequestPayloadSchema,
   type StartVideoStorylineRenderInput,
   type VideoStorylineProvider,
@@ -323,7 +324,10 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
 
     const input: MediaJobInput = {
       kind: "video",
-      prompt: shot.prompt,
+      // Camera notes go with the description (they used to be dropped).
+      prompt: videoShotVideoPrompt(shot.prompt, shot.cameraNotes),
+      // Sogni: our prompt as written, not rewritten from the pictures (decision 7).
+      promptRewrite: false,
       model: model ?? undefined,
       startImage,
       referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
@@ -655,7 +659,8 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
 
     const handle = await provider.start({
       kind: "video",
-      prompt: shot.prompt,
+      prompt: videoShotVideoPrompt(shot.prompt, shot.cameraNotes),
+      promptRewrite: false,
       model: model ?? undefined,
       startImage,
       referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
