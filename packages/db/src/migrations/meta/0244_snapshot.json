@@ -1,6 +1,6 @@
 {
-  "id": "bb617529-1450-4530-87c3-b1c1593ea3ff",
-  "prevId": "ca9327af-0b81-4b63-805f-0e81a1fc0ba3",
+  "id": "650de232-2589-4e49-91db-23a3b75085b2",
+  "prevId": "bb617529-1450-4530-87c3-b1c1593ea3ff",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -5360,6 +5360,30 @@
         "worktree_cleanup_retention_days": {
           "name": "worktree_cleanup_retention_days",
           "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "migrated_to_url": {
+          "name": "migrated_to_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "migrated_at": {
+          "name": "migrated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "migrated_by_user_id": {
+          "name": "migrated_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "migration_paused_routine_ids": {
+          "name": "migration_paused_routine_ids",
+          "type": "jsonb",
           "primaryKey": false,
           "notNull": false
         },

@@ -42,7 +42,8 @@ def strategy_row(strategy_id=STRATEGY, name="BTC rule v1", asset="BTC/USDT", sta
 class BridgeTradingTestCase(unittest.TestCase):
     def setUp(self):
         self.state = {"bots": {BOT["token"]: {"offset": 0, "chats": [OPERATOR]}}, "notified": []}
-        bridge.ALLOWED_USER_IDS = {OPERATOR}
+        # Per bot now (no instance-wide list): every test bot keeps these people.
+        bridge.legacy_allowed = lambda token: {OPERATOR}
         self.patches = [
             mock.patch.object(bridge, "tg", return_value={}),
             mock.patch.object(bridge, "cli", return_value=None),
