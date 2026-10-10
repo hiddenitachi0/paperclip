@@ -56,7 +56,8 @@ class MediaJobAnswerTests(unittest.TestCase):
         self.state = {"bots": {BOT["token"]: {"offset": 0,
                                                "tasks": {ISSUE1: {"chat": OPERATOR, "identifier": "DUR-40",
                                                                    "title": "A video", "at": time.time()}}}}}
-        bridge.ALLOWED_USER_IDS = {OPERATOR, OPERATOR2}
+        # Per bot now (no instance-wide list): every test bot keeps these people.
+        bridge.legacy_allowed = lambda token: {OPERATOR, OPERATOR2}
         self.patches = [
             mock.patch.object(bridge, "tg", return_value={}),
             mock.patch.object(bridge, "tg_upload", return_value={"message_id": 1}),

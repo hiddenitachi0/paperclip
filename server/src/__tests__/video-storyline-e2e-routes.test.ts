@@ -19,6 +19,7 @@ import {
   plugins,
   runInCompanyScopeBypass,
 } from "@paperclipai/db";
+import { seedCompanyWriterModel } from "./helpers/storyline-writer-model.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
 /**
@@ -194,6 +195,7 @@ d("video storylines end to end through the real request-scoped db", () => {
       issuePrefix: `F${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
       requireBoardApprovalForNewAgents: false,
     });
+    await seedCompanyWriterModel(db, companyId);
     const secret = await secretService(db).create(companyId, { name: `fal-${randomUUID()}`, provider: "local_encrypted", value: "fal-test-key" });
     const manifest = {
       id: "paperclip.media-studio",
@@ -433,7 +435,7 @@ d("video storylines end to end through the real request-scoped db", () => {
     const { default: Anthropic } = await import("@anthropic-ai/sdk");
     anthropicCreate.mockRejectedValueOnce(new (Anthropic as unknown as { RateLimitError: new (...args: unknown[]) => Error }).RateLimitError(429, { error: { message: "slow down" } }, "slow down", new Headers()));
     const res = await request(app).post(`${base}/${storylineId}/director/review`).send({});
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(429);
     expect(res.body.error).toContain("busy");
   });
 

@@ -361,6 +361,11 @@ DECLARE
     -- the schema.
     'report_runs',
     'report_templates',
+    -- Storyline strip (Simple editor, Phase 1). Created, granted on and
+    -- policed in 0244_storyline_transitions.sql; listed here so the
+    -- login-role lists match the schema.
+    'video_transition_takes',
+    'video_transitions',
     -- DUR-4037. Created (and granted on) in 0187_payment_notices_and_settings.sql;
     -- listed here so the login-role lists match the schema, as for the tables above.
     'payment_notices',
@@ -424,6 +429,13 @@ DECLARE
     -- 0166_telegram_bots.sql; the name is listed here for the same reason
     -- company_service_tokens is, above.
     'telegram_bots',
+    -- Hermes parity slice 1 (two-way Telegram chat for linked people).
+    -- Created, granted on and policed in 0243_telegram_two_way_chat.sql;
+    -- telegram_person_links is per person (no company_id), so it is in this
+    -- list only, not in the company-scoped one below.
+    'telegram_chat_requests',
+    'telegram_chat_settings',
+    'telegram_person_links',
     -- DUR-4157 2FA. Created (and granted on) in 0206_totp_2fa.sql;
     -- user-scoped (no company_id), so it is in this list only, not in the
     -- company-scoped one below.
@@ -692,6 +704,11 @@ DECLARE
     -- the schema.
     'report_runs',
     'report_templates',
+    -- Storyline strip (Simple editor, Phase 1). Created, granted on and
+    -- policed in 0244_storyline_transitions.sql; listed here so the
+    -- login-role lists match the schema.
+    'video_transition_takes',
+    'video_transitions',
     -- DUR-4037. Created (and granted on) in 0187_payment_notices_and_settings.sql;
     -- listed here so the login-role lists match the schema, as for the tables above.
     'payment_notices',
@@ -745,6 +762,10 @@ DECLARE
     -- DUR-3978 slice 2, created in 0166_telegram_bots.sql; company-scoped, so
     -- it belongs in this list too.
     'telegram_bots',
+    -- Hermes parity slice 1, created in 0243_telegram_two_way_chat.sql;
+    -- company-scoped, so they belong in this list too.
+    'telegram_chat_requests',
+    'telegram_chat_settings',
     -- DUR-4153/DUR-4171 trading agent (paper-trading only), created in
     -- 0197_trading_agent.sql; company-scoped, so it belongs in this list too.
     'trading_daily_stats',

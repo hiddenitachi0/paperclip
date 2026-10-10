@@ -88,6 +88,12 @@ export interface IssueAssigneeAdapterOverrides {
   useProjectWorkspace?: boolean;
   /** DUR-4144: "Plan first on Opus, then build on Sonnet" New Task switch. */
   planFirstOnOpus?: boolean;
+  /**
+   * Set when the model/effort in `adapterConfig` was copied from the parent
+   * task at creation (sub-task flow-down). Dropped as soon as someone edits the
+   * task's model/effort, because it is then the task's own setting.
+   */
+  inheritedFrom?: { issueId: string; identifier?: string | null };
 }
 
 export type DocumentFormat = "markdown";

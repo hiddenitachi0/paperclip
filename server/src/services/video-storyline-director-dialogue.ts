@@ -1,12 +1,10 @@
 import { randomUUID } from "node:crypto";
-import Anthropic from "@anthropic-ai/sdk";
 import type { Db } from "@paperclipai/db";
 import {
   VIDEO_DIRECTOR_DIALOGUE_MAX_OPTIONS_PER_QUESTION,
   VIDEO_DIRECTOR_DIALOGUE_MAX_OUTPUT_TOKENS,
   VIDEO_DIRECTOR_DIALOGUE_MAX_QUESTIONS_PER_TURN,
   VIDEO_DIRECTOR_DIALOGUE_MAX_TURNS,
-  VIDEO_DIRECTOR_DIALOGUE_MODEL,
   type AnswerVideoDirectorConversationInput,
   type VideoDirectorAnswerEntry,
   type VideoDirectorAnswerPayload,
@@ -16,8 +14,8 @@ import {
   type VideoDirectorReviewPayload,
 } from "@paperclipai/shared";
 import { conflict, HttpError } from "../errors.js";
-import { readAnthropicApiKey } from "../env-values.js";
-import { callDirectorModel, directorAiNotConfigured } from "./video-storyline-director-ai-errors.js";
+import { storylineCompanyModel } from "./video-storyline-company-model.js";
+import { callDirectorModel } from "./video-storyline-director-ai-errors.js";
 import { logActivity } from "./activity-log.js";
 import { videoStorylineService, type VideoStorylineActor, type VideoShotSummary } from "./video-storylines.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
@@ -150,26 +148,22 @@ export function videoStorylineDirectorDialogueService(db: Db) {
   const conversations = videoStorylineDirectorConversationStore(db);
   const proposals = videoStorylineDirectorProposalsService(db);
 
+  const writer = storylineCompanyModel(db);
+
   async function askAI(
+    companyId: string,
+    actor: VideoStorylineActor,
     review: VideoDirectorReviewPayload,
     shots: VideoShotSummary[],
     priorTurns: DialogueTurn[],
   ): Promise<VideoDirectorQuestionBatchPayload> {
-    const apiKey = readAnthropicApiKey();
-    if (!apiKey) {
-      throw directorAiNotConfigured();
-    }
-    const client = new Anthropic({ apiKey });
-    const response = await callDirectorModel(() => client.messages.create({
-      model: VIDEO_DIRECTOR_DIALOGUE_MODEL,
-      max_tokens: VIDEO_DIRECTOR_DIALOGUE_MAX_OUTPUT_TOKENS,
-      system: buildSystemPrompt(),
-      messages: [{ role: "user", content: buildUserMessage({ review, shots, priorTurns }) }],
-    }));
-    const text = response.content
-      .filter((block): block is Anthropic.TextBlock => block.type === "text")
-      .map((block) => block.text)
-      .join("");
+    const text = await callDirectorModel(() =>
+      writer.writeText(companyId, actor, {
+        maxTokens: VIDEO_DIRECTOR_DIALOGUE_MAX_OUTPUT_TOKENS,
+        system: buildSystemPrompt(),
+        user: buildUserMessage({ review, shots, priorTurns }),
+      }),
+    );
     return parseQuestionBatch(text, new Set(shots.map((shot) => shot.id)));
   }
 
@@ -218,7 +212,7 @@ export function videoStorylineDirectorDialogueService(db: Db) {
       return conclude(companyId, storylineId, conversationId, review, actor);
     }
     const shots = await storylines.listShots(companyId, storylineId);
-    const batch = await askAI(review, shots, []);
+    const batch = await askAI(companyId, actor, review, shots, []);
     if (batch.doneAsking || batch.questions.length === 0) {
       return conclude(companyId, storylineId, conversationId, review, actor);
     }
@@ -288,7 +282,7 @@ export function videoStorylineDirectorDialogueService(db: Db) {
 
     const shots = await storylines.listShots(companyId, storylineId);
     const priorTurns = await buildPriorTurns(conversation.id);
-    const nextBatch = await askAI(review, shots, priorTurns);
+    const nextBatch = await askAI(companyId, actor, review, shots, priorTurns);
     if (nextBatch.doneAsking || nextBatch.questions.length === 0) {
       return conclude(companyId, storylineId, conversation.id, review, actor);
     }

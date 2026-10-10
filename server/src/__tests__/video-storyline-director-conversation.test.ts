@@ -8,6 +8,7 @@ import type {
   VideoDirectorQuestionBatchPayload,
   VideoDirectorReviewPayload,
 } from "@paperclipai/shared";
+import { seedCompanyWriterModel } from "./helpers/storyline-writer-model.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { videoStorylineSettingsService } from "../services/video-storyline-settings.ts";
 import { videoStorylineService, type VideoStorylineActor } from "../services/video-storylines.ts";
@@ -115,6 +116,7 @@ d("video storyline director conversation (DUR-4327)", () => {
       issuePrefix: `S${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
       requireBoardApprovalForNewAgents: false,
     });
+    await seedCompanyWriterModel(db, companyId);
     const settings = videoStorylineSettingsService(db);
     await settings.setEnabled(companyId, true);
     await settings.setAdvancedEnabled(companyId, true);

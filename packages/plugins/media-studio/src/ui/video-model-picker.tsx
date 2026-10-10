@@ -4,7 +4,8 @@ import { useState } from "react";
 //
 // Fal: the Kling models the server's FalVideoProvider can drive
 // (server/src/services/video-provider-clients.ts sends prompt, image_url,
-// duration "5"/"10"; Kling only makes 5- or 10-second clips -- see
+// duration; Kling 1.6/2.1 only make 5- or 10-second clips, Kling 3 any
+// whole length from 3 to 15 seconds -- see
 // videoModelAllowedDurations in packages/shared/src/video-storylines.ts).
 // Prices are rough per-second figures from Fal's published pricing (list
 // reviewed FAL_VIDEO_MODELS_DATE, not read live); check fal.ai/pricing.
@@ -35,6 +36,8 @@ export interface VideoModelOption {
 }
 
 const KLING_LENGTHS = { values: [5, 10] };
+/** Kling 3 (Standard and Pro): any whole number of seconds from 3 to 15. */
+const KLING3_LENGTHS = { min: 3, max: 15 };
 
 export const FAL_VIDEO_MODELS: VideoModelOption[] = [
   {
@@ -56,14 +59,24 @@ export const FAL_VIDEO_MODELS: VideoModelOption[] = [
   { id: "fal-ai/kling-video/v2.1/master/text-to-video", name: "Kling 2.1 Master, from text only", clipSeconds: KLING_LENGTHS, centsPerSecond: 28, takesStartImage: false, needsStartImage: false, maxReferences: 0 },
   { id: "fal-ai/kling-video/v2.1/master/image-to-video", name: "Kling 2.1 Master, from a start picture", clipSeconds: KLING_LENGTHS, centsPerSecond: 28, takesStartImage: true, needsStartImage: true, maxReferences: 0 },
   {
-    id: "fal-ai/kling-video/v3/pro/image-to-video",
-    name: "Kling 3 Pro, from a start picture",
-    clipSeconds: KLING_LENGTHS,
-    centsPerSecond: null,
+    id: "fal-ai/kling-video/v3/standard/image-to-video",
+    name: "Kling 3 Standard, from a start picture",
+    clipSeconds: KLING3_LENGTHS,
+    centsPerSecond: 9,
     takesStartImage: true,
     needsStartImage: true,
-    maxReferences: 0,
-    note: "Picked by hand, character pictures are not sent; choose Automatic to use them.",
+    maxReferences: 3,
+    note: "Character pictures from the cast are sent with every clip. No AI sound (it costs 50% more).",
+  },
+  {
+    id: "fal-ai/kling-video/v3/pro/image-to-video",
+    name: "Kling 3 Pro, from a start picture",
+    clipSeconds: KLING3_LENGTHS,
+    centsPerSecond: 12,
+    takesStartImage: true,
+    needsStartImage: true,
+    maxReferences: 3,
+    note: "Character pictures from the cast are sent with every clip. No AI sound (it costs 50% more).",
   },
 ];
 
