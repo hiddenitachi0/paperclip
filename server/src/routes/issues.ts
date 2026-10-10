@@ -162,6 +162,11 @@ import { evaluateSelfReviewDoneGate } from "../services/self-review-gate.js";
 import { evaluateGoalConditionDoneGate } from "../services/goal-condition-judge.js";
 import { evaluateDeployCompletionDoneGate } from "../services/deploy-completion-gate.js";
 import { evaluateDoneGateCritic } from "../services/done-gate-critic.js";
+import {
+  applyDefaultReviewerPolicy,
+  evaluateQualityDoneCheck,
+  evaluateQualitySelfReviewGate,
+} from "../services/quality-loops.js";
 import { evaluateOriginCommitDoneGate } from "../services/origin-commit-gate.js";
 import { evaluateFeatureLaunchDoneGate } from "../services/feature-launch-gate.js";
 import { evaluateJobApprovalDoneGate } from "../services/job-approval-gate.js";
@@ -5802,10 +5807,17 @@ export function issueRoutes(
     }
     await assertIssueEnvironmentSelection(companyId, createBody.executionWorkspaceSettings?.environmentId);
 
-    const executionPolicy = applyActorMonitorScheduledBy(
-      normalizeIssueExecutionPolicy(createBody.executionPolicy),
-      actor.actorType,
-    );
+    const executionPolicy = await applyDefaultReviewerPolicy(db, {
+      companyId,
+      projectId: createAssignmentScope.projectId,
+      assigneeAgentId: createBody.assigneeAgentId ?? null,
+      requestedPolicy: createBody.executionPolicy,
+      normalizedPolicy: applyActorMonitorScheduledBy(
+        normalizeIssueExecutionPolicy(createBody.executionPolicy),
+        actor.actorType,
+      ),
+      normalize: normalizeIssueExecutionPolicy,
+    });
     await assertCanManageIssueMonitor(access, req, companyId, createBody.assigneeAgentId ?? null, Boolean(executionPolicy?.monitor));
     const issueId = randomUUID();
     const sourceTrust = await sourceTrustForActorWrite({
@@ -6060,10 +6072,17 @@ export function issueRoutes(
     const currentSerializedChild = serializationContext
       ? await findCurrentSerializedWatchdogChild(parent)
       : null;
-    const executionPolicy = applyActorMonitorScheduledBy(
-      normalizeIssueExecutionPolicy(createBody.executionPolicy),
-      actor.actorType,
-    );
+    const executionPolicy = await applyDefaultReviewerPolicy(db, {
+      companyId: parent.companyId,
+      projectId: createBody.projectId ?? parent.projectId ?? null,
+      assigneeAgentId: createBody.assigneeAgentId ?? null,
+      requestedPolicy: createBody.executionPolicy,
+      normalizedPolicy: applyActorMonitorScheduledBy(
+        normalizeIssueExecutionPolicy(createBody.executionPolicy),
+        actor.actorType,
+      ),
+      normalize: normalizeIssueExecutionPolicy,
+    });
     await assertCanManageIssueMonitor(access, req, parent.companyId, createBody.assigneeAgentId ?? null, Boolean(executionPolicy?.monitor));
     const issueId = randomUUID();
     const sourceTrust = await sourceTrustForActorWrite({
@@ -6559,6 +6578,27 @@ export function issueRoutes(
       res.status(409).json({ error: selfReviewGateResult.message });
       return;
     }
+    // Agent quality loops (per company, opt-in): a self-check pass for ANY task, not only
+    // code tasks. Counts the code self-review above toward the same per-task limit, so a
+    // code task never gets more passes than the company asked for.
+    const qualitySelfReviewResult = await evaluateQualitySelfReviewGate({
+      db,
+      wakeup: heartbeat.wakeup,
+      issue: {
+        id: existing.id,
+        identifier: existing.identifier,
+        companyId: existing.companyId,
+        projectId: existing.projectId,
+        executionPolicy: existing.executionPolicy,
+      },
+      actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
+      requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
+      currentStatus: existing.status,
+    });
+    if (qualitySelfReviewResult) {
+      res.status(409).json({ error: qualitySelfReviewResult.message });
+      return;
+    }
     // DUR-32: composes with self-review above — self-review runs first, then (if the issue
     // has a plain-English goal condition set) an independent judge decides whether another
     // round is needed before the transition to in_review/done is allowed through.
@@ -6662,7 +6702,25 @@ export function issueRoutes(
     // matches what the task asked for. Ships off (instance setting general.doneGate);
     // dry run only comments; enforce sends the task back with the findings and, after
     // maxRounds, asks the operator instead of looping. Never gates a board/human actor.
-    const doneGateCriticResult = await evaluateDoneGateCritic({
+    // Agent quality loops: a company (or task) that switched on its own finish check uses
+    // its own cheap saved model instead of the instance-wide reviewer below.
+    const qualityDoneCheck = await evaluateQualityDoneCheck({
+      db,
+      issue: {
+        id: existing.id,
+        identifier: existing.identifier,
+        companyId: existing.companyId,
+        title: existing.title,
+        description: existing.description ?? null,
+        executionPolicy: existing.executionPolicy,
+        projectId: existing.projectId,
+      },
+      actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
+      requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
+      currentStatus: existing.status,
+      patchComment: typeof commentBody === "string" ? commentBody : null,
+    });
+    const doneGateCriticResult = qualityDoneCheck.applies ? qualityDoneCheck.result : await evaluateDoneGateCritic({
       db,
       issue: {
         id: existing.id,

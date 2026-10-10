@@ -35,6 +35,8 @@ import {
 import type { StorageService } from "../storage/types.js";
 import { assertBoard, assertCompanyAccess, assertInstanceAdmin, getActorInfo } from "./authz.js";
 import { COMPANY_IMPORT_ROUTE_PATH } from "./company-import-paths.js";
+import { qualityLoopSettingsService } from "../services/quality-loops.js";
+import { logger } from "../middleware/logger.js";
 
 /**
  * DUR-277/DUR-350 (Wave 4): confirmed as a genuine (a+c) split, NOT a
@@ -500,6 +502,13 @@ export function companyRoutes(db: Db, storage?: StorageService) {
       entityId: company.id,
       details: { name: company.name },
     });
+    // Agent quality loops: a new company starts with the suggested checks on (existing
+    // companies have no row, which reads as everything off). Best-effort.
+    try {
+      await qualityLoopSettingsService(db).applyNewCompanyDefaults(company.id);
+    } catch (err) {
+      logger.warn({ err, companyId: company.id }, "could not apply the default quality checks to the new company");
+    }
     if (company.budgetMonthlyCents > 0) {
       await budgets.upsertPolicy(
         company.id,

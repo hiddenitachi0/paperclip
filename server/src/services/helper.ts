@@ -196,6 +196,60 @@ function builtInDefaultCanSeePictures(): boolean {
   return helperModelCanSeePictures({ provider: "anthropic", model: LANE_A_DEFAULT_MODEL }).canSee === true;
 }
 
+type LaneASettingsForCall = Pick<
+  ReturnType<typeof resolveLaneASettings>,
+  "temperature" | "reasoningEffort" | "providerRouting"
+>;
+
+/**
+ * One text completion with the saved model's own temperature/reasoning settings, dropping
+ * them (reasoning first) when the provider refuses them. Shared by the helper's answer and
+ * completeWithSavedModel below.
+ */
+async function completeWithSettingsFallback(
+  client: LaneAProviderClient,
+  settings: LaneASettingsForCall,
+  request: { model: string; maxTokens: number; system: string; messages: LaneAChatMessage[] },
+): Promise<Awaited<ReturnType<LaneAProviderClient["complete"]>>> {
+  let withTemperature = typeof settings.temperature === "number";
+  let withReasoningEffort = settings.reasoningEffort != null;
+  const send = async (): Promise<Awaited<ReturnType<LaneAProviderClient["complete"]>>> => {
+    try {
+      return await client.complete({
+        ...request,
+        ...(withTemperature ? { temperature: settings.temperature } : {}),
+        ...(withReasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}),
+        ...(settings.providerRouting ? { providerRouting: settings.providerRouting } : {}),
+      });
+    } catch (err) {
+      if (!isLaneATemperatureUnsupportedError(err)) throw err;
+      if (withReasoningEffort) {
+        withReasoningEffort = false;
+        return send();
+      }
+      if (withTemperature) {
+        withTemperature = false;
+        return send();
+      }
+      throw err;
+    }
+  };
+  return send();
+}
+
+/** What completeWithSavedModel answers: the text plus what it cost (already in the cost ledger). */
+export interface SavedModelCompletion {
+  text: string;
+  directoryEntryId: string;
+  modelLabel: string;
+  provider: LaneAProvider;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  costCents: number;
+  truncated: boolean;
+}
+
 export function helperService(db: Db, options: HelperServiceOptions = {}) {
   const secrets = secretService(db);
   const budgets = budgetService(db);
@@ -717,37 +771,10 @@ export function helperService(db: Db, options: HelperServiceOptions = {}) {
     const system = buildHelperSystemPrompt({ companyName: company?.name ?? null });
     const maxTokens = Math.min(settings.maxOutputTokens, 4_096);
 
-    let withTemperature = typeof settings.temperature === "number";
-    let withReasoningEffort = settings.reasoningEffort != null;
-    const send = async (): Promise<Awaited<ReturnType<LaneAProviderClient["complete"]>>> => {
-      try {
-        // Deliberately no `tools` key: the helper can only answer in words.
-        return await client.complete({
-          model,
-          maxTokens,
-          system,
-          messages,
-          ...(withTemperature ? { temperature: settings.temperature } : {}),
-          ...(withReasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}),
-          ...(settings.providerRouting ? { providerRouting: settings.providerRouting } : {}),
-        });
-      } catch (err) {
-        if (!isLaneATemperatureUnsupportedError(err)) throw err;
-        if (withReasoningEffort) {
-          withReasoningEffort = false;
-          return send();
-        }
-        if (withTemperature) {
-          withTemperature = false;
-          return send();
-        }
-        throw err;
-      }
-    };
-
     let response: Awaited<ReturnType<LaneAProviderClient["complete"]>>;
     try {
-      response = await send();
+      // Deliberately no `tools` key: the helper can only answer in words.
+      response = await completeWithSettingsFallback(client, settings, { model, maxTokens, system, messages });
     } catch (err) {
       throw toHttpError(err, modelLabel);
     }
@@ -794,5 +821,93 @@ export function helperService(db: Db, options: HelperServiceOptions = {}) {
     };
   }
 
-  return { getSettings, updateSettings, ask, assertEntryInCompany };
+  /**
+   * The helper's model-calling path for other cheap, tool-less checks (e.g. the quality
+   * loops' independent finish check): one saved model of the company, the helper's keys,
+   * the same provider plumbing and pricing. Records the cost under `billingCode`. Throws
+   * when the model cannot be used or does not answer -- callers decide what that means.
+   */
+  async function completeWithSavedModel(input: {
+    companyId: string;
+    directoryEntryId: string;
+    system: string;
+    user: string;
+    maxTokens: number;
+    billingCode: string;
+    agentId?: string | null;
+    issueId?: string | null;
+  }): Promise<SavedModelCompletion> {
+    const entry = await assertEntryInCompany(input.companyId, input.directoryEntryId);
+    const settings = resolveLaneASettings({
+      id: "saved-model-check",
+      companyId: input.companyId,
+      name: entry.name,
+      laneAEnabled: true,
+      laneAProvider: entry.provider,
+      laneAModel: entry.model,
+      laneABaseUrl: entry.baseUrl ?? null,
+      laneATemperature: entry.defaultTemperature ?? null,
+      laneAThinking: entry.defaultThinking ?? null,
+      laneAProviderRouting: (entry.providerRouting as never) ?? null,
+      laneAMaxOutputTokens: input.maxTokens,
+    });
+    if (!settings.model) throw new Error(`The saved model "${entry.name}" has no model id.`);
+    if (settings.provider !== "anthropic" && !settings.baseUrl) {
+      throw new Error(`The saved model "${entry.name}" has no address.`);
+    }
+    const model = settings.model;
+    const apiKey = await resolveKey(input.companyId, settings.provider, entry.name, null);
+    const client = createLaneAProviderClient({
+      provider: settings.provider,
+      apiKey,
+      baseUrl: settings.baseUrl,
+      anthropicClient: settings.provider === "anthropic" && options.createModelClient ? options.createModelClient() : undefined,
+      fetch: options.providerFetch,
+    });
+    const response = await completeWithSettingsFallback(client, settings, {
+      model,
+      maxTokens: Math.min(input.maxTokens, 4_096),
+      system: input.system,
+      messages: [{ role: "user", content: input.user }],
+    });
+    const cost = await priceLaneACall({
+      provider: settings.provider,
+      model,
+      inputTokens: response.usage.inputTokens,
+      outputTokens: response.usage.outputTokens,
+      providerCostUsd: response.usage.costUsd ?? null,
+    });
+    try {
+      await costService(db).createEvent(input.companyId, {
+        agentId: input.agentId ?? null,
+        issueId: input.issueId ?? null,
+        provider: settings.provider,
+        biller: settings.provider,
+        billingType: "metered_api",
+        billingCode: input.billingCode,
+        model,
+        inputTokens: response.usage.inputTokens,
+        outputTokens: response.usage.outputTokens,
+        costCents: cost.costCents,
+        costMicroUsd: cost.costMicroUsd,
+        costSource: cost.costSource,
+        occurredAt: new Date(),
+      });
+    } catch (err) {
+      logger.error({ err, companyId: input.companyId }, "saved-model check: could not record the cost event");
+    }
+    return {
+      text: response.text,
+      directoryEntryId: entry.id,
+      modelLabel: entry.name,
+      provider: settings.provider,
+      model,
+      inputTokens: response.usage.inputTokens,
+      outputTokens: response.usage.outputTokens,
+      costCents: cost.costCents,
+      truncated: response.stop === "max_tokens",
+    };
+  }
+
+  return { getSettings, updateSettings, ask, assertEntryInCompany, completeWithSavedModel };
 }

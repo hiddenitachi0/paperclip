@@ -532,7 +532,7 @@ export const DONE_GATE_SETTINGS_PATH = 'Settings > Instance settings > General, 
  * two cases happened, because they need different answers: "not set up" is a one-off setup
  * job, "could not be reached" is usually temporary.
  */
-export function buildDoneGateUnavailableComment(input: { reason: string | null }): string {
+export function buildDoneGateUnavailableComment(input: { reason: string | null; settingsPath?: string }): string {
   return [
     `${DONE_GATE_UNAVAILABLE_PREFIX}.`,
     "",
@@ -541,7 +541,7 @@ export function buildDoneGateUnavailableComment(input: { reason: string | null }
     input.reason ??
       "The reviewer could not be reached this time, or answered with something that could not be read. This is usually temporary; the next task will be checked again.",
     "",
-    `Nothing here is blocked. You can see and change the check under ${DONE_GATE_SETTINGS_PATH}.`,
+    `Nothing here is blocked. You can see and change the check under ${input.settingsPath ?? DONE_GATE_SETTINGS_PATH}.`,
   ].join("\n");
 }
 
@@ -594,6 +594,14 @@ export interface DoneGateEvaluationInput {
   patchComment?: string | null;
   readGeneralSettings: () => Promise<Pick<InstanceGeneralSettings, "doneGate">>;
   critic?: DoneGateCritic;
+  /**
+   * Quality loops (quality-loops.ts): a company that opted in supplies its own mode/rounds
+   * instead of the instance setting, and its own "why it could not run" wording and
+   * settings location for the could-not-run note.
+   */
+  configOverride?: { mode: DoneGateMode; maxRounds: number };
+  unavailableReason?: () => string | null;
+  settingsPath?: string;
 }
 
 export interface DoneGateEvaluationResult {
@@ -618,7 +626,7 @@ export async function evaluateDoneGateCritic(input: DoneGateEvaluationInput): Pr
 
   let config: { mode: DoneGateMode; maxRounds: number };
   try {
-    config = resolveDoneGateConfig(await input.readGeneralSettings(), input.issue.companyId);
+    config = input.configOverride ?? resolveDoneGateConfig(await input.readGeneralSettings(), input.issue.companyId);
   } catch (err) {
     logger.warn({ err, issueId: input.issue.id }, "done-gate critic: could not read settings; treating as off");
     return null;
@@ -707,7 +715,15 @@ export async function evaluateDoneGateCritic(input: DoneGateEvaluationInput): Pr
     // The critic not running must never hold real work hostage -- but it must not look
     // like a passing check either, or a switched-on gate silently degrades to no gate.
     logger.warn({ err, issueId, round }, "done-gate critic could not run; letting the transition through");
-    await noteDoneGateCouldNotRun({ db, companyId, issueId, sourceRunId, since: resetAt });
+    await noteDoneGateCouldNotRun({
+      db,
+      companyId,
+      issueId,
+      sourceRunId,
+      since: resetAt,
+      reason: input.unavailableReason ? input.unavailableReason() : describeDoneGateReadiness().notReadyReason,
+      settingsPath: input.settingsPath,
+    });
     return null;
   }
 
@@ -792,12 +808,14 @@ export async function evaluateDoneGateCritic(input: DoneGateEvaluationInput): Pr
  * loop. Best-effort throughout: a failure to write the note must not turn into a failure
  * to let the work through.
  */
-async function noteDoneGateCouldNotRun(input: {
+export async function noteDoneGateCouldNotRun(input: {
   db: Db;
   companyId: string;
   issueId: string;
   sourceRunId: string | null;
   since: Date | null;
+  reason: string | null;
+  settingsPath?: string;
 }): Promise<void> {
   const { db, companyId, issueId } = input;
   try {
@@ -806,7 +824,7 @@ async function noteDoneGateCouldNotRun(input: {
       companyId,
       issueId,
       sourceRunId: input.sourceRunId,
-      body: buildDoneGateUnavailableComment({ reason: describeDoneGateReadiness().notReadyReason }),
+      body: buildDoneGateUnavailableComment({ reason: input.reason, settingsPath: input.settingsPath }),
     });
   } catch (err) {
     logger.warn({ err, issueId }, "done-gate critic: failed to note that the check could not run");

@@ -224,6 +224,7 @@ import {
   upsertSelfReviewPassNoticeComment,
   SELF_REVIEW_PASS_REASON,
 } from "./self-review-gate.js";
+import { maybeScheduleQualityCheckFollowUp } from "./quality-loops.js";
 import {
   buildGoalConditionEscalationSummary,
   buildGoalConditionJudgeIdempotencyKey,
@@ -7858,6 +7859,23 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             return;
           }
         }
+      }
+    }
+
+    // Agent quality loops: the company's finish check sent this task back during the run
+    // and the run ended without fixing it -- wake the agent (normal lane) to work on the
+    // findings, instead of the status-only "missing disposition" recovery below.
+    if (issue) {
+      try {
+        const scheduled = await maybeScheduleQualityCheckFollowUp({
+          db,
+          run,
+          issue,
+          wakeup: enqueueWakeup,
+        });
+        if (scheduled) return;
+      } catch (err) {
+        logger.warn({ err, runId: run.id, issueId: issue.id }, "quality finish check follow-up failed; continuing with the normal handoff");
       }
     }
 

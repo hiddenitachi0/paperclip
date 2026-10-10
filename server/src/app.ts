@@ -43,6 +43,7 @@ import { modelDirectoryRoutes } from "./routes/model-directory.js";
 import { HELPER_ASK_API_PATH, HELPER_ASK_JSON_BODY_LIMIT, HELPER_INVESTIGATIONS_API_PATH, helperRoutes } from "./routes/helper.js";
 import { emailSettingsRoutes } from "./routes/email-settings.js";
 import { securityReviewSettingsRoutes } from "./routes/security-review-settings.js";
+import { qualityLoopRoutes } from "./routes/quality-loops.js";
 import { videoStorylineRoutes } from "./routes/video-storylines.js";
 import { mediaStudioDirectRoutes } from "./routes/media-studio-direct.js";
 import { bragRoutes } from "./routes/brag.js";
@@ -357,6 +358,7 @@ export async function createApp(
   }));
   api.use(emailSettingsRoutes(db));
   api.use(securityReviewSettingsRoutes(db));
+  api.use(qualityLoopRoutes(db));
   api.use(videoStorylineRoutes(db));
   api.use(mediaStudioDirectRoutes(db));
   api.use(bragRoutes(db));

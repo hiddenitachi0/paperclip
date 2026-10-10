@@ -249,6 +249,10 @@ export const issueExecutionPolicySchema = z.object({
   authorizationPolicy: trustAuthorizationPolicySchema.optional(),
   // Opt-out for the automatic self-review pass gate (default on for code issues). See DUR-22.
   selfReview: z.boolean().optional(),
+  // Per-task override of the company's quality-loop settings (quality-loops.ts):
+  // how many self-check passes (0-3) and whether the independent finish check runs.
+  selfReviewPasses: z.number().int().min(0).max(3).optional(),
+  doneCheck: z.boolean().optional(),
 });
 
 export const issueExecutionMonitorStateSchema = z.object({
