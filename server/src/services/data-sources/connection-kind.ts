@@ -59,6 +59,7 @@ import type {
   FileServerKind,
 } from "@paperclipai/shared";
 import type { CatalogResult, DataLookupOutcome, SalesRequest, SalesResult } from "./contract.js";
+import type { FikenClient } from "./fiken-client.js";
 import type { FileServerOperations } from "./file-server/operations.js";
 import type { ShopifyGraphQLClient, ShopifyRawTransport } from "./shopify-client.js";
 import type { OutboundFetch } from "../safe-outbound-fetch.js";
@@ -149,7 +150,18 @@ export interface FileServerReadContext extends DataSourceReadContextBase {
  * shape exists so the union is complete and exhaustive switches stay honest.
  */
 export interface PendingReadContext extends DataSourceReadContextBase {
-  kind: "woocommerce" | "fiken";
+  kind: "woocommerce";
+}
+
+/**
+ * DUR-4072 PR3: what the Fiken Test and its report reader get -- a GET-only
+ * client for this one company slug, already carrying the API key and going
+ * through the api.fiken.no-only outbound guard (fiken-client.ts). There is
+ * no method on it that can send anything but a GET.
+ */
+export interface FikenReadContext extends DataSourceReadContextBase {
+  kind: "fiken";
+  fiken: FikenClient;
 }
 
 /**
@@ -167,7 +179,12 @@ export interface PaperlessReadContext extends DataSourceReadContextBase {
 }
 
 /** Everything an adapter gets for one lookup, by kind. */
-export type DataSourceReadContext = ShopifyReadContext | FileServerReadContext | PendingReadContext | PaperlessReadContext;
+export type DataSourceReadContext =
+  | ShopifyReadContext
+  | FileServerReadContext
+  | PendingReadContext
+  | PaperlessReadContext
+  | FikenReadContext;
 
 /**
  * The credential as stored in the company secret, decoded. Only

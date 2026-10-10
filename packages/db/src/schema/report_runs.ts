@@ -41,6 +41,8 @@ export const reportRuns = pgTable(
     status: text("status").$type<ReportRunStatus>().notNull().default("fetching_data"),
     /** The data the script's input was built from -- stored for audit, same as PR1's run ledger stores script input/output. */
     fetchedData: jsonb("fetched_data").$type<unknown>(),
+    /** DUR-4072 PR3: sha256 of JSON.stringify(fetchedData) -- the exact input snapshot the script was given. */
+    fetchedDataSha256: text("fetched_data_sha256"),
     scriptRunId: uuid("script_run_id").references(() => reportScriptRuns.id, { onDelete: "set null" }),
     /** The script's JSON output verbatim -- the only numbers commentary may ever cite. */
     numbers: jsonb("numbers").$type<unknown>(),

@@ -62,6 +62,7 @@ import {
   createReportTemplateSchema,
   updateReportTemplateSchema,
   createReportRunSchema,
+  previewReportDataSchema,
   draftReportRunCommentarySchema,
   dataTrialCalculationSchema,
   setDatasetSourceSchema,
@@ -3430,6 +3431,7 @@ for (const route of [
   ["get", "/api/companies/{companyId}/report-runs", "List report runs", undefined],
   ["post", "/api/companies/{companyId}/report-runs", "Start a report run: fetch data and run the approved calculation", createReportRunSchema],
   ["get", "/api/companies/{companyId}/report-runs/{runId}", "Get one report run", undefined],
+  ["post", "/api/companies/{companyId}/report-data/preview", "Preview a report template's data (owner/admin only; audited, first rows only)", previewReportDataSchema],
   ["post", "/api/companies/{companyId}/report-runs/{runId}/commentary", "Submit commentary; every number in it must come from the calculation's output", draftReportRunCommentarySchema],
 ] as const) {
   registerCurrentRoute({

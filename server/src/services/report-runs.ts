@@ -1,25 +1,33 @@
 import { and, desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { reportRuns, reportTemplates } from "@paperclipai/db";
+import { reportRuns, reportScriptVersions, reportTemplates } from "@paperclipai/db";
 import type { ReportRun } from "@paperclipai/shared";
 import { notFound, unprocessable } from "../errors.js";
 import { checkReportCommentaryNumbers } from "./report-number-check.js";
 import type { ReportScriptsService } from "./report-scripts.js";
+import { canonicalizeJson, reportDataService, sha256OfJson, type ReportDataServiceDeps } from "./report-data.js";
 import { createOrReviseReportDocument } from "./report-templates.js";
+
+export type ReportTemplateRow = typeof reportTemplates.$inferSelect;
+
+/** Who started the run and which period it reads; passed to `fetchData`. */
+export interface ReportFetchContext {
+  reportRunId: string;
+  period: string | null;
+  actor: { agentId?: string; userId?: string; runId?: string };
+}
 
 export interface ReportRunsServiceDeps {
   reportScripts: ReportScriptsService;
   /**
-   * The template's data source. Deliberately pluggable rather than wired to
-   * a concrete connector in this PR: DUR-4058's open question about where
-   * Nordstrand's numbers actually come from is not resolved yet, and the
-   * ticket scopes PR2 to "the parts that do not depend on" that answer. The
-   * default refuses cleanly so a template without a wired fetch cannot
-   * silently proceed past this stage; a follow-up PR connects it to
-   * `dataConnections` (packages/db/src/schema/data_connections.ts) once the
-   * question is answered.
+   * The template's data. Since DUR-4072 PR3 the default reads the
+   * template's own company connection through the source adapters
+   * (report-data.ts: credential resolved server-side, every read audited in
+   * data_read_events, size/time/row caps). Tests may inject another one.
    */
-  fetchData?: (companyId: string, template: { dataConnectionId: string | null; key: string }) => Promise<unknown>;
+  fetchData?: (companyId: string, template: ReportTemplateRow, context: ReportFetchContext) => Promise<unknown>;
+  /** Passed to the default data fetch (stubbed transports in tests). */
+  dataDeps?: ReportDataServiceDeps;
 }
 
 /**
@@ -36,11 +44,26 @@ export interface ReportRunsServiceDeps {
  * document -- the previous ready document (if any) stays untouched.
  */
 export function reportRunsService(db: Db, deps: ReportRunsServiceDeps) {
+  const dataSvc = reportDataService(db, deps.dataDeps);
   const fetchData =
     deps.fetchData ??
-    (async (_companyId: string, template: { dataConnectionId: string | null }) => {
-      if (!template.dataConnectionId) throw new Error("This report template has no data source connected yet.");
-      throw new Error("Fetching live data for a report template is not wired up yet; inject `fetchData` or see 'Questions for Filip'.");
+    (async (companyId: string, template: ReportTemplateRow, context: ReportFetchContext) => {
+      if (!template.dataConnectionId || !template.dataQuery) throw new Error("This report template has no data source connected yet.");
+      const fetched = await dataSvc.fetch(
+        {
+          companyId,
+          channel: "report_run",
+          agentId: context.actor.agentId ?? null,
+          userId: context.actor.userId ?? null,
+          runId: context.actor.runId ?? null,
+          templateId: template.id,
+          reportRunId: context.reportRunId,
+        },
+        template.dataConnectionId,
+        template.dataQuery,
+        context.period,
+      );
+      return fetched.snapshot;
     });
 
   function toSummary(row: typeof reportRuns.$inferSelect): ReportRun {
@@ -50,6 +73,7 @@ export function reportRunsService(db: Db, deps: ReportRunsServiceDeps) {
       templateId: row.templateId,
       status: row.status,
       fetchedData: row.fetchedData,
+      fetchedDataSha256: row.fetchedDataSha256 ?? null,
       scriptRunId: row.scriptRunId,
       numbers: row.numbers,
       commentaryText: row.commentaryText,
@@ -85,7 +109,12 @@ export function reportRunsService(db: Db, deps: ReportRunsServiceDeps) {
    * template service already enforces the second at write time; this
    * re-checks, since a version can be retired after a template was made).
    */
-  async function startRun(companyId: string, templateId: string, actor: { agentId?: string; userId?: string; runId?: string }): Promise<ReportRun> {
+  async function startRun(
+    companyId: string,
+    templateId: string,
+    actor: { agentId?: string; userId?: string; runId?: string },
+    options: { period?: string | null } = {},
+  ): Promise<ReportRun> {
     const [template] = await db
       .select()
       .from(reportTemplates)
@@ -93,6 +122,15 @@ export function reportRunsService(db: Db, deps: ReportRunsServiceDeps) {
       .limit(1);
     if (!template) throw notFound("Report template not found");
     if (!template.isActive) throw unprocessable("This report template is switched off.");
+    // Nothing is read for a calculation that may not run: check approval
+    // BEFORE any data leaves its source (runForReport checks again, with the
+    // code digest, right before running).
+    const [version] = await db
+      .select({ status: reportScriptVersions.status })
+      .from(reportScriptVersions)
+      .where(and(eq(reportScriptVersions.id, template.scriptVersionId), eq(reportScriptVersions.companyId, companyId)))
+      .limit(1);
+    const scriptApproved = version?.status === "approved";
 
     const [created] = await db
       .insert(reportRuns)
@@ -107,9 +145,24 @@ export function reportRunsService(db: Db, deps: ReportRunsServiceDeps) {
       .returning();
     const run = created!;
 
+    if (!scriptApproved) {
+      const [failed] = await db
+        .update(reportRuns)
+        .set({
+          status: "failed",
+          error: "This calculation has not been approved yet, so it cannot run. A company owner or admin has to approve it first; no data was read.",
+          finishedAt: new Date(),
+        })
+        .where(eq(reportRuns.id, run.id))
+        .returning();
+      return toSummary(failed!);
+    }
+
     let fetchedData: unknown;
     try {
-      fetchedData = await fetchData(companyId, template);
+      // Keys sorted once, here: the stored jsonb row then re-serialises to the
+      // exact JSON the script gets, so its digest can be checked later.
+      fetchedData = canonicalizeJson(await fetchData(companyId, template, { reportRunId: run.id, period: options.period ?? null, actor }));
     } catch (err) {
       const [failed] = await db
         .update(reportRuns)
@@ -119,7 +172,14 @@ export function reportRunsService(db: Db, deps: ReportRunsServiceDeps) {
       return toSummary(failed!);
     }
 
-    await db.update(reportRuns).set({ fetchedData, status: "calculating" }).where(eq(reportRuns.id, run.id));
+    // The snapshot is stored with the digest of exactly the JSON the script
+    // gets (equal to the script run's input_sha256), so a run can be
+    // reproduced and checked from its stored input (sha256 of the stored
+    // row with keys sorted, see canonicalizeJson).
+    await db
+      .update(reportRuns)
+      .set({ fetchedData, fetchedDataSha256: sha256OfJson(fetchedData), status: "calculating" })
+      .where(eq(reportRuns.id, run.id));
 
     let scriptRun: Awaited<ReturnType<ReportScriptsService["runForReport"]>>;
     try {

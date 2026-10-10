@@ -234,7 +234,7 @@ d("DUR-3997 data connection kinds", () => {
     });
     expect(fiken.body).toMatchObject({
       kind: "fiken",
-      supported: false,
+      supported: true,
       target: "fiken-demo-firma-as",
       config: { kind: "fiken", companySlug: "fiken-demo-firma-as" },
       credentialKind: "api_token",
@@ -270,11 +270,11 @@ d("DUR-3997 data connection kinds", () => {
     const bindings = await db.select().from(companySecretBindings).where(eq(companySecretBindings.companyId, companyId));
     expect(bindings.map((binding) => binding.targetType)).toEqual(["data_connection", "data_connection", "data_connection"]);
 
-    // The list shows them next to each other; WooCommerce and Fiken are marked not readable yet, SFTP is readable.
+    // The list shows them next to each other; WooCommerce is marked not readable yet, SFTP and (since DUR-4072 PR3) Fiken are readable.
     const listed = await request(app).get(`/api/companies/${companyId}/data-connections`);
     expect(listed.status).toBe(200);
     expect(listed.body.map((entry: { kind: string; supported: boolean }) => [entry.kind, entry.supported])).toEqual(
-      expect.arrayContaining([["woocommerce", false], ["fiken", false], ["sftp_file", true]]),
+      expect.arrayContaining([["woocommerce", false], ["fiken", true], ["sftp_file", true]]),
     );
 
     // Test: a plain sentence, nothing contacted, nothing written, status untouched.
