@@ -1438,6 +1438,28 @@ export {
   type RecordTelegramReactionInput,
   type UpdateReactionEmojiConfigInput,
 } from "./validators/telegram-reaction.js";
+export {
+  TELEGRAM_CHAT_DAILY_CAP_DEFAULT,
+  TELEGRAM_CHAT_DAILY_CAP_MAX,
+  TELEGRAM_CHAT_MESSAGE_MAX_CHARS,
+  TELEGRAM_LINK_CODE_ALPHABET,
+  TELEGRAM_LINK_CODE_LENGTH,
+  ackTelegramChatAnswerSchema,
+  telegramChatAskSchema,
+  telegramChatLinkSchema,
+  updateTelegramChatSettingsSchema,
+  type AckTelegramChatAnswerInput,
+  type TelegramChatAskInput,
+  type TelegramChatAskOutcome,
+  type TelegramChatAskResult,
+  type TelegramChatLinkInput,
+  type TelegramChatLinkResult,
+  type TelegramChatOutboxItem,
+  type TelegramChatSettings,
+  type TelegramLinkCode,
+  type TelegramLinkStatus,
+  type UpdateTelegramChatSettingsInput,
+} from "./validators/telegram-chat.js";
 export type { SpeechSettings, SpeechSpeakResult, SpeechTranscribeResult } from "./types/speech.js";
 export {
   SPEECH_DEFAULT_DAILY_SPEAK_CHARACTERS,

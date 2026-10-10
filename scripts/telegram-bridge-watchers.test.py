@@ -65,7 +65,8 @@ class WatcherAlertTests(unittest.TestCase):
         self.state = {"bots": {MAJA_BOT["token"]: {"offset": 0, "chats": [OPERATOR, STRANGER]},
                                BOSS_BOT["token"]: {"offset": 0, "chats": [OPERATOR]}},
                       "notified": []}
-        bridge.ALLOWED_USER_IDS = {OPERATOR}
+        # Per bot now (no instance-wide list): every test bot keeps these people.
+        bridge.legacy_allowed = lambda token: {OPERATOR}
         self.outbox = {COMPANY: [alert()]}
         self.acks = []
         self.cli_calls = []

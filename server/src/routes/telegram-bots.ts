@@ -1,7 +1,7 @@
 import { Router, type Request } from "express";
 import { eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, createRequestScopedDb, telegramBots, withCompanyScope } from "@paperclipai/db";
+import { agents, createRequestScopedDb, telegramBots, telegramChatSettings, withCompanyScope } from "@paperclipai/db";
 import {
   createTelegramBotSchema,
   rotateTelegramBotTokenSchema,
@@ -273,13 +273,22 @@ export function telegramBotRoutes(rawDb: Db, deps: { fetchImpl?: typeof fetch } 
       // Read through the handle withCompanyScope hands out, not through the
       // request-scoped proxy: this route has no companyId of its own, so there
       // is no request scope for the proxy to resolve against.
-      const { rows, roles } = await withCompanyScope(rawDb, companyId, async (tx) => {
+      const { rows, roles, peopleBotId } = await withCompanyScope(rawDb, companyId, async (tx) => {
         const botRows = await tx.select().from(telegramBots).where(eq(telegramBots.companyId, companyId));
         const agentRows = await tx
           .select({ id: agents.id, role: agents.role })
           .from(agents)
           .where(eq(agents.companyId, companyId));
-        return { rows: botRows, roles: new Map(agentRows.map((agent) => [agent.id, agent.role])) };
+        // Hermes parity slice 1: the one bot (if any) that answers linked people.
+        const [chat] = await tx
+          .select({ enabled: telegramChatSettings.enabled, botId: telegramChatSettings.botId })
+          .from(telegramChatSettings)
+          .where(eq(telegramChatSettings.companyId, companyId));
+        return {
+          rows: botRows,
+          roles: new Map(agentRows.map((agent) => [agent.id, agent.role])),
+          peopleBotId: chat?.enabled ? chat.botId : null,
+        };
       });
       for (const row of rows) {
         if (!row.enabled) continue;
@@ -298,6 +307,9 @@ export function telegramBotRoutes(rawDb: Db, deps: { fetchImpl?: typeof fetch } 
           // Voice messages: when the bridge reads an answer aloud, and how.
           voiceReplyMode: normalizeVoiceReplyMode(row.voiceReplyMode),
           voice: row.voice ?? null,
+          // Only on this bot does the bridge answer people who are not on its
+          // allowlist, and only once they have linked their account.
+          answersLinkedPeople: peopleBotId === row.id,
         });
       }
     }

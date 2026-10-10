@@ -31,6 +31,7 @@ import { DataSourcesSection } from "../components/DataSourcesSection";
 import { PaymentsAndLoginsSection } from "../components/PaymentsAndLoginsSection";
 import { ServiceTokensSection } from "../components/ServiceTokensSection";
 import { TelegramBotsSection } from "../components/TelegramBotsSection";
+import { TelegramPeopleSection } from "../components/TelegramPeopleSection";
 import { WebSearchSection } from "../components/WebSearchSection";
 
 /**
@@ -387,6 +388,7 @@ export function CompanyConnections() {
       <div className="space-y-4" data-testid="connections-messaging">
         <SectionHeading>Messaging</SectionHeading>
         <TelegramBotsSection companyId={selectedCompanyId} readOnly={!canManage} />
+        <TelegramPeopleSection companyId={selectedCompanyId} readOnly={!canManage} />
         <ServiceTokensSection companyId={selectedCompanyId} readOnly={!canManage} />
       </div>
 
