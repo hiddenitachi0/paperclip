@@ -40,6 +40,7 @@ import {
   evaluateQualitySelfReviewGate,
   maybeScheduleQualityCheckFollowUp,
   pinQualityLoopPolicyFields,
+  issueHasReviewOrApprovalStage,
   qualityLoopSettingsService,
   resolveEffectiveQualityLoops,
 } from "./quality-loops.js";
@@ -98,6 +99,27 @@ describe("pinQualityLoopPolicyFields (what a non-person writer may NOT change)",
   it("keeps the stored checks when an agent clears the whole policy", () => {
     expect(pinQualityLoopPolicyFields(null, stored)).toMatchObject({ stages: [], doneCheck: true, selfReviewPasses: 2 });
     expect(pinQualityLoopPolicyFields(null, null)).toBeNull();
+  });
+});
+
+describe("issueHasReviewOrApprovalStage (self-staffed stage must not suppress the checks)", () => {
+  const me = "55555555-5555-4555-8555-555555555555";
+  const other = "66666666-6666-4666-8666-666666666666";
+  const policy = (agentId: string) => ({ stages: [{ type: "review", participants: [{ type: "agent", agentId }] }] });
+  it("counts a distinct reviewer", () => {
+    expect(issueHasReviewOrApprovalStage(policy(other), { agentIds: [me, me] })).toBe(true);
+  });
+  it("does not count a stage whose only participant is the assignee/actor", () => {
+    expect(issueHasReviewOrApprovalStage(policy(me), { agentIds: [me, null] })).toBe(false);
+    expect(issueHasReviewOrApprovalStage(policy(me), { agentIds: [other, me] })).toBe(false);
+  });
+  it("counts a stage that has at least one other participant", () => {
+    const mixed = { stages: [{ type: "approval", participants: [{ type: "agent", agentId: me }, { type: "agent", agentId: other }] }] };
+    expect(issueHasReviewOrApprovalStage(mixed, { agentIds: [me] })).toBe(true);
+  });
+  it("excludes a user assignee", () => {
+    const userPolicy = { stages: [{ type: "review", participants: [{ type: "user", userId: "u1" }] }] };
+    expect(issueHasReviewOrApprovalStage(userPolicy, { userIds: ["u1"] })).toBe(false);
   });
 });
 

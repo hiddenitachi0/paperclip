@@ -171,15 +171,54 @@ function pickQuality(source: Record<string, unknown>): Record<string, unknown> {
  * a hand-off to the reviewer, and the reviewer's/approver's own "done" is their verdict,
  * so neither the self-check nor the finish check may stand in the way of it.
  */
-export function issueHasReviewOrApprovalStage(executionPolicy: unknown): boolean {
+export function issueHasReviewOrApprovalStage(
+  executionPolicy: unknown,
+  /**
+   * People who cannot stand in as the independent check (the task's own worker). The stage engine auto-skips a stage whose only participants are the
+   * returning assignee, so such a stage reviews nothing and must not suppress the checks.
+   */
+  excluded?: { agentIds?: Array<string | null | undefined>; userIds?: Array<string | null | undefined> },
+): boolean {
   if (!executionPolicy || typeof executionPolicy !== "object" || Array.isArray(executionPolicy)) return false;
   const stages = (executionPolicy as { stages?: unknown }).stages;
   if (!Array.isArray(stages)) return false;
+  const excludedAgents = new Set((excluded?.agentIds ?? []).filter((id): id is string => Boolean(id)));
+  const excludedUsers = new Set((excluded?.userIds ?? []).filter((id): id is string => Boolean(id)));
   return stages.some((stage) => {
     if (!stage || typeof stage !== "object") return false;
     const { type, participants } = stage as { type?: unknown; participants?: unknown };
-    return (type === "review" || type === "approval") && Array.isArray(participants) && participants.length > 0;
+    if (type !== "review" && type !== "approval") return false;
+    if (!Array.isArray(participants)) return false;
+    return participants.some((participant) => {
+      if (!participant || typeof participant !== "object") return false;
+      const p = participant as { type?: unknown; agentId?: unknown; userId?: unknown };
+      if (p.type === "agent") return typeof p.agentId === "string" && p.agentId !== "" && !excludedAgents.has(p.agentId);
+      if (p.type === "user") return typeof p.userId === "string" && p.userId !== "" && !excludedUsers.has(p.userId);
+      return false;
+    });
   });
+}
+
+/**
+ * Who the stage engine treats as "the worker" of a task: the stored return assignee while
+ * a stage flow is running (the current assignee is then the reviewer), else the assignee.
+ */
+function workerExclusion(issue: {
+  assigneeAgentId?: string | null;
+  assigneeUserId?: string | null;
+  executionState?: unknown;
+}) {
+  const state = issue.executionState;
+  const ret =
+    state && typeof state === "object" ? (state as { returnAssignee?: unknown }).returnAssignee : null;
+  if (ret && typeof ret === "object") {
+    const r = ret as { type?: unknown; agentId?: unknown; userId?: unknown };
+    return {
+      agentIds: [r.type === "agent" && typeof r.agentId === "string" ? r.agentId : null],
+      userIds: [r.type === "user" && typeof r.userId === "string" ? r.userId : null],
+    };
+  }
+  return { agentIds: [issue.assigneeAgentId], userIds: [issue.assigneeUserId] };
 }
 
 export async function readQualityLoopSettingsRow(db: Db, companyId: string): Promise<SettingsRow | null> {
@@ -380,6 +419,9 @@ export interface QualitySelfReviewGateInput {
     companyId: string;
     projectId: string | null;
     executionPolicy: unknown;
+    assigneeAgentId?: string | null;
+    assigneeUserId?: string | null;
+    executionState?: unknown;
   };
   actor: { actorType: string; agentId: string | null; runId: string | null };
   requestedStatus: string | undefined;
@@ -406,7 +448,11 @@ export async function evaluateQualitySelfReviewGate(input: QualitySelfReviewGate
   const effective = resolveEffectiveQualityLoops(row, issue.executionPolicy);
   if (effective.selfReviewPasses <= 0) return null;
   // A reviewer/approver stage is the check; never block the hand-off to it.
-  if (issueHasReviewOrApprovalStage(issue.executionPolicy)) return null;
+  if (
+    issueHasReviewOrApprovalStage(issue.executionPolicy, workerExclusion(issue))
+  ) {
+    return null;
+  }
   if (!input.actor.runId) return { message: MISSING_RUN_ID_GATE_MESSAGE };
   const sourceRunId = input.actor.runId;
 
@@ -568,7 +614,13 @@ export function createSavedModelDoneCheckCritic(
 
 export interface QualityDoneCheckInput {
   db: Db;
-  issue: DoneGateEvaluationInput["issue"] & { executionPolicy: unknown; projectId?: string | null };
+  issue: DoneGateEvaluationInput["issue"] & {
+    executionPolicy: unknown;
+    projectId?: string | null;
+    assigneeAgentId?: string | null;
+    assigneeUserId?: string | null;
+    executionState?: unknown;
+  };
   actor: { actorType: string; agentId: string | null; runId: string | null };
   requestedStatus: string | undefined;
   currentStatus: string;
@@ -605,7 +657,9 @@ export async function evaluateQualityDoneCheck(input: QualityDoneCheckInput): Pr
   // (a cheap model would be judging the approver's note, not the work). So the company's
   // finish check stands aside for the whole stage flow -- it owns the decision (applies),
   // so the instance-wide reviewer does not step in either.
-  if (issueHasReviewOrApprovalStage(issue.executionPolicy)) {
+  if (
+    issueHasReviewOrApprovalStage(issue.executionPolicy, workerExclusion(issue))
+  ) {
     try {
       await logActivity(db, {
         companyId: issue.companyId,

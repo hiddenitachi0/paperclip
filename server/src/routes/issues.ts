@@ -883,6 +883,42 @@ function monitorPoliciesEqual(left: NormalizedExecutionPolicy | null, right: Nor
   return JSON.stringify(left?.monitor ?? null) === JSON.stringify(right?.monitor ?? null);
 }
 
+function stagesEqual(left: NormalizedExecutionPolicy | null, right: NormalizedExecutionPolicy | null) {
+  return JSON.stringify(left?.stages ?? []) === JSON.stringify(right?.stages ?? []);
+}
+
+/**
+ * Stages decide whether the mandatory quality checks run at all, so an agent may not
+ * remove an existing review/approval stage or staff one with itself or the task's own
+ * assignee (that would be a self-review the stage engine auto-skips). Board users are free.
+ */
+function assertAgentMayChangeStages(
+  req: Request,
+  assignee: { agentId: string | null; userId: string | null },
+  previous: NormalizedExecutionPolicy | null,
+  next: NormalizedExecutionPolicy | null,
+) {
+  if (req.actor.type === "board") return;
+  const actorAgentId = req.actor.type === "agent" ? req.actor.agentId ?? null : null;
+  const reviewStages = (policy: NormalizedExecutionPolicy | null) =>
+    (policy?.stages ?? []).filter((stage) => stage.type === "review" || stage.type === "approval");
+  if (reviewStages(previous).length > reviewStages(next).length) {
+    throw forbidden("Only a board user can remove a review or approval stage");
+  }
+  for (const stage of reviewStages(next)) {
+    for (const participant of stage.participants ?? []) {
+      const isSelf =
+        (participant.type === "agent" &&
+          participant.agentId != null &&
+          (participant.agentId === actorAgentId || participant.agentId === assignee.agentId)) ||
+        (participant.type === "user" && participant.userId != null && participant.userId === assignee.userId);
+      if (isSelf) {
+        throw forbidden("A review or approval stage cannot be staffed by the task's own assignee");
+      }
+    }
+  }
+}
+
 function applyActorMonitorScheduledBy(
   policy: NormalizedExecutionPolicy | null,
   actorType: "agent" | "user",
@@ -6603,6 +6639,9 @@ export function issueRoutes(
         companyId: existing.companyId,
         projectId: existing.projectId,
         executionPolicy: existing.executionPolicy,
+        assigneeAgentId: existing.assigneeAgentId,
+        assigneeUserId: existing.assigneeUserId,
+        executionState: existing.executionState,
       },
       actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
       requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
@@ -6727,6 +6766,9 @@ export function issueRoutes(
         description: existing.description ?? null,
         executionPolicy: existing.executionPolicy,
         projectId: existing.projectId,
+        assigneeAgentId: existing.assigneeAgentId,
+        assigneeUserId: existing.assigneeUserId,
+        executionState: existing.executionState,
       },
       actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
       requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
@@ -6936,6 +6978,14 @@ export function issueRoutes(
         : previousExecutionPolicy;
     if (normalizedAssigneeAgentId !== undefined) {
       updateFields.assigneeAgentId = normalizedAssigneeAgentId;
+    }
+    if (req.body.executionPolicy !== undefined && !stagesEqual(previousExecutionPolicy, nextExecutionPolicy)) {
+      assertAgentMayChangeStages(
+        req,
+        { agentId: existing.assigneeAgentId ?? null, userId: existing.assigneeUserId ?? null },
+        previousExecutionPolicy,
+        nextExecutionPolicy,
+      );
     }
     const monitorChanged = monitorPoliciesEqual(previousExecutionPolicy, nextExecutionPolicy) === false;
     await assertCanManageIssueMonitor(

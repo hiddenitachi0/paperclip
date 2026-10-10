@@ -368,6 +368,44 @@ describe("issue execution policy routes", () => {
     );
   });
 
+  it("refuses an agent self-staffing a review stage, but allows a distinct reviewer", async () => {
+    const me = "33333333-3333-4333-8333-333333333333";
+    const issue = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      companyId: "99999999-9999-4999-8999-999999999999",
+      status: "in_progress",
+      assigneeAgentId: me,
+      assigneeUserId: null,
+      createdByUserId: "local-board",
+      identifier: "PAP-1007",
+      title: "Self-staff",
+      executionPolicy: null,
+      executionState: null,
+    };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...issue,
+      ...patch,
+      updatedAt: new Date(),
+    }));
+    const patchAs = async (reviewer: string) =>
+      request(await createApp({
+        type: "agent",
+        agentId: me,
+        companyId: "99999999-9999-4999-8999-999999999999",
+        runId: "run-1",
+      }))
+        .patch("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        .send({ executionPolicy: { stages: [{ type: "review", participants: [{ type: "agent", agentId: reviewer }] }] } });
+
+    const self = await patchAs(me);
+    expect(self.status).toBe(403);
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+
+    const other = await patchAs("44444444-4444-4444-8444-444444444444");
+    expect(other.status).toBe(200);
+  });
+
   it("allows an agent-authored in_review transition with a scheduled monitor", async () => {
     const issue = {
       id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
