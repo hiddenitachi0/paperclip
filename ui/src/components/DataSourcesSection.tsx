@@ -210,6 +210,25 @@ type CredentialKind = ShopifyCredentialInput["kind"];
 
 const KIND_COMING_SOON_TEXT = "Coming soon – saved, not connected yet.";
 
+/** DUR-4072 PR3: how to get a Fiken key, in plain words. */
+export function FikenKeyHelp() {
+  return (
+    <div className="space-y-1 text-xs text-muted-foreground" data-testid="fiken-key-help">
+      <p className="font-medium text-foreground">How to get the key</p>
+      <ol className="list-decimal space-y-0.5 pl-4">
+        <li>Log in to Fiken and open the company.</li>
+        <li>Click your name at the top right, then Innstillinger (Settings), then API.</li>
+        <li>Under «Personlige API-nøkler», create a new key and call it Paperclip.</li>
+        <li>Copy the key and paste it above. Fiken shows it only once.</li>
+      </ol>
+      <p>
+        The company needs Fiken&apos;s API module switched on (a paid add-on in Fiken). The key can do whatever your
+        Fiken user can, but Paperclip only ever reads with it: it never creates, changes or deletes anything in Fiken.
+      </p>
+    </div>
+  );
+}
+
 function kindSupported(kind: DataConnectionKind): boolean {
   return SUPPORTED_DATA_CONNECTION_KINDS.includes(kind);
 }
@@ -1210,6 +1229,7 @@ function NewConnectionForm({
               onChange={(event) => setApiToken(event.target.value)}
             />
           </Field>
+          <FikenKeyHelp />
         </>
       )}
 

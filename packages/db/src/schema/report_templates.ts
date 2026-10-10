@@ -28,6 +28,12 @@ export const reportTemplates = pgTable(
     /** Section order / headings for the generated document; free-form JSON, not rendered logic. */
     layout: jsonb("layout").$type<Record<string, unknown>>().notNull().default({}),
     dataConnectionId: uuid("data_connection_id").references(() => dataConnections.id, { onDelete: "set null" }),
+    /**
+     * DUR-4072 PR3: what to read through `dataConnectionId` -- a period and up
+     * to six named datasets (validated by reportDataQuerySchema in
+     * @paperclipai/shared). Never a URL, a query text or a credential.
+     */
+    dataQuery: jsonb("data_query").$type<Record<string, unknown>>(),
     scriptVersionId: uuid("script_version_id").notNull().references(() => reportScriptVersions.id, { onDelete: "restrict" }),
     /** Off until a company owner/admin switches it on (agents may draft templates, never enable them). */
     isActive: boolean("is_active").notNull().default(false),

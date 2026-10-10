@@ -1,7 +1,17 @@
 import { and, desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { dataConnections, documentRevisions, documents, reportScriptVersions, reportTemplates } from "@paperclipai/db";
-import type { CreateReportTemplateInput, ReportTemplate, UpdateReportTemplateInput } from "@paperclipai/shared";
+import {
+  DATA_CONNECTION_KIND_LABELS,
+  REPORT_DATASET_KINDS,
+  REPORT_DATASET_LABELS,
+  reportDataQuerySchema,
+  type CreateReportTemplateInput,
+  type DataConnectionKind,
+  type ReportDataQuery,
+  type ReportTemplate,
+  type UpdateReportTemplateInput,
+} from "@paperclipai/shared";
 import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
 
 /**
@@ -27,6 +37,7 @@ export function reportTemplatesService(db: Db) {
       instructions: row.instructions,
       layout: row.layout,
       dataConnectionId: row.dataConnectionId,
+      dataQuery: parseDataQuery(row.dataQuery),
       scriptVersionId: row.scriptVersionId,
       isActive: row.isActive,
       createdByAgentId: row.createdByAgentId,
@@ -52,16 +63,30 @@ export function reportTemplatesService(db: Db) {
   /**
    * A template may only name a data connection of ITS OWN company. The
    * foreign key alone would accept another company's connection id, and
-   * once fetching is wired that would read another company's data.
+   * that would read another company's data. (The fetch re-checks at run
+   * time, report-data.ts.) Every dataset in `dataQuery` must also be one
+   * that connection's kind can give.
    */
-  async function assertOwnDataConnection(companyId: string, dataConnectionId: string | null | undefined): Promise<void> {
+  async function assertOwnDataConnection(
+    companyId: string,
+    dataConnectionId: string | null | undefined,
+    dataQuery?: ReportDataQuery | null,
+  ): Promise<void> {
     if (!dataConnectionId) return;
     const rows = await db
-      .select({ id: dataConnections.id })
+      .select({ id: dataConnections.id, kind: dataConnections.kind })
       .from(dataConnections)
       .where(and(eq(dataConnections.id, dataConnectionId), eq(dataConnections.companyId, companyId)))
       .limit(1);
     if (!rows[0]) throw notFound("Data connection not found");
+    const kind = rows[0].kind as DataConnectionKind;
+    for (const item of dataQuery?.items ?? []) {
+      if (!REPORT_DATASET_KINDS[item.dataset].includes(kind)) {
+        throw unprocessable(`${DATA_CONNECTION_KIND_LABELS[kind] ?? kind} cannot give "${REPORT_DATASET_LABELS[item.dataset].label}". Choose another dataset or connection.`, {
+          code: "dataset_not_offered",
+        });
+      }
+    }
   }
 
   async function listTemplates(companyId: string): Promise<ReportTemplate[]> {
@@ -91,7 +116,7 @@ export function reportTemplatesService(db: Db) {
     actor: { agentId?: string; userId?: string; canEnable?: boolean },
   ): Promise<ReportTemplate> {
     await assertApprovedVersion(companyId, input.scriptVersionId);
-    await assertOwnDataConnection(companyId, input.dataConnectionId);
+    await assertOwnDataConnection(companyId, input.dataConnectionId, input.dataQuery);
     const existing = await db
       .select({ id: reportTemplates.id })
       .from(reportTemplates)
@@ -107,6 +132,7 @@ export function reportTemplatesService(db: Db) {
         instructions: input.instructions,
         layout: input.layout,
         dataConnectionId: input.dataConnectionId ?? null,
+        dataQuery: (input.dataQuery ?? null) as Record<string, unknown> | null,
         scriptVersionId: input.scriptVersionId,
         isActive: actor.canEnable === true,
         createdByAgentId: actor.agentId ?? null,
@@ -133,13 +159,22 @@ export function reportTemplatesService(db: Db) {
     // template is switched off until an owner/admin switches it on again.
     const repointed =
       (input.scriptVersionId !== undefined && input.scriptVersionId !== current.scriptVersionId) ||
-      (input.dataConnectionId !== undefined && input.dataConnectionId !== current.dataConnectionId);
+      (input.dataConnectionId !== undefined && input.dataConnectionId !== current.dataConnectionId) ||
+      (input.dataQuery !== undefined && JSON.stringify(input.dataQuery) !== JSON.stringify(parseDataQuery(current.dataQuery)));
     if (repointed && !canEnable) changes.isActive = false;
     if (input.scriptVersionId) await assertApprovedVersion(companyId, input.scriptVersionId);
-    await assertOwnDataConnection(companyId, input.dataConnectionId);
+    // Check the connection and query as they will be after this change.
+    const nextConnectionId = input.dataConnectionId !== undefined ? input.dataConnectionId : current.dataConnectionId;
+    const nextQuery = input.dataQuery !== undefined ? input.dataQuery : parseDataQuery(current.dataQuery);
+    await assertOwnDataConnection(companyId, nextConnectionId, nextQuery);
+    const { dataQuery: nextDataQuery, ...rest } = changes;
     const [row] = await db
       .update(reportTemplates)
-      .set({ ...changes, updatedAt: new Date() })
+      .set({
+        ...rest,
+        ...(nextDataQuery !== undefined ? { dataQuery: (nextDataQuery ?? null) as Record<string, unknown> | null } : {}),
+        updatedAt: new Date(),
+      })
       .where(and(eq(reportTemplates.id, templateId), eq(reportTemplates.companyId, companyId)))
       .returning();
     if (!row) throw notFound("Report template not found");
@@ -150,6 +185,13 @@ export function reportTemplatesService(db: Db) {
 }
 
 export type ReportTemplatesService = ReturnType<typeof reportTemplatesService>;
+
+/** The stored query, or null when it is missing or no longer valid (it is re-validated before every fetch too). */
+export function parseDataQuery(value: unknown): ReportDataQuery | null {
+  if (value === null || value === undefined) return null;
+  const parsed = reportDataQuerySchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
 
 /** A thin, generic document helper -- a report document is not tied to an issue, unlike issueDocuments. */
 export async function createOrReviseReportDocument(

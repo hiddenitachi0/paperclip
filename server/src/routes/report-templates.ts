@@ -5,6 +5,7 @@ import {
   createReportRunSchema,
   createReportTemplateSchema,
   draftReportRunCommentarySchema,
+  previewReportDataSchema,
   updateReportTemplateSchema,
 } from "@paperclipai/shared";
 import { HttpError, forbidden } from "../errors.js";
@@ -16,6 +17,7 @@ import { instanceSettingsService } from "../services/instance-settings.js";
 import { reportTemplatesService } from "../services/report-templates.js";
 import { reportRunsService, type ReportRunsServiceDeps } from "../services/report-runs.js";
 import { reportScriptsService } from "../services/report-scripts.js";
+import { reportDataService } from "../services/report-data.js";
 
 /**
  * DUR-4072 PR2: report templates and report runs. Same actor rule as PR1's
@@ -30,7 +32,8 @@ export function reportTemplateRoutes(rawDb: Db, deps: Partial<ReportRunsServiceD
   const db = createRequestScopedDb(rawDb);
   const templatesSvc = reportTemplatesService(db);
   const scriptsSvc = deps.reportScripts ? undefined : reportScriptsService(db);
-  const runsSvc = reportRunsService(db, { reportScripts: deps.reportScripts ?? scriptsSvc!, fetchData: deps.fetchData });
+  const runsSvc = reportRunsService(db, { reportScripts: deps.reportScripts ?? scriptsSvc!, fetchData: deps.fetchData, dataDeps: deps.dataDeps });
+  const dataSvc = reportDataService(db, deps.dataDeps);
   const instanceSettings = instanceSettingsService(rawDb);
 
   const memberScope = () =>
@@ -92,6 +95,32 @@ export function reportTemplateRoutes(rawDb: Db, deps: Partial<ReportRunsServiceD
     res.json(updated);
   });
 
+  /**
+   * DUR-4072 PR3: "Preview data" on the template page. A company owner/admin
+   * (a person) only: it shows real rows from the company's own source. The
+   * same audited, capped fetch a run uses (channel 'report_preview'); the
+   * key never leaves the server.
+   */
+  router.post("/companies/:companyId/report-data/preview", validate(previewReportDataSchema), memberScope(), requireFeatureOn, async (req, res) => {
+    const companyId = req.params.companyId as string;
+    if (!canEnableTemplates(req, companyId)) {
+      throw forbidden("Only the company's owner or an admin can preview a report's data.");
+    }
+    const info = getActorInfo(req);
+    const preview = await dataSvc.preview(
+      { companyId, channel: "report_preview", userId: info.actorId },
+      req.body.dataConnectionId,
+      req.body.dataQuery,
+      req.body.period ?? null,
+    );
+    await audit(req, companyId, "report_data.previewed", "data_connection", req.body.dataConnectionId, {
+      datasets: preview.items.map((item) => item.dataset),
+      period: preview.period.token,
+      ok: preview.items.every((item) => item.ok),
+    });
+    res.json(preview);
+  });
+
   router.get("/companies/:companyId/report-runs", memberScope(), requireFeatureOn, async (req, res) => {
     const templateId = typeof req.query.templateId === "string" ? req.query.templateId : undefined;
     res.json(await runsSvc.listRuns(req.params.companyId as string, templateId));
@@ -99,8 +128,13 @@ export function reportTemplateRoutes(rawDb: Db, deps: Partial<ReportRunsServiceD
 
   router.post("/companies/:companyId/report-runs", validate(createReportRunSchema), memberScope(), requireFeatureOn, async (req, res) => {
     const companyId = req.params.companyId as string;
-    const run = await runsSvc.startRun(companyId, req.body.templateId, actorOf(req));
-    await audit(req, companyId, "report_run.started", "report_run", run.id, { templateId: run.templateId, status: run.status });
+    const run = await runsSvc.startRun(companyId, req.body.templateId, actorOf(req), { period: req.body.period ?? null });
+    await audit(req, companyId, "report_run.started", "report_run", run.id, {
+      templateId: run.templateId,
+      status: run.status,
+      period: req.body.period ?? null,
+      inputSha256: run.fetchedDataSha256,
+    });
     res.status(201).json(run);
   });
 

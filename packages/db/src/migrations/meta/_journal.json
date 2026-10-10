@@ -1695,6 +1695,13 @@
       "when": 1791583071889,
       "tag": "0242_helper_investigation_limits",
       "breakpoints": true
+    },
+    {
+      "idx": 248,
+      "version": "7",
+      "when": 1791654096627,
+      "tag": "0248_report_data_fetch",
+      "breakpoints": true
     }
   ]
 }

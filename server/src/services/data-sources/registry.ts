@@ -3,7 +3,6 @@ import {
   DATA_CONNECTION_CREDENTIAL_KINDS_BY_KIND,
   DATA_CONNECTION_KINDS,
   DATA_CONNECTION_KIND_LABELS,
-  fikenConnectionConfigSchema,
   wooCommerceConnectionConfigSchema,
   type CreateDataConnectionInput,
   type DataConnectionAccessLevel,
@@ -17,12 +16,12 @@ import {
 import { unprocessable } from "../../errors.js";
 import {
   createWooCommerceOutboundPolicy,
-  FIKEN_OUTBOUND_POLICY,
   type DnsLookupAll,
   type OutboundFetch,
   type OutboundHostPolicy,
   type PinnedInternalHostPolicy,
 } from "../safe-outbound-fetch.js";
+import { fikenDataSource } from "./fiken-source.js";
 import { fileServerDataSource } from "./file-server-source.js";
 import type { FileServerTestOnlyDeps } from "./file-server/session.js";
 import type {
@@ -46,8 +45,9 @@ import { shopifyDataSource } from "./shopify-source.js";
  * Fiken means writing one entry (its transport, its Test, its adapters) and
  * nothing else changes.
  *
- * Shopify and the three file-server kinds (FTP, FTPS, SFTP; file-server-
- * source.ts) are `supported: true`. WooCommerce and Fiken are registered so
+ * Shopify, the three file-server kinds (FTP, FTPS, SFTP; file-server-
+ * source.ts), paperless-ngx and -- since DUR-4072 PR3 -- Fiken (read-only,
+ * fiken-source.ts) are `supported: true`. WooCommerce is registered so
  * that a connection of that kind can be validated, stored and shown, and so
  * that every path that would read through it answers with the same plain
  * sentence instead of crashing.
@@ -203,13 +203,8 @@ const REGISTRY: Record<DataConnectionKind, DataSourceKindDefinition> = {
     describeTarget: (config) => (config.kind === "woocommerce" ? hostOf(config.storeUrl) : ""),
     outboundPolicy: (config) => (config.kind === "woocommerce" ? createWooCommerceOutboundPolicy(config.storeUrl) : null),
   }),
-  fiken: pendingKind({
-    kind: "fiken",
-    datasets: ["finance"],
-    configSchema: fikenConnectionConfigSchema,
-    describeTarget: (config) => (config.kind === "fiken" ? config.companySlug : ""),
-    outboundPolicy: () => FIKEN_OUTBOUND_POLICY,
-  }),
+  // DUR-4072 PR3: read-only (GET-only client), used by report templates.
+  fiken: fikenDataSource,
   ftp_file: fileServerDataSource("ftp_file"),
   ftps_file: fileServerDataSource("ftps_file"),
   sftp_file: fileServerDataSource("sftp_file"),

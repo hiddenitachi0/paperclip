@@ -76,6 +76,8 @@ export const SUPPORTED_DATA_CONNECTION_KINDS: readonly DataConnectionKind[] = [
   "ftps_file",
   "sftp_file",
   "paperless_ngx",
+  // DUR-4072 PR3: read-only, for report templates.
+  "fiken",
 ];
 
 /**
@@ -125,7 +127,8 @@ export type DataConnectionStatus = (typeof DATA_CONNECTION_STATUSES)[number];
 export const DATA_DATASETS = ["sales", "finance", "custom", "documents"] as const;
 export type DataDataset = (typeof DATA_DATASETS)[number];
 
-export const DATA_READ_CHANNELS = ["quick_chat", "telegram", "settings_test"] as const;
+/** `report_run` / `report_preview`: DUR-4072 PR3, a report template reading its data. */
+export const DATA_READ_CHANNELS = ["quick_chat", "telegram", "settings_test", "report_run", "report_preview"] as const;
 export type DataReadChannel = (typeof DATA_READ_CHANNELS)[number];
 
 export const DATA_READ_OUTCOMES = [

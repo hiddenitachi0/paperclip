@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { reportDataQuerySchema, reportPeriodSchema } from "../report-data.js";
 
 /**
  * DUR-4072 PR1: the calculation-script runner. Limits here bound what the
@@ -153,6 +154,8 @@ export const createReportTemplateSchema = z.object({
   instructions: z.string().trim().min(1).max(REPORT_TEMPLATE_INSTRUCTIONS_MAX_LENGTH),
   layout: z.record(z.string(), z.unknown()).default({}),
   dataConnectionId: z.string().uuid().nullable().optional(),
+  /** DUR-4072 PR3: what to read through that connection (period + datasets). */
+  dataQuery: reportDataQuerySchema.nullable().optional(),
   scriptVersionId: z.string().uuid(),
 });
 export type CreateReportTemplateInput = z.infer<typeof createReportTemplateSchema>;
@@ -162,6 +165,7 @@ export const updateReportTemplateSchema = z.object({
   instructions: z.string().trim().min(1).max(REPORT_TEMPLATE_INSTRUCTIONS_MAX_LENGTH).optional(),
   layout: z.record(z.string(), z.unknown()).optional(),
   dataConnectionId: z.string().uuid().nullable().optional(),
+  dataQuery: reportDataQuerySchema.nullable().optional(),
   scriptVersionId: z.string().uuid().optional(),
   isActive: z.boolean().optional(),
 });
@@ -169,6 +173,8 @@ export type UpdateReportTemplateInput = z.infer<typeof updateReportTemplateSchem
 
 export const createReportRunSchema = z.object({
   templateId: z.string().uuid(),
+  /** DUR-4072 PR3: read another period than the template's default (e.g. a redo of 2026-Q2). */
+  period: reportPeriodSchema.optional(),
 });
 export type CreateReportRunInput = z.infer<typeof createReportRunSchema>;
 
