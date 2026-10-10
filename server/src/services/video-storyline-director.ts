@@ -1,18 +1,16 @@
-import Anthropic from "@anthropic-ai/sdk";
 import { and, desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { videoScenes, videoShots, videoStorylineDirectorRuns } from "@paperclipai/db";
 import {
   VIDEO_DIRECTOR_CONTEXT_SHOT_COUNT,
   VIDEO_DIRECTOR_MAX_OUTPUT_TOKENS,
-  VIDEO_DIRECTOR_MODEL,
   type ApproveVideoDirectorRunInput,
   type DraftVideoDirectorShotsInput,
   type VideoDirectorDraftedShot,
   type VideoDirectorRunSummary,
 } from "@paperclipai/shared";
-import { badRequest, conflict, notFound } from "../errors.js";
-import { readAnthropicApiKey } from "../env-values.js";
+import { HttpError, badRequest, conflict, notFound } from "../errors.js";
+import { storylineCompanyModel } from "./video-storyline-company-model.js";
 import { DIRECTOR_AI_NOT_CONFIGURED_MESSAGE, directorAiFailure } from "./video-storyline-director-ai-errors.js";
 import { logActivity } from "./activity-log.js";
 import { videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
@@ -201,9 +199,9 @@ export function videoStorylineDirectorService(db: Db) {
       .limit(VIDEO_DIRECTOR_CONTEXT_SHOT_COUNT);
     const recentShots = recentShotRows.reverse();
 
-    const apiKey = readAnthropicApiKey();
     const now = new Date();
-    if (!apiKey) {
+    const writerEntry = await storylineCompanyModel(db).resolveEntry(companyId, null);
+    if (!writerEntry) {
       const [row] = await db
         .insert(videoStorylineDirectorRuns)
         .values({
@@ -223,35 +221,24 @@ export function videoStorylineDirectorService(db: Db) {
       return toRunSummary(row!);
     }
 
-    const client = new Anthropic({ apiKey });
     let draftedShots: VideoDirectorDraftedShot[];
     let errorMessage: string | null = null;
     try {
-      const response = await client.messages.create({
-        model: VIDEO_DIRECTOR_MODEL,
-        max_tokens: VIDEO_DIRECTOR_MAX_OUTPUT_TOKENS,
+      const text = await storylineCompanyModel(db).writeText(companyId, actor, {
+        maxTokens: VIDEO_DIRECTOR_MAX_OUTPUT_TOKENS,
         system: buildSystemPrompt(input.shotCount),
-        messages: [
-          {
-            role: "user",
-            content: buildUserMessage({
+        user: buildUserMessage({
               storylineTitle: storyline.title,
               sceneTitle: scene.title,
               sceneNotes: scene.notes,
               recentShots,
               idea: input.idea,
             }),
-          },
-        ],
       });
-      const text = response.content
-        .filter((block): block is Anthropic.TextBlock => block.type === "text")
-        .map((block) => block.text)
-        .join("");
       draftedShots = parseDraftedShots(text, input.shotCount);
     } catch (err) {
       draftedShots = [];
-      errorMessage = directorAiFailure(err).message;
+      errorMessage = err instanceof HttpError ? err.message : directorAiFailure(err).message;
     }
 
     const [row] = await db

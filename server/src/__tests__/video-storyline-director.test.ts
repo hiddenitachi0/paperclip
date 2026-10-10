@@ -3,6 +3,7 @@ import { afterEach, beforeAll, afterAll, describe, expect, it, vi } from "vitest
 import { createDb, companies, plugins, videoShots } from "@paperclipai/db";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
 import { eq } from "drizzle-orm";
+import { seedCompanyWriterModel } from "./helpers/storyline-writer-model.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { videoStorylineSettingsService } from "../services/video-storyline-settings.ts";
 import { videoStorylineService, type VideoStorylineActor } from "../services/video-storylines.ts";
@@ -105,7 +106,7 @@ d("videoStorylineDirectorService", () => {
     return videoStorylineDirectorService(db);
   }
 
-  async function seedStorylineAndScene(opts: { advanced?: boolean } = {}) {
+  async function seedStorylineAndScene(opts: { advanced?: boolean; writer?: boolean } = {}) {
     process.env.ANTHROPIC_API_KEY = "test-key";
     const companyId = randomUUID();
     await db.insert(companies).values({
@@ -114,6 +115,7 @@ d("videoStorylineDirectorService", () => {
       issuePrefix: `S${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
       requireBoardApprovalForNewAgents: false,
     });
+    if (opts.writer !== false) await seedCompanyWriterModel(db, companyId);
     const settings = videoStorylineSettingsService(db);
     await settings.setEnabled(companyId, true);
     if (opts.advanced !== false) await settings.setAdvancedEnabled(companyId, true);
@@ -161,6 +163,18 @@ d("videoStorylineDirectorService", () => {
     expect(run.draftedShots).toHaveLength(2);
     expect(run.draftedShots[0]).toMatchObject({ prompt: "Shot 1", durationSeconds: 5, castInView: ["Hero"] });
     expect(run.errorMessage).toBeNull();
+  });
+
+  it("never writes on the server-wide Anthropic key: a company without its own model gets a plain message (Phase 0)", async () => {
+    const { companyId, storylineId, sceneId } = await seedStorylineAndScene({ writer: false });
+    process.env.ANTHROPIC_API_KEY = "server-wide-key";
+    const mockCreate = mockAnthropicCreate(() => draftedShotsResponse(1));
+    const director = await freshDirectorService();
+    const run = await director.draftShots(companyId, storylineId, { sceneId, idea: "A storm rolls in", shotCount: 1 }, ACTOR);
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(run.status).toBe("failed");
+    expect(run.errorMessage).toContain("this company's own AI model");
+    expect(run.errorMessage).toContain("Company settings → General → Helper");
   });
 
   it("includes recent shots as continuity context", async () => {

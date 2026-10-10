@@ -52,6 +52,7 @@ import {
   createLaneAProviderClient,
   scrubLaneASecrets,
   type LaneAChatMessage,
+  type LaneAImage,
   type LaneAModelClient,
   type LaneAProviderClient,
 } from "./lane-a-providers.js";
@@ -794,5 +795,228 @@ export function helperService(db: Db, options: HelperServiceOptions = {}) {
     };
   }
 
-  return { getSettings, updateSettings, ask, assertEntryInCompany };
+  /**
+   * Storylines (AI director, transition writer, clip-frame reader): one
+   * tool-less call on a saved model of THIS company, paid with THIS
+   * company's key. Unlike ask(), there is never a fallback on Paperclip's own
+   * Claude key: the instance owner must not pay for every company's writing
+   * (design 2.11). No model or no key = a plain 503 the editor shows as is.
+   *
+   * The model is `entryId` when given (e.g. Media Studio's picture-reading
+   * model), else the company's helper default. The key is `keySecretId` when
+   * given (a company secret, read through the plugin path with the company
+   * check), else the helper's key for that service.
+   */
+  async function callCompanyModel(input: CompanyModelCallInput): Promise<CompanyModelCallResult> {
+    const block = await budgets.getCompanyInvocationBlock(input.companyId);
+    if (block) {
+      throw forbidden(`${input.purpose} cannot run right now: ${block.reason} An owner can raise or lift the limit under Costs.`, {
+        reason: "spending_limit",
+        scopeType: block.scopeType,
+      });
+    }
+    const entry = await resolveCompanyModelEntry(input.companyId, input.entryId ?? null);
+    if (!entry) throw new HttpError(503, input.noModelMessage, { code: "COMPANY_MODEL_MISSING" });
+    if (input.images && input.images.length > 0 && picturesOf(entry).canSeePictures !== true) {
+      throw new HttpError(503, `"${entry.name}" cannot look at pictures, so ${input.purpose.toLowerCase()} cannot use it.`, {
+        code: "COMPANY_MODEL_CANNOT_SEE_PICTURES",
+      });
+    }
+    const settings = resolveLaneASettings({
+      id: "storyline-writer",
+      companyId: input.companyId,
+      name: input.purpose,
+      laneAEnabled: true,
+      laneAProvider: entry.provider,
+      laneAModel: entry.model,
+      laneABaseUrl: entry.baseUrl ?? null,
+      laneATemperature: entry.defaultTemperature ?? null,
+      laneAThinking: entry.defaultThinking ?? null,
+      laneAProviderRouting: (entry.providerRouting as never) ?? null,
+      laneAMaxOutputTokens: entry.defaultMaxOutputTokens ?? input.maxTokens,
+    });
+    if (!settings.model) {
+      throw new HttpError(503, `The saved model "${entry.name}" has no model id. Fix it under Company settings → Models.`, { code: "COMPANY_MODEL_MISSING" });
+    }
+    if (settings.provider !== "anthropic" && settings.provider !== "local" && !settings.baseUrl) {
+      throw new HttpError(503, `The saved model "${entry.name}" has no address. Fix it under Company settings → Models.`, { code: "COMPANY_MODEL_MISSING" });
+    }
+    const label = laneAProviderLabel(settings.provider);
+    let apiKey: string | null = null;
+    if (settings.provider === "anthropic" && options.createModelClient) {
+      apiKey = null;
+    } else if (input.keySecretId) {
+      try {
+        apiKey = (
+          await secrets.resolveSecretValueForPlugin(input.companyId, input.keySecretId, "latest", {
+            consumerType: "plugin",
+            consumerId: input.keyConsumerId ?? "media-studio",
+            actorType: "plugin",
+            pluginId: input.keyConsumerId ?? "media-studio",
+          })
+        ).trim();
+      } catch {
+        apiKey = null;
+      }
+      if (!apiKey && settings.provider !== "local") {
+        throw new HttpError(503, `The ${label} key picked for "${entry.name}" could not be read. Pick it again from this company's Secrets.`, {
+          code: "COMPANY_MODEL_KEY_MISSING",
+        });
+      }
+    } else if (settings.provider !== "local") {
+      const keys = await listKeyBindings(input.companyId);
+      const key = keys.get(settings.provider);
+      if (key) {
+        try {
+          apiKey = (
+            await secrets.resolveSecretValue(input.companyId, key.secretId, "latest", {
+              consumerType: HELPER_BINDING_TARGET_TYPE,
+              consumerId: input.companyId,
+              configPath: helperKeyConfigPath(settings.provider),
+              actorType: input.actorUserId ? "user" : "system",
+              actorId: input.actorUserId,
+            })
+          ).trim();
+        } catch (err) {
+          logger.warn({ err: err instanceof Error ? err.message : String(err), companyId: input.companyId }, "company model: key could not be resolved");
+          apiKey = null;
+        }
+      }
+      if (!apiKey) {
+        throw new HttpError(
+          503,
+          `"${entry.name}" runs on ${label}, and this company has no ${label} key for it yet. A company owner or admin can pick one under Company settings → General → Helper. (Paperclip's own key is never used for this.)`,
+          { code: "COMPANY_MODEL_KEY_MISSING", provider: settings.provider },
+        );
+      }
+    }
+    let client: LaneAProviderClient;
+    try {
+      client = createLaneAProviderClient({
+        provider: settings.provider,
+        apiKey,
+        baseUrl: settings.baseUrl,
+        anthropicClient: settings.provider === "anthropic" && options.createModelClient ? options.createModelClient() : undefined,
+        fetch: options.providerFetch,
+      });
+    } catch (err) {
+      throw new HttpError(503, `Could not reach "${entry.name}": ${scrubLaneASecrets(String(err instanceof Error ? err.message : err), apiKey)}`);
+    }
+    const maxTokens = Math.min(settings.maxOutputTokens, input.maxTokens);
+    const messages: LaneAChatMessage[] = [
+      { role: "user", content: input.user, ...(input.images && input.images.length > 0 ? { images: input.images } : {}) },
+    ];
+    let withTemperature = typeof settings.temperature === "number";
+    let withReasoningEffort = settings.reasoningEffort != null;
+    const send = async (): Promise<Awaited<ReturnType<LaneAProviderClient["complete"]>>> => {
+      try {
+        // No `tools` key, ever: these calls only write text.
+        return await client.complete({
+          model: settings.model!,
+          maxTokens,
+          system: input.system,
+          messages,
+          ...(withTemperature ? { temperature: settings.temperature } : {}),
+          ...(withReasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}),
+          ...(settings.providerRouting ? { providerRouting: settings.providerRouting } : {}),
+        });
+      } catch (err) {
+        if (!isLaneATemperatureUnsupportedError(err)) throw err;
+        if (withReasoningEffort) {
+          withReasoningEffort = false;
+          return send();
+        }
+        if (withTemperature) {
+          withTemperature = false;
+          return send();
+        }
+        throw err;
+      }
+    };
+    let response: Awaited<ReturnType<LaneAProviderClient["complete"]>>;
+    try {
+      response = await send();
+    } catch (err) {
+      throw toHttpError(err, entry.name);
+    }
+    const cost = await priceLaneACall({
+      provider: settings.provider,
+      model: settings.model,
+      inputTokens: response.usage.inputTokens,
+      outputTokens: response.usage.outputTokens,
+      providerCostUsd: response.usage.costUsd ?? null,
+    });
+    try {
+      await costService(db).createEvent(input.companyId, {
+        agentId: null,
+        provider: settings.provider,
+        biller: settings.provider,
+        billingType: "metered_api",
+        billingCode: input.billingCode,
+        model: settings.model,
+        inputTokens: response.usage.inputTokens,
+        outputTokens: response.usage.outputTokens,
+        costCents: cost.costCents,
+        costMicroUsd: cost.costMicroUsd,
+        costSource: cost.costSource,
+        occurredAt: new Date(),
+      });
+    } catch (err) {
+      logger.error({ err, companyId: input.companyId }, "company model: could not record the cost event");
+    }
+    return {
+      text: response.text,
+      truncated: response.stop === "max_tokens",
+      costCents: cost.costCents,
+      modelLabel: entry.name,
+      entryId: entry.id,
+      provider: settings.provider,
+      model: settings.model,
+    };
+  }
+
+  /** The saved model a storyline call uses: the given one (must be this company's, not archived), else the helper default. */
+  async function resolveCompanyModelEntry(companyId: string, entryId: string | null): Promise<EntryRow | null> {
+    if (entryId) return assertEntryInCompany(companyId, entryId).catch(() => null);
+    const row = await getRow(companyId);
+    if (!row?.defaultDirectoryEntryId) return null;
+    return assertEntryInCompany(companyId, row.defaultDirectoryEntryId).catch(() => null);
+  }
+
+  /** Whether a saved model of this company can look at pictures (true / false / null = unknown). */
+  async function companyModelCanSeePictures(companyId: string, entryId: string | null): Promise<{ entryId: string; name: string; canSee: boolean | null } | null> {
+    const entry = await resolveCompanyModelEntry(companyId, entryId);
+    if (!entry) return null;
+    return { entryId: entry.id, name: entry.name, canSee: picturesOf(entry).canSeePictures };
+  }
+
+  return { getSettings, updateSettings, ask, assertEntryInCompany, callCompanyModel, resolveCompanyModelEntry, companyModelCanSeePictures };
+}
+
+export interface CompanyModelCallInput {
+  companyId: string;
+  /** Plain name of what is calling, e.g. "The AI director". */
+  purpose: string;
+  /** Shown as is when the company has no usable saved model. */
+  noModelMessage: string;
+  billingCode: string;
+  system: string;
+  user: string;
+  images?: LaneAImage[];
+  maxTokens: number;
+  actorUserId: string | null;
+  entryId?: string | null;
+  keySecretId?: string | null;
+  /** Who reads keySecretId (the audit trail's consumer), e.g. the Media Studio plugin id. */
+  keyConsumerId?: string | null;
+}
+
+export interface CompanyModelCallResult {
+  text: string;
+  truncated: boolean;
+  costCents: number;
+  modelLabel: string;
+  entryId: string;
+  provider: LaneAProvider;
+  model: string;
 }
