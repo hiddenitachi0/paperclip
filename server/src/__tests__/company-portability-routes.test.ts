@@ -735,4 +735,74 @@ describe.sequential("company portability routes", () => {
       companyId,
     }));
   });
+
+  describe.sequential("carrying secrets (owner/admin only)", () => {
+    function member(role: string, extra: Record<string, unknown> = {}) {
+      return {
+        type: "board",
+        source: "session",
+        userId: `user-${role}`,
+        isInstanceAdmin: false,
+        companyIds: [companyId],
+        memberships: [{ companyId, membershipRole: role, status: "active" }],
+        ...extra,
+      };
+    }
+    const withSecrets = { ...exportRequest, secretSelection: ["agent:ceo:SHOP_TOKEN"], secretsPassphrase: "a long passphrase" };
+    const importWithBundle = { ...importRequest, encryptedSecretsBundle: "sealed-blob", secretsPassphrase: "a long passphrase" };
+
+    it.sequential.each(["owner", "admin"])("lets an %s export with secrets", async (role) => {
+      const app = await createApp(member(role));
+      const res = await request(app).post(`/api/companies/${companyId}/exports`).send(withSecrets);
+      expect(res.status).toBe(200);
+      expect(mockCompanyPortabilityService.exportBundle).toHaveBeenCalledWith(
+        companyId,
+        expect.objectContaining({ secretSelection: ["agent:ceo:SHOP_TOKEN"] }),
+      );
+    });
+
+    it.sequential("refuses an operator who asks for secrets, but still lets them export without", async () => {
+      const app = await createApp(member("operator"));
+      const refused = await request(app).post(`/api/companies/${companyId}/exports`).send(withSecrets);
+      expect(refused.status).toBe(403);
+      expect(refused.body.error).toContain("owner or an admin");
+      expect(mockCompanyPortabilityService.exportBundle).not.toHaveBeenCalled();
+      const plain = await request(app).post(`/api/companies/${companyId}/exports`).send(exportRequest);
+      expect(plain.status).toBe(200);
+    });
+
+    it.sequential("refuses a CEO agent that asks for secrets on either export route", async () => {
+      const app = await createApp({ type: "agent", agentId: ceoAgentId, companyId, source: "agent_key", runId: "run-1" });
+      for (const route of ["exports", "export"]) {
+        const res = await request(app).post(`/api/companies/${companyId}/${route}`).send(withSecrets);
+        expect(res.status).toBe(403);
+      }
+      expect(mockCompanyPortabilityService.exportBundle).not.toHaveBeenCalled();
+    });
+
+    it.sequential("refuses an operator who brings a secrets file into an existing company", async () => {
+      const app = await createApp(member("operator"));
+      const res = await request(app).post("/api/companies/import").send(importWithBundle);
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain("owner or an admin");
+      expect(mockCompanyPortabilityService.importBundle).not.toHaveBeenCalled();
+    });
+
+    it.sequential("lets an owner bring a secrets file into their company", async () => {
+      const app = await createApp(member("owner"));
+      const res = await request(app).post("/api/companies/import").send(importWithBundle);
+      expect(res.status).toBe(200);
+      expect(mockCompanyPortabilityService.importBundle).toHaveBeenCalledWith(
+        expect.objectContaining({ encryptedSecretsBundle: "sealed-blob" }),
+        "user-owner",
+      );
+    });
+
+    it.sequential("refuses a CEO agent that brings a secrets file through the safe import route", async () => {
+      const app = await createApp({ type: "agent", agentId: ceoAgentId, companyId, source: "agent_key", runId: "run-1" });
+      const res = await request(app).post(`/api/companies/${companyId}/imports/apply`).send(importWithBundle);
+      expect(res.status).toBe(403);
+      expect(mockCompanyPortabilityService.importBundle).not.toHaveBeenCalled();
+    });
+  });
 });

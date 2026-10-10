@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, integer, timestamp, boolean, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, integer, timestamp, boolean, jsonb, uniqueIndex } from "drizzle-orm/pg-core";
 
 export const companies = pgTable(
   "companies",
@@ -36,6 +36,15 @@ export const companies = pgTable(
     // worktree-cleanup job may remove its agent worktree. NULL = use the
     // server default (7).
     worktreeCleanupRetentionDays: integer("worktree_cleanup_retention_days"),
+    // Franchise migration, phase B: "Mark as migrated" on the SOURCE company
+    // after it was copied to another Paperclip. NULL = not moved. While set,
+    // the company's agents are paused (pauseReason "company_migrated") and the
+    // routines listed in migrationPausedRoutineIds are paused; "Undo: resume
+    // here" clears all four and resumes exactly those. Nothing is deleted.
+    migratedToUrl: text("migrated_to_url"),
+    migratedAt: timestamp("migrated_at", { withTimezone: true }),
+    migratedByUserId: text("migrated_by_user_id"),
+    migrationPausedRoutineIds: jsonb("migration_paused_routine_ids").$type<string[]>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

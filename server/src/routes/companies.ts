@@ -33,7 +33,7 @@ import {
   workTimelineService,
 } from "../services/index.js";
 import type { StorageService } from "../storage/types.js";
-import { assertBoard, assertCompanyAccess, assertInstanceAdmin, getActorInfo } from "./authz.js";
+import { assertBoard, assertCompanyAccess, assertInstanceAdmin, getActorInfo, isCompanyOwnerOrAdmin } from "./authz.js";
 import { COMPANY_IMPORT_ROUTE_PATH } from "./company-import-paths.js";
 
 /**
@@ -118,6 +118,33 @@ export function companyRoutes(db: Db, storage?: StorageService) {
       return;
     }
     assertCompanyAccess(req, target.companyId);
+  }
+
+  // Franchise migration: secret VALUES may only leave or enter a company when
+  // its owner or an admin (or an instance admin / the local board) asks.
+  // Agents -- even ones allowed to export and import -- and operators/viewers
+  // can still move the structure, just never the secrets.
+  function assertMayExportSecrets(req: Request, companyId: string, secretSelection: string[] | undefined) {
+    if (!secretSelection || !secretSelection.some((key) => key.trim().length > 0)) return;
+    if (!isCompanyOwnerOrAdmin(req, companyId)) {
+      throw forbidden("Only the company's owner or an admin can send secrets with an export.");
+    }
+  }
+
+  function assertMayImportSecrets(
+    req: Request,
+    target: { mode: "new_company" } | { mode: "existing_company"; companyId: string },
+    encryptedSecretsBundle: string | undefined,
+  ) {
+    if (!encryptedSecretsBundle) return;
+    // A new company is already an instance-admin-only import.
+    if (target.mode === "new_company") {
+      assertInstanceAdmin(req);
+      return;
+    }
+    if (!isCompanyOwnerOrAdmin(req, target.companyId)) {
+      throw forbidden("Only the company's owner or an admin can bring secrets into this company.");
+    }
   }
 
   // NOTE: this used to gate on `actorAgent.role === "ceo"` directly, which
@@ -353,6 +380,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
     const companyId = req.params.companyId as string;
     await assertAgentCanManageCompanySettingsOrBoard(req, companyId, "company exports");
     const body = companyPortabilityExportSchema.parse(req.body);
+    assertMayExportSecrets(req, companyId, body.secretSelection);
     const result = await portability.exportBundle(companyId, body);
     res.json(result);
   });
@@ -389,6 +417,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
       const operation = async () => {
         const importBody = companyPortabilityImportSchema.parse(rawImportBody);
         assertImportTargetAccess(req, importBody.target);
+        assertMayImportSecrets(req, importBody.target, importBody.encryptedSecretsBundle);
         const activity = importedCompanyActivityContext(actor, importBody.include ?? null);
         const result = await portability.importBundle(importBody, boardUserId);
         await logImportedCompanyActivity(db, activity, result);
@@ -403,6 +432,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
 
     const importBody = companyPortabilityImportSchema.parse(rawImportBody);
     assertImportTargetAccess(req, importBody.target);
+    assertMayImportSecrets(req, importBody.target, importBody.encryptedSecretsBundle);
     const activity = importedCompanyActivityContext(actor, importBody.include ?? null);
     const result = await portability.importBundle(importBody, boardUserId);
     await logImportedCompanyActivity(db, activity, result);
@@ -421,6 +451,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
     const companyId = req.params.companyId as string;
     await assertAgentCanManageCompanySettingsOrBoard(req, companyId, "company exports");
     const body = companyPortabilityExportSchema.parse(req.body);
+    assertMayExportSecrets(req, companyId, body.secretSelection);
     const result = await portability.exportBundle(companyId, body);
     res.json(result);
   });
@@ -448,6 +479,9 @@ export function companyRoutes(db: Db, storage?: StorageService) {
     const body = companyPortabilityImportSchema.parse(req.body);
     if (body.target.mode === "existing_company" && body.target.companyId !== companyId) {
       throw forbidden("Safe import route can only target the route company");
+    }
+    if (body.encryptedSecretsBundle && !isCompanyOwnerOrAdmin(req, companyId)) {
+      throw forbidden("Only the company's owner or an admin can bring secrets into this company.");
     }
     if (body.collisionStrategy === "replace") {
       throw forbidden("Safe import route does not allow replace collision strategy");

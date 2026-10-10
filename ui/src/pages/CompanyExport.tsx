@@ -27,6 +27,14 @@ import { buildInitialExportCheckedFiles } from "../lib/company-export-selection"
 import { useAgentOrder } from "../hooks/useAgentOrder";
 import { useProjectOrder } from "../hooks/useProjectOrder";
 import { buildPortableSidebarOrder } from "../lib/company-portability-sidebar";
+import { useCompanyRole } from "../hooks/useCompanyRole";
+import { describeScopedSecretKey, downloadTextFile, manifestNames, secretsFileName } from "../lib/company-migration";
+import {
+  CarrySecretsPanel,
+  EMPTY_CARRY_SECRETS_STATE,
+  carrySecretsBlocker,
+  type CarrySecretsState,
+} from "../components/company-migration/CarrySecretsPanel";
 import { getPortableFileDataUrl, getPortableFileText, isPortableImageFile } from "../lib/portable-files";
 import {
   Download,
@@ -604,6 +612,8 @@ export function CompanyExport() {
   const [checkedFiles, setCheckedFiles] = useState<Set<string>>(new Set());
   const [treeSearch, setTreeSearch] = useState("");
   const [taskLimit, setTaskLimit] = useState(TASKS_PAGE_SIZE);
+  const [carrySecrets, setCarrySecrets] = useState<CarrySecretsState>(EMPTY_CARRY_SECRETS_STATE);
+  const companyRole = useCompanyRole(selectedCompanyId);
   const savedExpandedRef = useRef<Set<string> | null>(null);
   const initialFileFromUrl = useRef(filePathFromLocation(location.pathname));
   const currentUserId = session?.user?.id ?? session?.session?.userId ?? null;
@@ -731,6 +741,12 @@ export function CompanyExport() {
         include: { company: true, agents: true, projects: true, issues: true },
         selectedFiles: Array.from(checkedFiles).sort(),
         sidebarOrder,
+        ...(carrySecrets.selected.size > 0 && companyRole.canManageConnections
+          ? {
+              secretSelection: Array.from(carrySecrets.selected).sort(),
+              secretsPassphrase: carrySecrets.passphrase,
+            }
+          : {}),
       }),
     onSuccess: (result) => {
       const resultCheckedFiles = new Set(Object.keys(result.files));
@@ -740,6 +756,19 @@ export function CompanyExport() {
         title: "Export downloaded",
         body: `${resultCheckedFiles.size} file${resultCheckedFiles.size === 1 ? "" : "s"} exported as ${result.rootPath}.zip`,
       });
+      if (result.encryptedSecretsBundle) {
+        // A separate file, never inside the zip: the zip can be shared, this cannot.
+        const fileName = secretsFileName(result.rootPath);
+        downloadTextFile(fileName, result.encryptedSecretsBundle);
+        const names = manifestNames(result.manifest);
+        const carried = (result.carriedSecretKeys ?? []).map((key) => describeScopedSecretKey(key, names).key);
+        pushToast({
+          tone: "success",
+          title: `Secrets saved in ${fileName}`,
+          body: `${carried.length} secret${carried.length === 1 ? "" : "s"} sealed with your passphrase (${carried.join(", ")}). Send the passphrase a different way than the file.`,
+        });
+      }
+      setCarrySecrets(EMPTY_CARRY_SECRETS_STATE);
     },
     onError: (err) => {
       pushToast({
@@ -905,8 +934,10 @@ export function CompanyExport() {
     });
   }
 
+  const secretsBlocker = companyRole.canManageConnections ? carrySecretsBlocker(carrySecrets) : null;
+
   function handleDownload() {
-    if (!exportData || checkedFiles.size === 0 || downloadMutation.isPending) return;
+    if (!exportData || checkedFiles.size === 0 || downloadMutation.isPending || secretsBlocker) return;
     downloadMutation.mutate();
   }
 
@@ -949,7 +980,8 @@ export function CompanyExport() {
           <Button
             size="sm"
             onClick={handleDownload}
-            disabled={selectedCount === 0 || downloadMutation.isPending}
+            disabled={selectedCount === 0 || downloadMutation.isPending || Boolean(secretsBlocker)}
+            title={secretsBlocker ?? undefined}
           >
             <Download className="mr-1.5 h-3.5 w-3.5" />
             {downloadMutation.isPending
@@ -966,6 +998,18 @@ export function CompanyExport() {
             <div key={w} className="text-xs text-amber-500">{w}</div>
           ))}
         </div>
+      )}
+
+      <CarrySecretsPanel
+        manifest={exportData.manifest}
+        canCarry={companyRole.canManageConnections}
+        state={carrySecrets}
+        onChange={setCarrySecrets}
+      />
+      {secretsBlocker && (
+        <p className="mx-5 mt-2 text-xs text-destructive" data-testid="export-secrets-blocker">
+          To export with secrets: {secretsBlocker}
+        </p>
       )}
 
       {/* Two-column layout */}

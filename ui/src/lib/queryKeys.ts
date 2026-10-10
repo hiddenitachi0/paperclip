@@ -4,6 +4,7 @@ export const queryKeys = {
     detail: (id: string) => ["companies", id] as const,
     stats: ["companies", "stats"] as const,
     instructions: (id: string) => ["companies", id, "instructions"] as const,
+    migrationVerify: (id: string) => ["companies", id, "migration-verify"] as const,
     cacheSettings: (id: string) => ["companies", id, "cache-settings"] as const,
     securityReviewSettings: (id: string) => ["companies", id, "security-review-settings"] as const,
     serviceTokens: (id: string) => ["companies", id, "service-tokens"] as const,

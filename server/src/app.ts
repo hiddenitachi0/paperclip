@@ -28,6 +28,7 @@ import { webSearchRoutes } from "./routes/web-search.js";
 import { agentMemoryRoutes } from "./routes/agent-memories.js";
 import { agentWorkSummaryRoutes } from "./routes/agent-work-summaries.js";
 import { jobSettingsRoutes } from "./routes/job-settings.js";
+import { companyMigrationRoutes } from "./routes/company-migration.js";
 import { cacheSettingsRoutes } from "./routes/cache-settings.js";
 import { positionsJobsPathAliasMiddleware } from "./routes/positions-jobs-aliases.js";
 import { privateAccessRoutes } from "./routes/private-access.js";
@@ -340,6 +341,7 @@ export async function createApp(
   api.use(agentMemoryRoutes(db));
   api.use(agentWorkSummaryRoutes(db));
   api.use(jobSettingsRoutes(db));
+  api.use(companyMigrationRoutes(db));
   api.use(cacheSettingsRoutes(db));
   api.use(browserRoutes(db));
   api.use(paymentNoticesRoutes(db));
