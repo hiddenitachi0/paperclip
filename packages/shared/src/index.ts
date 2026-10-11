@@ -109,6 +109,7 @@ export {
   type LaneAKeywordRoute,
 } from "./lane-a-models.js";
 export * from "./prompt-cache.js";
+export * from "./report-data.js";
 export * from "./known-models.js";
 export * from "./openrouter-hosts.js";
 export * from "./model-readiness.js";

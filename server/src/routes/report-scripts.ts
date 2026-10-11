@@ -12,10 +12,10 @@ import {
 import { HttpError, forbidden, unprocessable } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
-import { assertCompanyAccess, assertCompanyOwnerAdminOrInstanceAdmin, getActorInfo } from "./authz.js";
+import { assertCompanyAccess, assertCompanyOwnerAdminOrInstanceAdmin, getActorInfo, isCompanyOwnerOrAdmin } from "./authz.js";
 import { approvalService, logActivity } from "../services/index.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
-import { reportScriptsService, type ReportScriptsServiceDeps } from "../services/report-scripts.js";
+import { maskReportScriptRunForViewer, reportScriptsService, type ReportScriptsServiceDeps } from "../services/report-scripts.js";
 
 /**
  * DUR-4072 PR1: report calculation scripts.
@@ -67,6 +67,15 @@ export function reportScriptRoutes(rawDb: Db, deps: ReportScriptsServiceDeps = {
       );
     }
     next();
+  }
+
+  /**
+   * DUR-4727: a report's script run carries the company's real data as its
+   * input (and possibly in its error). Shown in full to a company
+   * owner/admin person only; see maskReportScriptRunForViewer.
+   */
+  function canSeeCompanyData(req: Request, companyId: string): boolean {
+    return getActorInfo(req).actorType === "user" && isCompanyOwnerOrAdmin(req, companyId);
   }
 
   function actorOf(req: Request) {
@@ -131,11 +140,13 @@ export function reportScriptRoutes(rawDb: Db, deps: ReportScriptsServiceDeps = {
     const versionId = req.params.versionId as string;
     const run = await svc.runFixture(companyId, versionId, req.body.fixtureId, actorOf(req));
     await audit(req, companyId, "report_script.fixture_run", versionId, { runId: run.id, status: run.status });
-    res.json(run);
+    res.json(maskReportScriptRunForViewer(run, canSeeCompanyData(req, companyId)));
   });
 
   router.get("/companies/:companyId/report-scripts/versions/:versionId/runs", draftScope(), requireFeatureOn, async (req, res) => {
-    res.json(await svc.listRuns(req.params.companyId as string, req.params.versionId as string));
+    const companyId = req.params.companyId as string;
+    const canSee = canSeeCompanyData(req, companyId);
+    res.json((await svc.listRuns(companyId, req.params.versionId as string)).map((run) => maskReportScriptRunForViewer(run, canSee)));
   });
 
   // The code an approval card stands for, from the stored version -- what

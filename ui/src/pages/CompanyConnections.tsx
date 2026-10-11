@@ -28,6 +28,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { AddIntegrationTokenDialog } from "../components/AddIntegrationTokenDialog";
 import { HuggingFaceConnectDialog } from "../components/HuggingFaceConnectDialog";
 import { DataSourcesSection } from "../components/DataSourcesSection";
+import { ReportTemplatesSection } from "../components/ReportTemplatesSection";
 import { PaymentsAndLoginsSection } from "../components/PaymentsAndLoginsSection";
 import { ServiceTokensSection } from "../components/ServiceTokensSection";
 import { TelegramBotsSection } from "../components/TelegramBotsSection";
@@ -269,6 +270,7 @@ export function CompanyConnections() {
     retry: false,
   });
   const businessDataEnabled = experimentalSettings?.enableBusinessData === true;
+  const reportingEnabled = experimentalSettings?.enableReporting === true;
 
   const secrets = useMemo(() => secretsQuery.data ?? [], [secretsQuery.data]);
   const untaggedCount = useMemo(() => secrets.filter((secret) => secret.kind === null).length, [secrets]);
@@ -367,6 +369,14 @@ export function CompanyConnections() {
           </Card>
         )}
       </div>
+
+      {/* DUR-4072 PR3: where each report template's data comes from (only when reporting is switched on) */}
+      {reportingEnabled && businessDataEnabled && (
+        <div className="space-y-4" data-testid="connections-reports">
+          <SectionHeading>Reports</SectionHeading>
+          <ReportTemplatesSection companyId={selectedCompanyId} canManage={canManage} />
+        </div>
+      )}
 
       {/* Web search for quick agents */}
       <div className="space-y-4" data-testid="connections-web-search-section">

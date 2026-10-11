@@ -11,6 +11,7 @@ export const queryKeys = {
     telegramChatSettings: (id: string) => ["companies", id, "telegram-chat-settings"] as const,
     speechSettings: (id: string) => ["companies", id, "speech-settings"] as const,
     dataConnections: (id: string) => ["companies", id, "data-connections"] as const,
+    reportTemplates: (id: string) => ["companies", id, "report-templates"] as const,
     datasetSources: (id: string) => ["companies", id, "dataset-sources"] as const,
     modelDirectory: (id: string) => ["companies", id, "model-directory"] as const,
     modelReviews: (id: string, entryId: string) => ["companies", id, "model-directory", entryId, "reviews"] as const,

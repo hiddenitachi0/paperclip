@@ -1716,6 +1716,13 @@
       "when": 1791658809381,
       "tag": "0245_subtasks_inherit_model_effort",
       "breakpoints": true
+    },
+    {
+      "idx": 246,
+      "version": "7",
+      "when": 1791677123916,
+      "tag": "0246_report_data_fetch",
+      "breakpoints": true
     }
   ]
 }
