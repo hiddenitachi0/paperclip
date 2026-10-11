@@ -285,6 +285,13 @@ export const laneAAdapterConfigSchema = z
      * (server/src/routes/agents.ts).
      */
     browserAccess: z.enum(BROWSER_ACCESS_LEVELS).optional(),
+    /**
+     * "Use this model for picture requests": a saved model (Settings >
+     * Models) that answers the turns involving pictures. Null/absent: the
+     * agent's own model, as before. Board-only, like the provider stash
+     * (server/src/routes/agents.ts). See lane-a-picture-model.ts.
+     */
+    pictureModelId: z.string().uuid().nullable().optional(),
   })
   .strict();
 
@@ -409,7 +416,11 @@ const adapterConfigSchema = z.record(z.string(), z.unknown()).superRefine((value
       const browserAccessValue =
         typeof laneAValue === "object" && laneAValue !== null ? (laneAValue as { browserAccess?: unknown }).browserAccess : undefined;
       let message = "The quick agent's key must be a saved secret picked from the company's secrets — a key cannot be typed in here.";
-      if (webSearchValue !== undefined && typeof webSearchValue !== "boolean") {
+      const pictureModelValue =
+        typeof laneAValue === "object" && laneAValue !== null ? (laneAValue as { pictureModelId?: unknown }).pictureModelId : undefined;
+      if (pictureModelValue !== undefined && pictureModelValue !== null && !z.string().uuid().safeParse(pictureModelValue).success) {
+        message = "The quick agent's model for picture requests must be one of the company's saved models.";
+      } else if (webSearchValue !== undefined && typeof webSearchValue !== "boolean") {
         message = "The quick agent's \"Can search the web\" switch must be on or off (true or false).";
       } else if (browserAccessValue !== undefined && !BROWSER_ACCESS_LEVELS.includes(browserAccessValue as never)) {
         message = `The quick agent's "Browser access" setting must be one of: ${BROWSER_ACCESS_LEVELS.join(", ")}.`;
