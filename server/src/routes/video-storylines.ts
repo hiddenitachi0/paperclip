@@ -114,10 +114,34 @@ export function videoStorylineRoutes(rawDb: Db) {
    * memory before the company's own limit is checked), capped at the hard
    * upper limit here; the company's smaller limits are checked by the service.
    */
-  const footageUpload = multer({
-    storage: multer.diskStorage({ destination: tmpdir() }),
-    limits: { fileSize: MEDIA_FOOTAGE_HARD_LIMITS.maxVideoMb * 1024 * 1024, files: 1, fields: 10 },
-  });
+  /** Multer for one footage upload, capped at THIS company's own largest file (security review DUR-4745), never above the hard limit. */
+  function footageUploadFor(maxBytes: number) {
+    return multer({
+      storage: multer.diskStorage({ destination: tmpdir() }),
+      limits: { fileSize: Math.min(maxBytes, MEDIA_FOOTAGE_HARD_LIMITS.maxVideoMb * 1024 * 1024), files: 1, fields: 10 },
+    });
+  }
+  /**
+   * Uploads in flight per company: each is read into memory to be stored,
+   * so a burst of large uploads could exhaust the server (security review
+   * DUR-4745). A third one at the same time is asked to wait.
+   */
+  const UPLOADS_IN_FLIGHT_PER_COMPANY = 2;
+  const uploadsInFlight = new Map<string, number>();
+  async function withUploadSlot<T>(companyId: string, fn: () => Promise<T>): Promise<T> {
+    const current = uploadsInFlight.get(companyId) ?? 0;
+    if (current >= UPLOADS_IN_FLIGHT_PER_COMPANY) {
+      throw new HttpError(429, "Other uploads for this company are still going. Wait for them to finish, then try again.");
+    }
+    uploadsInFlight.set(companyId, current + 1);
+    try {
+      return await fn();
+    } finally {
+      const left = (uploadsInFlight.get(companyId) ?? 1) - 1;
+      if (left <= 0) uploadsInFlight.delete(companyId);
+      else uploadsInFlight.set(companyId, left);
+    }
+  }
   const musicUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024, files: 1, fields: 5 } });
 
   /** Runs multer for one "file" field and hands back the file (bytes read only after the size passed), in plain-English errors. */
@@ -404,8 +428,12 @@ export function videoStorylineRoutes(rawDb: Db) {
   });
 
   router.post("/companies/:companyId/video-storylines/music-files", ...gatedScope(), async (req, res) => {
-    const file = await receiveFile(musicUpload, req, res, 50 * 1024 * 1024);
-    res.status(201).json(await clips.uploadMusic(req.params.companyId as string, file, actorOf(req)));
+    const companyId = req.params.companyId as string;
+    const choice = await withUploadSlot(companyId, async () => {
+      const file = await receiveFile(musicUpload, req, res, 50 * 1024 * 1024);
+      return clips.uploadMusic(companyId, file, actorOf(req));
+    });
+    res.status(201).json(choice);
   });
 
   // ─── Strip (Simple editor): clips, transitions, versions ─────────────
@@ -538,10 +566,14 @@ export function videoStorylineRoutes(rawDb: Db) {
   router.post("/companies/:companyId/video-storylines/:storylineId/uploads", ...gatedScope(), async (req, res) => {
     const companyId = req.params.companyId as string;
     const limits = await footage.getSettings(companyId);
-    const file = await receiveFile(footageUpload, req, res, Math.max(limits.maxVideoMb, limits.maxPhotoMb) * 1024 * 1024);
-    const body = (req.body ?? {}) as Record<string, unknown>;
-    const consent = { showsPeople: bodyFlag(body.showsPeople), consentLikeness: bodyFlag(body.consentLikeness), consentAdults: bodyFlag(body.consentAdults) };
-    res.status(201).json(await clips.createUpload(companyId, req.params.storylineId as string, file, consent, actorOf(req)));
+    const maxBytes = Math.max(limits.maxVideoMb, limits.maxPhotoMb) * 1024 * 1024;
+    const created = await withUploadSlot(companyId, async () => {
+      const file = await receiveFile(footageUploadFor(maxBytes), req, res, maxBytes);
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const consent = { showsPeople: bodyFlag(body.showsPeople), consentLikeness: bodyFlag(body.consentLikeness), consentAdults: bodyFlag(body.consentAdults) };
+      return clips.createUpload(companyId, req.params.storylineId as string, file, consent, actorOf(req));
+    });
+    res.status(201).json(created);
   });
 
   router.patch(

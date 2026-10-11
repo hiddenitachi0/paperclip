@@ -29,13 +29,20 @@ import {
   type VideoStorylineExportSettings,
   type VideoUploadSummary,
 } from "@paperclipai/shared";
-import { conflict, HttpError, notFound, unprocessable } from "../errors.js";
+import { conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { getStorageService } from "../storage/index.js";
 import { logActivity } from "./activity-log.js";
 import { runMediaJob } from "./media-job-queue.js";
-import { processUploadedVideo, renderStillClip, prepareTrimmedClip, UploadProcessingError } from "./video-ffmpeg.js";
-import { companyMonthlyMediaSpendCents, toUploadSummary, uploadByteSize, videoStorylineFootageService } from "./video-storyline-footage.js";
+import { processUploadedVideo, renderStillClip, prepareTrimmedClip, sniffAudioContainer, UploadProcessingError } from "./video-ffmpeg.js";
+import {
+  companyMonthlyMediaSpendCents,
+  companyStorageUsedBytes,
+  STORYLINE_MUSIC_NAMESPACE,
+  toUploadSummary,
+  uploadByteSize,
+  videoStorylineFootageService,
+} from "./video-storyline-footage.js";
 import { estimateShotRenderCents, videoStorylineRenderService } from "./video-storyline-render.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
 import { videoStorylineStitchService } from "./video-storyline-stitch.js";
@@ -129,6 +136,19 @@ export function checkTrim(durationMs: number, trimInMs: number, trimOutMs: numbe
   return null;
 }
 
+/**
+ * Consent is a person's word: only a signed-in person (never an agent) can
+ * tick "everyone agreed to their likeness being used" or "everyone shown is
+ * an adult". An agent may still upload or change an upload with both boxes
+ * unticked -- which also clears ticks a person made earlier, so the footage
+ * cannot leave the server until a person ticks them again.
+ */
+export function assertConsentByPerson(actor: Pick<VideoStorylineActor, "actorType">, consent: { consentLikeness: boolean; consentAdults: boolean }): void {
+  if (actor.actorType !== "user" && (consent.consentLikeness || consent.consentAdults)) {
+    throw forbidden("Only a person can tick the consent boxes (likeness and adults). Upload it with the boxes unticked; a person in the company can tick them on the clip.");
+  }
+}
+
 export interface VideoStorylineClipsDeps {
   now?: () => Date;
   modelOptions?: HelperServiceOptions;
@@ -188,7 +208,9 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
     const storyline = await storylines.getStorylineRow(companyId, storylineId);
     const kind = uploadKindFor(file.contentType, file.originalName);
     if (!kind) throw new HttpError(415, "That file type can't be used. Upload a video (MP4, MOV, WebM) or a photo (JPEG, PNG, WebP, HEIC).");
-    if (consent.showsPeople && !(consent.consentLikeness && consent.consentAdults)) {
+    assertConsentByPerson(actor, consent);
+    // A person marking "shows people" ticks both boxes now; an agent leaves them for a person to tick later.
+    if (consent.showsPeople && !(consent.consentLikeness && consent.consentAdults) && actor.actorType === "user") {
       throw unprocessable("This upload shows people, so tick both boxes first: everyone shown agreed to their likeness being used, and everyone shown is an adult.");
     }
     const limits = await footage.getSettings(companyId);
@@ -239,11 +261,7 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
     try {
       row = await withCompanyScope(db, companyId, async (tx) => {
         await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`video_upload_quota:${companyId}`}, 0))`);
-        const [used] = await tx
-          .select({ total: sql<number>`coalesce(sum(${videoUploads.rawByteSize} + ${videoUploads.workingByteSize} + ${videoUploads.previewByteSize} + ${videoUploads.posterByteSize}), 0)::bigint` })
-          .from(videoUploads)
-          .where(eq(videoUploads.companyId, companyId));
-        const usedBytes = Number(used?.total ?? 0);
+        const usedBytes = await companyStorageUsedBytes(tx, companyId);
         if (usedBytes + incoming > limits.storageQuotaBytes) {
           throw new HttpError(
             413,
@@ -293,7 +311,8 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
   async function updateConsent(companyId: string, storylineId: string, uploadId: string, input: UpdateVideoUploadConsentInput, actor: VideoStorylineActor): Promise<VideoUploadSummary> {
     await settings.assertAdvancedEnabled(companyId);
     const upload = await uploadOf(companyId, storylineId, uploadId);
-    if (input.showsPeople && !(input.consentLikeness && input.consentAdults)) {
+    assertConsentByPerson(actor, input);
+    if (input.showsPeople && !(input.consentLikeness && input.consentAdults) && actor.actorType === "user") {
       throw unprocessable("This upload shows people, so tick both boxes: everyone shown agreed to their likeness being used, and everyone shown is an adult.");
     }
     const [row] = await db
@@ -745,21 +764,36 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
     const type = file.contentType.toLowerCase().split(";")[0]!.trim();
     if (!type.startsWith("audio/")) throw new HttpError(415, "That is not a sound file. Upload an MP3, WAV, M4A or similar.");
     if (file.size > MUSIC_MAX_BYTES) throw new HttpError(413, `Music files can be up to ${mb(MUSIC_MAX_BYTES)}.`);
-    const stored = await getStorageService().putFile({ companyId, namespace: "video-storylines/music", originalFilename: file.originalName ?? "music", contentType: type, body: file.buffer });
-    const [row] = await db
-      .insert(assets)
-      .values({
-        companyId,
-        provider: stored.provider,
-        objectKey: stored.objectKey,
-        contentType: stored.contentType,
-        byteSize: stored.byteSize,
-        sha256: stored.sha256,
-        originalFilename: file.originalName?.slice(0, 255) ?? null,
-        createdByUserId: actor.actorType === "user" ? actor.actorId : null,
-        createdByAgentId: actor.agentId,
-      })
-      .returning();
+    // The real type from its first bytes, not the name (security review DUR-4745).
+    if (!sniffAudioContainer(file.buffer)) throw new HttpError(415, "That file is not a sound file this server can use. Upload an MP3, WAV, M4A, Ogg or FLAC file.");
+    const quota = (await footage.getSettings(companyId)).storageQuotaBytes;
+    const stored = await getStorageService().putFile({ companyId, namespace: STORYLINE_MUSIC_NAMESPACE, originalFilename: file.originalName ?? "music", contentType: type, body: file.buffer });
+    const row = await withCompanyScope(db, companyId, async (tx) => {
+      // Music counts in the same storage limit as photos and videos, under the same lock.
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`video_upload_quota:${companyId}`}, 0))`);
+      const used = await companyStorageUsedBytes(tx, companyId);
+      if (used + stored.byteSize > quota) {
+        throw new HttpError(413, `This company's uploads would take ${gb(used + stored.byteSize)}, over its ${gb(quota)} storage limit. Remove files you no longer use, or ask an owner or admin to raise the limit.`);
+      }
+      const [inserted] = await tx
+        .insert(assets)
+        .values({
+          companyId,
+          provider: stored.provider,
+          objectKey: stored.objectKey,
+          contentType: stored.contentType,
+          byteSize: stored.byteSize,
+          sha256: stored.sha256,
+          originalFilename: file.originalName?.slice(0, 255) ?? null,
+          createdByUserId: actor.actorType === "user" ? actor.actorId : null,
+          createdByAgentId: actor.agentId,
+        })
+        .returning();
+      return inserted;
+    }).catch(async (err: unknown) => {
+      await deleteObjects(companyId, [stored.objectKey]);
+      throw err;
+    });
     return { id: row!.id, name: row!.originalFilename ?? "Music", contentType: row!.contentType, byteSize: row!.byteSize, createdAt: row!.createdAt.toISOString(), source: "upload" };
   }
 

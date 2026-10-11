@@ -2,7 +2,7 @@ import { buffer as streamToBuffer } from "node:stream/consumers";
 import { and, asc, eq, inArray, lt, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { assets, issueAttachments, videoMediaSpend, videoShotRenderJobs, videoShots, videoStorylines, withCompanyScope } from "@paperclipai/db";
-import { dataUriBytes, videoStorylineFootageService } from "./video-storyline-footage.js";
+import { sendableDataUriBytes, videoStorylineFootageService } from "./video-storyline-footage.js";
 import {
   MEDIA_STUDIO_PLUGIN_KEY,
   VIDEO_RENDER_JOB_MAX_AGE_MS,
@@ -349,7 +349,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     let carriesFootage = false;
     // An animated photo: the photo is the start picture, so it must pass the footage rules (design 2.5).
     if (approvedStillImage && shot.sourceUploadId) {
-      const sent = await footage.assertMaySend(companyId, shot, providerId, dataUriBytes(approvedStillImage) ?? Buffer.alloc(0), systemActor);
+      const sent = await footage.assertMaySend(companyId, shot, providerId, sendableDataUriBytes(approvedStillImage), systemActor);
       carriesFootage = carriesFootage || sent.footage;
     }
 
@@ -365,7 +365,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       // starts without it (continuity is a nicety, never a reason to leak).
       if (continuityImage && previous.sourceUploadId) {
         try {
-          const sent = await footage.assertMaySend(companyId, previous, providerId, dataUriBytes(continuityImage) ?? Buffer.alloc(0), systemActor);
+          const sent = await footage.assertMaySend(companyId, previous, providerId, sendableDataUriBytes(continuityImage), systemActor);
           carriesFootage = carriesFootage || sent.footage;
         } catch (err) {
           logger.info({ err, shotId: shot.id }, "video-storyline-render: continuity frame from own footage not sent");

@@ -428,7 +428,7 @@ export function buildMusicBedFilterComplex(params: { volumeDb: number; videoDura
 export async function probeDurationSeconds(filePath: string): Promise<number> {
   const { stdout } = await execFileAsync(
     FFPROBE_BINARY,
-    ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", filePath],
+    ["-v", "error", "-protocol_whitelist", "file", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", filePath],
     { timeout: PROBE_TIMEOUT_MS },
   );
   const value = Number.parseFloat(stdout.trim());
@@ -614,7 +614,8 @@ export async function addMusicBed(video: StitchResult, music: MusicBedInput): Pr
     const outputPath = join(dir, "with-music.mp4");
     await execFileAsync(
       FFMPEG_BINARY,
-      ["-y", "-i", videoPath, "-i", musicPath, "-filter_complex", filter, "-map", "0:v", "-map", output, "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-ac", "2", "-shortest", outputPath],
+      // The music may be an uploaded file: local files only, never a playlist reaching out (security review DUR-4745).
+      ["-y", "-i", videoPath, "-protocol_whitelist", "file", "-i", musicPath, "-filter_complex", filter, "-map", "0:v", "-map", output, "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-ac", "2", "-shortest", outputPath],
       { timeout: ffmpegTimeoutMsFor(videoDuration), cwd: dir },
     );
     return { buffer: await readFile(outputPath), contentType: "video/mp4" };
@@ -715,12 +716,15 @@ export function buildUploadTranscodeArgs(params: {
   fps: number;
   maxEdge?: number;
   toneMap: boolean;
+  /** The sniffed container of an untrusted upload (see sniffVideoContainer). */
+  inputFormat?: "mov" | "matroska" | null;
 }): string[] {
   const fps = clampExportFps(params.fps);
   const size = fitInside(params.media.width, params.media.height, params.media.rotation, params.maxEdge ?? 1920);
   const filters = [...(params.toneMap ? [HDR_TO_SDR_FILTER] : []), `fps=${fps}`, `scale=${size.width}:${size.height}`, "setsar=1", "format=yuv420p"];
   return [
     "-y",
+    ...untrustedInputArgs(params.inputFormat ?? null),
     "-i",
     params.input,
     "-map",
@@ -974,9 +978,42 @@ export async function ffmpegHasFilter(name: string): Promise<boolean> {
   return cachedFilters.names.has(name);
 }
 
-export async function probeMediaFile(filePath: string): Promise<ProbedMedia | null> {
+/**
+ * What an uploaded video really is, from its first bytes (never the name or
+ * the browser's claim): MP4/MOV/3GP ("ftyp" or a classic QuickTime atom) or
+ * Matroska/WebM. Anything else -- a playlist or concat list named .mp4, say --
+ * is refused before ffmpeg ever opens it (security review DUR-4745).
+ */
+export function sniffVideoContainer(bytes: Buffer): "mov" | "matroska" | null {
+  if (bytes.length < 12) return null;
+  if (bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3) return "matroska";
+  const atom = bytes.subarray(4, 8).toString("latin1");
+  if (["ftyp", "moov", "mdat", "wide", "free", "skip", "pnot"].includes(atom)) return "mov";
+  return null;
+}
+
+/** A sound file's real type from its first bytes: MP3/AAC, WAV, M4A, Ogg or FLAC; anything else is refused. */
+export function sniffAudioContainer(bytes: Buffer): "mp3" | "wav" | "m4a" | "ogg" | "flac" | "aac" | null {
+  if (bytes.length < 12) return null;
+  const head = bytes.subarray(0, 4).toString("latin1");
+  if (bytes.subarray(0, 3).toString("latin1") === "ID3") return "mp3";
+  if (head === "RIFF" && bytes.subarray(8, 12).toString("latin1") === "WAVE") return "wav";
+  if (bytes.subarray(4, 8).toString("latin1") === "ftyp") return "m4a";
+  if (head === "OggS") return "ogg";
+  if (head === "fLaC") return "flac";
+  if (bytes[0] === 0xff && (bytes[1]! & 0xf6) === 0xf0) return "aac";
+  if (bytes[0] === 0xff && (bytes[1]! & 0xe0) === 0xe0) return "mp3";
+  return null;
+}
+
+/** Input options for an untrusted upload: local files only, and the container we sniffed (no format guessing). */
+export function untrustedInputArgs(format: "mov" | "matroska" | null): string[] {
+  return ["-protocol_whitelist", "file", ...(format ? ["-f", format] : [])];
+}
+
+export async function probeMediaFile(filePath: string, format: "mov" | "matroska" | null = null): Promise<ProbedMedia | null> {
   try {
-    const { stdout } = await execFileAsync(FFPROBE_BINARY, ["-v", "error", "-show_streams", "-show_format", "-of", "json", filePath], {
+    const { stdout } = await execFileAsync(FFPROBE_BINARY, ["-v", "error", ...untrustedInputArgs(format), "-show_streams", "-show_format", "-of", "json", filePath], {
       timeout: PROBE_TIMEOUT_MS,
       maxBuffer: 8 * 1024 * 1024,
     });
@@ -1004,9 +1041,11 @@ export class UploadProcessingError extends Error {}
 /** Turns an uploaded video into its working copy, light preview and poster (design 2.5). */
 export async function processUploadedVideo(raw: Buffer, opts: { fps: number; maxSeconds: number }): Promise<ProcessedUploadVideo> {
   return withTempDir(async (dir) => {
+    const format = sniffVideoContainer(raw);
+    if (!format) throw new UploadProcessingError("This file is not a video this server can use. Upload an MP4, MOV or WebM video.");
     const input = join(dir, "raw.video");
     await writeFile(input, raw);
-    const media = await probeMediaFile(input);
+    const media = await probeMediaFile(input, format);
     if (!media) throw new UploadProcessingError("This file could not be read as a video. Try saving it as an MP4 or MOV and upload it again.");
     if (media.durationSeconds > opts.maxSeconds + 0.5) {
       throw new UploadProcessingError(`This video is ${Math.round(media.durationSeconds)} seconds long; this company allows up to ${opts.maxSeconds} seconds per upload. Shorten it and upload it again.`);
@@ -1014,7 +1053,7 @@ export async function processUploadedVideo(raw: Buffer, opts: { fps: number; max
     const hdr = isHdrMedia(media);
     const toneMap = hdr && (await ffmpegHasFilter("zscale")) && (await ffmpegHasFilter("tonemap"));
     const working = join(dir, "working.mp4");
-    await execFileAsync(FFMPEG_BINARY, buildUploadTranscodeArgs({ input, output: working, media, fps: opts.fps, toneMap }), {
+    await execFileAsync(FFMPEG_BINARY, buildUploadTranscodeArgs({ input, output: working, media, fps: opts.fps, toneMap, inputFormat: format }), {
       timeout: ffmpegTimeoutMsFor(media.durationSeconds * 3),
       cwd: dir,
     });

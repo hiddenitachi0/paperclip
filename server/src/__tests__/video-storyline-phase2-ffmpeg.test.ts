@@ -22,6 +22,9 @@ import {
   readProbeJson,
   renderStillClip,
   renderTitleCard,
+  sniffAudioContainer,
+  sniffVideoContainer,
+  untrustedInputArgs,
   wrapTitleText,
   type ProbedMedia,
 } from "../services/video-ffmpeg.ts";
@@ -121,6 +124,24 @@ describe("upload probe and conversion arguments", () => {
     expect(zoom.join(" ")).toContain("zoompan=z='min(1+0.12*on/48,1.12)'");
     const hold = buildStillClipArgs({ input: "p.jpg", output: "o.mp4", seconds: 3, motion: "hold", source: { width: 1080, height: 1920 }, target: { width: 1920, height: 1080, fps: 30, fit: "fit" } });
     expect(hold).toEqual(expect.arrayContaining(["-loop", "1", "-t", "3"]));
+  });
+});
+
+describe("untrusted uploads are identified by their bytes (security review DUR-4745)", () => {
+  it("sniffs video and audio containers and refuses playlists and text", () => {
+    const ftyp = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from("ftypqt  0000")]);
+    expect(sniffVideoContainer(ftyp)).toBe("mov");
+    expect(sniffVideoContainer(Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0, 0, 0, 0, 0, 0, 0, 0]))).toBe("matroska");
+    expect(sniffVideoContainer(Buffer.from("#EXTM3U\n#EXT-X-VERSION:3\n"))).toBeNull();
+    expect(sniffVideoContainer(Buffer.from("ffconcat version 1.0\nfile /etc/passwd"))).toBeNull();
+    expect(sniffAudioContainer(Buffer.from("ID3\u0004\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000"))).toBe("mp3");
+    expect(sniffAudioContainer(Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WAVE")]))).toBe("wav");
+    expect(sniffAudioContainer(Buffer.from("#EXTM3U\nhttp://evil/x.mp3\n"))).toBeNull();
+  });
+  it("opens untrusted files with local files only and the sniffed container", () => {
+    expect(untrustedInputArgs("mov")).toEqual(["-protocol_whitelist", "file", "-f", "mov"]);
+    const args = buildUploadTranscodeArgs({ input: "in", output: "out", media: media(), fps: 30, toneMap: false, inputFormat: "matroska" });
+    expect(args.slice(0, 7)).toEqual(["-y", "-protocol_whitelist", "file", "-f", "matroska", "-i", "in"]);
   });
 });
 
@@ -245,7 +266,9 @@ real("real ffmpeg: trim, fps, crop-fill, drawtext, HDR/VFR upload, photo clips, 
     expect(out.preview.length).toBeGreaterThan(500);
     expect(out.poster.subarray(0, 2).toString("hex")).toBe("ffd8");
     await expect(processUploadedVideo(hdr, { fps: 25, maxSeconds: 1 })).rejects.toThrow(/allows up to 1 seconds/);
-    await expect(processUploadedVideo(Buffer.from("not a video"), { fps: 25, maxSeconds: 60 })).rejects.toThrow(/could not be read/);
+    await expect(processUploadedVideo(Buffer.from("not a video at all"), { fps: 25, maxSeconds: 60 })).rejects.toThrow(/not a video this server can use/);
+    // A playlist dressed up as .mp4 never reaches ffmpeg (security review DUR-4745).
+    await expect(processUploadedVideo(Buffer.from("#EXTM3U\n#EXT-X-VERSION:3\nfile:///etc/passwd\n"), { fps: 25, maxSeconds: 60 })).rejects.toThrow(/not a video this server can use/);
   });
 
   it("makes a slowly zooming photo clip of the right length", async () => {

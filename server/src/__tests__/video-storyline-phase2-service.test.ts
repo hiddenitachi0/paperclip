@@ -334,6 +334,68 @@ d("storyline phase 2: clips, footage rules, spend, export, music", () => {
     expect(blocked!.stitchBlockedReason).toContain("Getting clip");
   });
 
+  it("only a person can tick the consent boxes; an agent uploads with them unticked and its changes clear them (security review DUR-4745)", async () => {
+    const companyId = await seedCompany();
+    const { storylineId } = await seedStoryline(companyId);
+    const clips = videoStorylineClipsService(db);
+    const AGENT = { actorType: "agent" as const, actorId: "agent-1", agentId: null };
+    await expect(clips.createUpload(companyId, storylineId, file("photo"), PEOPLE_OK, AGENT)).rejects.toMatchObject({ status: 403 });
+    await expect(clips.createUpload(companyId, storylineId, file("photo"), { showsPeople: false, consentLikeness: false, consentAdults: true }, AGENT)).rejects.toMatchObject({ status: 403 });
+    const byAgent = await clips.createUpload(companyId, storylineId, file("photo"), { showsPeople: true, consentLikeness: false, consentAdults: false }, AGENT);
+    expect(byAgent).toMatchObject({ showsPeople: true, consentLikeness: false, consentAdults: false });
+    // A person ticks them; an agent cannot tick them, and any change it makes clears them.
+    await clips.updateConsent(companyId, storylineId, byAgent.id, PEOPLE_OK, ACTOR);
+    await expect(clips.updateConsent(companyId, storylineId, byAgent.id, PEOPLE_OK, AGENT)).rejects.toMatchObject({ status: 403 });
+    const cleared = await clips.updateConsent(companyId, storylineId, byAgent.id, { showsPeople: true, consentLikeness: false, consentAdults: false }, AGENT);
+    expect(cleared).toMatchObject({ consentLikeness: false, consentAdults: false });
+  });
+
+  it("the picture-reading model never describes frames of people from your footage without both ticks, even when it was uploaded as no people (security review DUR-4745)", async () => {
+    const companyId = await seedCompany();
+    await seedCompanyWriterModel(db, companyId, { canSeePictures: true });
+    const { storylineId, aiShotId } = await seedStoryline(companyId, { withAiShot: true });
+    const clips = videoStorylineClipsService(db);
+    const upload = await clips.createUpload(companyId, storylineId, file("photo"), NO_PEOPLE, ACTOR);
+    const { shotId } = await clips.createClip(companyId, storylineId, { uploadId: upload.id }, ACTOR);
+    await clips.tick();
+    const systems: string[] = [];
+    const create = vi.fn(async (req: { system: string }) => {
+      systems.push(req.system);
+      const text = req.system.startsWith("You check pictures")
+        ? '{"peopleShown": true, "apparentAdult": true}'
+        : req.system.startsWith("You describe")
+          ? "Two colleagues at a desk."
+          : JSON.stringify({ suggestedKind: "blend", reason: "x", aiStyle: null, plainLine: "Soft blend. 1 s.", prompt: "", durationSeconds: 3 });
+      return { content: [{ type: "text", text }], usage: { input_tokens: 1, output_tokens: 1 }, stop_reason: "end_turn" };
+    });
+    const transitions = videoStorylineTransitionsService(db, { modelOptions: { createModelClient: () => ({ messages: { create } }) as never } });
+    const gap = await transitions.suggest(companyId, storylineId, { fromShotId: aiShotId!, toShotId: shotId }, ACTOR);
+    // The AI shot's end is described; the footage side is age-checked but never described.
+    expect(systems.filter((x) => x.startsWith("You describe"))).toHaveLength(1);
+    expect(gap.textOnlyReason).toContain("both consent ticks");
+    const [footageShot] = await db.select().from(videoShots).where(eq(videoShots.id, shotId));
+    expect((footageShot!.frameNotes as Record<string, unknown>).start).toBeUndefined();
+    // Once a person ticks both boxes, the next suggestion may describe it.
+    await clips.updateConsent(companyId, storylineId, upload.id, PEOPLE_OK, ACTOR);
+    systems.length = 0;
+    await transitions.suggest(companyId, storylineId, { fromShotId: aiShotId!, toShotId: shotId }, ACTOR);
+    expect(systems.filter((x) => x.startsWith("You describe"))).toHaveLength(1);
+  });
+
+  it("music uploads are checked by their bytes and count in the storage limit (security review DUR-4745)", async () => {
+    const companyId = await seedCompany();
+    const clips = videoStorylineClipsService(db);
+    const footage = videoStorylineFootageService(db);
+    const fake = { buffer: Buffer.from("#EXTM3U\nfile:///etc/passwd\n"), originalName: "song.mp3", contentType: "audio/mpeg", size: 30 };
+    await expect(clips.uploadMusic(companyId, fake, ACTOR)).rejects.toMatchObject({ status: 415 });
+    const wav = Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WAVEfmt "), Buffer.alloc(200)]);
+    const choice = await clips.uploadMusic(companyId, { buffer: wav, originalName: "song.wav", contentType: "audio/wav", size: wav.length }, ACTOR);
+    expect(choice.source).toBe("upload");
+    expect(await footage.storageUsedBytes(companyId)).toBe(wav.length);
+    await footage.setSettings(companyId, { storageQuotaBytes: wav.length + 10 });
+    await expect(clips.uploadMusic(companyId, { buffer: wav, originalName: "again.wav", contentType: "audio/wav", size: wav.length }, ACTOR)).rejects.toMatchObject({ status: 413 });
+  });
+
   it("an upload that is in use cannot be deleted; an unused one can", async () => {
     const companyId = await seedCompany();
     const { storylineId } = await seedStoryline(companyId);

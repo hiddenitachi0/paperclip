@@ -4,7 +4,7 @@ import { and, asc, desc, eq, inArray, ne, sql } from "drizzle-orm";
 import sharp from "sharp";
 import type { Db } from "@paperclipai/db";
 import { videoScenes, videoShots, videoStorylines, videoTransitionTakes, videoTransitions, withCompanyScope } from "@paperclipai/db";
-import { companyMonthlyMediaSpendCents, dataUriBytes, NO_READER_MESSAGE, parseFrameAgeCheck, videoStorylineFootageService } from "./video-storyline-footage.js";
+import { companyMonthlyMediaSpendCents, sendableDataUriBytes, NO_READER_MESSAGE, parseFrameAgeCheck, videoStorylineFootageService } from "./video-storyline-footage.js";
 import {
   MEDIA_MONTHLY_CAP_EXPLANATION,
   MEDIA_STUDIO_PLUGIN_KEY,
@@ -95,7 +95,7 @@ const READER_MAX_OUTPUT_TOKENS = 600;
 
 export { NO_READER_MESSAGE, parseFrameAgeCheck };
 export const AGE_REFUSED_MESSAGE =
-  "The frames at this join did not pass the age check (only pictures clearly of adults, or with no people at all, are sent to the picture-reading AI), so this transition was written from the script only.";
+  "The frames at this join were not sent to the picture-reading AI (only pictures clearly of adults, or with no people at all, pass the age check, and your own footage showing people also needs both consent ticks), so this transition was written from the script only.";
 export const NO_FRAMES_MESSAGE = "The clips at this join could not be read (they may not be rendered yet), so this transition was written from the script only.";
 
 // ─── Pure helpers (exported for tests) ────────────────────────────────────
@@ -666,6 +666,8 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
     if (cached && cached.sourceHash === sourceHash) {
       // A refusal never gets milder: the same frames are not checked again.
       const refused = cached.verdict === "under18" || cached.verdict === "unclear";
+      // Consent can be taken back: re-checked for footage that showed people.
+      if (!refused && cached.verdict === "adult" && (await footage.readerRefusal(companyId, shot, true))) return { text: null, refused: true };
       return { text: refused ? null : cached.text, refused };
     }
     let image: Buffer | null = null;
@@ -693,12 +695,17 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
       images,
     };
     let verdict: string | null = "local";
-    if (reader.provider !== "local") {
-      // Cloud model: age check first (design 2.5). Only "adult" or "no people" may be described.
+    // Cloud model, or any model reading the company's own footage: age check
+    // first (design 2.5). Only "adult" or "no people" may be described.
+    if (reader.provider !== "local" || shot.sourceUploadId) {
       const check = await models.write(companyId, actor, { ...common, system: AGE_CHECK_SYSTEM, user: AGE_CHECK_USER, maxTokens: 60 });
       verdict = parseFrameAgeCheck(check.text);
       if (verdict === null) return { text: null, refused: true };
     }
+    // Your own footage that shows people (whatever the upload said): both
+    // consent ticks before the frames are described. Not cached, so ticking
+    // the boxes later lets the next suggestion read them.
+    if (verdict === "adult" && (await footage.readerRefusal(companyId, shot, true))) return { text: null, refused: true };
     const refused = verdict === "under18" || verdict === "unclear";
     let text: string | null = null;
     let modelLabel: string | null = null;
@@ -970,8 +977,8 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
         throw unprocessable("The frames at this join could not be read (ffmpeg may be missing on the server), so nothing was made.");
       }
       // Your own footage on either side (design 2.5): Sogni rule, age check and consent before it leaves.
-      const sentA = await footage.assertMaySend(companyId, a, providerId, dataUriBytes(startImage) ?? Buffer.alloc(0), actor);
-      const sentB = await footage.assertMaySend(companyId, b, providerId, dataUriBytes(endImage) ?? Buffer.alloc(0), actor);
+      const sentA = await footage.assertMaySend(companyId, a, providerId, sendableDataUriBytes(startImage), actor);
+      const sentB = await footage.assertMaySend(companyId, b, providerId, sendableDataUriBytes(endImage), actor);
       const carriesFootage = sentA.footage || sentB.footage;
       // Cast pictures for everyone in A or B (Kling uses them to keep faces; Sogni LTX takes only the two frames).
       const [castA, castB] = [await render.castVideoInput(companyId, storyline, a), await render.castVideoInput(companyId, storyline, b)];

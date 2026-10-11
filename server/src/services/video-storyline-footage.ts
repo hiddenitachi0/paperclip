@@ -83,6 +83,13 @@ export function sha256Hex(bytes: Buffer): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+/** The bytes of a data: URI that is about to be sent out; fails closed (never age-checks an empty picture). */
+export function sendableDataUriBytes(dataUri: string): Buffer {
+  const bytes = dataUriBytes(dataUri);
+  if (!bytes || bytes.length === 0) throw unprocessable("The picture to send could not be read, so nothing was sent.");
+  return bytes;
+}
+
 /** The bytes of a data: URI (base64), or null. */
 export function dataUriBytes(dataUri: string): Buffer | null {
   const match = /^data:[^,]*;base64,(.*)$/s.exec(dataUri);
@@ -113,6 +120,28 @@ export async function companyMonthlyMediaSpendCents(executor: Pick<Db, "select">
     .from(videoMediaSpend)
     .where(and(eq(videoMediaSpend.companyId, companyId), gte(videoMediaSpend.createdAt, since)));
   return Number(takes?.total ?? 0) + Number(other?.total ?? 0);
+}
+
+/** Where music uploaded for storylines is stored (counted in the company's footage quota). */
+export const STORYLINE_MUSIC_NAMESPACE = "video-storylines/music";
+
+/**
+ * Everything the company's footage quota counts: its uploads (raw, working,
+ * preview, poster) plus music files uploaded for storylines (security review
+ * DUR-4745: music used to sit outside the quota).
+ */
+export async function companyStorageUsedBytes(executor: Pick<Db, "select">, companyId: string): Promise<number> {
+  const [uploads] = await executor
+    .select({
+      total: sql<number>`coalesce(sum(${videoUploads.rawByteSize} + ${videoUploads.workingByteSize} + ${videoUploads.previewByteSize} + ${videoUploads.posterByteSize}), 0)::bigint`,
+    })
+    .from(videoUploads)
+    .where(eq(videoUploads.companyId, companyId));
+  const [music] = await executor
+    .select({ total: sql<number>`coalesce(sum(${assets.byteSize}), 0)::bigint` })
+    .from(assets)
+    .where(and(eq(assets.companyId, companyId), sql`${assets.objectKey} like ${`${companyId}/${STORYLINE_MUSIC_NAMESPACE}/%`}`));
+  return Number(uploads?.total ?? 0) + Number(music?.total ?? 0);
 }
 
 export function uploadByteSize(row: Pick<UploadRow, "rawByteSize" | "workingByteSize" | "previewByteSize" | "posterByteSize">): number {
@@ -218,13 +247,7 @@ export function videoStorylineFootageService(db: Db, deps: FootageDeps = {}) {
   }
 
   async function storageUsedBytes(companyId: string): Promise<number> {
-    const [row] = await db
-      .select({
-        total: sql<number>`coalesce(sum(${videoUploads.rawByteSize} + ${videoUploads.workingByteSize} + ${videoUploads.previewByteSize} + ${videoUploads.posterByteSize}), 0)::bigint`,
-      })
-      .from(videoUploads)
-      .where(eq(videoUploads.companyId, companyId));
-    return Number(row?.total ?? 0);
+    return companyStorageUsedBytes(db, companyId);
   }
 
   function shotLabel(shot: Pick<ShotRow, "orderIndex">): string {
@@ -307,12 +330,21 @@ export function videoStorylineFootageService(db: Db, deps: FootageDeps = {}) {
     return { footage: true };
   }
 
-  /** Same rules, as a yes/no for the picture-reading model's transition context (it falls back to the script). */
-  async function readerRefusal(companyId: string, shot: Pick<ShotRow, "sourceUploadId" | "orderIndex">): Promise<string | null> {
+  /**
+   * Same rules, as a yes/no for the picture-reading model's transition
+   * context (it falls back to the script). Called twice by the reader: before
+   * anything is sent (peopleSeen false: the uploader said it shows people and
+   * did not tick both boxes), and again after the age check (peopleSeen true
+   * when the check saw people -- even on an upload marked "no people"), so no
+   * frame of real people is ever DESCRIBED without both ticks. The age check
+   * itself has to see the frames to know whether people are in them: that
+   * one call goes to the company's own chosen picture-reading model.
+   */
+  async function readerRefusal(companyId: string, shot: Pick<ShotRow, "sourceUploadId" | "orderIndex">, peopleSeen = false): Promise<string | null> {
     if (!shot.sourceUploadId) return null;
     const upload = await db.select().from(videoUploads).where(and(eq(videoUploads.id, shot.sourceUploadId), eq(videoUploads.companyId, companyId)));
     if (!upload[0]) return "The clip's upload is gone, so its frames were not read.";
-    return consentProblem(upload[0], shot, false);
+    return consentProblem(upload[0], shot, peopleSeen);
   }
 
   // ─── Music ───
