@@ -701,7 +701,8 @@ export async function evaluateQualityDoneCheck(input: QualityDoneCheckInput): Pr
     const model = await resolveDoneCheckModel(db, issue.companyId, row);
     if (!model) {
       await noteSkipped(noDoneCheckModelReason());
-      return { applies: true, result: null };
+      // The company check did not evaluate anything: the instance-wide gate still applies.
+      return { applies: false };
     }
     critic = createSavedModelDoneCheckCritic(
       db,
@@ -718,10 +719,17 @@ export async function evaluateQualityDoneCheck(input: QualityDoneCheckInput): Pr
     });
     if (block) {
       await noteSkipped(`A spending limit stops this check from running right now: ${block.reason}`);
-      return { applies: true, result: null };
+      return { applies: false };
     }
   } catch (err) {
-    logger.warn({ err, issueId: issue.id }, "quality finish check: could not read the spending limits; running the check");
+    // Fail closed: with the cap unread, no paid call is made; the instance-wide gate decides.
+    logger.warn({ err, issueId: issue.id }, "quality finish check: could not read the spending limits; skipping the check");
+    try {
+      await noteSkipped("The spending limits could not be read, so this check was skipped.");
+    } catch {
+      // best-effort
+    }
+    return { applies: false };
   }
 
   // Watch the reviewer so a failed or unreadable check is recorded as "not checked",
@@ -896,11 +904,20 @@ export async function applyDefaultReviewerPolicy<T>(
     projectId: string | null | undefined;
     assigneeAgentId: string | null | undefined;
     requestedPolicy: unknown;
+    /**
+     * True only for a board user. A board user passing an explicit policy (even `{}`) opts out
+     * of the default reviewer; an agent never can -- the agent being reviewed must not decide
+     * whether it gets reviewed.
+     */
+    actorMayOptOut?: boolean;
     normalizedPolicy: T;
     normalize: (policy: unknown) => T;
   },
 ): Promise<T> {
-  if (input.requestedPolicy != null || input.normalizedPolicy) return input.normalizedPolicy;
+  // Decide on the normalized policy, not on whether the raw input was non-null: `{}` or a
+  // stage-less policy (monitor only) must not skip the default reviewer for an agent creator.
+  if (issueHasReviewOrApprovalStage(input.normalizedPolicy)) return input.normalizedPolicy;
+  if (input.requestedPolicy != null && input.actorMayOptOut === true) return input.normalizedPolicy;
   try {
     const row = await readQualityLoopSettingsRow(db, input.companyId);
     const reviewerId = row?.defaultReviewerAgentId ?? null;
@@ -911,7 +928,10 @@ export async function applyDefaultReviewerPolicy<T>(
       .where(and(eq(agents.id, reviewerId), eq(agents.companyId, input.companyId)));
     if (!reviewer || reviewer.status === "terminated") return input.normalizedPolicy;
     if (!(await issueProjectHasGitWorkspace(db, input.companyId, input.projectId))) return input.normalizedPolicy;
+    const existingPolicy =
+      input.normalizedPolicy && typeof input.normalizedPolicy === "object" ? input.normalizedPolicy : {};
     return input.normalize({
+      ...existingPolicy,
       stages: [{ type: "review", participants: [{ type: "agent", agentId: reviewerId }] }],
     });
   } catch (err) {

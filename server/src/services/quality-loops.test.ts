@@ -636,7 +636,7 @@ describeEmbeddedPostgres("agent quality loops (DB-backed)", () => {
         requestedStatus: "done",
         currentStatus: "in_progress",
       });
-      expect(outcome).toEqual({ applies: true, result: null });
+      expect(outcome).toEqual({ applies: false });
     }
     const notes = await qualityComments(f.issueId);
     expect(notes).toHaveLength(1);
@@ -794,7 +794,24 @@ describeEmbeddedPostgres("agent quality loops (DB-backed)", () => {
     expect(applied?.stages[0]).toMatchObject({ type: "review", participants: [{ type: "agent", agentId: f.reviewerId }] });
     expect(await applyDefaultReviewerPolicy(db, { ...base, assigneeAgentId: f.reviewerId })).toBeNull();
     const explicit = normalizeIssueExecutionPolicy({ selfReview: false });
-    expect(await applyDefaultReviewerPolicy(db, { ...base, requestedPolicy: { selfReview: false }, normalizedPolicy: explicit })).toBe(explicit);
+    // A board user passing an explicit policy opts out of the default reviewer.
+    expect(
+      await applyDefaultReviewerPolicy(db, { ...base, actorMayOptOut: true, requestedPolicy: { selfReview: false }, normalizedPolicy: explicit }),
+    ).toBe(explicit);
+    // An agent cannot: `{}` or a stage-less policy still gets the reviewer, keeping its other fields.
+    for (const requestedPolicy of [{}, { selfReview: false }]) {
+      const viaAgent = await applyDefaultReviewerPolicy(db, {
+        ...base,
+        requestedPolicy,
+        normalizedPolicy: normalizeIssueExecutionPolicy(requestedPolicy),
+      });
+      expect(viaAgent?.stages[0]).toMatchObject({ type: "review", participants: [{ type: "agent", agentId: f.reviewerId }] });
+    }
+    // A policy that already has a staffed review stage is left alone.
+    const staffed = normalizeIssueExecutionPolicy({
+      stages: [{ type: "review", participants: [{ type: "agent", agentId: f.agentId }] }],
+    });
+    expect(await applyDefaultReviewerPolicy(db, { ...base, requestedPolicy: staffed, normalizedPolicy: staffed })).toBe(staffed);
     const nonCode = await seed({ settings: { defaultReviewerAgentId: null } });
     await db
       .update(companyQualityLoopSettings)

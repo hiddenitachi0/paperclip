@@ -6007,16 +6007,24 @@ export function issueRoutes(
     }
     await assertIssueEnvironmentSelection(companyId, createBody.executionWorkspaceSettings?.environmentId);
 
+    const requestedExecutionPolicy = pinQualityLoopFieldsForActor(
+      req,
+      applyActorMonitorScheduledBy(normalizeIssueExecutionPolicy(createBody.executionPolicy), actor.actorType),
+      null,
+    );
+    assertAgentMayChangeStages(
+      req,
+      { agentId: createBody.assigneeAgentId ?? null, userId: createBody.assigneeUserId ?? null },
+      null,
+      requestedExecutionPolicy,
+    );
     const executionPolicy = await applyDefaultReviewerPolicy(db, {
       companyId,
       projectId: createAssignmentScope.projectId,
       assigneeAgentId: createBody.assigneeAgentId ?? null,
       requestedPolicy: createBody.executionPolicy,
-      normalizedPolicy: pinQualityLoopFieldsForActor(
-        req,
-        applyActorMonitorScheduledBy(normalizeIssueExecutionPolicy(createBody.executionPolicy), actor.actorType),
-        null,
-      ),
+      actorMayOptOut: req.actor.type === "board",
+      normalizedPolicy: requestedExecutionPolicy,
       normalize: normalizeIssueExecutionPolicy,
     });
     await assertCanManageIssueMonitor(access, req, companyId, createBody.assigneeAgentId ?? null, Boolean(executionPolicy?.monitor));
@@ -6275,16 +6283,24 @@ export function issueRoutes(
     const currentSerializedChild = serializationContext
       ? await findCurrentSerializedWatchdogChild(parent)
       : null;
+    const requestedExecutionPolicy = pinQualityLoopFieldsForActor(
+      req,
+      applyActorMonitorScheduledBy(normalizeIssueExecutionPolicy(createBody.executionPolicy), actor.actorType),
+      null,
+    );
+    assertAgentMayChangeStages(
+      req,
+      { agentId: createBody.assigneeAgentId ?? null, userId: createBody.assigneeUserId ?? null },
+      null,
+      requestedExecutionPolicy,
+    );
     const executionPolicy = await applyDefaultReviewerPolicy(db, {
       companyId: parent.companyId,
       projectId: createBody.projectId ?? parent.projectId ?? null,
       assigneeAgentId: createBody.assigneeAgentId ?? null,
       requestedPolicy: createBody.executionPolicy,
-      normalizedPolicy: pinQualityLoopFieldsForActor(
-        req,
-        applyActorMonitorScheduledBy(normalizeIssueExecutionPolicy(createBody.executionPolicy), actor.actorType),
-        null,
-      ),
+      actorMayOptOut: req.actor.type === "board",
+      normalizedPolicy: requestedExecutionPolicy,
       normalize: normalizeIssueExecutionPolicy,
     });
     await assertCanManageIssueMonitor(access, req, parent.companyId, createBody.assigneeAgentId ?? null, Boolean(executionPolicy?.monitor));
