@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import type { Db } from "@paperclipai/db";
 import { LANE_A_SETUP_CHECK_MIN_INTERVAL_MS, laneATransformSchema, sendLaneAMessageSchema } from "@paperclipai/shared";
-import { badRequest, tooManyRequests, unauthorized } from "../errors.js";
+import { badRequest, notFound, tooManyRequests, unauthorized } from "../errors.js";
 import { logActivity } from "../services/activity-log.js";
 import { assertCompanyOwnerOrAdmin } from "./model-directory.js";
 import { validate } from "../middleware/validate.js";
@@ -18,6 +18,13 @@ import type { LaneAServiceOptions } from "../services/lane-a.js";
 import { LANE_A_CONTINUE_SPEC_MAX_LENGTH } from "../services/lane-a-continue.js";
 import { redactKnownLeakedSecretPatterns, redactSensitiveText } from "../redaction.js";
 import { assertBoard, assertCompanyAccess, assertServiceOrBoard, getActorInfo } from "./authz.js";
+import {
+  CONVERSATION_LOG_DEFAULT_LIMIT,
+  CONVERSATION_LOG_MAX_LIMIT,
+  CONVERSATION_LOG_SEARCH_MAX_LENGTH,
+  laneAConversationLogService,
+  type ConversationLogViewer,
+} from "../services/lane-a-conversation-log.js";
 
 /**
  * Lane A routes (DUR-217): `POST /api/lane-a/:agentId/messages`, a direct
@@ -61,6 +68,27 @@ function resolveTransformCompanyId(req: Parameters<typeof getActorInfo>[0]): str
   return parsed.data.companyId;
 }
 
+/**
+ * The Conversations review list's query. Dates are YYYY-MM-DD (UTC days):
+ * `from` keeps conversations still active on or after that day, `to` those
+ * started on or before it.
+ */
+const conversationLogQuerySchema = z.object({
+  userId: z.string().trim().min(1).max(200).optional(),
+  from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  hasHandoffs: z.enum(["true", "false"]).optional(),
+  q: z.string().max(CONVERSATION_LOG_SEARCH_MAX_LENGTH).optional(),
+  limit: z.coerce.number().int().min(1).max(CONVERSATION_LOG_MAX_LIMIT).optional(),
+  cursor: z.string().max(200).optional(),
+});
+
+function utcDay(value: string, plusDays = 0): Date {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(date.getTime())) throw badRequest("Invalid date");
+  return new Date(date.getTime() + plusDays * 24 * 60 * 60 * 1000);
+}
+
 /** "Check this setup": which model to check (the main one, or one saved backup by id). */
 const setupCheckSchema = z
   .object({
@@ -73,6 +101,7 @@ export function laneARoutes(db: Db, options: { laneA?: LaneAServiceOptions; hugg
   const router = Router();
   const agents = agentService(db);
   const laneA = laneAService(db, options.laneA);
+  const conversationLog = laneAConversationLogService(db);
 
   function requesterFor(req: Parameters<typeof getActorInfo>[0]) {
     const actor = getActorInfo(req);
@@ -428,6 +457,68 @@ export function laneARoutes(db: Db, options: { laneA?: LaneAServiceOptions; hugg
         laneAAssignedUserIds: (targetAgent.laneAAssignedUserIds as string[] | null) ?? [],
       },
       actor: req.actor,
+    });
+    res.json(result);
+  });
+
+  /**
+   * Conversations review (Lane A gap): what a quick agent told people.
+   * Board users only -- an agent key, a delegate token or a service token is
+   * refused. Owners and admins (and the local board / instance admins) see
+   * every conversation of this company's quick agent; everyone else only
+   * their own. An Employee (light) member's chat shows as a private row with
+   * no content (DUR-4094: owners read those only through emergency access).
+   * An agent of another company, or a conversation of another agent, is a
+   * 404. Read-only: deleting and retention are a later slice.
+   */
+  async function conversationLogTarget(req: Parameters<typeof getActorInfo>[0]) {
+    assertBoard(req);
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    if (!z.string().uuid().safeParse(companyId).success) throw notFound("Company not found");
+    const agentId = req.params.agentId as string;
+    if (!z.string().uuid().safeParse(agentId).success) throw notFound("Agent not found");
+    const targetAgent = await agents.getById(agentId);
+    if (!targetAgent || targetAgent.companyId !== companyId) throw notFound("Agent not found");
+    let canSeeAll = req.actor.source === "local_implicit" || Boolean(req.actor.isInstanceAdmin);
+    if (!canSeeAll) {
+      const membership = (req.actor.memberships ?? []).find((item) => item.companyId === companyId);
+      canSeeAll =
+        membership?.status === "active" && (membership.membershipRole === "owner" || membership.membershipRole === "admin");
+    }
+    const viewer: ConversationLogViewer = { userId: req.actor.userId ?? null, canSeeAll };
+    return { companyId, agentId: targetAgent.id, viewer };
+  }
+
+  router.get("/companies/:companyId/lane-a/agents/:agentId/conversations", async (req, res) => {
+    const { companyId, agentId, viewer } = await conversationLogTarget(req);
+    const parsed = conversationLogQuerySchema.safeParse(req.query);
+    if (!parsed.success) throw badRequest("Invalid conversation filters", parsed.error.flatten());
+    const query = parsed.data;
+    const result = await conversationLog.listConversations({
+      companyId,
+      agentId,
+      viewer,
+      filters: {
+        userId: query.userId,
+        from: query.from ? utcDay(query.from) : undefined,
+        to: query.to ? utcDay(query.to, 1) : undefined,
+        hasHandoffs: query.hasHandoffs === "true",
+        q: query.q,
+      },
+      limit: query.limit ?? CONVERSATION_LOG_DEFAULT_LIMIT,
+      cursor: query.cursor ?? null,
+    });
+    res.json(result);
+  });
+
+  router.get("/companies/:companyId/lane-a/agents/:agentId/conversations/:conversationId", async (req, res) => {
+    const { companyId, agentId, viewer } = await conversationLogTarget(req);
+    const result = await conversationLog.getTranscript({
+      companyId,
+      agentId,
+      conversationId: req.params.conversationId as string,
+      viewer,
     });
     res.json(result);
   });
