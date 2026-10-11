@@ -1723,6 +1723,13 @@
       "when": 1791677123916,
       "tag": "0246_report_data_fetch",
       "breakpoints": true
+    },
+    {
+      "idx": 247,
+      "version": "7",
+      "when": 1791677895626,
+      "tag": "0247_company_migrated_to",
+      "breakpoints": true
     }
   ]
 }
