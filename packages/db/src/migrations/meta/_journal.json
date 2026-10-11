@@ -1737,6 +1737,13 @@
       "when": 1791678861143,
       "tag": "0248_company_migrated_to",
       "breakpoints": true
+    },
+    {
+      "idx": 249,
+      "version": "7",
+      "when": 1791680646967,
+      "tag": "0249_storyline_clips_music_export",
+      "breakpoints": true
     }
   ]
 }

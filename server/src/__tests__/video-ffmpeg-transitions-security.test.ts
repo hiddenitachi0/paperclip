@@ -19,13 +19,14 @@ import {
  */
 
 describe("isXfadeTransition", () => {
-  it("accepts only the two allow-listed transition names", () => {
-    expect(isXfadeTransition("fade")).toBe(true);
-    expect(isXfadeTransition("dissolve")).toBe(true);
+  it("accepts only the allow-listed transition names (Phase 2 adds the extra free ones under More…)", () => {
+    for (const name of ["fade", "dissolve", "fadeblack", "fadewhite", "wipeleft", "wiperight", "slideleft", "slideright", "circleopen", "zoomin", "pixelize", "radial"]) {
+      expect(isXfadeTransition(name)).toBe(true);
+    }
   });
 
   it("rejects anything else, including shell/filter metacharacters", () => {
-    for (const candidate of ["cut", "", "fade;rm -rf /", "fade]; drawtext=text=pwned", "wipeleft", "FADE", "fade\nacrossfade"]) {
+    for (const candidate of ["cut", "", "fade;rm -rf /", "fade]; drawtext=text=pwned", "wipeleft:offset=0", "hblur", "FADE", "fade\nacrossfade"]) {
       expect(isXfadeTransition(candidate)).toBe(false);
     }
   });

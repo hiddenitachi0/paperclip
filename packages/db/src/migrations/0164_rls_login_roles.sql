@@ -370,6 +370,11 @@ DECLARE
     -- login-role lists match the schema.
     'video_transition_takes',
     'video_transitions',
+    -- Storyline Simple editor, Phase 2. Created, granted on and policed in
+    -- 0249_storyline_clips_music_export.sql; listed here so the login-role
+    -- lists match the schema.
+    'video_media_spend',
+    'video_uploads',
     -- DUR-4037. Created (and granted on) in 0187_payment_notices_and_settings.sql;
     -- listed here so the login-role lists match the schema, as for the tables above.
     'payment_notices',
@@ -717,6 +722,11 @@ DECLARE
     -- login-role lists match the schema.
     'video_transition_takes',
     'video_transitions',
+    -- Storyline Simple editor, Phase 2. Created, granted on and policed in
+    -- 0249_storyline_clips_music_export.sql; listed here so the login-role
+    -- lists match the schema.
+    'video_media_spend',
+    'video_uploads',
     -- DUR-4037. Created (and granted on) in 0187_payment_notices_and_settings.sql;
     -- listed here so the login-role lists match the schema, as for the tables above.
     'payment_notices',

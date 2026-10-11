@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { VIDEO_STORYLINE_ASPECTS } from "./video-storyline-clips.js";
 
 /**
  * DUR-4127 (backend half of DUR-4095, video storylines): types, limits and
@@ -279,6 +280,8 @@ export const createVideoStorylineSchema = z
     musicAssetId: storylineFields.musicAssetId.optional().default(null),
     musicSourceKey: storylineFields.musicSourceKey.optional().default(null),
     musicVolumeDb: storylineFields.musicVolumeDb.optional().default(VIDEO_MUSIC_DEFAULT_VOLUME_DB),
+    /** Phase 2: the picture shape, chosen before anything is rendered (16:9 when left out). */
+    aspect: z.enum(VIDEO_STORYLINE_ASPECTS).optional(),
   })
   .strict()
   .refine((value) => !(value.musicAssetId && value.musicSourceKey), {
