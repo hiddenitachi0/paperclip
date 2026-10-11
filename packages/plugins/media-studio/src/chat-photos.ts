@@ -1,9 +1,12 @@
 // Photos someone sent in a chat (a Telegram photo to a quick agent's bot).
 //
-// The Telegram bridge stores each one in the company's Files under a name
-// that starts with CHAT_PHOTO_FILENAME_PREFIX (packages/shared's
-// chat-attachments.ts; a server test pins that the two match). Such a photo
-// is a real photo of real people, so before Media Studio sends it to any
+// Which pictures count: every picture the host says the person attached in
+// this quick-agent chat (runContext.attachedFileIds, set by the host only,
+// whatever the file is called), and any picture stored under a name that
+// starts with CHAT_PHOTO_FILENAME_PREFIX (how the Telegram bridge stores a
+// photo; packages/shared's chat-attachments.ts, a server test pins that the
+// two match). Such a photo is a real photo of real people, so before Media
+// Studio sends it to any
 // picture service (as a reference, a start picture, or a Sogni tool's input)
 // it must pass the same age check as identity and training pictures
 // (requireAdultPictures): only a photo that clearly shows adults is sent.
@@ -50,16 +53,20 @@ export function chatPhotoRefusal(err: unknown): string {
 
 /**
  * Throws one plain sentence unless every chat photo among `files` clearly
- * shows adults. Pictures that are not chat photos are left alone (looks,
- * identities and pictures Media Studio made have their own rules).
+ * shows adults. A chat photo is a picture the person attached in this chat
+ * (`attachedFileIds`, from the host) or one stored under the chat-photo
+ * name. Other pictures are left alone (looks, identities and pictures Media
+ * Studio made have their own rules).
  */
 export async function requireAdultChatPhotos(
   ctx: PluginContext,
   companyId: string,
   files: Array<{ id: string; originalFilename: string | null | undefined }>,
   runId?: string | null,
+  attachedFileIds?: readonly string[] | null,
 ): Promise<void> {
-  const ids = files.filter(isChatPhoto).map((file) => file.id);
+  const attached = new Set((attachedFileIds ?? []).map((id) => id.toLowerCase()));
+  const ids = files.filter((file) => isChatPhoto(file) || attached.has(file.id.toLowerCase())).map((file) => file.id);
   if (ids.length === 0) return;
   try {
     await requireAdultPictures(ctx, companyId, ids, "The photo", { runId });

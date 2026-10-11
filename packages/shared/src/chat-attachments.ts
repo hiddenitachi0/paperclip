@@ -42,3 +42,22 @@ export function chatPhotoFilename(type: ChatPhotoType, now: Date = new Date()): 
   const extension = type === "image/jpeg" ? "jpg" : type === "image/png" ? "png" : "webp";
   return `${CHAT_PHOTO_FILENAME_PREFIX}${stamp}.${extension}`;
 }
+
+/**
+ * The one picture analysis a quick agent's tool call may ask the host for:
+ * Media Studio's age check of a photo the person attached in the chat. The
+ * host sends these fixed instructions itself (the plugin cannot choose the
+ * prompts on this path). They are Media Studio's own AGE_CHECK_* texts
+ * (packages/plugins/media-studio/src/age-check.ts); a server test pins that
+ * the two copies match.
+ */
+export const CHAT_PHOTO_AGE_CHECK_PURPOSE = "chat_photo_age_check";
+export const CHAT_PHOTO_AGE_CHECK_SYSTEM_PROMPT = [
+  "You check whether the person in a picture clearly looks like an adult (18 or older).",
+  "Never say or guess who the person is. Do not describe the picture.",
+  'Answer with exactly this JSON and nothing else: {"apparentAdult": true}',
+  "Use true only when the person clearly looks 18 or older; false when they look under 18; null when you are unsure, when there is no clear person, or when there is more than one person and any of them may be under 18.",
+].join("\n");
+export const CHAT_PHOTO_AGE_CHECK_USER_PROMPT =
+  'Does the person in this picture clearly look like an adult? Answer only {"apparentAdult": true|false|null}.';
+export const CHAT_PHOTO_AGE_CHECK_MAX_OUTPUT_TOKENS = 60;

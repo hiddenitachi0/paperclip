@@ -1029,8 +1029,14 @@ export interface PluginImageAnalysisInput {
    * run context. Outside a page action the host refuses the call unless this
    * names a quick agent's tool call that is running right now, for this
    * company, on behalf of a signed-in person; the call then runs as them.
+   * That path is narrow: only the plugin the tool call belongs to, only
+   * `purpose: "chat_photo_age_check"` (the host then sends its own fixed
+   * age-check instructions; `systemPrompt`/`userPrompt` are ignored), only a
+   * picture the person attached in that chat, and only a few per call.
    */
   runId?: string;
+  /** With `runId`: what the analysis is for. Only "chat_photo_age_check" is accepted. */
+  purpose?: "chat_photo_age_check";
 }
 
 /** Result of `models.analyseImage`: the model's text answer, unchecked (the plugin checks it). */
