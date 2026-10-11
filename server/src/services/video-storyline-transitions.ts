@@ -518,7 +518,8 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
     if (footageSettings.neverSendUploadsToSogni && providerId === "sogni" && shots.some((s) => s.sourceUploadId)) {
       exportWarnings.push("This storyline uses Sogni and your own footage. AI bridges and animation next to your footage are blocked by this company's setting; use Cut or a blend there.");
     }
-    const aspectLocked = shots.some((s) => s.clipKind === "generated" && (s.status !== "draft" || s.resultObjectKey !== null));
+    // Same rule as setAspect: an AI picture or clip has been made in the current shape.
+    const aspectLocked = shots.some((s) => s.clipKind === "generated" && !s.sourceUploadId && (s.status !== "draft" || s.resultObjectKey !== null || s.stillObjectKey !== null));
     const totalSeconds = Math.round(
       shots.reduce((sum, s) => sum + s.durationSeconds, 0) + gaps.filter((g) => g.kind === "ai").reduce((sum, g) => sum + g.durationMs / 1000, 0),
     );
