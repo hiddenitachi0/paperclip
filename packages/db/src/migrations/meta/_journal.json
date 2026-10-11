@@ -1727,8 +1727,15 @@
     {
       "idx": 247,
       "version": "7",
-      "when": 1791677895626,
-      "tag": "0247_company_migrated_to",
+      "when": 1791677879168,
+      "tag": "0247_company_quality_loop_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 248,
+      "version": "7",
+      "when": 1791678861143,
+      "tag": "0248_company_migrated_to",
       "breakpoints": true
     }
   ]

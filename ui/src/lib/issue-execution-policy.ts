@@ -109,6 +109,64 @@ export function buildGoalConditionMonitor(input: GoalConditionMonitorInput): Iss
   };
 }
 
+/** The per-task quality-check fields of a policy (self-check passes, finish check, the older self-review opt-out). */
+export function pickQualityLoopFields(
+  policy: IssueExecutionPolicy | null | undefined,
+): Pick<IssueExecutionPolicy, "selfReview" | "selfReviewPasses" | "doneCheck"> {
+  return {
+    ...(policy?.selfReview !== undefined ? { selfReview: policy.selfReview } : {}),
+    ...(policy?.selfReviewPasses !== undefined ? { selfReviewPasses: policy.selfReviewPasses } : {}),
+    ...(policy?.doneCheck !== undefined ? { doneCheck: policy.doneCheck } : {}),
+  };
+}
+
+/** Quality-check choices offered on a task ("company" = follow Company settings). */
+export const TASK_QUALITY_CHECK_CHOICES = [
+  { value: "company", label: "Company setting" },
+  { value: "both", label: "Self-check and finish check" },
+  { value: "finish", label: "Finish check only" },
+  { value: "self", label: "Self-check only" },
+  { value: "off", label: "Off for this task" },
+] as const;
+export type TaskQualityCheckChoice = (typeof TASK_QUALITY_CHECK_CHOICES)[number]["value"];
+
+export function readTaskQualityCheckChoice(policy: IssueExecutionPolicy | null | undefined): TaskQualityCheckChoice {
+  const passes = policy?.selfReviewPasses;
+  const done = policy?.doneCheck;
+  if (passes === undefined && done === undefined) return "company";
+  const self = (passes ?? 0) > 0;
+  if (self && done) return "both";
+  if (!self && done) return "finish";
+  if (self && !done) return "self";
+  return "off";
+}
+
+/** The policy with the task's quality-check choice applied (null when nothing is left). */
+export function applyTaskQualityCheckChoice(
+  policy: IssueExecutionPolicy | null | undefined,
+  choice: TaskQualityCheckChoice,
+): IssueExecutionPolicy | null {
+  const { selfReviewPasses: _p, doneCheck: _d, ...rest } = (policy ?? {
+    mode: "normal",
+    commentRequired: true,
+    stages: [],
+  }) as IssueExecutionPolicy;
+  const next: IssueExecutionPolicy = { ...rest };
+  if (choice !== "company") {
+    next.selfReviewPasses = choice === "both" || choice === "self" ? 1 : 0;
+    next.doneCheck = choice === "both" || choice === "finish";
+  }
+  const empty =
+    next.stages.length === 0 &&
+    !next.monitor &&
+    !next.reviewPreset &&
+    !next.authorizationPolicy &&
+    next.selfReview === undefined &&
+    next.selfReviewPasses === undefined &&
+    next.doneCheck === undefined;
+  return empty ? null : next;
+}
+
 export function buildExecutionPolicy(input: {
   existingPolicy?: IssueExecutionPolicy | null;
   reviewerValues: string[];
@@ -142,12 +200,15 @@ export function buildExecutionPolicy(input: {
     });
   }
 
-  if (stages.length === 0 && !monitor) return null;
+  // Per-task quality-check overrides ride along whatever else changes on the policy.
+  const qualityFields = pickQualityLoopFields(input.existingPolicy);
+  if (stages.length === 0 && !monitor && Object.keys(qualityFields).length === 0) return null;
 
   return {
     mode,
     commentRequired: true,
     stages,
     ...(monitor ? { monitor } : {}),
+    ...qualityFields,
   };
 }

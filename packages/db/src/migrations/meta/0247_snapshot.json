@@ -1,5 +1,5 @@
 {
-  "id": "b15a6f1f-e046-419c-a705-c1cdcd0169a9",
+  "id": "827930ca-1852-4711-a0c6-bd95769d8cb2",
   "prevId": "5fc675d7-f8f4-45e3-88c3-d9883c76e9e2",
   "version": "7",
   "dialect": "postgresql",
@@ -5363,30 +5363,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "migrated_to_url": {
-          "name": "migrated_to_url",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "migrated_at": {
-          "name": "migrated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "migrated_by_user_id": {
-          "name": "migrated_by_user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "migration_paused_routine_ids": {
-          "name": "migration_paused_routine_ids",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
         "subtasks_inherit_model_effort": {
           "name": "subtasks_inherit_model_effort",
           "type": "boolean",
@@ -6838,6 +6814,117 @@
             "id"
           ],
           "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.company_quality_loop_settings": {
+      "name": "company_quality_loop_settings",
+      "schema": "",
+      "columns": {
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "self_review_passes": {
+          "name": "self_review_passes",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "done_check_enabled": {
+          "name": "done_check_enabled",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "done_check_max_rounds": {
+          "name": "done_check_max_rounds",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "done_check_directory_entry_id": {
+          "name": "done_check_directory_entry_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "default_reviewer_agent_id": {
+          "name": "default_reviewer_agent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "updated_by_user_id": {
+          "name": "updated_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "company_quality_loop_settings_company_id_companies_id_fk": {
+          "name": "company_quality_loop_settings_company_id_companies_id_fk",
+          "tableFrom": "company_quality_loop_settings",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "cqls_done_check_entry_fk": {
+          "name": "cqls_done_check_entry_fk",
+          "tableFrom": "company_quality_loop_settings",
+          "tableTo": "model_directory_entries",
+          "columnsFrom": [
+            "done_check_directory_entry_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "cqls_default_reviewer_agent_fk": {
+          "name": "cqls_default_reviewer_agent_fk",
+          "tableFrom": "company_quality_loop_settings",
+          "tableTo": "agents",
+          "columnsFrom": [
+            "default_reviewer_agent_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },

@@ -18,6 +18,7 @@ import { CacheSettingsSection } from "../components/CacheSettingsSection";
 import { HelperSettingsSection } from "../components/helper/HelperSettingsSection";
 import { SecurityReviewSettingsSection } from "../components/SecurityReviewSettingsSection";
 import { MoveCompanySection } from "../components/company-migration/MoveCompanySection";
+import { QualityLoopSettingsSection } from "../components/QualityLoopSettingsSection";
 import { Settings, CloudUpload, Download, Plug, Upload, Image } from "lucide-react";
 import { CompanyPatternIcon } from "../components/CompanyPatternIcon";
 import { isDefaultSkin, setDefaultSkin } from "../lib/company-branding";
@@ -428,6 +429,8 @@ export function CompanySettings() {
       </div>
 
       <CacheSettingsSection companyId={selectedCompany.id} />
+
+      <QualityLoopSettingsSection companyId={selectedCompany.id} />
 
       <SecurityReviewSettingsSection companyId={selectedCompany.id} />
 

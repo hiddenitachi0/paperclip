@@ -165,6 +165,12 @@ import { evaluateSelfReviewDoneGate } from "../services/self-review-gate.js";
 import { evaluateGoalConditionDoneGate } from "../services/goal-condition-judge.js";
 import { evaluateDeployCompletionDoneGate } from "../services/deploy-completion-gate.js";
 import { evaluateDoneGateCritic } from "../services/done-gate-critic.js";
+import {
+  applyDefaultReviewerPolicy,
+  evaluateQualityDoneCheck,
+  evaluateQualitySelfReviewGate,
+  pinQualityLoopPolicyFields,
+} from "../services/quality-loops.js";
 import { evaluateOriginCommitDoneGate } from "../services/origin-commit-gate.js";
 import { evaluateFeatureLaunchDoneGate } from "../services/feature-launch-gate.js";
 import { evaluateJobApprovalDoneGate } from "../services/job-approval-gate.js";
@@ -606,6 +612,15 @@ async function buildIssueWorkspaceChangeActivityDetails(
   };
 }
 
+/**
+ * Agent quality loops: only a person may switch a task's quality checks on or off. For
+ * any other writer the task keeps what is stored (nothing on a new task), whatever was sent.
+ */
+function pinQualityLoopFieldsForActor<P extends object>(req: Request, next: P | null, previous: unknown): P | null {
+  if (req.actor.type === "board") return next;
+  return pinQualityLoopPolicyFields(next, previous);
+}
+
 function hasExecutionParticipant(value: unknown) {
   const state = parseIssueExecutionState(value);
   if (!state || state.status !== "pending") return false;
@@ -869,6 +884,42 @@ function summarizeIssueReferenceActivityDetails(input:
 
 function monitorPoliciesEqual(left: NormalizedExecutionPolicy | null, right: NormalizedExecutionPolicy | null) {
   return JSON.stringify(left?.monitor ?? null) === JSON.stringify(right?.monitor ?? null);
+}
+
+function stagesEqual(left: NormalizedExecutionPolicy | null, right: NormalizedExecutionPolicy | null) {
+  return JSON.stringify(left?.stages ?? []) === JSON.stringify(right?.stages ?? []);
+}
+
+/**
+ * Stages decide whether the mandatory quality checks run at all, so an agent may not
+ * remove an existing review/approval stage or staff one with itself or the task's own
+ * assignee (that would be a self-review the stage engine auto-skips). Board users are free.
+ */
+function assertAgentMayChangeStages(
+  req: Request,
+  assignee: { agentId: string | null; userId: string | null },
+  previous: NormalizedExecutionPolicy | null,
+  next: NormalizedExecutionPolicy | null,
+) {
+  if (req.actor.type === "board") return;
+  const actorAgentId = req.actor.type === "agent" ? req.actor.agentId ?? null : null;
+  const reviewStages = (policy: NormalizedExecutionPolicy | null) =>
+    (policy?.stages ?? []).filter((stage) => stage.type === "review" || stage.type === "approval");
+  if (reviewStages(previous).length > reviewStages(next).length) {
+    throw forbidden("Only a board user can remove a review or approval stage");
+  }
+  for (const stage of reviewStages(next)) {
+    for (const participant of stage.participants ?? []) {
+      const isSelf =
+        (participant.type === "agent" &&
+          participant.agentId != null &&
+          (participant.agentId === actorAgentId || participant.agentId === assignee.agentId)) ||
+        (participant.type === "user" && participant.userId != null && participant.userId === assignee.userId);
+      if (isSelf) {
+        throw forbidden("A review or approval stage cannot be staffed by the task's own assignee");
+      }
+    }
+  }
 }
 
 function applyActorMonitorScheduledBy(
@@ -5956,10 +6007,18 @@ export function issueRoutes(
     }
     await assertIssueEnvironmentSelection(companyId, createBody.executionWorkspaceSettings?.environmentId);
 
-    const executionPolicy = applyActorMonitorScheduledBy(
-      normalizeIssueExecutionPolicy(createBody.executionPolicy),
-      actor.actorType,
-    );
+    const executionPolicy = await applyDefaultReviewerPolicy(db, {
+      companyId,
+      projectId: createAssignmentScope.projectId,
+      assigneeAgentId: createBody.assigneeAgentId ?? null,
+      requestedPolicy: createBody.executionPolicy,
+      normalizedPolicy: pinQualityLoopFieldsForActor(
+        req,
+        applyActorMonitorScheduledBy(normalizeIssueExecutionPolicy(createBody.executionPolicy), actor.actorType),
+        null,
+      ),
+      normalize: normalizeIssueExecutionPolicy,
+    });
     await assertCanManageIssueMonitor(access, req, companyId, createBody.assigneeAgentId ?? null, Boolean(executionPolicy?.monitor));
     const issueId = randomUUID();
     const sourceTrust = await sourceTrustForActorWrite({
@@ -6216,10 +6275,18 @@ export function issueRoutes(
     const currentSerializedChild = serializationContext
       ? await findCurrentSerializedWatchdogChild(parent)
       : null;
-    const executionPolicy = applyActorMonitorScheduledBy(
-      normalizeIssueExecutionPolicy(createBody.executionPolicy),
-      actor.actorType,
-    );
+    const executionPolicy = await applyDefaultReviewerPolicy(db, {
+      companyId: parent.companyId,
+      projectId: createBody.projectId ?? parent.projectId ?? null,
+      assigneeAgentId: createBody.assigneeAgentId ?? null,
+      requestedPolicy: createBody.executionPolicy,
+      normalizedPolicy: pinQualityLoopFieldsForActor(
+        req,
+        applyActorMonitorScheduledBy(normalizeIssueExecutionPolicy(createBody.executionPolicy), actor.actorType),
+        null,
+      ),
+      normalize: normalizeIssueExecutionPolicy,
+    });
     await assertCanManageIssueMonitor(access, req, parent.companyId, createBody.assigneeAgentId ?? null, Boolean(executionPolicy?.monitor));
     const issueId = randomUUID();
     const sourceTrust = await sourceTrustForActorWrite({
@@ -6396,9 +6463,10 @@ export function issueRoutes(
     const actor = getActorInfo(req);
     const normalizedChildren = [];
     for (const child of requestedChildren) {
-      const executionPolicy = applyActorMonitorScheduledBy(
-        normalizeIssueExecutionPolicy(child.executionPolicy),
-        actor.actorType,
+      const executionPolicy = pinQualityLoopFieldsForActor(
+        req,
+        applyActorMonitorScheduledBy(normalizeIssueExecutionPolicy(child.executionPolicy), actor.actorType),
+        null,
       );
       await assertCanManageIssueMonitor(access, req, sourceIssue.companyId, child.assigneeAgentId ?? null, Boolean(executionPolicy?.monitor));
       const childIssueId = randomUUID();
@@ -6723,6 +6791,30 @@ export function issueRoutes(
       res.status(409).json({ error: selfReviewGateResult.message });
       return;
     }
+    // Agent quality loops (per company, opt-in): a self-check pass for ANY task, not only
+    // code tasks. Counts the code self-review above toward the same per-task limit, so a
+    // code task never gets more passes than the company asked for.
+    const qualitySelfReviewResult = await evaluateQualitySelfReviewGate({
+      db,
+      wakeup: heartbeat.wakeup,
+      issue: {
+        id: existing.id,
+        identifier: existing.identifier,
+        companyId: existing.companyId,
+        projectId: existing.projectId,
+        executionPolicy: existing.executionPolicy,
+        assigneeAgentId: existing.assigneeAgentId,
+        assigneeUserId: existing.assigneeUserId,
+        executionState: existing.executionState,
+      },
+      actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
+      requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
+      currentStatus: existing.status,
+    });
+    if (qualitySelfReviewResult) {
+      res.status(409).json({ error: qualitySelfReviewResult.message });
+      return;
+    }
     // DUR-32: composes with self-review above — self-review runs first, then (if the issue
     // has a plain-English goal condition set) an independent judge decides whether another
     // round is needed before the transition to in_review/done is allowed through.
@@ -6826,7 +6918,28 @@ export function issueRoutes(
     // matches what the task asked for. Ships off (instance setting general.doneGate);
     // dry run only comments; enforce sends the task back with the findings and, after
     // maxRounds, asks the operator instead of looping. Never gates a board/human actor.
-    const doneGateCriticResult = await evaluateDoneGateCritic({
+    // Agent quality loops: a company (or task) that switched on its own finish check uses
+    // its own cheap saved model instead of the instance-wide reviewer below.
+    const qualityDoneCheck = await evaluateQualityDoneCheck({
+      db,
+      issue: {
+        id: existing.id,
+        identifier: existing.identifier,
+        companyId: existing.companyId,
+        title: existing.title,
+        description: existing.description ?? null,
+        executionPolicy: existing.executionPolicy,
+        projectId: existing.projectId,
+        assigneeAgentId: existing.assigneeAgentId,
+        assigneeUserId: existing.assigneeUserId,
+        executionState: existing.executionState,
+      },
+      actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
+      requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
+      currentStatus: existing.status,
+      patchComment: typeof commentBody === "string" ? commentBody : null,
+    });
+    const doneGateCriticResult = qualityDoneCheck.applies ? qualityDoneCheck.result : await evaluateDoneGateCritic({
       db,
       issue: {
         id: existing.id,
@@ -7016,9 +7129,10 @@ export function issueRoutes(
       });
     }
     if (req.body.executionPolicy !== undefined) {
-      updateFields.executionPolicy = applyActorMonitorScheduledBy(
-        normalizeIssueExecutionPolicy(req.body.executionPolicy),
-        actor.actorType,
+      updateFields.executionPolicy = pinQualityLoopFieldsForActor(
+        req,
+        applyActorMonitorScheduledBy(normalizeIssueExecutionPolicy(req.body.executionPolicy), actor.actorType),
+        existing.executionPolicy ?? null,
       );
     }
     const previousExecutionPolicy = normalizeIssueExecutionPolicy(existing.executionPolicy ?? null);
@@ -7028,6 +7142,14 @@ export function issueRoutes(
         : previousExecutionPolicy;
     if (normalizedAssigneeAgentId !== undefined) {
       updateFields.assigneeAgentId = normalizedAssigneeAgentId;
+    }
+    if (req.body.executionPolicy !== undefined && !stagesEqual(previousExecutionPolicy, nextExecutionPolicy)) {
+      assertAgentMayChangeStages(
+        req,
+        { agentId: existing.assigneeAgentId ?? null, userId: existing.assigneeUserId ?? null },
+        previousExecutionPolicy,
+        nextExecutionPolicy,
+      );
     }
     const monitorChanged = monitorPoliciesEqual(previousExecutionPolicy, nextExecutionPolicy) === false;
     await assertCanManageIssueMonitor(

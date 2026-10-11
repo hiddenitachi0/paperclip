@@ -127,6 +127,7 @@ export {
 export { readLaneAConversationSearchSwitch } from "./lane-a-conversation-search.js";
 export * from "./helper.js";
 export * from "./company-migration.js";
+export * from "./quality-loops.js";
 export {
   BROWSER_ACCESS_LEVELS,
   readLaneABrowserAccess,
