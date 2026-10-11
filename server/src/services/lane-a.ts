@@ -1236,6 +1236,20 @@ export function buildLaneAAttachmentNote(input: {
   return `[${parts.join(" ")}]`;
 }
 
+const ATTACHMENT_NOTE_AT_END =
+  /\n\n\[The person attached (?:a picture|\d+ pictures) to this message: file ids? ((?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:, [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})*)\.[^\]]*\]$/i;
+
+/**
+ * The file ids of the note Paperclip itself appended to a stored message
+ * (buildLaneAAttachmentNote, always the very end of the row). A note the
+ * person typed somewhere in their own words is not at the end, so it is
+ * not read.
+ */
+export function readLaneAAttachmentNote(content: string): string[] {
+  const match = ATTACHMENT_NOTE_AT_END.exec(content);
+  return match ? match[1]!.split(", ").map((id) => id.toLowerCase()) : [];
+}
+
 /**
  * An earlier turn's pictures, as a line the model sees when the conversation
  * is replayed (the person does not see it). Without it, "same as the last
@@ -2127,6 +2141,15 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
    * photo). Another company's file reads exactly like a missing one. Returns
    * the ids in order, each once.
    */
+  /** The pictures attached to earlier messages of a conversation (Paperclip's own stored notes). */
+  async function earlierAttachedFileIds(conversationId: string): Promise<string[]> {
+    const rows = await db
+      .select({ content: laneAMessages.content })
+      .from(laneAMessages)
+      .where(and(eq(laneAMessages.conversationId, conversationId), eq(laneAMessages.role, "user")));
+    return rows.flatMap((row) => readLaneAAttachmentNote(row.content));
+  }
+
   async function checkChatAttachments(companyId: string, fileIds: string[]): Promise<string[]> {
     const ids = Array.from(new Set(fileIds));
     if (ids.length === 0) return [];
@@ -2881,6 +2904,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
             if (!execution) {
               outcome = { ok: false, content: "Add-on tools are not available right now." };
             } else {
+              const separator = pluginTool.namespacedName.indexOf(":");
               const pluginRun = openLaneAPluginRun({
                 agentId: ctx.agent.id,
                 companyId: ctx.companyId,
@@ -2890,7 +2914,12 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
                 // The person's own words this turn, so the host can tell a
                 // task they named from one a file or a lookup mentioned.
                 requesterMessage: message,
+                // Which plugin's tool this run is for (the host's registry),
+                // and the pictures the person attached: only that plugin may
+                // age-check, and only those pictures.
                 pluginKey: pluginTool.pluginKey,
+                toolName: separator > 0 ? pluginTool.namespacedName.slice(separator + 1) : pluginTool.namespacedName,
+                attachedFileIds: ctx.attachedFileIds ?? [],
               });
               try {
                 const executed = await execution.execute({
@@ -2907,6 +2936,9 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
                     // from the tool input): a plugin may react to what the
                     // person asked, e.g. Media Studio's keyword looks.
                     requesterMessage: message,
+                    // The pictures the person attached in this chat, from
+                    // the host: Media Studio age-checks every one of them.
+                    ...(ctx.attachedFileIds && ctx.attachedFileIds.length > 0 ? { attachedFileIds: ctx.attachedFileIds } : {}),
                   },
                   agent: {
                     laneAEnabled: ctx.laneAEnabled ?? true,
@@ -3157,6 +3189,12 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       conversationId: params.conversationId,
       requester: params.requester,
     });
+    // Every picture the person attached in this conversation (this message's
+    // and earlier ones, from the notes Paperclip stored with them), so "make
+    // it darker" two messages later is still age-checked like the first edit.
+    const conversationAttachedFileIds = Array.from(
+      new Set([...(await earlierAttachedFileIds(conversation.id)), ...attachedFileIds.map((id) => id.toLowerCase())]),
+    );
 
     // Settle everything that can refuse the call BEFORE opening the agent's
     // MCP tool servers: those are child processes and connections, and the
@@ -3285,6 +3323,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       // own words (never the caller's untrusted context), plus what
       // web_search returns below.
       web: createLaneAWebSession(params.message),
+      attachedFileIds: conversationAttachedFileIds,
     };
 
     // DUR-3972: offer the sales tool only when this company has an active

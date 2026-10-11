@@ -1,5 +1,5 @@
 {
-  "id": "08b0fc98-3d66-489c-9f6c-f75ee5b6f1fa",
+  "id": "5fc675d7-f8f4-45e3-88c3-d9883c76e9e2",
   "prevId": "61cd1aee-5e12-4482-a39c-d31fd2caacbc",
   "version": "7",
   "dialect": "postgresql",
@@ -5360,30 +5360,6 @@
         "worktree_cleanup_retention_days": {
           "name": "worktree_cleanup_retention_days",
           "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "migrated_to_url": {
-          "name": "migrated_to_url",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "migrated_at": {
-          "name": "migrated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "migrated_by_user_id": {
-          "name": "migrated_by_user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "migration_paused_routine_ids": {
-          "name": "migration_paused_routine_ids",
-          "type": "jsonb",
           "primaryKey": false,
           "notNull": false
         },
@@ -11777,7 +11753,7 @@
       "checkConstraints": {
         "data_read_events_channel_check": {
           "name": "data_read_events_channel_check",
-          "value": "\"data_read_events\".\"channel\" IN ('quick_chat', 'telegram', 'settings_test')"
+          "value": "\"data_read_events\".\"channel\" IN ('quick_chat', 'telegram', 'settings_test', 'report_run', 'report_preview')"
         },
         "data_read_events_outcome_check": {
           "name": "data_read_events_outcome_check",
@@ -35051,6 +35027,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "fetched_data_sha256": {
+          "name": "fetched_data_sha256",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "script_run_id": {
           "name": "script_run_id",
           "type": "uuid",
@@ -35919,6 +35901,12 @@
         "data_connection_id": {
           "name": "data_connection_id",
           "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "data_query": {
+          "name": "data_query",
+          "type": "jsonb",
           "primaryKey": false,
           "notNull": false
         },

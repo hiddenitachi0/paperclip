@@ -149,7 +149,7 @@ describe("DUR-3997 data-source registry", () => {
   it("a kind without a transport answers 'kommer snart' on every read path and never crashes", async () => {
     const cases: Array<[string, DataConnectionConfig]> = [
       ["woocommerce", { kind: "woocommerce", storeUrl: "https://butikken.no" }],
-      ["fiken", { kind: "fiken", companySlug: "fiken-demo-firma-as" }],
+      // Fiken has a read-only transport since DUR-4072 PR3 (dur4072-fiken-adapter.test.ts).
     ];
     for (const [kind, config] of cases) {
       const entry = getDataSourceKind(kind);
