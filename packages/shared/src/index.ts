@@ -125,6 +125,7 @@ export {
   type CompanyWebSearchSettings,
 } from "./web-search.js";
 export { readLaneAConversationSearchSwitch } from "./lane-a-conversation-search.js";
+export { readLaneAPictureModelId } from "./lane-a-picture-model.js";
 export * from "./helper.js";
 export * from "./company-migration.js";
 export * from "./quality-loops.js";

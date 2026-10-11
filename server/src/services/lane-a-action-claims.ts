@@ -252,10 +252,96 @@ export function detectLaneAPictureEditRequest(message: string): boolean {
   if (/^(?:what|why|how|do|does|did|is|are|was|were|which|who|where|hva|hvorfor|hvordan|hvem|hvor|liker|er)\b/.test(text) && text.includes("?")) {
     return false;
   }
+  // 11 Oct: "You left out my colleague, I want to see you and him working
+  // together on the meat" came with a photo and matched none of the verbs,
+  // so Maja's "here we are, working together!" (no picture made) went out.
+  // Wishes ("I want to see", "I'd like"), complaints about a picture ("you
+  // left out", "forgot", "missing") and "together" count too.
   const verbs =
-    "(?:alter|change|edit|modify|adjust|retouch|fix|replace|swap|remove|erase|add|put|place|insert|turn|make|show|draw|paint|render|recolou?r|colou?r|restyle|transform|use|include)";
-  const verbsNo = "(?:endre|endr|rediger|fjern|bytt|erstatt|legg|sett|plasser|gjør|gjor|lag|vis|tegn|bruk|fiks)";
+    "(?:alter|change|edit|modify|adjust|retouch|fix|replace|swap|remove|erase|add|put|place|insert|turn|make|show|draw|paint|render|recolou?r|colou?r|restyle|transform|use|include|see|want|wish|need|like|redo|try|left|leave|forgot|forget|forgotten|missing|missed|together)";
+  const verbsNo =
+    "(?:endre|endr|rediger|fjern|bytt|erstatt|legg|sett|plasser|gjør|gjor|lag|vis|tegn|bruk|fiks|se|vil|ønsker|onsker|glemte|glemt|mangler|utelot|sammen)";
   return new RegExp(`(?:^|[^\\p{L}])${verbs}(?![\\p{L}])`, "u").test(text) || new RegExp(`(?:^|[^\\p{L}])${verbsNo}(?![\\p{L}])`, "u").test(text);
+}
+
+/**
+ * A message WITHOUT a picture that is about the photo the person sent a
+ * moment ago: "you left out my colleague", "make it darker", "I want to see
+ * you and him together", "where is he?", "glemte du ham?". Only asked when an
+ * earlier message of this conversation came with a photo; the photo then
+ * counts as attached to this turn too (the forced retry uses it as the base).
+ * Narrow on purpose, so "thanks!" or "what time is it?" never counts.
+ */
+export function detectLaneAPhotoFollowUp(message: string): boolean {
+  const text = message.toLowerCase().trim();
+  if (!text) return false;
+  const patterns = [
+    // Complaints about what the picture left out.
+    /\b(?:left (?:\w+ ){0,2}out|leave (?:\w+ ){0,2}out|forgot|forgotten|missing|missed (?:out )?(?:him|her|them|my|the)|(?:is|are) not in (?:it|the (?:picture|photo|image))|didn'?t (?:include|add|put|show)|where (?:is|are) (?:he|she|they|my|the))\b/,
+    // The photo itself.
+    /\b(?:the|this|that|my|same|original|first) (?:photo|picture|image|pic|shot)\b/,
+    // Doing something to "it".
+    /\b(?:alter|change|edit|fix|redo|retouch|adjust|make|try)\s+(?:it|this|that|him|her|them)\b/,
+    // The agent and the people in the photo together.
+    /\b(?:you and (?:him|her|them|me|my)|(?:him|her|them|me) and you|with (?:him|her|them|my \w+)|together)\b/,
+    // Norwegian.
+    /(?<![\p{L}])(?:glemte|glemt|mangler|utelot|bildet|fotoet|samme bilde|deg og (?:ham|han|henne|dem|meg)|sammen med|endre det|fiks det)(?![\p{L}])/u,
+  ];
+  return patterns.some((pattern) => pattern.test(text));
+}
+
+/**
+ * In a turn about a photo the person sent, a reply that talks as if the
+ * edited picture is there: "here we are, working together on the meat!",
+ * "I've added myself next to him", "as you can see", "her er vi". Only used
+ * when such a turn made no picture; the strict claim patterns above still
+ * apply everywhere else.
+ */
+const PHOTO_CLAIM_PATTERNS: RegExp[] = [
+  /\bhere (?:we|you|it|they|i) (?:are|go|is|am)\b/i,
+  /\bthere (?:you go|we go|we are|it is)\b/i,
+  /\bvoil[aà]\b/i,
+  /\bas you can see\b/i,
+  /\bi(?:'ve| have)?\s*(?:just\s+)?(?:added|put|placed|included|inserted|edited|changed|altered|updated|fixed|adjusted|modified|redone|redid|swapped|replaced|removed)\b/i,
+  /\b(?:the|your|this) (?:new |updated |edited |altered |changed |fixed )?(?:picture|photo|image|version|pic) (?:now )?(?:shows|has|includes)\b/i,
+  /\bin (?:this|the new|the updated|the edited) (?:picture|photo|image|version|one)\b/i,
+  /\bnow (?:we(?:'re| are)|you can see|i(?:'m| am)|it shows|he(?:'s| is)|she(?:'s| is)|they(?:'re| are))\b/i,
+  /(?<![\p{L}])(?:her er (?:vi|det|den|bildet|du|jeg)|jeg har (?:lagt til|lagt inn|endret|fikset|redigert|satt inn|tatt med)|som du ser|vær så god|nå er (?:vi|jeg|han|hun|de))(?![\p{L}])/iu,
+];
+
+export function detectLaneAPhotoClaim(text: string): LaneAActionClaimMatch | null {
+  const strict = detectLaneAActionClaim(text);
+  if (strict) return strict.family === "media" ? strict : null;
+  for (const pattern of PHOTO_CLAIM_PATTERNS) {
+    const match = text.match(pattern);
+    if (match) return { family: "media", matchedPhrase: match[0] };
+  }
+  return null;
+}
+
+/**
+ * The one retry's note in a turn about a photo the person sent: names the
+ * photo's file id and the tool, so even a small model passes the photo as
+ * the base. `reason` "claim": the reply said a picture was made.
+ */
+export function buildLaneAPhotoRetryNote(input: { toolName: string; photoFileId: string; reason: "claim" | "request" }): string {
+  const lead =
+    input.reason === "claim"
+      ? "You wrote as if the changed picture was made, but no picture tool ran, so nothing was made and the person sees no picture."
+      : "The person asked you to change the photo they sent, and no picture was made.";
+  return `${lead} Call ${input.toolName} now with referenceFileIds ["${input.photoFileId}"] (their photo, which is changed, not re-drawn) and a prompt that says what to change. If you cannot, say plainly that no picture was made.`;
+}
+
+/**
+ * What the person sees when a turn about their photo still made no picture
+ * after the retry: plainly that nothing was made, and why. `toolError` is the
+ * picture tool's own plain sentence when it was called and refused.
+ */
+export function buildLaneAPhotoFallbackLine(toolError: string | null): string {
+  const why = toolError?.trim()
+    ? toolError.trim().replace(/^That did not work:\s*/i, "")
+    : "the picture tool was not started this time.";
+  return `No picture was made: ${why.replace(/\s+$/, "")}${/[.!?]$/.test(why.trim()) ? "" : "."} Ask me again to try once more.`;
 }
 
 /**

@@ -25,6 +25,7 @@ import {
   isSogniUploadType,
   sogniCanonicalModelId,
   sogniMaxReferences,
+  sogniEditModelName,
   sogniReferenceModel,
   sogniSize,
   type SogniLoraPick,
@@ -115,6 +116,7 @@ import {
   REFERENCE_ROLE_LABELS,
   SHEET_FIELDS,
   SHEET_FIELD_MAX,
+  assemblePhotoEditPrompt,
   assemblePrompt,
   normalizeFeedbackRules,
   type PictureFeedbackRules,
@@ -125,12 +127,23 @@ import {
   sheetIsEmpty,
   type CharacterSheet,
   type ReferenceRole,
+  type SheetKey,
 } from "./look-prompt.js";
 import { HIGGSFIELD_MODELS, readHiggsfieldCredentials } from "./higgsfield.js";
 import { guardedBytesFetch } from "./lora-training.js";
 import { identitiesMentionedIn, loraFitsModel, pickTrained, planIdentityReferences, sheetWithIdentity, sogniSlots, type Identity } from "./identity.js";
 import { loadIdentities, registerAnchorActions } from "./anchors.js";
 import { requireAdultChatPhotos } from "./chat-photos.js";
+import {
+  PHOTO_EDIT_SOGNI_MODEL,
+  attachedReferenceIds,
+  falPhotoEditModel,
+  isFalEditModel,
+  isSogniEditModel,
+  planPhotoEditReferences,
+  requestPutsAgentInPicture,
+  type PhotoEditPlan,
+} from "./photo-edit.js";
 import { companyConfig, registerServiceKeyActions } from "./company-settings.js";
 import { SOGNI_TOOLS, findSogniTool, prepareSogniCall, sogniToolDescription, sogniToolParameters, type SogniToolDef } from "./sogni-tools.js";
 
@@ -699,6 +712,18 @@ async function loadReferenceImages(
   return images;
 }
 
+/** The calling agent's name (read through the host), for a photo edit's prompt; null when it cannot be read. */
+async function agentNameFor(ctx: PluginContext, companyId: string, agentId: string | null | undefined): Promise<string | null> {
+  if (!agentId) return null;
+  try {
+    const agent = (await ctx.agents.get(agentId, companyId)) as { name?: unknown; companyId?: unknown } | null;
+    if (!agent || agent.companyId !== companyId || typeof agent.name !== "string") return null;
+    return agent.name.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 function readReferenceIds(value: unknown): string[] | "invalid" {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) return "invalid";
@@ -1154,6 +1179,30 @@ export async function prepareGeneration(
     }
   }
 
+  // A photo the person attached in this chat, named as a reference: this
+  // picture is an edit of that photo (photo-edit.ts). The agent's look and
+  // identity only come along when the request puts the agent in the picture
+  // ("show you helping him"); "put a hat on him" changes only the photo.
+  const photoIds = attachedReferenceIds(requestedRefs, options.attachedFileIds);
+  const photoEdit = photoIds.length > 0;
+  let editAgentName: string | null = null;
+  if (photoEdit) {
+    const agentName = await agentNameFor(ctx, companyId, options.agentId);
+    const names = [identity?.nickname, identity?.name, agentName].filter((n): n is string => typeof n === "string" && n.trim() !== "");
+    const named = lookReason === "look-input" || lookReason === "named-in-request";
+    if (named || requestPutsAgentInPicture({ requesterMessage: options.requesterMessage, request: input.prompt, names })) {
+      editAgentName = identity?.nickname?.trim() || identity?.name?.trim() || agentName;
+    } else if (look || identity) {
+      notes.push(
+        `${look ? `The look "${look.name}"` : `The saved person "${identity!.name}"`} was not used: this changes the photo the person sent, and the request does not put you in it.`,
+      );
+      look = null;
+      lookReason = null;
+      ruleText = null;
+      identity = null;
+    }
+  }
+
   const cfg = await companyConfig(ctx, companyId);
   const settingsProvider = String(cfg.provider ?? "mock").toLowerCase();
   const catalog = sogniCatalogFor(ctx);
@@ -1178,7 +1227,7 @@ export async function prepareGeneration(
   }
   // A model name that is neither a known Sogni key nor a Fal path may still be one of Sogni's many models.
   if (callModel && !serviceForModel(callModel) && isPictureService(settingsProvider)) await catalog.models();
-  const chosen = chooseService(
+  let chosen = chooseService(
     settingsProvider,
     isPictureService(rawProvider) ? rawProvider : null,
     callModel,
@@ -1186,8 +1235,82 @@ export async function prepareGeneration(
     (model) => serviceForModel(model) ?? (model && catalog.knows(model) ? "sogni" : null),
   );
   if ("error" in chosen) return chosen;
+  if (photoEdit && chosen.service === "higgsfield") {
+    // Higgsfield takes no pictures, so it cannot change a photo.
+    if (settingsProvider !== "fal" && settingsProvider !== "sogni") {
+      return { error: "This photo cannot be changed with Higgsfield, because it takes no pictures. An owner or admin can pick Sogni or Fal.ai in Media Studio's settings." };
+    }
+    notes.push(`Higgsfield takes no pictures, so this change to the photo was made with ${SERVICE_NAME[settingsProvider]} instead.`);
+    chosen = { service: settingsProvider, useLookModel: false };
+  }
   input.provider = chosen.service;
-  if (identity) {
+
+  // A photo edit: an edit model, the photo first, the agent's pictures after it.
+  let editPlan: PhotoEditPlan | null = null;
+  let editTrustedModel: string | null = null;
+  let editLookModelUsed = false;
+  if (photoEdit) {
+    const lookModel = chosen.useLookModel && look?.model ? look.model : null;
+    const candidate = callModel ?? lookModel;
+    const candidateLabel = callModel ? `the model ${callModel}` : lookModel ? `the look's model ${look?.modelName ?? lookModel}` : null;
+    let slots = MAX_REFERENCE_FILES;
+    if (chosen.service === "sogni") {
+      let candidateInfo: SogniModelInfo | null = null;
+      if (candidate && !isSogniEditModel(candidate)) {
+        try {
+          candidateInfo = (await catalog.model(sogniCanonicalModelId(candidate))).model ?? null;
+        } catch {
+          candidateInfo = null;
+        }
+      }
+      let editModel: string;
+      if (candidate && isSogniEditModel(candidate, candidateInfo?.takesReferences === true)) {
+        editModel = candidate;
+        editLookModelUsed = Boolean(lookModel) && !callModel;
+        if (candidateInfo?.maxReferences) slots = candidateInfo.maxReferences;
+        else slots = sogniSlots(editModel);
+      } else {
+        const settingsModel = textOrNull(cfg.sogniModel);
+        editModel = settingsModel && isSogniEditModel(settingsModel) ? settingsModel : PHOTO_EDIT_SOGNI_MODEL;
+        editTrustedModel = editModel;
+        slots = sogniSlots(editModel);
+        if (candidateLabel) {
+          notes.push(`${candidateLabel[0]!.toUpperCase()}${candidateLabel.slice(1)} only makes new pictures, so this change to the person's photo was made with ${sogniEditModelName(editModel)}, which edits photos.`);
+        }
+      }
+      input.model = editModel;
+      if (callModel && editModel !== callModel) callModel = undefined;
+    } else if (chosen.service === "fal") {
+      let editModel: string;
+      if (candidate && isFalEditModel(candidate)) {
+        editModel = candidate;
+      } else {
+        editModel = falPhotoEditModel(textOrNull(cfg.falModel));
+        if (candidateLabel) {
+          notes.push(`${candidateLabel[0]!.toUpperCase()}${candidateLabel.slice(1)} only makes new pictures, so this change to the person's photo was made with ${editModel}, which edits photos.`);
+        }
+      }
+      input.model = editModel;
+      if (callModel && editModel !== callModel) callModel = undefined;
+    }
+    editPlan = planPhotoEditReferences({
+      photoIds,
+      identity: editAgentName ? identity : null,
+      lookFileIds: editAgentName ? (look?.referenceFileIds ?? []) : [],
+      lookRoles: editAgentName ? (look?.referenceRoles ?? []) : [],
+      sameOutfit: look?.identitySameOutfit === true,
+      extraIds: requestedRefs.filter((id) => !photoIds.includes(id)),
+      slots,
+    });
+    referenceFileIds.splice(0, referenceFileIds.length, ...editPlan.fileIds);
+    referenceRoles.splice(0, referenceRoles.length, ...editPlan.roles);
+    notes.push(
+      editAgentName
+        ? `This changes the photo the person sent: it went in first, and ${editPlan.fileIds.length > editPlan.photoCount ? "your own pictures after it, only to show who to add" : "no pictures of you fit next to it"}.`
+        : "This changes the photo the person sent: it went in first.",
+      ...editPlan.notes,
+    );
+  } else if (identity) {
     // The model that will make the picture when nothing else pins it: the call's, or the look's.
     const lookModel = chosen.useLookModel && look?.model ? look.model : null;
     const fixedModel = callModel ?? lookModel ?? null;
@@ -1216,7 +1339,7 @@ export async function prepareGeneration(
       notes.push("A seed does not keep a person the same; the identity's reference pictures do.");
     }
   }
-  if (chosen.service === "higgsfield") {
+  if (!photoEdit && chosen.service === "higgsfield") {
     // Higgsfield Soul takes no reference pictures (see higgsfield.ts); it keeps
     // a person only through a ready Soul ID of the identity.
     if (referenceFileIds.length > 0) {
@@ -1237,11 +1360,16 @@ export async function prepareGeneration(
     return { error: `At most ${referenceCap} reference pictures can be used at once (this asked for ${referenceFileIds.length}).` };
   }
   // The look's model is used when the call names no model, or names the look's own model.
-  const lookModelUsed = callModel
-    ? Boolean(look?.model) && sogniCanonicalModelId(callModel) === sogniCanonicalModelId(look!.model!)
-    : Boolean(look?.model) && chosen.useLookModel;
-  if (lookModelUsed && !callModel) input.model = look!.model!;
-  const identityModel = identity && !callModel && !lookModelUsed && chosen.service === "sogni" ? input.model ?? null : null;
+  // A photo edit already picked its model above (the look's only when it edits).
+  const lookModelUsed = photoEdit
+    ? editLookModelUsed
+    : callModel
+      ? Boolean(look?.model) && sogniCanonicalModelId(callModel) === sogniCanonicalModelId(look!.model!)
+      : Boolean(look?.model) && chosen.useLookModel;
+  if (!photoEdit && lookModelUsed && !callModel) input.model = look!.model!;
+  const identityModel = photoEdit
+    ? editTrustedModel
+    : identity && !callModel && !lookModelUsed && chosen.service === "sogni" ? input.model ?? null : null;
 
   // Sogni's own limits, checked here so a mistake does not use up one of the day's pictures.
   let negativeAllowed = false;
@@ -1288,8 +1416,31 @@ export async function prepareGeneration(
     }
   }
 
+  if (editPlan) {
+    // A photo edit: keep the scene and its people, add the agent (look-prompt.ts).
+    const edit = assemblePhotoEditPrompt({
+      request: input.prompt,
+      agentName: editAgentName,
+      agentPictures: editPlan.fileIds.length - editPlan.photoCount,
+      facePositions: editPlan.facePositions,
+      photoCount: editPlan.photoCount,
+      sheet: editAgentName ? (identity ? sheetWithIdentity(look?.sheet, identity) : look?.sheet) : null,
+      style: editAgentName ? look?.style : null,
+      service: chosen.service,
+      feedback,
+    });
+    input.prompt = edit.prompt;
+    if (edit.styleLeftOut && look) {
+      notes.push(`The look's style words were left out: they describe a scene, light or camera, and the scene is the person's photo.`);
+    }
+    if (look && !sheetIsEmpty(look.sheet)) {
+      notes.push("Only the look's description of you was used, not its setting, light or camera: the scene is the person's photo.");
+    }
+  }
   // The final prompt: the request, what each picture is for, the look's sheet and style words.
-  const assembled = assemblePrompt({
+  const assembled = editPlan
+    ? { prompt: input.prompt, avoid: null, leftOut: [] as SheetKey[], requestAspects: [] }
+    : assemblePrompt({
     request: input.prompt,
     style: look?.style,
     sheet: identity ? sheetWithIdentity(look?.sheet, identity) : look?.sheet,

@@ -260,6 +260,33 @@ export async function resolveBackupModelsThroughDirectory(
   });
 }
 
+/**
+ * 11 Oct: a quick agent's "Use this model for picture requests" (a saved
+ * model of THIS company) as a pool entry with the given id, so it is called
+ * exactly like a backup model. Null when the entry is gone or another
+ * company's: picture turns then stay on the agent's own model.
+ */
+export async function resolveDirectoryEntryAsBackup(
+  db: Db,
+  companyId: string,
+  entryId: string,
+  poolId: string,
+): Promise<LaneABackupModelConfig | null> {
+  const [entry] = await db
+    .select()
+    .from(modelDirectoryEntries)
+    .where(and(eq(modelDirectoryEntries.companyId, companyId), eq(modelDirectoryEntries.id, entryId)));
+  if (!entry) return null;
+  return {
+    id: poolId,
+    provider: entry.provider as LaneABackupModelConfig["provider"],
+    model: entry.model,
+    baseUrl: entry.baseUrl,
+    temperature: entry.defaultTemperature,
+    directoryEntryId: entry.id,
+  };
+}
+
 /** How long the local resync waits for Ollama's model list. */
 export const LOCAL_MODELS_SYNC_TIMEOUT_MS = 10_000;
 

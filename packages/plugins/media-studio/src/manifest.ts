@@ -70,6 +70,7 @@ export const GENERATE_IMAGE_DESCRIPTION =
   "When no look is named, an automatic look is used if one fits (an owner or admin can set looks by time of day and by keywords in the person's message), else your default look (if you have one); a look named in the request wins over both. The result says which look was used and why. " +
   "To make a close variation of an earlier picture (\"same as the last one but with a blue sofa\"), pass the seed that earlier picture reported. " +
   "To keep the same person, product or style as existing pictures, pass their file ids as referenceFileIds (up to 4). " +
+  "To change a photo the person sent in the chat, pass its file id in referenceFileIds and describe the change in prompt: the photo is edited (everyone already in it is kept), not re-drawn. " +
   "Pictures are made by the picture service chosen in Media Studio settings; pass provider (\"fal\" or \"sogni\") only when the person asks for a specific one. " +
   "If the agent has a daily picture limit, this stops working once the limit is reached for the day (it resets at midnight UTC). " +
   "Use this for a real picture the person asked for; for a small mood picture to go along with your own message, use quick-picture instead.";

@@ -42,6 +42,7 @@ import {
   laneAProviderRoutingForCall,
   readLaneAWebSearchSwitch,
   readLaneAConversationSearchSwitch,
+  readLaneAPictureModelId,
   isLaneATrustLimited,
   helperModelCanSeePictures,
   CHAT_ATTACHMENTS_MAX,
@@ -80,13 +81,17 @@ import { logger } from "../middleware/logger.js";
 import { openRouterCataloguePrice } from "./lane-a-openrouter-catalogue.js";
 import { logActivity } from "./activity-log.js";
 import { resolveAgentMcpToolLibraryServers } from "./mcp-tool-library.js";
-import { modelDirectoryService, resolveBackupModelsThroughDirectory } from "./model-directory.js";
+import { modelDirectoryService, resolveBackupModelsThroughDirectory, resolveDirectoryEntryAsBackup } from "./model-directory.js";
 import { classifyLocalFailure, modelHealthService } from "./model-health.js";
 import { cleanLaneAAddonToolInput, parseLaneATextToolCall } from "./lane-a-text-tool-calls.js";
 import {
   buildLaneAActionClaimFallbackLine,
   buildLaneAActionClaimRetryNote,
+  buildLaneAPhotoFallbackLine,
+  buildLaneAPhotoRetryNote,
   detectLaneAActionClaim,
+  detectLaneAPhotoClaim,
+  detectLaneAPhotoFollowUp,
   detectLaneAPictureRequest,
   detectLaneAPictureEditRequest,
   laneAMediaToolAttempted,
@@ -1051,7 +1056,35 @@ export interface LaneAFallbackAttemptResult<T> {
   error?: unknown;
 }
 
-export type LaneAAnsweredBy = "main" | "keyword" | "no_answer_chain" | "refusal_chain";
+export type LaneAAnsweredBy = "main" | "keyword" | "picture_model" | "no_answer_chain" | "refusal_chain";
+
+/** The pool id of a quick agent's "Use this model for picture requests" model, when a turn uses it. */
+export const LANE_A_PICTURE_POOL_ID = "picture";
+export const LANE_A_PICTURE_MODEL_RULE = "picture_model";
+
+/**
+ * 11 Oct: a turn that involves pictures starts at the agent's picture model
+ * (when one is set and it is in the pool), before any keyword rule's or the
+ * main model; if it cannot answer, the turn falls back along the usual
+ * no-answer chain (the main model first). Pure, like resolveLaneARouting.
+ */
+export function withLaneAPictureModelStart(routing: LaneARoutingResult, pictureTurn: boolean): LaneARoutingResult {
+  if (!pictureTurn || !routing.pool.has(LANE_A_PICTURE_POOL_ID)) return routing;
+  const rest = [routing.start, ...routing.noAnswerChain].filter((id) => id !== LANE_A_PICTURE_POOL_ID);
+  const seen = new Set<string>();
+  const noAnswerChain = [LANE_A_PICTURE_POOL_ID, ...rest].filter((id) => {
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+  return {
+    ...routing,
+    start: LANE_A_PICTURE_POOL_ID,
+    startRule: LANE_A_PICTURE_MODEL_RULE,
+    noAnswerChain,
+    refusalChain: routing.refusalChain.filter((id) => id !== LANE_A_PICTURE_POOL_ID),
+  };
+}
 
 export type LaneAFallbackLoopResult<T> =
   | { ok: true; value: T; poolId: string; answeredBy: LaneAAnsweredBy }
@@ -1235,6 +1268,34 @@ export function buildLaneAAttachmentNote(input: {
   ];
   return `[${parts.join(" ")}]`;
 }
+
+/**
+ * 11 Oct: the photo the person sent goes into Media Studio's Generate image
+ * call even when the model left it out (a forced retry, or a small local
+ * model that described the change but passed no referenceFileIds). Only for
+ * that one tool, only when this turn is about a photo, and only when none of
+ * the conversation's attached photos is already in the call: the photo is
+ * put first, and the list kept to Media Studio's 4. Everything else is
+ * passed on unchanged.
+ */
+export function withLaneAPhotoBase(
+  parameters: Record<string, unknown> | null,
+  namespacedToolName: string,
+  photoFileId: string | null,
+  attachedFileIds: readonly string[],
+): Record<string, unknown> | null {
+  if (!photoFileId || namespacedToolName !== `${LANE_A_PICTURE_PLUGIN_KEY}:${LANE_A_PICTURE_TOOL_NAME}`) return parameters;
+  const params = parameters ?? {};
+  const current = Array.isArray(params.referenceFileIds)
+    ? params.referenceFileIds.filter((id): id is string => typeof id === "string" && id.trim() !== "")
+    : [];
+  const attached = new Set(attachedFileIds.map((id) => id.toLowerCase()));
+  if (current.some((id) => attached.has(id.trim().toLowerCase()))) return parameters;
+  return { ...params, referenceFileIds: [photoFileId, ...current].slice(0, 4) };
+}
+
+/** How many of the person's latest messages a photo follow-up may reach back over. */
+export const LANE_A_PHOTO_FOLLOW_UP_TURNS = 3;
 
 const ATTACHMENT_NOTE_AT_END =
   /\n\n\[The person attached (?:a picture|\d+ pictures) to this message: file ids? ((?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:, [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})*)\.[^\]]*\]$/i;
@@ -2150,6 +2211,25 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     return rows.flatMap((row) => readLaneAAttachmentNote(row.content));
   }
 
+  /**
+   * The photo of the most recent earlier message that came with one, when
+   * that message is among the person's last few (a follow-up such as "you
+   * left out my colleague" refers to it). Null otherwise.
+   */
+  async function recentAttachedPhotoId(conversationId: string): Promise<string | null> {
+    const rows = await db
+      .select({ content: laneAMessages.content })
+      .from(laneAMessages)
+      .where(and(eq(laneAMessages.conversationId, conversationId), eq(laneAMessages.role, "user")))
+      .orderBy(desc(laneAMessages.createdAt))
+      .limit(LANE_A_PHOTO_FOLLOW_UP_TURNS);
+    for (const row of rows) {
+      const ids = readLaneAAttachmentNote(row.content);
+      if (ids.length > 0) return ids[0]!;
+    }
+    return null;
+  }
+
   async function checkChatAttachments(companyId: string, fileIds: string[]): Promise<string[]> {
     const ids = Array.from(new Set(fileIds));
     if (ids.length === 0) return [];
@@ -2562,6 +2642,15 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
      * pictures, the pictures themselves.
      */
     attachments?: { note: string; images: LaneAImage[] } | null;
+    /**
+     * 11 Oct: this turn is about a photo the person sent -- attached to this
+     * message, or (`attachedThisTurn` false) to a recent earlier one that this
+     * message follows up on ("you left out my colleague"). Its file id is the
+     * base a forced picture call edits, and a reply that talks as if the
+     * edited picture is there without one being made is retried, then
+     * replaced with a plain "no picture was made" and why.
+     */
+    photo?: { fileId: string; attachedThisTurn: boolean } | null;
     toolset: LaneAToolset;
     ctx: LaneAToolContext;
     /** DUR-3997: the provider client for this one call, key already inside it. */
@@ -2641,10 +2730,14 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     // picture tool, exactly as for a reply that claims a picture it never made.
     // A message that came with a picture and asks to change it ("alter this
     // image to show you helping him") counts too.
+    const photo = params.photo ?? null;
     const pictureRequested =
       detectLaneAPictureRequest(message, {
         pictureEarlier: history.some((turn) => turn.role === "assistant" && /\[\s*Picture made in this turn\b/i.test(turn.content)),
-      }) || (attachments !== null && detectLaneAPictureEditRequest(message));
+      }) || ((attachments !== null || photo !== null) && detectLaneAPictureEditRequest(message));
+    // The picture tool's own refusal in a photo turn (age check, limit,
+    // outage), so the plain "no picture was made" can say why.
+    let photoToolError: string | null = null;
     let inputTokens = 0;
     let outputTokens = 0;
     let costUsd = 0;
@@ -2779,7 +2872,11 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           // is not claiming an action (picture/video/audio, memory, task,
           // weather/price) that no tool actually performed this turn.
           if (!claimRetry && !finalRound) {
-            const detected = detectLaneAActionClaim(response.text);
+            // In a turn about the person's photo, "here we are, working
+            // together!" also counts as saying the picture was made.
+            const detected = photo
+              ? (detectLaneAPhotoClaim(response.text) ?? detectLaneAActionClaim(response.text))
+              : detectLaneAActionClaim(response.text);
             const claim: { family: LaneAActionClaimFamily; matchedPhrase: string; reason: "claim" | "request" } | null =
               detected && !isLaneAActionClaimFulfilled(detected.family, actions)
                 ? { ...detected, reason: "claim" }
@@ -2788,7 +2885,10 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
                   ? { family: "media", matchedPhrase: message.slice(0, 200), reason: "request" }
                   : null;
             if (claim) {
-              const forced = toolsOff
+              // A picture call in a photo turn that already ran and was
+              // refused (age check, limit, outage) is not forced again: the
+              // person is told plainly why instead.
+              const forced = toolsOff || (photo !== null && claim.family === "media" && laneAMediaToolAttempted(actions))
                 ? null
                 : pickLaneAForcedToolName(
                     claim.family,
@@ -2798,7 +2898,13 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
               claimRetry = claim;
               if (forced) {
                 messages.push({ role: "assistant", content: response.text });
-                messages.push({ role: "user", content: buildLaneAActionClaimRetryNote(claim.family, claim.reason) });
+                messages.push({
+                  role: "user",
+                  content:
+                    photo && claim.family === "media" && forced.endsWith(LANE_A_PICTURE_TOOL_NAME)
+                      ? buildLaneAPhotoRetryNote({ toolName: forced, photoFileId: photo.fileId, reason: claim.reason })
+                      : buildLaneAActionClaimRetryNote(claim.family, claim.reason),
+                });
                 forcedToolName = forced;
                 correctiveRetryUsed = true;
                 continue;
@@ -2922,9 +3028,15 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
                 attachedFileIds: ctx.attachedFileIds ?? [],
               });
               try {
+                const parameters = withLaneAPhotoBase(
+                  cleanLaneAAddonToolInput(input),
+                  pluginTool.namespacedName,
+                  photo?.fileId ?? null,
+                  ctx.attachedFileIds ?? [],
+                );
                 const executed = await execution.execute({
                   tool: pluginTool.namespacedName,
-                  parameters: cleanLaneAAddonToolInput(input),
+                  parameters,
                   runContext: {
                     agentId: ctx.agent.id,
                     runId: pluginRun.run.runId,
@@ -2958,6 +3070,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
                 pluginRun.close();
               }
             }
+            if (!outcome.ok && photo && pluginTool.pluginKey === LANE_A_PICTURE_PLUGIN_KEY) photoToolError = outcome.content;
             const summary = !outcome.ok
               ? `The ${label} add-on tool did not work.`
               : image
@@ -3087,9 +3200,16 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       }
       // A request-type retry (the person asked; the reply claimed nothing)
       // keeps the model's own words when the retry still made nothing: it
-      // may be a fair question back ("which angle?"), not a false claim.
-      if (claimRetryOutcome === "failed" && claimRetry.reason === "claim") {
-        finalText = buildLaneAActionClaimFallbackLine(claimRetry.family);
+      // may be a fair question back ("which angle?"), not a false claim --
+      // unless the retry's own reply now claims the picture.
+      const claimsNow =
+        claimRetry.family === "media" &&
+        (photo ? detectLaneAPhotoClaim(finalText) !== null : detectLaneAActionClaim(finalText)?.family === "media");
+      if (claimRetryOutcome === "failed" && (claimRetry.reason === "claim" || claimsNow)) {
+        finalText =
+          photo && claimRetry.family === "media"
+            ? buildLaneAPhotoFallbackLine(photoToolError)
+            : buildLaneAActionClaimFallbackLine(claimRetry.family);
       }
       actions.push({
         tool: "action_claim_check",
@@ -3195,6 +3315,16 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     const conversationAttachedFileIds = Array.from(
       new Set([...(await earlierAttachedFileIds(conversation.id)), ...attachedFileIds.map((id) => id.toLowerCase())]),
     );
+    // 11 Oct: the photo this turn is about -- attached now, or sent a moment
+    // ago and referred to ("you left out my colleague"). Its file id is the
+    // base a forced picture call edits (callModel).
+    const recentPhotoId = attachedFileIds.length === 0 ? await recentAttachedPhotoId(conversation.id) : null;
+    const photoTurn: { fileId: string; attachedThisTurn: boolean } | null =
+      attachedFileIds.length > 0
+        ? { fileId: attachedFileIds[0]!, attachedThisTurn: true }
+        : recentPhotoId && detectLaneAPhotoFollowUp(params.message)
+          ? { fileId: recentPhotoId, attachedThisTurn: false }
+          : null;
 
     // Settle everything that can refuse the call BEFORE opening the agent's
     // MCP tool servers: those are child processes and connections, and the
@@ -3413,7 +3543,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     // settings just came from (never from the caller). Keyword routing is
     // matched against the person's own message, exactly as it will be
     // matched again on every later turn in this conversation.
-    const routing = resolveLaneARouting(
+    let routing = resolveLaneARouting(
       {
         ...targetAgentForSettings,
         laneABackupModels: await resolveBackupModelsThroughDirectory(db, params.companyId, (agentRow?.laneABackupModels as LaneABackupModelConfig[] | null) ?? []),
@@ -3423,6 +3553,38 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       },
       params.message,
     );
+    // 11 Oct: "Use this model for picture requests" -- a turn with a photo,
+    // about a recent photo, or asking for a picture starts at that saved
+    // model (resolved as one more backup) instead of the agent's own.
+    const pictureModelId = readLaneAPictureModelId(agentRow?.adapterConfig);
+    const pictureTurn =
+      photoTurn !== null ||
+      detectLaneAPictureRequest(params.message, {
+        pictureEarlier: history.some((turn) => turn.role === "assistant" && /\[\s*Picture made in this turn\b/i.test(turn.content)),
+      });
+    if (pictureModelId && pictureTurn) {
+      const pictureBackup = await resolveDirectoryEntryAsBackup(db, params.companyId, pictureModelId, LANE_A_PICTURE_POOL_ID);
+      if (pictureBackup) {
+        routing = withLaneAPictureModelStart(
+          {
+            ...routing,
+            pool: new Map(routing.pool).set(LANE_A_PICTURE_POOL_ID, {
+              id: LANE_A_PICTURE_POOL_ID,
+              provider: pictureBackup.provider,
+              model: pictureBackup.model,
+              baseUrl: pictureBackup.baseUrl ?? null,
+              temperature: pictureBackup.temperature ?? null,
+            }),
+          },
+          true,
+        );
+      } else {
+        logger.warn(
+          { companyId: params.companyId, agentId: params.targetAgent.id, pictureModelId },
+          "lane A: the model for picture requests is not one of this company's saved models any more; using the agent's own model",
+        );
+      }
+    }
 
     let text: string;
     let inputTokens: number;
@@ -3541,6 +3703,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
             history,
             message: params.message,
             attachments: await attachmentsFor(entrySettings.provider, entryModel),
+            photo: photoTurn,
             toolset,
             ctx,
             client: entryClient,
@@ -3682,7 +3845,12 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       outputTokens = loopResult.value.outputTokens;
       stopReason = loopResult.value.stopReason;
       actions = loopResult.value.actions;
-      answeredBy = loopResult.answeredBy === "main" && routing.startRule ? "keyword" : loopResult.answeredBy;
+      answeredBy =
+        loopResult.answeredBy === "main" && routing.startRule
+          ? routing.startRule === LANE_A_PICTURE_MODEL_RULE
+            ? "picture_model"
+            : "keyword"
+          : loopResult.answeredBy;
       text = guardLaneAPictureClaims(text, actions);
     } catch (err) {
       turnFailed = true;
