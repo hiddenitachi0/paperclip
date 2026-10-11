@@ -1,5 +1,15 @@
 import { z } from "zod";
 import type { VideoStorylineProvider } from "./video-storylines.js";
+import type {
+  MediaFootageSettings,
+  VideoClipKind,
+  VideoExportPreset,
+  VideoMusicLane,
+  VideoStillMotion,
+  VideoStorylineAspect,
+  VideoStorylineExportSettings,
+  VideoUploadSummary,
+} from "./video-storyline-clips.js";
 
 /**
  * Storyline strip (Simple editor, Phase 1; design 2.1-2.4): how each gap
@@ -8,7 +18,24 @@ import type { VideoStorylineProvider } from "./video-storylines.js";
  * These lists MUST stay in sync with packages/db's video_transitions CHECKs.
  */
 
-export const VIDEO_TRANSITION_KINDS = ["cut", "blend", "dissolve", "fade", "ai"] as const;
+export const VIDEO_TRANSITION_KINDS = [
+  "cut",
+  "blend",
+  "dissolve",
+  "fade",
+  "ai",
+  // Phase 2: extra free ffmpeg transitions, offered under "More…".
+  "fade_black",
+  "fade_white",
+  "wipe_left",
+  "wipe_right",
+  "slide_left",
+  "slide_right",
+  "circle_open",
+  "zoom_in",
+  "pixelize",
+  "radial",
+] as const;
 export type VideoTransitionKind = (typeof VIDEO_TRANSITION_KINDS)[number];
 
 /** What a person sees for each kind. "blend" is a smooth crossfade; dissolve and fade sit under "More…". */
@@ -18,13 +45,37 @@ export const VIDEO_TRANSITION_KIND_LABELS: Record<VideoTransitionKind, string> =
   dissolve: "Grainy dissolve",
   fade: "Soft fade",
   ai: "AI bridge",
+  fade_black: "Fade through black",
+  fade_white: "Fade through white",
+  wipe_left: "Wipe to the left",
+  wipe_right: "Wipe to the right",
+  slide_left: "Slide to the left",
+  slide_right: "Slide to the right",
+  circle_open: "Circle opening",
+  zoom_in: "Zoom in",
+  pixelize: "Pixelate",
+  radial: "Clock wipe",
 };
 
+/** The ffmpeg xfade transitions this codebase uses (video-ffmpeg.ts keeps its own copy of this allow-list). */
+export const VIDEO_XFADE_NAMES = ["fade", "dissolve", "fadeblack", "fadewhite", "wipeleft", "wiperight", "slideleft", "slideright", "circleopen", "zoomin", "pixelize", "radial"] as const;
+export type VideoXfadeName = (typeof VIDEO_XFADE_NAMES)[number];
+
 /** ffmpeg xfade name for each ffmpeg-made kind (cut and ai never crossfade). */
-export const VIDEO_TRANSITION_XFADE: Partial<Record<VideoTransitionKind, "fade" | "dissolve">> = {
+export const VIDEO_TRANSITION_XFADE: Partial<Record<VideoTransitionKind, VideoXfadeName>> = {
   blend: "fade",
   fade: "fade",
   dissolve: "dissolve",
+  fade_black: "fadeblack",
+  fade_white: "fadewhite",
+  wipe_left: "wipeleft",
+  wipe_right: "wiperight",
+  slide_left: "slideleft",
+  slide_right: "slideright",
+  circle_open: "circleopen",
+  zoom_in: "zoomin",
+  pixelize: "pixelize",
+  radial: "radial",
 };
 
 export const VIDEO_TRANSITION_AUDIO_MODES = ["ambient", "silent", "bed_only"] as const;
@@ -223,6 +274,18 @@ export interface VideoTransitionSummary {
 
 export interface VideoStripClip {
   shotId: string;
+  /** Phase 2: AI shot, the company's own video, or a photo. */
+  clipKind: VideoClipKind;
+  /** Set for clips made from (or animated from) an upload. */
+  upload: VideoUploadSummary | null;
+  trimInMs: number | null;
+  trimOutMs: number | null;
+  stillMotion: VideoStillMotion | null;
+  muted: boolean;
+  volumeDb: number;
+  /** A photo clip: about what animating it would cost (cents), else null. */
+  animateQuoteCents: number | null;
+  errorMessage: string | null;
   orderIndex: number;
   sceneId: string;
   prompt: string;
@@ -252,4 +315,18 @@ export interface VideoStripSummary {
   /** Stale AI transitions block combining; this lists them in plain words. */
   combineProblems: string[];
   canCombineAgain: boolean;
+  // ─── Phase 2 ───
+  aspect: VideoStorylineAspect;
+  /** The shape is fixed once an AI shot has been rendered. */
+  aspectLocked: boolean;
+  exportSettings: VideoStorylineExportSettings;
+  presets: readonly VideoExportPreset[];
+  /** Plain warnings about the chosen export (e.g. how much of each picture a crop throws away). */
+  exportWarnings: string[];
+  music: VideoMusicLane;
+  uploads: VideoUploadSummary[];
+  storage: { usedBytes: number; quotaBytes: number };
+  footage: MediaFootageSettings;
+  /** Seconds of the film without titles (clips + AI bridges), for the time ruler. */
+  totalSeconds: number;
 }

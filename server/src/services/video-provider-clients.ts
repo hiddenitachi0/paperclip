@@ -63,6 +63,15 @@ export interface MediaJobInput {
   seed?: number;
   durationSeconds?: number;
   aspectRatio?: string;
+  /**
+   * false = the request carries the company's own footage (an uploaded photo
+   * or a frame of an uploaded video): Fal gets `X-Fal-Store-IO: 0`, so it
+   * does not keep the request/response payloads (design 2.5). Fal's docs say
+   * the CDN files it makes stay reachable; whether the queue's result
+   * endpoint still answers is checked by the poll path (a missing result is a
+   * plain failure, never a silent success). Sogni has no such switch.
+   */
+  storeIO?: false;
 }
 
 /** What the service told us right after asking it to start (never the finished file: that comes from poll()). */
@@ -108,16 +117,20 @@ function falAuthHeaders(apiKey: string): Record<string, string> {
   return { Authorization: `Key ${apiKey}`, "Content-Type": "application/json" };
 }
 
+/** Fal's header for "do not store this request's inputs and outputs". */
+export const FAL_STORE_IO_HEADER = "X-Fal-Store-IO";
+
 async function falQueueSubmit(
   fetchImpl: FetchImpl,
   apiKey: string,
   model: string,
   body: Record<string, unknown>,
+  opts: { storeIO?: false } = {},
 ): Promise<{ requestId: string }> {
   const checked = assertFalModelId(model);
   const res = await fetchImpl(`${FAL_QUEUE_BASE}/${checked}`, {
     method: "POST",
-    headers: falAuthHeaders(apiKey),
+    headers: { ...falAuthHeaders(apiKey), ...(opts.storeIO === false ? { [FAL_STORE_IO_HEADER]: "0" } : {}) },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`fal.ai ${checked} could not be started (${res.status}): ${await res.text()}`);
@@ -291,7 +304,7 @@ export class FalVideoProvider implements MediaJobProvider {
     if (input.aspectRatio) body.aspect_ratio = input.aspectRatio;
     if (typeof input.durationSeconds === "number") body.duration = String(input.durationSeconds);
     if (typeof input.seed === "number") body.seed = input.seed;
-    const { requestId } = await falQueueSubmit(this.fetchImpl, this.apiKey, model, body);
+    const { requestId } = await falQueueSubmit(this.fetchImpl, this.apiKey, model, body, input.storeIO === false ? { storeIO: false } : {});
     return { externalId: requestId, model, provider: this.name };
   }
 

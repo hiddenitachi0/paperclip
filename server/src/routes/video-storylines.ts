@@ -1,4 +1,7 @@
+import { readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { Router, type Request, type RequestHandler } from "express";
+import multer from "multer";
 import type { Db } from "@paperclipai/db";
 import { createRequestScopedDb } from "@paperclipai/db";
 import {
@@ -32,6 +35,18 @@ import {
   generateVideoTransitionSchema,
   updateMediaMonthlyCapSchema,
   MEDIA_MONTHLY_CAP_EXPLANATION,
+  MEDIA_FOOTAGE_EXPLANATIONS,
+  MEDIA_FOOTAGE_HARD_LIMITS,
+  animateVideoClipSchema,
+  createVideoClipSchema,
+  exportVideoStorylineSchema,
+  reorderVideoShotsSchema,
+  updateMediaFootageSettingsSchema,
+  updateVideoClipSchema,
+  updateVideoExportSettingsSchema,
+  updateVideoMusicLaneSchema,
+  updateVideoStorylineAspectSchema,
+  updateVideoUploadConsentSchema,
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
@@ -54,6 +69,8 @@ import { videoStorylineDirectorReviewService } from "../services/video-storyline
 import { videoStorylineDirectorDialogueService } from "../services/video-storyline-director-dialogue.js";
 import { videoStorylineDirectorProposalsService } from "../services/video-storyline-director-proposals.js";
 import { videoStorylineTransitionsService } from "../services/video-storyline-transitions.js";
+import { videoStorylineClipsService, type IncomingFile } from "../services/video-storyline-clips.js";
+import { videoStorylineFootageService } from "../services/video-storyline-footage.js";
 import { extractPosterJpeg } from "../services/video-ffmpeg.js";
 import { runMediaJob } from "../services/media-job-queue.js";
 import type { NextFunction, Response } from "express";
@@ -89,6 +106,69 @@ export function videoStorylineRoutes(rawDb: Db) {
   const directorProposals = videoStorylineDirectorProposalsService(db);
   const stills = videoStorylineStillsService(db);
   const transitions = videoStorylineTransitionsService(db);
+  const clips = videoStorylineClipsService(db);
+  const footage = videoStorylineFootageService(db);
+
+  /**
+   * Phase 2 uploads: written to a temp file first (never held whole in
+   * memory before the company's own limit is checked), capped at the hard
+   * upper limit here; the company's smaller limits are checked by the service.
+   */
+  /** Multer for one footage upload, capped at THIS company's own largest file (security review DUR-4745), never above the hard limit. */
+  function footageUploadFor(maxBytes: number) {
+    return multer({
+      storage: multer.diskStorage({ destination: tmpdir() }),
+      limits: { fileSize: Math.min(maxBytes, MEDIA_FOOTAGE_HARD_LIMITS.maxVideoMb * 1024 * 1024), files: 1, fields: 10 },
+    });
+  }
+  /**
+   * Uploads in flight per company: each is read into memory to be stored,
+   * so a burst of large uploads could exhaust the server (security review
+   * DUR-4745). A third one at the same time is asked to wait.
+   */
+  const UPLOADS_IN_FLIGHT_PER_COMPANY = 2;
+  const uploadsInFlight = new Map<string, number>();
+  async function withUploadSlot<T>(companyId: string, fn: () => Promise<T>): Promise<T> {
+    const current = uploadsInFlight.get(companyId) ?? 0;
+    if (current >= UPLOADS_IN_FLIGHT_PER_COMPANY) {
+      throw new HttpError(429, "Other uploads for this company are still going. Wait for them to finish, then try again.");
+    }
+    uploadsInFlight.set(companyId, current + 1);
+    try {
+      return await fn();
+    } finally {
+      const left = (uploadsInFlight.get(companyId) ?? 1) - 1;
+      if (left <= 0) uploadsInFlight.delete(companyId);
+      else uploadsInFlight.set(companyId, left);
+    }
+  }
+  const musicUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024, files: 1, fields: 5 } });
+
+  /** Runs multer for one "file" field and hands back the file (bytes read only after the size passed), in plain-English errors. */
+  async function receiveFile(upload: ReturnType<typeof multer>, req: Request, res: Response, maxBytesForRead: number): Promise<IncomingFile> {
+    try {
+      await new Promise<void>((resolve, reject) => upload.single("file")(req, res, (err: unknown) => (err ? reject(err) : resolve())));
+    } catch (err) {
+      if (err instanceof multer.MulterError) {
+        if (err.code === "LIMIT_FILE_SIZE") throw new HttpError(413, "This file is larger than this server accepts. Make it smaller and upload it again.");
+        throw badRequest("The upload could not be read. Try again.");
+      }
+      throw err;
+    }
+    const file = (req as Request & { file?: Express.Multer.File }).file;
+    if (!file) throw badRequest("Choose a file to upload.");
+    try {
+      if (file.size > maxBytesForRead) throw new HttpError(413, "This file is larger than this company allows. Make it smaller and upload it again.");
+      const buffer = file.buffer ?? (await readFile(file.path));
+      return { buffer, originalName: file.originalname || null, contentType: file.mimetype || "application/octet-stream", size: file.size };
+    } finally {
+      if (file.path) await rm(file.path, { force: true }).catch(() => undefined);
+    }
+  }
+
+  function bodyFlag(value: unknown): boolean {
+    return value === true || value === "true" || value === "1" || value === "on";
+  }
 
   /** Streams one stored object of THIS company (the key always comes from a stored row, never the request). */
   async function streamStored(res: Response, next: NextFunction, companyId: string, objectKey: string, contentType: string, byteSize: number | null) {
@@ -308,6 +388,54 @@ export function videoStorylineRoutes(rawDb: Db) {
     },
   );
 
+  /**
+   * Phase 2: the company's settings for its own photos and videos (storage
+   * limit, upload limits, clean-up days, "Never send uploaded footage to
+   * Sogni"). Anyone in the company sees them; only an owner/admin changes them.
+   */
+  router.get("/companies/:companyId/video-storylines/settings/footage", scope(), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    res.json({ settings: await footage.getSettings(companyId), usedBytes: await footage.storageUsedBytes(companyId), explanations: MEDIA_FOOTAGE_EXPLANATIONS, hardLimits: MEDIA_FOOTAGE_HARD_LIMITS });
+  });
+
+  router.patch(
+    "/companies/:companyId/video-storylines/settings/footage",
+    validate(updateMediaFootageSettingsSchema),
+    companyScopeFromParam(rawDb, (req, companyId) => {
+      assertCompanyOwnerAdminOrInstanceAdmin(req, companyId, "the settings for uploaded photos and videos");
+    }),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const saved = await footage.setSettings(companyId, req.body);
+      await logActivity(db, {
+        companyId,
+        actorType: "user",
+        actorId: req.actor.userId ?? "board",
+        action: "video_storylines.footage_settings_updated",
+        entityType: "company",
+        entityId: companyId,
+        details: { fields: Object.keys(req.body) },
+      });
+      res.json({ settings: saved, usedBytes: await footage.storageUsedBytes(companyId), explanations: MEDIA_FOOTAGE_EXPLANATIONS, hardLimits: MEDIA_FOOTAGE_HARD_LIMITS });
+    },
+  );
+
+  // ─── Music (Phase 2): files to choose from, and uploading one ─────────
+  // Registered before GET .../:storylineId so these names are never read as a storyline id.
+
+  router.get("/companies/:companyId/video-storylines/music-choices", ...gatedScope(), async (req, res) => {
+    res.json(await clips.musicChoices(req.params.companyId as string));
+  });
+
+  router.post("/companies/:companyId/video-storylines/music-files", ...gatedScope(), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const choice = await withUploadSlot(companyId, async () => {
+      const file = await receiveFile(musicUpload, req, res, 50 * 1024 * 1024);
+      return clips.uploadMusic(companyId, file, actorOf(req));
+    });
+    res.status(201).json(choice);
+  });
+
   // ─── Strip (Simple editor): clips, transitions, versions ─────────────
 
   router.get("/companies/:companyId/video-storylines/:storylineId/strip", ...gatedScope(), async (req, res) => {
@@ -389,6 +517,14 @@ export function videoStorylineRoutes(rawDb: Db) {
     async (req, res, next) => {
       const companyId = req.params.companyId as string;
       const shot = await storylines.getShotRow(companyId, req.params.storylineId as string, req.params.shotId as string);
+      if (shot.sourceUploadId && !shot.stillObjectKey) {
+        // Your own video: its upload's ready-made poster (no ffmpeg in the request).
+        const upload = await clips.getUpload(companyId, shot.storylineId, shot.sourceUploadId).catch(() => null);
+        if (upload?.posterObjectKey) {
+          await streamStored(res, next, companyId, upload.posterObjectKey, "image/jpeg", upload.posterByteSize || null);
+          return;
+        }
+      }
       if (shot.stillObjectKey) {
         await streamStored(res, next, companyId, shot.stillObjectKey, shot.stillContentType || "image/png", shot.stillByteSize);
         return;
@@ -424,6 +560,102 @@ export function videoStorylineRoutes(rawDb: Db) {
       res.end(poster);
     },
   );
+
+  // ─── Phase 2: your own videos and photos, order, shape, export, music ───
+
+  router.post("/companies/:companyId/video-storylines/:storylineId/uploads", ...gatedScope(), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const limits = await footage.getSettings(companyId);
+    const maxBytes = Math.max(limits.maxVideoMb, limits.maxPhotoMb) * 1024 * 1024;
+    const created = await withUploadSlot(companyId, async () => {
+      const file = await receiveFile(footageUploadFor(maxBytes), req, res, maxBytes);
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const consent = { showsPeople: bodyFlag(body.showsPeople), consentLikeness: bodyFlag(body.consentLikeness), consentAdults: bodyFlag(body.consentAdults) };
+      return clips.createUpload(companyId, req.params.storylineId as string, file, consent, actorOf(req));
+    });
+    res.status(201).json(created);
+  });
+
+  router.patch(
+    "/companies/:companyId/video-storylines/:storylineId/uploads/:uploadId/consent",
+    validate(updateVideoUploadConsentSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      res.json(await clips.updateConsent(req.params.companyId as string, req.params.storylineId as string, req.params.uploadId as string, req.body, actorOf(req)));
+    },
+  );
+
+  router.delete("/companies/:companyId/video-storylines/:storylineId/uploads/:uploadId", ...gatedScope(), async (req, res) => {
+    await clips.deleteUpload(req.params.companyId as string, req.params.storylineId as string, req.params.uploadId as string, actorOf(req));
+    res.status(204).end();
+  });
+
+  /** The light preview copy (videos) or small picture (photos) of an upload, for the strip. */
+  router.get("/companies/:companyId/video-storylines/:storylineId/uploads/:uploadId/preview", ...gatedScope(), async (req, res, next) => {
+    const companyId = req.params.companyId as string;
+    const upload = await clips.getUpload(companyId, req.params.storylineId as string, req.params.uploadId as string);
+    if (!upload.previewObjectKey) throw notFound("This upload has no preview yet.");
+    await streamStored(res, next, companyId, upload.previewObjectKey, upload.previewContentType || "application/octet-stream", upload.previewByteSize || null);
+  });
+
+  router.get("/companies/:companyId/video-storylines/:storylineId/uploads/:uploadId/poster", ...gatedScope(), async (req, res, next) => {
+    const companyId = req.params.companyId as string;
+    const upload = await clips.getUpload(companyId, req.params.storylineId as string, req.params.uploadId as string);
+    if (!upload.posterObjectKey) throw notFound("This upload has no picture yet.");
+    await streamStored(res, next, companyId, upload.posterObjectKey, "image/jpeg", (upload.posterObjectKey === upload.previewObjectKey ? upload.previewByteSize : upload.posterByteSize) || null);
+  });
+
+  router.post("/companies/:companyId/video-storylines/:storylineId/clips", validate(createVideoClipSchema), ...gatedScope(), async (req, res) => {
+    res.status(201).json(await clips.createClip(req.params.companyId as string, req.params.storylineId as string, req.body, actorOf(req)));
+  });
+
+  router.patch("/companies/:companyId/video-storylines/:storylineId/clips/:shotId", validate(updateVideoClipSchema), ...gatedScope(), async (req, res) => {
+    await clips.updateClip(req.params.companyId as string, req.params.storylineId as string, req.params.shotId as string, req.body, actorOf(req));
+    res.json({ ok: true });
+  });
+
+  router.delete("/companies/:companyId/video-storylines/:storylineId/clips/:shotId", ...gatedScope(), async (req, res) => {
+    await clips.removeClip(req.params.companyId as string, req.params.storylineId as string, req.params.shotId as string, actorOf(req));
+    res.status(204).end();
+  });
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/clips/:shotId/animate",
+    validate(animateVideoClipSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      res.status(202).json(await clips.animate(req.params.companyId as string, req.params.storylineId as string, req.params.shotId as string, req.body, actorOf(req)));
+    },
+  );
+
+  router.put("/companies/:companyId/video-storylines/:storylineId/order", validate(reorderVideoShotsSchema), ...gatedScope(), async (req, res) => {
+    await clips.reorder(req.params.companyId as string, req.params.storylineId as string, req.body, actorOf(req));
+    res.json({ ok: true });
+  });
+
+  router.put("/companies/:companyId/video-storylines/:storylineId/aspect", validate(updateVideoStorylineAspectSchema), ...gatedScope(), async (req, res) => {
+    await clips.setAspect(req.params.companyId as string, req.params.storylineId as string, req.body.aspect, actorOf(req));
+    res.json({ ok: true });
+  });
+
+  router.patch(
+    "/companies/:companyId/video-storylines/:storylineId/export-settings",
+    validate(updateVideoExportSettingsSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      res.json(await clips.updateExportSettings(req.params.companyId as string, req.params.storylineId as string, req.body, actorOf(req)));
+    },
+  );
+
+  router.post("/companies/:companyId/video-storylines/:storylineId/export", validate(exportVideoStorylineSchema), ...gatedScope(), async (req, res) => {
+    await clips.exportAgain(req.params.companyId as string, req.params.storylineId as string, req.body, actorOf(req));
+    res.status(202).json({ ok: true });
+  });
+
+  router.patch("/companies/:companyId/video-storylines/:storylineId/music", validate(updateVideoMusicLaneSchema), ...gatedScope(), async (req, res) => {
+    await clips.updateMusicLane(req.params.companyId as string, req.params.storylineId as string, req.body, actorOf(req));
+    res.json({ ok: true });
+  });
 
   /** A script that fails validation is refused with every problem listed in plain words (details.errors), never a raw schema dump. */
   function parseScriptOrThrow(script: unknown): ParsedVideoStorylineScript {

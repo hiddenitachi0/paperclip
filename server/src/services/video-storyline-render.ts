@@ -1,7 +1,8 @@
 import { buffer as streamToBuffer } from "node:stream/consumers";
 import { and, asc, eq, inArray, lt, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { assets, issueAttachments, videoShotRenderJobs, videoShots, videoStorylines, withCompanyScope } from "@paperclipai/db";
+import { assets, issueAttachments, videoMediaSpend, videoShotRenderJobs, videoShots, videoStorylines, withCompanyScope } from "@paperclipai/db";
+import { sendableDataUriBytes, videoStorylineFootageService } from "./video-storyline-footage.js";
 import {
   MEDIA_STUDIO_PLUGIN_KEY,
   VIDEO_RENDER_JOB_MAX_AGE_MS,
@@ -185,6 +186,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
   const registry = pluginRegistryService(db);
   const secrets = secretService(db);
   const approvals = approvalService(db);
+  const footage = videoStorylineFootageService(db, { now: deps.now });
   const nowOf = () => deps.now?.() ?? new Date();
 
   /**
@@ -236,7 +238,8 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     const [row] = await db
       .select()
       .from(videoShots)
-      .where(and(eq(videoShots.storylineId, storylineId), ne(videoShots.status, "done"), ne(videoShots.storyboardStatus, "dropped")))
+      // Phase 2: only AI shots render; uploaded videos and photos are prepared by ffmpeg (video-storyline-clips.ts).
+      .where(and(eq(videoShots.storylineId, storylineId), ne(videoShots.status, "done"), ne(videoShots.storyboardStatus, "dropped"), eq(videoShots.clipKind, "generated")))
       .orderBy(asc(videoShots.orderIndex))
       .limit(1);
     return row ?? null;
@@ -315,15 +318,26 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
    * reach here (callers filter them out of the render queue first); a
    * 'pending' shot always does, since it has not been reviewed at all.
    */
-  async function beginShotRender(companyId: string, storyline: typeof videoStorylines.$inferSelect, shot: typeof videoShots.$inferSelect, actorId: string) {
+  async function beginShotRender(
+    companyId: string,
+    storyline: typeof videoStorylines.$inferSelect,
+    shot: typeof videoShots.$inferSelect,
+    actorId: string,
+    opts: { companyKeyOnly?: boolean } = {},
+  ) {
+    if (shot.clipKind !== "generated") {
+      throw unprocessable(`Clip ${shot.orderIndex + 1} is your own video or photo; it is prepared on the server, never rendered by an AI service.`);
+    }
     if (shot.storyboardStatus !== "approved") {
       throw unprocessable(
         `Shot ${shot.orderIndex + 1}'s storyboard still has not been approved yet. Generate and approve a still for it (or drop it) before rendering.`,
       );
     }
     const { providerId, model } = resolveShotRenderTarget(storyline, shot);
-    const apiKey = await resolveProviderApiKey(companyId, providerId, actorId);
+    // A shot animated from the company's own photo uses the company's own key only (decision 15).
+    const apiKey = await resolveProviderApiKey(companyId, providerId, actorId, { companyKeyOnly: opts.companyKeyOnly || Boolean(shot.sourceUploadId) });
     const provider = buildProvider(providerId, apiKey, model);
+    const systemActor = { actorType: "user" as const, actorId };
 
     // DUR-4317/DUR-4320: an approved storyboard still wins over the ordinary
     // last-frame continuity image -- the operator explicitly approved this
@@ -332,13 +346,31 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     // continuity/reference pictures below only when the still could not be
     // read back (see loadApprovedStillDataUri's doc comment).
     const approvedStillImage = await loadApprovedStillDataUri(companyId, shot);
+    let carriesFootage = false;
+    // An animated photo: the photo is the start picture, so it must pass the footage rules (design 2.5).
+    if (approvedStillImage && shot.sourceUploadId) {
+      const sent = await footage.assertMaySend(companyId, shot, providerId, sendableDataUriBytes(approvedStillImage), systemActor);
+      carriesFootage = carriesFootage || sent.footage;
+    }
 
     let continuityImage: string | undefined;
     const previous = await closestPreviousDoneShot(storyline.id, shot.orderIndex);
-    if (previous?.resultObjectKey && previous.resultProvider && previous.resultContentType) {
+    if (!approvedStillImage && previous?.resultObjectKey && previous.resultProvider && previous.resultContentType) {
       const clip = await downloadClipFromStorage(companyId, previous.resultProvider, previous.resultObjectKey);
       if (clip) {
         continuityImage = (await extractLastFrameDataUri(clip)) ?? undefined;
+      }
+      // The previous clip is the company's own footage: its last frame is only
+      // sent when it passes the footage rules; otherwise the shot simply
+      // starts without it (continuity is a nicety, never a reason to leak).
+      if (continuityImage && previous.sourceUploadId) {
+        try {
+          const sent = await footage.assertMaySend(companyId, previous, providerId, sendableDataUriBytes(continuityImage), systemActor);
+          carriesFootage = carriesFootage || sent.footage;
+        } catch (err) {
+          logger.info({ err, shotId: shot.id }, "video-storyline-render: continuity frame from own footage not sent");
+          continuityImage = undefined;
+        }
       }
     }
     const referenceAssetIds = [...shot.lookReferenceAssetIds, ...storyline.characterReferenceAssetIds];
@@ -364,7 +396,14 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       // 5 or 10 seconds and refuse anything else) -- see
       // videoRenderDurationSeconds; the estimate bills the same length.
       durationSeconds: videoRenderDurationSeconds(providerId, model, shot.durationSeconds),
+      // Phase 2: the storyline's picture shape, chosen before rendering.
+      ...(storyline.aspect ? { aspectRatio: storyline.aspect } : {}),
+      ...(carriesFootage ? { storeIO: false as const } : {}),
     };
+    if (providerId === "sogni" && storyline.aspect && storyline.aspect !== "16:9" && !startImage) {
+      // Sogni's video tools take no shape setting; with no start picture the prompt carries it.
+      input.prompt = `${input.prompt}\nFrame: ${storyline.aspect === "9:16" ? "vertical 9:16" : "square 1:1"}.`;
+    }
     const handle = await provider.start(input);
     const attempt = shot.attempt + 1;
     await db.insert(videoShotRenderJobs).values({
@@ -407,7 +446,9 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     // DUR-4317/DUR-4320: dropped shots never render and never cost anything
     // -- excluded from the cost estimate the same way they are excluded
     // from the render queue (nextPendingShot).
-    const renderableShots = shots.filter((s) => s.storyboardStatus !== "dropped");
+    // Phase 2: only AI shots render (and cost money); the company's own
+    // videos and photos are prepared by ffmpeg, free.
+    const renderableShots = shots.filter((s) => s.storyboardStatus !== "dropped" && s.clipKind === "generated");
 
     // DUR-4317/DUR-4320: the mandatory storyboard gate -- every shot that
     // still needs to render must already be approved. Checked here, upfront
@@ -424,7 +465,8 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
 
     const estimateResult = estimateShotRenderCents(storyline, renderableShots);
     const effectiveBudgetCapCents = input.confirmBudgetCapCents ?? storyline.budgetCapCents;
-    if (effectiveBudgetCapCents === null || effectiveBudgetCapCents === undefined) {
+    const nothingToPayFor = renderableShots.every((s) => s.status === "done");
+    if ((effectiveBudgetCapCents === null || effectiveBudgetCapCents === undefined) && !nothingToPayFor) {
       throw badRequest(
         `Set a budget cap before starting a render, so spending stops at a limit you chose. This render is estimated at ${formatDollars(estimateResult.estimatedTotalCents)}.`,
       );
@@ -436,7 +478,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       storyline,
       renderableShots.filter((s) => s.status !== "done"),
     );
-    if (storyline.spentCents + remainingEstimate.estimatedTotalCents > effectiveBudgetCapCents) {
+    if (effectiveBudgetCapCents !== null && effectiveBudgetCapCents !== undefined && storyline.spentCents + remainingEstimate.estimatedTotalCents > effectiveBudgetCapCents) {
       throw unprocessable(
         `This render is estimated at ${formatDollars(remainingEstimate.estimatedTotalCents)}, and ${formatDollars(storyline.spentCents)} is already spent -- together that is over the budget cap of ${formatDollars(effectiveBudgetCapCents)}. Raise the budget cap to at least ${formatDollars(storyline.spentCents + remainingEstimate.estimatedTotalCents)} to go ahead.`,
       );
@@ -526,6 +568,9 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     await settings.assertEnabled(companyId);
     const storyline = await storylines.getStorylineRow(companyId, storylineId);
     const shot = await storylines.getShotRow(companyId, storylineId, shotId);
+    if (shot.clipKind !== "generated") {
+      throw unprocessable("This clip is your own video or photo, so there is nothing to render. Change its trim or motion on the strip instead.");
+    }
     if (shot.status === "queued" || shot.status === "rendering") {
       throw conflict("This shot is already rendering.");
     }
@@ -851,7 +896,45 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     throw new Error("Provider returned neither a url nor a dataUrl");
   }
 
+  /** Phase 2: money held for this shot's paid step (animate photo), released when it fails. */
+  async function releaseShotReservation(companyId: string, storylineId: string, shotId: string): Promise<void> {
+    await withCompanyScope(db, companyId, async (tx) => {
+      const held = await tx
+        .select()
+        .from(videoMediaSpend)
+        .where(and(eq(videoMediaSpend.shotId, shotId), eq(videoMediaSpend.companyId, companyId), eq(videoMediaSpend.status, "reserved")))
+        .for("update");
+      const total = held.reduce((sum, row) => sum + row.reservedCents, 0);
+      if (held.length === 0) return;
+      await tx
+        .update(videoMediaSpend)
+        .set({ status: "released", costCents: 0, updatedAt: nowOf() })
+        .where(inArray(videoMediaSpend.id, held.map((r) => r.id)));
+      if (total > 0) {
+        await tx
+          .update(videoStorylines)
+          .set({ spentCents: sql`greatest(0, ${videoStorylines.spentCents} - ${total})`, updatedAt: nowOf() })
+          .where(eq(videoStorylines.id, storylineId));
+      }
+    });
+  }
+
+  /** Phase 2: settles this shot's held money at its real cost; returns what was held (already counted in spentCents). */
+  async function settleShotReservation(companyId: string, shotId: string, costCents: number): Promise<number> {
+    const held = await db
+      .select()
+      .from(videoMediaSpend)
+      .where(and(eq(videoMediaSpend.shotId, shotId), eq(videoMediaSpend.companyId, companyId), eq(videoMediaSpend.status, "reserved")));
+    if (held.length === 0) return 0;
+    await db
+      .update(videoMediaSpend)
+      .set({ status: "settled", costCents, updatedAt: nowOf() })
+      .where(inArray(videoMediaSpend.id, held.map((r) => r.id)));
+    return held.reduce((sum, row) => sum + row.reservedCents, 0);
+  }
+
   async function onShotFailed(companyId: string, storylineId: string, shotId: string, jobId: string, errorMessage: string) {
+    await releaseShotReservation(companyId, storylineId, shotId);
     await db.update(videoShotRenderJobs).set({ status: "failed", error: errorMessage, completedAt: nowOf(), updatedAt: nowOf() }).where(eq(videoShotRenderJobs.id, jobId));
     await db.update(videoShots).set({ status: "failed", errorMessage, updatedAt: nowOf() }).where(eq(videoShots.id, shotId));
     await db.update(videoStorylines).set({ status: "paused", errorMessage: `A shot failed: ${errorMessage}. Re-render it to continue.`, updatedAt: nowOf() }).where(eq(videoStorylines.id, storylineId));
@@ -933,7 +1016,16 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       .where(eq(videoShots.id, shot.id));
     await db.update(videoShotRenderJobs).set({ status: "done", completedAt: nowOf(), updatedAt: nowOf() }).where(eq(videoShotRenderJobs.id, jobId));
 
-    const spentCents = storyline.spentCents + actualCostCents;
+    // An animated photo had its estimate held (and counted) when it started: count only the difference now.
+    const alreadyHeld = await settleShotReservation(companyId, shot.id, actualCostCents);
+    const spentCents = Math.max(0, storyline.spentCents + actualCostCents - alreadyHeld);
+    // Phase 2: a single clip made outside a render run (an animated photo in
+    // a finished or not-yet-started film) never starts paid renders of other
+    // shots by itself: only a running render continues down the chain.
+    if (storyline.status !== "rendering") {
+      await db.update(videoStorylines).set({ spentCents, updatedAt: nowOf() }).where(eq(videoStorylines.id, storyline.id));
+      return;
+    }
     const next = await nextPendingShot(storyline.id);
     if (!next) {
       await db.update(videoStorylines).set({ spentCents, status: "ready_to_stitch", updatedAt: nowOf() }).where(eq(videoStorylines.id, storyline.id));
@@ -1037,6 +1129,8 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     cancelRender,
     tick,
     // Storyline strip (AI transitions) reuses these.
+    beginShotRender,
+    releaseShotReservation,
     resolveProviderApiKey,
     castVideoInput,
     downloadResultBytes,

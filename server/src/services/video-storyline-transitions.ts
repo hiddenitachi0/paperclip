@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { buffer as streamToBuffer } from "node:stream/consumers";
-import { and, asc, desc, eq, gte, inArray, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, ne, sql } from "drizzle-orm";
 import sharp from "sharp";
 import type { Db } from "@paperclipai/db";
 import { videoScenes, videoShots, videoStorylines, videoTransitionTakes, videoTransitions, withCompanyScope } from "@paperclipai/db";
+import { companyMonthlyMediaSpendCents, sendableDataUriBytes, NO_READER_MESSAGE, parseFrameAgeCheck, videoStorylineFootageService } from "./video-storyline-footage.js";
 import {
   MEDIA_MONTHLY_CAP_EXPLANATION,
   MEDIA_STUDIO_PLUGIN_KEY,
@@ -19,7 +20,17 @@ import {
   estimateVideoTransitionCents,
   findVideoTransitionModel,
   readVideoStorylineCast,
+  readVideoExportSettings,
   snapTransitionSeconds,
+  VIDEO_EXPORT_PRESETS,
+  videoAspectSize,
+  videoCropLossPercent,
+  videoExportPreset,
+  VIDEO_CLIP_MAX_SECONDS,
+  type VideoClipKind,
+  type VideoStillMotion,
+  type VideoStorylineAspect,
+  type VideoStripClip,
   videoShotCast,
   videoTransitionAudioModeFor,
   type GenerateVideoTransitionInput,
@@ -42,11 +53,10 @@ import { recordFalCostEvent } from "./fal-cost-events.js";
 import { runMediaJob } from "./media-job-queue.js";
 import { pluginRegistryService } from "./plugin-registry.js";
 import { recordSogniCost, SOGNI_CREDIT_PRICE_CONFIG_KEY } from "./sogni-cost.js";
-import { readPluginState } from "./storyline-cast.js";
 import { buildClipContactSheet, extractFirstFrameDataUri, extractLastFrameDataUri, type NormalizeClipOptions } from "./video-ffmpeg.js";
 import type { MediaJobHandle } from "./video-provider-clients.js";
 import { STORYLINE_TRANSITION_BILLING_CODE, STORYLINE_WRITER_NO_MODEL_MESSAGE, storylineCompanyModel } from "./video-storyline-company-model.js";
-import { buildProvider, storylineSafeFetch, videoStorylineRenderService } from "./video-storyline-render.js";
+import { buildProvider, estimateShotRenderCents, storylineSafeFetch, videoStorylineRenderService } from "./video-storyline-render.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
 import { lockStorylineRow, videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
 import type { HelperServiceOptions } from "./helper.js";
@@ -83,10 +93,9 @@ const FRAME_NOTE_MAX_CHARS = 1_200;
 const WRITER_MAX_OUTPUT_TOKENS = 1_500;
 const READER_MAX_OUTPUT_TOKENS = 600;
 
-export const NO_READER_MESSAGE =
-  "This company has no picture-reading AI set up, so this transition was written from the script only. Add one in Settings so the AI can look at the real clips (Media Studio → Identities → analysis model, or a helper model that can see pictures).";
+export { NO_READER_MESSAGE, parseFrameAgeCheck };
 export const AGE_REFUSED_MESSAGE =
-  "The frames at this join did not pass the age check (only pictures clearly of adults, or with no people at all, are sent to the picture-reading AI), so this transition was written from the script only.";
+  "The frames at this join were not sent to the picture-reading AI (only pictures clearly of adults, or with no people at all, pass the age check, and your own footage showing people also needs both consent ticks), so this transition was written from the script only.";
 export const NO_FRAMES_MESSAGE = "The clips at this join could not be read (they may not be rendered yet), so this transition was written from the script only.";
 
 // ─── Pure helpers (exported for tests) ────────────────────────────────────
@@ -172,22 +181,6 @@ export function parseTransitionSuggestion(text: string, model: Pick<VideoTransit
   return { suggestedKind: kind, reason: str(raw.reason, 300), aiStyle: style, plainLine, prompt, durationSeconds: snapTransitionSeconds(model, seconds) };
 }
 
-/** Age-check answer with the "no people" outcome (design 2.5). Unreadable = null (never cached). */
-export function parseFrameAgeCheck(text: string): "adult" | "no_people" | "under18" | "unclear" | null {
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start < 0 || end <= start) return null;
-  try {
-    const raw = JSON.parse(text.slice(start, end + 1)) as Record<string, unknown>;
-    if (raw.peopleShown === false) return "no_people";
-    if (raw.apparentAdult === true && raw.peopleShown !== null) return "adult";
-    if (raw.apparentAdult === false) return "under18";
-    return "unclear";
-  } catch {
-    return null;
-  }
-}
-
 const AGE_CHECK_SYSTEM = [
   "You check pictures before they are described by another AI. The picture is a strip of video frames side by side.",
   "Never say or guess who anyone is. Do not describe the picture.",
@@ -245,8 +238,9 @@ function dollars(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
 
-function startOfMonthUtc(now: Date): Date {
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+/** The storyline's picture shape for the video model (Fal takes it as aspect_ratio; Sogni follows the start picture). */
+export function aspectRatioFor(storyline: Pick<StorylineRow, "aspect">): string | null {
+  return storyline.aspect === "9:16" || storyline.aspect === "1:1" || storyline.aspect === "16:9" ? storyline.aspect : null;
 }
 
 // ─── Stitch plan (used by video-storyline-stitch.ts) ─────────────────────
@@ -287,6 +281,7 @@ export async function buildStitchPlan(
   const takeById = new Map(takes.map((t) => [t.id, t]));
   const items: StitchPlanItem[] = [];
   const problems: string[] = [];
+  const endFrameTrim = readVideoExportSettings(storyline.exportSettings, storyline.aspect).endFrame === "trim";
   for (const [index, shot] of shots.entries()) {
     let transitionIn: ShotTransitionInput["transitionIn"] = "cut";
     let durationMs = storyline.defaultTransitionDurationMs;
@@ -320,14 +315,30 @@ export async function buildStitchPlan(
         durationMs = Math.min(VIDEO_BLEND_MAX_MS, Math.max(VIDEO_BLEND_MIN_MS, row.durationMs));
       }
     }
+    // Phase 2: per-clip sound (mute / volume).
+    const audio: NormalizeClipOptions["audio"] = shot.clipMuted ? "strip" : shot.clipVolumeDb !== 0 ? { gainDb: shot.clipVolumeDb } : undefined;
     items.push({
       objectKey: shot.resultObjectKey ?? "",
       transitionIn,
       transitionDurationMs: durationMs,
+      ...(audio ? { normalize: { audio } } : {}),
       shotId: shot.id,
       takeId: null,
       writtenSeconds: shot.durationSeconds,
     });
+  }
+  // "End frame: trim" (design 2.7): an AI shot that is cut straight into the
+  // next AI shot loses its last frame -- the next shot starts on exactly that
+  // picture, so keeping both shows it twice (a tiny stutter).
+  if (endFrameTrim) {
+    const kindOf = new Map(shots.map((s) => [s.id, s.clipKind]));
+    for (let i = 0; i + 1 < items.length; i += 1) {
+      const here = items[i]!;
+      const next = items[i + 1]!;
+      if (here.shotId && next.shotId && next.transitionIn === "cut" && kindOf.get(here.shotId) === "generated" && kindOf.get(next.shotId) === "generated") {
+        here.normalize = { ...(here.normalize ?? {}), trimLastFrame: true };
+      }
+    }
   }
   return { items, problems };
 }
@@ -345,6 +356,7 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
   const render = videoStorylineRenderService(db);
   const registry = pluginRegistryService(db);
   const models = storylineCompanyModel(db, deps.modelOptions);
+  const footage = videoStorylineFootageService(db, { now: deps.now, modelOptions: deps.modelOptions });
   const nowOf = () => deps.now?.() ?? new Date();
 
   async function liveShots(companyId: string, storylineId: string): Promise<ShotRow[]> {
@@ -459,48 +471,10 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
   }
 
   async function monthlySpentCents(companyId: string): Promise<number> {
-    const [row] = await db
-      .select({
-        total: sql<number>`coalesce(sum(case when ${videoTransitionTakes.status} = 'failed' then coalesce(${videoTransitionTakes.costCents}, 0) else coalesce(${videoTransitionTakes.costCents}, ${videoTransitionTakes.reservedCents}) end), 0)::int`,
-      })
-      .from(videoTransitionTakes)
-      .where(and(eq(videoTransitionTakes.companyId, companyId), gte(videoTransitionTakes.createdAt, startOfMonthUtc(nowOf()))));
-    return Number(row?.total ?? 0);
+    return companyMonthlyMediaSpendCents(db, companyId, nowOf());
   }
 
-  /**
-   * Media Studio's picture-reading model, else the helper's default if it can
-   * see pictures, else (no helper default) the helper's built-in default
-   * under the helper's own key rule, else a plain reason.
-   */
-  async function readerFor(companyId: string): Promise<{ entryId: string | null; keySecretId: string | null; label: string; provider: string } | { problem: string }> {
-    const plugin = await registry.getByKey(MEDIA_STUDIO_PLUGIN_KEY);
-    const raw = plugin ? ((await readPluginState(db, plugin.id, companyId, "identitySettings")) as Record<string, unknown> | null) : null;
-    const analysis = raw && typeof raw.analysis === "object" && raw.analysis ? (raw.analysis as Record<string, unknown>) : null;
-    const entryId = typeof analysis?.entryId === "string" ? analysis.entryId : null;
-    if (entryId) {
-      const entry = await models.resolveEntry(companyId, entryId);
-      if (entry) {
-        return {
-          entryId: entry.id,
-          keySecretId: typeof analysis?.keySecretId === "string" ? analysis.keySecretId : null,
-          label: entry.name,
-          provider: entry.provider,
-        };
-      }
-    }
-    const helperDefault = await models.canSeePictures(companyId, null);
-    if (helperDefault) {
-      if (helperDefault.canSee === true) {
-        const entry = await models.resolveEntry(companyId, helperDefault.entryId);
-        if (entry) return { entryId: entry.id, keySecretId: null, label: entry.name, provider: entry.provider };
-      }
-      return { problem: NO_READER_MESSAGE };
-    }
-    const builtIn = await models.builtInDefault(companyId);
-    if (builtIn?.canSeePictures) return { entryId: null, keySecretId: null, label: builtIn.label, provider: "anthropic" };
-    return { problem: NO_READER_MESSAGE };
-  }
+  const readerFor = footage.pictureReader;
 
   async function writerProblem(companyId: string): Promise<string | null> {
     return (await models.writerAvailable(companyId)) ? null : STORYLINE_WRITER_NO_MODEL_MESSAGE;
@@ -526,11 +500,34 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
     const allDone = shots.length > 0 && shots.every((s) => s.status === "done" && s.resultObjectKey);
     const plan = allDone ? await buildStitchPlan(db, storyline, shots) : { items: [], problems: [] };
     const reader = await readerFor(companyId);
+    const uploads = await footage.uploadsFor(companyId, storylineId);
+    const uploadById = new Map(uploads.map((u) => [u.id, u]));
+    const footageSettings = await footage.getSettings(companyId);
+    const exportSettings = readVideoExportSettings(storyline.exportSettings, storyline.aspect);
+    const preset = videoExportPreset(exportSettings.preset);
+    const aspect = (["16:9", "9:16", "1:1"].includes(storyline.aspect) ? storyline.aspect : "16:9") as VideoStorylineAspect;
+    const exportWarnings: string[] = [];
+    if (preset.aspect !== aspect) {
+      const loss = videoCropLossPercent(videoAspectSize(aspect), preset);
+      exportWarnings.push(
+        exportSettings.fit === "fill"
+          ? `This film is ${aspect} and the export is ${preset.aspect}: cropping throws away about ${loss}% of every picture.`
+          : `This film is ${aspect} and the export is ${preset.aspect}, so the pictures get black bars to fit.`,
+      );
+    }
+    if (footageSettings.neverSendUploadsToSogni && providerId === "sogni" && shots.some((s) => s.sourceUploadId)) {
+      exportWarnings.push("This storyline uses Sogni and your own footage. AI bridges and animation next to your footage are blocked by this company's setting; use Cut or a blend there.");
+    }
+    // Same rule as setAspect: an AI picture or clip has been made in the current shape.
+    const aspectLocked = shots.some((s) => s.clipKind === "generated" && !s.sourceUploadId && (s.status !== "draft" || s.resultObjectKey !== null || s.stillObjectKey !== null));
+    const totalSeconds = Math.round(
+      shots.reduce((sum, s) => sum + s.durationSeconds, 0) + gaps.filter((g) => g.kind === "ai").reduce((sum, g) => sum + g.durationMs / 1000, 0),
+    );
     return {
       storylineId,
       providerId,
       status: storyline.status,
-      clips: shots.map((s) => ({
+      clips: shots.map((s): VideoStripClip => ({
         shotId: s.id,
         orderIndex: s.orderIndex,
         sceneId: s.sceneId,
@@ -540,7 +537,19 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
         status: s.status,
         storyboardStatus: s.storyboardStatus,
         hasClip: Boolean(s.resultObjectKey),
-        hasPoster: Boolean(s.stillObjectKey || s.previewObjectKey || s.resultObjectKey),
+        hasPoster: Boolean(s.stillObjectKey || s.previewObjectKey || s.resultObjectKey || s.sourceUploadId),
+        clipKind: s.clipKind as VideoClipKind,
+        upload: s.sourceUploadId ? uploadById.get(s.sourceUploadId) ?? null : null,
+        trimInMs: s.sourceTrimInMs,
+        trimOutMs: s.sourceTrimOutMs,
+        stillMotion: (s.stillMotion as VideoStillMotion | null) ?? null,
+        muted: s.clipMuted,
+        volumeDb: s.clipVolumeDb,
+        animateQuoteCents:
+          s.clipKind === "still"
+            ? estimateShotRenderCents(storyline, [{ providerId: null, model: null, durationSeconds: Math.min(VIDEO_CLIP_MAX_SECONDS, s.durationSeconds) }]).estimatedTotalCents
+            : null,
+        errorMessage: s.errorMessage,
       })),
       gaps,
       models: VIDEO_TRANSITION_MODELS.filter((m) => m.provider === providerId),
@@ -552,6 +561,16 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
       readerProblem: "problem" in reader ? reader.problem : null,
       combineProblems: plan.problems,
       canCombineAgain: allDone && plan.problems.length === 0 && ["done", "needs_attention"].includes(storyline.status),
+      aspect,
+      aspectLocked,
+      exportSettings,
+      presets: VIDEO_EXPORT_PRESETS,
+      exportWarnings,
+      music: await footage.musicLane(companyId, storyline),
+      uploads,
+      storage: { usedBytes: await footage.storageUsedBytes(companyId), quotaBytes: footageSettings.storageQuotaBytes },
+      footage: footageSettings,
+      totalSeconds,
     };
   }
 
@@ -638,6 +657,8 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
     reader: { entryId: string | null; keySecretId: string | null; provider: string },
     actor: VideoStorylineActor,
   ): Promise<{ text: string | null; refused: boolean }> {
+    // The company's own footage: no frames to the reader without the consent ticks (design 2.5).
+    if (await footage.readerRefusal(companyId, shot)) return { text: null, refused: true };
     const fromClip = Boolean(shot.resultObjectKey);
     const sourceHash = fromClip ? shot.resultSha256 ?? shot.resultObjectKey : side === "start" ? shot.stillSha256 ?? shot.stillObjectKey : null;
     if (!sourceHash) return { text: null, refused: false };
@@ -645,6 +666,8 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
     if (cached && cached.sourceHash === sourceHash) {
       // A refusal never gets milder: the same frames are not checked again.
       const refused = cached.verdict === "under18" || cached.verdict === "unclear";
+      // Consent can be taken back: re-checked for footage that showed people.
+      if (!refused && cached.verdict === "adult" && (await footage.readerRefusal(companyId, shot, true))) return { text: null, refused: true };
       return { text: refused ? null : cached.text, refused };
     }
     let image: Buffer | null = null;
@@ -672,12 +695,17 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
       images,
     };
     let verdict: string | null = "local";
-    if (reader.provider !== "local") {
-      // Cloud model: age check first (design 2.5). Only "adult" or "no people" may be described.
+    // Cloud model, or any model reading the company's own footage: age check
+    // first (design 2.5). Only "adult" or "no people" may be described.
+    if (reader.provider !== "local" || shot.sourceUploadId) {
       const check = await models.write(companyId, actor, { ...common, system: AGE_CHECK_SYSTEM, user: AGE_CHECK_USER, maxTokens: 60 });
       verdict = parseFrameAgeCheck(check.text);
       if (verdict === null) return { text: null, refused: true };
     }
+    // Your own footage that shows people (whatever the upload said): both
+    // consent ticks before the frames are described. Not cached, so ticking
+    // the boxes later lets the next suggestion read them.
+    if (verdict === "adult" && (await footage.readerRefusal(companyId, shot, true))) return { text: null, refused: true };
     const refused = verdict === "under18" || verdict === "unclear";
     let text: string | null = null;
     let modelLabel: string | null = null;
@@ -899,16 +927,11 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
           `This transition costs about ${dollars(quote.cents)}, and ${dollars(locked.spentCents)} of this film's ${dollars(locked.budgetCapCents)} budget is already spent. Raise the budget to at least ${dollars(locked.spentCents + quote.cents)} to go ahead.`,
         );
       }
-      const [month] = await tx
-        .select({
-          total: sql<number>`coalesce(sum(case when ${videoTransitionTakes.status} = 'failed' then coalesce(${videoTransitionTakes.costCents}, 0) else coalesce(${videoTransitionTakes.costCents}, ${videoTransitionTakes.reservedCents}) end), 0)::int`,
-        })
-        .from(videoTransitionTakes)
-        .where(and(eq(videoTransitionTakes.companyId, companyId), gte(videoTransitionTakes.createdAt, startOfMonthUtc(nowOf()))));
-      const spentThisMonth = Number(month?.total ?? 0);
+      // Transitions and other paid media steps (animate photo) share the cap.
+      const spentThisMonth = await companyMonthlyMediaSpendCents(tx, companyId, nowOf());
       if (spentThisMonth + quote.cents > monthlyCap) {
         throw unprocessable(
-          `This transition costs about ${dollars(quote.cents)}, and ${dollars(spentThisMonth)} of this company's ${dollars(monthlyCap)} monthly limit for AI transitions is already used. An owner or admin can raise the monthly limit.`,
+          `This transition costs about ${dollars(quote.cents)}, and ${dollars(spentThisMonth)} of this company's ${dollars(monthlyCap)} monthly limit for AI media is already used. An owner or admin can raise the monthly limit.`,
         );
       }
       await tx
@@ -953,6 +976,10 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
       if (!startImage || !endImage) {
         throw unprocessable("The frames at this join could not be read (ffmpeg may be missing on the server), so nothing was made.");
       }
+      // Your own footage on either side (design 2.5): Sogni rule, age check and consent before it leaves.
+      const sentA = await footage.assertMaySend(companyId, a, providerId, sendableDataUriBytes(startImage), actor);
+      const sentB = await footage.assertMaySend(companyId, b, providerId, sendableDataUriBytes(endImage), actor);
+      const carriesFootage = sentA.footage || sentB.footage;
       // Cast pictures for everyone in A or B (Kling uses them to keep faces; Sogni LTX takes only the two frames).
       const [castA, castB] = [await render.castVideoInput(companyId, storyline, a), await render.castVideoInput(companyId, storyline, b)];
       const characters = [...castA.characters];
@@ -969,6 +996,9 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
         // Paid Kling sound stays off; Sogni's ambient sound is free (decision 4).
         generateAudio: false,
         promptRewrite: false,
+        ...(aspectRatioFor(storyline) ? { aspectRatio: aspectRatioFor(storyline)! } : {}),
+        // Fal keeps no copy of requests that carry the company's own footage.
+        ...(carriesFootage ? { storeIO: false as const } : {}),
       });
       await db
         .update(videoTransitionTakes)
@@ -1035,6 +1065,7 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
       .where(and(eq(videoTransitionTakes.id, takeId), eq(videoTransitionTakes.transitionId, row.id), eq(videoTransitionTakes.companyId, companyId)));
     if (!take) throw notFound("That version is not part of this transition.");
     if (take.status !== "ready") throw conflict("That version is not ready, so it cannot be used.");
+    if (!take.resultObjectKey) throw conflict("That version's video was removed (it was not picked for a while), so it cannot be used. Make a new one.");
     await db.update(videoTransitions).set({ chosenTakeId: take.id, updatedAt: nowOf() }).where(eq(videoTransitions.id, row.id));
     await logActivity(db, {
       companyId,

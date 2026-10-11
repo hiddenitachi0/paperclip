@@ -87,6 +87,7 @@ import { videoStorylineRenderService } from "./services/video-storyline-render.j
 import { tradingService } from "./services/trading.js";
 import { videoStorylineStitchService } from "./services/video-storyline-stitch.js";
 import { videoStorylineTransitionsService } from "./services/video-storyline-transitions.js";
+import { videoStorylineClipsService } from "./services/video-storyline-clips.js";
 import { describeTickPhases } from "./services/scheduler-tick-phases.js";
 import { runDailyCostReconciliation } from "./services/cost-reconciliation.js";
 import { pluginRegistryService } from "./services/plugin-registry.js";
@@ -1078,6 +1079,7 @@ export async function startServer(): Promise<StartedServer> {
     const videoStorylineRender = videoStorylineRenderService(schedulerDb as any);
     const videoStorylineStitch = videoStorylineStitchService(schedulerDb as any);
     const videoStorylineTransitions = videoStorylineTransitionsService(schedulerDb as any);
+    const videoStorylineClips = videoStorylineClipsService(schedulerDb as any);
     const tradingAgent = tradingService(schedulerDb as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(schedulerDb as any);
     const quietModeAlerts = quietModeAlertsService(schedulerDb as any);
@@ -1671,7 +1673,15 @@ export async function startServer(): Promise<StartedServer> {
             actorType: "scheduler",
             route: "heartbeat-scheduler:videoStorylineStitch",
           },
-          () => videoStorylineStitch.tick(),
+          // Phase 2: convert uploads, prepare your own clips (ffmpeg, free) and clean up first, then stitch.
+          async () => {
+            const clipResult = await videoStorylineClips.tick().catch((err: unknown) => {
+              logger.error({ err }, "video-storyline-clips tick failed");
+              return null;
+            });
+            if (clipResult && Object.values(clipResult).some((n) => n > 0)) logger.info({ ...clipResult }, "video-storyline-clips tick");
+            return videoStorylineStitch.tick();
+          },
         )
           .then((result) => {
             if (result.stitched > 0 || result.needsAttention > 0 || result.blocked > 0 || result.failed > 0) {

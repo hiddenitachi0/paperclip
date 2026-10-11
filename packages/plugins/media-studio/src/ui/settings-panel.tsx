@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { usePluginAction } from "@paperclipai/plugin-sdk/ui";
 import { hostFetchJson } from "./anchor-helpers.js";
 import { IdentitySettingsPanel } from "./identities-panel.js";
+import { FootageSettingsPanel } from "./footage-settings.js";
 
 // Media Studio's Settings tab. Three parts:
 //   1. This company's own service keys (Sogni, Fal.ai, Higgsfield): the
@@ -139,6 +140,7 @@ export function MediaStudioSettingsTab({ companyId, isInstanceAdmin, instanceFor
         <>
           <ServiceKeysPanel companyId={companyId} />
           <IdentitySettingsPanel companyId={companyId} />
+          <FootageSettingsPanel companyId={companyId} />
         </>
       ) : (
         <div style={help}>Open Media Studio from inside a company to see the company's settings.</div>

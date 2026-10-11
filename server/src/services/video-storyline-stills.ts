@@ -194,6 +194,9 @@ export function videoStorylineStillsService(db: Db) {
     await settings.assertEnabled(companyId);
     const storyline = await storylines.getStorylineRow(companyId, storylineId);
     const shot = await storylines.getShotRow(companyId, storylineId, shotId);
+    if (shot.clipKind !== "generated" || shot.sourceUploadId) {
+      throw conflict("This clip is your own video or photo, so it needs no storyboard picture.");
+    }
     if (shot.status === "rendering" || shot.status === "queued") {
       throw conflict("This shot is currently rendering. Wait for it to finish before regenerating its still.");
     }
@@ -294,7 +297,9 @@ export function videoStorylineStillsService(db: Db) {
     const look = target.look;
     let imageResult: ImageGenerationResult;
     try {
-      imageResult = await provider.generate(input);
+      // Phase 2: the storyboard picture is made in the storyline's shape (it becomes the video's start picture).
+      const aspect = storyline.aspect === "9:16" || storyline.aspect === "1:1" || storyline.aspect === "16:9" ? storyline.aspect : undefined;
+      imageResult = await provider.generate(aspect ? { ...input, aspect } : input);
     } catch (err) {
       throw unprocessable(`Still generation failed: ${err instanceof Error ? err.message : String(err)}`);
     }

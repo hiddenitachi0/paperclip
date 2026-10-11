@@ -57,6 +57,12 @@ export interface MediaJobInput {
   seed?: number;
   durationSeconds?: number;
   aspectRatio?: string;
+  /**
+   * Mirror of server/src/services/video-provider-clients.ts: false = the
+   * request carries a company's own footage, so Fal is asked not to store it
+   * (X-Fal-Store-IO: 0). Only the server's storyline clients send footage today.
+   */
+  storeIO?: false;
 }
 
 /** What the service told us right after asking it to start (never the finished file: that comes from poll()). */

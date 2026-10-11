@@ -1,6 +1,6 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { videoScenes, videoShotRenderJobs, videoShots, videoStorylines, withCompanyScope } from "@paperclipai/db";
+import { assets, issueAttachments, videoScenes, videoShotRenderJobs, videoShots, videoStorylines, withCompanyScope } from "@paperclipai/db";
 import {
   VIDEO_SCRIPT_SCENE_NOTES_MAX_LENGTH,
   VIDEO_STORYLINE_MAX_SCENES,
@@ -11,6 +11,8 @@ import {
   formatVideoScriptCharacters,
   mergeScriptCharactersIntoCast,
   readVideoStorylineCast,
+  readVideoExportSettings,
+  type VideoStorylineExportSettings,
   type UpdateVideoStorylineCastInput,
   type VideoStorylineCast,
   type ParsedVideoStorylineScript,
@@ -82,6 +84,9 @@ export interface VideoStorylineSummary {
   musicAssetId: string | null;
   musicSourceKey: string | null;
   musicVolumeDb: number;
+  /** Phase 2: the picture shape and how the film is put together. */
+  aspect: string;
+  exportSettings: VideoStorylineExportSettings;
   createdAt: string;
   updatedAt: string;
 }
@@ -180,6 +185,8 @@ function toStorylineSummary(row: StorylineRow): VideoStorylineSummary {
     musicAssetId: row.musicAssetId,
     musicSourceKey: row.musicSourceKey,
     musicVolumeDb: row.musicVolumeDb,
+    aspect: row.aspect,
+    exportSettings: readVideoExportSettings(row.exportSettings, row.aspect),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -323,7 +330,7 @@ async function computeShotOrder(
 }
 
 /** Writes 0..n-1 positions for `orderedIds`, parking every shot first so the unique (storyline, order) index never sees a clash mid-update. */
-async function applyShotOrder(tx: ScopedTx, storylineId: string, orderedIds: readonly string[]): Promise<void> {
+export async function applyShotOrder(tx: ScopedTx, storylineId: string, orderedIds: readonly string[]): Promise<void> {
   if (orderedIds.length === 0) return;
   await tx
     .update(videoShots)
@@ -398,6 +405,18 @@ async function assertNothingPaidToReplace(executor: Db | ScopedTx, storyline: St
 }
 
 export function videoStorylineService(db: Db) {
+  /** A file id (issue attachment) or an assets id of THIS company -> the assets id; refuses anything else. */
+  async function resolveMusicAssetId(companyId: string, id: string): Promise<string> {
+    const [asset] = await db.select({ id: assets.id }).from(assets).where(and(eq(assets.id, id), eq(assets.companyId, companyId)));
+    if (asset) return asset.id;
+    const [file] = await db
+      .select({ assetId: issueAttachments.assetId })
+      .from(issueAttachments)
+      .where(and(eq(issueAttachments.id, id), eq(issueAttachments.companyId, companyId)));
+    if (file) return file.assetId;
+    throw notFound("That music file is not in this company.");
+  }
+
   async function getStorylineRow(companyId: string, storylineId: string): Promise<StorylineRow> {
     const [row] = await db
       .select()
@@ -479,6 +498,7 @@ export function videoStorylineService(db: Db) {
         musicAssetId: input.musicAssetId,
         musicSourceKey: input.musicSourceKey,
         musicVolumeDb: input.musicVolumeDb,
+        ...(input.aspect ? { aspect: input.aspect } : {}),
         createdByAgentId: actor.agentId,
         createdByUserId: actor.actorType === "user" ? actor.actorId : null,
         createdAt: now,
@@ -511,6 +531,10 @@ export function videoStorylineService(db: Db) {
     // request that only touches musicAssetId could collide with a
     // musicSourceKey left over from an earlier update.
     const settingMusicAssetId = input.musicAssetId !== undefined && input.musicAssetId !== null;
+    // Phase 2: musicAssetId may also be a company FILE id (what Media Studio
+    // hands out, e.g. music made there) -- resolved to its asset, the same way
+    // loadReferenceImages resolves picture ids.
+    if (settingMusicAssetId) input = { ...input, musicAssetId: await resolveMusicAssetId(companyId, input.musicAssetId!) };
     const settingMusicSourceKey = input.musicSourceKey !== undefined && input.musicSourceKey !== null;
     const [row] = await db
       .update(videoStorylines)
@@ -840,10 +864,11 @@ export function videoStorylineService(db: Db) {
   async function recomputeEstimate(companyId: string, storylineId: string): Promise<VideoStorylineSummary> {
     const storyline = await getStorylineRow(companyId, storylineId);
     const allShots = await db
-      .select({ durationSeconds: videoShots.durationSeconds, storyboardStatus: videoShots.storyboardStatus })
+      .select({ durationSeconds: videoShots.durationSeconds, storyboardStatus: videoShots.storyboardStatus, clipKind: videoShots.clipKind })
       .from(videoShots)
       .where(eq(videoShots.storylineId, storylineId));
-    const shots = allShots.filter((s) => s.storyboardStatus !== "dropped");
+    // Phase 2: the company's own videos and photos cost nothing to put in the film.
+    const shots = allShots.filter((s) => s.storyboardStatus !== "dropped" && s.clipKind === "generated");
     const estimate = estimateVideoStorylineCostCents(shots, storyline.providerId as VideoStorylineProvider, { model: storyline.model });
     const [row] = await db
       .update(videoStorylines)
