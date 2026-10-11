@@ -381,3 +381,93 @@ export function assemblePrompt(input: PromptInput): AssembledPrompt {
   }
   return { prompt: blocks.join("\n\n"), avoid, leftOut, requestAspects };
 }
+
+// ─── A photo the person sent, edited ─────────────────────────────────────────
+//
+// Used instead of assemblePrompt when the first reference is a photo the
+// person attached in a chat (photo-edit.ts). The edit models' own guides say
+// the same thing in their words: Sogni's edit_image ("Preserve all
+// unmentioned details" for one base picture) and Kontext ("while keeping
+// everything else the same"). The look's character sheet only describes the
+// agent being added; its setting, art style, lighting and camera fields are
+// left out, because the scene, its light and its framing are the photo's.
+
+/** The sheet fields that describe the person themselves (never the scene). */
+const PERSON_FIELDS: SheetKey[] = ["hair", "face", "eyes", "body", "skin", "outfit", "accessories", "expression"];
+/** Aspects of the look's style words that would re-draw the photo. */
+const SCENE_ASPECTS: Aspect[] = ["setting", "artStyle", "lighting", "camera"];
+
+export interface PhotoEditPromptInput {
+  /** What the agent asked for ("Maja helping her friend prepare the meat on the counter"). */
+  request: string;
+  /** The person being added: the identity's or agent's name. Null: nobody is added, only the change. */
+  agentName: string | null;
+  /** How many reference pictures follow the photo(s) and show the agent. */
+  agentPictures: number;
+  /** 1-based positions of the agent's face pictures. */
+  facePositions: number[];
+  /** How many of the first pictures are the person's photos (1 normally). */
+  photoCount: number;
+  sheet?: CharacterSheet | null;
+  style?: string | null;
+  service: string;
+  feedback?: PictureFeedbackRules | null;
+}
+
+export interface PhotoEditPrompt {
+  prompt: string;
+  /** True when the look's style words were left out because they would re-draw the photo. */
+  styleLeftOut: boolean;
+  /** "Keep out of the picture" text, always in the prompt for an edit. */
+  avoid: string | null;
+}
+
+export function assemblePhotoEditPrompt(input: PhotoEditPromptInput): PhotoEditPrompt {
+  const name = input.agentName?.trim() || null;
+  let request = input.request.trim().replace(/[\s.]+$/, "");
+  // "Maja helping her friend …" reads "Add Maja … doing: helping her friend …".
+  if (name) {
+    const lead = new RegExp(`^${escapeRegExp(name)}(?:\\s+(?:is|who is))?\\s+(?=\\S)`, "iu");
+    const stripped = request.replace(lead, "");
+    if (stripped.length > 0) request = stripped;
+  }
+  const noun = ROLE_TEXTS[roleWordingFor(input.service)].noun;
+  const blocks: string[] = [];
+  if (name && input.agentPictures > 0) {
+    blocks.push(
+      `Edit the first ${noun}. Keep the scene and every person already in it, unchanged. Add ${name} (from the other reference ${noun}s) doing: ${request}.`,
+    );
+  } else if (name) {
+    blocks.push(`Edit the first ${noun}. Keep the scene and every person already in it, unchanged. Add ${name} doing: ${request}.`);
+  } else {
+    blocks.push(`Edit the first ${noun}. Keep the scene and every person already in it, unchanged, apart from this change: ${request}.`);
+  }
+  if (input.photoCount > 1) {
+    blocks.push(`${noun[0]!.toUpperCase()}${noun.slice(1)}s 2 to ${input.photoCount} are more photos the person sent; use them only for the people and things in them.`);
+  }
+  if (name && input.facePositions.length > 0) {
+    const faces = refsText(noun, input.facePositions);
+    blocks.push(
+      `${name}'s face comes only from ${faces}: keep ${name}'s exact facial likeness. Do not change the face of anyone already in the first ${noun}, and do not give ${name}'s face to them.`,
+    );
+  }
+  const requestAspects = aspectsInRequest(request);
+  const sheet = input.sheet ?? {};
+  if (name) {
+    const person = SHEET_FIELDS.filter((field) => {
+      if (!PERSON_FIELDS.includes(field.key) || !sheet[field.key]) return false;
+      const aspect = FIELD_ASPECT[field.key];
+      return !(aspect && requestAspects.includes(aspect));
+    }).map((field) => sentence(field.promptLabel, sheet[field.key]!));
+    if (person.length > 0) blocks.push(`${name}: ${person.join(" ")}`);
+  }
+  const style = input.style?.trim() ?? "";
+  const styleConflicts = style !== "" && aspectsInRequest(style).some((aspect) => SCENE_ASPECTS.includes(aspect));
+  if (style && !styleConflicts) blocks.push(`Style for ${name ?? "the change"} where it fits the photo: ${style.replace(/[\s.]+$/, "")}.`);
+  blocks.push(`Match the first ${noun}'s light, colours, perspective and camera, so the result looks like the same photo.`);
+  const feedback = normalizeFeedbackRules(input.feedback);
+  if (feedback.avoid.length > 0) blocks.push(`Avoid, unless the request above asks for it: ${feedback.avoid.join(", ")}.`);
+  const avoid = sheet.avoid?.trim() || null;
+  if (avoid) blocks.push(sentence("Keep out of the picture", avoid));
+  return { prompt: blocks.join("\n\n"), styleLeftOut: styleConflicts, avoid };
+}

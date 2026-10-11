@@ -526,6 +526,23 @@ describe("quick-agent per-provider stash is board-only (DUR-4400)", () => {
     expect(mockAgentService.update).not.toHaveBeenCalled();
   });
 
+  it("rejects an agent-authenticated caller picking its own model for picture requests", async () => {
+    // "Use this model for picture requests" can move turns to a paid cloud
+    // model: board-only, like the stash.
+    mockAgentService.getById.mockResolvedValue(baseAgentWith({ apiKey: null }, "local"));
+    const app = await createApp(agentActor);
+
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl)
+        .patch(`/api/agents/${agentId}`)
+        .send({ adapterConfig: { laneA: { pictureModelId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" } } }),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error ?? JSON.stringify(res.body)).toMatch(/Use this model for picture requests/);
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
+
   it("still allows an agent to echo an unchanged stash back while editing an unrelated field", async () => {
     // Regression guard for the fix itself: a settings-form round trip that
     // reads laneA back and PATCHes it verbatim (unchanged map, keys possibly
