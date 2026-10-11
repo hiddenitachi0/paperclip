@@ -55,6 +55,7 @@ const apiPrefixes: Record<string, string> = {
   // /api so this coverage check still sees every method the proxy answers.
   "preview-proxy.ts": "/api",
   "projects.ts": "/api",
+  "quality-loops.ts": "/api",
   "resource-memberships.ts": "/api",
   "routines.ts": "/api",
   "secrets.ts": "/api",
