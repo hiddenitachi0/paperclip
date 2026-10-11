@@ -208,6 +208,22 @@ Phase B (maintainer agent + two-phase cutover) / Phase C (signed update packets)
 per the franchise roadmap. Behaviour is fully opt-in/additive — no secrets travel
 unless `secretSelection` is passed.
 
+### Feature 10b — Company migration UI + safe two-phase cutover (Phase B)
+
+The export/import screens can now carry secrets, and moving a company is a two-step
+cutover. Owner/admin only for anything that moves secrets or pauses a company; the
+server enforces it (agents and operators/viewers can still move structure).
+
+| File | Change | Type |
+|---|---|---|
+| `server/src/routes/companies.ts` | secrets in an export/import need the company's owner or an admin (`assertMayExportSecrets`/`assertMayImportSecrets`) | Surgical edit |
+| `server/src/services/company-portability.ts` + shared types | import result gains `secretsReport` (which secret settings arrived / still need a value; keys only) | Surgical edit |
+| `server/src/services/company-migration.ts` + `routes/company-migration.ts` | `GET /companies/:id/migration/verify` (read-only checklist, no paid calls), `POST …/mark-migrated` (pauses agents + active routines, banner, activity log), `POST …/undo` | **New files** |
+| `packages/db` migration `0243_company_migrated_to` | `companies.migrated_to_url/migrated_at/migrated_by_user_id/migration_paused_routine_ids` (additive, guarded) | Migration |
+| `ui/src/components/company-migration/*` | Carry-these-secrets panel, secrets-file field, import result + Verify destination, Moving-this-company section, "has moved" banner | **New files** |
+
+Phase C (signed update packets) is planned in `docs/plans/franchise-phase-c-update-packets.md`.
+
 ### Infra — global git credential helper (zero-wiring GitHub auth)
 
 Agents run `git` inside their workspace, but the base image wired **no

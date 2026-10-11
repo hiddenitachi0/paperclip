@@ -343,6 +343,17 @@ export interface CompanyPortabilityImportResult {
   }[];
   envInputs: CompanyPortabilityEnvInput[];
   warnings: string[];
+  /**
+   * Which secret settings arrived with a value (carried in a sealed secrets
+   * file or typed in) and which still need one on this company. Scoped keys
+   * only (`agent:<slug>:<KEY>` / `project:<slug>:<KEY>` / `<KEY>`), never
+   * values. `carried` is true when a sealed secrets file was supplied.
+   */
+  secretsReport?: {
+    carried: boolean;
+    arrived: string[];
+    notArrived: string[];
+  };
 }
 
 export interface CompanyPortabilityExportRequest {
