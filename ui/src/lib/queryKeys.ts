@@ -12,6 +12,7 @@ export const queryKeys = {
     telegramChatSettings: (id: string) => ["companies", id, "telegram-chat-settings"] as const,
     speechSettings: (id: string) => ["companies", id, "speech-settings"] as const,
     dataConnections: (id: string) => ["companies", id, "data-connections"] as const,
+    reportTemplates: (id: string) => ["companies", id, "report-templates"] as const,
     datasetSources: (id: string) => ["companies", id, "dataset-sources"] as const,
     modelDirectory: (id: string) => ["companies", id, "model-directory"] as const,
     modelReviews: (id: string, entryId: string) => ["companies", id, "model-directory", entryId, "reviews"] as const,
@@ -313,6 +314,13 @@ export const queryKeys = {
   // Quick-agent memory notebook (the persona's when the agent has one).
   agentMemories: {
     list: (agentId: string) => ["agent-memories", agentId] as const,
+  },
+  // Quick-agent Conversations review (list + one transcript).
+  laneAConversationLog: {
+    list: (companyId: string, agentId: string, filters: Record<string, unknown>) =>
+      ["lane-a-conversation-log", companyId, agentId, filters] as const,
+    detail: (companyId: string, agentId: string, conversationId: string) =>
+      ["lane-a-conversation-log", companyId, agentId, "detail", conversationId] as const,
   },
   // Overlapping work between open tasks.
   overlaps: {

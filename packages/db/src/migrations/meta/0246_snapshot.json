@@ -1,5 +1,5 @@
 {
-  "id": "5c075df4-2a02-4e60-a670-ae38de0431b9",
+  "id": "5fc675d7-f8f4-45e3-88c3-d9883c76e9e2",
   "prevId": "61cd1aee-5e12-4482-a39c-d31fd2caacbc",
   "version": "7",
   "dialect": "postgresql",
@@ -11753,7 +11753,7 @@
       "checkConstraints": {
         "data_read_events_channel_check": {
           "name": "data_read_events_channel_check",
-          "value": "\"data_read_events\".\"channel\" IN ('quick_chat', 'telegram', 'settings_test')"
+          "value": "\"data_read_events\".\"channel\" IN ('quick_chat', 'telegram', 'settings_test', 'report_run', 'report_preview')"
         },
         "data_read_events_outcome_check": {
           "name": "data_read_events_outcome_check",
@@ -35027,6 +35027,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "fetched_data_sha256": {
+          "name": "fetched_data_sha256",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "script_run_id": {
           "name": "script_run_id",
           "type": "uuid",
@@ -35895,6 +35901,12 @@
         "data_connection_id": {
           "name": "data_connection_id",
           "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "data_query": {
+          "name": "data_query",
+          "type": "jsonb",
           "primaryKey": false,
           "notNull": false
         },
@@ -43540,117 +43552,6 @@
           "tableTo": "heartbeat_runs",
           "columnsFrom": [
             "started_by_run_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.company_quality_loop_settings": {
-      "name": "company_quality_loop_settings",
-      "schema": "",
-      "columns": {
-        "company_id": {
-          "name": "company_id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "self_review_passes": {
-          "name": "self_review_passes",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "done_check_enabled": {
-          "name": "done_check_enabled",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
-        "done_check_max_rounds": {
-          "name": "done_check_max_rounds",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "done_check_directory_entry_id": {
-          "name": "done_check_directory_entry_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "default_reviewer_agent_id": {
-          "name": "default_reviewer_agent_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "updated_by_user_id": {
-          "name": "updated_by_user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "company_quality_loop_settings_company_id_companies_id_fk": {
-          "name": "company_quality_loop_settings_company_id_companies_id_fk",
-          "tableFrom": "company_quality_loop_settings",
-          "tableTo": "companies",
-          "columnsFrom": [
-            "company_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "cqls_done_check_entry_fk": {
-          "name": "cqls_done_check_entry_fk",
-          "tableFrom": "company_quality_loop_settings",
-          "tableTo": "model_directory_entries",
-          "columnsFrom": [
-            "done_check_directory_entry_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "cqls_default_reviewer_agent_fk": {
-          "name": "cqls_default_reviewer_agent_fk",
-          "tableFrom": "company_quality_loop_settings",
-          "tableTo": "agents",
-          "columnsFrom": [
-            "default_reviewer_agent_id"
           ],
           "columnsTo": [
             "id"

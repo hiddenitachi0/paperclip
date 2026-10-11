@@ -62,6 +62,7 @@ import {
   createReportTemplateSchema,
   updateReportTemplateSchema,
   createReportRunSchema,
+  previewReportDataSchema,
   draftReportRunCommentarySchema,
   dataTrialCalculationSchema,
   setDatasetSourceSchema,
@@ -3452,6 +3453,7 @@ for (const route of [
   ["get", "/api/companies/{companyId}/report-runs", "List report runs", undefined],
   ["post", "/api/companies/{companyId}/report-runs", "Start a report run: fetch data and run the approved calculation", createReportRunSchema],
   ["get", "/api/companies/{companyId}/report-runs/{runId}", "Get one report run", undefined],
+  ["post", "/api/companies/{companyId}/report-data/preview", "Preview a report template's data (owner/admin only; audited, first rows only)", previewReportDataSchema],
   ["post", "/api/companies/{companyId}/report-runs/{runId}/commentary", "Submit commentary; every number in it must come from the calculation's output", draftReportRunCommentarySchema],
 ] as const) {
   registerCurrentRoute({
@@ -3822,6 +3824,89 @@ registerCurrentRoute({
       }),
     ),
     400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+  },
+});
+
+const ConversationLogPersonSchema = z.object({ kind: z.enum(["user", "agent"]), id: z.string(), name: z.string() });
+const ConversationLogRowSchema = z.object({
+  id: z.string(),
+  person: ConversationLogPersonSchema.nullable(),
+  channel: z.enum(["telegram"]).nullable(),
+  startedAt: z.string(),
+  lastMessageAt: z.string(),
+  messageCount: z.number(),
+  firstQuestion: z.string().nullable(),
+  toolUse: z.array(z.object({ label: z.string(), count: z.number() })),
+  handoffCount: z.number(),
+  private: z.boolean(),
+  mine: z.boolean(),
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/lane-a/agents/{agentId}/conversations",
+  tags: ["agents"],
+  summary:
+    "List a quick agent's conversations for review, newest activity first (board users only; owners/admins see all, " +
+    "others their own; an Employee (light) member's chat is listed without content)",
+  query: z.object({
+    userId: z.string().optional(),
+    from: z.string().optional(),
+    to: z.string().optional(),
+    hasHandoffs: z.enum(["true", "false"]).optional(),
+    q: z.string().max(200).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+    cursor: z.string().optional(),
+  }),
+  responses: {
+    200: r.ok(
+      z.object({
+        conversations: z.array(ConversationLogRowSchema),
+        nextCursor: z.string().nullable(),
+        people: z.array(ConversationLogPersonSchema),
+        canSeeAll: z.boolean(),
+      }),
+    ),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+  },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/lane-a/agents/{agentId}/conversations/{conversationId}",
+  tags: ["agents"],
+  summary: "Read one quick-agent conversation for review, with what the agent did in plain words (text masked)",
+  responses: {
+    200: r.ok(
+      z.object({
+        conversation: ConversationLogRowSchema,
+        continuedFrom: z.string().nullable(),
+        messages: z.array(
+          z.object({
+            id: z.string(),
+            role: z.enum(["user", "assistant"]),
+            content: z.string(),
+            createdAt: z.string(),
+            actions: z.array(
+              z.object({
+                tool: z.string(),
+                label: z.string(),
+                summary: z.string(),
+                ok: z.boolean(),
+                image: z.object({ contentPath: z.string(), contentType: z.string() }).nullable(),
+                task: z.object({ issueId: z.string(), identifier: z.string().nullable(), title: z.string() }).nullable(),
+              }),
+            ),
+          }),
+        ),
+      }),
+    ),
     401: r.unauthorized,
     403: r.forbidden,
     404: r.notFound,

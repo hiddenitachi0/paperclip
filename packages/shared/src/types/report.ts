@@ -1,3 +1,4 @@
+import type { ReportDataQuery } from "../report-data.js";
 /**
  * DUR-4072 PR1: the calculation-script runner. A "script" is a named,
  * versioned Python program the server runs with JSON in, JSON out -- never
@@ -120,6 +121,8 @@ export interface ReportTemplate {
   instructions: string;
   layout: Record<string, unknown>;
   dataConnectionId: string | null;
+  /** DUR-4072 PR3: the period and datasets read through `dataConnectionId`. */
+  dataQuery: ReportDataQuery | null;
   scriptVersionId: string;
   isActive: boolean;
   createdByAgentId: string | null;
@@ -134,6 +137,8 @@ export interface ReportRun {
   templateId: string;
   status: ReportRunStatus;
   fetchedData: unknown;
+  /** sha256 of the stored input snapshot (the exact JSON the script was given). */
+  fetchedDataSha256: string | null;
   scriptRunId: string | null;
   numbers: unknown;
   commentaryText: string | null;
