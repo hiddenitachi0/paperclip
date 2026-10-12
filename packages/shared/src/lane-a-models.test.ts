@@ -10,6 +10,7 @@ import {
   LANE_A_PROVIDER_SLUG_RE,
   LANE_A_TEMPERATURE_PRESETS,
   isLaneAModelForProvider,
+  laneABackupKeySlot,
   laneAProviderRoutingForCall,
   normalizeLaneAProviderRouting,
   parseLaneAProviderSlugList,
@@ -376,5 +377,28 @@ describe("quick-agent model hosts (OpenRouter provider routing)", () => {
     expect(parseLaneAProviderSlugList("")).toEqual({ slugs: [], invalid: [] });
     expect(parseLaneAProviderSlugList("deepinfra, deepinfra")).toEqual({ slugs: ["deepinfra"], invalid: [] });
     expect(parseLaneAProviderSlugList("deepinfra, Infra!")).toEqual({ slugs: ["deepinfra"], invalid: ["Infra!"] });
+  });
+});
+
+describe("laneABackupKeySlot (which of the agent's keys a backup is called with)", () => {
+  it("uses the main key only on the main model's own provider and address", () => {
+    expect(laneABackupKeySlot({ provider: "openai" }, { provider: "openai" })).toBe("main");
+    expect(
+      laneABackupKeySlot({ provider: "local", baseUrl: "http://PC:11434/v1/" }, { provider: "local", baseUrl: "http://pc:11434/v1" }),
+    ).toBe("main");
+    expect(
+      laneABackupKeySlot({ provider: "local", baseUrl: "http://evil.example" }, { provider: "local", baseUrl: "http://pc:11434/v1" }),
+    ).toBe("none");
+  });
+
+  it("uses the agent's key for a different provider at that provider's own address", () => {
+    const localMain = { provider: "local", baseUrl: "http://pc:11434/v1" };
+    expect(laneABackupKeySlot({ provider: "openrouter" }, localMain)).toBe("provider");
+    expect(laneABackupKeySlot({ provider: "openrouter", baseUrl: "https://openrouter.ai/api/v1" }, localMain)).toBe("provider");
+    expect(laneABackupKeySlot({ provider: "openrouter", baseUrl: "https://collector.example/v1" }, localMain)).toBe("none");
+    expect(
+      laneABackupKeySlot({ provider: "openrouter", baseUrl: "https://proxy.example/v1" }, localMain, "https://proxy.example/v1"),
+    ).toBe("provider");
+    expect(laneABackupKeySlot({ provider: "anthropic" }, localMain)).toBe("provider");
   });
 });

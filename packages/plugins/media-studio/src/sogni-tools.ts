@@ -14,6 +14,16 @@ import { sogniToolNames, sogniToolSchema } from "./sogni-schemas.js";
 
 export type SogniToolKind = "picture" | "text";
 
+/**
+ * Group labels on an agent's Tools tab (the manifest's tool `category`).
+ * Generate image, Quick picture, List saved looks and Improve picture prompt
+ * are "Pictures"; the tools that change an existing picture are "Picture
+ * editing"; video, audio and their job check are "Video and sound".
+ */
+export const TOOL_CATEGORY_PICTURES = "Pictures";
+export const TOOL_CATEGORY_PICTURE_EDITING = "Picture editing";
+export const TOOL_CATEGORY_VIDEO_AND_SOUND = "Video and sound";
+
 export interface SogniToolDef {
   /** The Paperclip tool name (namespaced by the host as paperclip.media-studio:<name>). */
   name: string;
@@ -21,6 +31,8 @@ export interface SogniToolDef {
   sogniTool: string;
   /** What the operator sees on the Tools tab. */
   displayName: string;
+  /** The group it is listed under on the Tools tab. */
+  category: string;
   /** Plain first sentence(s) for the agent and the operator. */
   summary: string;
   kind: SogniToolKind;
@@ -56,6 +68,7 @@ export const SOGNI_TOOLS: readonly SogniToolDef[] = [
     name: "sogni-upscale-image",
     sogniTool: "upscale_image",
     displayName: "Upscale picture (Sogni)",
+    category: TOOL_CATEGORY_PICTURE_EDITING,
     summary:
       "Make a picture bigger with Sogni without changing what is in it: 2, 3 or 4 times the size, or a set longest side (3840 for 4K, 7680 for 8K, up to 15360). It does not repaint or fix anything; use Restore photo for that.",
     kind: "picture",
@@ -66,6 +79,7 @@ export const SOGNI_TOOLS: readonly SogniToolDef[] = [
     name: "sogni-remove-background",
     sogniTool: "remove_background",
     displayName: "Remove background (Sogni)",
+    category: TOOL_CATEGORY_PICTURE_EDITING,
     summary:
       "Cut out the main subject of a picture with Sogni and make the background transparent (a PNG), without repainting it. Set applyMask to false to get the soft black-and-white mask instead.",
     kind: "picture",
@@ -76,6 +90,7 @@ export const SOGNI_TOOLS: readonly SogniToolDef[] = [
     name: "sogni-restore-photo",
     sogniTool: "restore_photo",
     displayName: "Restore photo (Sogni)",
+    category: TOOL_CATEGORY_PICTURE_EDITING,
     summary:
       "Repair or change an existing photo with Sogni from a written instruction: remove scratches, stains and noise, colourise an old photo, remove an object, change text, or transform it while keeping the people recognisable.",
     kind: "picture",
@@ -86,6 +101,7 @@ export const SOGNI_TOOLS: readonly SogniToolDef[] = [
     name: "sogni-change-angle",
     sogniTool: "change_angle",
     displayName: "Change camera angle (Sogni)",
+    category: TOOL_CATEGORY_PICTURE_EDITING,
     summary:
       "Make a new view of a picture's subject from another camera angle with Sogni, for example from the left side, from above, or closer.",
     kind: "picture",
@@ -96,6 +112,7 @@ export const SOGNI_TOOLS: readonly SogniToolDef[] = [
     name: "sogni-apply-style",
     sogniTool: "apply_style",
     displayName: "Apply style (Sogni)",
+    category: TOOL_CATEGORY_PICTURE_EDITING,
     summary:
       "Redo a picture in another style with Sogni (an era, a painting style, a known artist or franchise) while keeping its subject, pose and composition. One style per call.",
     kind: "picture",
@@ -106,6 +123,7 @@ export const SOGNI_TOOLS: readonly SogniToolDef[] = [
     name: "sogni-segment-image",
     sogniTool: "segment_image",
     displayName: "Select objects (Sogni)",
+    category: TOOL_CATEGORY_PICTURE_EDITING,
     summary:
       "Select objects in a picture with Sogni and get a black-and-white mask of them, or with applyMask true the objects cut out on a transparent background. Say what to select with text (\"the red suitcase\"), with points, or with boxes (positions from 0 to 1 across and down the picture).",
     kind: "picture",
@@ -126,6 +144,7 @@ export const SOGNI_TOOLS: readonly SogniToolDef[] = [
     name: "sogni-enhance-prompt",
     sogniTool: "enhance_prompt",
     displayName: "Improve picture prompt (Sogni)",
+    category: TOOL_CATEGORY_PICTURES,
     summary:
       "Turn a rough picture idea into a detailed prompt written for one specific Sogni model, to use with Generate image. Returns text only: no picture is made and it does not count toward the daily picture limit. Needs the Sogni key in Media Studio settings.",
     kind: "text",
@@ -205,10 +224,17 @@ export function sogniToolDescription(def: SogniToolDef): string {
 }
 
 /** The manifest's tool entries for every Sogni tool. */
-export function sogniToolDeclarations(): Array<{ name: string; displayName: string; description: string; parametersSchema: Record<string, unknown> }> {
+export function sogniToolDeclarations(): Array<{
+  name: string;
+  displayName: string;
+  category: string;
+  description: string;
+  parametersSchema: Record<string, unknown>;
+}> {
   return SOGNI_TOOLS.map((def) => ({
     name: def.name,
     displayName: def.displayName,
+    category: def.category,
     description: sogniToolDescription(def),
     parametersSchema: sogniToolParameters(def),
   }));

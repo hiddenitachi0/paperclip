@@ -26,6 +26,22 @@ vi.mock("../services/budgets.js", () => ({
   budgetService: vi.fn(() => mockBudgetService),
 }));
 
+const mockSecurityReviewService = vi.hoisted(() => ({
+  computeState: vi.fn(),
+}));
+
+vi.mock("../services/security-review.js", () => ({
+  securityReviewService: vi.fn(() => mockSecurityReviewService),
+  isMergePrApprovalPayload: (payload: unknown) =>
+    Boolean(payload) && typeof payload === "object" && (payload as Record<string, unknown>).kind === "merge_pr",
+}));
+
+const mockLogActivity = vi.hoisted(() => vi.fn());
+
+vi.mock("../services/activity-log.js", () => ({
+  logActivity: mockLogActivity,
+}));
+
 type ApprovalRecord = {
   id: string;
   companyId: string;
@@ -42,6 +58,17 @@ function createApproval(status: string): ApprovalRecord {
     type: "hire_agent",
     status,
     payload: { agentId: "agent-1" },
+    requestedByAgentId: "requester-1",
+  };
+}
+
+function createMergePrApproval(status: string): ApprovalRecord {
+  return {
+    id: "approval-1",
+    companyId: "company-1",
+    type: "request_board_approval",
+    status,
+    payload: { kind: "merge_pr", repo: "acme/paperclip", prNumber: 42, commit: "deadbeef" },
     requestedByAgentId: "requester-1",
   };
 }
@@ -279,6 +306,75 @@ describe("approvalService.findOpenHireApprovalForAgent", () => {
   });
 });
 
+// DUR-4568 finding #1: the security-review gate lives inside approve()
+// itself so every caller is covered (the HTTP route, issue-thread-interaction
+// auto-decisions, merge-pr automation) -- not just the /approve route.
+describe("approve() gates merge_pr cards on their security-review state", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockAgentService.activatePendingApproval.mockResolvedValue({ agent: { id: "agent-1" }, activated: true });
+    mockNotifyHireApproved.mockResolvedValue(undefined);
+    mockSecurityReviewService.computeState.mockReset();
+    mockLogActivity.mockReset().mockResolvedValue(undefined);
+  });
+
+  it("refuses to approve a merge card with no passed review and no bypass reason", async () => {
+    const dbStub = createDbStub([[createMergePrApproval("pending")]], []);
+    mockSecurityReviewService.computeState.mockResolvedValue({ state: "not_requested" });
+
+    const svc = approvalService(dbStub.db as any);
+    await expect(svc.approve("approval-1", "board", "ship it")).rejects.toThrow(
+      /security review/i,
+    );
+
+    expect(dbStub.returning).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it("approves with a bypass reason and logs it to the activity log", async () => {
+    const approved = createMergePrApproval("approved");
+    const dbStub = createDbStub([[createMergePrApproval("pending")]], [approved]);
+    mockSecurityReviewService.computeState.mockResolvedValue({ state: "out_of_date" });
+
+    const svc = approvalService(dbStub.db as any);
+    const result = await svc.approve("approval-1", "board", "ship it", {
+      securityReviewBypass: { reason: "Filip reviewed it himself", actorType: "user", actorId: "user-1" },
+    });
+
+    expect(result.applied).toBe(true);
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "approval.approved_without_security_review",
+        entityId: "approval-1",
+        details: expect.objectContaining({ securityReviewState: "out_of_date", reason: "Filip reviewed it himself" }),
+      }),
+    );
+  });
+
+  it("approves a merge card directly when the review already passed, with no activity entry", async () => {
+    const approved = createMergePrApproval("approved");
+    const dbStub = createDbStub([[createMergePrApproval("pending")]], [approved]);
+    mockSecurityReviewService.computeState.mockResolvedValue({ state: "passed" });
+
+    const svc = approvalService(dbStub.db as any);
+    const result = await svc.approve("approval-1", "board", "ship it");
+
+    expect(result.applied).toBe(true);
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it("does not gate approvals that aren't merge cards", async () => {
+    const approved = createApproval("approved");
+    const dbStub = createDbStub([[createApproval("pending")]], [approved]);
+
+    const svc = approvalService(dbStub.db as any);
+    await svc.approve("approval-1", "board", "ship it");
+
+    expect(mockSecurityReviewService.computeState).not.toHaveBeenCalled();
+  });
+});
+
 // Agents asked for approvals by their shortened id ("4a365896"). Postgres
 // rejects that as a uuid, and the query error surfaced as a 500 on
 // GET /api/approvals/:id, eight times in one afternoon.
@@ -301,5 +397,46 @@ describe("approvalService getById with an id that is not a uuid", () => {
     await expect(svc.getById("11111111-1111-1111-1111-111111111111")).resolves.toEqual(found);
     await expect(svc.getById("9abd6c8e-4c1d-40e7-a81e-73d1481c25ef")).resolves.toMatchObject({ id: "approval-1" });
     expect(dbStub.selectWhere).toHaveBeenCalledTimes(2);
+  });
+});
+
+// Security review of PR #625 (DUR-4719): host actions and deploys can only be
+// approved by POST /approvals/:id/approve, which runs their own checks first
+// (owner/admin + card shape for host actions). Every other approve() caller
+// -- a linked confirmation accepted by any board member, automation -- is
+// refused here, whoever the actor is.
+describe("approve() refuses card-only kinds outside the approval route", () => {
+  function cardOnly(kind: string): ApprovalRecord {
+    return {
+      id: "approval-1",
+      companyId: "company-1",
+      type: "request_board_approval",
+      status: "pending",
+      payload: { kind, action: "restart_service", target: "telegram-bridge" },
+      requestedByAgentId: "requester-1",
+    };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockLogActivity.mockReset().mockResolvedValue(undefined);
+  });
+
+  for (const kind of ["operator_action", "deploy", "deploy_pr"]) {
+    it(`refuses a ${kind} card without decidedOnApprovalCard`, async () => {
+      const dbStub = createDbStub([[cardOnly(kind)]], []);
+      const svc = approvalService(dbStub.db as any);
+      await expect(svc.approve("approval-1", "board-member", null)).rejects.toThrow(/approval card itself/);
+      expect(dbStub.returning).not.toHaveBeenCalled();
+    });
+  }
+
+  it("approves an operator_action card when the approval route says it ran its checks", async () => {
+    const approved = { ...cardOnly("operator_action"), status: "approved" };
+    const dbStub = createDbStub([[cardOnly("operator_action")]], [approved]);
+    const svc = approvalService(dbStub.db as any);
+    const result = await svc.approve("approval-1", "owner", null, { decidedOnApprovalCard: true });
+    expect(result.applied).toBe(true);
+    expect(result.approval.status).toBe("approved");
   });
 });

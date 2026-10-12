@@ -30,6 +30,9 @@ Saved model setups (provider, model, address, defaults) a company can reuse for 
 | --- | --- | --- | --- |
 | GET | `/api/companies/{companyId}/model-directory` | | `200` entry list |
 | POST | `/api/companies/{companyId}/model-directory` | entry fields (strict; unknown fields such as `apiKey` → `400`) | `201` entry |
+| GET | `/api/companies/{companyId}/model-directory/health` | | `200` `{ entries[], agents[] }` stored health; `agents[].showBanner` drives the agent-page "can't reach your PC" banner |
+| POST | `/api/companies/{companyId}/model-directory/{entryId}/check` | | `200` `{ status: ready \| unreachable \| model_missing \| not_checked, message, hint, runbookPath }` |
+| POST | `/api/companies/{companyId}/model-directory/{entryId}/test` | | `200` `{ ran, reason, runs[{ thinking, answer, firstWordMs, totalMs, error }] }`; `ran:false` carries a plain-English `reason` |
 | GET | `/api/companies/{companyId}/model-directory/{entryId}` | | `200` entry |
 | PATCH | `/api/companies/{companyId}/model-directory/{entryId}` | any entry fields | `200` entry |
 | DELETE | `/api/companies/{companyId}/model-directory/{entryId}` | | `204` (also removed from other entries' backup chains) |

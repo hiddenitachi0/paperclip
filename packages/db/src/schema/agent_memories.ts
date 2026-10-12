@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, index, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { check, index, jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
 import { personas } from "./personas.js";
@@ -35,13 +35,15 @@ export const agentMemories = pgTable(
     text: text("text").notNull(),
     source: text("source").notNull(),
     createdByUserId: text("created_by_user_id"),
+    category: text("category"),
+    terms: jsonb("terms").$type<string[]>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
     companyAgentIdx: index("agent_memories_company_agent_idx").on(table.companyId, table.agentId, table.createdAt),
     companyPersonaIdx: index("agent_memories_company_persona_idx").on(table.companyId, table.personaId, table.createdAt),
-    sourceCheck: check("agent_memories_source_check", sql`${table.source} IN ('agent', 'user')`),
+    sourceCheck: check("agent_memories_source_check", sql`${table.source} IN ('agent', 'user', 'reaction')`),
     textLengthCheck: check(
       "agent_memories_text_length_check",
       sql`char_length(${table.text}) BETWEEN 1 AND 500`,

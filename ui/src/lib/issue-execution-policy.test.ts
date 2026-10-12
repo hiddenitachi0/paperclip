@@ -101,3 +101,22 @@ describe("buildGoalConditionMonitor", () => {
     expect(issueExecutionPolicySchema.shape.monitor.safeParse(monitor).success).toBe(true);
   });
 });
+
+describe("task quality-check choice", () => {
+  it("round-trips each choice and keeps reviewers when switching back to the company setting", async () => {
+    const { applyTaskQualityCheckChoice, readTaskQualityCheckChoice, buildExecutionPolicy } = await import(
+      "./issue-execution-policy"
+    );
+    expect(readTaskQualityCheckChoice(null)).toBe("company");
+    for (const choice of ["both", "finish", "self", "off"] as const) {
+      expect(readTaskQualityCheckChoice(applyTaskQualityCheckChoice(null, choice))).toBe(choice);
+    }
+    expect(applyTaskQualityCheckChoice(applyTaskQualityCheckChoice(null, "off"), "company")).toBeNull();
+    const withReviewer = buildExecutionPolicy({ existingPolicy: null, reviewerValues: ["agent:a1"], approverValues: [] });
+    const offPolicy = applyTaskQualityCheckChoice(withReviewer, "off");
+    expect(offPolicy?.stages).toHaveLength(1);
+    // Changing reviewers later keeps the task's quality-check choice.
+    const rebuilt = buildExecutionPolicy({ existingPolicy: offPolicy, reviewerValues: [], approverValues: [] });
+    expect(readTaskQualityCheckChoice(rebuilt)).toBe("off");
+  });
+});

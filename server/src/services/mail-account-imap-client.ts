@@ -32,6 +32,8 @@ export interface FetchedAccountMailMessage {
   from: string;
   to: string[];
   cc: string[];
+  /** Delivered-To / X-Original-To header values (raw), for the urgency recipient filter. Not stored. */
+  deliveredTo?: string[];
   subject: string;
   receivedAt: Date | null;
   bodyText: string;
@@ -68,6 +70,17 @@ async function readDownload(stream: NodeJS.ReadableStream): Promise<string> {
 function addressList(entries: Array<{ address?: string }> | undefined): string[] {
   if (!Array.isArray(entries)) return [];
   return entries.map((entry) => entry.address ?? "").filter((address) => address.length > 0);
+}
+
+/** Raw Delivered-To / X-Original-To values out of the fetched header block. */
+function headerValues(headers: Buffer | undefined): string[] {
+  if (!headers) return [];
+  const out: string[] = [];
+  for (const line of headers.toString("utf8").split(/\r?\n/)) {
+    const m = line.match(/^(?:delivered-to|x-original-to):\s*(.+)$/i);
+    if (m?.[1]) out.push(m[1].trim());
+  }
+  return out;
 }
 
 /**
@@ -115,7 +128,7 @@ export async function fetchNewAccountMailMessages(
       for (const uid of batch) {
         const fetched = await client.fetchOne(
           String(uid),
-          { envelope: true, bodyStructure: true },
+          { envelope: true, bodyStructure: true, headers: ["delivered-to", "x-original-to"] },
           { uid: true },
         );
         if (!fetched) continue;
@@ -145,6 +158,7 @@ export async function fetchNewAccountMailMessages(
           from: from ? `${from.address ?? ""}` : "",
           to: addressList(fetched.envelope?.to),
           cc: addressList(fetched.envelope?.cc),
+          deliveredTo: headerValues(fetched.headers),
           subject: fetched.envelope?.subject ?? "",
           receivedAt: fetched.envelope?.date ? new Date(fetched.envelope.date) : null,
           bodyText,

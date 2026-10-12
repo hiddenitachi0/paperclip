@@ -123,6 +123,11 @@ export function createStorageService(provider: StorageProvider): StorageService 
       return provider.headObject({ objectKey });
     },
 
+    async putObjectAt(companyId: string, objectKey: string, body: Buffer, contentType: string) {
+      ensureCompanyPrefix(companyId, objectKey);
+      await provider.putObject({ objectKey, body, contentType, contentLength: body.length });
+    },
+
     async deleteObject(companyId: string, objectKey: string) {
       ensureCompanyPrefix(companyId, objectKey);
       await provider.deleteObject({ objectKey });

@@ -348,7 +348,7 @@ export function TelegramBotsSection({ companyId, readOnly = false }: { companyId
                       className="text-xs text-amber-600 dark:text-amber-400"
                       data-testid={`telegram-bot-no-own-users-${bot.id}`}
                     >
-                      Anyone on the instance-wide list can use this bot. Add who may use it.
+                      No list of its own yet: only people who had already used this bot before per-bot lists can use it. Add who may use it.
                     </p>
                   ) : (
                     <ul className="flex flex-wrap gap-2">

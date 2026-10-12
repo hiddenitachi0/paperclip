@@ -46,6 +46,8 @@ export const updateCompanySchema = createCompanySchema
     attachmentMaxBytes: attachmentMaxBytesSchema.optional(),
     // DUR-4497: null resets to the server default (7 days).
     worktreeCleanupRetentionDays: worktreeCleanupRetentionDaysSchema.optional(),
+    // Sub-tasks inherit their parent task's model/effort setting (default on).
+    subtasksInheritModelEffort: z.boolean().optional(),
   });
 
 export type UpdateCompany = z.infer<typeof updateCompanySchema>;

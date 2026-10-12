@@ -13,9 +13,11 @@ import { NewGoalDialog } from "./NewGoalDialog";
 import { NewAgentDialog } from "./NewAgentDialog";
 import { KeyboardShortcutsCheatsheet } from "./KeyboardShortcutsCheatsheet";
 import { ToastViewport } from "./ToastViewport";
+import { HelperOverlay } from "./helper/HelperOverlay";
 import { MobileBottomNav } from "./MobileBottomNav";
 import { WorktreeBanner } from "./WorktreeBanner";
 import { DevRestartBanner } from "./DevRestartBanner";
+import { CompanyMovedBanner } from "./company-migration/CompanyMovedBanner";
 import { StandaloneBrowserControls } from "./StandaloneBrowserControls";
 import { RouteErrorBoundary } from "./RouteErrorBoundary";
 import { SidebarShell } from "./SidebarShell";
@@ -23,6 +25,8 @@ import { SecondarySidebar } from "./SecondarySidebar";
 import { SidebarAccountMenu } from "./SidebarAccountMenu";
 import { useDialogActions } from "../context/DialogContext";
 import { GeneralSettingsProvider } from "../context/GeneralSettingsContext";
+import { PresentationModeProvider } from "../context/PresentationModeContext";
+import { PresentationModeBadge } from "./PresentationModeBadge";
 import { usePanel } from "../context/PanelContext";
 import { useCompany } from "../context/CompanyContext";
 import { useApplyCompanyBranding } from "../hooks/useApplyCompanyBranding";
@@ -509,6 +513,8 @@ export function Layout() {
 
   return (
     <GeneralSettingsProvider value={{ keyboardShortcutsEnabled, factCheckCardStrictAllowlist }}>
+      <PresentationModeProvider>
+      <PresentationModeBadge />
       <div
       className={cn(
         "bg-background text-foreground pt-[env(safe-area-inset-top)]",
@@ -527,6 +533,7 @@ export function Layout() {
       </a>
       <WorktreeBanner />
       <DevRestartBanner devServer={health?.devServer} />
+      <CompanyMovedBanner />
       <div className={cn("min-h-0 flex-1", isMobile ? "w-full" : "flex overflow-clip")}>
         {isMobile && sidebarOpen && (
           <button
@@ -630,8 +637,10 @@ export function Layout() {
       <NewGoalDialog />
       <NewAgentDialog />
       <KeyboardShortcutsCheatsheet open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
+      <HelperOverlay />
       <ToastViewport />
       </div>
+      </PresentationModeProvider>
     </GeneralSettingsProvider>
   );
 }

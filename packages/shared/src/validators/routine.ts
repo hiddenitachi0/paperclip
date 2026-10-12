@@ -142,6 +142,10 @@ export const createRoutineTriggerSchema = z.discriminatedUnion("kind", [
     // webhook. Not company- or provider-specific: any source that can push a
     // message may be pointed at the resulting address.
     customerInboxChannel: z.enum(CUSTOMER_INBOX_CHANNELS).optional().nullable(),
+    // DUR-4583: attach an existing company secret as this trigger's webhook
+    // password instead of generating a new one. Owner/admin board users only
+    // (enforced in the route and again in the service).
+    existingSecretId: z.string().uuid().optional().nullable(),
   }),
   baseTriggerSchema.extend({
     kind: z.literal("api"),
@@ -167,6 +171,8 @@ export const updateRoutineTriggerSchema = z.object({
   timezone: z.string().trim().min(1).optional().nullable(),
   signingMode: z.enum(ROUTINE_TRIGGER_SIGNING_MODES).optional().nullable(),
   replayWindowSec: z.number().int().min(30).max(86_400).optional().nullable(),
+  // DUR-4583: swap a webhook trigger onto an existing company secret.
+  existingSecretId: z.string().uuid().optional(),
 });
 
 export type UpdateRoutineTrigger = z.infer<typeof updateRoutineTriggerSchema>;

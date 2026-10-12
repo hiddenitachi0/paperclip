@@ -300,6 +300,10 @@ export const ISSUE_ORIGIN_KINDS = [
   // DUR-62: the weekly check-up report. Written for the operator, deliberately
   // unassigned, and refused to every agent-authenticated mutation.
   "organization_checkup",
+  // "Ask Paperclip" Phase 3: a question a person handed from the Ask panel to
+  // the company's investigation agent (advice only). Created by that person
+  // (created_by_user_id), so the panel lists each person's own.
+  "helper_investigation",
 ] as const;
 export type BuiltInIssueOriginKind = (typeof ISSUE_ORIGIN_KINDS)[number];
 export type PluginIssueOriginKind = `plugin:${string}`;
@@ -638,7 +642,7 @@ export type RoutineRunStatus = (typeof ROUTINE_RUN_STATUSES)[number];
 export const ROUTINE_RUN_SOURCES = ["schedule", "manual", "api", "webhook"] as const;
 export type RoutineRunSource = (typeof ROUTINE_RUN_SOURCES)[number];
 
-export const PAUSE_REASONS = ["manual", "budget", "system", "company_archived"] as const;
+export const PAUSE_REASONS = ["manual", "budget", "system", "company_archived", "company_migrated"] as const;
 export type PauseReason = (typeof PAUSE_REASONS)[number];
 
 export const PROJECT_COLORS = [
@@ -736,6 +740,11 @@ export const SECRET_BINDING_TARGET_TYPES = [
   "project",
   "environment",
   "routine",
+  // DUR-4583: one routine_triggers row's webhook secret (config_path
+  // 'webhookSecret'). Pure "used by" bookkeeping: resolution still goes
+  // through the "routine" binding above. Not dedicated -- one secret may be
+  // shared by triggers on several routines.
+  "routine_trigger",
   // DUR-4182: webhook auth secret for a job_triggers row, same shape as
   // "routine" above (routineWebhookSecretConfigPath-style config path).
   "job",
@@ -812,6 +821,12 @@ export const SECRET_BINDING_TARGET_TYPES = [
   // mailbox's credential is that person's alone, never shared across two
   // mail accounts the way one watcher's price-check key might be.
   "mail_account",
+  // "Ask Paperclip" helper: the key the helper calls one provider with
+  // (target_id = the company id, config_path helperKeyConfigPath(provider),
+  // e.g. "helper.apiKey.openrouter"). Never resolved by any agent -- only by
+  // the server-side helper service, which makes the model call itself. Not
+  // dedicated: the same OpenRouter key may also be a quick agent's key.
+  "helper",
 ] as const;
 export type SecretBindingTargetType = (typeof SECRET_BINDING_TARGET_TYPES)[number];
 
@@ -1248,8 +1263,11 @@ export const PLUGIN_CAPABILITIES = [
   "external.objects.refresh",
   // Personas
   "personas.generation_cap.enforce",
+  "personas.picture_feedback.read",
   // Billing
   "billing.media_studio_direct.reserve",
+  // Models: picture analysis with a company's saved model, run by the host
+  "models.image_analysis.run",
   // Plugin State
   "plugin.state.read",
   "plugin.state.write",

@@ -43,6 +43,33 @@ approvals/tasks still live in Paperclip and the web UI.
   followed the same way, and a task with a result page (its "result"
   document) is linked straight to that page.
 
+- Inbound, photos: a photo (or a JPEG/PNG/WebP picture sent as a file) from
+  an allowed person is downloaded (at most 10 MB), stored in the bot's
+  company's Files (`chat attach`, base64 on standard input, under a
+  "chat-photo-" name), and its caption goes to the agent with the picture
+  attached (`chat send --attachment`), so "alter this image to show you
+  helping him" becomes a Media Studio edit with the photo as its reference.
+  Media Studio age-checks such a photo before sending it to any picture
+  service. A photo without a caption is kept for a while and goes with the
+  next message. Anything the bridge cannot open (a sticker, a video, another
+  kind of file) gets one plain sentence back instead of silence, and every
+  received message is logged with its time, bot, chat and kind (never its
+  text), plus the reason when one is dropped.
+
+- Inbound, linked people (Hermes parity slice 1): on the ONE bot a company
+  chose in Paperclip to answer people's questions, someone who is not on the
+  bot's allowlist is no longer simply ignored. If they have linked their
+  Telegram to their Paperclip account (a one-time code from their own profile
+  page, sent as `/link CODE`), their message is answered AS THEM: the
+  company's chosen quick agent first, otherwise a task for the chosen full
+  agent whose answer is posted back here once done (Paperclip's people outbox,
+  polled like the morning reports). The company is always the bot's own; the
+  sender is Telegram's own user id; Paperclip checks that person's rights.
+  Anyone who has not linked gets one polite "link your account first" line
+  (at most every ten minutes) and nothing else, and can never tap a button:
+  callbacks still only work for the allowlist. Allowlisted people keep
+  everything they had, plus `/ask <question>` to ask as their linked account.
+
 Config (DUR-3978 slice 2): the bots come from Paperclip itself — the operator
 connects them in company settings, and this service reads them through the
 same `docker exec` CLI path it already uses for everything else
@@ -69,7 +96,10 @@ import urllib.request
 import uuid
 from collections import defaultdict
 
-DEFAULT_COMPANY_ID = os.environ.get("PAPERCLIP_COMPANY_ID", "7600f03c-c836-4326-8d48-c801813c3a87")
+# The company for an old file bot that does not name its own. There is no
+# built-in default any more (it used to be one hard-coded company): a bot with
+# no company from Paperclip, its file entry or this setting does not start.
+DEFAULT_COMPANY_ID = (os.environ.get("PAPERCLIP_COMPANY_ID") or "").strip() or None
 CONTAINER = os.environ.get("PAPERCLIP_CONTAINER", "docker-server-1")
 API_BASE = os.environ.get("PAPERCLIP_API_BASE", "http://127.0.0.1:3100")
 DATA_DIR = os.environ.get("PAPERCLIP_CLI_DATA_DIR", "/paperclip/cli-state")
@@ -161,16 +191,45 @@ SPEECH_TIMEOUT_SECONDS = 150
 # The server reads at most 1,500 characters aloud; no need to send it more.
 SPOKEN_TEXT_SEND_MAX = 6000
 
+# Photos sent to a bot (see the module docstring). The limit matches what
+# Paperclip stores for a chat photo (CHAT_PHOTO_MAX_BYTES in
+# packages/shared/src/chat-attachments.ts) and what Media Studio reads.
+PHOTO_MAX_BYTES = 10 * 1024 * 1024
+PHOTO_DOCUMENT_TYPES = ("image/jpeg", "image/png", "image/webp")
+# Things a person can send that the bridge cannot open (besides stickers,
+# videos and other files); anything else without text is a Telegram notice.
+USER_CONTENT_KEYS = ("location", "venue", "contact", "poll", "dice", "game", "story", "paid_media", "invoice", "checklist")
+# A photo sent without a caption waits this long for the message that says
+# what to do with it.
+PENDING_PHOTO_SECONDS = 15 * 60
+# One plain sentence per kind of message the bridge cannot open.
+UNSUPPORTED_REPLIES = {
+    "sticker": "I can't read stickers. Write it as text, or send a photo.",
+    "video": "I can't open videos yet. Send a photo or write it as text.",
+    "file": "I can't open that kind of file yet. Send a photo (JPEG, PNG or WebP) or write it as text.",
+    "other": "I can't read that kind of message. Write it as text, or send a photo.",
+}
+
 LOCK = threading.Lock()
 
-# Telegram user ids allowed to use the bots; set in main(). Empty means nobody.
-ALLOWED_USER_IDS = set()
+# Per bot (by token): the people the one-time move to per-bot lists kept for a
+# bot that had no list of its own -- only people who had already used THAT
+# bot. Set in main() from the state file (see migrate_legacy_allowlists).
+# There is no instance-wide list any more: a person allowed on one company's
+# bot is never allowed on another's because of it.
+LEGACY_ALLOWED_BY_TOKEN = {}
+# Bots already reported as "no company, not started", so the line is logged once.
+REFUSED_NO_COMPANY = set()
 
 # The bots that should be running right now, keyed by token. Replaced wholesale
 # on every refresh, so a bot removed in Paperclip disappears from here and its
 # thread stops on its next pass (DUR-3978 slice 2).
 CURRENT_BOTS = {}
 BOT_THREADS = {}
+# Per (bot token, chat id): a photo that came without a caption, waiting for
+# the next message to say what to do with it. In memory only: after a
+# restart the person is simply asked to send it again.
+PENDING_PHOTOS = {}
 
 
 def _normalized_user_ids(raw):
@@ -204,11 +263,15 @@ def fetch_bots_from_api():
         agent_id = b.get("agentId")
         if not token or not agent_id:
             continue
+        company_id = b.get("companyId") if isinstance(b.get("companyId"), str) and b.get("companyId").strip() else None
+        if not company_id:
+            refuse_without_company(b.get("name") or "a bot")
+            continue
         bots.append({
             "agentId": agent_id,
             "name": b.get("name") or "Paperclip",
             "token": token,
-            "companyId": b.get("companyId") or DEFAULT_COMPANY_ID,
+            "companyId": company_id,
             "uiBase": b.get("uiBase") or UI_HOST,
             "allowedUserIds": _normalized_user_ids(b.get("allowedUserIds")),
             # How company_notice_bot picks the company's notice bot.
@@ -220,6 +283,9 @@ def fetch_bots_from_api():
             "botId": b.get("id") if isinstance(b.get("id"), str) and UUID_RE.match(b.get("id")) else None,
             "voiceReplyMode": b.get("voiceReplyMode") if b.get("voiceReplyMode") in VOICE_REPLY_MODES else "when_voice",
             "voice": b.get("voice") if isinstance(b.get("voice"), str) and VOICE_NAME_RE.match(b.get("voice")) else None,
+            # Hermes parity slice 1: the one bot per company that answers
+            # linked people (not just the people on its allowlist).
+            "answersLinkedPeople": b.get("answersLinkedPeople") is True,
             "source": "paperclip",
         })
     return bots
@@ -249,14 +315,19 @@ def load_file_bots():
         token = str(b.get("token") or "").strip()
         if not token or not b.get("agentId"):
             continue
+        company_id = b.get("companyId") or DEFAULT_COMPANY_ID
+        if not company_id:
+            refuse_without_company(b.get("name") or "a bot in the bot file")
+            continue
         bots.append({
             "agentId": b["agentId"],
             "name": b.get("name") or "Paperclip",
             "token": token,
-            "companyId": b.get("companyId") or DEFAULT_COMPANY_ID,
+            "companyId": company_id,
             "uiBase": b.get("uiBase") or UI_HOST,
-            # The file has never carried a per-bot allowlist; those bots keep
-            # using the instance-wide list, exactly as before.
+            # The file has never carried a per-bot allowlist; such a bot is
+            # used only by the people the one-time move kept for it
+            # (migrate_legacy_allowlists).
             "allowedUserIds": set(),
             # A file bot cannot be marked as the company's notice bot, and it
             # counts as older than any bot connected in the app; among file
@@ -298,16 +369,73 @@ def load_bots():
     return merge_bots(api_bots, load_file_bots())
 
 
-def allowed_users_for(bot):
-    """Who may use THIS bot.
+def refuse_without_company(name):
+    """A bot with no company is not started; said once per bot, not every pass."""
+    if name in REFUSED_NO_COMPANY:
+        return
+    REFUSED_NO_COMPANY.add(name)
+    print(f"telegram-bridge: not starting {name}: no company is configured for it "
+          "(connect it in Paperclip, or give its entry in the bot file a companyId)", flush=True)
 
-    A bot configured in the app carries its own list, and that list is the
-    whole answer for that bot. A bot with an empty list — a newly connected one
-    the operator has not filled in yet, or an old file bot — falls back to the
-    instance-wide list that was the only rule before this existed. Never wider
-    than one of those two, and never "everybody": with neither set, nobody.
+
+def legacy_allowed(token):
+    """The people the one-time move kept for this bot (see migrate_legacy_allowlists)."""
+    return set(LEGACY_ALLOWED_BY_TOKEN.get(token) or ())
+
+
+def allowed_users_for(bot):
+    """Who may use THIS bot as its operator (board rights: tasks, Approve).
+
+    Per bot only. A bot configured in the app carries its own list, and that
+    list is the whole answer. A bot with an empty list -- one connected before
+    per-bot lists, or an old file bot -- is used only by the people the
+    one-time move kept for THAT bot: those who had already used it. There is
+    no instance-wide fallback any more, so being allowed on one company's bot
+    never lets anyone use another company's bot (isolation audit, Oct 2026).
+    Everyone else reaches a bot only as a linked Paperclip person, on the bot
+    the company chose for that, with that person's own rights.
     """
-    return set(bot.get("allowedUserIds") or ()) or ALLOWED_USER_IDS
+    return set(bot.get("allowedUserIds") or ()) or legacy_allowed(bot["token"])
+
+
+def migrate_legacy_allowlists(state, bots, env_value, persist=True):
+    """One-time move from the instance-wide list to per-bot lists.
+
+    Before, a bot with an empty list fell back to TELEGRAM_ALLOWED_USER_IDS
+    or, without it, to every private chat that had ever written to ANY bot.
+    On the first start after the change, each such bot keeps only the people
+    from that old list who had already used that specific bot (their private
+    chat is in that bot's chats), so the bots that work today keep working for
+    the people who use them. What was kept is logged and stored in the state
+    file; later starts just read it back. Bots with their own list are not
+    touched. Returns the kept lists, by bot token.
+
+    `persist` is False while Paperclip has not said which bots it has (it is
+    restarting): the move is then worked out for the bots known so far but
+    not stored, and main() does it again, for good, once Paperclip answers.
+    """
+    stored = state.get("legacy_allowed")
+    if isinstance(stored, dict):
+        return {token: {int(u) for u in ids if str(u).isdigit()} for token, ids in stored.items() if isinstance(ids, list)}
+    instance_wide, source = resolve_allowed_user_ids(state, env_value)
+    kept = {}
+    for bot in bots:
+        if bot.get("allowedUserIds"):
+            continue
+        token = bot["token"]
+        used = {c for c in ((state.get("bots") or {}).get(token) or {}).get("chats") or []
+                if isinstance(c, int) and c > 0}
+        keep = sorted(instance_wide & used)
+        kept[token] = set(keep)
+        dropped = len(instance_wide - used)
+        print(f"telegram-bridge: allow-list move: {bot.get('name')} ({str(bot.get('companyId'))[:8]}) keeps "
+              f"{len(keep)} person(s) who already used this bot {keep} (from {source}); "
+              f"{dropped} other(s) on the old instance-wide list are no longer allowed on it", flush=True)
+    if persist:
+        with LOCK:
+            state["legacy_allowed"] = {token: sorted(ids) for token, ids in kept.items()}
+            save_state(state)
+    return kept
 
 
 def load_state():
@@ -333,8 +461,15 @@ def tg(token, method, http_timeout=20, **params):
         with urllib.request.urlopen(urllib.request.Request(f"https://api.telegram.org/bot{token}/{method}", data=data), timeout=http_timeout) as r:
             return json.load(r).get("result")
     except Exception as e:
-        print(f"tg {method} error: {e}", flush=True)
+        print(f"tg {method} error: {without_token(e, token)}", flush=True)
         return None
+
+
+def without_token(error, token):
+    """An error as text, with the bot token taken out (a Telegram address
+    carries it, and an error may quote the address)."""
+    text = str(error)
+    return text.replace(token, "<bot token>") if token else text
 
 
 class TypingIndicator:
@@ -391,11 +526,15 @@ def cli_env(env, *parts, timeout=90):
         return None
 
 
-def cli_stdin(data, *parts, timeout=90):
+def cli_stdin(data, *parts, timeout=90, env=None):
     """A CLI call that gets `data` on standard input (`docker exec -i`). Used
-    for a voice recording, which is far too big for the command line or an
-    environment variable, and must never appear in a process list."""
-    args = ["docker", "exec", "-i", CONTAINER, "sh", "-lc", f"{CLI} {' '.join(parts)} {ARGS}"]
+    for a voice recording or a photo, which is far too big for the command
+    line or an environment variable, and must never appear in a process list.
+    `env` carries short text (a caption) the same way cli_env does."""
+    args = ["docker", "exec", "-i"]
+    for k, v in (env or {}).items():
+        args += ["-e", f"{k}={v}"]
+    args += [CONTAINER, "sh", "-lc", f"{CLI} {' '.join(parts)} {ARGS}"]
     try:
         out = subprocess.run(args, input=data, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                              timeout=timeout, check=True).stdout
@@ -905,11 +1044,10 @@ def resolve_allowed_user_ids(state, env_value):
 def deliverable_chats(state, token, allowed=None):
     """The chats a bot may send cards to: allowed people's private chats only.
 
-    `allowed` is this bot's own list when it has one (see allowed_users_for).
-    With nothing given it falls back to the instance-wide list, which is what
-    every caller did before per-bot lists existed.
+    `allowed` is who may use this bot (allowed_users_for). With nothing given,
+    nobody: there is no instance-wide list to fall back to any more.
     """
-    permitted = ALLOWED_USER_IDS if allowed is None else allowed
+    permitted = set() if allowed is None else allowed
     return [chat for chat in bots_state(state, token)["chats"] if chat in permitted]
 
 
@@ -1036,6 +1174,69 @@ def handle_reaction(state, bot, update):
         # already agrees; anything else is worth a log line, never a message.
         if isinstance(res, dict) and res.get("ok") is False and res.get("status") not in (404, 409):
             print(f"reaction not recorded ({bot['name']}): {res.get('status')} {str(res.get('error'))[:200]}", flush=True)
+            continue
+        send_reaction_follow_up(state, bot, update, event, res)
+
+
+# DUR-4345: a disliked picture gets at most ONE short follow-up question. The
+# server decides (it answers a "negative" reaction with `followUp.text` the
+# first time only, however often the picture is reacted to again); the bridge
+# just sends it as a reply to the picture and remembers which message it was,
+# so that a Telegram reply to THAT message is taken as the answer. Nothing
+# else the person types is ever treated as an answer.
+REACTION_FOLLOW_UP_LIMIT = 200
+REACTION_FOLLOW_UP_TTL = 3 * 24 * 3600
+
+
+def send_reaction_follow_up(state, bot, update, event, res):
+    follow_up = res.get("followUp") if isinstance(res, dict) and res.get("ok") is not False else None
+    text = follow_up.get("text") if isinstance(follow_up, dict) else None
+    if event.get("action") != "added" or not isinstance(text, str) or not text.strip():
+        return
+    chat_id = (update.get("chat") or {}).get("id")
+    sent = tg(bot["token"], "sendMessage", chat_id=chat_id, text=text,
+              reply_to_message_id=update.get("message_id"), disable_web_page_preview=True)
+    question_id = sent.get("message_id") if isinstance(sent, dict) else None
+    if not isinstance(question_id, int):
+        return
+    with LOCK:
+        pending = _bot_entry(state, bot["token"]).setdefault("reactionFollowUps", {})
+        pending[f"{chat_id}:{question_id}"] = {
+            "agentId": event["agentId"],
+            "telegramUserId": event["telegramUserId"],
+            "telegramChatId": event["telegramChatId"],
+            "telegramMessageId": event["telegramMessageId"],
+            "at": time.time(),
+        }
+        while len(pending) > REACTION_FOLLOW_UP_LIMIT:
+            pending.pop(next(iter(pending)))
+        save_state(state)
+
+
+def take_follow_up_answer(state, bot, m, text):
+    """If this message is a reply to a follow-up question we asked, store it as
+    the answer (once). The message is still handled as a normal one afterwards."""
+    replied = m.get("reply_to_message")
+    chat_id = (m.get("chat") or {}).get("id")
+    if not isinstance(replied, dict) or not text or chat_id is None:
+        return
+    key = f"{chat_id}:{replied.get('message_id')}"
+    with LOCK:
+        pending = _bot_entry(state, bot["token"]).setdefault("reactionFollowUps", {})
+        entry = pending.get(key)
+        if not entry or time.time() - entry.get("at", 0) > REACTION_FOLLOW_UP_TTL:
+            pending.pop(key, None)
+            return
+        if str((m.get("from") or {}).get("id")) != entry["telegramUserId"]:
+            return
+        pending.pop(key, None)
+        save_state(state)
+    payload = {k: entry[k] for k in ("agentId", "telegramUserId", "telegramChatId", "telegramMessageId")}
+    payload["answer"] = text[:300]
+    res = cli_env({"TT": json.dumps(payload)}, "chat", "reaction", "-C", bot["companyId"],
+                  "--follow-up-answer", "--event", '"$TT"')
+    if isinstance(res, dict) and res.get("ok") is False and res.get("status") != 404:
+        print(f"follow-up answer not recorded ({bot['name']}): {res.get('status')} {str(res.get('error'))[:200]}", flush=True)
 
 
 def remember_task(state, token, chat_id, task_ref, text, colleague=False):
@@ -1133,7 +1334,7 @@ def tg_upload(token, method, field, filename, content_type, data, http_timeout=6
         with urllib.request.urlopen(request, timeout=http_timeout) as r:
             return json.load(r).get("result")
     except Exception as e:
-        print(f"tg {method} error: {e}", flush=True)
+        print(f"tg {method} error: {without_token(e, token)}", flush=True)
         return None
 
 
@@ -1227,15 +1428,19 @@ def send_reply_images(bot, chat_id, images, state=None, reaction_context=None):
                                      dict(reaction_context, picture={"fileId": image["fileId"]}))
 
 
-def chat_send(bot, text, conversation_id=None, lane=None):
+def chat_send(bot, text, conversation_id=None, lane=None, attachments=None):
     """One message through the chat router. The agent and the company are always
     the bot's own from its config; the message only ever travels as data in an
-    environment variable, never as part of the command."""
+    environment variable, never as part of the command. `attachments` are file
+    ids of photos already stored in the bot's company (chat attach)."""
     parts = ["chat", "send", bot["agentId"], "-C", bot["companyId"], "--message", '"$TT"']
     if conversation_id and UUID_RE.match(conversation_id):
         parts += ["--conversation-id", conversation_id]
     if lane in ("a", "b"):
         parts += ["--lane", lane]
+    for file_id in attachments or []:
+        if isinstance(file_id, str) and UUID_RE.match(file_id):
+            parts += ["--attachment", file_id]
     # A quick answer can include making a picture, which may take up to about
     # two minutes, so wait longer than for other commands.
     return cli_env({"TT": text}, *parts, timeout=CHAT_SEND_TIMEOUT_SECONDS)
@@ -1245,12 +1450,13 @@ def _refused(res):
     return isinstance(res, dict) and res.get("ok") is False
 
 
-def ask_agent(state, bot, chat_id, text, force_task=False, came_by_voice=False):
+def ask_agent(state, bot, chat_id, text, force_task=False, came_by_voice=False, attachments=None):
     """Send a chat message to the bot's agent and reply in the same chat.
 
     `came_by_voice` is True when `text` is what a voice message said; the
     message is otherwise handled exactly like a typed one. It only decides
-    whether the answer is also read aloud (see wants_voice_reply)."""
+    whether the answer is also read aloud (see wants_voice_reply).
+    `attachments` are file ids of photos sent with the message."""
     token, agent_name = bot["token"], bot["name"]
     conversation_id = None if force_task else get_conversation(state, token, chat_id)
     notes = []
@@ -1269,11 +1475,11 @@ def ask_agent(state, bot, chat_id, text, force_task=False, came_by_voice=False):
                     "Please send it again in a few minutes."))
                 return
         started_before = container_started_at()
-        res = chat_send(bot, text, conversation_id, "b" if force_task else None)
+        res = chat_send(bot, text, conversation_id, "b" if force_task else None, attachments=attachments)
         if _refused(res) and conversation_id and res.get("code") in CONVERSATION_ENDED_CODES:
             set_conversation(state, token, chat_id, None)
             notes.append("(The earlier conversation had ended, so this starts a fresh one.)")
-            res = chat_send(bot, text)
+            res = chat_send(bot, text, attachments=attachments)
         if _refused(res) and not force_task and res.get("code") in QUICK_SETUP_ERROR_CODES:
             reason = str(res.get("error") or "").strip()[:400]
             send_plain(token, chat_id, (
@@ -1283,7 +1489,7 @@ def ask_agent(state, bot, chat_id, text, force_task=False, came_by_voice=False):
             return
         if _refused(res) and not force_task and res.get("status") in QUICK_UNAVAILABLE_STATUSES:
             notes.append("Quick answers aren't available right now, so I've handed this over as a task.")
-            res = chat_send(bot, text, lane="b")
+            res = chat_send(bot, text, lane="b", attachments=attachments)
 
     if res is None and started_before is not None and container_started_at() != started_before:
         # Paperclip restarted while it was answering: the answer is lost, and
@@ -1355,10 +1561,10 @@ def wants_voice_reply(bot, came_by_voice):
     return mode == "always" or (mode == "when_voice" and came_by_voice)
 
 
-def download_telegram_file(token, file_id):
+def download_telegram_file(token, file_id, max_bytes=VOICE_MAX_BYTES, what="a voice message"):
     """The bytes of a file someone sent the bot, or (None, reason).
 
-    Reads at most VOICE_MAX_BYTES + 1 bytes, so an oversized file is refused
+    Reads at most max_bytes + 1 bytes, so an oversized file is refused
     without being held in memory. The download address carries the bot token,
     so no error message is printed with it."""
     if not isinstance(file_id, str) or not file_id:
@@ -1368,16 +1574,16 @@ def download_telegram_file(token, file_id):
     if not isinstance(path, str) or not path:
         return None, "missing"
     size = info.get("file_size")
-    if isinstance(size, int) and size > VOICE_MAX_BYTES:
+    if isinstance(size, int) and size > max_bytes:
         return None, "too_large"
     url = f"https://api.telegram.org/file/bot{token}/{urllib.parse.quote(path)}"
     try:
         with urllib.request.urlopen(url, timeout=60) as r:
-            data = r.read(VOICE_MAX_BYTES + 1)
+            data = r.read(max_bytes + 1)
     except Exception as e:
-        print(f"telegram-bridge: could not download a voice message ({type(e).__name__})", flush=True)
+        print(f"telegram-bridge: could not download {what} ({type(e).__name__})", flush=True)
         return None, "failed"
-    if len(data) > VOICE_MAX_BYTES:
+    if len(data) > max_bytes:
         return None, "too_large"
     return data, path
 
@@ -1488,6 +1694,148 @@ def send_voice_answer(bot, chat_id, text):
         send_plain(token, chat_id, "(I couldn't send the spoken answer here.)")
 
 
+# ─── Photos, and messages the bridge cannot open ───────────────────────────────
+
+def message_kind(m):
+    """What kind of message this is: text, photo, image_file (a picture sent
+    as a file), voice (also an audio file), sticker, video (also a round
+    video note or a GIF), file (any other document), other (a location, a
+    contact, a poll, ...) or service (a notice from Telegram itself)."""
+    if isinstance(m.get("voice"), dict) or isinstance(m.get("audio"), dict):
+        return "voice"
+    if isinstance(m.get("sticker"), dict):
+        return "sticker"
+    if any(isinstance(m.get(k), dict) for k in ("video", "video_note", "animation")):
+        return "video"
+    if isinstance(m.get("photo"), list) and m["photo"]:
+        return "photo"
+    document = m.get("document")
+    if isinstance(document, dict):
+        mime = str(document.get("mime_type") or "").lower()
+        return "image_file" if mime in PHOTO_DOCUMENT_TYPES else "file"
+    if isinstance(m.get("text"), str) and m["text"].strip():
+        return "text"
+    if any(k in m for k in USER_CONTENT_KEYS):
+        return "other"
+    # A pinned message, a changed auto-delete timer, ...: Telegram's own
+    # notices, not something the person sent to be answered.
+    return "service"
+
+
+def _log_time():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def log_received(bot, chat_id, kind):
+    """One line per message: when, which bot, which chat, what kind. Never
+    the text, a caption or a file id."""
+    print(f"telegram-bridge: {_log_time()} received {kind} for {bot.get('name')} in chat {chat_id}", flush=True)
+
+
+def log_dropped(bot, chat_id, kind, reason):
+    print(f"telegram-bridge: {_log_time()} dropped {kind} for {bot.get('name')} in chat {chat_id}: {reason}", flush=True)
+
+
+def pick_photo(m):
+    """The picture to use: the largest size Telegram offers for a photo, or
+    the picture file itself. {fileId, fileSize} or None."""
+    sizes = [p for p in (m.get("photo") or []) if isinstance(p, dict) and isinstance(p.get("file_id"), str)]
+    if sizes:
+        best = max(sizes, key=lambda p: (p.get("file_size") or 0, (p.get("width") or 0) * (p.get("height") or 0)))
+        return {"fileId": best["file_id"], "fileSize": best.get("file_size")}
+    document = m.get("document")
+    if isinstance(document, dict) and isinstance(document.get("file_id"), str):
+        return {"fileId": document["file_id"], "fileSize": document.get("file_size")}
+    return None
+
+
+def remember_pending_photo(token, chat_id, photo):
+    with LOCK:
+        PENDING_PHOTOS[(token, chat_id)] = dict(photo, at=time.time())
+
+
+def take_pending_photo(token, chat_id):
+    """The photo this chat sent without a caption a moment ago, once."""
+    with LOCK:
+        photo = PENDING_PHOTOS.pop((token, chat_id), None)
+    if photo and time.time() - photo.get("at", 0) <= PENDING_PHOTO_SECONDS:
+        return photo
+    return None
+
+
+PHOTO_TOO_LARGE = "That picture is larger than 10 MB. Please send a smaller one."
+
+
+def ask_what_to_do_with_photo(bot, chat_id, photo, who):
+    remember_pending_photo(bot["token"], chat_id, photo)
+    send_plain(bot["token"], chat_id, (
+        f"Got the photo. What should {who} do with it? Write it in your next message, "
+        "for example: put a red hat on him. Or send the photo again with a caption."))
+
+
+def download_photo(bot, chat_id, photo, kind):
+    """The photo's bytes from Telegram, or None after telling the person why."""
+    token = bot["token"]
+    size = photo.get("fileSize")
+    if isinstance(size, int) and size > PHOTO_MAX_BYTES:
+        log_dropped(bot, chat_id, kind, "larger than 10 MB")
+        send_plain(token, chat_id, PHOTO_TOO_LARGE)
+        return None
+    data, reason = download_telegram_file(token, photo.get("fileId"), max_bytes=PHOTO_MAX_BYTES, what="a photo")
+    if data is None:
+        log_dropped(bot, chat_id, kind, "too large" if reason == "too_large" else "download from Telegram failed")
+        send_plain(token, chat_id, PHOTO_TOO_LARGE if reason == "too_large"
+                   else "I couldn't get that photo from Telegram. Please send it again.")
+        return None
+    return data
+
+
+def send_photo_to_agent(state, bot, chat_id, photo, text, force_task=False, kind="photo"):
+    """Store the photo in the bot's company's Files, then send the words to
+    the agent with the photo attached, exactly like a typed message."""
+    token, agent_name = bot["token"], bot["name"]
+    with TypingIndicator(token, chat_id):
+        if not paperclip_ready():
+            send_plain(token, chat_id, (
+                f"Paperclip is restarting. I'll pass your photo on to {agent_name} as soon as it's back, usually within a minute."))
+            if not wait_for_paperclip():
+                log_dropped(bot, chat_id, kind, "Paperclip did not come back")
+                send_plain(token, chat_id, (
+                    f"Paperclip is still not back, so {agent_name} did not get your photo. Please send it again in a few minutes."))
+                return
+        data = download_photo(bot, chat_id, photo, kind)
+        if data is None:
+            return
+        res = cli_stdin(base64.b64encode(data), "chat", "attach", "-C", bot["companyId"], "--stdin", timeout=60)
+    file_id = res.get("fileId") if isinstance(res, dict) and res.get("ok") is not False else None
+    if not isinstance(file_id, str) or not UUID_RE.match(file_id):
+        log_dropped(bot, chat_id, kind, "Paperclip did not store the photo")
+        reason = str(res.get("error") or "").strip()[:300] if isinstance(res, dict) else ""
+        send_plain(token, chat_id, (
+            "I couldn't save that photo in Paperclip, so it was not passed on." + (f" {reason}" if reason else "")
+            + " Please send it again."))
+        return
+    ask_agent(state, bot, chat_id, text, force_task=force_task, attachments=[file_id])
+
+
+def handle_photo_message(state, bot, chat_id, m, caption, kind):
+    """A photo (or a picture sent as a file) from an allowed person."""
+    photo = pick_photo(m)
+    if photo is None:
+        log_dropped(bot, chat_id, kind, "no picture in the message")
+        send_plain(bot["token"], chat_id, UNSUPPORTED_REPLIES["file"])
+        return
+    if not caption:
+        ask_what_to_do_with_photo(bot, chat_id, photo, bot["name"])
+        return
+    force_task = caption.lower().startswith("/task ")
+    body = caption[len("/task "):].strip() if force_task else caption
+    if not body:
+        ask_what_to_do_with_photo(bot, chat_id, photo, bot["name"])
+        return
+    send_photo_to_agent(state, bot, chat_id, photo, body, force_task=force_task, kind=kind)
+
+
 def continue_conversation(state, bot, chat_id, spec):
     """/cont [what]: start a new quick-answer conversation that carries on from
     the earlier one. The words travel only as data in an environment variable;
@@ -1583,6 +1931,8 @@ HELP_TEXT = (
     "• A voice message → {name} hears it and answers the same way; the answer can be read "
     "aloud too (Company settings → Connections → Telegram)\n"
     "• `/task <text>` → always make it a task\n"
+    "• `/ask <question>` → ask as your own linked Paperclip account (only on the bot the company "
+    "chose for people's questions; link first with `/link <code>` from your Paperclip profile)\n"
     "• `/new` → start a fresh conversation\n"
     "• `/cont` → carry on from the last conversation (a conversation ends after 30 quiet minutes)\n"
     "• `/cont last 45 minutes`, `/cont this morning`, `/cont yesterday` → carry on from that time\n"
@@ -1866,6 +2216,72 @@ def notify_watcher_alerts(state, bots):
 
 
 
+def ack_mail_urgency_alert(company_id, alert_id, outcome="delivered"):
+    return cli("mail-urgency", "outbox:ack", alert_id, "-C", company_id, "--outcome", outcome) is not None
+
+
+def notify_mail_urgency_alerts(state, bots):
+    """Send every urgent-mail alert waiting in each company's outbox, once.
+    The text is built server-side (sender, subject, one-line summary, reason,
+    link) and never contains the mail body (DUR-4573)."""
+    by_company = defaultdict(list)
+    for b in bots:
+        by_company[b["companyId"]].append(b)
+    with LOCK:
+        remembered = list(state.get("sent_mail_urgency_alerts", []))
+    sent_before = set(remembered)
+    for company_id, cbots in by_company.items():
+        data = cli("mail-urgency", "outbox", "-C", company_id)
+        items = data.get("alerts") if isinstance(data, dict) else None
+        if not isinstance(items, list) or not items:
+            continue
+        reports_to, names, roles = fetch_org(company_id)
+        default_bot = company_notice_bot(cbots, roles)
+        bots_by_agent = {b["agentId"]: b for b in cbots}
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            # The mailbox's own assistant speaks for its mail. If the mailbox
+            # has an assistant but she has no bot yet, the alert waits (it is
+            # never sent from another agent's bot, e.g. Fork Lead's).
+            pa_agent = it.get("agentId")
+            if isinstance(pa_agent, str) and pa_agent:
+                bot = bots_by_agent.get(pa_agent)
+            else:
+                bot = default_bot
+            if bot is None:
+                continue
+            alert_id = it.get("id")
+            if not isinstance(alert_id, str) or not UUID_RE.match(alert_id):
+                continue
+            if it.get("companyId") not in (None, company_id):
+                continue
+            if alert_id in sent_before:
+                # Telegram already has it; only the acknowledgement was lost.
+                ack_mail_urgency_alert(company_id, alert_id)
+                continue
+            chats = deliverable_chats(state, bot["token"], allowed_users_for(bot))
+            if not chats:
+                continue  # nobody has started this bot yet: try again next pass
+            text = str(it.get("text") or "").strip()
+            if not text:
+                continue
+            delivered = False
+            for chat in chats:
+                if send_text_checked(bot["token"], chat, text):
+                    delivered = True
+            if not delivered:
+                continue  # Telegram refused; the next pass tries again
+            # Record as sent BEFORE acknowledging, so a crash between the two
+            # never double-sends on the next pass.
+            sent_before.add(alert_id)
+            remembered.append(alert_id)
+            with LOCK:
+                state["sent_mail_urgency_alerts"] = remembered[-WATCHER_ALERTS_REMEMBERED:]
+                save_state(state)
+            ack_mail_urgency_alert(company_id, alert_id)
+
+
 # ─── Disk warnings (DUR-4499) ─────────────────────────────────────────────────
 #
 # The instance disk report comes from `disk-health` (read-only). One message
@@ -2068,6 +2484,255 @@ def notify_morning_reports(state, bots):
                 save_state(state)
             ack_morning_report(company_id, report_id)
 
+# ─── Hermes parity slice 1: linked people ──────────────────────────────────────
+#
+# On the bot a company chose for it (answersLinkedPeople), people who are not
+# on the allowlist can ask questions once they have linked their Telegram to
+# their Paperclip account. Everything that matters is decided in Paperclip
+# (telegram people-ask / people-link): who the sender is, whether they may use
+# this company, what they may see, the daily limit, and the wording of every
+# refusal. The bridge only passes the bot's own id and company (from its
+# config), Telegram's sender id, and the text (as data, in an environment
+# variable), then sends back what Paperclip said.
+
+PEOPLE_HELP_TEXT = (
+    "Hi! I'm {name}. I answer questions about the company for people with a Paperclip account.\n\n"
+    "1. In Paperclip, open your profile and press \"Link Telegram\".\n"
+    "2. Send me /link followed by the code it shows.\n"
+    "3. Then just ask, for example: How did sales go last week?\n\n"
+    "/new starts a fresh conversation. /help shows this again."
+)
+# An unlinked sender gets the "link first" line at most this often; in
+# between, their messages cost nothing (no call into Paperclip at all).
+PEOPLE_UNLINKED_QUIET_SECONDS = 10 * 60
+# At most this many /link tries per sender in the window (Paperclip has its own
+# limit too); a guess at a code is not worth a call into Paperclip after that.
+PEOPLE_LINK_TRIES = 5
+PEOPLE_LINK_WINDOW_SECONDS = 15 * 60
+PEOPLE_MESSAGE_MAX_CHARS = 4000
+PEOPLE_ANSWERS_REMEMBERED = 500
+LINK_CODE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 -]{0,39}$")
+TELEGRAM_USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
+TASK_IDENTIFIER_RE = re.compile(r"^[A-Z][A-Z0-9]{0,15}-\d{1,9}$")
+# Per (bot token, sender): until when an unlinked sender is not answered again,
+# their recent /link tries, and whether their next question starts fresh.
+PEOPLE_UNLINKED_UNTIL = {}
+PEOPLE_LINK_ATTEMPTS = {}
+PEOPLE_FRESH = set()
+
+
+def answers_linked_people(bot):
+    """This bot answers linked people (the company chose it in Paperclip)."""
+    return bot.get("answersLinkedPeople") is True and isinstance(bot.get("botId"), str) and bool(UUID_RE.match(bot["botId"]))
+
+
+def handle_person_message(state, bot, chat_id, sender, m, text):
+    """A private message from someone not on the allowlist, on a people bot.
+    `text` is the message's text, or a photo's caption."""
+    token = bot["token"]
+    key = (token, sender)
+    kind = message_kind(m)
+    command = text.lower().split(maxsplit=1)[0] if text and kind == "text" else ""
+    if command == "/link":
+        words = text.split(maxsplit=1)
+        link_person(bot, chat_id, sender, m, words[1] if len(words) > 1 else "")
+        return
+    if time.time() < PEOPLE_UNLINKED_UNTIL.get(key, 0):
+        log_dropped(bot, chat_id, kind, "sender has not linked an account (told a moment ago)")
+        return  # told them how to link a moment ago; stay quiet
+    if command in ("/start", "/help"):
+        send_plain(token, chat_id, PEOPLE_HELP_TEXT.format(name=bot.get("name") or "Paperclip"))
+        return
+    if command == "/new":
+        PEOPLE_FRESH.add(key)
+        take_pending_photo(token, chat_id)
+        send_plain(token, chat_id, "🆕 Fresh start. Your next question begins a new conversation.")
+        return
+    if kind in ("photo", "image_file"):
+        photo = pick_photo(m)
+        if photo is None:
+            log_dropped(bot, chat_id, kind, "no picture in the message")
+            send_plain(token, chat_id, UNSUPPORTED_REPLIES["file"])
+            return
+        if not text:
+            ask_what_to_do_with_photo(bot, chat_id, photo, "I")
+            return
+        ask_as_person_with_photo(state, bot, chat_id, sender, text, photo, kind)
+        return
+    if kind in UNSUPPORTED_REPLIES:
+        log_dropped(bot, chat_id, kind, "cannot open this kind of message")
+        send_plain(token, chat_id, UNSUPPORTED_REPLIES[kind])
+        return
+    if kind == "service":
+        log_dropped(bot, chat_id, kind, "a notice from Telegram, nothing to answer")
+        return
+    if not text or command.startswith("/"):
+        log_dropped(bot, chat_id, kind, "not a typed question")
+        send_plain(token, chat_id, (
+            "I can only read typed questions here. /link, /new and /help are the only commands; "
+            "anything else, just write it as a question."))
+        return
+    pending = take_pending_photo(token, chat_id)
+    if pending:
+        ask_as_person_with_photo(state, bot, chat_id, sender, text, pending, "photo")
+        return
+    fresh = key in PEOPLE_FRESH
+    PEOPLE_FRESH.discard(key)
+    ask_as_person(state, bot, chat_id, sender, text, fresh=fresh)
+
+
+def ask_as_person_with_photo(state, bot, chat_id, sender, text, photo, kind):
+    """A linked person's question with a photo. The photo goes to Paperclip
+    with the question; Paperclip stores it only after it has checked who the
+    person is, that they may use this company, and their daily limit."""
+    data = download_photo(bot, chat_id, photo, kind)
+    if data is None:
+        return
+    key = (bot["token"], sender)
+    fresh = key in PEOPLE_FRESH
+    PEOPLE_FRESH.discard(key)
+    ask_as_person(state, bot, chat_id, sender, text, fresh=fresh, picture=data)
+
+
+def link_person(bot, chat_id, sender, m, code):
+    """`/link CODE`: link the sender's Telegram to the Paperclip person whose code it is."""
+    token = bot["token"]
+    key = (token, sender)
+    code = (code or "").strip()
+    if not code:
+        send_plain(token, chat_id, "Send /link followed by the code from your Paperclip profile page, for example: /link ABCD2345")
+        return
+    now = time.time()
+    tries = [t for t in PEOPLE_LINK_ATTEMPTS.get(key, []) if now - t < PEOPLE_LINK_WINDOW_SECONDS]
+    if len(tries) >= PEOPLE_LINK_TRIES:
+        PEOPLE_LINK_ATTEMPTS[key] = tries
+        send_plain(token, chat_id, "Too many tries. Wait 15 minutes, make a new code on your Paperclip profile page, and try again.")
+        return
+    PEOPLE_LINK_ATTEMPTS[key] = tries + [now]
+    if not LINK_CODE_RE.match(code):
+        send_plain(token, chat_id, "That doesn't look like a code. Copy it from your Paperclip profile page.")
+        return
+    env = {"CD": code}
+    parts = ["telegram", "people-link", bot["botId"], "-C", bot["companyId"],
+             "--telegram-user-id", str(sender), "--code", '"$CD"']
+    username = str((m.get("from") or {}).get("username") or "")
+    if TELEGRAM_USERNAME_RE.match(username):
+        env["TU"] = username
+        parts += ["--telegram-username", '"$TU"']
+    res = cli_env(env, *parts)
+    if not isinstance(res, dict) or res.get("ok") is False:
+        send_plain(token, chat_id, "I couldn't reach Paperclip to link your account. Please try again in a few minutes.")
+        return
+    if res.get("outcome") == "linked":
+        PEOPLE_UNLINKED_UNTIL.pop(key, None)
+        PEOPLE_LINK_ATTEMPTS.pop(key, None)
+    reply = str(res.get("reply") or "").strip()
+    if reply:
+        send_plain(token, chat_id, reply)
+
+
+def ask_as_person(state, bot, chat_id, sender, text, fresh=False, picture=None):
+    """Ask Paperclip as the linked person and send back what it said, with
+    any picture the quick agent made. `picture` is the bytes of a photo the
+    person sent with the question (as base64 on standard input, never on the
+    command line)."""
+    token = bot["token"]
+    if len(text) > PEOPLE_MESSAGE_MAX_CHARS:
+        send_plain(token, chat_id, f"That message is too long. Please keep a question under {PEOPLE_MESSAGE_MAX_CHARS} characters.")
+        return
+    with TypingIndicator(token, chat_id):
+        if not paperclip_ready():
+            send_plain(token, chat_id, "Paperclip is restarting. I'll ask as soon as it's back, usually within a minute.")
+            if not wait_for_paperclip():
+                send_plain(token, chat_id, "Paperclip is still not back, so nothing was asked. Please send it again in a few minutes.")
+                return
+        parts = ["telegram", "people-ask", bot["botId"], "-C", bot["companyId"],
+                 "--telegram-user-id", str(sender), "--chat-id", str(chat_id), "--message", '"$TT"']
+        if fresh:
+            parts.append("--fresh")
+        if picture:
+            parts.append("--picture-stdin")
+            res = cli_stdin(base64.b64encode(picture), *parts, timeout=CHAT_SEND_TIMEOUT_SECONDS, env={"TT": text})
+        else:
+            res = cli_env({"TT": text}, *parts, timeout=CHAT_SEND_TIMEOUT_SECONDS)
+    if res is None:
+        send_plain(token, chat_id, "I didn't hear back from Paperclip, so I can't tell whether that was asked. Check Paperclip before sending it again.")
+        return
+    if not isinstance(res, dict) or res.get("ok") is False:
+        send_plain(token, chat_id, "Paperclip could not take that question right now. Please try again in a few minutes.")
+        return
+    if res.get("outcome") == "not_linked":
+        PEOPLE_UNLINKED_UNTIL[(token, sender)] = time.time() + PEOPLE_UNLINKED_QUIET_SECONDS
+    reply = str(res.get("reply") or "").strip()
+    if reply:
+        send_plain(token, chat_id, reply)
+    images = []
+    for image in res.get("images") or []:
+        file_id = image.get("fileId") if isinstance(image, dict) else None
+        if isinstance(file_id, str) and UUID_RE.match(file_id) and not any(i["fileId"] == file_id for i in images):
+            seed = image.get("seed")
+            images.append({"fileId": file_id, "seed": seed if isinstance(seed, int) and not isinstance(seed, bool) else None,
+                           "hasTask": False})
+    if images:
+        send_reply_images(bot, chat_id, images[:QUICK_ANSWER_MAX_IMAGES])
+
+
+def ack_people_answer(company_id, answer_id, outcome="delivered"):
+    res = cli("telegram", "people-ack", answer_id, "-C", company_id, "--outcome", outcome)
+    return isinstance(res, dict) and res.get("ok") is not False
+
+
+def notify_people_answers(state, bots):
+    """Send each answer waiting in a company's people outbox, once.
+
+    Only through the bot the question came in on (by its Paperclip id), only if
+    that bot still answers linked people in that company, and only into the chat
+    Paperclip recorded (the asker's own private chat). Remembered in the state
+    file the moment Telegram took it, before the acknowledgement, so a lost
+    acknowledgement never sends it twice.
+    """
+    people_bots = {b["botId"]: b for b in bots if answers_linked_people(b)}
+    if not people_bots:
+        return
+    with LOCK:
+        remembered = list(state.get("sent_people_answers", []))
+    sent_before = set(remembered)
+    for company_id in sorted({b["companyId"] for b in people_bots.values()}):
+        data = cli("telegram", "people-outbox", "-C", company_id)
+        items = data.get("answers") if isinstance(data, dict) and data.get("ok") is not False else None
+        for it in items if isinstance(items, list) else []:
+            if not isinstance(it, dict):
+                continue
+            answer_id = it.get("id")
+            if not isinstance(answer_id, str) or not UUID_RE.match(answer_id):
+                continue
+            if answer_id in sent_before:
+                ack_people_answer(company_id, answer_id)
+                continue
+            bot = people_bots.get(it.get("botId"))
+            if bot is None or bot["companyId"] != company_id:
+                continue  # that bot is not running (or no longer answers people); Paperclip retires it after a day
+            chat = str(it.get("chatId") or "")
+            if not chat.isdigit():
+                ack_people_answer(company_id, answer_id, "failed")
+                continue
+            text = str(it.get("text") or "").strip()
+            if not text:
+                ack_people_answer(company_id, answer_id, "failed")
+                continue
+            ident = it.get("taskIdentifier")
+            if isinstance(ident, str) and TASK_IDENTIFIER_RE.match(ident):
+                text += f"\n\nOpen the task: {bot['uiBase']}/issues/{ident}"
+            if not send_text_checked(bot["token"], int(chat), text):
+                continue  # Telegram refused; the next pass tries again
+            sent_before.add(answer_id)
+            remembered.append(answer_id)
+            with LOCK:
+                state["sent_people_answers"] = remembered[-PEOPLE_ANSWERS_REMEMBERED:]
+                save_state(state)
+            ack_people_answer(company_id, answer_id)
+
+
 # Telegram limit for an inline button's callback_data.
 CALLBACK_DATA_MAX_BYTES = 64
 
@@ -2075,9 +2740,9 @@ def handle_callback(cq):
     data = cq.get("data", "")
     action, _, rest = data.partition(":")
     tgtoken = cq["_token"]
-    # This bot's own list when the caller supplied one, otherwise the
-    # instance-wide list — same rule as before for a bot that has no list.
-    if (cq.get("from") or {}).get("id") not in (cq.get("_allowed") or ALLOWED_USER_IDS):
+    # Who may use THIS bot (allowed_users_for, supplied by handle_updates).
+    # Nothing supplied means nobody: there is no instance-wide fallback.
+    if (cq.get("from") or {}).get("id") not in (cq.get("_allowed") or set()):
         print("telegram-bridge: refused a button tap from a Telegram user who is not allowed", flush=True)
         tg(tgtoken, "answerCallbackQuery", callback_query_id=cq.get("id"), text="Not allowed")
         return
@@ -2108,17 +2773,42 @@ def handle_callback(cq):
 
 def handle_message(state, bot, m):
     chat_id = (m.get("chat") or {}).get("id")
-    text = (m.get("text") or "").strip()
+    kind = message_kind(m)
+    # A photo's words are its caption; Telegram sends no "text" with it.
+    text = (m.get("text") or m.get("caption") or "").strip()
     if chat_id is None:
         return
+    log_received(bot, chat_id, kind)
     # Anyone can find a bot and write to it. A stranger gets no reply, so the
     # bot does not even confirm it is alive, and is never added to its chats.
-    if (m.get("chat") or {}).get("type") != "private" or (m.get("from") or {}).get("id") not in allowed_users_for(bot):
+    # The one exception is the bot a company chose to answer linked people:
+    # there a private message from someone not on the allowlist goes to
+    # handle_person_message, which answers only people Paperclip knows (and a
+    # stranger gets one "link your account first" line). Never a group chat,
+    # and never added to the bot's chats (cards and approvals never go there).
+    sender = (m.get("from") or {}).get("id")
+    is_private = (m.get("chat") or {}).get("type") == "private"
+    if not is_private or sender not in allowed_users_for(bot):
+        if is_private and answers_linked_people(bot) and isinstance(sender, int) and sender == chat_id:
+            handle_person_message(state, bot, chat_id, sender, m, text)
+            return
+        log_dropped(bot, chat_id, kind, "not a private chat" if not is_private else "sender is not allowed")
         print(f"telegram-bridge: ignored a message to {bot['name']} from a Telegram user or chat that is not allowed", flush=True)
         return
     register_chat(state, bot["token"], chat_id)
-    if isinstance(m.get("voice"), dict) or isinstance(m.get("audio"), dict):
+    take_follow_up_answer(state, bot, m, text)
+    if kind == "voice":
         handle_voice_message(state, bot, chat_id, m)
+        return
+    if kind in ("photo", "image_file"):
+        handle_photo_message(state, bot, chat_id, m, text, kind)
+        return
+    if kind in UNSUPPORTED_REPLIES:
+        log_dropped(bot, chat_id, kind, "cannot open this kind of message")
+        send_plain(bot["token"], chat_id, UNSUPPORTED_REPLIES[kind])
+        return
+    if kind == "service":
+        log_dropped(bot, chat_id, kind, "a notice from Telegram, nothing to answer")
         return
     token, agent_id, agent_name = bot["token"], bot["agentId"], bot["name"]
     company_id = bot["companyId"]
@@ -2138,8 +2828,20 @@ def handle_message(state, bot, m):
     if low == "/looks":
         show_looks(bot, chat_id)
         return
+    if answers_linked_people(bot) and command == "/link":
+        words = text.split(maxsplit=1)
+        link_person(bot, chat_id, sender, m, words[1] if len(words) > 1 else "")
+        return
+    if answers_linked_people(bot) and command == "/ask":
+        words = text.split(maxsplit=1)
+        if len(words) < 2 or not words[1].strip():
+            send_plain(token, chat_id, "Write your question after /ask, for example: /ask How did sales go last week?")
+            return
+        ask_as_person(state, bot, chat_id, sender, words[1].strip())
+        return
     if low == "/new":
         set_conversation(state, token, chat_id, None)
+        take_pending_photo(token, chat_id)
         send_plain(token, chat_id, f"🆕 Fresh start. {agent_name} won't remember the earlier conversation.")
         return
     if low == "/status":
@@ -2201,6 +2903,12 @@ def handle_message(state, bot, m):
     force_task = low.startswith("/task ")
     body = text[len("/task "):].strip() if force_task else text
     if not body:
+        log_dropped(bot, chat_id, kind, "no text")
+        return
+    # A photo that came without a caption goes with this message.
+    pending = take_pending_photo(token, chat_id)
+    if pending:
+        send_photo_to_agent(state, bot, chat_id, pending, body, force_task=force_task)
         return
     # The chat router decides between a quick answer and a task, exactly as
     # for the web chat. Nothing in the text can approve or reject anything:
@@ -2310,13 +3018,13 @@ def refresh_bots(state):
 
 def main():
     state = load_state()
-    global ALLOWED_USER_IDS
-    ALLOWED_USER_IDS, source = resolve_allowed_user_ids(state, os.environ.get("TELEGRAM_ALLOWED_USER_IDS", ""))
-    if ALLOWED_USER_IDS:
-        print(f"telegram-bridge: {len(ALLOWED_USER_IDS)} Telegram user(s) allowed by default ({source})", flush=True)
-    else:
-        print("telegram-bridge: nobody is allowed to use the bots by default; set TELEGRAM_ALLOWED_USER_IDS "
-              "or add people to each bot in Paperclip", flush=True)
+    global LEGACY_ALLOWED_BY_TOKEN
+    # Before any bot thread starts: who may use a bot is decided per bot.
+    env_allowed = os.environ.get("TELEGRAM_ALLOWED_USER_IDS", "")
+    if "legacy_allowed" not in state:
+        wait_for_paperclip()
+    first = load_bots()
+    LEGACY_ALLOWED_BY_TOKEN = migrate_legacy_allowlists(state, first, env_allowed, persist=LAST_API_BOTS is not None)
     bots = refresh_bots(state)
     if bots:
         companies = len({b["companyId"] for b in bots})
@@ -2328,6 +3036,9 @@ def main():
     while True:
         try:
             bots = refresh_bots(state)
+            if "legacy_allowed" not in state and LAST_API_BOTS is not None:
+                # Paperclip was down at start; finish the one-time move now.
+                LEGACY_ALLOWED_BY_TOKEN = migrate_legacy_allowlists(state, bots, env_allowed)
         except Exception as e:
             print(f"config-refresh error: {e}", flush=True)
         try:
@@ -2355,9 +3066,17 @@ def main():
         except Exception as e:
             print(f"watcher-alert-notify error: {e}", flush=True)
         try:
+            notify_mail_urgency_alerts(state, bots)
+        except Exception as e:
+            print(f"mail-urgency-alert-notify error: {e}", flush=True)
+        try:
             notify_morning_reports(state, bots)
         except Exception as e:
             print(f"morning-report-notify error: {e}", flush=True)
+        try:
+            notify_people_answers(state, bots)
+        except Exception as e:
+            print(f"people-answer-notify error: {e}", flush=True)
         try:
             if time.time() - state.get("disk_checked_at", 0) > 600:
                 state["disk_checked_at"] = time.time()

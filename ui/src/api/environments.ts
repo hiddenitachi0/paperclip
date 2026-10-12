@@ -41,6 +41,14 @@ export interface EnvironmentCustomImageRollbackResult {
   supersededTemplate: EnvironmentCustomImageTemplate;
 }
 
+// Environments are instance-scoped, but their secret bindings (including plain
+// env vars, which are synced as bindings) are company-scoped. Mutations made
+// from a company page must name that company so the server can resolve the
+// secret context instead of rejecting the save.
+function companyContextQuery(companyId?: string | null): string {
+  return companyId ? `?companyId=${encodeURIComponent(companyId)}` : "";
+}
+
 export const environmentsApi = {
   list: (companyId: string) => api.get<Environment[]>(`/companies/${companyId}/environments`),
   capabilities: (companyId: string) =>
@@ -59,9 +67,12 @@ export const environmentsApi = {
     driver?: "local" | "ssh" | "sandbox" | "plugin";
     status?: "active" | "archived";
     config?: Record<string, unknown>;
+    envVars?: Record<string, unknown>;
     metadata?: Record<string, unknown> | null;
-  }) => api.patch<Environment>(`/environments/${environmentId}`, body),
-  probe: (environmentId: string) => api.post<EnvironmentProbeResult>(`/environments/${environmentId}/probe`, {}),
+  }, companyId?: string | null) =>
+    api.patch<Environment>(`/environments/${environmentId}${companyContextQuery(companyId)}`, body),
+  probe: (environmentId: string, companyId?: string | null) =>
+    api.post<EnvironmentProbeResult>(`/environments/${environmentId}/probe${companyContextQuery(companyId)}`, {}),
   probeConfig: (companyId: string, body: {
     name?: string;
     driver: "local" | "ssh" | "sandbox" | "plugin";

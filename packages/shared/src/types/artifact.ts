@@ -29,6 +29,7 @@ export interface CompanyArtifact {
   contentType: string | null;
   contentPath: string | null;
   openPath: string | null;
+  thumbnailPath?: string | null;
   downloadPath: string | null;
   byteSize?: number | null;
   originalFilename?: string | null;

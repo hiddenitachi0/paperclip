@@ -35,6 +35,8 @@ const tokens = {
   fg: "var(--foreground, oklch(0.985 0 0))",
   muted: "var(--muted-foreground, oklch(0.708 0 0))",
   accent: "var(--accent, oklch(0.269 0 0))",
+  // Form fields use the host's input surface so they read in light mode too.
+  inputBg: "var(--input-background, oklch(0.2 0 0))",
   primary: "var(--primary, oklch(0.985 0 0))",
   primaryFg: "var(--primary-foreground, oklch(0.205 0 0))",
   destructive: "var(--destructive, oklch(0.637 0.237 25.331))",
@@ -576,7 +578,7 @@ function TextInput(props: React.InputHTMLAttributes<HTMLInputElement>) {
     <input
       {...props}
       style={{
-        background: "oklch(0.2 0 0)",
+        background: tokens.inputBg,
         border: `1px solid ${tokens.border}`,
         borderRadius: 6,
         padding: "6px 10px",
@@ -597,7 +599,7 @@ function TextArea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
     <textarea
       {...props}
       style={{
-        background: "oklch(0.2 0 0)",
+        background: tokens.inputBg,
         border: `1px solid ${tokens.border}`,
         borderRadius: 6,
         padding: "6px 10px",
@@ -4187,7 +4189,7 @@ function SpacePicker({
           display: "flex",
           alignItems: "center",
           gap: 8,
-          background: "oklch(0.2 0 0)",
+          background: tokens.inputBg,
           border: `1px solid ${tokens.border}`,
           borderRadius: 6,
           padding: "8px 10px",
@@ -5783,7 +5785,7 @@ function SelectInput({ defaultValue, options }: { defaultValue: string; options:
     <select
       defaultValue={defaultValue}
       style={{
-        background: "oklch(0.2 0 0)",
+        background: tokens.inputBg,
         color: tokens.fg,
         border: `1px solid ${tokens.border}`,
         borderRadius: 6,

@@ -81,10 +81,12 @@ export const laneAMessages = pgTable(
     attempts: jsonb("attempts").$type<LaneAAttemptRecord[]>(),
     // Which chain (if any) produced the reply: "main" (no routing involved),
     // "keyword" (a keyword rule picked the starting model and it answered),
+    // "picture_model" (a turn with pictures started at the agent's "model for
+    // picture requests" and it answered),
     // "no_answer_chain" or "refusal_chain" (a backup further down one of
     // those chains answered). Null for a row written before this column
     // existed, or for a `recap` row.
-    answeredBy: text("answered_by").$type<"main" | "keyword" | "no_answer_chain" | "refusal_chain">(),
+    answeredBy: text("answered_by").$type<"main" | "keyword" | "picture_model" | "no_answer_chain" | "refusal_chain">(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
