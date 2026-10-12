@@ -68,6 +68,7 @@ function defaultExperimentalSettings(): InstanceExperimentalSettingsPayload {
     enableWeeklyCheckup: false,
     enableCrossCompanyInstructions: false,
     enableBusinessData: false,
+    enableReporting: false,
   };
 }
 

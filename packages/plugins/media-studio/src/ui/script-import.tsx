@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { errorText, storylineFetchJson } from "./storyline-api.js";
 
 // "Import script (JSON)" and "Script-writer instructions" for the Storylines
@@ -79,10 +79,16 @@ export function ScriptImportDialog(props: {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  // Anything changed after a check means the preview is stale.
+  // Anything changed after a check means the preview is stale - except the
+  // text that was just checked (choosing a file sets the text and checks it
+  // in the same step).
+  const checkedText = useRef<string | null>(null);
+  useEffect(() => {
+    if (checkedText.current !== text) setPreview(null);
+  }, [text]);
   useEffect(() => {
     setPreview(null);
-  }, [text, mode, provider]);
+  }, [mode, provider]);
 
   const budgetCents = (): number | null | "invalid" => {
     if (!budget.trim()) return null;
@@ -90,8 +96,8 @@ export function ScriptImportDialog(props: {
     return Number.isFinite(value) && value >= 0 ? value : "invalid";
   };
 
-  const body = (dryRun: boolean): Record<string, unknown> | { error: string } => {
-    const parsed = parseScriptText(text);
+  const body = (dryRun: boolean, source: string = text): Record<string, unknown> | { error: string } => {
+    const parsed = parseScriptText(source);
     if (!parsed.ok) return { error: parsed.error };
     if (storylineId) return { mode, script: parsed.value, dryRun };
     const cents = budgetCents();
@@ -112,10 +118,12 @@ export function ScriptImportDialog(props: {
 
   const url = storylineId ? `${base}/${storylineId}/import` : `${base}/import`;
 
-  const check = async () => {
+  const check = async (source?: string) => {
     setError(null);
     setPreview(null);
-    const payload = body(true);
+    const checking = source ?? text;
+    checkedText.current = checking;
+    const payload = body(true, checking);
     if ("error" in payload && typeof payload.error === "string") {
       setError(payload.error);
       return;
@@ -156,7 +164,11 @@ export function ScriptImportDialog(props: {
       setError("That file is bigger than 10 MB. Split the script into smaller parts.");
       return;
     }
-    setText(await file.text());
+    const loaded = await file.text();
+    setText(loaded);
+    // Check straight away: choosing a file should show the preview (or what
+    // is wrong) without a second click.
+    void check(loaded);
   };
 
   return (
@@ -173,11 +185,22 @@ export function ScriptImportDialog(props: {
         aria-label="Script JSON"
         placeholder='{"title": "...", "characters": {...}, "scenes": [{"scene_title": "...", "shots": [{"prompt": "..."}]}]}'
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          setText(e.target.value);
+          setPreview(null);
+        }}
+        onPaste={(e) => {
+          const pasted = e.clipboardData.getData("text");
+          if (pasted.trim()) {
+            e.preventDefault();
+            setText(pasted);
+            void check(pasted);
+          }
+        }}
       />
       <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
         Or choose a file:
-        <input type="file" accept=".json,application/json" aria-label="Script file" onChange={(e) => void onFile(e.target.files?.[0])} />
+        <input type="file" accept=".json,application/json" aria-label="Script file" onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; void onFile(f); }} />
       </label>
 
       {storylineId ? (
@@ -214,11 +237,16 @@ export function ScriptImportDialog(props: {
       {storylineId && mode === "replace" && <div style={noticeBox}>Replace deletes every current scene and shot of this storyline.</div>}
 
       <div style={{ display: "flex", gap: 8 }}>
-        <button type="button" style={ghostBtn} disabled={busy} onClick={() => void check()}>Check script</button>
+        <button type="button" style={ghostBtn} disabled={busy} onClick={() => void check()}>{busy ? "Checking…" : "Check script"}</button>
         <button type="button" style={primaryBtn} disabled={busy || !preview} title={preview ? undefined : "Check the script first"} onClick={() => void confirm()}>
           {storylineId ? (mode === "replace" ? "Replace with this script" : "Import") : "Create storyline"}
         </button>
       </div>
+      {!preview && !error && !busy && (
+        <div style={{ fontSize: 12, opacity: 0.75 }}>
+          {text.trim() ? "Press \"Check script\" to see what will be created; the import button unlocks after that." : "Choose a .json file or paste the script above - it is checked automatically."}
+        </div>
+      )}
     </div>
   );
 }

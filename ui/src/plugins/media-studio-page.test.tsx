@@ -112,12 +112,12 @@ describe("Media Studio main-menu link and page (DUR-4060)", () => {
   const tabLabels = () =>
     [...container.querySelectorAll('[role="tablist"][aria-label="Media Studio"] [role="tab"]')].map((el) => el.textContent);
 
-  it("shows the Settings tab to an owner/admin, after the four creative tabs", async () => {
+  it("shows the Settings tab to an owner/admin, after the creative tabs", async () => {
     actions["settings.access"] = vi.fn(async () => ({ canManage: true }));
     root = createRoot(container);
     root.render(<MediaStudioPage context={{ companyId: COMPANY } as never} />);
     await flush();
-    expect(tabLabels()).toEqual(["Create", "Edit", "Looks", "Storylines", "Settings"]);
+    expect(tabLabels()).toEqual(["Create", "Edit", "Looks", "Identities", "Rooms", "Storylines", "Settings"]);
   });
 
   it("hides the Settings tab from everyone else", async () => {
@@ -125,7 +125,7 @@ describe("Media Studio main-menu link and page (DUR-4060)", () => {
     root = createRoot(container);
     root.render(<MediaStudioPage context={{ companyId: COMPANY } as never} />);
     await flush();
-    expect(tabLabels()).toEqual(["Create", "Edit", "Looks", "Storylines"]);
+    expect(tabLabels()).toEqual(["Create", "Edit", "Looks", "Identities", "Rooms", "Storylines"]);
   });
 
   it("falls back to Create when a non-admin opens ?tab=settings", async () => {
@@ -138,13 +138,61 @@ describe("Media Studio main-menu link and page (DUR-4060)", () => {
     expect(container.textContent).toContain("Make picture");
   });
 
-  it("deep-links to the settings form for an admin from ?tab=settings", async () => {
-    actions["settings.access"] = vi.fn(async () => ({ canManage: true }));
+  it("deep-links to the settings for an instance admin from ?tab=settings: the company's keys and the instance defaults", async () => {
+    actions["settings.access"] = vi.fn(async () => ({ canManage: true, isInstanceAdmin: true }));
     window.history.replaceState(null, "", "/media-studio?tab=settings");
     root = createRoot(container);
     root.render(<MediaStudioPage context={{ companyId: COMPANY } as never} />);
     await flush();
     expect(container.querySelector('[data-testid="config-form"]')?.textContent).toBe("paperclip.media-studio");
+    expect(container.textContent).toContain("Instance defaults (instance admin only)");
+  });
+
+  it("a company owner/admin gets the company's own keys and identity settings, but not the instance-wide form", async () => {
+    actions["settings.access"] = vi.fn(async () => ({ canManage: true, isInstanceAdmin: false }));
+    const keys = [
+      { service: "sogni", label: "Sogni", help: "Sogni makes pictures.", source: "instance", sourceText: "Using the instance's key (set by the instance admin)", companySecretId: null },
+      { service: "fal", label: "Fal.ai", help: "Fal.ai makes pictures.", source: "company", sourceText: "This company's own key", companySecretId: "s-fal" },
+      { service: "higgsfield", label: "Higgsfield", help: "Higgsfield keeps a person.", source: "none", sourceText: "No key yet: this service cannot be used until a key is picked", companySecretId: null },
+    ];
+    actions["serviceKeys.get"] = vi.fn(async () => ({ keys, canManage: true }));
+    actions["serviceKeys.save"] = vi.fn(async () => ({ keys }));
+    actions["identitySettings.get"] = vi.fn(async () => ({ settings: { analysis: null, hfTokenSecretId: null, hfNamespace: null }, canManage: true }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (path: string) => {
+        if (path.endsWith("/secrets")) return new Response(JSON.stringify([{ id: "s-sogni", name: "Our Sogni key" }, { id: "s-fal", name: "Our Fal key" }]), { status: 200 });
+        if (path.endsWith("/model-directory")) return new Response(JSON.stringify([]), { status: 200 });
+        return new Response(JSON.stringify({ artifacts: [] }), { status: 200 });
+      }),
+    );
+    window.history.replaceState(null, "", "/media-studio?tab=settings");
+    root = createRoot(container);
+    root.render(<MediaStudioPage context={{ companyId: COMPANY } as never} />);
+    await flush();
+    // The Settings tab mounts only after the access check resolves, and then
+    // each panel loads its own data, so wait for the loaded panels rather than
+    // counting flushes (the page grew; a fixed count raced on CI).
+    await vi.waitFor(() => {
+      expect(container.querySelector('[data-testid="key-source-sogni"]')).not.toBeNull();
+      expect(container.querySelector('select[aria-label="Sogni key"] option[value="s-sogni"]')).not.toBeNull();
+      expect(container.textContent).not.toContain("Loading settings");
+    });
+    expect(container.querySelector('[data-testid="config-form"]')).toBeNull();
+    expect(container.textContent).toContain("This company's service keys");
+    expect(container.querySelector('[data-testid="key-source-sogni"]')?.textContent).toBe("Using the instance's key (set by the instance admin)");
+    expect(container.querySelector('[data-testid="key-source-fal"]')?.textContent).toBe("This company's own key");
+    expect(container.textContent).toContain("Identity settings");
+
+    const sogni = container.querySelector('select[aria-label="Sogni key"]') as HTMLSelectElement;
+    const setValue = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!;
+    setValue.call(sogni, "s-sogni");
+    sogni.dispatchEvent(new Event("change", { bubbles: true }));
+    await flush();
+    const save = [...container.querySelectorAll("button")].find((b) => b.textContent === "Save keys") as HTMLButtonElement;
+    save.click();
+    await flush();
+    expect(actions["serviceKeys.save"]).toHaveBeenCalledWith({ sogni: "s-sogni", fal: "s-fal", higgsfield: null });
   });
 
   it("deep-links to the Edit tab from ?tab=edit", async () => {

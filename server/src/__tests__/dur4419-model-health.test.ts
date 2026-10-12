@@ -75,6 +75,27 @@ d("model health", () => {
     expect((await health.overview(other)).entries).toEqual([]);
   });
 
+  it("a saved local model with no address of its own is read on the company's model server address", async () => {
+    const co3 = randomUUID();
+    await db.insert(companies).values({ id: co3, name: "C", issuePrefix: "MHC" });
+    const dir = modelDirectoryService(db, { fetchImpl: tagsFetch(net) });
+    const health = modelHealthService(db, { fetchImpl: tagsFetch(net) });
+    await dir.updateSettings(co3, { localBaseUrl: ADDR }, { userId: "u" });
+    const noAddress = await dir.create(co3, { name: "No address", provider: "local", model: MODEL }, { userId: "u" });
+    // Never checked yet: applicable (it has the company's address), but no reading.
+    expect((await health.overview(co3)).entries.find((e) => e.entryId === noAddress.id)).toMatchObject({ applicable: true, status: "not_checked" });
+    // A resync that does not list it: "not installed", not silently skipped.
+    await health.recordLocalSync(co3, ADDR, ["llama3:latest"]);
+    expect((await health.overview(co3)).entries.find((e) => e.entryId === noAddress.id)).toMatchObject({ status: "model_missing" });
+    // A resync that lists it marks it installed, and the reading follows.
+    net.mode = "up";
+    const synced = await dir.syncLocalModels(co3, ADDR);
+    expect(synced.markedInstalledEntryIds).toContain(noAddress.id);
+    await health.recordLocalSync(co3, ADDR, synced.installed.map((m) => m.name));
+    expect((await health.overview(co3)).entries.find((e) => e.entryId === noAddress.id)).toMatchObject({ status: "ready" });
+    expect(await health.checkEntry(co3, noAddress.id)).toMatchObject({ applicable: true, status: "ready" });
+  });
+
   it("a hosted model has nothing to check", async () => {
     const health = modelHealthService(db, { fetchImpl: tagsFetch(net) });
     const e = await modelDirectoryService(db).create(co, { name: "Claude", provider: "anthropic", model: "claude-sonnet-5" }, { userId: "u" });

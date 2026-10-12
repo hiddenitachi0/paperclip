@@ -1,15 +1,13 @@
-import Anthropic from "@anthropic-ai/sdk";
 import type { Db } from "@paperclipai/db";
 import {
   VIDEO_DIRECTOR_REVIEW_MAX_OUTPUT_TOKENS,
-  VIDEO_DIRECTOR_REVIEW_MODEL,
   type VideoDirectorConversationDetail,
   type VideoDirectorReviewPayload,
   type VideoDirectorReviewShotFinding,
 } from "@paperclipai/shared";
 import { badRequest, HttpError } from "../errors.js";
-import { readAnthropicApiKey } from "../env-values.js";
-import { callDirectorModel, directorAiNotConfigured } from "./video-storyline-director-ai-errors.js";
+import { storylineCompanyModel } from "./video-storyline-company-model.js";
+import { callDirectorModel } from "./video-storyline-director-ai-errors.js";
 import { logActivity } from "./activity-log.js";
 import { videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
@@ -195,26 +193,17 @@ export function videoStorylineDirectorReviewService(db: Db) {
     }
     for (const list of shotsByScene.values()) list.sort((a, b) => a.orderIndex - b.orderIndex);
 
-    const apiKey = readAnthropicApiKey();
-    if (!apiKey) {
-      throw directorAiNotConfigured();
-    }
-
     const musicDescription = storyline.musicAssetId
       ? "an uploaded music bed"
       : storyline.musicSourceKey
         ? "a licensed/stock track"
         : "none set";
 
-    const client = new Anthropic({ apiKey });
-    const response = await callDirectorModel(() => client.messages.create({
-      model: VIDEO_DIRECTOR_REVIEW_MODEL,
-      max_tokens: VIDEO_DIRECTOR_REVIEW_MAX_OUTPUT_TOKENS,
-      system: buildSystemPrompt(),
-      messages: [
-        {
-          role: "user",
-          content: buildUserMessage({
+    const text = await callDirectorModel(() =>
+      storylineCompanyModel(db).writeText(companyId, actor, {
+        maxTokens: VIDEO_DIRECTOR_REVIEW_MAX_OUTPUT_TOKENS,
+        system: buildSystemPrompt(),
+        user: buildUserMessage({
             storylineTitle: storyline.title,
             providerId: storyline.providerId,
             defaultTransition: storyline.defaultTransition,
@@ -224,13 +213,8 @@ export function videoStorylineDirectorReviewService(db: Db) {
             scenes: scenes.map((scene) => ({ id: scene.id, title: scene.title, notes: scene.notes })),
             shotsByScene,
           }),
-        },
-      ],
-    }));
-    const text = response.content
-      .filter((block): block is Anthropic.TextBlock => block.type === "text")
-      .map((block) => block.text)
-      .join("");
+      }),
+    );
     const review = parseReviewPayload(text, shotsById);
 
     const conversation = await conversations.getOrResetConversationForReview(companyId, storylineId);

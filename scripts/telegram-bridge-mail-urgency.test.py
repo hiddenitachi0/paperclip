@@ -36,7 +36,8 @@ class MailUrgencyRoutingTests(unittest.TestCase):
     def setUp(self):
         self.state = {"bots": {SECRETARY_BOT["token"]: {"offset": 0, "chats": [OPERATOR]},
                                LEAD_BOT["token"]: {"offset": 0, "chats": [OPERATOR]}}}
-        bridge.ALLOWED_USER_IDS = {OPERATOR}
+        # Per bot now (no instance-wide list): every test bot keeps these people.
+        bridge.legacy_allowed = lambda token: {OPERATOR}
         self.outbox = [alert()]
         self.acks = []
 

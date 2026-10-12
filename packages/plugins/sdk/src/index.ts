@@ -157,6 +157,8 @@ export type {
   PluginPersonaGenerationCapReservation,
   PluginPictureFeedbackRules,
   PluginMediaStudioDirectSpendReservation,
+  PluginImageAnalysisInput,
+  PluginImageAnalysisResult,
   PluginCompanyFile,
   PluginCompanyFileContent,
   ExecuteToolParams,

@@ -260,6 +260,33 @@ export async function resolveBackupModelsThroughDirectory(
   });
 }
 
+/**
+ * 11 Oct: a quick agent's "Use this model for picture requests" (a saved
+ * model of THIS company) as a pool entry with the given id, so it is called
+ * exactly like a backup model. Null when the entry is gone or another
+ * company's: picture turns then stay on the agent's own model.
+ */
+export async function resolveDirectoryEntryAsBackup(
+  db: Db,
+  companyId: string,
+  entryId: string,
+  poolId: string,
+): Promise<LaneABackupModelConfig | null> {
+  const [entry] = await db
+    .select()
+    .from(modelDirectoryEntries)
+    .where(and(eq(modelDirectoryEntries.companyId, companyId), eq(modelDirectoryEntries.id, entryId)));
+  if (!entry) return null;
+  return {
+    id: poolId,
+    provider: entry.provider as LaneABackupModelConfig["provider"],
+    model: entry.model,
+    baseUrl: entry.baseUrl,
+    temperature: entry.defaultTemperature,
+    directoryEntryId: entry.id,
+  };
+}
+
 /** How long the local resync waits for Ollama's model list. */
 export const LOCAL_MODELS_SYNC_TIMEOUT_MS = 10_000;
 
@@ -296,6 +323,9 @@ export function withCompanyBlockedHosts(
   const choices = openRouterHostChoicesFromRouting(current);
   return resolveOpenRouterHostRouting({ choices, rules: { preferred: [], blocked }, base: current });
 }
+
+/** Marks a resync that reached no readable model server (as opposed to an address the company does not use). */
+export const LOCAL_SYNC_UNREADABLE_CODE = "LOCAL_MODELS_UNREADABLE";
 
 /** The one plain message for any failed local resync (unreachable, error status, not Ollama). */
 export function localSyncFailedMessage(address: string): string {
@@ -336,6 +366,33 @@ export function parseOllamaTags(body: unknown): Array<Omit<LocalInstalledModel, 
     });
   }
   return out;
+}
+
+/**
+ * The stored form of a local model address this company already uses -- its
+ * model server address setting (Settings > Models), a saved local model, or
+ * a quick agent on a local model -- or null when it uses no such address.
+ * Callers build the request from the returned (stored) address, never from
+ * the one they were given, so the server only ever calls a local host the
+ * company itself set up (the local resync, picture analysis for plugins).
+ */
+export async function findCompanyLocalAddress(db: Db, companyId: string, rawBaseUrl: string | null | undefined): Promise<string | null> {
+  const key = localAddressKey(rawBaseUrl);
+  if (!key) return null;
+  const entries = await db
+    .select({ baseUrl: modelDirectoryEntries.baseUrl })
+    .from(modelDirectoryEntries)
+    .where(and(eq(modelDirectoryEntries.companyId, companyId), eq(modelDirectoryEntries.provider, "local")));
+  const fromEntry = entries.find((e) => e.baseUrl && localAddressKey(e.baseUrl) === key)?.baseUrl;
+  if (fromEntry) return fromEntry;
+  const [settingsRow] = await db.select().from(modelDirectorySettings).where(eq(modelDirectorySettings.companyId, companyId));
+  const setting = settingsRow?.localBaseUrl ?? null;
+  if (setting && localAddressKey(setting) === key) return setting;
+  const agentRows = await db
+    .select({ baseUrl: agents.laneABaseUrl })
+    .from(agents)
+    .where(and(eq(agents.companyId, companyId), eq(agents.laneAProvider, "local")));
+  return agentRows.find((a) => a.baseUrl && localAddressKey(a.baseUrl) === key)?.baseUrl ?? null;
 }
 
 export interface ModelDirectoryServiceDeps {
@@ -438,22 +495,15 @@ export function modelDirectoryService(db: Db, deps: ModelDirectoryServiceDeps = 
      */
     async syncLocalModels(companyId: string, rawBaseUrl: string): Promise<LocalModelsSyncResult> {
       const key = localAddressKey(rawBaseUrl);
+      // A saved local model with no address of its own runs on the company's model server address.
+      const companyAddress = (await this.getSettings(companyId)).localBaseUrl?.trim() || null;
       const entries = (
         await db.select().from(modelDirectoryEntries).where(and(eq(modelDirectoryEntries.companyId, companyId), eq(modelDirectoryEntries.provider, "local")))
-      ).filter((e) => e.baseUrl && localAddressKey(e.baseUrl) === key);
-      let known = entries.length > 0 ? entries[0]!.baseUrl! : null;
-      if (!known) {
-        const [settingsRow] = await db.select().from(modelDirectorySettings).where(eq(modelDirectorySettings.companyId, companyId));
-        const setting = settingsRow?.localBaseUrl ?? null;
-        if (setting && localAddressKey(setting) === key) known = setting;
-      }
-      if (!known) {
-        const agentRows = await db
-          .select({ baseUrl: agents.laneABaseUrl })
-          .from(agents)
-          .where(and(eq(agents.companyId, companyId), eq(agents.laneAProvider, "local")));
-        known = agentRows.find((a) => a.baseUrl && localAddressKey(a.baseUrl) === key)?.baseUrl ?? null;
-      }
+      ).filter((e) => {
+        const address = e.baseUrl?.trim() || companyAddress;
+        return Boolean(address) && localAddressKey(address) === key;
+      });
+      const known = await findCompanyLocalAddress(db, companyId, rawBaseUrl);
       if (!key || !known) {
         throw unprocessable(
           "That address is not one this company uses for local models. Set it as the model server address in Settings > Models (or save a local model with it) first, then try again.",
@@ -464,7 +514,7 @@ export function modelDirectoryService(db: Db, deps: ModelDirectoryServiceDeps = 
       // One plain message for every failure; the detail goes to the server log only.
       const unreadable = (detail: string) => {
         logger.warn({ companyId, baseUrl: known, detail }, "model directory local sync failed");
-        return unprocessable(localSyncFailedMessage(known!));
+        return unprocessable(localSyncFailedMessage(known!), { code: LOCAL_SYNC_UNREADABLE_CODE });
       };
       let res: Response;
       try {

@@ -28,9 +28,16 @@ import type {
   WorkerHostCallContext,
 } from "@paperclipai/plugin-sdk";
 import type { CreateIssueThreadInteraction, InviteJoinType, IssueDocumentSummary, PermissionKey, PrincipalType } from "@paperclipai/shared";
-import { MEDIA_STUDIO_DIRECT_BILLING_CODE, MEDIA_STUDIO_EDIT_ACTIONS, MEDIA_STUDIO_EDIT_BILLING_CODE, estimateMediaStudioEditCostCents, pluginOperationIssueOriginKind, type MediaStudioEditAction } from "@paperclipai/shared";
+import {
+  CHAT_PHOTO_AGE_CHECK_MAX_OUTPUT_TOKENS,
+  CHAT_PHOTO_AGE_CHECK_PURPOSE,
+  CHAT_PHOTO_AGE_CHECK_SYSTEM_PROMPT,
+  CHAT_PHOTO_AGE_CHECK_USER_PROMPT,
+} from "@paperclipai/shared";
+import { MEDIA_STUDIO_DIRECT_BILLING_CODE, MEDIA_STUDIO_EDIT_ACTIONS, MEDIA_STUDIO_EDIT_BILLING_CODE, estimateMediaStudioEditCostCents, mediaStudioEditActionProvider, pluginOperationIssueOriginKind, type MediaStudioEditAction } from "@paperclipai/shared";
 import { HttpError } from "../errors.js";
 import { mediaStudioDirectService } from "./media-studio-direct.js";
+import { pluginImageAnalysisService, type ImageAnalysisCaller, type ImageAnalysisDeps } from "./plugin-image-analysis.js";
 import { companyService } from "./companies.js";
 import { agentService } from "./agents.js";
 import { projectService } from "./projects.js";
@@ -44,7 +51,7 @@ import { budgetService } from "./budgets.js";
 import { issueApprovalService } from "./issue-approvals.js";
 import { agentDailyLimitService } from "./agent-daily-limits.js";
 import { reactionLearningService } from "./reaction-learning.js";
-import { findLaneAPluginRun, laneAPluginRunNamesIssue } from "./lane-a-plugin-runs.js";
+import { LANE_A_RUN_IMAGE_ANALYSES_MAX, findLaneAPluginRun, laneAPluginRunNamesIssue } from "./lane-a-plugin-runs.js";
 import { subscribeCompanyLiveEvents } from "./live-events.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import path from "node:path";
@@ -346,6 +353,8 @@ export function buildHostServices(
     pluginWorkerManager?: PluginWorkerManager;
     manifest?: import("@paperclipai/shared").PaperclipPluginManifestV1;
     storage?: import("../storage/types.js").StorageService;
+    /** Test seams for models.analyseImage (the model call, the public-address check, Paperclip's own Claude key). */
+    imageAnalysis?: Omit<ImageAnalysisDeps, "storage">;
   } = {},
 ): HostServices & { dispose(): void } {
   const getStorage = () => options.storage ?? getStorageService();
@@ -400,6 +409,7 @@ export function buildHostServices(
   const agentDailyLimits = agentDailyLimitService(db);
   const reactionLearning = reactionLearningService(db);
   const mediaStudioDirect = mediaStudioDirectService(db);
+  const imageAnalysis = pluginImageAnalysisService(db, { ...options.imageAnalysis, storage: getStorage });
   const scopedBus = eventBus.forPlugin(pluginKey);
 
   // Track active session event subscriptions for cleanup
@@ -2696,6 +2706,77 @@ export function buildHostServices(
       },
     },
 
+    models: {
+      async analyseImage(params, context) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        // Only inside a UI action: the company and the person come from the
+        // host's own invocation scope (routes/plugins.ts resolved both from
+        // the session), never from what the worker sends. A tool call, job
+        // or webhook has no person, so it is refused.
+        const scope = context?.invalidInvocationScope ? null : context?.invocationScope ?? null;
+        let caller: ImageAnalysisCaller | null =
+          scope && scope.companyId === companyId && scope.userId
+            ? { companyId, userId: scope.userId, canManageCompany: scope.canManageCompany, pluginId }
+            : null;
+        const { companyId: _ignored, runId: _runId, purpose: _purpose, ...requested } = params;
+        let input = requested;
+        if (!caller && typeof params.runId === "string") {
+          // A quick agent's tool call: the age check of a photo the person
+          // attached in the chat, before Media Studio sends it anywhere. This
+          // path is narrow on purpose (DUR-4731): the host's own short-lived
+          // run for THIS company and THIS plugin's tool call, a signed-in
+          // person talking to the quick agent, only the age check (the host
+          // sends its own fixed instructions), only a picture the person
+          // attached in that chat, and only a few per tool call.
+          const run = findLaneAPluginRun(params.runId);
+          if (
+            run &&
+            run.companyId === companyId &&
+            run.requestedByUserId &&
+            run.pluginKey === pluginKey &&
+            params.purpose === CHAT_PHOTO_AGE_CHECK_PURPOSE
+          ) {
+            if (!run.attachedFileIds.includes(String(params.fileId ?? "").toLowerCase())) {
+              throw new Error("Only photos attached in this chat can be age-checked here, so this picture was not sent anywhere.");
+            }
+            if (run.imageAnalyses >= LANE_A_RUN_IMAGE_ANALYSES_MAX) {
+              throw new Error(`Too many photos to check in one step, so nothing was sent. Use at most ${LANE_A_RUN_IMAGE_ANALYSES_MAX} photos at a time.`);
+            }
+            run.imageAnalyses += 1;
+            caller = { companyId, userId: run.requestedByUserId, canManageCompany: false, quickAgentRun: true, pluginId };
+            input = {
+              entryId: requested.entryId,
+              fileId: requested.fileId,
+              keySecretId: requested.keySecretId,
+              systemPrompt: CHAT_PHOTO_AGE_CHECK_SYSTEM_PROMPT,
+              userPrompt: CHAT_PHOTO_AGE_CHECK_USER_PROMPT,
+              maxOutputTokens: CHAT_PHOTO_AGE_CHECK_MAX_OUTPUT_TOKENS,
+            };
+          }
+        }
+        if (!caller) {
+          throw new Error("Picture analysis only works from a person's action on Paperclip's own pages, for the company they have open.");
+        }
+        const result = await imageAnalysis.analyseImage(caller, input);
+        await logPluginActivity({
+          companyId,
+          action: "plugin.image_analysis.run",
+          entityType: "attachment",
+          entityId: input.fileId,
+          actor: { actorUserId: caller.userId ?? null },
+          details: {
+            modelDirectoryEntryId: input.entryId,
+            provider: result.provider,
+            model: result.model,
+            costCents: result.costCents,
+            ...(caller.quickAgentRun ? { quickAgentRun: true, purpose: CHAT_PHOTO_AGE_CHECK_PURPOSE } : {}),
+          },
+        });
+        return result;
+      },
+    },
+
     billing: {
       async reserveMediaStudioDirectSpend(params) {
         const companyId = ensureCompanyId(params.companyId);
@@ -2706,7 +2787,7 @@ export function buildHostServices(
         if (params.confirmBudgetCapCents != null && !(Number.isInteger(params.confirmBudgetCapCents) && params.confirmBudgetCapCents >= 0)) {
           throw new Error("confirmBudgetCapCents must be a non-negative integer");
         }
-        const provider = action === "variation" || action === "prompt-edit" || action === "inpaint" ? "fal" : "sogni";
+        const provider = mediaStudioEditActionProvider(action);
         // Admin status is decided here from real instance/company roles for
         // this user id -- never from anything the worker says about itself.
         // Anyone who is not an active member of this company (and not an
@@ -2779,6 +2860,25 @@ export function buildHostServices(
           usage,
           credits: params.credits ?? null,
           issueId: params.issueId ?? null,
+        });
+      },
+      async checkAgentMediaSpend(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        // Same rule as recordAgentMediaCost: the agent is the run's own, resolved here.
+        if (!params.runId) throw new Error("runId is required");
+        const callingAgentId = await callingAgentIdForRun(companyId, params.runId);
+        if (!callingAgentId) throw new Error("Run not found in this company");
+        if (!["image", "video", "audio"].includes(params.kind)) throw new Error("Unknown media kind");
+        const usage = params.usage ?? {};
+        for (const value of [usage.images, usage.megapixels, usage.seconds, usage.units]) {
+          if (value !== undefined && !(typeof value === "number" && Number.isFinite(value) && value >= 0)) throw new Error("usage values must be non-negative numbers");
+        }
+        return mediaStudioDirect.checkAgentMediaSpend(companyId, {
+          agentId: callingAgentId,
+          kind: params.kind,
+          provider: params.provider,
+          usage,
         });
       },
     },

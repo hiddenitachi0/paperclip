@@ -31,7 +31,8 @@ INTERACTION_ID = "37882c99-1111-4222-8333-444444444444"
 
 class ButtonsTest(unittest.TestCase):
     def setUp(self):
-        bridge.ALLOWED_USER_IDS = {OPERATOR}
+        # Per bot now (no instance-wide list): every test bot keeps these people.
+        bridge.legacy_allowed = lambda token: {OPERATOR}
         self.state = {"bots": {TOKEN: {"offset": 0, "chats": [OPERATOR]}}, "notified": []}
         self.calls = []
         mock.patch.object(bridge, "save_state").start()

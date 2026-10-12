@@ -45,8 +45,32 @@ const DURATION_TOLERANCE_RATIO = 0.05;
 
 export interface VideoQualityCheckShotPlan {
   durationSeconds: number;
-  transitionIn: VideoShotTransition;
+  transitionIn: VideoShotTransition | string;
   transitionDurationMs: number;
+  /** Phase 2: a title card or a held photo -- a still (or dark) picture here is meant, not a defect. */
+  allowStill?: boolean;
+  /** Phase 2: a title card or a muted clip -- silence here is meant. */
+  allowSilence?: boolean;
+}
+
+/** Whether a detected stretch lies inside clips where it is expected (titles, held photos, muted clips), with a little slack for joins. */
+export function stretchIsExpected(
+  timeline: readonly ShotTimelineEntry[],
+  shots: readonly VideoQualityCheckShotPlan[],
+  range: { startSeconds: number; durationSeconds: number },
+  key: "allowStill" | "allowSilence",
+): boolean {
+  const slack = 0.25;
+  const end = range.startSeconds + range.durationSeconds;
+  let cursor = range.startSeconds;
+  for (const entry of timeline) {
+    if (entry.endSeconds <= cursor - slack) continue;
+    if (entry.startSeconds > cursor + slack) return false;
+    if (!shots[entry.shotIndex]?.[key]) return false;
+    cursor = entry.endSeconds;
+    if (cursor >= end - slack) return true;
+  }
+  return false;
 }
 
 export interface VideoQualityCheckPlan {
@@ -218,6 +242,7 @@ export async function runVideoQualityCheck(videoBuffer: Buffer, plan: VideoQuali
 
       const { black, frozen } = await scanBlackAndFrozenStretches(filePath);
       for (const range of black) {
+        if (stretchIsExpected(timeline, plan.shots, range, "allowStill")) continue;
         issues.push(
           issue(
             "black_stretch",
@@ -228,6 +253,7 @@ export async function runVideoQualityCheck(videoBuffer: Buffer, plan: VideoQuali
         );
       }
       for (const range of frozen) {
+        if (stretchIsExpected(timeline, plan.shots, range, "allowStill")) continue;
         issues.push(
           issue(
             "frozen_stretch",
@@ -241,6 +267,7 @@ export async function runVideoQualityCheck(videoBuffer: Buffer, plan: VideoQuali
       if (hasAudioStream) {
         const { silence, maxVolumeDb } = await scanAudioIssues(filePath);
         for (const range of silence) {
+          if (stretchIsExpected(timeline, plan.shots, range, "allowSilence")) continue;
           issues.push(
             issue(
               "silent_audio",

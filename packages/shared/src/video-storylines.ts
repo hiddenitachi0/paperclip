@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { VIDEO_STORYLINE_ASPECTS } from "./video-storyline-clips.js";
 
 /**
  * DUR-4127 (backend half of DUR-4095, video storylines): types, limits and
@@ -137,8 +138,15 @@ export const VIDEO_PROVIDER_COST_CENTS_PER_SECOND: Record<VideoStorylineProvider
 
 // ─── Clip lengths per provider/model ───────────────────────────────────────
 
-/** Kling (every Fal default video model in this codebase) only accepts these clip lengths; anything else makes Fal refuse the job. */
+/** Kling 1.6 / 2.1 (every Fal default video model in this codebase) only accepts these clip lengths; anything else makes Fal refuse the job. */
 export const FAL_KLING_ALLOWED_DURATIONS_SECONDS: readonly number[] = [5, 10];
+/** Kling 3.0 / O3 (Standard and Pro) take any whole number of seconds from 3 to 15. */
+export const FAL_KLING_V3_ALLOWED_DURATIONS_SECONDS: readonly number[] = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+
+/** A Fal Kling 3.0 / O3 model id. */
+export function isFalKlingV3Model(model: string | null | undefined): boolean {
+  return !!model && /kling-video\/(v3|o3)\//i.test(model);
+}
 
 /**
  * The clip lengths (seconds) a provider/model really accepts, when this
@@ -147,6 +155,7 @@ export const FAL_KLING_ALLOWED_DURATIONS_SECONDS: readonly number[] = [5, 10];
  * confirmed). `model` null = the provider's default model.
  */
 export function videoModelAllowedDurations(providerId: VideoStorylineProvider, model: string | null | undefined): readonly number[] | null {
+  if (providerId === "fal" && isFalKlingV3Model(model)) return FAL_KLING_V3_ALLOWED_DURATIONS_SECONDS;
   if (providerId === "fal" && (!model || /kling/i.test(model))) return FAL_KLING_ALLOWED_DURATIONS_SECONDS;
   return null;
 }
@@ -163,6 +172,16 @@ export function videoRenderDurationSeconds(providerId: VideoStorylineProvider, m
   if (!allowed || allowed.length === 0) return requestedSeconds;
   const sorted = [...allowed].sort((a, b) => a - b);
   return sorted.find((value) => value >= requestedSeconds) ?? sorted[sorted.length - 1]!;
+}
+
+/**
+ * The text a shot's video call gets: the shot description plus its camera
+ * notes. Camera notes used to be dropped on the way to the video model, so
+ * "slow push-in" never reached it.
+ */
+export function videoShotVideoPrompt(prompt: string, cameraNotes: string | null | undefined): string {
+  const camera = cameraNotes?.trim();
+  return camera ? `${prompt.trim()}\n\nCamera: ${camera}` : prompt;
 }
 
 export interface VideoCostEstimateShotInput {
@@ -202,6 +221,32 @@ export function estimateVideoStorylineCostCents(
   };
 }
 
+// ─── Storyboard picture settings ─────────────────────────────────────────
+
+/**
+ * How the cheap storyboard pictures (step 2) are made for one storyline:
+ * which picture service and model, and an optional Media Studio look (its
+ * style words, character sheet, reference pictures and, on Sogni, LoRAs) put
+ * on every picture. Every field is optional: unset = the default (Fal.ai, its
+ * cheapest picture model, no look). Stored in video_storylines.picture_settings.
+ */
+export interface VideoStorylinePictureSettings {
+  providerId?: VideoStorylineProvider | null;
+  model?: string | null;
+  lookId?: string | null;
+}
+
+/** A shot's own look for its storyboard picture: null = use the storyline's look; this value = no look for this shot. */
+export const VIDEO_SHOT_PICTURE_LOOK_NONE = "none";
+
+export const videoStorylinePictureSettingsSchema = z
+  .object({
+    providerId: z.enum(VIDEO_STORYLINE_PROVIDERS).nullable().optional(),
+    model: z.string().trim().min(1).max(200).nullable().optional(),
+    lookId: z.string().trim().min(1).max(100).nullable().optional(),
+  })
+  .strict();
+
 // ─── Validators ──────────────────────────────────────────────────────────
 
 const assetIdArray = (max: number) => z.array(z.string().uuid()).max(max);
@@ -235,6 +280,8 @@ export const createVideoStorylineSchema = z
     musicAssetId: storylineFields.musicAssetId.optional().default(null),
     musicSourceKey: storylineFields.musicSourceKey.optional().default(null),
     musicVolumeDb: storylineFields.musicVolumeDb.optional().default(VIDEO_MUSIC_DEFAULT_VOLUME_DB),
+    /** Phase 2: the picture shape, chosen before anything is rendered (16:9 when left out). */
+    aspect: z.enum(VIDEO_STORYLINE_ASPECTS).optional(),
   })
   .strict()
   .refine((value) => !(value.musicAssetId && value.musicSourceKey), {
@@ -256,6 +303,8 @@ export const updateVideoStorylineSchema = z
     musicAssetId: storylineFields.musicAssetId,
     musicSourceKey: storylineFields.musicSourceKey,
     musicVolumeDb: storylineFields.musicVolumeDb,
+    /** Storyboard picture service / model / look (replaces the stored settings as a whole). */
+    pictureSettings: videoStorylinePictureSettingsSchema,
   })
   .partial()
   .strict()
@@ -326,6 +375,8 @@ export const updateVideoShotSchema = z
     durationSeconds: shotFields.durationSeconds,
     lookReferenceAssetIds: shotFields.lookReferenceAssetIds,
     transitionIn: shotFields.transitionIn,
+    /** This shot's own look for its storyboard picture (a look id, "none", or null to use the storyline's). */
+    pictureLookId: z.string().trim().min(1).max(100).nullable(),
   })
   .partial()
   .strict();

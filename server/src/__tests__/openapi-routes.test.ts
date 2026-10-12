@@ -55,6 +55,7 @@ const apiPrefixes: Record<string, string> = {
   // /api so this coverage check still sees every method the proxy answers.
   "preview-proxy.ts": "/api",
   "projects.ts": "/api",
+  "quality-loops.ts": "/api",
   "resource-memberships.ts": "/api",
   "routines.ts": "/api",
   "secrets.ts": "/api",
@@ -62,7 +63,10 @@ const apiPrefixes: Record<string, string> = {
   "sidebar-preferences.ts": "/api",
   "teams-catalog.ts": "/api",
   "telegram-bots.ts": "/api",
+  "telegram-chat.ts": "/api",
   "data-connections.ts": "/api",
+  "report-scripts.ts": "/api",
+  "report-templates.ts": "/api",
   "user-profiles.ts": "/api",
 };
 
@@ -144,6 +148,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "brag.ts",
   // Ask Paperclip helper routes (helper overlay, Phase 1) are board-only and not yet in the public OpenAPI document.
   "helper.ts",
+  // Franchise migration cutover routes (verify destination, mark as migrated, undo) are board-only and not yet in the public OpenAPI document.
+  "company-migration.ts",
 ]);
 
 function createApp() {

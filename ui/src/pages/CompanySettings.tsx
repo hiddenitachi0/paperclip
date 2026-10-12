@@ -17,6 +17,8 @@ import { Link } from "@/lib/router";
 import { CacheSettingsSection } from "../components/CacheSettingsSection";
 import { HelperSettingsSection } from "../components/helper/HelperSettingsSection";
 import { SecurityReviewSettingsSection } from "../components/SecurityReviewSettingsSection";
+import { MoveCompanySection } from "../components/company-migration/MoveCompanySection";
+import { QualityLoopSettingsSection } from "../components/QualityLoopSettingsSection";
 import { Settings, CloudUpload, Download, Plug, Upload, Image } from "lucide-react";
 import { CompanyPatternIcon } from "../components/CompanyPatternIcon";
 import { isDefaultSkin, setDefaultSkin } from "../lib/company-branding";
@@ -98,6 +100,14 @@ export function CompanySettings() {
       companiesApi.update(selectedCompanyId!, {
         requireBoardApprovalForNewAgents: requireApproval
       }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
+    }
+  });
+
+  const subtaskInheritMutation = useMutation({
+    mutationFn: (inherit: boolean) =>
+      companiesApi.update(selectedCompanyId!, { subtasksInheritModelEffort: inherit }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
     }
@@ -402,7 +412,25 @@ export function CompanySettings() {
         </div>
       </div>
 
+      {/* Task model/effort flow-down */}
+      <div className="space-y-4" data-testid="company-settings-model-effort-section">
+        <div className="section-title">
+          Model and effort
+        </div>
+        <div className="rounded-md section-box px-4 py-3">
+          <ToggleField
+            label="Sub-tasks inherit model/effort"
+            hint="When a task has its own model or thinking effort and the agent working on it splits the work into sub-tasks, the sub-tasks use the same setting, unless a sub-task sets its own. Turn off to let every sub-task run on its agent's usual model and effort."
+            checked={selectedCompany.subtasksInheritModelEffort !== false}
+            onChange={(v) => subtaskInheritMutation.mutate(v)}
+            toggleTestId="company-settings-subtasks-inherit-toggle"
+          />
+        </div>
+      </div>
+
       <CacheSettingsSection companyId={selectedCompany.id} />
+
+      <QualityLoopSettingsSection companyId={selectedCompany.id} />
 
       <SecurityReviewSettingsSection companyId={selectedCompany.id} />
 
@@ -482,6 +510,9 @@ export function CompanySettings() {
           </div>
         </div>
       </div>
+
+      {/* Franchise migration: verify after import, mark the old copy as moved. */}
+      <MoveCompanySection company={selectedCompany} />
 
       {/* Danger Zone */}
       <div className="space-y-4">

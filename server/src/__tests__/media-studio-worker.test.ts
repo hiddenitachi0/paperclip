@@ -267,6 +267,17 @@ describe("media-studio saved looks", () => {
     expect(result.content).toContain('Used the saved look "Catalogue"');
   });
 
+  it("sends nothing for a look's Sogni LoRAs to Fal.ai, and says they were not used", async () => {
+    const harness = await setup(FAL_CONFIG);
+    await harness.ctx.state.set(looksKey, [{ ...catalogue, provider: "fal", loras: [{ id: "krea2-candid", name: "Editorial <-> Candid", strength: 3 }] }]);
+    const calls = fakeFal(harness);
+    const result = await harness.executeTool<any>(TOOL_GENERATE, { prompt: "a sofa", look: "Catalogue" }, runCtx);
+    expect(result.error).toBeUndefined();
+    expect(JSON.stringify(calls[0]?.body)).not.toContain("krea2-candid");
+    expect(JSON.stringify(calls[0]?.body)).not.toMatch(/lora/i);
+    expect(result.content).toContain("The look's LoRAs were not used: they are Sogni LoRAs, and this picture was made with Fal.ai.");
+  });
+
   it("lets an explicit seed win over the look's fixed seed, and adds the person's references to the look's", async () => {
     const harness = await setup(FAL_CONFIG);
     await harness.ctx.state.set(looksKey, [catalogue]);
@@ -335,14 +346,14 @@ describe("media-studio saved looks", () => {
     expect(afterDelete.looks).toEqual([]);
   });
 
-  it("gates the Settings tab on instance-admin, not company owner/admin -- saving it goes through the instance-admin-only generic plugin-config route (DUR-4363)", async () => {
+  it("shows the Settings tab to the company's owner/admin (company keys) but the instance-wide part only to instance admins -- that part saves through the instance-admin-only plugin-config route (DUR-4363)", async () => {
     const harness = await setup();
     const owner = { actor: { type: "user" as const, userId: "u1", canManageCompany: true, isInstanceAdmin: false }, companyId: COMPANY };
     const instanceAdmin = { actor: { type: "user" as const, userId: "u2", canManageCompany: false, isInstanceAdmin: true }, companyId: COMPANY };
     const member = { actor: { type: "user" as const, userId: "u3", canManageCompany: false, isInstanceAdmin: false }, companyId: COMPANY };
 
-    expect((await harness.performAction<any>("settings.access", {}, owner)).canManage).toBe(false);
-    expect((await harness.performAction<any>("settings.access", {}, member)).canManage).toBe(false);
-    expect((await harness.performAction<any>("settings.access", {}, instanceAdmin)).canManage).toBe(true);
+    expect(await harness.performAction<any>("settings.access", {}, owner)).toEqual({ canManage: true, isInstanceAdmin: false });
+    expect(await harness.performAction<any>("settings.access", {}, member)).toEqual({ canManage: false, isInstanceAdmin: false });
+    expect(await harness.performAction<any>("settings.access", {}, instanceAdmin)).toEqual({ canManage: true, isInstanceAdmin: true });
   });
 });

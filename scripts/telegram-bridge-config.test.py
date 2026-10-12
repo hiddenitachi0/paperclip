@@ -66,7 +66,8 @@ class ConfigTestCase(unittest.TestCase):
         self.tmp.close()
         self.previous_config_file = bridge.CONFIG_FILE
         bridge.CONFIG_FILE = self.tmp.name
-        bridge.ALLOWED_USER_IDS = {OPERATOR}
+        # Per bot now (no instance-wide list): every test bot keeps these people.
+        bridge.legacy_allowed = lambda token: {OPERATOR}
         # The bridge remembers Paperclip's last answer; each test starts fresh.
         if hasattr(bridge, "LAST_API_BOTS"):
             bridge.LAST_API_BOTS = None
@@ -237,7 +238,8 @@ class AllowlistFromTheApiTests(ConfigTestCase):
         self.assertEqual(bridge.allowed_users_for(bot), {OPERATOR})
 
     def test_with_no_list_anywhere_nobody_gets_in(self):
-        bridge.ALLOWED_USER_IDS = set()
+        # Per bot now (no instance-wide list): every test bot keeps these people.
+        bridge.legacy_allowed = lambda token: set()
         bot = self.bot_with([])
 
         self.assertEqual(bridge.allowed_users_for(bot), set())

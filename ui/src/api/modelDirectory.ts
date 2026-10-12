@@ -8,6 +8,7 @@ import type {
   ModelDirectorySettings,
   ModelDirectoryStartersResult,
   ModelDirectoryStarterStatus,
+  ModelHealthOverview,
   ModelConverterOp,
   ModelProbeSetResult,
   OpenRouterHostsResult,
@@ -98,6 +99,8 @@ export const modelDirectoryApi = {
   /** Asks the local Ollama at one of the company's local addresses which models are installed and marks the setups there. */
   syncLocal: (companyId: string, baseUrl: string) =>
     api.post<LocalModelsSyncResult>(`/companies/${companyId}/model-directory/local-sync`, { baseUrl }),
+  /** The last model-server reading for every saved local setup and every quick agent on a local model. Reads only. */
+  health: (companyId: string) => api.get<ModelHealthOverview>(`/companies/${companyId}/model-directory/health`),
   listReviews: (companyId: string, entryId: string) =>
     api.get<ModelReview[]>(`/companies/${companyId}/model-directory/${entryId}/reviews`),
   runReview: (companyId: string, entryId: string) =>
