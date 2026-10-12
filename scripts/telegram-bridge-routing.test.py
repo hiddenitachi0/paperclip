@@ -83,7 +83,8 @@ class RoutingTestCase(unittest.TestCase):
         self.tmp.close()
         self.previous_config_file = bridge.CONFIG_FILE
         bridge.CONFIG_FILE = self.tmp.name
-        bridge.ALLOWED_USER_IDS = {OPERATOR}
+        # Per bot now (no instance-wide list): every test bot keeps these people.
+        bridge.legacy_allowed = lambda token: {OPERATOR}
         self.state = {"bots": {t: {"offset": 0, "chats": [OPERATOR]} for t in (CEO_TOKEN, MAJA_TOKEN, FORK_TOKEN)},
                       "notified": []}
         self.api_bots = []

@@ -120,7 +120,12 @@ export function classifyAssigneePickup(input: ClassifyAssigneePickupInput): Assi
   // Company first: archiving a company pauses every one of its agents
   // (pauseReason "company_archived"), and that must not read as dozens of
   // individually paused agents with waiting work.
-  if (!input.companyActive || agent.pauseReason === "company_archived") return { kind: "company_inactive" };
+  // Same for "Mark as migrated" (pauseReason "company_migrated").
+  if (
+    !input.companyActive ||
+    agent.pauseReason === "company_archived" ||
+    agent.pauseReason === "company_migrated"
+  ) return { kind: "company_inactive" };
 
   if (!invokability.invokable) {
     return { kind: "unavailable", reason: unavailableReasonForInvokability(agent, invokability) };

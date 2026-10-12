@@ -300,6 +300,10 @@ export const ISSUE_ORIGIN_KINDS = [
   // DUR-62: the weekly check-up report. Written for the operator, deliberately
   // unassigned, and refused to every agent-authenticated mutation.
   "organization_checkup",
+  // "Ask Paperclip" Phase 3: a question a person handed from the Ask panel to
+  // the company's investigation agent (advice only). Created by that person
+  // (created_by_user_id), so the panel lists each person's own.
+  "helper_investigation",
 ] as const;
 export type BuiltInIssueOriginKind = (typeof ISSUE_ORIGIN_KINDS)[number];
 export type PluginIssueOriginKind = `plugin:${string}`;
@@ -638,7 +642,7 @@ export type RoutineRunStatus = (typeof ROUTINE_RUN_STATUSES)[number];
 export const ROUTINE_RUN_SOURCES = ["schedule", "manual", "api", "webhook"] as const;
 export type RoutineRunSource = (typeof ROUTINE_RUN_SOURCES)[number];
 
-export const PAUSE_REASONS = ["manual", "budget", "system", "company_archived"] as const;
+export const PAUSE_REASONS = ["manual", "budget", "system", "company_archived", "company_migrated"] as const;
 export type PauseReason = (typeof PAUSE_REASONS)[number];
 
 export const PROJECT_COLORS = [
@@ -1262,6 +1266,8 @@ export const PLUGIN_CAPABILITIES = [
   "personas.picture_feedback.read",
   // Billing
   "billing.media_studio_direct.reserve",
+  // Models: picture analysis with a company's saved model, run by the host
+  "models.image_analysis.run",
   // Plugin State
   "plugin.state.read",
   "plugin.state.write",

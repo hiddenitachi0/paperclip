@@ -109,8 +109,11 @@ export {
   type LaneAKeywordRoute,
 } from "./lane-a-models.js";
 export * from "./prompt-cache.js";
+export * from "./report-data.js";
 export * from "./known-models.js";
 export * from "./openrouter-hosts.js";
+export * from "./model-readiness.js";
+export * from "./model-picker-readiness.js";
 export {
   WEB_SEARCH_BINDING_TARGET_TYPE,
   WEB_SEARCH_KEY_CONFIG_PATH,
@@ -122,7 +125,10 @@ export {
   type CompanyWebSearchSettings,
 } from "./web-search.js";
 export { readLaneAConversationSearchSwitch } from "./lane-a-conversation-search.js";
+export { readLaneAPictureModelId } from "./lane-a-picture-model.js";
 export * from "./helper.js";
+export * from "./company-migration.js";
+export * from "./quality-loops.js";
 export {
   BROWSER_ACCESS_LEVELS,
   readLaneABrowserAccess,
@@ -203,6 +209,15 @@ export {
   supportsThinkingEffort,
   isThinkingEffortValid,
   validateAdapterModelEffort,
+  getThinkingEffortValue,
+  thinkingEffortLabel,
+  agentDefaultLabel,
+  validateModelAgainstList,
+  deriveChildModelEffortInheritance,
+  type ModelListValidationInput,
+  type InheritedFromMarker,
+  type ChildModelEffortInheritanceInput,
+  type ChildModelEffortInheritance,
   type ThinkingEffortKey,
   type ThinkingEffortVocabulary,
   type ThinkingEffortOption,
@@ -1436,6 +1451,43 @@ export {
   type RecordTelegramReactionInput,
   type UpdateReactionEmojiConfigInput,
 } from "./validators/telegram-reaction.js";
+export {
+  TELEGRAM_CHAT_DAILY_CAP_DEFAULT,
+  TELEGRAM_CHAT_DAILY_CAP_MAX,
+  TELEGRAM_CHAT_MESSAGE_MAX_CHARS,
+  TELEGRAM_LINK_CODE_ALPHABET,
+  TELEGRAM_LINK_CODE_LENGTH,
+  ackTelegramChatAnswerSchema,
+  telegramChatAskSchema,
+  telegramChatLinkSchema,
+  updateTelegramChatSettingsSchema,
+  type AckTelegramChatAnswerInput,
+  type TelegramChatAskInput,
+  type TelegramChatAskOutcome,
+  type TelegramChatAskResult,
+  type TelegramChatAskImage,
+  type TelegramChatLinkInput,
+  type TelegramChatLinkResult,
+  type TelegramChatOutboxItem,
+  type TelegramChatSettings,
+  type TelegramLinkCode,
+  type TelegramLinkStatus,
+  type UpdateTelegramChatSettingsInput,
+} from "./validators/telegram-chat.js";
+export {
+  CHAT_ATTACHMENTS_MAX,
+  CHAT_PHOTO_AGE_CHECK_MAX_OUTPUT_TOKENS,
+  CHAT_PHOTO_AGE_CHECK_PURPOSE,
+  CHAT_PHOTO_AGE_CHECK_SYSTEM_PROMPT,
+  CHAT_PHOTO_AGE_CHECK_USER_PROMPT,
+  CHAT_PHOTO_FILENAME_PREFIX,
+  CHAT_PHOTO_MAX_BASE64_CHARS,
+  CHAT_PHOTO_MAX_BYTES,
+  CHAT_PHOTO_TYPES,
+  chatPhotoFilename,
+  sniffChatPhotoType,
+  type ChatPhotoType,
+} from "./chat-attachments.js";
 export type { SpeechSettings, SpeechSpeakResult, SpeechTranscribeResult } from "./types/speech.js";
 export {
   SPEECH_DEFAULT_DAILY_SPEAK_CHARACTERS,
@@ -1550,6 +1602,61 @@ export {
   type UpdateDataConnectionInput,
   type WooCommerceCredentialInput,
 } from "./validators/data-connection.js";
+export type {
+  ReportScriptVersionStatus,
+  ReportScriptRunTrigger,
+  ReportScriptRunStatus,
+  ReportScript,
+  ReportScriptVersion,
+  ReportFixture,
+  ReportFixtureDiff,
+  ReportFixtureCheckResult,
+  ReportScriptRun,
+  ReportRunStatus,
+  ReportTemplate,
+  ReportRun,
+  ReportScriptApprovalFixtureResult,
+  ReportScriptApprovalOutcome,
+} from "./types/report.js";
+export {
+  REPORT_SCRIPT_VERSION_STATUSES,
+  REPORT_SCRIPT_RUN_TRIGGERS,
+  REPORT_SCRIPT_RUN_STATUSES,
+  REPORT_RUN_STATUSES,
+} from "./types/report.js";
+export {
+  REPORT_SCRIPT_KEY_MAX_LENGTH,
+  REPORT_SCRIPT_NAME_MAX_LENGTH,
+  REPORT_SCRIPT_MAX_FILES,
+  REPORT_SCRIPT_MAX_TOTAL_FILE_BYTES,
+  REPORT_SCRIPT_STDLIB_ONLY_MESSAGE,
+  isForbiddenReportScriptPackagingFile,
+  REPORT_FIXTURE_NAME_MAX_LENGTH,
+  createReportScriptSchema,
+  createReportScriptVersionSchema,
+  approveReportScriptVersionSchema,
+  createReportFixtureSchema,
+  runReportScriptFixtureSchema,
+  requestReportScriptApprovalSchema,
+  type RequestReportScriptApprovalInput,
+  type CreateReportScriptInput,
+  type CreateReportScriptVersionInput,
+  type ApproveReportScriptVersionInput,
+  type CreateReportFixtureInput,
+  type RunReportScriptFixtureInput,
+  REPORT_TEMPLATE_KEY_MAX_LENGTH,
+  REPORT_TEMPLATE_NAME_MAX_LENGTH,
+  REPORT_TEMPLATE_INSTRUCTIONS_MAX_LENGTH,
+  REPORT_RUN_COMMENTARY_MAX_LENGTH,
+  createReportTemplateSchema,
+  updateReportTemplateSchema,
+  createReportRunSchema,
+  draftReportRunCommentarySchema,
+  type CreateReportTemplateInput,
+  type UpdateReportTemplateInput,
+  type CreateReportRunInput,
+  type DraftReportRunCommentaryInput,
+} from "./validators/report.js";
 export {
   CRM_ACTIVITY_TYPES,
   createCrmContactSchema,
@@ -2036,6 +2143,11 @@ export {
   bookingRequestPayloadSchema,
   purchaseRequestPayloadSchema,
   videoRenderRequestPayloadSchema,
+  OPERATOR_ACTION_TYPES,
+  operatorActionTargetNameSchema,
+  operatorActionEnvKeySchema,
+  operatorActionRequestInputSchema,
+  operatorActionRequestPayloadSchema,
   type CreateApproval,
   type UpsertBudgetPolicy,
   type ResolveBudgetIncident,
@@ -2056,6 +2168,9 @@ export {
   type BookingRequestPayload,
   type PurchaseRequestPayload,
   type VideoRenderRequestPayload,
+  type OperatorActionType,
+  type OperatorActionRequestInput,
+  type OperatorActionRequestPayload,
   envBindingPlainSchema,
   envBindingSecretRefSchema,
   envBindingSchema,
@@ -2584,10 +2699,19 @@ export {
   createVideoStorylineSchema,
   draftVideoDirectorShotsSchema,
   estimateVideoStorylineCostCents,
+  FAL_KLING_ALLOWED_DURATIONS_SECONDS,
+  videoModelAllowedDurations,
+  videoShotVideoPrompt,
+  isFalKlingV3Model,
+  FAL_KLING_V3_ALLOWED_DURATIONS_SECONDS,
+  videoRenderDurationSeconds,
   startVideoStorylineRenderSchema,
   updateVideoSceneSchema,
   updateVideoShotSchema,
   updateVideoStorylineSchema,
+  videoStorylinePictureSettingsSchema,
+  VIDEO_SHOT_PICTURE_LOOK_NONE,
+  type VideoStorylinePictureSettings,
   updateVideoStorylineSettingsSchema,
   type ApproveVideoDirectorRunInput,
   type CreateVideoSceneInput,
@@ -2614,6 +2738,29 @@ export {
   type VideoQualityIssueCode,
   type VideoStorylineQualityIssue,
 } from "./video-storylines.js";
+export {
+  VIDEO_CLIP_LENGTH_NOTE,
+  VIDEO_SCRIPT_IMPORT_MODES,
+  VIDEO_SCRIPT_MAX_CHARACTERS,
+  VIDEO_SCRIPT_MAX_REPORTED_ERRORS,
+  VIDEO_SCRIPT_PROMPT_MAX_LENGTH,
+  VIDEO_SCRIPT_SCENE_NOTES_MAX_LENGTH,
+  VIDEO_STORYLINE_SCRIPT_EXAMPLE,
+  VIDEO_STORYLINE_SCRIPT_INSTRUCTIONS,
+  createVideoStorylineFromScriptSchema,
+  formatVideoScriptCharacters,
+  importVideoStorylineScriptSchema,
+  validateVideoStorylineScript,
+  type CreateVideoStorylineFromScriptInput,
+  type ImportVideoStorylineScriptInput,
+  type ParsedVideoStorylineScript,
+  type VideoScriptCharacter,
+  type VideoScriptImportMode,
+  type VideoScriptImportSummary,
+  type VideoScriptScene,
+  type VideoScriptShot,
+  type VideoStorylineScriptValidation,
+} from "./video-storyline-script.js";
 export {
   VIDEO_DIRECTOR_CONVERSATION_STATUSES,
   VIDEO_DIRECTOR_DIALOGUE_MAX_ANSWERS_PER_TURN,
@@ -2676,6 +2823,25 @@ export {
 } from "./video-storyline-stills.js";
 
 export {
+  VIDEO_STORYLINE_MAX_CAST,
+  VIDEO_CAST_NAME_MAX_LENGTH,
+  VIDEO_CAST_DESCRIPTION_MAX_LENGTH,
+  videoStorylineCastMemberSchema,
+  updateVideoStorylineCastSchema,
+  updateVideoShotCastSchema,
+  readVideoStorylineCast,
+  assignVideoCastIds,
+  mergeScriptCharactersIntoCast,
+  videoCastNameMentioned,
+  detectVideoShotCast,
+  videoShotCast,
+  type VideoStorylineCastMember,
+  type VideoStorylineCast,
+  type UpdateVideoStorylineCastInput,
+  type UpdateVideoShotCastInput,
+} from "./video-storyline-cast.js";
+
+export {
   createMediaStudioDirectAudioSchema,
   createMediaStudioDirectPictureSchema,
   createMediaStudioDirectVideoSchema,
@@ -2697,6 +2863,11 @@ export {
   MEDIA_STUDIO_DIRECT_VIDEO_MIN_DURATION_SECONDS,
   estimateMediaStudioEditCostCents,
   MEDIA_STUDIO_EDIT_ACTIONS,
+  mediaStudioEditActionProvider,
+  MEDIA_STUDIO_LORA_TRAINING_STEPS,
+  MEDIA_STUDIO_LORA_TRAINING_USD_PER_STEP,
+  estimateLoraTrainingCostCents,
+  MEDIA_STUDIO_HIGGSFIELD_PICTURE_ESTIMATE_CENTS,
   MEDIA_STUDIO_EDIT_BILLING_CODE,
   type MediaStudioEditAction,
   mediaStudioDirectEstimateSchema,
@@ -2965,3 +3136,5 @@ export {
   type MailUrgencySummary,
   type SetMailUrgencyFeedbackInput,
 } from "./mail-urgency.js";
+export * from "./video-storyline-transitions.js";
+export * from "./video-storyline-clips.js";

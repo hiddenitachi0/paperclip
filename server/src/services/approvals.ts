@@ -1,6 +1,6 @@
 import { and, asc, desc, eq, inArray, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agentInstructionsRevisions, agents, approvalComments, approvals, personaPosts } from "@paperclipai/db";
+import { agentInstructionsRevisions, agents, approvalComments, approvals, personaPosts, reportScriptVersions } from "@paperclipai/db";
 import {
   hireMonthlySpendingLimitCentsFromPayload,
   LANE_A_THINKING_MODES,
@@ -23,6 +23,7 @@ import { isMergePrApprovalPayload, securityReviewService } from "./security-revi
 import { notifyHireApproved } from "./hire-hook.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { describeToolCapability, summarizeMcpServer } from "./agent-tool-audit.js";
+import { isUnsupportedDeployLikeKind } from "./deploy-workspace.js";
 
 const POSTGRES_UUID_TEXT_RE = /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i;
 
@@ -72,6 +73,28 @@ export function isCrossCompanyInstructionApproval(
 }
 
 /**
+ * `request_board_approval` approvals whose payload carries
+ * `kind:"report_script_version"` (DUR-4072): the card that shows a report
+ * calculation script's full source. Approving one must first RUN its saved
+ * examples (report-scripts.ts approveVersion); so this service refuses to
+ * mark such a card approved unless its script version is already approved
+ * with the very digest the card shows. Every approve path (route, thread
+ * interactions, automation) is covered because the check sits here.
+ */
+export function isReportScriptVersionApproval(
+  approval: Pick<typeof approvals.$inferSelect, "type" | "payload">,
+): boolean {
+  return approval.type === "request_board_approval" && approval.payload?.kind === "report_script_version";
+}
+
+const REPORT_SCRIPT_CARD_FILED_ELSEWHERE =
+  "Report calculation approval cards can only be filed by asking for approval on the calculation itself " +
+  "(the card is built from the stored code). To change the code, draft a new version and ask for approval again";
+
+const REPORT_SCRIPT_DECISION_ELSEWHERE =
+  "A report calculation can only be approved by a company owner or admin from its approval card: approving runs its saved examples first and switches it on only if they all match";
+
+/**
  * Hooks the approvals route passes so approving/rejecting a cross-company
  * instruction card and delivering/refusing the instruction happen as ONE
  * decision. If `deliverApproved` throws, the card is put back to where it was
@@ -99,7 +122,33 @@ export interface ApprovalSecurityReviewBypass {
 export interface ApprovalDecisionOptions {
   crossCompanyInstruction?: CrossCompanyInstructionDecisionHooks;
   securityReviewBypass?: ApprovalSecurityReviewBypass;
+  /**
+   * Set ONLY by POST /approvals/:id/approve, after its own per-kind checks
+   * (owner/admin for host actions, the unsupported deploy-kind refusal).
+   * Without it, approving a kind that must be decided on its own card is
+   * refused here -- see APPROVAL_CARD_ONLY below.
+   */
+  decidedOnApprovalCard?: boolean;
 }
+
+/**
+ * Kinds whose approval starts something on the host (a deploy, a host
+ * action) or whose approve route carries checks no other path repeats. Any
+ * approve() call that is not the approvals route itself -- a linked
+ * confirmation card being accepted, automation, a future caller -- is
+ * refused for these, whoever the actor is (security review of PR #625).
+ * merge_pr, report_script_version and cross_company_instruction are guarded
+ * here too, by their own checks further down (security review gate,
+ * approved-version digest, decision hooks).
+ */
+export function isApprovalCardOnlyKind(approval: Pick<typeof approvals.$inferSelect, "type" | "payload">): boolean {
+  if (approval.type !== "request_board_approval") return false;
+  const kind = approval.payload?.kind;
+  return kind === "operator_action" || kind === "deploy" || isUnsupportedDeployLikeKind(kind);
+}
+
+const APPROVAL_CARD_ONLY_DECISION_ELSEWHERE =
+  "This card can only be approved on the approval card itself (deploys and host actions need the approval page's own checks)";
 
 const CROSS_COMPANY_DECISION_ELSEWHERE =
   "An instruction from another company can only be approved or declined from this company's approvals page";
@@ -176,8 +225,27 @@ export function approvalService(db: Db) {
     if (isCrossCompanyInstructionApproval(existing) && !options.crossCompanyInstruction) {
       throw unprocessable(CROSS_COMPANY_DECISION_ELSEWHERE, { kind: "cross_company_instruction" });
     }
+    if (targetStatus === "approved" && isApprovalCardOnlyKind(existing) && !options.decidedOnApprovalCard) {
+      throw unprocessable(APPROVAL_CARD_ONLY_DECISION_ELSEWHERE, {
+        kind: (existing.payload as Record<string, unknown> | null)?.kind,
+      });
+    }
     if (targetStatus === "approved") {
       await assertSecurityReviewClearedOrBypassed(existing, options);
+    }
+    if (targetStatus === "approved" && isReportScriptVersionApproval(existing)) {
+      // Found through the VERSION's own approval_id link, never through
+      // ids in the card payload: a card that is not the version's own card
+      // (e.g. one forged with someone else's version id) never matches.
+      const payload = (existing.payload ?? {}) as Record<string, unknown>;
+      const version = await db
+        .select({ status: reportScriptVersions.status, sha256: reportScriptVersions.sha256 })
+        .from(reportScriptVersions)
+        .where(and(eq(reportScriptVersions.approvalId, existing.id), eq(reportScriptVersions.companyId, existing.companyId)))
+        .then((rows) => rows[0] ?? null);
+      if (!version || version.status !== "approved" || version.sha256 !== payload.sha256) {
+        throw unprocessable(REPORT_SCRIPT_DECISION_ELSEWHERE, { kind: "report_script_version" });
+      }
     }
 
     const now = new Date();
@@ -479,12 +547,20 @@ export function approvalService(db: Db) {
       return rows[0] ?? null;
     },
 
-    create: (companyId: string, data: Omit<typeof approvals.$inferInsert, "companyId">) =>
-      db
+    create: async (companyId: string, data: Omit<typeof approvals.$inferInsert, "companyId">) => {
+      // DUR-4072: report-calculation cards show code the owner approves; only
+      // report-scripts.ts requestApproval may mint them (from the stored
+      // version). Anyone filing one here could show code that is not the code
+      // that would run.
+      if (isReportScriptVersionApproval({ type: data.type, payload: data.payload })) {
+        throw unprocessable(REPORT_SCRIPT_CARD_FILED_ELSEWHERE, { kind: "report_script_version" });
+      }
+      return db
         .insert(approvals)
         .values({ ...data, companyId })
         .returning()
-        .then((rows) => rows[0]),
+        .then((rows) => rows[0]);
+    },
 
     approve: async (
       id: string,
@@ -820,6 +896,9 @@ export function approvalService(db: Db) {
       const existing = await getExistingApproval(id);
       if (existing.status !== "revision_requested") {
         throw unprocessable("Only revision requested approvals can be resubmitted");
+      }
+      if (isReportScriptVersionApproval(existing) || (payload && isReportScriptVersionApproval({ type: existing.type, payload }))) {
+        throw unprocessable(REPORT_SCRIPT_CARD_FILED_ELSEWHERE, { kind: "report_script_version" });
       }
 
       const now = new Date();

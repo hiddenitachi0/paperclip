@@ -1,5 +1,7 @@
 import type { Db } from "@paperclipai/db";
 import {
+  MEDIA_MONTHLY_CAP_DEFAULT_CENTS,
+  MEDIA_MONTHLY_CAP_SETTINGS_KEY,
   MEDIA_STUDIO_PLUGIN_KEY,
   VIDEO_STORYLINE_ADVANCED_SETTINGS_KEY,
   VIDEO_STORYLINE_APPROVAL_THRESHOLD_SETTINGS_KEY,
@@ -52,7 +54,7 @@ export function videoStorylineSettingsService(db: Db) {
   async function assertEnabled(companyId: string): Promise<void> {
     if (!(await isEnabled(companyId))) {
       throw unprocessable(
-        "Video storylines are switched off for this company. An owner or admin can turn them on under Media Studio settings.",
+        "Video storylines are switched off for this company. An owner or admin can turn them on at the top of the Storylines tab in Media Studio.",
       );
     }
   }
@@ -77,7 +79,7 @@ export function videoStorylineSettingsService(db: Db) {
     await assertEnabled(companyId);
     if (!(await isAdvancedEnabled(companyId))) {
       throw unprocessable(
-        "Director AI, previews, transitions and music are switched off for this company. An owner or admin can turn them on under Media Studio settings.",
+        "Director AI, previews, transitions and music are switched off for this company. An owner or admin can turn them on at the top of the Storylines tab in Media Studio.",
       );
     }
   }
@@ -110,7 +112,27 @@ export function videoStorylineSettingsService(db: Db) {
     return thresholdCents;
   }
 
+  /** Storyline strip: the company's monthly cap for AI transitions (design 2.11); $20 until an owner or admin changes it. */
+  async function getMediaMonthlyCapCents(companyId: string): Promise<number> {
+    const pluginId = await getPluginId();
+    const settings = await registry.getCompanySettings(pluginId, companyId);
+    const value = settings?.settingsJson?.[MEDIA_MONTHLY_CAP_SETTINGS_KEY];
+    return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : MEDIA_MONTHLY_CAP_DEFAULT_CENTS;
+  }
+
+  async function setMediaMonthlyCapCents(companyId: string, capCents: number): Promise<number> {
+    if (!Number.isInteger(capCents) || capCents < 0) throw badRequest("The monthly cap must be a whole number of cents, 0 or more.");
+    const pluginId = await getPluginId();
+    const existing = await registry.getCompanySettings(pluginId, companyId);
+    await registry.upsertCompanySettings(pluginId, companyId, {
+      settingsJson: { ...(existing?.settingsJson ?? {}), [MEDIA_MONTHLY_CAP_SETTINGS_KEY]: capCents },
+    });
+    return capCents;
+  }
+
   return {
+    getMediaMonthlyCapCents,
+    setMediaMonthlyCapCents,
     isEnabled,
     setEnabled,
     assertEnabled,

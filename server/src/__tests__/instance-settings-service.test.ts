@@ -40,6 +40,7 @@ describe("instance settings service", () => {
       enableWeeklyCheckup: false,
       enableCrossCompanyInstructions: false,
       enableBusinessData: false,
+      enableReporting: false,
     });
   });
 

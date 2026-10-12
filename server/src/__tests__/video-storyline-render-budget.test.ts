@@ -57,7 +57,7 @@ d("videoStorylineRenderService budget gate", () => {
     await stopDb?.();
   });
 
-  async function seedEnabledCompanyWithShot(budgetCapCents: number | null) {
+  async function seedEnabledCompanyWithShot(budgetCapCents: number | null, providerId: "fal" | "sogni" = "fal") {
     const companyId = randomUUID();
     await db.insert(companies).values({
       id: companyId,
@@ -69,7 +69,7 @@ d("videoStorylineRenderService budget gate", () => {
     const storylines = videoStorylineService(db);
     const storyline = await storylines.createStoryline(
       companyId,
-      { title: "T", projectId: null, providerId: "fal", model: null, budgetCapCents, characterReferenceAssetIds: [] },
+      { title: "T", projectId: null, providerId, model: null, budgetCapCents, characterReferenceAssetIds: [] },
       ACTOR,
     );
     const scene = await storylines.createScene(companyId, storyline.id, { title: "", notes: null, orderIndex: 0 }, ACTOR);
@@ -84,7 +84,7 @@ d("videoStorylineRenderService budget gate", () => {
     // (bypassing the real still-generation flow, which has its own
     // dedicated tests) so startRender/reRenderShot reach the budget checks.
     await db.update(videoShots).set({ storyboardStatus: "approved" }).where(eq(videoShots.id, shot.id));
-    return { companyId, storylineId: storyline.id };
+    return { companyId, storylineId: storyline.id, shotId: shot.id };
   }
 
   it("refuses to start a render for a company with the feature switched off", async () => {
@@ -177,5 +177,51 @@ d("videoStorylineRenderService budget gate", () => {
     await expect(
       videoStorylineRenderService(db).reRenderShot(companyId, storylineId, shotId, ACTOR),
     ).rejects.toMatchObject({ status: 409 });
+  });
+
+  describe("estimates price shots the way they are billed (shot provider/model over the storyline's)", () => {
+    // Storyline on Sogni (40c/s x 5s = 200c) but the shot was last rendered
+    // on Fal (50c/s x 5s = 250c) -- beginShotRender bills it on Fal.
+    it("startRender's budget gate uses the shot's provider", async () => {
+      const { companyId, storylineId, shotId } = await seedEnabledCompanyWithShot(220, "sogni");
+      await db.update(videoShots).set({ providerId: "fal" }).where(eq(videoShots.id, shotId));
+      await expect(videoStorylineRenderService(db).startRender(companyId, storylineId, ACTOR, {})).rejects.toMatchObject({
+        status: 422,
+        message: expect.stringContaining("Raise the budget cap to at least $2.50"),
+      });
+    });
+
+    it("reRenderShot's budget gate uses the shot's provider", async () => {
+      const { companyId, storylineId, shotId } = await seedEnabledCompanyWithShot(220, "sogni");
+      await db.update(videoShots).set({ providerId: "fal", status: "failed" }).where(eq(videoShots.id, shotId));
+      await expect(videoStorylineRenderService(db).reRenderShot(companyId, storylineId, shotId, ACTOR)).rejects.toMatchObject({
+        status: 422,
+        message: expect.stringContaining("estimated 250 cents"),
+      });
+    });
+  });
+
+  it("refuses to start a render whose shot was replaced between the checks and the start (security review: TOCTOU)", async () => {
+    const { companyId, storylineId, shotId } = await seedEnabledCompanyWithShot(100_000);
+    let fired = false;
+    // A "replace" import that commits right before startRender's locked transaction.
+    const racing = new Proxy(db, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop, target);
+        if (prop === "transaction") {
+          return async (...args: unknown[]) => {
+            if (!fired) {
+              fired = true;
+              await db.delete(videoShots).where(eq(videoShots.id, shotId));
+            }
+            return (value as (...a: unknown[]) => unknown).apply(target, args);
+          };
+        }
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    await expect(videoStorylineRenderService(racing).startRender(companyId, storylineId, ACTOR, {})).rejects.toMatchObject({ status: 409 });
+    const [row] = await db.select().from(videoStorylines).where(eq(videoStorylines.id, storylineId));
+    expect(row!.status).not.toBe("rendering");
   });
 });

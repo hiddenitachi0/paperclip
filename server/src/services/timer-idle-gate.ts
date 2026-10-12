@@ -247,6 +247,9 @@ export const TIMER_IDLE_GATE_WAKE_REASON_COVERAGE: Readonly<Record<string, reado
   goal_condition_judge: ["run_active_or_pending", "wakeup_request"],
   goal_condition_not_met: ["run_active_or_pending", "wakeup_request"],
   self_review_pass: ["run_active_or_pending", "wakeup_request"],
+  // Agent quality loops: the company's finish check sent the task back and the run
+  // ended without fixing it; queued via enqueueWakeup like the reasons above.
+  quality_check_needs_work: ["run_active_or_pending", "wakeup_request"],
 };
 
 /** Wake reasons deliberately NOT covered, and why. */

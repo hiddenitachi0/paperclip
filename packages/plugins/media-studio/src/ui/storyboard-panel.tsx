@@ -1,32 +1,33 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useRef, useState } from "react";
+import { errorText, storylineFetchJson } from "./storyline-api.js";
+import { SKIP_PICTURES_EXPLANATION, dollars, pictureCostCents, pictureCounts, plural } from "./storyline-flow.js";
 
 // Standalone ES module (see index.tsx's note): bare specifiers only outside
 // this ui/ folder, so the helpers and style palette below are small local
 // copies rather than imports from index.tsx (which imports this file).
 //
-// Storyboard (contact sheet) for one storyline: a cheap picture per shot that
-// the person reviews before any paid video is made. Talks to the server's
-// /video-storylines/:id/storyboard routes -- see
+// Step 2 of the guided Storylines flow ("Pictures"): a cheap picture per shot
+// that the person reviews before any paid video is made. Talks to the
+// server's /video-storylines/:id/storyboard routes -- see
 // packages/shared/src/video-storyline-stills.ts for the response shape.
+//
+// The page owns the summary (the step bar needs it on every step) and the
+// actions (step 3's one-click fixes reuse them), so this panel only draws.
 
-function hostFetchJson<T>(path: string, init?: RequestInit): Promise<T> {
-  return fetch(path, { credentials: "include", headers: { "content-type": "application/json", ...(init?.headers ?? {}) }, ...init }).then(
-    async (res) => {
-      if (!res.ok) throw new Error((await res.text()) || `Request failed: ${res.status}`);
-      return (res.status === 204 ? (undefined as T) : ((await res.json()) as T));
-    },
-  );
-}
+/** Plain-English errors for every storyboard call -- see storyline-api.ts. */
+const hostFetchJson = storylineFetchJson;
 
-const card: React.CSSProperties = { border: "1px solid rgba(128,128,128,0.35)", borderRadius: 10, padding: 12, display: "flex", flexDirection: "column", gap: 6 };
+const card: React.CSSProperties = { border: "1px solid rgba(128,128,128,0.35)", borderRadius: 10, padding: 12, display: "flex", flexDirection: "column", gap: 8 };
 const input: React.CSSProperties = { padding: 8, borderRadius: 8, border: "1px solid rgba(128,128,128,0.5)", fontFamily: "inherit", fontSize: 13, background: "transparent", color: "inherit" };
-const errorBox: React.CSSProperties = { background: "#fff0f6", color: "#a61e4d", padding: "8px 10px", borderRadius: 8, fontSize: 13 };
+const errorBox: React.CSSProperties = { background: "#fff0f6", color: "#a61e4d", padding: "8px 10px", borderRadius: 8, fontSize: 13, whiteSpace: "pre-line" };
 const noticeBox: React.CSSProperties = { background: "#fff9db", color: "#7f5f01", padding: "8px 10px", borderRadius: 8, fontSize: 13 };
 const baseBtn: React.CSSProperties = { padding: "6px 12px", borderRadius: 8, border: "1px solid transparent", cursor: "pointer", fontSize: 12, fontWeight: 600 };
-const primaryBtn: React.CSSProperties = { ...baseBtn, background: "#1971c2", color: "#fff" };
+const primaryBtn: React.CSSProperties = { ...baseBtn, background: "#1971c2", color: "#fff", padding: "8px 16px", fontSize: 13 };
 const secondaryBtn: React.CSSProperties = { ...baseBtn, background: "#e7f5ff", color: "#1971c2", borderColor: "#a5d8ff" };
 const approveBtn: React.CSSProperties = { ...baseBtn, background: "#087f5b", color: "#fff" };
 const ghostBtn: React.CSSProperties = { ...baseBtn, background: "transparent", color: "#495057", borderColor: "#ced4da" };
+const groupBox: React.CSSProperties = { border: "1px dashed rgba(128,128,128,0.45)", borderRadius: 8, padding: 10, display: "flex", flexDirection: "column", gap: 6 };
+const muted: React.CSSProperties = { fontSize: 12, color: "#868e96", margin: 0 };
 
 export interface StoryboardShotSummary {
   id: string;
@@ -49,6 +50,10 @@ export interface StoryboardSummary {
   videoEstimatedTotalCents: number | null;
   videoSpentCents: number;
   approvalThresholdCents: number | null;
+  /** Which picture services have a key set up (newer servers). */
+  pictureServices?: { fal: boolean; sogni: boolean };
+  /** What the next picture is made with (newer servers). */
+  picture?: { providerId: "fal" | "sogni"; model: string | null; lookId: string | null; costPerPictureCents: number };
 }
 
 /** The parts of a shot (from the scenes/shots list) the storyboard needs to show and edit. */
@@ -58,11 +63,13 @@ export interface StoryboardShotText {
   orderIndex: number;
   prompt: string;
   cameraNotes: string | null;
+  /** This shot's own look for its picture: a look id, "none", or null (the storyline's). */
+  pictureLookId?: string | null;
 }
 
 function money(cents: number | null): string {
   if (cents === null) return "not worked out yet";
-  return `$${(cents / 100).toFixed(2)}`;
+  return dollars(cents);
 }
 
 /** True when this shot has at least one non-dropped shot, so "all approved" is meaningful. */
@@ -81,81 +88,213 @@ export function overApprovalLimit(summary: StoryboardSummary | null): boolean {
   );
 }
 
-const STATUS_TEXT: Record<StoryboardShotSummary["storyboardStatus"], { label: string; color: string; background: string }> = {
-  pending: { label: "Needs your OK", color: "#7f5f01", background: "#fff3bf" },
-  approved: { label: "Approved", color: "#087f5b", background: "#e6fcf5" },
-  dropped: { label: "Left out", color: "#868e96", background: "#f1f3f5" },
-};
+/** The picture badge. Green = picture approved; these are never the purple "AI suggestion" colours. */
+export function pictureBadge(shot: Pick<StoryboardShotSummary, "storyboardStatus" | "stillObjectKey">): { label: string; color: string; background: string } {
+  if (shot.storyboardStatus === "dropped") return { label: "Left out", color: "#868e96", background: "#f1f3f5" };
+  if (shot.storyboardStatus === "approved") {
+    return shot.stillObjectKey
+      ? { label: "Picture approved", color: "#087f5b", background: "#e6fcf5" }
+      : { label: "Approved without picture", color: "#087f5b", background: "#e6fcf5" };
+  }
+  return shot.stillObjectKey
+    ? { label: "Picture needs your OK", color: "#7f5f01", background: "#fff3bf" }
+    : { label: "No picture yet", color: "#7f5f01", background: "#fff3bf" };
+}
+
+// ─── Actions (shared with step 3's one-click fixes) ──────────────────────
+
+export interface BulkProgress {
+  label: string;
+  done: number;
+  total: number;
+}
+
+export interface StoryboardActions {
+  busyShotId: string | null;
+  bulk: BulkProgress | null;
+  error: string | null;
+  clearError: () => void;
+  makePicture: (shotId: string) => Promise<void>;
+  /** Plain notes the server sent with a shot's newest picture (how the cast's saved people were used). */
+  pictureNotes: Record<string, string[]>;
+  approve: (shotId: string) => Promise<void>;
+  approveWithoutPicture: (shotId: string) => Promise<void>;
+  drop: (shotId: string) => Promise<void>;
+  saveText: (shotId: string, prompt: string, cameraNotes: string | null) => Promise<boolean>;
+  /** One shot after another (never in parallel), so a failure stops the batch with one clear message. */
+  makeMany: (shotIds: string[]) => Promise<void>;
+  approveMany: (shotIds: string[]) => Promise<void>;
+  /** Approves each shot on its description alone (withoutStill) -- nothing is made or paid for. */
+  skipMany: (shotIds: string[]) => Promise<void>;
+  /** Stops a running batch after the shot in progress. */
+  stop: () => void;
+}
+
+export function useStoryboardActions(opts: {
+  base: string;
+  /** Reload the storyboard summary (and anything else the page shows). */
+  reload: () => Promise<void>;
+  /** Called after a shot's text changed, so the page reloads its shot list and estimate. */
+  onShotsChanged?: () => void | Promise<void>;
+}): StoryboardActions {
+  const { base, reload, onShotsChanged } = opts;
+  const [busyShotId, setBusyShotId] = useState<string | null>(null);
+  const [bulk, setBulk] = useState<BulkProgress | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [pictureNotes, setPictureNotes] = useState<Record<string, string[]>>({});
+  const stopRef = useRef(false);
+
+  const post = useCallback(
+    (shotId: string, what: "still" | "approve" | "drop", body: Record<string, unknown>, action: string) =>
+      hostFetchJson(`${base}/shots/${shotId}/${what}`, { method: "POST", body: JSON.stringify(body) }, action),
+    [base],
+  );
+
+  /** Makes one shot's picture and keeps the server's notes about it. */
+  const makeStill = useCallback(
+    async (shotId: string, action: string) => {
+      const res = (await post(shotId, "still", {}, action)) as { notes?: unknown } | undefined;
+      const notes = Array.isArray(res?.notes) ? res!.notes.filter((n): n is string => typeof n === "string") : [];
+      setPictureNotes((prev) => ({ ...prev, [shotId]: notes }));
+    },
+    [post],
+  );
+
+  const runOne = useCallback(
+    async (shotId: string, fn: () => Promise<unknown>) => {
+      setBusyShotId(shotId);
+      setError(null);
+      try {
+        await fn();
+      } catch (e) {
+        setError(errorText(e));
+      } finally {
+        setBusyShotId(null);
+        await reload();
+      }
+    },
+    [reload],
+  );
+
+  const runMany = useCallback(
+    async (label: string, shotIds: string[], fn: (shotId: string) => Promise<unknown>) => {
+      if (shotIds.length === 0) return;
+      setError(null);
+      stopRef.current = false;
+      for (const [index, shotId] of shotIds.entries()) {
+        if (stopRef.current) {
+          setError(`Stopped after ${plural(index, "shot")} of ${shotIds.length}. Nothing more was made or charged.`);
+          break;
+        }
+        setBulk({ label, done: index, total: shotIds.length });
+        setBusyShotId(shotId);
+        try {
+          await fn(shotId);
+        } catch (e) {
+          setError(`Stopped at shot ${index + 1} of ${shotIds.length}: ${errorText(e)}`);
+          break;
+        }
+        // Show each finished picture as it lands, not only at the end.
+        await reload();
+      }
+      setBusyShotId(null);
+      setBulk(null);
+      await reload();
+    },
+    [reload],
+  );
+
+  return {
+    busyShotId,
+    bulk,
+    error,
+    clearError: () => setError(null),
+    makePicture: (shotId) => runOne(shotId, () => makeStill(shotId, "making the picture")),
+    pictureNotes,
+    approve: (shotId) => runOne(shotId, () => post(shotId, "approve", {}, "approving the picture")),
+    approveWithoutPicture: (shotId) => runOne(shotId, () => post(shotId, "approve", { withoutStill: true }, "approving the shot")),
+    drop: (shotId) => runOne(shotId, () => post(shotId, "drop", {}, "leaving the shot out")),
+    saveText: async (shotId, prompt, cameraNotes) => {
+      let ok = false;
+      await runOne(shotId, async () => {
+        await hostFetchJson(`${base}/shots/${shotId}`, { method: "PATCH", body: JSON.stringify({ prompt, cameraNotes }) }, "saving the shot");
+        ok = true;
+        await onShotsChanged?.();
+      });
+      return ok;
+    },
+    makeMany: (ids) => runMany("Making picture", ids, (id) => makeStill(id, "making a picture")),
+    approveMany: (ids) => runMany("Approving picture", ids, (id) => post(id, "approve", {}, "approving a picture")),
+    skipMany: (ids) => runMany("Skipping picture for shot", ids, (id) => post(id, "approve", { withoutStill: true }, "approving a shot without a picture")),
+    stop: () => {
+      stopRef.current = true;
+    },
+  };
+}
+
+export function BulkProgressBar({ bulk, onStop }: { bulk: BulkProgress; onStop?: () => void }) {
+  const pct = bulk.total > 0 ? Math.round((bulk.done / bulk.total) * 100) : 0;
+  return (
+    <div data-testid="bulk-progress" style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, fontSize: 12 }}>
+        <span>
+          {bulk.label} {Math.min(bulk.done + 1, bulk.total)} of {bulk.total}...
+        </span>
+        {onStop && (
+          <button type="button" style={ghostBtn} onClick={onStop}>
+            Stop after this one
+          </button>
+        )}
+      </div>
+      <div style={{ height: 6, borderRadius: 3, background: "rgba(128,128,128,0.2)", overflow: "hidden" }}>
+        <div style={{ height: "100%", width: `${pct}%`, background: "#1971c2" }} />
+      </div>
+    </div>
+  );
+}
+
+// ─── The step 2 panel ────────────────────────────────────────────────────
 
 export function StoryboardPanel(props: {
-  companyId: string;
-  storylineId: string;
+  base: string;
+  summary: StoryboardSummary | null;
+  /** Problem loading the summary (shown instead of the tiles). */
+  loadError: string | null;
   shots: StoryboardShotText[];
   /** False once a render has started: shots can no longer be changed. */
   editable: boolean;
-  /** True after "Start render" was refused because the owner's go-ahead is still pending. */
-  approvalPending: boolean;
-  /** Called whenever the summary is (re)loaded so the page can gate "Start render" on it. */
-  onSummary: (summary: StoryboardSummary | null) => void;
-  /** Called after a shot's text is saved, so the page can refresh its own shot list and cost estimate. */
-  onShotsChanged: () => void | Promise<void>;
+  actions: StoryboardActions;
+  /** Moves the person on to step 3. */
+  onNext: () => void;
+  /** The "Picture settings" block (service, model, look), drawn under the intro. */
+  settings?: React.ReactNode;
+  /** The company's saved looks, for a shot's own look. Empty = no per-shot look picker. */
+  looks?: Array<{ id: string; name: string }>;
+  /** The storyline's look name (what "Same as the storyline" means), or null. */
+  storylineLookName?: string | null;
+  /** Saves a shot's own look: a look id, "none", or null (use the storyline's). */
+  onShotLook?: (shotId: string, pictureLookId: string | null) => void;
+  /** Who is in each shot (from step 1's Cast), as plain labels such as "Maja (saved person)". */
+  shotCast?: Record<string, string[]>;
 }) {
-  const { companyId, storylineId, onSummary, onShotsChanged } = props;
-  const base = `/api/companies/${companyId}/video-storylines/${storylineId}`;
-  const [summary, setSummary] = useState<StoryboardSummary | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busyShotId, setBusyShotId] = useState<string | null>(null);
+  const { base, summary, actions } = props;
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editPrompt, setEditPrompt] = useState("");
   const [editCamera, setEditCamera] = useState("");
   const [brokenImages, setBrokenImages] = useState<Set<string>>(new Set());
+  /** "make" = confirming the bulk picture run (shows the cost first); "skip" = explaining what skipping means. */
+  const [confirming, setConfirming] = useState<"make" | "skip" | null>(null);
 
-  const load = useCallback(async () => {
-    try {
-      const res = await hostFetchJson<StoryboardSummary>(`${base}/storyboard`);
-      setSummary(res);
-      onSummary(res);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      onSummary(null);
-    }
-  }, [base, onSummary]);
+  if (!summary && !props.loadError) {
+    return <div style={card}><p style={{ fontSize: 12, margin: 0 }}>Loading the pictures...</p></div>;
+  }
 
-  useEffect(() => {
-    setSummary(null);
-    setEditingId(null);
-    void load();
-  }, [load]);
-
-  // The shot list changed under us (a shot was added or removed on the page): refresh the sheet too.
-  const shotKey = props.shots.map((s) => s.id).join(",");
-  useEffect(() => {
-    void load();
-  }, [shotKey, load]);
-
-  const run = async (shotId: string, action: () => Promise<unknown>) => {
-    setBusyShotId(shotId);
-    setError(null);
-    try {
-      await action();
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusyShotId(null);
-    }
-  };
-
-  const makePicture = (shotId: string) => {
-    setBrokenImages((prev) => {
-      const next = new Set(prev);
-      next.delete(shotId);
-      return next;
-    });
-    return run(shotId, () => hostFetchJson(`${base}/shots/${shotId}/still`, { method: "POST", body: JSON.stringify({}) }));
-  };
-  const approve = (shotId: string) => run(shotId, () => hostFetchJson(`${base}/shots/${shotId}/approve`, { method: "POST", body: JSON.stringify({}) }));
-  const leaveOut = (shotId: string) => run(shotId, () => hostFetchJson(`${base}/shots/${shotId}/drop`, { method: "POST", body: JSON.stringify({}) }));
+  const textById = new Map(props.shots.map((s) => [s.id, s]));
+  const sorted = (summary?.shots ?? []).slice().sort((a, b) => a.orderIndex - b.orderIndex);
+  const counts = pictureCounts(summary);
+  const busy = actions.busyShotId !== null || actions.bulk !== null;
+  const costEach = pictureCostCents(summary);
+  const makeCost = counts.missing * costEach;
 
   const startEdit = (shot: StoryboardShotText) => {
     setEditingId(shot.id);
@@ -163,35 +302,129 @@ export function StoryboardPanel(props: {
     setEditCamera(shot.cameraNotes ?? "");
   };
 
-  const saveEdit = (shotId: string) =>
-    run(shotId, async () => {
-      await hostFetchJson(`${base}/shots/${shotId}`, {
-        method: "PATCH",
-        body: JSON.stringify({ prompt: editPrompt.trim(), cameraNotes: editCamera.trim() || null }),
-      });
-      setEditingId(null);
-      await onShotsChanged();
+  const unbreak = (ids: string[]) =>
+    setBrokenImages((prev) => {
+      const next = new Set(prev);
+      for (const id of ids) next.delete(id);
+      return next;
     });
 
-  if (!summary && !error) {
-    return <div style={card}><p style={{ fontSize: 12, margin: 0 }}>Loading the storyboard...</p></div>;
+  // The one primary action for this step.
+  let primary: { label: string; onClick: () => void; testId: string } | null = null;
+  if (props.editable && counts.missing > 0) {
+    primary = { label: `Make all ${plural(counts.missing, "missing picture")}`, onClick: () => setConfirming("make"), testId: "pictures-primary-make" };
+  } else if (props.editable && counts.waiting > 0) {
+    primary = { label: `Approve all ${plural(counts.waiting, "picture")}`, onClick: () => void actions.approveMany(counts.waitingIds), testId: "pictures-primary-approve" };
+  } else if (counts.total > 0 && counts.approved === counts.total) {
+    primary = { label: "Next: Budget & render", onClick: props.onNext, testId: "pictures-primary-next" };
   }
 
-  const textById = new Map(props.shots.map((s) => [s.id, s]));
-  const sorted = (summary?.shots ?? []).slice().sort((a, b) => a.orderIndex - b.orderIndex);
-  const waitingOn = sorted.filter((s) => s.storyboardStatus === "pending").length;
-  const over = overApprovalLimit(summary);
+  const statusLine =
+    counts.total === 0
+      ? "Every shot is left out. Edit a shot to bring it back."
+      : counts.approved === counts.total
+        ? `All ${plural(counts.total, "shot")} approved. Next, set the budget and start the render.`
+        : [
+            `${counts.approved} of ${counts.total} pictures approved.`,
+            counts.waiting > 0 ? `${plural(counts.waiting, "picture")} waiting for your OK.` : "",
+            counts.missing > 0 ? `${plural(counts.missing, "shot")} without a picture.` : "",
+          ]
+            .filter(Boolean)
+            .join(" ");
 
   return (
     <div style={card} data-testid="storyboard-panel">
-      <strong style={{ fontSize: 13 }}>Storyboard</strong>
-      <p style={{ fontSize: 12, color: "#868e96", margin: 0 }}>
-        Check a cheap picture of each shot first. The video is only made for shots you approve, so you don't pay for clips that look wrong.
-      </p>
-      {error && <div style={errorBox}>{error}</div>}
+      <div>
+        <strong style={{ fontSize: 14 }}>Step 2: Pictures</strong>
+        <p style={muted}>
+          Check a cheap picture of each shot first (about {dollars(costEach)} each). Video is only made for shots you approve, so you don't pay for clips that look wrong.
+        </p>
+      </div>
+
+      {props.settings}
+
+      {props.loadError && <div style={errorBox}>{props.loadError}</div>}
+      {actions.error && <div style={errorBox} role="alert">{actions.error}</div>}
+
+      {summary && sorted.length > 0 && (
+        <p style={{ fontSize: 13, margin: 0, fontWeight: 600 }} data-testid="storyboard-progress">
+          {statusLine}
+        </p>
+      )}
+      {summary && sorted.length === 0 && <p style={{ fontSize: 12, margin: 0 }}>Add a shot in step 1 to see its picture here.</p>}
+
+      {actions.bulk && <BulkProgressBar bulk={actions.bulk} onStop={actions.stop} />}
+
+      {confirming === "make" && !actions.bulk && (
+        <div style={noticeBox} data-testid="make-pictures-confirm">
+          <div>
+            This makes {plural(counts.missing, "picture")}, one after another, at about {dollars(costEach)} each: about <strong>{dollars(makeCost)}</strong> in all. You can stop at any time; pictures already made are kept.
+          </div>
+          <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+            <button
+              type="button"
+              style={{ ...baseBtn, background: "#1971c2", color: "#fff" }}
+              disabled={busy}
+              onClick={() => {
+                setConfirming(null);
+                unbreak(counts.missingIds);
+                void actions.makeMany(counts.missingIds);
+              }}
+            >
+              Make {plural(counts.missing, "picture")} (about {dollars(makeCost)})
+            </button>
+            <button type="button" style={ghostBtn} onClick={() => setConfirming(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {primary && !actions.bulk && confirming !== "make" && (
+        <div>
+          <button type="button" style={primaryBtn} data-testid={primary.testId} disabled={busy} onClick={primary.onClick}>
+            {primary.label}
+          </button>
+        </div>
+      )}
+
+      {props.editable && (counts.missing > 0 || counts.waiting > 0) && !actions.bulk && (
+        <div style={groupBox} data-testid="pictures-other-options">
+          <strong style={{ fontSize: 12 }}>Other options for all shots</strong>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {counts.waiting > 0 && counts.missing > 0 && (
+              <button type="button" style={approveBtn} disabled={busy} onClick={() => void actions.approveMany(counts.waitingIds)}>
+                Approve all {plural(counts.waiting, "picture")} made so far
+              </button>
+            )}
+            {counts.missing > 0 && (
+              <button type="button" style={ghostBtn} disabled={busy} onClick={() => setConfirming(confirming === "skip" ? null : "skip")}>
+                Skip pictures for all {plural(counts.missing, "remaining shot")}
+              </button>
+            )}
+          </div>
+          {confirming === "skip" && (
+            <div style={noticeBox} data-testid="skip-pictures-confirm">
+              <div>{SKIP_PICTURES_EXPLANATION}</div>
+              <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  style={{ ...baseBtn, background: "#495057", color: "#fff" }}
+                  disabled={busy}
+                  onClick={() => {
+                    setConfirming(null);
+                    void actions.skipMany(counts.missingIds);
+                  }}
+                >
+                  Skip pictures for {plural(counts.missing, "shot")}
+                </button>
+                <button type="button" style={ghostBtn} onClick={() => setConfirming(null)}>Cancel</button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {summary && (
-        <div data-testid="storyboard-costs" style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
+        <div data-testid="storyboard-costs" style={{ display: "flex", flexWrap: "wrap", gap: "2px 16px", fontSize: 12, color: "#495057" }}>
           <span>Pictures so far: {money(summary.stillTotalCents)}</span>
           <span>
             {summary.videoSpentCents > 0
@@ -201,33 +434,13 @@ export function StoryboardPanel(props: {
         </div>
       )}
 
-      {over && summary && !props.approvalPending && (
-        <div style={noticeBox} data-testid="storyboard-over-limit">
-          This video is expected to cost more than your approval limit of {money(summary.approvalThresholdCents)}. When you press Start render, a request will go to the owner and the video waits until it is approved.
-        </div>
-      )}
-      {props.approvalPending && (
-        <div style={noticeBox} data-testid="storyboard-approval-pending">
-          Waiting for the owner's go-ahead. This video costs more than your approval limit, so it will start once the owner approves the request.
-        </div>
-      )}
-
-      {summary && sorted.length === 0 && <p style={{ fontSize: 12, margin: 0 }}>Add a shot to see its picture here.</p>}
-      {summary && sorted.length > 0 && (
-        <p style={{ fontSize: 12, margin: 0 }} data-testid="storyboard-progress">
-          {waitingOn === 0
-            ? "Every shot is approved or left out. You can start the render."
-            : `${waitingOn} shot${waitingOn === 1 ? "" : "s"} still need${waitingOn === 1 ? "s" : ""} your OK before you can start the render.`}
-        </p>
-      )}
-
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 10 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(min(190px, 100%), 1fr))", gap: 10 }}>
         {sorted.map((shot) => {
           const text = textById.get(shot.id);
-          const status = STATUS_TEXT[shot.storyboardStatus];
+          const badge = pictureBadge(shot);
           const hasPicture = shot.stillObjectKey !== null && !brokenImages.has(shot.id);
           const cost = shot.stillActualCostCents ?? shot.stillEstimatedCostCents;
-          const busy = busyShotId === shot.id;
+          const tileBusy = actions.busyShotId === shot.id;
           const editing = editingId === shot.id;
           return (
             <div
@@ -235,12 +448,14 @@ export function StoryboardPanel(props: {
               data-testid={`storyboard-tile-${shot.id}`}
               style={{ border: "1px solid rgba(128,128,128,0.3)", borderRadius: 8, padding: 8, display: "flex", flexDirection: "column", gap: 6, opacity: shot.storyboardStatus === "dropped" ? 0.6 : 1 }}
             >
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6, fontSize: 12 }}>
                 <strong>Shot {shot.orderIndex + 1}</strong>
-                <span style={{ padding: "2px 8px", borderRadius: 10, fontSize: 11, fontWeight: 600, color: status.color, background: status.background }}>{status.label}</span>
+                <span style={{ padding: "2px 8px", borderRadius: 10, fontSize: 11, fontWeight: 600, color: badge.color, background: badge.background }}>{badge.label}</span>
               </div>
               <div style={{ aspectRatio: "16 / 9", borderRadius: 6, background: "rgba(128,128,128,0.12)", overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                {hasPicture ? (
+                {tileBusy && actions.bulk?.label === "Making picture" ? (
+                  <span style={{ fontSize: 11, color: "#868e96" }}>Making the picture...</span>
+                ) : hasPicture ? (
                   <img
                     loading="lazy"
                     alt={`Picture for shot ${shot.orderIndex + 1}`}
@@ -250,10 +465,46 @@ export function StoryboardPanel(props: {
                   />
                 ) : (
                   <span style={{ fontSize: 11, color: "#868e96", padding: 6, textAlign: "center" }}>
-                    {shot.stillObjectKey ? "Picture could not be shown" : shot.storyboardStatus === "dropped" ? "Left out of the video" : "No picture yet"}
+                    {shot.stillObjectKey
+                      ? "Picture could not be shown"
+                      : shot.storyboardStatus === "dropped"
+                        ? "Left out of the video"
+                        : shot.storyboardStatus === "approved"
+                          ? "No picture: starts from the previous clip"
+                          : "No picture yet"}
                   </span>
                 )}
               </div>
+              {(props.shotCast?.[shot.id]?.length ?? 0) > 0 && (
+                <div style={{ fontSize: 11, color: "#868e96" }} data-testid={`shot-cast-${shot.id}`}>
+                  In this shot: {props.shotCast![shot.id]!.join(", ")}
+                </div>
+              )}
+              {(actions.pictureNotes[shot.id]?.length ?? 0) > 0 && (
+                <ul style={{ margin: 0, paddingLeft: 16, fontSize: 11, color: "#b45309" }} data-testid={`picture-notes-${shot.id}`}>
+                  {actions.pictureNotes[shot.id]!.map((note, i) => (
+                    <li key={i}>{note}</li>
+                  ))}
+                </ul>
+              )}
+              {props.editable && text && !editing && shot.storyboardStatus !== "dropped" && (props.looks?.length ?? 0) > 0 && props.onShotLook && (
+                <label style={{ fontSize: 11, color: "#868e96", display: "flex", flexDirection: "column", gap: 2 }}>
+                  Look for this picture
+                  <select
+                    style={{ ...input, padding: 4, fontSize: 12 }}
+                    aria-label={`Look for shot ${shot.orderIndex + 1}'s picture`}
+                    value={text.pictureLookId ?? ""}
+                    disabled={busy}
+                    onChange={(e) => props.onShotLook!(shot.id, e.target.value === "" ? null : e.target.value)}
+                  >
+                    <option value="">Same as the storyline{props.storylineLookName ? ` (${props.storylineLookName})` : " (no look)"}</option>
+                    <option value="none">No look for this shot</option>
+                    {props.looks!.map((l) => (
+                      <option key={l.id} value={l.id}>{l.name}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
               {text && !editing && <div style={{ fontSize: 12 }}>{text.prompt}{text.cameraNotes ? <span style={{ color: "#868e96" }}> · {text.cameraNotes}</span> : null}</div>}
               <div style={{ fontSize: 11, color: "#868e96" }}>
                 {shot.storyboardStatus === "dropped" ? "Not charged" : cost !== null ? `Picture cost: ${money(cost)}` : "Picture not made yet"}
@@ -265,28 +516,52 @@ export function StoryboardPanel(props: {
                   <input style={input} aria-label="Camera notes" placeholder="Camera notes (optional)" value={editCamera} onChange={(e) => setEditCamera(e.target.value)} />
                   <p style={{ fontSize: 11, color: "#868e96", margin: 0 }}>Saving clears the current picture and approval. You'll make a new picture and approve it again.</p>
                   <div style={{ display: "flex", gap: 6 }}>
-                    <button type="button" style={primaryBtn} disabled={busy || !editPrompt.trim()} onClick={() => void saveEdit(shot.id)}>Save changes</button>
-                    <button type="button" style={ghostBtn} disabled={busy} onClick={() => setEditingId(null)}>Cancel</button>
+                    <button
+                      type="button"
+                      style={{ ...baseBtn, background: "#1971c2", color: "#fff" }}
+                      disabled={tileBusy || !editPrompt.trim()}
+                      onClick={async () => {
+                        if (await actions.saveText(shot.id, editPrompt.trim(), editCamera.trim() || null)) setEditingId(null);
+                      }}
+                    >
+                      Save changes
+                    </button>
+                    <button type="button" style={ghostBtn} disabled={tileBusy} onClick={() => setEditingId(null)}>Cancel</button>
                   </div>
                 </div>
               ) : (
                 props.editable && (
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                    {shot.storyboardStatus === "pending" && shot.stillObjectKey && (
+                      <button type="button" style={approveBtn} disabled={busy} onClick={() => void actions.approve(shot.id)}>Approve picture</button>
+                    )}
                     {shot.storyboardStatus !== "dropped" && (
-                      <button type="button" style={secondaryBtn} disabled={busy} onClick={() => void makePicture(shot.id)}>
-                        {shot.stillObjectKey ? "Make a new picture" : "Make picture"}
+                      <button
+                        type="button"
+                        style={secondaryBtn}
+                        disabled={busy}
+                        onClick={() => {
+                          unbreak([shot.id]);
+                          void actions.makePicture(shot.id);
+                        }}
+                      >
+                        {shot.stillObjectKey ? "Remake picture" : "Make picture"}
                       </button>
                     )}
-                    {shot.storyboardStatus === "pending" && shot.stillObjectKey && (
-                      <button type="button" style={approveBtn} disabled={busy} onClick={() => void approve(shot.id)}>Approve</button>
+                    {shot.storyboardStatus === "pending" && !shot.stillObjectKey && (
+                      <button type="button" style={ghostBtn} disabled={busy} title={SKIP_PICTURES_EXPLANATION} onClick={() => void actions.approveWithoutPicture(shot.id)}>
+                        Approve without picture
+                      </button>
                     )}
                     {text && (
                       <button type="button" style={ghostBtn} disabled={busy} onClick={() => startEdit(text)}>
-                        {shot.storyboardStatus === "dropped" ? "Edit to bring back" : "Edit"}
+                        {shot.storyboardStatus === "dropped" ? "Edit to bring back" : "Edit text"}
                       </button>
                     )}
                     {shot.storyboardStatus !== "dropped" && (
-                      <button type="button" style={ghostBtn} disabled={busy} onClick={() => void leaveOut(shot.id)}>Leave out</button>
+                      <button type="button" style={ghostBtn} disabled={busy} title="Leave this shot out of the film. Nothing is charged for it." onClick={() => void actions.drop(shot.id)}>
+                        Drop shot
+                      </button>
                     )}
                   </div>
                 )

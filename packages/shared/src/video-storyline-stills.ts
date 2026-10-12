@@ -66,7 +66,17 @@ export function estimateStoryboardCostCents(
 export const generateStoryboardStillSchema = z.object({}).strict();
 export type GenerateStoryboardStillInput = z.infer<typeof generateStoryboardStillSchema>;
 
-export const approveStoryboardShotSchema = z.object({}).strict();
+export const approveStoryboardShotSchema = z
+  .object({
+    /**
+     * true = approve the shot on its written description alone, without a
+     * storyboard picture -- for when no picture can be made (no Fal.ai key)
+     * or the person simply does not want to pay for one. Still an explicit
+     * human OK before the paid video render.
+     */
+    withoutStill: z.boolean().optional(),
+  })
+  .strict();
 export type ApproveStoryboardShotInput = z.infer<typeof approveStoryboardShotSchema>;
 
 export const dropStoryboardShotSchema = z.object({}).strict();
@@ -92,6 +102,8 @@ export interface VideoStoryboardShotSummary {
   stillGeneratedAt: string | null;
   stillEstimatedCostCents: number | null;
   stillActualCostCents: number | null;
+  /** Only right after a picture is made: plain notes about how the cast's saved people were used (pictures left out, LoRA not used, ...). */
+  notes?: string[];
 }
 
 export interface VideoStoryboardSummary {
@@ -107,4 +119,8 @@ export interface VideoStoryboardSummary {
   videoSpentCents: number;
   /** The company's configured kind:"video_render" approval threshold, or null if not configured (that extra gate is off). */
   approvalThresholdCents: number | null;
+  /** Which picture services have an API key set up, so the editor only offers those. */
+  pictureServices: { fal: boolean; sogni: boolean };
+  /** What the next storyboard picture is made with, after defaults: service, model (null = the service's default) and look. */
+  picture: { providerId: VideoStorylineProvider; model: string | null; lookId: string | null; costPerPictureCents: number };
 }

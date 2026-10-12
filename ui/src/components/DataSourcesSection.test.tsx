@@ -444,7 +444,7 @@ describe("DataSourcesSection", () => {
     expect(labels).toEqual([
       "Shopify",
       "WooCommerce (coming soon)",
-      "Fiken (coming soon)",
+      "Fiken",
       "FTP server",
       "FTPS server (encrypted)",
       "SFTP server (encrypted)",
@@ -485,25 +485,25 @@ describe("DataSourcesSection", () => {
       connection(),
       connection({
         id: "66666666-6666-4666-8666-666666666666",
-        kind: "fiken",
-        kindLabel: "Fiken",
+        kind: "woocommerce",
+        kindLabel: "WooCommerce",
         supported: false,
-        name: "Regnskapet",
-        target: "fiken-demo-firma-as",
+        name: "Nettbutikken",
+        target: "butikken.no",
         shopDomain: null,
         apiVersion: null,
-        config: { kind: "fiken", companySlug: "fiken-demo-firma-as" },
-        credentialKind: "api_token",
+        config: { kind: "woocommerce", storeUrl: "https://butikken.no" },
+        credentialKind: "consumer_key_secret",
         credentialHint: "••••zz99",
         status: "draft",
         observed: null,
-        datasetsOffered: ["finance"],
+        datasetsOffered: ["sales"],
       }),
     ]);
     const root = await render();
     const pending = container.querySelector('[data-testid="data-connection-pending"]')!;
-    expect(pending.textContent).toContain("Regnskapet – fiken-demo-firma-as");
-    expect(pending.textContent).toContain("Fiken · Key ••••zz99");
+    expect(pending.textContent).toContain("Nettbutikken – butikken.no");
+    expect(pending.textContent).toContain("WooCommerce · Key ••••zz99");
     expect(pending.textContent).toContain("Coming soon – saved, not connected yet.");
     const pendingButtons = Array.from(pending.querySelectorAll("button")).map((element) => element.textContent?.trim());
     expect(pendingButtons).toEqual(["Remove"]);

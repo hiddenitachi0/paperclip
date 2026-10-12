@@ -42,6 +42,14 @@ import {
   type LaneABackupModelConfig,
   type LaneAKeywordRoute,
   type ModelDirectoryEntry,
+  modelPickerOptionText,
+  modelPickerReadiness,
+  modelReadiness,
+  modelReadinessSummary,
+  type ModelLastCheck,
+  type ModelReadinessContext,
+  type ModelSetupForReadiness,
+  readLaneAPictureModelId,
 } from "@paperclipai/shared";
 import { AlertCircle, CheckCircle2, Circle, Loader2 } from "lucide-react";
 import { Link } from "@/lib/router";
@@ -83,7 +91,18 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleSwitch } from "@/components/ui/toggle-switch";
 import { SecretBindingPicker, type SecretBindingValue } from "./SecretBindingPicker";
-import { QuickAgentBackupModels } from "./QuickAgentBackupModels";
+import { QuickAgentBackupModels, type BackupReadiness } from "./QuickAgentBackupModels";
+import {
+  ModelPickerNotice,
+  ReadinessLines,
+  RefreshStatusButton,
+  SetupCheck,
+  healthReading,
+  lastCheckFromResult,
+  setupFromEntry,
+  useModelReadinessSources,
+} from "./ModelReadiness";
+import { backupKeyState, mainModelKeyState, type AgentKeys } from "../lib/quick-agent-key-state";
 import { SettingsSection, SettingsSubsection } from "./SettingsSection";
 import { useHelperApplyTarget } from "../lib/helper-apply";
 
@@ -286,8 +305,6 @@ export function QuickAgentSection({
     enabled: Boolean(effectiveCompanyId),
   });
   const savedModels = modelDirectoryQuery.data ?? [];
-  // "Meta · Llama 3.2" > "3B · Local (llama3.2:latest)", so two setups of one model can be told apart.
-  const savedModelGroups = useMemo(() => pickerGroups(savedModels), [savedModels]);
   const applySavedModel = (entryId: string) => {
     const entry = savedModels.find((candidate) => candidate.id === entryId);
     if (entry) settingMutation.mutate(patchFromDirectoryEntry(entry));
@@ -373,6 +390,19 @@ export function QuickAgentSection({
   const saveWebSearch = (next: boolean) =>
     settingMutation.mutate({ adapterConfig: { laneA: { ...currentLaneA, webSearch: next } } });
 
+  // "Use this model for picture requests": a saved model that answers the
+  // messages with a photo, about a photo just sent, or asking for a picture.
+  const pictureModelId = readLaneAPictureModelId(agent.adapterConfig);
+  const pictureModel = pictureModelId ? (savedModels.find((entry) => entry.id === pictureModelId) ?? null) : null;
+  const pictureModelChoices = savedModels.filter((entry) => !entry.archivedAt || entry.id === pictureModelId);
+  const savePictureModel = (next: string | null) =>
+    settingMutation.mutate({ adapterConfig: { laneA: { ...currentLaneA, pictureModelId: next } } });
+  const pictureModelSummary = pictureModelId
+    ? pictureModel
+      ? pictureModel.name
+      : "A saved model that is no longer in the list"
+    : "Its own model";
+
   // "Browser access": off unless raised here. Board-only, same as webSearch.
   const browserAccess = readLaneABrowserAccess(agent.adapterConfig);
   const saveBrowserAccess = (next: BrowserAccessLevel) =>
@@ -398,7 +428,7 @@ export function QuickAgentSection({
   // Paperclip's own key is only readable by an instance admin (the route is
   // assertInstanceAdmin), so it is only asked for as one; everyone else gets
   // "cannot see, assume it is there".
-  const { isInstanceAdmin } = useCompanyRole(effectiveCompanyId);
+  const { isInstanceAdmin, canManageConnections } = useCompanyRole(effectiveCompanyId);
   const instanceKeyQuery = useQuery({
     queryKey: queryKeys.instance.serverAnthropicKey,
     queryFn: () => instanceServerAnthropicKeyApi.get(),
@@ -501,6 +531,102 @@ export function QuickAgentSection({
   // allowed, so a key that stops working can never trap an agent in the "on"
   // state.
   const cannotSwitchOn = !savedEnabled && readinessBlocksSwitchOn(modelLine.state);
+
+  // ─── Model readiness: per-option status, the checklist, "Check this setup" ──
+  const readinessSources = useModelReadinessSources(effectiveCompanyId, Boolean(effectiveCompanyId));
+  const [lastChecks, setLastChecks] = useState<Record<string, ModelLastCheck>>({});
+  const agentKeys: AgentKeys = useMemo(
+    () => ({
+      main: { provider, baseUrl: agent.laneABaseUrl ?? null },
+      hasMainKey: Boolean(keyBinding) && !(secretsQuery.isSuccess && !boundSecret),
+      providerKeys: backupProviderKeys,
+      stashedBaseUrls,
+      instanceClaudeKey: isInstanceAdmin && instanceKeyQuery.data ? instanceKeyQuery.data.configured : null,
+    }),
+    [provider, agent.laneABaseUrl, keyBinding, secretsQuery.isSuccess, boundSecret, backupProviderKeys, stashedBaseUrls, isInstanceAdmin, instanceKeyQuery.data],
+  );
+  const readinessBase: ModelReadinessContext = {
+    companyLocalBaseUrl: readinessSources.settings?.localBaseUrl ?? null,
+    gpuVramGb: readinessSources.settings?.localGpuVramGb ?? null,
+    blockedHosts: readinessSources.settings?.openrouterBlockedHosts ?? [],
+  };
+  const sameLocalAddress = (a: string | null | undefined, b: string | null | undefined) =>
+    (a ?? "").trim().toLowerCase().replace(/\/+$/, "").replace(/\/v1$/, "") ===
+    (b ?? "").trim().toLowerCase().replace(/\/+$/, "").replace(/\/v1$/, "");
+  /** The saved model that is the very same model as a typed-in setup, so its readings can be shown. */
+  const savedTwin = (setup: { provider: string; model: string; baseUrl?: string | null }) =>
+    savedModels.find(
+      (entry) =>
+        normalizeLaneAProvider(entry.provider) === normalizeLaneAProvider(setup.provider) &&
+        entry.model === setup.model &&
+        (normalizeLaneAProvider(setup.provider) !== "local" || sameLocalAddress(entry.baseUrl, setup.baseUrl)),
+    );
+  const entryHealth = (entryId: string | null | undefined) =>
+    entryId ? healthReading(readinessSources.healthByEntryId.get(entryId)) : null;
+  /** Readiness of a saved model as this agent's main model (its key, the last model-server reading). */
+  const mainPickerReadiness = (entryId: string) => {
+    const entry = savedModels.find((candidate) => candidate.id === entryId);
+    if (!entry) return null;
+    return modelPickerReadiness(setupFromEntry(entry), {
+      ...readinessBase,
+      key: mainModelKeyState(entry.provider, agentKeys),
+      health: entryHealth(entry.id),
+    });
+  };
+  // "Meta · Llama 3.2" > "✅ Ready · 3B · Local — installed (llama3.2:latest)": ready ones first,
+  // and two setups of one model can be told apart.
+  const savedModelGroups = pickerGroups(savedModels, undefined, (entry) => mainPickerReadiness(entry.id));
+  const currentModelId = agent.laneAModel ?? providerDescriptor.defaultModel ?? "";
+  const currentTwin = savedTwin({ provider, model: currentModelId, baseUrl: agent.laneABaseUrl ?? null });
+  const currentSetup: ModelSetupForReadiness = {
+    ...(currentTwin ? setupFromEntry(currentTwin) : {}),
+    provider,
+    model: currentModelId,
+    baseUrl: agent.laneABaseUrl ?? null,
+    providerRouting: agent.laneAProviderRouting ?? null,
+    thinking: agent.laneAThinking ?? null,
+    temperature: agent.laneATemperature ?? null,
+    archived: false,
+  };
+  const currentContext: ModelReadinessContext = {
+    ...readinessBase,
+    key: mainModelKeyState(provider, agentKeys),
+    health: entryHealth(currentTwin?.id) ?? healthReading(readinessSources.healthByAgentId.get(agent.id)),
+    lastCheck: lastChecks.main ?? null,
+  };
+  const currentReadiness = modelPickerReadiness(currentSetup, currentContext);
+  const currentLines = modelReadiness(currentSetup, currentContext);
+  const currentSummary = modelReadinessSummary(currentLines);
+  const localAddresses = Array.from(
+    new Set(
+      [
+        provider === "local" ? agent.laneABaseUrl : null,
+        readinessSources.settings?.localBaseUrl,
+        ...savedModels.filter((entry) => entry.provider === "local").map((entry) => entry.baseUrl),
+        ...(agent.laneABackupModels ?? []).filter((backup) => backup.provider === "local").map((backup) => backup.baseUrl),
+      ].filter((value): value is string => typeof value === "string" && value.trim() !== ""),
+    ),
+  );
+  const backupReadiness: BackupReadiness = {
+    agentId: agent.id,
+    companyId: effectiveCompanyId,
+    canCheck: canManageConnections,
+    optionReadiness: (entry) =>
+      modelPickerReadiness(setupFromEntry(entry), {
+        ...readinessBase,
+        key: backupKeyState(entry, agentKeys),
+        health: entryHealth(entry.id),
+      }),
+    lines: (setup, linkedEntryId, lastCheck) => {
+      const twin = linkedEntryId ? savedModels.find((entry) => entry.id === linkedEntryId) : savedTwin(setup);
+      return modelReadiness(
+        { ...(twin ? setupFromEntry(twin) : {}), ...setup, archived: twin ? Boolean(twin.archivedAt) : false },
+        { ...readinessBase, key: backupKeyState(setup, agentKeys), health: entryHealth(twin?.id), lastCheck },
+      );
+    },
+    refresh: readinessSources.refresh,
+    localAddresses,
+  };
 
   // ─── Short read-outs shown beside a group's heading while it is folded ──
   const modelText = agent.laneAModel
@@ -625,13 +751,17 @@ export function QuickAgentSection({
                 <optgroup key={group.key} label={group.label}>
                   {group.options.map((option) => (
                     <option key={option.id} value={option.id}>
-                      {option.label}
+                      {modelPickerOptionText(option.label, option.readiness)}
                     </option>
                   ))}
                 </optgroup>
               ))}
             </select>
+            <ModelPickerNotice readiness={currentReadiness} showWhenReady prefix="The model it uses now:" testId="quick-agent-current-model-status" />
             <span className="block text-xs text-muted-foreground">
+              Each saved model starts with whether it is ready for this agent (ready ones are listed first): for a model
+              on your own model server, whether the last check found it installed there; for a hosted one, whether this
+              agent has the key it needs.{" "}
               Picking a saved model fills the fields below and clears the ones that don't apply to it.{" "}
               <Link to="/company/settings/models" className="underline">
                 Manage saved models
@@ -779,6 +909,32 @@ export function QuickAgentSection({
           disabled={settingMutation.isPending}
           onSave={(next) => settingMutation.mutate({ laneAMaxOutputTokens: next })}
         />
+
+        <div className="space-y-2 rounded-md border border-border p-3" data-testid="quick-agent-model-readiness">
+          <p className="text-xs font-medium">
+            Is it ready? <span className="font-normal text-muted-foreground">{currentSummary.label}</span>
+          </p>
+          {!savedModels.length && (
+            <ModelPickerNotice readiness={currentReadiness} showWhenReady prefix="The model it uses now:" testId="quick-agent-current-model-status" />
+          )}
+          <ReadinessLines lines={currentLines} testId="quick-agent-model-checklist" />
+          <div className="flex flex-wrap items-start gap-2">
+            <RefreshStatusButton
+              addresses={localAddresses}
+              refresh={readinessSources.refresh}
+              disabled={!canManageConnections}
+              testId="quick-agent-refresh-status"
+            />
+          </div>
+          <SetupCheck
+            agentId={agent.id}
+            companyId={effectiveCompanyId}
+            target="main"
+            canCheck={canManageConnections}
+            onResult={(result) => setLastChecks((current) => ({ ...current, main: lastCheckFromResult(result) }))}
+            testId="quick-agent-check-main"
+          />
+        </div>
       </SettingsSubsection>
 
       {/* 3. Other models to fall back on. Open by default only when there are some. */}
@@ -812,9 +968,65 @@ export function QuickAgentSection({
             />
           )}
           savedModels={modelDirectoryQuery.isSuccess ? savedModels : undefined}
+          readiness={backupReadiness}
           saving={settingMutation.isPending}
           onSave={(patch) => settingMutation.mutateAsync(patch)}
         />
+      </SettingsSubsection>
+
+      {/* 3b. A stronger model only for messages that involve pictures. */}
+      <SettingsSubsection
+        title="Use this model for picture requests"
+        summary={pictureModelSummary}
+        defaultOpen={Boolean(pictureModelId)}
+        storageKey="agent.quickAgent.pictureModel"
+        data-testid="quick-agent-picture-model-group"
+      >
+        <div className="space-y-2">
+          <p className="text-xs text-muted-foreground">
+            When someone sends this quick agent a photo, talks about a photo they just sent, or asks it for a picture,
+            that message is answered by the model you pick here instead of its own. Pick one that is good at using
+            tools (and can see pictures, if you want it to look at the photo). This helps when its own model is a
+            small model on your own computer that sometimes says it made a picture without making one. All other
+            messages stay on its own model. A model from another provider uses that provider's key, the same as a
+            backup model.
+          </p>
+          <label className="block space-y-1">
+            <span className="text-xs text-muted-foreground">Model for picture requests</span>
+            <select
+              className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
+              value={pictureModelId ?? ""}
+              disabled={settingMutation.isPending || !modelDirectoryQuery.isSuccess}
+              aria-label="Model for picture requests"
+              data-testid="quick-agent-picture-model"
+              onChange={(event) => savePictureModel(event.target.value || null)}
+            >
+              <option value="">Its own model (no change)</option>
+              {pictureModelId && !pictureModel && (
+                <option value={pictureModelId}>A saved model that is no longer in the list</option>
+              )}
+              {pictureModelChoices.map((entry) => (
+                <option key={entry.id} value={entry.id}>
+                  {entry.name} ({LANE_A_PROVIDER_CATALOGUE[normalizeLaneAProvider(entry.provider)].label}: {entry.model})
+                </option>
+              ))}
+            </select>
+          </label>
+          {modelDirectoryQuery.isSuccess && savedModels.length === 0 && (
+            <p className="text-xs text-muted-foreground">
+              There are no saved models yet.{" "}
+              <Link to="/company/settings/models" className="underline">
+                Save one under Settings → Models
+              </Link>{" "}
+              first.
+            </p>
+          )}
+          {pictureModelId && !pictureModel && modelDirectoryQuery.isSuccess && (
+            <p className="text-xs text-amber-600 dark:text-amber-400">
+              The saved model picked here was removed, so picture messages use its own model. Pick another one.
+            </p>
+          )}
+        </div>
       </SettingsSubsection>
 
       {/* 4. Who it is and what it does, in plain words. */}

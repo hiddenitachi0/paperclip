@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { validateAdapterModelEffort } from "../model-effort.js";
+import { ISSUE_SIZE_LABELS, type IssueSizeLabel } from "../issue-progress.js";
 import {
   ISSUE_EXECUTION_DECISION_OUTCOMES,
   ISSUE_EXECUTION_MONITOR_CLEAR_REASONS,
@@ -139,6 +140,12 @@ export const issueAssigneeAdapterOverridesSchema = z
     // document; once the plan is accepted the server clears this flag so the
     // following fresh-session run falls back to the normal/cheap model.
     planFirstOnOpus: z.boolean().optional(),
+    // Sub-task flow-down marker (see deriveChildModelEffortInheritance). Accepted
+    // so a client echoing the stored value back is not refused.
+    inheritedFrom: z
+      .object({ issueId: z.string().uuid(), identifier: z.string().nullable().optional() })
+      .strict()
+      .optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -249,6 +256,10 @@ export const issueExecutionPolicySchema = z.object({
   authorizationPolicy: trustAuthorizationPolicySchema.optional(),
   // Opt-out for the automatic self-review pass gate (default on for code issues). See DUR-22.
   selfReview: z.boolean().optional(),
+  // Per-task override of the company's quality-loop settings (quality-loops.ts):
+  // how many self-check passes (0-3) and whether the independent finish check runs.
+  selfReviewPasses: z.number().int().min(0).max(3).optional(),
+  doneCheck: z.boolean().optional(),
 });
 
 export const issueExecutionMonitorStateSchema = z.object({
@@ -443,6 +454,7 @@ const createIssueBaseSchema = z.object({
   assigneeUserId: z.string().optional().nullable(),
   requestDepth: issueRequestDepthInputSchema.optional().default(0),
   billingCode: z.string().optional().nullable(),
+  sizeLabel: z.enum(ISSUE_SIZE_LABELS as [IssueSizeLabel, ...IssueSizeLabel[]]).optional().nullable(),
   changeLogVisible: z.boolean().optional(),
   changeLogSummary: multilineTextSchema.pipe(z.string().trim().min(1).max(500)).optional().nullable(),
   // DUR-313: marks an issue as a user-facing feature launch (DUR-299 point 2) --

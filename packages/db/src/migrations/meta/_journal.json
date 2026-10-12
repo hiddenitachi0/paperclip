@@ -1667,6 +1667,83 @@
       "when": 1791480000000,
       "tag": "0238_company_helper_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 239,
+      "version": "7",
+      "when": 1791496613928,
+      "tag": "0239_storyline_picture_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 240,
+      "version": "7",
+      "when": 1791551473173,
+      "tag": "0240_report_scripts",
+      "breakpoints": true
+    },
+    {
+      "idx": 241,
+      "version": "7",
+      "when": 1791555706546,
+      "tag": "0241_report_templates",
+      "breakpoints": true
+    },
+    {
+      "idx": 242,
+      "version": "7",
+      "when": 1791583071889,
+      "tag": "0242_helper_investigation_limits",
+      "breakpoints": true
+    },
+    {
+      "idx": 243,
+      "version": "7",
+      "when": 1791655438727,
+      "tag": "0243_telegram_two_way_chat",
+      "breakpoints": true
+    },
+    {
+      "idx": 244,
+      "version": "7",
+      "when": 1791657999490,
+      "tag": "0244_storyline_transitions",
+      "breakpoints": true
+    },
+    {
+      "idx": 245,
+      "version": "7",
+      "when": 1791658809381,
+      "tag": "0245_subtasks_inherit_model_effort",
+      "breakpoints": true
+    },
+    {
+      "idx": 246,
+      "version": "7",
+      "when": 1791677123916,
+      "tag": "0246_report_data_fetch",
+      "breakpoints": true
+    },
+    {
+      "idx": 247,
+      "version": "7",
+      "when": 1791677879168,
+      "tag": "0247_company_quality_loop_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 248,
+      "version": "7",
+      "when": 1791678861143,
+      "tag": "0248_company_migrated_to",
+      "breakpoints": true
+    },
+    {
+      "idx": 249,
+      "version": "7",
+      "when": 1791685082915,
+      "tag": "0249_storyline_clips_music_export",
+      "breakpoints": true
     }
   ]
 }

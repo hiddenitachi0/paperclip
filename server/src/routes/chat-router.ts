@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Router } from "express";
 import { z } from "zod";
 import type { Db } from "@paperclipai/db";
-import { formatAgentDisplayName } from "@paperclipai/shared";
+import { CHAT_ATTACHMENTS_MAX, formatAgentDisplayName } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { forbidden } from "../errors.js";
 import { redactKnownLeakedSecretPatterns, redactSensitiveText } from "../redaction.js";
@@ -45,6 +45,10 @@ const chatRouteMessageSchema = z.object({
   context: z.string().max(16_000).optional(),
   conversationId: z.string().uuid().optional(),
   laneHint: z.enum(["a", "b"]).optional(),
+  // Pictures sent with the message (a Telegram photo the bridge stored in
+  // the company's Files first). Lane A checks each is a picture in this
+  // company; a task gets their file ids in its description.
+  attachmentFileIds: z.array(z.string().uuid()).min(1).max(CHAT_ATTACHMENTS_MAX).optional(),
 }).strict();
 
 // DUR-251/DUR-335: request body for the secretary classifier step Simple
@@ -65,9 +69,15 @@ export function classifyLane(input: {
   laneHint?: "a" | "b";
   /** Whether the addressed agent has quick answers switched on. */
   laneAEnabled?: boolean;
+  /** The message came with pictures. */
+  hasAttachments?: boolean;
 }): "a" | "b" {
   if (input.laneHint === "a" && input.message.length <= LANE_A_MESSAGE_MAX_LENGTH) return "a";
   if (input.laneHint === "b") return "b";
+  // A picture to change ("alter this image ...") is the quick agent's picture
+  // tool's job; words like "make" or "create" in its caption must not turn it
+  // into a full task.
+  if (input.hasAttachments && input.laneAEnabled !== false && input.message.length <= LANE_A_MESSAGE_MAX_LENGTH) return "a";
   // DUR-3978: without an explicit hint the router is guessing, and it must not
   // guess a lane the addressed agent cannot serve. Before this, a short
   // question to an agent without quick answers was sent to Lane A and refused
@@ -126,12 +136,13 @@ export function chatRouterRoutes(db: Db, options: { laneA?: LaneAServiceOptions 
 
   router.post("/chat/:agentId/messages", validate(chatRouteMessageSchema), async (req, res) => {
     const targetAgentId = req.params.agentId as string;
-    const { companyId, message, context, conversationId, laneHint } = req.body as {
+    const { companyId, message, context, conversationId, laneHint, attachmentFileIds } = req.body as {
       companyId: string;
       message: string;
       context?: string;
       conversationId?: string;
       laneHint?: "a" | "b";
+      attachmentFileIds?: string[];
     };
 
     assertCompanyAccess(req, companyId);
@@ -143,7 +154,12 @@ export function chatRouterRoutes(db: Db, options: { laneA?: LaneAServiceOptions 
     }
 
     const actor = getActorInfo(req);
-    const lane = classifyLane({ message, laneHint, laneAEnabled: targetAgent.laneAEnabled });
+    const lane = classifyLane({
+      message,
+      laneHint,
+      laneAEnabled: targetAgent.laneAEnabled,
+      hasAttachments: Boolean(attachmentFileIds?.length),
+    });
 
     if (lane === "a") {
       const requester = actor.actorType === "agent"
@@ -187,6 +203,7 @@ export function chatRouterRoutes(db: Db, options: { laneA?: LaneAServiceOptions 
         message,
         context,
         conversationId,
+        ...(attachmentFileIds?.length ? { attachmentFileIds } : {}),
       });
 
       // DUR-3978: a quick answer can now leave Paperclip (the Telegram bridge
@@ -222,7 +239,7 @@ export function chatRouterRoutes(db: Db, options: { laneA?: LaneAServiceOptions 
     // how to deliver it" notes a quick agent's own hand-over writes, worded
     // as "if this is a research request" since the kind is only guessed.
     const researchKind = targetAgent.laneAEnabled ? inferResearchKind(message) : null;
-    const description = researchKind
+    const briefText = researchKind
       ? buildResearchTaskDescription({
           kind: researchKind,
           brief: message,
@@ -231,6 +248,17 @@ export function chatRouterRoutes(db: Db, options: { laneA?: LaneAServiceOptions 
           guessed: true,
         })
       : message;
+    for (const fileId of attachmentFileIds ?? []) {
+      // Another company's file reads exactly like a missing one.
+      const file = await issues.getAttachmentById(fileId);
+      if (!file || file.companyId !== companyId) {
+        res.status(422).json({ error: "An attached picture is not in this company's Files. Send it again." });
+        return;
+      }
+    }
+    const description = attachmentFileIds?.length
+      ? `${briefText}\n\n---\nThe person sent ${attachmentFileIds.length === 1 ? "a picture" : `${attachmentFileIds.length} pictures`} with this message, saved in the company's Files: ${attachmentFileIds.map((id) => `file id ${id}`).join(", ")}.`
+      : briefText;
 
     const issue = await issues.create(companyId, {
       id: randomUUID(),

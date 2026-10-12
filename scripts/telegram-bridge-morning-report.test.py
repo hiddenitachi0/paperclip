@@ -109,7 +109,8 @@ class MorningReportTests(unittest.TestCase):
         self.state = {"bots": {MAJA_BOT["token"]: {"offset": 0, "chats": [OPERATOR, STRANGER]},
                                BOSS_BOT["token"]: {"offset": 0, "chats": [OPERATOR]}},
                       "notified": []}
-        bridge.ALLOWED_USER_IDS = {OPERATOR}
+        # Per bot now (no instance-wide list): every test bot keeps these people.
+        bridge.legacy_allowed = lambda token: {OPERATOR}
         self.outbox = {COMPANY: [report()]}
         self.acks = []
         self.pictures = {WEATHER_FILE: picture(), MOOD_FILE: picture()}

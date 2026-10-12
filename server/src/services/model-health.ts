@@ -1,6 +1,6 @@
 import { and, eq, isNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, localModelHealth, modelDirectoryEntries } from "@paperclipai/db";
+import { agents, localModelHealth, modelDirectoryEntries, modelDirectorySettings } from "@paperclipai/db";
 import {
   MODEL_TEST_PROMPT,
   laneAModelAcceptsReasoningEffort,
@@ -16,6 +16,7 @@ import {
 } from "@paperclipai/shared";
 import { notFound } from "../errors.js";
 import { createModelSetupProbes } from "./model-setup-probes.js";
+import { localAddressKey } from "./model-directory.js";
 
 /**
  * DUR-4419: local-model health, the once-per-outage reminder state, and the
@@ -26,6 +27,9 @@ import { createModelSetupProbes } from "./model-setup-probes.js";
 
 export const MODEL_HEALTH_PROBE_TIMEOUT_MS = 5_000;
 export const MODEL_TEST_TIMEOUT_MS = 60_000;
+/** Response-size caps: a host at the configured address is not trusted to send a bounded body. */
+export const MODEL_TAGS_MAX_BYTES = 1_048_576;
+export const MODEL_TEST_MAX_BYTES = 65_536;
 /** How long the local model server must have been unreachable before the evening warning goes out. */
 export const MODEL_OUTAGE_WARN_AFTER_MS = 60 * 60_000;
 /** One evening warning per outage, and never twice within this window. */
@@ -51,6 +55,30 @@ function modelListed(wanted: string, listed: string[]): boolean {
   return listed.some((name) => norm(name) === target);
 }
 
+class BodyTooLargeError extends Error {}
+
+const isRedirect = (res: Response) => res.status >= 300 && res.status < 400;
+
+/** Reads at most maxBytes of the body; cancels the stream and throws if there is more. */
+async function readCappedText(res: Response, maxBytes: number): Promise<string> {
+  if (!res.body) return "";
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let text = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      throw new BodyTooLargeError();
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  return text + decoder.decode();
+}
+
 export type ProbeResult = { status: ModelHealthStatus; detail: string | null };
 
 export async function probeLocalModel(
@@ -61,14 +89,15 @@ export async function probeLocalModel(
 ): Promise<ProbeResult> {
   let res: Response;
   try {
-    res = await fetchImpl(`${ollamaRoot(baseUrl)}/api/tags`, { signal: AbortSignal.timeout(timeoutMs) });
+    res = await fetchImpl(`${ollamaRoot(baseUrl)}/api/tags`, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
   } catch (err) {
     return { status: "unreachable", detail: err instanceof Error ? err.message : String(err) };
   }
+  if (isRedirect(res)) return { status: "unreachable", detail: "The address tried to redirect elsewhere, which is not followed." };
   if (!res.ok) return { status: "unreachable", detail: `The address answered with HTTP ${res.status}.` };
   let body: unknown;
   try {
-    body = await res.json();
+    body = JSON.parse(await readCappedText(res, MODEL_TAGS_MAX_BYTES));
   } catch {
     return { status: "unreachable", detail: "The address answered, but not like Ollama." };
   }
@@ -76,6 +105,78 @@ export async function probeLocalModel(
   if (!Array.isArray(models)) return { status: "unreachable", detail: "The address answered, but not like Ollama." };
   const names = models.flatMap((m) => [m.name, m.model]).filter((n): n is string => typeof n === "string");
   return modelListed(model, names) ? { status: "ready", detail: null } : { status: "model_missing", detail: null };
+}
+
+export async function runModelTest(fetchImpl: FetchLike, baseUrl: string, model: string, thinking: ModelTestRun["thinking"]): Promise<ModelTestRun> {
+  const started = Date.now();
+  let firstWordMs: number | null = null;
+  try {
+    const body: Record<string, unknown> = {
+      model,
+      stream: true,
+      max_tokens: 200,
+      messages: [{ role: "user", content: MODEL_TEST_PROMPT }],
+    };
+    if (thinking === "off") body.reasoning_effort = "none";
+    const res = await fetchImpl(`${baseUrl.trim().replace(/\/+$/, "")}/chat/completions`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(MODEL_TEST_TIMEOUT_MS),
+    });
+    if (isRedirect(res)) {
+      return { thinking, ok: false, answer: null, firstWordMs: null, totalMs: Date.now() - started, error: "The address tried to redirect elsewhere, which is not followed." };
+    }
+    if (!res.ok || !res.body) {
+      return { thinking, ok: false, answer: null, firstWordMs: null, totalMs: Date.now() - started, error: `The model answered with an error (HTTP ${res.status}).` };
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let answer = "";
+    let totalBytes = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > MODEL_TEST_MAX_BYTES) {
+        await reader.cancel().catch(() => {});
+        return { thinking, ok: false, answer: null, firstWordMs, totalMs: Date.now() - started, error: "The model's answer was too long, so it was cut off." };
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const data = line.startsWith("data:") ? line.slice(5).trim() : "";
+        if (!data || data === "[DONE]") continue;
+        try {
+          const delta = (JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }> }).choices?.[0]?.delta?.content;
+          if (typeof delta === "string" && delta.length > 0) {
+            if (firstWordMs === null) firstWordMs = Date.now() - started;
+            answer += delta;
+          }
+        } catch {
+          // A partial or non-JSON line: ignore it, the next one carries on.
+        }
+      }
+    }
+    const totalMs = Date.now() - started;
+    if (answer.trim().length === 0) {
+      return { thinking, ok: false, answer: null, firstWordMs: null, totalMs, error: "The model answered, but with no words." };
+    }
+    return { thinking, ok: true, answer: answer.trim(), firstWordMs, totalMs, error: null };
+  } catch (err) {
+    const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+    return {
+      thinking,
+      ok: false,
+      answer: null,
+      firstWordMs,
+      totalMs: Date.now() - started,
+      error: timedOut ? "The model took too long to answer." : "Couldn't reach the model. Is your PC on, and is Ollama running?",
+    };
+  }
 }
 
 export function modelHealthService(db: Db, deps: ModelHealthDeps = {}) {
@@ -186,11 +287,22 @@ export function modelHealthService(db: Db, deps: ModelHealthDeps = {}) {
 
   const isLocalEntry = (e: { provider: string; baseUrl: string | null }) => e.provider === "local" && !!e.baseUrl?.trim();
 
+  /** The company's model server address (Settings > Models), used by a saved local model that has none of its own. */
+  async function companyLocalAddress(companyId: string): Promise<string | null> {
+    const [row] = await db.select().from(modelDirectorySettings).where(eq(modelDirectorySettings.companyId, companyId));
+    return row?.localBaseUrl?.trim() || null;
+  }
+
+  /** Where a saved local model runs: its own address, else the company's model server address. */
+  const entryAddress = (e: { provider: string; baseUrl: string | null }, companyAddress: string | null) =>
+    e.provider !== "local" ? null : e.baseUrl?.trim() || companyAddress;
+
   /** The Check button: probes now and stores the result. A hosted model has nothing to check. */
   async function checkEntry(companyId: string, entryId: string): Promise<ModelDirectoryEntryHealth> {
     const entry = await getEntry(companyId, entryId);
-    if (!isLocalEntry(entry)) return { entryId, applicable: false, ...modelHealthReport("not_checked") };
-    return { entryId, applicable: true, ...(await checkTarget(companyId, entry.baseUrl!, entry.model)) };
+    const address = entryAddress(entry, entry.provider === "local" && !entry.baseUrl?.trim() ? await companyLocalAddress(companyId) : null);
+    if (!address) return { entryId, applicable: false, ...modelHealthReport("not_checked") };
+    return { entryId, applicable: true, ...(await checkTarget(companyId, address, entry.model)) };
   }
 
   /** Stored state for every entry plus the agents that use a local model (for the agent-page banner). Reads only. */
@@ -198,9 +310,11 @@ export function modelHealthService(db: Db, deps: ModelHealthDeps = {}) {
     const entries = await db.select().from(modelDirectoryEntries).where(eq(modelDirectoryEntries.companyId, companyId));
     const states = await db.select().from(localModelHealth).where(eq(localModelHealth.companyId, companyId));
     const byKey = new Map(states.map((s) => [`${s.baseUrl}\n${s.model}`, s]));
+    const companyAddress = entries.some((e) => e.provider === "local" && !e.baseUrl?.trim()) ? await companyLocalAddress(companyId) : null;
     const entryHealth: ModelDirectoryEntryHealth[] = entries.map((e) => {
-      if (!isLocalEntry(e)) return { entryId: e.id, applicable: false, ...modelHealthReport("not_checked") };
-      return { entryId: e.id, applicable: true, ...reportOf(byKey.get(`${normalizeLocalModelAddress(e.baseUrl)}\n${e.model}`) ?? null, e.model) };
+      const address = entryAddress(e, companyAddress);
+      if (!address) return { entryId: e.id, applicable: false, ...modelHealthReport("not_checked") };
+      return { entryId: e.id, applicable: true, ...reportOf(byKey.get(`${normalizeLocalModelAddress(address)}\n${e.model}`) ?? null, e.model) };
     });
     const agentRows = await db
       .select({ id: agents.id, name: agents.name, provider: agents.laneAProvider, baseUrl: agents.laneABaseUrl, model: agents.laneAModel, entryId: agents.laneADirectoryEntryId })
@@ -263,69 +377,41 @@ export function modelHealthService(db: Db, deps: ModelHealthDeps = {}) {
     return claimed.length > 0;
   }
 
+  /**
+   * After a "Refresh status" / local resync: records what the model server
+   * said for every saved local setup and every quick agent's local model at
+   * that address, so pickers can say Installed / Not installed / Offline with
+   * a time. `installed` is null when the server could not be read (offline).
+   */
+  async function recordLocalSync(companyId: string, rawBaseUrl: string, installed: readonly string[] | null): Promise<{ recorded: number }> {
+    // Same address however it was typed (case, trailing slash, the "/v1" suffix).
+    const key = localAddressKey(rawBaseUrl);
+    const entries = await db
+      .select({ baseUrl: modelDirectoryEntries.baseUrl, model: modelDirectoryEntries.model })
+      .from(modelDirectoryEntries)
+      .where(and(eq(modelDirectoryEntries.companyId, companyId), eq(modelDirectoryEntries.provider, "local")));
+    const agentRows = await db
+      .select({ baseUrl: agents.laneABaseUrl, model: agents.laneAModel })
+      .from(agents)
+      .where(and(eq(agents.companyId, companyId), eq(agents.laneAProvider, "local")));
+    // A saved local model with no address of its own runs on the company's model server address.
+    const companyAddress = entries.some((e) => !e.baseUrl?.trim()) ? await companyLocalAddress(companyId) : null;
+    const entryTargets = entries.map((e) => ({ baseUrl: e.baseUrl?.trim() || companyAddress, model: e.model }));
+    const targets = new Map<string, { baseUrl: string; model: string }>();
+    for (const t of [...entryTargets, ...agentRows]) {
+      if (!t.baseUrl || !t.model || localAddressKey(t.baseUrl) !== key) continue;
+      targets.set(`${normalizeLocalModelAddress(t.baseUrl)}\n${t.model}`, { baseUrl: t.baseUrl, model: t.model });
+    }
+    for (const t of targets.values()) {
+      const status = installed === null ? "unreachable" : modelListed(t.model, [...installed]) ? "ready" : "model_missing";
+      await record(companyId, t.baseUrl, t.model, status);
+    }
+    return { recorded: targets.size };
+  }
+
   // ─── Test button ───────────────────────────────────────────────────────
 
-  async function oneTestRun(baseUrl: string, model: string, thinking: ModelTestRun["thinking"]): Promise<ModelTestRun> {
-    const started = Date.now();
-    let firstWordMs: number | null = null;
-    try {
-      const body: Record<string, unknown> = {
-        model,
-        stream: true,
-        max_tokens: 200,
-        messages: [{ role: "user", content: MODEL_TEST_PROMPT }],
-      };
-      if (thinking === "off") body.reasoning_effort = "none";
-      const res = await fetchImpl(`${baseUrl.trim().replace(/\/+$/, "")}/chat/completions`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(MODEL_TEST_TIMEOUT_MS),
-      });
-      if (!res.ok || !res.body) {
-        return { thinking, ok: false, answer: null, firstWordMs: null, totalMs: Date.now() - started, error: `The model answered with an error (HTTP ${res.status}).` };
-      }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let answer = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          const data = line.startsWith("data:") ? line.slice(5).trim() : "";
-          if (!data || data === "[DONE]") continue;
-          try {
-            const delta = (JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }> }).choices?.[0]?.delta?.content;
-            if (typeof delta === "string" && delta.length > 0) {
-              if (firstWordMs === null) firstWordMs = Date.now() - started;
-              answer += delta;
-            }
-          } catch {
-            // A partial or non-JSON line: ignore it, the next one carries on.
-          }
-        }
-      }
-      const totalMs = Date.now() - started;
-      if (answer.trim().length === 0) {
-        return { thinking, ok: false, answer: null, firstWordMs: null, totalMs, error: "The model answered, but with no words." };
-      }
-      return { thinking, ok: true, answer: answer.trim(), firstWordMs, totalMs, error: null };
-    } catch (err) {
-      const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
-      return {
-        thinking,
-        ok: false,
-        answer: null,
-        firstWordMs,
-        totalMs: Date.now() - started,
-        error: timedOut ? "The model took too long to answer." : "Couldn't reach the model. Is the computer that runs it switched on, and is Ollama (or the model server) running?",
-      };
-    }
-  }
+  const oneTestRun = (baseUrl: string, model: string, thinking: ModelTestRun["thinking"]) => runModelTest(fetchImpl, baseUrl, model, thinking);
 
   /**
    * The Test button. A setup that cannot be run at all gets a plain-English
@@ -358,7 +444,7 @@ export function modelHealthService(db: Db, deps: ModelHealthDeps = {}) {
     return createModelSetupProbes(fetchImpl).fetchHostCapabilities(await getEntry(companyId, entryId), opts);
   }
 
-  return { probeEntry, capabilitiesForEntry, probe: (b: string, m: string) => probeLocalModel(b, m, fetchImpl), record, noteLocalAttempt, claimOutageNotice, claimEveningWarning, checkEntry, overview, checkInUse, testEntry };
+  return { recordLocalSync, probeEntry, capabilitiesForEntry, probe: (b: string, m: string) => probeLocalModel(b, m, fetchImpl), record, noteLocalAttempt, claimOutageNotice, claimEveningWarning, checkEntry, overview, checkInUse, testEntry };
 }
 
 const MODEL_UNAVAILABLE_PATTERN = /model[^.]*(not loaded|not found|does not exist|is not available|unknown)/i;

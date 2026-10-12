@@ -39,6 +39,7 @@ import {
   laneABackupRoutingIssues,
   normalizeLaneAProvider,
   readLaneAWebSearchSwitch,
+  readLaneAPictureModelId,
   readLaneABrowserAccess,
   browserAccessLevelRank,
 } from "@paperclipai/shared";
@@ -1690,6 +1691,13 @@ export function agentRoutes(
     existingAdapterConfig: unknown,
   ) {
     if (req.actor.type !== "agent") return;
+    // "Use this model for picture requests" spends on another model (often a
+    // paid cloud one): board-only too, on the same write paths.
+    if (readLaneAPictureModelId(requestedAdapterConfig) !== readLaneAPictureModelId(existingAdapterConfig)) {
+      throw forbidden(
+        'Agent-authenticated callers cannot change a quick agent\'s "Use this model for picture requests" setting (adapterConfig.laneA.pictureModelId). Only board-authenticated callers can.',
+      );
+    }
     const requested = readLaneAProviderStash(requestedAdapterConfig);
     const existingStash = readLaneAProviderStash(existingAdapterConfig);
     if (

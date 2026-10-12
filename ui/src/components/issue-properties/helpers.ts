@@ -1,5 +1,13 @@
 import type { AdapterModel } from "../../api/agents";
-import { getThinkingEffortKey, getThinkingEffortOptions, type Issue, type Project } from "@paperclipai/shared";
+import {
+  agentDefaultLabel,
+  getThinkingEffortKey,
+  getThinkingEffortOptions,
+  getThinkingEffortValue,
+  thinkingEffortLabel,
+  type Issue,
+  type Project,
+} from "@paperclipai/shared";
 import { extractProviderIdWithFallback } from "../../lib/model-utils";
 import type { IssueModelLane } from "../../lib/issue-assignee-overrides";
 
@@ -85,9 +93,19 @@ export function compactRecord(record: Record<string, unknown>) {
   );
 }
 
-/** Task-override effort choices: the shared per-adapter level list, with "" meaning the agent's own setting. */
-export function thinkingEffortOptionsFor(adapterType: string | null | undefined) {
-  return getThinkingEffortOptions(adapterType, undefined, { autoLabel: "Default" });
+/**
+ * Task-override effort choices: the shared per-adapter level list, with ""
+ * meaning "no override -- use the agent's own setting", labelled with that
+ * setting ("Agent default (high)").
+ */
+export function thinkingEffortOptionsFor(
+  adapterType: string | null | undefined,
+  agentAdapterConfig?: Record<string, unknown> | null,
+) {
+  const agentEffort = getThinkingEffortValue(adapterType, agentAdapterConfig ?? null);
+  return getThinkingEffortOptions(adapterType, agentAdapterConfig ?? undefined, {
+    autoLabel: agentDefaultLabel(agentEffort ? thinkingEffortLabel(agentEffort) : null),
+  });
 }
 
 export function thinkingEffortKeyFor(adapterType: string | null | undefined) {
@@ -95,13 +113,7 @@ export function thinkingEffortKeyFor(adapterType: string | null | undefined) {
 }
 
 export function thinkingEffortValueFor(adapterType: string | null | undefined, adapterConfig: Record<string, unknown>) {
-  if (adapterType === "codex_local") {
-    return String(adapterConfig.modelReasoningEffort ?? adapterConfig.reasoningEffort ?? adapterConfig.effort ?? "");
-  }
-  if (adapterType === "opencode_local") {
-    return String(adapterConfig.variant ?? "");
-  }
-  return String(adapterConfig.effort ?? "");
+  return getThinkingEffortValue(adapterType, adapterConfig);
 }
 
 export function overrideLane(overrides: Issue["assigneeAdapterOverrides"]): IssueModelLane {
