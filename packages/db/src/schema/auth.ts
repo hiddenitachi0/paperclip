@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp, boolean, index, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, text, timestamp, boolean, integer, bigint, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
 export const authUsers = pgTable("user", {
@@ -63,6 +63,11 @@ export const userTotpSecrets = pgTable(
     verified: boolean("verified").notNull().default(false),
     enabledAt: timestamp("enabled_at", { withTimezone: true }),
     disabledAt: timestamp("disabled_at", { withTimezone: true }),
+    // DUR-4297: bounded attempts + lockout, and replay protection (the last
+    // accepted TOTP time-step; a code for a step <= this is rejected).
+    failedAttempts: integer("failed_attempts").notNull().default(0),
+    lockedUntil: timestamp("locked_until", { withTimezone: true }),
+    lastUsedStep: bigint("last_used_step", { mode: "number" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
   },
