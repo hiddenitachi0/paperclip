@@ -4,6 +4,7 @@ import { approvalService } from "./approvals.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { secretService } from "./secrets.js";
 import { logActivity } from "./activity-log.js";
+import { securityReviewService } from "./security-review.js";
 import { ghFetch, gitHubApiBase } from "./github-fetch.js";
 
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
@@ -395,6 +396,7 @@ export function mergePrAutomationService(
   options: {
     fetch?: FetchLike;
     approvalsSvc?: ReturnType<typeof approvalService>;
+    securityReviewSvc?: ReturnType<typeof securityReviewService>;
     instanceSettings?: ReturnType<typeof instanceSettingsService>;
     getGitHubToken?: (companyId: string) => Promise<string | null>;
     logActivityImpl?: typeof logActivity;
@@ -403,6 +405,7 @@ export function mergePrAutomationService(
 ) {
   const fetchImpl = options.fetch ?? ghFetch;
   const approvalsSvc = options.approvalsSvc ?? approvalService(db);
+  const securityReview = options.securityReviewSvc ?? securityReviewService(db);
   const instanceSettings = options.instanceSettings ?? instanceSettingsService(db);
   const secretsSvc = secretService(db);
   const getGitHubToken =
@@ -447,6 +450,19 @@ export function mergePrAutomationService(
       const token = await getGitHubToken(row.companyId);
       const evaluation = await evaluateMergePrApproval(payload, { fetchImpl, token });
       if (!evaluation.eligible) continue;
+
+      // DUR-4568 finding #1: DUR-299 rule 6 is about CI + an independent
+      // human reviewer on GitHub, not a security review -- it is not an
+      // exemption from the security-review gate. This automation carries no
+      // human-supplied bypass reason, so a merge_pr card with no `passed`
+      // review at its current head commit is left for a human to decide,
+      // same as every other `approve()` caller.
+      const reviewState = await securityReview.computeState({
+        id: row.id,
+        companyId: row.companyId,
+        payload: row.payload,
+      });
+      if (reviewState.state !== "passed") continue;
 
       const decidedByUserId = AUTOMATION_DECIDED_BY_PREFIX;
       const note =

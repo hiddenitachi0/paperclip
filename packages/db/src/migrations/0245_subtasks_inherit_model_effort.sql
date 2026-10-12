@@ -1,0 +1,15 @@
+-- Task-level model/effort, slice 2 (flow-down): per-company switch
+-- "Sub-tasks inherit model/effort". When on (the default), a sub-task created
+-- under a task that has its own model/effort setting gets the same setting
+-- unless the sub-task sets its own. Off = sub-tasks run on their agent's own
+-- model/effort.
+--
+-- Strictly additive: one NOT NULL column with a default, so every existing
+-- company keeps today's behaviour (inheritance was already always on).
+-- Guarded so a re-run is a no-op. companies is already covered by the RLS
+-- setup, nothing changes there.
+--
+-- Rollback: ALTER TABLE "companies" DROP COLUMN "subtasks_inherit_model_effort";
+-- Safe -- only the sub-task create path reads it; without it inheritance is
+-- simply always on again.
+ALTER TABLE "companies" ADD COLUMN IF NOT EXISTS "subtasks_inherit_model_effort" boolean DEFAULT true NOT NULL;

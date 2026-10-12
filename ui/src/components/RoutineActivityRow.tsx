@@ -69,7 +69,7 @@ export function RoutineActivityRow({ event }: { event: RoutineActivityEvent }) {
         ) : null}
       </button>
       {expanded && hasPayload ? (
-        <pre className="mx-1 mb-2 overflow-x-auto rounded-md bg-neutral-950 p-3 font-mono text-xs text-neutral-200">
+        <pre className="mx-1 mb-2 overflow-x-auto rounded-md border bg-code-background p-3 font-mono text-xs text-foreground">
           {JSON.stringify(event.details, null, 2)}
         </pre>
       ) : null}

@@ -299,9 +299,9 @@ describe("credential kinds", () => {
   });
 
   it("Shopify, the three file-server kinds and paperless-ngx are readable today; WooCommerce and Fiken are not", () => {
-    expect([...SUPPORTED_DATA_CONNECTION_KINDS].sort()).toEqual(["ftp_file", "ftps_file", "paperless_ngx", "sftp_file", "shopify"]);
+    // Fiken: read-only, for report templates (DUR-4072 PR3).
+    expect([...SUPPORTED_DATA_CONNECTION_KINDS].sort()).toEqual(["fiken", "ftp_file", "ftps_file", "paperless_ngx", "sftp_file", "shopify"]);
     expect(SUPPORTED_DATA_CONNECTION_KINDS).not.toContain("woocommerce");
-    expect(SUPPORTED_DATA_CONNECTION_KINDS).not.toContain("fiken");
   });
 });
 

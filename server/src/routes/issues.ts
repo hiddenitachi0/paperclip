@@ -60,6 +60,8 @@ import {
   upsertIssueDocumentSchema,
   updateIssueSchema,
   validateAdapterModelEffort,
+  validateModelAgainstList,
+  getThinkingEffortKey,
   getClosedIsolatedExecutionWorkspaceMessage,
   isClosedIsolatedExecutionWorkspace,
   isUuidLike,
@@ -75,6 +77,7 @@ import {
 import { trackAgentTaskCompleted } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
 import type { StorageService } from "../storage/types.js";
+import { getOrCreateThumbnail, isThumbnailableContentType, thumbnailObjectKey } from "../services/attachment-thumbnail.js";
 import { validate } from "../middleware/validate.js";
 import * as serviceIndex from "../services/index.js";
 import {
@@ -113,6 +116,7 @@ import type { TaskWatchdogServiceDeps, taskWatchdogService } from "../services/t
 import { logger } from "../middleware/logger.js";
 import { flagAgentBoardDecisionClaim } from "../services/board-decision-claims.js";
 import { conflict, forbidden, HttpError, notFound, unauthorized, unprocessable } from "../errors.js";
+import { listAdapterModels } from "../adapters/index.js";
 import { assertBoard, assertBoardOrDelegate, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { companyScope, companyScopeFromParam } from "../middleware/company-scope.js";
 
@@ -161,6 +165,12 @@ import { evaluateSelfReviewDoneGate } from "../services/self-review-gate.js";
 import { evaluateGoalConditionDoneGate } from "../services/goal-condition-judge.js";
 import { evaluateDeployCompletionDoneGate } from "../services/deploy-completion-gate.js";
 import { evaluateDoneGateCritic } from "../services/done-gate-critic.js";
+import {
+  applyDefaultReviewerPolicy,
+  evaluateQualityDoneCheck,
+  evaluateQualitySelfReviewGate,
+  pinQualityLoopPolicyFields,
+} from "../services/quality-loops.js";
 import { evaluateOriginCommitDoneGate } from "../services/origin-commit-gate.js";
 import { evaluateFeatureLaunchDoneGate } from "../services/feature-launch-gate.js";
 import { evaluateJobApprovalDoneGate } from "../services/job-approval-gate.js";
@@ -602,6 +612,15 @@ async function buildIssueWorkspaceChangeActivityDetails(
   };
 }
 
+/**
+ * Agent quality loops: only a person may switch a task's quality checks on or off. For
+ * any other writer the task keeps what is stored (nothing on a new task), whatever was sent.
+ */
+function pinQualityLoopFieldsForActor<P extends object>(req: Request, next: P | null, previous: unknown): P | null {
+  if (req.actor.type === "board") return next;
+  return pinQualityLoopPolicyFields(next, previous);
+}
+
 function hasExecutionParticipant(value: unknown) {
   const state = parseIssueExecutionState(value);
   if (!state || state.status !== "pending") return false;
@@ -865,6 +884,42 @@ function summarizeIssueReferenceActivityDetails(input:
 
 function monitorPoliciesEqual(left: NormalizedExecutionPolicy | null, right: NormalizedExecutionPolicy | null) {
   return JSON.stringify(left?.monitor ?? null) === JSON.stringify(right?.monitor ?? null);
+}
+
+function stagesEqual(left: NormalizedExecutionPolicy | null, right: NormalizedExecutionPolicy | null) {
+  return JSON.stringify(left?.stages ?? []) === JSON.stringify(right?.stages ?? []);
+}
+
+/**
+ * Stages decide whether the mandatory quality checks run at all, so an agent may not
+ * remove an existing review/approval stage or staff one with itself or the task's own
+ * assignee (that would be a self-review the stage engine auto-skips). Board users are free.
+ */
+function assertAgentMayChangeStages(
+  req: Request,
+  assignee: { agentId: string | null; userId: string | null },
+  previous: NormalizedExecutionPolicy | null,
+  next: NormalizedExecutionPolicy | null,
+) {
+  if (req.actor.type === "board") return;
+  const actorAgentId = req.actor.type === "agent" ? req.actor.agentId ?? null : null;
+  const reviewStages = (policy: NormalizedExecutionPolicy | null) =>
+    (policy?.stages ?? []).filter((stage) => stage.type === "review" || stage.type === "approval");
+  if (reviewStages(previous).length > reviewStages(next).length) {
+    throw forbidden("Only a board user can remove a review or approval stage");
+  }
+  for (const stage of reviewStages(next)) {
+    for (const participant of stage.participants ?? []) {
+      const isSelf =
+        (participant.type === "agent" &&
+          participant.agentId != null &&
+          (participant.agentId === actorAgentId || participant.agentId === assignee.agentId)) ||
+        (participant.type === "user" && participant.userId != null && participant.userId === assignee.userId);
+      if (isSelf) {
+        throw forbidden("A review or approval stage cannot be staffed by the task's own assignee");
+      }
+    }
+  }
 }
 
 function applyActorMonitorScheduledBy(
@@ -1262,6 +1317,113 @@ class AutoApprovalIssueMissingError extends Error {
     super("Issue not found during auto-approval transaction");
     this.name = "AutoApprovalIssueMissingError";
   }
+}
+
+/**
+ * The adapterConfig keys a task may carry: the model, the assignee adapter's
+ * thinking-effort key, and Chrome (Claude). Anything else (extraArgs, env,
+ * command, mcpServers, permission switches...) is agent configuration and is
+ * changed on the agent, never per task.
+ */
+const TASK_OVERRIDE_EFFORT_KEYS = ["effort", "modelReasoningEffort", "variant"] as const;
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function sameJson(a: unknown, b: unknown) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+export function findDisallowedTaskOverrideKeys(
+  adapterConfig: Record<string, unknown>,
+  input: {
+    adapterType: string | null;
+    agentAdapterConfig?: Record<string, unknown> | null;
+    previousAdapterConfig?: Record<string, unknown> | null;
+  },
+): string[] {
+  const allowed = new Set<string>(["model", "chrome"]);
+  if (input.adapterType) {
+    allowed.add(getThinkingEffortKey(input.adapterType, input.agentAdapterConfig ?? undefined));
+  } else {
+    for (const key of TASK_OVERRIDE_EFFORT_KEYS) allowed.add(key);
+  }
+  const previous = input.previousAdapterConfig ?? {};
+  return Object.keys(adapterConfig).filter((key) => {
+    if (allowed.has(key)) return false;
+    // A value already stored on the task (older data) may be sent back unchanged.
+    return !(key in previous && sameJson(previous[key], adapterConfig[key]));
+  });
+}
+
+/**
+ * Who may set a task's model/effort. Only a person (board actor) may set the
+ * model, effort or any adapter setting on a task; for agents and other
+ * non-board writers the stored value is kept and the only accepted change is
+ * the cheaper preset (`modelProfile: "cheap"`) or clearing it (`null`) --
+ * otherwise a task-level override would beat an approved boost grant and let
+ * an agent run itself on Opus/max (see mergeModelProfileAdapterConfig).
+ * `inheritedFrom` is written by the server only and is never taken from a
+ * request; a board edit that leaves the inherited model/effort as it was
+ * keeps the stored marker.
+ *
+ * Returns `undefined` when the field must be left out of the write (create:
+ * so server-side sub-task flow-down still applies; update: keep what is
+ * stored).
+ */
+export function pinAssigneeAdapterOverridesForActor(
+  actorType: string,
+  next: unknown,
+  previous: unknown,
+  mode: "create" | "update",
+): Record<string, unknown> | null | undefined {
+  if (next === undefined) return undefined;
+  if (next === null) return null;
+  if (!isPlainObject(next)) return undefined;
+  const previousRecord = isPlainObject(previous) ? previous : null;
+  const { inheritedFrom: _ignoredMarker, ...requested } = next;
+
+  if (actorType !== "board") {
+    if (requested.modelProfile !== "cheap") return undefined;
+    if (mode === "create") return { modelProfile: "cheap" };
+    return { ...(previousRecord ?? {}), modelProfile: "cheap" };
+  }
+
+  if (mode === "update" && previousRecord?.inheritedFrom && isPlainObject(previousRecord.adapterConfig)) {
+    const before = previousRecord.adapterConfig;
+    const after = isPlainObject(requested.adapterConfig) ? requested.adapterConfig : {};
+    const modelEffortKeys = ["model", ...TASK_OVERRIDE_EFFORT_KEYS];
+    const unchanged = modelEffortKeys.every((key) => sameJson(before[key], after[key]));
+    if (unchanged && requested.modelProfile === previousRecord.modelProfile) {
+      return { ...requested, inheritedFrom: previousRecord.inheritedFrom };
+    }
+  }
+  return requested;
+}
+
+/** The adapter's model list for the model typo guard; a discovery failure means "unknown" (nothing rejected). */
+async function listAdapterModelsSafely(adapterType: string): Promise<Array<{ id: string }>> {
+  try {
+    return await listAdapterModels(adapterType);
+  } catch {
+    return [];
+  }
+}
+
+/** Models the agent already uses (its own model + its model-profile models) -- never a typo. */
+function agentKnownModels(agent: { adapterConfig?: unknown; runtimeConfig?: unknown }): string[] {
+  const known: string[] = [];
+  const own = (agent.adapterConfig as Record<string, unknown> | null | undefined)?.model;
+  if (typeof own === "string") known.push(own);
+  const profiles = (agent.runtimeConfig as { modelProfiles?: unknown } | null | undefined)?.modelProfiles;
+  if (profiles && typeof profiles === "object") {
+    for (const profile of Object.values(profiles as Record<string, unknown>)) {
+      const model = (profile as { adapterConfig?: { model?: unknown } } | null | undefined)?.adapterConfig?.model;
+      if (typeof model === "string") known.push(model);
+    }
+  }
+  return known;
 }
 
 export function issueRoutes(
@@ -3241,6 +3403,22 @@ export function issueRoutes(
     };
   }
 
+  /** Rewrites `body.assigneeAdapterOverrides` in place per pinAssigneeAdapterOverridesForActor. */
+  function applyPinnedAssigneeAdapterOverrides(
+    req: Request,
+    body: { assigneeAdapterOverrides?: unknown },
+    previous: unknown,
+    mode: "create" | "update" = "create",
+  ) {
+    if (body.assigneeAdapterOverrides === undefined) return;
+    const pinned = pinAssigneeAdapterOverridesForActor(req.actor.type, body.assigneeAdapterOverrides, previous, mode);
+    if (pinned === undefined) {
+      delete body.assigneeAdapterOverrides;
+    } else {
+      body.assigneeAdapterOverrides = pinned;
+    }
+  }
+
   /**
    * Adapter-aware typo guard for a task's model/effort override. The shared
    * schema already rejects Codex/OpenCode-keyed typos; this covers the `effort`
@@ -3251,13 +3429,28 @@ export function issueRoutes(
     companyId: string,
     assigneeAgentId: string | null | undefined,
     overrides: unknown,
+    previousOverrides?: unknown,
   ) {
     if (!overrides || typeof overrides !== "object" || Array.isArray(overrides)) return;
     const adapterConfig = (overrides as { adapterConfig?: unknown }).adapterConfig;
-    if (!adapterConfig || typeof adapterConfig !== "object") return;
-    if (!assigneeAgentId) return;
-    const agent = await agentsSvc.getById(assigneeAgentId);
-    if (!agent || agent.companyId !== companyId) return;
+    if (!adapterConfig || typeof adapterConfig !== "object" || Array.isArray(adapterConfig)) return;
+    const agentRow = assigneeAgentId ? await agentsSvc.getById(assigneeAgentId) : null;
+    const agent = agentRow && agentRow.companyId === companyId ? agentRow : null;
+    const previousAdapterConfig = isPlainObject(previousOverrides) && isPlainObject(previousOverrides.adapterConfig)
+      ? previousOverrides.adapterConfig
+      : null;
+    const disallowed = findDisallowedTaskOverrideKeys(adapterConfig as Record<string, unknown>, {
+      adapterType: agent?.adapterType ?? null,
+      agentAdapterConfig: (agent?.adapterConfig as Record<string, unknown> | null | undefined) ?? null,
+      previousAdapterConfig,
+    });
+    if (disallowed.length > 0) {
+      throw unprocessable(
+        `This task's model/effort setting can't be saved. A task can only set its model and thinking effort; ` +
+          `${disallowed.map((key) => `"${key}"`).join(", ")} ${disallowed.length === 1 ? "is an agent setting" : "are agent settings"} -- change ${disallowed.length === 1 ? "it" : "them"} on the agent instead.`,
+      );
+    }
+    if (!agent) return;
     const error = validateAdapterModelEffort({
       adapterType: agent.adapterType,
       adapterConfig,
@@ -3265,6 +3458,18 @@ export function issueRoutes(
     });
     if (error) {
       throw unprocessable(`This task's model/effort setting can't be saved. ${error}`);
+    }
+    const model = (adapterConfig as Record<string, unknown>).model;
+    if (typeof model === "string" && model.length > 0) {
+      const modelError = validateModelAgainstList({
+        adapterType: agent.adapterType,
+        model,
+        models: await listAdapterModelsSafely(agent.adapterType),
+        alsoAllowed: agentKnownModels(agent),
+      });
+      if (modelError) {
+        throw unprocessable(`This task's model/effort setting can't be saved. ${modelError}`);
+      }
     }
   }
 
@@ -5784,6 +5989,7 @@ export function issueRoutes(
         : {}),
     };
     if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, { companyId }, createBody))) return;
+    applyPinnedAssigneeAdapterOverrides(req, createBody, null);
     await assertIssueAssigneeOverridesValid(companyId, createBody.assigneeAgentId, createBody.assigneeAdapterOverrides);
     const createAssignmentScope = {
       projectId: await resolveAssignmentProjectId({
@@ -5801,10 +6007,26 @@ export function issueRoutes(
     }
     await assertIssueEnvironmentSelection(companyId, createBody.executionWorkspaceSettings?.environmentId);
 
-    const executionPolicy = applyActorMonitorScheduledBy(
-      normalizeIssueExecutionPolicy(createBody.executionPolicy),
-      actor.actorType,
+    const requestedExecutionPolicy = pinQualityLoopFieldsForActor(
+      req,
+      applyActorMonitorScheduledBy(normalizeIssueExecutionPolicy(createBody.executionPolicy), actor.actorType),
+      null,
     );
+    assertAgentMayChangeStages(
+      req,
+      { agentId: createBody.assigneeAgentId ?? null, userId: createBody.assigneeUserId ?? null },
+      null,
+      requestedExecutionPolicy,
+    );
+    const executionPolicy = await applyDefaultReviewerPolicy(db, {
+      companyId,
+      projectId: createAssignmentScope.projectId,
+      assigneeAgentId: createBody.assigneeAgentId ?? null,
+      requestedPolicy: createBody.executionPolicy,
+      actorMayOptOut: req.actor.type === "board",
+      normalizedPolicy: requestedExecutionPolicy,
+      normalize: normalizeIssueExecutionPolicy,
+    });
     await assertCanManageIssueMonitor(access, req, companyId, createBody.assigneeAgentId ?? null, Boolean(executionPolicy?.monitor));
     const issueId = randomUUID();
     const sourceTrust = await sourceTrustForActorWrite({
@@ -6042,6 +6264,8 @@ export function issueRoutes(
       ...(normalizedAssigneeAgentId !== undefined ? { assigneeAgentId: normalizedAssigneeAgentId } : {}),
     };
     if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, parent, createBody))) return;
+    applyPinnedAssigneeAdapterOverrides(req, createBody, null);
+    await assertIssueAssigneeOverridesValid(parent.companyId, createBody.assigneeAgentId, createBody.assigneeAdapterOverrides);
     const childAssignmentScope = {
       projectId: createBody.projectId ?? parent.projectId ?? null,
       parentIssueId: parent.id,
@@ -6059,10 +6283,26 @@ export function issueRoutes(
     const currentSerializedChild = serializationContext
       ? await findCurrentSerializedWatchdogChild(parent)
       : null;
-    const executionPolicy = applyActorMonitorScheduledBy(
-      normalizeIssueExecutionPolicy(createBody.executionPolicy),
-      actor.actorType,
+    const requestedExecutionPolicy = pinQualityLoopFieldsForActor(
+      req,
+      applyActorMonitorScheduledBy(normalizeIssueExecutionPolicy(createBody.executionPolicy), actor.actorType),
+      null,
     );
+    assertAgentMayChangeStages(
+      req,
+      { agentId: createBody.assigneeAgentId ?? null, userId: createBody.assigneeUserId ?? null },
+      null,
+      requestedExecutionPolicy,
+    );
+    const executionPolicy = await applyDefaultReviewerPolicy(db, {
+      companyId: parent.companyId,
+      projectId: createBody.projectId ?? parent.projectId ?? null,
+      assigneeAgentId: createBody.assigneeAgentId ?? null,
+      requestedPolicy: createBody.executionPolicy,
+      actorMayOptOut: req.actor.type === "board",
+      normalizedPolicy: requestedExecutionPolicy,
+      normalize: normalizeIssueExecutionPolicy,
+    });
     await assertCanManageIssueMonitor(access, req, parent.companyId, createBody.assigneeAgentId ?? null, Boolean(executionPolicy?.monitor));
     const issueId = randomUUID();
     const sourceTrust = await sourceTrustForActorWrite({
@@ -6219,6 +6459,12 @@ export function issueRoutes(
       if (!assertFeatureLaunchFieldAllowedOnCreate(req, res, childBody)) return;
       assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(childBody));
       if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, sourceIssue, childBody))) return;
+      applyPinnedAssigneeAdapterOverrides(req, childBody, null);
+      await assertIssueAssigneeOverridesValid(
+        sourceIssue.companyId,
+        childBody.assigneeAgentId,
+        childBody.assigneeAdapterOverrides,
+      );
       if (childBody.assigneeAgentId || childBody.assigneeUserId) {
         await assertCanAssignTasks(req, sourceIssue.companyId, {
           projectId: childBody.projectId ?? sourceIssue.projectId ?? null,
@@ -6233,9 +6479,10 @@ export function issueRoutes(
     const actor = getActorInfo(req);
     const normalizedChildren = [];
     for (const child of requestedChildren) {
-      const executionPolicy = applyActorMonitorScheduledBy(
-        normalizeIssueExecutionPolicy(child.executionPolicy),
-        actor.actorType,
+      const executionPolicy = pinQualityLoopFieldsForActor(
+        req,
+        applyActorMonitorScheduledBy(normalizeIssueExecutionPolicy(child.executionPolicy), actor.actorType),
+        null,
       );
       await assertCanManageIssueMonitor(access, req, sourceIssue.companyId, child.assigneeAgentId ?? null, Boolean(executionPolicy?.monitor));
       const childIssueId = randomUUID();
@@ -6483,10 +6730,12 @@ export function issueRoutes(
       req.body.assigneeAgentId as string | null | undefined,
     );
     if (req.body.assigneeAdapterOverrides !== undefined) {
+      applyPinnedAssigneeAdapterOverrides(req, req.body, existing.assigneeAdapterOverrides, "update");
       await assertIssueAssigneeOverridesValid(
         existing.companyId,
         normalizedAssigneeAgentId === undefined ? existing.assigneeAgentId : normalizedAssigneeAgentId,
         req.body.assigneeAdapterOverrides,
+        existing.assigneeAdapterOverrides,
       );
     }
     const titleOrDescriptionChanged = req.body.title !== undefined || req.body.description !== undefined;
@@ -6556,6 +6805,30 @@ export function issueRoutes(
     });
     if (selfReviewGateResult) {
       res.status(409).json({ error: selfReviewGateResult.message });
+      return;
+    }
+    // Agent quality loops (per company, opt-in): a self-check pass for ANY task, not only
+    // code tasks. Counts the code self-review above toward the same per-task limit, so a
+    // code task never gets more passes than the company asked for.
+    const qualitySelfReviewResult = await evaluateQualitySelfReviewGate({
+      db,
+      wakeup: heartbeat.wakeup,
+      issue: {
+        id: existing.id,
+        identifier: existing.identifier,
+        companyId: existing.companyId,
+        projectId: existing.projectId,
+        executionPolicy: existing.executionPolicy,
+        assigneeAgentId: existing.assigneeAgentId,
+        assigneeUserId: existing.assigneeUserId,
+        executionState: existing.executionState,
+      },
+      actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
+      requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
+      currentStatus: existing.status,
+    });
+    if (qualitySelfReviewResult) {
+      res.status(409).json({ error: qualitySelfReviewResult.message });
       return;
     }
     // DUR-32: composes with self-review above — self-review runs first, then (if the issue
@@ -6661,7 +6934,28 @@ export function issueRoutes(
     // matches what the task asked for. Ships off (instance setting general.doneGate);
     // dry run only comments; enforce sends the task back with the findings and, after
     // maxRounds, asks the operator instead of looping. Never gates a board/human actor.
-    const doneGateCriticResult = await evaluateDoneGateCritic({
+    // Agent quality loops: a company (or task) that switched on its own finish check uses
+    // its own cheap saved model instead of the instance-wide reviewer below.
+    const qualityDoneCheck = await evaluateQualityDoneCheck({
+      db,
+      issue: {
+        id: existing.id,
+        identifier: existing.identifier,
+        companyId: existing.companyId,
+        title: existing.title,
+        description: existing.description ?? null,
+        executionPolicy: existing.executionPolicy,
+        projectId: existing.projectId,
+        assigneeAgentId: existing.assigneeAgentId,
+        assigneeUserId: existing.assigneeUserId,
+        executionState: existing.executionState,
+      },
+      actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
+      requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
+      currentStatus: existing.status,
+      patchComment: typeof commentBody === "string" ? commentBody : null,
+    });
+    const doneGateCriticResult = qualityDoneCheck.applies ? qualityDoneCheck.result : await evaluateDoneGateCritic({
       db,
       issue: {
         id: existing.id,
@@ -6851,9 +7145,10 @@ export function issueRoutes(
       });
     }
     if (req.body.executionPolicy !== undefined) {
-      updateFields.executionPolicy = applyActorMonitorScheduledBy(
-        normalizeIssueExecutionPolicy(req.body.executionPolicy),
-        actor.actorType,
+      updateFields.executionPolicy = pinQualityLoopFieldsForActor(
+        req,
+        applyActorMonitorScheduledBy(normalizeIssueExecutionPolicy(req.body.executionPolicy), actor.actorType),
+        existing.executionPolicy ?? null,
       );
     }
     const previousExecutionPolicy = normalizeIssueExecutionPolicy(existing.executionPolicy ?? null);
@@ -6863,6 +7158,14 @@ export function issueRoutes(
         : previousExecutionPolicy;
     if (normalizedAssigneeAgentId !== undefined) {
       updateFields.assigneeAgentId = normalizedAssigneeAgentId;
+    }
+    if (req.body.executionPolicy !== undefined && !stagesEqual(previousExecutionPolicy, nextExecutionPolicy)) {
+      assertAgentMayChangeStages(
+        req,
+        { agentId: existing.assigneeAgentId ?? null, userId: existing.assigneeUserId ?? null },
+        previousExecutionPolicy,
+        nextExecutionPolicy,
+      );
     }
     const monitorChanged = monitorPoliciesEqual(previousExecutionPolicy, nextExecutionPolicy) === false;
     await assertCanManageIssueMonitor(
@@ -9761,6 +10064,33 @@ export function issueRoutes(
     object.stream.pipe(res);
   });
 
+  router.get("/attachments/:attachmentId/thumbnail", scopeFromAttachmentParam(), async (req, res, next) => {
+    try {
+      const attachment = await svc.getAttachmentById(req.params.attachmentId as string);
+      if (!attachment) {
+        res.status(404).json({ error: "Attachment not found" });
+        return;
+      }
+      assertCompanyAccess(req, attachment.companyId);
+      if (!isThumbnailableContentType(attachment.contentType)) {
+        res.status(415).json({ error: "Attachment is not a raster image" });
+        return;
+      }
+      const thumb = await getOrCreateThumbnail(storage, attachment);
+      if (!thumb) {
+        res.status(413).json({ error: "Image too large to thumbnail" });
+        return;
+      }
+      res.setHeader("Content-Type", "image/webp");
+      res.setHeader("Cache-Control", "private, max-age=86400");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Content-Length", String(thumb.length));
+      res.end(thumb);
+    } catch (err) {
+      next(err);
+    }
+  });
+
   router.delete("/attachments/:attachmentId", scopeFromAttachmentParam(), async (req, res) => {
     const attachmentId = req.params.attachmentId as string;
     const attachment = await svc.getAttachmentById(attachmentId);
@@ -9793,6 +10123,13 @@ export function issueRoutes(
       await storage.deleteObject(attachment.companyId, attachment.objectKey);
     } catch (err) {
       logger.warn({ err, attachmentId }, "storage delete failed while removing attachment");
+    }
+    // The cached picture thumbnail is a copy of the file; remove it too.
+    // Not-found / failure is non-fatal (most attachments never had one).
+    try {
+      await storage.deleteObject(attachment.companyId, thumbnailObjectKey(attachment.objectKey));
+    } catch (err) {
+      logger.warn({ err, attachmentId }, "storage delete failed while removing attachment thumbnail");
     }
 
     const removed = await svc.removeAttachment(attachmentId);

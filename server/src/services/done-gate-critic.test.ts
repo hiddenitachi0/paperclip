@@ -68,11 +68,18 @@ describe("resolveDoneGateConfig", () => {
 describe("parseDoneGateCriticReply", () => {
   it("reads a clean verdict and caps findings at three", () => {
     expect(parseDoneGateCriticReply('{"verdict":"pass","findings":[]}')).toEqual({ verdict: "pass", findings: [] });
-    const parsed = parseDoneGateCriticReply(
-      'Sure: {"verdict":"needs_work","findings":["a","b","c","d"]} done',
-    );
+    const parsed = parseDoneGateCriticReply('{"verdict":"needs_work","findings":["a","b","c","d"]}');
     expect(parsed?.verdict).toBe("needs_work");
     expect(parsed?.findings).toEqual(["a", "b", "c"]);
+    // One ```json fence around the whole answer is tolerated.
+    expect(parseDoneGateCriticReply('```json\n{"verdict":"pass","findings":[]}\n```')?.verdict).toBe("pass");
+  });
+
+  it("is strict: prose around the object, extra keys, or a second object are not a verdict", () => {
+    expect(parseDoneGateCriticReply('Sure: {"verdict":"needs_work","findings":["a"]} done')).toBeNull();
+    expect(parseDoneGateCriticReply('{"verdict":"pass","findings":[],"note":"x"}')).toBeNull();
+    expect(parseDoneGateCriticReply('{"verdict":"needs_work","findings":["a"]} {"verdict":"pass"}')).toBeNull();
+    expect(parseDoneGateCriticReply('{"verdict":"pass","findings":"all good"}')).toBeNull();
   });
 
   it("returns null for anything that is not clearly a verdict (fail open, never needs_work)", () => {

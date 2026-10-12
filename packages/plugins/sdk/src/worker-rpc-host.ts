@@ -1257,6 +1257,12 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
         },
       },
 
+      models: {
+        async analyseImage(companyId, input) {
+          return callHost("models.analyseImage", { companyId, ...input });
+        },
+      },
+
       billing: {
         async reserveMediaStudioDirectSpend(companyId, input) {
           return callHost("billing.reserveMediaStudioDirectSpend", { companyId, ...input });
@@ -1270,6 +1276,9 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
         async recordAgentMediaCost(companyId, input) {
           return callHost("billing.recordAgentMediaCost", { companyId, ...input });
         },
+        async checkAgentMediaSpend(companyId, input) {
+          return callHost("billing.checkAgentMediaSpend", { companyId, ...input });
+        },
       },
 
       personas: {
@@ -1278,6 +1287,12 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
             throw new Error("reserveDailyGeneration requires options.runId (the invoking tool call's run id)");
           }
           return callHost("personas.reserveDailyGeneration", { companyId, runId: options.runId });
+        },
+        async getPictureFeedbackRules(companyId: string, options: { runId: string }) {
+          if (!options?.runId) {
+            throw new Error("getPictureFeedbackRules requires options.runId (the invoking tool call's run id)");
+          }
+          return callHost("personas.getPictureFeedbackRules", { companyId, runId: options.runId });
         },
       },
 

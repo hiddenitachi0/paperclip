@@ -24,7 +24,7 @@ Paperclip's UI is a professional-grade control plane — dense, keyboard-driven,
 - **Dense but scannable.** Maximum information without clicks to reveal. Whitespace separates, not pads.
 - **Keyboard-first.** Global shortcuts (Cmd+K, C, [, ]). Power users rarely touch the mouse.
 - **Contextual, not modal.** Inline editing over dialog boxes. Dropdowns over page navigations.
-- **Dark theme default.** Neutral grays (OKLCH), not pure black. Accent colors for status/priority only. Text is the primary visual element.
+- **Dark theme default, light theme first-class, "follow system" available.** Cool-grey neutrals (OKLCH), never pure black. Every surface level has its own lightness, borders read as edges (≥ 3:1 on the surface they sit on) and muted text stays ≥ 4.5:1 — `ui/src/theme-tokens.test.ts` enforces this. Accent colors for status/priority only. Text is the primary visual element.
 - **Component-driven.** Prefer reusable components that capture style conventions. Build at the right abstraction — not too granular, not too monolithic.
 
 ---
@@ -49,7 +49,7 @@ All tokens defined as CSS variables in `ui/src/index.css`. Both light and dark t
 
 ### Colors
 
-Use semantic token names, never raw color values:
+Use semantic token names, never raw color values. Surface ladder, darkest → lightest — dark: `code-background` < `background` < `sidebar` < `card` < `popover` < `input-background`; light: `sidebar` < `background` < `input-background` < `card` = `popover` (white). Dialogs, sheets and menus sit on `popover`; the sidebar on `sidebar`.
 
 | Token | Usage |
 |-------|-------|
@@ -60,8 +60,10 @@ Use semantic token names, never raw color values:
 | `--muted` / `--muted-foreground` | Subdued text, labels |
 | `--accent` / `--accent-foreground` | Hover states, active nav items |
 | `--destructive` | Destructive actions |
-| `--border` | All borders |
-| `--ring` | Focus rings |
+| `--border` | All borders (≥ 3:1 on card and page in both themes) |
+| `--input` / `--input-background` | Input border and input field fill — fields are always visibly bounded |
+| `--code-background` | Sunken wells for logs, stdout/stderr, JSON payloads |
+| `--ring` | Focus rings (a calm blue) |
 | `--sidebar-*` | Sidebar-specific variants |
 | `--chart-1` through `--chart-5` | Data visualization |
 
@@ -233,7 +235,7 @@ Standard `<table>` with `text-xs`, header row with `bg-accent/20`, `font-mono` f
 
 ### Log Viewer
 
-`bg-neutral-950 rounded-lg p-3 font-mono text-xs` container. Color lines by level: default (foreground), WARN (yellow-400), ERROR (red-400), SYS (blue-300). Include live indicator dot when streaming.
+`bg-code-background border rounded-lg p-3 font-mono text-xs` container (a sunken well in dark mode, a light grey in light mode — never `bg-neutral-950`, which is invisible for `text-foreground` in light mode). Color lines by level: default (foreground), WARN (yellow-400), ERROR (red-400), SYS (blue-300). Include live indicator dot when streaming.
 
 ---
 
@@ -348,4 +350,4 @@ All components use `cn()` from `@/lib/utils` for className merging. All componen
 - Adding components without updating the design guide page
 - Using `shadow-md` or heavier — keep shadows minimal (xs, sm only)
 - Using `rounded-2xl` or larger — max is `rounded-xl` (except `rounded-full` for pills)
-- Forgetting dark mode — always use semantic tokens, never hardcode light/dark values
+- Forgetting light mode — always use semantic tokens, never hardcode light/dark values (`bg-zinc-950`, `text-white` on a neutral surface, `text-[#959596]`); `text-white` is only right on a saturated colour or a media overlay

@@ -6,8 +6,10 @@
  * light page backgrounds.
  */
 
-const DARK_BG = { r: 24, g: 24, b: 27 }; // zinc-900 (#18181b)
-const LIGHT_BG = { r: 255, g: 255, b: 255 }; // white
+// The card surface of each theme (pills mostly sit on cards). Keep in sync
+// with --card in ui/src/index.css.
+const DARK_BG = { r: 33, g: 36, b: 40 }; // dark --card (#212428)
+const LIGHT_BG = { r: 255, g: 255, b: 255 }; // light --card (white)
 
 export function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
   const match = /^#?([0-9a-f]{3,6})$/i.exec(hex.trim());

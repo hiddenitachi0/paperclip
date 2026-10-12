@@ -11,6 +11,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { TelegramLinkCard } from "@/components/TelegramLinkCard";
 
 function deriveInitials(name: string) {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -289,7 +290,7 @@ export function ProfileSettings() {
 
         <div className="rounded-[28px] border border-border/70 bg-card p-6 shadow-sm">
           <div className="space-y-1">
-            <h2 className="text-base font-semibold">Change password</h2>
+            <h2 className="section-title">Change password</h2>
             <p className="text-sm text-muted-foreground">
               Update the password you use to sign in with email.
             </p>
@@ -367,6 +368,8 @@ export function ProfileSettings() {
             </div>
           </form>
         </div>
+
+        <TelegramLinkCard />
       </section>
     </div>
   );

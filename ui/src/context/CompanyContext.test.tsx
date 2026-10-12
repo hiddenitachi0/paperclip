@@ -46,6 +46,7 @@ function makeCompany(id: string): Company {
     feedbackDataSharingTermsVersion: null,
     brandColor: null,
     worktreeCleanupRetentionDays: null,
+    subtasksInheritModelEffort: true,
     logoAssetId: null,
     logoUrl: null,
     createdAt: new Date(),

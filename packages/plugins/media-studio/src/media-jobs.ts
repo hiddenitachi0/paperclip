@@ -27,6 +27,7 @@
 // linking to the file and waking the assignee — see deliverResult().
 
 import type { PluginContext, PluginEntityRecord } from "@paperclipai/plugin-sdk";
+import { companyConfig } from "./company-settings.js";
 import type { MediaKind } from "./media-provider.js";
 import type { MediaJobHandle, MediaJobInput, MediaJobProvider, MediaJobResult, MediaPollOutcome } from "./media-jobs-types.js";
 import { FalVideoProvider, SogniVideoProvider } from "./video.js";
@@ -75,12 +76,12 @@ async function resolveMediaSecrets(
 ): Promise<{ falKey?: string; sogniKey?: string }> {
   if (providerId === "fal") {
     const ref = textOrUndefined(cfg.falKeySecretRef);
-    if (!ref) throw new Error("Set the Fal.ai API key secret reference in Media Studio settings.");
+    if (!ref) throw new Error("Pick the Fal.ai API key in Media Studio's Settings tab (it comes from the company's Secrets).");
     return { falKey: await ctx.secrets.resolve(ref) };
   }
   if (providerId === "sogni") {
     const ref = textOrUndefined(cfg.sogniKeySecretRef);
-    if (!ref) throw new Error("Pick the Sogni API key in Media Studio settings (it comes from the company's Secrets).");
+    if (!ref) throw new Error("Pick the Sogni API key in Media Studio's Settings tab (it comes from the company's Secrets).");
     return { sogniKey: await ctx.secrets.resolve(ref) };
   }
   throw new Error(`"${providerId}" does not make video or audio.`);
@@ -129,7 +130,7 @@ export async function startMediaJob(
   jobInput: MediaJobInput,
   issueId: string | null,
 ): Promise<{ jobId: string; provider: string; model: string }> {
-  const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
+  const cfg = await companyConfig(ctx, runCtx.companyId);
   const secrets = await resolveMediaSecrets(ctx, cfg, providerId);
   const provider = buildMediaProvider(ctx, kind, providerId, cfg, secrets);
   const handle = await provider.start(jobInput);
@@ -271,7 +272,7 @@ async function advanceOne(ctx: PluginContext, jobRunId: string, record: PluginEn
   const data = record.data as unknown as MediaJobData;
   if (data.resultFileId) return; // Already delivered; nothing to do (defensive — should not happen once status flips to "done").
 
-  const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
+  const cfg = await companyConfig(ctx, data.companyId);
   let provider: MediaJobProvider;
   try {
     const secrets = await resolveMediaSecrets(ctx, cfg, data.provider);

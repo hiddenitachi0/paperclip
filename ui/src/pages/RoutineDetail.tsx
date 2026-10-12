@@ -463,18 +463,24 @@ export function RoutineDetail() {
           ? { cronExpression: newTrigger.cronExpression.trim(), timezone: getLocalTimezone() }
           : {}),
         ...(newTrigger.kind === "webhook"
-          ? { signingMode: newTrigger.signingMode, replayWindowSec: Number(newTrigger.replayWindowSec || "300") }
+          ? {
+              signingMode: newTrigger.signingMode,
+              replayWindowSec: Number(newTrigger.replayWindowSec || "300"),
+              ...(newTrigger.secretMode === "existing" && newTrigger.existingSecretId
+                ? { existingSecretId: newTrigger.existingSecretId }
+                : {}),
+            }
           : {}),
       });
     },
     onSuccess: async (result) => {
       if (result.secretMaterial) {
         setSecretMessage({
-          title: "Webhook trigger created",
+          title: "Webhook created",
           entries: [{ webhookUrl: result.secretMaterial.webhookUrl, webhookSecret: result.secretMaterial.webhookSecret }],
         });
       } else {
-        pushToast({ title: "Trigger added", body: "The routine schedule was saved.", tone: "success" });
+        pushToast({ title: "Trigger added", body: "Your new trigger was saved.", tone: "success" });
       }
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.routines.detail(routineId!) }),
@@ -533,7 +539,7 @@ export function RoutineDetail() {
     mutationFn: (id: string): Promise<RotateRoutineTriggerResponse> => routinesApi.rotateTriggerSecret(id),
     onSuccess: async (result) => {
       setSecretMessage({
-        title: "Webhook secret rotated",
+        title: "New webhook password made",
         entries: [{ webhookUrl: result.secretMaterial.webhookUrl, webhookSecret: result.secretMaterial.webhookSecret }],
       });
       await Promise.all([

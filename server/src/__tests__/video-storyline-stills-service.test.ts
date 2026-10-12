@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
-import { createDb, companies, plugins, videoShots } from "@paperclipai/db";
+import { createDb, companies, plugins, pluginState, videoShots } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { videoStorylineSettingsService } from "../services/video-storyline-settings.ts";
 import { videoStorylineStillsService } from "../services/video-storyline-stills.ts";
@@ -191,5 +191,30 @@ d("videoStorylineStillsService", () => {
     const summary = await videoStorylineStillsService(db).getStoryboardSummary(companyId, storylineId);
     expect(summary.allApproved).toBe(false);
     expect(summary.stillTotalCents).toBe(0);
+  });
+
+  it("offers a picture service only when THIS company has a key for it (its own pick in Media Studio settings)", async () => {
+    const a = await seedCompanyWithShot();
+    const b = await seedCompanyWithShot();
+    const [plugin] = await db.select().from(plugins).where(eq(plugins.pluginKey, "paperclip.media-studio"));
+    await db.insert(pluginState).values({
+      pluginId: plugin!.id,
+      scopeKind: "company",
+      scopeId: a.companyId,
+      namespace: "default",
+      stateKey: "serviceKeys",
+      valueJson: { sogni: randomUUID() },
+    });
+    const stills = videoStorylineStillsService(db);
+    expect((await stills.getStoryboardSummary(a.companyId, a.storylineId)).pictureServices).toEqual({ fal: false, sogni: true });
+    expect((await stills.getStoryboardSummary(b.companyId, b.storylineId)).pictureServices).toEqual({ fal: false, sogni: false });
+  });
+
+  it("refuses a Sogni storyboard picture with a plain message when the company has no Sogni key", async () => {
+    const { companyId, storylineId, shotId } = await seedCompanyWithShot();
+    await videoStorylineService(db).updateStoryline(companyId, storylineId, { pictureSettings: { providerId: "sogni" } } as never, ACTOR);
+    await expect(videoStorylineStillsService(db).generateStill(companyId, storylineId, shotId, ACTOR)).rejects.toThrow(
+      /no Sogni API key is set for this company yet/,
+    );
   });
 });

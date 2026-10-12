@@ -6,7 +6,7 @@ import { api } from "./client";
 // job that person holds), else the agent's own. Board-only routes; an agent
 // can never call them.
 
-export type AgentMemorySource = "agent" | "user";
+export type AgentMemorySource = "agent" | "user" | "reaction";
 
 export interface AgentMemoryNote {
   id: string;

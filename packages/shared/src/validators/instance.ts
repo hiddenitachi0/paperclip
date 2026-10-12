@@ -268,6 +268,9 @@ export const instanceExperimentalSettingsSchema = z.object({
   // DUR-3972: business-data sources (Shopify first). Off by default: with it
   // off, no data connection can be made or used on this instance.
   enableBusinessData: z.boolean().default(false),
+  // DUR-4072: the reporting framework. Off by default: with it off, no
+  // report script can be created, tested, approved or run on this instance.
+  enableReporting: z.boolean().default(false),
 }).strict();
 
 export const patchInstanceExperimentalSettingsSchema = instanceExperimentalSettingsSchema.partial();

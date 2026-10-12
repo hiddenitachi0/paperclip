@@ -2694,6 +2694,10 @@ function DetailRow({ label, children }: { label: string; children: React.ReactNo
   );
 }
 
+const USAGE_TYPE_LABELS: Record<string, string> = {
+  routine_trigger: "Webhook trigger",
+};
+
 function SecretUsageTab({ loading, bindings }: { loading: boolean; bindings: CompanySecretUsageBinding[] }) {
   if (loading) {
     return <div className="py-6 text-center text-xs text-muted-foreground">Loading…</div>;
@@ -2701,7 +2705,7 @@ function SecretUsageTab({ loading, bindings }: { loading: boolean; bindings: Com
   if (bindings.length === 0) {
     return (
       <div className="py-6 text-center text-xs text-muted-foreground">
-        No active bindings. Add this secret in agent, project, environment, or plugin config to start using it.
+        Nothing uses this secret yet. Add it to an agent, project, environment, plugin or webhook to start using it.
       </div>
     );
   }
@@ -2713,8 +2717,12 @@ function SecretUsageTab({ loading, bindings }: { loading: boolean; bindings: Com
           className="rounded-md border border-border bg-muted/30 p-2 text-xs"
         >
           <div className="flex items-center justify-between gap-2">
-            <span className="font-medium capitalize">{binding.target.type}</span>
-            <span className="font-mono text-muted-foreground">v{binding.versionSelector}</span>
+            <span className="font-medium capitalize">
+              {USAGE_TYPE_LABELS[binding.target.type] ?? binding.target.type}
+            </span>
+            {binding.target.type === "routine_trigger" ? null : (
+              <span className="font-mono text-muted-foreground">v{binding.versionSelector}</span>
+            )}
           </div>
           <div className="mt-0.5 flex min-w-0 items-center gap-2">
             {binding.target.href ? (
@@ -2730,12 +2738,16 @@ function SecretUsageTab({ loading, bindings }: { loading: boolean; bindings: Com
               </Badge>
             ) : null}
           </div>
-          <div className="font-mono text-[11px] text-muted-foreground break-all">
-            {binding.targetId}
-          </div>
-          <div className="text-[11px] text-muted-foreground">
-            {binding.configPath} {binding.required ? "· required" : "· optional"}
-          </div>
+          {binding.target.type === "routine_trigger" ? null : (
+            <>
+              <div className="font-mono text-[11px] text-muted-foreground break-all">
+                {binding.targetId}
+              </div>
+              <div className="text-[11px] text-muted-foreground">
+                {binding.configPath} {binding.required ? "· required" : "· optional"}
+              </div>
+            </>
+          )}
         </div>
       ))}
     </div>

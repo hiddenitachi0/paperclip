@@ -27,8 +27,27 @@ export interface LaneAPluginRun {
    * the agent read this turn named it" (see laneAPluginRunNamesIssue).
    */
   requesterMessage: string;
+  /**
+   * The plugin and tool this run was opened for (from the host's own tool
+   * registry, never from the plugin). Host services that only one plugin's
+   * tool call may use (the chat photo age check) compare against these.
+   */
+  pluginKey: string | null;
+  toolName: string | null;
+  /**
+   * Pictures the person attached in this conversation (server-set: Lane A
+   * checked each when it came in). Media Studio age-checks every one of them
+   * before sending it anywhere, and the host lets the age check look at
+   * these files only.
+   */
+  attachedFileIds: string[];
+  /** Age-check analyses made in this run so far (capped; see LANE_A_RUN_IMAGE_ANALYSES_MAX). */
+  imageAnalyses: number;
   startedAt: Date;
 }
+
+/** At most this many picture analyses (age checks) per quick-agent tool call. */
+export const LANE_A_RUN_IMAGE_ANALYSES_MAX = 4;
 
 /** A run that was never closed (a crash mid-call) stops resolving after this long. */
 export const LANE_A_PLUGIN_RUN_MAX_AGE_MS = 10 * 60 * 1000;
@@ -50,10 +69,19 @@ function sweepStale(now: number): void {
  * worker has answered; the id stops resolving from then on.
  */
 export function openLaneAPluginRun(
-  input: Omit<LaneAPluginRun, "runId" | "startedAt">,
+  input: Omit<LaneAPluginRun, "runId" | "startedAt" | "pluginKey" | "toolName" | "attachedFileIds" | "imageAnalyses"> &
+    Partial<Pick<LaneAPluginRun, "pluginKey" | "toolName" | "attachedFileIds">>,
 ): { run: LaneAPluginRun; close: () => void } {
   sweepStale(Date.now());
-  const run: LaneAPluginRun = { ...input, runId: randomUUID(), startedAt: new Date() };
+  const run: LaneAPluginRun = {
+    ...input,
+    pluginKey: input.pluginKey ?? null,
+    toolName: input.toolName ?? null,
+    attachedFileIds: [...(input.attachedFileIds ?? [])],
+    imageAnalyses: 0,
+    runId: randomUUID(),
+    startedAt: new Date(),
+  };
   activeRuns.set(run.runId, run);
   let closed = false;
   return {

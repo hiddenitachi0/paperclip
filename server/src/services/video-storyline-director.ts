@@ -1,18 +1,17 @@
-import Anthropic from "@anthropic-ai/sdk";
 import { and, desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { videoScenes, videoShots, videoStorylineDirectorRuns } from "@paperclipai/db";
 import {
   VIDEO_DIRECTOR_CONTEXT_SHOT_COUNT,
   VIDEO_DIRECTOR_MAX_OUTPUT_TOKENS,
-  VIDEO_DIRECTOR_MODEL,
   type ApproveVideoDirectorRunInput,
   type DraftVideoDirectorShotsInput,
   type VideoDirectorDraftedShot,
   type VideoDirectorRunSummary,
 } from "@paperclipai/shared";
-import { badRequest, conflict, notFound } from "../errors.js";
-import { readAnthropicApiKey } from "../env-values.js";
+import { HttpError, badRequest, conflict, notFound } from "../errors.js";
+import { storylineCompanyModel } from "./video-storyline-company-model.js";
+import { DIRECTOR_AI_NOT_CONFIGURED_MESSAGE, directorAiFailure } from "./video-storyline-director-ai-errors.js";
 import { logActivity } from "./activity-log.js";
 import { videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
@@ -200,9 +199,8 @@ export function videoStorylineDirectorService(db: Db) {
       .limit(VIDEO_DIRECTOR_CONTEXT_SHOT_COUNT);
     const recentShots = recentShotRows.reverse();
 
-    const apiKey = readAnthropicApiKey();
     const now = new Date();
-    if (!apiKey) {
+    if (!(await storylineCompanyModel(db).writerAvailable(companyId))) {
       const [row] = await db
         .insert(videoStorylineDirectorRuns)
         .values({
@@ -212,7 +210,7 @@ export function videoStorylineDirectorService(db: Db) {
           idea: input.idea,
           status: "failed",
           draftedShots: [],
-          errorMessage: "Director AI is not configured on this instance (ANTHROPIC_API_KEY unset).",
+          errorMessage: DIRECTOR_AI_NOT_CONFIGURED_MESSAGE,
           createdByAgentId: actor.agentId,
           createdByUserId: actor.actorType === "user" ? actor.actorId : null,
           createdAt: now,
@@ -222,43 +220,24 @@ export function videoStorylineDirectorService(db: Db) {
       return toRunSummary(row!);
     }
 
-    const client = new Anthropic({ apiKey });
     let draftedShots: VideoDirectorDraftedShot[];
     let errorMessage: string | null = null;
     try {
-      const response = await client.messages.create({
-        model: VIDEO_DIRECTOR_MODEL,
-        max_tokens: VIDEO_DIRECTOR_MAX_OUTPUT_TOKENS,
+      const text = await storylineCompanyModel(db).writeText(companyId, actor, {
+        maxTokens: VIDEO_DIRECTOR_MAX_OUTPUT_TOKENS,
         system: buildSystemPrompt(input.shotCount),
-        messages: [
-          {
-            role: "user",
-            content: buildUserMessage({
+        user: buildUserMessage({
               storylineTitle: storyline.title,
               sceneTitle: scene.title,
               sceneNotes: scene.notes,
               recentShots,
               idea: input.idea,
             }),
-          },
-        ],
       });
-      const text = response.content
-        .filter((block): block is Anthropic.TextBlock => block.type === "text")
-        .map((block) => block.text)
-        .join("");
       draftedShots = parseDraftedShots(text, input.shotCount);
     } catch (err) {
       draftedShots = [];
-      if (err instanceof Anthropic.AuthenticationError) {
-        errorMessage = "Director AI credentials are invalid.";
-      } else if (err instanceof Anthropic.RateLimitError) {
-        errorMessage = "Director AI is rate limited upstream — retry shortly.";
-      } else if (err instanceof Anthropic.APIError) {
-        errorMessage = `Director AI call failed: ${err.message}`;
-      } else {
-        errorMessage = err instanceof Error ? err.message : "Director AI call failed.";
-      }
+      errorMessage = err instanceof HttpError ? err.message : directorAiFailure(err).message;
     }
 
     const [row] = await db

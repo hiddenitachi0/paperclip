@@ -65,6 +65,8 @@ export type NewTriggerDraft = {
   cronExpression: string;
   signingMode: string;
   replayWindowSec: string;
+  secretMode: "generate" | "existing";
+  existingSecretId: string;
 };
 
 export function createDefaultNewTrigger(): NewTriggerDraft {
@@ -73,6 +75,8 @@ export function createDefaultNewTrigger(): NewTriggerDraft {
     cronExpression: "0 10 * * *",
     signingMode: "bearer",
     replayWindowSec: "300",
+    secretMode: "generate",
+    existingSecretId: "",
   };
 }
 

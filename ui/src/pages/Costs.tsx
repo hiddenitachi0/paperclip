@@ -12,6 +12,7 @@ import type {
 } from "@paperclipai/shared";
 import { ArrowDownLeft, ArrowUpRight, ChevronDown, ChevronRight, Coins, DollarSign, ReceiptText } from "lucide-react";
 import { budgetsApi } from "../api/budgets";
+import { agentsApi } from "../api/agents";
 import { costsApi } from "../api/costs";
 import { CostSourceCard } from "../components/CostSourceCard";
 import { BillerSpendCard } from "../components/BillerSpendCard";
@@ -21,6 +22,7 @@ import { EmptyState } from "../components/EmptyState";
 import { FinanceBillerCard } from "../components/FinanceBillerCard";
 import { FinanceKindCard } from "../components/FinanceKindCard";
 import { FinanceTimelineCard } from "../components/FinanceTimelineCard";
+import { HiddenInPresentationMode } from "../components/HiddenInPresentationMode";
 import { Identity } from "../components/Identity";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { PageTabBar } from "../components/PageTabBar";
@@ -313,6 +315,30 @@ export function Costs() {
     refetchInterval: 30_000,
     staleTime: 10_000,
   });
+
+  const { data: cacheStatusData } = useQuery({
+    queryKey: queryKeys.usageCacheStatus(companyId),
+    queryFn: () => costsApi.cacheStatus(companyId),
+    enabled: !!selectedCompanyId && mainTab === "overview",
+    refetchInterval: 30_000,
+    staleTime: 10_000,
+  });
+
+  const { data: allAgents } = useQuery({
+    queryKey: queryKeys.agents.list(companyId),
+    queryFn: () => agentsApi.list(companyId),
+    enabled: !!selectedCompanyId && mainTab === "overview",
+    staleTime: 30_000,
+  });
+
+  // Retired agents are always cold with no data, so keep them out of the panel.
+  const savedContextRows = useMemo(() => {
+    // The agents list leaves out terminated agents, so keep only rows for agents
+    // it still returns (and drop any it marks terminated, in case that changes).
+    if (!allAgents) return cacheStatusData ?? [];
+    const current = new Set(allAgents.filter((a) => a.status !== "terminated").map((a) => a.id));
+    return (cacheStatusData ?? []).filter((row) => current.has(row.agentId));
+  }, [allAgents, cacheStatusData]);
 
   const { data: weekData } = useQuery({
     queryKey: queryKeys.usageByProvider(companyId, weekRange.from, weekRange.to),
@@ -627,42 +653,44 @@ export function Costs() {
             </div>
           ) : null}
 
-          <div className="grid gap-3 lg:grid-cols-4">
-            <MetricTile
-              label="Inference spend"
-              value={formatCents(spendData?.summary.spendCents ?? 0)}
-              subtitle={`${formatTokens(inferenceTokenTotal)} tokens across request-scoped events`}
-              icon={DollarSign}
-            />
-            <MetricTile
-              label="Budget"
-              value={activeBudgetIncidents.length > 0 ? String(activeBudgetIncidents.length) : (
-                spendData?.summary.budgetCents && spendData.summary.budgetCents > 0
-                  ? `${spendData.summary.utilizationPercent}%`
-                  : "Open"
-              )}
-              subtitle={
-                activeBudgetIncidents.length > 0
-                  ? `${budgetData?.pausedAgentCount ?? 0} agents paused · ${budgetData?.pausedProjectCount ?? 0} projects paused`
-                  : spendData?.summary.budgetCents && spendData.summary.budgetCents > 0
-                    ? `${formatCents(spendData.summary.spendCents)} of ${formatCents(spendData.summary.budgetCents)}`
-                    : "No monthly cap configured"
-              }
-              icon={Coins}
-            />
-            <MetricTile
-              label="Finance net"
-              value={formatCents(financeData?.summary.netCents ?? 0)}
-              subtitle={`${formatCents(financeData?.summary.debitCents ?? 0)} debits · ${formatCents(financeData?.summary.creditCents ?? 0)} credits`}
-              icon={ReceiptText}
-            />
-            <MetricTile
-              label="Finance events"
-              value={String(financeData?.summary.eventCount ?? 0)}
-              subtitle={`${formatCents(financeData?.summary.estimatedDebitCents ?? 0)} estimated in range`}
-              icon={ArrowUpRight}
-            />
-          </div>
+          <HiddenInPresentationMode label="Cost and finance summary">
+            <div className="grid gap-3 lg:grid-cols-4">
+              <MetricTile
+                label="Inference spend"
+                value={formatCents(spendData?.summary.spendCents ?? 0)}
+                subtitle={`${formatTokens(inferenceTokenTotal)} tokens across request-scoped events`}
+                icon={DollarSign}
+              />
+              <MetricTile
+                label="Budget"
+                value={activeBudgetIncidents.length > 0 ? String(activeBudgetIncidents.length) : (
+                  spendData?.summary.budgetCents && spendData.summary.budgetCents > 0
+                    ? `${spendData.summary.utilizationPercent}%`
+                    : "Open"
+                )}
+                subtitle={
+                  activeBudgetIncidents.length > 0
+                    ? `${budgetData?.pausedAgentCount ?? 0} agents paused · ${budgetData?.pausedProjectCount ?? 0} projects paused`
+                    : spendData?.summary.budgetCents && spendData.summary.budgetCents > 0
+                      ? `${formatCents(spendData.summary.spendCents)} of ${formatCents(spendData.summary.budgetCents)}`
+                      : "No monthly cap configured"
+                }
+                icon={Coins}
+              />
+              <MetricTile
+                label="Finance net"
+                value={formatCents(financeData?.summary.netCents ?? 0)}
+                subtitle={`${formatCents(financeData?.summary.debitCents ?? 0)} debits · ${formatCents(financeData?.summary.creditCents ?? 0)} credits`}
+                icon={ReceiptText}
+              />
+              <MetricTile
+                label="Finance events"
+                value={String(financeData?.summary.eventCount ?? 0)}
+                subtitle={`${formatCents(financeData?.summary.estimatedDebitCents ?? 0)} estimated in range`}
+                icon={ArrowUpRight}
+              />
+            </div>
+          </HiddenInPresentationMode>
       </div>
 
       <Tabs value={mainTab} onValueChange={(value) => setMainTab(value as typeof mainTab)}>
@@ -702,6 +730,7 @@ export function Costs() {
                 </div>
               ) : null}
 
+              <HiddenInPresentationMode label="Inference and finance ledgers" className="xl:col-span-2">
               <div className="grid gap-4 xl:grid-cols-[1.3fr,1fr]">
                 <Card>
                   <CardHeader className="px-5 pt-5 pb-2">
@@ -760,6 +789,7 @@ export function Costs() {
                   eventCount={financeData?.summary.eventCount ?? 0}
                 />
               </div>
+              </HiddenInPresentationMode>
 
               <div className="grid gap-4 xl:grid-cols-[1.25fr,0.95fr]">
                 <Card>
@@ -877,6 +907,45 @@ export function Costs() {
               </div>
             </>
           )}
+          {savedContextRows.length > 0 ? (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Saved context</CardTitle>
+                <CardDescription>
+                  While an agent's saved context is warm, its next run is cheap. Once it goes cold, the next run pays to rebuild it.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-2">
+                {savedContextRows.map((row) => (
+                  <div key={row.agentId} className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <Identity name={row.agentName} size="sm" />
+                      <span
+                        className={cn(
+                          "rounded-full px-2 py-0.5 text-xs font-medium",
+                          row.cacheWarm
+                            ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                            : "bg-muted text-muted-foreground",
+                        )}
+                      >
+                        {row.cacheWarm ? "Warm" : "Cold"}
+                      </span>
+                    </div>
+                    <div className="text-right text-xs text-muted-foreground tabular-nums">
+                      <div>
+                        Context size: {row.contextTokens != null ? `${formatTokens(row.contextTokens)} tokens` : "unknown"}
+                      </div>
+                      <div>
+                        Last rebuild: {row.lastRewriteCostCents != null ? formatCents(row.lastRewriteCostCents) : "none yet"}
+                        {" · "}
+                        Rebuilt this week: {formatCents(row.rewritesThisWeekCents)}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+          ) : null}
         </TabsContent>
 
         <TabsContent value="budgets" className="mt-4 space-y-4">
@@ -924,7 +993,7 @@ export function Costs() {
               {activeBudgetIncidents.length > 0 ? (
                 <div className="space-y-3">
                   <div>
-                    <h2 className="text-lg font-semibold">Active incidents</h2>
+                    <h2 className="section-title">Active incidents</h2>
                     <p className="text-sm text-muted-foreground">
                       Resolve hard stops here by raising the budget or explicitly keeping the scope paused.
                     </p>
@@ -957,7 +1026,7 @@ export function Costs() {
                   return (
                     <section key={scopeType} className="space-y-3">
                       <div>
-                        <h2 className="text-lg font-semibold capitalize">{scopeType} budgets</h2>
+                        <h2 className="section-title">{scopeType} budgets</h2>
                         <p className="text-sm text-muted-foreground">
                           {scopeType === "company"
                             ? "Company-wide daily or monthly policy."

@@ -130,6 +130,10 @@ function formatVerb(
       return "updated company";
     case "company.archived":
       return "archived company";
+    case "company.marked_migrated":
+      return "marked the company as moved to another Paperclip";
+    case "company.migration_undone":
+      return "undid the move and resumed the company here";
     case "company.budget_updated":
       return "updated company budget";
 
@@ -452,8 +456,8 @@ export function FeedCard({
   // approval to learn why.
   const decisionNote = readActivityDecisionNote(event.action, details);
 
-  const mutedTextBase = isMuted ? "text-muted-foreground/70" : "text-[#959596]";
-  const mutedTextHover = isMuted ? "" : "group-hover:text-white";
+  const mutedTextBase = isMuted ? "text-muted-foreground/70" : "text-muted-foreground";
+  const mutedTextHover = isMuted ? "" : "group-hover:text-foreground";
 
   const card = (
     <div

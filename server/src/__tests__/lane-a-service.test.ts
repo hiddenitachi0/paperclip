@@ -804,6 +804,102 @@ describeEmbeddedPostgres("lane A service", () => {
     vi.resetModules();
   });
 
+  // ─── 8 Oct: follow-up pictures ───────────────────────────────────────────
+
+  it("forces the picture tool once when the person asks for a picture and the reply makes none", async () => {
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId, true, "Maja");
+    await agentService(db).syncPluginToolGrants(target.id, [PLUGIN_TOOL_NAMESPACED]);
+    const pictureId = await seedCompanyPicture(companyId);
+    const { dispatcher, call } = await seedPluginTool();
+    call.mockResolvedValueOnce({ content: "Made the picture.", data: { fileId: pictureId, seed: 7 } });
+
+    const mockCreate = vi
+      .fn()
+      // Round 1: a friendly question back, no tool call, no claim.
+      .mockResolvedValueOnce({
+        content: [{ type: "text", text: "Ooh, I'd love to! Which angle would you like?" }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+        stop_reason: "end_turn",
+      })
+      // Round 2 (forced onto the picture tool): the call is made.
+      .mockResolvedValueOnce({
+        content: [{ type: "tool_use", id: "call_1", name: PLUGIN_TOOL_MODEL_NAME, input: { prompt: "a sofa, seen from the side" } }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+        stop_reason: "tool_use",
+      })
+      .mockResolvedValueOnce({
+        content: [{ type: "text", text: "Here it is, from the side." }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+        stop_reason: "end_turn",
+      });
+    mockAnthropic(mockCreate);
+    vi.resetModules();
+    const { laneAService: freshLaneAService } = await import("../services/lane-a.ts");
+    const svc = freshLaneAService(db, { pluginToolDispatcher: dispatcher });
+
+    const result = await svc.sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "user-1", agentId: null },
+      message: "send me another image from a different angle",
+    });
+
+    expect(mockCreate).toHaveBeenCalledTimes(3);
+    expect(mockCreate.mock.calls[1][0].tool_choice).toEqual({ type: "tool", name: PLUGIN_TOOL_MODEL_NAME });
+    expect(JSON.stringify(mockCreate.mock.calls[1][0].messages)).toContain("The person asked you to make the picture");
+    expect(result.response).toBe("Here it is, from the side.");
+    expect(result.actions[0]?.image?.fileId).toBe(pictureId);
+    expect(result.actions).toContainEqual(expect.objectContaining({ tool: "action_claim_check", ok: true }));
+
+    vi.doUnmock("@anthropic-ai/sdk");
+    vi.resetModules();
+  });
+
+  it("makes a tool call the model wrote out as JSON text, through the normal tool path", async () => {
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId, true, "Maja");
+    await agentService(db).syncPluginToolGrants(target.id, [PLUGIN_TOOL_NAMESPACED]);
+    const pictureId = await seedCompanyPicture(companyId);
+    const { dispatcher, call } = await seedPluginTool();
+    call.mockResolvedValueOnce({ content: "Made the picture.", data: { fileId: pictureId, seed: 3 } });
+
+    const mockCreate = vi
+      .fn()
+      .mockResolvedValueOnce({
+        content: [{ type: "text", text: '{"name":"make-picture","parameters":{"prompt":"a lighthouse at dusk"}}' }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+        stop_reason: "end_turn",
+      })
+      .mockResolvedValueOnce({
+        content: [{ type: "text", text: "Here is your lighthouse." }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+        stop_reason: "end_turn",
+      });
+    mockAnthropic(mockCreate);
+    vi.resetModules();
+    const { laneAService: freshLaneAService } = await import("../services/lane-a.ts");
+    const svc = freshLaneAService(db, { pluginToolDispatcher: dispatcher });
+
+    const result = await svc.sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "user-1", agentId: null },
+      message: "make a picture of a lighthouse",
+    });
+
+    expect(call).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(call.mock.calls[0])).toContain("a lighthouse at dusk");
+    expect(result.response).toBe("Here is your lighthouse.");
+    expect(result.response).not.toContain('"name"');
+    expect(result.actions[0]?.image?.fileId).toBe(pictureId);
+
+    vi.doUnmock("@anthropic-ai/sdk");
+    vi.resetModules();
+  });
+
   it("gives a quick agent no add-on tools unless they are ticked: nothing ticked means none, unlike a full agent", async () => {
     process.env.ANTHROPIC_API_KEY = "test-key";
     const companyId = await seedCompany();

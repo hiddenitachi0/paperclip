@@ -18,6 +18,9 @@ import {
   type ModelBoostRequestPayload,
   modelBoostBossReviewDecisionSchema,
   modelBoostRequestPayloadSchema,
+  operatorActionRequestInputSchema,
+  operatorActionRequestPayloadSchema,
+  recordSecurityReviewVerdictSchema,
   requestApprovalRevisionSchema,
   resolveApprovalSchema,
   resubmitApprovalSchema,
@@ -68,12 +71,21 @@ import {
 } from "../services/deploy-change-guard.js";
 import { isCompletedDeployOutcome } from "../services/deploy-completion-gate.js";
 import { readDeployRunnerStatus, type DeployRunnerStatusEntry } from "../services/deploy-runner-status.js";
-import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
+import {
+  buildOperatorActionCard,
+  describeCompanyOperatorActions,
+  isOperatorActionApproval,
+  readOperatorActionCatalog,
+} from "../services/operator-actions.js";
+import { assertBoard, assertCompanyAccess, assertCompanyOwnerAdminOrInstanceAdmin, assertInstanceAdmin, getActorInfo, isCompanyOwnerOrAdmin } from "./authz.js";
+import { REPORT_SCRIPT_APPROVAL_KIND, reportScriptsService } from "../services/report-scripts.js";
+import { instanceSettingsService } from "../services/instance-settings.js";
 import { redactEventPayload } from "../redaction.js";
 import { HttpError, conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import { companyScope, companyScopeFromParam } from "../middleware/company-scope.js";
 import { describeToolCapability, summarizeMcpServer } from "../services/agent-tool-audit.js";
 import { crossCompanyInstructionService } from "../services/cross-company-instructions.js";
+import { isMergePrApprovalPayload, securityReviewService } from "../services/security-review.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import { isStatusOnlyCheapRecoveryContext } from "../services/recovery/model-profile-hint.js";
 import { recordCheapRunEscalation } from "../services/recovery/cheap-run-escalation.js";
@@ -81,6 +93,7 @@ import { recordCheapRunEscalation } from "../services/recovery/cheap-run-escalat
 // (it pulls in the issue/heartbeat graph, which route tests mock away).
 import { buildBossReviewStamp, readBossReview } from "../services/model-boost-boss-review.js";
 import { ghFetch, gitHubApiBase } from "../services/github-fetch.js";
+import { withResolvedMergePrHeadCommit } from "../services/merge-card-head-commit.js";
 
 function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(approval: T): T {
   return {
@@ -1484,6 +1497,9 @@ async function normalizeRequestBoardApprovalPayload(
   await assertMergePrRepoMatchesProject(db, companyId, issueIds, payload);
   if (payload.kind === "merge_pr") {
     await assertMergePrIssueIdsAreRelevant(db, companyId, issueIds, actor);
+    // DUR-4601: agents routinely file a merge card with only repo/prNumber -- fill the head
+    // commit from GitHub server-side so "Request security review" never 422s on it later.
+    payload = await withResolvedMergePrHeadCommit(db, companyId, payload);
   }
   stampOriginalIssueIds(payload, issueIds);
   if (typeof payload.title !== "string" || !payload.title.trim()) return payload;
@@ -1618,11 +1634,41 @@ export function approvalRoutes(
     pluginWorkerManager: options.pluginWorkerManager,
   });
   const issueApprovalsSvc = issueApprovalService(db);
+  const securityReviewSvc = securityReviewService(db);
   const interactionsSvc = issueThreadInteractionService(db);
   const secretsSvc = secretService(db, rawDb);
   const escalationGrantsSvc = escalationGrantService(db);
   const personasSvc = personaService(db);
   const crossCompanyInstructionsSvc = crossCompanyInstructionService(db, { rawDb });
+  const reportScriptsSvc = reportScriptsService(db);
+  const reportingSettings = instanceSettingsService(rawDb);
+
+  /**
+   * DUR-4072: approving a report-calculation card is the owner's approve
+   * action -- it runs the version's saved examples first and switches the
+   * version on only if they all match (report-scripts.ts approveVersion).
+   * Only a person who is the company's owner/admin (or an instance admin)
+   * may do it. If any example fails, the card stays open with the results
+   * on it and the request is refused with a plain reason.
+   */
+  async function approveReportScriptCard(req: Request, card: { id: string; companyId: string; payload: unknown }) {
+    assertCompanyOwnerAdminOrInstanceAdmin(req, card.companyId, "report calculations");
+    const info = getActorInfo(req);
+    if (info.actorType !== "user") throw forbidden("Only a person can approve a report calculation.");
+    const experimental = await reportingSettings.getExperimental();
+    if (!experimental.enableReporting) {
+      throw unprocessable("Reports are switched off for this Paperclip instance, so this calculation cannot be approved now.");
+    }
+    // Never trust ids or code from the card payload: the service finds the
+    // version whose own approval card this is, and approves its stored code.
+    const outcome = await reportScriptsSvc.approveFromCard(card.companyId, card.id, info.actorId);
+    if (!outcome.approved) {
+      throw unprocessable(outcome.message ?? "The saved examples did not all match, so nothing was switched on.", {
+        code: "report_script_fixtures_failed",
+        fixtureResults: outcome.fixtureResults,
+      });
+    }
+  }
 
   /**
    * Guarded cross-company channel: the hooks approvalService runs INSIDE
@@ -1672,6 +1718,48 @@ export function approvalRoutes(
   const rawSvc = approvalService(rawDb);
   const rawAccess = accessService(rawDb);
 
+  /**
+   * One-click host actions: turn a filer's operator_action request into the
+   * stored card. Only the filer's own fields are read (anything stamped on an
+   * earlier version of the card is dropped and re-stamped); every word the
+   * operator reads, and the exact command, comes from the box's published
+   * catalogue. Throws a plain-language 422 when the request is not allowed.
+   */
+  async function stampOperatorActionCard(companyId: string, rawPayload: Record<string, unknown>) {
+    const {
+      title: _title,
+      summary: _summary,
+      targetLabel: _targetLabel,
+      willRun: _willRun,
+      nextActionOnApproval: _next,
+      secretName: _secretName,
+      originalIssueIds: _originalIssueIds,
+      relatedApprovalId: _relatedApprovalId,
+      technicalReference: _technicalReference,
+      ...filerFields
+    } = rawPayload;
+    const parsed = operatorActionRequestInputSchema.safeParse(filerFields);
+    if (!parsed.success) {
+      const problems = parsed.error.issues
+        .map((issue) => (issue.path.length ? `${issue.path.join(".")}: ${issue.message}` : issue.message))
+        .join("; ");
+      throw unprocessable(`This host action request is not valid: ${problems}`, { code: "operator_action_invalid" });
+    }
+    let secretName: string | null = null;
+    if (parsed.data.action === "set_env_var" && parsed.data.secretId) {
+      const secret = await secretsSvc.getById(parsed.data.secretId).catch(() => null);
+      if (secret && secret.companyId === companyId && secret.status === "active") {
+        secretName = secret.name;
+      }
+    }
+    return buildOperatorActionCard({
+      companyId,
+      request: parsed.data,
+      catalog: readOperatorActionCatalog(),
+      secretName,
+    });
+  }
+
   /** Pre-scope companyId resolution (b): look up the approval by :id, 404 if missing. */
   async function resolveApprovalCompanyId(req: Request): Promise<string> {
     const id = req.params.id as string;
@@ -1688,6 +1776,32 @@ export function approvalRoutes(
   /** Board-only routes (approve/reject/request-revision). */
   function checkBoardCompanyAccess(req: Request, companyId: string) {
     assertBoard(req);
+    assertCompanyAccess(req, companyId);
+  }
+
+  /**
+   * DUR-4568 finding #2: the security-review request/verdict routes used to
+   * sit behind plain `company_scope:read` -- any actor allowed to read
+   * approvals (which includes ordinary company agents and read-only board
+   * members) could file a review request or, worse, record a verdict.
+   * `recordVerdict` itself still re-checks that an agent actor really is the
+   * configured reviewer, but a board actor needs more than read access: the
+   * same owner/admin bar as changing who the reviewer is
+   * (security-review-settings.ts's `assertCompanyOwnerOrAdmin`). Agents pass
+   * through to that per-agent check; a plain company membership is not
+   * enough for either actor type.
+   */
+  function checkSecurityReviewActionAccess(req: Request, companyId: string) {
+    if (req.actor.type === "agent") {
+      assertCompanyAccess(req, companyId);
+      return;
+    }
+    assertBoard(req);
+    if (!isCompanyOwnerOrAdmin(req, companyId)) {
+      throw forbidden(
+        "Only this company's owner or admin, or the configured security reviewer agent, may do this.",
+      );
+    }
     assertCompanyAccess(req, companyId);
   }
 
@@ -1807,12 +1921,29 @@ export function approvalRoutes(
     return false;
   }
 
+  /**
+   * DUR-4566 item 1: every merge card shows its security-review state.
+   * Computed fresh on every read (never cached on the approval row) so a
+   * later push always shows up immediately as `out_of_date` -- see
+   * securityReviewService.computeState. Any approval that isn't a merge_pr
+   * card gets `securityReview: null`.
+   */
+  async function withSecurityReviewState<T extends { id: string; companyId: string; payload: unknown }>(
+    approval: T,
+  ): Promise<T & { securityReview: Awaited<ReturnType<typeof securityReviewSvc.computeState>> | null }> {
+    if (!isMergePrApprovalPayload(approval.payload)) {
+      return { ...approval, securityReview: null };
+    }
+    return { ...approval, securityReview: await securityReviewSvc.computeState(approval) };
+  }
+
   router.get("/companies/:companyId/approvals", scopeFromCompanyIdParam(checkApprovalReadAccess), async (req, res) => {
     const companyId = req.params.companyId as string;
     const status = req.query.status as string | undefined;
     const result = await svc.list(companyId, status);
     const personaNames = await personaDisplayNamesFor(result);
-    res.json(result.map((approval) => withPersonaMetadata(approval, personaNames)));
+    const withPersona = result.map((approval) => withPersonaMetadata(approval, personaNames));
+    res.json(await Promise.all(withPersona.map(withSecurityReviewState)));
   });
 
   router.get("/approvals/:id", scopeFromApprovalIdParam(checkApprovalReadAccess), async (req, res) => {
@@ -1823,8 +1954,39 @@ export function approvalRoutes(
       return;
     }
     const personaNames = await personaDisplayNamesFor([approval]);
-    res.json(withPersonaMetadata(approval, personaNames));
+    res.json(await withSecurityReviewState(withPersonaMetadata(approval, personaNames)));
   });
+
+  router.post(
+    "/approvals/:id/security-review/request",
+    scopeFromApprovalIdParam(checkSecurityReviewActionAccess),
+    async (req, res) => {
+      const id = req.params.id as string;
+      const actorInfo = getActorInfo(req);
+      const actor = {
+        agentId: actorInfo.actorType === "agent" ? actorInfo.agentId : null,
+        userId: actorInfo.actorType === "user" ? actorInfo.actorId : null,
+      };
+      const state = await securityReviewSvc.requestReview(id, actor);
+      res.json(state);
+    },
+  );
+
+  router.post(
+    "/approvals/:id/security-review/verdict",
+    scopeFromApprovalIdParam(checkSecurityReviewActionAccess),
+    validate(recordSecurityReviewVerdictSchema),
+    async (req, res) => {
+      const id = req.params.id as string;
+      const actorInfo = getActorInfo(req);
+      const actor = {
+        agentId: actorInfo.actorType === "agent" ? actorInfo.agentId : null,
+        userId: actorInfo.actorType === "user" ? actorInfo.actorId : null,
+      };
+      const state = await securityReviewSvc.recordVerdict(id, actor, req.body);
+      res.json(state);
+    },
+  );
 
   router.post(
     "/companies/:companyId/approvals",
@@ -1850,6 +2012,15 @@ export function approvalRoutes(
       const unknownKindMessage = describeUnknownDeployLikeKind((approvalInput.payload as Record<string, unknown>).kind);
       if (unknownKindMessage) {
         res.status(422).json({ error: unknownKindMessage });
+        return;
+      }
+      // DUR-4072: only the calculation's own "ask for approval" action may
+      // file this card, built from the stored code (see services/approvals.ts).
+      if ((approvalInput.payload as Record<string, unknown>).kind === REPORT_SCRIPT_APPROVAL_KIND) {
+        res.status(422).json({
+          error: "Report calculation approval cards can only be filed by asking for approval on the calculation itself.",
+          code: "report_script_card_filed_elsewhere",
+        });
         return;
       }
     }
@@ -2032,6 +2203,17 @@ export function approvalRoutes(
         res.status(422).json({ error: "Feature launch approval must target an issue in this company" });
         return;
       }
+    }
+    if (isOperatorActionApproval(approvalInput.type, approvalInput.payload)) {
+      // An agent's host action must be tied to a task, so the result has
+      // somewhere to land and the operator can see what it is for.
+      if (actor.actorType === "agent" && uniqueIssueIds.length === 0) {
+        res.status(422).json({
+          error: "A host action request must be linked to the task it is for (issueIds), so the result can be posted there.",
+        });
+        return;
+      }
+      approvalInput.payload = await stampOperatorActionCard(companyId, approvalInput.payload as Record<string, unknown>);
     }
     let mergePrDeployBranches: ProjectDeployBranches | null = null;
     if (isMergePrRequestApproval(approvalInput.type, approvalInput.payload)) {
@@ -2276,6 +2458,58 @@ export function approvalRoutes(
     },
   );
 
+  // One-click host actions: what this company may ask the on-box runner to
+  // do -- names, plain-language labels and the exact command for each. Read
+  // from the catalogue the runner publishes; empty when nothing is set up.
+  router.get(
+    "/companies/:companyId/operator-actions",
+    scopeFromCompanyIdParam(checkApprovalReadAccess),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      res.json(describeCompanyOperatorActions(readOperatorActionCatalog(), companyId));
+    },
+  );
+
+  // One-click host actions: the on-box runner's ONLY way to read the value
+  // for an approved set_env_var card. Instance-admin only (the runner's own
+  // credential), and only for a card that is approved, is a set_env_var, and
+  // names a secret of the card's own company -- never a general secret read.
+  // Recorded in the secret's access trail like every other credential read.
+  router.get(
+    "/approvals/:id/operator-action-secret",
+    scopeFromApprovalIdParam((req) => assertInstanceAdmin(req)),
+    async (req, res) => {
+      const approval = await svc.getById(req.params.id as string);
+      if (!approval) throw notFound("Approval not found");
+      if (!isOperatorActionApproval(approval.type, approval.payload)) {
+        throw unprocessable("This approval is not a host action card.");
+      }
+      if (approval.status !== "approved") {
+        throw unprocessable("This host action has not been approved.");
+      }
+      // Same window the runner acts in: an old approval no longer unlocks the value.
+      const decidedAtMs = approval.decidedAt ? new Date(approval.decidedAt).getTime() : NaN;
+      if (!Number.isFinite(decidedAtMs) || Date.now() - decidedAtMs > 24 * 60 * 60 * 1000) {
+        throw unprocessable("This host action was approved more than 24 hours ago.");
+      }
+      const parsed = operatorActionRequestPayloadSchema.safeParse(approval.payload);
+      if (!parsed.success || parsed.data.action !== "set_env_var" || !parsed.data.secretId) {
+        throw unprocessable("This host action does not use a secret.");
+      }
+      // The secret's real name goes back with the value, so the runner can
+      // check it against its own per-key allow-list (doc/operator-actions.md).
+      const secret = await secretsSvc.getById(parsed.data.secretId);
+      if (!secret || secret.companyId !== approval.companyId) {
+        throw unprocessable("The secret named on this card no longer exists in this company.");
+      }
+      const value = await secretsSvc.resolveSecretValueForOperatorAction(approval.companyId, parsed.data.secretId, {
+        approvalId: approval.id,
+        actorId: req.actor.userId ?? "board",
+      });
+      res.json({ value, name: secret.name });
+    },
+  );
+
   router.get("/approvals/:id/issues", scopeFromApprovalIdParam(checkApprovalReadAccess), async (req, res) => {
     const id = req.params.id as string;
     const issues = await issueApprovalsSvc.listIssuesForApproval(id);
@@ -2299,12 +2533,42 @@ export function approvalRoutes(
       if (unsupportedKind) {
         throw unprocessable(unsupportedKind, { kind });
       }
+      if (kind === REPORT_SCRIPT_APPROVAL_KIND && (existingForKindCheck.status === "pending" || existingForKindCheck.status === "revision_requested")) {
+        await approveReportScriptCard(req, existingForKindCheck);
+      }
+      // One-click host actions: only a person who is this company's owner or
+      // admin (or an instance admin) may say yes, and only to a card that is
+      // still exactly the shape the server stamped.
+      if (isOperatorActionApproval(existingForKindCheck.type, existingForKindCheck.payload)) {
+        assertCompanyOwnerAdminOrInstanceAdmin(req, existingForKindCheck.companyId, "whether a host action runs");
+        if (getActorInfo(req).actorType !== "user") throw forbidden("Only a person can approve a host action.");
+        if (!operatorActionRequestPayloadSchema.safeParse(existingForKindCheck.payload).success) {
+          throw unprocessable(
+            "This host action card is not in the expected shape, so it cannot be approved. Reject it and ask for a new one.",
+            { code: "operator_action_invalid" },
+          );
+        }
+      }
     }
+    // DUR-4568 finding #1: the security-review gate now lives inside
+    // `approve()` itself (services/approvals.ts), so every caller is
+    // covered -- not just this route. This route only surfaces the user's
+    // bypass reason, if given; `approve()` does the state check, the
+    // refusal and the activity log.
+    const securityReviewBypass = req.body.approveWithoutSecurityReview;
     const { approval, applied, toolGrant, instructionsChange } = await svc.approve(
       id,
       decidedByUserId,
       req.body.decisionNote,
-      { crossCompanyInstruction: crossCompanyDecisionHooks(decidedByUserId, req.body.decisionNote) },
+      {
+        crossCompanyInstruction: crossCompanyDecisionHooks(decidedByUserId, req.body.decisionNote),
+        // This route ran the per-kind approve checks above (host-action
+        // owner/admin + shape, unsupported deploy kinds).
+        decidedOnApprovalCard: true,
+        securityReviewBypass: securityReviewBypass
+          ? { reason: securityReviewBypass.reason, actorType: "user", actorId: req.actor.userId ?? "board" }
+          : undefined,
+      },
     );
 
     if (applied) {
@@ -2574,6 +2838,19 @@ export function approvalRoutes(
       res.status(403).json({ error: "Only requesting agent can resubmit this approval" });
       return;
     }
+    // DUR-4072: a report-calculation card is rebuilt from the stored code by
+    // the calculation's own "ask for approval" action; it is never resubmitted
+    // (resubmit could swap the code the card shows).
+    if (
+      (existing.payload as Record<string, unknown> | null)?.kind === REPORT_SCRIPT_APPROVAL_KIND ||
+      (req.body.payload as Record<string, unknown> | undefined)?.kind === REPORT_SCRIPT_APPROVAL_KIND
+    ) {
+      res.status(422).json({
+        error: "This card cannot be resubmitted. Ask for approval again on the calculation; the card is rebuilt from the stored code.",
+        code: "report_script_card_filed_elsewhere",
+      });
+      return;
+    }
 
     if (req.body.payload && isDeployRequestApproval(existing.type, req.body.payload)) {
       const parsedDeployPayload = deployRequestPayloadSchema.parse(req.body.payload);
@@ -2618,6 +2895,17 @@ export function approvalRoutes(
             ? resubmitDeployPolicyDecision.askFirstActions
             : undefined,
       });
+    }
+    if (
+      isOperatorActionApproval(existing.type, existing.payload) &&
+      req.body.payload &&
+      typeof req.body.payload === "object"
+    ) {
+      if ((req.body.payload as Record<string, unknown>).kind !== "operator_action") {
+        res.status(422).json({ error: "Cannot change an approval's payload kind on resubmit" });
+        return;
+      }
+      req.body.payload = await stampOperatorActionCard(existing.companyId, req.body.payload as Record<string, unknown>);
     }
     let normalizedPayload = req.body.payload
       ? existing.type === "hire_agent"

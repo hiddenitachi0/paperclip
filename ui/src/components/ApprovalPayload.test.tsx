@@ -264,6 +264,31 @@ describe("ApprovalPayloadRenderer", () => {
     container.remove();
   });
 
+  it("shows a host action card's exact command before the requester's reason", () => {
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="request_board_approval"
+          payload={{
+            kind: "operator_action",
+            action: "restart_service",
+            target: "telegram-bridge",
+            title: "Paperclip — Restart the Telegram bridge",
+            reason: "so the new code is used",
+            willRun: "systemctl restart paperclip-telegram-bridge.service",
+            nextActionOnApproval: "When you approve, the server restarts the Telegram bridge.",
+          }}
+        />,
+      );
+    });
+    const text = container.textContent ?? "";
+    expect(text).toContain("Will run exactly this on the server");
+    expect(text).toContain("systemctl restart paperclip-telegram-bridge.service");
+    expect(text.indexOf("systemctl restart")).toBeLessThan(text.indexOf("so the new code is used"));
+    act(() => root.unmount());
+  });
+
   it("renders request_board_approval payload fields without falling back to raw JSON", () => {
     const root = createRoot(container);
 
@@ -377,6 +402,85 @@ describe("ApprovalPayloadRenderer", () => {
 
     act(() => {
       root.unmount();
+    });
+  });
+
+  describe("report_script_version cards (DUR-4072)", () => {
+    const realFetch = globalThis.fetch;
+    afterEach(() => {
+      globalThis.fetch = realFetch;
+    });
+
+    const forgedPayload = {
+      kind: "report_script_version",
+      title: 'Approve calculation "Sum" (version 1)',
+      summary: "It has not run yet.",
+      trustWarning: "Approved calculation scripts run on the Paperclip server with the server's own access.",
+      sha256: "a".repeat(64),
+      entrypoint: "main.py",
+      // What a forged card might SHOW -- must never be rendered.
+      files: { "main.py": "print('harmless looking')" },
+      fixtures: [{ id: "f1", name: "q1" }],
+      fixtureResults: [
+        { fixtureId: "f1", fixtureName: "q1", ok: false, summary: "1 number did not match.", diffs: [{ path: "total", expected: 6, actual: 999 }] },
+      ],
+    };
+
+    function mockSource(body: unknown, status = 200) {
+      const calls: string[] = [];
+      globalThis.fetch = (async (url: string) => {
+        calls.push(String(url));
+        return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+      }) as typeof fetch;
+      return calls;
+    }
+
+    async function renderCard() {
+      const root = createRoot(container);
+      await act(async () => {
+        root.render(<ApprovalPayloadRenderer type="request_board_approval" payload={forgedPayload} approvalId="card-1" companyId="co-1" />);
+      });
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      return root;
+    }
+
+    it("shows the code from the stored version, never the card payload's copy, plus the trust warning and results", async () => {
+      const calls = mockSource({
+        entrypoint: "main.py",
+        files: { "main.py": "import helpers\nprint(helpers.TOTAL)", "helpers.py": "TOTAL = 6" },
+        sha256: "a".repeat(64),
+        storedCodeMatchesDigest: true,
+        matchesCard: true,
+      });
+      const root = await renderCard();
+      expect(calls[0]).toBe("/api/companies/co-1/report-scripts/approval-cards/card-1");
+      const text = container.textContent ?? "";
+      expect(text).toContain("print(helpers.TOTAL)");
+      expect(text).toContain("TOTAL = 6");
+      expect(text).not.toContain("harmless looking");
+      expect(text).toContain("Approving means trusting this code");
+      expect(text).toContain("total: expected 6, got 999");
+      expect(text).toContain("a".repeat(64));
+      expect(text).not.toContain("Do not approve");
+      act(() => root.unmount());
+    });
+
+    it("warns not to approve when the stored code does not match the card", async () => {
+      mockSource({ entrypoint: "main.py", files: { "main.py": "x" }, sha256: "b".repeat(64), storedCodeMatchesDigest: true, matchesCard: false });
+      const root = await renderCard();
+      expect(container.textContent ?? "").toContain("does not match what this card was filed for. Do not approve it.");
+      act(() => root.unmount());
+    });
+
+    it("shows an error and no code when the card is not linked to a stored version", async () => {
+      mockSource({ error: "This card is not linked to any calculation version. Do not approve it." }, 404);
+      const root = await renderCard();
+      const text = container.textContent ?? "";
+      expect(text).toContain("Could not load the code from the stored calculation");
+      expect(text).not.toContain("harmless looking");
+      act(() => root.unmount());
     });
   });
 

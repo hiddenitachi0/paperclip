@@ -16,6 +16,7 @@ import { ScheduleEditor } from "./ScheduleEditor";
 import { buildRoutineTriggerPatch } from "../lib/routine-trigger-patch";
 import { describeCron } from "../lib/cron-readable";
 import { CustomerInboxDeliveries } from "./CustomerInboxDeliveries";
+import { WebhookSecretChoice, type WebhookSecretOption } from "./WebhookSecretChoice";
 
 const signingModes = ["bearer", "hmac_sha256", "github_hmac", "none"];
 const SIGNING_MODES_WITHOUT_REPLAY_WINDOW = new Set(["github_hmac", "none"]);
@@ -39,6 +40,7 @@ export function RoutineTriggerCard({
   onRotate,
   onDelete,
   disabled,
+  savedSecretOptions,
 }: {
   trigger: RoutineTrigger;
   routineId?: string;
@@ -46,7 +48,11 @@ export function RoutineTriggerCard({
   onRotate: (id: string) => void;
   onDelete: (id: string) => void;
   disabled?: boolean;
+  /** Only passed for owners and admins; omitted means the choice is hidden. */
+  savedSecretOptions?: WebhookSecretOption[];
 }) {
+  const [secretMode, setSecretMode] = useState<"generate" | "existing">("generate");
+  const [existingSecretId, setExistingSecretId] = useState("");
   const [draft, setDraft] = useState({
     label: trigger.label ?? "",
     cronExpression: trigger.cronExpression ?? "",
@@ -159,6 +165,19 @@ export function RoutineTriggerCard({
                 />
               </div>
             )}
+            {savedSecretOptions ? (
+              <WebhookSecretChoice
+                mode={secretMode}
+                secretId={existingSecretId}
+                options={savedSecretOptions}
+                onModeChange={(mode) => {
+                  setSecretMode(mode);
+                  setExistingSecretId("");
+                }}
+                onSecretChange={setExistingSecretId}
+                disabled={disabled}
+              />
+            ) : null}
           </>
         )}
       </div>
@@ -177,14 +196,17 @@ export function RoutineTriggerCard({
           {trigger.kind === "webhook" && (
             <Button variant="outline" size="sm" onClick={() => onRotate(trigger.id)}>
               <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
-              Rotate secret
+              Make a new password
             </Button>
           )}
           <Button
             variant="outline"
             size="sm"
             onClick={() =>
-              onSave(trigger.id, buildRoutineTriggerPatch(trigger, draft, getLocalTimezone()))
+              onSave(trigger.id, {
+                ...buildRoutineTriggerPatch(trigger, draft, getLocalTimezone()),
+                ...(secretMode === "existing" && existingSecretId ? { existingSecretId } : {}),
+              })
             }
           >
             <Save className="mr-1.5 h-3.5 w-3.5" />

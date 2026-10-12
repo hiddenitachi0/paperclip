@@ -1,10 +1,8 @@
-import Anthropic from "@anthropic-ai/sdk";
 import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { videoShots } from "@paperclipai/db";
 import {
   VIDEO_DIRECTOR_PROPOSALS_MAX_OUTPUT_TOKENS,
-  VIDEO_DIRECTOR_PROPOSALS_MODEL,
   VIDEO_SHOT_TRANSITIONS,
   type EditVideoDirectorProposalInput,
   type VideoDirectorAnswerEntry,
@@ -15,7 +13,8 @@ import {
   type VideoShotTransition,
 } from "@paperclipai/shared";
 import { conflict, notFound, HttpError } from "../errors.js";
-import { readAnthropicApiKey } from "../env-values.js";
+import { storylineCompanyModel } from "./video-storyline-company-model.js";
+import { callDirectorModel } from "./video-storyline-director-ai-errors.js";
 import { logActivity } from "./activity-log.js";
 import {
   assertStorylineEditable,
@@ -215,19 +214,11 @@ export function videoStorylineDirectorProposalsService(db: Db) {
 
     let entries: VideoDirectorProposalEntry[] = [];
     if (flagged.length > 0) {
-      const apiKey = readAnthropicApiKey();
-      if (!apiKey) {
-        throw new HttpError(503, "Director AI is not configured on this instance (ANTHROPIC_API_KEY unset).");
-      }
-      const client = new Anthropic({ apiKey });
-      const response = await client.messages.create({
-        model: VIDEO_DIRECTOR_PROPOSALS_MODEL,
-        max_tokens: VIDEO_DIRECTOR_PROPOSALS_MAX_OUTPUT_TOKENS,
-        system: buildSystemPrompt(),
-        messages: [
-          {
-            role: "user",
-            content: buildUserMessage({
+      const text = await callDirectorModel(() =>
+        storylineCompanyModel(db).writeText(companyId, actor, {
+          maxTokens: VIDEO_DIRECTOR_PROPOSALS_MAX_OUTPUT_TOKENS,
+          system: buildSystemPrompt(),
+          user: buildUserMessage({
               shots: flagged.map((finding) => {
                 const shot = shotsById.get(finding.shotId)!;
                 return {
@@ -241,13 +232,8 @@ export function videoStorylineDirectorProposalsService(db: Db) {
               }),
               priorTurns,
             }),
-          },
-        ],
-      });
-      const text = response.content
-        .filter((block): block is Anthropic.TextBlock => block.type === "text")
-        .map((block) => block.text)
-        .join("");
+        }),
+      );
       entries = parseProposalBatch(text, new Set(flagged.map((f) => f.shotId)));
     }
 

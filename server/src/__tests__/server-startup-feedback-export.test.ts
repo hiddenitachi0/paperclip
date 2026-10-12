@@ -144,6 +144,7 @@ vi.mock("../services/index.js", () => ({
     humanGrantsInserted: 0,
     agentMergeRequestGrantsInserted: 0,
   })),
+  backfillOpenMergeCardHeadCommits: vi.fn(async () => ({ checked: 0, resolved: 0 })),
   seedDurStarterJobs: vi.fn(async () => ({ created: [] })),
   seedLegalAdvisorStarterPack: vi.fn(async () => ({ createdJobs: [], createdPosition: false })),
   feedbackService: feedbackServiceFactoryMock,

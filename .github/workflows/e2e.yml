@@ -44,3 +44,12 @@ jobs:
             tests/e2e/playwright-report/
             tests/e2e/test-results/
           retention-days: 14
+
+      - name: Upload theme screenshots (dark + light, six operator surfaces)
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: theme-screenshots
+          path: tests/e2e/test-results/theme-shots/
+          if-no-files-found: ignore
+          retention-days: 14

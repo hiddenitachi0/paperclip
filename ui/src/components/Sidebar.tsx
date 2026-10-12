@@ -13,6 +13,7 @@ import {
   Boxes,
   Plug,
   Eye,
+  Layers,
   GitBranch,
   GitFork,
   Package,
@@ -23,6 +24,7 @@ import {
   Pin,
   MessagesSquare,
   RadioTower,
+  Building2,
   Sparkles,
   ScrollText,
   ShoppingCart,
@@ -43,6 +45,7 @@ import { heartbeatsApi } from "../api/heartbeats";
 import { instanceSettingsApi } from "../api/instanceSettings";
 import { productGrabberApi } from "../api/productGrabber";
 import { emailSettingsApi } from "../api/emailSettings";
+import { useCompanyRole } from "../hooks/useCompanyRole";
 import { queryKeys } from "../lib/queryKeys";
 import { useInboxBadge } from "../hooks/useInboxBadge";
 import { Button } from "@/components/ui/button";
@@ -82,7 +85,10 @@ export function Sidebar() {
     queryFn: () => emailSettingsApi.getSettings(selectedCompanyId!),
     enabled: Boolean(selectedCompanyId),
   });
-  const showEmail = emailSettings?.enabled === true;
+  const companyRole = useCompanyRole(selectedCompanyId);
+  // Owners and admins always see Email, even while it is off, so they can find
+  // the "Turn on email" button. Everyone else sees it only once it is on.
+  const showEmail = emailSettings?.enabled === true || companyRole.canManageConnections;
   // IA flag: branch the sidebar nav presentation. Default ON =
   // streamlined (top-level Projects link). Users can opt out in experiments to
   // get classic (per-project collapsible, no Projects nav link). Issue/Task
@@ -100,7 +106,7 @@ export function Sidebar() {
   };
 
   return (
-    <aside className="w-full h-full min-h-0 border-r border-border bg-background flex flex-col">
+    <aside className="w-full h-full min-h-0 border-r border-sidebar-border bg-sidebar text-sidebar-foreground flex flex-col">
       {/* Top bar: Company name (bold) + Search — aligned with top sections (no visible border) */}
       <div className="flex items-center gap-1 px-3 h-12 shrink-0">
         <SidebarCompanyMenu />
@@ -205,6 +211,7 @@ export function Sidebar() {
           <SidebarNavItem to="/jobs" label="Jobs" icon={Briefcase} />
           <SidebarNavItem to="/workflow-map" label="Workflow Map" icon={GitFork} />
           <SidebarNavItem to="/watchers" label="Watchers" icon={Eye} />
+          <SidebarNavItem to="/overlaps" label="Overlaps" icon={Layers} />
           <SidebarNavItem to="/trading" label="Trading" icon={CandlestickChart} />
           {showEmail ? <SidebarNavItem to="/email" label="Email" icon={Mail} /> : null}
           {showProductGrabber ? (
@@ -245,6 +252,7 @@ export function Sidebar() {
 
         <SidebarSection label="Company">
           <SidebarNavItem to="/org" label="Org" icon={Network} />
+          <SidebarNavItem to="/tower" label="Tower" icon={Building2} />
           <SidebarNavItem to="/positions" label="Positions" icon={IdCard} />
           <SidebarNavItem to="/costs" label="Costs" icon={DollarSign} />
           <SidebarNavItem to="/goal-adoption" label="Goal Adoption" icon={TrendingUp} />

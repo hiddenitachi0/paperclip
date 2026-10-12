@@ -13,6 +13,7 @@ import {
 import { Link } from "@/lib/router";
 import { heartbeatsApi, type LiveRunForIssue } from "../api/heartbeats";
 import { approvalsApi } from "../api/approvals";
+import { IssueProgressBar, readIssueProgress } from "../components/IssueProgressBar";
 import { issuesApi } from "../api/issues";
 import { interactionsApi, type PendingCompanyInteraction } from "../api/interactions";
 import { stalledTasksApi } from "../api/stalledTasks";
@@ -662,6 +663,9 @@ function RunRow({
       >
         {primary}
       </p>
+      {issue?.status === "in_progress" ? (
+        <IssueProgressBar progress={readIssueProgress(issue)} compact className="pl-4" />
+      ) : null}
       <div className="flex items-center justify-between gap-2 pl-4">
         {showTaskContext ? (
           <span className="min-w-0 truncate text-[10px] text-muted-foreground">on {taskTitle}</span>
@@ -861,6 +865,7 @@ function ApprovalRow({
 
   return (
     <div
+      data-helper-entity={`approval:${approval.id}`}
       className={cn(
         "flex flex-col gap-2 rounded-lg border px-2.5 py-2",
         isDuplicate || branchInfo?.mismatch || isRollback
@@ -1032,7 +1037,10 @@ function InteractionRow({
     interaction.kind === "request_confirmation" ? interaction.payload.rejectLabel ?? "Decline" : "Decline";
 
   return (
-    <div className="flex flex-col gap-2 rounded-lg border border-amber-500/40 bg-amber-500/[0.04] px-2.5 py-2">
+    <div
+      data-helper-entity={`interaction:${interaction.id}`}
+      className="flex flex-col gap-2 rounded-lg border border-amber-500/40 bg-amber-500/[0.04] px-2.5 py-2"
+    >
       <Link to={threadHref} className="group flex items-start gap-1.5">
         <MessageCircleQuestion className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
         <div className="min-w-0">

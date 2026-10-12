@@ -18,10 +18,12 @@ const REJECT_QUICK_REASONS = [
   "Wrong branch",
 ];
 
-export type DecisionReasonAction = "reject" | "revision";
+export type DecisionReasonAction = "reject" | "revision" | "approve_without_review";
 
-// Both reject and "ask for changes" require a reason so the requesting agent
-// never has to come back and ask why — see DUR-282.
+// Reject and "ask for changes" require a reason so the requesting agent never
+// has to come back and ask why — see DUR-282. "Approve without security
+// review" requires one for the same reason, and so the activity log carries
+// it (DUR-4566).
 export function DecisionReasonDialog({
   open,
   onOpenChange,
@@ -37,6 +39,7 @@ export function DecisionReasonDialog({
 }) {
   const [note, setNote] = useState("");
   const isReject = action === "reject";
+  const isApproveWithoutReview = action === "approve_without_review";
 
   useEffect(() => {
     if (open) setNote("");
@@ -48,11 +51,15 @@ export function DecisionReasonDialog({
     <Dialog open={open} onOpenChange={(next) => !isPending && onOpenChange(next)}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>{isReject ? "Reject this request" : "Ask for changes"}</DialogTitle>
+          <DialogTitle>
+            {isReject ? "Reject this request" : isApproveWithoutReview ? "Approve without security review" : "Ask for changes"}
+          </DialogTitle>
           <DialogDescription>
             {isReject
               ? "Say why, so the agent that filed this doesn't have to ask you later."
-              : "Say what needs to change so the agent knows what to fix."}
+              : isApproveWithoutReview
+                ? "There is no passed security review for this code yet. Say why you're approving it anyway — this is recorded in the activity log."
+                : "Say what needs to change so the agent knows what to fix."}
           </DialogDescription>
         </DialogHeader>
 
@@ -81,7 +88,11 @@ export function DecisionReasonDialog({
           value={note}
           onChange={(e) => setNote(e.target.value)}
           placeholder={
-            isReject ? "Why are you rejecting this? (or pick one above)" : "What should the agent change?"
+            isReject
+              ? "Why are you rejecting this? (or pick one above)"
+              : isApproveWithoutReview
+                ? "Why approve this without a security review?"
+                : "What should the agent change?"
           }
           rows={3}
         />
@@ -98,10 +109,14 @@ export function DecisionReasonDialog({
             {isPending
               ? isReject
                 ? "Rejecting…"
-                : "Sending…"
+                : isApproveWithoutReview
+                  ? "Approving…"
+                  : "Sending…"
               : isReject
                 ? "Reject"
-                : "Ask for changes"}
+                : isApproveWithoutReview
+                  ? "Approve without security review"
+                  : "Ask for changes"}
           </Button>
         </DialogFooter>
       </DialogContent>
