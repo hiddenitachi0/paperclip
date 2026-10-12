@@ -2358,10 +2358,13 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
     it("resolves a linked request_confirmation when its paired board approval is approved", async () => {
       const { companyId, issueId } = await seedConfirmationIssue("Approval decides the linked interaction");
 
+      // Not a merge_pr card on purpose: this test is about the generic
+      // approval <-> interaction linkage, not the DUR-4566 security-review
+      // gate (covered separately below), so it must not trip that gate.
       const [approval] = await db.insert(approvals).values({
         companyId,
         type: "request_board_approval",
-        payload: { kind: "merge_pr", title: "ship it" },
+        payload: { kind: "feature_launch", title: "ship it" },
         status: "pending",
       }).returning();
 
@@ -2392,7 +2395,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       const [approval] = await db.insert(approvals).values({
         companyId,
         type: "request_board_approval",
-        payload: { kind: "merge_pr", title: "ship it" },
+        payload: { kind: "feature_launch", title: "ship it" },
         status: "pending",
       }).returning();
 
@@ -2418,10 +2421,12 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
     it("decides the linked board approval when the interaction is accepted directly", async () => {
       const { companyId, issueId } = await seedConfirmationIssue("Accepting the interaction decides the approval");
 
+      // Not a merge_pr card on purpose: see the dedicated DUR-4568 test below
+      // for the gated case.
       const [approval] = await db.insert(approvals).values({
         companyId,
         type: "request_board_approval",
-        payload: { kind: "merge_pr", title: "ship it" },
+        payload: { kind: "feature_launch", title: "ship it" },
         status: "pending",
       }).returning();
 
@@ -2442,13 +2447,75 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       expect(approvalRow?.status).toBe("approved");
     });
 
+    // DUR-4568 finding #1 + security review of PR #625 (DUR-4719): accepting a
+    // request_confirmation must not be a side door around the approval page's
+    // own checks (security review gate, owner/admin for host actions, ...).
+    // Creating the link is refused for ANY actor, board users included.
+    for (const payload of [
+      { kind: "merge_pr", repo: "acme/paperclip", prNumber: 1, commit: "deadbeef", title: "ship it" },
+      { kind: "operator_action", action: "restart_service", target: "telegram-bridge", title: "Restart" },
+      { kind: "deploy", title: "ship it" },
+      { kind: "report_script_version", title: "calc" },
+    ]) {
+      it(`refuses a board user's confirmation linked to a ${payload.kind} card`, async () => {
+        const { companyId, issueId } = await seedConfirmationIssue(`Board link to ${payload.kind} refused`);
+        const [approval] = await db.insert(approvals).values({
+          companyId,
+          type: "request_board_approval",
+          payload,
+          status: "pending",
+        }).returning();
+
+        await expect(interactionsSvc.create({ id: issueId, companyId }, {
+          kind: "request_confirmation",
+          linkedApprovalId: approval!.id,
+          payload: { version: 1, prompt: "Approve this?" },
+        }, { userId: "local-board" })).rejects.toThrow("can only be decided on its own approval card");
+      });
+    }
+
+    // A link that already exists (made before the refusal above, or to a card
+    // whose kind changed) must still never approve a card-only kind when a
+    // board member accepts the confirmation.
+    for (const kind of ["operator_action", "deploy", "merge_pr"]) {
+      it(`does not approve an existing linked ${kind} card when a board member accepts the confirmation`, async () => {
+        const { companyId, issueId } = await seedConfirmationIssue(`Legacy link to ${kind}`);
+        const [approval] = await db.insert(approvals).values({
+          companyId,
+          type: "request_board_approval",
+          payload: { kind: "feature_launch", title: "ship it" },
+          status: "pending",
+        }).returning();
+        const created = await interactionsSvc.create({ id: issueId, companyId }, {
+          kind: "request_confirmation",
+          linkedApprovalId: approval!.id,
+          payload: { version: 1, prompt: "Approve this?" },
+        }, { userId: "local-board" });
+        await db.update(approvals)
+          .set({ payload: { kind, action: "restart_service", target: "telegram-bridge", title: "x" } })
+          .where(eq(approvals.id, approval!.id));
+
+        await interactionsSvc.acceptInteraction(
+          { id: issueId, companyId, goalId: null, projectId: null },
+          created.id,
+          {},
+          { userId: "board-member" },
+        );
+
+        const resolved = await interactionsSvc.getById(created.id);
+        expect(resolved?.status).toBe("accepted");
+        const [approvalRow] = await db.select().from(approvals).where(eq(approvals.id, approval!.id));
+        expect(approvalRow?.status).toBe("pending");
+      });
+    }
+
     it("decides the linked board approval when the interaction is rejected directly", async () => {
       const { companyId, issueId } = await seedConfirmationIssue("Rejecting the interaction decides the approval");
 
       const [approval] = await db.insert(approvals).values({
         companyId,
         type: "request_board_approval",
-        payload: { kind: "merge_pr", title: "ship it" },
+        payload: { kind: "feature_launch", title: "ship it" },
         status: "pending",
       }).returning();
 

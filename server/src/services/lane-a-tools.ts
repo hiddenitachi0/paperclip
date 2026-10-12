@@ -238,6 +238,12 @@ export interface LaneAToolContext {
    * returned in this message). Absent means read_web_page opens nothing.
    */
   web?: LaneAWebSession;
+  /**
+   * Pictures the person attached in this conversation (checked by Lane A
+   * when they came in). Passed to an add-on tool call by the host, never by
+   * the model: Media Studio age-checks each one before it sends it anywhere.
+   */
+  attachedFileIds?: string[];
 }
 
 /**

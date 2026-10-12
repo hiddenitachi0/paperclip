@@ -346,6 +346,7 @@ describe("mergePrAutomationService.tick", () => {
       fetch: fetchImpl,
       instanceSettings: { getGeneral: vi.fn(async () => ({ mergePrAutomationEnabled: true })) } as any,
       approvalsSvc: { approve } as any,
+      securityReviewSvc: { computeState: vi.fn(async () => ({ state: "passed" })) } as any,
       getGitHubToken: vi.fn(async () => null),
       logActivityImpl,
     });
@@ -408,6 +409,7 @@ describe("mergePrAutomationService.tick", () => {
       fetch: fetchImpl,
       instanceSettings: { getGeneral: vi.fn(async () => ({ mergePrAutomationEnabled: true })) } as any,
       approvalsSvc: { approve } as any,
+      securityReviewSvc: { computeState: vi.fn(async () => ({ state: "passed" })) } as any,
       getGitHubToken: vi.fn(async () => null),
       logActivityImpl: vi.fn(),
     });
@@ -416,5 +418,30 @@ describe("mergePrAutomationService.tick", () => {
     expect(result.evaluated).toBe(1);
     expect(approve).toHaveBeenCalledTimes(1);
     expect(approve).toHaveBeenCalledWith("approval-1", expect.any(String), expect.any(String));
+  });
+
+  it("does not auto-approve a merge_pr approval with no passed security review, even when every DUR-299 condition is met", async () => {
+    const row = approvalRow();
+    const db = dbStub([row]);
+    const fetchImpl = githubFetchStub({
+      "/pulls/42": OPEN_PR,
+      "/status": GREEN_STATUS,
+      "/check-runs": NO_CHECK_RUNS,
+      "/files": CLEAN_FILES,
+      "/reviews": INDEPENDENT_APPROVAL,
+    });
+    const approve = vi.fn();
+    const svc = mergePrAutomationService(db, {
+      fetch: fetchImpl,
+      instanceSettings: { getGeneral: vi.fn(async () => ({ mergePrAutomationEnabled: true })) } as any,
+      approvalsSvc: { approve } as any,
+      securityReviewSvc: { computeState: vi.fn(async () => ({ state: "not_requested" })) } as any,
+      getGitHubToken: vi.fn(async () => null),
+      logActivityImpl: vi.fn(),
+    });
+
+    const result = await svc.tick(new Date());
+    expect(result).toEqual({ evaluated: 1, approved: 0, killSwitchOff: false });
+    expect(approve).not.toHaveBeenCalled();
   });
 });

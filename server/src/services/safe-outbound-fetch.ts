@@ -169,17 +169,26 @@ export async function validateAndResolveFetchUrl(
   }
 }
 
-function buildPinnedRequestOptions(
+export function buildPinnedRequestOptions(
   target: ValidatedFetchTarget,
   init?: RequestInit,
-): { options: HttpRequestOptions & { servername?: string }; body: string | undefined } {
+): { options: HttpRequestOptions & { servername?: string }; body: string | Buffer | undefined } {
   const headers = new Headers(init?.headers);
   const method = init?.method ?? "GET";
-  const body = init?.body === undefined || init?.body === null
-    ? undefined
-    : typeof init.body === "string"
-      ? init.body
-      : String(init.body);
+  // Strings and raw bytes are sent as they are. FormData, Blobs and streams
+  // cannot be written here: encode it first (see
+  // image-provider-clients.ts's encodeMultipartBody) instead of letting it
+  // become the text "[object FormData]".
+  const raw = init?.body;
+  let body: string | Buffer | undefined;
+  if (raw === undefined || raw === null) body = undefined;
+  else if (typeof raw === "string") body = raw;
+  else if (Buffer.isBuffer(raw)) body = raw;
+  else if (raw instanceof Uint8Array) body = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength);
+  else if (raw instanceof ArrayBuffer) body = Buffer.from(raw);
+  else if (raw instanceof FormData || raw instanceof Blob || raw instanceof ReadableStream) {
+    throw new Error("This request body type cannot be sent through the pinned fetch; encode it to bytes first.");
+  } else body = String(raw); // e.g. URLSearchParams, whose text form is the right encoding.
 
   headers.set("Host", target.hostHeader);
   if (body !== undefined && !headers.has("content-length") && !headers.has("transfer-encoding")) {

@@ -47,6 +47,7 @@ import { setupLiveEventsWebSocketServer } from "./realtime/live-events-ws.js";
 import {
   feedbackService,
   backfillPrincipalAccessCompatibility,
+  backfillOpenMergeCardHeadCommits,
   seedDurStarterJobs,
   bootstrapExecutionPolicyFromEnv,
   environmentCustomImageService,
@@ -55,6 +56,7 @@ import {
   deployCarriedIssuesService,
   deployApprovalFeedbackService,
   mergePrAutomationService,
+  issueOverlapDetectorService,
   agentErrorAlertsService,
   untrackedWriteAlertsService,
   quietModeAlertsService,
@@ -77,12 +79,15 @@ import { schedulerLiveness } from "./services/scheduler-liveness.js";
 import { watcherService } from "./services/watchers.js";
 import { morningReportService } from "./services/morning-report.js";
 import { modelHealthService } from "./services/model-health.js";
+import { modelSetupReviewerService } from "./services/model-setup-reviewer.js";
 import { paymentCardService } from "./services/payment-cards.js";
 import { mailSecretaryService } from "./services/mail-secretary.js";
 import { mailAccountsService } from "./services/mail-accounts.js";
 import { videoStorylineRenderService } from "./services/video-storyline-render.js";
 import { tradingService } from "./services/trading.js";
 import { videoStorylineStitchService } from "./services/video-storyline-stitch.js";
+import { videoStorylineTransitionsService } from "./services/video-storyline-transitions.js";
+import { videoStorylineClipsService } from "./services/video-storyline-clips.js";
 import { describeTickPhases } from "./services/scheduler-tick-phases.js";
 import { runDailyCostReconciliation } from "./services/cost-reconciliation.js";
 import { pluginRegistryService } from "./services/plugin-registry.js";
@@ -130,6 +135,10 @@ import type {
 
 const LOCAL_MODEL_HEALTH_INTERVAL_MS = 3 * 60_000;
 let lastLocalModelHealthCheckAt = 0;
+// DUR-4560: the weekly model setup review is gated by each entry's last review row; this only
+// limits how often the scheduler asks the question.
+const MODEL_SETUP_REVIEW_CHECK_INTERVAL_MS = 60 * 60_000;
+let lastModelSetupReviewCheckAt = 0;
 
 type BetterAuthSessionUser = {
   id: string;
@@ -678,6 +687,16 @@ export async function startServer(): Promise<StartedServer> {
   ) {
     logger.info(accessBackfill, "Backfilled principal access compatibility records");
   }
+  // DUR-4601: open merge_pr cards filed before head-commit resolution existed are otherwise
+  // permanently stuck unable to ever request/record a security review -- idempotent, so safe
+  // to run on every boot.
+  const mergeCardHeadCommitBackfill = await backfillOpenMergeCardHeadCommits(db as any).catch((err) => {
+    logger.error({ err }, "merge card head-commit backfill failed");
+    return { checked: 0, resolved: 0 };
+  });
+  if (mergeCardHeadCommitBackfill.checked > 0) {
+    logger.info(mergeCardHeadCommitBackfill, "Backfilled merge card head commits");
+  }
   const durStarterJobsSeeded = await seedDurStarterJobs(db as any);
   if (durStarterJobsSeeded.created.length > 0) {
     logger.info(durStarterJobsSeeded, "Seeded DUR starter jobs");
@@ -1050,6 +1069,7 @@ export async function startServer(): Promise<StartedServer> {
     const deployCarriedIssues = deployCarriedIssuesService(schedulerDb as any);
     const deployApprovalFeedback = deployApprovalFeedbackService(schedulerDb as any);
     const mergePrAutomation = config.mergePrAutomationEnabled ? mergePrAutomationService(schedulerDb as any) : null;
+    const issueOverlapDetector = issueOverlapDetectorService(schedulerDb as any);
     const agentErrorAlerts = agentErrorAlertsService(schedulerDb as any);
     const marketWatchers = watcherService(schedulerDb as any);
     const morningReports = morningReportService(schedulerDb as any);
@@ -1058,6 +1078,8 @@ export async function startServer(): Promise<StartedServer> {
     const mailAccounts = mailAccountsService(schedulerDb as any);
     const videoStorylineRender = videoStorylineRenderService(schedulerDb as any);
     const videoStorylineStitch = videoStorylineStitchService(schedulerDb as any);
+    const videoStorylineTransitions = videoStorylineTransitionsService(schedulerDb as any);
+    const videoStorylineClips = videoStorylineClipsService(schedulerDb as any);
     const tradingAgent = tradingService(schedulerDb as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(schedulerDb as any);
     const quietModeAlerts = quietModeAlertsService(schedulerDb as any);
@@ -1393,6 +1415,30 @@ export async function startServer(): Promise<StartedServer> {
         );
       }
 
+      // DUR-4468: warn-only overlap detection between open tasks' workspaces
+      // (same file, same migration number, behind the base branch).
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.issueOverlapDetection, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: issueOverlapDetection",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:issueOverlapDetection",
+          },
+          async () => {
+            const companyRows = await schedulerDb.select({ id: companies.id }).from(companies);
+            for (const company of companyRows) {
+              const result = await issueOverlapDetector.runOverlapDetection(company.id);
+              if (result.opened > 0 || result.commentsPosted > 0) {
+                logger.info({ companyId: company.id, ...result }, "issue overlap detection found new overlaps");
+              }
+            }
+          },
+        ).catch((err) => {
+          logger.error({ err }, "issue overlap detection tick failed");
+        }),
+      );
+
       // DUR-128: an agent left sitting in "error" is invisible until someone
       // happens to look. Raise it as soon as it crosses the stall threshold
       // (see agent-error-alerts.ts) instead of waiting to be discovered.
@@ -1485,6 +1531,33 @@ export async function startServer(): Promise<StartedServer> {
         );
       }
 
+      // DUR-4560: weekly model setup review (local models only, free probes).
+      if (Date.now() - lastModelSetupReviewCheckAt >= MODEL_SETUP_REVIEW_CHECK_INTERVAL_MS) {
+        lastModelSetupReviewCheckAt = Date.now();
+        void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.modelSetupReview, () =>
+          runInCompanyScopeBypass(
+            bypassDb,
+            {
+              reason: "heartbeat scheduler tick: modelSetupReview",
+              actorType: "scheduler",
+              route: "heartbeat-scheduler:modelSetupReview",
+            },
+            async () => {
+              const reviewer = modelSetupReviewerService(schedulerDb as any);
+              const companyRows = await schedulerDb.select({ id: companies.id }).from(companies);
+              for (const company of companyRows) {
+                const result = await reviewer.reviewDue(company.id, new Date());
+                if (result.reviewed > 0 || result.failed > 0) {
+                  logger.info({ companyId: company.id, ...result }, "weekly model setup review ran");
+                }
+              }
+            },
+          ).catch((err) => {
+            logger.error({ err }, "weekly model setup review failed");
+          }),
+        );
+      }
+
       // Payment cards: sweep available/reserved cards whose expiresOn has
       // passed to expired (see services/payment-cards.ts). Ships behind the
       // same off-switches as the rest of the feature; an instance with zero
@@ -1572,10 +1645,18 @@ export async function startServer(): Promise<StartedServer> {
             actorType: "scheduler",
             route: "heartbeat-scheduler:videoStorylineRender",
           },
-          () => videoStorylineRender.tick(),
+          // Storyline strip: AI transition takes are polled in the same chain.
+          async () => {
+            const result = await videoStorylineRender.tick();
+            const transitionResult = await videoStorylineTransitions.tick().catch((err: unknown) => {
+              logger.error({ err }, "video-storyline-transitions tick failed");
+              return { finished: 0, failed: 0 };
+            });
+            return { ...result, transitionsFinished: transitionResult.finished, transitionsFailed: transitionResult.failed };
+          },
         )
           .then((result) => {
-            if (result.advanced > 0 || result.failed > 0) {
+            if (result.advanced > 0 || result.failed > 0 || result.transitionsFinished > 0 || result.transitionsFailed > 0) {
               logger.info({ ...result }, "video-storyline-render tick");
             }
           })
@@ -1592,7 +1673,15 @@ export async function startServer(): Promise<StartedServer> {
             actorType: "scheduler",
             route: "heartbeat-scheduler:videoStorylineStitch",
           },
-          () => videoStorylineStitch.tick(),
+          // Phase 2: convert uploads, prepare your own clips (ffmpeg, free) and clean up first, then stitch.
+          async () => {
+            const clipResult = await videoStorylineClips.tick().catch((err: unknown) => {
+              logger.error({ err }, "video-storyline-clips tick failed");
+              return null;
+            });
+            if (clipResult && Object.values(clipResult).some((n) => n > 0)) logger.info({ ...clipResult }, "video-storyline-clips tick");
+            return videoStorylineStitch.tick();
+          },
         )
           .then((result) => {
             if (result.stitched > 0 || result.needsAttention > 0 || result.blocked > 0 || result.failed > 0) {

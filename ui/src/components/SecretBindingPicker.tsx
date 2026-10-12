@@ -205,7 +205,8 @@ export function SecretBindingPicker({
   };
 
   return (
-    <div className={cn("space-y-1.5", className)}>
+    // "Ask Paperclip" never reads a secret picker (data-helper-private).
+    <div className={cn("space-y-1.5", className)} data-helper-private>
       {label ? (
         <div className="flex items-center justify-between text-xs font-medium text-foreground/80">
           <span>{label}</span>

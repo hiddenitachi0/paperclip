@@ -40,7 +40,20 @@ interface AgentRoleOverridesFields {
  * endpoint and surfaces the 403 the backend is required to return for agent
  * callers.
  */
-export function AgentJobSection({ agentId, companyId }: { agentId: string; companyId?: string }) {
+export function AgentJobSection({
+  agentId,
+  companyId,
+  embedded = false,
+}: {
+  agentId: string;
+  companyId?: string;
+  /**
+   * Render without the "Position" heading and card frame, for use inside a
+   * page section that already has its own heading and frame. Position then
+   * becomes a small sub-heading like Tools, Rights and Skills.
+   */
+  embedded?: boolean;
+}) {
   const queryClient = useQueryClient();
   const { pushToast } = useToastActions();
   const [pickingJob, setPickingJob] = useState(false);
@@ -193,203 +206,230 @@ export function AgentJobSection({ agentId, companyId }: { agentId: string; compa
   const currentSkillKeys = new Set([...skills.fromJob, ...skills.added]);
   const availableSkillsToAdd = (companySkills ?? []).filter((s) => !currentSkillKeys.has(s.key));
 
-  return (
-    <div>
-      <div className="flex items-center justify-between gap-2">
-        <h3 className="text-sm font-medium">Position</h3>
-        {!pickingJob ? (
-          <Button size="sm" variant="outline" onClick={() => setPickingJob(true)}>
-            {roleState.job ? "Change position" : "Assign a position"}
-          </Button>
+  const changePositionButton = !pickingJob ? (
+    <Button size="sm" variant="outline" onClick={() => setPickingJob(true)}>
+      {roleState.job ? "Change position" : "Assign a position"}
+    </Button>
+  ) : null;
+
+  const positionBody = pickingJob ? (
+    <div className="space-y-2">
+      <JobPicker
+        jobs={jobs ?? []}
+        value={roleState.job?.id ?? null}
+        onChange={(jobId) => jobId && assignJob.mutate(jobId)}
+        disabled={assignJob.isPending}
+        placeholder="Choose a position"
+      />
+      <p className="text-xs text-muted-foreground">
+        This copies the position's instructions, tools, and rights onto this agent once. It won't stay linked — later
+        changes to the position won't reach this agent.
+      </p>
+      <Button size="sm" variant="ghost" onClick={() => setPickingJob(false)} disabled={assignJob.isPending}>
+        Cancel
+      </Button>
+    </div>
+  ) : roleState.job ? (
+    <div className="flex items-start gap-2 text-sm">
+      <Briefcase className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+      <div>
+        <div className="font-medium">{roleState.job.name}</div>
+        {roleState.job.description ? (
+          <p className="text-xs text-muted-foreground">{roleState.job.description}</p>
         ) : null}
       </div>
+    </div>
+  ) : (
+    <p className="text-sm text-muted-foreground">No position assigned.</p>
+  );
 
-      <div className="mt-2 border border-border rounded-lg p-4 space-y-4">
-        {pickingJob ? (
-          <div className="space-y-2">
-            <JobPicker
-              jobs={jobs ?? []}
-              value={roleState.job?.id ?? null}
-              onChange={(jobId) => jobId && assignJob.mutate(jobId)}
-              disabled={assignJob.isPending}
-              placeholder="Choose a position"
+  const toolsRightsSkills = (
+    <>
+      <div>
+        <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+          <Wrench className="h-3.5 w-3.5" />
+          Tools
+        </div>
+        <ul className="mt-1.5 space-y-1">
+          {tools.fromJob.map((name) => (
+            <OverrideRow key={`from-job-${name}`} label={name} tag="From position" />
+          ))}
+          {tools.added.map((name) => (
+            <OverrideRow
+              key={`added-${name}`}
+              label={name}
+              tag="Added"
+              onRemove={() => removeTool.mutate(name)}
+              removing={removeTool.isPending}
             />
-            <p className="text-xs text-muted-foreground">
-              This copies the position's instructions, tools, and rights onto this agent once. It won't stay linked — later
-              changes to the position won't reach this agent.
-            </p>
-            <Button size="sm" variant="ghost" onClick={() => setPickingJob(false)} disabled={assignJob.isPending}>
+          ))}
+          {tools.removed.map((name) => (
+            <OverrideRow key={`removed-${name}`} label={name} tag="Removed" muted />
+          ))}
+          {currentToolNames.size === 0 && tools.removed.length === 0 ? (
+            <p className="text-xs text-muted-foreground">No tools.</p>
+          ) : null}
+        </ul>
+        {addingToolOverride ? (
+          <div className="mt-2">
+            <JobToolsPicker
+              value={[]}
+              onChange={(next) => {
+                const tool = next[0];
+                if (tool) addTool.mutate(tool);
+              }}
+              disabled={addTool.isPending}
+            />
+          </div>
+        ) : (
+          <Button size="sm" variant="ghost" className="mt-1.5" onClick={() => setAddingToolOverride(true)}>
+            Add a tool
+          </Button>
+        )}
+      </div>
+
+      <div>
+        <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+          <ShieldCheck className="h-3.5 w-3.5" />
+          Rights
+        </div>
+        <ul className="mt-1.5 space-y-1">
+          {rights.fromJob.map((grant) => (
+            <OverrideRow key={`from-job-${grant.permissionKey}`} label={permissionLabel(grant.permissionKey)} tag="From position" />
+          ))}
+          {rights.added.map((grant) => (
+            <OverrideRow
+              key={`added-${grant.permissionKey}`}
+              label={permissionLabel(grant.permissionKey)}
+              tag="Added"
+              onRemove={() => removeRight.mutate(grant.permissionKey)}
+              removing={removeRight.isPending}
+            />
+          ))}
+          {rights.removed.map((grant) => (
+            <OverrideRow key={`removed-${grant.permissionKey}`} label={permissionLabel(grant.permissionKey)} tag="Removed" muted />
+          ))}
+          {currentRightKeys.size === 0 && rights.removed.length === 0 ? (
+            <p className="text-xs text-muted-foreground">No rights.</p>
+          ) : null}
+        </ul>
+        {addingRightOverride ? (
+          <div className="mt-2 space-y-2">
+            <JobRightsPicker
+              value={[]}
+              onChange={(next) => {
+                const grant = next[0];
+                if (grant) addRight.mutate(grant);
+              }}
+              disabled={addRight.isPending}
+            />
+            <Button size="sm" variant="ghost" onClick={() => setAddingRightOverride(false)}>
+              Done
+            </Button>
+          </div>
+        ) : (
+          <Button size="sm" variant="ghost" className="mt-1.5" onClick={() => setAddingRightOverride(true)}>
+            Add a right
+          </Button>
+        )}
+      </div>
+
+      <div>
+        <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+          <GraduationCap className="h-3.5 w-3.5" />
+          Skills
+        </div>
+        <ul className="mt-1.5 space-y-1">
+          {skills.fromJob.map((key) => (
+            <OverrideRow key={`from-job-${key}`} label={skillLabel(key)} tag="From position" />
+          ))}
+          {skills.added.map((key) => (
+            <OverrideRow
+              key={`added-${key}`}
+              label={skillLabel(key)}
+              tag="Added"
+              onRemove={() => removeSkill.mutate(key)}
+              removing={removeSkill.isPending}
+            />
+          ))}
+          {skills.removed.map((key) => (
+            <OverrideRow key={`removed-${key}`} label={skillLabel(key)} tag="Removed" muted />
+          ))}
+          {currentSkillKeys.size === 0 && skills.removed.length === 0 ? (
+            <p className="text-xs text-muted-foreground">No skills.</p>
+          ) : null}
+        </ul>
+        {addingSkillOverride ? (
+          <div className="mt-2 flex items-center gap-2">
+            <select
+              className="flex-1 min-w-0 rounded-md border border-border bg-background px-2 py-1.5 text-sm"
+              value={draftSkillKey}
+              onChange={(e) => setDraftSkillKey(e.target.value)}
+              disabled={addSkill.isPending}
+            >
+              <option value="">Choose a skill…</option>
+              {availableSkillsToAdd.map((s) => (
+                <option key={s.key} value={s.key}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+            <Button
+              size="sm"
+              onClick={() => draftSkillKey && addSkill.mutate(draftSkillKey)}
+              disabled={!draftSkillKey || addSkill.isPending}
+            >
+              Add
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                setAddingSkillOverride(false);
+                setDraftSkillKey("");
+              }}
+              disabled={addSkill.isPending}
+            >
               Cancel
             </Button>
           </div>
-        ) : roleState.job ? (
-          <div className="flex items-start gap-2 text-sm">
-            <Briefcase className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-            <div>
-              <div className="font-medium">{roleState.job.name}</div>
-              {roleState.job.description ? (
-                <p className="text-xs text-muted-foreground">{roleState.job.description}</p>
-              ) : null}
-            </div>
-          </div>
         ) : (
-          <p className="text-sm text-muted-foreground">No position assigned.</p>
+          <Button size="sm" variant="ghost" className="mt-1.5" onClick={() => setAddingSkillOverride(true)}>
+            Add a skill
+          </Button>
         )}
+      </div>
+    </>
+  );
 
+  if (embedded) {
+    return (
+      <div className="space-y-4" data-testid="agent-job-section">
         <div>
-          <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-            <Wrench className="h-3.5 w-3.5" />
-            Tools
-          </div>
-          <ul className="mt-1.5 space-y-1">
-            {tools.fromJob.map((name) => (
-              <OverrideRow key={`from-job-${name}`} label={name} tag="From position" />
-            ))}
-            {tools.added.map((name) => (
-              <OverrideRow
-                key={`added-${name}`}
-                label={name}
-                tag="Added"
-                onRemove={() => removeTool.mutate(name)}
-                removing={removeTool.isPending}
-              />
-            ))}
-            {tools.removed.map((name) => (
-              <OverrideRow key={`removed-${name}`} label={name} tag="Removed" muted />
-            ))}
-            {currentToolNames.size === 0 && tools.removed.length === 0 ? (
-              <p className="text-xs text-muted-foreground">No tools.</p>
-            ) : null}
-          </ul>
-          {addingToolOverride ? (
-            <div className="mt-2">
-              <JobToolsPicker
-                value={[]}
-                onChange={(next) => {
-                  const tool = next[0];
-                  if (tool) addTool.mutate(tool);
-                }}
-                disabled={addTool.isPending}
-              />
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+              <Briefcase className="h-3.5 w-3.5" />
+              Position
             </div>
-          ) : (
-            <Button size="sm" variant="ghost" className="mt-1.5" onClick={() => setAddingToolOverride(true)}>
-              Add a tool
-            </Button>
-          )}
+            {changePositionButton}
+          </div>
+          <div className="mt-1.5">{positionBody}</div>
         </div>
+        {toolsRightsSkills}
+      </div>
+    );
+  }
 
-        <div>
-          <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-            <ShieldCheck className="h-3.5 w-3.5" />
-            Rights
-          </div>
-          <ul className="mt-1.5 space-y-1">
-            {rights.fromJob.map((grant) => (
-              <OverrideRow key={`from-job-${grant.permissionKey}`} label={permissionLabel(grant.permissionKey)} tag="From position" />
-            ))}
-            {rights.added.map((grant) => (
-              <OverrideRow
-                key={`added-${grant.permissionKey}`}
-                label={permissionLabel(grant.permissionKey)}
-                tag="Added"
-                onRemove={() => removeRight.mutate(grant.permissionKey)}
-                removing={removeRight.isPending}
-              />
-            ))}
-            {rights.removed.map((grant) => (
-              <OverrideRow key={`removed-${grant.permissionKey}`} label={permissionLabel(grant.permissionKey)} tag="Removed" muted />
-            ))}
-            {currentRightKeys.size === 0 && rights.removed.length === 0 ? (
-              <p className="text-xs text-muted-foreground">No rights.</p>
-            ) : null}
-          </ul>
-          {addingRightOverride ? (
-            <div className="mt-2 space-y-2">
-              <JobRightsPicker
-                value={[]}
-                onChange={(next) => {
-                  const grant = next[0];
-                  if (grant) addRight.mutate(grant);
-                }}
-                disabled={addRight.isPending}
-              />
-              <Button size="sm" variant="ghost" onClick={() => setAddingRightOverride(false)}>
-                Done
-              </Button>
-            </div>
-          ) : (
-            <Button size="sm" variant="ghost" className="mt-1.5" onClick={() => setAddingRightOverride(true)}>
-              Add a right
-            </Button>
-          )}
-        </div>
+  return (
+    <div data-testid="agent-job-section">
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-sm font-medium">Position</h3>
+        {changePositionButton}
+      </div>
 
-        <div>
-          <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-            <GraduationCap className="h-3.5 w-3.5" />
-            Skills
-          </div>
-          <ul className="mt-1.5 space-y-1">
-            {skills.fromJob.map((key) => (
-              <OverrideRow key={`from-job-${key}`} label={skillLabel(key)} tag="From position" />
-            ))}
-            {skills.added.map((key) => (
-              <OverrideRow
-                key={`added-${key}`}
-                label={skillLabel(key)}
-                tag="Added"
-                onRemove={() => removeSkill.mutate(key)}
-                removing={removeSkill.isPending}
-              />
-            ))}
-            {skills.removed.map((key) => (
-              <OverrideRow key={`removed-${key}`} label={skillLabel(key)} tag="Removed" muted />
-            ))}
-            {currentSkillKeys.size === 0 && skills.removed.length === 0 ? (
-              <p className="text-xs text-muted-foreground">No skills.</p>
-            ) : null}
-          </ul>
-          {addingSkillOverride ? (
-            <div className="mt-2 flex items-center gap-2">
-              <select
-                className="flex-1 min-w-0 rounded-md border border-border bg-background px-2 py-1.5 text-sm"
-                value={draftSkillKey}
-                onChange={(e) => setDraftSkillKey(e.target.value)}
-                disabled={addSkill.isPending}
-              >
-                <option value="">Choose a skill…</option>
-                {availableSkillsToAdd.map((s) => (
-                  <option key={s.key} value={s.key}>
-                    {s.name}
-                  </option>
-                ))}
-              </select>
-              <Button
-                size="sm"
-                onClick={() => draftSkillKey && addSkill.mutate(draftSkillKey)}
-                disabled={!draftSkillKey || addSkill.isPending}
-              >
-                Add
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => {
-                  setAddingSkillOverride(false);
-                  setDraftSkillKey("");
-                }}
-                disabled={addSkill.isPending}
-              >
-                Cancel
-              </Button>
-            </div>
-          ) : (
-            <Button size="sm" variant="ghost" className="mt-1.5" onClick={() => setAddingSkillOverride(true)}>
-              Add a skill
-            </Button>
-          )}
-        </div>
+      <div className="mt-2 border border-border rounded-lg p-4 space-y-4">
+        {positionBody}
+        {toolsRightsSkills}
       </div>
     </div>
   );

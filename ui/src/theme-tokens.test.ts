@@ -81,6 +81,8 @@ const REQUIRED_PAIRS: Array<[string, string, number]> = [
 /** Extra pairs the themes also promise; kept separate so the five required ones stay obvious. */
 const EXTRA_PAIRS: Array<[string, string, number]> = [
   ["border", "popover", 3],
+  ["border-strong", "card", 4.5],
+  ["border-strong", "background", 4.5],
   ["sidebar-border", "sidebar", 3],
   ["input", "input-background", 3],
   ["ring", "card", 3],
@@ -89,6 +91,7 @@ const EXTRA_PAIRS: Array<[string, string, number]> = [
   ["muted-foreground", "muted", 4.5],
   ["muted-foreground", "accent", 4.5],
   ["muted-foreground", "popover", 4.5],
+  ["popover-foreground", "popover", 4.5],
   ["foreground", "background", 4.5],
   ["foreground", "input-background", 4.5],
   ["foreground", "code-background", 4.5],
@@ -127,6 +130,14 @@ describe.each(Object.entries(THEMES))("%s theme tokens", (themeName, tokens) => 
     expect(contrastRatio(tokens[fg], tokens[bg])).toBeGreaterThanOrEqual(min);
   });
 
+  it("makes section frames clearly stronger than in-group lines", () => {
+    // Section frames (--border-strong) must stand out from input borders and row
+    // dividers (--border) on the page background, not just clear 3:1 on their own.
+    const strong = contrastRatio(tokens["border-strong"], tokens.background);
+    const line = contrastRatio(tokens.border, tokens.background);
+    expect(strong).toBeGreaterThanOrEqual(line * 1.5);
+  });
+
   it("gives input fields a background that differs from the card", () => {
     expect(Math.abs(tokens["input-background"].l - tokens.card.l)).toBeGreaterThanOrEqual(0.03);
   });
@@ -148,5 +159,16 @@ describe("surface ladder", () => {
     expect(t.sidebar.l).toBeLessThan(t.background.l);
     expect(t.background.l).toBeLessThan(t.card.l);
     expect(t.card.l).toBe(1);
+  });
+});
+
+describe("native select lists", () => {
+  // Chrome/Edge on Windows draw an open <select> list with the options' own
+  // colours; without these the dark theme showed light text on a white menu.
+  it("gives options and option groups the popover surface and text", () => {
+    const rule = CSS.match(/select option,\s*select optgroup\s*\{([^}]*)\}/);
+    expect(rule, "select option rule in index.css").not.toBeNull();
+    expect(rule![1]).toMatch(/background-color:\s*var\(--popover\)/);
+    expect(rule![1]).toMatch(/color:\s*var\(--popover-foreground\)/);
   });
 });

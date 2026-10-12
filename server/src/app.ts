@@ -28,6 +28,8 @@ import { webSearchRoutes } from "./routes/web-search.js";
 import { agentMemoryRoutes } from "./routes/agent-memories.js";
 import { agentWorkSummaryRoutes } from "./routes/agent-work-summaries.js";
 import { jobSettingsRoutes } from "./routes/job-settings.js";
+import { companyMigrationRoutes } from "./routes/company-migration.js";
+import { cacheSettingsRoutes } from "./routes/cache-settings.js";
 import { positionsJobsPathAliasMiddleware } from "./routes/positions-jobs-aliases.js";
 import { privateAccessRoutes } from "./routes/private-access.js";
 import { browserRoutes } from "./routes/browser.js";
@@ -39,9 +41,13 @@ import { morningReportRoutes } from "./routes/morning-report.js";
 import { mailSecretaryRoutes } from "./routes/mail-secretary.js";
 import { mailAccountsRoutes } from "./routes/mail-accounts.js";
 import { modelDirectoryRoutes } from "./routes/model-directory.js";
+import { HELPER_ASK_API_PATH, HELPER_ASK_JSON_BODY_LIMIT, HELPER_INVESTIGATIONS_API_PATH, helperRoutes } from "./routes/helper.js";
 import { emailSettingsRoutes } from "./routes/email-settings.js";
+import { securityReviewSettingsRoutes } from "./routes/security-review-settings.js";
+import { qualityLoopRoutes } from "./routes/quality-loops.js";
 import { videoStorylineRoutes } from "./routes/video-storylines.js";
 import { mediaStudioDirectRoutes } from "./routes/media-studio-direct.js";
+import { bragRoutes } from "./routes/brag.js";
 import { tradingRoutes } from "./routes/trading.js";
 import { mcpOAuthRoutes } from "./routes/mcp-oauth.js";
 import { projectRoutes } from "./routes/projects.js";
@@ -81,9 +87,12 @@ import { crossCompanyInstructionRoutes } from "./routes/cross-company-instructio
 import { instanceSecurityRoutes } from "./routes/instance-security.js";
 import { crossCompanyAccessLogRoutes } from "./routes/cross-company-access-log.js";
 import { telegramBotRoutes } from "./routes/telegram-bots.js";
+import { TELEGRAM_CHAT_ASK_API_PATH, TELEGRAM_CHAT_ASK_JSON_BODY_LIMIT, telegramChatRoutes } from "./routes/telegram-chat.js";
 import { telegramReactionRoutes } from "./routes/telegram-reactions.js";
 import { SPEECH_TRANSCRIBE_API_PATH, SPEECH_TRANSCRIBE_JSON_BODY_LIMIT, speechRoutes } from "./routes/speech.js";
 import { dataConnectionRoutes } from "./routes/data-connections.js";
+import { reportScriptRoutes } from "./routes/report-scripts.js";
+import { reportTemplateRoutes } from "./routes/report-templates.js";
 import { documentsDownloadRoutes } from "./routes/documents-download.js";
 import { openApiRoutes } from "./routes/openapi.js";
 import {
@@ -245,6 +254,21 @@ export async function createApp(
     limit: SPEECH_TRANSCRIBE_JSON_BODY_LIMIT,
     verify: captureRawBody,
   }));
+  // A linked person's Telegram question can carry one photo (up to 10 MB).
+  app.use(TELEGRAM_CHAT_ASK_API_PATH, express.json({
+    limit: TELEGRAM_CHAT_ASK_JSON_BODY_LIMIT,
+    verify: captureRawBody,
+  }));
+  // "Ask Paperclip" with pictures: up to 4 pictures of 5 MB each as base64.
+  app.use(HELPER_ASK_API_PATH, express.json({
+    limit: HELPER_ASK_JSON_BODY_LIMIT,
+    verify: captureRawBody,
+  }));
+  // "Investigate deeper" takes the same pictures.
+  app.use(HELPER_INVESTIGATIONS_API_PATH, express.json({
+    limit: HELPER_ASK_JSON_BODY_LIMIT,
+    verify: captureRawBody,
+  }));
   app.use(express.json({
     limit: DEFAULT_JSON_BODY_LIMIT,
     verify: captureRawBody,
@@ -323,6 +347,8 @@ export async function createApp(
   api.use(agentMemoryRoutes(db));
   api.use(agentWorkSummaryRoutes(db));
   api.use(jobSettingsRoutes(db));
+  api.use(companyMigrationRoutes(db));
+  api.use(cacheSettingsRoutes(db));
   api.use(browserRoutes(db));
   api.use(paymentNoticesRoutes(db));
   api.use(paymentCardRoutes(db));
@@ -332,9 +358,18 @@ export async function createApp(
   api.use(mailSecretaryRoutes(db));
   api.use(mailAccountsRoutes(db));
   api.use(modelDirectoryRoutes(db));
+  api.use(helperRoutes(db, {
+    investigations: {
+      pluginWorkerManager: workerManager,
+      storage: () => opts.storageService,
+    },
+  }));
   api.use(emailSettingsRoutes(db));
+  api.use(securityReviewSettingsRoutes(db));
+  api.use(qualityLoopRoutes(db));
   api.use(videoStorylineRoutes(db));
   api.use(mediaStudioDirectRoutes(db));
+  api.use(bragRoutes(db));
   api.use(tradingRoutes(db));
   api.use(mcpOAuthRoutes(db));
   api.use(assetRoutes(db, opts.storageService));
@@ -381,10 +416,14 @@ export async function createApp(
   api.use(instanceClaudeAuthRoutes(db));
   api.use(instanceServerAnthropicKeyRoutes(db));
   api.use(telegramBotRoutes(db));
+  // Hermes parity slice 1: linked people ask the company bot on Telegram.
+  api.use(telegramChatRoutes(db));
   api.use(telegramReactionRoutes(db));
   api.use(speechRoutes(db));
   // DUR-3972 S1: business-data sources. Off until enableBusinessData is on.
   api.use(dataConnectionRoutes(db));
+  api.use(reportScriptRoutes(db));
+  api.use(reportTemplateRoutes(db));
   api.use(documentsDownloadRoutes(db));
   api.use(instanceSecurityRoutes(db, { checkIntervalMinutes: opts.adminAuthCheckIntervalMinutes ?? 0 }));
   api.use(crossCompanyAccessLogRoutes(db));

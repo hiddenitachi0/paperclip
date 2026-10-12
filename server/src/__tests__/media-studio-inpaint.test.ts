@@ -182,7 +182,7 @@ describe("edit.segment (select an object)", () => {
   it("says where to set the Sogni key before calling Sogni", async () => {
     const { harness, starts } = await setup({});
     await expect(run(harness, { imageDataUrl: "data:image/png;base64,AA==", text: "sofa" })).rejects.toThrow(
-      /Ask an admin to add a Sogni API key/,
+      /Ask the company's owner or an admin to add a Sogni API key/,
     );
     expect(starts).toHaveLength(0);
   });
@@ -289,7 +289,7 @@ describe("edit.inpaint (replace / remove with mandatory server-side compositing)
         { imageDataUrl: "data:image/png;base64,AA==", maskDataUrl: "data:image/png;base64,AA==", mode: "remove" },
         USER,
       ),
-    ).rejects.toThrow(/Ask an admin to add a Fal.ai API key/);
+    ).rejects.toThrow(/Ask the company's owner or an admin to add a Fal.ai API key/);
   });
 
   it("mode remove ignores client-supplied text and always sends the fixed server-side prompt", async () => {

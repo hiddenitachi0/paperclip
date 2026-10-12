@@ -337,6 +337,7 @@ export interface PaperclipPluginManifestV1 {
     displayName: string;
     description: string;
     parametersSchema: JsonSchema;
+    category?: string;
   }>;
   database?: PluginDatabaseDeclaration;
   apiRoutes?: PluginApiRouteDeclaration[];
@@ -410,8 +411,12 @@ tools?: Array<{
   displayName: string;
   description: string;
   parametersSchema: JsonSchema;
+  /** Optional plain-English group label, e.g. "Pictures" (1–60 characters). */
+  category?: string;
 }>;
 ```
+
+An agent's Tools tab lists add-on tools grouped by `category`; tools without one are grouped under the plugin's display name.
 
 Tool names are automatically namespaced by plugin ID at runtime (e.g. `linear:search-issues`), so plugins cannot shadow core tools or each other's tools.
 

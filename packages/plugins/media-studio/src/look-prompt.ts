@@ -18,6 +18,9 @@
 //
 //   Keep out of the picture: ...                     unless the model takes "things to avoid" text
 //
+//   Do more of: ...  /  Avoid, unless the request asks for it: ...
+//                                                    what this person's emoji reactions taught (DUR-4345)
+//
 // The request wins: a sheet field (or a picture's role) about something the
 // request itself describes, such as a different outfit or place, is left out
 // (for a picture: the prompt says to take that from the request instead), and
@@ -276,6 +279,37 @@ export function roleInstructions(roles: ReferenceRole[], wording: RoleWording, r
 
 export const CHARACTER_INTRO = "Character (the same in every picture; where the request above says otherwise, follow the request)";
 
+/** Picture rules learned from a person's emoji reactions: short labels from the host's fixed vocabulary. */
+export interface PictureFeedbackRules {
+  doMore: string[];
+  avoid: string[];
+}
+
+const FEEDBACK_TERMS_MAX = 8;
+const FEEDBACK_TERM_MAX_LENGTH = 40;
+
+/**
+ * Whatever the host sends is data: keep only short single-line labels, a few
+ * of them, once each. An old prompt can never ride in through here.
+ */
+export function normalizeFeedbackRules(value: unknown): PictureFeedbackRules {
+  const raw = value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+  const clean = (list: unknown): string[] => {
+    if (!Array.isArray(list)) return [];
+    const out: string[] = [];
+    for (const item of list) {
+      if (typeof item !== "string") continue;
+      const term = item.trim();
+      if (!term || term.length > FEEDBACK_TERM_MAX_LENGTH || /[\r\n]/.test(term) || out.includes(term)) continue;
+      out.push(term);
+      if (out.length >= FEEDBACK_TERMS_MAX) break;
+    }
+    return out;
+  };
+  const avoid = clean(raw.avoid);
+  return { doMore: clean(raw.doMore).filter((term) => !avoid.includes(term)), avoid };
+}
+
 export interface PromptInput {
   /** What the agent or person asked for. */
   request: string;
@@ -288,6 +322,8 @@ export interface PromptInput {
   service: string;
   /** The model takes "things to avoid" text of its own: "Always avoid" goes there instead of into the prompt. */
   avoidAsNegative?: boolean;
+  /** What this person's reactions taught: more of this, less of that. Comes from the host, never from the request. */
+  feedback?: PictureFeedbackRules | null;
 }
 
 export interface AssembledPrompt {
@@ -332,6 +368,11 @@ export function assemblePrompt(input: PromptInput): AssembledPrompt {
   if (style) blocks.push(`Style: ${style}`);
   const styleFields = pick("style");
   if (styleFields.length > 0) blocks.push(styleFields.join(" "));
+  const feedback = normalizeFeedbackRules(input.feedback);
+  if (feedback.doMore.length > 0) blocks.push(`Do more of: ${feedback.doMore.join(", ")}.`);
+  // The request wins here too, so the avoid list says so in words; the model's
+  // own "things to avoid" field (below) cannot, so it only gets the sheet's.
+  if (feedback.avoid.length > 0) blocks.push(`Avoid, unless the request above asks for it: ${feedback.avoid.join(", ")}.`);
   const avoidText = sheet.avoid?.trim() || null;
   let avoid: string | null = null;
   if (avoidText) {
@@ -339,4 +380,94 @@ export function assemblePrompt(input: PromptInput): AssembledPrompt {
     else blocks.push(sentence("Keep out of the picture", avoidText));
   }
   return { prompt: blocks.join("\n\n"), avoid, leftOut, requestAspects };
+}
+
+// ─── A photo the person sent, edited ─────────────────────────────────────────
+//
+// Used instead of assemblePrompt when the first reference is a photo the
+// person attached in a chat (photo-edit.ts). The edit models' own guides say
+// the same thing in their words: Sogni's edit_image ("Preserve all
+// unmentioned details" for one base picture) and Kontext ("while keeping
+// everything else the same"). The look's character sheet only describes the
+// agent being added; its setting, art style, lighting and camera fields are
+// left out, because the scene, its light and its framing are the photo's.
+
+/** The sheet fields that describe the person themselves (never the scene). */
+const PERSON_FIELDS: SheetKey[] = ["hair", "face", "eyes", "body", "skin", "outfit", "accessories", "expression"];
+/** Aspects of the look's style words that would re-draw the photo. */
+const SCENE_ASPECTS: Aspect[] = ["setting", "artStyle", "lighting", "camera"];
+
+export interface PhotoEditPromptInput {
+  /** What the agent asked for ("Maja helping her friend prepare the meat on the counter"). */
+  request: string;
+  /** The person being added: the identity's or agent's name. Null: nobody is added, only the change. */
+  agentName: string | null;
+  /** How many reference pictures follow the photo(s) and show the agent. */
+  agentPictures: number;
+  /** 1-based positions of the agent's face pictures. */
+  facePositions: number[];
+  /** How many of the first pictures are the person's photos (1 normally). */
+  photoCount: number;
+  sheet?: CharacterSheet | null;
+  style?: string | null;
+  service: string;
+  feedback?: PictureFeedbackRules | null;
+}
+
+export interface PhotoEditPrompt {
+  prompt: string;
+  /** True when the look's style words were left out because they would re-draw the photo. */
+  styleLeftOut: boolean;
+  /** "Keep out of the picture" text, always in the prompt for an edit. */
+  avoid: string | null;
+}
+
+export function assemblePhotoEditPrompt(input: PhotoEditPromptInput): PhotoEditPrompt {
+  const name = input.agentName?.trim() || null;
+  let request = input.request.trim().replace(/[\s.]+$/, "");
+  // "Maja helping her friend …" reads "Add Maja … doing: helping her friend …".
+  if (name) {
+    const lead = new RegExp(`^${escapeRegExp(name)}(?:\\s+(?:is|who is))?\\s+(?=\\S)`, "iu");
+    const stripped = request.replace(lead, "");
+    if (stripped.length > 0) request = stripped;
+  }
+  const noun = ROLE_TEXTS[roleWordingFor(input.service)].noun;
+  const blocks: string[] = [];
+  if (name && input.agentPictures > 0) {
+    blocks.push(
+      `Edit the first ${noun}. Keep the scene and every person already in it, unchanged. Add ${name} (from the other reference ${noun}s) doing: ${request}.`,
+    );
+  } else if (name) {
+    blocks.push(`Edit the first ${noun}. Keep the scene and every person already in it, unchanged. Add ${name} doing: ${request}.`);
+  } else {
+    blocks.push(`Edit the first ${noun}. Keep the scene and every person already in it, unchanged, apart from this change: ${request}.`);
+  }
+  if (input.photoCount > 1) {
+    blocks.push(`${noun[0]!.toUpperCase()}${noun.slice(1)}s 2 to ${input.photoCount} are more photos the person sent; use them only for the people and things in them.`);
+  }
+  if (name && input.facePositions.length > 0) {
+    const faces = refsText(noun, input.facePositions);
+    blocks.push(
+      `${name}'s face comes only from ${faces}: keep ${name}'s exact facial likeness. Do not change the face of anyone already in the first ${noun}, and do not give ${name}'s face to them.`,
+    );
+  }
+  const requestAspects = aspectsInRequest(request);
+  const sheet = input.sheet ?? {};
+  if (name) {
+    const person = SHEET_FIELDS.filter((field) => {
+      if (!PERSON_FIELDS.includes(field.key) || !sheet[field.key]) return false;
+      const aspect = FIELD_ASPECT[field.key];
+      return !(aspect && requestAspects.includes(aspect));
+    }).map((field) => sentence(field.promptLabel, sheet[field.key]!));
+    if (person.length > 0) blocks.push(`${name}: ${person.join(" ")}`);
+  }
+  const style = input.style?.trim() ?? "";
+  const styleConflicts = style !== "" && aspectsInRequest(style).some((aspect) => SCENE_ASPECTS.includes(aspect));
+  if (style && !styleConflicts) blocks.push(`Style for ${name ?? "the change"} where it fits the photo: ${style.replace(/[\s.]+$/, "")}.`);
+  blocks.push(`Match the first ${noun}'s light, colours, perspective and camera, so the result looks like the same photo.`);
+  const feedback = normalizeFeedbackRules(input.feedback);
+  if (feedback.avoid.length > 0) blocks.push(`Avoid, unless the request above asks for it: ${feedback.avoid.join(", ")}.`);
+  const avoid = sheet.avoid?.trim() || null;
+  if (avoid) blocks.push(sentence("Keep out of the picture", avoid));
+  return { prompt: blocks.join("\n\n"), styleLeftOut: styleConflicts, avoid };
 }

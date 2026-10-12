@@ -3,7 +3,9 @@ import { useQueries, useQuery } from "@tanstack/react-query";
 import { accessApi } from "../api/access";
 import { useDialogActions } from "../context/DialogContext";
 import { useCompany } from "../context/CompanyContext";
-import { Link } from "@/lib/router";
+import { Link, useNavigate } from "@/lib/router";
+import { overlapsApi } from "../api/overlaps";
+import { openOverlapsForIssue } from "../lib/overlap-words";
 import { executionWorkspacesApi } from "../api/execution-workspaces";
 import { issuesApi } from "../api/issues";
 import { authApi } from "../api/auth";
@@ -644,6 +646,14 @@ export function IssuesList({
     queryKey: queryKeys.instance.experimentalSettings,
     queryFn: () => instanceSettingsApi.getExperimental(),
     retry: false,
+  });
+  const navigate = useNavigate();
+  const { data: openOverlaps } = useQuery({
+    queryKey: queryKeys.overlaps.list(selectedCompanyId!),
+    queryFn: () => overlapsApi.list(selectedCompanyId!),
+    enabled: !!selectedCompanyId,
+    retry: false,
+    staleTime: 60_000,
   });
   const currentUserId = session?.user?.id ?? session?.session?.userId ?? null;
   const experimentalSettingsLoaded = experimentalSettings !== undefined;
@@ -1815,6 +1825,22 @@ export function IssuesList({
                                   {issueBadge}
                                 </span>
                               )
+                            ) : null}
+                            {openOverlapsForIssue(openOverlaps ?? [], issue.id).length > 0 ? (
+                              <span
+                                role="link"
+                                tabIndex={0}
+                                data-testid="issue-row-overlap"
+                                className="ml-1.5 inline-flex cursor-pointer items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 hover:bg-amber-500/20 dark:text-amber-300"
+                                title="This task changes the same thing as another open task. Click to see which."
+                                onClick={(e) => { e.preventDefault(); e.stopPropagation(); navigate("/overlaps"); }}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); navigate("/overlaps"); }
+                                }}
+                              >
+                                <Layers className="h-3 w-3" aria-hidden />
+                                Overlaps with other work
+                              </span>
                             ) : null}
                             {isSuccessfulRunHandoffRequired(issue) ? (
                               <span

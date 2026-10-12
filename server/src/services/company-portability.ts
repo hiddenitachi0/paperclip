@@ -4507,6 +4507,19 @@ export function companyPortabilityService(db: Db, storage?: StorageService, rawD
       }
       effectiveSecretValues = { ...carried, ...(input.secretValues ?? {}) };
     }
+    // Plain summary for the import screen: which secret settings arrived with
+    // a value and which still need one. Keys only, never values.
+    const secretsReport = {
+      carried: Boolean(input.encryptedSecretsBundle),
+      arrived: [] as string[],
+      notArrived: [] as string[],
+    };
+    for (const envInput of importEnvInputs) {
+      if (envInput.kind !== "secret") continue;
+      const value = envInputValue(envInput, effectiveSecretValues);
+      if (value !== null && value.trim().length > 0) secretsReport.arrived.push(envInputScopedKey(envInput));
+      else secretsReport.notArrived.push(envInputScopedKey(envInput));
+    }
     const createdImportSecretIds: string[] = [];
     try {
       await materializeImportEnvInputValues(
@@ -5088,6 +5101,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService, rawD
         projects: resultProjects,
         envInputs: sourceManifest.envInputs ?? [],
         warnings,
+        secretsReport,
       };
     } catch (error) {
       for (const secretId of createdImportSecretIds) {

@@ -62,7 +62,7 @@ function QuietModeCard() {
           <div className="flex items-start gap-3">
             <Moon className="mt-0.5 h-5 w-5 text-muted-foreground" />
             <div>
-              <h2 className="text-sm font-semibold">Quiet mode</h2>
+              <h2 className="section-title">Quiet mode</h2>
               <p className="text-sm text-muted-foreground">
                 Stops every agent in every company from starting new work -- both scheduled timer wakes and
                 event-driven wakes. Work already running is left alone to finish; this is not Pause, which cancels

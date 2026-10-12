@@ -1,3 +1,5 @@
+import { getThinkingEffortKey } from "@paperclipai/shared";
+
 export const ISSUE_OVERRIDE_ADAPTER_TYPES = new Set([
   "claude_local",
   "codex_local",
@@ -52,13 +54,9 @@ export function buildAssigneeAdapterOverrides(
   const adapterConfig: Record<string, unknown> = {};
   if (input.modelOverride) adapterConfig.model = input.modelOverride;
   if (input.thinkingEffortOverride) {
-    if (adapterType === "codex_local") {
-      adapterConfig.modelReasoningEffort = input.thinkingEffortOverride;
-    } else if (adapterType === "opencode_local") {
-      adapterConfig.variant = input.thinkingEffortOverride;
-    } else if (adapterType === "claude_local") {
-      adapterConfig.effort = input.thinkingEffortOverride;
-    }
+    // The key each adapter reads its effort from comes from the one shared
+    // per-adapter definition (packages/shared/src/model-effort.ts).
+    adapterConfig[getThinkingEffortKey(adapterType)] = input.thinkingEffortOverride;
   }
   if (adapterType === "claude_local" && input.chrome) {
     adapterConfig.chrome = true;

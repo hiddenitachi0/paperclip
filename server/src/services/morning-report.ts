@@ -2,6 +2,7 @@ import { and, desc, eq, gte, isNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
+  issues,
   companyMemberships,
   laneAConversations,
   laneAMessages,
@@ -36,6 +37,7 @@ import {
 } from "@paperclipai/shared";
 import { notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
+import { formatProgressReportLine, progressMapForParents } from "./issue-progress.js";
 import { logActivity } from "./activity-log.js";
 import { formatWeatherReport } from "./lane-a-tools.js";
 import { laneAService } from "./lane-a.js";
@@ -689,8 +691,25 @@ function formatPriceLine(fact: MorningReportPriceFact): string {
  * only used to tell "not configured" (omit the section) apart from
  * "configured but nothing found" (say so in one line).
  */
+/** DUR-4467: one line per in-progress parent task with sub-tasks and an ETA (>=2 done). Company-scoped, capped. */
+export async function collectProgressLines(db: Db, companyId: string, now: Date): Promise<string[]> {
+  const parents = await db
+    .select({ id: issues.id, companyId: issues.companyId, identifier: issues.identifier, startedAt: issues.startedAt })
+    .from(issues)
+    .where(and(eq(issues.companyId, companyId), eq(issues.status, "in_progress")))
+    .limit(200);
+  const progress = await progressMapForParents(db, parents, now);
+  const lines: string[] = [];
+  for (const p of parents) {
+    const pr = progress.get(p.id);
+    const line = pr && p.identifier ? formatProgressReportLine(p.identifier, pr) : null;
+    if (line) lines.push(line);
+  }
+  return lines.slice(0, 10);
+}
+
 function renderFullReportText(
-  facts: Pick<MorningReportFacts, "opening" | "weather" | "headlines" | "hobby" | "sport" | "prices" | "stats">,
+  facts: Pick<MorningReportFacts, "opening" | "weather" | "headlines" | "hobby" | "sport" | "prices" | "stats"> & { progressLines?: string[] },
   settings: Pick<MorningReportSettings, "sources" | "hobbyTopics" | "sportFollows" | "priceSymbols">,
 ): string {
   const parts: string[] = [facts.opening];
@@ -720,6 +739,9 @@ function renderFullReportText(
     parts.push(
       facts.prices.length > 0 ? `Prices:\n${facts.prices.map(formatPriceLine).join("\n")}` : "Prices: unavailable today.",
     );
+  }
+  if (facts.progressLines && facts.progressLines.length > 0) {
+    parts.push(`Big tasks:\n${facts.progressLines.map((l) => `- ${l}`).join("\n")}`);
   }
   if (settings.sources.length > 0) {
     parts.push(`Sources checked: ${facts.stats.sourcesChecked}, headlines found: ${facts.stats.itemsFound}.`);
@@ -1345,7 +1367,14 @@ export function morningReportService(db: Db, deps: MorningReportServiceDeps = {}
     const pictures = await collectImages(agentRow, settings, places, weather.conditionsSummary, mood, modelThemeKeywords, direction, localDate);
     notes.push(...pictures.notes);
 
+    let progressLines: string[] = [];
+    try {
+      progressLines = await collectProgressLines(db, agentRow.companyId, now);
+    } catch (err) {
+      logger.warn({ err }, "morning report: progress lines unavailable");
+    }
     const facts: MorningReportFacts = {
+      progressLines,
       places,
       weather: weather.items,
       headlines: headlineItems,

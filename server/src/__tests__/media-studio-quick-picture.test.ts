@@ -308,7 +308,7 @@ describe("media-studio quick picture", () => {
     fakeServices(harness);
     const result = await run(harness, { prompt: "sunrise" });
     expect(result.error).toBe(
-      "The quick picture could not be made. Pick the Sogni API key in Media Studio settings (it comes from the company's Secrets).",
+      "The quick picture could not be made. Pick the Sogni API key in Media Studio's Settings tab (it comes from the company's Secrets).",
     );
   });
 

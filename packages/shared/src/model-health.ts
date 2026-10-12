@@ -129,3 +129,70 @@ export function modelCannotRunReason(entry: { provider: string; model: string; b
   }
   return null;
 }
+
+// ─── DUR-4557: model setup reviewer probes + host capabilities ───────────
+
+export const MODEL_PROBE_KINDS = ["tool_call", "picture_request", "empty_reply", "refusal"] as const;
+export type ModelProbeKind = (typeof MODEL_PROBE_KINDS)[number];
+
+/** Hard cap on model calls in one probe set; shown to the person alongside the count used. */
+export const MODEL_PROBE_MAX_CALLS = 14;
+/** Runs per thinking mode in the empty-reply probe. */
+export const MODEL_PROBE_EMPTY_REPLY_RUNS = 5;
+
+export interface ModelProbeResult {
+  kind: ModelProbeKind;
+  ok: boolean;
+  /** One plain-English line. */
+  summary: string;
+  /** Empty-reply probe only: per thinking mode, how many of N runs came back empty. */
+  emptyReplies?: Array<{ thinking: ModelTestRun["thinking"]; runs: number; empty: number; errors: number }>;
+}
+
+export interface ModelProbeSetResult {
+  entryId: string;
+  ran: boolean;
+  reason: string | null;
+  probes: ModelProbeResult[];
+  callsUsed: number;
+  callsMax: number;
+}
+
+export interface ModelHostEndpoint {
+  host: string;
+  contextLength: number | null;
+  supportedParameters: string[];
+  /** USD per million tokens; null when not published. */
+  promptPricePerM: number | null;
+  completionPricePerM: number | null;
+}
+
+/** What Paperclip currently sends for this entry (never includes keys or prompt text). */
+export interface ModelSentSummary {
+  tools: boolean;
+  toolCount: number | null;
+  reasoningEffort: string | null;
+  temperature: number | null;
+  maxTokens: number;
+  /** "json_object" when a job asks for JSON; "none" otherwise. */
+  responseFormat: "json_object_when_asked";
+  systemPromptChars: number | null;
+  pinnedHosts: string[];
+}
+
+export interface ModelHostCapabilities {
+  entryId: string;
+  source: "ollama" | "openrouter" | "none";
+  fetched: boolean;
+  reason: string | null;
+  contextLength: number | null;
+  /** Ollama capability names, e.g. "completion", "tools", "thinking". */
+  capabilities: string[];
+  supportedParameters: string[];
+  /** Ollama chat template, truncated. */
+  template: string | null;
+  hosts: ModelHostEndpoint[];
+  sent: ModelSentSummary;
+  /** Plain-English gaps between what is sent and what the host supports. */
+  mismatches: string[];
+}

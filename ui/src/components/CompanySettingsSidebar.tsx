@@ -102,7 +102,7 @@ export function CompanySettingsSidebar() {
       </div>
 
       <nav className="flex-1 min-h-0 overflow-y-auto scrollbar-auto-hide px-3 py-2">
-        <div className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+        <div className="px-3 pb-1 nav-group-title">
           Company settings
         </div>
         <div className="flex flex-col gap-0.5">
@@ -137,7 +137,7 @@ export function CompanySettingsSidebar() {
           <SidebarNavItem to="/company/settings/models" label="Models" icon={Cpu} end />
           <SidebarNavItem to="/company/settings/secrets" label="Secrets" icon={KeyRound} end />
         </div>
-        <div className="mt-5 px-3 pb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+        <div className="mt-5 px-3 pb-1 nav-group-title">
           Instance settings
         </div>
         <div className="flex flex-col gap-0.5">

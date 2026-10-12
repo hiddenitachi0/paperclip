@@ -397,8 +397,18 @@ export function normalizeIssueExecutionPolicy(input: unknown): IssueExecutionPol
   const reviewPreset = parsed.data.reviewPreset;
   const authorizationPolicy = parsed.data.authorizationPolicy;
   const selfReview = parsed.data.selfReview;
+  const selfReviewPasses = parsed.data.selfReviewPasses;
+  const doneCheck = parsed.data.doneCheck;
 
-  if (stages.length === 0 && !monitor && !reviewPreset && !authorizationPolicy && selfReview === undefined) {
+  if (
+    stages.length === 0 &&
+    !monitor &&
+    !reviewPreset &&
+    !authorizationPolicy &&
+    selfReview === undefined &&
+    selfReviewPasses === undefined &&
+    doneCheck === undefined
+  ) {
     return null;
   }
 
@@ -410,6 +420,8 @@ export function normalizeIssueExecutionPolicy(input: unknown): IssueExecutionPol
     ...(reviewPreset ? { reviewPreset } : {}),
     ...(authorizationPolicy ? { authorizationPolicy } : {}),
     ...(selfReview !== undefined ? { selfReview } : {}),
+    ...(selfReviewPasses !== undefined ? { selfReviewPasses } : {}),
+    ...(doneCheck !== undefined ? { doneCheck } : {}),
   };
 }
 

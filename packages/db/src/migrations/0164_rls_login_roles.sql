@@ -151,6 +151,11 @@ DECLARE
     'assets',
     'board_api_keys',
     'board_delegate_tokens',
+    -- DUR-4519 (Brag video phase 1). Created, granted on and policed in
+    -- 0226_brag_jobs.sql; listed here so the login-role lists match the
+    -- schema, as for the tables above.
+    'brag_jobs',
+    'brag_scenes',
     'budget_incidents',
     'budget_policies',
     'cli_auth_challenges',
@@ -158,6 +163,10 @@ DECLARE
     'cloud_upstream_runs',
     'companies',
     'company_agent_roles',
+    -- DUR-4471 cache-aware wake scheduling. Created, granted on and policed
+    -- in 0228_company_cache_settings.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'company_cache_settings',
     -- DUR-4142. Created, granted on and policed in
     -- 0207_company_job_settings.sql; listed here so the login-role lists
     -- match the schema, as for the tables above.
@@ -181,6 +190,10 @@ DECLARE
     'company_secret_provider_configs',
     'company_secret_versions',
     'company_secrets',
+    -- DUR-4566 (merge-card security-review state). Created, granted on and
+    -- policed in the new 0231_merge_security_reviews.sql migration; listed
+    -- here so the login-role lists match the schema, as for the tables above.
+    'company_security_review_settings',
     -- DUR-3977. The real DDL, grant and policy for this table live in
     -- 0165_lane_a_transform.sql; the name is listed here because
     -- packages/db/src/rls-login-roles.test.ts holds these arrays to the
@@ -258,6 +271,10 @@ DECLARE
     'issue_execution_decisions',
     'issue_inbox_archives',
     'issue_labels',
+    -- DUR-4468. Created, granted on and policed in 0224_issue_overlaps.sql;
+    -- listed here so the login-role lists match the schema, as for the
+    -- tables above.
+    'issue_overlaps',
     'issue_plan_decompositions',
     'issue_read_states',
     'issue_recovery_actions',
@@ -285,16 +302,41 @@ DECLARE
     -- Per-person mail accounts (DUR-4194). Created (and granted on) in
     -- 0203_mail_accounts.sql; listed here so the login-role lists match the
     -- schema, as for the tables above.
+    'mail_message_classifications',
     'mail_messages',
     'mail_secretary_items',
+    -- DUR-4573. Created, granted on and policed in 0232_mail_urgency.sql;
+    -- listed here so the login-role lists match the schema.
+    'mail_urgency_alerts',
     -- DUR-4329. Created, granted on and policed in
     -- 0212_media_studio_direct_creations.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'media_studio_direct_creations',
+    -- DUR-4566 (merge-card security-review state). Created, granted on and
+    -- policed in the new 0231_merge_security_reviews.sql migration; listed
+    -- here so the login-role lists match the schema, as for the tables above.
+    'merge_security_reviews',
     -- DUR-4379. Created, granted on and policed in
     -- 0216_model_directory_entries.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'model_directory_entries',
+    -- "Ask Paperclip" helper settings. Created, granted on and policed in
+    -- 0238_company_helper_settings.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'company_helper_settings',
+    -- Agent quality loops. Created, granted on and policed in
+    -- 0247_company_quality_loop_settings.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'company_quality_loop_settings',
+    -- DUR-4392. Created, granted on and policed in
+    -- 0229_model_directory_converters.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'model_directory_converters',
+    -- Catalogue v2 (Settings > Models settings). Created, granted on and
+    -- policed in 0236_model_catalogue_v2.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'model_directory_settings',
+    'model_setup_reviews',
     -- DUR-4419. Created, granted on and policed in
     -- 0223_local_model_health.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
@@ -312,6 +354,27 @@ DECLARE
     -- DUR-4040. Created (and granted on) in 0186_payment_cards.sql; listed
     -- here so the login-role lists match the schema, as for the tables above.
     'payment_cards',
+    -- DUR-4072. Created, granted on and policed in 0240_report_scripts.sql;
+    -- listed here so the login-role lists match the schema.
+    'report_fixtures',
+    'report_script_runs',
+    'report_script_versions',
+    'report_scripts',
+    -- DUR-4072. Created, granted on and policed in
+    -- 0241_report_templates.sql; listed here so the login-role lists match
+    -- the schema.
+    'report_runs',
+    'report_templates',
+    -- Storyline strip (Simple editor, Phase 1). Created, granted on and
+    -- policed in 0244_storyline_transitions.sql; listed here so the
+    -- login-role lists match the schema.
+    'video_transition_takes',
+    'video_transitions',
+    -- Storyline Simple editor, Phase 2. Created, granted on and policed in
+    -- 0249_storyline_clips_music_export.sql; listed here so the login-role
+    -- lists match the schema.
+    'video_media_spend',
+    'video_uploads',
     -- DUR-4037. Created (and granted on) in 0187_payment_notices_and_settings.sql;
     -- listed here so the login-role lists match the schema, as for the tables above.
     'payment_notices',
@@ -375,6 +438,13 @@ DECLARE
     -- 0166_telegram_bots.sql; the name is listed here for the same reason
     -- company_service_tokens is, above.
     'telegram_bots',
+    -- Hermes parity slice 1 (two-way Telegram chat for linked people).
+    -- Created, granted on and policed in 0243_telegram_two_way_chat.sql;
+    -- telegram_person_links is per person (no company_id), so it is in this
+    -- list only, not in the company-scoped one below.
+    'telegram_chat_requests',
+    'telegram_chat_settings',
+    'telegram_person_links',
     -- DUR-4157 2FA. Created (and granted on) in 0206_totp_2fa.sql;
     -- user-scoped (no company_id), so it is in this list only, not in the
     -- company-scoped one below.
@@ -454,11 +524,20 @@ DECLARE
     'approval_comments',
     'approvals',
     'assets',
+    -- DUR-4519 (Brag video phase 1). Created, granted on and policed in
+    -- 0226_brag_jobs.sql; listed here so the login-role lists match the
+    -- schema, as for the tables above.
+    'brag_jobs',
+    'brag_scenes',
     'budget_incidents',
     'budget_policies',
     'cloud_upstream_connections',
     'cloud_upstream_runs',
     'company_agent_roles',
+    -- DUR-4471 cache-aware wake scheduling. Created, granted on and policed
+    -- in 0228_company_cache_settings.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'company_cache_settings',
     -- DUR-4142. Created, granted on and policed in
     -- 0207_company_job_settings.sql; listed here so the login-role lists
     -- match the schema, as for the tables above.
@@ -481,6 +560,10 @@ DECLARE
     'company_secret_bindings',
     'company_secret_provider_configs',
     'company_secrets',
+    -- DUR-4566 (merge-card security-review state). Created, granted on and
+    -- policed in the new 0231_merge_security_reviews.sql migration; listed
+    -- here so the login-role lists match the schema, as for the tables above.
+    'company_security_review_settings',
     'company_service_tokens',
     'company_skill_comments',
     'company_skill_stars',
@@ -540,6 +623,10 @@ DECLARE
     'issue_execution_decisions',
     'issue_inbox_archives',
     'issue_labels',
+    -- DUR-4468. Created, granted on and policed in 0224_issue_overlaps.sql;
+    -- listed here so the login-role lists match the schema, as for the
+    -- tables above.
+    'issue_overlaps',
     'issue_plan_decompositions',
     'issue_read_states',
     'issue_recovery_actions',
@@ -567,16 +654,41 @@ DECLARE
     -- Per-person mail accounts (DUR-4194). Created (and granted on) in
     -- 0203_mail_accounts.sql; listed here so the login-role lists match the
     -- schema, as for the tables above.
+    'mail_message_classifications',
     'mail_messages',
     'mail_secretary_items',
+    -- DUR-4573. Created, granted on and policed in 0232_mail_urgency.sql;
+    -- listed here so the login-role lists match the schema.
+    'mail_urgency_alerts',
     -- DUR-4329. Created, granted on and policed in
     -- 0212_media_studio_direct_creations.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'media_studio_direct_creations',
+    -- DUR-4566 (merge-card security-review state). Created, granted on and
+    -- policed in the new 0231_merge_security_reviews.sql migration; listed
+    -- here so the login-role lists match the schema, as for the tables above.
+    'merge_security_reviews',
     -- DUR-4379. Created, granted on and policed in
     -- 0216_model_directory_entries.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'model_directory_entries',
+    -- "Ask Paperclip" helper settings. Created, granted on and policed in
+    -- 0238_company_helper_settings.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'company_helper_settings',
+    -- Agent quality loops. Created, granted on and policed in
+    -- 0247_company_quality_loop_settings.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'company_quality_loop_settings',
+    -- DUR-4392. Created, granted on and policed in
+    -- 0229_model_directory_converters.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'model_directory_converters',
+    -- Catalogue v2 (Settings > Models settings). Created, granted on and
+    -- policed in 0236_model_catalogue_v2.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'model_directory_settings',
+    'model_setup_reviews',
     -- DUR-4419. Created, granted on and policed in
     -- 0223_local_model_health.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
@@ -594,6 +706,27 @@ DECLARE
     -- DUR-4040. Created (and granted on) in 0186_payment_cards.sql; listed
     -- here so the login-role lists match the schema, as for the tables above.
     'payment_cards',
+    -- DUR-4072. Created, granted on and policed in 0240_report_scripts.sql;
+    -- listed here so the login-role lists match the schema.
+    'report_fixtures',
+    'report_script_runs',
+    'report_script_versions',
+    'report_scripts',
+    -- DUR-4072. Created, granted on and policed in
+    -- 0241_report_templates.sql; listed here so the login-role lists match
+    -- the schema.
+    'report_runs',
+    'report_templates',
+    -- Storyline strip (Simple editor, Phase 1). Created, granted on and
+    -- policed in 0244_storyline_transitions.sql; listed here so the
+    -- login-role lists match the schema.
+    'video_transition_takes',
+    'video_transitions',
+    -- Storyline Simple editor, Phase 2. Created, granted on and policed in
+    -- 0249_storyline_clips_music_export.sql; listed here so the login-role
+    -- lists match the schema.
+    'video_media_spend',
+    'video_uploads',
     -- DUR-4037. Created (and granted on) in 0187_payment_notices_and_settings.sql;
     -- listed here so the login-role lists match the schema, as for the tables above.
     'payment_notices',
@@ -647,6 +780,10 @@ DECLARE
     -- DUR-3978 slice 2, created in 0166_telegram_bots.sql; company-scoped, so
     -- it belongs in this list too.
     'telegram_bots',
+    -- Hermes parity slice 1, created in 0243_telegram_two_way_chat.sql;
+    -- company-scoped, so they belong in this list too.
+    'telegram_chat_requests',
+    'telegram_chat_settings',
     -- DUR-4153/DUR-4171 trading agent (paper-trading only), created in
     -- 0197_trading_agent.sql; company-scoped, so it belongs in this list too.
     'trading_daily_stats',

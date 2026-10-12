@@ -67,6 +67,7 @@ export const ROUTINE_SCHEDULER_BYPASS_ROUTES = [
   "heartbeat-scheduler:issueThreadInteractionsAbandonment",
   "heartbeat-scheduler:modelBoostBossReviewTimeouts",
   "heartbeat-scheduler:environmentCustomImagesCleanup",
+  "heartbeat-scheduler:issueOverlapDetection",
   "heartbeat-scheduler:periodicRecoveryPipeline",
   "heartbeat-scheduler:organizationCheckups",
   "heartbeat-scheduler:adminAuthCheck",
@@ -81,6 +82,7 @@ export const ROUTINE_SCHEDULER_BYPASS_ROUTES = [
   "heartbeat-scheduler:costReconciliation",
   "heartbeat-scheduler:tradingAgent",
   "heartbeat-scheduler:localModelHealth",
+  "heartbeat-scheduler:modelSetupReview",
 ] as const;
 
 export type RoutineSchedulerBypassRoute = (typeof ROUTINE_SCHEDULER_BYPASS_ROUTES)[number];

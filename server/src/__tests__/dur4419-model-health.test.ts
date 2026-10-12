@@ -5,7 +5,7 @@ import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } fro
 import { modelDirectoryService } from "../services/model-directory.ts";
 import { classifyLocalFailure, modelHealthService } from "../services/model-health.ts";
 import { LaneAProviderError } from "../services/lane-a-providers.ts";
-import { localModelOfflineNotice } from "@paperclipai/shared";
+import { MODEL_DIRECTORY_STARTERS, localModelOfflineNotice } from "@paperclipai/shared";
 
 /** DUR-4419: health states, once-per-outage reminder, Test button, on a real Postgres. */
 
@@ -75,10 +75,43 @@ d("model health", () => {
     expect((await health.overview(other)).entries).toEqual([]);
   });
 
+  it("a saved local model with no address of its own is read on the company's model server address", async () => {
+    const co3 = randomUUID();
+    await db.insert(companies).values({ id: co3, name: "C", issuePrefix: "MHC" });
+    const dir = modelDirectoryService(db, { fetchImpl: tagsFetch(net) });
+    const health = modelHealthService(db, { fetchImpl: tagsFetch(net) });
+    await dir.updateSettings(co3, { localBaseUrl: ADDR }, { userId: "u" });
+    const noAddress = await dir.create(co3, { name: "No address", provider: "local", model: MODEL }, { userId: "u" });
+    // Never checked yet: applicable (it has the company's address), but no reading.
+    expect((await health.overview(co3)).entries.find((e) => e.entryId === noAddress.id)).toMatchObject({ applicable: true, status: "not_checked" });
+    // A resync that does not list it: "not installed", not silently skipped.
+    await health.recordLocalSync(co3, ADDR, ["llama3:latest"]);
+    expect((await health.overview(co3)).entries.find((e) => e.entryId === noAddress.id)).toMatchObject({ status: "model_missing" });
+    // A resync that lists it marks it installed, and the reading follows.
+    net.mode = "up";
+    const synced = await dir.syncLocalModels(co3, ADDR);
+    expect(synced.markedInstalledEntryIds).toContain(noAddress.id);
+    await health.recordLocalSync(co3, ADDR, synced.installed.map((m) => m.name));
+    expect((await health.overview(co3)).entries.find((e) => e.entryId === noAddress.id)).toMatchObject({ status: "ready" });
+    expect(await health.checkEntry(co3, noAddress.id)).toMatchObject({ applicable: true, status: "ready" });
+  });
+
   it("a hosted model has nothing to check", async () => {
     const health = modelHealthService(db, { fetchImpl: tagsFetch(net) });
     const e = await modelDirectoryService(db).create(co, { name: "Claude", provider: "anthropic", model: "claude-sonnet-5" }, { userId: "u" });
     expect(await health.checkEntry(co, e.id)).toMatchObject({ applicable: false, status: "not_checked" });
+  });
+
+  it("reviewer handles every Hugging Face starter like other hosted entries: no probe, no call, plain reason", async () => {
+    let calls = 0;
+    const health = modelHealthService(db, { fetchImpl: (async () => { calls += 1; return new Response("{}"); }) as typeof fetch });
+    const dir = modelDirectoryService(db);
+    for (const s of MODEL_DIRECTORY_STARTERS.filter((x) => x.provider === "huggingface")) {
+      const e = await dir.create(co, { name: s.name, provider: s.provider, model: s.model, baseUrl: s.baseUrl }, { userId: "u" });
+      expect(await health.checkEntry(co, e.id)).toMatchObject({ applicable: false, status: "not_checked" });
+      expect(await health.testEntry(co, e.id)).toMatchObject({ ran: false, reason: expect.stringContaining("needs a key") });
+    }
+    expect(calls).toBe(0);
   });
 
   it("tells the person once per outage, not per message, and again after a fresh outage", async () => {

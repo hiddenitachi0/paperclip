@@ -349,7 +349,7 @@ describe("TelegramBotsSection", () => {
     const root = await render();
 
     expect(container.querySelector(`[data-testid="telegram-bot-no-own-users-${ASSISTANT_BOT}"]`)?.textContent).toBe(
-      "Anyone on the instance-wide list can use this bot. Add who may use it.",
+      "No list of its own yet: only people who had already used this bot before per-bot lists can use it. Add who may use it.",
     );
     // The bot that has its own list gets no warning.
     expect(container.querySelector(`[data-testid="telegram-bot-no-own-users-${BOT}"]`)).toBeNull();

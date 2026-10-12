@@ -1,12 +1,14 @@
 import { Router } from "express";
 import { z } from "zod";
 import type { Db } from "@paperclipai/db";
-import { recordTelegramReactionSchema, updateReactionEmojiConfigSchema } from "@paperclipai/shared";
+import { recordReactionFollowUpAnswerSchema, recordTelegramReactionSchema, updateReactionEmojiConfigSchema } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
 import { assertBoard, assertCompanyAccess, assertCompanyOwnerAdminOrInstanceAdmin } from "./authz.js";
 import { logActivity } from "../services/index.js";
 import { telegramReactionService } from "../services/telegram-reactions.js";
+import { reactionLearningService } from "../services/reaction-learning.js";
+import { notFound } from "../errors.js";
 
 /**
  * DUR-4344: Telegram reaction feedback.
@@ -27,6 +29,7 @@ const listQuerySchema = z.object({
 export function telegramReactionRoutes(db: Db) {
   const router = Router();
   const svc = telegramReactionService(db);
+  const learning = reactionLearningService(db);
 
   const boardScope = () =>
     companyScopeFromParam(db, (req, companyId) => {
@@ -62,7 +65,46 @@ export function telegramReactionRoutes(db: Db) {
           hasPicture: Boolean(event.pictureFileId),
         },
       });
-      res.status(created ? 201 : 200).json(event);
+      // DUR-4345: learn from it (a removal re-summarizes at once so its effect
+      // goes away; additions wait for the cadence), and, for a disliked
+      // picture, hand the bridge the one follow-up question to send. Neither
+      // can fail the request: the reaction itself is already recorded.
+      await learning.maybeSummarize(companyId, event.agentId, { force: req.body.action === "removed" });
+      let followUp: { text: string } | null = null;
+      if (req.body.action === "added") {
+        try {
+          followUp = await learning.claimPictureFollowUp(companyId, event, await svc.getConfig(companyId));
+        } catch (err) {
+          console.warn("reaction follow-up check failed", err instanceof Error ? err.message : err);
+        }
+      }
+      res.status(created ? 201 : 200).json(followUp ? { ...event, followUp } : event);
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/telegram-reactions/follow-up-answer",
+    companyScopeFromParam(db, (req, companyId) =>
+      assertCompanyOwnerAdminOrInstanceAdmin(req, companyId, "reaction feedback"),
+    ),
+    validate(recordReactionFollowUpAnswerSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const saved = await learning.recordFollowUpAnswer(companyId, req.body);
+      if (!saved) throw notFound("No unanswered follow-up question for that picture");
+      await logActivity(db, {
+        companyId,
+        actorType: "user",
+        actorId: actorId(req),
+        agentId: req.body.agentId,
+        action: "telegram_reaction.follow_up_answered",
+        entityType: "telegram_reaction",
+        entityId: saved.id,
+        // That it was answered, never what the person typed.
+        details: { answerLength: req.body.answer.length },
+      });
+      await learning.maybeSummarize(companyId, req.body.agentId, { force: true });
+      res.json({ id: saved.id });
     },
   );
 

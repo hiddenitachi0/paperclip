@@ -53,9 +53,13 @@ import type {
   PluginCompanyFileContent,
   PluginPerformActionContext,
   PluginPersonaGenerationCapReservation,
+  PluginPictureFeedbackRules,
   PluginMediaStudioDirectSpendReservation,
   PluginMediaStudioDirectSpendSettlement,
   PluginAgentMediaCostRecording,
+  PluginAgentMediaSpendCheck,
+  PluginImageAnalysisInput,
+  PluginImageAnalysisResult,
 } from "./protocol.js";
 
 // ---------------------------------------------------------------------------
@@ -274,6 +278,14 @@ export interface ToolRunContext {
    * wrote into the tool input.
    */
   requesterMessage?: string;
+  /**
+   * The file ids of pictures the person attached in this quick-agent chat
+   * (a photo sent to a Telegram bot), set by the host only, like
+   * `requesterMessage`. A plugin that sends pictures to an outside service
+   * must treat each as a real photo of real people (Media Studio age-checks
+   * them first).
+   */
+  attachedFileIds?: string[];
 }
 
 /**
@@ -1831,6 +1843,29 @@ export interface PluginPersonasClient {
     companyId: string,
     options: { runId: string },
   ): Promise<PluginPersonaGenerationCapReservation>;
+
+  /**
+   * DUR-4345: the "do more of / avoid" picture rules learned from the calling
+   * agent's person's emoji reactions. Requires `personas.picture_feedback.read`.
+   * Run-scoped like `reserveDailyGeneration`: the host resolves the agent from
+   * `options.runId`. Entries come from a fixed vocabulary, never free text.
+   */
+  getPictureFeedbackRules(companyId: string, options: { runId: string }): Promise<PluginPictureFeedbackRules>;
+}
+
+/**
+ * `ctx.models` — ask one of the company's saved models (Settings > Models)
+ * to look at a picture. Requires `models.image_analysis.run`.
+ *
+ * The host does the call, not the worker: it finds the model's provider,
+ * model id and address from the company's saved model (so a company's own
+ * model server on its own network can be reached the same way quick agents
+ * reach it), reads the picture from the company's Files itself, sends no
+ * tools, records the cost on the company, and returns only the text. It only
+ * works inside a UI action of a person who manages the company.
+ */
+export interface PluginModelsClient {
+  analyseImage(companyId: string, input: PluginImageAnalysisInput): Promise<PluginImageAnalysisResult>;
 }
 
 /**
@@ -1888,6 +1923,24 @@ export interface PluginBillingClient {
       issueId?: string | null;
     },
   ): Promise<PluginAgentMediaCostRecording>;
+
+  /**
+   * Before an AGENT starts a paid picture/video/audio: is the agent (or its
+   * company) stopped by a budget, and would the host's estimate for this call
+   * push the company's or agent's monthly budget, or Media Studio's shared
+   * cap, over? Nothing is recorded; record the cost with
+   * `recordAgentMediaCost` once the call finished. `runId` is the invoking
+   * tool call's run id; the host resolves the agent from it.
+   */
+  checkAgentMediaSpend(
+    companyId: string,
+    input: {
+      runId: string;
+      kind: "image" | "video" | "audio";
+      provider: string;
+      usage?: { images?: number; megapixels?: number; seconds?: number; units?: number };
+    },
+  ): Promise<PluginAgentMediaSpendCheck>;
 }
 
 /**
@@ -2078,6 +2131,9 @@ export interface PluginContext {
 
   /** Spend reservation against the company budget and shared Media Studio cap. Requires `billing.media_studio_direct.reserve`. */
   billing: PluginBillingClient;
+
+  /** Picture analysis with the company's saved models, run by the host. Requires `models.image_analysis.run`. */
+  models: PluginModelsClient;
 
   /** Company files not tied to a task. Requires `company.files.create` / `company.files.read`. */
   files: PluginFilesClient;

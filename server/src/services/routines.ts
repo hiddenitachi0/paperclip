@@ -100,6 +100,23 @@ function routineWebhookSecretConfigPath(secretId: string) {
   return `webhookSecret:${secretId}`;
 }
 
+// DUR-4583: "used by" bookkeeping binding, one per trigger. Resolution still
+// goes through the per-routine binding above.
+const ROUTINE_TRIGGER_SECRET_CONFIG_PATH = "webhookSecret";
+
+function webhookSecretDisplayName(routineTitle: string, agentName: string | null) {
+  const title = routineTitle.trim().slice(0, 120);
+  if (title.includes("{{")) {
+    return agentName ? `Webhook password — ${agentName}'s routine` : "Webhook password — routine";
+  }
+  return `Webhook password — routine: ${title}${agentName ? ` (${agentName})` : ""}`;
+}
+
+function webhookSecretDescription(triggerLabel: string | null, routineId: string, routineTitle: string) {
+  const label = triggerLabel?.trim() || "webhook";
+  return `Created by Paperclip for the webhook trigger '${label}'. Used by: [${routineTitle.trim()}](/routines/${routineId}).`;
+}
+
 function assertTimeZone(timeZone: string) {
   try {
     getZonedMinuteFormatter(timeZone).format(new Date());
@@ -1278,19 +1295,46 @@ export function routineService(
       .then((rows) => rows[0] ?? null);
   }
 
+  async function resolveAgentDisplayName(agentId: string | null, executor: Db): Promise<string | null> {
+    if (!agentId) return null;
+    const row = await executor
+      .select({ name: agents.name })
+      .from(agents)
+      .where(eq(agents.id, agentId))
+      .then((rows) => rows[0] ?? null);
+    return row?.name ?? null;
+  }
+
   async function createWebhookSecret(
     companyId: string,
     routineId: string,
     actor: Actor,
     executor?: Db,
+    triggerLabel: string | null = null,
   ) {
     const secretValue = crypto.randomBytes(24).toString("hex");
     const providerId = getConfiguredSecretProvider();
+    const lookupDb = executor ?? db;
+    const routineRow = await lookupDb
+      .select({ title: routines.title, assigneeAgentId: routines.assigneeAgentId })
+      .from(routines)
+      .where(eq(routines.id, routineId))
+      .then((rows) => rows[0] ?? null);
+    const routineTitle = routineRow?.title ?? routineId;
+    const agentName = await resolveAgentDisplayName(routineRow?.assigneeAgentId ?? null, lookupDb);
+    let displayName = webhookSecretDisplayName(routineTitle, agentName);
+    const nameTaken = await lookupDb
+      .select({ id: companySecrets.id })
+      .from(companySecrets)
+      .where(and(eq(companySecrets.companyId, companyId), eq(companySecrets.name, displayName)))
+      .then((rows) => rows.length > 0);
+    if (nameTaken) displayName = `${displayName} #${crypto.randomBytes(2).toString("hex")}`;
     const input = {
-      name: `routine-${routineId}-${crypto.randomBytes(6).toString("hex")}`,
+      key: `routine-${routineId}-${crypto.randomBytes(6).toString("hex")}`,
+      name: displayName,
       provider: providerId,
       value: secretValue,
-      description: `Webhook auth for routine ${routineId}`,
+      description: webhookSecretDescription(triggerLabel, routineId, routineTitle),
     };
     const provider = getSecretProvider(input.provider);
     const prepared = await provider.createSecret({
@@ -1298,7 +1342,7 @@ export function routineService(
       externalRef: null,
       context: {
         companyId,
-        secretKey: input.name,
+        secretKey: input.key,
         secretName: input.name,
         version: 1,
       },
@@ -1309,7 +1353,7 @@ export function routineService(
         .insert(companySecrets)
         .values({
           companyId,
-          key: input.name,
+          key: input.key,
           name: input.name,
           provider: input.provider,
           status: "active",
@@ -1352,6 +1396,132 @@ export function routineService(
       ? await insertSecret(executor)
       : await db.transaction(async (tx) => insertSecret(tx as unknown as Db));
     return { secret, secretValue };
+  }
+
+  async function bindTriggerSecret(
+    executor: Db,
+    input: { companyId: string; routineId: string; triggerId: string; secretId: string },
+  ) {
+    // Resolution binding (per routine; idempotent when several triggers of
+    // one routine share the secret) plus the per-trigger "used by" binding.
+    await executor
+      .insert(companySecretBindings)
+      .values({
+        companyId: input.companyId,
+        secretId: input.secretId,
+        targetType: "routine",
+        targetId: input.routineId,
+        configPath: routineWebhookSecretConfigPath(input.secretId),
+      })
+      .onConflictDoNothing();
+    await executor
+      .insert(companySecretBindings)
+      .values({
+        companyId: input.companyId,
+        secretId: input.secretId,
+        targetType: "routine_trigger",
+        targetId: input.triggerId,
+        configPath: ROUTINE_TRIGGER_SECRET_CONFIG_PATH,
+      })
+      .onConflictDoNothing();
+  }
+
+  async function assertAttachableSecret(companyId: string, secretId: string, actor: Actor) {
+    // Least privilege: attaching a shared secret is a human owner/admin
+    // action. The route enforces it; this is the backstop for any other caller.
+    if (actor.agentId) throw forbidden("Agents cannot set a webhook trigger's secret");
+    const secret = await db
+      .select({ id: companySecrets.id, companyId: companySecrets.companyId, status: companySecrets.status, deletedAt: companySecrets.deletedAt })
+      .from(companySecrets)
+      .where(eq(companySecrets.id, secretId))
+      .then((rows) => rows[0] ?? null);
+    if (!secret || secret.companyId !== companyId || secret.status === "deleted" || secret.deletedAt) {
+      throw unprocessable("Secret not found");
+    }
+  }
+
+  // Drops this trigger's bindings, then reports whether the secret is still
+  // referenced by anything else (another trigger, or any other binding such
+  // as an agent env or a different routine's webhook binding).
+  async function releaseTriggerSecretBindings(
+    executor: Db,
+    trigger: { id: string; companyId: string; routineId: string; secretId: string },
+  ): Promise<boolean> {
+    await executor
+      .delete(companySecretBindings)
+      .where(
+        and(
+          eq(companySecretBindings.secretId, trigger.secretId),
+          eq(companySecretBindings.targetType, "routine_trigger"),
+          eq(companySecretBindings.targetId, trigger.id),
+        ),
+      );
+    const siblingInRoutine = await executor
+      .select({ id: routineTriggers.id })
+      .from(routineTriggers)
+      .where(
+        and(
+          eq(routineTriggers.routineId, trigger.routineId),
+          eq(routineTriggers.secretId, trigger.secretId),
+          ne(routineTriggers.id, trigger.id),
+        ),
+      )
+      .limit(1);
+    if (siblingInRoutine.length === 0) {
+      await executor
+        .delete(companySecretBindings)
+        .where(
+          and(
+            eq(companySecretBindings.secretId, trigger.secretId),
+            eq(companySecretBindings.targetType, "routine"),
+            eq(companySecretBindings.targetId, trigger.routineId),
+            eq(companySecretBindings.configPath, routineWebhookSecretConfigPath(trigger.secretId)),
+          ),
+        );
+    }
+    const otherTrigger = await executor
+      .select({ id: routineTriggers.id })
+      .from(routineTriggers)
+      .where(and(eq(routineTriggers.secretId, trigger.secretId), ne(routineTriggers.id, trigger.id)))
+      .limit(1);
+    if (otherTrigger.length > 0) return true;
+    const otherBinding = await executor
+      .select({ id: companySecretBindings.id })
+      .from(companySecretBindings)
+      .where(eq(companySecretBindings.secretId, trigger.secretId))
+      .limit(1);
+    return otherBinding.length > 0;
+  }
+
+  // A secret is "shared" once anything besides this trigger's own bindings
+  // (its routine_trigger binding, and the generate-path's routine binding)
+  // references it. Agents must not rotate a shared secret: that would
+  // silently break every other consumer of the same secret value.
+  async function isSecretSharedWithOthers(
+    executor: Db,
+    trigger: { id: string; routineId: string; secretId: string },
+  ): Promise<boolean> {
+    const otherTrigger = await executor
+      .select({ id: routineTriggers.id })
+      .from(routineTriggers)
+      .where(and(eq(routineTriggers.secretId, trigger.secretId), ne(routineTriggers.id, trigger.id)))
+      .limit(1);
+    if (otherTrigger.length > 0) return true;
+    const ownConfigPath = routineWebhookSecretConfigPath(trigger.secretId);
+    const bindings = await executor
+      .select({
+        targetType: companySecretBindings.targetType,
+        targetId: companySecretBindings.targetId,
+        configPath: companySecretBindings.configPath,
+      })
+      .from(companySecretBindings)
+      .where(eq(companySecretBindings.secretId, trigger.secretId));
+    return bindings.some((b) => {
+      const isOwnTriggerBinding = b.targetType === "routine_trigger" && b.targetId === trigger.id;
+      const isOwnRoutineBinding =
+        b.targetType === "routine" && b.targetId === trigger.routineId && b.configPath === ownConfigPath;
+      return !isOwnTriggerBinding && !isOwnRoutineBinding;
+    });
   }
 
   async function resolveTriggerSecret(trigger: typeof routineTriggers.$inferSelect, companyId: string) {
@@ -2690,16 +2860,27 @@ export function routineService(
 
       if (input.kind === "webhook") {
         publicId = crypto.randomBytes(12).toString("hex");
-        const created = await createWebhookSecret(routine.companyId, routine.id, actor);
-        secretId = created.secret.id;
+        const existingSecretId = input.existingSecretId ?? null;
+        let generatedValue: string | null = null;
+        if (existingSecretId) {
+          await assertAttachableSecret(routine.companyId, existingSecretId, actor);
+          secretId = existingSecretId;
+        } else {
+          const created = await createWebhookSecret(routine.companyId, routine.id, actor, undefined, input.label ?? null);
+          secretId = created.secret.id;
+          generatedValue = created.secretValue;
+        }
         // A customer-inbox-owned trigger only ever shows the customer-inbox
         // address (DUR-68): a second door on the same publicId would stay
         // permanently open, so the generic fire URL is never shown for it.
-        secretMaterial = {
+        // Show-once: only a freshly generated value is ever returned. When an
+        // existing secret was attached there is nothing to reveal, so
+        // secretMaterial stays null.
+        if (generatedValue) secretMaterial = {
           webhookUrl: input.customerInboxChannel
             ? `${process.env.PAPERCLIP_API_URL}/api/customer-inbox/${publicId}`
             : `${process.env.PAPERCLIP_API_URL}/api/routine-triggers/public/${publicId}/fire`,
-          webhookSecret: created.secretValue,
+          webhookSecret: generatedValue,
         };
       }
 
@@ -2729,6 +2910,14 @@ export function routineService(
             updatedByUserId: actor.userId ?? null,
           })
           .returning();
+        if (secretId) {
+          await bindTriggerSecret(txDb, {
+            companyId: routine.companyId,
+            routineId: routine.id,
+            triggerId: createdTrigger.id,
+            secretId,
+          });
+        }
         const latestRoutine = await txDb.select().from(routines).where(eq(routines.id, routine.id)).then((rows) => rows[0] ?? routine);
         const appended = await appendRoutineRevision(txDb, latestRoutine, actor, {
           changeSummary: `Created ${input.kind} trigger`,
@@ -2784,12 +2973,33 @@ export function routineService(
         }
       }
 
+      const swapSecretId = patch.existingSecretId && patch.existingSecretId !== existing.secretId
+        ? patch.existingSecretId
+        : null;
+      if (patch.existingSecretId !== undefined) {
+        if (existing.kind !== "webhook") throw unprocessable("Only webhook triggers have a secret");
+        await assertAttachableSecret(existing.companyId, patch.existingSecretId, actor);
+      }
+
+      let releasedSecretId: string | null = null;
       const result = await db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
         await tx.execute(sql`select id from ${routines} where ${routines.id} = ${existing.routineId} for update`);
+        if (swapSecretId) {
+          if (existing.secretId) {
+            const stillReferenced = await releaseTriggerSecretBindings(txDb, {
+              id: existing.id,
+              companyId: existing.companyId,
+              routineId: existing.routineId,
+              secretId: existing.secretId,
+            });
+            if (!stillReferenced) releasedSecretId = existing.secretId;
+          }
+        }
         const [updated] = await txDb
           .update(routineTriggers)
           .set({
+            ...(swapSecretId ? { secretId: swapSecretId } : {}),
             label: patch.label === undefined ? existing.label : patch.label,
             enabled: patch.enabled ?? existing.enabled,
             cronExpression,
@@ -2804,6 +3014,14 @@ export function routineService(
           .where(eq(routineTriggers.id, id))
           .returning();
         if (!updated) return null;
+        if (swapSecretId) {
+          await bindTriggerSecret(txDb, {
+            companyId: existing.companyId,
+            routineId: existing.routineId,
+            triggerId: existing.id,
+            secretId: swapSecretId,
+          });
+        }
         const routine = await txDb
           .select()
           .from(routines)
@@ -2811,10 +3029,20 @@ export function routineService(
           .then((rows) => rows[0] ?? null);
         if (!routine) throw notFound("Routine not found");
         const appended = await appendRoutineRevision(txDb, routine, actor, {
-          changeSummary: `Updated ${existing.kind} trigger`,
+          changeSummary: swapSecretId ? "Changed webhook trigger secret" : `Updated ${existing.kind} trigger`,
         });
         return { trigger: updated as RoutineTrigger, revision: appended.revision };
       });
+      if (result && releasedSecretId) {
+        try {
+          await secretsSvc.remove(releasedSecretId);
+        } catch (err) {
+          logger.warn(
+            { err, routineId: existing.routineId, triggerId: existing.id, secretId: releasedSecretId },
+            "failed to remove replaced routine trigger webhook secret",
+          );
+        }
+      }
       return result;
     },
 
@@ -2825,6 +3053,14 @@ export function routineService(
         const txDb = tx as unknown as Db;
         await tx.execute(sql`select id from ${routines} where ${routines.id} = ${existing.routineId} for update`);
         await txDb.delete(routineTriggers).where(eq(routineTriggers.id, id));
+        const stillReferenced = existing.secretId
+          ? await releaseTriggerSecretBindings(txDb, {
+              id: existing.id,
+              companyId: existing.companyId,
+              routineId: existing.routineId,
+              secretId: existing.secretId,
+            })
+          : false;
         const routine = await txDb
           .select()
           .from(routines)
@@ -2834,9 +3070,9 @@ export function routineService(
         const appended = await appendRoutineRevision(txDb, routine, actor, {
           changeSummary: `Deleted ${existing.kind} trigger`,
         });
-        return { deleted: true, revision: appended.revision };
+        return { deleted: true, revision: appended.revision, stillReferenced };
       });
-      if (result.deleted && existing.secretId) {
+      if (result.deleted && existing.secretId && !result.stillReferenced) {
         try {
           await secretsSvc.remove(existing.secretId);
         } catch (err) {
@@ -2846,7 +3082,7 @@ export function routineService(
           );
         }
       }
-      return result;
+      return { deleted: result.deleted, revision: result.revision };
     },
 
     rotateTriggerSecret: async (
@@ -2857,6 +3093,16 @@ export function routineService(
       if (!existing) throw notFound("Routine trigger not found");
       if (existing.kind !== "webhook" || !existing.publicId || !existing.secretId) {
         throw unprocessable("Only webhook triggers can rotate secrets");
+      }
+      if (actor.agentId) {
+        const shared = await isSecretSharedWithOthers(db, {
+          id: existing.id,
+          routineId: existing.routineId,
+          secretId: existing.secretId,
+        });
+        if (shared) {
+          throw forbidden("Agents cannot rotate a webhook secret that is shared with other triggers or bindings");
+        }
       }
 
       const secretValue = crypto.randomBytes(24).toString("hex");
@@ -2965,7 +3211,7 @@ export function routineService(
         const recreatedWebhookSecrets = new Map<string, { publicId: string; secretId: string; secretMaterial: RoutineTriggerSecretRestoreMaterial }>();
         for (const trigger of missingWebhookTriggers) {
           const publicId = crypto.randomBytes(12).toString("hex");
-          const created = await createWebhookSecret(locked.companyId, locked.id, actor, txDb);
+          const created = await createWebhookSecret(locked.companyId, locked.id, actor, txDb, trigger.label ?? null);
           recreatedWebhookSecrets.set(trigger.id, {
             publicId,
             secretId: created.secret.id,
@@ -3019,6 +3265,19 @@ export function routineService(
             );
         }
 
+        const removedTriggerIds = [...currentTriggerIds].filter((triggerId) => !snapshotTriggerIds.has(triggerId));
+        if (removedTriggerIds.length > 0) {
+          await txDb
+            .delete(companySecretBindings)
+            .where(
+              and(
+                eq(companySecretBindings.companyId, locked.companyId),
+                eq(companySecretBindings.targetType, "routine_trigger"),
+                inArray(companySecretBindings.targetId, removedTriggerIds),
+              ),
+            );
+        }
+
         for (const triggerSnapshot of snapshot.triggers) {
           const current = await txDb
             .select()
@@ -3057,6 +3316,14 @@ export function routineService(
               createdByAgentId: actor.agentId ?? null,
               createdByUserId: actor.userId ?? null,
               createdAt: now,
+            });
+          }
+          if (triggerSnapshot.kind === "webhook" && baseValues.secretId) {
+            await bindTriggerSecret(txDb, {
+              companyId: locked.companyId,
+              routineId: locked.id,
+              triggerId: triggerSnapshot.id,
+              secretId: baseValues.secretId,
             });
           }
         }

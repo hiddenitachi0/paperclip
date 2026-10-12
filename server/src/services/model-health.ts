@@ -1,6 +1,6 @@
 import { and, eq, isNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, localModelHealth, modelDirectoryEntries } from "@paperclipai/db";
+import { agents, localModelHealth, modelDirectoryEntries, modelDirectorySettings } from "@paperclipai/db";
 import {
   MODEL_TEST_PROMPT,
   laneAModelAcceptsReasoningEffort,
@@ -15,6 +15,8 @@ import {
   type ModelTestRun,
 } from "@paperclipai/shared";
 import { notFound } from "../errors.js";
+import { createModelSetupProbes } from "./model-setup-probes.js";
+import { localAddressKey } from "./model-directory.js";
 
 /**
  * DUR-4419: local-model health, the once-per-outage reminder state, and the
@@ -28,7 +30,7 @@ export const MODEL_TEST_TIMEOUT_MS = 60_000;
 /** Response-size caps: a host at the configured address is not trusted to send a bounded body. */
 export const MODEL_TAGS_MAX_BYTES = 1_048_576;
 export const MODEL_TEST_MAX_BYTES = 65_536;
-/** How long the PC must have been unreachable before the evening warning goes out. */
+/** How long the local model server must have been unreachable before the evening warning goes out. */
 export const MODEL_OUTAGE_WARN_AFTER_MS = 60 * 60_000;
 /** One evening warning per outage, and never twice within this window. */
 export const MODEL_EVENING_WARNING_WINDOW_MS = 18 * 3_600_000;
@@ -285,11 +287,22 @@ export function modelHealthService(db: Db, deps: ModelHealthDeps = {}) {
 
   const isLocalEntry = (e: { provider: string; baseUrl: string | null }) => e.provider === "local" && !!e.baseUrl?.trim();
 
+  /** The company's model server address (Settings > Models), used by a saved local model that has none of its own. */
+  async function companyLocalAddress(companyId: string): Promise<string | null> {
+    const [row] = await db.select().from(modelDirectorySettings).where(eq(modelDirectorySettings.companyId, companyId));
+    return row?.localBaseUrl?.trim() || null;
+  }
+
+  /** Where a saved local model runs: its own address, else the company's model server address. */
+  const entryAddress = (e: { provider: string; baseUrl: string | null }, companyAddress: string | null) =>
+    e.provider !== "local" ? null : e.baseUrl?.trim() || companyAddress;
+
   /** The Check button: probes now and stores the result. A hosted model has nothing to check. */
   async function checkEntry(companyId: string, entryId: string): Promise<ModelDirectoryEntryHealth> {
     const entry = await getEntry(companyId, entryId);
-    if (!isLocalEntry(entry)) return { entryId, applicable: false, ...modelHealthReport("not_checked") };
-    return { entryId, applicable: true, ...(await checkTarget(companyId, entry.baseUrl!, entry.model)) };
+    const address = entryAddress(entry, entry.provider === "local" && !entry.baseUrl?.trim() ? await companyLocalAddress(companyId) : null);
+    if (!address) return { entryId, applicable: false, ...modelHealthReport("not_checked") };
+    return { entryId, applicable: true, ...(await checkTarget(companyId, address, entry.model)) };
   }
 
   /** Stored state for every entry plus the agents that use a local model (for the agent-page banner). Reads only. */
@@ -297,9 +310,11 @@ export function modelHealthService(db: Db, deps: ModelHealthDeps = {}) {
     const entries = await db.select().from(modelDirectoryEntries).where(eq(modelDirectoryEntries.companyId, companyId));
     const states = await db.select().from(localModelHealth).where(eq(localModelHealth.companyId, companyId));
     const byKey = new Map(states.map((s) => [`${s.baseUrl}\n${s.model}`, s]));
+    const companyAddress = entries.some((e) => e.provider === "local" && !e.baseUrl?.trim()) ? await companyLocalAddress(companyId) : null;
     const entryHealth: ModelDirectoryEntryHealth[] = entries.map((e) => {
-      if (!isLocalEntry(e)) return { entryId: e.id, applicable: false, ...modelHealthReport("not_checked") };
-      return { entryId: e.id, applicable: true, ...reportOf(byKey.get(`${normalizeLocalModelAddress(e.baseUrl)}\n${e.model}`) ?? null, e.model) };
+      const address = entryAddress(e, companyAddress);
+      if (!address) return { entryId: e.id, applicable: false, ...modelHealthReport("not_checked") };
+      return { entryId: e.id, applicable: true, ...reportOf(byKey.get(`${normalizeLocalModelAddress(address)}\n${e.model}`) ?? null, e.model) };
     });
     const agentRows = await db
       .select({ id: agents.id, name: agents.name, provider: agents.laneAProvider, baseUrl: agents.laneABaseUrl, model: agents.laneAModel, entryId: agents.laneADirectoryEntryId })
@@ -362,6 +377,38 @@ export function modelHealthService(db: Db, deps: ModelHealthDeps = {}) {
     return claimed.length > 0;
   }
 
+  /**
+   * After a "Refresh status" / local resync: records what the model server
+   * said for every saved local setup and every quick agent's local model at
+   * that address, so pickers can say Installed / Not installed / Offline with
+   * a time. `installed` is null when the server could not be read (offline).
+   */
+  async function recordLocalSync(companyId: string, rawBaseUrl: string, installed: readonly string[] | null): Promise<{ recorded: number }> {
+    // Same address however it was typed (case, trailing slash, the "/v1" suffix).
+    const key = localAddressKey(rawBaseUrl);
+    const entries = await db
+      .select({ baseUrl: modelDirectoryEntries.baseUrl, model: modelDirectoryEntries.model })
+      .from(modelDirectoryEntries)
+      .where(and(eq(modelDirectoryEntries.companyId, companyId), eq(modelDirectoryEntries.provider, "local")));
+    const agentRows = await db
+      .select({ baseUrl: agents.laneABaseUrl, model: agents.laneAModel })
+      .from(agents)
+      .where(and(eq(agents.companyId, companyId), eq(agents.laneAProvider, "local")));
+    // A saved local model with no address of its own runs on the company's model server address.
+    const companyAddress = entries.some((e) => !e.baseUrl?.trim()) ? await companyLocalAddress(companyId) : null;
+    const entryTargets = entries.map((e) => ({ baseUrl: e.baseUrl?.trim() || companyAddress, model: e.model }));
+    const targets = new Map<string, { baseUrl: string; model: string }>();
+    for (const t of [...entryTargets, ...agentRows]) {
+      if (!t.baseUrl || !t.model || localAddressKey(t.baseUrl) !== key) continue;
+      targets.set(`${normalizeLocalModelAddress(t.baseUrl)}\n${t.model}`, { baseUrl: t.baseUrl, model: t.model });
+    }
+    for (const t of targets.values()) {
+      const status = installed === null ? "unreachable" : modelListed(t.model, [...installed]) ? "ready" : "model_missing";
+      await record(companyId, t.baseUrl, t.model, status);
+    }
+    return { recorded: targets.size };
+  }
+
   // ─── Test button ───────────────────────────────────────────────────────
 
   const oneTestRun = (baseUrl: string, model: string, thinking: ModelTestRun["thinking"]) => runModelTest(fetchImpl, baseUrl, model, thinking);
@@ -389,7 +436,15 @@ export function modelHealthService(db: Db, deps: ModelHealthDeps = {}) {
     return { ...base, ran: true, reason: null, runs };
   }
 
-  return { probe: (b: string, m: string) => probeLocalModel(b, m, fetchImpl), record, noteLocalAttempt, claimOutageNotice, claimEveningWarning, checkEntry, overview, checkInUse, testEntry };
+  /** DUR-4557: the reviewer's probe set and host capability fetch for one saved setup (company-scoped lookup). */
+  async function probeEntry(companyId: string, entryId: string) {
+    return createModelSetupProbes(fetchImpl).runProbeSet(await getEntry(companyId, entryId));
+  }
+  async function capabilitiesForEntry(companyId: string, entryId: string, opts: { toolCount?: number | null; systemPromptChars?: number | null } = {}) {
+    return createModelSetupProbes(fetchImpl).fetchHostCapabilities(await getEntry(companyId, entryId), opts);
+  }
+
+  return { recordLocalSync, probeEntry, capabilitiesForEntry, probe: (b: string, m: string) => probeLocalModel(b, m, fetchImpl), record, noteLocalAttempt, claimOutageNotice, claimEveningWarning, checkEntry, overview, checkInUse, testEntry };
 }
 
 const MODEL_UNAVAILABLE_PATTERN = /model[^.]*(not loaded|not found|does not exist|is not available|unknown)/i;

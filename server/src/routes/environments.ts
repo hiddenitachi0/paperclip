@@ -236,6 +236,9 @@ export function environmentRoutes(
         : typeof req.query.companyId === "string" && req.query.companyId.trim().length > 0
           ? req.query.companyId.trim()
           : null;
+    // An explicit company context must be one the caller can act for; never let a
+    // query parameter widen secret scoping to a company outside the actor's reach.
+    if (routeCompanyId) assertCustomImageCompanyAccess(req, routeCompanyId);
     const bindingCompanyIds = await secrets.listBindingCompanyIdsForTarget({
       targetType: "environment",
       targetId: environmentId,

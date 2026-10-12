@@ -1289,6 +1289,68 @@ describe("environment routes", () => {
     expect(mockEnvironmentService.update).not.toHaveBeenCalled();
   });
 
+  it("saves plain env vars on the Local environment when the company page sends its company context", async () => {
+    const environment = createEnvironment();
+    const envVars = {
+      OLLAMA_CONTEXT_LENGTH: { type: "plain", value: "32768" },
+      OLLAMA_HOST: { type: "plain", value: "http://127.0.0.1:11434" },
+    };
+    mockEnvironmentService.getById.mockResolvedValue(environment);
+    mockEnvironmentService.update.mockResolvedValue({ ...environment, envVars });
+    mockInstanceSettingsService.listCompanyIds.mockResolvedValue(["company-1", "company-2"]);
+    const app = createApp({
+      type: "board",
+      userId: "user-1",
+      source: "session",
+      isInstanceAdmin: true,
+      companyIds: ["company-1", "company-2"],
+    });
+    const body = { name: "Local", driver: "local", config: {}, envVars };
+
+    // Without company context (what the UI used to send) an operator with
+    // several companies cannot be resolved to a secret-binding company.
+    const withoutContext = await request(app).patch(`/api/environments/${environment.id}`).send(body);
+    expect(withoutContext.status).toBe(422);
+    expect(withoutContext.body.error).toContain("requires a companyId context");
+    expect(mockEnvironmentService.update).not.toHaveBeenCalled();
+
+    const res = await request(app)
+      .patch(`/api/environments/${environment.id}?companyId=company-2`)
+      .send(body);
+
+    expect(res.status).toBe(200);
+    expect(mockSecretService.normalizeEnvBindingsForPersistence).toHaveBeenCalledWith(
+      "company-2",
+      envVars,
+      expect.anything(),
+    );
+    expect(mockSecretService.syncEnvBindingsForTarget).toHaveBeenCalledWith(
+      "company-2",
+      { targetType: "environment", targetId: environment.id },
+      envVars,
+    );
+  });
+
+  it("keeps secret bindings pinned to their existing company when a different company context is sent", async () => {
+    const environment = createEnvironment();
+    mockEnvironmentService.getById.mockResolvedValue(environment);
+    mockSecretService.listBindingCompanyIdsForTarget.mockResolvedValue(["company-1"]);
+    const app = createApp({
+      type: "board",
+      userId: "user-1",
+      source: "session",
+      isInstanceAdmin: true,
+      companyIds: ["company-1", "company-2"],
+    });
+
+    const res = await request(app)
+      .patch(`/api/environments/${environment.id}?companyId=company-2`)
+      .send({ envVars: { OLLAMA_CONTEXT_LENGTH: { type: "plain", value: "32768" } } });
+
+    expect(res.status).toBe(409);
+    expect(mockEnvironmentService.update).not.toHaveBeenCalled();
+  });
+
   it("returns 404 when patching a missing environment", async () => {
     mockEnvironmentService.getById.mockResolvedValue(null);
     const app = createApp({

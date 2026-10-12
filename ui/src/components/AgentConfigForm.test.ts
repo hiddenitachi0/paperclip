@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Environment } from "@paperclipai/shared";
-import { supportsAdapterModelRefresh } from "./AgentConfigForm";
+import { describeIntervalSeconds, supportsAdapterModelRefresh } from "./AgentConfigForm";
 import { resolveForcedKubernetesEnvironment } from "../lib/forced-kubernetes-environment";
 
 describe("supportsAdapterModelRefresh", () => {
@@ -68,5 +68,15 @@ describe("resolveForcedKubernetesEnvironment", () => {
     const result = resolveForcedKubernetesEnvironment("kubernetes", [localEnv, fakeSandbox]);
     expect(result.forced).toBe(true);
     expect(result.kubernetesEnvironment).toBeNull();
+  });
+});
+
+describe("describeIntervalSeconds", () => {
+  it("says the run schedule in the largest whole unit", () => {
+    expect(describeIntervalSeconds(300)).toBe("5 min");
+    expect(describeIntervalSeconds(7200)).toBe("2 h");
+    expect(describeIntervalSeconds(45)).toBe("45 sec");
+    expect(describeIntervalSeconds(0)).toBe("0 sec");
+    expect(describeIntervalSeconds(Number.NaN)).toBe("0 sec");
   });
 });

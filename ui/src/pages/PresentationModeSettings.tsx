@@ -32,9 +32,9 @@ function TagListEditor({
   }
 
   return (
-    <section className="rounded-xl border border-border bg-card p-5">
+    <section className="rounded-xl section-box bg-card p-5">
       <div className="space-y-1.5">
-        <h2 className="text-sm font-semibold">{label}</h2>
+        <h2 className="section-title">{label}</h2>
         <p className="max-w-2xl text-sm text-muted-foreground">{description}</p>
       </div>
       <form
@@ -128,10 +128,10 @@ export function PresentationModeSettings() {
         </p>
       </div>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Presentation mode</h2>
+            <h2 className="section-title">Presentation mode</h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               Shows a red "● Presentation mode" badge while on.
             </p>
@@ -140,10 +140,10 @@ export function PresentationModeSettings() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-xl section-box bg-card p-5">
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Strict level</h2>
+            <h2 className="section-title">Strict level</h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
               Also masks every large number and percentage, not just amounts next to money words or currency
               symbols.
