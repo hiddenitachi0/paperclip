@@ -184,6 +184,7 @@ export function HelperOverlay() {
         references: input.references,
         quickAnswer: input.quickAnswer,
         ...(input.pictures.length > 0 ? { pictures: input.pictures } : {}),
+        ...(input.applyTargets.length > 0 ? { applyTargets: input.applyTargets } : {}),
       }),
     onSuccess: (view) => {
       queryClient.setQueryData<HelperInvestigationList>(investigationsKey, (prev) =>
@@ -362,6 +363,7 @@ export function HelperOverlay() {
       references: capture?.entities ?? [],
       pictures: pictures.map((p) => p.input),
       quickAnswer: null,
+      applyTargets: capture?.applyTargets ?? [],
       fromComposer: true,
     });
   };
@@ -378,6 +380,7 @@ export function HelperOverlay() {
       references: asked.references ?? [],
       pictures: asked.pictureInputs ?? [],
       quickAnswer: answer.content,
+      applyTargets: asked.applyTargets ?? [],
       fromComposer: false,
     });
   };
@@ -570,7 +573,12 @@ export function HelperOverlay() {
               />
             ) : null}
             <DroppedReferencesNotice dropped={droppedNotice} onClose={() => setDroppedNotice([])} />
-            <MyInvestigations investigations={investigations} openIds={openInvestigationIds} />
+            <MyInvestigations
+              investigations={investigations}
+              openIds={openInvestigationIds}
+              canApply={(label) => registeredTargets.includes(label) || canApplyHelperAnswer(label)}
+              onApply={apply}
+            />
           </div>
 
           <footer className="space-y-2 border-t border-border px-4 py-3">

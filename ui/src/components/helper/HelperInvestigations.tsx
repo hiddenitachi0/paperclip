@@ -31,6 +31,8 @@ export interface InvestigationDraft {
   pictures: HelperPictureInput[];
   /** The quick helper's answer the person wants checked, if the draft came from one. */
   quickAnswer: string | null;
+  /** Text fields on screen the answer may be put into later ("Apply to …"). */
+  applyTargets: string[];
 }
 
 export const HELPER_INVESTIGATION_POLL_MS = 15_000;
@@ -134,6 +136,9 @@ export function InvestigateConfirm({
       ) : null}
       {availability?.ready ? (
         <div className="space-y-1.5" data-testid="helper-investigate-details">
+          <p className="font-medium" data-testid="helper-investigate-run-note">
+            This starts a full agent run (uses its budget).
+          </p>
           <p>
             “{availability.agentName}” will read what it needs (tasks, cards, comments, code, reviews, logs) and write one
             answer back here. It gives advice only: it does not approve, merge, deploy or change anything.
@@ -183,7 +188,19 @@ const BADGE: Record<HelperInvestigationView["status"], string> = {
   failed: "bg-amber-500/15 text-amber-700 dark:text-amber-400",
 };
 
-function InvestigationItem({ item, initiallyOpen }: { item: HelperInvestigationView; initiallyOpen: boolean }) {
+interface ApplyProps {
+  /** Whether a field with this label is on screen now. */
+  canApply?: (label: string) => boolean;
+  /** Puts the answer into that field (nothing is saved). */
+  onApply?: (label: string, answer: string) => void;
+}
+
+function InvestigationItem({
+  item,
+  initiallyOpen,
+  canApply,
+  onApply,
+}: { item: HelperInvestigationView; initiallyOpen: boolean } & ApplyProps) {
   const [open, setOpen] = useState(initiallyOpen);
   const taskPath = `/issues/${item.identifier ?? item.id}`;
   return (
@@ -218,8 +235,19 @@ function InvestigationItem({ item, initiallyOpen }: { item: HelperInvestigationV
       {item.statusDetail ? <p className="text-xs text-muted-foreground">{item.statusDetail}</p> : null}
       {item.answer ? (
         open ? (
-          <div className="border-t border-border pt-1.5" data-testid="helper-investigation-answer">
+          <div className="space-y-1.5 border-t border-border pt-1.5" data-testid="helper-investigation-answer">
             <MarkdownBody className="text-sm">{item.answer}</MarkdownBody>
+            {onApply && canApply ? (
+              <div className="flex flex-wrap gap-2">
+                {(item.applyTargets ?? [])
+                  .filter((label) => canApply(label))
+                  .map((label) => (
+                    <Button key={label} size="xs" variant="outline" onClick={() => onApply(label, item.answer!)}>
+                      Apply to {label}
+                    </Button>
+                  ))}
+              </div>
+            ) : null}
           </div>
         ) : (
           <Button size="xs" variant="ghost" onClick={() => setOpen(true)}>
@@ -235,11 +263,13 @@ function InvestigationItem({ item, initiallyOpen }: { item: HelperInvestigationV
 export function MyInvestigations({
   investigations,
   openIds,
+  canApply,
+  onApply,
 }: {
   investigations: HelperInvestigationView[];
   /** Items whose answer shows without a click (the newest, and any started in this panel). */
   openIds: ReadonlySet<string>;
-}) {
+} & ApplyProps) {
   if (investigations.length === 0) return null;
   const active = investigations.filter(isInvestigationActive).length;
   return (
@@ -252,7 +282,13 @@ export function MyInvestigations({
       </div>
       <ul className="space-y-1.5">
         {investigations.map((item) => (
-          <InvestigationItem key={item.id} item={item} initiallyOpen={openIds.has(item.id)} />
+          <InvestigationItem
+            key={item.id}
+            item={item}
+            initiallyOpen={openIds.has(item.id)}
+            canApply={canApply}
+            onApply={onApply}
+          />
         ))}
       </ul>
     </section>

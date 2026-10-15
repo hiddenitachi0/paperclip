@@ -195,6 +195,7 @@ describe("helper routes", () => {
           references: [`approval:${entryId}`],
           quickAnswer: "Maybe.",
           pictures: [{ kind: "file", fileId: entryId }],
+          applyTargets: ["Description"],
         });
       expect(res.status).toBe(201);
       expect(mockInvestigations.start).toHaveBeenCalledWith({
@@ -207,6 +208,7 @@ describe("helper routes", () => {
         references: [`approval:${entryId}`],
         quickAnswer: "Maybe.",
         pictures: [{ kind: "file", fileId: entryId }],
+        applyTargets: ["Description"],
         canConfigure: false,
       });
 
@@ -228,6 +230,8 @@ describe("helper routes", () => {
       expect((await request(app).post(investigationsUrl).send({ question: "hi", assigneeAgentId: entryId })).status).toBe(400);
       expect((await request(app).post(investigationsUrl).send({ question: "hi", companyId: otherCompanyId })).status).toBe(400);
       expect((await request(app).post(investigationsUrl).send({ question: "hi", status: "done" })).status).toBe(400);
+      expect((await request(app).post(investigationsUrl).send({ question: "hi", applyTargets: ["x".repeat(121)] })).status).toBe(400);
+      expect((await request(app).post(investigationsUrl).send({ question: "hi", applyTargets: Array.from({ length: 9 }, (_, i) => `F${i}`) })).status).toBe(400);
       expect((await request(app).post(investigationsUrl).send({ question: "hi", references: ["<script>"] })).status).toBe(400);
       expect((await request(app).post(investigationsUrl).send({ question: "hi", references: Array(21).fill(`agent:${entryId}`) })).status).toBe(400);
       const upload = { kind: "upload", dataBase64: "iVBORw0KGgo=" };

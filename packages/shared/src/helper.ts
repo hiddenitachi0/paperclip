@@ -219,6 +219,9 @@ export const HELPER_INVESTIGATION_COMPANY_MAX_PER_DAY_CAP = 1000;
 export const HELPER_INVESTIGATIONS_LIST_LIMIT = 20;
 export const HELPER_INVESTIGATION_REFERENCES_MAX = 20;
 export const HELPER_INVESTIGATION_QUICK_ANSWER_MAX_CHARS = 6_000;
+/** Text fields on the person's screen the answer may be put into ("Apply to …"). */
+export const HELPER_INVESTIGATION_APPLY_TARGETS_MAX = 8;
+export const HELPER_APPLY_TARGET_MAX_CHARS = 120;
 
 /**
  * The line the quick model ends an answer with when it thinks an agent should
@@ -259,6 +262,11 @@ export interface HelperInvestigationView {
   agentName: string | null;
   /** What the task's runs have cost so far, in cents (Costs view). */
   costCents: number;
+  /**
+   * Text fields that were on screen when the question was asked. The panel
+   * offers "Apply to …" for the answer while such a field is still on screen.
+   */
+  applyTargets: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -403,6 +411,11 @@ export const startHelperInvestigationSchema = z
     pictures: z
       .array(helperPictureSchema)
       .max(HELPER_PICTURES_MAX, `Attach at most ${HELPER_PICTURES_MAX} pictures to one question.`)
+      .optional(),
+    /** Labels of the text fields on screen the answer may be put into later. */
+    applyTargets: z
+      .array(z.string().trim().min(1).max(HELPER_APPLY_TARGET_MAX_CHARS))
+      .max(HELPER_INVESTIGATION_APPLY_TARGETS_MAX)
       .optional(),
   })
   .strict();

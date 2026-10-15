@@ -24,6 +24,7 @@ const mockHelperApi = vi.hoisted(() => ({
   startInvestigation: vi.fn(),
 }));
 vi.mock("../../api/helper", () => ({ helperApi: mockHelperApi }));
+const captureState = vi.hoisted(() => ({ applyTargets: [] as string[] }));
 vi.mock("../../context/CompanyContext", () => ({
   useCompany: () => ({ selectedCompanyId: "c1", selectedCompany: { id: "c1", name: "Acme", issuePrefix: "ACM" } }),
 }));
@@ -33,7 +34,7 @@ vi.mock("../../lib/helper-capture", () => ({
     text: "Card: Deploy PR #612",
     truncated: false,
     entities: ["approval:a1"],
-    applyTargets: [],
+    applyTargets: captureState.applyTargets,
     itemCount: 1,
   }),
   viewportRect: () => ({ left: 0, top: 0, width: 100, height: 100 }),
@@ -41,6 +42,7 @@ vi.mock("../../lib/helper-capture", () => ({
 }));
 
 import { HelperOverlay } from "./HelperOverlay";
+import { HELPER_APPLY_EVENT, type HelperApplyEventDetail } from "../../lib/helper-apply";
 import { investigationEstimateText } from "./HelperInvestigations";
 
 function settings(): HelperSettingsView {
@@ -96,6 +98,7 @@ function investigation(overrides: Partial<HelperInvestigationView> = {}): Helper
     agentId: "agent-1",
     agentName: "Investigator",
     costCents: 0,
+    applyTargets: [],
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     ...overrides,
@@ -111,6 +114,8 @@ afterEach(() => {
   host = null;
   vi.clearAllMocks();
   vi.useRealTimers();
+  captureState.applyTargets = [];
+  document.querySelectorAll("[data-helper-apply]").forEach((el) => el.remove());
 });
 
 async function flush() {
@@ -198,6 +203,9 @@ describe("HelperOverlay — Investigate deeper", () => {
     const confirm = document.querySelector("[data-testid=helper-investigate-confirm]")!;
     expect(confirm.textContent).toContain("“Investigator” will read what it needs");
     expect(confirm.textContent).toContain("advice only");
+    expect(document.querySelector("[data-testid=helper-investigate-run-note]")?.textContent).toBe(
+      "This starts a full agent run (uses its budget).",
+    );
     expect(document.querySelector("[data-testid=helper-investigate-estimate]")?.textContent).toContain(
       "It usually takes about 4 minutes and costs about $0.35, going by the middle of “Investigator”'s last 12 finished tasks.",
     );
@@ -369,6 +377,54 @@ describe("HelperOverlay — Investigate deeper", () => {
     expect(first.getAttribute("data-status")).toBe("done");
     expect(first.querySelector("[data-testid=helper-investigation-answer]")?.textContent).toContain("The sync key expired.");
     expect(mockHelperApi.listInvestigations).toHaveBeenCalledWith("c1");
+  });
+
+  it("sends the fields on screen, and offers Apply for the agent's answer (after a reload too) only while that field is still there", async () => {
+    const field = document.createElement("textarea");
+    field.setAttribute("data-helper-apply", "Description");
+    // A plain field takes the text through the helper's apply event (what useHelperApplyTarget-less fields do).
+    field.addEventListener(HELPER_APPLY_EVENT, (event) => {
+      const detail = (event as CustomEvent<HelperApplyEventDetail>).detail;
+      field.value = detail.value;
+      detail.handled = true;
+    });
+    document.body.appendChild(field);
+    captureState.applyTargets = ["Description"];
+    mockHelperApi.getSettings.mockResolvedValue(settings());
+    mockHelperApi.listInvestigations.mockResolvedValue({ investigations: [], availability: availability() });
+    mockHelperApi.startInvestigation.mockResolvedValue(investigation({ applyTargets: ["Description"] }));
+    await renderOpen();
+    typeQuestion("Write a better description");
+    await click("[data-testid=helper-investigate-composer]");
+    await click("[data-testid=helper-investigate-start]");
+    expect(mockHelperApi.startInvestigation).toHaveBeenCalledWith("c1", expect.objectContaining({ applyTargets: ["Description"] }));
+
+    // Later (a reload): the agent has answered with the text in a fenced block.
+    unmount();
+    const done = investigation({
+      status: "done",
+      statusLabel: "Done",
+      statusDetail: null,
+      answer: "Here is a clearer one:\n\n```\nReads cards and explains them.\n```",
+      applyTargets: ["Description", "Title"],
+    });
+    mockHelperApi.listInvestigations.mockResolvedValue({ investigations: [done], availability: availability() });
+    await renderOpen();
+    const answer = document.querySelector("[data-testid=helper-investigation-answer]")!;
+    const buttons = [...answer.querySelectorAll("button")].map((b) => b.textContent);
+    // "Title" is not on this screen, so it is not offered.
+    expect(buttons).toEqual(["Apply to Description"]);
+    await act(async () => {
+      [...answer.querySelectorAll("button")].find((b) => b.textContent === "Apply to Description")!.click();
+    });
+    expect(field.value).toBe("Reads cards and explains them.");
+    expect(document.body.textContent).toContain("nothing is saved yet");
+
+    // The field is gone: no Apply button.
+    field.remove();
+    unmount();
+    await renderOpen();
+    expect([...document.querySelectorAll("[data-testid=helper-investigation-answer] button")].map((b) => b.textContent)).toEqual([]);
   });
 
   it("polls while one is running and stops once it is done", async () => {
