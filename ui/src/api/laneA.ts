@@ -64,6 +64,24 @@ export interface LaneAContinueResult {
   fromConversations: number;
 }
 
+/** One host that runs a Hugging Face model, with its price, speed and what it supports. */
+export interface HuggingFaceProviderEntry {
+  provider: string;
+  status: string;
+  supportsTools: boolean;
+  supportsStructuredOutput: boolean;
+  contextLength: number | null;
+  inputUsdPerMillion: number | null;
+  outputUsdPerMillion: number | null;
+  firstTokenLatencyMs: number | null;
+  throughput: number | null;
+}
+
+export interface HuggingFaceModelEntry {
+  id: string;
+  providers: HuggingFaceProviderEntry[];
+}
+
 /** Conversations review: who a quick agent talked to and what it did (owners/admins: all; others: their own). */
 export interface LaneAConversationLogPerson {
   kind: "user" | "agent";
@@ -141,6 +159,8 @@ function conversationLogQuery(filters: LaneAConversationLogFilters): string {
 }
 
 export const laneAApi = {
+  huggingFaceModels: (companyId: string) =>
+    api.get<{ models: HuggingFaceModelEntry[] }>(`/companies/${companyId}/lane-a/huggingface/models`),
   sendMessage: (
     agentId: string,
     body: { companyId: string; message: string; conversationId?: string; context?: string },
