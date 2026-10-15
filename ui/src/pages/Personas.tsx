@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "@/lib/router";
+import { Link, useNavigate } from "@/lib/router";
 import { MoreVertical, Pause, Pencil, Play, Plus, Trash2, UserRound } from "lucide-react";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
@@ -30,14 +30,6 @@ import {
 import { EmptyState } from "../components/EmptyState";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { PersonaAvatar } from "../components/PersonaAvatar";
-import {
-  PersonaFormDialog,
-  createInputFromDraft,
-  draftFromPersona,
-  emptyPersonaDraft,
-  updateInputFromDraft,
-  type PersonaDraft,
-} from "../components/PersonaFormDialog";
 
 function errorMessage(error: unknown, fallback: string): string {
   if (error instanceof ApiError) return error.message;
@@ -73,9 +65,11 @@ export function describePersonaJobs(
   return count === 1 ? "1 job" : `${count} jobs`;
 }
 
-// DUR-184 item 14 / DUR-4000: the Personas page -- list, create, edit. A
-// persona is a person and is created on its own; the jobs it holds are
-// attached from its page (PersonaDetail) or from an agent's settings.
+// DUR-184 item 14 / DUR-4000: the Personas page -- list, pause, delete.
+// Creating and editing happen on their own page (PersonaEdit:
+// /personas/new, /personas/:personaId/edit). A persona is a person and is
+// created on its own; the jobs it holds are attached from its page
+// (PersonaDetail) or from an agent's settings.
 // Deliberately does NOT include a global posting-mode toggle: per-account
 // disclosure/autonomy settings attach per DUR-134 on the persona page once a
 // persona has a connected account to post through. Pausing here stops the
@@ -86,9 +80,8 @@ export function Personas() {
   const { setBreadcrumbs } = useBreadcrumbs();
   const { pushToast } = useToastActions();
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
 
-  const [formOpen, setFormOpen] = useState(false);
-  const [editingPersonaId, setEditingPersonaId] = useState<string | null>(null);
   const [deletingPersona, setDeletingPersona] = useState<Persona | null>(null);
 
   useEffect(() => {
@@ -121,28 +114,6 @@ export function Personas() {
     }
   };
 
-  const createPersona = useMutation({
-    mutationFn: (draft: PersonaDraft) => personasApi.create(selectedCompanyId!, createInputFromDraft(draft)),
-    onSuccess: () => {
-      invalidatePersonas();
-      setFormOpen(false);
-      pushToast({ title: "Persona created", tone: "success" });
-    },
-    onError: (error) => pushToast({ title: "Could not create persona", body: errorMessage(error, ""), tone: "error" }),
-  });
-
-  const updatePersona = useMutation({
-    mutationFn: ({ id, draft }: { id: string; draft: PersonaDraft }) =>
-      personasApi.update(id, updateInputFromDraft(draft)),
-    onSuccess: () => {
-      invalidatePersonas();
-      setFormOpen(false);
-      setEditingPersonaId(null);
-      pushToast({ title: "Persona saved", tone: "success" });
-    },
-    onError: (error) => pushToast({ title: "Could not save persona", body: errorMessage(error, ""), tone: "error" }),
-  });
-
   const setStatus = useMutation({
     mutationFn: ({ id, status }: { id: string; status: "active" | "paused" }) =>
       personasApi.update(id, { status }),
@@ -163,24 +134,12 @@ export function Personas() {
     onError: (error) => pushToast({ title: "Could not delete persona", body: errorMessage(error, ""), tone: "error" }),
   });
 
-  const editingPersona = personas.find((persona) => persona.id === editingPersonaId) ?? null;
-
   function openCreate() {
-    setEditingPersonaId(null);
-    setFormOpen(true);
+    navigate("/personas/new");
   }
 
   function openEdit(persona: Persona) {
-    setEditingPersonaId(persona.id);
-    setFormOpen(true);
-  }
-
-  function handleSubmit(draft: PersonaDraft) {
-    if (editingPersonaId) {
-      updatePersona.mutate({ id: editingPersonaId, draft });
-    } else {
-      createPersona.mutate(draft);
-    }
+    navigate(`/personas/${persona.id}/edit`);
   }
 
   return (
@@ -268,19 +227,6 @@ export function Personas() {
           ))}
         </ul>
       )}
-
-      <PersonaFormDialog
-        open={formOpen}
-        onOpenChange={(open) => {
-          setFormOpen(open);
-          if (!open) setEditingPersonaId(null);
-        }}
-        initialDraft={editingPersona ? draftFromPersona(editingPersona) : emptyPersonaDraft()}
-        title={editingPersona ? "Edit persona" : "New persona"}
-        isEditing={Boolean(editingPersona)}
-        onSubmit={handleSubmit}
-        isPending={createPersona.isPending || updatePersona.isPending}
-      />
 
       <AlertDialog open={deletingPersona !== null} onOpenChange={(open) => !open && setDeletingPersona(null)}>
         <AlertDialogContent>
