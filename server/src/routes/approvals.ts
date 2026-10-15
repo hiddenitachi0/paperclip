@@ -3,6 +3,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import { approvals, companies, heartbeatRuns, issues, projectWorkspaces, projects, createRequestScopedDb, type Db } from "@paperclipai/db";
 import {
   ESCALATION_GRANT_DEFAULT_DURATION_MINUTES,
+  HELPER_INVESTIGATION_ORIGIN_KIND,
   addApprovalCommentSchema,
   createApprovalSchema,
   type DeployChangeSummary,
@@ -1864,6 +1865,46 @@ export function approvalRoutes(
     return false;
   }
 
+  /** True when the run's task is an "Ask Paperclip" investigation (advice only). */
+  async function isHelperInvestigationRun(companyId: string, contextSnapshot: unknown): Promise<boolean> {
+    if (!contextSnapshot || typeof contextSnapshot !== "object") return false;
+    const issueId = (contextSnapshot as Record<string, unknown>).issueId;
+    if (typeof issueId !== "string" || !issueId.trim()) return false;
+    const row = await db
+      .select({ originKind: issues.originKind })
+      .from(issues)
+      .where(and(eq(issues.id, issueId), eq(issues.companyId, companyId)))
+      .then((rows) => rows[0] ?? null);
+    return row?.originKind === HELPER_INVESTIGATION_ORIGIN_KIND;
+  }
+
+  // "Ask Paperclip" investigations are advice only: a run working on one may
+  // read cards but never file, answer, review, resubmit, withdraw or comment
+  // on them. The decision stays with the person who asked.
+  function refuseHelperInvestigationRun(res: any, companyId: string, runId: string) {
+    res.status(403).json({
+      error:
+        "This run is answering an \"Ask Paperclip\" question. It gives advice only and cannot create, answer or change approval cards. Put your advice in your answer instead.",
+      details: { code: "HELPER_INVESTIGATION_ADVICE_ONLY", companyId, runId },
+    });
+  }
+
+  /** For agent routes outside the cheap-run guard: refuse only an investigation run. */
+  async function assertNotHelperInvestigationRun(req: Request, res: any, companyId: string) {
+    if (req.actor.type !== "agent") return true;
+    const runId = req.actor.runId?.trim();
+    if (!runId || !req.actor.agentId) return true;
+    const run = await db
+      .select({ id: heartbeatRuns.id, companyId: heartbeatRuns.companyId, agentId: heartbeatRuns.agentId, contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+    if (!run || run.companyId !== companyId || run.agentId !== req.actor.agentId) return true;
+    if (!(await isHelperInvestigationRun(companyId, run.contextSnapshot))) return true;
+    refuseHelperInvestigationRun(res, companyId, run.id);
+    return false;
+  }
+
   async function assertApprovalMutationAllowedByRunContext(
     req: Request,
     res: any,
@@ -1888,6 +1929,11 @@ export function approvalRoutes(
       .where(eq(heartbeatRuns.id, runId))
       .then((rows) => rows[0] ?? null);
     if (!run || run.companyId !== companyId || run.agentId !== req.actor.agentId) return true;
+    if (await isHelperInvestigationRun(companyId, run.contextSnapshot)) {
+      refuseHelperInvestigationRun(res, companyId, run.id);
+      return false;
+    }
+
     if (!isStatusOnlyCheapRecoveryContext(run.contextSnapshot)) return true;
 
     // DUR-45: this cheap run genuinely cannot take this action, but the issue
@@ -1962,6 +2008,10 @@ export function approvalRoutes(
     scopeFromApprovalIdParam(checkSecurityReviewActionAccess),
     async (req, res) => {
       const id = req.params.id as string;
+      if (req.actor.type === "agent") {
+        const existing = await svc.getById(id);
+        if (existing && !(await assertNotHelperInvestigationRun(req, res, existing.companyId))) return;
+      }
       const actorInfo = getActorInfo(req);
       const actor = {
         agentId: actorInfo.actorType === "agent" ? actorInfo.agentId : null,
@@ -1978,6 +2028,10 @@ export function approvalRoutes(
     validate(recordSecurityReviewVerdictSchema),
     async (req, res) => {
       const id = req.params.id as string;
+      if (req.actor.type === "agent") {
+        const existing = await svc.getById(id);
+        if (existing && !(await assertNotHelperInvestigationRun(req, res, existing.companyId))) return;
+      }
       const actorInfo = getActorInfo(req);
       const actor = {
         agentId: actorInfo.actorType === "agent" ? actorInfo.agentId : null,

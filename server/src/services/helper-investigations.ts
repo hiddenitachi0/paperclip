@@ -9,6 +9,8 @@ import {
   HELPER_INVESTIGATION_DEFAULT_MAX_PER_DAY,
   HELPER_INVESTIGATION_DEFAULT_MAX_RUNNING,
   HELPER_INVESTIGATION_ORIGIN_KIND,
+  HELPER_INVESTIGATION_APPLY_TARGETS_MAX,
+  HELPER_APPLY_TARGET_MAX_CHARS,
   HELPER_INVESTIGATION_QUICK_ANSWER_MAX_CHARS,
   HELPER_INVESTIGATION_REFERENCES_MAX,
   HELPER_INVESTIGATIONS_LIST_LIMIT,
@@ -105,6 +107,8 @@ export interface StartHelperInvestigationInput {
   references?: string[];
   quickAnswer?: string | null;
   pictures?: HelperPictureInput[];
+  /** Text fields on the person's screen the answer may be put into later ("Apply to …"). */
+  applyTargets?: string[];
   /** Owner/admin: the "not set up" message says they can fix it themselves. */
   canConfigure?: boolean;
 }
@@ -119,6 +123,10 @@ const ESTIMATE_SAMPLE = 20;
 const ANSWER_MAX_CHARS = 20_000;
 const TITLE_PREFIX = "Ask Paperclip: ";
 const QUESTION_HEADING = "## The question";
+// Machine-readable copy of the fields the answer may be applied to, so the
+// panel can offer "Apply to …" again after a reload. An HTML comment: hidden
+// when the description is shown, read back by extractHelperInvestigationApplyTargets.
+const APPLY_TARGETS_MARKER = "<!-- helper-apply-targets:";
 const SETTINGS_PLACE = "Company settings → General → Helper";
 
 // One start at a time per person and company, so two quick clicks cannot both
@@ -180,6 +188,7 @@ export function buildHelperInvestigationDescription(input: {
   references?: string[];
   quickAnswer?: string | null;
   pictureNames?: string[];
+  applyTargets?: string[];
   companyName?: string | null;
 }): string {
   const lines: string[] = [
@@ -232,6 +241,15 @@ export function buildHelperInvestigationDescription(input: {
     );
   }
 
+  const applyTargets = normalizeApplyTargets(input.applyTargets);
+  if (applyTargets.length > 0) {
+    lines.push(
+      "",
+      "## Fields they can fill with your answer",
+      `These text fields were on their screen: ${applyTargets.map((t) => `"${t}"`).join(", ")}. If the question asks you to write text for one of them, put exactly that text in ONE fenced block (\`\`\`) in your final comment, ready to paste, with no commentary inside the block. They decide whether to put it in and save it; you do not change the field yourself.`,
+    );
+  }
+
   if (input.quickAnswer?.trim()) {
     lines.push(
       "",
@@ -241,7 +259,41 @@ export function buildHelperInvestigationDescription(input: {
       fence(input.quickAnswer.trim()),
     );
   }
+  // Last, so text the person sent (question, page, quick answer) can never come after it.
+  if (applyTargets.length > 0) lines.push("", `${APPLY_TARGETS_MARKER} ${encodeApplyTargets(applyTargets)} -->`);
   return lines.join("\n");
+}
+
+/** Trimmed, one line, short, no duplicates, at most the allowed number. */
+export function normalizeApplyTargets(targets: string[] | null | undefined): string[] {
+  const out: string[] = [];
+  for (const raw of targets ?? []) {
+    if (typeof raw !== "string") continue;
+    const label = raw.replace(/\s+/g, " ").trim().slice(0, HELPER_APPLY_TARGET_MAX_CHARS);
+    if (label && !out.includes(label)) out.push(label);
+    if (out.length >= HELPER_INVESTIGATION_APPLY_TARGETS_MAX) break;
+  }
+  return out;
+}
+
+// JSON with < > & - escaped, so a label can never close the HTML comment.
+function encodeApplyTargets(targets: string[]): string {
+  return JSON.stringify(targets).replace(/[<>&-]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
+/** The "Apply to …" fields back out of a description written by buildHelperInvestigationDescription. */
+export function extractHelperInvestigationApplyTargets(description: string | null): string[] {
+  if (!description) return [];
+  const at = description.lastIndexOf(APPLY_TARGETS_MARKER);
+  if (at < 0) return [];
+  const end = description.indexOf("-->", at);
+  if (end < 0) return [];
+  try {
+    const parsed: unknown = JSON.parse(description.slice(at + APPLY_TARGETS_MARKER.length, end).trim());
+    return Array.isArray(parsed) ? normalizeApplyTargets(parsed.filter((v): v is string => typeof v === "string")) : [];
+  } catch {
+    return [];
+  }
 }
 
 /** The question back out of a description written by buildHelperInvestigationDescription. */
@@ -601,6 +653,7 @@ export function helperInvestigationService(db: Db, options: HelperInvestigationS
         agentId: row.assigneeAgentId ?? null,
         agentName: row.assigneeAgentId ? agentName.get(row.assigneeAgentId) ?? null : null,
         costCents: costById.get(row.id) ?? 0,
+        applyTargets: extractHelperInvestigationApplyTargets(row.description ?? null),
         createdAt: row.createdAt.toISOString(),
         updatedAt: row.updatedAt.toISOString(),
       };
@@ -718,6 +771,8 @@ export function helperInvestigationService(db: Db, options: HelperInvestigationS
         ? capHelperText(scrub(maskSecretLikeText(input.quickAnswer)), HELPER_INVESTIGATION_QUICK_ANSWER_MAX_CHARS).text
         : null;
 
+      const applyTargets = normalizeApplyTargets((input.applyTargets ?? []).map((t) => scrub(maskSecretLikeText(t))));
+
       const [company] = await db.select({ name: companies.name }).from(companies).where(eq(companies.id, input.companyId));
       const issueId = randomUUID();
       const pictureNames = prepared.map((_, i) => `helper-picture-${i + 1}.jpg`);
@@ -752,6 +807,7 @@ export function helperInvestigationService(db: Db, options: HelperInvestigationS
             references,
             quickAnswer,
             pictureNames,
+            applyTargets,
             companyName: company?.name ?? null,
           }),
           status: "todo",

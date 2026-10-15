@@ -135,6 +135,7 @@ export function helperRoutes(
         references: body.references ?? [],
         quickAnswer: body.quickAnswer ?? null,
         pictures: body.pictures,
+        applyTargets: body.applyTargets ?? [],
         canConfigure: isOwnerOrAdmin(req, companyId),
       });
       res.status(201).json(view);
