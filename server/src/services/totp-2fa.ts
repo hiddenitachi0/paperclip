@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { and, eq, gte, isNull } from "drizzle-orm";
+import { and, eq, gte, isNull, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { userTotpSecrets, userRecoveryCodes, totpSessionTokens, authUsers } from "@paperclipai/db";
 import * as speakeasy from "speakeasy";
@@ -42,6 +42,27 @@ export interface TotpVerifyResponse {
   valid: boolean;
   totalCodes: number;
   remainingCodes: number;
+  /** True when the attempt was refused because the user is locked out. */
+  locked?: boolean;
+  /** Seconds until the lockout ends (only set when locked). */
+  retryAfterSeconds?: number;
+}
+
+// DUR-4297: after this many failed attempts the factor is locked.
+export const TOTP_MAX_FAILED_ATTEMPTS = 5;
+export const TOTP_LOCKOUT_MS = 15 * 60 * 1000;
+const TOTP_STEP_SECONDS = 30;
+const TOTP_WINDOW = 2;
+
+export class TotpVerificationError extends Error {
+  constructor(
+    public readonly code: "invalid_code" | "locked" | "already_enabled",
+    message: string,
+    public readonly retryAfterSeconds?: number,
+  ) {
+    super(message);
+    this.name = "TotpVerificationError";
+  }
 }
 
 function hashCode(code: string): string {
@@ -83,19 +104,86 @@ export function totpService(db: Db) {
     } as TotpSetupResponse;
   }
 
-  async function verifyTotpToken(secret: string, token: string): Promise<boolean> {
-    return speakeasy.totp.verify({
+  // Returns the absolute time-step the token matched, or null.
+  function matchTotpStep(secret: string, token: string): number | null {
+    const result = speakeasy.totp.verifyDelta({
       secret,
       encoding: "base32",
       token,
-      window: 2,
+      window: TOTP_WINDOW,
+      step: TOTP_STEP_SECONDS,
     });
+    if (!result) return null;
+    return Math.floor(Date.now() / 1000 / TOTP_STEP_SECONDS) + result.delta;
+  }
+
+  async function verifyTotpToken(secret: string, token: string): Promise<boolean> {
+    return matchTotpStep(secret, token) !== null;
+  }
+
+  // Atomically charges one attempt against the user's active factor BEFORE the
+  // code is checked, so parallel guesses cannot exceed the limit. Returns the
+  // factor row, or a lockout result. A correct code refunds via resetAttempts.
+  async function chargeAttempt(userId: string): Promise<
+    | { ok: true; id: string; secret: string; verified: boolean; lastUsedStep: number | null }
+    | { ok: false; locked: boolean; retryAfterSeconds?: number }
+  > {
+    const now = new Date();
+    const lockUntil = new Date(now.getTime() + TOTP_LOCKOUT_MS);
+    const rows = await db
+      .update(userTotpSecrets)
+      .set({
+        failedAttempts: sql`CASE WHEN ${userTotpSecrets.lockedUntil} IS NOT NULL THEN 1 ELSE ${userTotpSecrets.failedAttempts} + 1 END`,
+        lockedUntil: sql`CASE WHEN (CASE WHEN ${userTotpSecrets.lockedUntil} IS NOT NULL THEN 1 ELSE ${userTotpSecrets.failedAttempts} + 1 END) >= ${TOTP_MAX_FAILED_ATTEMPTS} THEN ${lockUntil.toISOString()}::timestamptz ELSE NULL END`,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(userTotpSecrets.userId, userId),
+          isNull(userTotpSecrets.disabledAt),
+          sql`(${userTotpSecrets.lockedUntil} IS NULL OR ${userTotpSecrets.lockedUntil} <= ${now.toISOString()}::timestamptz)`,
+        ),
+      )
+      .returning({
+        id: userTotpSecrets.id,
+        secret: userTotpSecrets.secret,
+        verified: userTotpSecrets.verified,
+        lastUsedStep: userTotpSecrets.lastUsedStep,
+      });
+    if (rows[0]) return { ok: true, ...rows[0] };
+
+    const active = await db
+      .select({ lockedUntil: userTotpSecrets.lockedUntil })
+      .from(userTotpSecrets)
+      .where(and(eq(userTotpSecrets.userId, userId), isNull(userTotpSecrets.disabledAt)))
+      .then((r) => r[0] ?? null);
+    if (active?.lockedUntil) {
+      return {
+        ok: false,
+        locked: true,
+        retryAfterSeconds: Math.max(1, Math.ceil((active.lockedUntil.getTime() - now.getTime()) / 1000)),
+      };
+    }
+    return { ok: false, locked: false };
+  }
+
+  async function resetAttempts(id: string) {
+    await db
+      .update(userTotpSecrets)
+      .set({ failedAttempts: 0, lockedUntil: null, updatedAt: new Date() })
+      .where(eq(userTotpSecrets.id, id));
   }
 
   async function completeTotpSetup(userId: string, secret: string, token: string, recoveryCodes: string[]) {
+    // DUR-4297: replacing/resetting an enabled factor must go through
+    // disableTotpForUser, which demands a current TOTP or recovery code.
+    if (await isTotpEnabled(userId)) {
+      throw new TotpVerificationError("already_enabled", "Two-factor authentication is already enabled");
+    }
+
     // Verify the token works with this secret
-    const isValid = await verifyTotpToken(secret, token);
-    if (!isValid) {
+    const matchedStep = matchTotpStep(secret, token);
+    if (matchedStep === null) {
       throw new Error("Invalid TOTP token");
     }
 
@@ -111,6 +199,8 @@ export function totpService(db: Db) {
       secret: sealedSecret,
       verified: true,
       enabledAt: now,
+      // The setup code is spent: it cannot be replayed to log in.
+      lastUsedStep: matchedStep,
       createdAt: now,
       updatedAt: now,
     });
@@ -154,67 +244,8 @@ export function totpService(db: Db) {
     };
   }
 
-  async function validateAndConsumeTotpToken(
-    userId: string,
-    token: string,
-    isRecoveryCode: boolean = false,
-  ): Promise<TotpVerifyResponse> {
-    if (isRecoveryCode) {
-      const codeHash = hashCode(token);
-      const codeHashBuf = Buffer.from(codeHash, "hex");
-      const candidates = await db
-        .select({ id: userRecoveryCodes.id, codeHash: userRecoveryCodes.codeHash, usedAt: userRecoveryCodes.usedAt })
-        .from(userRecoveryCodes)
-        .where(and(eq(userRecoveryCodes.userId, userId), isNull(userRecoveryCodes.usedAt)));
-
-      const recoveryCode = candidates.find((candidate) => {
-        const candidateHashBuf = Buffer.from(candidate.codeHash, "hex");
-        return candidateHashBuf.length === codeHashBuf.length && timingSafeEqual(candidateHashBuf, codeHashBuf);
-      });
-
-      if (!recoveryCode) {
-        return { valid: false, totalCodes: 0, remainingCodes: 0 };
-      }
-
-      // Mark recovery code as used
-      await db
-        .update(userRecoveryCodes)
-        .set({ usedAt: new Date() })
-        .where(eq(userRecoveryCodes.id, recoveryCode.id));
-
-      // Get count of remaining codes
-      const counts = await db
-        .select({ id: userRecoveryCodes.id, usedAt: userRecoveryCodes.usedAt })
-        .from(userRecoveryCodes)
-        .where(eq(userRecoveryCodes.userId, userId))
-        .then((rows) => ({
-          total: rows.length,
-          remaining: rows.filter((r) => !r.usedAt).length,
-        }));
-
-      return { valid: true, totalCodes: counts.total, remainingCodes: counts.remaining };
-    }
-
-    // Regular TOTP token
-    const secret = await db
-      .select({ secret: userTotpSecrets.secret, verified: userTotpSecrets.verified })
-      .from(userTotpSecrets)
-      .where(and(eq(userTotpSecrets.userId, userId), isNull(userTotpSecrets.disabledAt)))
-      .then((rows) => rows[0] ?? null);
-
-    if (!secret?.verified) {
-      return { valid: false, totalCodes: 0, remainingCodes: 0 };
-    }
-
-    const plaintextSecret = await unsealTotpSecret(secret.secret);
-    const isValid = await verifyTotpToken(plaintextSecret, token);
-
-    if (!isValid) {
-      return { valid: false, totalCodes: 0, remainingCodes: 0 };
-    }
-
-    // Get recovery code counts
-    const counts = await db
+  async function countRecoveryCodes(userId: string) {
+    return db
       .select({ id: userRecoveryCodes.id, usedAt: userRecoveryCodes.usedAt })
       .from(userRecoveryCodes)
       .where(eq(userRecoveryCodes.userId, userId))
@@ -222,11 +253,84 @@ export function totpService(db: Db) {
         total: rows.length,
         remaining: rows.filter((r) => !r.usedAt).length,
       }));
+  }
 
+  async function validateAndConsumeTotpToken(
+    userId: string,
+    token: string,
+    isRecoveryCode: boolean = false,
+  ): Promise<TotpVerifyResponse> {
+    const none = { valid: false, totalCodes: 0, remainingCodes: 0 };
+    const charge = await chargeAttempt(userId);
+    if (!charge.ok) {
+      return charge.locked
+        ? { ...none, locked: true, retryAfterSeconds: charge.retryAfterSeconds }
+        : none;
+    }
+    if (!charge.verified) return none;
+
+    if (isRecoveryCode) {
+      const codeHashBuf = Buffer.from(hashCode(token), "hex");
+      const candidates = await db
+        .select({ id: userRecoveryCodes.id, codeHash: userRecoveryCodes.codeHash })
+        .from(userRecoveryCodes)
+        .where(and(eq(userRecoveryCodes.userId, userId), isNull(userRecoveryCodes.usedAt)));
+
+      const recoveryCode = candidates.find((candidate) => {
+        const candidateHashBuf = Buffer.from(candidate.codeHash, "hex");
+        return candidateHashBuf.length === codeHashBuf.length && timingSafeEqual(candidateHashBuf, codeHashBuf);
+      });
+      if (!recoveryCode) return none;
+
+      // Atomic single-use: only one concurrent caller can flip usedAt.
+      const claimed = await db
+        .update(userRecoveryCodes)
+        .set({ usedAt: new Date() })
+        .where(and(eq(userRecoveryCodes.id, recoveryCode.id), isNull(userRecoveryCodes.usedAt)))
+        .returning({ id: userRecoveryCodes.id });
+      if (claimed.length === 0) return none;
+
+      await resetAttempts(charge.id);
+      const counts = await countRecoveryCodes(userId);
+      return { valid: true, totalCodes: counts.total, remainingCodes: counts.remaining };
+    }
+
+    const plaintextSecret = await unsealTotpSecret(charge.secret);
+    const step = matchTotpStep(plaintextSecret, token);
+    if (step === null) return none;
+
+    // Replay protection: atomically advance last_used_step; a code from a step
+    // already used (or older) updates no row and is rejected.
+    const advanced = await db
+      .update(userTotpSecrets)
+      .set({ lastUsedStep: step, failedAttempts: 0, lockedUntil: null, updatedAt: new Date() })
+      .where(
+        and(
+          eq(userTotpSecrets.id, charge.id),
+          sql`(${userTotpSecrets.lastUsedStep} IS NULL OR ${userTotpSecrets.lastUsedStep} < ${step})`,
+        ),
+      )
+      .returning({ id: userTotpSecrets.id });
+    if (advanced.length === 0) return none;
+
+    const counts = await countRecoveryCodes(userId);
     return { valid: true, totalCodes: counts.total, remainingCodes: counts.remaining };
   }
 
-  async function disableTotpForUser(userId: string) {
+  // DUR-4297: disabling/resetting requires a valid current TOTP or recovery
+  // code, enforced here (not only in the route). Shares the attempt limiter.
+  async function disableTotpForUser(
+    userId: string,
+    proof: { token: string; isRecoveryCode?: boolean },
+  ) {
+    if (!(await isTotpEnabled(userId))) return { disabled: false };
+    const result = await validateAndConsumeTotpToken(userId, proof?.token ?? "", proof?.isRecoveryCode ?? false);
+    if (result.locked) {
+      throw new TotpVerificationError("locked", "Too many failed attempts", result.retryAfterSeconds);
+    }
+    if (!result.valid) {
+      throw new TotpVerificationError("invalid_code", "Invalid verification code");
+    }
     const now = new Date();
 
     // Soft-delete TOTP secret
@@ -243,6 +347,7 @@ export function totpService(db: Db) {
 
     // Clear TOTP verified timestamp
     await db.update(authUsers).set({ totpVerifiedAt: null }).where(eq(authUsers.id, userId));
+    return { disabled: true };
   }
 
   async function recordTotpSessionVerification(userId: string, sessionId: string, ttlMs: number = 30 * 60 * 1000) {
