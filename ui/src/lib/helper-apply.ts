@@ -86,6 +86,35 @@ export function applyHelperAnswer(
   return detail.handled;
 }
 
+/** The field element for a label, if it is on the page. */
+export function findHelperApplyElement(
+  label: string,
+  root: ParentNode | null = typeof document !== "undefined" ? document : null,
+): Element | null {
+  return root?.querySelector(`[data-helper-apply="${cssEscape(label)}"]`) ?? null;
+}
+
+/**
+ * What the field holds now, so "Apply" can be undone. Reads the text box
+ * inside the field's `data-helper-apply` wrapper (or the wrapper itself);
+ * null when it cannot be read (then no "Undo" is offered).
+ */
+export function readHelperApplyValue(
+  label: string,
+  root: ParentNode | null = typeof document !== "undefined" ? document : null,
+): string | null {
+  const el = findHelperApplyElement(label, root);
+  if (!el) return null;
+  const box =
+    el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement
+      ? el
+      : el.querySelector("textarea, input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=file])");
+  if (box instanceof HTMLTextAreaElement || box instanceof HTMLInputElement) return box.value;
+  const editable = el.matches("[contenteditable=true]") ? el : el.querySelector("[contenteditable=true]");
+  if (editable instanceof HTMLElement) return editable.innerText ?? editable.textContent ?? "";
+  return null;
+}
+
 function cssEscape(value: string): string {
   return typeof CSS !== "undefined" && typeof CSS.escape === "function" ? CSS.escape(value) : value.replace(/["\\]/g, "\\$&");
 }

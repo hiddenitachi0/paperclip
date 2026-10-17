@@ -20,6 +20,7 @@ import {
   type CreateVideoClipInput,
   type ExportVideoStorylineInput,
   type ReorderVideoShotsInput,
+  type SplitVideoClipInput,
   type UpdateVideoClipInput,
   type UpdateVideoExportSettingsInput,
   type UpdateVideoMusicLaneInput,
@@ -43,10 +44,10 @@ import {
   uploadByteSize,
   videoStorylineFootageService,
 } from "./video-storyline-footage.js";
-import { estimateShotRenderCents, videoStorylineRenderService } from "./video-storyline-render.js";
+import { estimateShotRenderCents, shotClipTiming, videoStorylineRenderService } from "./video-storyline-render.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
 import { videoStorylineStitchService } from "./video-storyline-stitch.js";
-import { applyShotOrder, lockStorylineRow, videoStorylineService, type ScopedTx, type VideoStorylineActor } from "./video-storylines.js";
+import { applyShotOrder, assertStorylineEditable, lockStorylineRow, videoStorylineService, type ScopedTx, type VideoStorylineActor } from "./video-storylines.js";
 import type { HelperServiceOptions } from "./helper.js";
 
 /**
@@ -500,7 +501,8 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
   }
 
   async function updateClip(companyId: string, storylineId: string, shotId: string, input: UpdateVideoClipInput, actor: VideoStorylineActor): Promise<void> {
-    await settings.assertAdvancedEnabled(companyId);
+    // Timeline editor: free editing, available without Advanced features.
+    await settings.assertEnabled(companyId);
     const storyline = await storylines.getStorylineRow(companyId, storylineId);
     assertStripEditable(storyline);
     const shot = await storylines.getShotRow(companyId, storylineId, shotId);
@@ -508,8 +510,23 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
     if (input.muted !== undefined) changes.clipMuted = input.muted;
     if (input.volumeDb !== undefined) changes.clipVolumeDb = input.volumeDb;
     const reshapes = input.trimInMs !== undefined || input.trimOutMs !== undefined || input.stillMotion !== undefined || input.holdSeconds !== undefined;
-    if (reshapes) {
-      if (shot.clipKind === "generated") throw unprocessable("Trim and photo motion are for your own videos and photos. Change an AI shot in the storyboard instead.");
+    if (reshapes && shot.clipKind === "generated") {
+      // Timeline editor: a made AI clip can be trimmed inside its own length (applied when the film is combined; nothing is re-made).
+      if (input.stillMotion !== undefined || input.holdSeconds !== undefined) throw unprocessable("Photo motion and length are for photos. Change an AI shot's length in the storyboard or on the timeline.");
+      if (shot.status !== "done" || !shot.resultObjectKey) {
+        throw unprocessable("This AI shot isn't made yet, so there is nothing to trim. Change its length instead; it is trimmed after it is made.");
+      }
+      const fullMs = shotClipTiming(storyline, shot).sourceLengthMs ?? shot.durationSeconds * 1000;
+      const trimInMs = input.trimInMs ?? shot.sourceTrimInMs ?? 0;
+      const trimOutMs = input.trimOutMs === null ? fullMs : input.trimOutMs ?? shot.sourceTrimOutMs ?? fullMs;
+      const problem = checkTrim(fullMs, trimInMs, trimOutMs);
+      if (problem) throw unprocessable(problem.replace("the video", "the clip"));
+      // Back to "no trim" when it covers the whole clip, so nothing changes for an untouched clip.
+      Object.assign(changes, {
+        sourceTrimInMs: trimInMs > 0 ? trimInMs : null,
+        sourceTrimOutMs: trimOutMs < fullMs ? trimOutMs : null,
+      });
+    } else if (reshapes) {
       if (shot.status === "rendering") throw conflict("This clip is being prepared right now. Try again in a moment.");
       const upload = shot.sourceUploadId ? await footage.getUpload(companyId, shot.sourceUploadId) : null;
       if (!upload) throw conflict("This clip's upload is gone. Remove the clip and add the file again.");
@@ -540,9 +557,10 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
   }
 
   async function removeClip(companyId: string, storylineId: string, shotId: string, actor: VideoStorylineActor): Promise<void> {
-    await settings.assertAdvancedEnabled(companyId);
+    // Timeline editor: free editing, available without Advanced features.
+    await settings.assertEnabled(companyId);
     const shot = await storylines.getShotRow(companyId, storylineId, shotId);
-    if (shot.clipKind === "generated" && !shot.sourceUploadId) throw unprocessable("AI shots are removed in the storyboard (step 1), where their script lives.");
+    // Timeline editor: any clip can be removed from the film, an AI shot too (the page asks first, with what remaking it would cost).
     await withCompanyScope(db, companyId, async (tx) => {
       const locked = await lockStorylineRow(tx, companyId, storylineId);
       assertStripEditable(locked);
@@ -554,9 +572,125 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
     await log(companyId, actor, "video_storyline.clip_removed", storylineId, { shotId });
   }
 
+  /**
+   * Timeline editor: cut one clip into two at `atMs` (measured from the start
+   * of what is shown of it). Nothing is re-made or paid for:
+   *  - a made AI clip becomes two trims of the same clip;
+   *  - an AI shot not made yet becomes two shorter shots (whole seconds) with
+   *    the same description and approved picture (each is made on its own);
+   *  - your video becomes two trims of the same upload (cut again, free);
+   *  - a photo becomes two photo clips (whole seconds).
+   * The join after the original clip moves to the new second part.
+   */
+  async function splitClip(companyId: string, storylineId: string, shotId: string, input: SplitVideoClipInput, actor: VideoStorylineActor): Promise<{ shotId: string }> {
+    const storyline = await storylines.getStorylineRow(companyId, storylineId);
+    assertStripEditable(storyline);
+    const shot = await storylines.getShotRow(companyId, storylineId, shotId);
+    if (shot.status === "queued" || shot.status === "rendering") throw conflict("This clip is being made right now. Split it once it is ready.");
+    const upload = shot.sourceUploadId ? await footage.getUpload(companyId, shot.sourceUploadId).catch(() => null) : null;
+    const timing = shotClipTiming(storyline, shot, upload?.durationMs ?? null);
+    const at = input.atMs;
+    const made = shot.clipKind === "generated" && shot.status === "done" && Boolean(shot.resultObjectKey);
+    const wholeSeconds = shot.clipKind === "still" || (shot.clipKind === "generated" && !made);
+    if (wholeSeconds) {
+      const firstSeconds = Math.round(at / 1000);
+      if (firstSeconds < 1 || shot.durationSeconds - firstSeconds < 1) {
+        throw unprocessable(
+          shot.clipKind === "still"
+            ? "A photo is split in whole seconds, and each part needs at least 1 second. Move the playhead and try again."
+            : "An AI shot that isn't made yet is split in whole seconds, and each part needs at least 1 second. Move the playhead and try again.",
+        );
+      }
+    } else if (at < VIDEO_CLIP_MIN_MS || timing.playMs - at < VIDEO_CLIP_MIN_MS) {
+      throw unprocessable("Split a little further from the clip's edges: each part must be at least half a second long.");
+    }
+    if (shot.clipKind === "generated" && !made) assertStorylineEditable(storyline);
+
+    let firstChanges: Partial<typeof videoShots.$inferInsert>;
+    let secondFields: Partial<typeof videoShots.$inferInsert>;
+    const cleared = { resultProvider: null, resultObjectKey: null, resultContentType: null, resultByteSize: null, resultSha256: null, errorMessage: null };
+    if (made) {
+      const inMs = shot.sourceTrimInMs ?? 0;
+      const cut = inMs + at;
+      firstChanges = { sourceTrimInMs: inMs > 0 ? inMs : null, sourceTrimOutMs: cut };
+      // The second part shares the clip (already paid for once: counted on the first part only).
+      secondFields = { sourceTrimInMs: cut, sourceTrimOutMs: shot.sourceTrimOutMs, actualCostCents: 0 };
+    } else if (shot.clipKind === "generated") {
+      const firstSeconds = Math.round(at / 1000);
+      firstChanges = { durationSeconds: firstSeconds };
+      secondFields = { durationSeconds: shot.durationSeconds - firstSeconds, status: "draft", ...cleared, actualCostCents: null };
+    } else if (shot.clipKind === "uploaded_video") {
+      if (!upload) throw conflict("This clip's upload is gone. Remove the clip and add the file again.");
+      const inMs = shot.sourceTrimInMs ?? 0;
+      const outMs = shot.sourceTrimOutMs ?? upload.durationMs ?? inMs + timing.playMs;
+      const cut = inMs + at;
+      const secondsOf = (ms: number) => Math.max(1, Math.min(VIDEO_CLIP_MAX_SECONDS, Math.round(ms / 1000)));
+      firstChanges = { sourceTrimInMs: inMs, sourceTrimOutMs: cut, durationSeconds: secondsOf(cut - inMs), status: "queued", ...cleared };
+      secondFields = { sourceTrimInMs: cut, sourceTrimOutMs: outMs, durationSeconds: secondsOf(outMs - cut), status: "queued", ...cleared, actualCostCents: 0 };
+    } else {
+      const firstSeconds = Math.round(at / 1000);
+      firstChanges = { durationSeconds: firstSeconds, status: "queued", ...cleared };
+      secondFields = { durationSeconds: shot.durationSeconds - firstSeconds, status: "queued", ...cleared, actualCostCents: 0 };
+    }
+
+    const newId = await withCompanyScope(db, companyId, async (tx) => {
+      const locked = await lockStorylineRow(tx, companyId, storylineId);
+      assertStripEditable(locked);
+      const [current] = await tx.select().from(videoShots).where(and(eq(videoShots.id, shot.id), eq(videoShots.storylineId, storylineId)));
+      if (!current || current.status !== shot.status || current.updatedAt.getTime() !== shot.updatedAt.getTime()) {
+        throw conflict("This clip changed while you were splitting it. Look at it again and split once more.");
+      }
+      const order = await orderedShots(tx, storylineId);
+      if (order.length >= VIDEO_STORYLINE_MAX_SHOTS) throw unprocessable(`A storyline may have at most ${VIDEO_STORYLINE_MAX_SHOTS} clips.`);
+      const {
+        id: _id,
+        orderIndex: _orderIndex,
+        createdAt: _createdAt,
+        updatedAt: _updatedAt,
+        proposedPrompt: _pp,
+        proposedCameraNotes: _pc,
+        proposedDurationSeconds: _pd,
+        proposedTransitionIn: _pt,
+        proposalStatus: _ps,
+        proposalConversationId: _pcid,
+        ...copy
+      } = current;
+      const [inserted] = await tx
+        .insert(videoShots)
+        .values({ ...copy, promptHistory: [], transitionIn: null, orderIndex: 2_000_000 + order.length, ...secondFields, createdAt: nowOf(), updatedAt: nowOf() })
+        .returning({ id: videoShots.id });
+      await tx.update(videoShots).set({ ...firstChanges, updatedAt: nowOf() }).where(eq(videoShots.id, shot.id));
+      const at = order.findIndex((o) => o.id === shot.id);
+      const next = order[at + 1] ?? null;
+      const withNew = [...order.slice(0, at + 1), { id: inserted!.id, sceneId: current.sceneId, orderIndex: 0 }, ...order.slice(at + 1)];
+      await writeOrder(tx, storylineId, withNew);
+      // The join after the original clip now sits after its second part (an AI bridge is made for two pictures, so it stays and goes out of date).
+      if (next) {
+        await tx
+          .update(videoTransitions)
+          .set({ fromShotId: inserted!.id, updatedAt: nowOf() })
+          .where(and(eq(videoTransitions.storylineId, storylineId), eq(videoTransitions.fromShotId, shot.id), eq(videoTransitions.toShotId, next.id), ne(videoTransitions.kind, "ai")));
+      }
+      // The same people are in both parts.
+      const settingsJson = (locked.pictureSettings ?? {}) as Record<string, unknown>;
+      const shotCast = settingsJson.shotCast as Record<string, string[]> | undefined;
+      if (shotCast?.[shot.id]) {
+        await tx
+          .update(videoStorylines)
+          .set({ pictureSettings: { ...settingsJson, shotCast: { ...shotCast, [inserted!.id]: [...shotCast[shot.id]!] } } as StorylineRow["pictureSettings"], updatedAt: nowOf() })
+          .where(eq(videoStorylines.id, storylineId));
+      }
+      return inserted!.id;
+    });
+    if (shot.clipKind === "generated" && !made) await storylines.recomputeEstimate(companyId, storylineId);
+    await log(companyId, actor, "video_storyline.clip_split", storylineId, { shotId, newShotId: newId, atMs: at });
+    return { shotId: newId };
+  }
+
   /** Drag to reorder: the whole new order at once. Gaps between new neighbours start as the default join (AI bridges are keyed by the pair of clips). */
   async function reorder(companyId: string, storylineId: string, input: ReorderVideoShotsInput, actor: VideoStorylineActor): Promise<void> {
-    await settings.assertAdvancedEnabled(companyId);
+    // Timeline editor: free editing, available without Advanced features.
+    await settings.assertEnabled(companyId);
     await withCompanyScope(db, companyId, async (tx) => {
       const locked = await lockStorylineRow(tx, companyId, storylineId);
       assertStripEditable(locked);
@@ -651,7 +785,8 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
   // ─── Picture shape and export ───
 
   async function setAspect(companyId: string, storylineId: string, aspect: VideoStorylineAspect, actor: VideoStorylineActor): Promise<void> {
-    await settings.assertAdvancedEnabled(companyId);
+    // Timeline editor: free editing, available without Advanced features.
+    await settings.assertEnabled(companyId);
     await withCompanyScope(db, companyId, async (tx) => {
       const locked = await lockStorylineRow(tx, companyId, storylineId);
       assertStripEditable(locked);
@@ -670,7 +805,8 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
   }
 
   async function updateExportSettings(companyId: string, storylineId: string, patch: UpdateVideoExportSettingsInput, actor: VideoStorylineActor): Promise<VideoStorylineExportSettings> {
-    await settings.assertAdvancedEnabled(companyId);
+    // Timeline editor: free editing, available without Advanced features.
+    await settings.assertEnabled(companyId);
     const storyline = await storylines.getStorylineRow(companyId, storylineId);
     if (storyline.status === "stitching") throw conflict("The film is being combined right now. Wait for it to finish, then change the export.");
     const next: Record<string, unknown> = { ...(storyline.exportSettings as Record<string, unknown>) };
@@ -696,7 +832,8 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
 
   /** "Export again": new settings (optional), then the film is combined again from the finished clips -- nothing is re-rendered or paid for. */
   async function exportAgain(companyId: string, storylineId: string, input: ExportVideoStorylineInput, actor: VideoStorylineActor): Promise<void> {
-    await settings.assertAdvancedEnabled(companyId);
+    // Timeline editor: free editing, available without Advanced features.
+    await settings.assertEnabled(companyId);
     if (input.settings) await updateExportSettings(companyId, storylineId, input.settings, actor);
     await stitch.retryStitch(companyId, storylineId);
     await log(companyId, actor, "video_storyline.export_requested", storylineId, {});
@@ -705,7 +842,8 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
   // ─── Music lane ───
 
   async function updateMusicLane(companyId: string, storylineId: string, input: UpdateVideoMusicLaneInput, actor: VideoStorylineActor): Promise<void> {
-    await settings.assertAdvancedEnabled(companyId);
+    // Timeline editor: free editing, available without Advanced features.
+    await settings.assertEnabled(companyId);
     const storyline = await storylines.getStorylineRow(companyId, storylineId);
     if (storyline.status === "stitching") throw conflict("The film is being combined right now. Wait for it to finish, then change the music.");
     const changes: Partial<typeof videoStorylines.$inferInsert> = {};
@@ -734,7 +872,8 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
 
   /** Sound files this company can put under a film: music made in Media Studio (company files) and music uploaded here. */
   async function musicChoices(companyId: string): Promise<VideoMusicChoice[]> {
-    await settings.assertAdvancedEnabled(companyId);
+    // Timeline editor: free editing, available without Advanced features.
+    await settings.assertEnabled(companyId);
     const rows = await db
       .select({ asset: assets, fileId: issueAttachments.id })
       .from(assets)
@@ -760,7 +899,8 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
   }
 
   async function uploadMusic(companyId: string, file: IncomingFile, actor: VideoStorylineActor): Promise<VideoMusicChoice> {
-    await settings.assertAdvancedEnabled(companyId);
+    // Timeline editor: free editing, available without Advanced features.
+    await settings.assertEnabled(companyId);
     const type = file.contentType.toLowerCase().split(";")[0]!.trim();
     if (!type.startsWith("audio/")) throw new HttpError(415, "That is not a sound file. Upload an MP3, WAV, M4A or similar.");
     if (file.size > MUSIC_MAX_BYTES) throw new HttpError(413, `Music files can be up to ${mb(MUSIC_MAX_BYTES)}.`);
@@ -838,7 +978,7 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
       assertStripEditable(locked);
       const [current] = await tx.select().from(videoShots).where(and(eq(videoShots.id, shot.id), eq(videoShots.storylineId, storylineId)));
       if (!current || current.clipKind !== "still") throw conflict("This clip changed. Refresh the strip and try again.");
-      if (locked.budgetCapCents === null) throw unprocessable("Set a budget for this film first (step 3), so spending stops at a limit you chose.");
+      if (locked.budgetCapCents === null) throw unprocessable("Set a budget for this film first (step 5, Render & export), so spending stops at a limit you chose.");
       if (locked.spentCents + quote > locked.budgetCapCents) {
         throw unprocessable(
           `Animating this photo costs about ${dollars(quote)}, and ${dollars(locked.spentCents)} of this film's ${dollars(locked.budgetCapCents)} budget is already spent. Raise the budget to at least ${dollars(locked.spentCents + quote)} to go ahead.`,
@@ -981,6 +1121,7 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
     createClip,
     updateClip,
     removeClip,
+    splitClip,
     reorder,
     prepareClips,
     setAspect,

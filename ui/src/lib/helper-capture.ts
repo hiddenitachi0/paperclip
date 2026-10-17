@@ -163,6 +163,16 @@ export function captureHelperContext(input: HelperCaptureInput = {}): HelperCapt
     };
 
     const visit = (el: Element) => {
+      if (el.tagName.toUpperCase() === "IFRAME" && !el.closest("[data-helper-ignore],[data-helper-private]")) {
+        // An embedded page (some add-ons draw their screens in one) cannot be read from here: say so
+        // instead of leaving the person wondering why its text is missing.
+        if (!rect || intersects(el, rect)) {
+          flush();
+          const title = clean(el.getAttribute("title"));
+          lines.push(`[Embedded page${title ? `: ${title}` : ""} — the helper cannot read what is inside it]`);
+        }
+        return;
+      }
       if (isExcludedElement(el)) return;
       if (rect && !intersects(el, rect) && el !== root) {
         // A child may still overlap even when the parent box does not (e.g.
@@ -230,4 +240,78 @@ export function viewportRect(): HelperRect {
 /** Normalises a drag from (x1,y1) to (x2,y2) into a rect. */
 export function rectFromPoints(x1: number, y1: number, x2: number, y2: number): HelperRect {
   return { left: Math.min(x1, x2), top: Math.min(y1, y2), width: Math.abs(x2 - x1), height: Math.abs(y2 - y1) };
+}
+
+const OPEN_DIALOG_SELECTOR = '[role="dialog"][data-state="open"],[role="alertdialog"][data-state="open"],dialog[open]';
+
+/**
+ * Where "the visible page" is read from: the top-most open pop-up dialog when
+ * one is open (that is what the person is looking at), otherwise the page's
+ * main area.
+ */
+export function helperDefaultRoot(doc: Document = document): Element {
+  const dialogs = Array.from(doc.querySelectorAll(OPEN_DIALOG_SELECTOR)).filter(
+    (el) => !el.closest("[data-helper-ignore]") && !el.closest("[data-helper-private]"),
+  );
+  const top = dialogs[dialogs.length - 1];
+  if (top) return top;
+  return doc.getElementById("main-content") ?? doc.body;
+}
+
+/** Page elements under a point, top-most first, without the helper's own layers. */
+function pageElementsAt(x: number, y: number, doc: Document): Element[] {
+  const all = typeof doc.elementsFromPoint === "function" ? doc.elementsFromPoint(x, y) : [];
+  return all.filter((el) => !el.closest("[data-helper-ignore]"));
+}
+
+const CLICK_TARGET_SELECTOR =
+  "[data-helper-apply],[data-helper-entity],fieldset,form,li,tr,article,section,[role=dialog],[role=alertdialog],label,p,h1,h2,h3,h4,h5,h6,td";
+
+/**
+ * A click (instead of a drag) while marking: the block under the pointer —
+ * the nearest field, card, row, section or paragraph around it.
+ */
+export function helperRectAtPoint(x: number, y: number, doc: Document = document): HelperRect | null {
+  const hit = pageElementsAt(x, y, doc)[0];
+  if (!hit || hit === doc.body || hit === doc.documentElement) return null;
+  const block = hit.closest(CLICK_TARGET_SELECTOR) ?? hit;
+  const r = block.getBoundingClientRect();
+  if (r.width < 4 || r.height < 4) return null;
+  return { left: r.left, top: r.top, width: r.width, height: r.height };
+}
+
+function isScrollable(el: Element): boolean {
+  const view = el.ownerDocument.defaultView;
+  if (!view) return false;
+  const style = view.getComputedStyle(el);
+  return /(auto|scroll|overlay)/.test(style.overflowY) && el.scrollHeight > el.clientHeight + 1;
+}
+
+/** The scrolling area under a point (so the page can still be scrolled while marking). */
+export function helperScrollableAt(x: number, y: number, doc: Document = document): Element | null {
+  for (const start of pageElementsAt(x, y, doc)) {
+    for (let el: Element | null = start; el && el !== doc.body; el = el.parentElement) {
+      if (isScrollable(el)) return el;
+    }
+  }
+  return doc.scrollingElement ?? doc.documentElement;
+}
+
+/** One plain line about what was captured, for under "What the helper sees". */
+export function helperCaptureSummary(capture: HelperCapture, marked: boolean): string {
+  const where = marked ? "the area you marked" : "the visible page";
+  if (capture.itemCount === 0) {
+    return marked
+      ? "Nothing readable was found in the area you marked. Mark a bigger area, or use the visible page."
+      : "Nothing readable was found on the visible page. Only your question and the page address are sent.";
+  }
+  const parts = [`${capture.itemCount} line${capture.itemCount === 1 ? "" : "s"} of text from ${where}`];
+  if (capture.entities.length > 0) {
+    parts.push(`${capture.entities.length} record${capture.entities.length === 1 ? "" : "s"}`);
+  }
+  let out = parts.join(" and ") + ".";
+  if (capture.applyTargets.length > 0) {
+    out += ` The answer can be put into ${capture.applyTargets.map((t) => `“${t}”`).join(", ")}.`;
+  }
+  return out;
 }

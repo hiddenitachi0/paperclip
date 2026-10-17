@@ -5,6 +5,7 @@ import {
   type CurrentUserProfile,
   type UpdateCurrentUserProfile,
 } from "@paperclipai/shared";
+import { clearHelperSessions } from "../components/helper/helper-session";
 
 type AuthErrorBody =
   | {
@@ -140,6 +141,8 @@ export const authApi = {
   },
 
   signOut: async () => {
+    // The Ask panel's saved conversations belong to whoever was signed in: never leave them for the next person.
+    clearHelperSessions();
     await authPost("/sign-out", {});
   },
 };

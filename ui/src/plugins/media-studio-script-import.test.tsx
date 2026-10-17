@@ -211,7 +211,7 @@ describe("script import and instructions dialogs", () => {
   });
 });
 
-describe("Step 3 offers a one-click budget instead of a dead button", () => {
+describe("Step 5 offers a one-click budget instead of a dead button", () => {
   let container: HTMLDivElement;
   let root: Root;
 
@@ -269,7 +269,7 @@ describe("Step 3 offers a one-click budget instead of a dead button", () => {
   });
 
   it("lists the missing budget with a suggested amount, sets it in one click, then starts", async () => {
-    // Everything else is ready, so the guided flow opens step 3 straight away.
+    // Everything else is ready, so the guided flow opens the render step straight away.
     expect(container.querySelector('[data-testid="render-step"]')).toBeTruthy();
     const start = container.querySelector('[data-testid="start-render"]') as HTMLButtonElement;
     expect(start.disabled).toBe(true);
@@ -283,8 +283,9 @@ describe("Step 3 offers a one-click budget instead of a dead button", () => {
     await click(container.querySelector('[data-testid="start-render"]') as HTMLButtonElement);
     const startCall = calls.find((c) => c.path === `${BASE}/sl-1/render/start`);
     expect(JSON.parse(startCall!.body!)).toEqual({});
-    // Once started, the page moves on to step 4.
-    expect(container.querySelector('[data-testid="film-panel"]')).toBeTruthy();
+    // Started: no refusal; the same step follows the render (its progress panel appears once the server says "rendering").
+    expect(container.querySelector('[data-testid="render-refused"]')).toBeNull();
+    expect(container.querySelector('[data-testid="render-step"]')).toBeTruthy();
   });
 
   it("offers script import and the writer instructions on the editor and the list", async () => {

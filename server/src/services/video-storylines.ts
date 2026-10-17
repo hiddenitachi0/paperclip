@@ -1,6 +1,6 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { assets, issueAttachments, videoScenes, videoShotRenderJobs, videoShots, videoStorylines, withCompanyScope } from "@paperclipai/db";
+import { assets, issueAttachments, videoScenes, videoShotRenderJobs, videoShots, videoStorylines, videoTransitionTakes, withCompanyScope } from "@paperclipai/db";
 import {
   VIDEO_SCRIPT_SCENE_NOTES_MAX_LENGTH,
   VIDEO_STORYLINE_MAX_SCENES,
@@ -581,10 +581,36 @@ export function videoStorylineService(db: Db) {
     return refreshed ?? toStorylineSummary(row);
   }
 
+  /**
+   * Deleting is a real delete (scenes, shots, transitions and render rows go
+   * with it by cascade); there is no archive flag. Allowed in any state
+   * except while something is actually being made or combined -- a finished
+   * film, a failed one, or one left "rendering" with nothing running can all
+   * be deleted (they used to be refused as "cannot be edited").
+   */
   async function deleteStoryline(companyId: string, storylineId: string, actor: VideoStorylineActor): Promise<void> {
     const existing = await getStorylineRow(companyId, storylineId);
-    assertStorylineEditable(existing);
-    await db.delete(videoStorylines).where(eq(videoStorylines.id, storylineId));
+    if (existing.status === "stitching") {
+      throw conflict("The film is being put together right now. Wait a minute for it to finish, then delete the storyline.");
+    }
+    const [running] = await db
+      .select({ id: videoShotRenderJobs.id })
+      .from(videoShotRenderJobs)
+      .where(and(eq(videoShotRenderJobs.storylineId, storylineId), eq(videoShotRenderJobs.companyId, companyId), eq(videoShotRenderJobs.status, "running")))
+      .limit(1);
+    const [making] = await db
+      .select({ id: videoTransitionTakes.id })
+      .from(videoTransitionTakes)
+      .where(and(eq(videoTransitionTakes.storylineId, storylineId), eq(videoTransitionTakes.companyId, companyId), eq(videoTransitionTakes.status, "generating")))
+      .limit(1);
+    if (running || making) {
+      throw conflict("Clips are being made for this storyline right now. Cancel the render first (in the Render & export step), then delete it.");
+    }
+    const deleted = await db
+      .delete(videoStorylines)
+      .where(and(eq(videoStorylines.id, storylineId), eq(videoStorylines.companyId, companyId)))
+      .returning({ id: videoStorylines.id });
+    if (deleted.length === 0) throw notFound("Video storyline not found");
     await logActivity(db, {
       companyId,
       ...activityActor(actor),

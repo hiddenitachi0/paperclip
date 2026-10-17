@@ -41,6 +41,7 @@ import {
   createVideoClipSchema,
   exportVideoStorylineSchema,
   reorderVideoShotsSchema,
+  splitVideoClipSchema,
   updateMediaFootageSettingsSchema,
   updateVideoClipSchema,
   updateVideoExportSettingsSchema,
@@ -617,6 +618,11 @@ export function videoStorylineRoutes(rawDb: Db) {
   router.delete("/companies/:companyId/video-storylines/:storylineId/clips/:shotId", ...gatedScope(), async (req, res) => {
     await clips.removeClip(req.params.companyId as string, req.params.storylineId as string, req.params.shotId as string, actorOf(req));
     res.status(204).end();
+  });
+
+  /** Timeline editor: cut a clip in two at a point (free; nothing is re-made). */
+  router.post("/companies/:companyId/video-storylines/:storylineId/clips/:shotId/split", validate(splitVideoClipSchema), ...gatedScope(), async (req, res) => {
+    res.status(201).json(await clips.splitClip(req.params.companyId as string, req.params.storylineId as string, req.params.shotId as string, req.body, actorOf(req)));
   });
 
   router.post(

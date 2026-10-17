@@ -324,7 +324,11 @@ d("storyline phase 2: clips, footage rules, spend, export, music", () => {
     await clips.updateClip(companyId, storylineId, videoClip, { trimOutMs: 9_000 }, ACTOR);
     [shot] = await db.select().from(videoShots).where(eq(videoShots.id, videoClip));
     expect(shot).toMatchObject({ status: "queued", sourceTrimOutMs: 9_000, durationSeconds: 7, resultObjectKey: null });
-    await expect(clips.updateClip(companyId, storylineId, aiShotId!, { trimInMs: 0 }, ACTOR)).rejects.toMatchObject({ status: 422 });
+    // Timeline v3: a made AI clip is trimmed in place (applied when combining; nothing is re-made), but has no photo length.
+    await clips.updateClip(companyId, storylineId, aiShotId!, { trimInMs: 500 }, ACTOR);
+    [shot] = await db.select().from(videoShots).where(eq(videoShots.id, aiShotId!));
+    expect(shot).toMatchObject({ status: "done", sourceTrimInMs: 500, sourceTrimOutMs: null });
+    await expect(clips.updateClip(companyId, storylineId, aiShotId!, { holdSeconds: 3 }, ACTOR)).rejects.toMatchObject({ status: 422 });
 
     // A clip being prepared stops the film from being combined, in plain words.
     await db.update(videoStorylines).set({ status: "ready_to_stitch" }).where(eq(videoStorylines.id, storylineId));

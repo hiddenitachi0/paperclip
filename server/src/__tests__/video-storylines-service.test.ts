@@ -129,6 +129,8 @@ d("videoStorylineService", () => {
       await expect(
         service().createScene(companyId, storyline.id, { title: "x", notes: null, orderIndex: 5 }, ACTOR),
       ).rejects.toMatchObject({ status: 409 });
+      // Deleting is refused only while something is really being made or combined (timeline v3).
+      await db.update(videoStorylines).set({ status: "stitching" }).where(eq(videoStorylines.id, storyline.id));
       await expect(service().deleteStoryline(companyId, storyline.id, ACTOR)).rejects.toMatchObject({ status: 409 });
     });
   });

@@ -5,7 +5,7 @@ import { errorText, storylineFetchJson } from "./storyline-api.js";
 // this ui/ folder, so the helpers below are copies of
 // packages/shared/src/video-storyline-cast.ts (a test checks they agree).
 //
-// Step 1's "Cast" section: the script's characters, each linked (or not) to
+// Step 2's "Cast" section: the script's characters, each linked (or not) to
 // one of the company's saved people (Media Studio identities). A linked
 // character keeps the same face and body in every storyboard picture and
 // every video clip they are in. The server checks every link belongs to this
@@ -104,7 +104,7 @@ export function scriptCharacterSuggestions(sceneNotes: ReadonlyArray<string | nu
   return out;
 }
 
-/** Plain labels per shot for step 2's tiles: "Maja (saved person)", "Bob". */
+/** Plain labels per shot for step 3's tiles: "Maja (saved person)", "Bob". */
 export function shotCastLabels(
   shots: readonly CastShot[],
   cast: StorylineCast,

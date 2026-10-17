@@ -1,18 +1,16 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { errorText, friendlyStorylineError, storylineFetchJson } from "./storyline-api.js";
+import { useEffect, useRef, useState } from "react";
+import { friendlyStorylineError, storylineFetchJson } from "./storyline-api.js";
 
-// Storyline strip (Simple editor, Phase 1; design 2.1): the film as a row of
-// clip cards with a transition tile in every gap, and an inspector for the
-// selected transition. Talks to /video-storylines/:id/strip and
-// /transitions. Standalone ES module (see index.tsx's note): local types and
-// styles, no imports from @paperclipai/shared.
-//
-// Phase 2 (design 2.5-2.7): your own videos and photos as clips (upload,
-// trim, hold / slow zoom / animate, consent ticks), drag to reorder, a
-// Timeline view with a time ruler and the music lane, and export (picture
-// shape, presets, Advanced folded away, title cards, Export again).
+// The Storylines editor's panels (the timeline editor in timeline-editor.tsx
+// lays them out): the join inspector (cut, blends, AI bridge), the clip
+// inspector for your own videos and photos (trim, hold / slow zoom /
+// animate, sound, consent), adding your own footage, the music lane, the
+// picture shape and the export. Talks to /video-storylines/:id/strip,
+// /transitions, /clips, /music and /export. Standalone ES module (see
+// index.tsx's note): local types and styles, no imports from
+// @paperclipai/shared.
 
-type Kind =
+export type Kind =
   | "cut"
   | "blend"
   | "dissolve"
@@ -119,6 +117,13 @@ export interface StripClip {
   volumeDb?: number;
   animateQuoteCents?: number | null;
   errorMessage?: string | null;
+  // Timeline editor (optional so an older server's answer still renders).
+  storyboardStatus?: string;
+  playMs?: number;
+  sourceLengthMs?: number | null;
+  providerId?: string | null;
+  model?: string | null;
+  estimatedCostCents?: number | null;
 }
 
 export type Aspect = "16:9" | "9:16" | "1:1";
@@ -181,9 +186,11 @@ export interface StripSummary {
   storage?: { usedBytes: number; quotaBytes: number };
   footage?: StripFootageSettings;
   totalSeconds?: number;
+  remainingRenderCents?: number;
+  advancedEnabled?: boolean;
 }
 
-const KIND_LABEL: Record<Kind, string> = {
+export const KIND_LABEL: Record<Kind, string> = {
   cut: "Cut",
   blend: "Smooth blend",
   dissolve: "Grainy dissolve",
@@ -202,14 +209,14 @@ const KIND_LABEL: Record<Kind, string> = {
 };
 /** The free ffmpeg transitions offered under "More…" (no AI, no cost). */
 export const MORE_TRANSITIONS: Kind[] = ["fade", "dissolve", "fade_black", "fade_white", "wipe_left", "wipe_right", "slide_left", "slide_right", "circle_open", "zoom_in", "pixelize", "radial"];
-const CLIP_KIND_LABEL: Record<ClipKind, string> = { generated: "AI shot", uploaded_video: "Your video", still: "Photo" };
+export const CLIP_KIND_LABEL: Record<ClipKind, string> = { generated: "AI shot", uploaded_video: "Your video", still: "Photo" };
 const ASPECT_LABEL: Record<Aspect, string> = { "16:9": "Wide 16:9 (YouTube, TV)", "9:16": "Tall 9:16 (Reels, TikTok, Shorts)", "1:1": "Square 1:1" };
 const DEFAULT_PRESETS: NonNullable<StripSummary["presets"]> = [
   { id: "youtube_16_9", label: "YouTube 16:9 1080p", aspect: "16:9", width: 1920, height: 1080 },
   { id: "reels_9_16", label: "Reels / TikTok 9:16", aspect: "9:16", width: 1080, height: 1920 },
   { id: "square_1_1", label: "Square 1:1", aspect: "1:1", width: 1080, height: 1080 },
 ];
-const STATE_LABEL: Record<StripGap["state"], string> = {
+export const STATE_LABEL: Record<StripGap["state"], string> = {
   default: "",
   suggested: "Suggested",
   generating: "Generating…",
@@ -218,7 +225,6 @@ const STATE_LABEL: Record<StripGap["state"], string> = {
   out_of_date: "Out of date",
   needs_making: "Not made yet",
 };
-const SHOT_STATUS: Record<string, string> = { draft: "draft", queued: "waiting", rendering: "rendering", done: "done", failed: "failed" };
 
 const card: React.CSSProperties = { border: "1px solid rgba(128,128,128,0.35)", borderRadius: 10, padding: 12, display: "flex", flexDirection: "column", gap: 8 };
 const baseBtn: React.CSSProperties = { padding: "6px 12px", borderRadius: 8, border: "1px solid transparent", cursor: "pointer", fontSize: 12, fontWeight: 600 };
@@ -239,27 +245,6 @@ export function stripTakeCostCents(model: StripModel, seconds: number, audioMode
   const s = Math.min(model.maxSeconds, Math.max(model.minSeconds, Math.round(seconds)));
   const perSecond = audioMode === "ambient" && model.soundIsFree && model.soundCentsPerSecond !== null ? model.soundCentsPerSecond : model.centsPerSecond;
   return Math.ceil(s * perSecond);
-}
-
-/** The new play order after dragging `id` in front of `beforeId` (null = to the end). */
-export function stripMoveClip(order: readonly string[], id: string, beforeId: string | null): string[] {
-  if (id === beforeId) return [...order];
-  const rest = order.filter((x) => x !== id);
-  const at = beforeId === null ? rest.length : rest.indexOf(beforeId);
-  rest.splice(at < 0 ? rest.length : at, 0, id);
-  return rest;
-}
-
-/** m:ss for the time ruler and the music lane. */
-export function stripClock(seconds: number): string {
-  const s = Math.max(0, Math.round(seconds));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-}
-
-/** Ruler tick spacing so a film shows about 6-12 labels. */
-export function stripRulerStep(totalSeconds: number): number {
-  for (const step of [1, 2, 5, 10, 15, 30, 60, 120, 300]) if (totalSeconds / step <= 12) return step;
-  return 600;
 }
 
 function sizeText(bytes: number): string {
@@ -284,373 +269,12 @@ async function uploadFootage(apiBase: string, file: File, consent: { showsPeople
   return (await res.json()) as StripUpload;
 }
 
-function gapKey(gap: Pick<StripGap, "fromShotId" | "toShotId">): string {
-  return `${gap.fromShotId}:${gap.toShotId}`;
-}
-
-export function StripPanel(props: { apiBase: string; editable: boolean; onCombineAgain?: () => void | Promise<void> }) {
-  const { apiBase, editable } = props;
-  const [strip, setStrip] = useState<StripSummary | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [selectedClip, setSelectedClip] = useState<string | null>(null);
-  const [playing, setPlaying] = useState<string | null>(null);
-  const [view, setView] = useState<"strip" | "timeline">("strip");
-  const [dragging, setDragging] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    try {
-      setStrip(await storylineFetchJson<StripSummary>(`${apiBase}/strip`, undefined, "loading the strip"));
-      setError(null);
-    } catch (e) {
-      setError(errorText(e));
-    }
-  }, [apiBase]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  // While a version is being made, or your own clips are being got ready, check every few seconds.
-  const working =
-    (strip?.gaps.some((g) => g.state === "generating") ?? false) ||
-    (strip?.clips.some((c) => c.status === "queued" || c.status === "rendering") ?? false) ||
-    ((strip?.uploads ?? []).some((u) => u.status === "processing") ?? false);
-  useEffect(() => {
-    if (!working) return;
-    const timer = setInterval(() => void load(), 5_000);
-    return () => clearInterval(timer);
-  }, [working, load]);
-
-  const run = useCallback(
-    async (fn: () => Promise<unknown>) => {
-      setBusy(true);
-      setError(null);
-      try {
-        await fn();
-        await load();
-      } catch (e) {
-        setError(errorText(e));
-      } finally {
-        setBusy(false);
-      }
-    },
-    [load],
-  );
-
-  if (!strip) {
-    return (
-      <div style={card} data-testid="strip-panel">
-        <strong style={{ fontSize: 14 }}>Strip</strong>
-        {error ? <div style={errorBox}>{error}</div> : <p style={muted}>Loading the strip…</p>}
-      </div>
-    );
-  }
-
-  const clipsById = new Map(strip.clips.map((c) => [c.shotId, c]));
-  const gap = strip.gaps.find((g) => gapKey(g) === selected) ?? null;
-  const clip = selectedClip ? clipsById.get(selectedClip) ?? null : null;
-  const putGap = (g: StripGap, patch: Record<string, unknown>) =>
-    run(() => storylineFetchJson(`${apiBase}/transitions`, { method: "PUT", body: JSON.stringify({ fromShotId: g.fromShotId, toShotId: g.toShotId, ...patch }) }, "saving the transition"));
-  const order = strip.clips.map((c) => c.shotId);
-  const moveTo = (id: string, beforeId: string | null) => {
-    const next = stripMoveClip(order, id, beforeId);
-    if (next.join() === order.join()) return;
-    void run(() => storylineFetchJson(`${apiBase}/order`, { method: "PUT", body: JSON.stringify({ shotIds: next }) }, "moving the clip"));
-  };
-  const dragProps = (beforeId: string | null) =>
-    editable
-      ? {
-          onDragOver: (e: React.DragEvent) => {
-            if (dragging) e.preventDefault();
-          },
-          onDrop: (e: React.DragEvent) => {
-            e.preventDefault();
-            if (dragging) moveTo(dragging, beforeId);
-            setDragging(null);
-          },
-        }
-      : {};
-
-  return (
-    <div style={card} data-testid="strip-panel">
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-        <div>
-          <strong style={{ fontSize: 14 }}>Strip: your clips and the joins between them</strong>
-          <p style={muted}>Click a clip or a join to change it. Drag clips to change their order. Nothing is made or paid for until you press a button that shows its price.</p>
-        </div>
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-          <div role="radiogroup" aria-label="View" style={{ display: "flex", gap: 4 }}>
-            {(["strip", "timeline"] as const).map((v) => (
-              <button key={v} type="button" role="radio" aria-checked={view === v} style={view === v ? secondaryBtn : ghostBtn} onClick={() => setView(v)} data-testid={`strip-view-${v}`}>
-                {v === "strip" ? "Strip" : "Timeline"}
-              </button>
-            ))}
-          </div>
-          <button
-            type="button"
-            style={primaryBtn}
-            data-testid="strip-combine-again"
-            disabled={busy || !strip.canCombineAgain || !props.onCombineAgain}
-            title={strip.canCombineAgain ? undefined : "Every clip must be finished and every AI bridge up to date first."}
-            onClick={() => props.onCombineAgain && void run(async () => props.onCombineAgain!())}
-          >
-            Combine the film again
-          </button>
-        </div>
-      </div>
-      {strip.combineProblems.length > 0 && (
-        <div style={noticeBox} data-testid="strip-combine-problems">
-          The film can't be combined yet:
-          <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
-            {strip.combineProblems.map((p) => (
-              <li key={p}>{p}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {error && <div style={errorBox}>{error}</div>}
-
-      {view === "strip" ? (
-        <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 6, alignItems: "stretch" }} data-testid="strip-row">
-          {strip.clips.map((c, index) => {
-            const before = index > 0 ? strip.gaps[index - 1] : undefined;
-            return (
-              <div key={c.shotId} style={{ display: "flex", gap: 6, alignItems: "stretch" }}>
-                {before && <GapTile gap={before} selected={selected === gapKey(before)} onSelect={() => { setSelected(gapKey(before)); setSelectedClip(null); }} />}
-                <ClipCard
-                  clip={c}
-                  apiBase={apiBase}
-                  playing={playing === c.shotId}
-                  selected={selectedClip === c.shotId}
-                  draggable={editable}
-                  onPlay={() => setPlaying(playing === c.shotId ? null : c.shotId)}
-                  onSelect={() => { setSelectedClip(c.shotId); setSelected(null); }}
-                  onDragStart={() => setDragging(c.shotId)}
-                  onDragEnd={() => setDragging(null)}
-                  dropProps={dragProps(c.shotId)}
-                />
-              </div>
-            );
-          })}
-          {strip.clips.length > 0 && editable && (
-            <div data-testid="strip-drop-end" {...dragProps(null)} style={{ width: 40, flexShrink: 0, borderRadius: 8, border: dragging ? "2px dashed #1971c2" : "1px dashed transparent" }} aria-label="Drop here to move to the end" />
-          )}
-          {strip.clips.length === 0 && <p style={muted}>No clips yet. Write and render some shots, or add your own videos and photos below.</p>}
-        </div>
-      ) : (
-        <TimelineView strip={strip} selectedClip={selectedClip} onSelectClip={(id) => { setSelectedClip(id); setSelected(null); }} />
-      )}
-
-      {editable && <AddFootage apiBase={apiBase} strip={strip} busy={busy} run={run} afterShotId={selectedClip ?? order[order.length - 1] ?? null} />}
-
-      {clip && (
-        <ClipInspector
-          key={`${clip.shotId}:${clip.status}:${clip.clipKind}`}
-          clip={clip}
-          strip={strip}
-          apiBase={apiBase}
-          editable={editable}
-          busy={busy}
-          index={order.indexOf(clip.shotId)}
-          onMove={(delta) => {
-            const i = order.indexOf(clip.shotId);
-            const target = i + delta;
-            if (target < 0 || target >= order.length) return;
-            moveTo(clip.shotId, delta < 0 ? order[target]! : order[target + 1] ?? null);
-          }}
-          run={run}
-          onRemoved={() => setSelectedClip(null)}
-        />
-      )}
-
-      {gap && (
-        <TransitionInspector
-          key={gapKey(gap)}
-          gap={gap}
-          strip={strip}
-          from={clipsById.get(gap.fromShotId)!}
-          to={clipsById.get(gap.toShotId)!}
-          apiBase={apiBase}
-          editable={editable}
-          busy={busy}
-          onPut={(patch) => void putGap(gap, patch)}
-          onSuggest={(body) =>
-            void run(() =>
-              storylineFetchJson(`${apiBase}/transitions/suggest`, { method: "POST", body: JSON.stringify({ fromShotId: gap.fromShotId, toShotId: gap.toShotId, ...body }) }, "asking the AI for a suggestion"),
-            )
-          }
-          onGenerate={(body) =>
-            void run(async () => {
-              let id = gap.id;
-              if (!id) {
-                const saved = await storylineFetchJson<StripGap>(`${apiBase}/transitions`, { method: "PUT", body: JSON.stringify({ fromShotId: gap.fromShotId, toShotId: gap.toShotId, kind: "ai" }) }, "saving the transition");
-                id = saved.id;
-              }
-              await storylineFetchJson(`${apiBase}/transitions/${id}/generate`, { method: "POST", body: JSON.stringify(body) }, "making the transition");
-            })
-          }
-          onUse={(takeId) => void run(() => storylineFetchJson(`${apiBase}/transitions/${gap.id}/takes/${takeId}/use`, { method: "POST", body: "{}" }, "choosing that version"))}
-        />
-      )}
-
-      {strip.music && <MusicLane apiBase={apiBase} strip={strip} editable={editable} busy={busy} run={run} />}
-      {strip.exportSettings && <ExportPanel apiBase={apiBase} strip={strip} editable={editable} busy={busy} run={run} />}
-    </div>
-  );
-}
-
 function clipKindOf(clip: StripClip): ClipKind {
   return clip.clipKind ?? "generated";
 }
 
-function ClipCard(props: {
-  clip: StripClip;
-  apiBase: string;
-  playing: boolean;
-  selected?: boolean;
-  draggable?: boolean;
-  onPlay: () => void;
-  onSelect?: () => void;
-  onDragStart?: () => void;
-  onDragEnd?: () => void;
-  dropProps?: Record<string, unknown>;
-}) {
-  const { clip } = props;
-  const kind = clipKindOf(clip);
-  const preparing = kind !== "generated" && (clip.status === "queued" || clip.status === "rendering");
-  // Your own video plays its light preview copy; everything else its clip.
-  const playSrc = kind === "uploaded_video" && clip.upload ? `${props.apiBase}/uploads/${clip.upload.id}/preview` : `${props.apiBase}/shots/${clip.shotId}/clip`;
-  const statusText = preparing ? "getting ready" : clip.status === "failed" ? "needs a look" : SHOT_STATUS[clip.status] ?? clip.status;
-  return (
-    <div
-      data-testid={`strip-clip-${clip.shotId}`}
-      draggable={props.draggable}
-      onDragStart={(e) => {
-        try {
-          e.dataTransfer?.setData("text/plain", clip.shotId);
-        } catch {
-          // Some browsers refuse custom data; the order is tracked in state anyway.
-        }
-        props.onDragStart?.();
-      }}
-      onDragEnd={props.onDragEnd}
-      {...(props.dropProps ?? {})}
-      style={{
-        width: 170,
-        flexShrink: 0,
-        border: props.selected ? "2px solid #1971c2" : "1px solid rgba(128,128,128,0.35)",
-        borderRadius: 8,
-        padding: 6,
-        display: "flex",
-        flexDirection: "column",
-        gap: 4,
-        fontSize: 12,
-        cursor: props.draggable ? "grab" : "default",
-      }}
-    >
-      {props.playing && clip.hasClip ? (
-        <video src={playSrc} controls autoPlay style={{ width: "100%", borderRadius: 6 }} />
-      ) : clip.hasPoster ? (
-        <img src={`${props.apiBase}/shots/${clip.shotId}/poster`} alt={`Clip ${clip.orderIndex + 1}`} style={{ width: "100%", aspectRatio: "16 / 9", objectFit: "cover", borderRadius: 6 }} />
-      ) : (
-        <div style={{ width: "100%", aspectRatio: "16 / 9", borderRadius: 6, background: "rgba(128,128,128,0.15)" }} />
-      )}
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 4 }}>
-        <strong>{kind === "generated" ? "Shot" : "Clip"} {clip.orderIndex + 1}</strong>
-        <span style={{ color: "#868e96" }}>
-          {clip.durationSeconds} s · {statusText}
-        </span>
-      </div>
-      <span style={{ color: "#868e96", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={clip.prompt}>
-        {CLIP_KIND_LABEL[kind]} · {kind === "still" ? (clip.stillMotion === "slow_zoom" ? "slow zoom" : "held still") : clip.prompt}
-      </span>
-      {clip.muted && <span style={{ color: "#868e96" }}>Sound off</span>}
-      <div style={{ display: "flex", gap: 4 }}>
-        {clip.hasClip && (
-          <button type="button" style={ghostBtn} onClick={props.onPlay} aria-label={`Play clip ${clip.orderIndex + 1}`}>
-            {props.playing ? "Stop" : "Play"}
-          </button>
-        )}
-        {props.onSelect && (
-          <button type="button" style={ghostBtn} onClick={props.onSelect} data-testid={`strip-clip-edit-${clip.shotId}`}>
-            Edit
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/** Timeline view: a time ruler, the clips as blocks as long as they play, and the music lane under them. */
-function TimelineView(props: { strip: StripSummary; selectedClip: string | null; onSelectClip: (id: string) => void }) {
-  const { strip } = props;
-  const blocks: Array<{ key: string; label: string; seconds: number; shotId?: string; bridge?: boolean }> = [];
-  strip.clips.forEach((c, i) => {
-    const before = i > 0 ? strip.gaps[i - 1] : undefined;
-    if (before?.kind === "ai") blocks.push({ key: `gap-${before.fromShotId}`, label: "AI bridge", seconds: before.durationMs / 1000, bridge: true });
-    blocks.push({ key: c.shotId, label: `${CLIP_KIND_LABEL[clipKindOf(c)]} ${c.orderIndex + 1}`, seconds: c.durationSeconds, shotId: c.shotId });
-  });
-  const total = Math.max(1, strip.totalSeconds ?? blocks.reduce((s, b) => s + b.seconds, 0));
-  const step = stripRulerStep(total);
-  const ticks: number[] = [];
-  for (let t = 0; t <= total; t += step) ticks.push(t);
-  const music = strip.music;
-  const musicLeft = music ? Math.min(100, ((music.offsetMs / 1000) / total) * 100) : 0;
-  return (
-    <div data-testid="strip-timeline" style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11 }}>
-      <div data-testid="timeline-ruler" style={{ position: "relative", height: 16, borderBottom: "1px solid rgba(128,128,128,0.5)" }}>
-        {ticks.map((t) => (
-          <span key={t} style={{ position: "absolute", left: `${(t / total) * 100}%`, transform: "translateX(-50%)", color: "#868e96" }}>
-            {stripClock(t)}
-          </span>
-        ))}
-      </div>
-      <div style={{ display: "flex", height: 34 }} aria-label="Clips lane">
-        {blocks.map((b) => (
-          <button
-            key={b.key}
-            type="button"
-            data-testid={`timeline-block-${b.key}`}
-            onClick={() => b.shotId && props.onSelectClip(b.shotId)}
-            style={{
-              width: `${(b.seconds / total) * 100}%`,
-              minWidth: 4,
-              border: props.selectedClip === b.shotId ? "2px solid #1971c2" : "1px solid rgba(128,128,128,0.5)",
-              background: b.bridge ? "#f3f0ff" : "rgba(25,113,194,0.08)",
-              borderRadius: 4,
-              overflow: "hidden",
-              whiteSpace: "nowrap",
-              fontSize: 11,
-              color: "inherit",
-              padding: "0 4px",
-              cursor: b.shotId ? "pointer" : "default",
-            }}
-            title={`${b.label} · ${b.seconds.toFixed(b.seconds % 1 ? 1 : 0)} s`}
-          >
-            {b.label}
-          </button>
-        ))}
-      </div>
-      <div style={{ position: "relative", height: 26, background: "rgba(128,128,128,0.06)", borderRadius: 4 }} aria-label="Music lane" data-testid="timeline-music-lane">
-        {music?.musicAssetId ? (
-          <div
-            data-testid="timeline-music-block"
-            style={{ position: "absolute", left: `${musicLeft}%`, right: 0, top: 2, bottom: 2, background: "#e6fcf5", border: "1px solid #63e6be", borderRadius: 4, padding: "2px 6px", overflow: "hidden", whiteSpace: "nowrap" }}
-          >
-            ♪ {music.fileName ?? "Music"} · from {stripClock(music.offsetMs / 1000)} · {music.audioMode === "replace" ? "replaces clip sound" : "under clip sound"}
-          </div>
-        ) : (
-          <span style={{ position: "absolute", left: 6, top: 5, color: "#868e96" }}>No music. Pick some below.</span>
-        )}
-      </div>
-    </div>
-  );
-}
-
 /** Add your own video or photo: consent ticks first when it shows people, then upload; ready uploads can be put in the film. */
-function AddFootage(props: { apiBase: string; strip: StripSummary; busy: boolean; run: (fn: () => Promise<unknown>) => Promise<void>; afterShotId: string | null }) {
+export function AddFootage(props: { apiBase: string; strip: StripSummary; busy: boolean; run: (fn: () => Promise<unknown>) => Promise<void>; afterShotId: string | null }) {
   const { strip } = props;
   const [showsPeople, setShowsPeople] = useState(false);
   const [likeness, setLikeness] = useState(false);
@@ -742,7 +366,7 @@ function AddFootage(props: { apiBase: string; strip: StripSummary; busy: boolean
 }
 
 /** One clip: trim (your video), hold / slow zoom / animate (photo), sound, consent, order. */
-function ClipInspector(props: {
+export function ClipInspector(props: {
   clip: StripClip;
   strip: StripSummary;
   apiBase: string;
@@ -854,17 +478,7 @@ function ClipInspector(props: {
         </>
       )}
 
-      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 12 }} data-testid="clip-sound">
-        <label style={{ display: "flex", gap: 4, alignItems: "center" }}>
-          <input type="checkbox" checked={clip.muted ?? false} disabled={disabled} onChange={(e) => patch({ muted: e.target.checked }, "saving the sound")} data-testid="clip-mute" />
-          Mute this clip
-        </label>
-        <label style={{ display: "flex", gap: 4, alignItems: "center" }}>
-          Volume
-          <input type="range" min={-30} max={12} step={1} defaultValue={clip.volumeDb ?? 0} disabled={disabled || clip.muted} onMouseUp={(e) => patch({ volumeDb: Number((e.target as HTMLInputElement).value) }, "saving the volume")} onKeyUp={(e) => patch({ volumeDb: Number((e.target as HTMLInputElement).value) }, "saving the volume")} aria-label="Clip volume" data-testid="clip-volume" />
-          {clip.volumeDb ?? 0} dB
-        </label>
-      </div>
+      <ClipSound clip={clip} disabled={disabled} onPatch={patch} />
 
       {upload && (
         <div style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12 }} data-testid="clip-consent">
@@ -919,8 +533,63 @@ function ClipInspector(props: {
   );
 }
 
+/** A clip's own sound: mute, or turn it up or down (used by every kind of clip). */
+export function ClipSound(props: { clip: StripClip; disabled: boolean; onPatch: (body: Record<string, unknown>, doing: string) => void }) {
+  const { clip, disabled } = props;
+  return (
+    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 12 }} data-testid="clip-sound">
+      <label style={{ display: "flex", gap: 4, alignItems: "center" }}>
+        <input type="checkbox" checked={clip.muted ?? false} disabled={disabled} onChange={(e) => props.onPatch({ muted: e.target.checked }, "saving the sound")} data-testid="clip-mute" />
+        Mute this clip
+      </label>
+      <label style={{ display: "flex", gap: 4, alignItems: "center" }}>
+        Volume
+        <input
+          type="range"
+          min={-30}
+          max={12}
+          step={1}
+          defaultValue={clip.volumeDb ?? 0}
+          disabled={disabled || clip.muted}
+          onMouseUp={(e) => props.onPatch({ volumeDb: Number((e.target as HTMLInputElement).value) }, "saving the volume")}
+          onKeyUp={(e) => props.onPatch({ volumeDb: Number((e.target as HTMLInputElement).value) }, "saving the volume")}
+          aria-label="Clip volume"
+          data-testid="clip-volume"
+        />
+        {clip.volumeDb ?? 0} dB
+      </label>
+    </div>
+  );
+}
+
+/** The picture shape, chosen before anything is made (step 2); fixed once an AI picture or clip exists. */
+export function AspectPicker(props: { apiBase: string; aspect: Aspect; locked: boolean; disabled: boolean; run: (fn: () => Promise<unknown>) => Promise<void> }) {
+  return (
+    <label style={{ fontSize: 12, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }} data-testid="aspect-picker">
+      Picture shape
+      <select
+        style={{ ...input, padding: 6 }}
+        value={props.aspect}
+        disabled={props.disabled || props.locked}
+        data-testid="export-aspect"
+        aria-label="Picture shape"
+        onChange={(e) => void props.run(() => storylineFetchJson(`${props.apiBase}/aspect`, { method: "PUT", body: JSON.stringify({ aspect: e.target.value }) }, "saving the picture shape"))}
+      >
+        {(Object.keys(ASPECT_LABEL) as Aspect[]).map((a) => (
+          <option key={a} value={a}>
+            {ASPECT_LABEL[a]}
+          </option>
+        ))}
+      </select>
+      <span style={muted}>
+        {props.locked ? "Fixed: AI pictures and clips have already been made in this shape." : "Choose it before anything is made; the AI makes every picture and clip in this shape."}
+      </span>
+    </label>
+  );
+}
+
 /** The music lane: pick a file (including music made in Media Studio), trim, start, fades, volume, mix or replace. */
-function MusicLane(props: { apiBase: string; strip: StripSummary; editable: boolean; busy: boolean; run: (fn: () => Promise<unknown>) => Promise<void> }) {
+export function MusicLane(props: { apiBase: string; strip: StripSummary; editable: boolean; busy: boolean; run: (fn: () => Promise<unknown>) => Promise<void>; defaultOpen?: boolean }) {
   const music = props.strip.music!;
   const disabled = props.busy || !props.editable;
   const companyBase = props.apiBase.replace(/\/[^/]+$/, "");
@@ -939,8 +608,12 @@ function MusicLane(props: { apiBase: string; strip: StripSummary; editable: bool
       .then(setChoices)
       .catch(() => setChoices([]));
   const ms = (v: string) => Math.max(0, Math.round(Number(v || 0) * 1000));
+  useEffect(() => {
+    if (props.defaultOpen && choices === null) loadChoices();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.defaultOpen]);
   return (
-    <details style={{ fontSize: 12 }} data-testid="music-lane" onToggle={(e) => (e.currentTarget as HTMLDetailsElement).open && choices === null && loadChoices()}>
+    <details style={{ fontSize: 12 }} data-testid="music-lane" open={props.defaultOpen} onToggle={(e) => (e.currentTarget as HTMLDetailsElement).open && choices === null && loadChoices()}>
       <summary style={{ cursor: "pointer", fontWeight: 600 }}>Music: {music.fileName ?? "none"}</summary>
       <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
@@ -1038,7 +711,7 @@ function MusicLane(props: { apiBase: string; strip: StripSummary; editable: bool
 }
 
 /** Export: the picture shape (before anything is made), presets, Advanced folded away, title cards, Export again. */
-function ExportPanel(props: { apiBase: string; strip: StripSummary; editable: boolean; busy: boolean; run: (fn: () => Promise<unknown>) => Promise<void> }) {
+export function ExportPanel(props: { apiBase: string; strip: StripSummary; editable: boolean; busy: boolean; run: (fn: () => Promise<unknown>) => Promise<void>; hideAspect?: boolean }) {
   const { strip } = props;
   const settings = strip.exportSettings!;
   const presets = strip.presets ?? DEFAULT_PRESETS;
@@ -1058,27 +731,8 @@ function ExportPanel(props: { apiBase: string; strip: StripSummary; editable: bo
   const canExport = strip.canCombineAgain;
   return (
     <div style={{ ...card, background: "rgba(128,128,128,0.03)" }} data-testid="export-panel">
-      <strong style={{ fontSize: 13 }}>Picture shape and export</strong>
-      <label style={{ fontSize: 12, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-        Picture shape
-        <select
-          style={{ ...input, padding: 6 }}
-          value={strip.aspect ?? "16:9"}
-          disabled={disabled || strip.aspectLocked}
-          data-testid="export-aspect"
-          aria-label="Picture shape"
-          onChange={(e) => void props.run(() => storylineFetchJson(`${props.apiBase}/aspect`, { method: "PUT", body: JSON.stringify({ aspect: e.target.value }) }, "saving the picture shape"))}
-        >
-          {(Object.keys(ASPECT_LABEL) as Aspect[]).map((a) => (
-            <option key={a} value={a}>
-              {ASPECT_LABEL[a]}
-            </option>
-          ))}
-        </select>
-        <span style={muted}>
-          {strip.aspectLocked ? "Fixed: AI pictures and clips have already been made in this shape." : "Choose it before anything is made; the AI makes every picture and clip in this shape."}
-        </span>
-      </label>
+      <strong style={{ fontSize: 13 }}>{props.hideAspect ? "Export" : "Picture shape and export"}</strong>
+      {!props.hideAspect && <AspectPicker apiBase={props.apiBase} aspect={strip.aspect ?? "16:9"} locked={Boolean(strip.aspectLocked)} disabled={disabled} run={props.run} />}
       <div role="radiogroup" aria-label="Export preset" style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
         {presets.map((p) => (
           <button key={p.id} type="button" role="radio" aria-checked={draft.preset === p.id} style={draft.preset === p.id ? primaryBtn : ghostBtn} disabled={disabled} data-testid={`export-preset-${p.id}`} onClick={() => setDraft({ ...draft, preset: p.id })}>
@@ -1154,45 +808,7 @@ function ExportPanel(props: { apiBase: string; strip: StripSummary; editable: bo
   );
 }
 
-function GapTile(props: { gap: StripGap; selected: boolean; onSelect: () => void }) {
-  const { gap } = props;
-  const stale = gap.state === "out_of_date" || gap.state === "failed";
-  const seconds = gap.kind === "cut" ? "" : ` · ${(gap.durationMs / 1000).toFixed(gap.durationMs % 1000 === 0 ? 0 : 1)} s`;
-  return (
-    <button
-      type="button"
-      data-testid={`strip-gap-${gap.fromShotId}`}
-      onClick={props.onSelect}
-      aria-pressed={props.selected}
-      style={{
-        width: 96,
-        flexShrink: 0,
-        borderRadius: 8,
-        cursor: "pointer",
-        padding: 6,
-        fontSize: 11,
-        textAlign: "left",
-        color: "inherit",
-        display: "flex",
-        flexDirection: "column",
-        justifyContent: "center",
-        gap: 2,
-        border: props.selected ? "2px solid #1971c2" : `1px dashed ${stale ? "#e8590c" : "rgba(128,128,128,0.6)"}`,
-        background: gap.kind === "ai" ? "#f3f0ff" : "transparent",
-      }}
-    >
-      <strong>
-        {KIND_LABEL[gap.kind]}
-        {seconds}
-      </strong>
-      {gap.locked && <span>Locked</span>}
-      {STATE_LABEL[gap.state] && <span style={{ color: stale ? "#d9480f" : "#868e96" }}>{STATE_LABEL[gap.state]}</span>}
-      {gap.kind === "ai" && gap.plainLine && <span style={{ color: "#5f3dc4", overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>{gap.plainLine}</span>}
-    </button>
-  );
-}
-
-function TransitionInspector(props: {
+export function TransitionInspector(props: {
   gap: StripGap;
   strip: StripSummary;
   from: StripClip;
@@ -1204,8 +820,11 @@ function TransitionInspector(props: {
   onSuggest: (body: { plainLine?: string; note?: string }) => void;
   onGenerate: (body: { note?: string; confirmCostCents: number }) => void;
   onUse: (takeId: string) => void;
+  /** False when the company has Advanced features off: an AI bridge can't be chosen. */
+  aiAllowed?: boolean;
 }) {
   const { gap, strip } = props;
+  const aiAllowed = props.aiAllowed !== false;
   const [plainLine, setPlainLine] = useState(gap.plainLine ?? "");
   const [prompt, setPrompt] = useState(gap.prompt ?? "");
   const [note, setNote] = useState("");
@@ -1242,37 +861,7 @@ function TransitionInspector(props: {
       {gap.textOnlyReason && <p style={{ ...muted, color: "#7f5f01" }} data-testid="transition-text-only">{gap.textOnlyReason}</p>}
       {gap.suggestionOutdated && <p style={muted}>The clips changed since this suggestion was written. Ask again for a fresh one.</p>}
 
-      {/* 1. What happens */}
-      <label style={{ fontSize: 12, fontWeight: 600 }} htmlFor={`what-${gap.fromShotId}`}>
-        What happens
-      </label>
-      <textarea
-        id={`what-${gap.fromShotId}`}
-        style={{ ...input, minHeight: 50 }}
-        value={plainLine}
-        placeholder="Ask the AI for a suggestion, or write what should happen between the two clips."
-        disabled={lockedOut}
-        onChange={(e) => setPlainLine(e.target.value)}
-        data-testid="transition-plain-line"
-      />
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-        <button
-          type="button"
-          style={secondaryBtn}
-          disabled={lockedOut || Boolean(strip.writerProblem)}
-          data-testid="transition-suggest"
-          onClick={() => props.onSuggest(plainLine.trim() && plainLine !== gap.plainLine ? { plainLine } : {})}
-        >
-          {gap.plainLine ? (plainLine !== gap.plainLine ? "Rewrite the AI prompt from my sentence" : "Ask the AI again") : "Let the AI look at this join"}
-        </button>
-        <span style={muted}>
-          Uses this company's own AI{strip.readerLabel ? ` (it looks at the clips with "${strip.readerLabel}")` : ""}; a few cents at most.
-        </span>
-      </div>
-      {strip.writerProblem && <div style={noticeBox} data-testid="transition-writer-problem">{strip.writerProblem}</div>}
-      {!strip.writerProblem && strip.readerProblem && !gap.textOnlyReason && <p style={muted}>{strip.readerProblem}</p>}
-
-      {/* 2. The three choices */}
+      {/* 1. How to join: the three choices */}
       <div role="radiogroup" aria-label="How to join" style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
         {(["cut", "blend", "ai"] as const).map((kind) => (
           <button
@@ -1280,7 +869,8 @@ function TransitionInspector(props: {
             type="button"
             role="radio"
             aria-checked={gap.kind === kind}
-            disabled={lockedOut}
+            disabled={lockedOut || (kind === "ai" && !aiAllowed && gap.kind !== "ai")}
+            title={kind === "ai" && !aiAllowed ? "AI bridges are part of Advanced features (top of the page)." : undefined}
             data-testid={`transition-kind-${kind}`}
             style={gap.kind === kind ? primaryBtn : ghostBtn}
             onClick={() => props.onPut({ kind })}
@@ -1310,6 +900,40 @@ function TransitionInspector(props: {
         </p>
       )}
 
+      {aiAllowed && (
+        <>
+      {/* 2. What happens (the AI reads the two clips; Advanced features) */}
+      <label style={{ fontSize: 12, fontWeight: 600 }} htmlFor={`what-${gap.fromShotId}`}>
+        What happens
+      </label>
+      <textarea
+        id={`what-${gap.fromShotId}`}
+        style={{ ...input, minHeight: 50 }}
+        value={plainLine}
+        placeholder="Ask the AI for a suggestion, or write what should happen between the two clips."
+        disabled={lockedOut}
+        onChange={(e) => setPlainLine(e.target.value)}
+        data-testid="transition-plain-line"
+      />
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        <button
+          type="button"
+          style={secondaryBtn}
+          disabled={lockedOut || Boolean(strip.writerProblem)}
+          data-testid="transition-suggest"
+          onClick={() => props.onSuggest(plainLine.trim() && plainLine !== gap.plainLine ? { plainLine } : {})}
+        >
+          {gap.plainLine ? (plainLine !== gap.plainLine ? "Rewrite the AI prompt from my sentence" : "Ask the AI again") : "Let the AI look at this join"}
+        </button>
+        <span style={muted}>
+          Uses this company's own AI{strip.readerLabel ? ` (it looks at the clips with "${strip.readerLabel}")` : ""}; a few cents at most.
+        </span>
+      </div>
+      {strip.writerProblem && <div style={noticeBox} data-testid="transition-writer-problem">{strip.writerProblem}</div>}
+      {!strip.writerProblem && strip.readerProblem && !gap.textOnlyReason && <p style={muted}>{strip.readerProblem}</p>}
+
+        </>
+      )}
       {/* 3. Length */}
       {(isBlend || gap.kind === "ai") && (
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
