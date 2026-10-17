@@ -663,6 +663,31 @@ describeDb("helper investigations (Ask Paperclip, Phase 3)", () => {
     expect(system).toContain("Never say that you started anything yourself");
     expect(await db.select().from(issues)).toHaveLength(0);
   });
+
+  it("flags questions that ask Paperclip to make a change, so the panel can offer Board chat", async () => {
+    const companyId = await seedCompany();
+    const answerWith = (text: string) =>
+      vi.fn().mockResolvedValue({ content: [{ type: "text", text }], usage: { input_tokens: 5, output_tokens: 5 }, stop_reason: "end_turn" });
+    const ask = (create: ReturnType<typeof answerWith>, message: string) =>
+      helperService(db, { createModelClient: () => ({ messages: { create } }) as never }).ask({ companyId, userId: "maria", message });
+
+    // A request, by the plain check on the question (the model did not mark it).
+    const request = await ask(answerWith("I can't change things. Go to Agents → Hire."), "Can you hire a marketing agent for me?");
+    expect(request.suggestBoardChat).toBe(true);
+
+    // The model marked it (wording the plain check does not know); the marker never reaches the person.
+    const markedCreate = answerWith(`I can't do that myself. Open the agent and press Pause.\n\n[[wants-change]]`);
+    const marked = await ask(markedCreate, "Ola should take a break from tonight's runs");
+    expect(marked.suggestBoardChat).toBe(true);
+    expect(marked.answer).toBe("I can't do that myself. Open the agent and press Pause.");
+    expect(markedCreate.mock.calls[0]![0].system as string).toContain("[[wants-change]]");
+
+    // A question about how something works is not flagged.
+    const question = await ask(answerWith("It decides how often the agent wakes up."), "What does the heartbeat interval do?");
+    expect(question.suggestBoardChat).toBe(false);
+    expect(question.suggestInvestigation).toBe(false);
+    expect(await db.select().from(issues)).toHaveLength(0);
+  });
 });
 
 describe("helper investigation pieces", () => {

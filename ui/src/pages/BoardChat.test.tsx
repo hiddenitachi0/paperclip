@@ -6,8 +6,10 @@ import { act, forwardRef, useImperativeHandle } from "react";
 import type { ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BoardChat } from "./BoardChat";
+import { boardChatPrefillState } from "../lib/board-chat-handoff";
 
 /**
  * Regression coverage for the post-wizard Conference Room intro (PAP-134,
@@ -52,10 +54,12 @@ vi.mock("../components/ActivityFeed", () => ({
 vi.mock("../components/MarkdownBody", () => ({
   MarkdownBody: ({ children }: { children: ReactNode }) => <div>{children}</div>,
 }));
+const composerSpy = vi.hoisted(() => ({ onSubmit: vi.fn() }));
 vi.mock("../components/ChatComposer", () => ({
-  ChatComposer: forwardRef((_props, ref) => {
+  ChatComposer: forwardRef((props: { value: string; onSubmit: () => void }, ref) => {
     useImperativeHandle(ref, () => ({ focus: vi.fn() }));
-    return <div data-testid="chat-composer" />;
+    composerSpy.onSubmit = vi.fn(props.onSubmit);
+    return <div data-testid="chat-composer" data-value={props.value} />;
   }),
 }));
 vi.mock("../components/AgentBubbleActionRow", () => ({
@@ -148,13 +152,17 @@ describe("BoardChat staged typing intro", () => {
   });
 
   let queryClient: QueryClient | null = null;
+  let initialEntry: string | { pathname: string; state: unknown } = "/PAP/board-chat";
 
   function buildElement() {
     // A fresh element every time — rendering an identical element reference
     // lets React bail out of re-rendering, which would hide mock-state flips.
     return (
       <QueryClientProvider client={queryClient!}>
-        <BoardChat />
+        <MemoryRouter initialEntries={[initialEntry]}>
+          <BoardChat />
+          <LocationProbe />
+        </MemoryRouter>
       </QueryClientProvider>
     );
   }
@@ -267,7 +275,62 @@ describe("BoardChat staged typing intro", () => {
     expect(hasWelcome(container)).toBe(true);
     expect(hasTypingDots(container)).toBe(false);
   });
+
+  it("is titled Board chat and says what it can do", async () => {
+    await render();
+    expect(container.querySelector("h3")?.textContent).toBe("Alex");
+    expect(container.querySelector("[data-testid=board-chat-subtitle]")?.textContent).toBe(
+      "Talk to an AI board member that can make changes for you (hire agents, create tasks, change settings).",
+    );
+    expect(container.textContent).not.toContain("Conference Room");
+  });
+
+  it("points to Ask while the conversation is empty, and not once there are messages", async () => {
+    await render();
+    expect(container.querySelector("[data-testid=board-chat-ask-tip]")?.textContent).toBe(
+      "Just want an explanation of a page? Use the Ask tab on the right edge.",
+    );
+    await act(async () => {
+      root?.unmount();
+    });
+    mockIssuesApi.listComments.mockResolvedValue([USER_COMMENT]);
+    await render();
+    expect(container.querySelector("[data-testid=board-chat-ask-tip]")).toBeNull();
+  });
+
+  it("types in a message handed over from Ask, without sending it, and clears it from the history entry", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    sessionStorage.setItem("paperclip.boardChat.draft.company-1", "an older draft");
+    initialEntry = { pathname: "/PAP/board-chat", state: boardChatPrefillState("Hire a marketing agent\n\n(I asked this while looking at the page “Agents · Acme”.)") };
+    await render();
+
+    const composer = container.querySelector("[data-testid=chat-composer]")!;
+    expect(composer.getAttribute("data-value")).toBe(
+      "Hire a marketing agent\n\n(I asked this while looking at the page “Agents · Acme”.)",
+    );
+    // Nothing was sent: the person reviews it and presses Send themselves.
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(composerSpy.onSubmit).not.toHaveBeenCalled();
+    // The hand-off lived only in navigation state (never the address), and is gone after use.
+    const probe = JSON.parse(container.querySelector("[data-testid=location-probe]")!.textContent!);
+    expect(probe.pathname).toBe("/PAP/board-chat");
+    expect(probe.search).toBe("");
+    expect(probe.state).toBeNull();
+    // It is kept as the draft, like anything typed.
+    expect(sessionStorage.getItem("paperclip.boardChat.draft.company-1")).toContain("Hire a marketing agent");
+    initialEntry = "/PAP/board-chat";
+  });
 });
+
+function LocationProbe() {
+  const location = useLocation();
+  return (
+    <pre data-testid="location-probe" hidden>
+      {JSON.stringify({ pathname: location.pathname, search: location.search, state: location.state ?? null })}
+    </pre>
+  );
+}
 
 describe("typing-dots CSS animation guard (PAP-54 failure mode)", () => {
   // PAP-54: the .typing-dots CSS block was silently dropped from index.css
