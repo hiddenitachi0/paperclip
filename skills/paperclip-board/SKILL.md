@@ -117,10 +117,12 @@ curl -sS -X POST "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/agent-h
     "adapterType": "claude_local",
     "adapterConfig": {
       "cwd": "/path/to/working/directory",
-      "model": "sonnet"
+      "model": "claude-sonnet-5-5",
+      "effort": "medium"
     },
+    "instructionsBundle": {"files": {"AGENTS.md": "... the CEO system prompt from the template ..."}},
     "runtimeConfig": {
-      "heartbeat": {"enabled": true, "intervalSec": 300, "wakeOnDemand": true}
+      "heartbeat": {"enabled": true, "intervalSec": 3600, "wakeOnDemand": true}
     },
     "permissions": {"canCreateAgents": true},
     "budgetMonthlyCents": 10000
@@ -275,15 +277,23 @@ curl -sS -X POST "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/agent-h
     "adapterType": "claude_local",
     "adapterConfig": {
       "cwd": "/path/to/working/directory",
-      "model": "sonnet",
-      "systemPrompt": "... the full system prompt from the template ..."
+      "model": "claude-sonnet-5-5",
+      "effort": "medium"
     },
+    "instructionsBundle": {"files": {"AGENTS.md": "... the full system prompt from the template ..."}},
+    "desiredSkills": ["paperclipai/paperclip/paperclip"],
     "runtimeConfig": {
-      "heartbeat": {"enabled": true, "intervalSec": 300, "wakeOnDemand": true}
+      "heartbeat": {"enabled": false, "wakeOnDemand": true}
     },
     "budgetMonthlyCents": 5000
   }'
 ```
+
+Hiring notes:
+- **The system prompt goes in `instructionsBundle.files["AGENTS.md"]`.** `claude_local` has no `adapterConfig.systemPrompt` field — a prompt put there is silently ignored.
+- **Always set a model and effort.** Leaving `model` empty runs the Claude CLI's own default, which is usually the most expensive model. Rough guide: `claude-opus-5-5` + `high` for reviewers, security and hard reasoning; `claude-sonnet-5-5` + `medium`/`high` for coding, orchestration and CEO/manager roles; `claude-haiku-5-5` + `low`/`medium` for routine, high-volume work (inbox sorting, simple replies, status reports).
+- **Timer heartbeats stay off unless the role needs scheduled work.** A wake every 5 minutes on an idle agent burns budget for nothing; `wakeOnDemand` already wakes the agent when it gets a task or a mention.
+- **If the company has a matching Position** (`GET /api/companies/:companyId/positions`), assign it after the hire (`POST /api/agents/:id/role` with `{"roleId": "..."}`, board only) — the agent then gets the position's starting instructions, tools, rights and skills.
 
 ### Cross-Agent Escalation Path Updates
 
@@ -498,7 +508,13 @@ Three ways the user can edit system prompts:
 # Always re-fetch before modifying
 curl -sS "$PAPERCLIP_API_URL/api/agents/{id}"
 
-# Then update
+# Agents with a managed instructions bundle: read and rewrite AGENTS.md
+curl -sS "$PAPERCLIP_API_URL/api/agents/{id}/instructions-bundle/file?path=AGENTS.md"
+curl -sS -X PUT "$PAPERCLIP_API_URL/api/agents/{id}/instructions-bundle/file" \
+  -H "Content-Type: application/json" \
+  -d '{"path": "AGENTS.md", "content": "... full updated prompt ..."}'
+
+# Other settings (model, effort, cwd, ...) go through adapterConfig
 curl -sS -X PATCH "$PAPERCLIP_API_URL/api/agents/{id}" \
   -H "Content-Type: application/json" \
   -d '{"adapterConfig": { ... updated config ... }}'
@@ -617,4 +633,7 @@ All web UI links must include the company prefix:
 | Adapter detail | GET | `/llms/agent-configuration/:adapterType.txt` |
 | Agent icons | GET | `/llms/agent-icons.txt` |
 | Set instructions | PATCH | `/api/agents/:id/instructions-path` |
+| Read / write AGENTS.md | GET / PUT | `/api/agents/:id/instructions-bundle/file` |
+| List positions | GET | `/api/companies/:companyId/positions` |
+| Assign a position | POST | `/api/agents/:id/role` |
 | Search issues | GET | `/api/companies/:companyId/issues?q=term` |

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "packageName": "@paperclipai/skills-catalog",
   "packageVersion": "0.3.1",
-  "generatedAt": "2026-10-04T23:24:22.174Z",
+  "generatedAt": "2026-10-17T01:58:51.126Z",
   "skills": [
     {
       "id": "paperclipai:bundled:docs:doc-maintenance",
@@ -200,8 +200,8 @@
         {
           "path": "SKILL.md",
           "kind": "skill",
-          "sizeBytes": 11887,
-          "sha256": "a910d038d8cdd13615b82f44a2195b781ebccf01c49f9c58babd43b0701fe644"
+          "sizeBytes": 12350,
+          "sha256": "cd8e7e88426e3856512bc7e97454da82f7cec94397f9bb892840490dbeb412d2"
         },
         {
           "path": "assets/site-template.html",
@@ -240,7 +240,7 @@
           "sha256": "017260d2216859d57e5fa869e0efc6b88c7ed4d8a8a4f5af04fe89a3ef2445bd"
         }
       ],
-      "contentHash": "sha256:0bd9a9fdc656d529e3f97c00cd504dcf72d3a4fecb8b0504ca2fe3e00d63287f"
+      "contentHash": "sha256:ae23284bd9024c9c763b2799aa8bb136848abdff7234b45deea1a432b8b3b49f"
     },
     {
       "id": "paperclipai:bundled:quality:qa-acceptance",
@@ -344,6 +344,43 @@
       "contentHash": "sha256:7cc3308a959c3de77740355669029ca10d28f4d76029584f88bc7e617c894a13"
     },
     {
+      "id": "paperclipai:optional:analysis:report-analysis",
+      "key": "paperclipai/optional/analysis/report-analysis",
+      "kind": "optional",
+      "category": "analysis",
+      "slug": "report-analysis",
+      "name": "report-analysis",
+      "description": "Read a report — PDF, spreadsheet, CSV or dashboard export — and explain what it says with every number cited to its source, totals recomputed, periods and units checked, and facts kept apart from interpretation. Use when a task asks you to read, summarise, check or compare reports or figures. Never invents a number.",
+      "path": "catalog/optional/analysis/report-analysis",
+      "entrypoint": "SKILL.md",
+      "trustLevel": "markdown_only",
+      "compatibility": "compatible",
+      "defaultInstall": false,
+      "recommendedForRoles": [
+        "analyst",
+        "finance",
+        "ceo",
+        "reporting"
+      ],
+      "requires": [],
+      "tags": [
+        "analysis",
+        "reports",
+        "kpi",
+        "finance",
+        "spreadsheets"
+      ],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "kind": "skill",
+          "sizeBytes": 4880,
+          "sha256": "700a3e1de744e5934166449d753f4c0a0c89f083f1a51348675fbd92c3c44c97"
+        }
+      ],
+      "contentHash": "sha256:f0c63c50717293ca22b6f5a861343e9750a36fb4f27100f8d54d44c23d3ea6bd"
+    },
+    {
       "id": "paperclipai:optional:browser:agent-browser",
       "key": "paperclipai/optional/browser/agent-browser",
       "kind": "optional",
@@ -379,6 +416,117 @@
       "contentHash": "sha256:eabb2c9f7b5e1a27ebb1e05a711d61433a266478154cd671a685e99e67aadea2"
     },
     {
+      "id": "paperclipai:optional:communication:customer-support-replies",
+      "key": "paperclipai/optional/communication/customer-support-replies",
+      "kind": "optional",
+      "category": "communication",
+      "slug": "customer-support-replies",
+      "name": "customer-support-replies",
+      "description": "Answer customer questions with replies grounded in the real order, account and policy facts — friendly, short, in the customer's language — and escalate refunds, legal, safety and angry cases to a human. Use when a task asks you to reply to a customer, handle a support ticket, or draft answers to customer messages.",
+      "path": "catalog/optional/communication/customer-support-replies",
+      "entrypoint": "SKILL.md",
+      "trustLevel": "markdown_only",
+      "compatibility": "compatible",
+      "defaultInstall": false,
+      "recommendedForRoles": [
+        "support",
+        "customer-support",
+        "sales",
+        "assistant"
+      ],
+      "requires": [],
+      "tags": [
+        "support",
+        "customer-service",
+        "replies",
+        "escalation",
+        "communication"
+      ],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "kind": "skill",
+          "sizeBytes": 5560,
+          "sha256": "2ffb154ad96b02f3599a9ee7a4d880f7ceb5993f92d736ae859b7cbb23179460"
+        }
+      ],
+      "contentHash": "sha256:d1878d24d9965e282061ceb41ef01d695c4da75a10de5b96051cb0b9a915f6fd"
+    },
+    {
+      "id": "paperclipai:optional:communication:email-triage",
+      "key": "paperclipai/optional/communication/email-triage",
+      "kind": "optional",
+      "category": "communication",
+      "slug": "email-triage",
+      "name": "email-triage",
+      "description": "Sort an inbox into urgent, needs-reply, FYI and noise, summarise what matters, and draft replies for a person to approve. Use when a task asks you to go through email, summarise an inbox, or propose replies. Never sends anything on its own.",
+      "path": "catalog/optional/communication/email-triage",
+      "entrypoint": "SKILL.md",
+      "trustLevel": "markdown_only",
+      "compatibility": "compatible",
+      "defaultInstall": false,
+      "recommendedForRoles": [
+        "assistant",
+        "secretary",
+        "email-manager",
+        "support"
+      ],
+      "requires": [],
+      "tags": [
+        "email",
+        "inbox",
+        "triage",
+        "drafting",
+        "communication"
+      ],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "kind": "skill",
+          "sizeBytes": 5499,
+          "sha256": "812345d3e6ca6999417467b4f84cc7ab6e8eec35f04a271dc597309a4cfedd29"
+        }
+      ],
+      "contentHash": "sha256:d37bc3835b793ecca9d48fd60993917369de6d60ed2e320cc83994044946fa9b"
+    },
+    {
+      "id": "paperclipai:optional:communication:meeting-notes",
+      "key": "paperclipai/optional/communication/meeting-notes",
+      "kind": "optional",
+      "category": "communication",
+      "slug": "meeting-notes",
+      "name": "meeting-notes",
+      "description": "Turn a meeting transcript, recording summary or rough notes into clear minutes with decisions, action items (owner and due date) and open questions, and propose Paperclip tasks for the actions. Use when a task hands you meeting notes or a transcript and asks for minutes, a summary or follow-ups.",
+      "path": "catalog/optional/communication/meeting-notes",
+      "entrypoint": "SKILL.md",
+      "trustLevel": "markdown_only",
+      "compatibility": "compatible",
+      "defaultInstall": false,
+      "recommendedForRoles": [
+        "assistant",
+        "secretary",
+        "project-manager",
+        "hr"
+      ],
+      "requires": [],
+      "tags": [
+        "meetings",
+        "minutes",
+        "action-items",
+        "summary",
+        "communication"
+      ],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "kind": "skill",
+          "sizeBytes": 4294,
+          "sha256": "1f4d0fa972ffa39fbdd6978eaaa01a03ebef23fc7e9699787006e008f4d49939"
+        }
+      ],
+      "contentHash": "sha256:0f59091ee92bfeb60b6fea7ad5fff20b4b41a360f6d1c8752dba50277ce8d899"
+    },
+    {
       "id": "paperclipai:optional:content:brag",
       "key": "paperclipai/optional/content/brag",
       "kind": "optional",
@@ -392,7 +540,8 @@
       "compatibility": "compatible",
       "defaultInstall": false,
       "recommendedForRoles": [
-        "brag",
+        "content-producer",
+        "marketing",
         "devrel",
         "product"
       ],
@@ -406,8 +555,8 @@
         {
           "path": "SKILL.md",
           "kind": "skill",
-          "sizeBytes": 9916,
-          "sha256": "edff747d24a96690a09383f418fa68e929ca30d2d54051eb01400dfa2e95ce12"
+          "sizeBytes": 9942,
+          "sha256": "1f4198de650e36980439a86a244dfaa509b4ed9c4bf77361dfc1fcf4791c6ba2"
         },
         {
           "path": "assets/sfx/casino/card-fan-1.ogg",
@@ -2048,7 +2197,44 @@
           "sha256": "c97ea53d7c5df2a3dd64694a388c013a05c363ac7c2e4e0d956c18ad3bfaa5ee"
         }
       ],
-      "contentHash": "sha256:ff9e93a179e405e1f2ed43f34530b52d2060f749db527b526007c2f77090810d"
+      "contentHash": "sha256:10524d9847184d7339928c1c7581cd73d23c85d649569401560d44d2843b0f11"
+    },
+    {
+      "id": "paperclipai:optional:content:brag-video",
+      "key": "paperclipai/optional/content/brag-video",
+      "kind": "optional",
+      "category": "content",
+      "slug": "brag-video",
+      "name": "brag-video",
+      "description": "Get a short launch video (\"brag video\") made for a project through Paperclip's Brag pipeline — pick the source, estimate the cost, plan scenes, get every scene approved, render, and deliver with share copy. Use when a task asks for a launch video, a \"show what we built\" clip, or a 10–60 second product teaser from a project's code or website.",
+      "path": "catalog/optional/content/brag-video",
+      "entrypoint": "SKILL.md",
+      "trustLevel": "markdown_only",
+      "compatibility": "compatible",
+      "defaultInstall": false,
+      "recommendedForRoles": [
+        "content",
+        "marketing",
+        "devrel",
+        "product"
+      ],
+      "requires": [],
+      "tags": [
+        "video",
+        "launch",
+        "brag",
+        "marketing",
+        "approval"
+      ],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "kind": "skill",
+          "sizeBytes": 7189,
+          "sha256": "872f3b68e83d7a2f4d9f7ddf06190b20b5ddc49bfc9da9abe6dc599a636a93b7"
+        }
+      ],
+      "contentHash": "sha256:4982ebc5a602e8e2829d102650651e4d5e1109cf15068de021228a8c74b3ec0c"
     },
     {
       "id": "paperclipai:optional:content:release-announcement",
@@ -2079,11 +2265,234 @@
         {
           "path": "SKILL.md",
           "kind": "skill",
-          "sizeBytes": 4416,
-          "sha256": "062810ac34e9edc89efa701fec2eee60f16949d1944cc2cae49803cb91e8cbf4"
+          "sizeBytes": 4765,
+          "sha256": "9a130c284d58a64189c6e58308096c2d3c24f921ff5b324fbae33369a020c9bc"
         }
       ],
-      "contentHash": "sha256:f22a9ed696e6614c6db2757a149f48b3295e81f78c27d065d9cb164cf4f8a9bd"
+      "contentHash": "sha256:c760cca49bbc216c198d1fb0219b355477504a4316d4c1b090851860a22f5cba"
+    },
+    {
+      "id": "paperclipai:optional:content:seo-content-writing",
+      "key": "paperclipai/optional/content/seo-content-writing",
+      "kind": "optional",
+      "category": "content",
+      "slug": "seo-content-writing",
+      "name": "seo-content-writing",
+      "description": "Write web pages, blog posts and product descriptions that match what people search for — search intent, outline, title and meta description, headings, internal links — without keyword stuffing or invented claims. Use when a task asks for website copy, a blog article, product texts or SEO improvements to existing pages.",
+      "path": "catalog/optional/content/seo-content-writing",
+      "entrypoint": "SKILL.md",
+      "trustLevel": "markdown_only",
+      "compatibility": "compatible",
+      "defaultInstall": false,
+      "recommendedForRoles": [
+        "writer",
+        "marketing",
+        "content",
+        "seo"
+      ],
+      "requires": [],
+      "tags": [
+        "seo",
+        "copywriting",
+        "blog",
+        "product-descriptions",
+        "content"
+      ],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "kind": "skill",
+          "sizeBytes": 4867,
+          "sha256": "a8687856ff326e1b3f71099f6648fd44f80d89203518d3c534afa0fe9ca4114e"
+        }
+      ],
+      "contentHash": "sha256:055272fae17d335e02daa00c09ee5861e58feed742902b026ef18463f2e61bbd"
+    },
+    {
+      "id": "paperclipai:optional:content:social-media-management",
+      "key": "paperclipai/optional/content/social-media-management",
+      "kind": "optional",
+      "category": "content",
+      "slug": "social-media-management",
+      "name": "social-media-management",
+      "description": "Plan and write social media posts — content calendar, per-platform formats, brand voice, captions and hashtags — and get every post approved before it is published. Use when a task asks for social posts, a posting plan, a content calendar or a social performance summary.",
+      "path": "catalog/optional/content/social-media-management",
+      "entrypoint": "SKILL.md",
+      "trustLevel": "markdown_only",
+      "compatibility": "compatible",
+      "defaultInstall": false,
+      "recommendedForRoles": [
+        "social-media-manager",
+        "marketing",
+        "content",
+        "writer"
+      ],
+      "requires": [],
+      "tags": [
+        "social-media",
+        "content-calendar",
+        "instagram",
+        "linkedin",
+        "tiktok",
+        "marketing"
+      ],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "kind": "skill",
+          "sizeBytes": 5477,
+          "sha256": "be4a63039a86ca0b1d33862d40f9e4b4650b95faca66b6811d669a7b3a7dd5e6"
+        }
+      ],
+      "contentHash": "sha256:854c7d1bb517f99223407cc471ee4c152b529f087c9d0c048c39f4981df306a2"
+    },
+    {
+      "id": "paperclipai:optional:finance:bookkeeping-assistant",
+      "key": "paperclipai/optional/finance/bookkeeping-assistant",
+      "kind": "optional",
+      "category": "finance",
+      "slug": "bookkeeping-assistant",
+      "name": "bookkeeping-assistant",
+      "description": "Prepare bookkeeping for a human or accountant to approve — categorise transactions, match receipts, reconcile bank against the ledger, flag VAT/tax questions — with a source for every amount and nothing posted or paid by the agent. Use when a task asks to tidy up transactions, find missing receipts, reconcile an account, or prepare a month-end or VAT period.",
+      "path": "catalog/optional/finance/bookkeeping-assistant",
+      "entrypoint": "SKILL.md",
+      "trustLevel": "markdown_only",
+      "compatibility": "compatible",
+      "defaultInstall": false,
+      "recommendedForRoles": [
+        "finance",
+        "bookkeeper",
+        "accountant",
+        "operations"
+      ],
+      "requires": [],
+      "tags": [
+        "bookkeeping",
+        "reconciliation",
+        "accounting",
+        "vat",
+        "finance"
+      ],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "kind": "skill",
+          "sizeBytes": 4748,
+          "sha256": "511f1e6d3d38ef8d11fca1e48661337d85080988fe63e66b87d868ed774ccc25"
+        }
+      ],
+      "contentHash": "sha256:9bdfb736ac07ff2b129bdac7ebd649e5f77963792356ee8a3e1265b55b97afcc"
+    },
+    {
+      "id": "paperclipai:optional:media:media-studio-generation",
+      "key": "paperclipai/optional/media/media-studio-generation",
+      "kind": "optional",
+      "category": "media",
+      "slug": "media-studio-generation",
+      "name": "media-studio-generation",
+      "description": "Make pictures, short videos, music and multi-shot video storylines with Paperclip's Media Studio — brief, prompt, generate, review, deliver — while keeping cost, consent and brand rules. Use when a task asks for an image, a product shot, a social visual, a short clip, a voice-over or a storyboarded video.",
+      "path": "catalog/optional/media/media-studio-generation",
+      "entrypoint": "SKILL.md",
+      "trustLevel": "markdown_only",
+      "compatibility": "compatible",
+      "defaultInstall": false,
+      "recommendedForRoles": [
+        "designer",
+        "marketing",
+        "content",
+        "social-media"
+      ],
+      "requires": [],
+      "tags": [
+        "media",
+        "image-generation",
+        "video",
+        "storyline",
+        "creative"
+      ],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "kind": "skill",
+          "sizeBytes": 8618,
+          "sha256": "2156abf27059ea95f4e44581c05755f96b287ea8f5f65817e2e567738c36201b"
+        }
+      ],
+      "contentHash": "sha256:fc655030e6f4fb77bbb7a5a31753b48459d8fbbd6f816ce05b61f23440514ecd"
+    },
+    {
+      "id": "paperclipai:optional:operations:calendar-scheduling",
+      "key": "paperclipai/optional/operations/calendar-scheduling",
+      "kind": "optional",
+      "category": "operations",
+      "slug": "calendar-scheduling",
+      "name": "calendar-scheduling",
+      "description": "Find meeting times that respect everyone's time zones, working hours and buffers, propose two or three options, and draft invites, reschedules and cancellations for approval. Use when a task asks you to schedule, move or cancel a meeting or find a free slot. Never accepts or declines on the owner's behalf without approval.",
+      "path": "catalog/optional/operations/calendar-scheduling",
+      "entrypoint": "SKILL.md",
+      "trustLevel": "markdown_only",
+      "compatibility": "compatible",
+      "defaultInstall": false,
+      "recommendedForRoles": [
+        "assistant",
+        "secretary",
+        "scheduler",
+        "project-manager"
+      ],
+      "requires": [],
+      "tags": [
+        "calendar",
+        "scheduling",
+        "meetings",
+        "time-zones",
+        "operations"
+      ],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "kind": "skill",
+          "sizeBytes": 4404,
+          "sha256": "9ab8715723b8ba4eb6462a1fdd54d37ba726d527c416c4b32206c2ccbe10a393"
+        }
+      ],
+      "contentHash": "sha256:91ca190c3f9b3b0ae70dfb96da2449d368ac377a2539532d87016653e575bfcf"
+    },
+    {
+      "id": "paperclipai:optional:people:hiring-pipeline",
+      "key": "paperclipai/optional/people/hiring-pipeline",
+      "kind": "optional",
+      "category": "people",
+      "slug": "hiring-pipeline",
+      "name": "hiring-pipeline",
+      "description": "Support hiring for human roles — write the job description, structured interview questions with a scoring rubric, fair candidate summaries, and scheduling hand-offs — while protecting candidates' privacy and leaving every decision to a human. Use when a task asks to open a role, screen applications, prepare interviews, or summarise candidates.",
+      "path": "catalog/optional/people/hiring-pipeline",
+      "entrypoint": "SKILL.md",
+      "trustLevel": "markdown_only",
+      "compatibility": "compatible",
+      "defaultInstall": false,
+      "recommendedForRoles": [
+        "hr",
+        "recruiter",
+        "people-ops",
+        "manager"
+      ],
+      "requires": [],
+      "tags": [
+        "hiring",
+        "recruiting",
+        "interviews",
+        "hr",
+        "fairness"
+      ],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "kind": "skill",
+          "sizeBytes": 4994,
+          "sha256": "889de1fe1d806f368edf5bef5714e671fccbe86676fb0009c9c3c795f24abebe"
+        }
+      ],
+      "contentHash": "sha256:92b704fb1287c06eb1486ebf896a2fde7ed4090839e770d1283db27b7ffff7a6"
     },
     {
       "id": "paperclipai:optional:product:design-critique",
@@ -2119,6 +2528,78 @@
         }
       ],
       "contentHash": "sha256:429f94df398a0697042b5bbe4755b1ff1a230aa5f41d99118ad37493ac65d21c"
+    },
+    {
+      "id": "paperclipai:optional:quality:code-review",
+      "key": "paperclipai/optional/quality/code-review",
+      "kind": "optional",
+      "category": "quality",
+      "slug": "code-review",
+      "name": "code-review",
+      "description": "Review a pull request or diff for correctness bugs first, then for risky design and missing tests, with file:line evidence and a severity for every finding and a clear verdict. Use when a task asks you to review, check or second-opinion a PR, branch or patch before it is merged.",
+      "path": "catalog/optional/quality/code-review",
+      "entrypoint": "SKILL.md",
+      "trustLevel": "markdown_only",
+      "compatibility": "compatible",
+      "defaultInstall": false,
+      "recommendedForRoles": [
+        "reviewer",
+        "engineer",
+        "qa",
+        "tech-lead"
+      ],
+      "requires": [],
+      "tags": [
+        "code-review",
+        "pull-request",
+        "quality",
+        "engineering"
+      ],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "kind": "skill",
+          "sizeBytes": 4914,
+          "sha256": "92f9e9c9e5da3bfb9fa593ccebfbbdbf3c171e4165f765e63a28a2553c6fd020"
+        }
+      ],
+      "contentHash": "sha256:d53a0753255d581cf29afd729d11a10abdef8ae1868d7c339e651c00bc1ed43e"
+    },
+    {
+      "id": "paperclipai:optional:quality:security-review",
+      "key": "paperclipai/optional/quality/security-review",
+      "kind": "optional",
+      "category": "quality",
+      "slug": "security-review",
+      "name": "security-review",
+      "description": "Security review of a code change or a running system — quick threat model, a checklist covering access control, tenant scoping, injection, secrets, SSRF, uploads, dependencies and sensitive logging, proof for each finding, severity, and safe handling. Use when a task asks for a security review, a PR touches auth/data access/input handling/secrets, or before a risky release.",
+      "path": "catalog/optional/quality/security-review",
+      "entrypoint": "SKILL.md",
+      "trustLevel": "markdown_only",
+      "compatibility": "compatible",
+      "defaultInstall": false,
+      "recommendedForRoles": [
+        "security",
+        "reviewer",
+        "engineer",
+        "tech-lead"
+      ],
+      "requires": [],
+      "tags": [
+        "security",
+        "review",
+        "threat-model",
+        "appsec"
+      ],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "kind": "skill",
+          "sizeBytes": 6146,
+          "sha256": "5b94d9584de492492ebb8d4fd9a31a7ff8f7c20dd7219454ae0eb48a6a054f7b"
+        }
+      ],
+      "contentHash": "sha256:3adaf19254ed4704f2d238d529116b36a9a3244d3c20e12fbe5172b75595986b"
     },
     {
       "id": "paperclipai:optional:research:last30days",
@@ -2640,6 +3121,43 @@
         "path": "skills/last30days",
         "url": "https://github.com/mvanhorn/last30days-skill/tree/v3.3.0/skills/last30days"
       }
+    },
+    {
+      "id": "paperclipai:optional:sales:lead-follow-up",
+      "key": "paperclipai/optional/sales/lead-follow-up",
+      "kind": "optional",
+      "category": "sales",
+      "slug": "lead-follow-up",
+      "name": "lead-follow-up",
+      "description": "Qualify incoming leads, keep a simple pipeline (stage, next step, due date), and draft personalised follow-up messages for human approval — using only real data, respecting consent and opt-outs, with no false urgency. Use when a task involves new leads, prospect lists, sales follow-ups, quotes awaiting a reply, or a stalled deal.",
+      "path": "catalog/optional/sales/lead-follow-up",
+      "entrypoint": "SKILL.md",
+      "trustLevel": "markdown_only",
+      "compatibility": "compatible",
+      "defaultInstall": false,
+      "recommendedForRoles": [
+        "sales",
+        "account-manager",
+        "customer-success",
+        "marketing"
+      ],
+      "requires": [],
+      "tags": [
+        "sales",
+        "leads",
+        "pipeline",
+        "follow-up",
+        "crm"
+      ],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "kind": "skill",
+          "sizeBytes": 5014,
+          "sha256": "17b60f8a2dcf6d1af54e63c3fa0484ea3a5265de9d49cd3b35003ee9b2642b80"
+        }
+      ],
+      "contentHash": "sha256:7fab2220789c4be300f00cbc9542c94b8f8683a7ce957cca5918338784243e62"
     }
   ]
 }
