@@ -87,7 +87,7 @@ import {
   type Identity,
   type IdentityTraining,
 } from "./identity.js";
-import { cropPicture, maskBoundingBox, sogniSizeLike } from "./image-ops.js";
+import { cropPictures, maskBoundingBox, sogniSizeLike } from "./image-ops.js";
 import { ANALYSIS_SYSTEM_PROMPT, ANALYSIS_USER_PROMPT, parseAnalysis, type AnalysisModelSetting } from "./vision-analysis.js";
 import {
   AGE_CHECK_COST_NOTE,
@@ -686,14 +686,16 @@ async function cropAction(ctx: PluginContext, params: Record<string, unknown>, c
   const boxes = Array.isArray(params.boxes) ? params.boxes : [];
   if (boxes.length === 0 || boxes.length > 8) throw new Error("Draw between 1 and 8 boxes.");
   const picture = await readPicture(ctx, companyId, fileId);
-  const crops = [];
-  for (const item of boxes) {
+  const wanted = boxes.map((item) => {
     const row = (item ?? {}) as Record<string, unknown>;
     if (!isCropRole(row.role)) throw new Error("Each box needs a role: face, body, outfit or other.");
-    const box = readCropBox(row.box);
-    const cut = await cropPicture(picture.bytes, box);
-    crops.push({ role: row.role, box, imageDataUrl: `data:${cut.contentType};base64,${cut.bytes.toString("base64")}`, width: cut.width, height: cut.height });
-  }
+    return { role: row.role, box: readCropBox(row.box) };
+  });
+  const cuts = await cropPictures(picture.bytes, wanted.map((w) => w.box));
+  const crops = wanted.map((w, i) => {
+    const cut = cuts[i]!;
+    return { role: w.role, box: w.box, imageDataUrl: `data:${cut.contentType};base64,${cut.bytes.toString("base64")}`, width: cut.width, height: cut.height };
+  });
   return { crops };
 }
 
