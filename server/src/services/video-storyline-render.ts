@@ -256,7 +256,8 @@ export function describeRenderStartFailure(
   }
   if (/^(Sogni|Fal|The starting frame|This Sogni video model)/.test(raw)) {
     // The provider clients' own messages (video-provider-clients.ts) are already plain sentences.
-    const said = raw.trim().slice(0, 300);
+    // Room for Sogni's whole (cleaned, ~1500-character) reason: cutting it is how a refusal became undiagnosable.
+    const said = raw.trim().slice(0, 2000);
     return `${service} didn't accept ${shot}: ${said}${/[.!?]$/.test(said) ? "" : "."}${retry}`;
   }
   // A bug on our side (a programming error, an unexpected answer): never show its raw text.
@@ -714,7 +715,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
         action: "video_storyline.render_start_failed",
         entityType: "video_storyline",
         entityId: storylineId,
-        details: { shotOrderIndex: lockedPending.shot.orderIndex, reason: reason.slice(0, 500) },
+        details: { shotOrderIndex: lockedPending.shot.orderIndex, reason: reason.slice(0, 2000) },
       });
       throw err instanceof HttpError ? err : unprocessable(`The render did not start. ${reason}`);
     }
