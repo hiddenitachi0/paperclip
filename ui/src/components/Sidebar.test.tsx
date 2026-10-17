@@ -70,6 +70,14 @@ vi.mock("../api/instanceSettings", () => ({
   instanceSettingsApi: mockInstanceSettingsApi,
 }));
 
+// Board chat only works in single-operator local mode; the sidebar hides it elsewhere.
+const mockHealthApi = vi.hoisted(() => ({
+  get: vi.fn(async () => ({ status: "ok", deploymentMode: "local_trusted" })),
+}));
+vi.mock("../api/health", () => ({
+  healthApi: mockHealthApi,
+}));
+
 vi.mock("../hooks/useInboxBadge", () => ({
   useInboxBadge: () => ({ inbox: 0, failedRuns: 0 }),
 }));
@@ -325,6 +333,22 @@ describe("Sidebar", () => {
       "Talk to an AI board member that can make changes for you (hire agents, create tasks, change settings).",
     );
     expect(container.textContent).not.toContain("Conference Room");
+
+    flushSync(() => {
+      root.unmount();
+    });
+  });
+
+  it("hides the Board chat nav item on a shared, signed-in server, where sending would fail", async () => {
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({
+      enableIsolatedWorkspaces: false,
+      enableConferenceRoomChat: true,
+    });
+    mockHealthApi.get.mockResolvedValueOnce({ status: "ok", deploymentMode: "authenticated" });
+    const root = await renderSidebar();
+
+    expect(container.textContent).not.toContain("Board chat");
+    expect(mockHealthApi.get).toHaveBeenCalled();
 
     flushSync(() => {
       root.unmount();
