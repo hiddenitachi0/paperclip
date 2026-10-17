@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { and, eq, gte, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { assets, issueAttachments, videoMediaSpend, videoShots, videoStorylines, videoTransitionTakes, videoUploads } from "@paperclipai/db";
+import { assets, issueAttachments, videoShots, videoStorylines, videoUploads } from "@paperclipai/db";
 import {
   MEDIA_FOOTAGE_SETTINGS_KEYS,
   MEDIA_STUDIO_PLUGIN_KEY,
@@ -15,6 +15,7 @@ import { notFound, unprocessable } from "../errors.js";
 import { pluginRegistryService } from "./plugin-registry.js";
 import { loadCastAgeRefusals, readPluginState } from "./storyline-cast.js";
 import { storylineCompanyModel } from "./video-storyline-company-model.js";
+import { companyMonthlyMediaSpendCents } from "./storyline-media-ledger.js";
 import type { HelperServiceOptions } from "./helper.js";
 import type { VideoStorylineActor } from "./video-storylines.js";
 
@@ -96,31 +97,12 @@ export function dataUriBytes(dataUri: string): Buffer | null {
   return match?.[1] ? Buffer.from(match[1], "base64") : null;
 }
 
-function startOfMonthUtc(now: Date): Date {
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-}
-
 /**
- * This month's media spend for a company (the monthly cap): AI transition
- * takes plus other paid steps (animate photo). A failed or released item
- * counts only what it really cost.
+ * This month's AI media spend for a company (the monthly limit), counted from
+ * the durable cost ledger so deleting a film or a clip never gives it back
+ * (security review DUR-4807 item 4). See storyline-media-ledger.ts.
  */
-export async function companyMonthlyMediaSpendCents(executor: Pick<Db, "select">, companyId: string, now: Date): Promise<number> {
-  const since = startOfMonthUtc(now);
-  const [takes] = await executor
-    .select({
-      total: sql<number>`coalesce(sum(case when ${videoTransitionTakes.status} = 'failed' then coalesce(${videoTransitionTakes.costCents}, 0) else coalesce(${videoTransitionTakes.costCents}, ${videoTransitionTakes.reservedCents}) end), 0)::int`,
-    })
-    .from(videoTransitionTakes)
-    .where(and(eq(videoTransitionTakes.companyId, companyId), gte(videoTransitionTakes.createdAt, since)));
-  const [other] = await executor
-    .select({
-      total: sql<number>`coalesce(sum(case when ${videoMediaSpend.status} = 'released' then coalesce(${videoMediaSpend.costCents}, 0) when ${videoMediaSpend.status} = 'settled' then coalesce(${videoMediaSpend.costCents}, ${videoMediaSpend.reservedCents}) else ${videoMediaSpend.reservedCents} end), 0)::int`,
-    })
-    .from(videoMediaSpend)
-    .where(and(eq(videoMediaSpend.companyId, companyId), gte(videoMediaSpend.createdAt, since)));
-  return Number(takes?.total ?? 0) + Number(other?.total ?? 0);
-}
+export { companyMonthlyMediaSpendCents } from "./storyline-media-ledger.js";
 
 /** Where music uploaded for storylines is stored (counted in the company's footage quota). */
 export const STORYLINE_MUSIC_NAMESPACE = "video-storylines/music";
