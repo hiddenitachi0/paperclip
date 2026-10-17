@@ -122,7 +122,8 @@ describe("Sogni first-and-last frame, prompt as written (Phase 0)", () => {
     expect(body.input.steps[0]).toEqual({
       id: "video",
       toolName: "animate_photo",
-      arguments: { prompt: "Continuous shot, no cut.", duration: 3, videoModel: "ltx25", sourceImageIndex: -1, endImageIndex: -2, frameRole: "both", skipPromptProcessing: true },
+      // LTX 2.5 is Sogni's default, asked for by leaving videoModel out (see SOGNI_DEFAULT_VIDEO_MODEL).
+      arguments: { prompt: "Continuous shot, no cut.", duration: 3, sourceImageIndex: -1, endImageIndex: -2, frameRole: "both", skipPromptProcessing: true },
     });
     expect(body.media_references).toHaveLength(2);
   });

@@ -1,10 +1,23 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SogniVideoProvider as PluginSogniVideoProvider } from "../../../packages/plugins/media-studio/src/video.js";
-import { sogniVideoModelKey as pluginModelKey, sogniVideoStep as pluginVideoStep } from "../../../packages/plugins/media-studio/src/sogni-video-step.js";
+import {
+  sanitizeSogniErrorText as pluginSanitize,
+  sogniVideoModelKey as pluginModelKey,
+  sogniVideoRefusal as pluginRefusal,
+  sogniVideoStep as pluginVideoStep,
+} from "../../../packages/plugins/media-studio/src/sogni-video-step.js";
 import { guardedTransferFetch } from "../../../packages/plugins/media-studio/src/sogni.js";
 import { encodeMultipartBody, sogniStorageFetch } from "../services/image-provider-clients.ts";
 import { buildPinnedRequestOptions, type ValidatedFetchTarget } from "../services/safe-outbound-fetch.ts";
-import { SogniVideoProvider, sogniVideoModelKey, sogniVideoStep } from "../services/video-provider-clients.ts";
+import { describeRenderStartFailure } from "../services/video-storyline-render.ts";
+import {
+  SogniVideoProvider,
+  SogniVideoRequestError,
+  sanitizeSogniErrorText,
+  sogniVideoModelKey,
+  sogniVideoRefusal,
+  sogniVideoStep,
+} from "../services/video-provider-clients.ts";
 
 /**
  * Sogni video: uploads go to Sogni's storage as real multipart bytes (they
@@ -77,7 +90,7 @@ describe("Sogni storage uploads", () => {
   });
 });
 
-function sogniApi() {
+function sogniApi(startAnswer?: () => Response) {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   let uploads = 0;
   const apiFetch = async (url: string, init?: RequestInit) => {
@@ -89,7 +102,9 @@ function sogniApi() {
     if (url.includes("/v2/image/downloadUrl")) {
       return new Response(JSON.stringify({ data: { downloadUrl: `https://bucket.s3-accelerate.amazonaws.com/ref-${uploads}.png` } }));
     }
-    if (url.endsWith("/v1/creative-agent/workflows")) return new Response(JSON.stringify({ data: { workflow: { workflowId: "wf-9" } } }), { status: 201 });
+    if (url.endsWith("/v1/creative-agent/workflows")) {
+      return startAnswer ? startAnswer() : new Response(JSON.stringify({ data: { workflow: { workflowId: "wf-9" } } }), { status: 201 });
+    }
     return new Response("{}", { status: 404 });
   };
   const startBody = () => JSON.parse(String(calls.find((c) => c.url.endsWith("/v1/creative-agent/workflows"))!.init!.body));
@@ -178,6 +193,8 @@ const MODEL_IDS = [
   "seedance2-mini", "happyhorse-1.1-t2v", "happyhorse-1.1-i2v", "happyhorse-1.1-r2v", "minimax-h3-fl2va-fp8_t2v",
   "minimax-h3-fl2va-fp8_i2v_turbo", "minimax-h3-fastvideo-int8_t2v_turbo_2stage", "minimax-h3-fastvideo-int8_flf2v_turbo",
   "minimax-h3-ref2va-fp8_r2v", "minimax-h3-ref2va-fp8_r2v_balanced_2stage", "my-custom-model",
+  "ltx25-22b-int8_t2v_distilled", "minimax-h3-i2v-balanced", "minimax-h3-fl2va-fp8_flf2v_balanced", "minimax-h3-balanced",
+  "minimax-h3-ref2va-fp8_r2v_balanced", "seedance-2-0-mini-uncensored", "seedance2-mini-uncensored",
 ];
 
 describe("plugin and server Sogni video clients agree", () => {
@@ -245,5 +262,172 @@ describe("plugin Sogni video uploads", () => {
     // Throws before any request (inside the provider's async upload this becomes a rejection).
     expect(() => guardedTransferFetch("https://evil.example.com/up", { method: "POST" })).toThrow(/not Sogni's picture storage/);
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ─── 17 Oct 2026: Sogni refused animate_photo with videoModel "ltx25" ──────
+
+/** Sogni's animate_photo videoModel list as its live answer of 17 Oct 2026 started it, completed from @sogni-ai/sogni-client 5.64.0's hosted tools manifest. */
+const SOGNI_ANIMATE_PHOTO_MODELS = [
+  "ltx25", "ltx23", "wan22", "happyhorse-1.1-i2v", "happyhorse-1.1-r2v", "minimax-h3-i2v", "minimax-h3-i2v-balanced",
+  "minimax-h3-i2v-turbo", "minimax-h3-fasth3-i2v-turbo", "minimax-h3-fasth3-i2v-turbo-2stage", "minimax-h3-flf2v",
+  "minimax-h3-flf2v-balanced", "minimax-h3-flf2v-turbo", "minimax-h3-fasth3-flf2v-turbo", "minimax-h3-fasth3-flf2v-turbo-2stage",
+  "wan3.0-video", "wan3.0-spicy-video",
+];
+const SOGNI_GENERATE_VIDEO_MODELS = [
+  "ltx25", "ltx23", "wan22", "seedance2", "seedance2-mini", "seedance2-mini-uncensored", "seedance2-5", "seedance2-5-uncensored",
+  "minimax-h3-t2v", "minimax-h3-t2v-turbo", "minimax-h3-fasth3-t2v-turbo", "minimax-h3-fasth3-t2v-turbo-2stage",
+  "happyhorse-1.1-t2v", "happyhorse-1.1-i2v", "happyhorse-1.1-r2v", "minimax-h3-r2v", "minimax-h3-r2v-turbo",
+  "minimax-h3-r2v-2stage", "minimax-h3-r2v-balanced-2stage", "wan3.0-video", "wan3.0-spicy-video", "minimax-h3-turbo",
+  "minimax-h3-fasth3-turbo", "minimax-h3-fasth3-turbo-2stage", "minimax-h3-balanced", "minimax-h3-t2v-balanced", "minimax-h3-r2v-balanced",
+];
+const SOGNI_REFUSAL_17_OCT = JSON.stringify({
+  status: "error",
+  errorCode: 102,
+  message: `Creative workflow pre-start validation failed for step 0 (video:animate_photo): Argument "videoModel" must be one of ${SOGNI_ANIMATE_PHOTO_MODELS.map((m) => JSON.stringify(m)).join(", ")}`,
+});
+const transferOk = async () => new Response(null, { status: 204 });
+
+describe("Sogni video request bodies (exact)", () => {
+  const cases: Array<{ name: string; input: Record<string, unknown>; step: Record<string, unknown>; refs: number; model: string }> = [
+    {
+      name: "the failing shot: storyline LTX 2.5 catalogue id, approved still, prompt as written",
+      input: { model: "ltx25", startImage: PNG_DATA_URI, durationSeconds: 5, promptRewrite: false },
+      // LTX 2.5 is Sogni's default: asked for by leaving videoModel out.
+      step: { id: "video", toolName: "animate_photo", arguments: { prompt: "Shot", duration: 5, sourceImageIndex: -1, skipPromptProcessing: true } },
+      refs: 1,
+      model: "ltx25",
+    },
+    {
+      name: "LTX 2.5 catalogue id, text only",
+      input: { model: "ltx25-22b-int8_t2v_distilled", durationSeconds: 4 },
+      step: { id: "video", toolName: "generate_video", arguments: { prompt: "Shot", duration: 4 } },
+      refs: 0,
+      model: "ltx25",
+    },
+    {
+      name: "LTX 2.5 transition (start and end picture)",
+      input: { model: "ltx25-22b-int8_i2v_distilled", startImage: PNG_DATA_URI, endImage: PNG_DATA_URI_2, durationSeconds: 3, promptRewrite: false },
+      step: { id: "video", toolName: "animate_photo", arguments: { prompt: "Shot", duration: 3, sourceImageIndex: -1, endImageIndex: -2, frameRole: "both", skipPromptProcessing: true } },
+      refs: 2,
+      model: "ltx25",
+    },
+    {
+      name: "LTX 2.3 is named",
+      input: { model: "ltx23-22b-fp8_i2v_distilled", startImage: PNG_DATA_URI, durationSeconds: 5 },
+      step: { id: "video", toolName: "animate_photo", arguments: { prompt: "Shot", duration: 5, videoModel: "ltx23", sourceImageIndex: -1 } },
+      refs: 1,
+      model: "ltx23",
+    },
+    {
+      name: "MiniMax H3 Balanced keeps its own key",
+      input: { model: "minimax-h3-fl2va-fp8_i2v_balanced", startImage: PNG_DATA_URI, durationSeconds: 6 },
+      step: { id: "video", toolName: "animate_photo", arguments: { prompt: "Shot", duration: 6, videoModel: "minimax-h3-i2v-balanced", sourceImageIndex: -1 } },
+      refs: 1,
+      model: "minimax-h3-i2v-balanced",
+    },
+    {
+      name: "Seedance 2.0 Mini Uncensored: loose references",
+      input: { model: "seedance-2-0-mini-uncensored", startImage: PNG_DATA_URI, referenceImages: [PNG_DATA_URI_2], durationSeconds: 8 },
+      step: { id: "video", toolName: "generate_video", arguments: { prompt: "Shot", duration: 8, videoModel: "seedance2-mini-uncensored", referenceImageIndices: [-1, -2] } },
+      refs: 2,
+      model: "seedance2-mini-uncensored",
+    },
+  ];
+
+  for (const c of cases) {
+    it(c.name, async () => {
+      for (const Provider of [SogniVideoProvider, PluginSogniVideoProvider]) {
+        const api = sogniApi();
+        const handle = await new Provider({ apiKey: "k", apiFetch: api.apiFetch, transferFetch: transferOk }).start({ kind: "video", prompt: "Shot", ...c.input });
+        const body = api.startBody();
+        expect(body.input.steps).toEqual([c.step]);
+        expect(body.media_references ?? []).toHaveLength(c.refs);
+        expect(body).toMatchObject({ token_type: "auto", app_source: "paperclip-media-studio", safe_content_filter: true });
+        expect(handle.model).toBe(c.model);
+      }
+    });
+  }
+
+  it("every key we send is on Sogni's current list for that tool", () => {
+    for (const id of MODEL_IDS) {
+      for (const [start, end] of [[true, false], [true, true], [false, false]] as const) {
+        const plan = sogniVideoStep(id, start, end);
+        if (!plan.videoModel || plan.videoModel === "my-custom-model") continue;
+        const list = plan.tool === "animate_photo" ? SOGNI_ANIMATE_PHOTO_MODELS : SOGNI_GENERATE_VIDEO_MODELS;
+        expect(list, `${id} (${plan.tool})`).toContain(plan.videoModel);
+      }
+    }
+  });
+});
+
+describe("Sogni refusals are readable", () => {
+  it("the 17 Oct refusal: says which model, for what, what Sogni accepts, and keeps Sogni's whole message", async () => {
+    for (const Provider of [SogniVideoProvider, PluginSogniVideoProvider]) {
+      const api = sogniApi(() => new Response(SOGNI_REFUSAL_17_OCT, { status: 400, headers: { "content-type": "application/json" } }));
+      const err = await new Provider({ apiKey: "k", apiFetch: api.apiFetch, transferFetch: transferOk })
+        .start({ kind: "video", prompt: "Shot", model: "ltx25", startImage: PNG_DATA_URI, durationSeconds: 5, promptRewrite: false })
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(Error);
+      const e = err as SogniVideoRequestError;
+      expect(e.message).toMatch(/^Sogni refused the video request \(400\): it didn't accept the video model "ltx25" \(asked for as Sogni's default, without naming it\) for animating a picture; it accepts: ltx25, ltx23, wan22, /);
+      expect(e.message).toContain("minimax-h3-fasth3-flf2v-turbo-2stage, wan3.0-video, wan3.0-spicy-video.");
+      expect(e.message).toContain(`"ltx25" is on Sogni's own list, so this looks like a problem on Sogni's side.`);
+      // Sogni's own words, whole (the old code cut them at 300 characters, mid-list).
+      expect(e.message).toContain('Sogni said: Creative workflow pre-start validation failed for step 0 (video:animate_photo): Argument "videoModel" must be one of "ltx25"');
+      expect(e.message).toContain('"wan3.0-spicy-video"');
+      expect(e).toMatchObject({ status: 400, sogniErrorCode: 102, tool: "animate_photo", videoModel: "ltx25", sentVideoModel: null });
+    }
+  });
+
+  it("a model Sogni does not list: names it and the list, no 'Sogni's side' hint", () => {
+    const body = JSON.stringify({ status: "error", errorCode: 102, message: 'Creative workflow pre-start validation failed for step 0 (video:animate_photo): Argument "videoModel" must be one of "ltx25", "ltx23"' });
+    for (const refusal of [sogniVideoRefusal, pluginRefusal]) {
+      const e = refusal(400, body, { tool: "animate_photo", videoModel: "my-custom-model", sentVideoModel: "my-custom-model" });
+      expect(e.message).toBe(
+        `Sogni refused the video request (400): it didn't accept the video model "my-custom-model" for animating a picture; it accepts: ltx25, ltx23. Sogni said: Creative workflow pre-start validation failed for step 0 (video:animate_photo): Argument "videoModel" must be one of "ltx25", "ltx23"`,
+      );
+    }
+  });
+
+  it("any other refusal: what we asked for plus Sogni's reason; plain text bodies too", () => {
+    const json = sogniVideoRefusal(400, JSON.stringify({ status: "error", errorCode: 7, message: "Prompt too long." }), { tool: "generate_video", videoModel: "seedance2", sentVideoModel: "seedance2" });
+    expect(json.message).toBe(`Sogni refused the video request (400) for making a video with the video model "seedance2": Prompt too long.`);
+    expect(json.sogniErrorCode).toBe(7);
+    const text = sogniVideoRefusal(503, "Service Unavailable", { tool: "animate_photo", videoModel: null, sentVideoModel: null });
+    expect(text.message).toBe(`Sogni refused the video request (503) for animating a picture with Sogni's default video model: Service Unavailable`);
+    expect(sogniVideoRefusal(400, "", { tool: "animate_photo", videoModel: null, sentVideoModel: null }).message).toMatch(/no reason given$/);
+  });
+
+  it("never carries links, keys or picture data, and stops at about 1500 characters", () => {
+    const apiKey = "sk-live-0123456789abcdef";
+    const raw = [
+      `Upload https://bucket.s3-accelerate.amazonaws.com/up-1?X-Amz-Signature=abc failed;`,
+      `key ${apiKey}; header Bearer abc.def.ghi;`,
+      `image ${PNG_DATA_URI};`,
+      `token ${"A".repeat(64)};`,
+      "x ".repeat(2000),
+    ].join(" ");
+    for (const clean of [sanitizeSogniErrorText, pluginSanitize]) {
+      const out = clean(raw, [apiKey]);
+      expect(out).not.toMatch(/https?:\/\//);
+      expect(out).not.toContain(apiKey);
+      expect(out).not.toContain("abc.def.ghi");
+      expect(out).not.toContain("base64");
+      expect(out).not.toContain("A".repeat(40));
+      expect(out).toContain("[link]");
+      expect(out.length).toBeLessThanOrEqual(1500);
+    }
+    const e = sogniVideoRefusal(400, JSON.stringify({ message: raw }), { tool: "animate_photo", videoModel: "ltx23", sentVideoModel: "ltx23" }, [apiKey]);
+    expect(e.message).not.toContain(apiKey);
+    expect(e.sogniMessage.length).toBeLessThanOrEqual(1500);
+  });
+
+  it("the storyline shows Sogni's whole reason, not 300 characters of it", () => {
+    const e = sogniVideoRefusal(400, SOGNI_REFUSAL_17_OCT, { tool: "animate_photo", videoModel: "ltx25", sentVideoModel: null });
+    const shown = describeRenderStartFailure(e, { providerId: "sogni", shotNumber: 1, charged: false });
+    expect(shown.startsWith("Sogni didn't accept shot 1: Sogni refused the video request (400): it didn't accept the video model \"ltx25\"")).toBe(true);
+    expect(shown).toContain('"wan3.0-spicy-video"');
+    expect(shown).toContain("Nothing was charged.");
   });
 });
