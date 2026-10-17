@@ -28,14 +28,15 @@ const textSize: Record<IdentitySize, string> = {
 
 export function Identity({ name, avatarUrl, initials, size = "default", className }: IdentityProps) {
   const displayInitials = initials ?? deriveInitials(name);
+  const label = name ?? undefined;
 
   return (
     <span
       className={cn("inline-flex min-w-0 gap-1.5 items-center", size === "xs" && "gap-1", size === "lg" && "gap-2", className)}
-      title={name}
+      title={label}
     >
       <Avatar size={size}>
-        {avatarUrl && <AvatarImage src={avatarUrl} alt={name} />}
+        {avatarUrl && <AvatarImage src={avatarUrl} alt={label} />}
         <AvatarFallback>{displayInitials}</AvatarFallback>
       </Avatar>
       <span className={cn("truncate", textSize[size])}>{name}</span>
