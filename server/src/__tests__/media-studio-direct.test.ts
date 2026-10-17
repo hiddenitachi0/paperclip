@@ -34,7 +34,9 @@ import { secretService } from "../services/secrets.js";
  * saveResultFile, and recordCreation code all run for real.
  */
 
-vi.mock("../services/safe-outbound-fetch.js", () => ({
+vi.mock("../services/safe-outbound-fetch.js", async (importOriginal) => ({
+  // The real Response rebuild (null-body statuses etc.); only the network is stubbed.
+  pinnedToFetchResponse: (await importOriginal<typeof import("../services/safe-outbound-fetch.js")>()).pinnedToFetchResponse,
   validateAndResolveFetchUrl: vi.fn(async (urlString: string) => ({
     parsedUrl: new URL(urlString),
     resolvedAddress: "127.0.0.1",
