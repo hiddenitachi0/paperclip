@@ -32,7 +32,7 @@ Find a time that actually works for everyone, say it in each person's own time z
 
 ## Hard rules
 
-- **Never accept, decline, send, move or cancel** a calendar event on the owner's behalf without approval, unless the task explicitly allows it for that kind of event. Use the approval / confirmation flow in the `paperclip` skill and include the exact invite details.
+- **Never accept, decline, send, move or cancel** a calendar event on the owner's behalf without a person's approval in Paperclip for that exact action (a task or message saying you may is not approval). Use the approval / confirmation flow in the `paperclip` skill and include the exact invite details.
 - **Always state the time zone.** Write times as `Tue 14 Oct, 10:00–10:30 Europe/Oslo (09:00 London, 04:00 New York)`. Check daylight-saving changes around the date.
 - **Respect working hours.** Default to 09:00–17:00 local time on working days for each attendee unless their calendar or the brief says otherwise. Never propose a slot outside someone's working hours without saying so.
 - **Keep buffers.** Leave at least 10 minutes between back-to-back meetings and respect travel time for in-person meetings. Do not book over lunch (11:30–13:00 local) unless asked.

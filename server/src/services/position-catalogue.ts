@@ -188,10 +188,23 @@ export async function addPositionFromCatalogue(
 // Brag is a skill, so it now sits on the Content & Video Producer position.
 // This runs at every startup and is a no-op once nothing is left to convert.
 
-function isSeededBragPosition(role: RoleRow): boolean {
-  if (role.key !== BRAG_POSITION_KEY) return false;
+// Only the position Paperclip itself seeded is converted: built-in, holding
+// exactly the brag skill, with no rights, tool connections or MCP servers.
+// A position someone made (or customised) under the key "brag" is left alone,
+// so its instructions, grants and connectors are never lost silently.
+export function isSeededBragPosition(role: RoleRow): boolean {
+  if (role.key !== BRAG_POSITION_KEY || !role.isBuiltin) return false;
   const skillKeys = (role.skillKeys as string[] | null) ?? [];
-  return role.isBuiltin || skillKeys.includes(CATALOGUE_SKILL_KEYS.brag);
+  const grants = (role.defaultGrants as unknown[] | null) ?? [];
+  const connectors = (role.connectorKeys as string[] | null) ?? [];
+  const mcp = (role.defaultMcpServers as unknown[] | null) ?? [];
+  return (
+    skillKeys.length === 1 &&
+    skillKeys[0] === CATALOGUE_SKILL_KEYS.brag &&
+    grants.length === 0 &&
+    connectors.length === 0 &&
+    mcp.length === 0
+  );
 }
 
 export interface BragConversionResult {

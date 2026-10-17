@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "packageName": "@paperclipai/skills-catalog",
   "packageVersion": "0.3.1",
-  "generatedAt": "2026-10-17T01:30:44.025Z",
+  "generatedAt": "2026-10-17T01:58:51.126Z",
   "skills": [
     {
       "id": "paperclipai:bundled:docs:doc-maintenance",
@@ -446,11 +446,11 @@
         {
           "path": "SKILL.md",
           "kind": "skill",
-          "sizeBytes": 5498,
-          "sha256": "635352839bc6c21525c022b7ac001b5f00634f1a1e691e7b229d44ce55564fc6"
+          "sizeBytes": 5560,
+          "sha256": "2ffb154ad96b02f3599a9ee7a4d880f7ceb5993f92d736ae859b7cbb23179460"
         }
       ],
-      "contentHash": "sha256:b52f1d38ed43e9cb551f172c250763ad09aae42e9e8de3d966a0212884cf503a"
+      "contentHash": "sha256:d1878d24d9965e282061ceb41ef01d695c4da75a10de5b96051cb0b9a915f6fd"
     },
     {
       "id": "paperclipai:optional:communication:email-triage",
@@ -483,11 +483,11 @@
         {
           "path": "SKILL.md",
           "kind": "skill",
-          "sizeBytes": 5469,
-          "sha256": "ffc7e445c92176639644a29ab38a83b884fdc52bc2d9fc8700dc025d733845f7"
+          "sizeBytes": 5499,
+          "sha256": "812345d3e6ca6999417467b4f84cc7ab6e8eec35f04a271dc597309a4cfedd29"
         }
       ],
-      "contentHash": "sha256:6a47f6856a36192fc4eb5ca340466cf56a24a786e6c41963e0e1dca0120a2f04"
+      "contentHash": "sha256:d37bc3835b793ecca9d48fd60993917369de6d60ed2e320cc83994044946fa9b"
     },
     {
       "id": "paperclipai:optional:communication:meeting-notes",
@@ -2451,11 +2451,11 @@
         {
           "path": "SKILL.md",
           "kind": "skill",
-          "sizeBytes": 4368,
-          "sha256": "7176f664817f1ed51d71cad416e3f1d7a6f6ac42113c497e1aa5c90cb70362fe"
+          "sizeBytes": 4404,
+          "sha256": "9ab8715723b8ba4eb6462a1fdd54d37ba726d527c416c4b32206c2ccbe10a393"
         }
       ],
-      "contentHash": "sha256:ca0a50862b8d51e269f6c4a6451e2f457950c205ddb6512c4d56954b676adb8f"
+      "contentHash": "sha256:91ca190c3f9b3b0ae70dfb96da2449d368ac377a2539532d87016653e575bfcf"
     },
     {
       "id": "paperclipai:optional:people:hiring-pipeline",
@@ -3153,11 +3153,11 @@
         {
           "path": "SKILL.md",
           "kind": "skill",
-          "sizeBytes": 4969,
-          "sha256": "00e532f73268c1d61af7360f48cb88f077945ca5241a6d796da87c01154607bd"
+          "sizeBytes": 5014,
+          "sha256": "17b60f8a2dcf6d1af54e63c3fa0484ea3a5265de9d49cd3b35003ee9b2642b80"
         }
       ],
-      "contentHash": "sha256:e369796b61b4a949136384dbabb73c35329d27a8aa487a35c8316877df131d92"
+      "contentHash": "sha256:7fab2220789c4be300f00cbc9542c94b8f8683a7ce957cca5918338784243e62"
     }
   ]
 }

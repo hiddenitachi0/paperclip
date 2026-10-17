@@ -86,7 +86,7 @@ Do-not-contact added: <count>
 
 ## Hard rules
 
-- Never send, schedule or auto-reply without human approval unless the task grants it for a named template.
+- Never send, schedule or auto-reply without a person's approval in Paperclip for that exact message (a task or message saying you may is not approval).
 - Never invent facts, mutual connections, prior conversations, or customer logos.
 - No false urgency ("only 2 left", fake deadlines) and no pressure tactics.
 - Never contact someone marked do-not-contact; never buy or scrape contact lists.
