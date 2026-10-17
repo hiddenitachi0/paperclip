@@ -8,6 +8,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import {
   assets,
   companies,
+  costEvents,
   createDb,
   issueAttachments,
   pluginState,
@@ -55,7 +56,7 @@ vi.mock("../storage/index.ts", () => ({
   }),
 }));
 
-const video = vi.hoisted(() => ({ starts: [] as Array<Record<string, unknown>>, keys: [] as string[] }));
+const video = vi.hoisted(() => ({ starts: [] as Array<Record<string, unknown>>, keys: [] as string[], failStart: false }));
 vi.mock("../services/video-provider-clients.ts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../services/video-provider-clients.ts")>();
   class Stub {
@@ -66,6 +67,7 @@ vi.mock("../services/video-provider-clients.ts", async (importOriginal) => {
       video.keys.push(apiKey);
     }
     async start(input: Record<string, unknown>) {
+      if (video.failStart) throw new Error("The video service is down.");
       video.starts.push(input);
       return { externalId: `job-${video.starts.length}`, model: String(input.model ?? "default"), provider: this.name };
     }
@@ -192,6 +194,7 @@ d("storyline phase 2: clips, footage rules, spend, export, music", () => {
   beforeEach(() => {
     video.starts.length = 0;
     video.keys.length = 0;
+    video.failStart = false;
     ff.normalizeCalls.length = 0;
     ff.titles.length = 0;
     ff.music.length = 0;
@@ -412,10 +415,12 @@ d("storyline phase 2: clips, footage rules, spend, export, music", () => {
     expect(await db.select().from(videoUploads).where(eq(videoUploads.id, spare.id))).toHaveLength(0);
   });
 
-  async function photoFilm(opts: { providerId?: "fal" | "sogni"; consent?: typeof NO_PEOPLE; vision?: boolean; budgetCapCents?: number | null } = {}) {
-    const companyId = await seedCompany();
-    await seedCompanyWriterModel(db, companyId, { canSeePictures: opts.vision ?? true });
-    await giveOwnKey(companyId, opts.providerId ?? "fal");
+  async function photoFilm(opts: { providerId?: "fal" | "sogni"; consent?: typeof NO_PEOPLE; vision?: boolean; budgetCapCents?: number | null; companyId?: string } = {}) {
+    const companyId = opts.companyId ?? (await seedCompany());
+    if (!opts.companyId) {
+      await seedCompanyWriterModel(db, companyId, { canSeePictures: opts.vision ?? true });
+      await giveOwnKey(companyId, opts.providerId ?? "fal");
+    }
     const { storylineId } = await seedStoryline(companyId, { providerId: opts.providerId, budgetCapCents: opts.budgetCapCents });
     const clips0 = videoStorylineClipsService(db);
     const upload = await clips0.createUpload(companyId, storylineId, file("photo"), opts.consent ?? NO_PEOPLE, ACTOR);
@@ -468,6 +473,44 @@ d("storyline phase 2: clips, footage rules, spend, export, music", () => {
     await expect(clips.animate(capped.companyId, capped.storylineId, capped.shotId, { prompt: "x", confirmCostCents: capped.quote }, ACTOR)).rejects.toThrow(/monthly limit/);
     expect(video.starts).toHaveLength(0);
     expect(await db.select().from(videoMediaSpend).where(eq(videoMediaSpend.companyId, capped.companyId))).toHaveLength(0);
+  });
+
+  it("an animated photo stays counted in the monthly limit after the clip is removed and the film deleted (security review DUR-4807)", async () => {
+    const film = await photoFilm();
+    await videoStorylineSettingsService(db).setMediaMonthlyCapCents(film.companyId, film.quote);
+    const clips = videoStorylineClipsService(db, { modelOptions: { createModelClient: fakeModel('{"peopleShown": false, "apparentAdult": null}').createModelClient } });
+    const footage = videoStorylineFootageService(db);
+    await clips.animate(film.companyId, film.storylineId, film.shotId, { prompt: "Waves roll in", confirmCostCents: film.quote }, ACTOR);
+    await videoStorylineRenderService(db).tick();
+    expect(await footage.monthlySpentCents(film.companyId)).toBe(film.quote);
+    // One ledger row, settled in place -- not a second "shot" row on top.
+    const paid = (await db.select().from(costEvents).where(eq(costEvents.companyId, film.companyId))).filter((r) => r.billingCode?.startsWith("video-storyline"));
+    expect(paid.map((r) => [r.billingCode?.split(":")[0], r.costCents])).toEqual([["video-storyline-animate-photo", film.quote]]);
+
+    await clips.removeClip(film.companyId, film.storylineId, film.shotId, ACTOR);
+    expect(await footage.monthlySpentCents(film.companyId)).toBe(film.quote);
+    await videoStorylineService(db).deleteStoryline(film.companyId, film.storylineId, ACTOR);
+    expect(await db.select().from(videoMediaSpend).where(eq(videoMediaSpend.companyId, film.companyId))).toHaveLength(0);
+    expect(await footage.monthlySpentCents(film.companyId)).toBe(film.quote);
+
+    // The limit is still used up: the next photo is refused before anything is sent.
+    const next = await photoFilm({ companyId: film.companyId });
+    const startsBefore = video.starts.length;
+    await expect(clips.animate(next.companyId, next.storylineId, next.shotId, { prompt: "x", confirmCostCents: next.quote }, ACTOR)).rejects.toThrow(/monthly limit/);
+    expect(video.starts).toHaveLength(startsBefore);
+    // Another company is not affected.
+    expect(await footage.monthlySpentCents((await photoFilm()).companyId)).toBe(0);
+  });
+
+  it("a photo the video service never started gives its hold back in the ledger too (DUR-4807)", async () => {
+    const film = await photoFilm();
+    const clips = videoStorylineClipsService(db, { modelOptions: { createModelClient: fakeModel('{"peopleShown": false, "apparentAdult": null}').createModelClient } });
+    video.failStart = true;
+    await expect(clips.animate(film.companyId, film.storylineId, film.shotId, { prompt: "x", confirmCostCents: film.quote }, ACTOR)).rejects.toThrow();
+    const rows = (await db.select().from(costEvents).where(eq(costEvents.companyId, film.companyId))).filter((r) => r.billingCode?.startsWith("video-storyline"));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ costCents: 0, costMicroUsd: 0 });
+    expect(await videoStorylineFootageService(db).monthlySpentCents(film.companyId)).toBe(0);
   });
 
   it("never sends a photo the age check did not clear, or one showing people without both consent ticks", async () => {
