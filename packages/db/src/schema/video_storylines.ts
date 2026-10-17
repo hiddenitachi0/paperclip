@@ -89,7 +89,7 @@ export const videoStorylines = pgTable(
     // shot timeline, not re-probed per shot), null when not localizable to a
     // single shot (e.g. a whole-file duration mismatch).
     qualityCheckIssues: jsonb("quality_check_issues")
-      .$type<Array<{ code: string; message: string; shotIndex: number | null; timeSeconds: number | null }>>()
+      .$type<Array<{ code: string; message: string; shotIndex: number | null; timeSeconds: number | null; severity?: "warning" | "blocking" }>>()
       .notNull()
       .default([]),
     qualityCheckedAt: timestamp("quality_checked_at", { withTimezone: true }),

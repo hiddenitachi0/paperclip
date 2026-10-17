@@ -1,5 +1,5 @@
-import type { FlowStepKey, ReadinessFix, ReadinessItem, StepStatus } from "./storyline-flow.js";
-import { dollars } from "./storyline-flow.js";
+import type { FilmQualityIssue, FlowStepKey, ReadinessFix, ReadinessItem, StepStatus } from "./storyline-flow.js";
+import { dollars, filmQuality } from "./storyline-flow.js";
 
 // Drawing pieces of the guided Storylines flow (see storyline-flow.ts for the
 // logic): the step bar, step 5's "what is missing" checklist, and step 5's
@@ -14,6 +14,7 @@ const ghostBtn: React.CSSProperties = { ...baseBtn, background: "transparent", c
 const dangerGhostBtn: React.CSSProperties = { ...baseBtn, background: "transparent", color: "#c92a2a", borderColor: "#ffc9c9" };
 const errorBox: React.CSSProperties = { background: "#fff0f6", color: "#a61e4d", padding: "8px 10px", borderRadius: 8, fontSize: 13, whiteSpace: "pre-line" };
 const okBox: React.CSSProperties = { background: "#e6fcf5", color: "#087f5b", padding: "8px 10px", borderRadius: 8, fontSize: 13 };
+const warnBox: React.CSSProperties = { background: "#fff9db", color: "#7c5a00", padding: "8px 10px", borderRadius: 8, fontSize: 13 };
 const muted: React.CSSProperties = { fontSize: 12, color: "#868e96", margin: 0 };
 
 const STATE_COLORS: Record<StepStatus["state"], { dot: string; text: string }> = {
@@ -153,7 +154,7 @@ export interface FilmStoryline {
   stitchBlockedReason: string | null;
   errorMessage: string | null;
   qualityCheckedAt?: string | null;
-  qualityCheckIssues?: Array<{ message: string }> | null;
+  qualityCheckIssues?: FilmQualityIssue[] | null;
 }
 
 export interface FilmProgress {
@@ -193,6 +194,8 @@ export function FilmPanel(props: {
   busy: boolean;
   onRetryShot: (shotId: string) => void;
   onCombineAgain: () => void;
+  /** "Accept warnings and finish": a film held back only by warnings becomes finished as it is. */
+  onAcceptWarnings?: () => void;
   onCancel: () => void;
   /** Older layout: a button to the separate render step. Leave out when the start controls are on the same page. */
   onGoRender?: () => void;
@@ -204,7 +207,11 @@ export function FilmPanel(props: {
   const done = progress?.doneShots ?? 0;
   const pct = total > 0 ? Math.round((done / total) * 100) : 0;
   const hasFilm = !!storyline.finalObjectKey && (status === "done" || status === "needs_attention");
-  const issues = storyline.qualityCheckIssues ?? [];
+  const { warnings, problems, canAcceptWarnings } = filmQuality(storyline);
+  const exporting = status === "ready_to_stitch" || status === "stitching";
+  const fileName = `${storyline.title || "video-storyline"}.mp4`;
+  const sizeText = storyline.finalByteSize ? ` (${(storyline.finalByteSize / (1024 * 1024)).toFixed(1)} MB)` : "";
+  const stitchFailed = problems.some((p) => p.code === "stitch_failed");
 
   let headline: string;
   let primary: { label: string; onClick?: () => void; href?: string } | null = null;
@@ -214,20 +221,33 @@ export function FilmPanel(props: {
       primary = { label: "Refresh", onClick: props.onRefresh };
       break;
     case "ready_to_stitch":
-      headline = "All clips are done. They will be combined into one film in a moment.";
+      headline = "Exporting your film. All clips are done; putting them together starts in a moment.";
       primary = { label: "Refresh", onClick: props.onRefresh };
       break;
     case "stitching":
-      headline = "Combining the clips into one film...";
+      headline = "Exporting your film: putting the clips together, evening out the sound and checking the result. This usually takes a minute or two; you can leave the page.";
       primary = { label: "Refresh", onClick: props.onRefresh };
       break;
     case "done":
-      headline = "Your film is ready.";
-      primary = { label: "Download film", href: props.videoUrl };
+      if (warnings.length > 0) {
+        headline = "Your film is ready. The automatic check noticed something you may want to look at, but nothing that stops you using it.";
+        primary = { label: "Download anyway", href: props.videoUrl };
+      } else {
+        headline = "Your film is ready.";
+        primary = { label: "Download film", href: props.videoUrl };
+      }
       break;
     case "needs_attention":
-      headline = "Your film is made, but the automatic quality check found problems. Watch it, then combine the clips again if needed.";
-      primary = { label: "Combine again", onClick: props.onCombineAgain };
+      if (canAcceptWarnings) {
+        headline = "Your film is made. The automatic check noticed something you may want to look at, but nothing that stops you using it.";
+        primary = props.onAcceptWarnings ? { label: "Accept warnings and finish", onClick: props.onAcceptWarnings } : { label: "Download anyway", href: props.videoUrl };
+      } else if (stitchFailed) {
+        headline = "Putting the film together did not work. Your clips are kept; try combining them again.";
+        primary = { label: "Combine again", onClick: props.onCombineAgain };
+      } else {
+        headline = "Your film is made, but the automatic check found a real problem with it. Watch it, then combine the clips again.";
+        primary = { label: "Combine again", onClick: props.onCombineAgain };
+      }
       break;
     case "paused":
       headline = `Paused with ${done} of ${total} clips done. Finished clips are kept; see why below, then continue.`;
@@ -246,6 +266,13 @@ export function FilmPanel(props: {
       primary = props.onGoRender ? { label: "Go to Render", onClick: props.onGoRender } : null;
   }
 
+  const downloadLink = (label: string, testId: string) => (
+    <a href={props.videoUrl} download={fileName} style={{ ...secondaryBtn, textDecoration: "none", display: "inline-block" }} data-testid={testId}>
+      {label}
+      {sizeText}
+    </a>
+  );
+
   return (
     <div style={card} data-testid="film-panel">
       <div>
@@ -253,18 +280,41 @@ export function FilmPanel(props: {
         <p style={{ fontSize: 13, margin: "2px 0 0" }} data-testid="film-headline">{headline}</p>
       </div>
 
+      {exporting && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }} data-testid="export-progress">
+          <div
+            role="progressbar"
+            aria-label="Export progress"
+            aria-valuemin={0}
+            aria-valuemax={2}
+            aria-valuenow={status === "stitching" ? 1 : 0}
+            style={{ height: 8, borderRadius: 4, background: "rgba(128,128,128,0.2)", overflow: "hidden" }}
+          >
+            <div style={{ height: "100%", width: status === "stitching" ? "60%" : "15%", background: "#1971c2" }} />
+          </div>
+          <p style={muted}>{status === "stitching" ? "Step 2 of 2: putting the film together and checking it." : "Step 1 of 2: waiting for its turn."}</p>
+        </div>
+      )}
+
       {primary && (
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
           {primary.href ? (
-            <a href={primary.href} download={`${storyline.title || "video-storyline"}.mp4`} style={{ ...primaryBtn, textDecoration: "none", display: "inline-block" }}>
+            <a href={primary.href} download={fileName} style={{ ...primaryBtn, textDecoration: "none", display: "inline-block" }} data-testid="film-download">
               {primary.label}
-              {storyline.finalByteSize ? ` (${(storyline.finalByteSize / (1024 * 1024)).toFixed(1)} MB)` : ""}
+              {sizeText}
             </a>
           ) : (
-            <button type="button" style={primaryBtn} disabled={props.busy} onClick={primary.onClick}>
+            <button type="button" style={primaryBtn} disabled={props.busy} onClick={primary.onClick} data-testid="film-primary">
               {primary.label}
             </button>
           )}
+          {status === "needs_attention" && canAcceptWarnings && props.onAcceptWarnings && hasFilm && downloadLink("Download anyway", "film-download-anyway")}
+          {status === "needs_attention" && canAcceptWarnings && (
+            <button type="button" style={ghostBtn} disabled={props.busy} onClick={props.onCombineAgain} data-testid="film-combine-again">
+              Combine again
+            </button>
+          )}
+          {status === "needs_attention" && !canAcceptWarnings && hasFilm && downloadLink(stitchFailed ? "Download the previous version" : "Download this version anyway", "film-download-anyway")}
           {status === "rendering" && (
             <button type="button" style={dangerGhostBtn} disabled={props.busy} onClick={props.onCancel}>
               Cancel render
@@ -273,36 +323,37 @@ export function FilmPanel(props: {
         </div>
       )}
 
-      {storyline.errorMessage && status !== "needs_attention" && <div style={errorBox}>{storyline.errorMessage}</div>}
+      {storyline.errorMessage && status !== "needs_attention" && status !== "done" && (
+        <div style={errorBox} role="alert" data-testid="film-error">
+          {storyline.errorMessage}
+        </div>
+      )}
       {(progress?.stitchBlockedReason ?? storyline.stitchBlockedReason) && <div style={errorBox}>{progress?.stitchBlockedReason ?? storyline.stitchBlockedReason}</div>}
 
       {(status === "done" || status === "needs_attention") && (
-        <div style={status === "done" ? okBox : errorBox} data-testid="quality-check">
-          {status === "done" ? (
-            "The automatic quality check passed."
-          ) : issues.length > 0 ? (
-            <>
-              Quality check found {issues.length} problem{issues.length === 1 ? "" : "s"}:
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }} data-testid="quality-check">
+          {problems.length > 0 && (
+            <div style={errorBox} role="alert" data-testid="quality-problems">
+              {problems.length === 1 ? "A problem that needs fixing:" : `${problems.length} problems that need fixing:`}
               <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
-                {issues.map((issue, i) => <li key={i}>{issue.message}</li>)}
+                {problems.map((issue, i) => <li key={i}>{issue.message}</li>)}
               </ul>
-            </>
-          ) : (
-            storyline.errorMessage ?? "Quality check found problems."
+            </div>
           )}
+          {problems.length === 0 && status === "needs_attention" && warnings.length === 0 && storyline.errorMessage && <div style={errorBox}>{storyline.errorMessage}</div>}
+          {warnings.length > 0 && (
+            <div style={warnBox} data-testid="quality-warnings">
+              {warnings.length === 1 ? "Worth a look (this does not stop the download):" : `${warnings.length} things worth a look (they do not stop the download):`}
+              <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+                {warnings.map((issue, i) => <li key={i}>{issue.message}</li>)}
+              </ul>
+            </div>
+          )}
+          {status === "done" && warnings.length === 0 && problems.length === 0 && <div style={okBox}>The automatic quality check passed.</div>}
         </div>
       )}
 
-      {hasFilm && (
-        <>
-          <video controls style={{ width: "100%", borderRadius: 8, background: "#000" }} src={props.videoUrl} data-testid="film-video" />
-          {status === "needs_attention" && (
-            <a href={props.videoUrl} download={`${storyline.title || "video-storyline"}.mp4`} style={{ color: "#1971c2", fontSize: 12 }}>
-              Download this version anyway
-            </a>
-          )}
-        </>
-      )}
+      {hasFilm && <video controls style={{ width: "100%", borderRadius: 8, background: "#000" }} src={props.videoUrl} data-testid="film-video" />}
 
       {progress && total > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }} data-testid="film-progress">

@@ -26,6 +26,7 @@ import {
   type UpdateVideoShotInput,
   type UpdateVideoStorylineInput,
   type VideoStorylineProgress,
+  videoQualityIssueSeverity,
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
@@ -77,7 +78,8 @@ export interface VideoStorylineSummary {
   finalDurationSeconds: number | null;
   stitchBlockedReason: string | null;
   errorMessage: string | null;
-  qualityCheckIssues: Array<{ code: string; message: string; shotIndex: number | null; timeSeconds: number | null }>;
+  /** severity: "blocking" means the film is really broken; "warning" is worth a look but never stops Download. */
+  qualityCheckIssues: Array<{ code: string; message: string; shotIndex: number | null; timeSeconds: number | null; severity: "warning" | "blocking" }>;
   qualityCheckedAt: string | null;
   defaultTransition: string;
   defaultTransitionDurationMs: number;
@@ -178,7 +180,8 @@ function toStorylineSummary(row: StorylineRow): VideoStorylineSummary {
     finalDurationSeconds: row.finalDurationSeconds,
     stitchBlockedReason: row.stitchBlockedReason,
     errorMessage: row.errorMessage,
-    qualityCheckIssues: row.qualityCheckIssues,
+    // Always from the code, so rows checked before severities existed read the same way.
+    qualityCheckIssues: (row.qualityCheckIssues ?? []).map((issue) => ({ ...issue, severity: videoQualityIssueSeverity(issue) })),
     qualityCheckedAt: iso(row.qualityCheckedAt),
     defaultTransition: row.defaultTransition,
     defaultTransitionDurationMs: row.defaultTransitionDurationMs,

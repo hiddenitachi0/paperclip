@@ -896,7 +896,7 @@ export function TimelineEditor(props: TimelineEditorProps) {
 }
 
 /** Step 5's export block: size and frame rate presets, title card and credits, and "Export again" (free, nothing is re-made). */
-export function ExportSection(props: { apiBase: string; editable: boolean; reloadKey?: number; onChanged?: () => void | Promise<void> }) {
+export function ExportSection(props: { apiBase: string; editable: boolean; reloadKey?: number; onChanged?: () => void | Promise<void>; /** The storyline's status, so a running export shows here too and the panel refreshes when it ends. */ storylineStatus?: string }) {
   const [strip, setStrip] = useState<StripSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -910,7 +910,7 @@ export function ExportSection(props: { apiBase: string; editable: boolean; reloa
   }, [props.apiBase]);
   useEffect(() => {
     void load();
-  }, [load, props.reloadKey]);
+  }, [load, props.reloadKey, props.storylineStatus]);
   const run = useCallback(
     async (fn: () => Promise<unknown>) => {
       setBusy(true);
@@ -934,6 +934,11 @@ export function ExportSection(props: { apiBase: string; editable: boolean; reloa
       {error && (
         <div style={errorBox} role="alert">
           {error}
+        </div>
+      )}
+      {(props.storylineStatus === "ready_to_stitch" || props.storylineStatus === "stitching") && (
+        <div style={noticeBox} role="status" data-testid="export-running">
+          Exporting your film now. You can follow it under "Progress and your film" above; the download appears there when it is ready.
         </div>
       )}
       {!strip.canCombineAgain && (
