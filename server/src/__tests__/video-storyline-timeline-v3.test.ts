@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import express from "express";
 import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { companies, createDb, plugins, videoShotRenderJobs, videoShots, videoStorylines, videoTransitions } from "@paperclipai/db";
+import { activityLog, companies, createDb, plugins, videoShotRenderJobs, videoShots, videoStorylines, videoTransitions } from "@paperclipai/db";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
@@ -262,13 +262,35 @@ d("storyline timeline v3", () => {
       const keep = await videoStorylineService(db).createStoryline(companyId, { title: "Keep", projectId: null, providerId: "fal", model: null, budgetCapCents: null, characterReferenceAssetIds: [] }, ACTOR);
       await db.update(videoStorylines).set({ status: "done" }).where(eq(videoStorylines.id, storylineId));
       const app = appFor(companyId);
-      const del = await request(app).delete(`/api/companies/${companyId}/video-storylines/${storylineId}`);
+      const url = `/api/companies/${companyId}/video-storylines/${storylineId}`;
+      const del = await request(app).delete(url);
+      // A real delete answers 204 with no body -- never 200 with the storyline in it.
       expect(del.status).toBe(204);
+      expect(del.text).toBe("");
       expect(await db.select().from(videoStorylines).where(eq(videoStorylines.id, storylineId))).toHaveLength(0);
+      expect((await request(app).get(url)).status).toBe(404);
       const list = await request(app).get(`/api/companies/${companyId}/video-storylines`);
       expect(list.status).toBe(200);
       expect((list.body as Array<{ id: string }>).map((s) => s.id)).toEqual([keep.id]);
-      expect((await request(app).delete(`/api/companies/${companyId}/video-storylines/${storylineId}`)).status).toBe(404);
+      const logged = await db.select().from(activityLog).where(and(eq(activityLog.entityId, storylineId), eq(activityLog.action, "video_storyline.deleted")));
+      expect(logged).toHaveLength(1);
+      expect(logged[0]!.details).toMatchObject({ title: "Test" });
+      // Deleting it again, or one that never existed, is a plain 404.
+      expect((await request(app).delete(url)).status).toBe(404);
+      expect((await request(app).delete(`/api/companies/${companyId}/video-storylines/${randomUUID()}`)).status).toBe(404);
+    });
+
+    it("the 9 Oct symptom (200 with the storyline, nothing deleted, nothing logged) is what a PATCH with an empty body returns", async () => {
+      // The on-box API helper sends any method it doesn't recognise as PATCH {}:
+      // PATCH /video-storylines/:id with nothing to change answers 200 with the full
+      // storyline and deletes nothing -- exactly what was seen for the smoke tests.
+      const { companyId, storylineId } = await seed();
+      const app = appFor(companyId);
+      const res = await request(app).patch(`/api/companies/${companyId}/video-storylines/${storylineId}`).send({});
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ id: storylineId, title: "Test" });
+      expect(await db.select().from(videoStorylines).where(eq(videoStorylines.id, storylineId))).toHaveLength(1);
+      expect(await db.select().from(activityLog).where(and(eq(activityLog.entityId, storylineId), eq(activityLog.action, "video_storyline.deleted")))).toHaveLength(0);
     });
 
     it("refuses while clips are being made, and while the film is being put together", async () => {
