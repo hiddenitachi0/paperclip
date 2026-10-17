@@ -54,6 +54,7 @@ import { cn, SIDEBAR_RAIL_HIDDEN_LABEL } from "../lib/utils";
 import { PluginSlotOutlet } from "@/plugins/slots";
 import { PluginLauncherOutlet } from "@/plugins/launchers";
 import { SidebarCompanyMenu } from "./SidebarCompanyMenu";
+import { BOARD_CHAT_SUBTITLE } from "../lib/board-chat-handoff";
 
 export function Sidebar() {
   const { openNewIssue } = useDialogActions();
@@ -95,7 +96,7 @@ export function Sidebar() {
   // wording is split to PR #7651. Gating is navigation-only; all routes stay
   // registered in both modes.
   const streamlined = experimentalSettings?.enableStreamlinedLeftNavigation !== false;
-  // Conference Room Chat flag (PAP-136/PAP-137): the Conference Room nav item
+  // Conference Room Chat flag (PAP-136/PAP-137): the Board chat (formerly "Conference Room") nav item
   // is a new surface, hidden entirely while the flag is off (same no-flash
   // pattern as showWorkspacesLink above).
   const conferenceRoomChatEnabled = experimentalSettings?.enableConferenceRoomChat === true;
@@ -202,7 +203,12 @@ export function Sidebar() {
             alert={inboxBadge.failedRuns > 0}
           />
           {conferenceRoomChatEnabled ? (
-            <SidebarNavItem to="/board-chat" label="Conference Room" icon={MessagesSquare} />
+            <SidebarNavItem
+              to="/board-chat"
+              label="Board chat"
+              icon={MessagesSquare}
+              title={BOARD_CHAT_SUBTITLE}
+            />
           ) : null}
         </div>
 

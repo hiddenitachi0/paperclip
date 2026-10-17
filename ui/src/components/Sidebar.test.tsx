@@ -310,7 +310,7 @@ describe("Sidebar", () => {
     });
   });
 
-  it("shows the Conference Room nav item when conference room chat is enabled (PAP-137)", async () => {
+  it("shows the Board chat nav item (formerly Conference Room) when conference room chat is enabled (PAP-137)", async () => {
     mockInstanceSettingsApi.getExperimental.mockResolvedValue({
       enableIsolatedWorkspaces: false,
       enableConferenceRoomChat: true,
@@ -318,22 +318,27 @@ describe("Sidebar", () => {
     const root = await renderSidebar();
 
     const link = [...container.querySelectorAll("nav a")].find(
-      (anchor) => anchor.textContent?.trim() === "Conference Room",
+      (anchor) => anchor.textContent?.trim() === "Board chat",
     );
     expect(link?.getAttribute("href")).toBe("/board-chat");
+    expect(link?.getAttribute("title")).toBe(
+      "Talk to an AI board member that can make changes for you (hire agents, create tasks, change settings).",
+    );
+    expect(container.textContent).not.toContain("Conference Room");
 
     flushSync(() => {
       root.unmount();
     });
   });
 
-  it("hides the Conference Room nav item when conference room chat is off (PAP-137)", async () => {
+  it("hides the Board chat nav item when conference room chat is off (PAP-137)", async () => {
     mockInstanceSettingsApi.getExperimental.mockResolvedValue({
       enableIsolatedWorkspaces: false,
       enableConferenceRoomChat: false,
     });
     const root = await renderSidebar();
 
+    expect(container.textContent).not.toContain("Board chat");
     expect(container.textContent).not.toContain("Conference Room");
 
     flushSync(() => {
@@ -341,11 +346,11 @@ describe("Sidebar", () => {
     });
   });
 
-  it("does not flash the Conference Room item while experimental settings are loading (PAP-137)", async () => {
+  it("does not flash the Board chat item while experimental settings are loading (PAP-137)", async () => {
     mockInstanceSettingsApi.getExperimental.mockImplementation(() => new Promise(() => {}));
     const root = await renderSidebar();
 
-    expect(container.textContent).not.toContain("Conference Room");
+    expect(container.textContent).not.toContain("Board chat");
 
     flushSync(() => {
       root.unmount();
