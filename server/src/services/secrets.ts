@@ -7,6 +7,7 @@ import {
   companySecretProviderConfigs,
   companySecrets,
   companySecretVersions,
+  cryptoWallets,
   environments,
   heartbeatRuns,
   issues,
@@ -33,6 +34,8 @@ import type {
   SecretVersionSelector,
 } from "@paperclipai/shared";
 import {
+  CRYPTO_DUST,
+  type CryptoChain,
   createSecretProviderConfigSchema,
   DEDICATED_SECRET_BINDING_TARGET_TYPES,
   deriveProjectUrlKey,
@@ -70,6 +73,20 @@ import { findActiveServerAdapter } from "../adapters/index.js";
 // bindings share exactly this pattern instead of re-declaring a copy that
 // could drift out of sync.
 export const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Crypto wallets: a key must outlive its wallet while the wallet is in use,
+ * or while a real-money wallet (even an archived one) last showed more than
+ * dust -- deleting it then would lock the coins away for good. Shared by
+ * the secret delete and the company delete guards.
+ */
+export function isCryptoWalletKeyStillNeeded(wallet: { status: string; network: string; chain: string; lastBalance: string | null }): boolean {
+  if (wallet.status !== "archived") return true;
+  if (wallet.network !== "mainnet") return false;
+  if (wallet.lastBalance === null) return true;
+  const dust = CRYPTO_DUST[wallet.chain as CryptoChain];
+  return dust === undefined || BigInt(wallet.lastBalance) > BigInt(dust);
+}
 const SENSITIVE_ENV_KEY_RE =
   /(api[-_]?key|access[-_]?token|auth(?:_?token)?|authorization|bearer|secret|passwd|password|credential|jwt|private[-_]?key|cookie|connectionstring)/i;
 const REDACTED_SENTINEL = "***REDACTED***";
@@ -958,6 +975,12 @@ export function secretService(db: Db, rawDb: Db = db) {
     if (!context.actorId?.trim()) {
       throw forbidden("Payment card fill requires an agent actor context");
     }
+    // This reader may open protected kinds, so it opens only its own two.
+    const secret = await getById(secretId);
+    if (!secret || secret.companyId !== companyId) throw notFound("Secret not found");
+    if (secret.kind !== "payment_card_single_use" && secret.kind !== "site_login") {
+      throw forbidden("Only a payment card or a website login can be read by the browser fill");
+    }
     return (await resolveSecretValueInternal(companyId, secretId, "latest", {
       accessContext: {
         consumerType: "system",
@@ -966,6 +989,38 @@ export function secretService(db: Db, rawDb: Db = db) {
         actorId: context.actorId,
         issueId: context.issueId ?? null,
         heartbeatRunId: context.heartbeatRunId ?? null,
+      },
+      allowProtectedSecretKind: true,
+    })).value;
+  }
+
+  /**
+   * Crypto wallets for agents: resolve a `crypto_wallet_key` secret for the
+   * server-side signer (cryptoWalletService), the ONLY caller. The wallet
+   * service has already checked every switch (company kill switch, wallet
+   * frozen, real money allowed, allow-list, limits, approval) before calling
+   * this; the value goes straight into the signing function and is never
+   * returned by any route, logged, or shown to an agent. Refuses any secret
+   * that is not of kind crypto_wallet_key, so this reader can never be used
+   * to pull some other protected value. Every resolution is recorded in the
+   * secret's own access trail.
+   */
+  async function resolveSecretValueForWalletSigning(
+    companyId: string,
+    secretId: string,
+    context: { walletId: string; actorType: "agent" | "user" | "system"; actorId: string },
+  ): Promise<string> {
+    const secret = await getById(secretId);
+    if (!secret || secret.companyId !== companyId) throw notFound("Secret not found");
+    if (secret.kind !== "crypto_wallet_key") {
+      throw forbidden("Only a crypto wallet key can be read by the wallet signer");
+    }
+    return (await resolveSecretValueInternal(companyId, secretId, "latest", {
+      accessContext: {
+        consumerType: "system",
+        consumerId: `crypto_wallet_sign:${context.walletId}`,
+        actorType: context.actorType,
+        actorId: context.actorId,
       },
       allowProtectedSecretKind: true,
     })).value;
@@ -1387,6 +1442,8 @@ export function secretService(db: Db, rawDb: Db = db) {
       key: string;
       value: string;
       description?: string | null;
+      /** e.g. "crypto_wallet_key" -- a protected kind is then only readable by its dedicated reader. */
+      kind?: string | null;
     },
     actor?: { userId?: string | null; agentId?: string | null },
   ) {
@@ -1431,6 +1488,7 @@ export function secretService(db: Db, rawDb: Db = db) {
         providerMetadata: null,
         latestVersion: 0,
         description: input.description ?? null,
+        kind: input.kind ?? null,
         createdByAgentId: actor?.agentId ?? null,
         createdByUserId: actor?.userId ?? null,
       })
@@ -2419,6 +2477,7 @@ export function secretService(db: Db, rawDb: Db = db) {
     resolveSecretValue,
     resolveSecretValueForEphemeralAccess,
     resolveSecretValueForExport,
+    resolveSecretValueForWalletSigning,
     resolveSecretValueForPlugin,
     resolveSecretValueForBrowserFill,
     resolveSecretValueForVideoRender,
@@ -2630,6 +2689,11 @@ export function secretService(db: Db, rawDb: Db = db) {
       const secret = await getById(secretId);
       if (!secret) throw notFound("Secret not found");
       if (secret.status !== "active") throw unprocessable("Cannot rotate a non-active secret");
+      // A wallet's address comes from its key: a different key would be a
+      // different wallet, and the coins would stay behind on the old one.
+      if (secret.kind === "crypto_wallet_key") {
+        throw unprocessable("A crypto wallet key cannot be replaced. Make a new wallet instead and move the coins over.");
+      }
       const providerId = secret.provider as SecretProvider;
       const provider = getSecretProvider(providerId);
       const providerConfigId =
@@ -2792,6 +2856,14 @@ export function secretService(db: Db, rawDb: Db = db) {
         if (duplicateKey && duplicateKey.id !== secret.id) {
           throw conflict(`Secret key already exists: ${nextKey}`);
         }
+      }
+      // A protected kind (payment card, website login, crypto wallet key) is
+      // sticky: relabelling it as an ordinary secret would make it bindable
+      // to an agent's environment, which is exactly what the kind forbids.
+      if (patch.kind !== undefined && patch.kind !== secret.kind && !isSecretKindBindable(secret.kind)) {
+        throw unprocessable(
+          "This secret holds a payment card, a website login or a crypto wallet key, so what kind of secret it is cannot be changed.",
+        );
       }
       const deleting = patch.status === "deleted";
       if (deleting && secret.managedMode === "paperclip_managed") {
@@ -3082,6 +3154,17 @@ export function secretService(db: Db, rawDb: Db = db) {
     remove: async (secretId: string) => {
       const secret = await getById(secretId);
       if (!secret) return null;
+      // Deleting a wallet's key would lock any coins still in it away for
+      // good. Archive the wallet first (after moving the coins out).
+      if (secret.kind === "crypto_wallet_key") {
+        const holders = await db
+          .select({ status: cryptoWallets.status, network: cryptoWallets.network, chain: cryptoWallets.chain, lastBalance: cryptoWallets.lastBalance })
+          .from(cryptoWallets)
+          .where(eq(cryptoWallets.secretId, secret.id));
+        if (holders.some(isCryptoWalletKeyStillNeeded)) {
+          throw unprocessable("This key belongs to a crypto wallet that is still in use or may still hold coins. Move the coins out and archive the wallet first.");
+        }
+      }
       const versionRow = await getSecretVersion(secret.id, secret.latestVersion);
       const providerId = secret.provider as SecretProvider;
       const provider = getSecretProvider(providerId);

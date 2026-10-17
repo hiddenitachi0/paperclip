@@ -83,6 +83,9 @@ export const ROUTINE_SCHEDULER_BYPASS_ROUTES = [
   "heartbeat-scheduler:tradingAgent",
   "heartbeat-scheduler:localModelHealth",
   "heartbeat-scheduler:modelSetupReview",
+  // Follows up wallet approval cards and submitted payments each tick; every
+  // actual payment is recorded in the trading ledger and activity log.
+  "heartbeat-scheduler:cryptoWallets",
 ] as const;
 
 export type RoutineSchedulerBypassRoute = (typeof ROUTINE_SCHEDULER_BYPASS_ROUTES)[number];

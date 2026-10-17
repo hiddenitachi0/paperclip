@@ -337,6 +337,15 @@ export const queryKeys = {
     dashboard: (companyId: string, strategyId: string) => ["trading-dashboard", companyId, strategyId] as const,
     orders: (companyId: string, strategyId: string) => ["trading-orders", companyId, strategyId] as const,
   },
+  // Crypto wallets for agents.
+  cryptoWallets: {
+    settings: (companyId: string) => ["crypto-settings", companyId] as const,
+    list: (companyId: string, agentId?: string) => ["crypto-wallets", companyId, agentId ?? "all"] as const,
+    balance: (companyId: string, walletId: string) => ["crypto-wallet-balance", companyId, walletId] as const,
+    destinations: (companyId: string, walletId: string) => ["crypto-wallet-destinations", companyId, walletId] as const,
+    transactions: (companyId: string, walletId: string) => ["crypto-wallet-transactions", companyId, walletId] as const,
+    agentLimits: (companyId: string, agentId: string) => ["crypto-agent-limits", companyId, agentId] as const,
+  },
   // Product grabber: vendor site -> staging list -> human approval.
   productGrabber: {
     settings: (companyId: string) => ["product-grabber", "settings", companyId] as const,
