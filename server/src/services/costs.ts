@@ -57,6 +57,42 @@ async function getMonthlySpendTotal(
 export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
   const budgets = budgetService(db, budgetHooks);
   const escalationGrants = escalationGrantService(db);
+  /**
+   * After a cost row is written or changed: the agent's and company's month
+   * totals are recomputed and budgets/escalation grants are evaluated
+   * (createEvent, and storyline media spend that is reserved first and
+   * settled or released later).
+   */
+  async function refreshAfterEvent(event: typeof costEvents.$inferSelect): Promise<void> {
+    const agentId = event.agentId ?? null;
+    const companyId = event.companyId;
+    const [agentMonthSpend, companyMonthSpend] = await Promise.all([
+      agentId ? getMonthlySpendTotal(db, { companyId, agentId }) : Promise.resolve(null),
+      getMonthlySpendTotal(db, { companyId }),
+    ]);
+
+    if (agentId && agentMonthSpend !== null) {
+      await db
+        .update(agents)
+        .set({
+          spentMonthlyCents: agentMonthSpend,
+          updatedAt: new Date(),
+        })
+        .where(eq(agents.id, agentId));
+    }
+
+    await db
+      .update(companies)
+      .set({
+        spentMonthlyCents: companyMonthSpend,
+        updatedAt: new Date(),
+      })
+      .where(eq(companies.id, companyId));
+
+    await budgets.evaluateCostEvent(event);
+    await escalationGrants.evaluateCostEvent(event);
+  }
+
   return {
     // DUR-4329: data.agentId is null for a board-user-triggered cost with no
     // agent involved at all (Media Studio's Create tab direct generation) --
@@ -90,34 +126,12 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         .returning()
         .then((rows) => rows[0]);
 
-      const [agentMonthSpend, companyMonthSpend] = await Promise.all([
-        agentId ? getMonthlySpendTotal(db, { companyId, agentId }) : Promise.resolve(null),
-        getMonthlySpendTotal(db, { companyId }),
-      ]);
-
-      if (agentId && agentMonthSpend !== null) {
-        await db
-          .update(agents)
-          .set({
-            spentMonthlyCents: agentMonthSpend,
-            updatedAt: new Date(),
-          })
-          .where(eq(agents.id, agentId));
-      }
-
-      await db
-        .update(companies)
-        .set({
-          spentMonthlyCents: companyMonthSpend,
-          updatedAt: new Date(),
-        })
-        .where(eq(companies.id, companyId));
-
-      await budgets.evaluateCostEvent(event);
-      await escalationGrants.evaluateCostEvent(event);
+      await refreshAfterEvent(event);
 
       return event;
     },
+
+    refreshAfterEvent,
 
     summary: async (companyId: string, range?: CostDateRange) => {
       const company = await db

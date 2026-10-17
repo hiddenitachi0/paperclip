@@ -23,6 +23,7 @@ import { FalVideoProvider, SogniVideoProvider } from "./video-provider-clients.j
 import { badRequest, conflict, HttpError, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { recordFalCostEvent } from "./fal-cost-events.js";
+import { releaseStorylineMediaSpend, settleSogniStorylineSpend, storylineAnimateSpendCode } from "./storyline-media-ledger.js";
 import { recordSogniCost, SOGNI_CREDIT_PRICE_CONFIG_KEY } from "./sogni-cost.js";
 import { getStorageService } from "../storage/index.js";
 import { logActivity } from "./activity-log.js";
@@ -1087,14 +1088,14 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
 
   /** Phase 2: money held for this shot's paid step (animate photo), released when it fails. */
   async function releaseShotReservation(companyId: string, storylineId: string, shotId: string): Promise<void> {
-    await withCompanyScope(db, companyId, async (tx) => {
+    const releasedIds = await withCompanyScope(db, companyId, async (tx) => {
       const held = await tx
         .select()
         .from(videoMediaSpend)
         .where(and(eq(videoMediaSpend.shotId, shotId), eq(videoMediaSpend.companyId, companyId), eq(videoMediaSpend.status, "reserved")))
         .for("update");
       const total = held.reduce((sum, row) => sum + row.reservedCents, 0);
-      if (held.length === 0) return;
+      if (held.length === 0) return [];
       await tx
         .update(videoMediaSpend)
         .set({ status: "released", costCents: 0, updatedAt: nowOf() })
@@ -1105,7 +1106,10 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
           .set({ spentCents: sql`greatest(0, ${videoStorylines.spentCents} - ${total})`, updatedAt: nowOf() })
           .where(eq(videoStorylines.id, storylineId));
       }
+      return held.map((row) => row.id);
     });
+    // Nothing was charged: the ledger rows stop counting (they are kept, at 0).
+    for (const id of releasedIds) await releaseStorylineMediaSpend(db, companyId, storylineAnimateSpendCode(id));
   }
 
   /** Phase 2: settles this shot's held money at its real cost; returns what was held (already counted in spentCents). */
@@ -1148,6 +1152,15 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     const target = resolveShotRenderTarget(storyline, shot);
     const estimateForShot = estimateShotRenderCents(storyline, [shot]);
     let actualCostCents = estimateForShot.estimatedTotalCents;
+    // An animated photo had its money held, with a ledger row the monthly limit
+    // counts (DUR-4807): that row is settled to the real cost, never doubled.
+    const [heldSpend] = await db
+      .select({ id: videoMediaSpend.id })
+      .from(videoMediaSpend)
+      .where(and(eq(videoMediaSpend.shotId, shot.id), eq(videoMediaSpend.companyId, companyId), eq(videoMediaSpend.status, "reserved")))
+      .orderBy(asc(videoMediaSpend.createdAt))
+      .limit(1);
+    const heldSpendCode = heldSpend ? storylineAnimateSpendCode(heldSpend.id) : undefined;
     // DUR-4455: Fal video is priced per its published unit (usually seconds); Sogni has no Fal price and keeps the static estimate.
     if (target.providerId === "fal" && fal) {
       const recorded = await recordFalCostEvent(db, safeFetch, {
@@ -1159,6 +1172,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
         usage: { seconds: videoRenderDurationSeconds("fal", target.model, shot.durationSeconds) },
         estimateCents: estimateForShot.estimatedTotalCents,
         billingCode: "video-storyline-shot",
+        settleBillingCode: heldSpendCode,
       });
       if (recorded) actualCostCents = recorded.costCents;
     }
@@ -1174,7 +1188,19 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
         const plugin = await registry.getByKey(MEDIA_STUDIO_PLUGIN_KEY);
         const config = plugin ? await registry.getConfig(plugin.id) : null;
         const cfg = (config?.configJson ?? {}) as Record<string, unknown>;
-        await recordSogniCost(db, {
+        const settled = heldSpendCode
+          ? await settleSogniStorylineSpend(db, {
+              companyId,
+              billingCode: heldSpendCode,
+              credits: sogniCredits,
+              creditPriceUsd: cfg[SOGNI_CREDIT_PRICE_CONFIG_KEY],
+              model: target.model ?? "sogni-video",
+            }).catch((err) => {
+              logger.error({ err, shotId: shot.id }, "video-storyline-render: could not settle the held Sogni cost");
+              return true;
+            })
+          : false;
+        if (!settled) await recordSogniCost(db, {
           companyId,
           agentId: storyline.createdByAgentId ?? null,
           credits: sogniCredits,

@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import express from "express";
 import request from "supertest";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createDb, companies, pluginConfig, pluginState, plugins, videoShots, videoStorylines, videoTransitionTakes, videoTransitions } from "@paperclipai/db";
+import { createDb, companies, costEvents, pluginConfig, pluginState, plugins, videoShots, videoStorylines, videoTransitionTakes, videoTransitions } from "@paperclipai/db";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { seedCompanyWriterModel } from "./helpers/storyline-writer-model.js";
@@ -91,6 +91,7 @@ const { videoStorylineTransitionsService, buildStitchPlan, transitionAnchorHash,
 );
 const { videoStorylineSettingsService } = await import("../services/video-storyline-settings.ts");
 const { videoStorylineService } = await import("../services/video-storylines.ts");
+const { videoStorylineClipsService } = await import("../services/video-storyline-clips.ts");
 const { videoStorylineStitchService } = await import("../services/video-storyline-stitch.ts");
 const { secretService } = await import("../services/secrets.ts");
 const { storylineCompanyModel } = await import("../services/video-storyline-company-model.ts");
@@ -166,13 +167,15 @@ d("storyline strip transitions", () => {
   }
 
   /** A finished two-shot film on Fal. */
-  async function seedFilm(opts: { ownKey?: boolean; vision?: boolean; budgetCapCents?: number | null } = {}) {
-    const companyId = await seedCompany("Film Co");
+  async function seedFilm(opts: { ownKey?: boolean; vision?: boolean; budgetCapCents?: number | null; companyId?: string } = {}) {
+    const companyId = opts.companyId ?? (await seedCompany("Film Co"));
     const settings = videoStorylineSettingsService(db);
-    await settings.setEnabled(companyId, true);
-    await settings.setAdvancedEnabled(companyId, true);
-    await seedCompanyWriterModel(db, companyId, { canSeePictures: opts.vision ?? false });
-    if (opts.ownKey !== false) await giveOwnFalKey(companyId);
+    if (!opts.companyId) {
+      await settings.setEnabled(companyId, true);
+      await settings.setAdvancedEnabled(companyId, true);
+      await seedCompanyWriterModel(db, companyId, { canSeePictures: opts.vision ?? false });
+      if (opts.ownKey !== false) await giveOwnFalKey(companyId);
+    }
     const svc = videoStorylineService(db);
     const storyline = await svc.createStoryline(
       companyId,
@@ -497,5 +500,86 @@ d("storyline strip transitions", () => {
     expect(sent.system).not.toContain("SYSTEMSECRET");
     expect(JSON.stringify(sent.messages)).not.toContain("USERSECRET");
     expect(JSON.stringify(sent.messages)).toContain("[hidden]");
+  });
+
+  describe("the monthly limit survives deletes (security review DUR-4807)", () => {
+    const QUOTE = Math.ceil(3 * 8.4);
+
+    async function madeBridge(film: Awaited<ReturnType<typeof seedFilm>>, svc = videoStorylineTransitionsService(db)) {
+      const gap = await svc.upsert(film.companyId, film.storylineId, { fromShotId: film.a, toShotId: film.b, kind: "ai" }, ACTOR);
+      await svc.generate(film.companyId, film.storylineId, gap.id!, {}, ACTOR);
+      return gap;
+    }
+
+    async function ledger(companyId: string) {
+      return (await db.select().from(costEvents).where(eq(costEvents.companyId, companyId))).filter((r) => r.billingCode?.startsWith("video-storyline"));
+    }
+
+    it("spend, delete the storyline: the month's total is unchanged and the next bridge over the limit is refused", async () => {
+      const film = await seedFilm();
+      await videoStorylineSettingsService(db).setMediaMonthlyCapCents(film.companyId, QUOTE);
+      const svc = videoStorylineTransitionsService(db);
+      await madeBridge(film, svc);
+      await svc.tick();
+      expect(await svc.monthlySpentCents(film.companyId)).toBe(QUOTE);
+      // One ledger row for the bridge, counted once (held, then settled in place).
+      expect((await ledger(film.companyId)).map((r) => r.costCents)).toEqual([QUOTE]);
+
+      await videoStorylineService(db).deleteStoryline(film.companyId, film.storylineId, ACTOR);
+      expect(await db.select().from(videoTransitionTakes).where(eq(videoTransitionTakes.companyId, film.companyId))).toHaveLength(0);
+      expect(await svc.monthlySpentCents(film.companyId)).toBe(QUOTE);
+
+      const again = await seedFilm({ companyId: film.companyId });
+      const gap = await svc.upsert(again.companyId, again.storylineId, { fromShotId: again.a, toShotId: again.b, kind: "ai" }, ACTOR);
+      const startsBefore = video.starts.length;
+      await expect(svc.generate(again.companyId, again.storylineId, gap.id!, {}, ACTOR)).rejects.toThrow(/monthly limit/);
+      expect(video.starts).toHaveLength(startsBefore);
+    });
+
+    it("removing the AI shot or a clip at the AI join gives nothing back, even while the bridge is still being made", async () => {
+      const film = await seedFilm();
+      await videoStorylineSettingsService(db).setMediaMonthlyCapCents(film.companyId, QUOTE * 2);
+      const svc = videoStorylineTransitionsService(db);
+      const clips = videoStorylineClipsService(db);
+
+      // A finished bridge, then the AI shot before the join is removed (its transition and takes go with it).
+      await madeBridge(film, svc);
+      await svc.tick();
+      await clips.removeClip(film.companyId, film.storylineId, film.a, ACTOR);
+      expect(await db.select().from(videoTransitionTakes).where(eq(videoTransitionTakes.storylineId, film.storylineId))).toHaveLength(0);
+      expect(await svc.monthlySpentCents(film.companyId)).toBe(QUOTE);
+
+      // A bridge still being made, then the clip after the join is removed: the held money stays counted.
+      const second = await seedFilm({ companyId: film.companyId });
+      video.outcome = { status: "running" };
+      await madeBridge(second, svc);
+      expect(await svc.monthlySpentCents(film.companyId)).toBe(QUOTE * 2);
+      await clips.removeClip(second.companyId, second.storylineId, second.b, ACTOR);
+      expect(await db.select().from(videoTransitionTakes).where(eq(videoTransitionTakes.storylineId, second.storylineId))).toHaveLength(0);
+      await svc.tick();
+      expect(await svc.monthlySpentCents(film.companyId)).toBe(QUOTE * 2);
+
+      // The limit is used up: a third bridge is refused before anything is sent.
+      const third = await seedFilm({ companyId: film.companyId });
+      const gap = await svc.upsert(third.companyId, third.storylineId, { fromShotId: third.a, toShotId: third.b, kind: "ai" }, ACTOR);
+      const startsBefore = video.starts.length;
+      await expect(svc.generate(third.companyId, third.storylineId, gap.id!, {}, ACTOR)).rejects.toThrow(/monthly limit/);
+      expect(video.starts).toHaveLength(startsBefore);
+    });
+
+    it("one company's spend never counts against another's limit", async () => {
+      const a = await seedFilm();
+      const b = await seedFilm();
+      await videoStorylineSettingsService(db).setMediaMonthlyCapCents(a.companyId, QUOTE);
+      await videoStorylineSettingsService(db).setMediaMonthlyCapCents(b.companyId, QUOTE);
+      const svc = videoStorylineTransitionsService(db);
+      await madeBridge(a, svc);
+      await svc.tick();
+      expect(await svc.monthlySpentCents(a.companyId)).toBe(QUOTE);
+      expect(await svc.monthlySpentCents(b.companyId)).toBe(0);
+      await madeBridge(b, svc);
+      expect(await svc.monthlySpentCents(b.companyId)).toBe(QUOTE);
+      expect(await svc.monthlySpentCents(a.companyId)).toBe(QUOTE);
+    });
   });
 });
