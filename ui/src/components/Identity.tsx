@@ -4,17 +4,19 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 type IdentitySize = "xs" | "sm" | "default" | "lg";
 
 export interface IdentityProps {
-  name: string;
+  name: string | null | undefined;
   avatarUrl?: string | null;
   initials?: string;
   size?: IdentitySize;
   className?: string;
 }
 
-export function deriveInitials(name: string): string {
-  const parts = name.trim().split(/\s+/);
+export function deriveInitials(name: string | null | undefined): string {
+  const text = (name ?? "").trim();
+  if (!text) return "?";
+  const parts = text.split(/\s+/);
   if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-  return name.slice(0, 2).toUpperCase();
+  return text.slice(0, 2).toUpperCase();
 }
 
 const textSize: Record<IdentitySize, string> = {
