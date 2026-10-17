@@ -3302,7 +3302,7 @@ interface VideoStorylineSummary {
   finalDurationSeconds: number | null;
   stitchBlockedReason: string | null;
   errorMessage: string | null;
-  qualityCheckIssues?: Array<{ code?: string; message: string }> | null;
+  qualityCheckIssues?: Array<{ code?: string; message: string; severity?: "warning" | "blocking" }> | null;
   qualityCheckedAt?: string | null;
   createdAt: string;
   updatedAt: string;
@@ -4019,6 +4019,21 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
     }
   };
 
+  /** "Accept warnings and finish": the film is kept as it is and marked finished. */
+  const acceptWarnings = async () => {
+    if (!companyId || !selectedId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await storylineFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}/stitch/accept-warnings`, { method: "POST" }, "finishing the film");
+      await loadStorylines();
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const addScene = async () => {
     if (!companyId || !selectedId) return;
     setBusy(true);
@@ -4705,6 +4720,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                         busy={busy}
                         onRetryShot={(id) => void rerenderShot(id)}
                         onCombineAgain={() => void retryStitch()}
+                        onAcceptWarnings={() => void acceptWarnings()}
                         onCancel={() => void cancelRender()}
                         onRefresh={() => void refreshAll()}
                       />
@@ -4839,7 +4855,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                       </div>
                     )}
 
-                    {base && <ExportSection key={`export-${selected.id}`} apiBase={base} editable={selected.status !== "stitching"} reloadKey={timelineReload} onChanged={refreshPage} />}
+                    {base && <ExportSection key={`export-${selected.id}`} apiBase={base} editable={selected.status !== "stitching"} storylineStatus={selected.status} reloadKey={timelineReload} onChanged={refreshPage} />}
                   </div>
                 )}
               </>

@@ -902,6 +902,22 @@ export function videoStorylineRoutes(rawDb: Db) {
   );
 
   /**
+   * "Accept warnings and finish": a film parked on "needs_attention" whose
+   * findings are all warnings becomes "done" as it is (no new export).
+   * Refused when any finding is a real problem.
+   */
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/stitch/accept-warnings",
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      await stitch.acceptWarnings(companyId, storylineId, actorOf(req));
+      res.json(await storylines.getStoryline(companyId, storylineId));
+    },
+  );
+
+  /**
    * DUR-4170: streams the finished stitched film, same pattern as
    * assets.ts's GET /assets/:assetId/content -- content-type/length off the
    * stored row, inline disposition, company-scoped access via gatedScope().
