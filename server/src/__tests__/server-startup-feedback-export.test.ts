@@ -139,6 +139,7 @@ vi.mock("../realtime/live-events-ws.js", () => ({
 }));
 
 vi.mock("../services/index.js", () => ({
+  convertBragPositionsToSkill: vi.fn(async () => []),
   backfillPrincipalAccessCompatibility: vi.fn(async () => ({
     agentMembershipsInserted: 0,
     humanGrantsInserted: 0,

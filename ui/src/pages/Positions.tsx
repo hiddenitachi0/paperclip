@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Briefcase, Copy, MoreVertical, Pencil, Plus, Trash2, Wrench, ShieldCheck } from "lucide-react";
+import { Briefcase, Copy, LayoutList, MoreVertical, Pencil, Plus, Trash2, Wrench, ShieldCheck } from "lucide-react";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useToastActions } from "../context/ToastContext";
@@ -39,6 +39,7 @@ import { EmptyState } from "../components/EmptyState";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { JobToolsPicker } from "../components/jobs/JobToolsPicker";
 import { JobRightsPicker } from "../components/jobs/JobRightsPicker";
+import { PositionCatalogueDialog } from "../components/jobs/PositionCatalogueDialog";
 import { permissionLabel } from "../lib/permission-labels";
 
 const queryKeysJobs = {
@@ -77,6 +78,7 @@ export function Positions() {
   const [editingJobId, setEditingJobId] = useState<string | null>(null);
   const [deletingJob, setDeletingJob] = useState<Job | null>(null);
   const [duplicatingJob, setDuplicatingJob] = useState<Job | null>(null);
+  const [catalogueOpen, setCatalogueOpen] = useState(false);
 
   useEffect(() => {
     setBreadcrumbs([{ label: "Positions" }]);
@@ -165,10 +167,16 @@ export function Positions() {
             Assigning a position copies its defaults onto that agent once; it will not keep them in sync if you change the position later.
           </p>
         </div>
-        <Button onClick={openCreate}>
-          <Plus className="mr-1.5 h-3.5 w-3.5" />
-          New position
-        </Button>
+        <div className="flex shrink-0 gap-2">
+          <Button variant="outline" onClick={() => setCatalogueOpen(true)}>
+            <LayoutList className="mr-1.5 h-3.5 w-3.5" />
+            Add from catalogue
+          </Button>
+          <Button onClick={openCreate}>
+            <Plus className="mr-1.5 h-3.5 w-3.5" />
+            New position
+          </Button>
+        </div>
       </div>
 
       {isLoading ? (
@@ -178,7 +186,7 @@ export function Positions() {
       ) : !jobs || jobs.length === 0 ? (
         <EmptyState
           icon={Briefcase}
-          message="No positions yet. Create one to give agents a ready-made starting point."
+          message="No positions yet. Create one, or add a ready-made one from the catalogue, to give agents a starting point."
           action="New position"
           onAction={openCreate}
         />
@@ -227,6 +235,15 @@ export function Positions() {
           ))}
         </ul>
       )}
+
+      {selectedCompanyId ? (
+        <PositionCatalogueDialog
+          companyId={selectedCompanyId}
+          open={catalogueOpen}
+          onOpenChange={setCatalogueOpen}
+          onAdded={invalidateJobs}
+        />
+      ) : null}
 
       <JobFormDialog
         open={formOpen}

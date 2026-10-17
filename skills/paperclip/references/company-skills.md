@@ -188,6 +188,12 @@ curl -sS "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/skills/<skill-i
 
 The server persists canonical company skill keys.
 
+**`desiredSkills` is the agent's complete list, not an addition.** Any skill
+you leave out is removed from the agent. To add one skill, first read the
+current list (`GET /api/agents/<agent-id>/skills`), then send the old keys plus
+the new one. An agent cannot sync skills onto itself; a board user or another
+agent with permission to update it must do it.
+
 ```sh
 curl -sS -X POST "$PAPERCLIP_API_URL/api/agents/<agent-id>/skills/sync" \
   -H "Authorization: Bearer $PAPERCLIP_API_KEY" \

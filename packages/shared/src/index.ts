@@ -3139,3 +3139,13 @@ export {
 export * from "./video-storyline-transitions.js";
 export * from "./video-storyline-clips.js";
 export * from "./crypto-wallets.js";
+export {
+  POSITION_CATALOGUE,
+  CATALOGUE_SKILL_KEYS,
+  LEGAL_ADVISOR_CATALOGUE_JOBS,
+  findPositionTemplate,
+  catalogueSkillIdForKey,
+  type PositionCatalogueEntry,
+  type PositionCatalogueJob,
+  type PositionCatalogueJobVariable,
+} from "./position-catalogue.js";
