@@ -19,6 +19,8 @@ const api = vi.hoisted(() => ({
 }));
 vi.mock("../api/cryptoWallets", () => ({ cryptoWalletsApi: api }));
 vi.mock("../context/ToastContext", () => ({ useToastActions: () => ({ pushToast: vi.fn() }) }));
+const role = vi.hoisted(() => ({ current: { role: "owner", isInstanceAdmin: false, localBoard: false, canManageConnections: true, isLoading: false } }));
+vi.mock("../hooks/useCompanyRole", () => ({ useCompanyRole: () => role.current }));
 
 const wallet = {
   id: "w1",
@@ -74,6 +76,28 @@ describe("AgentCryptoWalletsSection", () => {
     expect(text.toLowerCase()).not.toContain("show key");
     expect(text.toLowerCase()).not.toContain("export key");
     expect(api.list).toHaveBeenCalledWith("c1", "a1");
+    root.unmount();
+  });
+
+  it("does not let an admin unfreeze a frozen real-money wallet", async () => {
+    role.current = { ...role.current, role: "admin" };
+    api.settings.mockResolvedValue({ companyId: "c1", mainnetEnabled: true, mainnetEnabledAt: null, allWalletsFrozen: false, frozenReason: null, rpcEndpoints: {} });
+    api.list.mockResolvedValue([{ ...wallet, network: "mainnet", status: "frozen", frozenReason: "Coins left this wallet that Paperclip did not send." }]);
+    api.agentLimits.mockResolvedValue({ perTransactionUsd: 25, dailyUsd: 50, totalUsd: 200, approvalAboveUsd: 10 });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={new QueryClient()}>
+          <AgentCryptoWalletsSection companyId="c1" agentId="a1" />
+        </QueryClientProvider>,
+      );
+    });
+    await flush();
+    const unfreeze = [...container.querySelectorAll("button")].find((b) => b.textContent === "Unfreeze")!;
+    expect(unfreeze.disabled).toBe(true);
+    expect(unfreeze.title).toMatch(/Only the owner/);
     root.unmount();
   });
 });

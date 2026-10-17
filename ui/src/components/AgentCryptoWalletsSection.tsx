@@ -20,6 +20,7 @@ import { cryptoWalletsApi } from "../api/cryptoWallets";
 import { ApiError } from "../api/client";
 import { queryKeys } from "../lib/queryKeys";
 import { useToastActions } from "../context/ToastContext";
+import { useCompanyRole } from "../hooks/useCompanyRole";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -112,6 +113,9 @@ function WalletCard({ wallet, companyId }: { wallet: CryptoWalletSummary; compan
   const queryClient = useQueryClient();
   const { pushToast } = useToastActions();
   const info = CRYPTO_CHAIN_INFO[wallet.chain];
+  const role = useCompanyRole(companyId);
+  const isOwner = role.localBoard || role.isInstanceAdmin || role.role === "owner";
+  const ownerOnlyUnfreeze = wallet.status === "frozen" && wallet.network === "mainnet" && !isOwner;
   const [showDetails, setShowDetails] = useState(false);
   const [newAddress, setNewAddress] = useState("");
   const [newAddressLabel, setNewAddressLabel] = useState("");
@@ -215,7 +219,8 @@ function WalletCard({ wallet, companyId }: { wallet: CryptoWalletSummary; compan
             <Button
               size="sm"
               variant={wallet.status === "frozen" ? "outline" : "destructive"}
-              disabled={freeze.isPending}
+              disabled={freeze.isPending || ownerOnlyUnfreeze}
+              title={ownerOnlyUnfreeze ? "Only the owner can unfreeze a real-money wallet." : undefined}
               onClick={() => freeze.mutate(wallet.status !== "frozen")}
             >
               {wallet.status === "frozen" ? "Unfreeze" : "Freeze"}
