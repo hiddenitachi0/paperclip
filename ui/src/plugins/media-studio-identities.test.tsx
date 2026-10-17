@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  CropEditor,
   IdentitiesPanel,
   IdentitySettingsPanel,
   addSourcePicture,
@@ -128,6 +129,35 @@ describe("anchor helpers", () => {
     const worker = Object.entries(anchors).filter(([k]) => k.startsWith("ACTION_"));
     expect(worker.length).toBeGreaterThan(20);
     for (const [key, value] of worker) expect((helpers as Record<string, unknown>)[key]).toBe(value);
+  });
+
+  it("crop boxes are laid over the picture itself and clipped to it, not sized to the frame", async () => {
+    // jsdom has no layout: pretend a tall picture shrunk by max-height sits at the frame's left edge.
+    const define = (prop: string, value: number) =>
+      Object.defineProperty(HTMLImageElement.prototype, prop, { configurable: true, get: () => value });
+    define("offsetLeft", 0);
+    define("offsetTop", 0);
+    define("offsetWidth", 260);
+    define("offsetHeight", 520);
+    try {
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      root = createRoot(container);
+      await act(async () =>
+        root!.render(<CropEditor src="/x.png" boxes={[{ role: "body", box: { x: 0.1, y: 0.1, w: 0.9, h: 0.9 } }]} onChange={() => {}} />),
+      );
+      const box = container.querySelector('[aria-label="body box"]') as HTMLElement;
+      const layer = box.parentElement as HTMLElement;
+      expect(layer.style.width).toBe("260px");
+      expect(layer.style.height).toBe("520px");
+      expect(layer.style.overflow).toBe("hidden");
+      // The resize handle sits inside the box, so it cannot hang past the picture's edge.
+      const handle = container.querySelector('[aria-label="Resize body box"]') as HTMLElement;
+      expect(handle.style.right).toBe("0px");
+      expect(handle.style.bottom).toBe("0px");
+    } finally {
+      for (const prop of ["offsetLeft", "offsetTop", "offsetWidth", "offsetHeight"]) delete (HTMLImageElement.prototype as never)[prop];
+    }
   });
 
   it("boxes move and resize inside the picture", () => {
