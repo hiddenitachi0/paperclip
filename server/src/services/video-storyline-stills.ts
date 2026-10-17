@@ -35,7 +35,7 @@ import {
 } from "./storyboard-picture-look.js";
 import { recordSogniCost, SOGNI_CREDIT_PRICE_CONFIG_KEY } from "./sogni-cost.js";
 import { pluginRegistryService } from "./plugin-registry.js";
-import { executePinnedHttpRequest, validateAndResolveFetchUrl } from "./safe-outbound-fetch.js";
+import { executePinnedHttpRequest, validateAndResolveFetchUrl, pinnedToFetchResponse } from "./safe-outbound-fetch.js";
 import { secretService } from "./secrets.js";
 import { loadReferenceImages } from "./video-storyline-render.js";
 import { recordFalCostEvent } from "./fal-cost-events.js";
@@ -87,7 +87,7 @@ const safeImageFetch: ImageFetchImpl = async (url, init) => {
   const timeout = setTimeout(() => controller.abort(), IMAGE_FETCH_TIMEOUT_MS);
   try {
     const pinned = await executePinnedHttpRequest(target, init, controller.signal, { maxResponseBytes: IMAGE_MAX_BYTES });
-    return new Response(new Uint8Array(pinned.bodyBytes), { status: pinned.status, statusText: pinned.statusText, headers: pinned.headers });
+    return pinnedToFetchResponse(pinned);
   } finally {
     clearTimeout(timeout);
   }
