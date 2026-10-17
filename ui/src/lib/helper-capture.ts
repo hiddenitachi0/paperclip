@@ -251,7 +251,7 @@ const OPEN_DIALOG_SELECTOR = '[role="dialog"][data-state="open"],[role="alertdia
  */
 export function helperDefaultRoot(doc: Document = document): Element {
   const dialogs = Array.from(doc.querySelectorAll(OPEN_DIALOG_SELECTOR)).filter(
-    (el) => !el.closest("[data-helper-ignore]"),
+    (el) => !el.closest("[data-helper-ignore]") && !el.closest("[data-helper-private]"),
   );
   const top = dialogs[dialogs.length - 1];
   if (top) return top;

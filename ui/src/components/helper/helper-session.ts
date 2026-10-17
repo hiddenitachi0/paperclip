@@ -7,11 +7,15 @@ import {
 } from "@paperclipai/shared";
 
 /**
- * The Ask panel's conversation, per company, for this browser tab.
+ * The Ask panel's conversation, per signed-in person and company, for this
+ * browser tab.
  *
  * It lives in sessionStorage so it survives moving between pages and a
  * reload, and is gone when the tab is closed. Nothing of it is kept on the
- * server. Uploaded pictures are not kept (only their names); a picture
+ * server. The key carries the user id, so someone else signing in on the same
+ * tab never sees (or sends as history) another person's questions, answers or
+ * captured page text; signing out removes all of it (clearHelperSessions,
+ * called from authApi.signOut). With no known user nothing is read or written. Uploaded pictures are not kept (only their names); a picture
  * picked from the company's Files is kept by reference.
  */
 
@@ -69,9 +73,14 @@ function emptySession(): HelperSession {
   return { turns: [], entryId: "", seenAnswerIds: [] };
 }
 
-export function loadHelperSession(companyId: string): HelperSession {
+function sessionKey(userId: string, companyId: string): string {
+  return `${SESSION_PREFIX}${userId}:${companyId}`;
+}
+
+export function loadHelperSession(userId: string | null, companyId: string): HelperSession {
+  if (!userId) return emptySession();
   try {
-    const raw = storage("session")?.getItem(SESSION_PREFIX + companyId);
+    const raw = storage("session")?.getItem(sessionKey(userId, companyId));
     if (!raw) return emptySession();
     const parsed = JSON.parse(raw) as Partial<HelperSession>;
     return {
@@ -95,10 +104,11 @@ function storableTurn(turn: HelperTurn): HelperTurn {
   };
 }
 
-export function saveHelperSession(companyId: string, session: HelperSession): void {
+export function saveHelperSession(userId: string | null, companyId: string, session: HelperSession): void {
+  if (!userId) return;
   const store = storage("session");
   if (!store) return;
-  const key = SESSION_PREFIX + companyId;
+  const key = sessionKey(userId, companyId);
   try {
     if (session.turns.length === 0 && !session.entryId) {
       store.removeItem(key);
@@ -112,6 +122,23 @@ export function saveHelperSession(companyId: string, session: HelperSession): vo
     store.setItem(key, JSON.stringify(value));
   } catch {
     // Storage full or blocked: the conversation still works, it just will not survive a reload.
+  }
+}
+
+/** Sign-out: forget every saved Ask conversation in this tab (all people, all companies) and the open panel. */
+export function clearHelperSessions(): void {
+  const store = storage("session");
+  if (!store) return;
+  try {
+    const keys: string[] = [];
+    for (let i = 0; i < store.length; i += 1) {
+      const key = store.key(i);
+      if (key && key.startsWith(SESSION_PREFIX)) keys.push(key);
+    }
+    for (const key of keys) store.removeItem(key);
+    store.removeItem(OPEN_KEY);
+  } catch {
+    // ignore
   }
 }
 

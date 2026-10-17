@@ -129,6 +129,9 @@ describe("helperDefaultRoot", () => {
     expect(helperDefaultRoot(document).id).toBe("d1");
     mount(`<div role="alertdialog" data-state="open" id="d2"></div>`);
     expect(helperDefaultRoot(document).id).toBe("d2");
+    // A dialog inside a private wrapper is never read.
+    mount(`<div data-helper-private><div role="dialog" data-state="open" id="secret"></div></div>`);
+    expect(helperDefaultRoot(document).id).toBe("d2");
   });
 });
 

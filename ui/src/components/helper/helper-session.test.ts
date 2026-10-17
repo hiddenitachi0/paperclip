@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { HELPER_HISTORY_MAX_TURNS, HELPER_HISTORY_TURN_MAX_CHARS } from "@paperclipai/shared";
 import { ApiError } from "../../api/client";
 import { helperErrorText } from "./helper-errors";
-import { buildHelperHistory, clampHelperWidth, loadHelperSession, saveHelperSession, type HelperTurn } from "./helper-session";
+import { buildHelperHistory, clampHelperWidth, clearHelperSessions, loadHelperSession, saveHelperSession, type HelperTurn } from "./helper-session";
 
 afterEach(() => window.sessionStorage.clear());
 
@@ -24,18 +24,33 @@ describe("helper session", () => {
       },
       { role: "assistant", content: "A logo." },
     ];
-    saveHelperSession("c1", { turns, entryId: "m1", seenAnswerIds: [] });
-    const back = loadHelperSession("c1");
+    saveHelperSession("u1", "c1", { turns, entryId: "m1", seenAnswerIds: [] });
+    const back = loadHelperSession("u1", "c1");
     expect(back.entryId).toBe("m1");
     expect(back.turns[0]!.pictures!.map((p) => p.previewUrl)).toEqual(["", "/api/attachments/f1/content"]);
     expect(back.turns[0]!.pictureInputs).toEqual([{ kind: "file", fileId: "11111111-1111-4111-8111-111111111111" }]);
-    expect(window.sessionStorage.getItem("paperclip.helper.session.v1:c1")).not.toContain("AAAA");
-    expect(loadHelperSession("c2").turns).toEqual([]);
+    expect(window.sessionStorage.getItem("paperclip.helper.session.v1:u1:c1")).not.toContain("AAAA");
+    expect(loadHelperSession("u1", "c2").turns).toEqual([]);
+    // Someone else on the same tab, or nobody known yet: nothing.
+    expect(loadHelperSession("u2", "c1").turns).toEqual([]);
+    expect(loadHelperSession(null, "c1").turns).toEqual([]);
+  });
+
+  it("does not save anything while nobody is known, and sign-out forgets every conversation and the open panel", () => {
+    saveHelperSession(null, "c1", { turns: [{ role: "user", content: "secret page text" }], entryId: "", seenAnswerIds: [] });
+    expect(window.sessionStorage.length).toBe(0);
+    saveHelperSession("u1", "c1", { turns: [{ role: "user", content: "a" }], entryId: "", seenAnswerIds: [] });
+    saveHelperSession("u1", "c2", { turns: [{ role: "user", content: "b" }], entryId: "", seenAnswerIds: [] });
+    window.sessionStorage.setItem("paperclip.helper.session.v1:c9", "{}");
+    window.sessionStorage.setItem("paperclip.helper.open.v1", "1");
+    window.sessionStorage.setItem("unrelated", "keep");
+    clearHelperSessions();
+    expect(Object.keys(window.sessionStorage)).toEqual(["unrelated"]);
   });
 
   it("survives broken storage", () => {
-    window.sessionStorage.setItem("paperclip.helper.session.v1:c1", "{not json");
-    expect(loadHelperSession("c1")).toEqual({ turns: [], entryId: "", seenAnswerIds: [] });
+    window.sessionStorage.setItem("paperclip.helper.session.v1:u1:c1", "{not json");
+    expect(loadHelperSession("u1", "c1")).toEqual({ turns: [], entryId: "", seenAnswerIds: [] });
   });
 
   it("builds history within the server's limits, with investigation answers as answers", () => {

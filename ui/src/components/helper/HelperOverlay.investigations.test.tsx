@@ -24,6 +24,14 @@ const mockHelperApi = vi.hoisted(() => ({
   startInvestigation: vi.fn(),
 }));
 vi.mock("../../api/helper", () => ({ helperApi: mockHelperApi }));
+const authState = vi.hoisted(() => ({ userId: "u1" as string | null }));
+vi.mock("../../api/auth", () => ({
+  authApi: {
+    getSession: vi.fn(async () =>
+      authState.userId ? { session: { id: `s-${authState.userId}`, userId: authState.userId }, user: { id: authState.userId, email: null, name: null, image: null } } : null,
+    ),
+  },
+}));
 const captureState = vi.hoisted(() => ({ applyTargets: [] as string[] }));
 vi.mock("../../context/CompanyContext", () => ({
   useCompany: () => ({ selectedCompanyId: "c1", selectedCompany: { id: "c1", name: "Acme", issuePrefix: "ACM" } }),
@@ -110,6 +118,7 @@ let root: Root | null = null;
 let host: HTMLDivElement | null = null;
 afterEach(() => {
   window.sessionStorage.clear();
+  authState.userId = "u1";
   act(() => root?.unmount());
   host?.remove();
   root = null;
@@ -142,6 +151,8 @@ async function renderOpen() {
       </QueryClientProvider>,
     ),
   );
+  // The helper appears once it knows who is signed in.
+  await flush();
   // After a "reload" the panel is still open (it is remembered for the browser tab).
   const opener = document.querySelector("[data-testid=helper-open]") as HTMLButtonElement | null;
   if (opener) act(() => opener.click());

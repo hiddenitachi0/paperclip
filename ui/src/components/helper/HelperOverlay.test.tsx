@@ -16,6 +16,14 @@ const mockHelperApi = vi.hoisted(() => ({
   startInvestigation: vi.fn(),
 }));
 vi.mock("../../api/helper", () => ({ helperApi: mockHelperApi }));
+const authState = vi.hoisted(() => ({ userId: "u1" as string | null }));
+vi.mock("../../api/auth", () => ({
+  authApi: {
+    getSession: vi.fn(async () =>
+      authState.userId ? { session: { id: `s-${authState.userId}`, userId: authState.userId }, user: { id: authState.userId, email: null, name: null, image: null } } : null,
+    ),
+  },
+}));
 const companyState = vi.hoisted(() => ({ id: "c1", name: "Acme" }));
 vi.mock("../../context/CompanyContext", () => ({
   useCompany: () => ({ selectedCompanyId: companyState.id, selectedCompany: { id: companyState.id, name: companyState.name } }),
@@ -80,6 +88,7 @@ afterEach(() => {
   window.sessionStorage.clear();
   companyState.id = "c1";
   companyState.name = "Acme";
+  authState.userId = "u1";
   document.body.innerHTML = "";
   vi.clearAllMocks();
   vi.restoreAllMocks();
@@ -132,6 +141,8 @@ function rerenderSame() {
 }
 
 async function openPanel() {
+  // The helper appears once it knows who is signed in.
+  await flush();
   const opener = document.querySelector("[data-testid=helper-open]") as HTMLButtonElement | null;
   if (opener) act(() => opener.click());
   await flush();
@@ -174,6 +185,7 @@ describe("HelperOverlay", () => {
     mockHelperApi.getSettings.mockResolvedValue(settings());
     mockHelperApi.ask.mockResolvedValue(answer("Step 1. Do it."));
     render();
+    await flush();
     expect(document.querySelector("[data-testid=helper-panel]")).toBeNull();
     act(() => {
       window.dispatchEvent(new KeyboardEvent("keydown", { key: "H", ctrlKey: true, shiftKey: true }));
@@ -200,6 +212,7 @@ describe("HelperOverlay", () => {
   it("is drawn outside the page (above pop-ups) and the Ask tab is labelled for screen readers", async () => {
     mockHelperApi.getSettings.mockResolvedValue(settings());
     render();
+    await flush();
     const opener = document.querySelector("[data-testid=helper-open]")!;
     expect(opener.getAttribute("aria-label")).toBe("Ask Paperclip");
     expect(opener.getAttribute("aria-keyshortcuts")).toContain("Control+Shift+H");
@@ -249,13 +262,43 @@ describe("HelperOverlay", () => {
 
     await click(document.querySelector("[data-testid=helper-new-conversation]"));
     expect(document.querySelectorAll("[data-testid=helper-question]")).toHaveLength(0);
-    expect(window.sessionStorage.getItem("paperclip.helper.session.v1:c1")).toBeNull();
+    expect(window.sessionStorage.getItem("paperclip.helper.session.v1:u1:c1")).toBeNull();
+  });
+
+  it("keeps each person's conversation to themselves on a shared tab, and saves nothing while nobody is signed in", async () => {
+    mockHelperApi.getSettings.mockResolvedValue(settings());
+    mockHelperApi.ask.mockResolvedValue(answer("Here is the payroll."));
+    render();
+    await openPanel();
+    await ask("Show me the payroll page");
+    expect(document.querySelectorAll("[data-testid=helper-question]")).toHaveLength(1);
+
+    // Someone else signs in on the same tab and company.
+    act(() => root?.unmount());
+    host?.remove();
+    authState.userId = "u2";
+    render();
+    await openPanel();
+    expect(document.querySelectorAll("[data-testid=helper-question]")).toHaveLength(0);
+    mockHelperApi.ask.mockClear();
+    await ask("Hello");
+    expect(mockHelperApi.ask.mock.calls[0]![1].history).toEqual([]);
+
+    // Nobody known: works, but nothing goes into storage.
+    act(() => root?.unmount());
+    host?.remove();
+    window.sessionStorage.clear();
+    authState.userId = null;
+    render();
+    await openPanel();
+    await ask("Anything");
+    expect(Object.keys(window.sessionStorage).filter((k) => k.startsWith("paperclip.helper.session"))).toEqual([]);
   });
 
   it("sends only the last turns of a long conversation, so the next question is never refused", async () => {
     mockHelperApi.getSettings.mockResolvedValue(settings());
     const turns = Array.from({ length: 40 }, (_, i) => ({ role: i % 2 === 0 ? "user" : "assistant", content: `${i} ${"z".repeat(7_000)}` }));
-    window.sessionStorage.setItem("paperclip.helper.session.v1:c1", JSON.stringify({ turns, entryId: "", seenAnswerIds: [] }));
+    window.sessionStorage.setItem("paperclip.helper.session.v1:u1:c1", JSON.stringify({ turns, entryId: "", seenAnswerIds: [] }));
     mockHelperApi.ask.mockResolvedValue(answer("ok"));
     render();
     await openPanel();
@@ -311,7 +354,7 @@ describe("HelperOverlay", () => {
   it("sends no page text when the person switches it off, and falls back to the default when a picked model is gone", async () => {
     mockHelperApi.getSettings.mockResolvedValue(settings());
     mockHelperApi.ask.mockResolvedValue(answer("ok"));
-    window.sessionStorage.setItem("paperclip.helper.session.v1:c1", JSON.stringify({ turns: [], entryId: "removed-model", seenAnswerIds: [] }));
+    window.sessionStorage.setItem("paperclip.helper.session.v1:u1:c1", JSON.stringify({ turns: [], entryId: "removed-model", seenAnswerIds: [] }));
     render();
     await openPanel();
     expect((document.querySelector("[data-testid=helper-model]") as HTMLSelectElement).value).toBe("");

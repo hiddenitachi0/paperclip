@@ -31,6 +31,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { useCompany } from "../../context/CompanyContext";
 import { helperApi } from "../../api/helper";
+import { authApi } from "../../api/auth";
 import { queryKeys } from "../../lib/queryKeys";
 import {
   captureHelperContext,
@@ -251,9 +252,16 @@ function useHelperHost(): HTMLElement | null {
 export function HelperOverlay() {
   const { selectedCompanyId } = useCompany();
   const host = useHelperHost();
-  if (!selectedCompanyId || !host) return null;
-  // One instance per company: a company switch starts from that company's own conversation.
-  return createPortal(<CompanyHelper key={selectedCompanyId} companyId={selectedCompanyId} />, host);
+  // Whose conversation this is: it is saved per person and company, and not at all while nobody is known.
+  const sessionQuery = useQuery({ queryKey: queryKeys.auth.session, queryFn: () => authApi.getSession(), retry: false });
+  const userId = sessionQuery.data?.session?.userId ?? sessionQuery.data?.user?.id ?? null;
+  // Wait until it is known who is signed in (or that nobody is), so the panel does not start over a moment later.
+  if (!selectedCompanyId || !host || sessionQuery.isPending) return null;
+  // One instance per person and company: a switch starts from that person's own conversation in that company.
+  return createPortal(
+    <CompanyHelper key={`${userId ?? "unknown"}:${selectedCompanyId}`} companyId={selectedCompanyId} userId={userId} />,
+    host,
+  );
 }
 
 interface Note {
@@ -261,10 +269,10 @@ interface Note {
   undo?: () => void;
 }
 
-function CompanyHelper({ companyId }: { companyId: string }) {
+function CompanyHelper({ companyId, userId }: { companyId: string; userId: string | null }) {
   const { selectedCompany } = useCompany();
   const location = useLocation();
-  const initial = useMemo(() => loadHelperSession(companyId), [companyId]);
+  const initial = useMemo(() => loadHelperSession(userId, companyId), [userId, companyId]);
   const [open, setOpen] = useState(loadHelperOpen);
   const [width, setWidth] = useState(loadHelperWidth);
   const [marking, setMarking] = useState(false);
@@ -303,8 +311,8 @@ function CompanyHelper({ companyId }: { companyId: string }) {
   // ─── Remembered for this tab ──────────────────────────────────────────────
   useEffect(() => saveHelperOpen(open), [open]);
   useEffect(() => {
-    saveHelperSession(companyId, { turns, entryId, seenAnswerIds });
-  }, [companyId, turns, entryId, seenAnswerIds]);
+    saveHelperSession(userId, companyId, { turns, entryId, seenAnswerIds });
+  }, [userId, companyId, turns, entryId, seenAnswerIds]);
 
   // ─── Server data ──────────────────────────────────────────────────────────
   const settingsQuery = useQuery({
