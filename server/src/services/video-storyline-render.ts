@@ -7,6 +7,7 @@ import {
   MEDIA_STUDIO_PLUGIN_KEY,
   VIDEO_RENDER_JOB_MAX_AGE_MS,
   VIDEO_RENDER_TICK_BATCH,
+  VIDEO_CLIP_MIN_MS,
   VIDEO_SHOT_MIN_DURATION_SECONDS,
   estimateVideoStorylineCostCents,
   readVideoStorylineCast,
@@ -19,7 +20,7 @@ import {
 } from "@paperclipai/shared";
 import type { MediaJobHandle, MediaJobInput, MediaJobProvider, MediaPollOutcome } from "./video-provider-clients.js";
 import { FalVideoProvider, SogniVideoProvider } from "./video-provider-clients.js";
-import { badRequest, conflict, unprocessable } from "../errors.js";
+import { badRequest, conflict, HttpError, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { recordFalCostEvent } from "./fal-cost-events.js";
 import { recordSogniCost, SOGNI_CREDIT_PRICE_CONFIG_KEY } from "./sogni-cost.js";
@@ -33,7 +34,7 @@ import { sogniStorageFetch } from "./image-provider-clients.js";
 import { loadApprovedStillDataUri } from "./video-storyline-still-frame.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
 import { lockStorylineRow, videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
-import { executePinnedHttpRequest, validateAndResolveFetchUrl } from "./safe-outbound-fetch.js";
+import { executePinnedHttpRequest, validateAndResolveFetchUrl, pinnedToFetchResponse } from "./safe-outbound-fetch.js";
 import { companyMediaStudioKeyRef, mediaStudioKeyRef } from "./media-studio-company-keys.js";
 import {
   castIdentityNames,
@@ -70,6 +71,12 @@ const MAX_REFERENCE_IMAGES = 4;
 const PREVIEW_DURATION_SECONDS = VIDEO_SHOT_MIN_DURATION_SECONDS;
 const PREVIEW_POLL_INTERVAL_MS = 2_000;
 const PREVIEW_POLL_TIMEOUT_MS = 90_000;
+/**
+ * How long a storyline may sit on "rendering" with no render job running
+ * before the tick calls it stalled. Longer than the slowest real start (a
+ * few reference uploads at 30 s each), so a start in progress is never cut.
+ */
+export const STALLED_RENDER_GRACE_MS = 15 * 60_000;
 
 /** SSRF-guarded FetchImpl, reused for both provider API calls and downloading finished clips -- see safe-outbound-fetch.ts. */
 async function safeFetch(url: string, init?: RequestInit, maxResponseBytes = 8 * 1024 * 1024): Promise<Response> {
@@ -78,7 +85,7 @@ async function safeFetch(url: string, init?: RequestInit, maxResponseBytes = 8 *
   const timeout = setTimeout(() => controller.abort(), init?.method === "GET" || !init?.method ? CLIP_DOWNLOAD_TIMEOUT_MS : RENDER_API_FETCH_TIMEOUT_MS);
   try {
     const pinned = await executePinnedHttpRequest(target, init, controller.signal, { maxResponseBytes });
-    return new Response(new Uint8Array(pinned.bodyBytes), { status: pinned.status, statusText: pinned.statusText, headers: pinned.headers });
+    return pinnedToFetchResponse(pinned);
   } finally {
     clearTimeout(timeout);
   }
@@ -156,6 +163,35 @@ export function resolveShotRenderTarget(
   };
 }
 
+/**
+ * Timeline editor: how long a clip plays in the film and how far its trim
+ * handles reach (both in ms). An AI shot plays for the length its model
+ * really makes (Kling 1.6/2.1 snap 7 s up to 10 s); once made, it can be
+ * trimmed within that length (applied when the film is combined). Your own
+ * video plays its trimmed part; a photo plays for its set length.
+ */
+export function shotClipTiming(
+  storyline: Pick<StorylineRow, "providerId" | "model">,
+  shot: Pick<ShotRow, "clipKind" | "status" | "resultObjectKey" | "providerId" | "model" | "durationSeconds" | "sourceTrimInMs" | "sourceTrimOutMs">,
+  uploadDurationMs: number | null = null,
+): { playMs: number; sourceLengthMs: number | null; trimmed: boolean } {
+  if (shot.clipKind === "generated") {
+    const { providerId, model } = resolveShotRenderTarget(storyline, shot);
+    const fullMs = videoRenderDurationSeconds(providerId, model, shot.durationSeconds) * 1000;
+    if (shot.status !== "done" || !shot.resultObjectKey) return { playMs: fullMs, sourceLengthMs: null, trimmed: false };
+    const inMs = Math.min(Math.max(0, shot.sourceTrimInMs ?? 0), fullMs);
+    const outMs = Math.min(fullMs, shot.sourceTrimOutMs ?? fullMs);
+    const trimmed = inMs > 0 || outMs < fullMs;
+    return { playMs: Math.max(VIDEO_CLIP_MIN_MS, outMs - inMs), sourceLengthMs: fullMs, trimmed };
+  }
+  if (shot.clipKind === "uploaded_video") {
+    const inMs = shot.sourceTrimInMs ?? 0;
+    const outMs = shot.sourceTrimOutMs ?? uploadDurationMs ?? inMs + shot.durationSeconds * 1000;
+    return { playMs: Math.max(VIDEO_CLIP_MIN_MS, outMs - inMs), sourceLengthMs: uploadDurationMs, trimmed: true };
+  }
+  return { playMs: shot.durationSeconds * 1000, sourceLengthMs: null, trimmed: false };
+}
+
 /** Render-cost estimate for a set of shots, each priced with resolveShotRenderTarget (shots on different providers/models are summed). */
 export function estimateShotRenderCents(
   storyline: Pick<StorylineRow, "providerId" | "model">,
@@ -176,8 +212,76 @@ function formatDollars(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
 
+const PROVIDER_LABEL: Record<VideoStorylineProvider, string> = { fal: "Fal.ai", sogni: "Sogni" };
+
+/**
+ * One plain-English sentence for a render that could not start, with what to
+ * do next. Our own refusals (HttpError: no key, picture not approved, budget,
+ * ...) are already written for people and pass through unchanged. A failure
+ * talking to the video service itself (its refusal, a timeout, a network
+ * error, or a bug on our side) becomes "<service> didn't accept shot N: ...".
+ * `charged` is false whenever the service never confirmed a job -- the
+ * usual case -- so the person knows retrying costs nothing extra.
+ */
+export function describeRenderStartFailure(
+  err: unknown,
+  ctx: { providerId: VideoStorylineProvider; shotNumber: number; charged?: boolean },
+): string {
+  if (err instanceof HttpError) return err.message;
+  const service = PROVIDER_LABEL[ctx.providerId] ?? "The video service";
+  const raw = err instanceof Error ? err.message : String(err ?? "");
+  const name = err instanceof Error ? err.name : "";
+  const code = (err as { code?: unknown } | null)?.code;
+  const status = /\((\d{3})\)/.exec(raw)?.[1];
+  const shot = `shot ${ctx.shotNumber}`;
+  // What to do next. A job the service may already have taken is never "free to retry".
+  const retry = ctx.charged
+    ? " The video service may have started it anyway: check its dashboard before trying again, so you don't pay twice."
+    : " Nothing was charged. Try again in a minute.";
+  const noCharge = ctx.charged ? retry : " Nothing was charged.";
+  if (status === "401" || status === "403") {
+    return `${service} didn't accept the API key while starting ${shot}. An owner or admin can check the key in Media Studio's Settings tab.${noCharge}`;
+  }
+  if (status === "402") {
+    return `${service} says the account doesn't have enough credit to make ${shot}. Top it up on ${service}'s website, then start the render again.${noCharge}`;
+  }
+  if (status === "429" || status === "409") return `${service} is busy with other work for this account and turned ${shot} away for now.${retry}`;
+  if (name === "AbortError" || /abort|timed? ?out/i.test(raw)) return `${service} didn't answer in time while ${shot} was being sent.${retry}`;
+  if (
+    (typeof code === "string" && /^(ECONN|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|EPIPE)/.test(code)) ||
+    /fetch failed|socket hang up|getaddrinfo|could not reach/i.test(raw)
+  ) {
+    return `Couldn't reach ${service} to start ${shot}. The internet connection or ${service} may be down.${retry}`;
+  }
+  if (/^(Sogni|Fal|The starting frame|This Sogni video model)/.test(raw)) {
+    // The provider clients' own messages (video-provider-clients.ts) are already plain sentences.
+    const said = raw.trim().slice(0, 300);
+    return `${service} didn't accept ${shot}: ${said}${/[.!?]$/.test(said) ? "" : "."}${retry}`;
+  }
+  // A bug on our side (a programming error, an unexpected answer): never show its raw text.
+  return `Something went wrong on our side while sending ${shot} to ${service}. If it keeps happening, tell your admin.${retry}`;
+}
+
+/** Raised by beginShotRender when the video service never got (or never confirmed) the job. */
+export class RenderStartError extends Error {
+  readonly charged: boolean;
+  constructor(
+    message: string,
+    readonly original: unknown,
+    charged: boolean,
+  ) {
+    super(message);
+    this.name = "RenderStartError";
+    this.charged = charged;
+  }
+}
+
 export interface VideoStorylineRenderDeps {
   now?: () => Date;
+  /** Test seam: the provider client for a shot render (production builds the real Fal/Sogni client). */
+  buildProvider?: (providerId: VideoStorylineProvider, apiKey: string, model: string | null) => MediaJobProvider;
+  /** Test seam: the API key lookup (production reads the company's / instance's secret). */
+  resolveApiKey?: (companyId: string, providerId: VideoStorylineProvider) => Promise<string>;
 }
 
 export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDeps = {}) {
@@ -205,6 +309,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     actorId: string,
     opts: { companyKeyOnly?: boolean } = {},
   ): Promise<string> {
+    if (deps.resolveApiKey) return deps.resolveApiKey(companyId, providerId);
     const plugin = await registry.getByKey(MEDIA_STUDIO_PLUGIN_KEY);
     if (!plugin) throw unprocessable("The media-studio plugin is not installed, so there is no Fal/Sogni key configured.");
     const config = await registry.getConfig(plugin.id);
@@ -336,7 +441,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     const { providerId, model } = resolveShotRenderTarget(storyline, shot);
     // A shot animated from the company's own photo uses the company's own key only (decision 15).
     const apiKey = await resolveProviderApiKey(companyId, providerId, actorId, { companyKeyOnly: opts.companyKeyOnly || Boolean(shot.sourceUploadId) });
-    const provider = buildProvider(providerId, apiKey, model);
+    const provider = (deps.buildProvider ?? buildProvider)(providerId, apiKey, model);
     const systemActor = { actorType: "user" as const, actorId };
 
     // DUR-4317/DUR-4320: an approved storyboard still wins over the ordinary
@@ -404,24 +509,69 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       // Sogni's video tools take no shape setting; with no start picture the prompt carries it.
       input.prompt = `${input.prompt}\nFrame: ${storyline.aspect === "9:16" ? "vertical 9:16" : "square 1:1"}.`;
     }
-    const handle = await provider.start(input);
+    const shotNumber = shot.orderIndex + 1;
+    let handle: MediaJobHandle;
+    try {
+      handle = await provider.start(input);
+    } catch (err) {
+      // The service never confirmed a job, so nothing was charged.
+      logger.warn({ err, shotId: shot.id, providerId }, "video-storyline-render: the video service did not start a shot");
+      throw new RenderStartError(describeRenderStartFailure(err, { providerId, shotNumber, charged: false }), err, false);
+    }
     const attempt = shot.attempt + 1;
-    await db.insert(videoShotRenderJobs).values({
-      companyId,
-      storylineId: storyline.id,
-      shotId: shot.id,
-      attempt,
-      provider: handle.provider,
-      model: handle.model,
-      externalId: handle.externalId,
-      status: "running",
-      startedAt: nowOf(),
-      updatedAt: nowOf(),
-    });
+    try {
+      await db.insert(videoShotRenderJobs).values({
+        companyId,
+        storylineId: storyline.id,
+        shotId: shot.id,
+        attempt,
+        provider: handle.provider,
+        model: handle.model,
+        externalId: handle.externalId,
+        status: "running",
+        startedAt: nowOf(),
+        updatedAt: nowOf(),
+      });
+      await db
+        .update(videoShots)
+        .set({ status: "rendering", providerId: handle.provider, model: handle.model, attempt, errorMessage: null, updatedAt: nowOf() })
+        .where(eq(videoShots.id, shot.id));
+    } catch (err) {
+      // The job started but could not be written down: stop it rather than leave it unfollowed.
+      logger.error({ err, shotId: shot.id, externalId: handle.externalId }, "video-storyline-render: started a shot but could not record it");
+      await provider.cancel(handle).catch(() => undefined);
+      throw new RenderStartError(describeRenderStartFailure(err, { providerId, shotNumber, charged: true }), err, true);
+    }
+  }
+
+  /**
+   * A shot that could not be started: the shot shows its own reason (status
+   * "failed"), and the storyline is put back where it was -- never left on
+   * "rendering" with nothing running, which is how a failed start used to
+   * look (no message, a spinner forever). Returns the plain reason.
+   */
+  async function recordShotStartFailure(
+    companyId: string,
+    storyline: Pick<StorylineRow, "id" | "providerId" | "model">,
+    shot: Pick<ShotRow, "id" | "orderIndex" | "providerId" | "model">,
+    err: unknown,
+    restore: { status: string; errorPrefix?: string },
+  ): Promise<string> {
+    const { providerId } = resolveShotRenderTarget(storyline, shot);
+    const reason = err instanceof RenderStartError ? err.message : describeRenderStartFailure(err, { providerId, shotNumber: shot.orderIndex + 1 });
+    if (!(err instanceof HttpError)) {
+      logger.warn({ err, shotId: shot.id }, "video-storyline-render: a shot could not be started");
+    }
     await db
       .update(videoShots)
-      .set({ status: "rendering", providerId: handle.provider, model: handle.model, attempt, errorMessage: null, updatedAt: nowOf() })
-      .where(eq(videoShots.id, shot.id));
+      .set({ status: "failed", errorMessage: reason, updatedAt: nowOf() })
+      // Only a shot that is not running: a start that did get recorded is the tick's to follow.
+      .where(and(eq(videoShots.id, shot.id), inArray(videoShots.status, ["draft", "queued", "failed"])));
+    await db
+      .update(videoStorylines)
+      .set({ status: restore.status, errorMessage: `${restore.errorPrefix ?? ""}${reason}`, updatedAt: nowOf() })
+      .where(and(eq(videoStorylines.id, storyline.id), eq(videoStorylines.status, "rendering")));
+    return reason;
   }
 
   async function downloadClipFromStorage(companyId: string, provider: string, objectKey: string): Promise<Buffer | null> {
@@ -546,10 +696,27 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
           updatedAt: nowOf(),
         })
         .where(eq(videoStorylines.id, storylineId));
-      return current;
+      return { shot: current, previousStatus: locked.status };
     });
     const refreshed = await storylines.getStorylineRow(companyId, storylineId);
-    await beginShotRender(companyId, refreshed, lockedPending, actor.agentId ?? actor.actorId);
+    try {
+      await beginShotRender(companyId, refreshed, lockedPending.shot, actor.agentId ?? actor.actorId);
+    } catch (err) {
+      // Compensate: the storyline goes back to where it was (with the reason),
+      // the shot shows its own reason, and the person gets the same sentence.
+      const reason = await recordShotStartFailure(companyId, refreshed, lockedPending.shot, err, { status: lockedPending.previousStatus, errorPrefix: "The render did not start. " });
+      await logActivity(db, {
+        companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        action: "video_storyline.render_start_failed",
+        entityType: "video_storyline",
+        entityId: storylineId,
+        details: { shotOrderIndex: lockedPending.shot.orderIndex, reason: reason.slice(0, 500) },
+      });
+      throw err instanceof HttpError ? err : unprocessable(`The render did not start. ${reason}`);
+    }
 
     await logActivity(db, {
       companyId,
@@ -605,7 +772,19 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       const lockedRefund = current.actualCostCents ?? 0;
       await tx
         .update(videoShots)
-        .set({ status: "queued", errorMessage: null, resultProvider: null, resultObjectKey: null, resultContentType: null, resultByteSize: null, resultSha256: null, actualCostCents: null, updatedAt: nowOf() })
+        .set({
+          status: "queued",
+          errorMessage: null,
+          resultProvider: null,
+          resultObjectKey: null,
+          resultContentType: null,
+          resultByteSize: null,
+          resultSha256: null,
+          actualCostCents: null,
+          // A new clip: the old one's trim no longer applies.
+          ...(current.clipKind === "generated" ? { sourceTrimInMs: null, sourceTrimOutMs: null } : {}),
+          updatedAt: nowOf(),
+        })
         .where(eq(videoShots.id, shotId));
       await tx
         .update(videoStorylines)
@@ -618,7 +797,16 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     });
     const refreshedShot = await storylines.getShotRow(companyId, storylineId, shotId);
     const finalStoryline = await storylines.getStorylineRow(companyId, storylineId);
-    await beginShotRender(companyId, finalStoryline, refreshedShot, actor.agentId ?? actor.actorId);
+    try {
+      await beginShotRender(companyId, finalStoryline, refreshedShot, actor.agentId ?? actor.actorId);
+    } catch (err) {
+      // Paused (not "rendering" with nothing running), with the shot's own reason.
+      const reason = await recordShotStartFailure(companyId, finalStoryline, refreshedShot, err, {
+        status: "paused",
+        errorPrefix: `Shot ${refreshedShot.orderIndex + 1} did not start again. `,
+      });
+      throw err instanceof HttpError ? err : unprocessable(`Shot ${refreshedShot.orderIndex + 1} did not start again. ${reason}`);
+    }
     await logActivity(db, {
       companyId,
       actorType: actor.actorType,
@@ -717,7 +905,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
   ) {
     const shotId = shot.id;
     const apiKey = await resolveProviderApiKey(companyId, providerId, actor.agentId ?? actor.actorId);
-    const provider = buildProvider(providerId, apiKey, model);
+    const provider = (deps.buildProvider ?? buildProvider)(providerId, apiKey, model);
 
     let continuityImage: string | undefined;
     const previous = await closestPreviousDoneShot(storyline.id, shot.orderIndex);
@@ -836,7 +1024,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       try {
         const apiKey = await resolveProviderApiKey(companyId, job.provider as VideoStorylineProvider, actor.agentId ?? actor.actorId);
         const handle: MediaJobHandle = { externalId: job.externalId, model: job.model, provider: job.provider };
-        await buildProvider(job.provider as VideoStorylineProvider, apiKey, job.model).cancel(handle);
+        await (deps.buildProvider ?? buildProvider)(job.provider as VideoStorylineProvider, apiKey, job.model).cancel(handle);
       } catch (err) {
         logger.warn({ err, jobId: job.id }, "video-storyline-render: best-effort provider cancel failed during cancelRender");
       }
@@ -1058,7 +1246,16 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     }
     await db.update(videoStorylines).set({ spentCents, updatedAt: nowOf() }).where(eq(videoStorylines.id, storyline.id));
     const refreshedStoryline = await storylines.getStorylineRow(companyId, storyline.id);
-    await beginShotRender(companyId, refreshedStoryline, next, storyline.createdByAgentId ?? storyline.createdByUserId ?? "system");
+    try {
+      await beginShotRender(companyId, refreshedStoryline, next, storyline.createdByAgentId ?? storyline.createdByUserId ?? "system");
+    } catch (err) {
+      // The next shot could not start: pause with its reason instead of
+      // leaving the storyline "rendering" with nothing running.
+      await recordShotStartFailure(companyId, refreshedStoryline, next, err, {
+        status: "paused",
+        errorPrefix: `Shot ${next.orderIndex + 1} could not start, so the render paused. `,
+      });
+    }
   }
 
   /**
@@ -1069,7 +1266,51 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
    * paymentCards.runDailyExpiryTick use. One job failing to advance is
    * logged and skipped; it never stops the batch.
    */
+  /**
+   * A storyline left on "rendering" with nothing actually running -- a start
+   * that crashed between flipping the status and the video service call (a
+   * restart, a bug like the 204 upload crash) -- is put on "paused" with a
+   * plain reason after a grace period, so it never shows a render that will
+   * never finish. Shots stuck "queued"/"rendering" without a job get their
+   * own reason. Runs on the render tick.
+   */
+  async function releaseStalledRenders(): Promise<number> {
+    const cutoff = new Date(nowOf().getTime() - STALLED_RENDER_GRACE_MS);
+    const stalled = await db
+      .select({ id: videoStorylines.id })
+      .from(videoStorylines)
+      .where(
+        and(
+          eq(videoStorylines.status, "rendering"),
+          lt(videoStorylines.updatedAt, cutoff),
+          sql`not exists (select 1 from ${videoShotRenderJobs} where ${videoShotRenderJobs.storylineId} = ${videoStorylines.id} and ${videoShotRenderJobs.status} = 'running')`,
+        ),
+      )
+      .limit(VIDEO_RENDER_TICK_BATCH);
+    for (const row of stalled) {
+      await db
+        .update(videoShots)
+        .set({ status: "failed", errorMessage: "This shot never started on the video service. Nothing was charged for it. Try it again.", updatedAt: nowOf() })
+        .where(and(eq(videoShots.storylineId, row.id), eq(videoShots.clipKind, "generated"), inArray(videoShots.status, ["queued", "rendering"])));
+      await db
+        .update(videoStorylines)
+        .set({
+          status: "paused",
+          errorMessage: "The render stopped without finishing: nothing is being made right now. Finished clips are kept. Start the render again to continue.",
+          updatedAt: nowOf(),
+        })
+        .where(and(eq(videoStorylines.id, row.id), eq(videoStorylines.status, "rendering")));
+    }
+    return stalled.length;
+  }
+
   async function tick(): Promise<{ advanced: number; failed: number }> {
+    try {
+      const released = await releaseStalledRenders();
+      if (released > 0) logger.warn({ released }, "video-storyline-render: paused storylines that were left rendering with nothing running");
+    } catch (err) {
+      logger.error({ err }, "video-storyline-render: could not check for stalled renders");
+    }
     const running = await db
       .select()
       .from(videoShotRenderJobs)
@@ -1091,7 +1332,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
           const handle: MediaJobHandle = { externalId: job.externalId, model: job.model, provider: job.provider };
           try {
             const apiKey = await resolveProviderApiKey(job.companyId, job.provider as VideoStorylineProvider, storyline.createdByAgentId ?? "system");
-            await buildProvider(job.provider as VideoStorylineProvider, apiKey, job.model).cancel(handle);
+            await (deps.buildProvider ?? buildProvider)(job.provider as VideoStorylineProvider, apiKey, job.model).cancel(handle);
           } catch {
             // Best effort -- the job is being marked failed regardless.
           }
@@ -1101,7 +1342,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
         }
 
         const apiKey = await resolveProviderApiKey(job.companyId, job.provider as VideoStorylineProvider, storyline.createdByAgentId ?? "system");
-        const provider = buildProvider(job.provider as VideoStorylineProvider, apiKey, job.model);
+        const provider = (deps.buildProvider ?? buildProvider)(job.provider as VideoStorylineProvider, apiKey, job.model);
         const outcome = await provider.poll({ externalId: job.externalId, model: job.model, provider: job.provider });
         if (outcome.status === "running") {
           await db.update(videoShotRenderJobs).set({ updatedAt: nowOf() }).where(eq(videoShotRenderJobs.id, job.id));
@@ -1124,6 +1365,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
   return {
     estimate,
     startRender,
+    releaseStalledRenders,
     reRenderShot,
     renderPreview,
     cancelRender,

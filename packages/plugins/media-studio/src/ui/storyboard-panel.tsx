@@ -6,13 +6,13 @@ import { SKIP_PICTURES_EXPLANATION, dollars, pictureCostCents, pictureCounts, pl
 // this ui/ folder, so the helpers and style palette below are small local
 // copies rather than imports from index.tsx (which imports this file).
 //
-// Step 2 of the guided Storylines flow ("Pictures"): a cheap picture per shot
+// Step 3 of the guided Storylines flow ("Storyboard"): a cheap picture per shot
 // that the person reviews before any paid video is made. Talks to the
 // server's /video-storylines/:id/storyboard routes -- see
 // packages/shared/src/video-storyline-stills.ts for the response shape.
 //
 // The page owns the summary (the step bar needs it on every step) and the
-// actions (step 3's one-click fixes reuse them), so this panel only draws.
+// actions (step 5's one-click fixes reuse them), so this panel only draws.
 
 /** Plain-English errors for every storyboard call -- see storyline-api.ts. */
 const hostFetchJson = storylineFetchJson;
@@ -101,7 +101,7 @@ export function pictureBadge(shot: Pick<StoryboardShotSummary, "storyboardStatus
     : { label: "No picture yet", color: "#7f5f01", background: "#fff3bf" };
 }
 
-// ─── Actions (shared with step 3's one-click fixes) ──────────────────────
+// ─── Actions (shared with step 5's one-click fixes) ──────────────────────
 
 export interface BulkProgress {
   label: string;
@@ -253,7 +253,7 @@ export function BulkProgressBar({ bulk, onStop }: { bulk: BulkProgress; onStop?:
   );
 }
 
-// ─── The step 2 panel ────────────────────────────────────────────────────
+// ─── The step 3 panel ────────────────────────────────────────────────────
 
 export function StoryboardPanel(props: {
   base: string;
@@ -264,7 +264,7 @@ export function StoryboardPanel(props: {
   /** False once a render has started: shots can no longer be changed. */
   editable: boolean;
   actions: StoryboardActions;
-  /** Moves the person on to step 3. */
+  /** Moves the person on to step 4 (the timeline). */
   onNext: () => void;
   /** The "Picture settings" block (service, model, look), drawn under the intro. */
   settings?: React.ReactNode;
@@ -274,7 +274,7 @@ export function StoryboardPanel(props: {
   storylineLookName?: string | null;
   /** Saves a shot's own look: a look id, "none", or null (use the storyline's). */
   onShotLook?: (shotId: string, pictureLookId: string | null) => void;
-  /** Who is in each shot (from step 1's Cast), as plain labels such as "Maja (saved person)". */
+  /** Who is in each shot (from step 2's Cast), as plain labels such as "Maja (saved person)". */
   shotCast?: Record<string, string[]>;
 }) {
   const { base, summary, actions } = props;
@@ -316,14 +316,14 @@ export function StoryboardPanel(props: {
   } else if (props.editable && counts.waiting > 0) {
     primary = { label: `Approve all ${plural(counts.waiting, "picture")}`, onClick: () => void actions.approveMany(counts.waitingIds), testId: "pictures-primary-approve" };
   } else if (counts.total > 0 && counts.approved === counts.total) {
-    primary = { label: "Next: Budget & render", onClick: props.onNext, testId: "pictures-primary-next" };
+    primary = { label: "Next: Timeline", onClick: props.onNext, testId: "pictures-primary-next" };
   }
 
   const statusLine =
     counts.total === 0
       ? "Every shot is left out. Edit a shot to bring it back."
       : counts.approved === counts.total
-        ? `All ${plural(counts.total, "shot")} approved. Next, set the budget and start the render.`
+        ? `All ${plural(counts.total, "shot")} approved. Next, check the order and lengths on the timeline, then render.`
         : [
             `${counts.approved} of ${counts.total} pictures approved.`,
             counts.waiting > 0 ? `${plural(counts.waiting, "picture")} waiting for your OK.` : "",
@@ -335,7 +335,7 @@ export function StoryboardPanel(props: {
   return (
     <div style={card} data-testid="storyboard-panel">
       <div>
-        <strong style={{ fontSize: 14 }}>Step 2: Pictures</strong>
+        <strong style={{ fontSize: 14 }}>Step 3: Storyboard</strong>
         <p style={muted}>
           Check a cheap picture of each shot first (about {dollars(costEach)} each). Video is only made for shots you approve, so you don't pay for clips that look wrong.
         </p>
@@ -351,7 +351,7 @@ export function StoryboardPanel(props: {
           {statusLine}
         </p>
       )}
-      {summary && sorted.length === 0 && <p style={{ fontSize: 12, margin: 0 }}>Add a shot in step 1 to see its picture here.</p>}
+      {summary && sorted.length === 0 && <p style={{ fontSize: 12, margin: 0 }}>Add a shot in step 1 (Script) to see its picture here.</p>}
 
       {actions.bulk && <BulkProgressBar bulk={actions.bulk} onStop={actions.stop} />}
 

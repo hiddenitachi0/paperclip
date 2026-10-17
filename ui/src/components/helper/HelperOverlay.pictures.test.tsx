@@ -24,12 +24,21 @@ const mockHelperApi = vi.hoisted(() => ({
 }));
 const mockArtifactsApi = vi.hoisted(() => ({ list: vi.fn(), listAgents: vi.fn() }));
 vi.mock("../../api/helper", () => ({ helperApi: mockHelperApi }));
+const authState = vi.hoisted(() => ({ userId: "u1" as string | null }));
+vi.mock("../../api/auth", () => ({
+  authApi: {
+    getSession: vi.fn(async () =>
+      authState.userId ? { session: { id: `s-${authState.userId}`, userId: authState.userId }, user: { id: authState.userId, email: null, name: null, image: null } } : null,
+    ),
+  },
+}));
 vi.mock("../../api/artifacts", () => ({ artifactsApi: mockArtifactsApi }));
 vi.mock("../../context/CompanyContext", () => ({
   useCompany: () => ({ selectedCompanyId: "c1", selectedCompany: { id: "c1", name: "Acme" } }),
 }));
 vi.mock("../MarkdownBody", () => ({ MarkdownBody: ({ children }: { children: string }) => <div>{children}</div> }));
-vi.mock("../../lib/helper-capture", () => ({
+vi.mock("../../lib/helper-capture", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/helper-capture")>()),
   captureHelperContext: () => ({ text: "Label: Character sheet", truncated: false, entities: [], applyTargets: ["Character sheet (all fields)"], itemCount: 1 }),
   viewportRect: () => ({ left: 0, top: 0, width: 100, height: 100 }),
   rectFromPoints: () => ({ left: 0, top: 0, width: 100, height: 100 }),
@@ -88,6 +97,8 @@ function settings(overrides: Partial<HelperSettingsView> = {}): HelperSettingsVi
 let root: Root | null = null;
 let host: HTMLDivElement | null = null;
 afterEach(() => {
+  window.sessionStorage.clear();
+  authState.userId = "u1";
   act(() => root?.unmount());
   host?.remove();
   root = null;
@@ -117,6 +128,8 @@ async function openPanel() {
       </QueryClientProvider>,
     ),
   );
+  // The helper appears once it knows who is signed in.
+  await flush();
   act(() => {
     (document.querySelector("[data-testid=helper-open]") as HTMLButtonElement).click();
   });

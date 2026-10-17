@@ -35,7 +35,7 @@ import {
 } from "./storyboard-picture-look.js";
 import { recordSogniCost, SOGNI_CREDIT_PRICE_CONFIG_KEY } from "./sogni-cost.js";
 import { pluginRegistryService } from "./plugin-registry.js";
-import { executePinnedHttpRequest, validateAndResolveFetchUrl } from "./safe-outbound-fetch.js";
+import { executePinnedHttpRequest, validateAndResolveFetchUrl, pinnedToFetchResponse } from "./safe-outbound-fetch.js";
 import { secretService } from "./secrets.js";
 import { loadReferenceImages } from "./video-storyline-render.js";
 import { recordFalCostEvent } from "./fal-cost-events.js";
@@ -87,7 +87,7 @@ const safeImageFetch: ImageFetchImpl = async (url, init) => {
   const timeout = setTimeout(() => controller.abort(), IMAGE_FETCH_TIMEOUT_MS);
   try {
     const pinned = await executePinnedHttpRequest(target, init, controller.signal, { maxResponseBytes: IMAGE_MAX_BYTES });
-    return new Response(new Uint8Array(pinned.bodyBytes), { status: pinned.status, statusText: pinned.statusText, headers: pinned.headers });
+    return pinnedToFetchResponse(pinned);
   } finally {
     clearTimeout(timeout);
   }
@@ -180,7 +180,7 @@ export function videoStorylineStillsService(db: Db) {
     pluginId: string | null,
   ): Promise<{ provider: ImageGenerationProvider; apiKey: string }> {
     const name = SERVICE_NAME[target.providerId];
-    const noKey = `Storyboard pictures for this storyline are made with ${name}, and no ${name} API key is set for this company yet. The company's owner or an admin can pick one in Media Studio's Settings tab. Or pick another picture service in step 2, or approve this shot without a picture.`;
+    const noKey = `Storyboard pictures for this storyline are made with ${name}, and no ${name} API key is set for this company yet. The company's owner or an admin can pick one in Media Studio's Settings tab. Or pick another picture service in step 2 (Cast & look), or approve this shot without a picture.`;
     const ref = await keyRef(pluginId, companyId, cfg, target.providerId);
     if (!ref) throw unprocessable(noKey);
     const apiKey = await secrets.resolveSecretValueForVideoRender(companyId, ref, { actorId });
@@ -205,7 +205,7 @@ export function videoStorylineStillsService(db: Db) {
     const { target, pluginId, cfg } = await pictureTarget(companyId, storyline, shot);
     if (target.lookId && !target.look) {
       throw unprocessable(
-        "The look picked for this shot's picture no longer exists (it was deleted on the Looks tab). Pick another look, or none, in step 2's picture settings.",
+        "The look picked for this shot's picture no longer exists (it was deleted on the Looks tab). Pick another look, or none, in step 2 (Cast & look).",
       );
     }
     const estimate = estimateStoryboardCostCents([{ storyboardStatus: shot.storyboardStatus as VideoShotStoryboardStatus }], target.providerId);

@@ -230,6 +230,33 @@ export interface PinnedHttpResponse {
 }
 
 /**
+ * HTTP statuses whose responses carry no body. The WHATWG Response
+ * constructor throws ("Invalid response status code 204") when one is built
+ * with a body -- even an empty one -- and anything below 200 or above 599 is
+ * refused outright. Sogni's storage answers an upload with 204 No Content,
+ * which used to crash every storyline render that sent a start picture.
+ */
+const NULL_BODY_STATUSES = new Set([101, 103, 204, 205, 304]);
+
+/**
+ * Turns a pinned request's answer into a standard fetch Response, safely for
+ * every status: null-body statuses get no body, and a status the Response
+ * constructor refuses (below 200, above 599) becomes 502 Bad Gateway. Every
+ * place that rebuilds a Response from executePinnedHttpRequest must use this
+ * instead of `new Response(...)` directly.
+ */
+export function pinnedToFetchResponse(pinned: Pick<PinnedHttpResponse, "status" | "statusText" | "headers" | "bodyBytes">): Response {
+  const status = pinned.status;
+  const usable = status >= 200 && status <= 599;
+  const bodyAllowed = usable && !NULL_BODY_STATUSES.has(status);
+  return new Response(bodyAllowed ? new Uint8Array(pinned.bodyBytes) : null, {
+    status: usable ? status : 502,
+    statusText: usable ? pinned.statusText : "Bad Gateway",
+    headers: pinned.headers,
+  });
+}
+
+/**
  * Test-only seam: where the pinned connection is actually opened. Production
  * code never passes it. Tests use it to send a request that has passed every
  * check (host allow-list, DNS, address rule) to a local fake server over plain
@@ -573,12 +600,7 @@ export function createPinnedInternalFetch(
       );
     }
 
-    const bodyAllowed = response.status !== 204 && response.status !== 205 && response.status >= 200;
-    return new Response(bodyAllowed ? new Uint8Array(response.bodyBytes) : null, {
-      status: response.status < 200 || response.status > 599 ? 502 : response.status,
-      statusText: response.statusText,
-      headers: response.headers,
-    });
+    return pinnedToFetchResponse(response);
   };
   return ((input: RequestInfo | URL, init?: RequestInit) => guarded(input, init)) as OutboundFetch;
 }
@@ -737,12 +759,7 @@ export function createSafeOutboundFetch(
       );
     }
 
-    const bodyAllowed = response.status !== 204 && response.status !== 205 && response.status >= 200;
-    return new Response(bodyAllowed ? new Uint8Array(response.bodyBytes) : null, {
-      status: response.status < 200 || response.status > 599 ? 502 : response.status,
-      statusText: response.statusText,
-      headers: response.headers,
-    });
+    return pinnedToFetchResponse(response);
   };
   return ((input: RequestInfo | URL, init?: RequestInit) => guarded(input, init)) as OutboundFetch;
 }

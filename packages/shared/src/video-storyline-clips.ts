@@ -239,6 +239,19 @@ export const updateVideoClipSchema = z
   .strict();
 export type UpdateVideoClipInput = z.infer<typeof updateVideoClipSchema>;
 
+/**
+ * Timeline editor: cut one clip into two at a point measured from the start
+ * of what is shown of it (after any trim). Works for every kind of clip; an
+ * AI shot that is not made yet is split into two shorter shots (whole
+ * seconds) that keep its description and approved picture.
+ */
+export const splitVideoClipSchema = z
+  .object({
+    atMs: z.number().int().min(1).max(VIDEO_CLIP_MAX_SECONDS * 1000),
+  })
+  .strict();
+export type SplitVideoClipInput = z.infer<typeof splitVideoClipSchema>;
+
 export const reorderVideoShotsSchema = z.object({ shotIds: z.array(z.string().uuid()).min(1).max(5_000) }).strict();
 export type ReorderVideoShotsInput = z.infer<typeof reorderVideoShotsSchema>;
 

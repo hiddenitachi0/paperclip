@@ -2,8 +2,9 @@ import type { FlowStepKey, ReadinessFix, ReadinessItem, StepStatus } from "./sto
 import { dollars } from "./storyline-flow.js";
 
 // Drawing pieces of the guided Storylines flow (see storyline-flow.ts for the
-// logic): the step bar, step 3's "what is missing" checklist, and step 4's
-// film panel. Standalone ES module -- local style copies, no host imports.
+// logic): the step bar, step 5's "what is missing" checklist, and step 5's
+// progress and film panel. Standalone ES module -- local style copies, no
+// host imports.
 
 const card: React.CSSProperties = { border: "1px solid rgba(128,128,128,0.35)", borderRadius: 10, padding: 12, display: "flex", flexDirection: "column", gap: 8 };
 const baseBtn: React.CSSProperties = { padding: "6px 12px", borderRadius: 8, border: "1px solid transparent", cursor: "pointer", fontSize: 12, fontWeight: 600 };
@@ -138,7 +139,7 @@ export function ReadinessChecklist(props: {
   );
 }
 
-// ─── Step 4: Film ────────────────────────────────────────────────────────
+// ─── Step 5: progress and the film ───────────────────────────────────────
 
 export interface FilmStoryline {
   id: string;
@@ -166,10 +167,10 @@ export interface FilmProgress {
   shots: Array<{ id: string; orderIndex: number; status: string; attempt: number; errorMessage: string | null }>;
 }
 
-function shotStatusText(status: string): string {
+function shotStatusText(status: string, renderRunning: boolean): string {
   switch (status) {
     case "draft":
-      return "Not started";
+      return renderRunning ? "Waiting its turn" : "Not made yet";
     case "queued":
       return "Waiting to render";
     case "rendering":
@@ -193,7 +194,8 @@ export function FilmPanel(props: {
   onRetryShot: (shotId: string) => void;
   onCombineAgain: () => void;
   onCancel: () => void;
-  onGoRender: () => void;
+  /** Older layout: a button to the separate render step. Leave out when the start controls are on the same page. */
+  onGoRender?: () => void;
   onRefresh: () => void;
 }) {
   const { storyline, progress } = props;
@@ -228,26 +230,26 @@ export function FilmPanel(props: {
       primary = { label: "Combine again", onClick: props.onCombineAgain };
       break;
     case "paused":
-      headline = `Paused with ${done} of ${total} clips done (usually the budget limit was reached). Finished clips are kept.`;
-      primary = { label: "Continue: check budget & render", onClick: props.onGoRender };
+      headline = `Paused with ${done} of ${total} clips done. Finished clips are kept; see why below, then continue.`;
+      primary = props.onGoRender ? { label: "Continue: check budget & render", onClick: props.onGoRender } : null;
       break;
     case "failed":
-      headline = "The render failed. Finished clips are kept; fix what is listed and start again.";
-      primary = { label: "Go to Budget & render", onClick: props.onGoRender };
+      headline = "The render stopped. Finished clips are kept; fix what is listed below and start again.";
+      primary = props.onGoRender ? { label: "Go to Render", onClick: props.onGoRender } : null;
       break;
     case "cancelled":
       headline = done > 0 ? `Cancelled. ${done} of ${total} clips are kept.` : "Cancelled.";
-      primary = { label: "Go to Budget & render", onClick: props.onGoRender };
+      primary = props.onGoRender ? { label: "Go to Render", onClick: props.onGoRender } : null;
       break;
     default:
-      headline = "Nothing has been rendered yet. Start the render in step 3.";
-      primary = { label: "Go to Budget & render", onClick: props.onGoRender };
+      headline = "Nothing has been made yet. Start the render below.";
+      primary = props.onGoRender ? { label: "Go to Render", onClick: props.onGoRender } : null;
   }
 
   return (
     <div style={card} data-testid="film-panel">
       <div>
-        <strong style={{ fontSize: 14 }}>Step 4: Film</strong>
+        <strong style={{ fontSize: 14 }}>Progress and your film</strong>
         <p style={{ fontSize: 13, margin: "2px 0 0" }} data-testid="film-headline">{headline}</p>
       </div>
 
@@ -317,7 +319,7 @@ export function FilmPanel(props: {
             {progress.shots.map((shot) => (
               <div key={shot.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, fontSize: 12, flexWrap: "wrap" }} data-testid={`film-shot-${shot.id}`}>
                 <span>
-                  Shot {shot.orderIndex + 1}: <span style={{ color: SHOT_COLORS[shot.status] ?? "#868e96", fontWeight: 600 }}>{shotStatusText(shot.status)}</span>
+                  Shot {shot.orderIndex + 1}: <span style={{ color: SHOT_COLORS[shot.status] ?? "#868e96", fontWeight: 600 }}>{shotStatusText(shot.status, status === "rendering")}</span>
                   {shot.errorMessage ? ` (${shot.errorMessage})` : ""}
                 </span>
                 {shot.status === "failed" && (
