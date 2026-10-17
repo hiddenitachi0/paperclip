@@ -28,7 +28,7 @@ import { budgetService } from "./budgets.js";
 import { SOGNI_CREDIT_PRICE_CONFIG_KEY, recordSogniCost } from "./sogni-cost.js";
 import { falPricingClient, microUsdToCents, type FalUsage } from "./fal-pricing.js";
 import { issueService } from "./issues.js";
-import { executePinnedHttpRequest, validateAndResolveFetchUrl } from "./safe-outbound-fetch.js";
+import { executePinnedHttpRequest, validateAndResolveFetchUrl, pinnedToFetchResponse } from "./safe-outbound-fetch.js";
 import {
   FalDirectAudioProvider,
   FalDirectPictureProvider,
@@ -84,7 +84,7 @@ async function safeFetch(url: string, init?: RequestInit, maxResponseBytes = MED
   const timeout = setTimeout(() => controller.abort(), MEDIA_FETCH_TIMEOUT_MS);
   try {
     const pinned = await executePinnedHttpRequest(target, init, controller.signal, { maxResponseBytes });
-    return new Response(new Uint8Array(pinned.bodyBytes), { status: pinned.status, statusText: pinned.statusText, headers: pinned.headers });
+    return pinnedToFetchResponse(pinned);
   } finally {
     clearTimeout(timeout);
   }

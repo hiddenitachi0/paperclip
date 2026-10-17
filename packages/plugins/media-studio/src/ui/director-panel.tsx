@@ -110,7 +110,7 @@ const secondaryBtn: React.CSSProperties = { ...baseBtn, background: "#e7f5ff", c
 const ghostBtn: React.CSSProperties = { ...baseBtn, background: "transparent", color: "#495057", borderColor: "#ced4da" };
 const errorBox: React.CSSProperties = { background: "#fff0f6", color: "#a61e4d", padding: "8px 10px", borderRadius: 8, fontSize: 12 };
 const muted: React.CSSProperties = { fontSize: 12, color: "#868e96", margin: 0 };
-// AI suggestions are purple on purpose: picture approval (step 2) is green, so
+// AI suggestions are purple on purpose: picture approval (step 3) is green, so
 // accepting a suggestion never looks like approving a picture.
 const suggestionBadge: React.CSSProperties = { padding: "2px 8px", borderRadius: 10, fontSize: 11, fontWeight: 700, color: "#5f3dc4", background: "#f3f0ff", border: "1px solid #d0bfff" };
 const suggestionBtn: React.CSSProperties = { ...baseBtn, background: "#7048e8", color: "#fff" };
@@ -436,7 +436,7 @@ export function ProposalCard(props: {
             </button>
             <button type="button" style={ghostBtn} disabled={busy} onClick={props.onReject}>Reject (keep mine)</button>
           </div>
-          <p style={{ ...muted, fontSize: 11 }}>Accepting only changes this shot's written description. Its picture is checked separately in step 2.</p>
+          <p style={{ ...muted, fontSize: 11 }}>Accepting only changes this shot's written description. Its picture is checked separately in step 3 (Storyboard).</p>
         </div>
       )}
     </div>
@@ -607,7 +607,7 @@ export function AiDirectorSection(props: {
       {conversation?.status === "done" && pending.length === 0 && (
         <div style={card} data-testid="director-done">
           <strong style={{ fontSize: 13 }}>All done with the director</strong>
-          <p style={muted}>Your shot descriptions are up to date. Next, make and approve a picture for each shot (step 2).</p>
+          <p style={muted}>Your shot descriptions are up to date. Next, make and approve a picture for each shot (step 3, Storyboard).</p>
         </div>
       )}
     </div>
@@ -637,7 +637,7 @@ export function AdvancedFeaturesToggle(props: {
         </label>
       </div>
       <p style={muted}>
-        Adds the AI director, scene changes, background music and quick preview pictures to your storylines.
+        Adds the AI director, AI-made bridges between clips, your own videos and photos, and quick preview pictures. The timeline, music and export work without it.
       </p>
       {props.error && <div style={errorBox}>{props.error}</div>}
     </div>

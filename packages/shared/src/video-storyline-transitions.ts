@@ -295,6 +295,18 @@ export interface VideoStripClip {
   storyboardStatus: string;
   hasClip: boolean;
   hasPoster: boolean;
+  /**
+   * Timeline editor: how long this clip plays in the film (ms), after any
+   * trim. An AI shot not made yet plays for its planned length.
+   */
+  playMs?: number;
+  /** The full length the trim handles can reach (ms): your video's length, or a made AI clip's length; null when it can't be trimmed yet. */
+  sourceLengthMs?: number | null;
+  /** The video service and model this clip uses (AI shots only). */
+  providerId?: VideoStorylineProvider | null;
+  model?: string | null;
+  /** About what making this AI shot (again) costs, in cents; null for your own videos and photos. */
+  estimatedCostCents?: number | null;
 }
 
 export interface VideoStripSummary {
@@ -329,4 +341,9 @@ export interface VideoStripSummary {
   footage: MediaFootageSettings;
   /** Seconds of the film without titles (clips + AI bridges), for the time ruler. */
   totalSeconds: number;
+  // ─── Timeline editor (optional so an older server's answer still renders) ───
+  /** About what making every AI shot that is not made yet costs (cents). */
+  remainingRenderCents?: number;
+  /** Whether this company has Advanced features on (AI bridges, your own footage, animating photos). */
+  advancedEnabled?: boolean;
 }

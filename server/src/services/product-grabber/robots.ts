@@ -197,7 +197,16 @@ export function createPinnedFetch(address: string, family: number): typeof fetch
           const chunks: Buffer[] = [];
           res.on("data", (chunk: Buffer) => chunks.push(chunk));
           res.on("end", () => {
-            resolve(new Response(Buffer.concat(chunks), { status: res.statusCode ?? 0 }));
+            // The Response constructor throws for a 204/304 with a body and for
+            // any status outside 200-599; a throw here would escape the promise.
+            try {
+              const status = res.statusCode ?? 0;
+              const usable = status >= 200 && status <= 599;
+              const nullBody = status === 204 || status === 205 || status === 304;
+              resolve(new Response(usable && !nullBody ? Buffer.concat(chunks) : null, { status: usable ? status : 502 }));
+            } catch (err) {
+              reject(err);
+            }
           });
           res.on("error", reject);
         },

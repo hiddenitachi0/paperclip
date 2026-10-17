@@ -164,7 +164,7 @@ describe("AI director section", () => {
     expect(text).toContain("Fade");
     // Labelled as an AI suggestion -- never as a picture approval.
     expect(text).toContain("AI suggestion");
-    expect(text).toContain("Its picture is checked separately in step 2");
+    expect(text).toContain("Its picture is checked separately in step 3 (Storyboard)");
     expect(byText("Approve")).toBeUndefined();
     expect(byText("Approve picture")).toBeUndefined();
     await click(byText("Accept suggestion"));
