@@ -4256,13 +4256,15 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
   const sortedScenes = scenes.slice().sort((a, b) => a.orderIndex - b.orderIndex);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }} data-ms-storylines="">
+      {/* Disabled buttons look disabled (inline styles alone keep their colours). */}
+      <style>{"[data-ms-storylines] button:disabled { opacity: 0.5; cursor: not-allowed; }"}</style>
       <div style={card}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
           <div style={{ flex: "1 1 240px" }}>
             <strong style={{ fontSize: 13 }}>Video storylines</strong>
             <p style={{ fontSize: 12, color: "#868e96", margin: "2px 0 0" }}>
-              Turn a script into a film in four steps: write the script, check a picture of each shot, set a budget and render, then watch and download the film. Off by default.
+              Turn a script into a film in five steps: write the script, choose the cast and look, check a picture of each shot, arrange the timeline, then render and download the film. Off by default.
             </p>
           </div>
           <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
@@ -4696,7 +4698,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                       <div style={card} data-testid="render-start">
                         <strong style={{ fontSize: 13 }}>{someMade ? "Continue the render" : "Start the render"}</strong>
                         {selected.errorMessage && !filmStarted && (
-                          <div style={errorBox} role="alert" data-testid="render-last-error">
+                          <div style={{ ...errorBox, fontSize: 13 }} role="alert" data-testid="render-last-error">
                             {selected.errorMessage}
                           </div>
                         )}

@@ -167,10 +167,10 @@ export interface FilmProgress {
   shots: Array<{ id: string; orderIndex: number; status: string; attempt: number; errorMessage: string | null }>;
 }
 
-function shotStatusText(status: string): string {
+function shotStatusText(status: string, renderRunning: boolean): string {
   switch (status) {
     case "draft":
-      return "Not made yet";
+      return renderRunning ? "Waiting its turn" : "Not made yet";
     case "queued":
       return "Waiting to render";
     case "rendering":
@@ -319,7 +319,7 @@ export function FilmPanel(props: {
             {progress.shots.map((shot) => (
               <div key={shot.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, fontSize: 12, flexWrap: "wrap" }} data-testid={`film-shot-${shot.id}`}>
                 <span>
-                  Shot {shot.orderIndex + 1}: <span style={{ color: SHOT_COLORS[shot.status] ?? "#868e96", fontWeight: 600 }}>{shotStatusText(shot.status)}</span>
+                  Shot {shot.orderIndex + 1}: <span style={{ color: SHOT_COLORS[shot.status] ?? "#868e96", fontWeight: 600 }}>{shotStatusText(shot.status, status === "rendering")}</span>
                   {shot.errorMessage ? ` (${shot.errorMessage})` : ""}
                 </span>
                 {shot.status === "failed" && (

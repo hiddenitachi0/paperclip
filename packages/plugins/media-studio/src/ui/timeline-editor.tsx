@@ -1100,12 +1100,32 @@ const ClipBlock = memo(function ClipBlock(props: {
         userSelect: "none",
       }}
     >
-      {clip.hasPoster && width > 30 && (
-        <img src={`${props.apiBase}/shots/${clip.shotId}/poster`} alt="" loading="lazy" draggable={false} style={{ height: "100%", width: Math.min(72, width * 0.45), objectFit: "cover", flexShrink: 0, pointerEvents: "none" }} />
+      {clip.hasPoster && (
+        <img
+          src={`${props.apiBase}/shots/${clip.shotId}/poster`}
+          alt=""
+          loading="lazy"
+          draggable={false}
+          style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", pointerEvents: "none", opacity: isMade(clip) || clipKindOf(clip) !== "generated" ? 1 : 0.6 }}
+        />
       )}
-      <span style={{ padding: "3px 6px", overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis", minWidth: 0, display: "flex", flexDirection: "column", gap: 1 }}>
-        <strong>{clipLabel(clip)}</strong>
-        <span style={{ color: "#868e96" }}>{secondsText(clipPlayMs(clip))} s</span>
+      <span
+        style={{
+          position: "relative",
+          margin: 3,
+          padding: "1px 5px",
+          alignSelf: "flex-start",
+          maxWidth: "calc(100% - 6px)",
+          overflow: "hidden",
+          whiteSpace: "nowrap",
+          textOverflow: "ellipsis",
+          background: "rgba(255,255,255,0.85)",
+          color: "#212529",
+          borderRadius: 4,
+          lineHeight: 1.3,
+        }}
+      >
+        <strong>{clipLabel(clip)}</strong> · {secondsText(clipPlayMs(clip))} s
       </span>
       <span aria-hidden style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: 3, background: color }} />
       {props.editable && mode === "trim" && (
