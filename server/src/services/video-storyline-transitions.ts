@@ -947,7 +947,7 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
       const locked = await lockStorylineRow(tx, companyId, storylineId);
       if (locked.status === "stitching") throw conflict("The film is being combined right now. Wait for it to finish before making a transition.");
       if (locked.budgetCapCents === null) {
-        throw unprocessable("Set a budget for this film first (step 3), so spending stops at a limit you chose.");
+        throw unprocessable("Set a budget for this film first (step 5, Render & export), so spending stops at a limit you chose.");
       }
       if (locked.spentCents + quote.cents > locked.budgetCapCents) {
         throw unprocessable(

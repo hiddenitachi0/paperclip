@@ -978,7 +978,7 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
       assertStripEditable(locked);
       const [current] = await tx.select().from(videoShots).where(and(eq(videoShots.id, shot.id), eq(videoShots.storylineId, storylineId)));
       if (!current || current.clipKind !== "still") throw conflict("This clip changed. Refresh the strip and try again.");
-      if (locked.budgetCapCents === null) throw unprocessable("Set a budget for this film first (step 3), so spending stops at a limit you chose.");
+      if (locked.budgetCapCents === null) throw unprocessable("Set a budget for this film first (step 5, Render & export), so spending stops at a limit you chose.");
       if (locked.spentCents + quote > locked.budgetCapCents) {
         throw unprocessable(
           `Animating this photo costs about ${dollars(quote)}, and ${dollars(locked.spentCents)} of this film's ${dollars(locked.budgetCapCents)} budget is already spent. Raise the budget to at least ${dollars(locked.spentCents + quote)} to go ahead.`,

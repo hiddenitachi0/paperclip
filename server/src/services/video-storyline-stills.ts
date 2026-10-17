@@ -180,7 +180,7 @@ export function videoStorylineStillsService(db: Db) {
     pluginId: string | null,
   ): Promise<{ provider: ImageGenerationProvider; apiKey: string }> {
     const name = SERVICE_NAME[target.providerId];
-    const noKey = `Storyboard pictures for this storyline are made with ${name}, and no ${name} API key is set for this company yet. The company's owner or an admin can pick one in Media Studio's Settings tab. Or pick another picture service in step 2, or approve this shot without a picture.`;
+    const noKey = `Storyboard pictures for this storyline are made with ${name}, and no ${name} API key is set for this company yet. The company's owner or an admin can pick one in Media Studio's Settings tab. Or pick another picture service in step 2 (Cast & look), or approve this shot without a picture.`;
     const ref = await keyRef(pluginId, companyId, cfg, target.providerId);
     if (!ref) throw unprocessable(noKey);
     const apiKey = await secrets.resolveSecretValueForVideoRender(companyId, ref, { actorId });
@@ -205,7 +205,7 @@ export function videoStorylineStillsService(db: Db) {
     const { target, pluginId, cfg } = await pictureTarget(companyId, storyline, shot);
     if (target.lookId && !target.look) {
       throw unprocessable(
-        "The look picked for this shot's picture no longer exists (it was deleted on the Looks tab). Pick another look, or none, in step 2's picture settings.",
+        "The look picked for this shot's picture no longer exists (it was deleted on the Looks tab). Pick another look, or none, in step 2 (Cast & look).",
       );
     }
     const estimate = estimateStoryboardCostCents([{ storyboardStatus: shot.storyboardStatus as VideoShotStoryboardStatus }], target.providerId);
