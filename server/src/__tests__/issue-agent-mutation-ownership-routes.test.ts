@@ -1415,7 +1415,7 @@ describe("agent issue mutation checkout ownership", () => {
 
     expect(res.status, JSON.stringify(res.body)).toBe(422);
     expect(String(res.body.error ?? "")).toContain("This task's model/effort setting can't be saved.");
-    expect(String(res.body.error ?? "")).toContain('Did you mean "claude-opus-5"?');
+    expect(String(res.body.error ?? "")).toContain('Did you mean "claude-opus-5-5"?');
     expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 

@@ -89,7 +89,17 @@ d("DUR-4072 report scripts: approval first", () => {
   afterEach(async () => {
     // Approving a card wakes the agent that asked (heartbeat rows etc.);
     // truncating companies clears every company-owned row in one go.
-    await db.execute(sql`TRUNCATE TABLE companies CASCADE`);
+    // A background wake can hold row locks for a moment; retry on deadlock.
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await db.execute(sql`TRUNCATE TABLE companies CASCADE`);
+        break;
+      } catch (err) {
+        const message = String((err as { cause?: { message?: string } })?.cause?.message ?? (err as Error)?.message ?? "");
+        if (attempt >= 5 || !/deadlock/i.test(message)) throw err;
+        await new Promise((resolve) => setTimeout(resolve, 200 * attempt));
+      }
+    }
   });
 
   afterAll(async () => {
