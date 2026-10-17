@@ -73,6 +73,8 @@ export interface VideoStorylineSummary {
   pictureSettings: { providerId?: string | null; model?: string | null; lookId?: string | null };
   /** The script's characters and the saved people (Media Studio identities) they are linked to; see video-storyline-cast.ts. */
   cast: VideoStorylineCast;
+  /** The director whose AI story writer writes this storyline (step 1); null = none picked. */
+  directorId: string | null;
   finalObjectKey: string | null;
   finalByteSize: number | null;
   finalDurationSeconds: number | null;
@@ -175,6 +177,7 @@ function toStorylineSummary(row: StorylineRow): VideoStorylineSummary {
     characterReferenceAssetIds: row.characterReferenceAssetIds,
     pictureSettings: pictureFields(row.pictureSettings),
     cast: readVideoStorylineCast(row.pictureSettings),
+    directorId: row.directorId ?? null,
     finalObjectKey: row.finalObjectKey,
     finalByteSize: row.finalByteSize,
     finalDurationSeconds: row.finalDurationSeconds,

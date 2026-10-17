@@ -171,6 +171,8 @@ export { paymentCards } from "./payment_cards.js";
 export { videoStorylines, videoScenes, videoShots, videoShotRenderJobs, videoStorylineDirectorRuns, videoTransitions, videoTransitionTakes, videoUploads, videoMediaSpend } from "./video_storylines.js";
 export { videoStorylineDirectorConversations } from "./video_storyline_director_conversations.js";
 export { videoStorylineDirectorMessages } from "./video_storyline_director_messages.js";
+export { videoStorylineDirectors } from "./video_storyline_directors.js";
+export { videoStorylineWriterMessages } from "./video_storyline_writer_messages.js";
 export { tradingStrategies, tradingOrders, tradingFifoLots, tradingLedgerEntries, tradingDailyStats } from "./trading.js";
 export { companyCryptoSettings, cryptoWallets, cryptoWalletDestinations, cryptoAgentLimits, cryptoWalletTransactions } from "./crypto_wallets.js";
 export { crmOrganizations } from "./crm_organizations.js";

@@ -329,6 +329,46 @@ export function videoStorylineFootageService(db: Db, deps: FootageDeps = {}) {
     return consentProblem(upload[0], shot, peopleSeen);
   }
 
+  /**
+   * The story writer's picture analysis (18 Oct 2026): may this uploaded
+   * photo of the storyline be described by an AI? The same rules as a frame
+   * of the company's own footage: both consent ticks when it shows people,
+   * and the age check (Media Studio's picture-reading model, verdict kept on
+   * the upload, never milder) must say "adult" or "no people". Returns the
+   * plain reason it may not, else null. `bytes` is the exact picture sent.
+   */
+  async function photoReadRefusal(
+    companyId: string,
+    storylineId: string,
+    uploadId: string,
+    bytes: Buffer,
+    actor: Pick<VideoStorylineActor, "actorType" | "actorId"> | null,
+  ): Promise<string | null> {
+    const [upload] = await db
+      .select()
+      .from(videoUploads)
+      .where(and(eq(videoUploads.id, uploadId), eq(videoUploads.companyId, companyId), eq(videoUploads.storylineId, storylineId)));
+    if (!upload) return "That photo is not in this storyline any more.";
+    const name = upload.originalFilename ? `"${upload.originalFilename}"` : "One of your photos";
+    const consentMissing = !(upload.consentLikeness && upload.consentAdults);
+    if (upload.showsPeople && consentMissing) {
+      return `${name} shows people, so it was not sent: tick both boxes on it first (everyone shown agreed to their likeness being used, and everyone shown is an adult).`;
+    }
+    let verdict: FootageVerdict;
+    try {
+      verdict = await verdictFor(companyId, upload, bytes, actor);
+    } catch (err) {
+      return err instanceof Error ? `${name} was not sent: ${err.message}` : `${name} was not sent: the age check could not run.`;
+    }
+    if (verdict === "under18" || verdict === "unclear") {
+      return `${name} did not pass the age check (only pictures clearly of adults, or with no people at all, are ever sent to an AI service), so it was not sent.`;
+    }
+    if (verdict === "adult" && consentMissing) {
+      return `${name} shows people, so it was not sent: tick both boxes on it first (everyone shown agreed to their likeness being used, and everyone shown is an adult).`;
+    }
+    return null;
+  }
+
   // ─── Music ───
 
   /** A company file id (issue attachment) or assets id -> the assets row, if it is this company's audio. */
@@ -389,6 +429,7 @@ export function videoStorylineFootageService(db: Db, deps: FootageDeps = {}) {
     storageUsedBytes,
     assertMaySend,
     readerRefusal,
+    photoReadRefusal,
     resolveMusicAsset,
     musicLane,
     uploadsFor,

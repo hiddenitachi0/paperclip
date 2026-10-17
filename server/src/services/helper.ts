@@ -870,6 +870,41 @@ export function helperService(db: Db, options: HelperServiceOptions = {}) {
    * masks its question and context. The cost is recorded on the company.
    */
   async function callCompanyModel(input: CompanyModelCallInput): Promise<CompanyModelCallResult> {
+    const prepared = await prepareCompanyModel({ ...input, hasImages: Boolean(input.images && input.images.length > 0) });
+    const { settings, modelLabel, client } = prepared;
+    const maxTokens = Math.min(settings.maxOutputTokens, input.maxTokens);
+    // Masked like ask() masks the question and context: no secret-looking text leaves in a prompt.
+    const messages: LaneAChatMessage[] = [
+      { role: "user", content: maskSecretLikeText(input.user), ...(input.images && input.images.length > 0 ? { images: input.images } : {}) },
+    ];
+    const system = maskSecretLikeText(input.system);
+    let response: Awaited<ReturnType<LaneAProviderClient["complete"]>>;
+    try {
+      // No `tools` key, ever: these calls only write text.
+      response = await completeWithSettingsFallback(client, settings, { model: settings.model!, maxTokens, system, messages });
+    } catch (err) {
+      throw toHttpError(err, modelLabel);
+    }
+    const cost = await recordCompanyModelCost(input.companyId, input.billingCode, prepared, response.usage);
+    return {
+      text: response.text,
+      truncated: response.stop === "max_tokens",
+      costCents: cost.costCents,
+      modelLabel,
+      entryId: prepared.entry?.id ?? null,
+      provider: settings.provider,
+      model: settings.model!,
+    };
+  }
+
+  /**
+   * Everything callCompanyModel does before the call itself, for callers
+   * that hold a longer exchange with the model (the storyline writer's tool
+   * loop): the spending-limit check, the saved model (or the helper's
+   * default), the key, and a provider client. `temperature`/`thinking`
+   * override the saved model's own defaults when given (undefined = keep).
+   */
+  async function prepareCompanyModel(input: PrepareCompanyModelInput): Promise<PreparedCompanyModel> {
     const block = await budgets.getCompanyInvocationBlock(input.companyId);
     if (block) {
       throw forbidden(`${input.purpose} cannot run right now: ${block.reason} An owner can raise or lift the limit under Costs.`, {
@@ -883,7 +918,7 @@ export function helperService(db: Db, options: HelperServiceOptions = {}) {
     // No helper default = the helper's built-in default, exactly like ask().
     const canSee = entry ? picturesOf(entry).canSeePictures === true : builtInDefaultCanSeePictures();
     const modelLabel = entry?.name ?? `${laneAProviderLabel("anthropic")} (${LANE_A_DEFAULT_MODEL})`;
-    if (input.images && input.images.length > 0 && !canSee) {
+    if (input.hasImages && !canSee) {
       throw new HttpError(503, `"${modelLabel}" cannot look at pictures, so ${input.purpose.toLowerCase()} cannot use it.`, {
         code: "COMPANY_MODEL_CANNOT_SEE_PICTURES",
       });
@@ -896,8 +931,8 @@ export function helperService(db: Db, options: HelperServiceOptions = {}) {
       laneAProvider: entry?.provider ?? "anthropic",
       laneAModel: entry?.model ?? LANE_A_DEFAULT_MODEL,
       laneABaseUrl: entry?.baseUrl ?? null,
-      laneATemperature: entry?.defaultTemperature ?? null,
-      laneAThinking: entry?.defaultThinking ?? null,
+      laneATemperature: input.temperature !== undefined ? input.temperature : entry?.defaultTemperature ?? null,
+      laneAThinking: input.thinking !== undefined ? input.thinking : entry?.defaultThinking ?? null,
       laneAProviderRouting: (entry?.providerRouting as never) ?? null,
       laneAMaxOutputTokens: entry?.defaultMaxOutputTokens ?? input.maxTokens,
     });
@@ -952,79 +987,43 @@ export function helperService(db: Db, options: HelperServiceOptions = {}) {
     } catch (err) {
       throw new HttpError(503, `Could not reach "${modelLabel}": ${scrubLaneASecrets(String(err instanceof Error ? err.message : err), apiKey)}`);
     }
-    const maxTokens = Math.min(settings.maxOutputTokens, input.maxTokens);
-    // Masked like ask() masks the question and context: no secret-looking text leaves in a prompt.
-    const messages: LaneAChatMessage[] = [
-      { role: "user", content: maskSecretLikeText(input.user), ...(input.images && input.images.length > 0 ? { images: input.images } : {}) },
-    ];
-    const system = maskSecretLikeText(input.system);
-    let withTemperature = typeof settings.temperature === "number";
-    let withReasoningEffort = settings.reasoningEffort != null;
-    const send = async (): Promise<Awaited<ReturnType<LaneAProviderClient["complete"]>>> => {
-      try {
-        // No `tools` key, ever: these calls only write text.
-        return await client.complete({
-          model: settings.model!,
-          maxTokens,
-          system,
-          messages,
-          ...(withTemperature ? { temperature: settings.temperature } : {}),
-          ...(withReasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}),
-          ...(settings.providerRouting ? { providerRouting: settings.providerRouting } : {}),
-        });
-      } catch (err) {
-        if (!isLaneATemperatureUnsupportedError(err)) throw err;
-        if (withReasoningEffort) {
-          withReasoningEffort = false;
-          return send();
-        }
-        if (withTemperature) {
-          withTemperature = false;
-          return send();
-        }
-        throw err;
-      }
-    };
-    let response: Awaited<ReturnType<LaneAProviderClient["complete"]>>;
-    try {
-      response = await send();
-    } catch (err) {
-      throw toHttpError(err, modelLabel);
-    }
+    return { entry, settings, modelLabel, client, apiKey, canSeePictures: canSee };
+  }
+
+  /** Prices one call of a prepared model and records it on the company's costs (never throws for the record). */
+  async function recordCompanyModelCost(
+    companyId: string,
+    billingCode: string,
+    prepared: Pick<PreparedCompanyModel, "settings">,
+    usage: { inputTokens: number; outputTokens: number; costUsd?: number | null },
+  ): Promise<{ costCents: number }> {
+    const { settings } = prepared;
     const cost = await priceLaneACall({
       provider: settings.provider,
-      model: settings.model,
-      inputTokens: response.usage.inputTokens,
-      outputTokens: response.usage.outputTokens,
-      providerCostUsd: response.usage.costUsd ?? null,
+      model: settings.model!,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      providerCostUsd: usage.costUsd ?? null,
     });
     try {
-      await costService(db).createEvent(input.companyId, {
+      await costService(db).createEvent(companyId, {
         agentId: null,
         provider: settings.provider,
         biller: settings.provider,
         billingType: "metered_api",
-        billingCode: input.billingCode,
-        model: settings.model,
-        inputTokens: response.usage.inputTokens,
-        outputTokens: response.usage.outputTokens,
+        billingCode,
+        model: settings.model!,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
         costCents: cost.costCents,
         costMicroUsd: cost.costMicroUsd,
         costSource: cost.costSource,
         occurredAt: new Date(),
       });
     } catch (err) {
-      logger.error({ err, companyId: input.companyId }, "company model: could not record the cost event");
+      logger.error({ err, companyId }, "company model: could not record the cost event");
     }
-    return {
-      text: response.text,
-      truncated: response.stop === "max_tokens",
-      costCents: cost.costCents,
-      modelLabel,
-      entryId: entry?.id ?? null,
-      provider: settings.provider,
-      model: settings.model,
-    };
+    return { costCents: cost.costCents };
   }
 
   /** The saved model a storyline call uses: the given one (must be this company's, not archived), else the helper default. */
@@ -1152,7 +1151,21 @@ export function helperService(db: Db, options: HelperServiceOptions = {}) {
     };
   }
 
-  return { getSettings, updateSettings, ask, assertEntryInCompany, completeWithSavedModel, callCompanyModel, resolveCompanyModelEntry, companyModelCanSeePictures, builtInDefaultUsable };
+  return {
+    getSettings,
+    updateSettings,
+    ask,
+    assertEntryInCompany,
+    completeWithSavedModel,
+    callCompanyModel,
+    prepareCompanyModel,
+    recordCompanyModelCost,
+    providerErrorToHttp: toHttpError,
+    listKeyBindings,
+    resolveCompanyModelEntry,
+    companyModelCanSeePictures,
+    builtInDefaultUsable,
+  };
 }
 
 export interface CompanyModelCallInput {
@@ -1171,6 +1184,32 @@ export interface CompanyModelCallInput {
   keySecretId?: string | null;
   /** Who reads keySecretId (the audit trail's consumer), e.g. the Media Studio plugin id. */
   keyConsumerId?: string | null;
+}
+
+export interface PrepareCompanyModelInput {
+  companyId: string;
+  purpose: string;
+  noModelMessage: string;
+  maxTokens: number;
+  actorUserId: string | null;
+  entryId?: string | null;
+  keySecretId?: string | null;
+  keyConsumerId?: string | null;
+  /** Pictures will be sent: refused up front for a model that cannot see them. */
+  hasImages?: boolean;
+  /** Overrides the saved model's own creativity (undefined = keep its default). */
+  temperature?: number | null;
+  /** Overrides the saved model's own thinking setting (undefined = keep its default). */
+  thinking?: "on" | "off" | null;
+}
+
+export interface PreparedCompanyModel {
+  entry: typeof modelDirectoryEntries.$inferSelect | null;
+  settings: ReturnType<typeof resolveLaneASettings>;
+  modelLabel: string;
+  client: LaneAProviderClient;
+  apiKey: string | null;
+  canSeePictures: boolean;
 }
 
 export interface CompanyModelCallResult {
