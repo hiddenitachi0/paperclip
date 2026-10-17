@@ -14,7 +14,7 @@ import { api } from "./client";
 
 export interface BragJob {
   id: string;
-  projectId: string;
+  projectId: string | null;
   status: BragJobStatus;
   sourceUrl: string | null;
   tone: string | null;

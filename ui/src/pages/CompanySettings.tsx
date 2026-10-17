@@ -19,6 +19,7 @@ import { HelperSettingsSection } from "../components/helper/HelperSettingsSectio
 import { SecurityReviewSettingsSection } from "../components/SecurityReviewSettingsSection";
 import { MoveCompanySection } from "../components/company-migration/MoveCompanySection";
 import { QualityLoopSettingsSection } from "../components/QualityLoopSettingsSection";
+import { BragOnDoneSettingsSection } from "../components/BragOnDoneSettingsSection";
 import { Settings, CloudUpload, Download, Plug, Upload, Image } from "lucide-react";
 import { CompanyPatternIcon } from "../components/CompanyPatternIcon";
 import { isDefaultSkin, setDefaultSkin } from "../lib/company-branding";
@@ -427,6 +428,8 @@ export function CompanySettings() {
           />
         </div>
       </div>
+
+      <BragOnDoneSettingsSection company={selectedCompany} />
 
       <CacheSettingsSection companyId={selectedCompany.id} />
 

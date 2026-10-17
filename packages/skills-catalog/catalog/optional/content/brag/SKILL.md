@@ -26,6 +26,8 @@ download Hyperframes — use the brag-slim path (slim.md) to build the video
 with tools already on the machine.
 -->
 
+> **PAPERCLIP RULE — ONLY WHEN A PERSON ASKS.** Run this skill only when a person asked for a video on the task (in the task they wrote or in their comment). Never start a brag video on your own initiative, for example after finishing a task. A person can instead tick "Make a short brag video when this is done" on a task; Paperclip then makes it automatically and you do nothing.
+
 # /brag
 
 You built it. Now let's brag about it.

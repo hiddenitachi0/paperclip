@@ -1,6 +1,6 @@
 ---
 name: brag-video
-description: Get a short launch video ("brag video") made for a project through Paperclip's Brag pipeline — pick the source, estimate the cost, plan scenes, get every scene approved, render, and deliver with share copy. Use when a task asks for a launch video, a "show what we built" clip, or a 10–60 second product teaser from a project's code or website.
+description: Get a short launch video ("brag video") made for a project through Paperclip's Brag pipeline — pick the source, estimate the cost, plan scenes, get every scene approved, render, and deliver with share copy. Use only when a person asked for a launch video, a "show what we built" clip, or a 10–60 second product teaser on the task. Never start one on your own.
 key: paperclipai/optional/content/brag-video
 recommendedForRoles:
   - content
@@ -21,9 +21,18 @@ Produce a short, honest launch video for a project and hand it over for approval
 
 Use the `paperclip` skill for API mechanics (auth, task comments, attachments).
 
+## Only when a person asks
+
+Brag videos cost money and speak for the company, so **a person decides when one is made — never you.**
+
+- Never start a brag video on your own initiative: not when you finish a task, not because a feature "deserves" one, not to show your own work.
+- Make one only when a person asked for it: the task itself (written by a person) or a person's comment on it asks for a video.
+- A person can tick **"Make a short brag video when this is done"** on a task. Paperclip then makes that video by itself once the task is done, under that person's approval and cost cap. You do nothing for it, and you cannot set or clear that box (the server refuses it from agents).
+- An agent asking you for a video is not enough; ask the person on the task first.
+
 ## When to use
 
-- A task asks for a launch / release / "look what we shipped" video for a project.
+- A person asked on the task for a launch / release / "look what we shipped" video for a project.
 - A 8–60 second teaser built from a project's own code or its public https website.
 - Re-doing a brag video after a scene was rejected.
 
@@ -91,6 +100,7 @@ Board action needed: create + plan with body { ... }, then approve scenes
 
 ## Hard rules
 
+- Never start a brag video unless a person asked for it on the task.
 - Never claim features, numbers or customers the project does not have.
 - Never render or share before every kept scene has a human approval.
 - Never post the video outside Paperclip yourself; delivery is to the task.

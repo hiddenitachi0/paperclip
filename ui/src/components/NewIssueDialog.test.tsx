@@ -1803,4 +1803,100 @@ describe("NewIssueDialog", () => {
       act(() => root.unmount());
     });
   });
+
+  describe("brag video when the task is done", () => {
+    async function openWithTitle(title: string) {
+      const handle = renderDialog(container);
+      await flush();
+      const titleInput = container.querySelector('textarea[placeholder="Task title"]') as HTMLTextAreaElement;
+      await typeTextareaValue(titleInput, title);
+      return handle;
+    }
+
+    function option() {
+      return container.querySelector('[data-testid="brag-on-done-option"]') as HTMLElement | null;
+    }
+
+    function tickBox() {
+      return option()?.querySelector('input[type="checkbox"]') as HTMLInputElement | null;
+    }
+
+    async function submitTask() {
+      const submitButton = Array.from(container.querySelectorAll("button"))
+        .find((button) => button.textContent?.includes("Create Task"));
+      await vi.waitFor(() => {
+        expect(submitButton?.hasAttribute("disabled")).toBe(false);
+      });
+      await act(async () => {
+        submitButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await flush();
+    }
+
+    afterEach(() => {
+      delete (companyState.companies[0] as Record<string, unknown>).bragOnDoneEnabled;
+      delete (companyState.companies[0] as Record<string, unknown>).bragOnDoneMaxCostCents;
+    });
+
+    it("shows the tick box with plain help text: what it is, what it costs, and that it starts by itself", async () => {
+      const { root } = await openWithTitle("Ship the export button");
+      expect(option()).not.toBeNull();
+      const text = option()!.textContent ?? "";
+      expect(text).toContain("Make a short brag video when this is done");
+      expect(text).toMatch(/short video \(about 30 seconds\)/);
+      expect(text).toMatch(/costs about \$0\.\d\d/);
+      expect(text).toMatch(/never more than \$0\.39/);
+      expect(text).toContain("starts by itself once the task is done");
+      expect(tickBox()?.checked).toBe(false);
+      expect(tickBox()?.disabled).toBe(false);
+      act(() => root.unmount());
+    });
+
+    it("uses the company's own cost limit in the help text", async () => {
+      (companyState.companies[0] as Record<string, unknown>).bragOnDoneMaxCostCents = 150;
+      const { root } = await openWithTitle("Ship it");
+      expect(option()!.textContent).toMatch(/never more than \$1\.50/);
+      act(() => root.unmount());
+    });
+
+    it("sends the pre-approval only when the person ticks it", async () => {
+      const first = await openWithTitle("Without a video");
+      await submitTask();
+      expect(mockIssuesApi.create).toHaveBeenCalledTimes(1);
+      expect(mockIssuesApi.create.mock.calls[0]?.[1]).not.toHaveProperty("bragOnDone");
+      act(() => first.root.unmount());
+      document.body.innerHTML = "";
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      mockIssuesApi.create.mockClear();
+
+      const { root } = await openWithTitle("With a video");
+      await act(async () => {
+        tickBox()!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await flush();
+      expect(tickBox()?.checked).toBe(true);
+      await submitTask();
+      expect(mockIssuesApi.create).toHaveBeenCalledWith(
+        "company-1",
+        expect.objectContaining({ title: "With a video", bragOnDone: true }),
+      );
+      act(() => root.unmount());
+    });
+
+    it("is disabled with an explanation when the company has it turned off, and never sent", async () => {
+      (companyState.companies[0] as Record<string, unknown>).bragOnDoneEnabled = false;
+      const { root } = await openWithTitle("No videos here");
+      expect(option()!.textContent).toContain("turned off for this company");
+      expect(option()!.textContent).toContain("Company settings");
+      expect(tickBox()?.disabled).toBe(true);
+      await act(async () => {
+        tickBox()!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await flush();
+      await submitTask();
+      expect(mockIssuesApi.create.mock.calls[0]?.[1]).not.toHaveProperty("bragOnDone");
+      act(() => root.unmount());
+    });
+  });
 });

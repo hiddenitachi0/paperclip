@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "packageName": "@paperclipai/skills-catalog",
   "packageVersion": "0.3.1",
-  "generatedAt": "2026-10-17T01:58:51.126Z",
+  "generatedAt": "2026-10-17T07:47:26.369Z",
   "skills": [
     {
       "id": "paperclipai:bundled:docs:doc-maintenance",
@@ -555,8 +555,8 @@
         {
           "path": "SKILL.md",
           "kind": "skill",
-          "sizeBytes": 9942,
-          "sha256": "1f4198de650e36980439a86a244dfaa509b4ed9c4bf77361dfc1fcf4791c6ba2"
+          "sizeBytes": 10327,
+          "sha256": "52c349a07fbd725cc9c348d033d064b6d08e84605d75a27c948b042493ea0632"
         },
         {
           "path": "assets/sfx/casino/card-fan-1.ogg",
@@ -2197,7 +2197,7 @@
           "sha256": "c97ea53d7c5df2a3dd64694a388c013a05c363ac7c2e4e0d956c18ad3bfaa5ee"
         }
       ],
-      "contentHash": "sha256:10524d9847184d7339928c1c7581cd73d23c85d649569401560d44d2843b0f11"
+      "contentHash": "sha256:5342e079cbb63c98098e00abd8f42eb593e715250672956684d72a8bd5f23393"
     },
     {
       "id": "paperclipai:optional:content:brag-video",
@@ -2206,7 +2206,7 @@
       "category": "content",
       "slug": "brag-video",
       "name": "brag-video",
-      "description": "Get a short launch video (\"brag video\") made for a project through Paperclip's Brag pipeline — pick the source, estimate the cost, plan scenes, get every scene approved, render, and deliver with share copy. Use when a task asks for a launch video, a \"show what we built\" clip, or a 10–60 second product teaser from a project's code or website.",
+      "description": "Get a short launch video (\"brag video\") made for a project through Paperclip's Brag pipeline — pick the source, estimate the cost, plan scenes, get every scene approved, render, and deliver with share copy. Use only when a person asked for a launch video, a \"show what we built\" clip, or a 10–60 second product teaser on the task. Never start one on your own.",
       "path": "catalog/optional/content/brag-video",
       "entrypoint": "SKILL.md",
       "trustLevel": "markdown_only",
@@ -2230,11 +2230,11 @@
         {
           "path": "SKILL.md",
           "kind": "skill",
-          "sizeBytes": 7189,
-          "sha256": "872f3b68e83d7a2f4d9f7ddf06190b20b5ddc49bfc9da9abe6dc599a636a93b7"
+          "sizeBytes": 8064,
+          "sha256": "ca89f53ed2d3092e57b4ecfbdc6380ebb418a14aa5dd4b4bfc2da316e39a2acb"
         }
       ],
-      "contentHash": "sha256:4982ebc5a602e8e2829d102650651e4d5e1109cf15068de021228a8c74b3ec0c"
+      "contentHash": "sha256:6f463fdd9f4e8ff118a960ef36d9597683ada2bffbc888fd29866489152d9ef1"
     },
     {
       "id": "paperclipai:optional:content:release-announcement",

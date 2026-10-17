@@ -48,6 +48,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { ToggleSwitch } from "@/components/ui/toggle-switch";
+import { BragOnDoneOption } from "./BragOnDoneOption";
 import {
   Popover,
   PopoverContent,
@@ -443,6 +444,7 @@ export function NewIssueDialog() {
   const [assigneeThinkingEffort, setAssigneeThinkingEffort] = useState("");
   const [assigneeChrome, setAssigneeChrome] = useState(false);
   const [planFirstOnOpus, setPlanFirstOnOpus] = useState(false);
+  const [bragOnDone, setBragOnDone] = useState(false);
   const [executionWorkspaceMode, setExecutionWorkspaceMode] = useState<string>("shared_workspace");
   const [selectedExecutionWorkspaceId, setSelectedExecutionWorkspaceId] = useState("");
   const [workMode, setWorkMode] = useState<IssueWorkMode>("standard");
@@ -825,6 +827,7 @@ export function NewIssueDialog() {
       setAssigneeThinkingEffort("");
       setAssigneeChrome(false);
       setPlanFirstOnOpus(false);
+      setBragOnDone(false);
       setExecutionWorkspaceMode(defaultExecutionWorkspaceMode);
       setWorkMode(nextWorkMode);
       setSelectedExecutionWorkspaceId(newIssueDefaults.executionWorkspaceId ?? "");
@@ -864,6 +867,7 @@ export function NewIssueDialog() {
       setAssigneeThinkingEffort("");
       setAssigneeChrome(false);
       setPlanFirstOnOpus(false);
+      setBragOnDone(false);
       setExecutionWorkspaceMode(defaultExecutionWorkspaceModeForIssueDefaults(newIssueDefaults, defaultProject));
       setWorkMode(nextWorkMode);
       setSelectedExecutionWorkspaceId(newIssueDefaults.executionWorkspaceId ?? "");
@@ -960,6 +964,7 @@ export function NewIssueDialog() {
       setAssigneeThinkingEffort("");
       setAssigneeChrome(false);
       setPlanFirstOnOpus(false);
+      setBragOnDone(false);
       setExecutionWorkspaceMode(defaultExecutionWorkspaceModeForIssueDefaults(newIssueDefaults, defaultProject));
       setSelectedExecutionWorkspaceId(newIssueDefaults.executionWorkspaceId ?? "");
       executionWorkspaceDefaultProjectId.current = hasExplicitProjectWorkspaceId || newIssueDefaults.executionWorkspaceId || defaultProject
@@ -993,6 +998,7 @@ export function NewIssueDialog() {
       setAssigneeThinkingEffort("");
       setAssigneeChrome(false);
       setPlanFirstOnOpus(false);
+      setBragOnDone(false);
       return;
     }
     // Read the operator's lane from the ref, never from the render snapshot: this pass may
@@ -1077,6 +1083,7 @@ export function NewIssueDialog() {
     setAssigneeThinkingEffort("");
     setAssigneeChrome(false);
     setPlanFirstOnOpus(false);
+    setBragOnDone(false);
     setExecutionWorkspaceMode("shared_workspace");
     setSelectedExecutionWorkspaceId("");
     setWorkMode("standard");
@@ -1115,6 +1122,7 @@ export function NewIssueDialog() {
     setAssigneeThinkingEffort("");
     setAssigneeChrome(false);
     setPlanFirstOnOpus(false);
+    setBragOnDone(false);
     setExecutionWorkspaceMode("shared_workspace");
     setSelectedExecutionWorkspaceId("");
     setWorkMode("standard");
@@ -1195,6 +1203,7 @@ export function NewIssueDialog() {
       ...(taskWatchdogsEnabled && watchdogAgentId
         ? { watchdog: { agentId: watchdogAgentId, instructions: watchdogInstructions.trim() || null } }
         : {}),
+      ...(bragOnDone && dialogCompany?.bragOnDoneEnabled !== false ? { bragOnDone: true } : {}),
     });
   }
 
@@ -2389,6 +2398,16 @@ export function NewIssueDialog() {
               </div>
             ) : null}
           </div>
+        </div>
+
+        {/* "Make a short brag video when this is done" (people only; the server refuses it from agents) */}
+        <div className="border-t border-border px-4 py-2 shrink-0">
+          <BragOnDoneOption
+            company={dialogCompany}
+            checked={bragOnDone && dialogCompany?.bragOnDoneEnabled !== false}
+            onCheckedChange={setBragOnDone}
+            disabled={createIssue.isPending}
+          />
         </div>
 
         {/* Property chips bar */}

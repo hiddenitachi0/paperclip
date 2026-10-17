@@ -1758,6 +1758,13 @@
       "when": 1791790100000,
       "tag": "0251_crypto_wallets",
       "breakpoints": true
+    },
+    {
+      "idx": 252,
+      "version": "7",
+      "when": 1792222979038,
+      "tag": "0252_brag_on_done",
+      "breakpoints": true
     }
   ]
 }

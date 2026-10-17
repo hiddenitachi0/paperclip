@@ -462,6 +462,10 @@ const createIssueBaseSchema = z.object({
   // approval before this issue can move to done. See assertFeatureLaunchFieldAllowed
   // in server/src/routes/issues.ts for who may flip it back to false.
   featureLaunch: z.boolean().optional(),
+  // "Make a short brag video when this is done". Only a person (board user)
+  // may send this; every issue route refuses it from an agent. The server
+  // turns it into a stored pre-approval (who, when, cost cap).
+  bragOnDone: z.boolean().optional(),
   assigneeAdapterOverrides: issueAssigneeAdapterOverridesSchema.optional().nullable(),
   executionPolicy: issueExecutionPolicySchema.optional().nullable(),
   executionWorkspaceId: z.string().uuid().optional().nullable(),

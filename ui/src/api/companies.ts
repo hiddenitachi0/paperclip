@@ -39,6 +39,8 @@ export const companiesApi = {
         | "attachmentMaxBytes"
         | "requireBoardApprovalForNewAgents"
         | "subtasksInheritModelEffort"
+        | "bragOnDoneEnabled"
+        | "bragOnDoneMaxCostCents"
         | "feedbackDataSharingEnabled"
         | "brandColor"
         | "logoAssetId"
