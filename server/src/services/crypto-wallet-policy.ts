@@ -15,7 +15,13 @@ import type { CryptoAgentLimits } from "@paperclipai/shared";
 export interface WalletSpendGateInput {
   /** Base units of the wallet's own coin (or USDC micro-units for a Hyperliquid order). */
   amount: bigint;
-  /** Dollar value of the amount, or null when no price was available. */
+  /**
+   * The most this payment may pay in network fees (base units). Counted
+   * together with the amount in every limit and threshold below: the
+   * network service sets the fee, so it is never left out of the sums.
+   */
+  fee: bigint;
+  /** Dollar value of amount + fee, or null when no price was available. */
   amountUsd: number | null;
   assetLabel: string;
   formatAmount: (baseUnits: bigint) => string;
@@ -43,9 +49,17 @@ function usd(value: number): string {
 }
 
 export function evaluateWalletSpend(input: WalletSpendGateInput): WalletSpendVerdict {
-  const { amount, amountUsd, wallet, agent, formatAmount } = input;
+  const { amount, fee, amountUsd, wallet, agent, formatAmount } = input;
 
   if (amount <= 0n) return { kind: "block", reason: "The amount must be more than zero." };
+  if (fee < 0n) return { kind: "block", reason: "The network fee could not be worked out." };
+  // A fee bigger than the payment itself is never worth it, and is the
+  // first sign of a network service asking for far too much.
+  if (fee > amount) {
+    return { kind: "block", reason: `The network fee could be up to ${formatAmount(fee)}, more than the payment itself. Nothing was sent.` };
+  }
+  const total = amount + fee;
+  const withFee = fee > 0n ? " (network fee included)" : "";
 
   // Without a price, the dollar limits cannot be checked. Refuse rather
   // than guess -- the agent can try again when prices are available.
@@ -53,16 +67,16 @@ export function evaluateWalletSpend(input: WalletSpendGateInput): WalletSpendVer
     return { kind: "block", reason: "Could not get a price to check the dollar limits, so nothing was sent. Try again in a few minutes." };
   }
 
-  if (amount > wallet.perTransactionLimit) {
-    return { kind: "block", reason: `This is more than the wallet's limit of ${formatAmount(wallet.perTransactionLimit)} per payment.` };
+  if (total > wallet.perTransactionLimit) {
+    return { kind: "block", reason: `This is more than the wallet's limit of ${formatAmount(wallet.perTransactionLimit)} per payment${withFee}.` };
   }
-  if (wallet.spentToday + amount > wallet.dailyLimit) {
+  if (wallet.spentToday + total > wallet.dailyLimit) {
     return {
       kind: "block",
       reason: `This would go over the wallet's daily limit of ${formatAmount(wallet.dailyLimit)} (already used today: ${formatAmount(wallet.spentToday)}).`,
     };
   }
-  if (wallet.spentTotal + amount > wallet.totalLimit) {
+  if (wallet.spentTotal + total > wallet.totalLimit) {
     return {
       kind: "block",
       reason: `This would go over the wallet's total limit of ${formatAmount(wallet.totalLimit)} (already used: ${formatAmount(wallet.spentTotal)}).`,
@@ -85,7 +99,7 @@ export function evaluateWalletSpend(input: WalletSpendGateInput): WalletSpendVer
     };
   }
 
-  const walletNeedsApproval = wallet.approvalAbove === null || amount >= wallet.approvalAbove;
+  const walletNeedsApproval = wallet.approvalAbove === null || total >= wallet.approvalAbove;
   const agentNeedsApproval = agent.approvalAboveUsd === null || amountUsd >= agent.approvalAboveUsd;
   if (walletNeedsApproval || agentNeedsApproval) {
     const why =
@@ -113,6 +127,12 @@ export function evaluateHyperliquidLeverage(input: {
   maxLeverage: number;
 }): { ok: true } | { ok: false; reason: string } {
   if (input.reduceOnly) return { ok: true };
+  // Anything that is not a plain finite number (a broken or hostile answer
+  // from the exchange) refuses the order rather than slipping past the
+  // comparisons below, which are all false for NaN.
+  if (![input.orderValueUsd, input.accountValueUsd, input.openPositionsValueUsd, input.maxLeverage].every((v) => Number.isFinite(v) && v >= 0)) {
+    return { ok: false, reason: "The Hyperliquid account's numbers could not be read, so the leverage cap could not be checked." };
+  }
   if (input.accountValueUsd <= 0) return { ok: false, reason: "The Hyperliquid account has no money in it to trade with." };
   const exposure = input.openPositionsValueUsd + input.orderValueUsd;
   const allowed = input.accountValueUsd * input.maxLeverage;

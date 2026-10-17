@@ -13,7 +13,9 @@ import {
 } from "@paperclipai/db";
 import {
   CRYPTO_CHAIN_INFO,
+  CRYPTO_DUST,
   CRYPTO_MAINNET_CONFIRM_PHRASE,
+  CRYPTO_NETWORK_FEE_CEILING,
   CRYPTO_TX_APPROVAL_EXPIRY_MS,
   CRYPTO_TX_COUNTING_STATUSES,
   DEFAULT_CRYPTO_AGENT_LIMITS,
@@ -49,6 +51,7 @@ import {
   CryptoChainError,
   defaultCryptoChainAdapters,
   type ChainContext,
+  type BroadcastResult,
   type ChainTxStatus,
   type CryptoChainAdapter,
   type CryptoChainAdapters,
@@ -120,7 +123,11 @@ export interface CryptoActor {
   actorId: string;
 }
 
-const AMBIGUOUS_GIVE_UP_MS = 30 * 60_000;
+/** An unclear send is re-sent (the same signed bytes, never a new payment) at most this often. */
+const REBROADCAST_INTERVAL_MS = 5 * 60_000;
+/** A payment reserves its estimated network fee times this, capped by CRYPTO_NETWORK_FEE_CEILING, as its fee budget. */
+const FEE_BUDGET_NUMERATOR = 3n;
+const FEE_BUDGET_DENOMINATOR = 2n;
 const APPROVED_WITHOUT_HASH_GIVE_UP_MS = 10 * 60_000;
 const RECONCILE_WINDOW_MS = 60 * 60_000;
 const TICK_BATCH = 25;
@@ -178,6 +185,7 @@ export function toTxSummary(row: CryptoWalletTxRow): CryptoWalletTransactionSumm
     destination: row.destination,
     amount: row.amount,
     amountUsd: row.amountUsd,
+    feeUpperBound: row.feeUpperBound,
     orderDetail: (row.orderDetail as Record<string, unknown> | null) ?? null,
     purpose: row.purpose,
     status: row.status as CryptoTxStatus,
@@ -220,10 +228,6 @@ function chainFailure(err: unknown): string {
   if (err instanceof SafeOutboundFetchError) return `Could not reach the network service: ${err.message}`;
   if (err instanceof HttpError) return err.message;
   return "Something went wrong while talking to the network. Nothing more is known.";
-}
-
-function isAmbiguousNetworkFailure(err: unknown): boolean {
-  return err instanceof SafeOutboundFetchError && (err.code === "timeout" || err.code === "network_error" || err.code === "response_too_large");
 }
 
 export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletServiceDeps = {}) {
@@ -307,6 +311,9 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     }
 
     if (input.rpcEndpoints) {
+      // Which network service a wallet talks to decides which network it
+      // really signs on, so this is the owner's call, like real money.
+      if (!actor.isOwner) throw forbidden("Only the company's owner can change the crypto network addresses.");
       const merged: CompanyCryptoSettings["rpcEndpoints"] = JSON.parse(JSON.stringify(current.rpcEndpoints));
       for (const [chain, networks] of Object.entries(input.rpcEndpoints) as Array<[CryptoChain, Partial<Record<CryptoNetwork, string | null>>]>) {
         for (const [network, url] of Object.entries(networks ?? {}) as Array<[CryptoNetwork, string | null]>) {
@@ -446,8 +453,18 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     return toWalletSummary(row!);
   }
 
-  async function updateWallet(companyId: string, walletId: string, input: UpdateCryptoWalletInput, actor: { userId: string }): Promise<CryptoWalletSummary> {
+  /** Real-money wallets: anything that widens what can leave (limits, allow-list, owner send, leverage, who uses it) is the owner's call. */
+  function assertOwnerForRealMoney(wallet: CryptoWalletRow, actor: { isOwner: boolean }, what: string) {
+    if (wallet.network === "mainnet" && !actor.isOwner) {
+      throw forbidden(`Only the company's owner can ${what} on a real-money wallet.`);
+    }
+  }
+
+  async function updateWallet(companyId: string, walletId: string, input: UpdateCryptoWalletInput, actor: { userId: string; isOwner: boolean }): Promise<CryptoWalletSummary> {
     const row = await requireWalletRow(companyId, walletId);
+    if (input.limits !== undefined || input.maxLeverage !== undefined || input.agentId !== undefined) {
+      assertOwnerForRealMoney(row, actor, "change limits, leverage or which agent uses it");
+    }
     const chain = row.chain as CryptoChain;
     const patch: Partial<typeof cryptoWallets.$inferInsert> = { updatedAt: nowOf() };
     if (input.label !== undefined) patch.label = input.label;
@@ -497,6 +514,23 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     const row = await requireWalletRow(companyId, walletId);
     if (row.status === "archived") return toWalletSummary(row);
     if (row.status !== "frozen") throw unprocessable("Freeze the wallet first, then archive it.");
+    const [inFlight] = await db
+      .select({ id: cryptoWalletTransactions.id })
+      .from(cryptoWalletTransactions)
+      .where(and(eq(cryptoWalletTransactions.walletId, walletId), inArray(cryptoWalletTransactions.status, ["pending_approval", "approved", "submitted"])))
+      .limit(1);
+    if (inFlight) throw unprocessable("This wallet still has a payment on its way or waiting for approval. Wait until it settles, then archive.");
+    if (row.network === "mainnet") {
+      // Archiving is final and lets the key be deleted later, so a
+      // real-money wallet must be empty -- checked on the network now, not
+      // from an old reading.
+      const fresh = await refreshBalance(companyId, walletId);
+      if (BigInt(fresh.balance) > BigInt(CRYPTO_DUST[row.chain as CryptoChain])) {
+        throw unprocessable(
+          `This wallet still holds ${fresh.balanceDisplay}. Send the coins out first (add your own address to the allowed list and use Send funds), then archive it.`,
+        );
+      }
+    }
     const now = nowOf();
     const [updated] = await db
       .update(cryptoWallets)
@@ -519,8 +553,14 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     return rows.map((r) => ({ id: r.id, walletId: r.walletId, address: r.address, label: r.label, createdAt: r.createdAt.toISOString() }));
   }
 
-  async function addDestination(companyId: string, walletId: string, input: { address: string; label: string }, actor: { userId: string }): Promise<CryptoWalletDestination> {
+  async function addDestination(
+    companyId: string,
+    walletId: string,
+    input: { address: string; label: string },
+    actor: { userId: string; isOwner: boolean },
+  ): Promise<CryptoWalletDestination> {
     const wallet = await requireWalletRow(companyId, walletId);
+    assertOwnerForRealMoney(wallet, actor, "add an allowed address");
     const chain = wallet.chain as CryptoChain;
     let normalized: string | null;
     try {
@@ -563,8 +603,11 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     return { perTransactionUsd: row.perTransactionUsd, dailyUsd: row.dailyUsd, totalUsd: row.totalUsd, approvalAboveUsd: row.approvalAboveUsd };
   }
 
-  async function setAgentLimits(companyId: string, agentId: string, input: CryptoAgentLimits, actor: { userId: string }): Promise<CryptoAgentLimits> {
+  async function setAgentLimits(companyId: string, agentId: string, input: CryptoAgentLimits, actor: { userId: string; isOwner: boolean }): Promise<CryptoAgentLimits> {
     await requireAgent(companyId, agentId);
+    if ((await getSettings(companyId)).mainnetEnabled && !actor.isOwner) {
+      throw forbidden("Real money is on for this company, so only the owner can change an agent's crypto limits.");
+    }
     if (input.perTransactionUsd > input.dailyUsd || input.dailyUsd > input.totalUsd) {
       throw unprocessable("The limits must go up: per payment no more than per day, and per day no more than in total.");
     }
@@ -715,8 +758,8 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     );
     const [walletRow] = await tx
       .select({
-        today: sql<string>`coalesce(sum(case when ${cryptoWalletTransactions.createdAt} >= ${dayStartIso}::timestamptz then ${cryptoWalletTransactions.amount} else 0 end), 0)::text`,
-        total: sql<string>`coalesce(sum(${cryptoWalletTransactions.amount}), 0)::text`,
+        today: sql<string>`coalesce(sum(case when ${cryptoWalletTransactions.createdAt} >= ${dayStartIso}::timestamptz then ${cryptoWalletTransactions.amount} + coalesce(${cryptoWalletTransactions.feeUpperBound}, 0) else 0 end), 0)::text`,
+        total: sql<string>`coalesce(sum(${cryptoWalletTransactions.amount} + coalesce(${cryptoWalletTransactions.feeUpperBound}, 0)), 0)::text`,
       })
       .from(cryptoWalletTransactions)
       .where(walletBase);
@@ -746,7 +789,9 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     const what =
       tx.kind === "order"
         ? `place a Hyperliquid order: ${String((tx.orderDetail as Record<string, unknown> | null)?.side ?? "")} ${String((tx.orderDetail as Record<string, unknown> | null)?.size ?? "")} ${String((tx.orderDetail as Record<string, unknown> | null)?.coin ?? "")} (about $${(tx.amountUsd ?? 0).toFixed(2)})`
-        : `send ${formatChainAmount(chain, tx.amount)} to ${destinationLabel ? `${destinationLabel} (${tx.destination})` : tx.destination}`;
+        : `send ${formatChainAmount(chain, tx.amount)} to ${destinationLabel ? `${destinationLabel} (${tx.destination})` : tx.destination}${
+            tx.feeUpperBound && BigInt(tx.feeUpperBound) > 0n ? `, plus a network fee of at most ${formatChainAmount(chain, tx.feeUpperBound)}` : ""
+          }`;
     const expiresAt = tx.approvalExpiresAt ?? new Date(nowOf().getTime() + CRYPTO_TX_APPROVAL_EXPIRY_MS);
     const summary = `${agentName} wants to ${what} from the wallet "${wallet.label}". Reason given: "${tx.purpose}". ${reasonForOperator} ${
       realMoney ? "This is REAL money and cannot be undone." : "This is on a test network; test coins have no value."
@@ -780,6 +825,12 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
   /**
    * Signs and broadcasts one already-approved transaction. The caller must
    * have claimed the row (status 'approved') so nobody else sends it too.
+   *
+   * Once a transaction is signed, its bytes and hash are saved BEFORE the
+   * first send. From then on the payment stays counted ("submitted") unless
+   * the network gives a definite answer that it did not happen; any unclear
+   * answer is settled later by checkOnNetwork, which only ever re-sends
+   * those same saved bytes -- never a newly signed payment.
    */
   async function executeApproved(txRow: CryptoWalletTxRow, actor: CryptoActor): Promise<CryptoWalletTxRow> {
     const wallet = await requireWalletRow(txRow.companyId, txRow.walletId);
@@ -798,6 +849,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
 
     const ctx = await chainContext(wallet.companyId, chain, wallet.network as CryptoNetwork);
     let privateKey = "";
+    let signed: SignedTransfer;
     try {
       privateKey = await secrets.resolveSecretValueForWalletSigning(wallet.companyId, wallet.secretId, {
         walletId: wallet.id,
@@ -816,10 +868,8 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
 
       if (txRow.kind === "order") {
         const detail = (txRow.orderDetail ?? {}) as Record<string, unknown>;
-        const hl = adapters.hyperliquid;
-        const result = await hl.placeOrder(ctx, {
+        const prepared = await adapters.hyperliquid.signOrder(ctx, {
           privateKey,
-          address: wallet.address,
           coin: String(detail.coin),
           isBuy: detail.side === "buy",
           size: String(detail.size),
@@ -828,57 +878,72 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
           leverage: wallet.maxLeverage,
         });
         privateKey = "";
-        if (result.status === "error") {
-          return finish(txRow, { status: "failed", error: result.detail }, "wallet_tx_failed", { reason: result.detail });
-        }
-        return finish(
-          txRow,
-          {
-            status: "confirmed",
-            txHash: result.orderRef ? `hyperliquid-order-${result.orderRef}` : null,
-            orderDetail: { ...detail, result: result.status, resultDetail: result.detail },
-            submittedAt: now,
-            confirmedAt: now,
-          },
-          "wallet_tx_confirmed",
-          { result: result.status, detail: result.detail },
-        );
-      }
-
-      let signed: SignedTransfer;
-      try {
-        signed = await adapter.signTransfer(ctx, { privateKey, from: wallet.address, to: txRow.destination!, amount: BigInt(txRow.amount) });
-      } finally {
+        // The leverage cap goes first. If that does not clearly succeed, the
+        // order is never sent at all -- so failing here is always safe.
+        await adapters.hyperliquid.applyLeverage(ctx, prepared.leverageRaw);
+        signed = prepared.order;
+      } else {
+        const maxFee = BigInt(txRow.feeUpperBound ?? "0");
+        signed = await adapter.signTransfer(ctx, { privateKey, from: wallet.address, to: txRow.destination!, amount: BigInt(txRow.amount), maxFee });
         privateKey = "";
       }
-      // Record the hash before broadcasting, so a crash in between can
-      // still be traced on the network rather than sent twice.
-      const [withHash] = await db
-        .update(cryptoWalletTransactions)
-        .set({ txHash: signed.txHash, feeUpperBound: signed.feeUpperBound.toString(), updatedAt: nowOf() })
-        .where(eq(cryptoWalletTransactions.id, txRow.id))
-        .returning();
-      try {
-        const status = await adapter.broadcast(ctx, signed);
-        return finish(
-          withHash!,
-          { status: status === "confirmed" ? "confirmed" : "submitted", submittedAt: now, ...(status === "confirmed" ? { confirmedAt: now } : {}) },
-          status === "confirmed" ? "wallet_tx_confirmed" : "wallet_tx_submitted",
-          {},
-        );
-      } catch (err) {
-        if (isAmbiguousNetworkFailure(err)) {
-          // It may or may not have reached the network. Keep it counted and
-          // let the tick look the hash up; never send it again blindly.
-          return finish(withHash!, { status: "submitted", submittedAt: now, error: "Sent, but the network did not answer. Paperclip is checking whether it arrived." }, "wallet_tx_submitted", { ambiguous: true });
-        }
-        return finish(withHash!, { status: "failed", error: chainFailure(err) }, "wallet_tx_failed", { reason: chainFailure(err) });
-      }
     } catch (err) {
+      // Nothing has been sent at this point.
       privateKey = "";
-      logger.warn({ walletId: wallet.id, txId: txRow.id, code: err instanceof CryptoChainError ? err.code : err instanceof Error ? err.name : "unknown" }, "crypto wallet: sending failed");
-      return finish(txRow, { status: "failed", error: chainFailure(err) }, "wallet_tx_failed", { reason: chainFailure(err) });
+      logger.warn({ walletId: wallet.id, txId: txRow.id, code: err instanceof CryptoChainError ? err.code : err instanceof Error ? err.name : "unknown" }, "crypto wallet: signing failed, nothing sent");
+      return finish(txRow, { status: "failed", error: `Nothing was sent. ${chainFailure(err)}` }, "wallet_tx_failed", { reason: chainFailure(err), stage: "before_send" });
     }
+
+    // Record the signed bytes and hash before sending, so a crash or an
+    // unclear answer can be traced on the network instead of sent twice.
+    const [withHash] = await db
+      .update(cryptoWalletTransactions)
+      .set({
+        status: "submitted",
+        txHash: signed.txHash,
+        signedRaw: signed.raw,
+        chainDetail: { ...(signed.chainDetail ?? {}), from: wallet.address, signedAt: now.toISOString() },
+        // Never more than the budget the limits were checked against.
+        feeUpperBound: signed.feeUpperBound.toString(),
+        submittedAt: now,
+        lastBroadcastAt: now,
+        updatedAt: nowOf(),
+      })
+      .where(eq(cryptoWalletTransactions.id, txRow.id))
+      .returning();
+    return sendSigned(withHash!, ctx, signed, true);
+  }
+
+  /** One send of the saved signed bytes; see executeApproved for the rules. */
+  async function sendSigned(row: CryptoWalletTxRow, ctx: ChainContext, signed: SignedTransfer, firstSend: boolean): Promise<CryptoWalletTxRow> {
+    const now = nowOf();
+    let result: BroadcastResult;
+    try {
+      result = await adapterFor(row.chain as CryptoChain).broadcast(ctx, signed);
+    } catch (err) {
+      const note = `No clear answer from the network (${chainFailure(err)}). It may still go through, so it keeps counting toward the limits; Paperclip keeps checking and only ever re-sends this same payment.`;
+      if (firstSend) {
+        return finish(row, { status: "submitted", error: note, lastBroadcastAt: now }, "wallet_tx_submitted", { unclear: true });
+      }
+      const [updated] = await db.update(cryptoWalletTransactions).set({ lastBroadcastAt: now, error: note, updatedAt: now }).where(eq(cryptoWalletTransactions.id, row.id)).returning();
+      return updated ?? row;
+    }
+    const withDetail = (patch: Partial<typeof cryptoWalletTransactions.$inferInsert>) =>
+      row.kind === "order" && result.detail ? { ...patch, orderDetail: { ...((row.orderDetail as Record<string, unknown>) ?? {}), resultDetail: result.detail } } : patch;
+    if (result.status === "confirmed") {
+      return finish(row, withDetail({ status: "confirmed", confirmedAt: now, error: null, lastBroadcastAt: now }), "wallet_tx_confirmed", { detail: result.detail ?? null });
+    }
+    if (result.status === "failed") {
+      if (!firstSend) {
+        // A refusal of a RE-send says nothing certain about the first send.
+        const [updated] = await db.update(cryptoWalletTransactions).set({ lastBroadcastAt: now, updatedAt: now }).where(eq(cryptoWalletTransactions.id, row.id)).returning();
+        return updated ?? row;
+      }
+      return finish(row, withDetail({ status: "failed", error: result.detail ?? "The network refused it. Nothing was sent." }), "wallet_tx_failed", { reason: result.detail ?? null });
+    }
+    if (firstSend) return finish(row, { status: "submitted", error: null, lastBroadcastAt: now }, "wallet_tx_submitted", {});
+    const [updated] = await db.update(cryptoWalletTransactions).set({ lastBroadcastAt: now, updatedAt: now }).where(eq(cryptoWalletTransactions.id, row.id)).returning();
+    return updated ?? row;
   }
 
   async function finish(
@@ -915,6 +980,9 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     destination: string | null;
     destinationLabel: string | null;
     amount: bigint;
+    /** Network fee budget, base units (0 for Hyperliquid orders). Counted with the amount everywhere. */
+    fee: bigint;
+    /** Dollar value of amount + fee. */
     amountUsd: number | null;
     countsTowardLimits: boolean;
     orderDetail: Record<string, unknown> | null;
@@ -941,6 +1009,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
       destination: req.destination,
       amount: req.amount.toString(),
       amountUsd: req.amountUsd,
+      feeUpperBound: req.fee > 0n ? req.fee.toString() : null,
       countsTowardLimits: req.countsTowardLimits,
       orderDetail: req.orderDetail,
       purpose: req.purpose,
@@ -961,13 +1030,16 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
       const lockKey = req.agentId ? `crypto_wallet_agent:${req.agentId}` : `crypto_wallet:${wallet.id}`;
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`);
       let verdict: ReturnType<typeof evaluateWalletSpend>;
-      if (req.initiatedBy === "owner" || !req.countsTowardLimits) {
+      if (req.fee > req.amount) {
+        verdict = { kind: "block", reason: `The network fee could be up to ${formatChainAmount(chain, req.fee)}, more than the payment itself. Nothing was sent.` };
+      } else if (req.initiatedBy === "owner" || !req.countsTowardLimits) {
         verdict = { kind: "allow" };
       } else {
         const spent = await spentSoFar(tx as unknown as Db, wallet, req.agentId!, now);
         const agentLimits = await getAgentLimits(wallet.companyId, req.agentId!);
         verdict = evaluateWalletSpend({
           amount: req.amount,
+          fee: req.fee,
           amountUsd: req.amountUsd,
           assetLabel: CRYPTO_CHAIN_INFO[chain].asset,
           formatAmount: (v) => formatChainAmount(chain, v),
@@ -1013,6 +1085,25 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     return toTxSummary(await executeApproved(row, req.actor));
   }
 
+  /**
+   * The fee budget a payment reserves: the network's current estimate
+   * (already capped by the adapter) with headroom, never above the chain's
+   * hard ceiling. The signer refuses to pay more than this.
+   */
+  async function feeBudget(wallet: CryptoWalletRow, to: string, amount: bigint): Promise<{ fee: bigint } | { refusal: string }> {
+    const chain = wallet.chain as CryptoChain;
+    const ceiling = BigInt(CRYPTO_NETWORK_FEE_CEILING[chain]);
+    try {
+      const ctx = await chainContext(wallet.companyId, chain, wallet.network as CryptoNetwork);
+      const estimate = await adapterFor(chain).estimateFee(ctx, { from: wallet.address, to, amount });
+      if (estimate < 0n || estimate > ceiling) return { refusal: "The network fee is above Paperclip's ceiling right now. Nothing was sent; try again later." };
+      const padded = (estimate * FEE_BUDGET_NUMERATOR + FEE_BUDGET_DENOMINATOR - 1n) / FEE_BUDGET_DENOMINATOR;
+      return { fee: padded > ceiling ? ceiling : padded };
+    } catch (err) {
+      return { refusal: `Could not work out the network fee, so nothing was sent. ${chainFailure(err)}` };
+    }
+  }
+
   async function prepareSend(wallet: CryptoWalletRow, input: CryptoSendRequest) {
     const chain = wallet.chain as CryptoChain;
     const decimals = CRYPTO_CHAIN_INFO[chain].decimals;
@@ -1030,11 +1121,17 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
         .where(and(eq(cryptoWalletDestinations.walletId, wallet.id), eq(cryptoWalletDestinations.address, destination)));
       destinationLabel = dest?.label ?? null;
     }
-    const preBlockReason =
+    let preBlockReason =
       switchRefusal ??
       (destination ? null : "That address is not on this wallet's allowed list. Only an owner or admin can add addresses to it.");
+    let fee = 0n;
+    if (!preBlockReason && destination) {
+      const budget = await feeBudget(wallet, destination, amount);
+      if ("refusal" in budget) preBlockReason = budget.refusal;
+      else fee = budget.fee;
+    }
     const price = await priceSource.usdPrice(chain).catch(() => null);
-    return { amount, destination: destination ?? input.to.trim(), destinationLabel, preBlockReason, amountUsd: amountUsdOf(chain, amount, price) };
+    return { amount, fee, destination: destination ?? input.to.trim(), destinationLabel, preBlockReason, amountUsd: amountUsdOf(chain, amount + fee, price) };
   }
 
   // ─── Agent-facing operations ───────────────────────────────────────────
@@ -1071,6 +1168,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
       destination: prepared.destination,
       destinationLabel: prepared.destinationLabel,
       amount: prepared.amount,
+      fee: prepared.fee,
       amountUsd: prepared.amountUsd,
       countsTowardLimits: true,
       orderDetail: null,
@@ -1125,6 +1223,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
       destination: null,
       destinationLabel: null,
       amount,
+      fee: 0n,
       amountUsd: notionalUsd,
       // Closing (reduce-only) can never be blocked by a spending limit.
       countsTowardLimits: !input.reduceOnly,
@@ -1152,15 +1251,20 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
       if (amount === null) throw unprocessable("That amount is not valid for this coin.");
       const switchRefusal = await assertSwitchesAllow(wallet);
       const destination = input.to ? await allowListed(wallet, input.to) : null;
-      const amountUsd = amountUsdOf(chain, amount, price);
+      const budget = destination ? await feeBudget(wallet, destination, amount) : null;
+      const fee = budget && "fee" in budget ? budget.fee : 0n;
+      const amountUsd = amountUsdOf(chain, amount + fee, price);
       const spent = await spentSoFar(db, wallet, agentId, nowOf());
       const verdict =
         switchRefusal !== null
           ? { kind: "block" as const, reason: switchRefusal }
           : input.to && !destination
             ? { kind: "block" as const, reason: "That address is not on this wallet's allowed list." }
+            : budget && "refusal" in budget
+              ? { kind: "block" as const, reason: budget.refusal }
             : evaluateWalletSpend({
                 amount,
+                fee,
                 amountUsd,
                 assetLabel: CRYPTO_CHAIN_INFO[chain].asset,
                 formatAmount: (v) => formatChainAmount(chain, v),
@@ -1174,19 +1278,9 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
                 },
                 agent: { ...(await getAgentLimits(companyId, agentId)), spentTodayUsd: spent.agentTodayUsd, spentTotalUsd: spent.agentTotalUsd },
               });
-      let feeEstimate: string | null = null;
-      if (destination && chain !== "hyperliquid") {
-        try {
-          feeEstimate = formatChainAmount(chain, await adapterFor(chain).estimateFee(ctx, { from: wallet.address, to: destination, amount }));
-        } catch {
-          feeEstimate = null;
-        }
-      } else if (chain === "hyperliquid") {
-        feeEstimate = "1 USDC (Hyperliquid's withdrawal fee)";
-      }
       out.amount = formatChainAmount(chain, amount);
       out.amountUsd = amountUsd;
-      out.networkFeeEstimate = feeEstimate;
+      out.networkFeeAtMost = fee > 0n ? formatChainAmount(chain, fee) : null;
       out.outcome =
         verdict.kind === "allow"
           ? "Would be sent straight away."
@@ -1215,8 +1309,9 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
    * still stopped by the kill switches and the real-money switch; limits and
    * approval cards are for agents and do not apply.
    */
-  async function ownerSend(companyId: string, walletId: string, input: CryptoSendRequest, actor: { userId: string }): Promise<CryptoWalletTransactionSummary> {
+  async function ownerSend(companyId: string, walletId: string, input: CryptoSendRequest, actor: { userId: string; isOwner: boolean }): Promise<CryptoWalletTransactionSummary> {
     const wallet = await requireWalletRow(companyId, walletId);
+    assertOwnerForRealMoney(wallet, actor, "send funds");
     const prepared = await prepareSend(wallet, input);
     return processSpend({
       wallet,
@@ -1227,6 +1322,7 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
       destination: prepared.destination,
       destinationLabel: prepared.destinationLabel,
       amount: prepared.amount,
+      fee: prepared.fee,
       amountUsd: prepared.amountUsd,
       countsTowardLimits: false,
       orderDetail: null,
@@ -1274,42 +1370,71 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     }
 
     if (row.status === "approved" && now.getTime() - row.updatedAt.getTime() > APPROVED_WITHOUT_HASH_GIVE_UP_MS) {
-      // Stuck between approval and sending (e.g. a server restart). Never
-      // re-send: look the hash up if there is one, otherwise call it failed.
+      // Stuck between approval and signing (e.g. a server restart). Signed
+      // bytes are always saved together with status "submitted", so an
+      // "approved" row was never signed and never sent.
       if (!row.txHash) {
         return finish(row, { status: "failed", error: "Sending was interrupted before anything was signed. Nothing was sent." }, "wallet_tx_failed", { reason: "interrupted_before_signing" });
       }
-      return checkOnNetwork({ ...row, status: "submitted" }, now, true);
+      return checkOnNetwork(row, now);
     }
 
-    if (row.status === "submitted" && row.txHash) return checkOnNetwork(row, now, false);
+    if (row.status === "submitted" && row.txHash) return checkOnNetwork(row, now);
     return row;
   }
 
-  async function checkOnNetwork(row: CryptoWalletTxRow, now: Date, wasStuck: boolean): Promise<CryptoWalletTxRow> {
+  /**
+   * Settles a sent payment. "failed" only on the chain adapter's definite
+   * answer (Solana: its block id has long expired; Ethereum: its nonce was
+   * used by another mined transaction; Bitcoin: one of its inputs was spent
+   * elsewhere; or a clear refusal of the first send). Network trouble or
+   * "not seen yet" keeps it counted and re-sends the same signed bytes now
+   * and then -- never a newly signed payment, so it cannot land twice.
+   */
+  async function checkOnNetwork(row: CryptoWalletTxRow, now: Date): Promise<CryptoWalletTxRow> {
     const chain = row.chain as CryptoChain;
+    const wallet = await requireWalletRow(row.companyId, row.walletId);
+    const ctx = await chainContext(row.companyId, chain, row.network as CryptoNetwork);
+    const detail = (row.chainDetail as Record<string, unknown> | null) ?? null;
     let status: ChainTxStatus;
     try {
-      const ctx = await chainContext(row.companyId, chain, row.network as CryptoNetwork);
-      status = await adapterFor(chain).getTxStatus(ctx, row.txHash!);
+      status = await adapterFor(chain).getTxStatus(ctx, { txHash: row.txHash!, raw: row.signedRaw, chainDetail: detail, from: wallet.address });
     } catch {
-      return row;
+      status = "unknown";
     }
     if (status === "confirmed") {
       return finish(row, { status: "confirmed", confirmedAt: now, error: null }, "wallet_tx_confirmed", {});
     }
     if (status === "failed") {
-      return finish(row, { status: "failed", error: "The network rejected the payment. The coins did not leave (only a network fee may have been charged)." }, "wallet_tx_failed", {});
+      return finish(
+        row,
+        { status: "failed", error: "The network shows this payment can never go through, so the coins did not leave (a network fee may still have been charged)." },
+        "wallet_tx_failed",
+        { reason: "definitely_not_landed" },
+      );
     }
-    const since = (row.submittedAt ?? row.updatedAt).getTime();
-    if (status === "unknown" && now.getTime() - since > AMBIGUOUS_GIVE_UP_MS) {
-      return finish(row, { status: "failed", error: "The network never saw this payment, so it did not happen." }, "wallet_tx_failed", { reason: "never_seen" });
+    const lastSend = row.lastBroadcastAt?.getTime() ?? 0;
+    if (row.signedRaw && now.getTime() - lastSend >= REBROADCAST_INTERVAL_MS) {
+      const signed: SignedTransfer = {
+        raw: row.signedRaw,
+        txHash: row.txHash!,
+        feeUpperBound: BigInt(row.feeUpperBound ?? "0"),
+        chainDetail: detail ?? undefined,
+      };
+      const after = await sendSigned(row.status === "submitted" ? row : { ...row, status: "submitted" }, ctx, signed, false);
+      if (row.status !== "submitted" && after.status === row.status) {
+        const [moved] = await db.update(cryptoWalletTransactions).set({ status: "submitted", updatedAt: now }).where(eq(cryptoWalletTransactions.id, row.id)).returning();
+        return moved ?? after;
+      }
+      return after;
     }
-    if (wasStuck) {
-      const [updated] = await db.update(cryptoWalletTransactions).set({ status: "submitted", updatedAt: now }).where(eq(cryptoWalletTransactions.id, row.id)).returning();
-      return updated ?? row;
-    }
-    return row;
+    // Touch it so the tick's batch keeps rotating through every open payment.
+    const [touched] = await db
+      .update(cryptoWalletTransactions)
+      .set({ status: "submitted", updatedAt: now })
+      .where(eq(cryptoWalletTransactions.id, row.id))
+      .returning();
+    return touched ?? row;
   }
 
   async function tick(now: Date = nowOf()): Promise<{ checked: number; changed: number }> {

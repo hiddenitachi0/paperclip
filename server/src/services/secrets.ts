@@ -34,6 +34,8 @@ import type {
   SecretVersionSelector,
 } from "@paperclipai/shared";
 import {
+  CRYPTO_DUST,
+  type CryptoChain,
   createSecretProviderConfigSchema,
   DEDICATED_SECRET_BINDING_TARGET_TYPES,
   deriveProjectUrlKey,
@@ -71,6 +73,20 @@ import { findActiveServerAdapter } from "../adapters/index.js";
 // bindings share exactly this pattern instead of re-declaring a copy that
 // could drift out of sync.
 export const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Crypto wallets: a key must outlive its wallet while the wallet is in use,
+ * or while a real-money wallet (even an archived one) last showed more than
+ * dust -- deleting it then would lock the coins away for good. Shared by
+ * the secret delete and the company delete guards.
+ */
+export function isCryptoWalletKeyStillNeeded(wallet: { status: string; network: string; chain: string; lastBalance: string | null }): boolean {
+  if (wallet.status !== "archived") return true;
+  if (wallet.network !== "mainnet") return false;
+  if (wallet.lastBalance === null) return true;
+  const dust = CRYPTO_DUST[wallet.chain as CryptoChain];
+  return dust === undefined || BigInt(wallet.lastBalance) > BigInt(dust);
+}
 const SENSITIVE_ENV_KEY_RE =
   /(api[-_]?key|access[-_]?token|auth(?:_?token)?|authorization|bearer|secret|passwd|password|credential|jwt|private[-_]?key|cookie|connectionstring)/i;
 const REDACTED_SENTINEL = "***REDACTED***";
@@ -958,6 +974,12 @@ export function secretService(db: Db, rawDb: Db = db) {
   ): Promise<string> {
     if (!context.actorId?.trim()) {
       throw forbidden("Payment card fill requires an agent actor context");
+    }
+    // This reader may open protected kinds, so it opens only its own two.
+    const secret = await getById(secretId);
+    if (!secret || secret.companyId !== companyId) throw notFound("Secret not found");
+    if (secret.kind !== "payment_card_single_use" && secret.kind !== "site_login") {
+      throw forbidden("Only a payment card or a website login can be read by the browser fill");
     }
     return (await resolveSecretValueInternal(companyId, secretId, "latest", {
       accessContext: {
@@ -3135,13 +3157,12 @@ export function secretService(db: Db, rawDb: Db = db) {
       // Deleting a wallet's key would lock any coins still in it away for
       // good. Archive the wallet first (after moving the coins out).
       if (secret.kind === "crypto_wallet_key") {
-        const [inUse] = await db
-          .select({ id: cryptoWallets.id })
+        const holders = await db
+          .select({ status: cryptoWallets.status, network: cryptoWallets.network, chain: cryptoWallets.chain, lastBalance: cryptoWallets.lastBalance })
           .from(cryptoWallets)
-          .where(and(eq(cryptoWallets.secretId, secret.id), ne(cryptoWallets.status, "archived")))
-          .limit(1);
-        if (inUse) {
-          throw unprocessable("This key belongs to a crypto wallet that is still in use. Move the coins out and archive the wallet first.");
+          .where(eq(cryptoWallets.secretId, secret.id));
+        if (holders.some(isCryptoWalletKeyStillNeeded)) {
+          throw unprocessable("This key belongs to a crypto wallet that is still in use or may still hold coins. Move the coins out and archive the wallet first.");
         }
       }
       const versionRow = await getSecretVersion(secret.id, secret.latestVersion);

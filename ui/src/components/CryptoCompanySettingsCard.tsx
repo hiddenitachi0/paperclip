@@ -127,7 +127,8 @@ export function CryptoCompanySettingsCard({ companyId }: { companyId: string }) 
           <div className="space-y-3">
             <p className="text-xs text-muted-foreground">
               Paperclip asks these services for balances and sends payments through them. Leave a box empty to use the public default. If
-              your provider's address contains a key, anyone who can open these settings can see it.
+              your provider's address contains a key, anyone who can open these settings can see it. Only the owner can change these, because
+              they decide which network a wallet really pays on.
             </p>
             {CRYPTO_CHAINS.flatMap((chain) =>
               (["testnet", "mainnet"] as const).map((network) => {
@@ -150,7 +151,7 @@ export function CryptoCompanySettingsCard({ companyId }: { companyId: string }) 
             )}
             <Button
               size="sm"
-              disabled={update.isPending || Object.keys(endpointDrafts).length === 0}
+              disabled={!isOwner || update.isPending || Object.keys(endpointDrafts).length === 0}
               onClick={() => {
                 const rpcEndpoints: Record<string, Record<string, string | null>> = {};
                 for (const [key, value] of Object.entries(endpointDrafts)) {

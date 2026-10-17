@@ -182,6 +182,36 @@ export const DEFAULT_CRYPTO_WALLET_LIMITS: Record<CryptoChain, CryptoWalletLimit
   hyperliquid: { perTransaction: "25", daily: "50", total: "200", approvalAbove: "10" },
 };
 
+/**
+ * Network fees. A fee is set partly by the network service Paperclip talks
+ * to, so it is never taken on trust: every payment reserves a fee budget up
+ * front, the budget counts toward every limit together with the amount, the
+ * signer refuses to pay more than the budget, and no fee may ever exceed
+ * these hard ceilings (base units) or the payment itself.
+ */
+export const CRYPTO_NETWORK_FEE_CEILING: Record<CryptoChain, string> = {
+  bitcoin: "50000", // 0.0005 BTC
+  ethereum: "10000000000000000", // 0.01 ETH
+  solana: "100000", // 0.0001 SOL (a plain transfer costs 0.000005)
+  hyperliquid: "1000000", // Hyperliquid's fixed 1 USDC withdrawal fee
+};
+
+/** Ethereum gas price ceilings (wei per gas): the tip and the total price per gas unit. */
+export const EVM_MAX_PRIORITY_FEE_PER_GAS = 5_000_000_000n; // 5 gwei
+export const EVM_MAX_FEE_PER_GAS = 200_000_000_000n; // 200 gwei
+
+/**
+ * At or below this, a wallet counts as empty (what is left cannot be sent
+ * on for less than it costs). A real-money wallet can only be archived, and
+ * its key deleted, once its balance is at or below this.
+ */
+export const CRYPTO_DUST: Record<CryptoChain, string> = {
+  bitcoin: "546",
+  ethereum: "1000000000000", // 0.000001 ETH
+  solana: "10000", // 0.00001 SOL
+  hyperliquid: "1000000", // 1 USDC: no more than the withdrawal fee
+};
+
 /** Hyperliquid leverage: 1x by default, never above this ceiling. */
 export const HYPERLIQUID_DEFAULT_MAX_LEVERAGE = 1;
 export const HYPERLIQUID_HARD_MAX_LEVERAGE = 5;
@@ -311,7 +341,10 @@ export interface CryptoWalletTransactionSummary {
   destination: string | null;
   /** Integer base units, as a string. For a Hyperliquid order: its USDC value. */
   amount: string;
+  /** Dollar value of the amount plus the network fee budget. */
   amountUsd: number | null;
+  /** The most this payment may pay in network fees (base units), counted toward the limits. */
+  feeUpperBound: string | null;
   orderDetail: Record<string, unknown> | null;
   purpose: string;
   status: CryptoTxStatus;
@@ -488,11 +521,13 @@ export const CRYPTO_RISK_EXPLANATIONS = {
   mainnet:
     "Turning on the main network means agents can move real money, within the limits you set. Start with small amounts.",
   limits:
-    "Limits cap how much one payment, one day and the wallet's whole life may spend. Agent limits (in dollars) apply on top, across all the agent's wallets.",
+    "Limits cap how much one payment, one day and the wallet's whole life may spend, network fees included. Agent limits (in dollars) apply on top, across all the agent's wallets.",
   allowList:
     "An agent can only send to addresses you have put on this wallet's allowed list. Anything else is refused.",
   approval:
     "Payments at or above the approval amount wait for a person to approve them on an approval card. If nobody answers within an hour, nothing is sent.",
+  fees:
+    "Every payment also pays a small network fee. Paperclip sets aside the most it may cost, counts that toward the limits, caps it, and never pays more than the payment itself is worth.",
   killSwitch:
     "Freezing stops every new payment at once. Payments already sent to the network cannot be called back.",
   import:

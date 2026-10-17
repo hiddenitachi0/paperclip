@@ -77,7 +77,7 @@ function LimitsEditor({
   return (
     <div className="space-y-2">
       <p className="text-xs text-muted-foreground">
-        {CRYPTO_RISK_EXPLANATIONS.limits} Amounts in {asset}
+        {CRYPTO_RISK_EXPLANATIONS.limits} {CRYPTO_RISK_EXPLANATIONS.fees} Amounts in {asset}
         {chain === "hyperliquid" ? " (for trades: the dollar size of each order)" : ""}.
       </p>
       <div className="grid grid-cols-3 gap-2">
@@ -240,6 +240,11 @@ function WalletCard({ wallet, companyId }: { wallet: CryptoWalletSummary; compan
 
       {showDetails ? (
         <div className="space-y-5 text-sm">
+          {wallet.network === "mainnet" ? (
+            <p className="rounded border border-destructive/40 px-3 py-2 text-xs">
+              Real money: only the company's owner can change this wallet's limits, leverage and allowed addresses, or send funds from it.
+            </p>
+          ) : null}
           <div className="space-y-1">
             <p className="font-medium">How to add funds</p>
             <p className="text-muted-foreground">
@@ -324,7 +329,9 @@ function WalletCard({ wallet, companyId }: { wallet: CryptoWalletSummary; compan
                       <span className="font-medium">
                         {tx.kind === "order"
                           ? `Trade: ${String(tx.orderDetail?.side ?? "")} ${String(tx.orderDetail?.size ?? "")} ${String(tx.orderDetail?.coin ?? "")}`
-                          : `${formatChainAmount(wallet.chain, tx.amount)} to ${tx.destination ?? ""}`}
+                          : `${formatChainAmount(wallet.chain, tx.amount)} to ${tx.destination ?? ""}${
+                              tx.feeUpperBound && tx.feeUpperBound !== "0" ? ` (network fee at most ${formatChainAmount(wallet.chain, tx.feeUpperBound)})` : ""
+                            }`}
                       </span>
                       <span className={tx.status === "blocked" || tx.status === "failed" ? "text-destructive" : "text-muted-foreground"}>
                         {describeCryptoTxStatus(tx.status)}
@@ -347,7 +354,10 @@ function WalletCard({ wallet, companyId }: { wallet: CryptoWalletSummary; compan
               <Button size="sm" variant="ghost" disabled={archive.isPending} onClick={() => archive.mutate()}>
                 Archive this wallet
               </Button>
-              <p className="text-xs text-muted-foreground">Archiving takes the wallet away from the agent for good. Move the coins out first.</p>
+              <p className="text-xs text-muted-foreground">
+                Archiving takes the wallet away from the agent for good. Move the coins out first
+                {wallet.network === "mainnet" ? ": a real-money wallet can only be archived once it is empty." : "."}
+              </p>
             </div>
           ) : null}
         </div>

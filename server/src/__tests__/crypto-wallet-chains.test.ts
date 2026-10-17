@@ -13,11 +13,13 @@ import {
 } from "../services/crypto-wallet-encoding.ts";
 import {
   bitcoinAdapter,
+  cappedEvmFees,
   CryptoChainError,
   loadCryptoLibs,
   solanaAdapter,
   ethereumAdapter,
   eip712Digest,
+  hyperliquidAdapter,
   hyperliquidL1ActionDigest,
   type ChainContext,
   type CryptoLibsLoader,
@@ -133,7 +135,7 @@ describe("bitcoin adapter (offline parts)", () => {
   it("refuses to sign when the signing library is not installed, with a plain message", async () => {
     const made = await btc.generateKey("testnet");
     const ctx: ChainContext = { network: "testnet", rpcUrl: "https://mempool.space/testnet4/api", fetch: (async () => json({})) as OutboundFetch };
-    await expect(btc.signTransfer(ctx, { privateKey: made.privateKey, from: made.address, to: made.address, amount: 1000n })).rejects.toThrow(/not installed/);
+    await expect(btc.signTransfer(ctx, { privateKey: made.privateKey, from: made.address, to: made.address, amount: 1000n, maxFee: 10_000n })).rejects.toThrow(/not installed/);
   });
 
   it("reads the balance from an Esplora-style service", async () => {
@@ -243,12 +245,13 @@ describe("solana adapter (Node's own Ed25519, fake RPC)", () => {
     const fetch = (async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body));
       calls.push(body.method);
+      if (body.method === "getGenesisHash") return json({ result: "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG" });
       if (body.method === "getBalance") return json({ result: { value: 0 } });
-      if (body.method === "getLatestBlockhash") return json({ result: { value: { blockhash } } });
+      if (body.method === "getLatestBlockhash") return json({ result: { value: { blockhash, lastValidBlockHeight: 1150 } } });
       throw new Error(`unexpected ${body.method}`);
     }) as unknown as OutboundFetch;
     const ctx: ChainContext = { network: "testnet", rpcUrl: "https://api.devnet.solana.com", fetch };
-    const signed = await sol.signTransfer(ctx, { privateKey: exp.seedHex, from: exp.address, to, amount: 1_000_000n });
+    const signed = await sol.signTransfer(ctx, { privateKey: exp.seedHex, from: exp.address, to, amount: 1_000_000n, maxFee: 7_500n });
 
     const tx = Buffer.from(signed.raw, "base64");
     expect(tx[0]).toBe(1); // one signature
@@ -260,15 +263,127 @@ describe("solana adapter (Node's own Ed25519, fake RPC)", () => {
     // Transfer instruction: index 2, little-endian lamports at the end.
     expect(message.subarray(-8).readBigUInt64LE()).toBe(1_000_000n);
     expect(tx.toString("hex")).not.toContain(exp.seedHex);
-    expect(calls).toEqual(["getBalance", "getLatestBlockhash"]);
+    expect(calls).toEqual(["getGenesisHash", "getBalance", "getLatestBlockhash"]);
+    expect(signed.chainDetail).toEqual({ lastValidBlockHeight: 1150 });
   });
 
   it("refuses a first payment below the network's minimum to a brand-new address", async () => {
     const exp = exportedSecret();
-    const fetch = (async () => json({ result: { value: 0 } })) as unknown as OutboundFetch;
+    const fetch = (async (_url: string, init?: RequestInit) =>
+      json({ result: JSON.parse(String(init?.body)).method === "getGenesisHash" ? "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG" : { value: 0 } })) as unknown as OutboundFetch;
     const ctx: ChainContext = { network: "testnet", rpcUrl: "https://api.devnet.solana.com", fetch };
     await expect(
-      sol.signTransfer(ctx, { privateKey: exp.seedHex, from: exp.address, to: base58Encode(new Uint8Array(randomBytes(32))), amount: 1000n }),
+      sol.signTransfer(ctx, { privateKey: exp.seedHex, from: exp.address, to: base58Encode(new Uint8Array(randomBytes(32))), amount: 1000n, maxFee: 7_500n }),
     ).rejects.toThrow(/refuses a first payment/);
+  });
+});
+
+describe("network fees are capped, whatever the network service says (B1)", () => {
+  const gwei = 1_000_000_000n;
+
+  it("clamps the tip and the price per gas, and refuses when the base fee alone is above the ceiling", () => {
+    expect(cappedEvmFees(50n * gwei, 100_000n * gwei)).toEqual({ priority: 5n * gwei, maxFee: 105n * gwei });
+    expect(cappedEvmFees(150n * gwei, 1n * gwei)).toEqual({ priority: 1n * gwei, maxFee: 200n * gwei });
+    expect(() => cappedEvmFees(199n * gwei, 5n * gwei)).toThrow(/unusually high/);
+  });
+
+  it("estimates an Ethereum fee from a hostile node at the capped price, and refuses an impossible one", async () => {
+    const answers: Record<string, unknown> = {
+      eth_getBlockByNumber: { baseFeePerGas: `0x${(10n * gwei).toString(16)}` },
+      eth_maxPriorityFeePerGas: `0x${(100_000n * gwei).toString(16)}`,
+      eth_estimateGas: "0x5208",
+    };
+    const fetch = (async (_url: string, init?: RequestInit) => json({ result: answers[JSON.parse(String(init?.body)).method] })) as unknown as OutboundFetch;
+    const eth = ethereumAdapter(missingLibs);
+    const ctx: ChainContext = { network: "testnet", rpcUrl: "https://rpc.example.org", fetch };
+    const fee = await eth.estimateFee(ctx, { from: "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23", to: "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed", amount: 10n ** 16n });
+    expect(fee).toBe(21_000n * 25n * gwei); // 2 x 10 gwei base + 5 gwei capped tip
+    answers.eth_estimateGas = `0x${(99_000).toString(16)}`;
+    answers.eth_getBlockByNumber = { baseFeePerGas: `0x${(90n * gwei).toString(16)}` };
+    await expect(eth.estimateFee(ctx, { from: "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23", to: "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed", amount: 1n })).rejects.toThrow(/ceiling/);
+  });
+});
+
+describe("unclear answers are never treated as failures (B2)", () => {
+  const rpc = (handler: (method: string, params: unknown[]) => Response) =>
+    (async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      return handler(body.method, body.params);
+    }) as unknown as OutboundFetch;
+
+  it("Ethereum: 'already known' is a success, a 502 is unclear, and a missing receipt only fails once the nonce is used elsewhere", async () => {
+    const eth = ethereumAdapter(missingLibs);
+    const signed = { raw: "0x02aa", txHash: "0xabc", feeUpperBound: 1n, chainDetail: { nonce: "7" } };
+    const known: ChainContext = { network: "testnet", rpcUrl: "https://rpc.example.org", fetch: rpc(() => json({ error: { message: "already known" } })) };
+    await expect(eth.broadcast(known, signed)).resolves.toEqual({ status: "pending" });
+    const gateway: ChainContext = { network: "testnet", rpcUrl: "https://rpc.example.org", fetch: rpc(() => new Response("bad gateway", { status: 502 })) };
+    await expect(eth.broadcast(gateway, signed)).rejects.toThrow(/HTTP 502/);
+    await expect(eth.getTxStatus(gateway, { txHash: "0xabc", raw: null, chainDetail: { nonce: "7" }, from: "0x01" })).rejects.toThrow();
+
+    let latestNonce = "0x7";
+    const node: ChainContext = {
+      network: "testnet",
+      rpcUrl: "https://rpc.example.org",
+      fetch: rpc((method) => json({ result: method === "eth_getTransactionCount" ? latestNonce : null })),
+    };
+    await expect(eth.getTxStatus(node, { txHash: "0xabc", raw: null, chainDetail: { nonce: "7" }, from: "0x01" })).resolves.toBe("pending");
+    latestNonce = "0x8";
+    await expect(eth.getTxStatus(node, { txHash: "0xabc", raw: null, chainDetail: { nonce: "7" }, from: "0x01" })).resolves.toBe("failed");
+  });
+
+  it("Bitcoin: a 5xx or 429 is unknown, and a missing transaction only fails once its inputs are spent elsewhere", async () => {
+    const btc = bitcoinAdapter(missingLibs);
+    const tx = { txHash: "aa".repeat(32), raw: "00", chainDetail: { inputs: [{ txid: "bb".repeat(32), vout: 0 }] }, from: "tb1qx" };
+    for (const status of [429, 500, 503]) {
+      const ctx: ChainContext = { network: "testnet", rpcUrl: "https://mempool.space/testnet4/api", fetch: (async () => new Response("busy", { status })) as unknown as OutboundFetch };
+      await expect(btc.getTxStatus(ctx, tx)).rejects.toThrow();
+    }
+    let spentBy: string | null = null;
+    const ctx: ChainContext = {
+      network: "testnet",
+      rpcUrl: "https://mempool.space/testnet4/api",
+      fetch: (async (url: string) =>
+        url.endsWith("/status") ? new Response("Transaction not found", { status: 404 }) : json(spentBy ? { spent: true, txid: spentBy } : { spent: false })) as unknown as OutboundFetch,
+    };
+    await expect(btc.getTxStatus(ctx, tx)).resolves.toBe("unknown");
+    spentBy = "cc".repeat(32);
+    await expect(btc.getTxStatus(ctx, tx)).resolves.toBe("failed");
+
+    const known: ChainContext = { ...ctx, fetch: (async () => new Response("sendrawtransaction RPC error: txn-already-known", { status: 400 })) as unknown as OutboundFetch };
+    await expect(btc.broadcast(known, { raw: "00", txHash: tx.txHash, feeUpperBound: 1n })).resolves.toEqual({ status: "pending" });
+    const broken: ChainContext = { ...ctx, fetch: (async () => new Response("oops", { status: 502 })) as unknown as OutboundFetch };
+    await expect(btc.broadcast(broken, { raw: "00", txHash: tx.txHash, feeUpperBound: 1n })).rejects.toThrow(/did not accept the payment cleanly/);
+  });
+
+  it("Solana: a refused fee budget or a node on the wrong network never signs", async () => {
+    const sol = solanaAdapter();
+    const made = await sol.generateKey("testnet");
+    const to = base58Encode(new Uint8Array(randomBytes(32)));
+    const onMainnet: ChainContext = {
+      network: "testnet",
+      rpcUrl: "https://api.devnet.solana.com",
+      fetch: rpc((method) => json({ result: method === "getGenesisHash" ? "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d" : { value: 0 } })),
+    };
+    await expect(sol.signTransfer(onMainnet, { privateKey: made.privateKey, from: made.address, to, amount: 10_000_000n, maxFee: 10_000n })).rejects.toThrow(/not on the test network/);
+    await expect(sol.signTransfer(onMainnet, { privateKey: made.privateKey, from: made.address, to, amount: 10_000_000n, maxFee: 1n })).rejects.toThrow(/reserve enough/);
+  });
+});
+
+describe("Hyperliquid answers", () => {
+  const hl = hyperliquidAdapter(missingLibs);
+  const ctxWith = (answer: () => Response): ChainContext => ({ network: "testnet", rpcUrl: "https://api.hyperliquid-testnet.xyz", fetch: (async () => answer()) as unknown as OutboundFetch });
+  const withdraw = { raw: JSON.stringify({ action: { type: "withdraw3" }, nonce: 1 }), txHash: "hyperliquid-withdraw-1", feeUpperBound: 1_000_000n };
+  const order = { raw: JSON.stringify({ action: { type: "order" }, nonce: 2 }), txHash: "hyperliquid-order-2", feeUpperBound: 0n };
+
+  it("treats HTTP trouble as unclear, a re-used nonce as already accepted, and a clear refusal as a refusal", async () => {
+    await expect(hl.broadcast(ctxWith(() => new Response("", { status: 502 })), withdraw)).rejects.toThrow(/HTTP 502/);
+    await expect(hl.broadcast(ctxWith(() => json({ status: "err", response: "Nonce already used" })), withdraw)).resolves.toMatchObject({ status: "confirmed" });
+    await expect(hl.broadcast(ctxWith(() => json({ status: "err", response: "Insufficient balance" })), withdraw)).resolves.toMatchObject({ status: "failed" });
+    await expect(hl.broadcast(ctxWith(() => json({ status: "ok", response: { data: { statuses: [{ error: "Order price too far" }] } } })), order)).resolves.toMatchObject({ status: "failed" });
+    await expect(hl.broadcast(ctxWith(() => json({ status: "ok", response: { data: { statuses: [{ resting: { oid: 5 } }] } } })), order)).resolves.toMatchObject({ status: "confirmed" });
+  });
+
+  it("refuses account numbers that are not numbers (S3)", async () => {
+    await expect(hl.accountState(ctxWith(() => json({ marginSummary: { accountValue: "lots" }, withdrawable: "1" })), "0x01")).rejects.toThrow(/not a number/);
   });
 });

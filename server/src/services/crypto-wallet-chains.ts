@@ -1,7 +1,10 @@
 import { createECDH, createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign as nodeSign } from "node:crypto";
 import {
   CRYPTO_CHAIN_INFO,
+  CRYPTO_NETWORK_FEE_CEILING,
   EVM_CHAIN_IDS,
+  EVM_MAX_FEE_PER_GAS,
+  EVM_MAX_PRIORITY_FEE_PER_GAS,
   formatCryptoAmount,
   type CryptoChain,
   type CryptoNetwork,
@@ -66,10 +69,31 @@ export interface SignedTransfer {
   raw: string;
   /** Known before broadcast for Bitcoin/Ethereum/Solana; for Hyperliquid an internal reference. */
   txHash: string;
+  /** The most this transaction can pay in network fees (never more than the budget it was signed with). */
   feeUpperBound: bigint;
+  /** What getTxStatus needs later to tell "still on its way" from "can never land" (nonce, inputs, ...). */
+  chainDetail?: Record<string, unknown>;
 }
 
+/**
+ * "failed" is only ever returned on a definite answer that the transaction
+ * did not and can never take effect. Anything unclear is "pending" or
+ * "unknown" (keep counting it, keep checking), and trouble reaching the
+ * network service is thrown, never reported as failed.
+ */
 export type ChainTxStatus = "pending" | "confirmed" | "failed" | "unknown";
+
+export interface BroadcastResult {
+  status: "pending" | "confirmed" | "failed";
+  detail?: string;
+}
+
+export interface StoredTransfer {
+  txHash: string;
+  raw: string | null;
+  chainDetail: Record<string, unknown> | null;
+  from: string;
+}
 
 export interface CryptoChainAdapter {
   chain: CryptoChain;
@@ -80,11 +104,17 @@ export interface CryptoChainAdapter {
   /** Normalized address, or null when it is not a valid address for this chain and network. */
   validateAddress(address: string, network: CryptoNetwork): Promise<string | null>;
   getBalance(ctx: ChainContext, address: string): Promise<{ balance: bigint; withdrawable?: bigint }>;
+  /** The most a plain payment would cost in network fees right now, already capped by the chain's ceilings. */
   estimateFee(ctx: ChainContext, input: { from: string; to: string; amount: bigint }): Promise<bigint>;
-  signTransfer(ctx: ChainContext, input: { privateKey: string; from: string; to: string; amount: bigint }): Promise<SignedTransfer>;
-  /** Returns the final status when the network decides at once (Hyperliquid), otherwise "pending". */
-  broadcast(ctx: ChainContext, signed: SignedTransfer): Promise<ChainTxStatus>;
-  getTxStatus(ctx: ChainContext, txHash: string): Promise<ChainTxStatus>;
+  /** Refuses (CryptoChainError "fee_over_budget") when the fee could exceed maxFee. */
+  signTransfer(ctx: ChainContext, input: { privateKey: string; from: string; to: string; amount: bigint; maxFee: bigint }): Promise<SignedTransfer>;
+  /**
+   * Sends exactly these signed bytes. Safe to call again with the same
+   * bytes. Returns "failed" only on a definite rejection; throws when the
+   * answer is unclear (the caller then keeps the payment counted and checks).
+   */
+  broadcast(ctx: ChainContext, signed: SignedTransfer): Promise<BroadcastResult>;
+  getTxStatus(ctx: ChainContext, tx: StoredTransfer): Promise<ChainTxStatus>;
 }
 
 export interface HyperliquidAccountState {
@@ -93,20 +123,18 @@ export interface HyperliquidAccountState {
   positions: Array<{ coin: string; size: number; positionValueUsd: number }>;
 }
 
-export interface HyperliquidOrderResult {
-  status: "filled" | "resting" | "error";
-  orderRef: string | null;
-  detail: string;
-}
-
 export interface HyperliquidAdapter extends CryptoChainAdapter {
   chain: "hyperliquid";
   midPrice(ctx: ChainContext, coin: string): Promise<number | null>;
+  /** Throws when the exchange's numbers do not add up (never lets NaN through). */
   accountState(ctx: ChainContext, address: string): Promise<HyperliquidAccountState>;
-  placeOrder(
+  /** Signs the leverage-cap action and the order. Sends nothing. */
+  signOrder(
     ctx: ChainContext,
-    input: { privateKey: string; address: string; coin: string; isBuy: boolean; size: string; limitPrice: string; reduceOnly: boolean; leverage: number },
-  ): Promise<HyperliquidOrderResult>;
+    input: { privateKey: string; coin: string; isBuy: boolean; size: string; limitPrice: string; reduceOnly: boolean; leverage: number },
+  ): Promise<{ leverageRaw: string; order: SignedTransfer }>;
+  /** Sets the leverage cap on the exchange. Throws unless the exchange clearly said yes. */
+  applyLeverage(ctx: ChainContext, leverageRaw: string): Promise<void>;
 }
 
 export type CryptoChainAdapters = {
@@ -294,6 +322,11 @@ function p2wpkhVsize(inputs: number, outputs: number): number {
 const BTC_DUST = 546n;
 const BTC_MAX_FEE_RATE = 100; // sat/vB -- a fee spike above this waits rather than overpays.
 
+const BTC_FEE_CEILING = BigInt(CRYPTO_NETWORK_FEE_CEILING.bitcoin);
+
+/** Esplora answers for "this exact transaction is already there" -- a re-send of the same bytes, not a failure. */
+const BTC_ALREADY_KNOWN = /already in block ?chain|txn-already-known|txn-already-in-mempool|already known/i;
+
 export function bitcoinAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs): CryptoChainAdapter {
   async function feeRate(ctx: ChainContext): Promise<number> {
     try {
@@ -314,7 +347,7 @@ export function bitcoinAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs): Cry
     const list = (await readJson(response, "The bitcoin network service")) as Array<{ txid: string; vout: number; value: number; status?: { confirmed?: boolean } }>;
     if (!Array.isArray(list)) throw new CryptoChainError("bad_response", "The bitcoin network service sent back an unexpected answer.");
     return list
-      .filter((u) => u?.status?.confirmed === true && /^[0-9a-f]{64}$/.test(u.txid) && Number.isSafeInteger(u.value))
+      .filter((u) => u?.status?.confirmed === true && /^[0-9a-f]{64}$/.test(u.txid) && Number.isSafeInteger(u.value) && Number.isSafeInteger(u.vout))
       .map((u) => ({ txid: u.txid, vout: u.vout, value: BigInt(u.value) }))
       .sort((a, b) => (a.value === b.value ? 0 : a.value > b.value ? -1 : 1));
   }
@@ -377,12 +410,17 @@ export function bitcoinAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs): Cry
       return { balance };
     },
     async estimateFee(ctx, { from, amount }) {
-      const rate = Math.min(await feeRate(ctx), BTC_MAX_FEE_RATE);
+      const rate = await feeRate(ctx);
+      if (rate > BTC_MAX_FEE_RATE) {
+        throw new CryptoChainError("fee_too_high", "Bitcoin network fees are unusually high right now. Try again later.");
+      }
       const utxos = await confirmedUtxos(ctx, from);
       const planned = plan(utxos, amount, rate);
-      return planned ? planned.fee : BigInt(p2wpkhVsize(1, 2) * rate);
+      const fee = planned ? planned.fee : BigInt(p2wpkhVsize(1, 2) * rate);
+      if (fee > BTC_FEE_CEILING) throw new CryptoChainError("fee_too_high", "The bitcoin network fee for this payment would be above Paperclip's ceiling.");
+      return fee;
     },
-    async signTransfer(ctx, { privateKey, from, to, amount }) {
+    async signTransfer(ctx, { privateKey, from, to, amount, maxFee }) {
       const libs = await loadLibs();
       const rate = await feeRate(ctx);
       if (rate > BTC_MAX_FEE_RATE) {
@@ -391,24 +429,52 @@ export function bitcoinAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs): Cry
       const utxos = await confirmedUtxos(ctx, from);
       const planned = plan(utxos, amount, rate);
       if (!planned) throw new CryptoChainError("insufficient_funds", "The wallet does not have enough confirmed bitcoin for this payment and its network fee.");
+      if (planned.fee > maxFee || planned.fee > BTC_FEE_CEILING) {
+        throw new CryptoChainError("fee_over_budget", "The bitcoin network fee went up above what this payment reserved. Nothing was sent; try again.");
+      }
       const outputs = [{ address: to, amount }];
       if (planned.change > 0n) outputs.push({ address: from, amount: planned.change });
       const signed = libs.bitcoinSignP2wpkh({ privateKey: parsePrivateKeyHex(privateKey), network: ctx.network, utxos: planned.chosen, outputs });
-      return { raw: signed.hex, txHash: signed.txid, feeUpperBound: planned.fee };
+      return {
+        raw: signed.hex,
+        txHash: signed.txid,
+        feeUpperBound: planned.fee,
+        chainDetail: { inputs: planned.chosen.map((u) => ({ txid: u.txid, vout: u.vout })) },
+      };
     },
     async broadcast(ctx, signed) {
       const response = await ctx.fetch(joinUrl(ctx.rpcUrl, "/tx"), { method: "POST", headers: { "content-type": "text/plain" }, body: signed.raw });
       const text = (await response.text()).trim();
-      if (!response.ok) throw new CryptoChainError("broadcast_refused", `The bitcoin network refused the payment: ${text.slice(0, 200)}`);
-      if (text && text !== signed.txHash) throw new CryptoChainError("broadcast_mismatch", "The bitcoin network service answered with a different transaction id.");
-      return "pending";
+      if (response.ok) {
+        if (text && text !== signed.txHash) throw new CryptoChainError("broadcast_mismatch", "The bitcoin network service answered with a different transaction id.");
+        return { status: "pending" };
+      }
+      if (BTC_ALREADY_KNOWN.test(text)) return { status: "pending" };
+      // Any other refusal is not taken as final: the same bytes may already
+      // be on their way. The network check decides.
+      throw new CryptoChainError("broadcast_unclear", `The bitcoin network service did not accept the payment cleanly: ${text.slice(0, 200)}`);
     },
-    async getTxStatus(ctx, txHash) {
-      const response = await ctx.fetch(joinUrl(ctx.rpcUrl, `/tx/${txHash}/status`));
-      if (response.status === 404) return "unknown";
-      if (!response.ok) return "unknown";
-      const body = await readJson(response, "The bitcoin network service");
-      return body?.confirmed === true ? "confirmed" : "pending";
+    async getTxStatus(ctx, tx) {
+      const response = await ctx.fetch(joinUrl(ctx.rpcUrl, `/tx/${tx.txHash}/status`));
+      if (response.ok) {
+        const body = await readJson(response, "The bitcoin network service");
+        return body?.confirmed === true ? "confirmed" : "pending";
+      }
+      if (response.status !== 404) {
+        // 5xx, 429 and the like: the service is unwell, not the payment.
+        throw new CryptoChainError("rpc_http", `The bitcoin network service answered with an error (HTTP ${response.status}).`);
+      }
+      // Not seen. It is only dead for sure once one of its inputs has been
+      // spent by a DIFFERENT transaction (then it can never be valid).
+      const inputs = Array.isArray(tx.chainDetail?.inputs) ? (tx.chainDetail!.inputs as Array<{ txid: string; vout: number }>) : [];
+      for (const input of inputs) {
+        const out = await ctx.fetch(joinUrl(ctx.rpcUrl, `/tx/${input.txid}/outspend/${input.vout}`));
+        if (!out.ok) throw new CryptoChainError("rpc_http", `The bitcoin network service answered with an error (HTTP ${out.status}).`);
+        const spend = await readJson(out, "The bitcoin network service");
+        if (spend?.spent === true && typeof spend.txid === "string" && spend.txid !== tx.txHash) return "failed";
+        if (spend?.spent === true && spend.txid === tx.txHash) return "pending";
+      }
+      return "unknown";
     },
   };
 }
@@ -466,6 +532,26 @@ function hexQuantity(value: unknown, what: string): bigint {
 
 const EVM_MAX_GAS = 100_000n;
 
+const EVM_FEE_CEILING = BigInt(CRYPTO_NETWORK_FEE_CEILING.ethereum);
+/** JSON-RPC answers that mean "this exact transaction is already in the pool" -- not a failure. */
+const EVM_ALREADY_KNOWN = /already known|known transaction|already imported|alreadyknown/i;
+
+/**
+ * The gas prices the network service reports are never trusted as-is: the
+ * tip is clamped to EVM_MAX_PRIORITY_FEE_PER_GAS, the price per gas unit to
+ * EVM_MAX_FEE_PER_GAS, and when the network's own base fee is above what
+ * that allows, the payment is refused rather than overpaid.
+ */
+export function cappedEvmFees(baseFee: bigint, reportedPriority: bigint): { maxFee: bigint; priority: bigint } {
+  const priority = reportedPriority > EVM_MAX_PRIORITY_FEE_PER_GAS ? EVM_MAX_PRIORITY_FEE_PER_GAS : reportedPriority < 0n ? 0n : reportedPriority;
+  const wanted = baseFee * 2n + priority;
+  const maxFee = wanted > EVM_MAX_FEE_PER_GAS ? EVM_MAX_FEE_PER_GAS : wanted;
+  if (maxFee < baseFee + priority) {
+    throw new CryptoChainError("fee_too_high", "Ethereum network fees are unusually high right now. Try again later.");
+  }
+  return { maxFee, priority };
+}
+
 export function ethereumAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs): CryptoChainAdapter {
   const what = "The Ethereum network service";
 
@@ -482,18 +568,23 @@ export function ethereumAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs): Cr
   async function feeParams(ctx: ChainContext, from: string, to: string, amount: bigint) {
     const block = await jsonRpc(ctx, "eth_getBlockByNumber", ["latest", false], what);
     const baseFee = hexQuantity(block?.baseFeePerGas, what);
-    let priority = 1_500_000_000n;
+    let reported = 1_500_000_000n;
     try {
-      priority = hexQuantity(await jsonRpc(ctx, "eth_maxPriorityFeePerGas", [], what), what);
+      reported = hexQuantity(await jsonRpc(ctx, "eth_maxPriorityFeePerGas", [], what), what);
     } catch {
       // Some endpoints do not offer this; 1.5 gwei is a safe tip.
     }
-    const maxFee = baseFee * 2n + priority;
+    const { maxFee, priority } = cappedEvmFees(baseFee, reported);
     const gas = hexQuantity(await jsonRpc(ctx, "eth_estimateGas", [{ from, to, value: `0x${amount.toString(16)}` }], what), what);
     if (gas > EVM_MAX_GAS) {
       throw new CryptoChainError("gas_too_high", "This address is a program that needs more network fee than a plain payment is allowed to use.");
     }
-    return { maxFee, priority, gas };
+    if (gas < 21_000n) throw new CryptoChainError("bad_response", `${what} reported an impossible gas amount.`);
+    const feeUpperBound = gas * maxFee;
+    if (feeUpperBound > EVM_FEE_CEILING) {
+      throw new CryptoChainError("fee_too_high", "The Ethereum network fee for this payment would be above Paperclip's ceiling.");
+    }
+    return { maxFee, priority, gas, feeUpperBound };
   }
 
   return {
@@ -516,14 +607,16 @@ export function ethereumAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs): Cr
       return { balance: hexQuantity(await jsonRpc(ctx, "eth_getBalance", [address, "latest"], what), what) };
     },
     async estimateFee(ctx, { from, to, amount }) {
-      const fees = await feeParams(ctx, from, to, amount);
-      return fees.gas * fees.maxFee;
+      return (await feeParams(ctx, from, to, amount)).feeUpperBound;
     },
-    async signTransfer(ctx, { privateKey, from, to, amount }) {
+    async signTransfer(ctx, { privateKey, from, to, amount, maxFee }) {
       const libs = await loadLibs();
       await assertChainId(ctx);
       const nonce = hexQuantity(await jsonRpc(ctx, "eth_getTransactionCount", [from, "pending"], what), what);
       const fees = await feeParams(ctx, from, to, amount);
+      if (fees.feeUpperBound > maxFee) {
+        throw new CryptoChainError("fee_over_budget", "The Ethereum network fee went up above what this payment reserved. Nothing was sent; try again.");
+      }
       const chainId = BigInt(EVM_CHAIN_IDS[ctx.network]);
       const fields = [
         bigintToBytes(chainId),
@@ -542,21 +635,45 @@ export function ethereumAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs): Cr
         Uint8Array.of(0x02),
         rlpEncode([...fields, bigintToBytes(BigInt(sig.recovery)), bigintToBytes(sig.r), bigintToBytes(sig.s)]),
       );
-      return { raw: `0x${bytesToHex(signed)}`, txHash: `0x${bytesToHex(libs.keccak256(signed))}`, feeUpperBound: fees.gas * fees.maxFee };
+      return {
+        raw: `0x${bytesToHex(signed)}`,
+        txHash: `0x${bytesToHex(libs.keccak256(signed))}`,
+        feeUpperBound: fees.feeUpperBound,
+        chainDetail: { nonce: nonce.toString() },
+      };
     },
     async broadcast(ctx, signed) {
-      const hash = await jsonRpc(ctx, "eth_sendRawTransaction", [signed.raw], what);
+      let hash: unknown;
+      try {
+        hash = await jsonRpc(ctx, "eth_sendRawTransaction", [signed.raw], what);
+      } catch (err) {
+        if (err instanceof CryptoChainError && err.code === "rpc_error" && EVM_ALREADY_KNOWN.test(err.message)) return { status: "pending" };
+        throw err;
+      }
       if (typeof hash === "string" && hash.toLowerCase() !== signed.txHash.toLowerCase()) {
         throw new CryptoChainError("broadcast_mismatch", "The Ethereum network service answered with a different transaction id.");
       }
-      return "pending";
+      return { status: "pending" };
     },
-    async getTxStatus(ctx, txHash) {
-      const receipt = await jsonRpc(ctx, "eth_getTransactionReceipt", [txHash], what);
-      if (!receipt) return "pending";
-      if (receipt.status === "0x1") return "confirmed";
-      if (receipt.status === "0x0") return "failed";
-      return "unknown";
+    async getTxStatus(ctx, tx) {
+      const receipt = await jsonRpc(ctx, "eth_getTransactionReceipt", [tx.txHash], what);
+      if (receipt) {
+        if (receipt.status === "0x1") return "confirmed";
+        if (receipt.status === "0x0") return "failed";
+        return "unknown";
+      }
+      // No receipt. Ethereum transactions never expire, so it is only dead
+      // for sure once its nonce has been used by another, mined transaction.
+      const nonceText = tx.chainDetail?.nonce;
+      if (typeof nonceText !== "string") return "pending";
+      const mined = hexQuantity(await jsonRpc(ctx, "eth_getTransactionCount", [tx.from, "latest"], what), what);
+      if (mined > BigInt(nonceText)) {
+        // Look once more for ours, in case the receipt lookup lagged behind.
+        const again = await jsonRpc(ctx, "eth_getTransactionByHash", [tx.txHash], what);
+        if (again?.blockNumber) return "pending";
+        return "failed";
+      }
+      return "pending";
     },
   };
 }
@@ -566,6 +683,14 @@ export function ethereumAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs): Cr
 const ED25519_PKCS8_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
 const SOLANA_SYSTEM_PROGRAM = new Uint8Array(32);
 const SOLANA_FEE_LAMPORTS = 5_000n;
+/** Genesis block ids: how a Solana service proves which network it is on. */
+export const SOLANA_GENESIS_HASHES: Record<CryptoNetwork, string[]> = {
+  // devnet (the default test network) and testnet
+  testnet: ["EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG", "4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY"],
+  mainnet: ["5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"],
+};
+/** Extra blocks past a transaction's last valid height before calling it dead (finalized lags a little). */
+const SOLANA_EXPIRY_MARGIN_BLOCKS = 150;
 /** A brand-new Solana account must receive at least this much or the network refuses the payment. */
 export const SOLANA_RENT_EXEMPT_MINIMUM = 890_880n;
 
@@ -679,15 +804,30 @@ export function solanaAdapter(): CryptoChainAdapter {
       return { balance: BigInt(value) };
     },
     async estimateFee() {
+      // A plain one-signature transfer always costs exactly this; Paperclip
+      // never adds a priority fee, so the network service cannot raise it.
       return SOLANA_FEE_LAMPORTS;
     },
-    async signTransfer(ctx, { privateKey, from, to, amount }) {
+    async signTransfer(ctx, { privateKey, from, to, amount, maxFee }) {
+      if (SOLANA_FEE_LAMPORTS > maxFee) {
+        throw new CryptoChainError("fee_over_budget", "This payment did not reserve enough for the Solana network fee.");
+      }
       const seed = seedOf(privateKey);
       const fromKey = solanaPublicKey(seed);
       if (base58Encode(fromKey) !== from) throw new CryptoChainError("key_mismatch", "The stored key does not belong to this wallet.");
       const toKey = base58Decode(to);
       if (Buffer.compare(Buffer.from(fromKey), Buffer.from(toKey)) === 0) {
         throw new CryptoChainError("self_send", "A wallet cannot send to itself.");
+      }
+      // Which network is this service really on? A test wallet must never
+      // sign on the main network (and the other way round), whatever
+      // address the settings point at.
+      const genesis = await jsonRpc(ctx, "getGenesisHash", [], what);
+      if (typeof genesis !== "string" || !SOLANA_GENESIS_HASHES[ctx.network].includes(genesis)) {
+        throw new CryptoChainError(
+          "wrong_network",
+          `The Solana network service is not on the ${ctx.network === "mainnet" ? "main network" : "test network (devnet)"} this wallet belongs to. Check the network address in the crypto settings.`,
+        );
       }
       const target = await jsonRpc(ctx, "getBalance", [to, { commitment: "confirmed" }], what);
       if (Number(target?.value ?? 0) === 0 && amount < SOLANA_RENT_EXEMPT_MINIMUM) {
@@ -696,28 +836,52 @@ export function solanaAdapter(): CryptoChainAdapter {
           "That address has no SOL yet, and the Solana network refuses a first payment smaller than 0.00089088 SOL.",
         );
       }
-      const latest = await jsonRpc(ctx, "getLatestBlockhash", [{ commitment: "confirmed" }], what);
+      const latest = await jsonRpc(ctx, "getLatestBlockhash", [{ commitment: "finalized" }], what);
       const blockhash = latest?.value?.blockhash;
-      if (typeof blockhash !== "string") throw new CryptoChainError("bad_response", `${what} did not send a recent block id.`);
+      const lastValidBlockHeight = latest?.value?.lastValidBlockHeight;
+      if (typeof blockhash !== "string" || !Number.isSafeInteger(lastValidBlockHeight)) {
+        throw new CryptoChainError("bad_response", `${what} did not send a recent block id.`);
+      }
       const message = solanaTransferMessage(fromKey, toKey, amount, base58Decode(blockhash));
       const signature = new Uint8Array(nodeSign(null, Buffer.from(message), solanaKeyObject(seed)));
       const tx = concatBytes(compactU16(1), signature, message);
-      return { raw: Buffer.from(tx).toString("base64"), txHash: base58Encode(signature), feeUpperBound: SOLANA_FEE_LAMPORTS };
+      return {
+        raw: Buffer.from(tx).toString("base64"),
+        txHash: base58Encode(signature),
+        feeUpperBound: SOLANA_FEE_LAMPORTS,
+        chainDetail: { lastValidBlockHeight },
+      };
     },
     async broadcast(ctx, signed) {
-      const sig = await jsonRpc(ctx, "sendTransaction", [signed.raw, { encoding: "base64", preflightCommitment: "confirmed" }], what);
+      let sig: unknown;
+      try {
+        sig = await jsonRpc(ctx, "sendTransaction", [signed.raw, { encoding: "base64", preflightCommitment: "confirmed" }], what);
+      } catch (err) {
+        if (err instanceof CryptoChainError && err.code === "rpc_error" && /already been processed|AlreadyProcessed/i.test(err.message)) {
+          return { status: "pending" };
+        }
+        throw err;
+      }
       if (typeof sig === "string" && sig !== signed.txHash) {
         throw new CryptoChainError("broadcast_mismatch", "The Solana network service answered with a different transaction id.");
       }
-      return "pending";
+      return { status: "pending" };
     },
-    async getTxStatus(ctx, txHash) {
-      const result = await jsonRpc(ctx, "getSignatureStatuses", [[txHash], { searchTransactionHistory: true }], what);
+    async getTxStatus(ctx, tx) {
+      const result = await jsonRpc(ctx, "getSignatureStatuses", [[tx.txHash], { searchTransactionHistory: true }], what);
       const status = result?.value?.[0];
-      if (!status) return "unknown";
-      if (status.err) return "failed";
-      if (status.confirmationStatus === "confirmed" || status.confirmationStatus === "finalized") return "confirmed";
-      return "pending";
+      if (status) {
+        const settled = status.confirmationStatus === "confirmed" || status.confirmationStatus === "finalized";
+        if (!settled) return "pending";
+        return status.err ? "failed" : "confirmed";
+      }
+      // Not seen. A Solana transaction can only land while its block id is
+      // valid; once the finalized chain is well past that height, it never can.
+      const lastValid = Number(tx.chainDetail?.lastValidBlockHeight);
+      if (!Number.isSafeInteger(lastValid)) return "unknown";
+      const height = await jsonRpc(ctx, "getBlockHeight", [{ commitment: "finalized" }], what);
+      if (Number.isSafeInteger(height) && height > lastValid + SOLANA_EXPIRY_MARGIN_BLOCKS) return "failed";
+      return "unknown";
     },
   };
 }
@@ -818,11 +982,26 @@ function usdcUnits(value: unknown): bigint {
   return match[1] === "-" ? -units : units;
 }
 
+const HYPERLIQUID_WITHDRAW_FEE = BigInt(CRYPTO_NETWORK_FEE_CEILING.hyperliquid);
+
+// Shared by every adapter instance in this process, so two signed actions
+// never carry the same nonce (Hyperliquid treats a nonce as used once).
+let lastHyperliquidNonce = 0;
+
+function hyperliquidRejection(response: any): string {
+  return typeof response?.response === "string" ? response.response.slice(0, 200) : "no reason given";
+}
+
+function finiteNumber(value: unknown, what: string): number {
+  const n = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : NaN;
+  if (!Number.isFinite(n)) throw new CryptoChainError("bad_response", `The Hyperliquid exchange sent back a ${what} that is not a number.`);
+  return n;
+}
+
 export function hyperliquidAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs, nowMs: () => number = () => Date.now()): HyperliquidAdapter {
-  let lastNonce = 0;
   const nextNonce = () => {
-    lastNonce = Math.max(nowMs(), lastNonce + 1);
-    return lastNonce;
+    lastHyperliquidNonce = Math.max(nowMs(), lastHyperliquidNonce + 1);
+    return lastHyperliquidNonce;
   };
 
   async function post(ctx: ChainContext, path: "/info" | "/exchange", body: unknown): Promise<any> {
@@ -842,15 +1021,20 @@ export function hyperliquidAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs, 
     const universe = Array.isArray(meta?.universe) ? meta.universe : [];
     const index = universe.findIndex((asset: { name?: string }) => asset?.name === coin);
     if (index < 0) throw new CryptoChainError("unknown_coin", `Hyperliquid does not list ${coin} for trading.`);
-    return { index, szDecimals: Number(universe[index].szDecimals ?? 0), maxLeverage: Number(universe[index].maxLeverage ?? 1) };
+    const szDecimals = Number(universe[index].szDecimals ?? 0);
+    const maxLeverage = Number(universe[index].maxLeverage ?? 1);
+    if (!Number.isInteger(szDecimals) || !Number.isFinite(maxLeverage)) {
+      throw new CryptoChainError("bad_response", "The Hyperliquid exchange sent back unexpected market details.");
+    }
+    return { index, szDecimals, maxLeverage };
   }
 
-  async function signAndSendL1(ctx: ChainContext, privateKey: string, action: MsgpackValue): Promise<any> {
+  async function signL1(ctx: ChainContext, privateKey: string, action: MsgpackValue): Promise<{ body: string; nonce: number }> {
     const libs = await loadLibs();
     const nonce = nextNonce();
     const digest = hyperliquidL1ActionDigest(libs, action, BigInt(nonce), ctx.network);
     const signature = rsv(libs.secp256k1SignDigest(digest, parsePrivateKeyHex(privateKey)));
-    return post(ctx, "/exchange", { action, nonce, signature, vaultAddress: null });
+    return { body: JSON.stringify({ action, nonce, signature, vaultAddress: null }), nonce };
   }
 
   const evm = ethereumAdapter(loadLibs);
@@ -863,13 +1047,17 @@ export function hyperliquidAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs, 
     validateAddress: evm.validateAddress,
     async getBalance(ctx, address) {
       const state = await post(ctx, "/info", { type: "clearinghouseState", user: address });
+      finiteNumber(state?.marginSummary?.accountValue, "account value");
       return { balance: usdcUnits(state?.marginSummary?.accountValue), withdrawable: usdcUnits(state?.withdrawable) };
     },
     async estimateFee() {
-      // Hyperliquid charges a flat 1 USDC withdrawal fee.
-      return 1_000_000n;
+      // Hyperliquid charges a flat 1 USDC withdrawal fee, set by the exchange's rules, not by us.
+      return HYPERLIQUID_WITHDRAW_FEE;
     },
-    async signTransfer(ctx, { privateKey, to, amount }) {
+    async signTransfer(ctx, { privateKey, to, amount, maxFee }) {
+      if (HYPERLIQUID_WITHDRAW_FEE > maxFee) {
+        throw new CryptoChainError("fee_over_budget", "This withdrawal did not reserve enough for Hyperliquid's 1 USDC fee.");
+      }
       const libs = await loadLibs();
       const time = BigInt(nextNonce());
       const amountText = formatCryptoAmount(amount, 6);
@@ -882,19 +1070,29 @@ export function hyperliquidAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs, 
         nonce: Number(time),
         signature,
       };
-      return { raw: JSON.stringify(body), txHash: `hyperliquid-withdraw-${time.toString()}`, feeUpperBound: 1_000_000n };
+      return { raw: JSON.stringify(body), txHash: `hyperliquid-withdraw-${time.toString()}`, feeUpperBound: HYPERLIQUID_WITHDRAW_FEE, chainDetail: { nonce: Number(time) } };
     },
     async broadcast(ctx, signed) {
+      // HTTP trouble throws (unclear: it may have arrived).
       const response = await post(ctx, "/exchange", JSON.parse(signed.raw));
       if (response?.status !== "ok") {
-        const detail = typeof response?.response === "string" ? response.response.slice(0, 200) : "unknown reason";
-        throw new CryptoChainError("broadcast_refused", `Hyperliquid refused the withdrawal: ${detail}`);
+        const reason = hyperliquidRejection(response);
+        // The same signed action sent again: its nonce is already used, so it arrived the first time.
+        if (/nonce/i.test(reason) && /(used|duplicate|already)/i.test(reason)) return { status: "confirmed", detail: "Accepted by Hyperliquid on an earlier attempt." };
+        return { status: "failed", detail: `Hyperliquid refused it: ${reason}` };
       }
-      // Accepted by the exchange; it pays out on Arbitrum within minutes.
-      return "confirmed";
+      const kind = (JSON.parse(signed.raw) as { action?: { type?: string } }).action?.type;
+      if (kind !== "order") return { status: "confirmed", detail: "Accepted by Hyperliquid; it pays out within minutes." };
+      const status = response?.response?.data?.statuses?.[0];
+      if (status?.filled) return { status: "confirmed", detail: `Filled ${String(status.filled.totalSz)} at ${String(status.filled.avgPx)}.` };
+      if (status?.resting) return { status: "confirmed", detail: "The order is waiting on the order book." };
+      if (typeof status?.error === "string") return { status: "failed", detail: `Hyperliquid refused the order: ${status.error.slice(0, 200)}` };
+      throw new CryptoChainError("broadcast_unclear", "Hyperliquid did not say what happened to the order.");
     },
     async getTxStatus() {
-      return "confirmed";
+      // Hyperliquid has no lookup by our reference; re-sending the same
+      // signed action (see broadcast) is how an unclear send gets settled.
+      return "unknown";
     },
     async midPrice(ctx, coin) {
       const mids = await post(ctx, "/info", { type: "allMids" });
@@ -906,14 +1104,18 @@ export function hyperliquidAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs, 
       const positions = (Array.isArray(state?.assetPositions) ? state.assetPositions : [])
         .map((entry: any) => entry?.position)
         .filter(Boolean)
-        .map((p: any) => ({ coin: String(p.coin), size: Number(p.szi ?? 0), positionValueUsd: Math.abs(Number(p.positionValue ?? 0)) }));
+        .map((p: any) => ({
+          coin: String(p.coin),
+          size: finiteNumber(p.szi ?? 0, "position size"),
+          positionValueUsd: Math.abs(finiteNumber(p.positionValue ?? 0, "position value")),
+        }));
       return {
-        accountValueUsd: Number(state?.marginSummary?.accountValue ?? 0),
-        withdrawableUsd: Number(state?.withdrawable ?? 0),
+        accountValueUsd: finiteNumber(state?.marginSummary?.accountValue, "account value"),
+        withdrawableUsd: finiteNumber(state?.withdrawable ?? 0, "withdrawable amount"),
         positions,
       };
     },
-    async placeOrder(ctx, input) {
+    async signOrder(ctx, input) {
       const asset = await assetIndex(ctx, input.coin);
       const sizeDecimals = input.size.includes(".") ? input.size.split(".")[1]!.length : 0;
       if (sizeDecimals > asset.szDecimals) {
@@ -923,11 +1125,7 @@ export function hyperliquidAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs, 
       // Leverage first, every time, so an order never runs at a higher
       // leverage someone set on the exchange directly.
       const leverageAction: MsgpackValue = { type: "updateLeverage", asset: asset.index, isCross: true, leverage };
-      const leverageResult = await signAndSendL1(ctx, input.privateKey, leverageAction);
-      if (leverageResult?.status !== "ok") {
-        const detail = typeof leverageResult?.response === "string" ? leverageResult.response.slice(0, 200) : "unknown reason";
-        return { status: "error", orderRef: null, detail: `Hyperliquid refused to set the leverage cap: ${detail}` };
-      }
+      const leverageSigned = await signL1(ctx, input.privateKey, leverageAction);
       const orderAction: MsgpackValue = {
         type: "order",
         orders: [
@@ -942,15 +1140,17 @@ export function hyperliquidAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs, 
         ],
         grouping: "na",
       };
-      const result = await signAndSendL1(ctx, input.privateKey, orderAction);
-      if (result?.status !== "ok") {
-        const detail = typeof result?.response === "string" ? result.response.slice(0, 200) : "unknown reason";
-        return { status: "error", orderRef: null, detail: `Hyperliquid refused the order: ${detail}` };
+      const orderSigned = await signL1(ctx, input.privateKey, orderAction);
+      return {
+        leverageRaw: leverageSigned.body,
+        order: { raw: orderSigned.body, txHash: `hyperliquid-order-${orderSigned.nonce}`, feeUpperBound: 0n, chainDetail: { nonce: orderSigned.nonce, leverage } },
+      };
+    },
+    async applyLeverage(ctx, leverageRaw) {
+      const response = await post(ctx, "/exchange", JSON.parse(leverageRaw));
+      if (response?.status !== "ok") {
+        throw new CryptoChainError("leverage_refused", `Hyperliquid refused to set the leverage cap: ${hyperliquidRejection(response)}`);
       }
-      const status = result?.response?.data?.statuses?.[0];
-      if (status?.filled) return { status: "filled", orderRef: String(status.filled.oid ?? ""), detail: `Filled ${status.filled.totalSz} at ${status.filled.avgPx}.` };
-      if (status?.resting) return { status: "resting", orderRef: String(status.resting.oid ?? ""), detail: "The order is waiting on the order book." };
-      return { status: "error", orderRef: null, detail: typeof status?.error === "string" ? status.error.slice(0, 200) : "Hyperliquid did not say what happened to the order." };
     },
   };
 }

@@ -1,5 +1,5 @@
 {
-  "id": "aced1f3c-f7da-4090-9a4c-0a7a591f1db3",
+  "id": "2602fbc8-1cfd-46ae-b091-c6c96c1aa278",
   "prevId": "efd80993-b4e0-4a3f-b954-019c7d9b3bf0",
   "version": "7",
   "dialect": "postgresql",
@@ -11396,6 +11396,24 @@
         "tx_hash": {
           "name": "tx_hash",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "signed_raw": {
+          "name": "signed_raw",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "chain_detail": {
+          "name": "chain_detail",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_broadcast_at": {
+          "name": "last_broadcast_at",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },

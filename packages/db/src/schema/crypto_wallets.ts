@@ -160,6 +160,15 @@ export const cryptoWalletTransactions = pgTable(
     approvalId: uuid("approval_id"),
     approvalExpiresAt: timestamp("approval_expires_at", { withTimezone: true }),
     txHash: text("tx_hash"),
+    // The signed transaction, saved before the first broadcast. A signed
+    // transaction is public once sent and holds no key. Any later retry
+    // re-sends exactly these bytes, never a newly signed payment, so a
+    // payment whose first send got no clear answer can never land twice.
+    signedRaw: text("signed_raw"),
+    // What the network check needs to decide a payment is truly dead:
+    // Ethereum nonce, Bitcoin inputs, Solana signing time, and so on.
+    chainDetail: jsonb("chain_detail"),
+    lastBroadcastAt: timestamp("last_broadcast_at", { withTimezone: true }),
     error: text("error"),
     submittedAt: timestamp("submitted_at", { withTimezone: true }),
     confirmedAt: timestamp("confirmed_at", { withTimezone: true }),

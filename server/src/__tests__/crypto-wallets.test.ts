@@ -5,7 +5,7 @@ import path from "node:path";
 import express from "express";
 import request from "supertest";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import {
   activityLog,
   agents,
@@ -55,11 +55,18 @@ interface FakeSolanaState {
   sent: Array<{ signature: string; raw: string }>;
   statuses: Map<string, { confirmationStatus: string; err: unknown } | null>;
   calls: string[];
+  genesis: string;
+  blockHeight: number;
+  /** "accept-then-502": the node takes the transaction, then the load balancer answers 502. */
+  sendMode: "ok" | "accept-then-502" | "already-processed";
 }
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
+
+const DEVNET_GENESIS = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG";
+const MAINNET_GENESIS = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d";
 
 function fakeSolanaRpc(state: FakeSolanaState): OutboundFetch {
   const blockhash = base58Encode(new Uint8Array(randomBytes(32)));
@@ -67,15 +74,21 @@ function fakeSolanaRpc(state: FakeSolanaState): OutboundFetch {
     const body = JSON.parse(String(init?.body));
     state.calls.push(body.method);
     switch (body.method) {
+      case "getGenesisHash":
+        return json({ result: state.genesis });
       case "getBalance":
         return json({ result: { value: state.balances.get(body.params[0]) ?? 0 } });
       case "getLatestBlockhash":
-        return json({ result: { value: { blockhash } } });
+        return json({ result: { value: { blockhash, lastValidBlockHeight: state.blockHeight + 150 } } });
+      case "getBlockHeight":
+        return json({ result: state.blockHeight });
       case "sendTransaction": {
         const tx = Buffer.from(body.params[0], "base64");
         const signature = base58Encode(new Uint8Array(tx.subarray(1, 65)));
         state.sent.push({ signature, raw: body.params[0] });
-        state.statuses.set(signature, { confirmationStatus: "processed", err: null });
+        if (!state.statuses.has(signature)) state.statuses.set(signature, null);
+        if (state.sendMode === "accept-then-502") return new Response("bad gateway", { status: 502 });
+        if (state.sendMode === "already-processed") return json({ error: { code: -32002, message: "Transaction simulation failed: This transaction has already been processed" } });
         return json({ result: signature });
       }
       case "getSignatureStatuses":
@@ -116,6 +129,7 @@ function inertAdapter(chain: "bitcoin" | "ethereum"): CryptoChainAdapter {
 
 interface FakeHyperliquid extends HyperliquidAdapter {
   orders: Array<{ coin: string; isBuy: boolean; size: string; leverage: number; reduceOnly: boolean; keySeen: boolean }>;
+  leverageCalls: number;
   state: { accountValueUsd: number; positionsValueUsd: number };
 }
 
@@ -123,10 +137,13 @@ function fakeHyperliquid(): FakeHyperliquid {
   const keys = new Map<string, string>(); // privateKey -> address, in memory only
   const orders: FakeHyperliquid["orders"] = [];
   const state = { accountValueUsd: 100, positionsValueUsd: 0 };
+  // eslint-disable-next-line prefer-const
+  let fake!: FakeHyperliquid;
   const addressOf = (key: string) => `0x${Buffer.from(key).toString("hex").slice(0, 40).padEnd(40, "0")}`;
-  return {
+  fake = {
     chain: "hyperliquid",
     orders,
+    leverageCalls: 0,
     state,
     async generateKey() {
       const privateKey = randomBytes(32).toString("hex");
@@ -149,13 +166,15 @@ function fakeHyperliquid(): FakeHyperliquid {
       return 1_000_000n;
     },
     async signTransfer(_ctx, input) {
-      return { raw: "{}", txHash: `hyperliquid-withdraw-${input.amount}`, feeUpperBound: 1_000_000n };
+      return { raw: JSON.stringify({ action: { type: "withdraw3" } }), txHash: `hyperliquid-withdraw-${input.amount}`, feeUpperBound: 1_000_000n };
     },
-    async broadcast() {
-      return "confirmed";
+    async broadcast(_ctx, signed) {
+      const parsed = JSON.parse(signed.raw) as { action: { type: string }; order?: FakeHyperliquid["orders"][number] };
+      if (parsed.action.type === "order" && parsed.order) orders.push(parsed.order);
+      return { status: "confirmed", detail: "Filled." };
     },
     async getTxStatus() {
-      return "confirmed";
+      return "unknown";
     },
     async midPrice() {
       return 100;
@@ -163,11 +182,18 @@ function fakeHyperliquid(): FakeHyperliquid {
     async accountState() {
       return { accountValueUsd: state.accountValueUsd, withdrawableUsd: state.accountValueUsd, positions: state.positionsValueUsd ? [{ coin: "BTC", size: 1, positionValueUsd: state.positionsValueUsd }] : [] };
     },
-    async placeOrder(_ctx: ChainContext, input) {
-      orders.push({ coin: input.coin, isBuy: input.isBuy, size: input.size, leverage: input.leverage, reduceOnly: input.reduceOnly, keySeen: input.privateKey.length > 0 });
-      return { status: "filled", orderRef: String(orders.length), detail: "Filled." };
+    async signOrder(_ctx: ChainContext, input) {
+      const order = { coin: input.coin, isBuy: input.isBuy, size: input.size, leverage: input.leverage, reduceOnly: input.reduceOnly, keySeen: input.privateKey.length > 0 };
+      return {
+        leverageRaw: JSON.stringify({ action: { type: "updateLeverage", leverage: input.leverage } }),
+        order: { raw: JSON.stringify({ action: { type: "order" }, order }), txHash: `hyperliquid-order-${randomUUID()}`, feeUpperBound: 0n },
+      };
+    },
+    async applyLeverage() {
+      fake.leverageCalls++;
     },
   };
+  return fake;
 }
 
 d("crypto wallets for agents", () => {
@@ -218,8 +244,16 @@ d("crypto wallets for agents", () => {
     else process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE = previousKeyFile;
   });
 
-  beforeEach(() => {
-    solState = { balances: new Map(), sent: [], statuses: new Map(), calls: [] };
+  beforeEach(async () => {
+    // The tick is instance-wide: settle every earlier test's open payments
+    // so they do not show up in this test's fake network.
+    if (db) {
+      await db
+        .update(cryptoWalletTransactions)
+        .set({ status: "confirmed" })
+        .where(inArray(cryptoWalletTransactions.status, ["pending_approval", "approved", "submitted"]));
+    }
+    solState = { balances: new Map(), sent: [], statuses: new Map(), calls: [], genesis: DEVNET_GENESIS, blockHeight: 1_000, sendMode: "ok" };
     hl = fakeHyperliquid();
     adapters = { bitcoin: inertAdapter("bitcoin"), ethereum: inertAdapter("ethereum"), solana: solanaAdapter(), hyperliquid: hl };
     now = new Date("2026-10-17T10:00:00Z");
@@ -291,8 +325,8 @@ d("crypto wallets for agents", () => {
     return res.body as { id: string; address: string };
   }
 
-  async function allow(companyId: string, walletId: string, address = randomSolAddress()) {
-    const res = await boardApp(companyId, "admin").post(`/api/companies/${companyId}/crypto/wallets/${walletId}/destinations`, { address, label: "Supplier" });
+  async function allow(companyId: string, walletId: string, address = randomSolAddress(), role: MembershipRole = "admin") {
+    const res = await boardApp(companyId, role).post(`/api/companies/${companyId}/crypto/wallets/${walletId}/destinations`, { address, label: "Supplier" });
     expect(res.status).toBe(201);
     return address;
   }
@@ -332,7 +366,9 @@ d("crypto wallets for agents", () => {
 
     // Turning it off again stops the main-network wallet at once.
     expect((await admin.patch(`/api/companies/${companyId}/crypto/settings`, { mainnetEnabled: false })).body.mainnetEnabled).toBe(false);
-    const to = await allow(companyId, real.body.id);
+    // On a real-money wallet only the owner may add an allowed address.
+    expect((await admin.post(`/api/companies/${companyId}/crypto/wallets/${real.body.id}/destinations`, { address: randomSolAddress(), label: "x" })).status).toBe(403);
+    const to = await allow(companyId, real.body.id, randomSolAddress(), "owner");
     const tx = await agentApp(companyId, agentId).post(`/api/agent-wallets/${real.body.id}/send`, { to, amount: "0.01", purpose: "Pay a supplier" });
     expect(tx.body.status).toBe("blocked");
     expect(tx.body.blockReason).toMatch(/Real money is switched off/);
@@ -524,7 +560,8 @@ d("crypto wallets for agents", () => {
     await db.update(approvals).set({ status: "approved" }).where(eq(approvals.id, c.approvalId));
     await svc.tick(now);
     expect((await statusOf(c.id)).status).toBe("expired_approval");
-    expect(solState.sent).toHaveLength(1);
+    // The sent one may be re-sent while unconfirmed, but only ever as the same signed transaction.
+    expect(new Set(solState.sent.map((t) => t.raw)).size).toBe(1);
 
     // The network confirms the sent one; the tick records it with its hash.
     solState.statuses.set(solState.sent[0]!.signature, { confirmationStatus: "confirmed", err: null });
@@ -683,6 +720,136 @@ d("crypto wallets for agents", () => {
     expect((await admin.post(`/api/companies/${other.companyId}/crypto/wallets/${real.id}/archive`)).body.status).toBe("archived");
     await companyService(db).remove(other.companyId);
     expect(await db.select().from(companies).where(eq(companies.id, other.companyId))).toHaveLength(0);
+  });
+
+  // ─── Network fees (B1) ─────────────────────────────────────────────────
+
+  it("reserves the network fee, counts it in the limits and shows it on the approval card", async () => {
+    const { companyId, agentId } = await seed();
+    const wallet = await makeSolanaWallet(companyId, agentId);
+    const to = await allow(companyId, wallet.id);
+    const agent = agentApp(companyId, agentId);
+    // Exactly the per-payment limit (0.2 SOL) is refused once the fee is added on top.
+    const atLimit = await agent.post(`/api/agent-wallets/${wallet.id}/send`, { to, amount: "0.2", purpose: "Exactly the limit" });
+    expect(atLimit.body.status).toBe("blocked");
+    expect(atLimit.body.blockReason).toMatch(/network fee included/);
+    const card = await agent.post(`/api/agent-wallets/${wallet.id}/send`, { to, amount: "0.09", purpose: "With a fee" });
+    expect(card.body.feeUpperBound).toBe("7500"); // 5000 lamports estimate x 1.5 headroom
+    const [approval] = await db.select().from(approvals).where(eq(approvals.id, card.body.approvalId));
+    expect(String((approval!.payload as Record<string, unknown>).summary)).toMatch(/plus a network fee of at most 0\.0000075 SOL/);
+  });
+
+  // ─── Unclear sends never release the limits (B2) ───────────────────────
+
+  it("keeps a payment counted when the node accepts it but answers 502, and only ever re-sends the same signed bytes", async () => {
+    const { companyId, agentId } = await seed();
+    const wallet = await makeSolanaWallet(companyId, agentId);
+    const to = await allow(companyId, wallet.id);
+    const agent = agentApp(companyId, agentId);
+    const svc = cryptoWalletService(db, db, deps());
+    // Wallet daily limit 0.4 SOL: a 0.35 SOL payment that "failed" must still block a second one.
+    await boardApp(companyId, "owner").patch(`/api/companies/${companyId}/crypto/wallets/${wallet.id}`, {
+      limits: { perTransaction: "0.4", daily: "0.4", total: "2", approvalAbove: "1" },
+    });
+    await boardApp(companyId, "owner").put(`/api/companies/${companyId}/crypto/agents/${agentId}/limits`, { perTransactionUsd: 100, dailyUsd: 100, totalUsd: 200, approvalAboveUsd: 100 });
+
+    solState.sendMode = "accept-then-502";
+    const first = await agent.post(`/api/agent-wallets/${wallet.id}/send`, { to, amount: "0.35", purpose: "First try" });
+    expect(first.body.status).toBe("submitted");
+    expect(first.body.error).toMatch(/No clear answer/);
+    expect(first.body.txHash).toBe(solState.sent[0]!.signature);
+
+    const retry = await agent.post(`/api/agent-wallets/${wallet.id}/send`, { to, amount: "0.35", purpose: "Retry" });
+    expect(retry.body.status).toBe("blocked");
+    expect(retry.body.blockReason).toMatch(/daily limit/);
+    expect(solState.sent).toHaveLength(1);
+
+    // Not seen yet: after the re-send interval the tick re-sends the SAME transaction.
+    solState.sendMode = "already-processed";
+    now = new Date(now.getTime() + 6 * 60_000);
+    await svc.tick(now);
+    expect(solState.sent).toHaveLength(2);
+    expect(solState.sent[1]!.raw).toBe(solState.sent[0]!.raw);
+    const statusOf = async () => (await db.select().from(cryptoWalletTransactions).where(eq(cryptoWalletTransactions.id, first.body.id)))[0]!;
+    expect((await statusOf()).status).toBe("submitted");
+
+    // It landed after all.
+    solState.statuses.set(solState.sent[0]!.signature, { confirmationStatus: "confirmed", err: null });
+    await svc.tick(now);
+    expect((await statusOf()).status).toBe("confirmed");
+  });
+
+  it("only gives up on a Solana payment once its block id has expired for sure", async () => {
+    const { companyId, agentId } = await seed();
+    const wallet = await makeSolanaWallet(companyId, agentId);
+    const to = await allow(companyId, wallet.id);
+    const svc = cryptoWalletService(db, db, deps());
+    solState.sendMode = "accept-then-502";
+    const tx = (await agentApp(companyId, agentId).post(`/api/agent-wallets/${wallet.id}/send`, { to, amount: "0.05", purpose: "Unclear" })).body;
+    const statusOf = async () => (await db.select().from(cryptoWalletTransactions).where(eq(cryptoWalletTransactions.id, tx.id)))[0]!;
+
+    // Hours later but the chain has not moved past its last valid height: still counted.
+    now = new Date(now.getTime() + 3 * 60 * 60_000);
+    await svc.tick(now);
+    expect((await statusOf()).status).toBe("submitted");
+
+    // Now the finalized chain is well past it: it can never land.
+    solState.blockHeight += 1_000;
+    await svc.tick(now);
+    const settled = await statusOf();
+    expect(settled.status).toBe("failed");
+    expect(settled.error).toMatch(/can never go through/);
+  });
+
+  // ─── Solana network check (S2) ─────────────────────────────────────────
+
+  it("refuses to sign a test wallet's payment on a node that is really on the main network", async () => {
+    const { companyId, agentId } = await seed();
+    const wallet = await makeSolanaWallet(companyId, agentId);
+    const to = await allow(companyId, wallet.id);
+    solState.genesis = MAINNET_GENESIS;
+    const tx = await agentApp(companyId, agentId).post(`/api/agent-wallets/${wallet.id}/send`, { to, amount: "0.05", purpose: "Wrong network" });
+    expect(tx.body.status).toBe("failed");
+    expect(tx.body.error).toMatch(/Nothing was sent.*not on the test network/);
+    expect(solState.sent).toHaveLength(0);
+  });
+
+  // ─── Archive and key deletion (S1) ─────────────────────────────────────
+
+  it("will not archive a real-money wallet that still holds coins, nor delete its key", async () => {
+    const { companyId, agentId } = await seed();
+    const owner = boardApp(companyId, "owner");
+    await owner.patch(`/api/companies/${companyId}/crypto/settings`, { mainnetEnabled: true, confirmPhrase: "REAL MONEY" });
+    const wallet = await makeSolanaWallet(companyId, agentId, { network: "mainnet" });
+    solState.genesis = MAINNET_GENESIS;
+    solState.balances.set(wallet.address, 500_000_000);
+    await owner.post(`/api/companies/${companyId}/crypto/wallets/${wallet.id}/freeze`, { frozen: true });
+    const refused = await owner.post(`/api/companies/${companyId}/crypto/wallets/${wallet.id}/archive`);
+    expect(refused.status).toBe(422);
+    expect(refused.body.error).toMatch(/still holds 0\.5 SOL/);
+    const [row] = await db.select().from(cryptoWallets).where(eq(cryptoWallets.id, wallet.id));
+    await expect(secretService(db).remove(row!.secretId)).rejects.toThrow(/may still hold coins/);
+
+    // Even an archived real-money wallet keeps its key while its last balance was above dust.
+    await db.update(cryptoWallets).set({ status: "archived" }).where(eq(cryptoWallets.id, wallet.id));
+    await expect(secretService(db).remove(row!.secretId)).rejects.toThrow(/may still hold coins/);
+    const { companyService } = await import("../services/companies.js");
+    await expect(companyService(db).remove(companyId)).rejects.toThrow(/may hold coins/);
+  });
+
+  // ─── Owner-only on real money, browser-fill reader ─────────────────────
+
+  it("keeps network addresses owner-only and the browser-fill reader away from wallet keys", async () => {
+    const { companyId, agentId } = await seed();
+    const wallet = await makeSolanaWallet(companyId, agentId);
+    const changed = await boardApp(companyId, "admin").patch(`/api/companies/${companyId}/crypto/settings`, {
+      rpcEndpoints: { solana: { testnet: "https://api.mainnet-beta.solana.com" } },
+    });
+    expect(changed.status).toBe(403);
+    const [row] = await db.select().from(cryptoWallets).where(eq(cryptoWallets.id, wallet.id));
+    await expect(secretService(db).resolveSecretValueForBrowserFill(companyId, row!.secretId, { actorId: agentId })).rejects.toThrow(
+      /Only a payment card or a website login/,
+    );
   });
 
   // ─── Owner sends (the recovery path) ───────────────────────────────────

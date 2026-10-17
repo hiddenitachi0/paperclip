@@ -24,8 +24,11 @@ import { cryptoWalletService, type CryptoWalletServiceDeps } from "../services/c
  *
  *   /companies/:companyId/crypto/...  -- the owner/admin "Wallets" screens.
  *     Every route, reading included, is owner/admin (or instance admin)
- *     only: these screens move money. Turning real money ON is owner-only
- *     (checked in the service, with the confirm phrase).
+ *     only: these screens move money. Owner-only (checked in the service):
+ *     turning real money on (with the confirm phrase), changing network
+ *     addresses, and -- on real-money wallets -- limits, leverage, the
+ *     allowed-address list, owner sends, and agent limits while real money
+ *     is on.
  *
  *   /agent-wallets/...  -- what an agent's tools call. Agent actor only,
  *     identity and company from the agent's own run token, never from the
@@ -123,7 +126,7 @@ export function cryptoWalletRoutes(rawDb: Db, deps: CryptoWalletServiceDeps = {}
   });
 
   router.patch("/companies/:companyId/crypto/wallets/:walletId", validate(updateCryptoWalletSchema), ownerAdminScope(), async (req, res) => {
-    res.json(await svc.updateWallet(companyIdOf(req), walletIdOf(req), req.body, { userId: userIdOf(req) }));
+    res.json(await svc.updateWallet(companyIdOf(req), walletIdOf(req), req.body, { userId: userIdOf(req), isOwner: isOwner(req, companyIdOf(req)) }));
   });
 
   /** The per-wallet kill switch. */
@@ -156,7 +159,7 @@ export function cryptoWalletRoutes(rawDb: Db, deps: CryptoWalletServiceDeps = {}
   });
 
   router.post("/companies/:companyId/crypto/wallets/:walletId/destinations", validate(addCryptoWalletDestinationSchema), ownerAdminScope(), async (req, res) => {
-    res.status(201).json(await svc.addDestination(companyIdOf(req), walletIdOf(req), req.body, { userId: userIdOf(req) }));
+    res.status(201).json(await svc.addDestination(companyIdOf(req), walletIdOf(req), req.body, { userId: userIdOf(req), isOwner: isOwner(req, companyIdOf(req)) }));
   });
 
   router.delete("/companies/:companyId/crypto/wallets/:walletId/destinations/:destinationId", ownerAdminScope(), async (req, res) => {
@@ -177,7 +180,7 @@ export function cryptoWalletRoutes(rawDb: Db, deps: CryptoWalletServiceDeps = {}
   /** Owner/admin sends coins out (to an allowed address) -- how funds come back out, since the key is never shown. */
   router.post("/companies/:companyId/crypto/wallets/:walletId/send", validate(cryptoSendRequestSchema), ownerAdminScope(), async (req, res) => {
     const companyId = companyIdOf(req);
-    const tx = await svc.ownerSend(companyId, walletIdOf(req), req.body, { userId: userIdOf(req) });
+    const tx = await svc.ownerSend(companyId, walletIdOf(req), req.body, { userId: userIdOf(req), isOwner: isOwner(req, companyId) });
     await logActivity(db, {
       companyId,
       actorType: "user",
@@ -195,7 +198,7 @@ export function cryptoWalletRoutes(rawDb: Db, deps: CryptoWalletServiceDeps = {}
   });
 
   router.put("/companies/:companyId/crypto/agents/:agentId/limits", validate(cryptoAgentLimitsSchema), ownerAdminScope(), async (req, res) => {
-    res.json(await svc.setAgentLimits(companyIdOf(req), req.params.agentId as string, req.body, { userId: userIdOf(req) }));
+    res.json(await svc.setAgentLimits(companyIdOf(req), req.params.agentId as string, req.body, { userId: userIdOf(req), isOwner: isOwner(req, companyIdOf(req)) }));
   });
 
   // ─── Agent tools ─────────────────────────────────────────────────────

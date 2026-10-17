@@ -32,6 +32,7 @@ import {
   withCompanyScope,
 } from "@paperclipai/db";
 import { notFound, unprocessable } from "../errors.js";
+import { isCryptoWalletKeyStillNeeded } from "./secrets.js";
 import { environmentService } from "./environments.js";
 import { sumCostCents } from "./cost-sql.js";
 import { heartbeatService } from "./heartbeat.js";
@@ -441,14 +442,13 @@ export function companyService(db: Db, rawDb: Db = db) {
         // coins left in a real-money wallet would be lost for good. Refuse
         // while a main-network wallet is still in use; test-network wallets
         // (worthless test coins) and archived ones go with the company.
-        const [liveRealMoneyWallet] = await tx
-          .select({ id: cryptoWallets.id })
+        const walletRows = await tx
+          .select({ status: cryptoWallets.status, network: cryptoWallets.network, chain: cryptoWallets.chain, lastBalance: cryptoWallets.lastBalance })
           .from(cryptoWallets)
-          .where(and(eq(cryptoWallets.companyId, id), eq(cryptoWallets.network, "mainnet"), sql`${cryptoWallets.status} <> 'archived'`))
-          .limit(1);
-        if (liveRealMoneyWallet) {
+          .where(eq(cryptoWallets.companyId, id));
+        if (walletRows.some((w) => w.network === "mainnet" && isCryptoWalletKeyStillNeeded(w))) {
           throw unprocessable(
-            "This company still has a real-money crypto wallet. Move its coins out and archive it on the agent's Crypto wallets settings before deleting the company.",
+            "This company still has a real-money crypto wallet that is in use or may hold coins. Move its coins out and archive it on the agent's Crypto wallets settings before deleting the company.",
           );
         }
         await tx.delete(cryptoWallets).where(eq(cryptoWallets.companyId, id));
