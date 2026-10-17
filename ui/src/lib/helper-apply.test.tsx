@@ -8,6 +8,7 @@ import {
   canApplyHelperAnswer,
   extractApplicableText,
   listHelperApplyTargets,
+  readHelperApplyValue,
   registerHelperApplyTarget,
   resetHelperApplyRegistryForTests,
   useHelperApplyTarget,
@@ -96,5 +97,20 @@ describe("helper apply registry", () => {
       "You are the front desk.\nBe brief.",
     );
     expect(extractApplicableText("  Just this.  ")).toBe("Just this.");
+  });
+
+  it("reads what a field holds now (for Undo), or null when it cannot", () => {
+    const wrapper = document.createElement("div");
+    wrapper.setAttribute("data-helper-apply", "Notes");
+    wrapper.innerHTML = `<label>Notes</label><textarea>Before</textarea>`;
+    document.body.appendChild(wrapper);
+    expect(readHelperApplyValue("Notes")).toBe("Before");
+    const plain = document.createElement("div");
+    plain.setAttribute("data-helper-apply", "Canvas");
+    document.body.appendChild(plain);
+    expect(readHelperApplyValue("Canvas")).toBeNull();
+    expect(readHelperApplyValue("Missing")).toBeNull();
+    wrapper.remove();
+    plain.remove();
   });
 });
