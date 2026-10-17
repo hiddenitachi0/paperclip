@@ -7,6 +7,7 @@ import { costEvents, type Db } from "@paperclipai/db";
 import { sumMicroUsd } from "./cost-sql.js";
 import { logger } from "../middleware/logger.js";
 import { costService } from "./costs.js";
+import { settleStorylineMediaSpend } from "./storyline-media-ledger.js";
 import { falPricingClient, fetchFalUsageSummary, microUsdToCents, type FalFetchImpl, type FalUsage } from "./fal-pricing.js";
 
 /** Casts a drizzle transaction handle to Db so services written against Db (e.g. costService) can run inside it. */
@@ -28,12 +29,23 @@ export async function recordFalCostEvent(
     estimateCents: number;
     billingCode: string;
     occurredAt?: Date;
+    /**
+     * Storyline media spend (DUR-4807): the billing code of the cost row
+     * written when the money was held. That row is settled to the real
+     * price instead of writing a second one; only when it does not exist
+     * (a step started before holds were recorded) is a new row written.
+     */
+    settleBillingCode?: string;
   },
 ): Promise<{ costCents: number; costMicroUsd: number } | null> {
   try {
     const priced = await falPricingClient(fetchImpl).priceCall(params.apiKey, params.model, params.usage, params.companyId);
     const costMicroUsd = priced?.costMicroUsd ?? params.estimateCents * 10_000;
     const costCents = priced ? microUsdToCents(priced.costMicroUsd) : params.estimateCents;
+    if (params.settleBillingCode) {
+      const settled = await settleStorylineMediaSpend(db, { companyId: params.companyId, billingCode: params.settleBillingCode, costCents, costMicroUsd, model: params.model });
+      if (settled) return { costCents, costMicroUsd };
+    }
     await costService(db).createEvent(params.companyId, {
       agentId: params.agentId,
       createdByUserId: params.createdByUserId ?? null,
