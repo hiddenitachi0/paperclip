@@ -128,6 +128,7 @@ export {
 } from "./principal-access-compatibility.js";
 export { seedDurStarterJobs, DUR_COMPANY_ID } from "./agent-role-seed.js";
 export { seedLegalAdvisorStarterPack } from "./job-starter-pack-seed.js";
+export { convertBragPositionsToSkill } from "./position-catalogue.js";
 export {
   resolveAgentRoleProvisioning,
   addAgentCatalogOverride,

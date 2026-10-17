@@ -50,14 +50,14 @@ describeEmbeddedPostgres("seedDurStarterJobs", () => {
     const first = await seedDurStarterJobs(db);
     const second = await seedDurStarterJobs(db);
 
-    expect(first.created.sort()).toEqual(["boss", "brag", "developer"]);
+    expect(first.created.sort()).toEqual(["boss", "developer"]);
     expect(second.created).toEqual([]);
 
     const roles = await db
       .select()
       .from(companyAgentRoles)
       .where(eq(companyAgentRoles.companyId, DUR_COMPANY_ID));
-    expect(roles).toHaveLength(3);
+    expect(roles).toHaveLength(2);
 
     const boss = roles.find((role) => role.key === "boss")!;
     const developer = roles.find((role) => role.key === "developer")!;
@@ -76,9 +76,8 @@ describeEmbeddedPostgres("seedDurStarterJobs", () => {
       .sort();
     expect(developerKeys).toEqual(["merges:request"]);
 
-    const brag = roles.find((role) => role.key === "brag")!;
-    expect(brag.defaultGrants).toEqual([]);
-    expect(brag.skillKeys).toEqual(["paperclipai/optional/content/brag"]);
+    // Brag is a skill on the Content & Video Producer position, never a position of its own.
+    expect(roles.find((role) => role.key === "brag")).toBeUndefined();
 
     // is_builtin is provenance-only — it must never block a plain edit/delete.
     await db
@@ -90,7 +89,7 @@ describeEmbeddedPostgres("seedDurStarterJobs", () => {
       .select()
       .from(companyAgentRoles)
       .where(eq(companyAgentRoles.companyId, DUR_COMPANY_ID));
-    expect(remaining).toHaveLength(2);
+    expect(remaining).toHaveLength(1);
   });
 
   it("skips silently when the DUR company row does not exist on this instance", async () => {
