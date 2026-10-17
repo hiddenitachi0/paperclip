@@ -54,6 +54,8 @@ import { cn, SIDEBAR_RAIL_HIDDEN_LABEL } from "../lib/utils";
 import { PluginSlotOutlet } from "@/plugins/slots";
 import { PluginLauncherOutlet } from "@/plugins/launchers";
 import { SidebarCompanyMenu } from "./SidebarCompanyMenu";
+import { BOARD_CHAT_SUBTITLE } from "../lib/board-chat-handoff";
+import { useBoardChatAvailability } from "../hooks/useBoardChatAvailability";
 
 export function Sidebar() {
   const { openNewIssue } = useDialogActions();
@@ -95,10 +97,11 @@ export function Sidebar() {
   // wording is split to PR #7651. Gating is navigation-only; all routes stay
   // registered in both modes.
   const streamlined = experimentalSettings?.enableStreamlinedLeftNavigation !== false;
-  // Conference Room Chat flag (PAP-136/PAP-137): the Conference Room nav item
-  // is a new surface, hidden entirely while the flag is off (same no-flash
-  // pattern as showWorkspacesLink above).
-  const conferenceRoomChatEnabled = experimentalSettings?.enableConferenceRoomChat === true;
+  // Board chat (formerly "Conference Room", PAP-136/PAP-137): shown only where
+  // sending actually works — the Board chat setting is on AND Paperclip runs in
+  // single-operator local mode (its server route refuses everything else).
+  // Hidden while either is still loading (same no-flash pattern as above).
+  const boardChatAvailable = useBoardChatAvailability().available;
 
   const pluginContext = {
     companyId: selectedCompanyId,
@@ -201,8 +204,13 @@ export function Sidebar() {
             badgeTone={inboxBadge.failedRuns > 0 ? "danger" : "default"}
             alert={inboxBadge.failedRuns > 0}
           />
-          {conferenceRoomChatEnabled ? (
-            <SidebarNavItem to="/board-chat" label="Conference Room" icon={MessagesSquare} />
+          {boardChatAvailable ? (
+            <SidebarNavItem
+              to="/board-chat"
+              label="Board chat"
+              icon={MessagesSquare}
+              title={BOARD_CHAT_SUBTITLE}
+            />
           ) : null}
         </div>
 

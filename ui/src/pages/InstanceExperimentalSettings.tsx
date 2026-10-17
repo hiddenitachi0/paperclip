@@ -422,9 +422,10 @@ export function InstanceExperimentalSettings() {
         <section className="rounded-xl section-box bg-card p-5">
           <div className="flex items-start justify-between gap-4">
             <div className="space-y-1.5">
-              <h2 className="section-title">Conference Room Chat</h2>
+              <h2 className="section-title">Board chat</h2>
               <p className="max-w-2xl text-sm text-muted-foreground">
-                Adds a Conference Room — one chat where you and your whole team work together — plus the live activity
+                Adds Board chat — talk to an AI board member that can make changes for you (hire agents, create tasks,
+                change settings) — plus the live activity
                 feed and the redesigned onboarding. Also restyles task threads as chat bubbles. Turn off anytime to
                 restore the classic UI.
               </p>
@@ -437,7 +438,7 @@ export function InstanceExperimentalSettings() {
                 })
               }
               disabled={toggleMutation.isPending}
-              aria-label="Toggle conference room chat experimental setting"
+              aria-label="Toggle board chat experimental setting"
             />
           </div>
         </section>
