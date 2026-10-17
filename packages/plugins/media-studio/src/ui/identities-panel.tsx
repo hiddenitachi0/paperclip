@@ -1467,7 +1467,7 @@ export function IdentitiesPanel({ context }: { context: PluginHostContext }) {
       const res = (await crop({ fileId: source, boxes })) as { crops: Array<{ role: CropRole; box: Box; imageDataUrl: string }> };
       const crops: IdentityCrop[] = [];
       for (const c of res.crops) {
-        const fileId = await uploadPicture(companyId, c.imageDataUrl, `${(draft.name || "person").replace(/[^A-Za-z0-9-]+/g, "-")}-${c.role}.png`);
+        const fileId = await uploadPicture(companyId, c.imageDataUrl, `${(draft.name || "person").replace(/[^A-Za-z0-9-]+/g, "-")}-${c.role}.${c.imageDataUrl.startsWith("data:image/jpeg") ? "jpg" : "png"}`);
         crops.push({ role: c.role, fileId, sourceFileId: source, box: c.box });
       }
       setDraft((d) => (d ? withNewCrops(d, crops) : d));

@@ -6,7 +6,17 @@
 import sharp from "sharp";
 import type { CropBox } from "./identity.js";
 
-/** Cut one box (fractions of the picture) out of a picture. PNG keeps it lossless. */
+/** A crop stays a lossless PNG while it is this small; above it the crop is saved as a JPEG so several crops fit the platform's file limits. */
+const CROP_PNG_MAX_BYTES = 1_000_000;
+/** The most a JPEG crop may weigh; bigger ones are scaled down until they fit. */
+const CROP_JPEG_MAX_BYTES = 1_500_000;
+
+/**
+ * Cut one box (fractions of the picture) out of a picture. Small crops stay
+ * lossless PNG; a crop that would be big (a phone photo's body box is easily
+ * 10 MB as PNG, far above its source JPEG) is saved as a high-quality JPEG
+ * instead, and scaled down if even that is over the cap.
+ */
 export async function cropPicture(bytes: Buffer, box: CropBox): Promise<{ bytes: Buffer; contentType: string; width: number; height: number }> {
   const image = sharp(bytes).rotate(); // apply EXIF orientation first, so boxes match what people see
   const meta = await image.metadata();
@@ -18,8 +28,22 @@ export async function cropPicture(bytes: Buffer, box: CropBox): Promise<{ bytes:
   const top = Math.max(0, Math.min(height - 1, Math.round(box.y * height)));
   const w = Math.max(1, Math.min(width - left, Math.round(box.w * width)));
   const h = Math.max(1, Math.min(height - top, Math.round(box.h * height)));
-  const out = await image.extract({ left, top, width: w, height: h }).png().toBuffer();
-  return { bytes: out, contentType: "image/png", width: w, height: h };
+  // extract() applies to the rotated pipeline; keep the cut as PNG bytes so it can be re-encoded without redoing the crop.
+  const cut = await image.extract({ left, top, width: w, height: h }).png().toBuffer();
+  if (cut.length <= CROP_PNG_MAX_BYTES) return { bytes: cut, contentType: "image/png", width: w, height: h };
+  let scale = 1;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const outW = Math.max(1, Math.round(w * scale));
+    const outH = Math.max(1, Math.round(h * scale));
+    const jpeg = await sharp(cut)
+      .flatten({ background: "#ffffff" }) // JPEG has no transparency
+      .resize(outW, outH, { fit: "fill" })
+      .jpeg({ quality: 92, chromaSubsampling: "4:4:4", mozjpeg: true })
+      .toBuffer();
+    if (jpeg.length <= CROP_JPEG_MAX_BYTES || attempt === 5) return { bytes: jpeg, contentType: "image/jpeg", width: outW, height: outH };
+    scale *= Math.max(0.5, Math.sqrt(CROP_JPEG_MAX_BYTES / jpeg.length) * 0.95);
+  }
+  throw new Error("The crop could not be made."); // unreachable: the last attempt returns
 }
 
 /** The box around the white part of a mask, as fractions; null when the mask is empty. */
