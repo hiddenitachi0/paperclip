@@ -104,6 +104,24 @@ export async function extractFirstFrameDataUri(clipBuffer: Buffer): Promise<stri
   }
 }
 
+/** One picture from a clip at a point in time (seconds, clamped number): a trimmed AI clip's new first or last picture. */
+export async function extractFrameAtDataUri(clipBuffer: Buffer, atSeconds: number): Promise<string | null> {
+  if (!(await checkFfmpegAvailable())) return null;
+  const at = Math.min(3600, Math.max(0, Number.isFinite(atSeconds) ? atSeconds : 0));
+  try {
+    return await withTempDir(async (dir) => {
+      const input = join(dir, "in.mp4");
+      const output = join(dir, "frame.jpg");
+      await writeFile(input, clipBuffer);
+      await execFileAsync(FFMPEG_BINARY, ["-y", "-ss", at.toFixed(3), "-i", input, "-frames:v", "1", "-q:v", "2", output], { timeout: FRAME_EXTRACT_TIMEOUT_MS });
+      const frame = await readFile(output);
+      return `data:image/jpeg;base64,${frame.toString("base64")}`;
+    });
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Storyline strip (design 2.3, "keeping the context cheap"): 4 frames from a
  * clip's last second ("end") or first second ("start") on ONE picture side
@@ -283,6 +301,20 @@ export interface NormalizeClipOptions {
   audio?: "keep" | "strip" | { gainDb: number };
   /** Phase 2 "end frame: trim": drop this clip's last frame (the next AI shot starts on exactly that picture). */
   trimLastFrame?: boolean;
+  /** Timeline editor: only this part of the clip (a made AI clip's trim). endMs null = to the end. */
+  trimMs?: { startMs: number; endMs: number | null };
+}
+
+/** The input-side seek for a trimmed clip: numbers only (clamped), never caller text. */
+export function clipTrimInputArgs(trim: NormalizeClipOptions["trimMs"]): string[] {
+  if (!trim) return [];
+  const start = Math.min(3600, Math.max(0, Math.round(trim.startMs) / 1000));
+  const args = start > 0 ? ["-ss", start.toFixed(3)] : [];
+  if (trim.endMs !== null && Number.isFinite(trim.endMs)) {
+    const length = Math.min(3600, Math.max(0.1, Math.round(trim.endMs) / 1000 - start));
+    args.push("-t", length.toFixed(3));
+  }
+  return args;
 }
 
 /**
@@ -365,7 +397,7 @@ export async function normalizeClipsForStitch(
     for (const [index, input] of inputs.entries()) {
       const output = join(dir, `norm-${String(index).padStart(6, "0")}.mp4`);
       const opts = clipOptions[index];
-      const args = ["-y", "-i", input];
+      const args = ["-y", ...clipTrimInputArgs(opts?.trimMs), "-i", input];
       if (anyAudio && !hasAudio[index]) {
         args.push("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000");
       }
@@ -375,7 +407,8 @@ export async function normalizeClipsForStitch(
       const videoFilter = `${target ? buildFitFilter(size, { width, height }, fit) : `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`},setsar=1,fps=${fps},format=yuv420p`;
       let clipVideoFilter = videoFilter;
       const audioFilters: string[] = [];
-      if (opts?.trimEdgeFrames || opts?.trimLastFrame) {
+      // A trimmed clip is already cut where the person chose; frame-exact trims would count the wrong frames.
+      if ((opts?.trimEdgeFrames || opts?.trimLastFrame) && !opts?.trimMs) {
         const probe = await probeFrames(input);
         const dropFirst = opts.trimEdgeFrames ? 1 : 0;
         if (probe && probe.frames >= 3) {

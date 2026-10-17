@@ -53,10 +53,10 @@ import { recordFalCostEvent } from "./fal-cost-events.js";
 import { runMediaJob } from "./media-job-queue.js";
 import { pluginRegistryService } from "./plugin-registry.js";
 import { recordSogniCost, SOGNI_CREDIT_PRICE_CONFIG_KEY } from "./sogni-cost.js";
-import { buildClipContactSheet, extractFirstFrameDataUri, extractLastFrameDataUri, type NormalizeClipOptions } from "./video-ffmpeg.js";
+import { buildClipContactSheet, extractFirstFrameDataUri, extractFrameAtDataUri, extractLastFrameDataUri, type NormalizeClipOptions } from "./video-ffmpeg.js";
 import type { MediaJobHandle } from "./video-provider-clients.js";
 import { STORYLINE_TRANSITION_BILLING_CODE, STORYLINE_WRITER_NO_MODEL_MESSAGE, storylineCompanyModel } from "./video-storyline-company-model.js";
-import { buildProvider, estimateShotRenderCents, storylineSafeFetch, videoStorylineRenderService } from "./video-storyline-render.js";
+import { buildProvider, estimateShotRenderCents, resolveShotRenderTarget, shotClipTiming, storylineSafeFetch, videoStorylineRenderService } from "./video-storyline-render.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
 import { lockStorylineRow, videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
 import type { HelperServiceOptions } from "./helper.js";
@@ -109,18 +109,25 @@ export const NO_FRAMES_MESSAGE = "The clips at this join could not be read (they
  */
 export function transitionAnchorHash(
   storyline: Pick<StorylineRow, "pictureSettings" | "characterReferenceAssetIds">,
-  a: Pick<ShotRow, "id" | "resultSha256" | "resultObjectKey" | "prompt" | "cameraNotes" | "lookReferenceAssetIds">,
-  b: Pick<ShotRow, "id" | "resultSha256" | "resultObjectKey" | "stillSha256" | "stillObjectKey" | "prompt" | "cameraNotes" | "lookReferenceAssetIds">,
+  a: Pick<ShotRow, "id" | "resultSha256" | "resultObjectKey" | "prompt" | "cameraNotes" | "lookReferenceAssetIds"> & Partial<Pick<ShotRow, "clipKind" | "sourceTrimOutMs">>,
+  b: Pick<ShotRow, "id" | "resultSha256" | "resultObjectKey" | "stillSha256" | "stillObjectKey" | "prompt" | "cameraNotes" | "lookReferenceAssetIds"> &
+    Partial<Pick<ShotRow, "clipKind" | "sourceTrimInMs">>,
 ): string {
   const cast = readVideoStorylineCast(storyline.pictureSettings);
+  // A bridge starts on A's last picture and ends on B's first: trimming a made
+  // AI clip's end (A) or start (B) changes those pictures, so it makes the
+  // bridge out of date. Only added when set, so untrimmed clips keep their hash.
+  const aTrim = a.clipKind === "generated" && a.sourceTrimOutMs != null ? { trimOut: a.sourceTrimOutMs } : {};
+  const bTrim = b.clipKind === "generated" && b.sourceTrimInMs != null && b.sourceTrimInMs > 0 ? { trimIn: b.sourceTrimInMs } : {};
   const payload = {
-    a: { id: a.id, clip: a.resultSha256 ?? a.resultObjectKey ?? null, prompt: a.prompt, camera: a.cameraNotes ?? null, looks: a.lookReferenceAssetIds },
+    a: { id: a.id, clip: a.resultSha256 ?? a.resultObjectKey ?? null, prompt: a.prompt, camera: a.cameraNotes ?? null, looks: a.lookReferenceAssetIds, ...aTrim },
     b: {
       id: b.id,
       clip: b.resultSha256 ?? b.resultObjectKey ?? (b.stillSha256 || b.stillObjectKey ? `still:${b.stillSha256 ?? b.stillObjectKey}` : null),
       prompt: b.prompt,
       camera: b.cameraNotes ?? null,
       looks: b.lookReferenceAssetIds,
+      ...bTrim,
     },
     cast: cast.members.map((m) => [m.id, m.identityId]),
     shotCast: [cast.shotCast[a.id] ?? null, cast.shotCast[b.id] ?? null],
@@ -317,14 +324,18 @@ export async function buildStitchPlan(
     }
     // Phase 2: per-clip sound (mute / volume).
     const audio: NormalizeClipOptions["audio"] = shot.clipMuted ? "strip" : shot.clipVolumeDb !== 0 ? { gainDb: shot.clipVolumeDb } : undefined;
+    // Timeline editor: a made AI clip's trim is applied here (your own videos are cut when they are prepared).
+    const timing = shot.clipKind === "generated" ? shotClipTiming(storyline, shot) : null;
+    const trimMs = timing?.trimmed ? { startMs: Math.max(0, shot.sourceTrimInMs ?? 0), endMs: shot.sourceTrimOutMs ?? null } : undefined;
+    const normalize: NormalizeClipOptions | undefined = audio || trimMs ? { ...(audio ? { audio } : {}), ...(trimMs ? { trimMs } : {}) } : undefined;
     items.push({
       objectKey: shot.resultObjectKey ?? "",
       transitionIn,
       transitionDurationMs: durationMs,
-      ...(audio ? { normalize: { audio } } : {}),
+      ...(normalize ? { normalize } : {}),
       shotId: shot.id,
       takeId: null,
-      writtenSeconds: shot.durationSeconds,
+      writtenSeconds: timing?.trimmed ? timing.playMs / 1000 : shot.durationSeconds,
     });
   }
   // "End frame: trim" (design 2.7): an AI shot that is cut straight into the
@@ -335,7 +346,7 @@ export async function buildStitchPlan(
     for (let i = 0; i + 1 < items.length; i += 1) {
       const here = items[i]!;
       const next = items[i + 1]!;
-      if (here.shotId && next.shotId && next.transitionIn === "cut" && kindOf.get(here.shotId) === "generated" && kindOf.get(next.shotId) === "generated") {
+      if (here.shotId && next.shotId && next.transitionIn === "cut" && kindOf.get(here.shotId) === "generated" && kindOf.get(next.shotId) === "generated" && !here.normalize?.trimMs) {
         here.normalize = { ...(here.normalize ?? {}), trimLastFrame: true };
       }
     }
@@ -520,9 +531,12 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
     }
     // Same rule as setAspect: an AI picture or clip has been made in the current shape.
     const aspectLocked = shots.some((s) => s.clipKind === "generated" && !s.sourceUploadId && (s.status !== "draft" || s.resultObjectKey !== null || s.stillObjectKey !== null));
+    const timing = new Map(shots.map((s) => [s.id, shotClipTiming(storyline, s, s.sourceUploadId ? uploadById.get(s.sourceUploadId)?.durationMs ?? null : null)]));
     const totalSeconds = Math.round(
-      shots.reduce((sum, s) => sum + s.durationSeconds, 0) + gaps.filter((g) => g.kind === "ai").reduce((sum, g) => sum + g.durationMs / 1000, 0),
+      shots.reduce((sum, s) => sum + (timing.get(s.id)?.playMs ?? s.durationSeconds * 1000) / 1000, 0) +
+        gaps.filter((g) => g.kind === "ai").reduce((sum, g) => sum + g.durationMs / 1000, 0),
     );
+    const notMade = shots.filter((s) => s.clipKind === "generated" && s.status !== "done");
     return {
       storylineId,
       providerId,
@@ -550,6 +564,15 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
             ? estimateShotRenderCents(storyline, [{ providerId: null, model: null, durationSeconds: Math.min(VIDEO_CLIP_MAX_SECONDS, s.durationSeconds) }]).estimatedTotalCents
             : null,
         errorMessage: s.errorMessage,
+        playMs: timing.get(s.id)?.playMs,
+        sourceLengthMs: timing.get(s.id)?.sourceLengthMs ?? null,
+        ...(s.clipKind === "generated"
+          ? {
+              providerId: resolveShotRenderTarget(storyline, s).providerId,
+              model: resolveShotRenderTarget(storyline, s).model,
+              estimatedCostCents: estimateShotRenderCents(storyline, [s]).estimatedTotalCents,
+            }
+          : { providerId: null, model: null, estimatedCostCents: null }),
       })),
       gaps,
       models: VIDEO_TRANSITION_MODELS.filter((m) => m.provider === providerId),
@@ -571,13 +594,16 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
       storage: { usedBytes: await footage.storageUsedBytes(companyId), quotaBytes: footageSettings.storageQuotaBytes },
       footage: footageSettings,
       totalSeconds,
+      remainingRenderCents: estimateShotRenderCents(storyline, notMade).estimatedTotalCents,
+      advancedEnabled: await settings.isAdvancedEnabled(companyId),
     };
   }
 
   // ─── Edit a gap ───
 
   async function upsert(companyId: string, storylineId: string, input: UpsertVideoTransitionInput, actor: VideoStorylineActor): Promise<VideoTransitionSummary> {
-    await settings.assertAdvancedEnabled(companyId);
+    // Timeline editor: a cut or a free blend between two clips is basic editing; an AI bridge needs Advanced features.
+    await settings.assertEnabled(companyId);
     const storyline = await storylines.getStorylineRow(companyId, storylineId);
     if (storyline.status === "stitching") throw conflict("The film is being combined right now. Wait for it to finish before changing a transition.");
     const { a, b } = await adjacentPair(companyId, storylineId, input.fromShotId, input.toShotId);
@@ -592,6 +618,7 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
     if (!option) throw unprocessable("That model cannot make transitions for this storyline's video service. Pick one from the list.");
     if (input.model !== undefined) modelId = option.model;
     const kind: VideoTransitionKind = input.kind ?? (existing?.kind as VideoTransitionKind | undefined) ?? legacyTransitionKind(b.transitionIn, storyline.defaultTransition);
+    if (kind === "ai") await settings.assertAdvancedEnabled(companyId);
     let durationMs = input.durationMs ?? existing?.durationMs ?? (kind === "ai" ? TRANSITION_DEFAULT_AI_SECONDS * 1000 : VIDEO_BLEND_DEFAULT_MS);
     if (kind === "ai") {
       // Switching from a 0.5 s blend to AI starts at a length the model makes.
@@ -964,11 +991,16 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
 
     try {
       const aClip = await render.downloadClipFromStorage(companyId, a.resultProvider ?? "", a.resultObjectKey);
-      const startImage = aClip ? await runMediaJob("transition start frame", () => extractLastFrameDataUri(aClip)) : null;
+      // A trimmed AI clip ends (or starts) where the person cut it, not at the file's edge.
+      const aTrimOut = a.clipKind === "generated" && a.sourceTrimOutMs != null ? a.sourceTrimOutMs : null;
+      const bTrimIn = b.clipKind === "generated" && b.sourceTrimInMs ? b.sourceTrimInMs : null;
+      const startImage = aClip
+        ? await runMediaJob("transition start frame", () => (aTrimOut !== null ? extractFrameAtDataUri(aClip, Math.max(0, aTrimOut / 1000 - 0.05)) : extractLastFrameDataUri(aClip)))
+        : null;
       let endImage: string | null = null;
       if (b.resultObjectKey) {
         const bClip = await render.downloadClipFromStorage(companyId, b.resultProvider ?? "", b.resultObjectKey);
-        endImage = bClip ? await runMediaJob("transition end frame", () => extractFirstFrameDataUri(bClip)) : null;
+        endImage = bClip ? await runMediaJob("transition end frame", () => (bTrimIn !== null ? extractFrameAtDataUri(bClip, bTrimIn / 1000) : extractFirstFrameDataUri(bClip))) : null;
       } else if (b.stillObjectKey) {
         const object = await getStorageService().getObject(companyId, b.stillObjectKey);
         endImage = `data:${b.stillContentType || "image/png"};base64,${(await streamToBuffer(object.stream)).toString("base64")}`;
