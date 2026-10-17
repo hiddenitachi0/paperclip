@@ -241,7 +241,7 @@ describe("models and picture settings on the Storylines page", () => {
     vi.unstubAllGlobals();
   });
 
-  it("step 3: the video model is picked from Sogni's catalogue; switching service resets the model", async () => {
+  it("step 5: the video model is picked from Sogni's catalogue; switching service resets the model", async () => {
     await click(container.querySelector('[data-testid="step-render"]') as HTMLButtonElement);
     expect(actions["sogni.videoModels"]).toHaveBeenCalled();
     const picker = container.querySelector('[data-testid="video-model-picker"]')!;
@@ -252,7 +252,8 @@ describe("models and picture settings on the Storylines page", () => {
   });
 
   it("step 2: picture service (only those with a key), model and look are saved; a shot can have its own look", async () => {
-    // The guided flow opens on Pictures for this storyline.
+    // The picture settings (service, model, look) live in step 2, Cast & look.
+    await click(container.querySelector('[data-testid="step-cast"]') as HTMLButtonElement);
     const settings = container.querySelector('[data-testid="picture-settings"]')!;
     expect(settings.textContent).toContain("Picture settings: Sogni, default model, no look (about $0.01 a picture)");
     const serviceOptions = Array.from((settings.querySelector('select[aria-label="Picture service"]') as HTMLSelectElement).options).map((o) => o.value);
@@ -269,7 +270,7 @@ describe("models and picture settings on the Storylines page", () => {
     expect(JSON.parse(calls.filter((c) => c.path === `${BASE}/${SL}` && c.method === "PATCH").at(-1)!.body!)).toEqual({ pictureSettings: { lookId: "look-1", model: "z_image_turbo_bf16" } });
   });
 
-  it("step 2: per-shot look and the picture cost follow the chosen service", async () => {
+  it("step 3: per-shot look and the picture cost follow the chosen service", async () => {
     const tile = container.querySelector('[data-testid="storyboard-tile-sh-1"]')!;
     await choose(tile.querySelector("select") as HTMLSelectElement, "none");
     expect(JSON.parse(calls.find((c) => c.path === `${BASE}/${SL}/shots/sh-1` && c.method === "PATCH")!.body!)).toEqual({ pictureLookId: "none" });

@@ -184,7 +184,10 @@ describe("Storylines storyboard (DUR-4321)", () => {
     expect(tile2().textContent).toContain("Not charged");
     expect(container.querySelector('[data-testid="storyboard-progress"]')?.textContent).toContain("All 1 shot approved");
     expect(container.querySelector('[data-testid="step-pictures-status"]')?.textContent).toBe("1 of 1 pictures approved (1 left out)");
+    // Next goes to the timeline (step 4); the render is step 5.
     await click(container.querySelector('[data-testid="pictures-primary-next"]') as HTMLButtonElement);
+    expect(container.querySelector('[data-testid="timeline-editor"]')).toBeTruthy();
+    await click(container.querySelector('[data-testid="step-render"]') as HTMLButtonElement);
     expect(container.querySelector('[data-testid="readiness-ready"]')).toBeTruthy();
     expect(startBtn().disabled).toBe(false);
   });
