@@ -293,22 +293,21 @@ describe("Sogni video request bodies (exact)", () => {
     {
       name: "the failing shot: storyline LTX 2.5 catalogue id, approved still, prompt as written",
       input: { model: "ltx25", startImage: PNG_DATA_URI, durationSeconds: 5, promptRewrite: false },
-      // LTX 2.5 is Sogni's default: asked for by leaving videoModel out.
-      step: { id: "video", toolName: "animate_photo", arguments: { prompt: "Shot", duration: 5, sourceImageIndex: -1, skipPromptProcessing: true } },
+      step: { id: "video", toolName: "animate_photo", arguments: { prompt: "Shot", duration: 5, videoModel: "ltx25", sourceImageIndex: -1, skipPromptProcessing: true } },
       refs: 1,
       model: "ltx25",
     },
     {
       name: "LTX 2.5 catalogue id, text only",
       input: { model: "ltx25-22b-int8_t2v_distilled", durationSeconds: 4 },
-      step: { id: "video", toolName: "generate_video", arguments: { prompt: "Shot", duration: 4 } },
+      step: { id: "video", toolName: "generate_video", arguments: { prompt: "Shot", duration: 4, videoModel: "ltx25" } },
       refs: 0,
       model: "ltx25",
     },
     {
       name: "LTX 2.5 transition (start and end picture)",
       input: { model: "ltx25-22b-int8_i2v_distilled", startImage: PNG_DATA_URI, endImage: PNG_DATA_URI_2, durationSeconds: 3, promptRewrite: false },
-      step: { id: "video", toolName: "animate_photo", arguments: { prompt: "Shot", duration: 3, sourceImageIndex: -1, endImageIndex: -2, frameRole: "both", skipPromptProcessing: true } },
+      step: { id: "video", toolName: "animate_photo", arguments: { prompt: "Shot", duration: 3, videoModel: "ltx25", sourceImageIndex: -1, endImageIndex: -2, frameRole: "both", skipPromptProcessing: true } },
       refs: 2,
       model: "ltx25",
     },
@@ -362,7 +361,7 @@ describe("Sogni video request bodies (exact)", () => {
 });
 
 describe("Sogni refusals are readable", () => {
-  it("the 17 Oct refusal: says which model, for what, what Sogni accepts, and keeps Sogni's whole message", async () => {
+  it("the 17 Oct refusal (a model on Sogni's own list): temporary problem on Sogni's side, keeps Sogni's whole message", async () => {
     for (const Provider of [SogniVideoProvider, PluginSogniVideoProvider]) {
       const api = sogniApi(() => new Response(SOGNI_REFUSAL_17_OCT, { status: 400, headers: { "content-type": "application/json" } }));
       const err = await new Provider({ apiKey: "k", apiFetch: api.apiFetch, transferFetch: transferOk })
@@ -370,20 +369,22 @@ describe("Sogni refusals are readable", () => {
         .catch((e: unknown) => e);
       expect(err).toBeInstanceOf(Error);
       const e = err as SogniVideoRequestError;
-      expect(e.message).toMatch(/^Sogni refused the video request \(400\): it didn't accept the video model "ltx25" \(asked for as Sogni's default, without naming it\) for animating a picture; it accepts: ltx25, ltx23, wan22, /);
-      expect(e.message).toContain("minimax-h3-fasth3-flf2v-turbo-2stage, wan3.0-video, wan3.0-spicy-video.");
-      expect(e.message).toContain(`"ltx25" is on Sogni's own list, so this looks like a problem on Sogni's side.`);
+      expect(e.message).toMatch(
+        /^Sogni refused the video request \(400\) for animating a picture with the video model "ltx25", even though that model is on its own list of accepted ones\. This looks like a temporary problem on Sogni's side; trying again in a few minutes usually works\. Sogni said: /,
+      );
+      // No wording that blames the model choice.
+      expect(e.message).not.toMatch(/didn't accept|pick another/);
       // Sogni's own words, whole (the old code cut them at 300 characters, mid-list).
       expect(e.message).toContain('Sogni said: Creative workflow pre-start validation failed for step 0 (video:animate_photo): Argument "videoModel" must be one of "ltx25"');
       expect(e.message).toContain('"wan3.0-spicy-video"');
-      expect(e).toMatchObject({ status: 400, sogniErrorCode: 102, tool: "animate_photo", videoModel: "ltx25", sentVideoModel: null });
+      expect(e).toMatchObject({ status: 400, sogniErrorCode: 102, tool: "animate_photo", videoModel: "ltx25" });
     }
   });
 
-  it("a model Sogni does not list: names it and the list, no 'Sogni's side' hint", () => {
+  it("a model Sogni does not list: names it and the list, no 'temporary' hint", () => {
     const body = JSON.stringify({ status: "error", errorCode: 102, message: 'Creative workflow pre-start validation failed for step 0 (video:animate_photo): Argument "videoModel" must be one of "ltx25", "ltx23"' });
     for (const refusal of [sogniVideoRefusal, pluginRefusal]) {
-      const e = refusal(400, body, { tool: "animate_photo", videoModel: "my-custom-model", sentVideoModel: "my-custom-model" });
+      const e = refusal(400, body, { tool: "animate_photo", videoModel: "my-custom-model" });
       expect(e.message).toBe(
         `Sogni refused the video request (400): it didn't accept the video model "my-custom-model" for animating a picture; it accepts: ltx25, ltx23. Sogni said: Creative workflow pre-start validation failed for step 0 (video:animate_photo): Argument "videoModel" must be one of "ltx25", "ltx23"`,
       );
@@ -391,12 +392,12 @@ describe("Sogni refusals are readable", () => {
   });
 
   it("any other refusal: what we asked for plus Sogni's reason; plain text bodies too", () => {
-    const json = sogniVideoRefusal(400, JSON.stringify({ status: "error", errorCode: 7, message: "Prompt too long." }), { tool: "generate_video", videoModel: "seedance2", sentVideoModel: "seedance2" });
+    const json = sogniVideoRefusal(400, JSON.stringify({ status: "error", errorCode: 7, message: "Prompt too long." }), { tool: "generate_video", videoModel: "seedance2" });
     expect(json.message).toBe(`Sogni refused the video request (400) for making a video with the video model "seedance2": Prompt too long.`);
     expect(json.sogniErrorCode).toBe(7);
-    const text = sogniVideoRefusal(503, "Service Unavailable", { tool: "animate_photo", videoModel: null, sentVideoModel: null });
+    const text = sogniVideoRefusal(503, "Service Unavailable", { tool: "animate_photo", videoModel: null });
     expect(text.message).toBe(`Sogni refused the video request (503) for animating a picture with Sogni's default video model: Service Unavailable`);
-    expect(sogniVideoRefusal(400, "", { tool: "animate_photo", videoModel: null, sentVideoModel: null }).message).toMatch(/no reason given$/);
+    expect(sogniVideoRefusal(400, "", { tool: "animate_photo", videoModel: null }).message).toMatch(/no reason given$/);
   });
 
   it("never carries links, keys or picture data, and stops at about 1500 characters", () => {
@@ -418,15 +419,16 @@ describe("Sogni refusals are readable", () => {
       expect(out).toContain("[link]");
       expect(out.length).toBeLessThanOrEqual(1500);
     }
-    const e = sogniVideoRefusal(400, JSON.stringify({ message: raw }), { tool: "animate_photo", videoModel: "ltx23", sentVideoModel: "ltx23" }, [apiKey]);
+    const e = sogniVideoRefusal(400, JSON.stringify({ message: raw }), { tool: "animate_photo", videoModel: "ltx23" }, [apiKey]);
     expect(e.message).not.toContain(apiKey);
     expect(e.sogniMessage.length).toBeLessThanOrEqual(1500);
   });
 
   it("the storyline shows Sogni's whole reason, not 300 characters of it", () => {
-    const e = sogniVideoRefusal(400, SOGNI_REFUSAL_17_OCT, { tool: "animate_photo", videoModel: "ltx25", sentVideoModel: null });
+    const e = sogniVideoRefusal(400, SOGNI_REFUSAL_17_OCT, { tool: "animate_photo", videoModel: "ltx25" });
     const shown = describeRenderStartFailure(e, { providerId: "sogni", shotNumber: 1, charged: false });
-    expect(shown.startsWith("Sogni didn't accept shot 1: Sogni refused the video request (400): it didn't accept the video model \"ltx25\"")).toBe(true);
+    expect(shown.startsWith('Sogni didn\'t accept shot 1: Sogni refused the video request (400) for animating a picture with the video model "ltx25", even though')).toBe(true);
+    expect(shown).toContain("trying again in a few minutes usually works");
     expect(shown).toContain('"wan3.0-spicy-video"');
     expect(shown).toContain("Nothing was charged.");
   });

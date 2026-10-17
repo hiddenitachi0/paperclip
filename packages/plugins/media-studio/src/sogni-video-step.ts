@@ -8,8 +8,6 @@
 // `videoModel` takes Sogni's tool keys ("ltx25", "seedance2-mini", ...); a
 // catalogue id from the Storylines picker is mapped to its key (the SDK's
 // utils/videoModelIds.js and seedanceModelIds.js aliases).
-// Sogni's default ("ltx25") is asked for by leaving videoModel out -- see
-// SOGNI_DEFAULT_VIDEO_MODEL for the 17 Oct 2026 refusal that made us do so.
 //
 // A copy of the same section in server/src/services/video-provider-clients.ts
 // (the server cannot import this private package, nor this package the
@@ -111,20 +109,6 @@ export function sogniVideoStep(model: string | null | undefined, hasStartImage: 
   return { tool: "generate_video", videoModel: key, pictures: loose ? "references" : "none" };
 }
 
-/**
- * Sogni's documented default video model for both tools. It is asked for by
- * leaving `videoModel` out rather than naming it: on 17 Oct 2026 Sogni's
- * workflow check refused animate_photo with videoModel "ltx25" while listing
- * "ltx25" as allowed, so naming its own default is the one request shape we
- * know it can trip over. The model the shot is recorded with stays "ltx25".
- */
-export const SOGNI_DEFAULT_VIDEO_MODEL = "ltx25";
-
-/** The `videoModel` argument to send for a planned model (null = leave it out). */
-export function sogniVideoModelArgument(videoModel: string | null): string | null {
-  return videoModel && videoModel !== SOGNI_DEFAULT_VIDEO_MODEL ? videoModel : null;
-}
-
 const SOGNI_ERROR_DETAIL_MAX = 1500;
 const SOGNI_TOOL_WORDS: Record<SogniVideoTool, string> = {
   animate_photo: "animating a picture",
@@ -157,13 +141,11 @@ export class SogniVideoRequestError extends Error {
   readonly sogniErrorCode: number | string | null;
   readonly sogniMessage: string;
   readonly tool: SogniVideoTool;
-  /** The model the shot asked for (Sogni's key), null = Sogni's default. */
+  /** The videoModel we sent (Sogni's key), null = left out (Sogni's default). */
   readonly videoModel: string | null;
-  /** What actually went in `arguments.videoModel` (null = left out). */
-  readonly sentVideoModel: string | null;
   constructor(
     message: string,
-    details: { status: number; sogniErrorCode: number | string | null; sogniMessage: string; tool: SogniVideoTool; videoModel: string | null; sentVideoModel: string | null },
+    details: { status: number; sogniErrorCode: number | string | null; sogniMessage: string; tool: SogniVideoTool; videoModel: string | null },
   ) {
     super(message);
     this.name = "SogniVideoRequestError";
@@ -172,7 +154,6 @@ export class SogniVideoRequestError extends Error {
     this.sogniMessage = details.sogniMessage;
     this.tool = details.tool;
     this.videoModel = details.videoModel;
-    this.sentVideoModel = details.sentVideoModel;
   }
 }
 
@@ -185,7 +166,7 @@ export class SogniVideoRequestError extends Error {
 export function sogniVideoRefusal(
   status: number,
   bodyText: string,
-  sent: { tool: SogniVideoTool; videoModel: string | null; sentVideoModel: string | null },
+  sent: { tool: SogniVideoTool; videoModel: string | null },
   secrets: readonly string[] = [],
 ): SogniVideoRequestError {
   let parsed: Record<string, unknown> | null = null;
@@ -201,19 +182,20 @@ export function sogniVideoRefusal(
   const said = sanitizeSogniErrorText(rawMessage, secrets);
   const doing = SOGNI_TOOL_WORDS[sent.tool];
   const model = sent.videoModel ? `the video model "${sent.videoModel}"` : "Sogni's default video model";
-  const leftOut = sent.videoModel && !sent.sentVideoModel ? " (asked for as Sogni's default, without naming it)" : "";
   let message: string;
   const enumMatch = /Argument "videoModel" must be one of ((?:"[^"]*"(?:,\s*)?)+)/.exec(rawMessage);
   if (enumMatch) {
     const accepted = [...enumMatch[1]!.matchAll(/"([^"]*)"/g)].map((m) => m[1]!).filter((v) => v !== "");
     const list = sanitizeSogniErrorText(accepted.join(", "), secrets);
-    message = `Sogni refused the video request (${status}): it didn't accept ${model}${leftOut} for ${doing}; it accepts: ${list}.`;
     if (sent.videoModel && accepted.includes(sent.videoModel)) {
-      message += ` "${sent.videoModel}" is on Sogni's own list, so this looks like a problem on Sogni's side. Try again later, or pick another video model for this shot.`;
+      // Sogni refused a model on its own list: seen on 17 Oct 2026, and the same request went through minutes later.
+      message = `Sogni refused the video request (${status}) for ${doing} with ${model}, even though that model is on its own list of accepted ones. This looks like a temporary problem on Sogni's side; trying again in a few minutes usually works.`;
+    } else {
+      message = `Sogni refused the video request (${status}): it didn't accept ${model} for ${doing}; it accepts: ${list}.`;
     }
     message += ` Sogni said: ${said}`;
   } else {
-    message = `Sogni refused the video request (${status}) for ${doing} with ${model}${leftOut}: ${said || "no reason given"}`;
+    message = `Sogni refused the video request (${status}) for ${doing} with ${model}: ${said || "no reason given"}`;
   }
-  return new SogniVideoRequestError(message, { status, sogniErrorCode: code, sogniMessage: said, tool: sent.tool, videoModel: sent.videoModel, sentVideoModel: sent.sentVideoModel });
+  return new SogniVideoRequestError(message, { status, sogniErrorCode: code, sogniMessage: said, tool: sent.tool, videoModel: sent.videoModel });
 }
