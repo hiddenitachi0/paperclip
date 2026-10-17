@@ -40,6 +40,15 @@ export const HELPER_CONTEXT_MAX_CHARS = 12_000;
 export const HELPER_MESSAGE_MAX_CHARS = 4_000;
 export const HELPER_HISTORY_MAX_TURNS = 12;
 export const HELPER_HISTORY_TURN_MAX_CHARS = 6_000;
+/**
+ * What the ask route ACCEPTS as history. It is more than the model gets: the
+ * server keeps only the last HELPER_HISTORY_MAX_TURNS questions and answers,
+ * each cut to HELPER_HISTORY_TURN_MAX_CHARS, so a long conversation (or an
+ * older browser tab that sends all of it) keeps working instead of being
+ * refused.
+ */
+export const HELPER_HISTORY_ACCEPT_MAX_ITEMS = 100;
+export const HELPER_HISTORY_ACCEPT_TURN_MAX_CHARS = 24_000;
 export const HELPER_PAGE_ROUTE_MAX_CHARS = 500;
 export const HELPER_MAX_OUTPUT_TOKENS = 1_500;
 
@@ -347,7 +356,7 @@ export interface HelperInvestigationAgentSummary {
 
 export const helperAskTurnSchema = z.object({
   role: z.enum(["user", "assistant"]),
-  content: z.string().max(HELPER_HISTORY_TURN_MAX_CHARS),
+  content: z.string().max(HELPER_HISTORY_ACCEPT_TURN_MAX_CHARS),
 });
 
 export const helperPictureSchema = z.discriminatedUnion("kind", [
@@ -382,8 +391,8 @@ export const helperAskSchema = z
     pageRoute: z.string().max(HELPER_PAGE_ROUTE_MAX_CHARS).optional().nullable(),
     /** A saved model (model directory entry) of this company; absent = the company's helper default. */
     directoryEntryId: z.string().uuid().optional().nullable(),
-    /** Earlier turns of this panel conversation (kept in the browser only). */
-    history: z.array(helperAskTurnSchema).max(HELPER_HISTORY_MAX_TURNS * 2).optional(),
+    /** Earlier turns of this panel conversation (kept in the browser only; the server uses the last few). */
+    history: z.array(helperAskTurnSchema).max(HELPER_HISTORY_ACCEPT_MAX_ITEMS).optional(),
     /** Pictures attached to this question only (Phase 2). Needs a model that can see pictures. */
     pictures: z
       .array(helperPictureSchema)

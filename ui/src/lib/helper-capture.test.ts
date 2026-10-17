@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
 import { HELPER_CONTEXT_MAX_CHARS } from "@paperclipai/shared";
-import { captureHelperContext, rectFromPoints } from "./helper-capture";
+import { captureHelperContext, helperCaptureSummary, helperDefaultRoot, helperRectAtPoint, rectFromPoints } from "./helper-capture";
 
 function mount(html: string): HTMLElement {
   const root = document.createElement("div");
@@ -108,5 +108,50 @@ describe("captureHelperContext", () => {
 
   it("normalises a drag in any direction", () => {
     expect(rectFromPoints(100, 80, 20, 10)).toEqual({ left: 20, top: 10, width: 80, height: 70 });
+  });
+
+  it("says when part of the area is an embedded page it cannot read", () => {
+    const root = mount(`<div data-box="0,0,400,400"><p data-box="0,0,400,20">Plugin page</p><iframe title="Studio editor" data-box="0,30,400,300"></iframe></div>`);
+    layout(root);
+    const result = captureHelperContext({ root, rect: rectFromPoints(0, 0, 400, 400) });
+    expect(result.text).toContain("[Embedded page: Studio editor — the helper cannot read what is inside it]");
+  });
+});
+
+describe("helperDefaultRoot", () => {
+  it("is the top-most open pop-up dialog when there is one, else the main area", () => {
+    mount(`<main id="main-content"><p>Page</p></main>`);
+    expect(helperDefaultRoot(document).id).toBe("main-content");
+    const dialog = mount(`<div role="dialog" data-state="open" id="d1"><p>Delete?</p></div>`);
+    expect(helperDefaultRoot(document)).toBe(dialog.firstElementChild);
+    // The helper's own layers never count.
+    mount(`<div data-helper-ignore><div role="dialog" data-state="open" id="helper"></div></div>`);
+    expect(helperDefaultRoot(document).id).toBe("d1");
+    mount(`<div role="alertdialog" data-state="open" id="d2"></div>`);
+    expect(helperDefaultRoot(document).id).toBe("d2");
+  });
+});
+
+describe("helperRectAtPoint", () => {
+  it("a click marks the field, card or paragraph under the pointer, never the helper's own layer", () => {
+    const root = mount(`<div data-helper-ignore id="layer"></div><section data-helper-entity="agent:1" data-box="0,0,300,200"><span id="word" data-box="5,5,20,10">Hi</span></section>`);
+    layout(root);
+    const layer = document.getElementById("layer")!;
+    const word = document.getElementById("word")!;
+    (document as Document & { elementsFromPoint: (x: number, y: number) => Element[] }).elementsFromPoint = () => [layer, word, document.body];
+    expect(helperRectAtPoint(10, 10, document)).toEqual({ left: 0, top: 0, width: 300, height: 200 });
+    (document as Document & { elementsFromPoint: (x: number, y: number) => Element[] }).elementsFromPoint = () => [layer, document.body];
+    expect(helperRectAtPoint(10, 10, document)).toBeNull();
+  });
+});
+
+describe("helperCaptureSummary", () => {
+  it("says what was found in plain words, and when nothing was", () => {
+    expect(
+      helperCaptureSummary({ text: "x", truncated: false, entities: ["agent:1"], applyTargets: ["Description"], itemCount: 3 }, true),
+    ).toBe("3 lines of text from the area you marked and 1 record. The answer can be put into “Description”.");
+    expect(helperCaptureSummary({ text: "x", truncated: false, entities: [], applyTargets: [], itemCount: 0 }, true)).toContain(
+      "Nothing readable was found in the area you marked.",
+    );
   });
 });

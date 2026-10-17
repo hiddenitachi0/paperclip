@@ -29,7 +29,8 @@ vi.mock("../../context/CompanyContext", () => ({
   useCompany: () => ({ selectedCompanyId: "c1", selectedCompany: { id: "c1", name: "Acme" } }),
 }));
 vi.mock("../MarkdownBody", () => ({ MarkdownBody: ({ children }: { children: string }) => <div>{children}</div> }));
-vi.mock("../../lib/helper-capture", () => ({
+vi.mock("../../lib/helper-capture", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/helper-capture")>()),
   captureHelperContext: () => ({ text: "Label: Character sheet", truncated: false, entities: [], applyTargets: ["Character sheet (all fields)"], itemCount: 1 }),
   viewportRect: () => ({ left: 0, top: 0, width: 100, height: 100 }),
   rectFromPoints: () => ({ left: 0, top: 0, width: 100, height: 100 }),
@@ -88,6 +89,7 @@ function settings(overrides: Partial<HelperSettingsView> = {}): HelperSettingsVi
 let root: Root | null = null;
 let host: HTMLDivElement | null = null;
 afterEach(() => {
+  window.sessionStorage.clear();
   act(() => root?.unmount());
   host?.remove();
   root = null;

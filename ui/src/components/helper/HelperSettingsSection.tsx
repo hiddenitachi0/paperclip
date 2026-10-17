@@ -10,6 +10,7 @@ import { Link } from "@/lib/router";
 import { SecretBindingPicker } from "../SecretBindingPicker";
 import { groupEntries, type CatalogueItem } from "../../lib/model-catalogue";
 import { helperStatusText, isHelperStatusReady, sortByReadiness } from "./helper-model-status";
+import { helperErrorText } from "./helper-errors";
 
 function toCatalogueItem(option: HelperModelOption): CatalogueItem {
   return {
@@ -157,7 +158,7 @@ export function HelperSettingsSection({ companyId }: { companyId: string }) {
         setCanWriteRefusal(refusal);
         return;
       }
-      pushToast({ title: error instanceof ApiError ? error.message : "Could not save the helper settings", tone: "error" });
+      pushToast({ title: helperErrorText(error, "save"), tone: "error" });
     },
   });
   const investigator = settings?.investigationAgent ?? null;
@@ -169,11 +170,17 @@ export function HelperSettingsSection({ companyId }: { companyId: string }) {
       <div className="section-title">Helper (Ask Paperclip)</div>
       <div className="space-y-4 rounded-md section-box px-4 py-4 text-sm">
         <p className="text-xs text-muted-foreground">
-          The “Ask” button at the bottom right of every page (or Ctrl/Cmd+Shift+H) opens a helper that explains what is
-          on the page. You can mark part of the page and ask about it. It only reads the text you choose to send, it
-          cannot change anything, and each answer is counted in Costs like any other model call. For harder questions
-          it can hand over to an agent (see “Agent for deeper investigations” below).
+          The “Ask” tab on the right edge of every page (or Ctrl/Cmd+Shift+H) opens a helper that explains what is on
+          the page, pop-up windows included. People can mark part of the page and ask about it. It only reads the text
+          they choose to send, it cannot change anything, and each answer is counted in Costs like any other model call.
+          For harder questions it can hand over to an agent (see “Agent for deeper investigations” below). Everything
+          here works without changes: Claude on Paperclip's own key answers until you pick something else.
         </p>
+        {settings && readOnly ? (
+          <p className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground" data-testid="helper-settings-read-only">
+            You can see these settings, but only a company owner or admin can change them.
+          </p>
+        ) : null}
         {settingsQuery.isLoading ? <p className="text-xs text-muted-foreground">Loading…</p> : null}
         {settingsQuery.error ? (
           <p className="text-xs text-destructive">
@@ -185,7 +192,7 @@ export function HelperSettingsSection({ companyId }: { companyId: string }) {
             <label className="block space-y-1">
               <span className="text-xs font-medium">Default model</span>
               <select
-                className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm"
+                className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-foreground"
                 value={settings.defaultDirectoryEntryId ?? ""}
                 disabled={readOnly || mutation.isPending}
                 onChange={(e) => mutation.mutate({ defaultDirectoryEntryId: e.target.value || null })}
@@ -211,7 +218,7 @@ export function HelperSettingsSection({ companyId }: { companyId: string }) {
                 const picked = settings.defaultDirectoryEntryId ? optionsById.get(settings.defaultDirectoryEntryId) : null;
                 const status = picked ? picked.status : settings.builtInDefaultStatus;
                 return status && !isHelperStatusReady(status) ? (
-                  <span className="block text-xs text-amber-600" data-testid="helper-default-model-warning">
+                  <span className="block text-xs text-amber-700 dark:text-amber-500" data-testid="helper-default-model-warning">
                     {helperStatusText(status)}: {status.detail}
                   </span>
                 ) : null;
@@ -253,7 +260,7 @@ export function HelperSettingsSection({ companyId }: { companyId: string }) {
                     disabled={readOnly || mutation.isPending}
                   />
                   {key.status === "unusable" ? (
-                    <p className="text-xs text-amber-600">This secret is deleted or switched off. Pick another one.</p>
+                    <p className="text-xs text-amber-700 dark:text-amber-500">This secret is deleted or switched off. Pick another one.</p>
                   ) : null}
                 </div>
               ))}
@@ -263,7 +270,7 @@ export function HelperSettingsSection({ companyId }: { companyId: string }) {
               <label className="block space-y-1">
                 <span className="text-xs font-medium">Agent for deeper investigations</span>
                 <select
-                  className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm"
+                  className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-foreground"
                   value={settings.investigationAgentId ?? ""}
                   disabled={readOnly || mutation.isPending}
                   onChange={(e) => mutation.mutate({ investigationAgentId: e.target.value || null })}
@@ -279,7 +286,7 @@ export function HelperSettingsSection({ companyId }: { companyId: string }) {
                       </option>
                     ))}
                   {settings.investigationAgentId && !(agentsQuery.data ?? []).some((a) => a.id === settings.investigationAgentId) ? (
-                    <option value={settings.investigationAgentId}>Saved agent</option>
+                    <option value={settings.investigationAgentId}>{investigator?.name ?? "The agent picked earlier"}</option>
                   ) : null}
                 </select>
                 <span className="block text-xs text-muted-foreground">
@@ -316,7 +323,7 @@ export function HelperSettingsSection({ companyId }: { companyId: string }) {
               ) : null}
               {!canWriteRefusal && investigator && investigator.writeCapabilities.length > 0 && !investigator.writeAcknowledged ? (
                 readOnly ? (
-                  <p className="text-xs text-amber-600" data-testid="helper-investigator-unconfirmed">
+                  <p className="text-xs text-amber-700 dark:text-amber-500" data-testid="helper-investigator-unconfirmed">
                     “{investigator.name}” can change things and no owner or admin has confirmed that, so investigations are
                     off until one does.
                   </p>
@@ -337,7 +344,7 @@ export function HelperSettingsSection({ companyId }: { companyId: string }) {
                 </p>
               ) : null}
               {investigator && investigator.budgetMonthlyCents === 0 && !readOnly ? (
-                <p className="text-xs text-amber-600" data-testid="helper-investigator-no-budget">
+                <p className="text-xs text-amber-700 dark:text-amber-500" data-testid="helper-investigator-no-budget">
                   “{investigator.name}” has no monthly budget, so only the limits below cap what investigations cost. You
                   can set a budget on the agent's page.
                 </p>
@@ -346,7 +353,7 @@ export function HelperSettingsSection({ companyId }: { companyId: string }) {
                 <label className="block space-y-1">
                   <span className="text-xs font-medium">Running at once, per person</span>
                   <select
-                    className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm"
+                    className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-foreground"
                     value={settings.investigationMaxRunning}
                     disabled={readOnly || mutation.isPending}
                     onChange={(e) => mutation.mutate({ investigationMaxRunning: Number(e.target.value) })}
@@ -362,7 +369,7 @@ export function HelperSettingsSection({ companyId }: { companyId: string }) {
                 <label className="block space-y-1">
                   <span className="text-xs font-medium">Started per person in 24 hours</span>
                   <select
-                    className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm"
+                    className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-foreground"
                     value={settings.investigationMaxPerDay}
                     disabled={readOnly || mutation.isPending}
                     onChange={(e) => mutation.mutate({ investigationMaxPerDay: Number(e.target.value) })}
@@ -378,7 +385,7 @@ export function HelperSettingsSection({ companyId }: { companyId: string }) {
                 <label className="block space-y-1">
                   <span className="text-xs font-medium">Whole company in 24 hours</span>
                   <select
-                    className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm"
+                    className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-foreground"
                     value={settings.investigationCompanyMaxPerDay}
                     disabled={readOnly || mutation.isPending}
                     onChange={(e) => mutation.mutate({ investigationCompanyMaxPerDay: Number(e.target.value) })}
@@ -398,9 +405,6 @@ export function HelperSettingsSection({ companyId }: { companyId: string }) {
                 ceiling too. Changing the limits does not stop anything already running.
               </span>
             </div>
-            {readOnly ? (
-              <p className="text-xs text-muted-foreground">Only a company owner or admin can change these settings.</p>
-            ) : null}
           </>
         ) : null}
       </div>

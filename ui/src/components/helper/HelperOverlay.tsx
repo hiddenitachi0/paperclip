@@ -1,15 +1,30 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { HelpCircle, Crop, X, Send, Eye, RotateCcw, Loader2, ImagePlus, FolderOpen, Search } from "lucide-react";
+import { DismissableLayer, FocusScope } from "radix-ui/internal";
+import {
+  HelpCircle,
+  Crop,
+  X,
+  Send,
+  Eye,
+  RotateCcw,
+  Loader2,
+  ImagePlus,
+  FolderOpen,
+  Search,
+  Copy,
+  Check,
+  MessageSquarePlus,
+  Undo2,
+} from "lucide-react";
 import {
   HELPER_INVESTIGATIONS_LIST_LIMIT,
   HELPER_MESSAGE_MAX_CHARS,
   HELPER_PICTURES_MAX,
-  type HelperAskResponse,
   type HelperDroppedReference,
   type HelperInvestigationList,
   type HelperModelOption,
-  type HelperPictureInput,
 } from "@paperclipai/shared";
 import { useLocation } from "@/lib/router";
 import { Button } from "@/components/ui/button";
@@ -17,8 +32,25 @@ import { Textarea } from "@/components/ui/textarea";
 import { useCompany } from "../../context/CompanyContext";
 import { helperApi } from "../../api/helper";
 import { queryKeys } from "../../lib/queryKeys";
-import { captureHelperContext, rectFromPoints, viewportRect, type HelperCapture, type HelperRect } from "../../lib/helper-capture";
-import { applyHelperAnswer, canApplyHelperAnswer, extractApplicableText, useHelperApplyTargets } from "../../lib/helper-apply";
+import {
+  captureHelperContext,
+  helperCaptureSummary,
+  helperDefaultRoot,
+  helperRectAtPoint,
+  helperScrollableAt,
+  rectFromPoints,
+  viewportRect,
+  type HelperCapture,
+  type HelperRect,
+} from "../../lib/helper-capture";
+import {
+  applyHelperAnswer,
+  canApplyHelperAnswer,
+  extractApplicableText,
+  findHelperApplyElement,
+  readHelperApplyValue,
+  useHelperApplyTargets,
+} from "../../lib/helper-apply";
 import { groupEntries, type CatalogueItem } from "../../lib/model-catalogue";
 import { MarkdownBody } from "../MarkdownBody";
 import { HelperFilePicker } from "./HelperFilePicker";
@@ -34,60 +66,57 @@ import {
   DroppedReferencesNotice,
   HELPER_INVESTIGATION_POLL_MS,
   InvestigateConfirm,
+  InvestigationInline,
   MyInvestigations,
   isInvestigationActive,
   type InvestigationDraft,
 } from "./HelperInvestigations";
+import { helperErrorText } from "./helper-errors";
+import {
+  buildHelperHistory,
+  clampHelperWidth,
+  historyContentOf,
+  loadHelperOpen,
+  loadHelperSession,
+  loadHelperWidth,
+  saveHelperOpen,
+  saveHelperSession,
+  saveHelperWidth,
+  type HelperTurn,
+} from "./helper-session";
+
+export { historyContentOf };
 
 /**
- * "Ask Paperclip" — the floating helper (Phase 1).
+ * "Ask Paperclip" — the floating helper.
  *
- * Phase 2: the person can attach up to 4 pictures (upload, paste, or pick
- * one from the company's Files) to a question. Only a model that can see
- * pictures may answer it; otherwise the panel says so and offers those that
- * can. Each model in the picker shows whether it is ready.
+ * An "Ask" tab on the right edge of the screen (and Ctrl/Cmd+Shift+H) opens
+ * a side panel. The person can mark an area of the page (drag a rectangle,
+ * like a snipping tool, or click one thing); the panel then shows exactly
+ * the text the helper will see before anything is sent. Answers can be
+ * applied to an opted-in text field (and undone); the person still presses
+ * the page's own Save.
  *
- * A small "Ask" button (and Ctrl/Cmd+Shift+H) opens a side panel. The
- * person can mark an area of the page (drag a rectangle, like a snipping
- * tool); the panel then shows exactly the text the helper will see before
- * anything is sent. Answers can be applied to an opted-in text field that was
- * inside the marked area; the person still presses the page's own Save.
+ * Phase 2: up to 4 pictures (upload, paste, or one of the company's Files).
+ * Only a model that can see pictures may answer them; the panel says so and
+ * offers those that can. Each model in the picker shows whether it is ready.
  *
- * The panel and the marking layer carry data-helper-ignore so they are never
- * part of what is captured. Conversation turns live in this component only
- * (gone on reload); nothing is remembered on the server.
+ * Phase 3: "Investigate deeper" hands a question to the company's
+ * investigation agent as a normal task, after the person sees who will look,
+ * what it usually takes and costs, and that it is advice only. Its state and
+ * its answer show up in the conversation itself, and in "My investigations"
+ * (fetched from the server, so it survives a reload).
  *
- * Phase 3: "Investigate deeper" hands a question (typed, or one already
- * answered) to the company's investigation agent as a normal task, after the
- * person sees who will look, what it usually takes and costs, and that it is
- * advice only. The quick helper may suggest it; it never starts by itself.
- * "My investigations" is fetched from the server (so it survives a reload)
- * and polled while any is running.
+ * The conversation is kept per company for this browser tab (sessionStorage,
+ * see helper-session.ts): it survives moving between pages and a reload, and
+ * a company switch shows that company's own conversation. Nothing of it is
+ * remembered on the server.
+ *
+ * The panel works over pop-up dialogs too: it is drawn above them, clicking
+ * in it does not close them, typing in it is not pulled back into them, and
+ * "the visible page" then means the dialog. Everything it draws carries
+ * data-helper-ignore so it is never part of what is captured.
  */
-
-interface Turn {
-  role: "user" | "assistant";
-  content: string;
-  meta?: Pick<HelperAskResponse, "modelLabel" | "costCents" | "truncated">;
-  /** Fields the person marked when asking this question. */
-  applyTargets?: string[];
-  /** Pictures attached to this question (previews only; not sent again with later questions). */
-  pictures?: Array<{ key: string; name: string; previewUrl: string }>;
-  /** What was sent with this question, so "Investigate deeper" can hand the same to an agent. */
-  context?: string | null;
-  pageRoute?: string | null;
-  references?: string[];
-  pictureInputs?: HelperPictureInput[];
-  /** The quick model said this needs a closer look (Phase 3). */
-  suggestInvestigation?: boolean;
-}
-
-/** History text for an earlier question that had pictures: the model knows they existed, they are not resent. */
-export function historyContentOf(turn: Pick<Turn, "content" | "pictures">): string {
-  const n = turn.pictures?.length ?? 0;
-  if (n === 0) return turn.content;
-  return `${turn.content}\n\n[${n === 1 ? "1 picture was" : `${n} pictures were`} attached to this question; they are not sent again.]`;
-}
 
 const SHORTCUT_LABEL = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘⇧H" : "Ctrl+Shift+H";
 
@@ -119,65 +148,212 @@ function toCatalogueItem(option: HelperModelOption): CatalogueItem & { option: H
   };
 }
 
-function describeError(err: unknown): string {
-  if (err instanceof Error && err.message) return err.message;
-  return "The helper could not answer. Try again.";
+function isSmallScreen(): boolean {
+  return typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(max-width: 767px)").matches;
+}
+
+/**
+ * Pop-up dialogs trap the keyboard focus inside themselves. While the panel is
+ * open this keeps that trap paused (the newest focus scope pauses the older
+ * ones), so the person can type in the panel next to an open dialog. It is
+ * remounted whenever a dialog opens, so it is always the newest scope.
+ */
+function DialogFocusPause() {
+  const [generation, setGeneration] = useState(0);
+  useEffect(() => {
+    if (typeof MutationObserver === "undefined") return;
+    const observer = new MutationObserver((records) => {
+      if (records.some((record) => touchesDialog(record.addedNodes))) setGeneration((g) => g + 1);
+    });
+    observer.observe(document.body, { childList: true });
+    return () => observer.disconnect();
+  }, []);
+  return (
+    <FocusScope.FocusScope
+      key={generation}
+      trapped={false}
+      loop={false}
+      onMountAutoFocus={(event) => event.preventDefault()}
+      onUnmountAutoFocus={(event) => event.preventDefault()}
+      style={{ display: "none" }}
+    />
+  );
+}
+
+function CopyButton({ text, testId }: { text: string; testId?: string }) {
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+  useEffect(() => {
+    if (state === "idle") return;
+    const timer = setTimeout(() => setState("idle"), 2000);
+    return () => clearTimeout(timer);
+  }, [state]);
+  return (
+    <Button
+      size="xs"
+      variant="ghost"
+      data-testid={testId}
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(text);
+          setState("copied");
+        } catch {
+          setState("failed");
+        }
+      }}
+    >
+      {state === "copied" ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+      {state === "copied" ? "Copied" : state === "failed" ? "Could not copy" : "Copy"}
+    </Button>
+  );
+}
+
+const DIALOG_SELECTOR = '[role="dialog"],[role="alertdialog"]';
+
+function touchesDialog(nodes: NodeList): boolean {
+  return Array.from(nodes).some(
+    (node) =>
+      node instanceof Element &&
+      !node.hasAttribute("data-helper-ignore") &&
+      (node.matches(DIALOG_SELECTOR) || node.querySelector(DIALOG_SELECTOR) !== null),
+  );
+}
+
+/**
+ * The helper's own place in the page: a container straight under <body>, so
+ * it is drawn above pop-up dialogs and is not inside the page it reads.
+ *
+ * Pointer presses inside it stop here. A pop-up dialog closes on any press
+ * "outside" itself, and it decides that a moment later, after the click, when
+ * the button pressed may already be gone (the helper swaps buttons as it
+ * goes); stopping the press here means a dialog never counts a press in the
+ * helper as outside. React still sees it: it listens on this container.
+ */
+function useHelperHost(): HTMLElement | null {
+  const [host, setHost] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    const el = document.createElement("div");
+    el.setAttribute("data-helper-ignore", "");
+    // Kept readable for screen readers while a dialog hides everything else (aria-live elements are left alone).
+    el.setAttribute("aria-live", "off");
+    el.setAttribute("data-testid", "helper-root");
+    const stop = (event: Event) => event.stopPropagation();
+    el.addEventListener("pointerdown", stop);
+    document.body.appendChild(el);
+    setHost(el);
+    return () => {
+      el.removeEventListener("pointerdown", stop);
+      el.remove();
+    };
+  }, []);
+  return host;
 }
 
 export function HelperOverlay() {
-  const { selectedCompanyId, selectedCompany } = useCompany();
+  const { selectedCompanyId } = useCompany();
+  const host = useHelperHost();
+  if (!selectedCompanyId || !host) return null;
+  // One instance per company: a company switch starts from that company's own conversation.
+  return createPortal(<CompanyHelper key={selectedCompanyId} companyId={selectedCompanyId} />, host);
+}
+
+interface Note {
+  text: string;
+  undo?: () => void;
+}
+
+function CompanyHelper({ companyId }: { companyId: string }) {
+  const { selectedCompany } = useCompany();
   const location = useLocation();
-  const [open, setOpen] = useState(false);
+  const initial = useMemo(() => loadHelperSession(companyId), [companyId]);
+  const [open, setOpen] = useState(loadHelperOpen);
+  const [width, setWidth] = useState(loadHelperWidth);
   const [marking, setMarking] = useState(false);
   const [drag, setDrag] = useState<{ x: number; y: number; x2: number; y2: number } | null>(null);
   const [markedRect, setMarkedRect] = useState<HelperRect | null>(null);
+  const [outlineVisible, setOutlineVisible] = useState(true);
   const [capture, setCapture] = useState<HelperCapture | null>(null);
+  const [includePage, setIncludePage] = useState(true);
   const [seeOpen, setSeeOpen] = useState(false);
   const [message, setMessage] = useState("");
-  const [entryId, setEntryId] = useState("");
-  const [turns, setTurns] = useState<Turn[]>([]);
+  const [entryId, setEntryId] = useState(initial.entryId);
+  const [turns, setTurns] = useState<HelperTurn[]>(initial.turns);
+  const [seenAnswerIds, setSeenAnswerIds] = useState<string[]>(initial.seenAnswerIds);
   const [pending, setPending] = useState(false);
+  const [slow, setSlow] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [appliedNote, setAppliedNote] = useState<string | null>(null);
+  const [note, setNote] = useState<Note | null>(null);
   const [pictures, setPictures] = useState<HelperAttachedPicture[]>([]);
   const [pictureProblems, setPictureProblems] = useState<string[]>([]);
   const [filePickerOpen, setFilePickerOpen] = useState(false);
   const [draft, setDraft] = useState<(InvestigationDraft & { fromComposer: boolean }) | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
-  const [startedIds, setStartedIds] = useState<string[]>([]);
   const [droppedNotice, setDroppedNotice] = useState<HelperDroppedReference[]>([]);
   const queryClient = useQueryClient();
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const panelRef = useRef<HTMLElement | null>(null);
+  const openButtonRef = useRef<HTMLButtonElement | null>(null);
+  const endRef = useRef<HTMLDivElement | null>(null);
+  const sendingRef = useRef(false);
+  const wantFocusRef = useRef(false);
   const registeredTargets = useHelperApplyTargets();
 
   const route = `${location.pathname}${location.search}`;
 
+  // ─── Remembered for this tab ──────────────────────────────────────────────
+  useEffect(() => saveHelperOpen(open), [open]);
+  useEffect(() => {
+    saveHelperSession(companyId, { turns, entryId, seenAnswerIds });
+  }, [companyId, turns, entryId, seenAnswerIds]);
+
+  // ─── Server data ──────────────────────────────────────────────────────────
   const settingsQuery = useQuery({
-    queryKey: queryKeys.companies.helperSettings(selectedCompanyId ?? ""),
-    queryFn: () => helperApi.getSettings(selectedCompanyId!),
-    enabled: open && Boolean(selectedCompanyId),
+    queryKey: queryKeys.companies.helperSettings(companyId),
+    queryFn: () => helperApi.getSettings(companyId),
+    enabled: open,
     staleTime: 60_000,
   });
   const settings = settingsQuery.data;
-  const investigationsKey = queryKeys.companies.helperInvestigations(selectedCompanyId ?? "");
+
+  const inlineIds = useMemo(
+    () => turns.filter((t) => t.role === "investigation" && t.investigationId).map((t) => t.investigationId!),
+    [turns],
+  );
+  const investigationsKey = queryKeys.companies.helperInvestigations(companyId);
+  const cachedList = queryClient.getQueryData<HelperInvestigationList>(investigationsKey);
+  const watchWhileClosed = inlineIds.some((id) => {
+    const item = cachedList?.investigations.find((i) => i.id === id);
+    return !item || isInvestigationActive(item);
+  });
   const investigationsQuery = useQuery({
     queryKey: investigationsKey,
-    queryFn: () => helperApi.listInvestigations(selectedCompanyId!),
-    enabled: open && Boolean(selectedCompanyId),
-    // Live while any is waiting or working, and only while the panel is open.
+    queryFn: () => helperApi.listInvestigations(companyId),
+    // While the panel is open, and while one started from this conversation is still running.
+    enabled: open || watchWhileClosed,
     refetchInterval: (query) =>
       query.state.data?.investigations.some(isInvestigationActive) ? HELPER_INVESTIGATION_POLL_MS : false,
     refetchOnWindowFocus: true,
   });
-  const investigations = investigationsQuery.data?.investigations ?? [];
-  const openInvestigationIds = useMemo(
-    () => new Set([...startedIds, ...(investigations[0] ? [investigations[0].id] : [])]),
-    [startedIds, investigations],
+  const investigations = useMemo(() => investigationsQuery.data?.investigations ?? [], [investigationsQuery.data]);
+  const investigationsById = useMemo(() => new Map(investigations.map((i) => [i.id, i])), [investigations]);
+  const investigationAnswers = useMemo(
+    () => new Map(investigations.filter((i) => i.answer).map((i) => [i.id, i.answer!])),
+    [investigations],
   );
+  const listOpenIds = useMemo(() => {
+    const newest = investigations[0];
+    return new Set(newest && !inlineIds.includes(newest.id) ? [newest.id] : []);
+  }, [investigations, inlineIds]);
+  const unseenAnswerIds = inlineIds.filter((id) => investigationsById.get(id)?.answer && !seenAnswerIds.includes(id));
+
+  useEffect(() => {
+    if (open && unseenAnswerIds.length > 0) setSeenAnswerIds((prev) => [...prev, ...unseenAnswerIds.filter((id) => !prev.includes(id))]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, unseenAnswerIds.join(",")]);
+
   const startInvestigation = useMutation({
     mutationFn: (input: InvestigationDraft) =>
-      helperApi.startInvestigation(selectedCompanyId!, {
+      helperApi.startInvestigation(companyId, {
         question: input.question,
         context: input.context,
         pageRoute: input.pageRoute,
@@ -193,7 +369,16 @@ export function HelperOverlay() {
           : prev,
       );
       void queryClient.invalidateQueries({ queryKey: investigationsKey });
-      setStartedIds((prev) => [view.id, ...prev]);
+      setTurns((prev) => [
+        ...prev,
+        {
+          role: "investigation",
+          content: view.question,
+          investigationId: view.id,
+          investigationIdentifier: view.identifier,
+          agentName: view.agentName,
+        },
+      ]);
       setDroppedNotice(view.droppedReferences ?? []);
       if (draft?.fromComposer) {
         setMessage("");
@@ -204,10 +389,12 @@ export function HelperOverlay() {
       setStartError(null);
     },
     onError: (err) => {
-      setStartError(describeError(err));
+      setStartError(helperErrorText(err, "investigate"));
       void queryClient.invalidateQueries({ queryKey: investigationsKey });
     },
   });
+
+  // ─── Models ───────────────────────────────────────────────────────────────
   // Ready models first: groups with a ready model first, and ready models first inside each group.
   const groups = useMemo(() => {
     const grouped = groupEntries((settings?.models ?? []).map(toCatalogueItem), "maker").map((group) => ({
@@ -227,27 +414,28 @@ export function HelperOverlay() {
   const visionModels = sortByReadiness(
     (settings?.models ?? []).filter((m) => m.canSeePictures === true).map((option) => ({ option })),
   ).map(({ option }) => option);
+  const offerBuiltInForPictures = Boolean(settings?.builtInDefaultCanSeePictures && !defaultModel && entryId);
 
+  // A model picked earlier that is no longer in the company's list: fall back to the default.
+  useEffect(() => {
+    if (settings && entryId && !settings.models.some((m) => m.id === entryId)) setEntryId("");
+  }, [settings, entryId]);
+
+  // ─── What the helper sees ─────────────────────────────────────────────────
   const captureNow = useCallback(
-    (rect: HelperRect | null) => {
-      const main = document.getElementById("main-content");
-      setCapture(
-        captureHelperContext({
-          root: rect ? document.body : main ?? document.body,
-          rect: rect ?? viewportRect(),
-          route,
-          pageTitle: document.title,
-          companyName: selectedCompany?.name ?? null,
-        }),
-      );
+    (rect: HelperRect | null): HelperCapture => {
+      const next = captureHelperContext({
+        root: rect ? document.body : helperDefaultRoot(document),
+        rect: rect ?? viewportRect(),
+        route,
+        pageTitle: document.title,
+        companyName: selectedCompany?.name ?? null,
+      });
+      setCapture(next);
+      return next;
     },
     [route, selectedCompany?.name],
   );
-
-  // Opening the panel takes the visible page as the default context.
-  useEffect(() => {
-    if (open && !capture) captureNow(null);
-  }, [open, capture, captureNow]);
 
   // A new page means the old context no longer matches what is on screen.
   useEffect(() => {
@@ -255,39 +443,142 @@ export function HelperOverlay() {
     setMarkedRect(null);
   }, [route]);
 
+  // While the panel is open, read the visible page (shortly after a page change, so the new page has drawn).
   useEffect(() => {
+    if (!open || marking || capture || markedRect) return;
+    const timer = setTimeout(() => captureNow(null), 250);
+    return () => clearTimeout(timer);
+  }, [open, marking, capture, markedRect, captureNow]);
+
+  // The marked outline is drawn where the area was; once the page scrolls it no longer matches.
+  useEffect(() => {
+    if (!markedRect || !outlineVisible) return;
+    const hide = (event: Event) => {
+      if (event.target instanceof Element && event.target.closest("[data-helper-ignore]")) return;
+      setOutlineVisible(false);
+    };
+    document.addEventListener("scroll", hide, true);
+    window.addEventListener("resize", hide);
+    return () => {
+      document.removeEventListener("scroll", hide, true);
+      window.removeEventListener("resize", hide);
+    };
+  }, [markedRect, outlineVisible]);
+
+  // A pop-up dialog opening or closing changes what is on screen: a marked area no longer matches it.
+  useEffect(() => {
+    if (!markedRect || typeof MutationObserver === "undefined") return;
+    const observer = new MutationObserver((records) => {
+      if (records.some((record) => touchesDialog(record.addedNodes) || touchesDialog(record.removedNodes))) {
+        setMarkedRect(null);
+        setCapture(null);
+      }
+    });
+    observer.observe(document.body, { childList: true });
+    return () => observer.disconnect();
+  }, [markedRect]);
+
+  // ─── Open, close, focus, keys ─────────────────────────────────────────────
+  const openPanel = useCallback(() => {
+    wantFocusRef.current = true;
+    setOpen(true);
+  }, []);
+
+  const closePanel = useCallback(() => {
+    const hadFocus = Boolean(panelRef.current && panelRef.current.contains(document.activeElement));
+    setOpen(false);
+    setMarking(false);
+    setDrag(null);
+    if (hadFocus) requestAnimationFrame(() => openButtonRef.current?.focus());
+  }, []);
+
+  const cancelMarking = useCallback(() => {
+    setMarking(false);
+    setDrag(null);
+    wantFocusRef.current = true;
+  }, []);
+
+  useEffect(() => {
+    if (open && !marking && wantFocusRef.current) {
+      wantFocusRef.current = false;
+      inputRef.current?.focus();
+    }
+  }, [open, marking]);
+
+  useEffect(() => {
+    // Capture phase on window: runs before a pop-up dialog's own Esc handling (on document), so Esc
+    // in the panel closes the panel, not the dialog the person is asking about.
     const onKey = (event: KeyboardEvent) => {
       if (isHelperShortcut(event)) {
         event.preventDefault();
-        setOpen((v) => !v);
+        if (open) closePanel();
+        else openPanel();
         return;
       }
-      if (event.key === "Escape" && marking) {
+      if (event.key !== "Escape") return;
+      if (marking) {
         event.preventDefault();
-        setMarking(false);
-        setDrag(null);
+        event.stopPropagation();
+        cancelMarking();
+        return;
       }
+      const panel = panelRef.current;
+      if (!open || !panel || !(event.target instanceof Node) || !panel.contains(event.target)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (filePickerOpen) setFilePickerOpen(false);
+      else if (draft) setDraft(null);
+      else closePanel();
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [marking]);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [open, marking, filePickerOpen, draft, openPanel, closePanel, cancelMarking]);
 
+  // A pop-up dialog blocks scrolling everywhere but itself; the panel's own lists must still scroll.
   useEffect(() => {
-    if (open && !marking) inputRef.current?.focus();
+    const panel = panelRef.current;
+    if (!open || marking || !panel) return;
+    const stop = (event: Event) => event.stopPropagation();
+    panel.addEventListener("wheel", stop, { passive: true });
+    panel.addEventListener("touchmove", stop, { passive: true });
+    return () => {
+      panel.removeEventListener("wheel", stop);
+      panel.removeEventListener("touchmove", stop);
+    };
   }, [open, marking]);
 
-  if (!selectedCompanyId) return null;
+  // Keep the newest message (or the confirm step) in view.
+  const answeredCount = inlineIds.filter((id) => investigationAnswers.has(id)).length;
+  useEffect(() => {
+    if (!open || marking) return;
+    endRef.current?.scrollIntoView?.({ block: "end" });
+  }, [open, marking, turns.length, pending, error, Boolean(draft), answeredCount]);
 
-  const finishMarking = (rect: HelperRect | null) => {
+  useEffect(() => {
+    if (!pending) {
+      setSlow(false);
+      return;
+    }
+    const timer = setTimeout(() => setSlow(true), 15_000);
+    return () => clearTimeout(timer);
+  }, [pending]);
+
+  // ─── Marking ──────────────────────────────────────────────────────────────
+  const finishMarking = (rect: HelperRect | null, point: { x: number; y: number } | null) => {
     setMarking(false);
     setDrag(null);
-    if (rect && rect.width >= 8 && rect.height >= 8) {
-      setMarkedRect(rect);
-      captureNow(rect);
+    wantFocusRef.current = true;
+    const area = rect && rect.width >= 8 && rect.height >= 8 ? rect : point ? helperRectAtPoint(point.x, point.y) : null;
+    if (area) {
+      setMarkedRect(area);
+      setOutlineVisible(true);
+      setIncludePage(true);
+      captureNow(area);
       setSeeOpen(true);
     }
   };
 
+  // ─── Asking ───────────────────────────────────────────────────────────────
   const addFiles = async (files: readonly File[]) => {
     if (files.length === 0) return;
     const { pictures: added, problems } = await filesToHelperPictures(files, pictures.length);
@@ -295,22 +586,31 @@ export function HelperOverlay() {
     if (added.length > 0) setPictures((prev) => [...prev, ...added].slice(0, HELPER_PICTURES_MAX));
   };
 
+  /** What goes with a question now: the marked area as marked, or the visible page read again. */
+  const contextForSend = (): HelperCapture | null => {
+    if (!includePage) return null;
+    if (markedRect && capture) return capture;
+    return captureNow(null);
+  };
+
   const send = async () => {
     const text = message.trim();
-    if (!text || pending || blindWithPictures) return;
+    if (!text || sendingRef.current || blindWithPictures) return;
+    sendingRef.current = true;
     setPending(true);
     setError(null);
-    setAppliedNote(null);
-    const history = turns.map((t) => ({ role: t.role, content: historyContentOf(t) }));
+    setNote(null);
+    const sent = contextForSend();
+    const history = buildHelperHistory(turns, investigationAnswers);
     const sentPictures = pictures;
-    const asked: Turn = {
+    const asked: HelperTurn = {
       role: "user",
       content: text,
-      applyTargets: capture?.applyTargets ?? [],
+      applyTargets: sent?.applyTargets ?? [],
       pictures: sentPictures.map(({ key, name, previewUrl }) => ({ key, name, previewUrl })),
-      context: capture?.text ? capture.text : null,
+      context: sent?.text ? sent.text : null,
       pageRoute: route,
-      references: capture?.entities ?? [],
+      references: sent?.entities ?? [],
       pictureInputs: sentPictures.map((p) => p.input),
     };
     setTurns((prev) => [...prev, asked]);
@@ -318,9 +618,9 @@ export function HelperOverlay() {
     setPictures([]);
     setPictureProblems([]);
     try {
-      const result = await helperApi.ask(selectedCompanyId, {
+      const result = await helperApi.ask(companyId, {
         message: text,
-        context: capture?.text ?? null,
+        context: sent?.text ? sent.text : null,
         pageRoute: route,
         directoryEntryId: entryId || null,
         history,
@@ -337,13 +637,26 @@ export function HelperOverlay() {
         },
       ]);
     } catch (err) {
-      setError(describeError(err));
-      setTurns((prev) => prev.slice(0, -1));
-      setMessage(text);
-      setPictures(sentPictures);
+      setError(helperErrorText(err, "ask"));
+      setTurns((prev) => prev.filter((t) => t !== asked));
+      setMessage((current) => current || text);
+      setPictures((current) => (current.length > 0 ? current : sentPictures));
     } finally {
+      sendingRef.current = false;
       setPending(false);
     }
+  };
+
+  const newConversation = () => {
+    setTurns([]);
+    setSeenAnswerIds([]);
+    setError(null);
+    setNote(null);
+    setDraft(null);
+    setStartError(null);
+    setDroppedNotice([]);
+    wantFocusRef.current = false;
+    inputRef.current?.focus();
   };
 
   /** Opens the confirm step; nothing starts until the person presses "Start investigation". */
@@ -356,14 +669,15 @@ export function HelperOverlay() {
   const investigateComposer = () => {
     const text = message.trim();
     if (!text) return;
+    const sent = contextForSend();
     openInvestigation({
       question: text,
-      context: capture?.text ? capture.text : null,
+      context: sent?.text ? sent.text : null,
       pageRoute: route,
-      references: capture?.entities ?? [],
+      references: sent?.entities ?? [],
       pictures: pictures.map((p) => p.input),
       quickAnswer: null,
-      applyTargets: capture?.applyTargets ?? [],
+      applyTargets: sent?.applyTargets ?? [],
       fromComposer: true,
     });
   };
@@ -385,36 +699,169 @@ export function HelperOverlay() {
     });
   };
 
+  const canApply = (label: string) => registeredTargets.includes(label) || canApplyHelperAnswer(label);
+
   const apply = (label: string, answer: string) => {
-    const ok = applyHelperAnswer(label, extractApplicableText(answer));
-    setAppliedNote(
-      ok
-        ? `Put into "${label}". Check it, then press that page's own Save — nothing is saved yet.`
-        : `"${label}" is no longer on the page, so nothing was changed.`,
+    const before = readHelperApplyValue(label);
+    const value = extractApplicableText(answer);
+    const ok = applyHelperAnswer(label, value);
+    if (!ok) {
+      setNote({ text: `“${label}” is no longer on this page, so nothing was changed.` });
+      return;
+    }
+    findHelperApplyElement(label)?.scrollIntoView?.({ block: "nearest" });
+    setNote({
+      text: `Put into “${label}”. Check it, then press that page's own Save — nothing is saved yet.`,
+      undo:
+        before !== null && before !== value
+          ? () => {
+              const undone = applyHelperAnswer(label, before);
+              setNote({
+                text: undone
+                  ? `Put back what was in “${label}” before.`
+                  : `“${label}” is no longer on this page, so it could not be put back.`,
+              });
+            }
+          : undefined,
+    });
+  };
+
+  const onOpenTask = () => {
+    if (isSmallScreen()) closePanel();
+  };
+  const answerActions = (answer: string) => <CopyButton text={answer} />;
+
+  // ─── Resize (wider screens) ───────────────────────────────────────────────
+  const startResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const handle = event.currentTarget;
+    handle.setPointerCapture?.(event.pointerId);
+    const move = (e: PointerEvent) => setWidth(clampHelperWidth(window.innerWidth - e.clientX, window.innerWidth));
+    const up = (e: PointerEvent) => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+      handle.removeEventListener("pointercancel", up);
+      const final = clampHelperWidth(window.innerWidth - e.clientX, window.innerWidth);
+      setWidth(final);
+      saveHelperWidth(final);
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+    handle.addEventListener("pointercancel", up);
+  };
+  const panelWidth = clampHelperWidth(width, typeof window !== "undefined" ? window.innerWidth : 1280);
+
+  // ─── Drawing ──────────────────────────────────────────────────────────────
+  const renderTurn = (turn: HelperTurn, index: number): ReactNode => {
+    if (turn.role === "user") {
+      return (
+        <div key={index} className="ml-8 space-y-1.5 rounded-lg bg-muted px-3 py-2 text-sm whitespace-pre-wrap" data-testid="helper-question">
+          {turn.pictures && turn.pictures.length > 0 ? (
+            <div className="flex flex-wrap gap-1" data-testid="helper-turn-pictures">
+              {turn.pictures.map((p) =>
+                p.previewUrl ? (
+                  <img key={p.key} src={p.previewUrl} alt={p.name} title={p.name} className="h-12 w-12 rounded object-cover" />
+                ) : (
+                  <span key={p.key} className="rounded border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground" title={p.name}>
+                    Picture: {p.name}
+                  </span>
+                ),
+              )}
+            </div>
+          ) : null}
+          {turn.content}
+        </div>
+      );
+    }
+    if (turn.role === "investigation") {
+      const id = turn.investigationId ?? "";
+      return (
+        <InvestigationInline
+          key={`inv-${id}-${index}`}
+          item={investigationsById.get(id) ?? null}
+          fallback={{ id, identifier: turn.investigationIdentifier ?? null, question: turn.content, agentName: turn.agentName ?? null }}
+          canApply={canApply}
+          onApply={apply}
+          onOpenTask={onOpenTask}
+          answerActions={answerActions}
+        />
+      );
+    }
+    return (
+      <div key={index} className="space-y-2" data-testid="helper-answer">
+        <MarkdownBody className="text-sm">{turn.content}</MarkdownBody>
+        {turn.suggestInvestigation ? (
+          <div className="space-y-1.5 rounded-md border border-primary/40 bg-primary/5 px-2.5 py-2 text-xs" data-testid="helper-suggest-investigation">
+            <p>
+              This needs a closer look than the quick helper can give. An agent can investigate it: that takes a few
+              minutes and is paid from that agent's budget. Nothing starts until you press the button.
+            </p>
+            <Button size="xs" variant="outline" onClick={() => investigateTurn(index)} data-testid="helper-investigate-suggested">
+              <Search className="h-3.5 w-3.5" /> Investigate deeper
+            </Button>
+          </div>
+        ) : null}
+        <div className="flex flex-wrap items-center gap-2">
+          {(turn.applyTargets ?? []).filter(canApply).map((label) => (
+            <Button key={label} size="xs" variant="outline" onClick={() => apply(label, turn.content)}>
+              Apply to {label}
+            </Button>
+          ))}
+          <CopyButton text={turn.content} testId="helper-copy-answer" />
+          {!turn.suggestInvestigation ? (
+            <Button
+              size="xs"
+              variant="ghost"
+              onClick={() => investigateTurn(index)}
+              title="Hand this question to an agent that can look things up (takes a few minutes and costs money)"
+              data-testid="helper-investigate-answer"
+            >
+              <Search className="h-3.5 w-3.5" /> Investigate deeper
+            </Button>
+          ) : null}
+          {turn.meta ? (
+            <span className="text-[11px] text-muted-foreground">
+              {turn.meta.modelLabel}
+              {turn.meta.costCents > 0 ? ` · ${(turn.meta.costCents / 100).toFixed(2)} USD` : ""}
+              {turn.meta.truncated ? " · answer was cut short" : ""}
+            </span>
+          ) : null}
+        </div>
+      </div>
     );
   };
 
+  const summary = capture ? helperCaptureSummary(capture, Boolean(markedRect)) : null;
+
   return (
-    <>
+    <DismissableLayer.Branch className="contents">
       {!open ? (
         <button
+          ref={openButtonRef}
           type="button"
-          data-helper-ignore
           data-testid="helper-open"
-          onClick={() => setOpen(true)}
-          title={`Ask Paperclip (${SHORTCUT_LABEL})`}
-          className="pointer-events-auto fixed bottom-24 right-4 z-40 flex items-center gap-1.5 rounded-full border border-border bg-background px-3 py-2 text-sm font-medium shadow-md hover:bg-accent md:bottom-6 md:right-20"
+          onClick={openPanel}
+          aria-label={unseenAnswerIds.length > 0 ? "Ask Paperclip — an investigation answer is ready" : "Ask Paperclip"}
+          aria-keyshortcuts="Control+Shift+H Meta+Shift+H"
+          title={`Ask Paperclip about this page (${SHORTCUT_LABEL})`}
+          className="pointer-events-auto fixed right-0 top-1/2 z-[60] flex -translate-y-1/2 flex-col items-center gap-1.5 rounded-l-lg border border-r-0 border-border bg-background px-1.5 py-2.5 text-xs font-medium text-foreground shadow-md transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
-          <HelpCircle className="h-4 w-4" />
-          Ask
+          <HelpCircle className="h-4 w-4" aria-hidden="true" />
+          <span className="[writing-mode:vertical-rl] rotate-180" aria-hidden="true">
+            Ask
+          </span>
+          {unseenAnswerIds.length > 0 ? (
+            <span className="absolute -left-1 -top-1 h-2.5 w-2.5 rounded-full bg-primary ring-2 ring-background" data-testid="helper-answer-ready" />
+          ) : null}
         </button>
       ) : null}
 
+      {open ? <DialogFocusPause /> : null}
+
       {marking ? (
         <div
-          data-helper-ignore
           data-testid="helper-marking-layer"
-          className="pointer-events-auto fixed inset-0 z-[70] cursor-crosshair bg-black/10"
+          className="pointer-events-auto fixed inset-0 z-[70] cursor-crosshair touch-none bg-black/10"
           onPointerDown={(e) => {
             (e.target as Element).setPointerCapture?.(e.pointerId);
             setDrag({ x: e.clientX, y: e.clientY, x2: e.clientX, y2: e.clientY });
@@ -423,15 +870,34 @@ export function HelperOverlay() {
             if (drag) setDrag({ ...drag, x2: e.clientX, y2: e.clientY });
           }}
           onPointerUp={(e) => {
-            if (!drag) return finishMarking(null);
-            const rect = rectFromPoints(drag.x, drag.y, e.clientX, e.clientY);
+            const point = { x: e.clientX, y: e.clientY };
+            const rect = drag ? rectFromPoints(drag.x, drag.y, e.clientX, e.clientY) : null;
             // The layer must be gone before reading the page underneath.
             setMarking(false);
-            requestAnimationFrame(() => finishMarking(rect));
+            requestAnimationFrame(() => finishMarking(rect, point));
+          }}
+          onPointerCancel={cancelMarking}
+          onWheel={(e) => {
+            // Scrolling still moves the page underneath, so the person can find the part they want.
+            helperScrollableAt(e.clientX, e.clientY)?.scrollBy?.({ top: e.deltaY, left: e.deltaX });
           }}
         >
-          <div className="pointer-events-none fixed left-1/2 top-4 -translate-x-1/2 rounded-md bg-background px-3 py-1.5 text-sm shadow">
-            Drag over the part of the page you want help with. Esc cancels.
+          <div
+            role="status"
+            className="pointer-events-none fixed left-1/2 top-4 flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-3 rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground shadow"
+          >
+            <span>Drag over the part you want help with, or click one thing. You can scroll first. Esc cancels.</span>
+            <Button
+              size="xs"
+              variant="outline"
+              className="pointer-events-auto"
+              onPointerDown={(e) => e.stopPropagation()}
+              onPointerUp={(e) => e.stopPropagation()}
+              onClick={cancelMarking}
+              data-testid="helper-mark-cancel"
+            >
+              Cancel
+            </Button>
           </div>
           {drag ? (
             <div
@@ -447,35 +913,60 @@ export function HelperOverlay() {
         </div>
       ) : null}
 
-      {markedRect && open && !marking ? (
+      {markedRect && open && !marking && outlineVisible ? (
         <div
-          data-helper-ignore
           aria-hidden="true"
-          className="pointer-events-none fixed z-[45] rounded border-2 border-dashed border-primary/70"
+          data-testid="helper-marked-outline"
+          className="pointer-events-none fixed z-[55] rounded border-2 border-dashed border-primary/70"
           style={{ left: markedRect.left, top: markedRect.top, width: markedRect.width, height: markedRect.height }}
         />
       ) : null}
 
       {open && !marking ? (
         <aside
-          data-helper-ignore
+          ref={panelRef}
           data-testid="helper-panel"
           aria-label="Ask Paperclip"
-          className="pointer-events-auto fixed inset-y-0 right-0 z-50 flex w-full max-w-[400px] flex-col border-l border-border bg-background shadow-xl"
+          className="pointer-events-auto fixed inset-y-0 right-0 z-[60] flex w-full max-w-full flex-col border-l border-border bg-background text-foreground shadow-xl md:w-[var(--helper-width)]"
+          style={{ "--helper-width": `${panelWidth}px` } as CSSProperties}
         >
-          <header className="flex items-center justify-between border-b border-border px-4 py-3">
-            <div>
-              <div className="text-sm font-semibold">Ask Paperclip</div>
-              <div className="text-xs text-muted-foreground">
-                Explains what is on this page. It cannot change anything. {SHORTCUT_LABEL} opens and closes it.
-              </div>
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Drag to make the helper wider or narrower"
+            title="Drag to resize"
+            className="absolute inset-y-0 -left-1 hidden w-2 cursor-col-resize md:block"
+            onPointerDown={startResize}
+            data-testid="helper-resize"
+          />
+          <header className="flex items-start justify-between gap-2 border-b border-border px-4 py-3">
+            <div className="min-w-0">
+              <h2 className="text-sm font-semibold">Ask Paperclip</h2>
+              <p className="text-xs text-muted-foreground">
+                Explains what is on this page. It cannot change anything.
+                <span className="hidden md:inline"> {SHORTCUT_LABEL} opens and closes it.</span>
+              </p>
             </div>
-            <Button variant="ghost" size="icon-sm" onClick={() => setOpen(false)} aria-label="Close the helper">
-              <X className="h-4 w-4" />
-            </Button>
+            <div className="flex shrink-0 items-center gap-1">
+              {turns.length > 0 ? (
+                <Button
+                  variant="ghost"
+                  size="icon-xs"
+                  onClick={newConversation}
+                  aria-label="New conversation"
+                  title="New conversation (forgets this one)"
+                  data-testid="helper-new-conversation"
+                >
+                  <MessageSquarePlus className="h-4 w-4" />
+                </Button>
+              ) : null}
+              <Button variant="ghost" size="icon-xs" onClick={closePanel} aria-label="Close the helper" title="Close (Esc)">
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
           </header>
 
-          <div className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
+          <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-4 py-3" data-testid="helper-conversation">
             {turns.length === 0 ? (
               <div className="space-y-2 text-sm text-muted-foreground">
                 <p>Ask about anything on this page. For example:</p>
@@ -489,74 +980,40 @@ export function HelperOverlay() {
                     to hand it to an agent. You see what it costs before it starts.
                   </li>
                 </ul>
+                <p className="text-xs">The conversation stays while you move between pages, until you close this browser tab.</p>
               </div>
             ) : null}
-            {turns.map((turn, index) =>
-              turn.role === "user" ? (
-                <div key={index} className="ml-8 space-y-1.5 rounded-lg bg-muted px-3 py-2 text-sm whitespace-pre-wrap">
-                  {turn.pictures && turn.pictures.length > 0 ? (
-                    <div className="flex flex-wrap gap-1" data-testid="helper-turn-pictures">
-                      {turn.pictures.map((p) => (
-                        <img key={p.key} src={p.previewUrl} alt={p.name} title={p.name} className="h-12 w-12 rounded object-cover" />
-                      ))}
-                    </div>
-                  ) : null}
-                  {turn.content}
-                </div>
-              ) : (
-                <div key={index} className="space-y-2" data-testid="helper-answer">
-                  <MarkdownBody className="text-sm">{turn.content}</MarkdownBody>
-                  {turn.suggestInvestigation ? (
-                    <div className="space-y-1.5 rounded-md border border-primary/40 bg-primary/5 px-2.5 py-2 text-xs" data-testid="helper-suggest-investigation">
-                      <p>
-                        This needs a closer look than the quick helper can give. An agent can investigate it: that takes
-                        a few minutes and is paid from that agent's budget. Nothing starts until you press the button.
-                      </p>
-                      <Button size="xs" variant="outline" onClick={() => investigateTurn(index)} data-testid="helper-investigate-suggested">
-                        <Search className="h-3.5 w-3.5" /> Investigate deeper
-                      </Button>
-                    </div>
-                  ) : null}
-                  <div className="flex flex-wrap items-center gap-2">
-                    {(turn.applyTargets ?? [])
-                      .filter((label) => registeredTargets.includes(label) || canApplyHelperAnswer(label))
-                      .map((label) => (
-                        <Button key={label} size="xs" variant="outline" onClick={() => apply(label, turn.content)}>
-                          Apply to {label}
-                        </Button>
-                      ))}
-                    {!turn.suggestInvestigation ? (
-                      <Button
-                        size="xs"
-                        variant="ghost"
-                        onClick={() => investigateTurn(index)}
-                        title="Hand this question to an agent that can look things up (takes a few minutes and costs money)"
-                        data-testid="helper-investigate-answer"
-                      >
-                        <Search className="h-3.5 w-3.5" /> Investigate deeper
-                      </Button>
-                    ) : null}
-                    {turn.meta ? (
-                      <span className="text-[11px] text-muted-foreground">
-                        {turn.meta.modelLabel}
-                        {turn.meta.costCents > 0 ? ` · ${(turn.meta.costCents / 100).toFixed(2)} USD` : ""}
-                        {turn.meta.truncated ? " · answer was cut short" : ""}
-                      </span>
-                    ) : null}
-                  </div>
-                </div>
-              ),
-            )}
+            <div role="log" aria-live="polite" aria-label="Conversation" className="space-y-3">
+              {turns.map(renderTurn)}
+            </div>
             {pending ? (
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <Loader2 className="h-4 w-4 animate-spin" /> Thinking…
+              <div className="flex items-center gap-2 text-sm text-muted-foreground" role="status" data-testid="helper-thinking">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                {slow ? "Still thinking… bigger questions and pictures can take up to a minute." : "Thinking…"}
               </div>
             ) : null}
-            {appliedNote ? <p className="rounded-md bg-muted px-3 py-2 text-xs">{appliedNote}</p> : null}
+            {note ? (
+              <div className="flex flex-wrap items-center gap-2 rounded-md bg-muted px-3 py-2 text-xs" role="status" data-testid="helper-note">
+                <span className="flex-1">{note.text}</span>
+                {note.undo ? (
+                  <Button size="xs" variant="outline" onClick={note.undo} data-testid="helper-apply-undo">
+                    <Undo2 className="h-3.5 w-3.5" /> Undo
+                  </Button>
+                ) : null}
+              </div>
+            ) : null}
             {error ? (
-              <p role="alert" className="rounded-md border border-destructive/40 px-3 py-2 text-xs text-destructive">
-                {error}
-              </p>
+              <div role="alert" className="space-y-1.5 rounded-md border border-destructive/40 px-3 py-2 text-xs text-destructive" data-testid="helper-error">
+                <p>{error}</p>
+                <div className="flex gap-2">
+                  <Button size="xs" variant="outline" onClick={() => void send()} disabled={pending || !message.trim()} data-testid="helper-retry">
+                    <RotateCcw className="h-3.5 w-3.5" /> Try again
+                  </Button>
+                  <Button size="xs" variant="ghost" onClick={() => setError(null)}>
+                    Dismiss
+                  </Button>
+                </div>
+              </div>
             ) : null}
             {draft ? (
               <InvestigateConfirm
@@ -564,8 +1021,10 @@ export function HelperOverlay() {
                 availability={investigationsQuery.data?.availability ?? null}
                 loading={investigationsQuery.isFetching}
                 starting={startInvestigation.isPending}
-                error={startError ?? (investigationsQuery.error ? describeError(investigationsQuery.error) : null)}
-                onStart={() => startInvestigation.mutate(draft)}
+                error={startError ?? (investigationsQuery.error ? helperErrorText(investigationsQuery.error, "load") : null)}
+                onStart={() => {
+                  if (!startInvestigation.isPending) startInvestigation.mutate(draft);
+                }}
                 onCancel={() => {
                   setDraft(null);
                   setStartError(null);
@@ -575,15 +1034,27 @@ export function HelperOverlay() {
             <DroppedReferencesNotice dropped={droppedNotice} onClose={() => setDroppedNotice([])} />
             <MyInvestigations
               investigations={investigations}
-              openIds={openInvestigationIds}
-              canApply={(label) => registeredTargets.includes(label) || canApplyHelperAnswer(label)}
+              openIds={listOpenIds}
+              canApply={canApply}
               onApply={apply}
+              onOpenTask={onOpenTask}
+              answerActions={answerActions}
             />
+            <div ref={endRef} />
           </div>
 
-          <footer className="space-y-2 border-t border-border px-4 py-3">
+          <footer className="max-h-[65%] space-y-2 overflow-y-auto border-t border-border px-4 py-3">
             <div className="flex flex-wrap items-center gap-2">
-              <Button size="xs" variant="outline" onClick={() => setMarking(true)} data-testid="helper-mark">
+              <Button
+                size="xs"
+                variant="outline"
+                onClick={() => {
+                  setFilePickerOpen(false);
+                  setMarking(true);
+                }}
+                data-testid="helper-mark"
+                title="Drag over part of the page, or click one thing, to ask about just that"
+              >
                 <Crop className="h-3.5 w-3.5" /> {markedRect ? "Mark again" : "Mark an area"}
               </Button>
               {markedRect ? (
@@ -594,33 +1065,58 @@ export function HelperOverlay() {
                     setMarkedRect(null);
                     captureNow(null);
                   }}
+                  data-testid="helper-use-visible-page"
                 >
                   <RotateCcw className="h-3.5 w-3.5" /> Use the visible page
                 </Button>
               ) : null}
-              {capture ? (
-                <Button size="xs" variant="ghost" onClick={() => setCapture({ ...capture, text: "", itemCount: 0, entities: [], applyTargets: [] })}>
-                  Send no page text
-                </Button>
-              ) : null}
-              {turns.length > 0 ? (
-                <Button size="xs" variant="ghost" onClick={() => setTurns([])}>
-                  New conversation
-                </Button>
-              ) : null}
+              <label className="ml-auto flex items-center gap-1.5 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={includePage}
+                  onChange={(e) => setIncludePage(e.target.checked)}
+                  data-testid="helper-include-page"
+                />
+                Send page text
+              </label>
             </div>
 
-            <details open={seeOpen} onToggle={(e) => setSeeOpen((e.currentTarget as HTMLDetailsElement).open)} className="text-xs">
+            <details
+              open={seeOpen}
+              onToggle={(e) => {
+                const nowOpen = (e.currentTarget as HTMLDetailsElement).open;
+                setSeeOpen(nowOpen);
+                if (nowOpen && !markedRect && includePage) captureNow(null);
+              }}
+              className="text-xs"
+            >
               <summary className="flex cursor-pointer items-center gap-1 text-muted-foreground">
                 <Eye className="h-3.5 w-3.5" /> What the helper sees
-                {capture ? ` (${capture.text.length.toLocaleString()} characters${capture.truncated ? ", cut to fit" : ""})` : ""}
+                {includePage && capture
+                  ? ` (${markedRect ? "marked area" : "visible page"}, ${capture.text.length.toLocaleString()} characters${capture.truncated ? ", cut to fit" : ""})`
+                  : includePage
+                    ? ""
+                    : " (only your question and the page address)"}
               </summary>
+              {includePage && summary ? (
+                <p className={`mt-1 ${capture?.itemCount === 0 ? "text-amber-700 dark:text-amber-500" : "text-muted-foreground"}`} data-testid="helper-sees-summary">
+                  {summary}
+                </p>
+              ) : null}
               <p className="mt-1 text-muted-foreground">
                 Only this text is sent, together with the page address — never a picture of the screen. Passwords, keys and
-                anything that looks like one are left out or shown as [hidden].
+                anything that looks like one are left out or shown as [hidden]. Embedded pages some add-ons show cannot be
+                read.
               </p>
-              <pre data-testid="helper-sees" className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap rounded border border-border bg-muted/40 p-2 font-mono text-[11px]">
-                {capture?.text ? capture.text : `Page address: ${route}\n(No page text will be sent.)`}
+              <pre
+                data-testid="helper-sees"
+                className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap rounded border border-border bg-muted/40 p-2 font-mono text-[11px]"
+              >
+                {!includePage
+                  ? `Page address: ${route}\n(No page text will be sent.)`
+                  : capture?.text
+                    ? capture.text
+                    : `Page address: ${route}\n(Reading the page… it is read again when you send.)`}
               </pre>
             </details>
 
@@ -640,13 +1136,12 @@ export function HelperOverlay() {
                   variant="ghost"
                   onClick={() => setFilePickerOpen((v) => !v)}
                   disabled={pictures.length >= HELPER_PICTURES_MAX}
+                  aria-expanded={filePickerOpen}
                   data-testid="helper-from-files"
                 >
                   <FolderOpen className="h-3.5 w-3.5" /> From Files
                 </Button>
-                <span className="text-[11px] text-muted-foreground">
-                  or paste one. Up to {HELPER_PICTURES_MAX}, 5 MB each.
-                </span>
+                <span className="text-[11px] text-muted-foreground">or paste one. Up to {HELPER_PICTURES_MAX}, 5 MB each.</span>
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -663,7 +1158,7 @@ export function HelperOverlay() {
               </div>
               {filePickerOpen ? (
                 <HelperFilePicker
-                  companyId={selectedCompanyId}
+                  companyId={companyId}
                   onClose={() => setFilePickerOpen(false)}
                   onPick={(file) => {
                     setFilePickerOpen(false);
@@ -693,9 +1188,7 @@ export function HelperOverlay() {
                 </div>
               ) : null}
               {hasPictures ? (
-                <p className="text-[11px] text-muted-foreground">
-                  Only these pictures are sent, with this question only. They are not saved.
-                </p>
+                <p className="text-[11px] text-muted-foreground">Only these pictures are sent, with this question only. They are not saved.</p>
               ) : null}
               {pictureProblems.map((problem) => (
                 <p key={problem} role="alert" className="text-xs text-destructive">
@@ -705,16 +1198,20 @@ export function HelperOverlay() {
             </div>
 
             <label className="block text-xs">
-              <span className="text-muted-foreground">Model</span>
+              <span className="text-muted-foreground">Model that answers</span>
               <select
-                className="mt-0.5 w-full rounded-md border border-border bg-transparent px-2 py-1 text-sm"
+                className="mt-0.5 w-full rounded-md border border-border bg-background px-2 py-1 text-sm text-foreground"
                 value={entryId}
                 onChange={(e) => setEntryId(e.target.value)}
+                disabled={!settings}
                 data-testid="helper-model"
               >
                 <option value="">
-                  Use default ({defaultModel ? defaultModel.name : settings?.builtInDefaultLabel ?? "Paperclip's default"})
-                  {settings ? ` — ${helperStatusText(defaultModel ? defaultModel.status : settings.builtInDefaultStatus)}` : ""}
+                  {settings
+                    ? `Use default (${defaultModel ? defaultModel.name : settings.builtInDefaultLabel}) — ${helperStatusText(defaultModel ? defaultModel.status : settings.builtInDefaultStatus)}`
+                    : settingsQuery.isError
+                      ? "Use default"
+                      : "Loading models…"}
                 </option>
                 {groups.map((group) => (
                   <optgroup key={group.key} label={group.title}>
@@ -728,8 +1225,14 @@ export function HelperOverlay() {
                 ))}
               </select>
             </label>
+            {settingsQuery.isError ? (
+              <p className="text-xs text-amber-700 dark:text-amber-500" data-testid="helper-settings-error">
+                The model list could not be loaded ({helperErrorText(settingsQuery.error, "load")}) You can still ask with the
+                default model.
+              </p>
+            ) : null}
             {settings && effective.status && !isHelperStatusReady(effective.status) ? (
-              <p className="text-xs text-amber-600" data-testid="helper-model-warning">
+              <p className="text-xs text-amber-700 dark:text-amber-500" data-testid="helper-model-warning">
                 {helperStatusText(effective.status)}: {chosen && !chosen.keyReady && chosen.keyHint ? chosen.keyHint : effective.status.detail}
               </p>
             ) : null}
@@ -739,20 +1242,24 @@ export function HelperOverlay() {
                   {effective.canSeePictures === false
                     ? `“${effective.name}” cannot look at pictures, so it cannot answer about the ones you attached.`
                     : `Paperclip does not know whether “${effective.name}” can look at pictures, so they are not sent to it.`}{" "}
-                  Pick a model that can, or remove the pictures.
+                  {visionModels.length > 0 || offerBuiltInForPictures
+                    ? "Pick a model that can, or remove the pictures."
+                    : "None of this company's models is known to see pictures yet, so remove the pictures to ask."}
                 </p>
-                <div className="flex flex-wrap gap-1">
-                  {settings?.builtInDefaultCanSeePictures && !defaultModel && entryId ? (
-                    <Button size="xs" variant="outline" onClick={() => setEntryId("")} data-testid="helper-vision-option">
-                      Paperclip's default
-                    </Button>
-                  ) : null}
-                  {visionModels.map((m) => (
-                    <Button key={m.id} size="xs" variant="outline" onClick={() => setEntryId(m.id)} data-testid="helper-vision-option">
-                      {m.name}
-                    </Button>
-                  ))}
-                </div>
+                {visionModels.length > 0 || offerBuiltInForPictures ? (
+                  <div className="flex flex-wrap gap-1">
+                    {offerBuiltInForPictures ? (
+                      <Button size="xs" variant="outline" onClick={() => setEntryId("")} data-testid="helper-vision-option">
+                        Paperclip's default
+                      </Button>
+                    ) : null}
+                    {visionModels.map((m) => (
+                      <Button key={m.id} size="xs" variant="outline" onClick={() => setEntryId(m.id)} data-testid="helper-vision-option">
+                        {m.name}
+                      </Button>
+                    ))}
+                  </div>
+                ) : null}
                 <p className="text-muted-foreground">
                   Whether a saved model can see pictures is its “Pictures” setting under Company settings → Models. Models
                   Paperclip already knows are filled in for you; an owner or admin can change it.
@@ -775,13 +1282,14 @@ export function HelperOverlay() {
                   void addFiles(files);
                 }}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
+                  if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                     e.preventDefault();
                     void send();
                   }
                 }}
                 className="min-h-[64px] flex-1 text-sm"
                 aria-label="Your question"
+                aria-describedby="helper-composer-hint"
               />
               <div className="flex flex-col gap-1.5">
                 <Button
@@ -795,15 +1303,26 @@ export function HelperOverlay() {
                 >
                   <Search className="h-4 w-4" />
                 </Button>
-                <Button size="icon-sm" onClick={() => void send()} disabled={pending || !message.trim() || blindWithPictures} aria-label="Send">
-                  <Send className="h-4 w-4" />
+                <Button
+                  size="icon-sm"
+                  onClick={() => void send()}
+                  disabled={pending || !message.trim() || blindWithPictures}
+                  aria-label="Send"
+                  title="Send (Enter)"
+                >
+                  {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
                 </Button>
               </div>
             </div>
+            <p id="helper-composer-hint" className="text-[11px] text-muted-foreground">
+              Enter sends, Shift+Enter starts a new line.
+              {message.length > HELPER_MESSAGE_MAX_CHARS - 300
+                ? ` ${message.length.toLocaleString()} of ${HELPER_MESSAGE_MAX_CHARS.toLocaleString()} characters.`
+                : ""}
+            </p>
           </footer>
         </aside>
       ) : null}
-    </>
+    </DismissableLayer.Branch>
   );
 }
-
