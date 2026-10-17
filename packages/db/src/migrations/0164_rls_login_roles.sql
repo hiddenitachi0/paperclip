@@ -224,6 +224,13 @@ DECLARE
     'crm_organizations',
     'cross_company_access_log',
     'cross_company_instructions',
+    -- Crypto wallets for agents. Created, granted on and policed in
+    -- 0251_crypto_wallets.sql; company-scoped, so they are in both lists.
+    'company_crypto_settings',
+    'crypto_agent_limits',
+    'crypto_wallet_destinations',
+    'crypto_wallet_transactions',
+    'crypto_wallets',
     'customer_inbox_conversations',
     'customer_inbox_deliveries',
     -- DUR-3972 slice S1. The real DDL, grant and policy for these tables live
@@ -589,6 +596,13 @@ DECLARE
     'crm_organizations',
     'customer_inbox_conversations',
     'customer_inbox_deliveries',
+    -- Crypto wallets for agents. Created, granted on and policed in
+    -- 0251_crypto_wallets.sql; company-scoped, so they are in both lists.
+    'company_crypto_settings',
+    'crypto_agent_limits',
+    'crypto_wallet_destinations',
+    'crypto_wallet_transactions',
+    'crypto_wallets',
     -- DUR-3972 slice S1, created in 0168_data_connections.sql; company-scoped,
     -- so they belong in this list too.
     'data_connections',

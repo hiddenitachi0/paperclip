@@ -30,7 +30,7 @@ import {
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { logger } from "../middleware/logger.js";
-import type { CrossCompanyInstructionDecisionHooks } from "../services/approvals.js";
+import { isCryptoWalletTxApproval, type CrossCompanyInstructionDecisionHooks } from "../services/approvals.js";
 import {
   approvalService,
   accessService,
@@ -2589,6 +2589,12 @@ export function approvalRoutes(
       }
       if (kind === REPORT_SCRIPT_APPROVAL_KIND && (existingForKindCheck.status === "pending" || existingForKindCheck.status === "revision_requested")) {
         await approveReportScriptCard(req, existingForKindCheck);
+      }
+      // Crypto wallet payments: only a person who is this company's owner or
+      // admin (or an instance admin) may say yes -- money leaves on approval.
+      if (isCryptoWalletTxApproval(existingForKindCheck)) {
+        assertCompanyOwnerAdminOrInstanceAdmin(req, existingForKindCheck.companyId, "whether a crypto wallet payment is sent");
+        if (getActorInfo(req).actorType !== "user") throw forbidden("Only a person can approve a crypto wallet payment.");
       }
       // One-click host actions: only a person who is this company's owner or
       // admin (or an instance admin) may say yes, and only to a card that is

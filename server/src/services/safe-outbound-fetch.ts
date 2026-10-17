@@ -409,6 +409,44 @@ export function createWooCommerceOutboundPolicy(storeUrl: string): OutboundHostP
 }
 
 /**
+ * Crypto wallets: the one network endpoint (RPC/API) a company uses for a
+ * chain and network -- a public default from packages/shared or one the
+ * owner typed in. Built per endpoint, like WooCommerce: that one host only,
+ * https, port 443, no credentials in the URL, a public DNS name (never an IP
+ * literal, never a .local/.internal name), no redirects. Every resolved
+ * address must be public, checked again on every request. The path may carry
+ * a provider key; it never appears in a refusal (those only name the host).
+ */
+export function createCryptoRpcOutboundPolicy(endpointUrl: string): OutboundHostPolicy {
+  let parsed: URL;
+  try {
+    parsed = new URL(endpointUrl);
+  } catch {
+    throw new SafeOutboundFetchError("invalid_url", "The network address is not valid.");
+  }
+  if (parsed.protocol !== "https:") {
+    throw new SafeOutboundFetchError("protocol_not_allowed", "The network address must start with https://");
+  }
+  if (parsed.username || parsed.password) {
+    throw new SafeOutboundFetchError("credentials_in_url", "The network address cannot contain a username or password.");
+  }
+  if (parsed.port && parsed.port !== "443") {
+    throw new SafeOutboundFetchError("port_not_allowed", "The network address cannot use a special port.");
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (!PUBLIC_WEB_PAGE_OUTBOUND_POLICY.hostPattern.test(host)) {
+    throw new SafeOutboundFetchError("host_not_allowed", `${host} is not an allowed network address.`);
+  }
+  return {
+    sourceKind: "crypto network",
+    protocols: ["https:"],
+    hostPattern: new RegExp(`^${escapeRegExp(host)}$`),
+    timeoutMs: 15_000,
+    maxResponseBytes: 2 * 1024 * 1024,
+  };
+}
+
+/**
  * paperless-ngx (DUR-4302): each company's container lives on the host's
  * internal network, never publicly reachable, one port per company -- the
  * mirror image of every policy above, which requires https and a *public*

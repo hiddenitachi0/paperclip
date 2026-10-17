@@ -22,6 +22,7 @@ import {
   approvals,
   activityLog,
   companySecrets,
+  cryptoWallets,
   joinRequests,
   invites,
   principalPermissionGrants,
@@ -436,6 +437,21 @@ export function companyService(db: Db, rawDb: Db = db) {
 
     remove: (id: string) =>
       db.transaction(async (tx) => {
+        // Crypto wallets: deleting a company deletes its wallet keys, and any
+        // coins left in a real-money wallet would be lost for good. Refuse
+        // while a main-network wallet is still in use; test-network wallets
+        // (worthless test coins) and archived ones go with the company.
+        const [liveRealMoneyWallet] = await tx
+          .select({ id: cryptoWallets.id })
+          .from(cryptoWallets)
+          .where(and(eq(cryptoWallets.companyId, id), eq(cryptoWallets.network, "mainnet"), sql`${cryptoWallets.status} <> 'archived'`))
+          .limit(1);
+        if (liveRealMoneyWallet) {
+          throw unprocessable(
+            "This company still has a real-money crypto wallet. Move its coins out and archive it on the agent's Crypto wallets settings before deleting the company.",
+          );
+        }
+        await tx.delete(cryptoWallets).where(eq(cryptoWallets.companyId, id));
         // Delete from child tables in dependency order
         const companyRunIds = await tx
           .select({ id: heartbeatRuns.id })

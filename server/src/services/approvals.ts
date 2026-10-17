@@ -91,6 +91,22 @@ const REPORT_SCRIPT_CARD_FILED_ELSEWHERE =
   "Report calculation approval cards can only be filed by asking for approval on the calculation itself " +
   "(the card is built from the stored code). To change the code, draft a new version and ask for approval again";
 
+/**
+ * Crypto wallet payment cards (kind "crypto_wallet_tx") are filed only by
+ * cryptoWalletService from its own transaction row, never through create():
+ * a card someone else wrote could describe a different payment than the one
+ * that would be sent. Approving one is owner/admin-only on the card itself
+ * (routes/approvals.ts) -- see isApprovalCardOnlyKind.
+ */
+export const CRYPTO_WALLET_TX_APPROVAL_KIND = "crypto_wallet_tx";
+
+export function isCryptoWalletTxApproval(approval: Pick<typeof approvals.$inferSelect, "type" | "payload">): boolean {
+  return approval.type === "request_board_approval" && approval.payload?.kind === CRYPTO_WALLET_TX_APPROVAL_KIND;
+}
+
+const CRYPTO_WALLET_CARD_FILED_ELSEWHERE =
+  "Crypto wallet payment cards can only be filed by the wallet itself, when an agent asks to pay. Use the agent's wallet tools instead";
+
 const REPORT_SCRIPT_DECISION_ELSEWHERE =
   "A report calculation can only be approved by a company owner or admin from its approval card: approving runs its saved examples first and switches it on only if they all match";
 
@@ -144,7 +160,7 @@ export interface ApprovalDecisionOptions {
 export function isApprovalCardOnlyKind(approval: Pick<typeof approvals.$inferSelect, "type" | "payload">): boolean {
   if (approval.type !== "request_board_approval") return false;
   const kind = approval.payload?.kind;
-  return kind === "operator_action" || kind === "deploy" || isUnsupportedDeployLikeKind(kind);
+  return kind === "operator_action" || kind === "deploy" || kind === CRYPTO_WALLET_TX_APPROVAL_KIND || isUnsupportedDeployLikeKind(kind);
 }
 
 const APPROVAL_CARD_ONLY_DECISION_ELSEWHERE =
@@ -555,6 +571,9 @@ export function approvalService(db: Db) {
       if (isReportScriptVersionApproval({ type: data.type, payload: data.payload })) {
         throw unprocessable(REPORT_SCRIPT_CARD_FILED_ELSEWHERE, { kind: "report_script_version" });
       }
+      if (isCryptoWalletTxApproval({ type: data.type, payload: data.payload })) {
+        throw unprocessable(CRYPTO_WALLET_CARD_FILED_ELSEWHERE, { kind: CRYPTO_WALLET_TX_APPROVAL_KIND });
+      }
       return db
         .insert(approvals)
         .values({ ...data, companyId })
@@ -899,6 +918,9 @@ export function approvalService(db: Db) {
       }
       if (isReportScriptVersionApproval(existing) || (payload && isReportScriptVersionApproval({ type: existing.type, payload }))) {
         throw unprocessable(REPORT_SCRIPT_CARD_FILED_ELSEWHERE, { kind: "report_script_version" });
+      }
+      if (isCryptoWalletTxApproval(existing) || (payload && isCryptoWalletTxApproval({ type: existing.type, payload }))) {
+        throw unprocessable(CRYPTO_WALLET_CARD_FILED_ELSEWHERE, { kind: CRYPTO_WALLET_TX_APPROVAL_KIND });
       }
 
       const now = new Date();

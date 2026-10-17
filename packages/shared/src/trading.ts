@@ -60,6 +60,19 @@ export const TRADING_LEDGER_EVENT_TYPES = [
   "circuit_breaker",
   "kill_switch",
   "reconciliation",
+  // Crypto wallet events (packages/shared/src/crypto-wallets.ts): same
+  // append-only ledger, with wallet_id set instead of strategy_id.
+  "wallet_created",
+  "wallet_tx_requested",
+  "wallet_tx_blocked",
+  "wallet_tx_approval_requested",
+  "wallet_tx_submitted",
+  "wallet_tx_confirmed",
+  "wallet_tx_failed",
+  "wallet_tx_rejected",
+  "wallet_kill_switch",
+  "wallet_reconciliation",
+  "wallet_settings_changed",
 ] as const;
 export type TradingLedgerEventType = (typeof TRADING_LEDGER_EVENT_TYPES)[number];
 

@@ -85,6 +85,7 @@ import { mailSecretaryService } from "./services/mail-secretary.js";
 import { mailAccountsService } from "./services/mail-accounts.js";
 import { videoStorylineRenderService } from "./services/video-storyline-render.js";
 import { tradingService } from "./services/trading.js";
+import { cryptoWalletService } from "./services/crypto-wallets.js";
 import { videoStorylineStitchService } from "./services/video-storyline-stitch.js";
 import { videoStorylineTransitionsService } from "./services/video-storyline-transitions.js";
 import { videoStorylineClipsService } from "./services/video-storyline-clips.js";
@@ -1081,6 +1082,7 @@ export async function startServer(): Promise<StartedServer> {
     const videoStorylineTransitions = videoStorylineTransitionsService(schedulerDb as any);
     const videoStorylineClips = videoStorylineClipsService(schedulerDb as any);
     const tradingAgent = tradingService(schedulerDb as any);
+    const cryptoWallets = cryptoWalletService(schedulerDb as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(schedulerDb as any);
     const quietModeAlerts = quietModeAlertsService(schedulerDb as any);
     const personaPublisherSweep = config.personaPublishingSweepEnabled
@@ -1715,6 +1717,30 @@ export async function startServer(): Promise<StartedServer> {
           })
           .catch((err) => {
             logger.error({ err }, "trading-agent tick failed");
+          }),
+      );
+
+      // Crypto wallets for agents: resolves wallet payment approval cards
+      // (approved -> signed and sent, turned down or expired -> not sent)
+      // and follows sent payments until the network confirms them. Never
+      // re-sends anything on its own.
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.cryptoWallets, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: cryptoWallets",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:cryptoWallets",
+          },
+          () => cryptoWallets.tick(new Date()),
+        )
+          .then((result) => {
+            if (result.changed > 0) {
+              logger.info({ ...result }, "crypto-wallets tick");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "crypto-wallets tick failed");
           }),
       );
 
