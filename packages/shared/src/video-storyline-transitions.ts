@@ -182,7 +182,7 @@ export const MEDIA_MONTHLY_CAP_SETTINGS_KEY = "mediaMonthlyCapCents";
 /** $20 a month unless an owner or admin sets another amount. */
 export const MEDIA_MONTHLY_CAP_DEFAULT_CENTS = 2_000;
 export const MEDIA_MONTHLY_CAP_EXPLANATION =
-  "The most this company may spend on AI transitions in one calendar month, across all storylines. Each transition reserves its cost before it is made; a failed one gives it back. Shot renders keep their own per-film budget.";
+  "The most this company may spend on AI transitions and animated photos in one calendar month, across all storylines. Each one reserves its cost before it is made; a failed one gives it back. Deleting a film or a clip does not give money back, because it was already spent. Shot renders keep their own per-film budget.";
 
 export const updateMediaMonthlyCapSchema = z.object({ capCents: z.number().int().min(0).max(10_000_000) }).strict();
 
