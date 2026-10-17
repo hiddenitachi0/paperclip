@@ -3,8 +3,8 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type { VideoQualityIssueCode, VideoShotTransition, VideoStorylineQualityIssue } from "@paperclipai/shared";
-import { probeDurationSeconds, probeHasAudioStream } from "./video-ffmpeg.js";
+import { videoQualityIssueSeverity, type VideoQualityIssueCode, type VideoShotTransition, type VideoStorylineQualityIssue } from "@paperclipai/shared";
+import { probeDurationSeconds, probeHasAudioStream, probeHasVideoStream } from "./video-ffmpeg.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -18,9 +18,11 @@ const execFileAsync = promisify(execFile);
  * is written fresh against ffmpeg/ffprobe's own documented filters -- no
  * code, prompts, schemas or word lists were copied from any other project.
  * A failed check never throws: it returns structured issues with a shot
- * number/time where possible, and the caller is responsible for landing the
- * storyline on "needs_attention" (with these issues attached) instead of
- * "done". Ships with the same execFile-only, no-shell discipline as
+ * number/time where possible. Most findings are warnings (the film is still
+ * done and downloadable, the person just sees what was noticed); only a
+ * blocking finding (no picture, wrong length -- see
+ * VIDEO_QUALITY_BLOCKING_ISSUE_CODES) lands the storyline on
+ * "needs_attention" instead of "done". Ships with the same execFile-only, no-shell discipline as
  * video-ffmpeg.ts.
  */
 
@@ -80,7 +82,10 @@ export interface VideoQualityCheckPlan {
 }
 
 export interface VideoQualityCheckResult {
+  /** No findings at all. */
   passed: boolean;
+  /** At least one finding means the film is really broken (see VIDEO_QUALITY_BLOCKING_ISSUE_CODES); warnings alone never block. */
+  blocking: boolean;
   issues: VideoStorylineQualityIssue[];
 }
 
@@ -202,8 +207,16 @@ function shotLabel(timeline: readonly ShotTimelineEntry[], timeSeconds: number):
   return index === null ? "the final video" : `shot #${index + 1}`;
 }
 
+/** The first line of an error, capped: ffmpeg errors repeat the whole command line, which helps nobody reading the film page. */
+function shortErrorText(err: unknown): string {
+  const text = (err instanceof Error ? err.message : String(err)).split("\n")[0]!.trim();
+  if (/^Command failed/i.test(text)) return "the video tool stopped with an error";
+  if (/timed? ?out|ETIMEDOUT|SIGTERM/i.test(text)) return "it took too long";
+  return text.length > 160 ? `${text.slice(0, 157)}...` : text;
+}
+
 function issue(code: VideoQualityIssueCode, message: string, shotIndex: number | null, timeSeconds: number | null): VideoStorylineQualityIssue {
-  return { code, message, shotIndex, timeSeconds };
+  return { code, message, shotIndex, timeSeconds, severity: videoQualityIssueSeverity({ code }) };
 }
 
 /**
@@ -220,6 +233,11 @@ export async function runVideoQualityCheck(videoBuffer: Buffer, plan: VideoQuali
 
   try {
     await withTempFile(videoBuffer, async (filePath) => {
+      // A film without a picture (or a file nothing can read) is truly broken; nothing else is worth checking.
+      if (!(await probeHasVideoStream(filePath))) {
+        issues.push(issue("missing_video_stream", "The finished film has no picture, or the file cannot be read.", null, null));
+        return;
+      }
       const actualDuration = await probeDurationSeconds(filePath);
       const toleranceSeconds = Math.max(DURATION_TOLERANCE_SECONDS, expectedDuration * DURATION_TOLERANCE_RATIO);
       if (Math.abs(actualDuration - expectedDuration) > toleranceSeconds) {
@@ -279,16 +297,21 @@ export async function runVideoQualityCheck(videoBuffer: Buffer, plan: VideoQuali
         }
         if (maxVolumeDb !== null && maxVolumeDb >= CLIPPING_MAX_VOLUME_DB_THRESHOLD) {
           issues.push(
-            issue("clipped_audio", `The audio track peaks at ${maxVolumeDb.toFixed(1)} dB, which indicates clipping.`, null, null),
+            issue("clipped_audio", `The sound is very loud in places (it peaks at ${maxVolumeDb.toFixed(1)} dB), so some moments may sound distorted.`, null, null),
           );
         }
       }
     });
   } catch (err) {
     issues.push(
-      issue("check_error", `Automatic quality check could not finish: ${err instanceof Error ? err.message : String(err)}`, null, null),
+      issue(
+        "check_error",
+        `The automatic check could not finish, so this film was only partly checked (${shortErrorText(err)}).`,
+        null,
+        null,
+      ),
     );
   }
 
-  return { passed: issues.length === 0, issues };
+  return { passed: issues.length === 0, blocking: issues.some((i) => i.severity === "blocking"), issues };
 }

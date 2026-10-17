@@ -2,15 +2,17 @@ import { buffer as streamToBuffer } from "node:stream/consumers";
 import { and, asc, eq, ne } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { assets, videoShots, videoStorylines } from "@paperclipai/db";
-import { readVideoExportSettings, videoExportPreset } from "@paperclipai/shared";
+import { hasBlockingVideoQualityIssue, readVideoExportSettings, videoExportPreset, videoQualityIssueSeverity, type VideoStorylineQualityIssue } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { getStorageService } from "../storage/index.js";
 import { logActivity } from "./activity-log.js";
+import type { VideoStorylineActor } from "./video-storylines.js";
 import {
   addMusicBed,
   checkFfmpegAvailable,
   normalizeClipsForStitch,
+  normalizeLoudness,
   renderTitleCard,
   stitchClips,
   stitchClipsWithTransitions,
@@ -41,7 +43,37 @@ import { runVideoQualityCheck, type VideoQualityCheckShotPlan } from "./video-qu
  * failed check lands the storyline on "needs_attention" instead, with
  * qualityCheckIssues/errorMessage explaining what to look at and where --
  * the file itself is still stored so it can be inspected.
+ *
+ * Storyline export fix (Oct 2026): most findings are warnings, not
+ * blockers. A film whose check found only warnings (a loud peak, a quiet
+ * stretch) lands on "done" with the warnings attached, so it can be
+ * downloaded and shown with them; only a blocking finding (no picture, the
+ * wrong length) lands on "needs_attention". Every film with sound is also
+ * evened out (loudnorm to about -14 LUFS with a peak limiter, see
+ * video-ffmpeg.ts#normalizeLoudness), so a normal export never trips the
+ * clipping check in the first place. A stitch that fails twice in a row
+ * stops on "needs_attention" with a plain explanation instead of being
+ * retried on every tick forever.
  */
+
+/** Marks a failed attempt in errorMessage, so the next failure in a row stops instead of looping. */
+const STITCH_FAILED_PREFIX = "Putting the film together did not work";
+
+/** Plain words for a failed stitch: ffmpeg's own error repeats the whole command line, which helps nobody on the film page. */
+export function friendlyStitchError(err: unknown): string {
+  const text = (err instanceof Error ? err.message : String(err)).split("\n")[0]!.trim();
+  if (/^Command failed/i.test(text)) return "the video tool stopped with an error";
+  if (/timed? ?out|ETIMEDOUT|SIGTERM|SIGKILL/i.test(text)) return "it took too long and was stopped";
+  if (/ENOSPC|no space/i.test(text)) return "the server ran out of disk space";
+  return text.length > 160 ? `${text.slice(0, 157)}...` : text;
+}
+
+/** The storyline's message for a check result: blocking findings only (warnings are shown from qualityCheckIssues next to Download). */
+function qualityExplanation(issues: readonly VideoStorylineQualityIssue[]): string | null {
+  const blocking = issues.filter((i) => videoQualityIssueSeverity(i) === "blocking");
+  if (blocking.length === 0) return null;
+  return `The automatic check found ${blocking.length === 1 ? "a problem" : `${blocking.length} problems`} that stop this film from being finished:\n${blocking.map((i) => `- ${i.message}`).join("\n")}`;
+}
 
 const STITCH_TICK_BATCH = 5;
 
@@ -223,6 +255,15 @@ export function videoStorylineStitchService(db: Db, deps: VideoStorylineStitchDe
         if (musicBed) {
           result = await addMusicBed(result, musicBed);
         }
+        // An even, never-clipping sound track. If this step fails the film
+        // is kept as it is (the check may then warn about loud peaks)
+        // rather than losing the whole export over the sound.
+        try {
+          const evened = await normalizeLoudness(result);
+          result = { buffer: evened.buffer, contentType: evened.contentType };
+        } catch (err) {
+          logger.warn({ err, storylineId: storyline.id }, "video-storyline-stitch: evening out the sound failed; keeping the film as stitched");
+        }
         return { stitched: result, normalized, items };
       });
       const { stitched, normalized, items: builtItems } = built;
@@ -248,20 +289,19 @@ export function videoStorylineStitchService(db: Db, deps: VideoStorylineStitchDe
         contentType: stitched.contentType,
         body: stitched.buffer,
       });
-      const explanation = qualityCheck.passed
-        ? null
-        : `Automatic quality check found ${qualityCheck.issues.length} issue(s):\n${qualityCheck.issues.map((i) => `- ${i.message}`).join("\n")}`;
+      // Warnings never block: only a truly broken film waits on "needs_attention".
+      const blocked = qualityCheck.blocking;
       await db
         .update(videoStorylines)
         .set({
-          status: qualityCheck.passed ? "done" : "needs_attention",
+          status: blocked ? "needs_attention" : "done",
           finalProvider: stored.provider,
           finalObjectKey: stored.objectKey,
           finalContentType: stored.contentType,
           finalByteSize: stored.byteSize,
           finalSha256: stored.sha256,
           finalDurationSeconds: durationSeconds,
-          errorMessage: explanation,
+          errorMessage: qualityExplanation(qualityCheck.issues),
           stitchBlockedReason: null,
           qualityCheckIssues: qualityCheck.issues,
           qualityCheckedAt: nowOf(),
@@ -273,19 +313,43 @@ export function videoStorylineStitchService(db: Db, deps: VideoStorylineStitchDe
         actorType: "agent",
         actorId: storyline.createdByAgentId ?? storyline.createdByUserId ?? "system",
         agentId: storyline.createdByAgentId,
-        action: qualityCheck.passed ? "video_storyline.stitched" : "video_storyline.needs_attention",
+        action: blocked ? "video_storyline.needs_attention" : "video_storyline.stitched",
         entityType: "video_storyline",
         entityId: storyline.id,
-        details: { shotCount: shots.length, durationSeconds, byteSize: stored.byteSize, qualityCheckIssues: qualityCheck.issues },
+        details: {
+          shotCount: shots.length,
+          durationSeconds,
+          byteSize: stored.byteSize,
+          qualityCheckIssues: qualityCheck.issues,
+          warningCount: qualityCheck.issues.filter((i) => i.severity !== "blocking").length,
+        },
       });
-      return qualityCheck.passed ? "stitched" : "needs_attention";
+      return blocked ? "needs_attention" : "stitched";
     } catch (err) {
       logger.error({ err, storylineId: storyline.id }, "video-storyline-stitch: stitch failed");
+      const reason = friendlyStitchError(err);
+      // One automatic retry; a second failure in a row stops and says so,
+      // instead of re-running a heavy ffmpeg job on every tick forever.
+      const failedBefore = (storyline.errorMessage ?? "").startsWith(STITCH_FAILED_PREFIX);
+      if (failedBefore) {
+        const message = `${STITCH_FAILED_PREFIX} twice in a row (${reason}). Your clips are kept. Press "Combine again" to try once more; if it keeps failing, change or remove the clip you changed last.`;
+        await db
+          .update(videoStorylines)
+          .set({
+            status: "needs_attention",
+            errorMessage: message,
+            qualityCheckIssues: [{ code: "stitch_failed", message, shotIndex: null, timeSeconds: null, severity: "blocking" }],
+            qualityCheckedAt: nowOf(),
+            updatedAt: nowOf(),
+          })
+          .where(eq(videoStorylines.id, storyline.id));
+        return "failed";
+      }
       await db
         .update(videoStorylines)
         .set({
           status: "ready_to_stitch",
-          errorMessage: `Stitching failed: ${err instanceof Error ? err.message : String(err)}`,
+          errorMessage: `${STITCH_FAILED_PREFIX} (${reason}). Trying once more automatically.`,
           updatedAt: nowOf(),
         })
         .where(eq(videoStorylines.id, storyline.id));
@@ -362,5 +426,46 @@ export function videoStorylineStitchService(db: Db, deps: VideoStorylineStitchDe
       .where(eq(videoStorylines.id, storylineId));
   }
 
-  return { tick, stitchOne, retryStitch };
+  /**
+   * "Accept warnings and finish": a film parked on "needs_attention" whose
+   * findings are all warnings (from before warnings stopped blocking, or a
+   * person who simply wants it as it is) becomes "done" without making it
+   * again. A film with a real problem cannot be accepted this way.
+   */
+  async function acceptWarnings(companyId: string, storylineId: string, actor: VideoStorylineActor): Promise<void> {
+    const [storyline] = await db
+      .select()
+      .from(videoStorylines)
+      .where(and(eq(videoStorylines.id, storylineId), eq(videoStorylines.companyId, companyId)));
+    if (!storyline) throw notFound("Video storyline not found");
+    if (storyline.status === "done") return;
+    if (storyline.status !== "needs_attention") {
+      throw conflict(`This storyline is ${storyline.status.replace(/_/g, " ")}, so there is nothing to accept right now.`);
+    }
+    if (!storyline.finalObjectKey) throw conflict("There is no finished film to accept yet. Combine the clips again first.");
+    if (hasBlockingVideoQualityIssue(storyline.qualityCheckIssues)) {
+      throw unprocessable("The automatic check found a real problem with this film, so it cannot be accepted as it is. Combine the clips again.");
+    }
+    await db
+      .update(videoStorylines)
+      .set({
+        status: "done",
+        errorMessage: null,
+        // The findings stay, so they are still shown next to Download as warnings.
+        updatedAt: nowOf(),
+      })
+      .where(and(eq(videoStorylines.id, storylineId), eq(videoStorylines.companyId, companyId), eq(videoStorylines.status, "needs_attention")));
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      action: "video_storyline.warnings_accepted",
+      entityType: "video_storyline",
+      entityId: storylineId,
+      details: { warningCount: (storyline.qualityCheckIssues ?? []).length },
+    });
+  }
+
+  return { tick, stitchOne, retryStitch, acceptWarnings };
 }
