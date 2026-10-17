@@ -95,6 +95,7 @@ export function cryptoWalletRoutes(rawDb: Db, deps: CryptoWalletServiceDeps = {}
         mainnetEnabled: req.body.mainnetEnabled ?? null,
         allWalletsFrozen: req.body.allWalletsFrozen ?? null,
         endpointsChanged: req.body.rpcEndpoints ? Object.keys(req.body.rpcEndpoints) : [],
+        agentLimitsResetToDefaults: result.agentLimitsReset ?? null,
       },
     });
     res.json(result);
@@ -107,7 +108,7 @@ export function cryptoWalletRoutes(rawDb: Db, deps: CryptoWalletServiceDeps = {}
 
   router.post("/companies/:companyId/crypto/wallets", validate(createCryptoWalletSchema), ownerAdminScope(), async (req, res) => {
     const companyId = companyIdOf(req);
-    const wallet = await svc.createWallet(companyId, req.body, { userId: userIdOf(req) });
+    const wallet = await svc.createWallet(companyId, req.body, { userId: userIdOf(req), isOwner: isOwner(req, companyId) });
     await logActivity(db, {
       companyId,
       actorType: "user",
@@ -132,7 +133,11 @@ export function cryptoWalletRoutes(rawDb: Db, deps: CryptoWalletServiceDeps = {}
   /** The per-wallet kill switch. */
   router.post("/companies/:companyId/crypto/wallets/:walletId/freeze", validate(setCryptoWalletFrozenSchema), ownerAdminScope(), async (req, res) => {
     const companyId = companyIdOf(req);
-    const wallet = await svc.setFrozen(companyId, walletIdOf(req), req.body.frozen, req.body.reason, { actorType: "user", actorId: userIdOf(req) });
+    const wallet = await svc.setFrozen(companyId, walletIdOf(req), req.body.frozen, req.body.reason, {
+      actorType: "user",
+      actorId: userIdOf(req),
+      isOwner: isOwner(req, companyId),
+    });
     await logActivity(db, {
       companyId,
       actorType: "user",

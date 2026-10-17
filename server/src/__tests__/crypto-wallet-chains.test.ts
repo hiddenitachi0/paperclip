@@ -387,3 +387,59 @@ describe("Hyperliquid answers", () => {
     await expect(hl.accountState(ctxWith(() => json({ marginSummary: { accountValue: "lots" }, withdrawable: "1" })), "0x01")).rejects.toThrow(/not a number/);
   });
 });
+
+describe("mined-but-rejected payments keep their paid fee (follow-up 1)", () => {
+  it("Ethereum: a reverted receipt reports gasUsed x effectiveGasPrice, never more than the fee budget", async () => {
+    const eth = ethereumAdapter(missingLibs);
+    let receipt: Record<string, unknown> = { status: "0x0", gasUsed: "0x5208", effectiveGasPrice: "0x3b9aca00" };
+    const ctx: ChainContext = {
+      network: "testnet",
+      rpcUrl: "https://rpc.example.org",
+      fetch: (async () => json({ result: receipt })) as unknown as OutboundFetch,
+    };
+    const tx = { txHash: "0xabc", raw: null, chainDetail: { nonce: "1" }, from: "0x01", feeUpperBound: 10n ** 15n, checkedAt: new Date() };
+    await expect(eth.getTxStatus(ctx, tx)).resolves.toEqual({ status: "reverted", feePaid: 21_000n * 1_000_000_000n });
+    receipt = { status: "0x0", gasUsed: "0x5208", effectiveGasPrice: "0xffffffffffff" }; // more than the budget: a lying node
+    await expect(eth.getTxStatus(ctx, tx)).resolves.toEqual({ status: "reverted", feePaid: 10n ** 15n });
+    receipt = { status: "0x0" };
+    await expect(eth.getTxStatus(ctx, tx)).resolves.toEqual({ status: "reverted", feePaid: 10n ** 15n });
+  });
+});
+
+describe("Hyperliquid status lookups (follow-up 3)", () => {
+  const hl = hyperliquidAdapter(missingLibs);
+  const nonce = Date.parse("2026-10-17T10:00:00Z");
+  const order = { txHash: `hyperliquid-order-${nonce}`, raw: JSON.stringify({ action: { type: "order" } }), chainDetail: { nonce, cloid: "0x" + "ab".repeat(16) }, from: "0x01", feeUpperBound: 0n };
+  const withdraw = { txHash: `hyperliquid-withdraw-${nonce}`, raw: JSON.stringify({ action: { type: "withdraw3" } }), chainDetail: { nonce }, from: "0x01", feeUpperBound: 1_000_000n };
+  const soon = new Date(nonce + 60 * 60_000);
+  const late = new Date(nonce + 3 * 24 * 60 * 60_000);
+  const ctxWith = (answer: (body: any) => Response): ChainContext => ({
+    network: "testnet",
+    rpcUrl: "https://api.hyperliquid-testnet.xyz",
+    fetch: (async (_u: string, init?: RequestInit) => answer(JSON.parse(String(init?.body)))) as unknown as OutboundFetch,
+  });
+
+  it("finds an order by its own order id, and only gives up once the nonce can no longer be accepted", async () => {
+    let seen: unknown = null;
+    const found = ctxWith((body) => {
+      seen = body;
+      return json({ status: "order", order: { status: "filled", order: {} } });
+    });
+    await expect(hl.getTxStatus(found, { ...order, checkedAt: soon })).resolves.toBe("confirmed");
+    expect(seen).toEqual({ type: "orderStatus", user: "0x01", oid: order.chainDetail.cloid });
+    const rejected = ctxWith(() => json({ status: "order", order: { status: "perpMarginRejected" } }));
+    await expect(hl.getTxStatus(rejected, { ...order, checkedAt: soon })).resolves.toBe("failed");
+    const unknown = ctxWith(() => json({ status: "unknownOid" }));
+    await expect(hl.getTxStatus(unknown, { ...order, checkedAt: soon })).resolves.toBe("unknown");
+    await expect(hl.getTxStatus(unknown, { ...order, checkedAt: late })).resolves.toBe("failed");
+    const down = ctxWith(() => new Response("", { status: 502 }));
+    await expect(hl.getTxStatus(down, { ...order, checkedAt: late })).rejects.toThrow(/HTTP 502/);
+  });
+
+  it("finds a withdrawal in the account history by its nonce", async () => {
+    const history = (entries: unknown[]) => ctxWith(() => json(entries));
+    await expect(hl.getTxStatus(history([{ time: nonce + 1, delta: { type: "withdraw", usdc: "10.0", nonce, fee: "1.0" } }]), { ...withdraw, checkedAt: soon })).resolves.toBe("confirmed");
+    await expect(hl.getTxStatus(history([{ delta: { type: "withdraw", nonce: nonce + 5 } }]), { ...withdraw, checkedAt: soon })).resolves.toBe("unknown");
+    await expect(hl.getTxStatus(history([]), { ...withdraw, checkedAt: late })).resolves.toBe("failed");
+  });
+});

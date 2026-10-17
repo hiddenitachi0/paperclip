@@ -130,6 +130,9 @@ function inertAdapter(chain: "bitcoin" | "ethereum"): CryptoChainAdapter {
 interface FakeHyperliquid extends HyperliquidAdapter {
   orders: Array<{ coin: string; isBuy: boolean; size: string; leverage: number; reduceOnly: boolean; keySeen: boolean }>;
   leverageCalls: number;
+  broadcasts: number;
+  broadcastMode: "ok" | "unclear";
+  statusAnswer: "unknown" | "failed" | "confirmed";
   state: { accountValueUsd: number; positionsValueUsd: number };
 }
 
@@ -144,6 +147,9 @@ function fakeHyperliquid(): FakeHyperliquid {
     chain: "hyperliquid",
     orders,
     leverageCalls: 0,
+    broadcasts: 0,
+    broadcastMode: "ok",
+    statusAnswer: "unknown",
     state,
     async generateKey() {
       const privateKey = randomBytes(32).toString("hex");
@@ -169,12 +175,14 @@ function fakeHyperliquid(): FakeHyperliquid {
       return { raw: JSON.stringify({ action: { type: "withdraw3" } }), txHash: `hyperliquid-withdraw-${input.amount}`, feeUpperBound: 1_000_000n };
     },
     async broadcast(_ctx, signed) {
+      fake.broadcasts++;
+      if (fake.broadcastMode === "unclear") throw new Error("socket hang up");
       const parsed = JSON.parse(signed.raw) as { action: { type: string }; order?: FakeHyperliquid["orders"][number] };
       if (parsed.action.type === "order" && parsed.order) orders.push(parsed.order);
       return { status: "confirmed", detail: "Filled." };
     },
     async getTxStatus() {
-      return "unknown";
+      return fake.statusAnswer;
     },
     async midPrice() {
       return 100;
@@ -850,6 +858,94 @@ d("crypto wallets for agents", () => {
     await expect(secretService(db).resolveSecretValueForBrowserFill(companyId, row!.secretId, { actorId: agentId })).rejects.toThrow(
       /Only a payment card or a website login/,
     );
+  });
+
+  // ─── Follow-ups (DUR-4808) ──────────────────────────────────────────────
+
+  it("keeps the fee of a payment the receiver rejected counted, and does not mistake it for a stolen key", async () => {
+    const { companyId, agentId } = await seed();
+    const wallet = await makeSolanaWallet(companyId, agentId);
+    const to = await allow(companyId, wallet.id);
+    const owner = boardApp(companyId, "owner");
+    const agent = agentApp(companyId, agentId);
+    const svc = cryptoWalletService(db, db, deps());
+    await owner.patch(`/api/companies/${companyId}/crypto/wallets/${wallet.id}`, {
+      limits: { perTransaction: "0.1000075", daily: "0.1000075", total: "1", approvalAbove: "1" },
+    });
+    await owner.put(`/api/companies/${companyId}/crypto/agents/${agentId}/limits`, { perTransactionUsd: 100, dailyUsd: 100, totalUsd: 200, approvalAboveUsd: 100 });
+    solState.balances.set(wallet.address, 1_000_000_000);
+    expect((await owner.get(`/api/companies/${companyId}/crypto/wallets/${wallet.id}/balance`)).body.reconciliation.ok).toBe(true);
+
+    const sent = (await agent.post(`/api/agent-wallets/${wallet.id}/send`, { to, amount: "0.1", purpose: "Rejected by the receiver" })).body;
+    expect(sent.status).toBe("submitted");
+    solState.statuses.set(solState.sent[0]!.signature, { confirmationStatus: "confirmed", err: { InstructionError: [0, "Custom"] } });
+    await svc.tick(now);
+    const [row] = await db.select().from(cryptoWalletTransactions).where(eq(cryptoWalletTransactions.id, sent.id));
+    expect(row!.status).toBe("failed");
+    expect(row!.error).toMatch(/rejected by the receiving program.*fee .* was still paid/);
+    expect((row!.chainDetail as Record<string, unknown>).feePaid).toBe("5000");
+
+    // The paid fee still counts: the same payment again no longer fits today's limit.
+    const again = await agent.post(`/api/agent-wallets/${wallet.id}/send`, { to, amount: "0.1", purpose: "Try again" });
+    expect(again.body.status).toBe("blocked");
+    expect(again.body.blockReason).toMatch(/daily limit/);
+
+    // Only the fee left the wallet: explained, so no freeze.
+    solState.balances.set(wallet.address, 1_000_000_000 - 5_000);
+    const check = await owner.get(`/api/companies/${companyId}/crypto/wallets/${wallet.id}/balance`);
+    expect(check.body.reconciliation.ok).toBe(true);
+    expect((await db.select().from(cryptoWallets).where(eq(cryptoWallets.id, wallet.id)))[0]!.status).toBe("active");
+  });
+
+  it("makes real-money limits on creation, unfreezing and the company unfreeze owner-only, and resets agent limits when real money goes on", async () => {
+    const { companyId, agentId } = await seed();
+    const owner = boardApp(companyId, "owner");
+    const admin = boardApp(companyId, "admin");
+    // Set while real money is off...
+    expect((await admin.put(`/api/companies/${companyId}/crypto/agents/${agentId}/limits`, { perTransactionUsd: 900, dailyUsd: 1900, totalUsd: 9000, approvalAboveUsd: null })).status).toBe(200);
+    const on = await owner.patch(`/api/companies/${companyId}/crypto/settings`, { mainnetEnabled: true, confirmPhrase: "REAL MONEY" });
+    expect(on.body.agentLimitsReset).toBe(1);
+    // ...and back to the safe defaults once real money is on.
+    expect((await owner.get(`/api/companies/${companyId}/crypto/agents/${agentId}/limits`)).body).toEqual({ perTransactionUsd: 25, dailyUsd: 50, totalUsd: 200, approvalAboveUsd: 10 });
+
+    const limits = { perTransaction: "5", daily: "5", total: "5", approvalAbove: null };
+    expect((await admin.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "solana", network: "mainnet", label: "x", mode: "generate", limits })).status).toBe(403);
+    const real = await admin.post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "solana", network: "mainnet", label: "Real", mode: "generate" });
+    expect(real.status).toBe(201);
+
+    expect((await admin.post(`/api/companies/${companyId}/crypto/wallets/${real.body.id}/freeze`, { frozen: true })).body.status).toBe("frozen");
+    const adminUnfreeze = await admin.post(`/api/companies/${companyId}/crypto/wallets/${real.body.id}/freeze`, { frozen: false });
+    expect(adminUnfreeze.status).toBe(403);
+    expect((await owner.post(`/api/companies/${companyId}/crypto/wallets/${real.body.id}/freeze`, { frozen: false })).body.status).toBe("active");
+
+    expect((await admin.patch(`/api/companies/${companyId}/crypto/settings`, { allWalletsFrozen: true })).body.allWalletsFrozen).toBe(true);
+    expect((await admin.patch(`/api/companies/${companyId}/crypto/settings`, { allWalletsFrozen: false })).status).toBe(403);
+    expect((await owner.patch(`/api/companies/${companyId}/crypto/settings`, { allWalletsFrozen: false })).body.allWalletsFrozen).toBe(false);
+  });
+
+  it("never re-sends a Hyperliquid order with an unclear answer; it only looks it up until it is found or can no longer be accepted", async () => {
+    const { companyId, agentId } = await seed();
+    const created = await boardApp(companyId, "owner").post(`/api/companies/${companyId}/crypto/wallets`, { agentId, chain: "hyperliquid", label: "Trader", mode: "generate" });
+    const walletId = created.body.id as string;
+    const agent = agentApp(companyId, agentId);
+    const svc = cryptoWalletService(db, db, deps());
+    hl.broadcastMode = "unclear";
+    const order = (await agent.post(`/api/agent-wallets/${walletId}/hyperliquid-order`, { coin: "BTC", side: "buy", size: "0.05", limitPrice: "100", purpose: "Unclear" })).body;
+    expect(order.status).toBe("submitted");
+    expect(hl.broadcasts).toBe(1);
+
+    now = new Date(now.getTime() + 30 * 60_000);
+    await svc.tick(now);
+    expect(hl.broadcasts).toBe(1); // looked up, never re-sent
+    const statusOf = async () => (await db.select().from(cryptoWalletTransactions).where(eq(cryptoWalletTransactions.id, order.id)))[0]!;
+    expect((await statusOf()).status).toBe("submitted");
+
+    hl.statusAnswer = "failed"; // the exchange never saw it and the nonce window has passed
+    await svc.tick(now);
+    const settled = await statusOf();
+    expect(settled.status).toBe("failed");
+    expect(settled.error).toMatch(/Hyperliquid has no record of this/);
+    expect(hl.broadcasts).toBe(1);
   });
 
   // ─── Owner sends (the recovery path) ───────────────────────────────────

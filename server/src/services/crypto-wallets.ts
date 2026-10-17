@@ -52,7 +52,7 @@ import {
   defaultCryptoChainAdapters,
   type ChainContext,
   type BroadcastResult,
-  type ChainTxStatus,
+  type TxStatusCheck,
   type CryptoChainAdapter,
   type CryptoChainAdapters,
   type SignedTransfer,
@@ -288,10 +288,11 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     companyId: string,
     input: UpdateCompanyCryptoSettingsInput,
     actor: { userId: string; isOwner: boolean },
-  ): Promise<CompanyCryptoSettings> {
+  ): Promise<CompanyCryptoSettings & { agentLimitsReset?: number }> {
     const current = await getSettings(companyId);
     const now = nowOf();
     const patch: Partial<typeof companyCryptoSettings.$inferInsert> = { updatedAt: now };
+    let turningMainnetOn = false;
 
     if (input.mainnetEnabled === true && !current.mainnetEnabled) {
       if (!actor.isOwner) throw forbidden("Only the company's owner can turn on real money for crypto wallets.");
@@ -301,11 +302,17 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
       patch.mainnetEnabled = true;
       patch.mainnetEnabledAt = now;
       patch.mainnetEnabledByUserId = actor.userId;
+      turningMainnetOn = true;
     } else if (input.mainnetEnabled === false) {
       patch.mainnetEnabled = false;
     }
 
     if (input.allWalletsFrozen !== undefined) {
+      // Anyone allowed here may pull the brake; while real money is on, only
+      // the owner may release it.
+      if (input.allWalletsFrozen === false && current.allWalletsFrozen && (current.mainnetEnabled || turningMainnetOn) && !actor.isOwner) {
+        throw forbidden("Real money is on for this company, so only the owner can unfreeze all wallets.");
+      }
       patch.allWalletsFrozen = input.allWalletsFrozen;
       patch.frozenReason = input.allWalletsFrozen ? (input.frozenReason?.trim() || "Frozen by an owner or admin.") : null;
     }
@@ -338,6 +345,15 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
       .values({ companyId, ...patch })
       .onConflictDoUpdate({ target: companyCryptoSettings.companyId, set: patch });
 
+    // Agent dollar limits set while real money was off were never the
+    // owner's real-money decision: turning real money on puts every agent
+    // back on the safe defaults, which the owner can then raise on purpose.
+    let agentLimitsReset: number | undefined;
+    if (turningMainnetOn) {
+      const removed = await db.delete(cryptoAgentLimits).where(eq(cryptoAgentLimits.companyId, companyId)).returning({ id: cryptoAgentLimits.id });
+      agentLimitsReset = removed.length;
+    }
+
     if (input.allWalletsFrozen !== undefined && input.allWalletsFrozen !== current.allWalletsFrozen) {
       const wallets = await db.select({ id: cryptoWallets.id }).from(cryptoWallets).where(eq(cryptoWallets.companyId, companyId));
       for (const wallet of wallets) {
@@ -349,7 +365,8 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
         });
       }
     }
-    return getSettings(companyId);
+    const settings = await getSettings(companyId);
+    return agentLimitsReset === undefined ? settings : { ...settings, agentLimitsReset };
   }
 
   function endpointFor(settings: CompanyCryptoSettings, chain: CryptoChain, network: CryptoNetwork): string {
@@ -385,11 +402,14 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     return rows.map(toWalletSummary);
   }
 
-  async function createWallet(companyId: string, input: CreateCryptoWalletInput, actor: { userId: string }): Promise<CryptoWalletSummary> {
+  async function createWallet(companyId: string, input: CreateCryptoWalletInput, actor: { userId: string; isOwner: boolean }): Promise<CryptoWalletSummary> {
     const agent = await requireAgent(companyId, input.agentId);
     const settings = await getSettings(companyId);
     if (input.network === "mainnet" && !settings.mainnetEnabled) {
       throw forbidden("Real money is switched off for this company. The owner can turn it on in the crypto settings; until then, use the test network.");
+    }
+    if (input.network === "mainnet" && input.limits !== undefined && !actor.isOwner) {
+      throw forbidden("Only the company's owner can set limits on a real-money wallet. Leave the limits out to start with the safe defaults.");
     }
     const limits = limitsToBaseUnits(input.chain, input.limits ?? DEFAULT_CRYPTO_WALLET_LIMITS[input.chain]);
     const adapter = adapterFor(input.chain);
@@ -493,9 +513,20 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     return toWalletSummary(updated!);
   }
 
-  async function setFrozen(companyId: string, walletId: string, frozen: boolean, reason: string | undefined, actor: CryptoActor): Promise<CryptoWalletSummary> {
+  async function setFrozen(
+    companyId: string,
+    walletId: string,
+    frozen: boolean,
+    reason: string | undefined,
+    actor: CryptoActor & { isOwner: boolean },
+  ): Promise<CryptoWalletSummary> {
     const row = await requireWalletRow(companyId, walletId);
     if (row.status === "archived") throw unprocessable("This wallet is archived.");
+    // Freezing is always allowed; unfreezing a real-money wallet (perhaps
+    // frozen because coins left it that Paperclip did not send) is the owner's call.
+    if (!frozen && row.status === "frozen" && row.network === "mainnet" && !actor.isOwner) {
+      throw forbidden("Only the company's owner can unfreeze a real-money wallet.");
+    }
     const now = nowOf();
     const [updated] = await db
       .update(cryptoWallets)
@@ -669,18 +700,21 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
       const since = new Date(wallet.lastBalanceAt.getTime() - RECONCILE_WINDOW_MS);
       const [sent] = await db
         .select({
-          total: sql<string>`coalesce(sum(${cryptoWalletTransactions.amount} + coalesce(${cryptoWalletTransactions.feeUpperBound}, 0)), 0)::text`,
+          // Sent payments (amount + highest fee), and the fee a reverted
+          // payment still paid -- both really left the wallet.
+          total: sql<string>`coalesce(sum(${costSql}), 0)::text`,
         })
         .from(cryptoWalletTransactions)
         .where(
           and(
             eq(cryptoWalletTransactions.walletId, walletId),
             isNotNull(cryptoWalletTransactions.txHash),
-            inArray(cryptoWalletTransactions.status, ["approved", "submitted", "confirmed"]),
+            or(inArray(cryptoWalletTransactions.status, ["approved", "submitted", "confirmed"]), stillCostsSql),
+            sql`${cryptoWalletTransactions.status} <> 'pending_approval'`,
             gte(cryptoWalletTransactions.updatedAt, since),
           ),
         );
-      const explained = BigInt(sent?.total ?? "0");
+      const explained = BigInt(String(sent?.total ?? "0").split(".")[0]!);
       const drop = previous - result.balance;
       if (drop > explained) {
         ok = false;
@@ -742,37 +776,43 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     return hit?.address ?? null;
   }
 
+  /**
+   * What a transaction still costs the wallet, for the limits: amount + fee
+   * budget while it may still go through, and just the fee actually paid
+   * when it was mined but rejected by the receiver ("reverted": recorded in
+   * chain_detail.feePaid). Everything else counts nothing.
+   */
+  const COUNTING_SQL = sql.raw(CRYPTO_TX_COUNTING_STATUSES.map((st) => `'${st}'`).join(", "));
+  const costSql = sql`case when ${cryptoWalletTransactions.status} in (${COUNTING_SQL}) then ${cryptoWalletTransactions.amount} + coalesce(${cryptoWalletTransactions.feeUpperBound}, 0) when ${cryptoWalletTransactions.status} = 'failed' then coalesce((${cryptoWalletTransactions.chainDetail} ->> 'feePaid')::numeric, 0) else 0 end`;
+  const costUsdSql = sql`case when ${cryptoWalletTransactions.status} in (${COUNTING_SQL}) then coalesce(${cryptoWalletTransactions.amountUsd}, 0) when ${cryptoWalletTransactions.status} = 'failed' then coalesce((${cryptoWalletTransactions.chainDetail} ->> 'feePaidUsd')::float8, 0) else 0 end`;
+  const stillCostsSql = sql`(${cryptoWalletTransactions.status} in (${COUNTING_SQL}) or (${cryptoWalletTransactions.status} = 'failed' and (${cryptoWalletTransactions.chainDetail} ->> 'feePaid') is not null))`;
+
   async function spentSoFar(tx: Pick<Db, "select">, wallet: CryptoWalletRow, agentId: string, now: Date) {
-    const counting = [...CRYPTO_TX_COUNTING_STATUSES];
     const dayStartIso = utcDayStart(now).toISOString();
-    const walletBase = and(
-      eq(cryptoWalletTransactions.walletId, wallet.id),
-      eq(cryptoWalletTransactions.countsTowardLimits, true),
-      inArray(cryptoWalletTransactions.status, counting),
-    );
+    const walletBase = and(eq(cryptoWalletTransactions.walletId, wallet.id), eq(cryptoWalletTransactions.countsTowardLimits, true), stillCostsSql);
     const agentBase = and(
       eq(cryptoWalletTransactions.agentId, agentId),
       eq(cryptoWalletTransactions.companyId, wallet.companyId),
       eq(cryptoWalletTransactions.countsTowardLimits, true),
-      inArray(cryptoWalletTransactions.status, counting),
+      stillCostsSql,
     );
     const [walletRow] = await tx
       .select({
-        today: sql<string>`coalesce(sum(case when ${cryptoWalletTransactions.createdAt} >= ${dayStartIso}::timestamptz then ${cryptoWalletTransactions.amount} + coalesce(${cryptoWalletTransactions.feeUpperBound}, 0) else 0 end), 0)::text`,
-        total: sql<string>`coalesce(sum(${cryptoWalletTransactions.amount} + coalesce(${cryptoWalletTransactions.feeUpperBound}, 0)), 0)::text`,
+        today: sql<string>`coalesce(sum(case when ${cryptoWalletTransactions.createdAt} >= ${dayStartIso}::timestamptz then ${costSql} else 0 end), 0)::text`,
+        total: sql<string>`coalesce(sum(${costSql}), 0)::text`,
       })
       .from(cryptoWalletTransactions)
       .where(walletBase);
     const [agentRow] = await tx
       .select({
-        today: sql<number>`coalesce(sum(case when ${cryptoWalletTransactions.createdAt} >= ${dayStartIso}::timestamptz then ${cryptoWalletTransactions.amountUsd} else 0 end), 0)::float8`,
-        total: sql<number>`coalesce(sum(${cryptoWalletTransactions.amountUsd}), 0)::float8`,
+        today: sql<number>`coalesce(sum(case when ${cryptoWalletTransactions.createdAt} >= ${dayStartIso}::timestamptz then ${costUsdSql} else 0 end), 0)::float8`,
+        total: sql<number>`coalesce(sum(${costUsdSql}), 0)::float8`,
       })
       .from(cryptoWalletTransactions)
       .where(agentBase);
     return {
-      walletToday: BigInt(walletRow?.today ?? "0"),
-      walletTotal: BigInt(walletRow?.total ?? "0"),
+      walletToday: BigInt(String(walletRow?.today ?? "0").split(".")[0]!),
+      walletTotal: BigInt(String(walletRow?.total ?? "0").split(".")[0]!),
       agentTodayUsd: Number(agentRow?.today ?? 0),
       agentTotalUsd: Number(agentRow?.total ?? 0),
     };
@@ -1396,25 +1436,61 @@ export function cryptoWalletService(db: Db, rawDb: Db = db, deps: CryptoWalletSe
     const wallet = await requireWalletRow(row.companyId, row.walletId);
     const ctx = await chainContext(row.companyId, chain, row.network as CryptoNetwork);
     const detail = (row.chainDetail as Record<string, unknown> | null) ?? null;
-    let status: ChainTxStatus;
+    let status: TxStatusCheck;
     try {
-      status = await adapterFor(chain).getTxStatus(ctx, { txHash: row.txHash!, raw: row.signedRaw, chainDetail: detail, from: wallet.address });
+      status = await adapterFor(chain).getTxStatus(ctx, {
+        txHash: row.txHash!,
+        raw: row.signedRaw,
+        chainDetail: detail,
+        from: wallet.address,
+        feeUpperBound: BigInt(row.feeUpperBound ?? "0"),
+        checkedAt: now,
+      });
     } catch {
       status = "unknown";
     }
     if (status === "confirmed") {
       return finish(row, { status: "confirmed", confirmedAt: now, error: null }, "wallet_tx_confirmed", {});
     }
+    if (typeof status === "object" && status.status === "reverted") {
+      // The payment was mined but the receiver rejected it: the coins
+      // stayed, the network fee did not. That fee keeps counting toward the
+      // limits and explains the balance drop (so no false "stolen key").
+      const price = await priceSource.usdPrice(chain).catch(() => null);
+      const feePaidUsd = amountUsdOf(chain, status.feePaid, price);
+      return finish(
+        row,
+        {
+          status: "failed",
+          confirmedAt: now,
+          chainDetail: { ...(detail ?? {}), feePaid: status.feePaid.toString(), feePaidUsd: feePaidUsd ?? 0 },
+          error: `The payment was rejected by the receiving ${chain === "solana" ? "program" : "contract"}, so the coins did not move. The network fee (${formatChainAmount(chain, status.feePaid)}) was still paid and still counts toward the limits.`,
+        },
+        "wallet_tx_failed",
+        { reason: "reverted", feePaid: status.feePaid.toString() },
+      );
+    }
     if (status === "failed") {
       return finish(
         row,
-        { status: "failed", error: "The network shows this payment can never go through, so the coins did not leave (a network fee may still have been charged)." },
+        {
+          status: "failed",
+          error:
+            chain === "hyperliquid"
+              ? "Hyperliquid has no record of this and can no longer accept it (more than two days have passed), so it did not happen. It no longer counts toward the limits."
+              : "The network shows this payment can never go through, so the coins did not leave. It no longer counts toward the limits.",
+        },
         "wallet_tx_failed",
         { reason: "definitely_not_landed" },
       );
     }
     const lastSend = row.lastBroadcastAt?.getTime() ?? 0;
-    if (row.signedRaw && now.getTime() - lastSend >= REBROADCAST_INTERVAL_MS) {
+    // Orders are never re-sent: a late re-send could run at whatever
+    // leverage the exchange account has by then. An order with an unclear
+    // answer is only looked up (by its own order id) until it is found or
+    // can no longer be accepted. Withdrawals carry no leverage and are
+    // re-sent as the same signed bytes (same nonce, so at most once).
+    if (row.kind !== "order" && row.signedRaw && now.getTime() - lastSend >= REBROADCAST_INTERVAL_MS) {
       const signed: SignedTransfer = {
         raw: row.signedRaw,
         txHash: row.txHash!,

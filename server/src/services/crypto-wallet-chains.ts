@@ -83,6 +83,18 @@ export interface SignedTransfer {
  */
 export type ChainTxStatus = "pending" | "confirmed" | "failed" | "unknown";
 
+/**
+ * Mined (or confirmed) but the payment itself did not happen: the receiving
+ * contract/program rejected it. The coins stayed, but the network fee was
+ * paid -- `feePaid` (base units), which must keep counting toward limits.
+ */
+export interface RevertedTxStatus {
+  status: "reverted";
+  feePaid: bigint;
+}
+
+export type TxStatusCheck = ChainTxStatus | RevertedTxStatus;
+
 export interface BroadcastResult {
   status: "pending" | "confirmed" | "failed";
   detail?: string;
@@ -93,6 +105,10 @@ export interface StoredTransfer {
   raw: string | null;
   chainDetail: Record<string, unknown> | null;
   from: string;
+  /** The highest fee this transaction could pay (used when the exact fee is not reported). */
+  feeUpperBound: bigint;
+  /** When the check runs (tests move the clock). */
+  checkedAt: Date;
 }
 
 export interface CryptoChainAdapter {
@@ -114,7 +130,7 @@ export interface CryptoChainAdapter {
    * answer is unclear (the caller then keeps the payment counted and checks).
    */
   broadcast(ctx: ChainContext, signed: SignedTransfer): Promise<BroadcastResult>;
-  getTxStatus(ctx: ChainContext, tx: StoredTransfer): Promise<ChainTxStatus>;
+  getTxStatus(ctx: ChainContext, tx: StoredTransfer): Promise<TxStatusCheck>;
 }
 
 export interface HyperliquidAccountState {
@@ -659,7 +675,19 @@ export function ethereumAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs): Cr
       const receipt = await jsonRpc(ctx, "eth_getTransactionReceipt", [tx.txHash], what);
       if (receipt) {
         if (receipt.status === "0x1") return "confirmed";
-        if (receipt.status === "0x0") return "failed";
+        if (receipt.status === "0x0") {
+          // Mined but reverted by the receiving contract: no ETH moved, but
+          // gas was paid. gasUsed x effectiveGasPrice is the exact fee; if the
+          // node leaves either out, count the highest it could have been.
+          let feePaid = tx.feeUpperBound;
+          try {
+            const exact = hexQuantity(receipt.gasUsed, what) * hexQuantity(receipt.effectiveGasPrice, what);
+            if (exact >= 0n && exact <= tx.feeUpperBound) feePaid = exact;
+          } catch {
+            // keep the upper bound
+          }
+          return { status: "reverted", feePaid };
+        }
         return "unknown";
       }
       // No receipt. Ethereum transactions never expire, so it is only dead
@@ -873,7 +901,9 @@ export function solanaAdapter(): CryptoChainAdapter {
       if (status) {
         const settled = status.confirmationStatus === "confirmed" || status.confirmationStatus === "finalized";
         if (!settled) return "pending";
-        return status.err ? "failed" : "confirmed";
+        // Confirmed with an error: the transfer did not happen, but the
+        // fixed signature fee was paid.
+        return status.err ? { status: "reverted", feePaid: SOLANA_FEE_LAMPORTS } : "confirmed";
       }
       // Not seen. A Solana transaction can only land while its block id is
       // valid; once the finalized chain is well past that height, it never can.
@@ -984,6 +1014,19 @@ function usdcUnits(value: unknown): bigint {
 
 const HYPERLIQUID_WITHDRAW_FEE = BigInt(CRYPTO_NETWORK_FEE_CEILING.hyperliquid);
 
+/**
+ * Hyperliquid only accepts an action whose nonce (a millisecond time) is
+ * within two days before the exchange's clock. Past that (plus an hour of
+ * margin) an action that was never seen can never be accepted any more.
+ */
+export const HYPERLIQUID_NONCE_ACCEPTANCE_MS = 2 * 24 * 60 * 60_000;
+const HYPERLIQUID_GIVE_UP_AFTER_MS = HYPERLIQUID_NONCE_ACCEPTANCE_MS + 60 * 60_000;
+
+/** Order outcomes Hyperliquid reports for an order that was refused when placed. */
+function isRejectedOrderStatus(status: unknown): boolean {
+  return typeof status === "string" && /rejected$/i.test(status);
+}
+
 // Shared by every adapter instance in this process, so two signed actions
 // never carry the same nonce (Hyperliquid treats a nonce as used once).
 let lastHyperliquidNonce = 0;
@@ -1089,10 +1132,28 @@ export function hyperliquidAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs, 
       if (typeof status?.error === "string") return { status: "failed", detail: `Hyperliquid refused the order: ${status.error.slice(0, 200)}` };
       throw new CryptoChainError("broadcast_unclear", "Hyperliquid did not say what happened to the order.");
     },
-    async getTxStatus() {
-      // Hyperliquid has no lookup by our reference; re-sending the same
-      // signed action (see broadcast) is how an unclear send gets settled.
-      return "unknown";
+    async getTxStatus(ctx, tx) {
+      // A real lookup: withdrawals in the account's ledger by their nonce,
+      // orders by our own order id (cloid). Network trouble throws.
+      const nonce = Number(tx.chainDetail?.nonce);
+      if (!Number.isSafeInteger(nonce) || nonce <= 0) return "unknown";
+      const kind = tx.raw ? (JSON.parse(tx.raw) as { action?: { type?: string } }).action?.type : undefined;
+      const pastWindow = tx.checkedAt.getTime() - nonce > HYPERLIQUID_GIVE_UP_AFTER_MS;
+      if (kind === "order") {
+        const cloid = tx.chainDetail?.cloid;
+        if (typeof cloid !== "string") return pastWindow ? "failed" : "unknown";
+        const answer = await post(ctx, "/info", { type: "orderStatus", user: tx.from, oid: cloid });
+        if (answer?.status === "order") {
+          return isRejectedOrderStatus(answer?.order?.status) ? "failed" : "confirmed";
+        }
+        if (answer?.status === "unknownOid") return pastWindow ? "failed" : "unknown";
+        throw new CryptoChainError("bad_response", "The Hyperliquid exchange sent back an unexpected order status.");
+      }
+      const updates = await post(ctx, "/info", { type: "userNonFundingLedgerUpdates", user: tx.from, startTime: Math.max(0, nonce - 60 * 60_000) });
+      if (!Array.isArray(updates)) throw new CryptoChainError("bad_response", "The Hyperliquid exchange sent back an unexpected account history.");
+      const found = updates.some((u: any) => u?.delta?.type === "withdraw" && Number(u.delta.nonce) === nonce);
+      if (found) return "confirmed";
+      return pastWindow ? "failed" : "unknown";
     },
     async midPrice(ctx, coin) {
       const mids = await post(ctx, "/info", { type: "allMids" });
@@ -1126,6 +1187,7 @@ export function hyperliquidAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs, 
       // leverage someone set on the exchange directly.
       const leverageAction: MsgpackValue = { type: "updateLeverage", asset: asset.index, isCross: true, leverage };
       const leverageSigned = await signL1(ctx, input.privateKey, leverageAction);
+      const cloid = `0x${randomBytes(16).toString("hex")}`;
       const orderAction: MsgpackValue = {
         type: "order",
         orders: [
@@ -1136,6 +1198,9 @@ export function hyperliquidAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs, 
             s: normalizeDecimalString(input.size),
             r: input.reduceOnly,
             t: { limit: { tif: "Gtc" } },
+            // Our own order id, so the order can be looked up later even if
+            // the answer to placing it never arrived.
+            c: cloid,
           },
         ],
         grouping: "na",
@@ -1143,7 +1208,7 @@ export function hyperliquidAdapter(loadLibs: CryptoLibsLoader = loadCryptoLibs, 
       const orderSigned = await signL1(ctx, input.privateKey, orderAction);
       return {
         leverageRaw: leverageSigned.body,
-        order: { raw: orderSigned.body, txHash: `hyperliquid-order-${orderSigned.nonce}`, feeUpperBound: 0n, chainDetail: { nonce: orderSigned.nonce, leverage } },
+        order: { raw: orderSigned.body, txHash: `hyperliquid-order-${orderSigned.nonce}`, feeUpperBound: 0n, chainDetail: { nonce: orderSigned.nonce, leverage, cloid } },
       };
     },
     async applyLeverage(ctx, leverageRaw) {

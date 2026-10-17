@@ -48,11 +48,19 @@ export function CryptoCompanySettingsCard({ companyId }: { companyId: string }) 
 
   const update = useMutation({
     mutationFn: (input: Parameters<typeof cryptoWalletsApi.updateSettings>[1]) => cryptoWalletsApi.updateSettings(companyId, input),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.cryptoWallets.settings(companyId) });
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["crypto-settings", companyId] });
+      queryClient.invalidateQueries({ queryKey: ["crypto-agent-limits", companyId] });
       setConfirmOpen(false);
       setPhrase("");
-      pushToast({ title: "Crypto settings saved", tone: "success" });
+      pushToast({
+        title: "Crypto settings saved",
+        body:
+          result.agentLimitsReset !== undefined
+            ? "Real money is on. Every agent's dollar limits are back to the safe defaults; raise them on each agent if you want to."
+            : undefined,
+        tone: "success",
+      });
     },
     onError: (error) => pushToast({ title: "Could not save the crypto settings", body: errorMessage(error), tone: "error" }),
   });
@@ -110,7 +118,8 @@ export function CryptoCompanySettingsCard({ companyId }: { companyId: string }) 
         <Button
           variant={settings.allWalletsFrozen ? "outline" : "destructive"}
           size="sm"
-          disabled={update.isPending}
+          disabled={update.isPending || (settings.allWalletsFrozen && settings.mainnetEnabled && !isOwner)}
+          title={settings.allWalletsFrozen && settings.mainnetEnabled && !isOwner ? "Only the owner can unfreeze while real money is on." : undefined}
           onClick={() =>
             update.mutate(settings.allWalletsFrozen ? { allWalletsFrozen: false } : { allWalletsFrozen: true, frozenReason: "Frozen from the company settings." })
           }
@@ -179,6 +188,8 @@ export function CryptoCompanySettingsCard({ companyId }: { companyId: string }) 
               <li>Agents can still only send to addresses you allow, within the limits you set.</li>
               <li>Payments above each wallet's approval amount still wait for a person to approve them.</li>
               <li>Existing test wallets stay on the test network. Make a new wallet for real money.</li>
+              <li>Every agent's dollar limits go back to the safe defaults, so you decide them again with real money in mind.</li>
+              <li>From then on only you, the owner, can unfreeze wallets or change real-money limits and addresses.</li>
             </ul>
             <div className="space-y-1">
               <Label htmlFor="mainnet-confirm">Type {CRYPTO_MAINNET_CONFIRM_PHRASE} to confirm</Label>

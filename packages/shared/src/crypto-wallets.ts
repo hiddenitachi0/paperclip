@@ -366,6 +366,8 @@ export interface CompanyCryptoSettings {
   frozenReason: string | null;
   /** Only the endpoints the company changed; anything missing uses DEFAULT_CRYPTO_RPC_ENDPOINTS. */
   rpcEndpoints: Partial<Record<CryptoChain, Partial<Record<CryptoNetwork, string>>>>;
+  /** Only on the answer to turning real money on: how many agents' dollar limits went back to the defaults. */
+  agentLimitsReset?: number;
 }
 
 export interface CryptoWalletBalance {
