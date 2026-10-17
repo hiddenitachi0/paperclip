@@ -72,6 +72,7 @@ import {
   routineService,
   jobService,
   seedLegalAdvisorStarterPack,
+  convertBragPositionsToSkill,
   logScheduleChainBootstrapVerification,
   startSecretSurfaceScanner,
 } from "./services/index.js";
@@ -704,6 +705,15 @@ export async function startServer(): Promise<StartedServer> {
   const legalAdvisorStarterPackSeeded = await seedLegalAdvisorStarterPack(db as any);
   if (legalAdvisorStarterPackSeeded.createdJobs.length > 0 || legalAdvisorStarterPackSeeded.createdPosition) {
     logger.info(legalAdvisorStarterPackSeeded, "Seeded Legal Advisor Jobs starter pack");
+  }
+  // Brag is a skill on the Content & Video Producer position, not a position
+  // of its own: convert any old Brag position (idempotent, no-op afterwards).
+  const bragConversions = await convertBragPositionsToSkill(db as any).catch((err) => {
+    logger.error({ err }, "Brag position conversion failed");
+    return [];
+  });
+  if (bragConversions.length > 0) {
+    logger.info({ bragConversions }, "Converted Brag positions to the Content & Video Producer position");
   }
   if (config.deploymentMode === "authenticated") {
     const {

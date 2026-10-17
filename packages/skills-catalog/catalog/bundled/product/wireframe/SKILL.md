@@ -158,7 +158,9 @@ design/<task-slug>/
 
 ## If the user asks to deploy / publish / host the wireframes
 
-Defer to the **`here-now` skill** — it owns publishing, anonymous vs. permanent sites, claim tokens, and credentials. Do not roll your own hosting.
+**Default: do not publish to the public internet.** Inside Paperclip, upload the viewer and SVGs as task artifacts (see the `paperclip` skill, "Generated Artifacts and Work Products") and link them in your comment — that is enough for the people on the task to see them. Publish to a public host only when the request explicitly asks for a public link, and say in your comment that anyone with the link can see it.
+
+When a public link is wanted, defer to the **`here-now` skill** — it owns publishing, anonymous vs. permanent sites, claim tokens, and credentials. Do not roll your own hosting.
 
 Load the `here-now` skill and follow its `publish.sh` recipe. The shape is:
 
@@ -168,7 +170,7 @@ cd design/<task-slug>
 # → https://{adjective-noun-suffix}.here.now/
 ```
 
-If `here-now` isn't installed for the current agent, install it (`npx skills add heredotnow/skill --skill here-now -g`) or escalate to whoever owns the agent's skill set. Do not roll your own hosting.
+If `here-now` isn't installed for the current agent, do not install it yourself — ask whoever manages the company's skills to add it, and deliver the artifacts in Paperclip meanwhile. Do not roll your own hosting.
 
 Things to remember when invoking it:
 

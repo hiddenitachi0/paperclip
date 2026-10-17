@@ -13,11 +13,25 @@ const EXPECTED_BUNDLED_KEYS = [
 ];
 
 const EXPECTED_OPTIONAL_KEYS = [
+  "paperclipai/optional/analysis/report-analysis",
   "paperclipai/optional/browser/agent-browser",
+  "paperclipai/optional/communication/customer-support-replies",
+  "paperclipai/optional/communication/email-triage",
+  "paperclipai/optional/communication/meeting-notes",
   "paperclipai/optional/content/brag",
+  "paperclipai/optional/content/brag-video",
   "paperclipai/optional/content/release-announcement",
+  "paperclipai/optional/content/seo-content-writing",
+  "paperclipai/optional/content/social-media-management",
+  "paperclipai/optional/finance/bookkeeping-assistant",
+  "paperclipai/optional/media/media-studio-generation",
+  "paperclipai/optional/operations/calendar-scheduling",
+  "paperclipai/optional/people/hiring-pipeline",
   "paperclipai/optional/product/design-critique",
+  "paperclipai/optional/quality/code-review",
+  "paperclipai/optional/quality/security-review",
   "paperclipai/optional/research/last30days",
+  "paperclipai/optional/sales/lead-follow-up",
 ];
 
 describe("shipped skills catalog", () => {
