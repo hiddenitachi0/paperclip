@@ -3138,6 +3138,7 @@ export {
 } from "./mail-urgency.js";
 export * from "./video-storyline-transitions.js";
 export * from "./video-storyline-clips.js";
+export * from "./crypto-wallets.js";
 export {
   POSITION_CATALOGUE,
   CATALOGUE_SKILL_KEYS,

@@ -57,6 +57,8 @@ import { QuickAgentChatPanel } from "../components/QuickAgentChatPanel";
 import { AgentAddOnToolsSection } from "../components/AgentAddOnToolsSection";
 import { TrustPresetSection } from "../components/TrustPresetSection";
 import { SettingsSection, SettingsSubsection } from "../components/SettingsSection";
+import { AgentCryptoWalletsSection } from "../components/AgentCryptoWalletsSection";
+import { useCompanyRole } from "../hooks/useCompanyRole";
 import { FileTree, buildFileTree } from "../components/FileTree";
 import { ScrollToBottom } from "../components/ScrollToBottom";
 import { SourceResolvedFoldCallout } from "../components/SourceResolvedFoldCallout";
@@ -1641,6 +1643,7 @@ export function AgentConfigurePage({
     </>
   );
   const revisionCount = configRevisions?.length ?? 0;
+  const companyRole = useCompanyRole(companyId);
 
   return (
     <div className="max-w-3xl space-y-6" data-helper-entity={`agent:${agent.id}`}>
@@ -1666,6 +1669,18 @@ export function AgentConfigurePage({
       >
         <KeysTab agentId={agentId} companyId={companyId} />
       </SettingsSection>
+
+      {companyId && companyRole.canManageConnections ? (
+        <SettingsSection
+          title="Crypto wallets"
+          description="Wallets this agent can pay or trade from. The server keeps the keys; you set the limits and allowed addresses."
+          defaultOpen={false}
+          storageKey="agent.configuration.cryptoWallets"
+          data-testid="agent-config-crypto-wallets"
+        >
+          <AgentCryptoWalletsSection companyId={companyId} agentId={agent.id} />
+        </SettingsSection>
+      ) : null}
 
       <SettingsSection
         title="Configuration history"

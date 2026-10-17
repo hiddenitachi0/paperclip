@@ -15,6 +15,7 @@ import { StatusBadge } from "../components/StatusBadge";
 import { EmptyState } from "../components/EmptyState";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { CreateTradingStrategyDialog } from "../components/CreateTradingStrategyDialog";
+import { CryptoCompanySettingsCard } from "../components/CryptoCompanySettingsCard";
 
 /**
  * Trading agent (DUR-4153/DUR-4171/DUR-4227): one page listing every
@@ -177,6 +178,8 @@ export function Trading() {
       {!canManage && strategies.length > 0 ? (
         <p className="text-xs text-muted-foreground">Only a company owner or admin can add strategies or use the kill switch.</p>
       ) : null}
+
+      {canManage && selectedCompanyId ? <CryptoCompanySettingsCard companyId={selectedCompanyId} /> : null}
 
       <CreateTradingStrategyDialog
         open={formOpen}

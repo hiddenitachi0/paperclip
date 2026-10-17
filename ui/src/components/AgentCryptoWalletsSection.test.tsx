@@ -1,0 +1,79 @@
+// @vitest-environment jsdom
+
+import { act } from "react";
+import { createRoot } from "react-dom/client";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { AgentCryptoWalletsSection } from "./AgentCryptoWalletsSection";
+
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+const api = vi.hoisted(() => ({
+  settings: vi.fn(),
+  list: vi.fn(),
+  agentLimits: vi.fn(),
+  create: vi.fn(),
+  balance: vi.fn(),
+  destinations: vi.fn(),
+  transactions: vi.fn(),
+}));
+vi.mock("../api/cryptoWallets", () => ({ cryptoWalletsApi: api }));
+vi.mock("../context/ToastContext", () => ({ useToastActions: () => ({ pushToast: vi.fn() }) }));
+
+const wallet = {
+  id: "w1",
+  companyId: "c1",
+  agentId: "a1",
+  chain: "solana",
+  network: "testnet",
+  address: "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin",
+  label: "Purchases",
+  keyOrigin: "generated",
+  status: "active",
+  frozenReason: null,
+  limits: { perTransaction: "0.2", daily: "0.4", total: "2", approvalAbove: "0.08" },
+  maxLeverage: 1,
+  lastBalance: null,
+  lastBalanceAt: null,
+  createdAt: "2026-10-17T00:00:00Z",
+  updatedAt: "2026-10-17T00:00:00Z",
+};
+
+async function flush() {
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 0));
+  });
+}
+
+describe("AgentCryptoWalletsSection", () => {
+  afterEach(() => {
+    document.body.innerHTML = "";
+    vi.clearAllMocks();
+  });
+
+  it("shows the wallet as test coins with its address, explains the risks, and offers no way to see the key", async () => {
+    api.settings.mockResolvedValue({ companyId: "c1", mainnetEnabled: false, mainnetEnabledAt: null, allWalletsFrozen: false, frozenReason: null, rpcEndpoints: {} });
+    api.list.mockResolvedValue([wallet]);
+    api.agentLimits.mockResolvedValue({ perTransactionUsd: 25, dailyUsd: 50, totalUsd: 200, approvalAboveUsd: 10 });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={new QueryClient()}>
+          <AgentCryptoWalletsSection companyId="c1" agentId="a1" />
+        </QueryClientProvider>,
+      );
+    });
+    await flush();
+    const text = container.textContent ?? "";
+    expect(text).toContain(wallet.address);
+    expect(text).toContain("Test coins");
+    expect(text).toContain("Real money is off for this company");
+    expect(text).toContain("Nobody can read it back");
+    expect(text.toLowerCase()).not.toContain("show key");
+    expect(text.toLowerCase()).not.toContain("export key");
+    expect(api.list).toHaveBeenCalledWith("c1", "a1");
+    root.unmount();
+  });
+});
