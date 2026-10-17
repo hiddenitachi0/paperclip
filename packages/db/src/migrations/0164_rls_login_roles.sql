@@ -493,6 +493,11 @@ DECLARE
     -- on) in 0211_video_storyline_director_conversation.sql.
     'video_storyline_director_conversations',
     'video_storyline_director_messages',
+    -- Storyline directors and the AI story writer chat. Created, granted on
+    -- and policed in 0252_storyline_directors.sql; company-scoped, so they
+    -- are in both lists.
+    'video_storyline_directors',
+    'video_storyline_writer_messages',
     -- DUR-4182 Positions/Jobs. Created (and granted on) in 0201_jobs.sql;
     -- listed here so the login-role lists match the schema, as for the
     -- tables above.
@@ -827,6 +832,11 @@ DECLARE
     -- so it is in both lists.
     'video_storyline_director_conversations',
     'video_storyline_director_messages',
+    -- Storyline directors and the AI story writer chat. Created, granted on
+    -- and policed in 0252_storyline_directors.sql; company-scoped, so they
+    -- are in both lists.
+    'video_storyline_directors',
+    'video_storyline_writer_messages',
     -- DUR-4182 Positions/Jobs. Created (and granted on) in 0201_jobs.sql;
     -- listed here so the login-role lists match the schema, as for the
     -- tables above. Company-scoped, so it is in both lists.

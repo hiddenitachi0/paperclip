@@ -48,6 +48,14 @@ import {
   updateVideoMusicLaneSchema,
   updateVideoStorylineAspectSchema,
   updateVideoUploadConsentSchema,
+  createVideoStorylineDirectorSchema,
+  updateVideoStorylineDirectorSchema,
+  setVideoStorylineDirectorSchema,
+  writeVideoStorylineSchema,
+  answerVideoStorylineWriterSchema,
+  improveVideoStorylineSchema,
+  acceptVideoStorylineChangesSchema,
+  estimateVideoStorylineWriterSchema,
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
@@ -72,6 +80,8 @@ import { videoStorylineDirectorProposalsService } from "../services/video-storyl
 import { videoStorylineTransitionsService } from "../services/video-storyline-transitions.js";
 import { videoStorylineClipsService, type IncomingFile } from "../services/video-storyline-clips.js";
 import { videoStorylineFootageService } from "../services/video-storyline-footage.js";
+import { videoStorylineDirectorsService } from "../services/video-storyline-directors.js";
+import { videoStorylineWriterService } from "../services/video-storyline-writer.js";
 import { extractPosterJpeg } from "../services/video-ffmpeg.js";
 import { runMediaJob } from "../services/media-job-queue.js";
 import type { NextFunction, Response } from "express";
@@ -109,6 +119,18 @@ export function videoStorylineRoutes(rawDb: Db) {
   const transitions = videoStorylineTransitionsService(db);
   const clips = videoStorylineClipsService(db);
   const footage = videoStorylineFootageService(db);
+  const directors = videoStorylineDirectorsService(db);
+  const writer = videoStorylineWriterService(db);
+
+  /** Owners and admins (and instance admins) edit directors; everyone with access may pick and use them. */
+  function canEditDirectors(req: Request, companyId: string): boolean {
+    try {
+      assertCompanyOwnerAdminOrInstanceAdmin(req, companyId, "the storyline directors");
+      return true;
+    } catch {
+      return false;
+    }
+  }
 
   /**
    * Phase 2 uploads: written to a temp file first (never held whole in
@@ -704,6 +726,42 @@ export function videoStorylineRoutes(rawDb: Db) {
     });
   });
 
+  // ─── Directors (registered before .../:storylineId so "directors" is never read as an id) ───
+
+  router.get("/companies/:companyId/video-storylines/directors", ...gatedScope(), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    res.json(await directors.list(companyId, { canEdit: canEditDirectors(req, companyId) }));
+  });
+
+  router.post(
+    "/companies/:companyId/video-storylines/directors",
+    validate(createVideoStorylineDirectorSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      assertCompanyOwnerAdminOrInstanceAdmin(req, companyId, "the storyline directors");
+      res.status(201).json(await directors.create(companyId, req.body, actorOf(req)));
+    },
+  );
+
+  router.patch(
+    "/companies/:companyId/video-storylines/directors/:directorId",
+    validate(updateVideoStorylineDirectorSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      assertCompanyOwnerAdminOrInstanceAdmin(req, companyId, "the storyline directors");
+      res.json(await directors.update(companyId, req.params.directorId as string, req.body, actorOf(req)));
+    },
+  );
+
+  router.delete("/companies/:companyId/video-storylines/directors/:directorId", ...gatedScope(), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyOwnerAdminOrInstanceAdmin(req, companyId, "the storyline directors");
+    await directors.remove(companyId, req.params.directorId as string, actorOf(req));
+    res.status(204).end();
+  });
+
   /** A brand-new storyline (plus all its scenes and shots, in one transaction) from a script. dryRun: true only checks it and returns the summary. */
   router.post(
     "/companies/:companyId/video-storylines/import",
@@ -1085,6 +1143,77 @@ export function videoStorylineRoutes(rawDb: Db) {
       const storylineId = req.params.storylineId as string;
       const shotId = req.params.shotId as string;
       res.json(await render.renderPreview(companyId, storylineId, shotId, actorOf(req)));
+    },
+  );
+
+  // ─── AI story writer (step 1): director pick, write, questions, improvements ───
+
+  router.put(
+    "/companies/:companyId/video-storylines/:storylineId/director",
+    validate(setVideoStorylineDirectorSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      res.json(await directors.setStorylineDirector(companyId, req.params.storylineId as string, req.body.directorId, actorOf(req)));
+    },
+  );
+
+  router.get("/companies/:companyId/video-storylines/:storylineId/writer", ...gatedScope(), async (req, res) => {
+    res.json(await writer.getSession(req.params.companyId as string, req.params.storylineId as string));
+  });
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/writer/estimate",
+    validate(estimateVideoStorylineWriterSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      res.json(await writer.estimate(req.params.companyId as string, req.params.storylineId as string, req.body));
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/writer/write",
+    validate(writeVideoStorylineSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      res.json(await writer.write(req.params.companyId as string, req.params.storylineId as string, req.body, actorOf(req)));
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/writer/answer",
+    validate(answerVideoStorylineWriterSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      res.json(await writer.answer(req.params.companyId as string, req.params.storylineId as string, req.body, actorOf(req)));
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/writer/improve",
+    validate(improveVideoStorylineSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      res.json(await writer.improve(req.params.companyId as string, req.params.storylineId as string, req.body, actorOf(req)));
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/writer/changes/:messageId/accept",
+    validate(acceptVideoStorylineChangesSchema),
+    ...gatedScope(),
+    async (req, res) => {
+      res.json(
+        await writer.acceptChanges(req.params.companyId as string, req.params.storylineId as string, req.params.messageId as string, req.body, actorOf(req)),
+      );
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/video-storylines/:storylineId/writer/changes/:messageId/discard",
+    ...gatedScope(),
+    async (req, res) => {
+      res.json(await writer.discardChanges(req.params.companyId as string, req.params.storylineId as string, req.params.messageId as string, actorOf(req)));
     },
   );
 

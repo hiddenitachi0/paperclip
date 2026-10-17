@@ -4,6 +4,7 @@ import { agents } from "./agents.js";
 import { assets } from "./assets.js";
 import { companies } from "./companies.js";
 import { projects } from "./projects.js";
+import { videoStorylineDirectors } from "./video_storyline_directors.js";
 
 /**
  * DUR-4127 (backend half of DUR-4095, video storylines): a storyline is a
@@ -69,6 +70,9 @@ export const videoStorylines = pgTable(
       }>()
       .notNull()
       .default({}),
+    // The director (video_storyline_directors) whose AI story writer writes
+    // this storyline in step 1; null = none picked yet.
+    directorId: uuid("director_id").references(() => videoStorylineDirectors.id, { onDelete: "set null" }),
     // Direct-storage pointer for the final stitched film -- deliberately NOT
     // an attachments-table row: a multi-hour concatenated film routinely
     // exceeds the 25MB company-attachment cap (attachment-types.ts), and

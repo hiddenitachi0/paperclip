@@ -26,6 +26,9 @@ import { pluginRegistryService } from "./plugin-registry.js";
  * exact round-1 behavior until it separately opts in. See
  * VIDEO_STORYLINE_ADVANCED_SETTINGS_KEY's doc comment in packages/shared.
  */
+/** plugin_company_settings key: the starter directors were created for this company. */
+export const VIDEO_STORYLINE_DIRECTORS_SEEDED_KEY = "videoStorylineDirectorsSeeded";
+
 export function videoStorylineSettingsService(db: Db) {
   const registry = pluginRegistryService(db);
 
@@ -130,7 +133,24 @@ export function videoStorylineSettingsService(db: Db) {
     return capCents;
   }
 
+  /** Whether this company already got the starter directors (so deleting them all does not bring them back). */
+  async function directorsSeeded(companyId: string): Promise<boolean> {
+    const pluginId = await getPluginId();
+    const settings = await registry.getCompanySettings(pluginId, companyId);
+    return settings?.settingsJson?.[VIDEO_STORYLINE_DIRECTORS_SEEDED_KEY] === true;
+  }
+
+  async function markDirectorsSeeded(companyId: string): Promise<void> {
+    const pluginId = await getPluginId();
+    const existing = await registry.getCompanySettings(pluginId, companyId);
+    await registry.upsertCompanySettings(pluginId, companyId, {
+      settingsJson: { ...(existing?.settingsJson ?? {}), [VIDEO_STORYLINE_DIRECTORS_SEEDED_KEY]: true },
+    });
+  }
+
   return {
+    directorsSeeded,
+    markDirectorsSeeded,
     getMediaMonthlyCapCents,
     setMediaMonthlyCapCents,
     isEnabled,
