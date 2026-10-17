@@ -3,7 +3,8 @@ name: brag
 description: Turn the current project website into a short, polished, shareable launch video using Hyperframes. Use when someone says "/brag", "let's brag about this", "make a launch video", "turn this into a video", or wants to share what they built. Reads the project code directly — no live URL or screenshots needed.
 key: paperclipai/optional/content/brag
 recommendedForRoles:
-  - brag
+  - content-producer
+  - marketing
   - devrel
   - product
 tags:

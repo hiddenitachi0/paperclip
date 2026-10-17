@@ -3,7 +3,8 @@ name: paperclip-create-agent
 description: >
   Create new agents in Paperclip with governance-aware hiring. Use when you need
   to inspect adapter configuration options, compare existing agent configs,
-  draft a new agent prompt/config, and submit a hire request.
+  pick a model/effort and skills for a role, draft a new agent prompt/config,
+  and submit a hire request.
 ---
 
 # Paperclip Create Agent Skill
@@ -77,7 +78,9 @@ curl -sS "$PAPERCLIP_API_URL/llms/agent-icons.txt" \
 - icon (required in practice; pick from `/llms/agent-icons.txt`)
 - reporting line (`reportsTo`)
 - adapter type
-- `desiredSkills` from the company skill library when this role needs installed skills on day one
+- model and effort, chosen on purpose (see "Choosing model and effort" below) — never left empty
+- `desiredSkills` from the company skill library when this role needs installed skills on day one. This is the agent's complete skill list; check `GET /api/companies/:companyId/skills` for exact keys
+- if the company has a Position that fits the role (`GET /api/companies/:companyId/positions`), say so in the hire comment: after approval the board assigns it with `POST /api/agents/:id/role`, and whoever holds a position gets that position's starting instructions, tools, rights and skills. You cannot assign a position yourself
 - if any `desiredSkills` or adapter settings expand browser access, external-system reach, filesystem scope, or secret-handling capability, justify each one in the hire comment
 - adapter and runtime config aligned to this environment
 - leave timer heartbeats off by default; only set `runtimeConfig.heartbeat.enabled=true` with an `intervalSec` when the role genuinely needs scheduled recurring work or the user explicitly asked for it
@@ -88,6 +91,18 @@ curl -sS "$PAPERCLIP_API_URL/llms/agent-icons.txt" \
 - instruction text such as `AGENTS.md` built from step 4; for local managed-bundle adapters, send this as top-level `instructionsBundle.files["AGENTS.md"]`. Do not set `adapterConfig.promptTemplate` or `bootstrapPromptTemplate` for new agents.
 - source issue linkage (`sourceIssueId` or `sourceIssueIds`) when this hire came from an issue
 - `budgetMonthlyCents`: the most this hire may spend per calendar month, in cents. If you leave it out, the hire gets the standard limit of 5000 ($50). When the agent reaches it, the agent is paused and the board gets a card to raise it. Only send `0` (no monthly limit) when the board has asked for that, and say why in the hire comment: the approval card shows "No monthly limit" as a warning
+
+#### Choosing model and effort (claude_local)
+
+An empty `model` does not mean "cheap": the Claude CLI then picks its own default, which is usually the most expensive model. Always set both fields, and justify the choice in one line in the hire comment.
+
+| Work the agent does | Model | Effort |
+| --- | --- | --- |
+| Code review, security review, legal/financial checks, hard multi-step reasoning | `claude-opus-5-5` | `high` |
+| Writing and changing code, orchestration, CEO/manager roles, research | `claude-sonnet-5-5` | `medium` (coding: `high`) |
+| Routine or high-volume work: inbox sorting, simple replies, status summaries, data lookups | `claude-haiku-5-5` | `low` or `medium` |
+
+Reserve `claude-fable-5-1` and `xhigh`/`max` effort for agents the board explicitly asks to be "best possible" — they cost far more per run. For one-off hard tasks, prefer a temporary boost on the task over a permanently expensive agent.
 
 ### 7. Review the draft against the quality checklist
 
@@ -108,8 +123,8 @@ curl -sS -X POST "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/agent-h
     "reportsTo": "<ceo-agent-id>",
     "capabilities": "Owns technical roadmap, architecture, staffing, execution",
     "desiredSkills": ["vercel-labs/agent-browser/agent-browser"],
-    "adapterType": "codex_local",
-    "adapterConfig": {"cwd": "/abs/path/to/repo", "model": "o4-mini"},
+    "adapterType": "claude_local",
+    "adapterConfig": {"cwd": "/abs/path/to/repo", "model": "claude-sonnet-5-5", "effort": "high"},
     "instructionsBundle": {"files": {"AGENTS.md": "You are the CTO..."}},
     "runtimeConfig": {"heartbeat": {"enabled": false, "wakeOnDemand": true}},
     "budgetMonthlyCents": 5000,

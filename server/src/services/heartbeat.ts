@@ -65,6 +65,7 @@ import {
 } from "@paperclipai/db";
 import { conflict, HttpError, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
+import { readPositionSkillKeys } from "./position-catalogue.js";
 import { publishLiveEvent } from "./live-events.js";
 import { getRunLogStore, type RunLogHandle } from "./run-log-store.js";
 import { getServerAdapter, listAdapterModelProfiles, runningProcesses } from "../adapters/index.js";
@@ -12378,10 +12379,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     } else {
       delete context.paperclipSecrets;
     }
-    const effectiveResolvedConfig = applyRunScopedMentionedSkillKeys(
-      resolvedConfig,
-      runScopedMentionedSkillKeys,
-    );
+    // A position's skills (plus per-agent skill overrides on top of it) are
+    // given to whoever holds the position. They are added for the run only,
+    // the same way skills mentioned on the issue are, so the agent's own saved
+    // skill list is left exactly as the operator set it.
+    const effectiveResolvedConfig = applyRunScopedMentionedSkillKeys(resolvedConfig, [
+      ...runScopedMentionedSkillKeys,
+      ...readPositionSkillKeys(agent.roleProvisionedSkillKeys),
+    ]);
     const runtimeSkillPreference = readPaperclipSkillSyncPreference(effectiveResolvedConfig);
     const runtimeSkillEntries = await companySkills.listRuntimeSkillEntries(agent.companyId, {
       versionSelections: skillVersionSelectionMap(runtimeSkillPreference.desiredSkillEntries),

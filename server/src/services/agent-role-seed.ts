@@ -60,20 +60,10 @@ export async function seedDurStarterJobs(db: Db): Promise<{ created: string[] }>
     created.push("developer");
   }
 
-  // DUR-4519: "Brag" role carrying the vendored /brag launch-video skill.
-  // Least privilege: no permission grants at all.
-  if (!existingKeys.has("brag")) {
-    await createRole(db, DUR_COMPANY_ID, {
-      name: "Brag",
-      description:
-        "Turns a project's code or website into a short launch video using the /brag skill " +
-        "(MIT, latent-spaces/brag v0.4.0).",
-      defaultGrants: [],
-      skillKeys: ["paperclipai/optional/content/brag"],
-      isBuiltin: true,
-    });
-    created.push("brag");
-  }
+  // DUR-4519 shipped a "Brag" position here. Brag is a skill, not a job: it
+  // now lives on the catalogue's "Content & Video Producer" position, and
+  // convertBragPositionsToSkill (position-catalogue.ts) converts any Brag
+  // position an install already has. Do not seed it again.
 
   return { created };
 }

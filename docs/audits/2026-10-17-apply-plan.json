@@ -1,0 +1,1092 @@
+{
+  "title": "Agent, skill and position changes — apply plan",
+  "date": "2026-10-17",
+  "branch": "agent-skill-audit",
+  "agentIds": "Agents are listed by the first 8 characters of their id (from the live inventory). Resolve the full id with GET /api/companies/{companyId}/agents before applying.",
+  "skip": [
+    "621d5687 Assistant (quick agent, excluded by Filip)",
+    "3aacdb86 Secretary (quick agent, excluded by Filip)"
+  ],
+  "prerequisites": [
+    "Deploy branch agent-skill-audit first. Steps marked needsDeploy=true use skills, routes or model ids that only exist after the deploy.",
+    "The Brag position in Durkan Agency converts itself on the first server start after the deploy (startup task convertBragPositionsToSkill): it becomes the Content & Video Producer position, any agent in it moves over, and the Brag position is removed. No manual step needed; step 'verify-brag' checks it.",
+    "Model ids claude-*-5-5 are accepted by PATCH /api/agents/:id before the deploy too (the agent PATCH does not validate against the model list), but the model picker in the UI only lists them after the deploy. Applying model changes after the deploy is cleaner."
+  ],
+  "endpoints": {
+    "enableJobs": {
+      "method": "PUT",
+      "path": "/api/companies/{companyId}/job-settings/jobs-enabled",
+      "body": {
+        "enabled": true
+      },
+      "auth": "board (owner or admin)"
+    },
+    "installCatalogSkill": {
+      "method": "POST",
+      "path": "/api/companies/{companyId}/skills/install-catalog",
+      "body": {
+        "catalogSkillId": "<id>"
+      },
+      "auth": "board",
+      "note": "Idempotent: returns action 'unchanged' when already installed. The new skills only exist after branch agent-skill-audit is deployed."
+    },
+    "addPositionFromCatalogue": {
+      "method": "POST",
+      "path": "/api/companies/{companyId}/positions/catalogue/{templateKey}",
+      "body": {},
+      "auth": "board",
+      "note": "New in this branch (alias of /agent-roles/catalogue). Creates the position + its jobs and installs the catalogue skills it needs; idempotent (an existing position is left as is, only missing jobs are linked). Response lists warnings for skills that could not be installed."
+    },
+    "listCatalogue": {
+      "method": "GET",
+      "path": "/api/companies/{companyId}/positions/catalogue",
+      "auth": "board"
+    },
+    "patchAgent": {
+      "method": "PATCH",
+      "path": "/api/agents/{agentId}",
+      "body": {
+        "adapterConfig": {
+          "model": "<id>",
+          "effort": "<level>"
+        }
+      },
+      "auth": "board",
+      "note": "adapterConfig is MERGED (replaceAdapterConfig not set), so only model/effort change."
+    },
+    "readAgentSkills": {
+      "method": "GET",
+      "path": "/api/agents/{agentId}/skills",
+      "auth": "board",
+      "note": "Read desiredSkills before syncing."
+    },
+    "syncAgentSkills": {
+      "method": "POST",
+      "path": "/api/agents/{agentId}/skills/sync",
+      "body": {
+        "desiredSkills": [
+          "<key>",
+          "..."
+        ]
+      },
+      "auth": "board",
+      "note": "REPLACES the whole list. Send union(current desiredSkills, addSkillKeys) minus removeSkillKeys. Agents cannot call this on themselves."
+    },
+    "assignPosition": {
+      "method": "POST",
+      "path": "/api/agents/{agentId}/role",
+      "body": {
+        "roleId": "<positionId>"
+      },
+      "auth": "board",
+      "note": "Not used in this plan: assigning a position overwrites the agent's bootstrapPromptTemplate with the position's instructions."
+    },
+    "patchPosition": {
+      "method": "PATCH",
+      "path": "/api/positions/{positionId}",
+      "body": {
+        "skillKeys": [
+          "..."
+        ]
+      },
+      "auth": "board"
+    }
+  },
+  "companies": [
+    {
+      "companyId": "7600f03c-c836-4326-8d48-c801813c3a87",
+      "name": "Durkan Agency",
+      "steps": [
+        {
+          "id": "check-jobs-enabled",
+          "needsDeploy": false,
+          "endpoint": "enableJobs",
+          "note": "First GET /api/companies/{companyId}/job-settings. If jobsEnabled is false, ask Filip before switching it on (PUT body {\"enabled\": true})."
+        },
+        {
+          "id": "install-skills",
+          "needsDeploy": true,
+          "endpoint": "installCatalogSkill",
+          "catalogSkillIds": [
+            "paperclipai:bundled:quality:qa-acceptance",
+            "paperclipai:bundled:software-development:github-pr-workflow",
+            "paperclipai:optional:analysis:report-analysis",
+            "paperclipai:optional:quality:code-review",
+            "paperclipai:optional:quality:security-review"
+          ]
+        },
+        {
+          "id": "add-positions",
+          "needsDeploy": true,
+          "endpoint": "addPositionFromCatalogue",
+          "templateKeys": [
+            "content-video-producer",
+            "social-media-manager",
+            "image-video-creator",
+            "executive-assistant",
+            "email-manager",
+            "scheduler",
+            "report-analyst",
+            "researcher",
+            "marketing-strategist",
+            "tech-lead",
+            "developer",
+            "code-reviewer",
+            "security-reviewer",
+            "qa-tester",
+            "legal-advisor",
+            "project-manager",
+            "customer-support-rep",
+            "sales-lead-manager",
+            "bookkeeper-finance-assistant",
+            "hr-recruiter"
+          ],
+          "note": "developer and legal-advisor already exist: the call keeps them as they are and only links missing one-click jobs (Developer gains 'Fix a bug'). content-video-producer will already exist after the Brag conversion; calling add again installs its missing skills (brag-video, media-studio-generation, social-media-management). The brag skill ships scripts and may be refused by the install audit; that comes back as a warning, which is fine."
+        },
+        {
+          "id": "update-existing-position-skills",
+          "needsDeploy": true,
+          "endpoint": "patchPosition",
+          "items": [
+            {
+              "positionKey": "developer",
+              "body": {
+                "skillKeys": [
+                  "paperclipai/paperclip/paperclip",
+                  "paperclipai/bundled/software-development/github-pr-workflow",
+                  "paperclipai/bundled/software-development/lean-coding",
+                  "paperclipai/bundled/quality/qa-acceptance",
+                  "paperclipai/bundled/docs/doc-maintenance"
+                ]
+              },
+              "note": "Existing Developer position has rights only; give it the catalogue skills. Keep its grants (PATCH only sends skillKeys)."
+            },
+            {
+              "positionKey": "legal-advisor",
+              "body": {
+                "skillKeys": [
+                  "paperclipai/paperclip/paperclip",
+                  "paperclipai/paperclip/research-and-plan"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "id": "agent-model-effort",
+          "needsDeploy": false,
+          "endpoint": "patchAgent",
+          "items": [
+            {
+              "agentIdPrefix": "a662a39d",
+              "name": "Backend Engineer",
+              "current": {
+                "model": null,
+                "effort": null
+              },
+              "modelEffortPatch": {
+                "method": "PATCH",
+                "path": "/api/agents/{agentId}",
+                "body": {
+                  "adapterConfig": {
+                    "model": "claude-sonnet-5-5",
+                    "effort": "high"
+                  }
+                }
+              },
+              "reason": "Writes production code; Sonnet is strong at coding and high effort keeps changes careful. Today it runs on whatever the CLI defaults to."
+            },
+            {
+              "agentIdPrefix": "7fde2673",
+              "name": "Security Reviewer",
+              "current": {
+                "model": null,
+                "effort": "medium"
+              },
+              "modelEffortPatch": {
+                "method": "PATCH",
+                "path": "/api/agents/{agentId}",
+                "body": {
+                  "adapterConfig": {
+                    "model": "claude-opus-5-5",
+                    "effort": "high"
+                  }
+                }
+              },
+              "reason": "Security review is where a miss is most expensive; strongest model, more thinking time."
+            },
+            {
+              "agentIdPrefix": "70c25b89",
+              "name": "Fork Lead",
+              "current": {
+                "model": "claude-sonnet-5",
+                "effort": "medium"
+              },
+              "modelEffortPatch": {
+                "method": "PATCH",
+                "path": "/api/agents/{agentId}",
+                "body": {
+                  "adapterConfig": {
+                    "model": "claude-sonnet-5-5",
+                    "effort": "high"
+                  }
+                }
+              },
+              "reason": "Lead engineer who plans, reviews and asks for merges/deploys; same price as Sonnet 5, newer model, more care on risky steps."
+            },
+            {
+              "agentIdPrefix": "9a822248",
+              "name": "Frontend Engineer",
+              "current": {
+                "model": null,
+                "effort": "medium"
+              },
+              "modelEffortPatch": {
+                "method": "PATCH",
+                "path": "/api/agents/{agentId}",
+                "body": {
+                  "adapterConfig": {
+                    "model": "claude-sonnet-5-5",
+                    "effort": "high"
+                  }
+                }
+              },
+              "reason": "Writes UI code; Sonnet coding tier."
+            },
+            {
+              "agentIdPrefix": "3895b2b8",
+              "name": "Investigator",
+              "current": {
+                "model": null,
+                "effort": "medium"
+              },
+              "modelEffortPatch": {
+                "method": "PATCH",
+                "path": "/api/agents/{agentId}",
+                "body": {
+                  "adapterConfig": {
+                    "model": "claude-sonnet-5-5",
+                    "effort": "medium"
+                  }
+                }
+              },
+              "reason": "Advice-only research helper; reading and reasoning at a moderate cost."
+            },
+            {
+              "agentIdPrefix": "c29a9730",
+              "name": "Web Reviewer",
+              "current": {
+                "model": null,
+                "effort": null
+              },
+              "modelEffortPatch": {
+                "method": "PATCH",
+                "path": "/api/agents/{agentId}",
+                "body": {
+                  "adapterConfig": {
+                    "model": "claude-opus-5-5",
+                    "effort": "high"
+                  }
+                }
+              },
+              "reason": "Reviewer of website changes; reviewers get the strongest model."
+            },
+            {
+              "agentIdPrefix": "5b5d5669",
+              "name": "Web Developer",
+              "current": {
+                "model": null,
+                "effort": "medium"
+              },
+              "modelEffortPatch": {
+                "method": "PATCH",
+                "path": "/api/agents/{agentId}",
+                "body": {
+                  "adapterConfig": {
+                    "model": "claude-sonnet-5-5",
+                    "effort": "high"
+                  }
+                }
+              },
+              "reason": "Writes website code (PHP); Sonnet coding tier."
+            },
+            {
+              "agentIdPrefix": "bd3ef1b9",
+              "name": "CEO",
+              "current": {
+                "model": "claude-haiku-4-5",
+                "effort": "low"
+              },
+              "modelEffortPatch": {
+                "method": "PATCH",
+                "path": "/api/agents/{agentId}",
+                "body": {
+                  "adapterConfig": {
+                    "model": "claude-sonnet-5-5",
+                    "effort": "medium"
+                  }
+                }
+              },
+              "reason": "Orchestrator: decides who does what. Haiku 4.5 at low effort is too weak for that; CEOs/orchestrators belong on Sonnet."
+            },
+            {
+              "agentIdPrefix": "dfb3cd42",
+              "name": "Web Administrator",
+              "current": {
+                "model": null,
+                "effort": "medium"
+              },
+              "modelEffortPatch": {
+                "method": "PATCH",
+                "path": "/api/agents/{agentId}",
+                "body": {
+                  "adapterConfig": {
+                    "model": "claude-sonnet-5-5",
+                    "effort": "medium"
+                  }
+                }
+              },
+              "reason": "Runs the website day to day with server access; routine, but mistakes are visible, so Sonnet rather than Haiku."
+            }
+          ]
+        },
+        {
+          "id": "agent-skills",
+          "needsDeploy": true,
+          "endpoint": "syncAgentSkills",
+          "procedure": "For each agent: GET skills, desiredSkills = union(current, addSkillKeys) - removeSkillKeys, POST sync.",
+          "items": [
+            {
+              "agentIdPrefix": "a662a39d",
+              "name": "Backend Engineer",
+              "addSkillKeys": [
+                "paperclipai/paperclip/paperclip",
+                "paperclipai/bundled/software-development/github-pr-workflow",
+                "multica-ai/andrej-karpathy-skills/karpathy-guidelines",
+                "paperclipai/bundled/quality/qa-acceptance",
+                "paperclipai/bundled/docs/doc-maintenance"
+              ],
+              "removeSkillKeys": []
+            },
+            {
+              "agentIdPrefix": "7fde2673",
+              "name": "Security Reviewer",
+              "addSkillKeys": [
+                "paperclipai/paperclip/paperclip",
+                "paperclipai/optional/quality/security-review",
+                "paperclipai/optional/quality/code-review"
+              ],
+              "removeSkillKeys": []
+            },
+            {
+              "agentIdPrefix": "70c25b89",
+              "name": "Fork Lead",
+              "addSkillKeys": [
+                "paperclipai/paperclip/paperclip",
+                "paperclipai/bundled/paperclip-operations/task-planning",
+                "paperclipai/paperclip/paperclip-converting-plans-to-tasks",
+                "paperclipai/bundled/software-development/github-pr-workflow",
+                "paperclipai/optional/quality/code-review",
+                "paperclipai/bundled/paperclip-operations/issue-triage",
+                "paperclipai/bundled/docs/doc-maintenance",
+                "paperclipai/paperclip/paperclip-create-agent"
+              ],
+              "removeSkillKeys": []
+            },
+            {
+              "agentIdPrefix": "9a822248",
+              "name": "Frontend Engineer",
+              "addSkillKeys": [
+                "paperclipai/paperclip/paperclip",
+                "paperclipai/bundled/software-development/github-pr-workflow",
+                "multica-ai/andrej-karpathy-skills/karpathy-guidelines",
+                "paperclipai/bundled/quality/qa-acceptance",
+                "paperclipai/optional/product/design-critique",
+                "paperclipai/bundled/product/wireframe",
+                "paperclipai/optional/browser/agent-browser"
+              ],
+              "removeSkillKeys": []
+            },
+            {
+              "agentIdPrefix": "3895b2b8",
+              "name": "Investigator",
+              "addSkillKeys": [
+                "paperclipai/paperclip/paperclip",
+                "paperclipai/paperclip/research-and-plan",
+                "paperclipai/optional/analysis/report-analysis"
+              ],
+              "removeSkillKeys": []
+            },
+            {
+              "agentIdPrefix": "c29a9730",
+              "name": "Web Reviewer",
+              "addSkillKeys": [
+                "paperclipai/paperclip/paperclip",
+                "paperclipai/optional/quality/code-review",
+                "paperclipai/optional/product/design-critique",
+                "paperclipai/optional/browser/agent-browser",
+                "paperclipai/paperclip/link-checker",
+                "paperclipai/bundled/quality/qa-acceptance"
+              ],
+              "removeSkillKeys": []
+            },
+            {
+              "agentIdPrefix": "5b5d5669",
+              "name": "Web Developer",
+              "addSkillKeys": [
+                "paperclipai/paperclip/paperclip",
+                "paperclipai/bundled/software-development/github-pr-workflow",
+                "multica-ai/andrej-karpathy-skills/karpathy-guidelines",
+                "paperclipai/optional/browser/agent-browser",
+                "paperclipai/paperclip/link-checker"
+              ],
+              "removeSkillKeys": []
+            },
+            {
+              "agentIdPrefix": "bd3ef1b9",
+              "name": "CEO",
+              "addSkillKeys": [
+                "paperclipai/paperclip/paperclip",
+                "paperclipai/paperclip/paperclip-create-agent",
+                "paperclipai/paperclip/paperclip-converting-plans-to-tasks",
+                "paperclipai/bundled/paperclip-operations/task-planning",
+                "paperclipai/bundled/paperclip-operations/issue-triage",
+                "paperclipai/paperclip/para-memory-files"
+              ],
+              "removeSkillKeys": []
+            },
+            {
+              "agentIdPrefix": "dfb3cd42",
+              "name": "Web Administrator",
+              "addSkillKeys": [
+                "paperclipai/paperclip/paperclip",
+                "paperclipai/paperclip/link-checker",
+                "paperclipai/optional/browser/agent-browser",
+                "paperclipai/bundled/docs/doc-maintenance"
+              ],
+              "removeSkillKeys": []
+            }
+          ]
+        },
+        {
+          "id": "verify-brag",
+          "needsDeploy": true,
+          "endpoint": "listCatalogue",
+          "expect": "content-video-producer alreadyAdded=true; GET /api/companies/{companyId}/positions has no position with key 'brag'."
+        }
+      ]
+    },
+    {
+      "companyId": "a80a8afe-9c51-4767-ace0-1f39aae6ea0d",
+      "name": "Nordstrand Konsernet",
+      "steps": [
+        {
+          "id": "enable-jobs",
+          "needsDeploy": false,
+          "endpoint": "enableJobs",
+          "note": "First GET /api/companies/{companyId}/job-settings. Jobs is off by default; the one-click jobs only show once it is on. Ask Filip before switching it on (PUT body {\"enabled\": true}) — it is a visible feature switch."
+        },
+        {
+          "id": "install-skills",
+          "needsDeploy": true,
+          "endpoint": "installCatalogSkill",
+          "catalogSkillIds": [
+            "paperclipai:bundled:paperclip-operations:issue-triage",
+            "paperclipai:bundled:paperclip-operations:task-planning",
+            "paperclipai:bundled:quality:qa-acceptance",
+            "paperclipai:bundled:software-development:lean-coding",
+            "paperclipai:optional:analysis:report-analysis",
+            "paperclipai:optional:communication:customer-support-replies",
+            "paperclipai:optional:communication:email-triage",
+            "paperclipai:optional:finance:bookkeeping-assistant",
+            "paperclipai:optional:quality:code-review",
+            "paperclipai:optional:quality:security-review",
+            "paperclipai:optional:sales:lead-follow-up"
+          ]
+        },
+        {
+          "id": "add-positions",
+          "needsDeploy": true,
+          "endpoint": "addPositionFromCatalogue",
+          "templateKeys": [
+            "social-media-manager",
+            "image-video-creator",
+            "content-video-producer",
+            "customer-support-rep",
+            "email-manager",
+            "report-analyst",
+            "bookkeeper-finance-assistant",
+            "sales-lead-manager",
+            "marketing-strategist",
+            "developer",
+            "code-reviewer",
+            "qa-tester"
+          ]
+        },
+        {
+          "id": "agent-model-effort",
+          "needsDeploy": false,
+          "endpoint": "patchAgent",
+          "items": [
+            {
+              "agentIdPrefix": "ec938ae2",
+              "name": "Sales Rep",
+              "current": {
+                "model": "claude-haiku-4-5",
+                "effort": null
+              },
+              "modelEffortPatch": {
+                "method": "PATCH",
+                "path": "/api/agents/{agentId}",
+                "body": {
+                  "adapterConfig": {
+                    "model": "claude-haiku-5-5",
+                    "effort": "medium"
+                  }
+                }
+              },
+              "reason": "Customer-facing drafts at high volume; Haiku 5.5 is newer and ~10x cheaper than Haiku 4.5."
+            },
+            {
+              "agentIdPrefix": "ff0952c7",
+              "name": "Quarterly Reporting Agent",
+              "current": {
+                "model": "claude-haiku-4-5",
+                "effort": null
+              },
+              "modelEffortPatch": {
+                "method": "PATCH",
+                "path": "/api/agents/{agentId}",
+                "body": {
+                  "adapterConfig": {
+                    "model": "claude-sonnet-5-5",
+                    "effort": "high"
+                  }
+                }
+              },
+              "reason": "Numbers must be right (a KPI double-count bug was already found here); more capable model and more thinking time."
+            },
+            {
+              "agentIdPrefix": "643488b3",
+              "name": "Orders",
+              "current": {
+                "model": "claude-haiku-4-5",
+                "effort": "medium"
+              },
+              "modelEffortPatch": {
+                "method": "PATCH",
+                "path": "/api/agents/{agentId}",
+                "body": {
+                  "adapterConfig": {
+                    "model": "claude-sonnet-5-5",
+                    "effort": "medium"
+                  }
+                }
+              },
+              "reason": "Module specialist that writes Django code for a live finance/e-commerce system; Haiku 4.5 is too weak for that code. Sonnet 5.5 at medium."
+            },
+            {
+              "agentIdPrefix": "a60b64ff",
+              "name": "Salgsanalytikeren",
+              "current": {
+                "model": null,
+                "effort": null
+              },
+              "modelEffortPatch": {
+                "method": "PATCH",
+                "path": "/api/agents/{agentId}",
+                "body": {
+                  "adapterConfig": {
+                    "model": "claude-sonnet-5-5",
+                    "effort": "high"
+                  }
+                }
+              },
+              "reason": "Sales analyst: numbers grounded in data; today it runs on the CLI default model."
+            },
+            {
+              "agentIdPrefix": "e9be2122",
+              "name": "Support Rep",
+              "current": {
+                "model": "claude-haiku-4-5",
+                "effort": null
+              },
+              "modelEffortPatch": {
+                "method": "PATCH",
+                "path": "/api/agents/{agentId}",
+                "body": {
+                  "adapterConfig": {
+                    "model": "claude-haiku-5-5",
+                    "effort": "medium"
+                  }
+                }
+              },
+              "reason": "Support drafts at high volume; Haiku 5.5 fits."
+            },
+            {
+              "agentIdPrefix": "86b9da0c",
+              "name": "CEO",
+              "current": {
+                "model": "claude-haiku-4-5",
+                "effort": null
+              },
+              "modelEffortPatch": {
+                "method": "PATCH",
+                "path": "/api/agents/{agentId}",
+                "body": {
+                  "adapterConfig": {
+                    "model": "claude-sonnet-5-5",
+                    "effort": "medium"
+                  }
+                }
+              },
+              "reason": "Orchestrator; CEOs belong on Sonnet."
+            },
+            {
+              "agentIdPrefix": "93885ec7",
+              "name": "Claims",
+              "current": {
+                "model": "claude-haiku-4-5",
+                "effort": "medium"
+              },
+              "modelEffortPatch": {
+                "method": "PATCH",
+                "path": "/api/agents/{agentId}",
+                "body": {
+                  "adapterConfig": {
+                    "model": "claude-sonnet-5-5",
+                    "effort": "medium"
+                  }
+                }
+              },
+              "reason": "Module specialist that writes Django code for a live finance/e-commerce system; Haiku 4.5 is too weak for that code. Sonnet 5.5 at medium."
+            },
+            {
+              "agentIdPrefix": "1ad915dd",
+              "name": "Automations",
+              "current": {
+                "model": "claude-haiku-4-5",
+                "effort": "medium"
+              },
+              "modelEffortPatch": {
+                "method": "PATCH",
+                "path": "/api/agents/{agentId}",
+                "body": {
+                  "adapterConfig": {
+                    "model": "claude-sonnet-5-5",
+                    "effort": "medium"
+                  }
+                }
+              },
+              "reason": "Module specialist that writes Django code for a live finance/e-commerce system; Haiku 4.5 is too weak for that code. Sonnet 5.5 at medium."
+            },
+            {
+              "agentIdPrefix": "f4a5b6bf",
+              "name": "Dashboard Boss",
+              "current": {
+                "model": "claude-haiku-4-5",
+                "effort": "medium"
+              },
+              "modelEffortPatch": {
+                "method": "PATCH",
+                "path": "/api/agents/{agentId}",
+                "body": {
+                  "adapterConfig": {
+                    "model": "claude-sonnet-5-5",
+                    "effort": "high"
+                  }
+                }
+              },
+              "reason": "Orchestrator and sole owner of shared infrastructure; the riskiest changes go through it."
+            },
+            {
+              "agentIdPrefix": "18d74ca7",
+              "name": "Reporting module",
+              "current": {
+                "model": null,
+                "effort": "medium"
+              },
+              "modelEffortPatch": {
+                "method": "PATCH",
+                "path": "/api/agents/{agentId}",
+                "body": {
+                  "adapterConfig": {
+                    "model": "claude-sonnet-5-5",
+                    "effort": "medium"
+                  }
+                }
+              },
+              "reason": "Writes the reporting module; today it runs on the CLI default model."
+            },
+            {
+              "agentIdPrefix": "1cff818c",
+              "name": "Products",
+              "current": {
+                "model": "claude-haiku-4-5",
+                "effort": "medium"
+              },
+              "modelEffortPatch": {
+                "method": "PATCH",
+                "path": "/api/agents/{agentId}",
+                "body": {
+                  "adapterConfig": {
+                    "model": "claude-sonnet-5-5",
+                    "effort": "medium"
+                  }
+                }
+              },
+              "reason": "Module specialist that writes Django code for a live finance/e-commerce system; Haiku 4.5 is too weak for that code. Sonnet 5.5 at medium."
+            },
+            {
+              "agentIdPrefix": "09ad3eff",
+              "name": "Purchasing",
+              "current": {
+                "model": "claude-haiku-4-5",
+                "effort": "medium"
+              },
+              "modelEffortPatch": {
+                "method": "PATCH",
+                "path": "/api/agents/{agentId}",
+                "body": {
+                  "adapterConfig": {
+                    "model": "claude-sonnet-5-5",
+                    "effort": "medium"
+                  }
+                }
+              },
+              "reason": "Module specialist that writes Django code for a live finance/e-commerce system; Haiku 4.5 is too weak for that code. Sonnet 5.5 at medium."
+            },
+            {
+              "agentIdPrefix": "fcd4ccba",
+              "name": "Claims Rep",
+              "current": {
+                "model": "claude-haiku-4-5",
+                "effort": null
+              },
+              "modelEffortPatch": {
+                "method": "PATCH",
+                "path": "/api/agents/{agentId}",
+                "body": {
+                  "adapterConfig": {
+                    "model": "claude-haiku-5-5",
+                    "effort": "medium"
+                  }
+                }
+              },
+              "reason": "Customer claim replies at volume; Haiku 5.5 fits."
+            },
+            {
+              "agentIdPrefix": "8beda601",
+              "name": "Governance",
+              "current": {
+                "model": "claude-haiku-4-5",
+                "effort": "medium"
+              },
+              "modelEffortPatch": {
+                "method": "PATCH",
+                "path": "/api/agents/{agentId}",
+                "body": {
+                  "adapterConfig": {
+                    "model": "claude-sonnet-5-5",
+                    "effort": "medium"
+                  }
+                }
+              },
+              "reason": "Module specialist that writes Django code for a live finance/e-commerce system; Haiku 4.5 is too weak for that code. Sonnet 5.5 at medium."
+            },
+            {
+              "agentIdPrefix": "a34ed2d2",
+              "name": "Tasks",
+              "current": {
+                "model": "claude-haiku-4-5",
+                "effort": "medium"
+              },
+              "modelEffortPatch": {
+                "method": "PATCH",
+                "path": "/api/agents/{agentId}",
+                "body": {
+                  "adapterConfig": {
+                    "model": "claude-sonnet-5-5",
+                    "effort": "medium"
+                  }
+                }
+              },
+              "reason": "Module specialist that writes Django code for a live finance/e-commerce system; Haiku 4.5 is too weak for that code. Sonnet 5.5 at medium."
+            },
+            {
+              "agentIdPrefix": "5c1fc775",
+              "name": "Finance",
+              "current": {
+                "model": null,
+                "effort": "medium"
+              },
+              "modelEffortPatch": {
+                "method": "PATCH",
+                "path": "/api/agents/{agentId}",
+                "body": {
+                  "adapterConfig": {
+                    "model": "claude-sonnet-5-5",
+                    "effort": "high"
+                  }
+                }
+              },
+              "reason": "Fiken-Shopify reconciliation: money must be exact; today it runs on the CLI default model."
+            },
+            {
+              "agentIdPrefix": "fe8014f3",
+              "name": "Tech Boss",
+              "current": {
+                "model": "claude-haiku-4-5",
+                "effort": "medium"
+              },
+              "modelEffortPatch": {
+                "method": "PATCH",
+                "path": "/api/agents/{agentId}",
+                "body": {
+                  "adapterConfig": {
+                    "model": "claude-opus-5-5",
+                    "effort": "high"
+                  }
+                }
+              },
+              "reason": "Technical gate for a live finance system (reviews and approves the specialists' work); reviewers get the strongest model. Low volume, so the cost stays small."
+            },
+            {
+              "agentIdPrefix": "f02eba5a",
+              "name": "Customer Leader",
+              "current": {
+                "model": "claude-haiku-4-5",
+                "effort": null
+              },
+              "modelEffortPatch": {
+                "method": "PATCH",
+                "path": "/api/agents/{agentId}",
+                "body": {
+                  "adapterConfig": {
+                    "model": "claude-sonnet-5-5",
+                    "effort": "medium"
+                  }
+                }
+              },
+              "reason": "Leads the customer reps (orchestrator); Sonnet."
+            },
+            {
+              "agentIdPrefix": "9ac0a197",
+              "name": "Email",
+              "current": {
+                "model": "claude-haiku-4-5",
+                "effort": "medium"
+              },
+              "modelEffortPatch": {
+                "method": "PATCH",
+                "path": "/api/agents/{agentId}",
+                "body": {
+                  "adapterConfig": {
+                    "model": "claude-sonnet-5-5",
+                    "effort": "medium"
+                  }
+                }
+              },
+              "reason": "Module specialist that writes Django code for a live finance/e-commerce system; Haiku 4.5 is too weak for that code. Sonnet 5.5 at medium."
+            }
+          ]
+        },
+        {
+          "id": "agent-skills",
+          "needsDeploy": true,
+          "endpoint": "syncAgentSkills",
+          "procedure": "For each agent: GET skills, desiredSkills = union(current, addSkillKeys) - removeSkillKeys, POST sync. Module agents already hold 4-5 company skills (nordstrand-ops, cross-module-contracts, ...); keep them.",
+          "items": [
+            {
+              "agentIdPrefix": "ec938ae2",
+              "name": "Sales Rep",
+              "addSkillKeys": [
+                "paperclipai/optional/sales/lead-follow-up",
+                "paperclipai/optional/communication/customer-support-replies",
+                "paperclipai/optional/communication/email-triage"
+              ],
+              "removeSkillKeys": []
+            },
+            {
+              "agentIdPrefix": "ff0952c7",
+              "name": "Quarterly Reporting Agent",
+              "addSkillKeys": [
+                "paperclipai/optional/analysis/report-analysis"
+              ],
+              "removeSkillKeys": []
+            },
+            {
+              "agentIdPrefix": "643488b3",
+              "name": "Orders",
+              "addSkillKeys": [
+                "paperclipai/bundled/software-development/lean-coding",
+                "paperclipai/bundled/quality/qa-acceptance"
+              ],
+              "removeSkillKeys": []
+            },
+            {
+              "agentIdPrefix": "a60b64ff",
+              "name": "Salgsanalytikeren",
+              "addSkillKeys": [
+                "paperclipai/paperclip/paperclip",
+                "paperclipai/optional/analysis/report-analysis"
+              ],
+              "removeSkillKeys": []
+            },
+            {
+              "agentIdPrefix": "e9be2122",
+              "name": "Support Rep",
+              "addSkillKeys": [
+                "paperclipai/optional/communication/customer-support-replies",
+                "paperclipai/optional/communication/email-triage"
+              ],
+              "removeSkillKeys": []
+            },
+            {
+              "agentIdPrefix": "86b9da0c",
+              "name": "CEO",
+              "addSkillKeys": [
+                "paperclipai/paperclip/paperclip-converting-plans-to-tasks",
+                "paperclipai/bundled/paperclip-operations/task-planning",
+                "paperclipai/bundled/paperclip-operations/issue-triage"
+              ],
+              "removeSkillKeys": []
+            },
+            {
+              "agentIdPrefix": "93885ec7",
+              "name": "Claims",
+              "addSkillKeys": [
+                "paperclipai/bundled/software-development/lean-coding",
+                "paperclipai/bundled/quality/qa-acceptance"
+              ],
+              "removeSkillKeys": []
+            },
+            {
+              "agentIdPrefix": "1ad915dd",
+              "name": "Automations",
+              "addSkillKeys": [
+                "paperclipai/bundled/software-development/lean-coding",
+                "paperclipai/bundled/quality/qa-acceptance"
+              ],
+              "removeSkillKeys": []
+            },
+            {
+              "agentIdPrefix": "f4a5b6bf",
+              "name": "Dashboard Boss",
+              "addSkillKeys": [
+                "paperclipai/bundled/paperclip-operations/task-planning",
+                "paperclipai/paperclip/paperclip-converting-plans-to-tasks",
+                "paperclipai/optional/quality/code-review",
+                "paperclipai/bundled/paperclip-operations/issue-triage"
+              ],
+              "removeSkillKeys": []
+            },
+            {
+              "agentIdPrefix": "18d74ca7",
+              "name": "Reporting module",
+              "addSkillKeys": [
+                "paperclipai/optional/analysis/report-analysis",
+                "paperclipai/bundled/software-development/lean-coding",
+                "paperclipai/bundled/quality/qa-acceptance"
+              ],
+              "removeSkillKeys": []
+            },
+            {
+              "agentIdPrefix": "1cff818c",
+              "name": "Products",
+              "addSkillKeys": [
+                "paperclipai/bundled/software-development/lean-coding",
+                "paperclipai/bundled/quality/qa-acceptance"
+              ],
+              "removeSkillKeys": []
+            },
+            {
+              "agentIdPrefix": "09ad3eff",
+              "name": "Purchasing",
+              "addSkillKeys": [
+                "paperclipai/bundled/software-development/lean-coding",
+                "paperclipai/bundled/quality/qa-acceptance",
+                "paperclipai/optional/analysis/report-analysis"
+              ],
+              "removeSkillKeys": []
+            },
+            {
+              "agentIdPrefix": "fcd4ccba",
+              "name": "Claims Rep",
+              "addSkillKeys": [
+                "paperclipai/optional/communication/customer-support-replies",
+                "paperclipai/optional/communication/email-triage"
+              ],
+              "removeSkillKeys": []
+            },
+            {
+              "agentIdPrefix": "8beda601",
+              "name": "Governance",
+              "addSkillKeys": [
+                "paperclipai/bundled/software-development/lean-coding",
+                "paperclipai/bundled/quality/qa-acceptance"
+              ],
+              "removeSkillKeys": []
+            },
+            {
+              "agentIdPrefix": "a34ed2d2",
+              "name": "Tasks",
+              "addSkillKeys": [
+                "paperclipai/bundled/software-development/lean-coding",
+                "paperclipai/bundled/quality/qa-acceptance"
+              ],
+              "removeSkillKeys": []
+            },
+            {
+              "agentIdPrefix": "5c1fc775",
+              "name": "Finance",
+              "addSkillKeys": [
+                "paperclipai/optional/analysis/report-analysis",
+                "paperclipai/optional/finance/bookkeeping-assistant",
+                "paperclipai/bundled/software-development/lean-coding",
+                "paperclipai/bundled/quality/qa-acceptance"
+              ],
+              "removeSkillKeys": []
+            },
+            {
+              "agentIdPrefix": "fe8014f3",
+              "name": "Tech Boss",
+              "addSkillKeys": [
+                "paperclipai/paperclip/paperclip",
+                "paperclipai/optional/quality/code-review",
+                "paperclipai/optional/quality/security-review",
+                "paperclipai/bundled/paperclip-operations/task-planning"
+              ],
+              "removeSkillKeys": []
+            },
+            {
+              "agentIdPrefix": "f02eba5a",
+              "name": "Customer Leader",
+              "addSkillKeys": [
+                "paperclipai/optional/communication/customer-support-replies",
+                "paperclipai/optional/communication/email-triage",
+                "paperclipai/optional/analysis/report-analysis"
+              ],
+              "removeSkillKeys": []
+            },
+            {
+              "agentIdPrefix": "9ac0a197",
+              "name": "Email",
+              "addSkillKeys": [
+                "paperclipai/bundled/software-development/lean-coding",
+                "paperclipai/bundled/quality/qa-acceptance"
+              ],
+              "removeSkillKeys": []
+            }
+          ]
+        },
+        {
+          "id": "company-skill-text",
+          "needsDeploy": false,
+          "endpoint": "companySkillFileUpdate",
+          "note": "Optional, needs Filip's OK: the company-only skills' content is not in the repo. Proposed wording is in docs/audits/2026-10-17-agents-skills.md (section 'Company-only skills'). Edit via the Skills page or PATCH /api/companies/{companyId}/skills/{skillId}/files after reading the current text."
+        }
+      ]
+    }
+  ]
+}

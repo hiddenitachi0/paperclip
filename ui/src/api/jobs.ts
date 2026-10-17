@@ -1,4 +1,4 @@
-import type { PermissionKey } from "@paperclipai/shared";
+import type { PermissionKey, PositionCatalogueEntry } from "@paperclipai/shared";
 
 type McpServerConfig = { name: string; command?: string; args?: string[]; url?: string; transport?: string; env?: Record<string, string>; headers?: Record<string, string> };
 import { api } from "./client";
@@ -101,6 +101,22 @@ function toDto(draft: Partial<JobDraft>): Record<string, unknown> {
   return dto;
 }
 
+/** A ready-to-hire position template, as GET /companies/:id/positions/catalogue returns it. */
+export interface PositionCatalogueItem extends PositionCatalogueEntry {
+  alreadyAdded: boolean;
+  existingPositionId: string | null;
+  missingSkillKeys: string[];
+}
+
+export interface AddFromCatalogueResult {
+  createdPosition: boolean;
+  createdJobs: string[];
+  linkedJobs: string[];
+  installedSkills: string[];
+  missingSkillKeys: string[];
+  warnings: string[];
+}
+
 function rolePath(id: string, suffix = "") {
   return `/agent-roles/${encodeURIComponent(id)}${suffix}`;
 }
@@ -115,6 +131,13 @@ export const jobsApi = {
     ),
   update: async (id: string, data: Partial<JobDraft>) => fromDto(await api.patch<AgentRoleDto>(rolePath(id), toDto(data))),
   remove: (id: string) => api.delete<void>(rolePath(id)),
+  listCatalogue: (companyId: string) =>
+    api.get<PositionCatalogueItem[]>(`/companies/${encodeURIComponent(companyId)}/agent-roles/catalogue`),
+  addFromCatalogue: (companyId: string, templateKey: string) =>
+    api.post<AddFromCatalogueResult>(
+      `/companies/${encodeURIComponent(companyId)}/agent-roles/catalogue/${encodeURIComponent(templateKey)}`,
+      {},
+    ),
   duplicateToCompany: async (id: string, targetCompanyId: string) =>
     fromDto(await api.post<AgentRoleDto>(rolePath(id, "/copy"), { targetCompanyId })),
 
