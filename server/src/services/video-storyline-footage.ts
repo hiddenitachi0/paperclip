@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { and, eq, gte, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { assets, issueAttachments, videoMediaSpend, videoShots, videoStorylines, videoTransitionTakes, videoUploads } from "@paperclipai/db";
+import { assets, issueAttachments, videoShots, videoStorylines, videoUploads } from "@paperclipai/db";
 import {
   MEDIA_FOOTAGE_SETTINGS_KEYS,
   MEDIA_STUDIO_PLUGIN_KEY,
@@ -15,6 +15,7 @@ import { notFound, unprocessable } from "../errors.js";
 import { pluginRegistryService } from "./plugin-registry.js";
 import { loadCastAgeRefusals, readPluginState } from "./storyline-cast.js";
 import { storylineCompanyModel } from "./video-storyline-company-model.js";
+import { companyMonthlyMediaSpendCents } from "./storyline-media-ledger.js";
 import type { HelperServiceOptions } from "./helper.js";
 import type { VideoStorylineActor } from "./video-storylines.js";
 
@@ -96,31 +97,12 @@ export function dataUriBytes(dataUri: string): Buffer | null {
   return match?.[1] ? Buffer.from(match[1], "base64") : null;
 }
 
-function startOfMonthUtc(now: Date): Date {
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-}
-
 /**
- * This month's media spend for a company (the monthly cap): AI transition
- * takes plus other paid steps (animate photo). A failed or released item
- * counts only what it really cost.
+ * This month's AI media spend for a company (the monthly limit), counted from
+ * the durable cost ledger so deleting a film or a clip never gives it back
+ * (security review DUR-4807 item 4). See storyline-media-ledger.ts.
  */
-export async function companyMonthlyMediaSpendCents(executor: Pick<Db, "select">, companyId: string, now: Date): Promise<number> {
-  const since = startOfMonthUtc(now);
-  const [takes] = await executor
-    .select({
-      total: sql<number>`coalesce(sum(case when ${videoTransitionTakes.status} = 'failed' then coalesce(${videoTransitionTakes.costCents}, 0) else coalesce(${videoTransitionTakes.costCents}, ${videoTransitionTakes.reservedCents}) end), 0)::int`,
-    })
-    .from(videoTransitionTakes)
-    .where(and(eq(videoTransitionTakes.companyId, companyId), gte(videoTransitionTakes.createdAt, since)));
-  const [other] = await executor
-    .select({
-      total: sql<number>`coalesce(sum(case when ${videoMediaSpend.status} = 'released' then coalesce(${videoMediaSpend.costCents}, 0) when ${videoMediaSpend.status} = 'settled' then coalesce(${videoMediaSpend.costCents}, ${videoMediaSpend.reservedCents}) else ${videoMediaSpend.reservedCents} end), 0)::int`,
-    })
-    .from(videoMediaSpend)
-    .where(and(eq(videoMediaSpend.companyId, companyId), gte(videoMediaSpend.createdAt, since)));
-  return Number(takes?.total ?? 0) + Number(other?.total ?? 0);
-}
+export { companyMonthlyMediaSpendCents } from "./storyline-media-ledger.js";
 
 /** Where music uploaded for storylines is stored (counted in the company's footage quota). */
 export const STORYLINE_MUSIC_NAMESPACE = "video-storylines/music";
@@ -347,6 +329,46 @@ export function videoStorylineFootageService(db: Db, deps: FootageDeps = {}) {
     return consentProblem(upload[0], shot, peopleSeen);
   }
 
+  /**
+   * The story writer's picture analysis (18 Oct 2026): may this uploaded
+   * photo of the storyline be described by an AI? The same rules as a frame
+   * of the company's own footage: both consent ticks when it shows people,
+   * and the age check (Media Studio's picture-reading model, verdict kept on
+   * the upload, never milder) must say "adult" or "no people". Returns the
+   * plain reason it may not, else null. `bytes` is the exact picture sent.
+   */
+  async function photoReadRefusal(
+    companyId: string,
+    storylineId: string,
+    uploadId: string,
+    bytes: Buffer,
+    actor: Pick<VideoStorylineActor, "actorType" | "actorId"> | null,
+  ): Promise<string | null> {
+    const [upload] = await db
+      .select()
+      .from(videoUploads)
+      .where(and(eq(videoUploads.id, uploadId), eq(videoUploads.companyId, companyId), eq(videoUploads.storylineId, storylineId)));
+    if (!upload) return "That photo is not in this storyline any more.";
+    const name = upload.originalFilename ? `"${upload.originalFilename}"` : "One of your photos";
+    const consentMissing = !(upload.consentLikeness && upload.consentAdults);
+    if (upload.showsPeople && consentMissing) {
+      return `${name} shows people, so it was not sent: tick both boxes on it first (everyone shown agreed to their likeness being used, and everyone shown is an adult).`;
+    }
+    let verdict: FootageVerdict;
+    try {
+      verdict = await verdictFor(companyId, upload, bytes, actor);
+    } catch (err) {
+      return err instanceof Error ? `${name} was not sent: ${err.message}` : `${name} was not sent: the age check could not run.`;
+    }
+    if (verdict === "under18" || verdict === "unclear") {
+      return `${name} did not pass the age check (only pictures clearly of adults, or with no people at all, are ever sent to an AI service), so it was not sent.`;
+    }
+    if (verdict === "adult" && consentMissing) {
+      return `${name} shows people, so it was not sent: tick both boxes on it first (everyone shown agreed to their likeness being used, and everyone shown is an adult).`;
+    }
+    return null;
+  }
+
   // ─── Music ───
 
   /** A company file id (issue attachment) or assets id -> the assets row, if it is this company's audio. */
@@ -407,6 +429,7 @@ export function videoStorylineFootageService(db: Db, deps: FootageDeps = {}) {
     storageUsedBytes,
     assertMaySend,
     readerRefusal,
+    photoReadRefusal,
     resolveMusicAsset,
     musicLane,
     uploadsFor,

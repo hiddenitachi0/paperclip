@@ -4,6 +4,7 @@ import { agents } from "./agents.js";
 import { assets } from "./assets.js";
 import { companies } from "./companies.js";
 import { projects } from "./projects.js";
+import { videoStorylineDirectors } from "./video_storyline_directors.js";
 
 /**
  * DUR-4127 (backend half of DUR-4095, video storylines): a storyline is a
@@ -69,6 +70,9 @@ export const videoStorylines = pgTable(
       }>()
       .notNull()
       .default({}),
+    // The director (video_storyline_directors) whose AI story writer writes
+    // this storyline in step 1; null = none picked yet.
+    directorId: uuid("director_id").references(() => videoStorylineDirectors.id, { onDelete: "set null" }),
     // Direct-storage pointer for the final stitched film -- deliberately NOT
     // an attachments-table row: a multi-hour concatenated film routinely
     // exceeds the 25MB company-attachment cap (attachment-types.ts), and
@@ -89,7 +93,7 @@ export const videoStorylines = pgTable(
     // shot timeline, not re-probed per shot), null when not localizable to a
     // single shot (e.g. a whole-file duration mismatch).
     qualityCheckIssues: jsonb("quality_check_issues")
-      .$type<Array<{ code: string; message: string; shotIndex: number | null; timeSeconds: number | null }>>()
+      .$type<Array<{ code: string; message: string; shotIndex: number | null; timeSeconds: number | null; severity?: "warning" | "blocking" }>>()
       .notNull()
       .default([]),
     qualityCheckedAt: timestamp("quality_checked_at", { withTimezone: true }),
@@ -600,7 +604,8 @@ export const videoUploads = pgTable(
  * (today: "animate this photo"). Reserved against the storyline budget AND
  * the company's monthly media cap before the provider is called (same lock
  * as transitions), settled to the real cost when the clip arrives, released
- * when it fails. Rows are never deleted: the monthly cap sums them.
+ * when it fails. The monthly cap is counted from the matching cost_events
+ * row (storyline-media-ledger.ts), because these rows go with their storyline.
  */
 export const videoMediaSpend = pgTable(
   "video_media_spend",

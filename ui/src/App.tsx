@@ -47,6 +47,7 @@ import { GoalAdoption } from "./pages/GoalAdoption";
 import { Activity } from "./pages/Activity";
 import { Inbox } from "./pages/Inbox";
 import { BoardChat } from "./pages/BoardChat";
+import { BoardChatAvailabilityGate } from "./components/BoardChatAvailabilityGate";
 import { CompanySettings } from "./pages/CompanySettings";
 import { CompanyConnections } from "./pages/CompanyConnections";
 import { CompanyModels } from "./pages/CompanyModels";
@@ -262,7 +263,14 @@ function boardRoutes() {
           conference-room one; the master-level mount above it still serves
           `/artifacts` in both modes. */}
       <Route element={<ConferenceRoomChatGate />}>
-        <Route path="board-chat" element={<BoardChat />} />
+        <Route
+          path="board-chat"
+          element={
+            <BoardChatAvailabilityGate>
+              <BoardChat />
+            </BoardChatAvailabilityGate>
+          }
+        />
         <Route path="files" element={<Artifacts />} />
         <Route path="artifacts" element={<LegacyArtifactsRedirect />} />
       </Route>

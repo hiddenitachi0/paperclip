@@ -16,6 +16,7 @@ import {
   Copy,
   Check,
   MessageSquarePlus,
+  MessagesSquare,
   Undo2,
 } from "lucide-react";
 import {
@@ -26,7 +27,7 @@ import {
   type HelperInvestigationList,
   type HelperModelOption,
 } from "@paperclipai/shared";
-import { useLocation } from "@/lib/router";
+import { Link, useLocation, useNavigate } from "@/lib/router";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { useCompany } from "../../context/CompanyContext";
@@ -73,6 +74,8 @@ import {
   type InvestigationDraft,
 } from "./HelperInvestigations";
 import { helperErrorText } from "./helper-errors";
+import { boardChatUnavailableText, useBoardChatAvailability } from "../../hooks/useBoardChatAvailability";
+import { boardChatPrefillState, buildBoardChatHandoffText } from "../../lib/board-chat-handoff";
 import {
   buildHelperHistory,
   clampHelperWidth,
@@ -107,6 +110,12 @@ export { historyContentOf };
  * what it usually takes and costs, and that it is advice only. Its state and
  * its answer show up in the conversation itself, and in "My investigations"
  * (fetched from the server, so it survives a reload).
+ *
+ * Ask only explains. When a question asks Paperclip to DO something (the
+ * server flags it: suggestBoardChat), the answer offers "Do this in Board
+ * chat", which opens Board chat with the question typed in for the person to
+ * check and send. It is also a small action under every answer. A person who
+ * cannot use Board chat gets a plain note instead of the button.
  *
  * The conversation is kept per company for this browser tab (sessionStorage,
  * see helper-session.ts): it survives moving between pages and a reload, and
@@ -272,6 +281,8 @@ interface Note {
 function CompanyHelper({ companyId, userId }: { companyId: string; userId: string | null }) {
   const { selectedCompany } = useCompany();
   const location = useLocation();
+  const navigate = useNavigate();
+  const boardChat = useBoardChatAvailability();
   const initial = useMemo(() => loadHelperSession(userId, companyId), [userId, companyId]);
   const [open, setOpen] = useState(loadHelperOpen);
   const [width, setWidth] = useState(loadHelperWidth);
@@ -618,6 +629,7 @@ function CompanyHelper({ companyId, userId }: { companyId: string; userId: strin
       pictures: sentPictures.map(({ key, name, previewUrl }) => ({ key, name, previewUrl })),
       context: sent?.text ? sent.text : null,
       pageRoute: route,
+      pageTitle: typeof document !== "undefined" ? document.title : null,
       references: sent?.entities ?? [],
       pictureInputs: sentPictures.map((p) => p.input),
     };
@@ -642,6 +654,7 @@ function CompanyHelper({ companyId, userId }: { companyId: string; userId: strin
           meta: { modelLabel: result.modelLabel, costCents: result.costCents, truncated: result.truncated },
           applyTargets: asked.applyTargets,
           suggestInvestigation: result.suggestInvestigation === true,
+          suggestBoardChat: result.suggestBoardChat === true,
         },
       ]);
     } catch (err) {
@@ -705,6 +718,19 @@ function CompanyHelper({ companyId, userId }: { companyId: string; userId: strin
       applyTargets: asked.applyTargets ?? [],
       fromComposer: false,
     });
+  };
+
+  /**
+   * "Do this in Board chat": opens Board chat with the question (and where it
+   * was asked) typed in. Passed in navigation state, never the URL; nothing is
+   * sent until the person presses Send there.
+   */
+  const handOffToBoardChat = (index: number) => {
+    const asked = turns[index - 1];
+    if (!asked || asked.role !== "user") return;
+    const text = buildBoardChatHandoffText({ question: asked.content, pageTitle: asked.pageTitle ?? null });
+    closePanel();
+    navigate("/board-chat", { state: boardChatPrefillState(text) });
   };
 
   const canApply = (label: string) => registeredTargets.includes(label) || canApplyHelperAnswer(label);
@@ -809,6 +835,22 @@ function CompanyHelper({ companyId, userId }: { companyId: string; userId: strin
             </Button>
           </div>
         ) : null}
+        {turn.suggestBoardChat && boardChat.available ? (
+          <div className="space-y-1.5 rounded-md border border-primary/40 bg-primary/5 px-2.5 py-2 text-xs" data-testid="helper-suggest-board-chat">
+            <p>
+              This asks for a change. Ask can only explain, but Board chat can do it for you. Your question is typed in
+              there for you to check; nothing is sent until you press Send.
+            </p>
+            <Button size="xs" variant="outline" onClick={() => handOffToBoardChat(index)} data-testid="helper-board-chat-suggested">
+              <MessagesSquare className="h-3.5 w-3.5" /> Do this in Board chat
+            </Button>
+          </div>
+        ) : null}
+        {turn.suggestBoardChat && boardChat.loaded && !boardChat.available && boardChatUnavailableText(boardChat.reason) ? (
+          <p className="rounded-md bg-muted px-2.5 py-2 text-xs text-muted-foreground" data-testid="helper-board-chat-unavailable">
+            {boardChatUnavailableText(boardChat.reason)}
+          </p>
+        ) : null}
         <div className="flex flex-wrap items-center gap-2">
           {(turn.applyTargets ?? []).filter(canApply).map((label) => (
             <Button key={label} size="xs" variant="outline" onClick={() => apply(label, turn.content)}>
@@ -825,6 +867,17 @@ function CompanyHelper({ companyId, userId }: { companyId: string; userId: strin
               data-testid="helper-investigate-answer"
             >
               <Search className="h-3.5 w-3.5" /> Investigate deeper
+            </Button>
+          ) : null}
+          {boardChat.available && !turn.suggestBoardChat ? (
+            <Button
+              size="xs"
+              variant="ghost"
+              onClick={() => handOffToBoardChat(index)}
+              title="Open Board chat with this question typed in, so it can make the change for you. You check it and press Send."
+              data-testid="helper-board-chat-answer"
+            >
+              <MessagesSquare className="h-3.5 w-3.5" /> Do this in Board chat
             </Button>
           ) : null}
           {turn.meta ? (
@@ -950,8 +1003,8 @@ function CompanyHelper({ companyId, userId }: { companyId: string; userId: strin
           <header className="flex items-start justify-between gap-2 border-b border-border px-4 py-3">
             <div className="min-w-0">
               <h2 className="text-sm font-semibold">Ask Paperclip</h2>
-              <p className="text-xs text-muted-foreground">
-                Explains what is on this page. It cannot change anything.
+              <p className="text-xs text-muted-foreground" data-testid="helper-subtitle">
+                Explains this page — makes no changes.
                 <span className="hidden md:inline"> {SHORTCUT_LABEL} opens and closes it.</span>
               </p>
             </div>
@@ -988,6 +1041,15 @@ function CompanyHelper({ companyId, userId }: { companyId: string; userId: strin
                     to hand it to an agent. You see what it costs before it starts.
                   </li>
                 </ul>
+                {boardChat.available ? (
+                  <p data-testid="helper-board-chat-tip">
+                    Want something changed?{" "}
+                    <Link to="/board-chat" onClick={onOpenTask} className="font-medium text-foreground underline underline-offset-2">
+                      Use Board chat
+                    </Link>
+                    .
+                  </p>
+                ) : null}
                 <p className="text-xs">The conversation stays while you move between pages, until you close this browser tab.</p>
               </div>
             ) : null}

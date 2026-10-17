@@ -26,6 +26,7 @@ import {
   type UpdateVideoShotInput,
   type UpdateVideoStorylineInput,
   type VideoStorylineProgress,
+  videoQualityIssueSeverity,
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
@@ -72,12 +73,15 @@ export interface VideoStorylineSummary {
   pictureSettings: { providerId?: string | null; model?: string | null; lookId?: string | null };
   /** The script's characters and the saved people (Media Studio identities) they are linked to; see video-storyline-cast.ts. */
   cast: VideoStorylineCast;
+  /** The director whose AI story writer writes this storyline (step 1); null = none picked. */
+  directorId: string | null;
   finalObjectKey: string | null;
   finalByteSize: number | null;
   finalDurationSeconds: number | null;
   stitchBlockedReason: string | null;
   errorMessage: string | null;
-  qualityCheckIssues: Array<{ code: string; message: string; shotIndex: number | null; timeSeconds: number | null }>;
+  /** severity: "blocking" means the film is really broken; "warning" is worth a look but never stops Download. */
+  qualityCheckIssues: Array<{ code: string; message: string; shotIndex: number | null; timeSeconds: number | null; severity: "warning" | "blocking" }>;
   qualityCheckedAt: string | null;
   defaultTransition: string;
   defaultTransitionDurationMs: number;
@@ -173,12 +177,14 @@ function toStorylineSummary(row: StorylineRow): VideoStorylineSummary {
     characterReferenceAssetIds: row.characterReferenceAssetIds,
     pictureSettings: pictureFields(row.pictureSettings),
     cast: readVideoStorylineCast(row.pictureSettings),
+    directorId: row.directorId ?? null,
     finalObjectKey: row.finalObjectKey,
     finalByteSize: row.finalByteSize,
     finalDurationSeconds: row.finalDurationSeconds,
     stitchBlockedReason: row.stitchBlockedReason,
     errorMessage: row.errorMessage,
-    qualityCheckIssues: row.qualityCheckIssues,
+    // Always from the code, so rows checked before severities existed read the same way.
+    qualityCheckIssues: (row.qualityCheckIssues ?? []).map((issue) => ({ ...issue, severity: videoQualityIssueSeverity(issue) })),
     qualityCheckedAt: iso(row.qualityCheckedAt),
     defaultTransition: row.defaultTransition,
     defaultTransitionDurationMs: row.defaultTransitionDurationMs,

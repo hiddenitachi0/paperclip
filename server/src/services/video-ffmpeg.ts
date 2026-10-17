@@ -655,6 +655,179 @@ export async function addMusicBed(video: StitchResult, music: MusicBedInput): Pr
   });
 }
 
+// ─── Loudness: an even, never-clipping sound track on every export ─────────
+//
+// Clips from video services (and music files) arrive at wildly different
+// loudness, and loud ones peak at full scale -- which the automatic quality
+// check rightly reports as clipping. Every stitched film with sound is
+// therefore run through ffmpeg's loudnorm (EBU R128) to about -14 LUFS, the
+// level the big video sites play at, with a true-peak ceiling, followed by a
+// hard sample-peak limiter as a safety net for the AAC encode. Two passes
+// when the measurement works (the first only decodes the sound, so it is
+// cheap); one pass otherwise. The picture is copied, never re-encoded.
+
+export const LOUDNESS_TARGET_LUFS = -14;
+export const LOUDNESS_TRUE_PEAK_DBTP = -1.5;
+export const LOUDNESS_RANGE_LU = 11;
+/** Hard ceiling for any single sample after the encode, in dBFS (well under the quality check's clipping line). */
+export const LOUDNESS_LIMITER_CEILING_DB = -1.0;
+/** Never lift a quiet film by more than this: a near-silent track would otherwise be turned into loud hiss. */
+export const LOUDNESS_MAX_BOOST_DB = 12;
+/** Quieter than this is treated as silence: only the limiter runs. */
+const LOUDNESS_SILENCE_LUFS = -60;
+
+export interface LoudnormMeasurement {
+  inputI: number;
+  inputTp: number;
+  inputLra: number;
+  inputThresh: number;
+  targetOffset: number;
+}
+
+/** Reads loudnorm's `print_format=json` summary out of ffmpeg's log; null when it is missing or not all numbers (e.g. `-inf` for silence). */
+export function parseLoudnormMeasurement(stderrOutput: string): LoudnormMeasurement | null {
+  const match = /\{[^{}]*"input_i"[^{}]*\}/.exec(stderrOutput);
+  if (!match) return null;
+  let json: Record<string, unknown>;
+  try {
+    json = JSON.parse(match[0]) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const read = (key: string) => Number.parseFloat(String(json[key] ?? ""));
+  const measured: LoudnormMeasurement = {
+    inputI: read("input_i"),
+    inputTp: read("input_tp"),
+    inputLra: read("input_lra"),
+    inputThresh: read("input_thresh"),
+    targetOffset: read("target_offset"),
+  };
+  return Object.values(measured).every((v) => Number.isFinite(v)) ? measured : null;
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+/**
+ * The audio filter chain for the export. Numbers only (our constants, or
+ * ffmpeg's own measurement clamped to loudnorm's documented ranges and
+ * formatted here) -- never caller text. With a measurement: the second
+ * pass in linear mode (one gain for the whole film, so nothing "pumps").
+ * Without: single-pass loudnorm. A silent track gets the limiter only.
+ */
+export function buildLoudnessFilter(measured: LoudnormMeasurement | null): string {
+  const ceiling = Math.pow(10, LOUDNESS_LIMITER_CEILING_DB / 20).toFixed(4);
+  const limiter = `alimiter=limit=${ceiling}:level=0`;
+  if (measured && measured.inputI <= LOUDNESS_SILENCE_LUFS) {
+    return `aresample=48000,${limiter}`;
+  }
+  const target = measured ? clampNumber(Math.min(LOUDNESS_TARGET_LUFS, measured.inputI + LOUDNESS_MAX_BOOST_DB), -70, -5) : LOUDNESS_TARGET_LUFS;
+  let loudnorm = `loudnorm=I=${target.toFixed(1)}:TP=${LOUDNESS_TRUE_PEAK_DBTP.toFixed(1)}:LRA=${LOUDNESS_RANGE_LU.toFixed(1)}`;
+  if (measured) {
+    loudnorm +=
+      `:measured_I=${clampNumber(measured.inputI, -99, 0).toFixed(2)}` +
+      `:measured_TP=${clampNumber(measured.inputTp, -99, 99).toFixed(2)}` +
+      `:measured_LRA=${clampNumber(measured.inputLra, 0, 99).toFixed(2)}` +
+      `:measured_thresh=${clampNumber(measured.inputThresh, -99, 0).toFixed(2)}` +
+      `:offset=${clampNumber(measured.targetOffset, -99, 99).toFixed(2)}` +
+      ":linear=true";
+  }
+  // loudnorm works at 192 kHz internally; bring it back to the film's 48 kHz before the limiter.
+  return `${loudnorm},aresample=48000,${limiter}`;
+}
+
+/** The first pass: measure the sound only (no picture decoded). */
+export function buildLoudnessMeasureArgs(inputPath: string): string[] {
+  return [
+    "-hide_banner",
+    "-nostats",
+    "-i",
+    inputPath,
+    "-map",
+    "0:a:0",
+    "-af",
+    `loudnorm=I=${LOUDNESS_TARGET_LUFS.toFixed(1)}:TP=${LOUDNESS_TRUE_PEAK_DBTP.toFixed(1)}:LRA=${LOUDNESS_RANGE_LU.toFixed(1)}:print_format=json`,
+    "-vn",
+    "-f",
+    "null",
+    "-",
+  ];
+}
+
+/** The second (or only) pass: the picture copied as is, the sound evened out and limited. */
+export function buildLoudnessApplyArgs(inputPath: string, outputPath: string, filter: string): string[] {
+  return [
+    "-y",
+    "-i",
+    inputPath,
+    "-map",
+    "0:v:0",
+    "-map",
+    "0:a:0",
+    "-c:v",
+    "copy",
+    "-af",
+    filter,
+    "-c:a",
+    "aac",
+    "-b:a",
+    "192k",
+    "-ar",
+    "48000",
+    "-ac",
+    "2",
+    "-movflags",
+    "+faststart",
+    outputPath,
+  ];
+}
+
+export interface LoudnessResult extends StitchResult {
+  /** "two-pass" / "one-pass" when the sound was evened out, "no-audio" when the film has no sound track. */
+  mode: "two-pass" | "one-pass" | "no-audio";
+}
+
+/**
+ * Evens out the film's sound and keeps every peak under the ceiling. A
+ * film without a sound track comes back unchanged. Throws when the apply
+ * pass fails -- the caller decides whether to keep the un-normalised film.
+ */
+export async function normalizeLoudness(video: StitchResult): Promise<LoudnessResult> {
+  return withTempDir(async (dir) => {
+    const inputPath = join(dir, "film.mp4");
+    await writeFile(inputPath, video.buffer);
+    if (!(await probeHasAudioStream(inputPath))) return { ...video, mode: "no-audio" };
+    const duration = await probeDurationSeconds(inputPath).catch(() => 0);
+    const timeout = ffmpegTimeoutMsFor(duration);
+    let measured: LoudnormMeasurement | null = null;
+    try {
+      const { stderr } = await execFileAsync(FFMPEG_BINARY, buildLoudnessMeasureArgs(inputPath), { timeout, maxBuffer: 16 * 1024 * 1024, cwd: dir });
+      measured = parseLoudnormMeasurement(stderr);
+    } catch (err) {
+      const withStderr = err as { stderr?: unknown };
+      measured = typeof withStderr.stderr === "string" ? parseLoudnormMeasurement(withStderr.stderr) : null;
+    }
+    const outputPath = join(dir, "film-loudness.mp4");
+    await execFileAsync(FFMPEG_BINARY, buildLoudnessApplyArgs(inputPath, outputPath, buildLoudnessFilter(measured)), { timeout, cwd: dir });
+    return { buffer: await readFile(outputPath), contentType: video.contentType, mode: measured ? "two-pass" : "one-pass" };
+  });
+}
+
+/** Whether a file has a picture at all (false when ffprobe cannot read it). */
+export async function probeHasVideoStream(filePath: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync(
+      FFPROBE_BINARY,
+      ["-v", "error", "-select_streams", "v", "-show_entries", "stream=index", "-of", "csv=p=0", filePath],
+      { timeout: PROBE_TIMEOUT_MS },
+    );
+    return stdout.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
 // ─── Phase 2: uploads, prepared clips, photo clips, title cards ─────────────
 //
 // SECURITY: same rules as above. Every argument list is built here from
