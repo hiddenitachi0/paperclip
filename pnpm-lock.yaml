@@ -779,6 +779,12 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(zod@3.25.76)
+      '@noble/curves':
+        specifier: 2.2.0
+        version: 2.2.0
+      '@noble/hashes':
+        specifier: 2.2.0
+        version: 2.2.0
       '@paperclipai/adapter-acpx-local':
         specifier: workspace:*
         version: link:../packages/adapters/acpx-local
@@ -830,6 +836,9 @@ importers:
       '@paperclipai/skills-catalog':
         specifier: workspace:*
         version: link:../packages/skills-catalog
+      '@scure/btc-signer':
+        specifier: 2.2.0
+        version: 2.2.0
       ajv:
         specifier: ^8.20.0
         version: 8.20.0
@@ -4409,6 +4418,9 @@ packages:
   '@scure/base@2.2.0':
     resolution: {integrity: sha512-b8XEupJibegiXV+tDUseI8oLQc8ei3d/4Jkb2RpbHh3MfE054ov3uIz2dhFkB3FI8iwYkEh0gGCApkrYggkPNg==}
 
+  '@scure/btc-signer@2.2.0':
+    resolution: {integrity: sha512-ZXZ08sZqSZKEcOuEQnxTF66ouHtl6+UA6U/QfQM06K9WiOlEkXF4LviZCaSgkdiFh9cyMt9+xdup7JtEv3p0fw==}
+
   '@scure/starknet@2.2.0':
     resolution: {integrity: sha512-FPgUFyEgbEG7ewrj9gWUeXpf2b6klBnqcZOSFz6z4ycVCIAeGhNqKQUPlvl2Ka8gfmrbCcdIrImyi+dINr06Uw==}
     engines: {node: '>= 20.19.0'}
@@ -6853,6 +6865,10 @@ packages:
   methods@1.1.2:
     resolution: {integrity: sha512-iclAHeNqNm68zFtnZ0e+1L2yUIdvzNoauKU4WBA3VvH/vPFieF7qfRlwUZU+DA9P9bPXIS90ulxoUoCH23sV2w==}
     engines: {node: '>= 0.6'}
+
+  micro-packed@0.9.0:
+    resolution: {integrity: sha512-gFdaWTxEXOwtSOcpxulO4AuXVtp3HWIRmB8eq8+3m1Zku0ubgva0UGpi03YhcvsTJasHngG9gTIUK5kHNKdesg==}
+    engines: {node: '>= 20.19.0'}
 
   micromark-core-commonmark@2.0.3:
     resolution: {integrity: sha512-RDBrHEMSxVFLg6xvnXmb1Ayr2WzLAWjeSATAoxwKYJV94TeNavgoIdA0a9ytzDSVzBy2YKFK+emCPOEibLeCrg==}
@@ -11789,6 +11805,13 @@ snapshots:
 
   '@scure/base@2.2.0': {}
 
+  '@scure/btc-signer@2.2.0':
+    dependencies:
+      '@noble/curves': 2.2.0
+      '@noble/hashes': 2.2.0
+      '@scure/base': 2.2.0
+      micro-packed: 0.9.0
+
   '@scure/starknet@2.2.0':
     dependencies:
       '@noble/curves': 2.2.0
@@ -14525,6 +14548,10 @@ snapshots:
       uuid: 14.0.1
 
   methods@1.1.2: {}
+
+  micro-packed@0.9.0:
+    dependencies:
+      '@scure/base': 2.2.0
 
   micromark-core-commonmark@2.0.3:
     dependencies:
