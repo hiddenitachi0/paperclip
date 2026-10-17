@@ -50,6 +50,7 @@ import { logger } from "../middleware/logger.js";
 import { getStorageService } from "../storage/index.js";
 import { logActivity } from "./activity-log.js";
 import { recordFalCostEvent } from "./fal-cost-events.js";
+import { refreshStorylineMediaSpend, releaseStorylineMediaSpend, reserveStorylineMediaSpend, settleSogniStorylineSpend, storylineTransitionSpendCode } from "./storyline-media-ledger.js";
 import { runMediaJob } from "./media-job-queue.js";
 import { pluginRegistryService } from "./plugin-registry.js";
 import { recordSogniCost, SOGNI_CREDIT_PRICE_CONFIG_KEY } from "./sogni-cost.js";
@@ -933,7 +934,7 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
     const monthlyCap = await settings.getMediaMonthlyCapCents(companyId);
 
     // Reserve under the storyline lock: storyline budget, then the company's monthly cap.
-    const take = await withCompanyScope(db, companyId, async (tx) => {
+    const reserved = await withCompanyScope(db, companyId, async (tx) => {
       // One reservation at a time per company (security review DUR-4711): the
       // monthly sum and the "already being made" check below are only safe
       // when no other generate() for this company is between its check and
@@ -986,8 +987,22 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
           updatedAt: nowOf(),
         })
         .returning();
-      return inserted!;
+      // The durable ledger row the monthly limit counts (DUR-4807): it survives
+      // deleting the film, the transition or a clip at this join.
+      const spend = await reserveStorylineMediaSpend(tx, {
+        companyId,
+        billingCode: storylineTransitionSpendCode(inserted!.id),
+        provider: providerId,
+        model: quote.option.model,
+        cents: quote.cents,
+        agentId: storyline.createdByAgentId ?? null,
+        createdByUserId: inserted!.createdByUserId ?? (storyline.createdByAgentId ? null : storyline.createdByUserId),
+        occurredAt: nowOf(),
+      });
+      return { take: inserted!, spend };
     });
+    await refreshStorylineMediaSpend(db, reserved.spend);
+    const take = reserved.take;
 
     try {
       const aClip = await render.downloadClipFromStorage(companyId, a.resultProvider ?? "", a.resultObjectKey);
@@ -1064,15 +1079,15 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
    * (cost_cents = reserved) on the storyline and the month, with a plain note.
    */
   async function failTake(take: TakeRow, message: string, opts: { keepReservation?: boolean } = {}): Promise<void> {
-    await withCompanyScope(db, take.companyId, async (tx) => {
+    const released = await withCompanyScope(db, take.companyId, async (tx) => {
       const [current] = await tx.select().from(videoTransitionTakes).where(eq(videoTransitionTakes.id, take.id)).for("update");
-      if (!current || current.status !== "generating") return;
+      if (!current || current.status !== "generating") return false;
       if (opts.keepReservation) {
         await tx
           .update(videoTransitionTakes)
           .set({ status: "failed", error: message.slice(0, 1_000), costCents: current.reservedCents, completedAt: nowOf(), updatedAt: nowOf() })
           .where(eq(videoTransitionTakes.id, take.id));
-        return;
+        return false;
       }
       await tx
         .update(videoTransitionTakes)
@@ -1084,7 +1099,10 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
           .set({ spentCents: sql`greatest(0, ${videoStorylines.spentCents} - ${current.reservedCents})`, updatedAt: nowOf() })
           .where(eq(videoStorylines.id, take.storylineId));
       }
+      return true;
     });
+    // Nothing was charged: the ledger row stops counting (it is kept, at 0).
+    if (released) await releaseStorylineMediaSpend(db, take.companyId, storylineTransitionSpendCode(take.id));
   }
 
   async function useTake(companyId: string, storylineId: string, transitionId: string, takeId: string, actor: VideoStorylineActor): Promise<VideoTransitionSummary> {
@@ -1150,6 +1168,7 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
         usage: { seconds: Math.round(take.durationMs / 1000) },
         estimateCents: take.reservedCents,
         billingCode: "video-storyline-transition",
+        settleBillingCode: storylineTransitionSpendCode(take.id),
       }).catch((err: unknown) => {
         logger.error({ err, takeId: take.id }, "video-storyline-transitions: could not record the Fal cost");
         return null;
@@ -1161,7 +1180,20 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
         const plugin = await registry.getByKey(MEDIA_STUDIO_PLUGIN_KEY);
         const config = plugin ? await registry.getConfig(plugin.id) : null;
         const cfg = (config?.configJson ?? {}) as Record<string, unknown>;
-        await recordSogniCost(db, {
+        // The held ledger row becomes the real credit cost when a credit price is set;
+        // without one the held estimate stands (never 0). Only a take started before
+        // holds were recorded has no row and is recorded the old way.
+        const settled = await settleSogniStorylineSpend(db, {
+          companyId: take.companyId,
+          billingCode: storylineTransitionSpendCode(take.id),
+          credits,
+          creditPriceUsd: cfg[SOGNI_CREDIT_PRICE_CONFIG_KEY],
+          model: take.model,
+        }).catch((err: unknown) => {
+          logger.error({ err, takeId: take.id }, "video-storyline-transitions: could not settle the Sogni cost");
+          return true;
+        });
+        if (!settled) await recordSogniCost(db, {
           companyId: take.companyId,
           agentId: storyline.createdByAgentId ?? null,
           credits,

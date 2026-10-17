@@ -44,6 +44,7 @@ import {
   uploadByteSize,
   videoStorylineFootageService,
 } from "./video-storyline-footage.js";
+import { refreshStorylineMediaSpend, reserveStorylineMediaSpend, storylineAnimateSpendCode } from "./storyline-media-ledger.js";
 import { estimateShotRenderCents, shotClipTiming, videoStorylineRenderService } from "./video-storyline-render.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
 import { videoStorylineStitchService } from "./video-storyline-stitch.js";
@@ -972,7 +973,7 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
     await footage.assertMaySend(companyId, shot, providerId, await download(companyId, upload.objectKey), actor);
     const monthlyCap = await settings.getMediaMonthlyCapCents(companyId);
 
-    await withCompanyScope(db, companyId, async (tx) => {
+    const held = await withCompanyScope(db, companyId, async (tx) => {
       await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`video_transition_spend:${companyId}`}, 0))`);
       const locked = await lockStorylineRow(tx, companyId, storylineId);
       assertStripEditable(locked);
@@ -991,7 +992,22 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
         );
       }
       await tx.update(videoStorylines).set({ spentCents: sql`${videoStorylines.spentCents} + ${quote}`, updatedAt: nowOf() }).where(eq(videoStorylines.id, storylineId));
-      await tx.insert(videoMediaSpend).values({ companyId, storylineId, shotId: shot.id, kind: "animate_photo", status: "reserved", reservedCents: quote, createdByUserId: actor.actorType === "user" ? actor.actorId : null, createdAt: nowOf(), updatedAt: nowOf() });
+      const [hold] = await tx
+        .insert(videoMediaSpend)
+        .values({ companyId, storylineId, shotId: shot.id, kind: "animate_photo", status: "reserved", reservedCents: quote, createdByUserId: actor.actorType === "user" ? actor.actorId : null, createdAt: nowOf(), updatedAt: nowOf() })
+        .returning({ id: videoMediaSpend.id });
+      // The durable ledger row the monthly limit counts (DUR-4807): it survives
+      // deleting the film or removing this clip.
+      const spend = await reserveStorylineMediaSpend(tx, {
+        companyId,
+        billingCode: storylineAnimateSpendCode(hold!.id),
+        provider: providerId,
+        model: locked.model ?? "animate-photo",
+        cents: quote,
+        agentId: locked.createdByAgentId ?? null,
+        createdByUserId: actor.actorType === "user" ? actor.actorId : locked.createdByAgentId ? null : locked.createdByUserId,
+        occurredAt: nowOf(),
+      });
       await tx
         .update(videoShots)
         .set({
@@ -1012,7 +1028,9 @@ export function videoStorylineClipsService(db: Db, deps: VideoStorylineClipsDeps
           updatedAt: nowOf(),
         })
         .where(eq(videoShots.id, shot.id));
+      return spend;
     });
+    await refreshStorylineMediaSpend(db, held);
     try {
       const fresh = await storylines.getStorylineRow(companyId, storylineId);
       const freshShot = await storylines.getShotRow(companyId, storylineId, shot.id);

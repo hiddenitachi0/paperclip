@@ -604,7 +604,8 @@ export const videoUploads = pgTable(
  * (today: "animate this photo"). Reserved against the storyline budget AND
  * the company's monthly media cap before the provider is called (same lock
  * as transitions), settled to the real cost when the clip arrives, released
- * when it fails. Rows are never deleted: the monthly cap sums them.
+ * when it fails. The monthly cap is counted from the matching cost_events
+ * row (storyline-media-ledger.ts), because these rows go with their storyline.
  */
 export const videoMediaSpend = pgTable(
   "video_media_spend",
