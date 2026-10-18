@@ -39,6 +39,8 @@ export interface AgentMemoryOwner {
   agentName: string;
   personaId: string | null;
   personaName: string | null;
+  /** DUR-4829: the agent's "learn from emoji reactions" switch. */
+  reactionLearningEnabled: boolean;
 }
 
 /** Who is changing the notebook, for the activity log. */
@@ -71,7 +73,13 @@ export function checkAgentMemoryText(input: unknown): string {
 export function agentMemoryService(db: Db) {
   async function resolveOwner(companyId: string, agentId: string): Promise<AgentMemoryOwner> {
     const [agent] = await db
-      .select({ id: agents.id, companyId: agents.companyId, name: agents.name, personaId: agents.personaId })
+      .select({
+        id: agents.id,
+        companyId: agents.companyId,
+        name: agents.name,
+        personaId: agents.personaId,
+        reactionLearningEnabled: agents.reactionLearningEnabled,
+      })
       .from(agents)
       .where(and(eq(agents.id, agentId), eq(agents.companyId, companyId)));
     if (!agent) throw notFound("Agent not found");
@@ -88,7 +96,14 @@ export function agentMemoryService(db: Db) {
         personaName = persona.displayName ?? null;
       }
     }
-    return { companyId, agentId: agent.id, agentName: agent.name, personaId, personaName };
+    return {
+      companyId,
+      agentId: agent.id,
+      agentName: agent.name,
+      personaId,
+      personaName,
+      reactionLearningEnabled: agent.reactionLearningEnabled,
+    };
   }
 
   function ownerFilter(owner: AgentMemoryOwner): SQL {
@@ -205,9 +220,13 @@ export function agentMemoryService(db: Db) {
      * private_access_events row (see server/src/services/private-access.ts
      * and routes/private-access.ts).
      */
-    async list(companyId: string, agentId: string, options?: { emergencyAccess?: boolean }): Promise<AgentMemoryList> {
+    async list(
+      companyId: string,
+      agentId: string,
+      options?: { emergencyAccess?: boolean; source?: AgentMemorySource },
+    ): Promise<AgentMemoryList> {
       const owner = await resolveOwner(companyId, agentId);
-      const rows = await listRows(owner);
+      const rows = (await listRows(owner)).filter((row) => !options?.source || row.source === options.source);
       const protectedAuthorIds = options?.emergencyAccess
         ? new Set<string>()
         : await privacyProtectedAuthorIds(
@@ -226,10 +245,14 @@ export function agentMemoryService(db: Db) {
       };
     },
 
-    /** The notes a quick agent reads, newest first (ids, text and dates only). */
+    /**
+     * The notes a quick agent reads, newest first (ids, text and dates only).
+     * DUR-4829: with "learn from emoji reactions" off, the notes learned from
+     * reactions stay on the page but are not read into the agent's prompt.
+     */
     async listForAgent(companyId: string, agentId: string): Promise<Array<{ id: string; text: string; createdAt: Date }>> {
       const owner = await resolveOwner(companyId, agentId);
-      const rows = await listRows(owner);
+      const rows = (await listRows(owner)).filter((row) => owner.reactionLearningEnabled || row.source !== "reaction");
       return rows.map((row) => ({ id: row.id, text: row.text, createdAt: row.createdAt }));
     },
 

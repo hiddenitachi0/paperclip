@@ -1,8 +1,9 @@
 import { and, count, desc, eq, gt, inArray, isNull, max, sql, type SQL } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agentMemories, laneAConversations, laneAMessages, telegramMessageReactions } from "@paperclipai/db";
+import { agentMemories, agents, laneAConversations, laneAMessages, telegramMessageReactions } from "@paperclipai/db";
 import { AGENT_MEMORY_MAX_LENGTH, AGENT_MEMORY_MAX_NOTES } from "@paperclipai/shared/validators/agent-memory";
 import { reactionEmojiMeaning, type ReactionEmojiConfig } from "@paperclipai/shared";
+import { notFound } from "../errors.js";
 import { agentMemoryService } from "./agent-memories.js";
 import { logActivity } from "./activity-log.js";
 import { telegramReactionService } from "./telegram-reactions.js";
@@ -280,9 +281,24 @@ export function reactionLearningService(db: Db) {
     return { events, requestedByUserId };
   }
 
+  /**
+   * DUR-4829: whether this agent learns from reactions at all. 404 when the
+   * agent is not in the company, so a wrong id answers like a missing one.
+   */
+  async function isEnabled(companyId: string, agentId: string): Promise<boolean> {
+    const [agent] = await db
+      .select({ enabled: agents.reactionLearningEnabled })
+      .from(agents)
+      .where(and(eq(agents.id, agentId), eq(agents.companyId, companyId)));
+    if (!agent) throw notFound("Agent not found");
+    return agent.enabled;
+  }
+
   /** Rewrite this agent's reaction notes from the reactions that still stand. */
   async function summarizeAgent(companyId: string, agentId: string) {
     const owner = await memories.resolveOwner(companyId, agentId);
+    // Off = no new notes. Notes written while it was on are left as they are.
+    if (!owner.reactionLearningEnabled) return { removed: 0, added: 0, reactionsRead: 0 };
     const config = await reactions.getConfig(companyId);
     const { events, requestedByUserId } = await loadEvents(companyId, agentId, config);
     const derived = summarizeReactions(events);
@@ -338,6 +354,7 @@ export function reactionLearningService(db: Db) {
     try {
       if (!options.force) {
         const owner = await memories.resolveOwner(companyId, agentId);
+        if (!owner.reactionLearningEnabled) return null;
         const [{ lastRun } = { lastRun: null }] = await db
           .select({ lastRun: max(agentMemories.createdAt) })
           .from(agentMemories)
@@ -429,6 +446,8 @@ export function reactionLearningService(db: Db) {
    */
   async function pictureRules(companyId: string, agentId: string): Promise<{ doMore: string[]; avoid: string[] }> {
     const owner = await memories.resolveOwner(companyId, agentId);
+    // DUR-4829: off = no picture rules, whatever notes were learned before.
+    if (!owner.reactionLearningEnabled) return { doMore: [], avoid: [] };
     const rows = await db
       .select({ category: agentMemories.category, terms: agentMemories.terms })
       .from(agentMemories)
@@ -454,7 +473,7 @@ export function reactionLearningService(db: Db) {
     return { doMore: doMore.filter((t) => !avoid.includes(t)), avoid: avoid.filter((t) => !doMore.includes(t)) };
   }
 
-  return { summarizeAgent, maybeSummarize, claimPictureFollowUp, recordFollowUpAnswer, pictureRules };
+  return { isEnabled, summarizeAgent, maybeSummarize, claimPictureFollowUp, recordFollowUpAnswer, pictureRules };
 }
 
 export type ReactionLearningService = ReturnType<typeof reactionLearningService>;
