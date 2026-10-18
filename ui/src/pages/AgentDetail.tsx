@@ -52,6 +52,7 @@ import { BudgetPolicyCard } from "../components/BudgetPolicyCard";
 import { SorteringsreglerCard } from "../components/SorteringsreglerCard";
 import { QuickAgentSection } from "../components/QuickAgentSection";
 import { QuickAgentMemorySection } from "../components/QuickAgentMemorySection";
+import { ReactionLearningSection } from "../components/ReactionLearningSection";
 import { MorningReportSection } from "../components/MorningReportSection";
 import { QuickAgentChatPanel } from "../components/QuickAgentChatPanel";
 import { AgentAddOnToolsSection } from "../components/AgentAddOnToolsSection";
@@ -1639,6 +1640,7 @@ export function AgentConfigurePage({
     <>
       <QuickAgentSection agent={agent} companyId={companyId} />
       {quickAgentOn && <QuickAgentMemorySection agentId={agent.id} />}
+      {quickAgentOn && <ReactionLearningSection agentId={agent.id} agentName={agent.name} />}
       {quickAgentOn && <MorningReportSection agent={agent} companyId={companyId} />}
     </>
   );
