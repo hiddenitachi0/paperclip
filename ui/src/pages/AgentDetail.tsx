@@ -1640,7 +1640,7 @@ export function AgentConfigurePage({
     <>
       <QuickAgentSection agent={agent} companyId={companyId} />
       {quickAgentOn && <QuickAgentMemorySection agentId={agent.id} />}
-      {quickAgentOn && <ReactionLearningSection agentId={agent.id} agentName={agent.name} />}
+      {quickAgentOn && <ReactionLearningSection agentId={agent.id} agentName={agent.name} companyId={companyId} />}
       {quickAgentOn && <MorningReportSection agent={agent} companyId={companyId} />}
     </>
   );

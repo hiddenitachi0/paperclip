@@ -1,12 +1,15 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { agentMemoriesApi, type AgentMemoryNote } from "../api/agentMemories";
+import { agentReactionsApi, type AgentReaction } from "../api/agentReactions";
+import { agentsApi } from "../api/agents";
 import { ApiError } from "../api/client";
 import { queryKeys } from "../lib/queryKeys";
 import { timeAgo } from "../lib/timeAgo";
 import { useToastActions } from "../context/ToastContext";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { ToggleSwitch } from "@/components/ui/toggle-switch";
 import { SettingsSection } from "./SettingsSection";
 
 /**
@@ -17,14 +20,33 @@ import { SettingsSection } from "./SettingsSection";
  *
  * The notes live in the same notebook as the Memory card (they are the ones
  * marked as learned from reactions), so editing and deleting use the same
- * routes. When the server refuses, the card says so in one sentence.
+ * routes. A switch turns the learning off for this agent, and a list shows the
+ * latest reactions. When the server refuses, the card says so in one sentence.
  */
-export function ReactionLearningSection({ agentId, agentName }: { agentId: string; agentName: string }) {
+const REACTIONS_PAGE = 25;
+
+export function ReactionLearningSection({
+  agentId,
+  agentName,
+  companyId,
+}: {
+  agentId: string;
+  agentName: string;
+  companyId?: string;
+}) {
   const queryClient = useQueryClient();
   const { pushToast } = useToastActions();
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [reactionLimit, setReactionLimit] = useState(REACTIONS_PAGE);
+
+  const reactionsQuery = useQuery({
+    queryKey: queryKeys.agentReactions.list(agentId, reactionLimit),
+    queryFn: () => agentReactionsApi.list(agentId, reactionLimit),
+    retry: false,
+    placeholderData: (previous) => previous,
+  });
 
   const listQuery = useQuery({
     queryKey: queryKeys.agentMemories.list(agentId),
@@ -46,6 +68,20 @@ export function ReactionLearningSection({ agentId, agentName }: { agentId: strin
     onError: failed("Could not save the note"),
   });
 
+  const switchMutation = useMutation({
+    mutationFn: (enabled: boolean) => agentsApi.update(agentId, { reactionLearningEnabled: enabled }, companyId),
+    onSuccess: (_agent, enabled) => {
+      setError(null);
+      void queryClient.invalidateQueries({ queryKey: ["agent-reactions", agentId] });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agentId) });
+      pushToast({
+        title: enabled ? `${agentName} is learning from your reactions` : `${agentName} has stopped learning from your reactions`,
+        tone: "success",
+      });
+    },
+    onError: failed("Could not change this setting"),
+  });
+
   const removeMutation = useMutation({
     mutationFn: (id: string) => agentMemoriesApi.remove(agentId, id),
     onSuccess: () => {
@@ -61,6 +97,8 @@ export function ReactionLearningSection({ agentId, agentName }: { agentId: strin
   const notes = (data?.notes ?? []).filter((note) => note.source === "reaction");
   const maxLength = data?.maxLength ?? 500;
   const busy = updateMutation.isPending || removeMutation.isPending;
+  const reactions = reactionsQuery.data;
+  const learningOn = reactions?.reactionLearningEnabled ?? true;
 
   return (
     <SettingsSection
@@ -83,9 +121,28 @@ export function ReactionLearningSection({ agentId, agentName }: { agentId: strin
         </p>
       ) : (
         <>
+          <div className="flex items-center justify-between gap-4 text-sm" data-testid="reaction-learning-switch">
+            <div className="space-y-1">
+              <div>Learn from my reactions</div>
+              <p className="text-xs text-muted-foreground">
+                {learningOn
+                  ? `${agentName} notes what you liked or did not like.`
+                  : `Off. ${agentName} ignores new reactions and adds no new notes. Notes it already has are kept.`}
+              </p>
+            </div>
+            <ToggleSwitch
+              checked={learningOn}
+              onCheckedChange={(next) => switchMutation.mutate(next)}
+              disabled={!reactions || switchMutation.isPending}
+              aria-label="Learn from my reactions"
+            />
+          </div>
+
           {notes.length === 0 ? (
             <p className="text-sm text-muted-foreground" data-testid="reaction-learning-empty">
-              Nothing yet. React to one of {agentName}'s messages in Telegram and it will learn from it.
+              {learningOn
+                ? `Nothing yet. React to one of ${agentName}'s messages in Telegram and it will learn from it.`
+                : "Nothing learned yet."}
             </p>
           ) : (
             <ul className="space-y-2" data-testid="reaction-learning-list">
@@ -153,6 +210,49 @@ export function ReactionLearningSection({ agentId, agentName }: { agentId: strin
             </ul>
           )}
 
+          <div className="space-y-2 pt-1" data-testid="recent-reactions">
+            <h4 className="text-sm font-medium">Recent reactions</h4>
+            {reactionsQuery.isLoading ? (
+              <p className="text-xs text-muted-foreground">Loading reactions…</p>
+            ) : reactionsQuery.error ? (
+              <p className="text-xs text-destructive">Could not load your recent reactions.</p>
+            ) : !reactions || reactions.items.length === 0 ? (
+              <p className="text-sm text-muted-foreground" data-testid="recent-reactions-empty">
+                No reactions yet.
+              </p>
+            ) : (
+              <>
+                <ul className="space-y-1.5">
+                  {reactions.items.map((item) => (
+                    <li
+                      key={item.id}
+                      className="flex items-start gap-2 rounded-md border border-border p-2"
+                      data-testid="recent-reaction"
+                    >
+                      <span className="text-lg leading-none" aria-hidden="true">
+                        {item.emoji}
+                      </span>
+                      <div className="min-w-0 flex-1 space-y-0.5">
+                        <p className="text-sm break-words">{describeTarget(item)}</p>
+                        <p className="text-xs text-muted-foreground">{describeReaction(item)}</p>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+                {reactions.hasMore && reactionLimit < 100 && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setReactionLimit((current) => Math.min(100, current + REACTIONS_PAGE))}
+                    disabled={reactionsQuery.isFetching}
+                  >
+                    Show more
+                  </Button>
+                )}
+              </>
+            )}
+          </div>
+
           {error && (
             <p className="text-xs text-destructive" role="alert">
               {error}
@@ -168,4 +268,22 @@ export function ReactionLearningSection({ agentId, agentName }: { agentId: strin
 function describeWhen(note: AgentMemoryNote): string {
   const edited = note.updatedAt !== note.createdAt ? " (edited)" : "";
   return `Learned ${timeAgo(note.createdAt)}${edited}`;
+}
+
+const MEANING_LABEL = { positive: "Liked", negative: "Did not like", neutral: "Reacted" } as const;
+
+/** What the reaction was on: the picture or the reply. */
+function describeTarget(item: AgentReaction): string {
+  if (item.picture) {
+    const what = item.picture.look ?? item.picture.promptExcerpt;
+    return what ? `Picture: ${what}` : "A picture";
+  }
+  return item.message.excerpt ? `“${item.message.excerpt}”` : "A message that is no longer available";
+}
+
+/** "Liked · 2d ago" / "Liked · taken back 1h ago". */
+function describeReaction(item: AgentReaction): string {
+  const label = item.meaning ? MEANING_LABEL[item.meaning] : "Reacted";
+  if (!item.active && item.removedAt) return `${label} · taken back ${timeAgo(item.removedAt)}`;
+  return `${label} · ${timeAgo(item.reactedAt)}`;
 }
