@@ -1,4 +1,4 @@
-import { and, desc, eq, like } from "drizzle-orm";
+import { and, desc, eq, like, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -19,6 +19,14 @@ import {
   type UpdateReactionEmojiConfigInput,
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
+
+/** How much of a reply or picture prompt the recent-reactions list shows. */
+export const REACTION_EXCERPT_CHARS = 160;
+
+function excerpt(text: string, limit: number): string {
+  const clean = text.replace(/\s+/g, " ").trim();
+  return clean.length <= limit ? clean : `${clean.slice(0, limit - 1)}…`;
+}
 
 /**
  * DUR-4344: the data path for Telegram emoji-reaction feedback. Raw events
@@ -197,5 +205,69 @@ export function telegramReactionService(db: Db) {
     return rows.map((row) => ({ ...row, meaning: reactionEmojiMeaning(config, row.emoji) }));
   }
 
-  return { getConfig, updateConfig, record, list };
+  /**
+   * DUR-4829: the newest reactions to one agent's messages, for the "What it
+   * has learned" panel. Newest first, `limit + 1` read so the caller knows
+   * whether there is more. Only what the panel shows leaves here: the emoji,
+   * a short excerpt of the reply or picture it was on, and when -- never the
+   * Telegram user, chat or message ids.
+   *
+   * Privacy (DUR-4094): a reaction in a chat requested by an active Employee
+   * (light) member is hers, like her PA's chat transcript, and is left out.
+   */
+  async function listRecentForAgent(companyId: string, agentId: string, opts: { limit: number; offset: number }) {
+    const config = await getConfig(companyId);
+    const rows = await db
+      .select({
+        reaction: telegramMessageReactions,
+        replyText: laneAMessages.content,
+        replyRole: laneAMessages.role,
+      })
+      .from(telegramMessageReactions)
+      .leftJoin(laneAMessages, eq(laneAMessages.id, telegramMessageReactions.messageId))
+      .leftJoin(laneAConversations, eq(laneAConversations.id, telegramMessageReactions.conversationId))
+      .where(
+        and(
+          eq(telegramMessageReactions.companyId, companyId),
+          eq(telegramMessageReactions.agentId, agentId),
+          sql`NOT EXISTS (
+            SELECT 1 FROM company_memberships m
+            WHERE m.company_id = ${companyId}
+              AND m.principal_type = 'user'
+              AND m.status = 'active'
+              AND m.membership_role = 'employee'
+              AND m.principal_id = ${laneAConversations.requestedByUserId}
+          )`,
+        ),
+      )
+      .orderBy(desc(telegramMessageReactions.reactedAt), desc(telegramMessageReactions.id))
+      .limit(opts.limit + 1)
+      .offset(opts.offset);
+    const items = rows.slice(0, opts.limit).map(({ reaction, replyText, replyRole }) => {
+      const hasPicture = Boolean(reaction.pictureFileId || reaction.picturePrompt);
+      return {
+        id: reaction.id,
+        emoji: reaction.emoji,
+        meaning: reactionEmojiMeaning(config, reaction.emoji),
+        active: reaction.active,
+        reactedAt: reaction.reactedAt.toISOString(),
+        removedAt: reaction.removedAt ? reaction.removedAt.toISOString() : null,
+        message: {
+          id: reaction.messageId,
+          conversationId: reaction.conversationId,
+          excerpt: !hasPicture && replyRole === "assistant" && replyText ? excerpt(replyText, REACTION_EXCERPT_CHARS) : null,
+        },
+        picture: hasPicture
+          ? {
+              fileId: reaction.pictureFileId,
+              look: reaction.pictureLook,
+              promptExcerpt: reaction.picturePrompt ? excerpt(reaction.picturePrompt, REACTION_EXCERPT_CHARS) : null,
+            }
+          : null,
+      };
+    });
+    return { items, hasMore: rows.length > opts.limit };
+  }
+
+  return { getConfig, updateConfig, record, list, listRecentForAgent };
 }
