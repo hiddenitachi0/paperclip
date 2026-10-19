@@ -49,6 +49,11 @@ export const companies = pgTable(
     // model/effort setting creates sub-tasks, they get the same setting unless
     // the sub-task sets its own. On by default; an owner can turn it off.
     subtasksInheritModelEffort: boolean("subtasks_inherit_model_effort").notNull().default(true),
+    // "Brag videos for finished tasks": when on, a person may tick "make a
+    // short brag video when this is done" on a task. The cap is the most one
+    // such video may cost; NULL = the default (BRAG_ON_DONE_DEFAULT_MAX_COST_CENTS).
+    bragOnDoneEnabled: boolean("brag_on_done_enabled").notNull().default(true),
+    bragOnDoneMaxCostCents: integer("brag_on_done_max_cost_cents"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

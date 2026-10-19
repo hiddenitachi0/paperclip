@@ -2405,6 +2405,7 @@ const issueListSelect = {
   changeLogVisible: issues.changeLogVisible,
   changeLogSummary: issues.changeLogSummary,
   featureLaunch: issues.featureLaunch,
+  bragPreapproval: issues.bragPreapproval,
   startedAt: issues.startedAt,
   completedAt: issues.completedAt,
   cancelledAt: issues.cancelledAt,
@@ -5746,8 +5747,12 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
         inheritExecutionWorkspaceFromIssueId,
         watchdog,
         watchdogActorRunId,
+        // The brag-video pre-approval is written only by brag-on-done.ts's
+        // person-only setter; no create path may carry it in.
+        bragOnDone: _ignoredBragOnDone,
+        bragPreapproval: _ignoredBragPreapproval,
         ...issueData
-      } = data;
+      } = data as typeof data & { bragOnDone?: unknown; bragPreapproval?: unknown };
       const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
       if (!isolatedWorkspacesEnabled) {
         delete issueData.executionWorkspaceId;
@@ -6060,8 +6065,11 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
         blockedByIssueIds,
         actorAgentId,
         actorUserId,
+        // Same as create: only brag-on-done.ts writes the pre-approval.
+        bragOnDone: _ignoredBragOnDone,
+        bragPreapproval: _ignoredBragPreapproval,
         ...issueData
-      } = data;
+      } = data as typeof data & { bragOnDone?: unknown };
       const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
       if (!isolatedWorkspacesEnabled) {
         delete issueData.executionWorkspaceId;

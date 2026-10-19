@@ -50,6 +50,7 @@ import type { IssueExternalObjectGroup } from "../../hooks/useIssueExternalObjec
 import { timeAgo } from "../../lib/timeAgo";
 import { Button } from "@/components/ui/button";
 import { ToggleSwitch } from "@/components/ui/toggle-switch";
+import { BragOnDoneOption } from "../BragOnDoneOption";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -153,9 +154,10 @@ export function IssueProperties({
   externalObjectsError,
   onRetryExternalObjects,
 }: IssuePropertiesProps) {
-  const { selectedCompanyId } = useCompany();
+  const { selectedCompanyId, companies: knownCompanies } = useCompany();
   const queryClient = useQueryClient();
   const companyId = issue.companyId ?? selectedCompanyId;
+  const issueCompany = (knownCompanies ?? []).find((company) => company.id === companyId) ?? null;
   const { data: experimentalSettings } = useQuery({
     queryKey: queryKeys.instance.experimentalSettings,
     queryFn: () => instanceSettingsApi.getExperimental(),
@@ -2520,6 +2522,17 @@ export function IssueProperties({
           >
             {watchdogContent}
           </PropertyPicker>
+        ) : null}
+        {issue.bragPreapproval || issue.status !== "done" ? (
+          <div className="py-1.5">
+            <BragOnDoneOption
+              company={issueCompany}
+              checked={Boolean(issue.bragPreapproval)}
+              preapproval={issue.bragPreapproval ?? null}
+              taskDone={issue.status === "done"}
+              onCheckedChange={(next) => onUpdate({ bragOnDone: next })}
+            />
+          </div>
         ) : null}
       </PropertySection>
 

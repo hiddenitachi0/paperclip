@@ -27,6 +27,7 @@ import type {
   IssueStatus,
   GoalConditionVerdict,
 } from "../constants.js";
+import type { IssueBragPreapproval } from "../brag.js";
 import type { Goal } from "./goal.js";
 import type { EscalationGrantWithSpend } from "./escalation-grant.js";
 import type { Project, ProjectWorkspace } from "./project.js";
@@ -653,6 +654,8 @@ export interface Issue {
   cancelledAt: Date | null;
   hiddenAt: Date | null;
   sourceTrust?: SourceTrustMetadata | null;
+  /** A person's pre-approval for one short brag video when this task is done. */
+  bragPreapproval?: IssueBragPreapproval | null;
   labelIds?: string[];
   labels?: IssueLabel[];
   blockedBy?: IssueRelationIssueSummary[];

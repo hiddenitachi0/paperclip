@@ -256,6 +256,7 @@ export function Tower() {
         <div className="absolute inset-y-0 right-0 z-30 w-full sm:w-80 md:static md:z-auto md:shrink-0">
           <TowerAgentPanel
             companyId={companyId}
+            company={selectedCompany ?? null}
             agent={selectedAgent}
             boss={selectedAgent.reportsTo ? agentMap.get(selectedAgent.reportsTo) ?? null : null}
             run={runByAgent.get(selectedAgent.id) ?? null}

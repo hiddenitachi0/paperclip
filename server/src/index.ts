@@ -120,6 +120,7 @@ import { initTelemetry, getTelemetryClient } from "./telemetry.js";
 import { waitForInFlightRunsToDrain } from "./shutdown-drain.js";
 import { startHeartbeatRunRetention } from "./services/heartbeat-run-retention.js";
 import { startWorktreeCleanup } from "./services/worktree-cleanup.js";
+import { bragOnDoneService } from "./services/brag-on-done.js";
 import { startCrossCompanyAccessLogRetention } from "./services/cross-company-access-log-retention.js";
 import { conflict } from "./errors.js";
 import {
@@ -1101,6 +1102,7 @@ export async function startServer(): Promise<StartedServer> {
     const organizationCheckups = organizationCheckupService(schedulerDb as any);
     const issueThreadInteractions = issueThreadInteractionService(schedulerDb as any);
     const escalationGrants = escalationGrantService(schedulerDb as any);
+    const bragOnDone = bragOnDoneService(schedulerDb as any);
 
     // Reap orphaned runs before timer ticks start so wakeups cannot coalesce
     // into a dead "running" row during startup recovery. Wrapped in
@@ -1649,6 +1651,30 @@ export async function startServer(): Promise<StartedServer> {
       // per-company videoStorylinesEnabled flag (default off) -- see
       // video-storyline-settings.ts -- but the ticks themselves always run;
       // an instance with the flag off everywhere just finds nothing to do.
+      // "Make a short brag video when this is done": done tasks with a
+      // person's unused pre-approval get their one video. Cross-company sweep,
+      // so bypass scope like the other sweeps; a company with the feature off
+      // gets a plain "turned off" comment instead.
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.bragOnDone, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: bragOnDone",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:bragOnDone",
+          },
+          () => bragOnDone.tick(),
+        )
+          .then((result) => {
+            if (result.checked > 0) {
+              logger.info({ ...result }, "brag-on-done tick");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "brag-on-done tick failed");
+          }),
+      );
+
       void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.videoStorylineRender, () =>
         runInCompanyScopeBypass(
           bypassDb,

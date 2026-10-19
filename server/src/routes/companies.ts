@@ -589,6 +589,10 @@ export function companyRoutes(db: Db, storage?: StorageService) {
     if (body.subtasksInheritModelEffort !== undefined) {
       assertCompanyOwnerAdminOrInstanceAdmin(req, companyId, "whether sub-tasks inherit model/effort");
     }
+    // "Brag videos for finished tasks" decides what a ticked task may spend.
+    if (body.bragOnDoneEnabled !== undefined || body.bragOnDoneMaxCostCents !== undefined) {
+      assertCompanyOwnerAdminOrInstanceAdmin(req, companyId, "brag videos for finished tasks");
+    }
 
     if (req.actor.type !== "agent") {
       if (body.feedbackDataSharingEnabled === true && !existingCompany.feedbackDataSharingEnabled) {

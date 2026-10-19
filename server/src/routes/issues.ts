@@ -80,6 +80,7 @@ import type { StorageService } from "../storage/types.js";
 import { getOrCreateThumbnail, isThumbnailableContentType, thumbnailObjectKey } from "../services/attachment-thumbnail.js";
 import { validate } from "../middleware/validate.js";
 import * as serviceIndex from "../services/index.js";
+import { bragOnDoneService } from "../services/brag-on-done.js";
 import {
   accessService,
   agentService,
@@ -3230,6 +3231,27 @@ export function issueRoutes(
     return false;
   }
 
+  // "Make a short brag video when this is done" is a spending pre-approval, so
+  // only a person (board user) may set or clear it -- on create, on child
+  // create, on plan decompositions and on update. An agent sending the field
+  // at all (true or false) is refused, so it can neither start a video nor
+  // withdraw a person's choice.
+  function assertBragOnDoneFieldAllowed(req: Request, res: Response, body: { bragOnDone?: unknown }) {
+    if (body.bragOnDone === undefined) return true;
+    if (req.actor.type === "board") return true;
+    res.status(403).json({
+      error: "Only a person can ask for a brag video when a task is done. Agents cannot set or change this.",
+      details: {
+        securityPrinciples: ["Least Privilege", "Secure Defaults", "Complete Mediation"],
+      },
+    });
+    return false;
+  }
+
+  function bragOnDoneUserId(req: Request) {
+    return req.actor.userId ?? "local-board";
+  }
+
   async function assertExplicitResumeIntentAllowed(
     req: Request,
     res: Response,
@@ -5914,8 +5936,10 @@ export function issueRoutes(
     if (await assertLowTrustControlPlaneDenied(req, res, companyId, null)) return;
     if (!assertChangeLogFieldsAllowedOnCreate(req, res, req.body)) return;
     if (!assertFeatureLaunchFieldAllowedOnCreate(req, res, req.body)) return;
+    if (!assertBragOnDoneFieldAllowed(req, res, req.body)) return;
+    if (req.body.bragOnDone === true) await bragOnDoneService(db).assertEnabled(companyId);
     assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
-    const { watchdogDiscovery: rawWatchdogDiscovery, ...rawCreateBody } = req.body;
+    const { watchdogDiscovery: rawWatchdogDiscovery, bragOnDone: requestedBragOnDone, ...rawCreateBody } = req.body;
     const watchdogDiscovery = normalizeWatchdogDiscovery(rawWatchdogDiscovery);
     const watchdogProductBugFollowUp = await resolveTaskWatchdogProductBugFollowUp(
       req,
@@ -6045,6 +6069,15 @@ export function issueRoutes(
       createdByUserId: actor.actorType === "user" ? actor.actorId : null,
       watchdogActorRunId: actor.runId,
     });
+    if (requestedBragOnDone === true && req.actor.type === "board") {
+      issue.bragPreapproval = await bragOnDoneService(db).setPreapproval({
+        companyId,
+        issueId: issue.id,
+        userId: bragOnDoneUserId(req),
+        enabled: true,
+        allowDoneTask: true,
+      });
+    }
     await issueReferencesSvc.syncIssue(issue.id);
     await externalObjectsSvc.syncIssueSafely(issue.id, issue.companyId);
     const referenceSummary = await issueReferencesSvc.listIssueReferenceSummary(issue.id);
@@ -6254,6 +6287,8 @@ export function issueRoutes(
     if (await assertLowTrustControlPlaneDenied(req, res, parent.companyId, parent)) return;
     if (!assertChangeLogFieldsAllowedOnCreate(req, res, req.body)) return;
     if (!assertFeatureLaunchFieldAllowedOnCreate(req, res, req.body)) return;
+    if (!assertBragOnDoneFieldAllowed(req, res, req.body)) return;
+    if (req.body.bragOnDone === true) await bragOnDoneService(db).assertEnabled(parent.companyId);
     assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
     const normalizedAssigneeAgentId = await normalizeIssueAssigneeAgentReference(
       parent.companyId,
@@ -6419,6 +6454,16 @@ export function issueRoutes(
     });
     void queueTaskWatchdogEvaluation(issue, actor.runId);
 
+    if (req.body.bragOnDone === true && req.actor.type === "board") {
+      (issue as { bragPreapproval?: unknown }).bragPreapproval = await bragOnDoneService(db).setPreapproval({
+        companyId: parent.companyId,
+        issueId: issue.id,
+        userId: bragOnDoneUserId(req),
+        enabled: true,
+        allowDoneTask: true,
+      });
+    }
+
     res.status(201).json(issue);
   });
 
@@ -6457,6 +6502,7 @@ export function issueRoutes(
       requestedChildren.push(childBody);
       if (!assertChangeLogFieldsAllowedOnCreate(req, res, childBody)) return;
       if (!assertFeatureLaunchFieldAllowedOnCreate(req, res, childBody)) return;
+      if (!assertBragOnDoneFieldAllowed(req, res, childBody)) return;
       assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(childBody));
       if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, sourceIssue, childBody))) return;
       applyPinnedAssigneeAdapterOverrides(req, childBody, null);
@@ -6750,10 +6796,24 @@ export function issueRoutes(
       resume: resumeRequested,
       interrupt: interruptRequested,
       hiddenAt: hiddenAtRaw,
+      bragOnDone: requestedBragOnDone,
       ...updateFields
     } = req.body;
     if (!assertChangeLogFieldsAllowed(req, res, updateFields, existing)) return;
     if (!assertFeatureLaunchFieldAllowed(req, res, updateFields, existing)) return;
+    if (!assertBragOnDoneFieldAllowed(req, res, { bragOnDone: requestedBragOnDone })) return;
+    // A person ticking/unticking the brag-video box. Applied before the rest of
+    // the update so a single "tick + mark done" request still counts, and
+    // judged against the task's status BEFORE this request (once done, the
+    // choice is locked).
+    if (typeof requestedBragOnDone === "boolean" && req.actor.type === "board") {
+      await bragOnDoneService(db).setPreapproval({
+        companyId: existing.companyId,
+        issueId: existing.id,
+        userId: bragOnDoneUserId(req),
+        enabled: requestedBragOnDone,
+      });
+    }
     // DUR-3993: an agent may not park a task as blocked on the operator without giving
     // the operator a way to answer (a question card, a linked approval) or linking the
     // unfinished task it waits on. Runs after the DUR-45 cheap-run interception above,
@@ -8651,6 +8711,18 @@ export function issueRoutes(
             _previous: { assigneeAdapterOverrides: planFirstOverrides },
           },
         });
+      }
+
+      // A person said "make it anyway" on the brag-on-done over-cap card. The
+      // service ignores every other card. It only records the answer here; the
+      // scheduler sweep makes the video and comments on the task.
+      if (interaction.kind === "request_confirmation" && interaction.status === "accepted" && actor.actorType === "user") {
+        try {
+          await bragOnDoneService(db).acceptOverCap({ issue, interaction, userId: actor.actorId });
+        } catch (err) {
+          // The card itself was accepted; a failure here must not undo that.
+          logger.warn({ err, issueId: issue.id, interactionId }, "brag-on-done: could not record the accepted card");
+        }
       }
 
       queueResolvedInteractionContinuationWakeup({
