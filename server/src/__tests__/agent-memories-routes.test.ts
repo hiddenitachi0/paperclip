@@ -42,8 +42,12 @@ const mockSvc = vi.hoisted(() => ({
   update: vi.fn(),
   remove: vi.fn(),
   clear: vi.fn(),
+  resolveOwner: vi.fn(),
 }));
 vi.mock("../services/agent-memories.js", () => ({ agentMemoryService: () => mockSvc }));
+
+const mockReactions = vi.hoisted(() => ({ listRecentForAgent: vi.fn() }));
+vi.mock("../services/telegram-reactions.js", () => ({ telegramReactionService: () => mockReactions }));
 
 const mockDecide = vi.hoisted(() => vi.fn());
 vi.mock("../services/access.js", () => ({ accessService: () => ({ decide: mockDecide }) }));
@@ -91,6 +95,7 @@ const allRoutes: Array<[string, string, Record<string, unknown> | undefined]> = 
   ["PATCH", `${base}/${memoryId}`, { text: "Changed." }],
   ["DELETE", `${base}/${memoryId}`, undefined],
   ["DELETE", base, undefined],
+  ["GET", `/api/agents/${agentId}/reactions`, undefined],
 ];
 
 function send(app: express.Express, method: string, url: string, body?: Record<string, unknown>) {
@@ -99,7 +104,7 @@ function send(app: express.Express, method: string, url: string, body?: Record<s
 }
 
 function expectServiceUntouched() {
-  for (const fn of Object.values(mockSvc)) expect(fn).not.toHaveBeenCalled();
+  for (const fn of [...Object.values(mockSvc), ...Object.values(mockReactions)]) expect(fn).not.toHaveBeenCalled();
 }
 
 describe("quick-agent memory routes", () => {
@@ -112,6 +117,8 @@ describe("quick-agent memory routes", () => {
     mockSvc.update.mockResolvedValue({ ...note, text: "Changed." });
     mockSvc.remove.mockResolvedValue({ id: memoryId, text: note.text });
     mockSvc.clear.mockResolvedValue({ deleted: 1 });
+    mockSvc.resolveOwner.mockResolvedValue({ reactionLearningEnabled: true });
+    mockReactions.listRecentForAgent.mockResolvedValue({ items: [], hasMore: false });
   });
 
   describe("agents are refused everywhere", () => {
@@ -163,7 +170,41 @@ describe("quick-agent memory routes", () => {
       const res = await send(await buildApp(member()), "GET", base);
       expect(res.status).toBe(200);
       expect(res.body.notes).toEqual([note]);
-      expect(mockSvc.list).toHaveBeenCalledWith(companyId, agentId);
+      expect(mockSvc.list).toHaveBeenCalledWith(companyId, agentId, { source: undefined });
+    });
+
+    it("lists only the notes learned from reactions with ?source=reaction, and refuses an unknown source", async () => {
+      const app = await buildApp(member());
+      expect((await send(app, "GET", `${base}?source=reaction`)).status).toBe(200);
+      expect(mockSvc.list).toHaveBeenCalledWith(companyId, agentId, { source: "reaction" });
+      mockSvc.list.mockClear();
+      expect((await send(app, "GET", `${base}?source=nope`)).status).toBe(400);
+      expect(mockSvc.list).not.toHaveBeenCalled();
+    });
+
+    it("pages the recent reactions: defaults, the company off the agent row, and bounds on limit and offset", async () => {
+      const app = await buildApp(member());
+      const url = `/api/agents/${agentId}/reactions`;
+      mockReactions.listRecentForAgent.mockResolvedValue({ items: [{ id: "r1" }], hasMore: true });
+      mockSvc.resolveOwner.mockResolvedValue({ reactionLearningEnabled: false });
+      const res = await send(app, "GET", url);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        agentId,
+        reactionLearningEnabled: false,
+        limit: 25,
+        offset: 0,
+        hasMore: true,
+        items: [{ id: "r1" }],
+      });
+      expect(mockReactions.listRecentForAgent).toHaveBeenCalledWith(companyId, agentId, { limit: 25, offset: 0 });
+      await send(app, "GET", `${url}?limit=100&offset=50`);
+      expect(mockReactions.listRecentForAgent).toHaveBeenLastCalledWith(companyId, agentId, { limit: 100, offset: 50 });
+      mockReactions.listRecentForAgent.mockClear();
+      for (const bad of ["limit=0", "limit=101", "limit=abc", "offset=-1"]) {
+        expect((await send(app, "GET", `${url}?${bad}`)).status, bad).toBe(400);
+      }
+      expect(mockReactions.listRecentForAgent).not.toHaveBeenCalled();
     });
 
     it("adds a note as 'user', tidied, with the person as the actor", async () => {

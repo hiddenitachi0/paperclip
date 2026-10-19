@@ -145,6 +145,8 @@ export interface Agent {
   orgChainHealth?: AgentOrgChainHealth;
   /** Quick agent (Lane A) switch: answers directly in chat instead of running as a full agent. Board-only. */
   laneAEnabled?: boolean;
+  /** DUR-4829: learn from the person's Telegram emoji reactions. Defaults to true. Board-only. */
+  reactionLearningEnabled?: boolean;
   /** Quick agent instruction set (persona + rules). Board-only, null = none. */
   laneAInstructions?: string | null;
   /** DUR-3977 quick-agent settings. Null on all three = platform default. */

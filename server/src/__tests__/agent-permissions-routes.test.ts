@@ -955,6 +955,54 @@ describe.sequential("agent permission routes", () => {
     );
   });
 
+  it("blocks agent-authenticated updates of reactionLearningEnabled, even on their own record (DUR-4829)", async () => {
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    for (const value of [false, true]) {
+      const res = await requestApp(app, (baseUrl) => request(baseUrl)
+        .patch(`/api/agents/${agentId}`)
+        .send({ reactionLearningEnabled: value }));
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain("cannot change reaction learning");
+    }
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
+
+  it("allows a board-authenticated update of reactionLearningEnabled and rejects a non-boolean (DUR-4829)", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ reactionLearningEnabled: false }));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockAgentService.update).toHaveBeenCalledWith(
+      agentId,
+      expect.objectContaining({ reactionLearningEnabled: false }),
+      expect.anything(),
+    );
+
+    mockAgentService.update.mockClear();
+    const bad = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ reactionLearningEnabled: "no" }));
+    expect(bad.status).toBe(400);
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
+
   it("forces agent-authenticated hires to pending_approval even when the company disables required approval (DUR-81)", async () => {
     mockAccessService.hasPermission.mockResolvedValue(true);
     mockApprovalService.create.mockResolvedValue({

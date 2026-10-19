@@ -182,6 +182,15 @@ export const BROWSER_ACCESS_FIELDS = ["browserAccess"] as const;
 export type BrowserAccessField = (typeof BROWSER_ACCESS_FIELDS)[number];
 
 /**
+ * DUR-4829: the per-agent "learn from emoji reactions" switch. Board-only on
+ * every write path (guard in server/src/routes/agents.ts): an agent that could
+ * flip it could stop its person's feedback from reaching it, or turn learning
+ * back on after the operator switched it off.
+ */
+export const REACTION_LEARNING_FIELDS = ["reactionLearningEnabled"] as const;
+export type ReactionLearningField = (typeof REACTION_LEARNING_FIELDS)[number];
+
+/**
  * "off" — no browser tool offered at all (default). "browse_and_forms" —
  * navigate/read/click/type/fill forms, no final booking/purchase step (the
  * only level step 3 wires up). "book_and_buy" — adds the gated
@@ -735,6 +744,9 @@ export const updateAgentSchema = createAgentObjectSchema
     roleAppliedMcpServerNames: z.unknown().optional(),
     roleAppliedPermissionKeys: z.unknown().optional(),
     replaceAdapterConfig: z.boolean().optional(),
+    // DUR-4829: board-only (REACTION_LEARNING_FIELDS); not on the create/hire
+    // schema because a new agent always starts with learning on.
+    reactionLearningEnabled: z.boolean().optional(),
     status: z.enum(AGENT_STATUSES).optional(),
     spentMonthlyCents: z.number().int().nonnegative().optional(),
     // Lane A (DUR-217) opt-in — laneAEnabled/laneAInstructions are inherited
