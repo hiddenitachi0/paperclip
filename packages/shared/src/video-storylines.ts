@@ -35,14 +35,39 @@ export const VIDEO_QUALITY_ISSUE_CODES = [
   "silent_audio",
   "clipped_audio",
   "check_error",
+  // The film file has no picture at all (or cannot be read).
+  "missing_video_stream",
+  // Putting the film together failed more than once in a row.
+  "stitch_failed",
 ] as const;
 export type VideoQualityIssueCode = (typeof VIDEO_QUALITY_ISSUE_CODES)[number];
+
+/**
+ * Most findings are warnings: the film is still made and can be downloaded,
+ * the person just sees what the check noticed (a loud peak, a quiet
+ * stretch, a dark moment). Only a truly broken film blocks: no picture, the
+ * wrong length, or a film that could not be put together at all.
+ */
+export const VIDEO_QUALITY_BLOCKING_ISSUE_CODES: readonly VideoQualityIssueCode[] = ["missing_video_stream", "duration_mismatch", "stitch_failed"];
+
+export type VideoQualityIssueSeverity = "warning" | "blocking";
 
 export interface VideoStorylineQualityIssue {
   code: VideoQualityIssueCode;
   message: string;
   shotIndex: number | null;
   timeSeconds: number | null;
+  /** Derived from the code (see videoQualityIssueSeverity); stored rows from before this field existed have none. */
+  severity?: VideoQualityIssueSeverity;
+}
+
+export function videoQualityIssueSeverity(issue: { code: string }): VideoQualityIssueSeverity {
+  return (VIDEO_QUALITY_BLOCKING_ISSUE_CODES as readonly string[]).includes(issue.code) ? "blocking" : "warning";
+}
+
+/** True when any finding means the film is really broken (not just worth a look). */
+export function hasBlockingVideoQualityIssue(issues: ReadonlyArray<{ code: string }> | null | undefined): boolean {
+  return (issues ?? []).some((issue) => videoQualityIssueSeverity(issue) === "blocking");
 }
 
 export const VIDEO_SHOT_STATUSES = ["draft", "queued", "rendering", "done", "failed"] as const;

@@ -5,6 +5,7 @@ import { MediaStudioEditTab } from "./edit-tab.js";
 import { CAST_IDENTITIES_ACTION, EMPTY_CAST, StorylineCastSection, castIdentityOptions, shotCastLabels, type CastIdentityOption, type StorylineCast } from "./storyline-cast.js";
 import { BulkProgressBar, StoryboardPanel, overApprovalLimit, useStoryboardActions, type StoryboardSummary } from "./storyboard-panel.js";
 import { AdvancedFeaturesToggle, AiDirectorSection } from "./director-panel.js";
+import { StoryWriterSection } from "./story-writer-panel.js";
 import { IdentitiesPanel } from "./identities-panel.js";
 import { RoomsPanel } from "./rooms-panel.js";
 import { MediaStudioSettingsTab } from "./settings-panel.js";
@@ -3278,6 +3279,8 @@ const VIDEO_STORYLINE_PROVIDER_OPTIONS: Array<{ value: "fal" | "sogni"; label: s
 interface VideoStorylineSummary {
   id: string;
   companyId: string;
+  /** The director whose AI story writer writes this storyline (step 1). */
+  directorId?: string | null;
   projectId: string | null;
   title: string;
   status: string;
@@ -3299,7 +3302,7 @@ interface VideoStorylineSummary {
   finalDurationSeconds: number | null;
   stitchBlockedReason: string | null;
   errorMessage: string | null;
-  qualityCheckIssues?: Array<{ code?: string; message: string }> | null;
+  qualityCheckIssues?: Array<{ code?: string; message: string; severity?: "warning" | "blocking" }> | null;
   qualityCheckedAt?: string | null;
   createdAt: string;
   updatedAt: string;
@@ -4016,6 +4019,21 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
     }
   };
 
+  /** "Accept warnings and finish": the film is kept as it is and marked finished. */
+  const acceptWarnings = async () => {
+    if (!companyId || !selectedId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await storylineFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}/stitch/accept-warnings`, { method: "POST" }, "finishing the film");
+      await loadStorylines();
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const addScene = async () => {
     if (!companyId || !selectedId) return;
     setBusy(true);
@@ -4384,7 +4402,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                       <div>
                         <strong style={{ fontSize: 14 }}>Step 1: Script</strong>
                         <p style={{ fontSize: 12, color: "#868e96", margin: 0 }}>
-                          The script is the list of shots: what happens in each one, how long it lasts, and the camera. Import one, let the AI director improve it, or write shots by hand below.
+                          The script is the list of shots: what happens in each one, how long it lasts, and the camera. Let the AI story writer below write it from your ideas, import one, or write shots by hand.
                         </p>
                       </div>
                       <p style={{ fontSize: 13, fontWeight: 600, margin: 0 }} data-testid="script-status">
@@ -4436,6 +4454,19 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                         />
                       )}
                     </div>
+
+                    {companyId && (
+                      <StoryWriterSection
+                        companyId={companyId}
+                        storylineId={selected.id}
+                        directorId={selected.directorId ?? null}
+                        shotIds={shots.slice().sort((a, b) => a.orderIndex - b.orderIndex).map((sh) => sh.id)}
+                        editable={editable}
+                        fetchJson={storylineFetchJson}
+                        looks={looks.map((l) => ({ id: l.id, name: l.name }))}
+                        onChanged={refreshAll}
+                      />
+                    )}
 
                     {(advancedEnabled || pendingSuggestions > 0) && companyId && (
                       <AiDirectorSection
@@ -4689,6 +4720,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                         busy={busy}
                         onRetryShot={(id) => void rerenderShot(id)}
                         onCombineAgain={() => void retryStitch()}
+                        onAcceptWarnings={() => void acceptWarnings()}
                         onCancel={() => void cancelRender()}
                         onRefresh={() => void refreshAll()}
                       />
@@ -4823,7 +4855,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                       </div>
                     )}
 
-                    {base && <ExportSection key={`export-${selected.id}`} apiBase={base} editable={selected.status !== "stitching"} reloadKey={timelineReload} onChanged={refreshPage} />}
+                    {base && <ExportSection key={`export-${selected.id}`} apiBase={base} editable={selected.status !== "stitching"} storylineStatus={selected.status} reloadKey={timelineReload} onChanged={refreshPage} />}
                   </div>
                 )}
               </>

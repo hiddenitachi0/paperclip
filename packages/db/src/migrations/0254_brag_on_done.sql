@@ -1,4 +1,5 @@
 -- "Make a short brag video when this task is done" (brag-on-done).
+-- (Numbered 0254: 0252 is storyline directors, 0253 is agent reaction learning.)
 -- Additive and idempotent. Rollback: DROP INDEX "issues_brag_preapproval_pending_idx";
 -- ALTER TABLE "issues" DROP COLUMN "brag_preapproval";
 -- ALTER TABLE "companies" DROP COLUMN "brag_on_done_enabled", DROP COLUMN "brag_on_done_max_cost_cents";

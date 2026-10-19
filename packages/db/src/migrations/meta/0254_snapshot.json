@@ -42613,6 +42613,475 @@
       },
       "isRLSEnabled": false
     },
+    "public.video_storyline_directors": {
+      "name": "video_storyline_directors",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "description": {
+          "name": "description",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "''"
+        },
+        "builtin_key": {
+          "name": "builtin_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "writing_entry_id": {
+          "name": "writing_entry_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "writing_key_secret_id": {
+          "name": "writing_key_secret_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "analysis_entry_id": {
+          "name": "analysis_entry_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "analysis_key_secret_id": {
+          "name": "analysis_key_secret_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "helper_entry_id": {
+          "name": "helper_entry_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "helper_key_secret_id": {
+          "name": "helper_key_secret_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "temperature": {
+          "name": "temperature",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "thinking": {
+          "name": "thinking",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "style_instructions": {
+          "name": "style_instructions",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "''"
+        },
+        "default_video_provider_id": {
+          "name": "default_video_provider_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "default_video_model": {
+          "name": "default_video_model",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "default_look_id": {
+          "name": "default_look_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "default_shot_seconds": {
+          "name": "default_shot_seconds",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_by_user_id": {
+          "name": "created_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "video_storyline_directors_company_idx": {
+          "name": "video_storyline_directors_company_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "video_storyline_directors_company_name_uq": {
+          "name": "video_storyline_directors_company_name_uq",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "lower(\"name\")",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "video_storyline_directors_company_id_companies_id_fk": {
+          "name": "video_storyline_directors_company_id_companies_id_fk",
+          "tableFrom": "video_storyline_directors",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "video_storyline_directors_writing_entry_id_model_directory_entries_id_fk": {
+          "name": "video_storyline_directors_writing_entry_id_model_directory_entries_id_fk",
+          "tableFrom": "video_storyline_directors",
+          "tableTo": "model_directory_entries",
+          "columnsFrom": [
+            "writing_entry_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "video_storyline_directors_writing_key_secret_id_company_secrets_id_fk": {
+          "name": "video_storyline_directors_writing_key_secret_id_company_secrets_id_fk",
+          "tableFrom": "video_storyline_directors",
+          "tableTo": "company_secrets",
+          "columnsFrom": [
+            "writing_key_secret_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "video_storyline_directors_analysis_entry_id_model_directory_entries_id_fk": {
+          "name": "video_storyline_directors_analysis_entry_id_model_directory_entries_id_fk",
+          "tableFrom": "video_storyline_directors",
+          "tableTo": "model_directory_entries",
+          "columnsFrom": [
+            "analysis_entry_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "video_storyline_directors_analysis_key_secret_id_company_secrets_id_fk": {
+          "name": "video_storyline_directors_analysis_key_secret_id_company_secrets_id_fk",
+          "tableFrom": "video_storyline_directors",
+          "tableTo": "company_secrets",
+          "columnsFrom": [
+            "analysis_key_secret_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "video_storyline_directors_helper_entry_id_model_directory_entries_id_fk": {
+          "name": "video_storyline_directors_helper_entry_id_model_directory_entries_id_fk",
+          "tableFrom": "video_storyline_directors",
+          "tableTo": "model_directory_entries",
+          "columnsFrom": [
+            "helper_entry_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "video_storyline_directors_helper_key_secret_id_company_secrets_id_fk": {
+          "name": "video_storyline_directors_helper_key_secret_id_company_secrets_id_fk",
+          "tableFrom": "video_storyline_directors",
+          "tableTo": "company_secrets",
+          "columnsFrom": [
+            "helper_key_secret_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "video_storyline_directors_thinking_check": {
+          "name": "video_storyline_directors_thinking_check",
+          "value": "\"video_storyline_directors\".\"thinking\" IS NULL OR \"video_storyline_directors\".\"thinking\" IN ('on', 'off')"
+        },
+        "video_storyline_directors_provider_check": {
+          "name": "video_storyline_directors_provider_check",
+          "value": "\"video_storyline_directors\".\"default_video_provider_id\" IS NULL OR \"video_storyline_directors\".\"default_video_provider_id\" IN ('fal', 'sogni')"
+        },
+        "video_storyline_directors_shot_seconds_check": {
+          "name": "video_storyline_directors_shot_seconds_check",
+          "value": "\"video_storyline_directors\".\"default_shot_seconds\" IS NULL OR (\"video_storyline_directors\".\"default_shot_seconds\" >= 1 AND \"video_storyline_directors\".\"default_shot_seconds\" <= 60)"
+        },
+        "video_storyline_directors_temperature_check": {
+          "name": "video_storyline_directors_temperature_check",
+          "value": "\"video_storyline_directors\".\"temperature\" IS NULL OR (\"video_storyline_directors\".\"temperature\" >= 0 AND \"video_storyline_directors\".\"temperature\" <= 2)"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.video_storyline_writer_messages": {
+      "name": "video_storyline_writer_messages",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "storyline_id": {
+          "name": "storyline_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "director_id": {
+          "name": "director_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "role": {
+          "name": "role",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "payload": {
+          "name": "payload",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "created_by_user_id": {
+          "name": "created_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_by_agent_id": {
+          "name": "created_by_agent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "video_storyline_writer_messages_storyline_created_idx": {
+          "name": "video_storyline_writer_messages_storyline_created_idx",
+          "columns": [
+            {
+              "expression": "storyline_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "video_storyline_writer_messages_company_idx": {
+          "name": "video_storyline_writer_messages_company_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "video_storyline_writer_messages_company_id_companies_id_fk": {
+          "name": "video_storyline_writer_messages_company_id_companies_id_fk",
+          "tableFrom": "video_storyline_writer_messages",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "video_storyline_writer_messages_storyline_id_video_storylines_id_fk": {
+          "name": "video_storyline_writer_messages_storyline_id_video_storylines_id_fk",
+          "tableFrom": "video_storyline_writer_messages",
+          "tableTo": "video_storylines",
+          "columnsFrom": [
+            "storyline_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "video_storyline_writer_messages_director_id_video_storyline_directors_id_fk": {
+          "name": "video_storyline_writer_messages_director_id_video_storyline_directors_id_fk",
+          "tableFrom": "video_storyline_writer_messages",
+          "tableTo": "video_storyline_directors",
+          "columnsFrom": [
+            "director_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "video_storyline_writer_messages_role_check": {
+          "name": "video_storyline_writer_messages_role_check",
+          "value": "\"video_storyline_writer_messages\".\"role\" IN ('writer', 'person', 'system')"
+        },
+        "video_storyline_writer_messages_kind_check": {
+          "name": "video_storyline_writer_messages_kind_check",
+          "value": "\"video_storyline_writer_messages\".\"kind\" IN ('brief', 'analysis', 'question', 'answer', 'storyboard', 'change_request', 'change_set', 'note')"
+        },
+        "video_storyline_writer_messages_status_check": {
+          "name": "video_storyline_writer_messages_status_check",
+          "value": "\"video_storyline_writer_messages\".\"status\" IS NULL OR \"video_storyline_writer_messages\".\"status\" IN ('pending', 'applied', 'partly_applied', 'discarded')"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.video_storylines": {
       "name": "video_storylines",
       "schema": "",
@@ -42700,6 +43169,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "'{}'::jsonb"
+        },
+        "director_id": {
+          "name": "director_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
         },
         "final_provider": {
           "name": "final_provider",
@@ -42962,6 +43437,19 @@
           "tableTo": "projects",
           "columnsFrom": [
             "project_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "video_storylines_director_id_video_storyline_directors_id_fk": {
+          "name": "video_storylines_director_id_video_storyline_directors_id_fk",
+          "tableFrom": "video_storylines",
+          "tableTo": "video_storyline_directors",
+          "columnsFrom": [
+            "director_id"
           ],
           "columnsTo": [
             "id"

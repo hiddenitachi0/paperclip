@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import sharp from "sharp";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,6 +7,7 @@ import { estimateMediaStudioEditCostCents, mediaStudioEditActionProvider, MEDIA_
 import plugin, { prepareGeneration } from "../../../packages/plugins/media-studio/src/worker.js";
 import manifest from "../../../packages/plugins/media-studio/src/manifest.js";
 import { anchorSeams } from "../../../packages/plugins/media-studio/src/anchors.js";
+import { cropPicture, cropPictures } from "../../../packages/plugins/media-studio/src/image-ops.js";
 import {
   CONSENT_ADULT_TEXT,
   IDENTITY_DEFAULT_SOGNI_MODEL,
@@ -465,7 +467,60 @@ describe("crops", () => {
       ["body", 200, 100],
     ]);
     const meta = await sharp(Buffer.from(res.crops[0]!.imageDataUrl.split(",")[1]!, "base64")).metadata();
-    expect([meta.width, meta.height, meta.format]).toEqual([50, 50, "png"]);
+    expect([meta.width, meta.height, meta.format]).toEqual([50, 50, "jpeg"]);
+    expect(res.crops[0]!.imageDataUrl.startsWith("data:image/jpeg;base64,")).toBe(true);
+  });
+
+  it("cropPicture: a big noisy photo comes out as a JPEG capped at 2048px and far smaller than a PNG", async () => {
+    const raw = randomBytes(3000 * 2000 * 3);
+    const source = await sharp(raw, { raw: { width: 3000, height: 2000, channels: 3 } }).png().toBuffer();
+    const cut = await cropPicture(source, { x: 0, y: 0, w: 1, h: 1 });
+    expect(cut.contentType).toBe("image/jpeg");
+    expect([cut.width, cut.height]).toEqual([2048, 1365]);
+    const meta = await sharp(cut.bytes).metadata();
+    expect([meta.format, meta.width, meta.height]).toEqual(["jpeg", 2048, 1365]);
+    const asPng = await sharp(raw, { raw: { width: 3000, height: 2000, channels: 3 } }).extract({ left: 0, top: 0, width: 2048, height: 1365 }).png().toBuffer();
+    expect(cut.bytes.length).toBeLessThan(asPng.length / 2);
+  });
+
+  it("cropPicture: never enlarges a small crop and flattens transparency onto white", async () => {
+    const source = await sharp({ create: { width: 100, height: 100, channels: 4, background: { r: 255, g: 0, b: 0, alpha: 0 } } }).png().toBuffer();
+    const cut = await cropPicture(source, { x: 0, y: 0, w: 0.5, h: 0.5 });
+    expect([cut.width, cut.height]).toEqual([50, 50]);
+    const { data, info } = await sharp(cut.bytes).raw().toBuffer({ resolveWithObject: true });
+    expect(info.channels).toBe(3);
+    expect(Array.from(data.subarray(0, 3)).every((v) => v >= 250)).toBe(true);
+  });
+
+  it("cropPicture: an EXIF-rotated picture is cut where people see the box", async () => {
+    // 100x50 stored: left half red, right half blue; orientation 6 shows it as 50x100 rotated 90 degrees clockwise,
+    // so the stored-left (red) half is at the TOP of what people see.
+    const stored = await sharp({ create: { width: 100, height: 50, channels: 3, background: { r: 0, g: 0, b: 255 } } })
+      .composite([{ input: await sharp({ create: { width: 50, height: 50, channels: 3, background: { r: 255, g: 0, b: 0 } } }).png().toBuffer(), left: 0, top: 0 }])
+      .jpeg({ quality: 100, chromaSubsampling: "4:4:4" })
+      .withMetadata({ orientation: 6 })
+      .toBuffer();
+    const top = await cropPicture(stored, { x: 0, y: 0, w: 1, h: 0.5 });
+    expect([top.width, top.height]).toEqual([50, 50]);
+    const px = await sharp(top.bytes).raw().toBuffer();
+    expect(px[0]!).toBeGreaterThan(200);
+    expect(px[2]!).toBeLessThan(60);
+    const bottom = await cropPicture(stored, { x: 0, y: 0.5, w: 1, h: 0.5 });
+    const bpx = await sharp(bottom.bytes).raw().toBuffer();
+    expect(bpx[2]!).toBeGreaterThan(200);
+  });
+
+  it("cropPictures: shrinks every crop when together they pass the budget, and says so plainly when nothing fits", async () => {
+    const raw = randomBytes(1500 * 1500 * 3);
+    const source = await sharp(raw, { raw: { width: 1500, height: 1500, channels: 3 } }).png().toBuffer();
+    const boxes = Array.from({ length: 4 }, () => ({ x: 0, y: 0, w: 1, h: 1 }));
+    const first = await cropPictures(source, boxes);
+    const firstTotal = first.reduce((n, c) => n + c.bytes.length, 0);
+    const squeezed = await cropPictures(source, boxes, Math.floor(firstTotal * 0.8));
+    expect(squeezed).toHaveLength(4);
+    expect(squeezed.reduce((n, c) => n + c.bytes.length, 0)).toBeLessThanOrEqual(Math.floor(firstTotal * 0.8));
+    expect(squeezed[0]!.width).toBeLessThan(first[0]!.width);
+    await expect(cropPictures(source, boxes, 1000)).rejects.toThrow(/Draw fewer or smaller boxes/);
   });
 
   it("refuses boxes outside the picture, unknown roles, members and other companies' pictures", async () => {

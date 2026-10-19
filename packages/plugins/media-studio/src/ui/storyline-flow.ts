@@ -405,3 +405,31 @@ export function refusalToItem(message: string, input: FlowInput): ReadinessItem 
 
   return { id: "refusal-other", blocking: true, text: message, fixes: [] };
 }
+
+// ─── The finished film's automatic check ───────────────────────────────────
+
+/** Must match VIDEO_QUALITY_BLOCKING_ISSUE_CODES in @paperclipai/shared (this bundle cannot import it). */
+const BLOCKING_QUALITY_CODES = new Set(["missing_video_stream", "duration_mismatch", "stitch_failed"]);
+
+export interface FilmQualityIssue {
+  code?: string;
+  message: string;
+  severity?: string;
+}
+
+/**
+ * Splits the check's findings: warnings (worth a look, never stop Download)
+ * and real problems (the film is broken). A film parked on "needs attention"
+ * with warnings only can be accepted as it is.
+ */
+export function filmQuality(storyline: { status: string; finalObjectKey: string | null; qualityCheckIssues?: FilmQualityIssue[] | null }): {
+  warnings: FilmQualityIssue[];
+  problems: FilmQualityIssue[];
+  canAcceptWarnings: boolean;
+} {
+  const issues = storyline.qualityCheckIssues ?? [];
+  const isProblem = (i: FilmQualityIssue) => i.severity === "blocking" || (!i.severity && BLOCKING_QUALITY_CODES.has(i.code ?? ""));
+  const problems = issues.filter(isProblem);
+  const warnings = issues.filter((i) => !isProblem(i));
+  return { warnings, problems, canAcceptWarnings: storyline.status === "needs_attention" && !!storyline.finalObjectKey && problems.length === 0 };
+}

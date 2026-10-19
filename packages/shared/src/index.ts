@@ -2693,6 +2693,10 @@ export {
   VIDEO_TRANSITION_MAX_DURATION_MS,
   VIDEO_TRANSITION_MIN_DURATION_MS,
   VIDEO_QUALITY_ISSUE_CODES,
+  VIDEO_QUALITY_BLOCKING_ISSUE_CODES,
+  videoQualityIssueSeverity,
+  hasBlockingVideoQualityIssue,
+  type VideoQualityIssueSeverity,
   approveVideoDirectorRunSchema,
   createVideoSceneSchema,
   createVideoShotSchema,
@@ -3147,6 +3151,7 @@ export {
 } from "./mail-urgency.js";
 export * from "./video-storyline-transitions.js";
 export * from "./video-storyline-clips.js";
+export * from "./video-storyline-directors.js";
 export * from "./crypto-wallets.js";
 export {
   POSITION_CATALOGUE,

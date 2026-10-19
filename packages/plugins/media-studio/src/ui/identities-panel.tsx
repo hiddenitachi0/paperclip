@@ -294,7 +294,32 @@ export function CropEditor(props: {
   onChange: (boxes: Array<{ role: CropRole; box: Box }>) => void;
   disabled?: boolean;
 }) {
-  const frame = useRef<HTMLDivElement>(null);
+  const picture = useRef<HTMLImageElement>(null);
+  const layer = useRef<HTMLDivElement>(null);
+  // Where the picture really is inside the frame. The frame is sized from the
+  // picture's natural width, but a tall picture is shrunk by max-height and ends
+  // up narrower than the frame, so boxes must be laid over the picture itself.
+  const [shown, setShown] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
+  const measure = useCallback(() => {
+    const img = picture.current;
+    if (!img || img.offsetWidth === 0 || img.offsetHeight === 0) return;
+    setShown((prev) =>
+      prev && prev.left === img.offsetLeft && prev.top === img.offsetTop && prev.width === img.offsetWidth && prev.height === img.offsetHeight
+        ? prev
+        : { left: img.offsetLeft, top: img.offsetTop, width: img.offsetWidth, height: img.offsetHeight },
+    );
+  }, []);
+  useEffect(() => {
+    measure();
+    const img = picture.current;
+    window.addEventListener("resize", measure);
+    const observer = typeof ResizeObserver === "undefined" || !img ? null : new ResizeObserver(measure);
+    if (img) observer?.observe(img);
+    return () => {
+      window.removeEventListener("resize", measure);
+      observer?.disconnect();
+    };
+  }, [measure, props.src]);
   const drag = useRef<{ index: number; mode: "move" | "resize"; startX: number; startY: number; start: Box } | null>(null);
   const boxesRef = useRef(props.boxes);
   boxesRef.current = props.boxes;
@@ -302,7 +327,7 @@ export function CropEditor(props: {
   useEffect(() => {
     const onMove = (e: PointerEvent) => {
       const d = drag.current;
-      const el = frame.current;
+      const el = layer.current;
       if (!d || !el) return;
       const rect = el.getBoundingClientRect();
       const dx = (e.clientX - d.startX) / Math.max(1, rect.width);
@@ -329,39 +354,53 @@ export function CropEditor(props: {
   };
 
   return (
-    <div ref={frame} style={{ position: "relative", display: "inline-block", maxWidth: "100%", userSelect: "none", touchAction: "none" }} aria-label="Crop editor">
-      <img src={props.src} alt="The person's picture" style={{ display: "block", maxWidth: "100%", maxHeight: 520 }} draggable={false} />
-      {props.boxes.map((b, i) => {
-        const color = CROP_ROLE_OPTIONS.find((o) => o.value === b.role)?.color ?? "#333";
-        return (
-          <div
-            key={`${b.role}-${i}`}
-            role="group"
-            aria-label={`${b.role} box`}
-            onPointerDown={start(i, "move")}
-            style={{
-              position: "absolute",
-              left: `${b.box.x * 100}%`,
-              top: `${b.box.y * 100}%`,
-              width: `${b.box.w * 100}%`,
-              height: `${b.box.h * 100}%`,
-              border: `2px solid ${color}`,
-              background: `${color}22`,
-              cursor: props.disabled ? "default" : "move",
-              boxSizing: "border-box",
-            }}
-          >
-            <span style={{ position: "absolute", left: 0, top: 0, background: color, color: "#fff", fontSize: 11, padding: "1px 4px" }}>
-              {CROP_ROLE_OPTIONS.find((o) => o.value === b.role)?.label ?? b.role}
-            </span>
-            <span
-              aria-label={`Resize ${b.role} box`}
-              onPointerDown={start(i, "resize")}
-              style={{ position: "absolute", right: -6, bottom: -6, width: 12, height: 12, background: color, borderRadius: 2, cursor: "nwse-resize" }}
-            />
-          </div>
-        );
-      })}
+    <div style={{ position: "relative", display: "inline-block", maxWidth: "100%", userSelect: "none", touchAction: "none" }} aria-label="Crop editor">
+      <img
+        ref={picture}
+        src={props.src}
+        alt="The person's picture"
+        onLoad={measure}
+        style={{ display: "block", maxWidth: "100%", maxHeight: 520 }}
+        draggable={false}
+      />
+      {/* Same size and place as the picture, and clips whatever sticks out. */}
+      <div
+        ref={layer}
+        style={{ position: "absolute", overflow: "hidden", ...(shown ?? { left: 0, top: 0, width: "100%", height: "100%" }), pointerEvents: "none" }}
+      >
+        {props.boxes.map((b, i) => {
+          const color = CROP_ROLE_OPTIONS.find((o) => o.value === b.role)?.color ?? "#333";
+          return (
+            <div
+              key={`${b.role}-${i}`}
+              role="group"
+              aria-label={`${b.role} box`}
+              onPointerDown={start(i, "move")}
+              style={{
+                position: "absolute",
+                left: `${b.box.x * 100}%`,
+                top: `${b.box.y * 100}%`,
+                width: `${b.box.w * 100}%`,
+                height: `${b.box.h * 100}%`,
+                border: `2px solid ${color}`,
+                background: `${color}22`,
+                cursor: props.disabled ? "default" : "move",
+                boxSizing: "border-box",
+                pointerEvents: "auto",
+              }}
+            >
+              <span style={{ position: "absolute", left: 0, top: 0, background: color, color: "#fff", fontSize: 11, padding: "1px 4px" }}>
+                {CROP_ROLE_OPTIONS.find((o) => o.value === b.role)?.label ?? b.role}
+              </span>
+              <span
+                aria-label={`Resize ${b.role} box`}
+                onPointerDown={start(i, "resize")}
+                style={{ position: "absolute", right: 0, bottom: 0, width: 12, height: 12, background: color, borderRadius: 2, cursor: "nwse-resize" }}
+              />
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -1467,7 +1506,7 @@ export function IdentitiesPanel({ context }: { context: PluginHostContext }) {
       const res = (await crop({ fileId: source, boxes })) as { crops: Array<{ role: CropRole; box: Box; imageDataUrl: string }> };
       const crops: IdentityCrop[] = [];
       for (const c of res.crops) {
-        const fileId = await uploadPicture(companyId, c.imageDataUrl, `${(draft.name || "person").replace(/[^A-Za-z0-9-]+/g, "-")}-${c.role}.png`);
+        const fileId = await uploadPicture(companyId, c.imageDataUrl, `${(draft.name || "person").replace(/[^A-Za-z0-9-]+/g, "-")}-${c.role}.${c.imageDataUrl.startsWith("data:image/jpeg") ? "jpg" : "png"}`);
         crops.push({ role: c.role, fileId, sourceFileId: source, box: c.box });
       }
       setDraft((d) => (d ? withNewCrops(d, crops) : d));

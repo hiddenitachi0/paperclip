@@ -41,6 +41,10 @@ export interface HelperTurn {
   pictureInputs?: HelperPictureInput[];
   /** The quick model said this needs a closer look (Phase 3). */
   suggestInvestigation?: boolean;
+  /** The question asked Paperclip to make a change: the panel offers "Do this in Board chat". */
+  suggestBoardChat?: boolean;
+  /** role "user": the page's title when it was asked (names the records on it), for the Board chat hand-off. */
+  pageTitle?: string | null;
   /** role "investigation": the task that was started from this conversation. */
   investigationId?: string;
   investigationIdentifier?: string | null;

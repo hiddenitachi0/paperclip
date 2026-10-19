@@ -6,7 +6,7 @@
 // called again and again by the background job (media-jobs.ts) — see
 // media-jobs-types.ts for why a video cannot be made inside one tool call.
 
-import { sogniVideoStep } from "./sogni-video-step.js";
+import { sogniVideoRefusal, sogniVideoStep } from "./sogni-video-step.js";
 import type { FetchImpl } from "./providers.js";
 import { falQueueCancel, falQueuePoll, falQueueSubmit } from "./fal-queue.js";
 import type { MediaJobHandle, MediaJobInput, MediaJobProvider, MediaPollOutcome } from "./media-jobs-types.js";
@@ -130,7 +130,9 @@ export class SogniVideoProvider implements MediaJobProvider {
       headers: this.headers({ "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() }),
       body: JSON.stringify(body),
     });
-    if (!res.ok) throw new Error(`Sogni refused the video request (${res.status}): ${(await res.text()).slice(0, 300)}`);
+    if (!res.ok) {
+      throw sogniVideoRefusal(res.status, await res.text(), { tool: plan.tool, videoModel: plan.videoModel }, [this.options.apiKey]);
+    }
     const parsed = asRecord(JSON.parse(await res.text()));
     const workflowId = asRecord(asRecord(parsed?.data)?.workflow)?.workflowId;
     if (typeof workflowId !== "string" || !workflowId) throw new Error("Sogni did not say which job it started.");

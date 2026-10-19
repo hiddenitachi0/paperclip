@@ -39,7 +39,7 @@ async function flushReact() {
 }
 
 const CONFERENCE_TOGGLE_SELECTOR =
-  'button[aria-label="Toggle conference room chat experimental setting"]';
+  'button[aria-label="Toggle board chat experimental setting"]';
 const STREAMLINED_TOGGLE_SELECTOR =
   'button[aria-label="Toggle streamlined left navigation experimental setting"]';
 const TASK_WATCHDOGS_TOGGLE_SELECTOR =
@@ -130,6 +130,7 @@ describe("InstanceExperimentalSettings — Conference Room Chat card (PAP-11233)
     const headings = [...container.querySelectorAll("section h2")].map((h) => h.textContent);
     expect(headings).toContain("Streamlined Left Navigation Bar");
     expect(headings).not.toContain("Conference Room Chat");
+    expect(headings).not.toContain("Board chat");
     expect(container.querySelector(CONFERENCE_TOGGLE_SELECTOR)).toBeNull();
   });
 
