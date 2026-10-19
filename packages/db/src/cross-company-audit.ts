@@ -86,6 +86,9 @@ export const ROUTINE_SCHEDULER_BYPASS_ROUTES = [
   // Follows up wallet approval cards and submitted payments each tick; every
   // actual payment is recorded in the trading ledger and activity log.
   "heartbeat-scheduler:cryptoWallets",
+  // Claims finished tasks with a person's brag pre-approval and starts at most
+  // one capped video each; every job and cost is recorded under that person.
+  "heartbeat-scheduler:bragOnDone",
 ] as const;
 
 export type RoutineSchedulerBypassRoute = (typeof ROUTINE_SCHEDULER_BYPASS_ROUTES)[number];
