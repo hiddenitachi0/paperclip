@@ -13,6 +13,7 @@ import type { LiveRunForIssue } from "../api/heartbeats";
 import { queryKeys } from "../lib/queryKeys";
 import { agentUrl, cn, formatCents } from "../lib/utils";
 import { TOWER_STATUS_COLOR, towerAgentState } from "./TowerScene";
+import { BragOnDoneOption, type BragOnDoneCompanySettings } from "./BragOnDoneOption";
 
 /**
  * Paperclip Tower side panel for one agent: Inspect (what they're doing, what
@@ -39,6 +40,8 @@ function errorWords(error: unknown): string {
 
 export interface TowerAgentPanelProps {
   companyId: string;
+  /** The company's settings, for the "brag video when done" tick box. */
+  company?: BragOnDoneCompanySettings | null;
   agent: Agent;
   boss: Agent | null;
   run: LiveRunForIssue | null;
@@ -49,6 +52,7 @@ export interface TowerAgentPanelProps {
 
 export function TowerAgentPanel({
   companyId,
+  company = null,
   agent,
   boss,
   run,
@@ -59,6 +63,7 @@ export function TowerAgentPanel({
   const [tab, setTab] = useState<"inspect" | "task">(initialTab);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
+  const [bragOnDone, setBragOnDone] = useState(false);
   const [created, setCreated] = useState<{ ref: string } | null>(null);
   const queryClient = useQueryClient();
 
@@ -67,6 +72,7 @@ export function TowerAgentPanel({
     setTab(initialTab);
     setTitle("");
     setDescription("");
+    setBragOnDone(false);
     setCreated(null);
   }, [agent.id, initialTab]);
 
@@ -78,13 +84,14 @@ export function TowerAgentPanel({
   });
 
   const createTask = useMutation({
-    mutationFn: (input: { title: string; description: string }) =>
+    mutationFn: (input: { title: string; description: string; bragOnDone: boolean }) =>
       issuesApi.create(companyId, {
         title: input.title,
         ...(input.description ? { description: input.description } : {}),
         status: "todo",
         priority: "medium",
         assigneeAgentId: agent.id,
+        ...(input.bragOnDone ? { bragOnDone: true } : {}),
       }),
     onSuccess: (issue) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.issues.list(companyId) });
@@ -92,6 +99,7 @@ export function TowerAgentPanel({
       setCreated({ ref: issue.identifier ?? issue.id });
       setTitle("");
       setDescription("");
+      setBragOnDone(false);
     },
   });
 
@@ -104,7 +112,11 @@ export function TowerAgentPanel({
     const t = title.trim();
     if (!t || createTask.isPending) return;
     setCreated(null);
-    createTask.mutate({ title: t, description: description.trim() });
+    createTask.mutate({
+      title: t,
+      description: description.trim(),
+      bragOnDone: bragOnDone && company?.bragOnDoneEnabled !== false,
+    });
   };
 
   return (
@@ -224,6 +236,13 @@ export function TowerAgentPanel({
               rows={5}
             />
           </div>
+          {/* People only; the server refuses this from agents. */}
+          <BragOnDoneOption
+            company={company}
+            checked={bragOnDone && company?.bragOnDoneEnabled !== false}
+            onCheckedChange={setBragOnDone}
+            disabled={createTask.isPending}
+          />
           <p className="text-xs text-muted-foreground">
             This creates a normal task for {agent.name}. They'll pick it up on their next turn.
           </p>

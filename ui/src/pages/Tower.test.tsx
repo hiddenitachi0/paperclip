@@ -192,6 +192,50 @@ describe("Tower page", () => {
     expect(container.textContent).toContain("DUR-10");
   });
 
+  async function openNewTask(agentId: string, title: string) {
+    await click(q(`[data-testid="tower-agent-${agentId}"]`));
+    const taskTab = [...container.querySelectorAll('[role="tab"]')].find((t) => t.textContent === "New task");
+    await click(taskTab ?? null);
+    const input = q("#tower-task-title") as HTMLInputElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, title);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+
+  it("new task can ask for a brag video when it is done, only when the person ticks it", async () => {
+    await render();
+    await openNewTask("frontend", "Ship it");
+    const option = q('[data-testid="brag-on-done-option"]')!;
+    expect(option.textContent).toContain("Make a short brag video when this is done");
+    expect(option.textContent).toMatch(/costs about \$\d+\.\d\d/);
+    const box = option.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    await click(box);
+    expect(box.checked).toBe(true);
+    await click([...container.querySelectorAll("button")].find((b) => b.textContent === "Create task") ?? null);
+    expect(mocks.issues.create).toHaveBeenCalledWith(DUR, expect.objectContaining({ title: "Ship it", bragOnDone: true }));
+  });
+
+  it("new task: the brag video box is disabled and never sent when the company turned it off", async () => {
+    const original = { ...COMPANIES[0] };
+    Object.assign(COMPANIES[0], { bragOnDoneEnabled: false });
+    try {
+      await render();
+      await openNewTask("frontend", "Ship it");
+      const option = q('[data-testid="brag-on-done-option"]')!;
+      const box = option.querySelector('input[type="checkbox"]') as HTMLInputElement;
+      expect(box.disabled).toBe(true);
+      expect(option.textContent).toContain("turned off for this company");
+      await click([...container.querySelectorAll("button")].find((b) => b.textContent === "Create task") ?? null);
+      expect(mocks.issues.create).toHaveBeenCalledTimes(1);
+      expect(mocks.issues.create.mock.calls[0]![1]).not.toHaveProperty("bragOnDone");
+    } finally {
+      for (const key of Object.keys(COMPANIES[0])) delete (COMPANIES[0] as Record<string, unknown>)[key];
+      Object.assign(COMPANIES[0], original);
+    }
+  });
+
   it("explains a permission refusal in plain words", async () => {
     const { ApiError } = await import("../api/client");
     mocks.issues.create.mockRejectedValue(new ApiError("Forbidden", 403, null));
