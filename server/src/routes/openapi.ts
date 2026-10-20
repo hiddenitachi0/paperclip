@@ -3629,16 +3629,6 @@ registry.registerPath({
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
 });
 
-registry.registerPath({
-  method: "post",
-  path: "/api/board/chat/runs/{runId}/token",
-  tags: ["instance"],
-  security: [],
-  summary: "Internal: a Board chat run's Paperclip connector swaps its one-time code for the run credential (once)",
-  request: { params: z.object({ runId: z.string() }), body: jsonBody(z.object({ code: z.string() })) },
-  responses: { 200: r.ok(), 403: r.forbidden, 404: r.notFound },
-});
-
 // ─── Lane A (direct-model-call text primitive) ────────────────────────────────
 
 registry.registerPath({

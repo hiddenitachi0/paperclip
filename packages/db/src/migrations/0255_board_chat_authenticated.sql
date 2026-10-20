@@ -4,9 +4,9 @@
 -- Three new company-scoped tables, see packages/db/src/schema/board_chat.ts:
 --   * board_chat_company_settings: per-company on/off switch (no row = off)
 --     and the daily message cap.
---   * board_chat_runs: one row per Board chat message on a signed-in server;
---     holds only the HASH of the short-lived credential the run uses (the
---     value is never stored), the count behind the daily cap, and the cost.
+--   * board_chat_runs: one row per Board chat message on a signed-in server:
+--     the count behind the daily cap, and that message's model and cost. The
+--     model runs inside the Paperclip server; no credential is stored here.
 --   * board_chat_actions: every change a Board chat run asked for. Changes are
 --     held here as a card until the person clicks Approve or Cancel.
 -- No existing table or row is changed. Every statement is guarded so a re-run
@@ -28,8 +28,6 @@ CREATE TABLE IF NOT EXISTS "board_chat_actions" (
 	"summary" text NOT NULL,
 	"details" jsonb DEFAULT '[]'::jsonb NOT NULL,
 	"status" text DEFAULT 'pending' NOT NULL,
-	"exec_token_hash" text,
-	"exec_token_expires_at" timestamp with time zone,
 	"decided_by_user_id" text,
 	"decided_at" timestamp with time zone,
 	"result_status" integer,
@@ -58,17 +56,13 @@ CREATE TABLE IF NOT EXISTS "board_chat_runs" (
 	"user_id" text NOT NULL,
 	"issue_id" uuid,
 	"status" text DEFAULT 'running' NOT NULL,
-	"bootstrap_code_hash" text,
-	"token_hash" text,
-	"token_exchange_count" integer DEFAULT 0 NOT NULL,
-	"expires_at" timestamp with time zone NOT NULL,
+	"provider" text,
 	"model" text,
 	"input_tokens" integer DEFAULT 0 NOT NULL,
 	"cached_input_tokens" integer DEFAULT 0 NOT NULL,
 	"output_tokens" integer DEFAULT 0 NOT NULL,
 	"cost_cents" integer DEFAULT 0 NOT NULL,
 	"cost_micro_usd" bigint,
-	"cost_event_id" uuid,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"ended_at" timestamp with time zone
 );
@@ -117,15 +111,9 @@ END $$;
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "board_chat_actions_company_issue_created_idx" ON "board_chat_actions" USING btree ("company_id","issue_id","created_at");
 --> statement-breakpoint
-CREATE UNIQUE INDEX IF NOT EXISTS "board_chat_actions_exec_token_hash_uq" ON "board_chat_actions" USING btree ("exec_token_hash");
---> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "board_chat_company_settings_company_uq" ON "board_chat_company_settings" USING btree ("company_id");
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "board_chat_runs_company_created_idx" ON "board_chat_runs" USING btree ("company_id","created_at");
---> statement-breakpoint
-CREATE UNIQUE INDEX IF NOT EXISTS "board_chat_runs_token_hash_uq" ON "board_chat_runs" USING btree ("token_hash");
---> statement-breakpoint
-CREATE UNIQUE INDEX IF NOT EXISTS "board_chat_runs_bootstrap_code_hash_uq" ON "board_chat_runs" USING btree ("bootstrap_code_hash");
 --> statement-breakpoint
 DO $$
 DECLARE

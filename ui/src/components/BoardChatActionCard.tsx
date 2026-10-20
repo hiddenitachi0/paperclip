@@ -10,7 +10,6 @@ import { cn } from "../lib/utils";
 
 const STATUS_TEXT: Record<BoardChatAction["status"], string> = {
   pending: "Waiting for your approval",
-  confirmed: "Approved, making the change...",
   executing: "Approved, making the change...",
   done: "Approved and done",
   failed: "Approved, but it didn't go through",

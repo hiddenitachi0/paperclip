@@ -1,5 +1,5 @@
 {
-  "id": "b1407fbd-90c1-491f-a1b3-ee2f8fc67365",
+  "id": "2f97b427-60b8-467b-9e36-24d6003e8941",
   "prevId": "cc5bdb3a-d565-4eec-b9da-627d72233ef3",
   "version": "7",
   "dialect": "postgresql",
@@ -3781,18 +3781,6 @@
           "notNull": true,
           "default": "'pending'"
         },
-        "exec_token_hash": {
-          "name": "exec_token_hash",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "exec_token_expires_at": {
-          "name": "exec_token_expires_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
         "decided_by_user_id": {
           "name": "decided_by_user_id",
           "type": "text",
@@ -3868,21 +3856,6 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "board_chat_actions_exec_token_hash_uq": {
-          "name": "board_chat_actions_exec_token_hash_uq",
-          "columns": [
-            {
-              "expression": "exec_token_hash",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -4073,30 +4046,11 @@
           "notNull": true,
           "default": "'running'"
         },
-        "bootstrap_code_hash": {
-          "name": "bootstrap_code_hash",
+        "provider": {
+          "name": "provider",
           "type": "text",
           "primaryKey": false,
           "notNull": false
-        },
-        "token_hash": {
-          "name": "token_hash",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "token_exchange_count": {
-          "name": "token_exchange_count",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "expires_at": {
-          "name": "expires_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true
         },
         "model": {
           "name": "model",
@@ -4138,12 +4092,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "cost_event_id": {
-          "name": "cost_event_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -4176,36 +4124,6 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "board_chat_runs_token_hash_uq": {
-          "name": "board_chat_runs_token_hash_uq",
-          "columns": [
-            {
-              "expression": "token_hash",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "board_chat_runs_bootstrap_code_hash_uq": {
-          "name": "board_chat_runs_bootstrap_code_hash_uq",
-          "columns": [
-            {
-              "expression": "bootstrap_code_hash",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
           "concurrently": false,
           "method": "btree",
           "with": {}

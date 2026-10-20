@@ -10,17 +10,14 @@ import { issues } from "./issues.js";
  *   board_chat_company_settings  the company's on/off switch (off by default:
  *                                no row reads as off) and its daily message cap.
  *   board_chat_runs              one row per message sent in a signed-in
- *                                Board chat. Holds the hash of the short-lived
- *                                credential that run uses to call Paperclip as
- *                                the person, scoped to this one company; it
- *                                stops working when the run ends. Also the
- *                                count behind the daily cap, and the run's cost.
+ *                                Board chat: the count behind the daily cap,
+ *                                and the model and cost of that message. The
+ *                                model runs inside the Paperclip server; no
+ *                                credential is ever handed to anything else.
  *   board_chat_actions           every change a run wanted to make. A change is
  *                                never made when asked: it waits here as a card
  *                                in the chat until the person clicks Approve
  *                                (or Cancel), and records what happened.
- *
- * No credential value is ever stored, only sha256 hashes.
  */
 export const boardChatCompanySettings = pgTable(
   "board_chat_company_settings",
@@ -53,25 +50,18 @@ export const boardChatRuns = pgTable(
     issueId: uuid("issue_id").references(() => issues.id, { onDelete: "set null" }),
     // running | done | failed | timed_out
     status: text("status").notNull().default("running"),
-    // One-time code the run's Paperclip connector swaps for its credential.
-    bootstrapCodeHash: text("bootstrap_code_hash"),
-    tokenHash: text("token_hash"),
-    tokenExchangeCount: integer("token_exchange_count").notNull().default(0),
-    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    provider: text("provider"),
     model: text("model"),
     inputTokens: integer("input_tokens").notNull().default(0),
     cachedInputTokens: integer("cached_input_tokens").notNull().default(0),
     outputTokens: integer("output_tokens").notNull().default(0),
     costCents: integer("cost_cents").notNull().default(0),
     costMicroUsd: bigint("cost_micro_usd", { mode: "number" }),
-    costEventId: uuid("cost_event_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     endedAt: timestamp("ended_at", { withTimezone: true }),
   },
   (table) => ({
     companyCreatedIdx: index("board_chat_runs_company_created_idx").on(table.companyId, table.createdAt),
-    tokenHashUq: uniqueIndex("board_chat_runs_token_hash_uq").on(table.tokenHash),
-    bootstrapHashUq: uniqueIndex("board_chat_runs_bootstrap_code_hash_uq").on(table.bootstrapCodeHash),
   }),
 );
 
@@ -88,14 +78,12 @@ export const boardChatActions = pgTable(
     method: text("method").notNull(),
     path: text("path").notNull(),
     // The exact JSON body that will be sent on Approve, as text (jsonb would
-    // reorder keys; the replay is compared against this).
+    // reorder keys; the in-process request on Approve is compared with it).
     bodyJson: text("body_json"),
     summary: text("summary").notNull(),
     details: jsonb("details").$type<Array<{ label: string; value: string }>>().notNull().default([]),
-    // pending | confirmed | executing | done | failed | cancelled | expired
+    // pending | executing | done | failed | cancelled | expired
     status: text("status").notNull().default("pending"),
-    execTokenHash: text("exec_token_hash"),
-    execTokenExpiresAt: timestamp("exec_token_expires_at", { withTimezone: true }),
     decidedByUserId: text("decided_by_user_id"),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
     resultStatus: integer("result_status"),
@@ -111,6 +99,5 @@ export const boardChatActions = pgTable(
       table.issueId,
       table.createdAt,
     ),
-    execTokenHashUq: uniqueIndex("board_chat_actions_exec_token_hash_uq").on(table.execTokenHash),
   }),
 );

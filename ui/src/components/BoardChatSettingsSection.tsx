@@ -15,9 +15,9 @@ export const BOARD_CHAT_RISK_TEXT =
   "Board chat lets this company's owner and admins ask Paperclip in plain words to look things up and make changes for them, " +
   "such as creating or changing tasks, hiring or adjusting agents, and approving hire cards. It acts as the person who asks, " +
   "and only inside this company. Every change is shown first as a card with the exact details, and nothing happens until that " +
-  "person clicks Approve. It can never approve deploy or merge cards, and it has no access to the server itself. Each message " +
-  "uses your Paperclip's Claude sign-in and costs money; you can see the cost under Costs. Turn it on only if you trust your " +
-  "admins to read each card before they approve it.";
+  "person clicks Approve. It can never approve deploy or merge cards, and it has no access to the server itself. It answers with " +
+  "the same model as Ask Paperclip (Company settings → General → Helper), and each message costs money; you can see the cost " +
+  "under Costs. Turn it on only if you trust your admins to read each card before they approve it.";
 
 /**
  * Company settings: "Board chat" on a signed-in Paperclip. The company's

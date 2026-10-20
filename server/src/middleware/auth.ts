@@ -17,7 +17,7 @@ import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "./logger.js";
 import { boardAuthService } from "../services/board-auth.js";
 import { companyServiceTokenService } from "../services/company-service-tokens.js";
-import { boardChatService, isBoardChatToken } from "../services/board-chat.js";
+import { readInProcessBoardChatRequest } from "../services/board-chat-dispatch.js";
 import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compatibility.js";
 import { readServerSecret } from "../server-secrets.js";
 
@@ -90,6 +90,24 @@ interface ActorMiddlewareOptions {
 export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHandler {
   const boardAuth = boardAuthService(db);
   return async (req, _res, next) => {
+    // Board chat on a signed-in server hands its tool calls to this app as
+    // in-process requests (services/board-chat-dispatch.ts). They carry the
+    // person's one-company actor on a private Symbol, which no network
+    // request can carry, so nothing else is consulted for them.
+    const inProcess = readInProcessBoardChatRequest(req);
+    if (inProcess) {
+      const source = inProcess.actor.source;
+      if (inProcess.actor.type !== "board" || (source !== "board_chat" && source !== "board_chat_confirmed")) {
+        req.actor = { type: "none", source: "none" };
+        next();
+        return;
+      }
+      req.actor = inProcess.actor;
+      if (inProcess.action) req.boardChatAction = inProcess.action;
+      next();
+      return;
+    }
+
     req.actor =
       opts.deploymentMode === "local_trusted"
         ? {
@@ -172,21 +190,6 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
 
     const token = authHeader.slice("bearer ".length).trim();
     if (!token) {
-      next();
-      return;
-    }
-
-    // Board chat on a signed-in server: a run's short-lived credential, or the
-    // single-use credential that replays one approved change. Both resolve to
-    // the person, in one company, never as instance admin (see
-    // services/board-chat.ts). An unknown or expired one authenticates as
-    // nobody -- it never falls through to the other token kinds below.
-    if (opts.deploymentMode === "authenticated" && isBoardChatToken(token)) {
-      const resolved = await boardChatService(db).resolveActorForToken(token);
-      if (resolved) {
-        req.actor = resolved.actor;
-        if (resolved.action) req.boardChatAction = resolved.action;
-      }
       next();
       return;
     }

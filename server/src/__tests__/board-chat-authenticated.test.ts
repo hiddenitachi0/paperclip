@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { EventEmitter } from "node:events";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import express, { Router } from "express";
@@ -17,14 +16,17 @@ import {
   costEvents,
   createDb,
   instanceUserRoles,
+  goals,
+  issueComments,
+  issues,
 } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
 /**
  * Board chat on a signed-in Paperclip, end to end over real HTTP with a real
- * database: who may use it, the per-run credential, held changes, Approve and
- * Cancel, the deploy/merge refusal, caps, cost and the activity log. The
- * `claude` CLI is a fake process; no model is ever called.
+ * database. The model runs in-process (a scripted fake Claude client; no
+ * model is ever called) and its tools are in-process requests into this same
+ * app. There is no child process and no credential on the signed-in path.
  */
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -33,41 +35,38 @@ if (!support.supported) {
   console.warn(`Skipping Board chat signed-in tests: ${support.reason ?? "embedded Postgres unsupported"}`);
 }
 
-type FakeProc = EventEmitter & {
-  stdout: EventEmitter;
-  stderr: EventEmitter;
-  stdin: { write: (text: string) => void; end: () => void };
-  exitCode: number | null;
-  killed: boolean;
-  kill: (signal?: string) => void;
-  prompt: string;
-};
+type ScriptStep =
+  | { text: string }
+  | { tool: string; input: Record<string, unknown> };
 
-function makeFakeProc(): FakeProc {
-  const proc = new EventEmitter() as FakeProc;
-  proc.stdout = new EventEmitter();
-  proc.stderr = new EventEmitter();
-  proc.prompt = "";
-  proc.stdin = { write: (text: string) => { proc.prompt += text; }, end: () => {} };
-  proc.exitCode = null;
-  proc.killed = false;
-  proc.kill = () => {
-    proc.killed = true;
-    setImmediate(() => {
-      proc.exitCode = 143;
-      proc.emit("close", 143);
-    });
+function anthropicMessage(steps: ScriptStep[]) {
+  const content = steps.map((step, index) =>
+    "tool" in step
+      ? { type: "tool_use", id: `tool-${index}-${Math.random().toString(36).slice(2, 8)}`, name: step.tool, input: step.input }
+      : { type: "text", text: step.text },
+  );
+  const usesTools = steps.some((step) => "tool" in step);
+  return {
+    id: `msg-${Math.random().toString(36).slice(2, 8)}`,
+    type: "message",
+    role: "assistant",
+    model: "claude-test",
+    content,
+    stop_reason: usesTools ? "tool_use" : "end_turn",
+    usage: { input_tokens: 1000, output_tokens: 50 },
   };
-  return proc;
 }
 
 describeDb("Board chat on a signed-in server", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   let server: http.Server | null = null;
+  let testApp: any = null;
   let base = "";
-  let spawned: Array<{ command: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv; proc: FakeProc }> = [];
+  const spawnSpy = vi.fn();
   const targetCalls: Array<{ route: string; body: unknown; actor: any }> = [];
+  let script: ScriptStep[][] = [];
+  const modelCalls: Array<{ tools?: Array<{ name: string }>; messages: unknown[]; system: string }> = [];
 
   let companyA = "";
   let companyB = "";
@@ -77,6 +76,7 @@ describeDb("Board chat on a signed-in server", () => {
   const member = `member-${randomUUID()}`;
   const outsider = `outsider-${randomUUID()}`;
   const instanceAdmin = `iadmin-${randomUUID()}`;
+  const loneInstanceAdmin = `loneadmin-${randomUUID()}`;
 
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-board-chat-signed-in-");
@@ -88,8 +88,10 @@ describeDb("Board chat on a signed-in server", () => {
   });
 
   beforeEach(async () => {
-    spawned = [];
+    spawnSpy.mockReset();
     targetCalls.length = 0;
+    modelCalls.length = 0;
+    script = [];
     companyA = randomUUID();
     companyB = randomUUID();
     await db.insert(companies).values([
@@ -100,7 +102,7 @@ describeDb("Board chat on a signed-in server", () => {
     await db
       .insert(authUsers)
       .values(
-        [owner, owner2, admin, member, outsider, instanceAdmin].map((id) => ({
+        [owner, owner2, admin, member, outsider, instanceAdmin, loneInstanceAdmin].map((id) => ({
           id,
           name: id.split("-")[0]!,
           email: `${id}@example.test`,
@@ -117,26 +119,63 @@ describeDb("Board chat on a signed-in server", () => {
       { companyId: companyA, principalType: "user", principalId: member, status: "active", membershipRole: "operator" },
       { companyId: companyB, principalType: "user", principalId: outsider, status: "active", membershipRole: "owner" },
       // Paperclip only lets people into companies they belong to; an instance
-      // admin with an ordinary role still gets Board chat.
+      // admin with an ordinary role still gets Board chat there.
       { companyId: companyA, principalType: "user", principalId: instanceAdmin, status: "active", membershipRole: "operator" },
+      // The owner of A is also an owner of B: the chat must still stay in A.
+      { companyId: companyB, principalType: "user", principalId: owner, status: "active", membershipRole: "owner" },
     ]);
-    await db.insert(instanceUserRoles).values({ userId: instanceAdmin, role: "instance_admin" }).onConflictDoNothing();
+    await db
+      .insert(instanceUserRoles)
+      .values([
+        { userId: instanceAdmin, role: "instance_admin" },
+        { userId: loneInstanceAdmin, role: "instance_admin" },
+      ])
+      .onConflictDoNothing();
     await db.insert(boardChatCompanySettings).values({ companyId: companyA, enabled: true, dailyMessageCap: 40 });
 
-    const [{ instanceSettingsService }, { actorMiddleware }, { boardChatGuard }, { boardMutationGuard }, { boardChatRoutes }, { errorHandler }, { assertCompanyAccess }] =
-      await Promise.all([
-        import("../services/instance-settings.js"),
-        import("../middleware/auth.js"),
-        import("../middleware/board-chat-guard.js"),
-        import("../middleware/board-mutation-guard.js"),
-        import("../routes/board-chat.js"),
-        import("../middleware/error-handler.js"),
-        import("../routes/authz.js"),
-      ]);
+    const [
+      { instanceSettingsService },
+      { actorMiddleware },
+      { boardChatGuard },
+      { boardMutationGuard },
+      { boardChatRoutes },
+      { errorHandler },
+      { assertCompanyAccess },
+      { createInProcessDispatcher },
+      { goalRoutes },
+      { httpLogger },
+      { createRequestLoadTracker },
+    ] = await Promise.all([
+      import("../services/instance-settings.js"),
+      import("../middleware/auth.js"),
+      import("../middleware/board-chat-guard.js"),
+      import("../middleware/board-mutation-guard.js"),
+      import("../routes/board-chat.js"),
+      import("../middleware/error-handler.js"),
+      import("../routes/authz.js"),
+      import("../services/board-chat-dispatch.js"),
+      import("../routes/goals.js"),
+      import("../middleware/logger.js"),
+      import("../services/request-load.js"),
+    ]);
     await instanceSettingsService(db).updateExperimental({ enableConferenceRoomChat: true });
+
+    const fakeClient = {
+      messages: {
+        create: vi.fn(async (params: any) => {
+          modelCalls.push({ tools: params.tools, messages: params.messages, system: params.system });
+          const next = script.shift() ?? [{ text: "All done." }];
+          return anthropicMessage(next);
+        }),
+      },
+    };
 
     const app = express();
     app.use(express.json());
+    // The same request-wide middleware the real app runs before sign-in, so
+    // in-process requests are proven to pass through them too.
+    app.use(httpLogger);
+    app.use(createRequestLoadTracker().middleware());
     app.use(
       actorMiddleware(db, {
         deploymentMode: "authenticated",
@@ -153,19 +192,21 @@ describeDb("Board chat on a signed-in server", () => {
       boardChatRoutes(db, {
         deploymentMode: "authenticated",
         deps: {
-          spawn: ((command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv }) => {
-            const proc = makeFakeProc();
-            spawned.push({ command, args, cwd: options.cwd, env: options.env, proc });
-            return proc as any;
-          }) as any,
-          resolveClaudeFallbackToken: async () => null,
+          spawn: spawnSpy as never,
+          dispatch: createInProcessDispatcher(() => app as never),
+          helperOptions: { createModelClient: () => fakeClient as never },
         },
       }),
     );
-    // Stand-ins for the real routes a held change ends up calling.
+    // Stand-ins for the real routes the tools and approved changes call.
     api.get("/companies/:companyId/dashboard", (req, res) => {
       assertCompanyAccess(req, req.params.companyId as string);
-      res.json({ ok: true, userId: req.actor.userId });
+      targetCalls.push({ route: "dashboard", body: null, actor: { ...req.actor } });
+      res.json({ ok: true, agents: 3, userId: req.actor.userId });
+    });
+    api.get("/companies/:companyId/mail-accounts/:accountId/messages", (_req, res) => {
+      targetCalls.push({ route: "mail", body: null, actor: null });
+      res.json({ secret: "mail" });
     });
     api.post("/companies/:companyId/issues", (req, res) => {
       assertCompanyAccess(req, req.params.companyId as string);
@@ -176,9 +217,12 @@ describeDb("Board chat on a signed-in server", () => {
       targetCalls.push({ route: "approve", body: req.body, actor: { ...req.actor } });
       res.json({ ok: true });
     });
-    api.get("/instance/settings", (_req, res) => res.json({ secret: "nope" }));
+    // One real route file, so a held change is proven against real route code
+    // (company scope, validation, activity log), not only stand-ins.
+    api.use(goalRoutes(db));
     app.use("/api", api);
     app.use(errorHandler);
+    testApp = app;
 
     server = http.createServer(app);
     await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", () => resolve()));
@@ -189,113 +233,66 @@ describeDb("Board chat on a signed-in server", () => {
     server?.closeAllConnections();
     await new Promise<void>((resolve) => server?.close(() => resolve()));
     server = null;
-    for (const table of [boardChatActions, boardChatRuns, boardChatCompanySettings, costEvents, activityLog, approvals]) {
+    for (const table of [boardChatActions, boardChatRuns, boardChatCompanySettings, costEvents, activityLog, approvals, issueComments, issues, goals]) {
       await db.delete(table);
     }
   });
 
-  function asUser(userId: string, extra: Record<string, string> = {}) {
-    return { "x-test-user": userId, origin: base, "content-type": "application/json", ...extra };
+  function asUser(userId: string) {
+    return { "x-test-user": userId, origin: base, "content-type": "application/json" };
   }
 
-  async function startChat(userId: string, message = "What is going on?") {
-    const before = spawned.length;
-    const response = fetch(`${base}/api/board/chat/stream`, {
+  async function chat(userId: string, message = "What is going on?") {
+    const res = await fetch(`${base}/api/board/chat/stream`, {
       method: "POST",
       headers: asUser(userId),
       body: JSON.stringify({ companyId: companyA, message }),
     });
-    await vi.waitFor(() => expect(spawned.length).toBeGreaterThan(before), { timeout: 10_000 });
-    const entry = spawned[spawned.length - 1]!;
-    const mcpConfig = JSON.parse(entry.args[entry.args.indexOf("--mcp-config") + 1]!);
-    const env = mcpConfig.mcpServers.paperclip.env as Record<string, string>;
-    const res = await response;
-    const textPromise = res.text();
-    return {
-      ...entry,
-      status: res.status,
-      runId: env.PAPERCLIP_BC_RUN_ID,
-      bootstrap: env.PAPERCLIP_BC_BOOTSTRAP,
-      async exchange(code = env.PAPERCLIP_BC_BOOTSTRAP) {
-        const r = await fetch(`${base}/api/board/chat/runs/${env.PAPERCLIP_BC_RUN_ID}/token`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ code }),
-        });
-        return { status: r.status, body: (await r.json()) as { token?: string } };
-      },
-      async finish(lines: unknown[] = []) {
-        for (const line of lines) entry.proc.stdout.emit("data", Buffer.from(`${JSON.stringify(line)}\n`));
-        entry.proc.exitCode = 0;
-        entry.proc.emit("close", 0);
-        return textPromise;
-      },
-    };
+    return { status: res.status, text: await res.text() };
   }
 
-  function asRun(token: string) {
-    return { authorization: `Bearer ${token}`, "content-type": "application/json" };
-  }
-
-  it("lets an owner chat with a locked-down CLI that has only the Paperclip connector", async () => {
-    const chat = await startChat(owner);
-    expect(chat.status).toBe(200);
-    expect(chat.command).toBe("claude");
-    expect(chat.args).not.toContain("--dangerously-skip-permissions");
-    expect(chat.args[chat.args.indexOf("--tools") + 1]).toBe("");
-    expect(chat.args).toContain("--strict-mcp-config");
-    expect(chat.args[chat.args.indexOf("--allowedTools") + 1]).toBe("mcp__paperclip__api");
-    expect(chat.args[chat.args.indexOf("--permission-mode") + 1]).toBe("dontAsk");
-    expect(chat.cwd).not.toBe("/tmp");
-    // The CLI never sees a usable credential: only a one-time code, in the connector's config.
-    expect(chat.bootstrap).toMatch(/^pcp_bcboot_/);
-    expect(JSON.stringify(chat.args)).not.toMatch(/pcp_bcrun_|pcp_bcexec_/);
-    expect(JSON.stringify(chat.env)).not.toMatch(/pcp_bc/);
-    expect(chat.env.DATABASE_URL).toBeUndefined();
-    const sse = await chat.finish([{ type: "stream_event", event: { type: "content_block_delta", delta: { text: "All good." } } }]);
-    expect(sse).toContain('"type":"done"');
+  it("answers in-process with a closed tool list and never starts a child process", async () => {
+    script = [[{ tool: "get_overview", input: {} }], [{ text: "You have 3 agents." }]];
+    const res = await chat(owner);
+    expect(res.status).toBe(200);
+    expect(res.text).toContain("You have 3 agents.");
+    expect(spawnSpy).not.toHaveBeenCalled();
+    // The model only ever sees the named tools: no shell, no free-form address tool.
+    const toolNames = (modelCalls[0]!.tools ?? []).map((t) => t.name).sort();
+    expect(toolNames).toContain("get_overview");
+    expect(toolNames).toContain("create_task");
+    expect(toolNames).not.toContain("api");
+    expect(toolNames.some((name) => /bash|shell|fetch|http|request/i.test(name))).toBe(false);
+    // The read ran in-process as the person, inside one company, never as instance admin.
+    expect(targetCalls).toHaveLength(1);
+    expect(targetCalls[0]!.actor).toMatchObject({ type: "board", userId: owner, companyIds: [companyA], isInstanceAdmin: false, source: "board_chat" });
+    // Nothing credential-shaped anywhere in what the model was sent.
+    expect(JSON.stringify(modelCalls)).not.toMatch(/pcp_|Bearer /);
   });
 
-  it("lets an admin and an instance admin chat, refuses members and other companies", async () => {
-    const adminChat = await startChat(admin);
-    expect(adminChat.status).toBe(200);
-    await adminChat.finish();
-    const iadminChat = await startChat(instanceAdmin);
-    expect(iadminChat.status).toBe(200);
-    await iadminChat.finish();
-    spawned = [];
+  it("lets an admin and an instance admin who belongs here chat; refuses members, other companies and outsiders", async () => {
+    expect((await chat(admin)).status).toBe(200);
+    expect((await chat(instanceAdmin)).status).toBe(200);
 
-    const memberRes = await fetch(`${base}/api/board/chat/stream`, {
-      method: "POST",
-      headers: asUser(member),
-      body: JSON.stringify({ companyId: companyA, message: "hi" }),
-    });
+    const memberRes = await chat(member);
     expect(memberRes.status).toBe(403);
-    expect(await memberRes.json()).toMatchObject({ code: "BOARD_CHAT_ROLE_REQUIRED", error: "Board chat is only for this company's owner and admins." });
-
-    const outsiderRes = await fetch(`${base}/api/board/chat/stream`, {
-      method: "POST",
-      headers: asUser(outsider),
-      body: JSON.stringify({ companyId: companyA, message: "hi" }),
-    });
-    expect(outsiderRes.status).toBe(403);
-    expect(spawned).toHaveLength(0);
+    expect(JSON.parse(memberRes.text)).toMatchObject({ code: "BOARD_CHAT_ROLE_REQUIRED", error: "Board chat is only for this company's owner and admins." });
+    expect((await chat(outsider)).status).toBe(403);
+    expect((await chat(loneInstanceAdmin)).status).toBe(403);
 
     const availability = await fetch(`${base}/api/companies/${companyA}/board-chat/availability`, { headers: asUser(member) });
     expect(await availability.json()).toMatchObject({ available: false, reason: "not_allowed", mode: "signed_in" });
     const ownerAvailability = await fetch(`${base}/api/companies/${companyA}/board-chat/availability`, { headers: asUser(owner) });
     expect(await ownerAvailability.json()).toMatchObject({ available: true, canChangeSettings: true });
+    const anonymous = await fetch(`${base}/api/companies/${companyA}/board-chat/availability`);
+    expect(anonymous.status).toBe(403);
   });
 
   it("is off until the company switches it on, and only an owner can switch it", async () => {
     await db.update(boardChatCompanySettings).set({ enabled: false }).where(eq(boardChatCompanySettings.companyId, companyA));
-    const off = await fetch(`${base}/api/board/chat/stream`, {
-      method: "POST",
-      headers: asUser(owner),
-      body: JSON.stringify({ companyId: companyA, message: "hi" }),
-    });
+    const off = await chat(owner);
     expect(off.status).toBe(403);
-    expect(await off.json()).toMatchObject({ code: "BOARD_CHAT_COMPANY_OFF" });
+    expect(JSON.parse(off.text)).toMatchObject({ code: "BOARD_CHAT_COMPANY_OFF" });
 
     const adminPatch = await fetch(`${base}/api/companies/${companyA}/board-chat/settings`, {
       method: "PATCH",
@@ -314,131 +311,48 @@ describeDb("Board chat on a signed-in server", () => {
     expect(logged[0]).toMatchObject({ actorType: "user", actorId: owner, companyId: companyA });
   });
 
-  it("enforces the daily message cap", async () => {
-    await db.update(boardChatCompanySettings).set({ dailyMessageCap: 1 }).where(eq(boardChatCompanySettings.companyId, companyA));
-    const first = await startChat(owner);
-    await first.finish();
-    const second = await fetch(`${base}/api/board/chat/stream`, {
-      method: "POST",
-      headers: asUser(owner),
-      body: JSON.stringify({ companyId: companyA, message: "again" }),
-    });
-    expect(second.status).toBe(429);
-    expect(await second.json()).toMatchObject({ code: "BOARD_CHAT_DAILY_CAP" });
+  it("enforces the daily message cap, even for messages sent at the same moment", async () => {
+    await db.update(boardChatCompanySettings).set({ dailyMessageCap: 2 }).where(eq(boardChatCompanySettings.companyId, companyA));
+    const results = await Promise.all([chat(owner), chat(owner), chat(owner)]);
+    const statuses = results.map((r) => r.status).sort();
+    expect(statuses.filter((s) => s === 200)).toHaveLength(2);
+    const refused = results.find((r) => r.status === 429)!;
+    expect(JSON.parse(refused.text)).toMatchObject({ code: "BOARD_CHAT_DAILY_CAP" });
+    const runs = await db.select().from(boardChatRuns).where(eq(boardChatRuns.companyId, companyA));
+    expect(runs).toHaveLength(2);
   });
 
-  it("gives the run a credential that reads only this company and dies with the run", async () => {
-    const chat = await startChat(owner);
-    const { status, body } = await chat.exchange();
-    expect(status).toBe(200);
-    const token = body.token!;
-    expect(token).toMatch(/^pcp_bcrun_/);
-
-    const own = await fetch(`${base}/api/companies/${companyA}/dashboard`, { headers: asRun(token) });
-    expect(own.status).toBe(200);
-    expect(await own.json()).toMatchObject({ ok: true, userId: owner });
-    const other = await fetch(`${base}/api/companies/${companyB}/dashboard`, { headers: asRun(token) });
-    expect(other.status).toBe(403);
-    expect(await other.json()).toMatchObject({ code: "BOARD_CHAT_OTHER_COMPANY" });
-    const instance = await fetch(`${base}/api/instance/settings`, { headers: asRun(token) });
-    expect(instance.status).toBe(403);
-    const ownApproval = await fetch(`${base}/api/board/chat/actions/${randomUUID()}/confirm`, { method: "POST", headers: asRun(token) });
-    expect(ownApproval.status).toBe(403);
-
-    await chat.finish();
-    const after = await fetch(`${base}/api/companies/${companyA}/dashboard`, { headers: asRun(token) });
-    expect(after.status).toBe(401); // the credential no longer authenticates anyone
-    const [run] = await db.select().from(boardChatRuns).where(eq(boardChatRuns.id, chat.runId!));
-    expect(run).toMatchObject({ status: "done", tokenHash: null });
-  });
-
-  it("revokes the credential when the one-time code is used twice", async () => {
-    const chat = await startChat(owner);
-    const first = await chat.exchange();
-    expect(first.status).toBe(200);
-    const second = await chat.exchange();
-    expect(second.status).toBe(403);
-    const blocked = await fetch(`${base}/api/companies/${companyA}/dashboard`, { headers: asRun(first.body.token!) });
-    expect(blocked.status).toBe(401);
-    const sse = await chat.finish();
-    expect(sse).toContain("stopped for safety");
-  });
-
-  it("holds a write until the person approves it, then makes exactly that change once", async () => {
-    const chat = await startChat(owner);
-    const token = (await chat.exchange()).body.token!;
-    const held = await fetch(`${base}/api/companies/${companyA}/issues`, {
-      method: "POST",
-      headers: asRun(token),
-      body: JSON.stringify({ title: "Launch plan", priority: "high" }),
-    });
-    expect(held.status).toBe(202);
-    const heldBody = (await held.json()) as { held: boolean; pendingActionId: string; summary: string };
-    expect(heldBody).toMatchObject({ held: true, summary: 'Create a new task "Launch plan"' });
-    expect(targetCalls).toHaveLength(0);
-    const sse = await chat.finish();
-    expect(sse).toContain('"type":"action"');
-
-    const list = await fetch(`${base}/api/companies/${companyA}/board-chat/actions`, { headers: asUser(owner) });
-    const { actions } = (await list.json()) as { actions: Array<{ id: string; status: string; details: unknown[] }> };
-    expect(actions).toHaveLength(1);
-    expect(actions[0]).toMatchObject({ id: heldBody.pendingActionId, status: "pending" });
-    expect(actions[0]!.details).toContainEqual({ label: "Priority", value: "high" });
-
-    // Nobody else can approve it: not a member, not another owner.
-    const byMember = await fetch(`${base}/api/board/chat/actions/${heldBody.pendingActionId}/confirm`, { method: "POST", headers: asUser(member) });
-    expect(byMember.status).toBe(403);
-    const byOtherOwner = await fetch(`${base}/api/board/chat/actions/${heldBody.pendingActionId}/confirm`, { method: "POST", headers: asUser(owner2) });
-    expect(byOtherOwner.status).toBe(403);
-    expect(await byOtherOwner.json()).toMatchObject({ code: "BOARD_CHAT_NOT_YOUR_CHANGE" });
-    expect(targetCalls).toHaveLength(0);
-
-    const confirm = await fetch(`${base}/api/board/chat/actions/${heldBody.pendingActionId}/confirm`, { method: "POST", headers: asUser(owner) });
-    expect(confirm.status).toBe(200);
-    expect(await confirm.json()).toMatchObject({ action: { status: "done", resultMessage: "Done (ALP-9)." } });
-    expect(targetCalls).toHaveLength(1);
-    expect(targetCalls[0]).toMatchObject({
-      route: "create_issue",
-      body: { title: "Launch plan", priority: "high" },
-      actor: { type: "board", userId: owner, companyIds: [companyA], isInstanceAdmin: false, source: "board_chat_confirmed" },
-    });
-
-    const again = await fetch(`${base}/api/board/chat/actions/${heldBody.pendingActionId}/confirm`, { method: "POST", headers: asUser(owner) });
-    expect(again.status).toBe(409);
-    expect(targetCalls).toHaveLength(1);
-
-    const actionsLogged = (await db.select().from(activityLog).where(eq(activityLog.companyId, companyA))).map((row) => [row.action, row.actorId]);
-    expect(actionsLogged).toEqual(
-      expect.arrayContaining([
-        ["board_chat.message_sent", owner],
-        ["board_chat.action_requested", owner],
-        ["board_chat.action_confirmed", owner],
-        ["board_chat.reply_finished", owner],
-      ]),
-    );
-  });
-
-  it("drops a held change on Cancel and never makes it", async () => {
-    const chat = await startChat(owner);
-    const token = (await chat.exchange()).body.token!;
-    const held = (await (await fetch(`${base}/api/companies/${companyA}/issues`, {
-      method: "POST",
-      headers: asRun(token),
-      body: JSON.stringify({ title: "Never" }),
-    })).json()) as { pendingActionId: string };
-    await chat.finish();
-    const cancel = await fetch(`${base}/api/board/chat/actions/${held.pendingActionId}/cancel`, { method: "POST", headers: asUser(owner) });
-    expect(cancel.status).toBe(200);
-    expect(await cancel.json()).toMatchObject({ action: { status: "cancelled" } });
-    const confirm = await fetch(`${base}/api/board/chat/actions/${held.pendingActionId}/confirm`, { method: "POST", headers: asUser(owner) });
-    expect(confirm.status).toBe(409);
-    expect(targetCalls).toHaveLength(0);
-    const logged = await db.select().from(activityLog).where(and(eq(activityLog.action, "board_chat.action_cancelled"), eq(activityLog.actorId, owner)));
-    expect(logged).toHaveLength(1);
-  });
-
-  it("only lets an Approve credential send the exact approved request", async () => {
+  it("keeps in-process reads inside the one company, refuses mixed-case addresses, and holds any write", async () => {
     const { boardChatService } = await import("../services/board-chat.js");
+    const { createInProcessDispatcher } = await import("../services/board-chat-dispatch.js");
+    const dispatch = createInProcessDispatcher(() => testApp);
+    const actor = (await boardChatService(db).buildActor({ companyId: companyA, userId: owner }))!;
+    expect(actor).toMatchObject({ companyIds: [companyA], isInstanceAdmin: false, source: "board_chat" });
+
+    expect((await dispatch({ method: "GET", path: `/api/companies/${companyA}/dashboard`, actor })).status).toBe(200);
+    // The owner also owns company B, but this chat is about A only.
+    const other = await dispatch({ method: "GET", path: `/api/companies/${companyB}/dashboard`, actor });
+    expect(other.status).toBe(403);
+    expect(other.json).toMatchObject({ code: "BOARD_CHAT_OTHER_COMPANY" });
+    for (const path of [
+      `/api/companies/${companyA}/Mail-Accounts/x/messages`,
+      `/api/companies/${companyA}/MAIL-ACCOUNTS/x/messages`,
+      `/api/companies/${companyA}/mail-accounts/x/messages`,
+      "/api/Admin/users",
+      "/api/Secrets/1/usage",
+      `/API/companies/${companyA}/dashboard`,
+    ]) {
+      const res = await dispatch({ method: "GET", path, actor });
+      expect(res.status, path).toBe(403);
+    }
+    expect(targetCalls.filter((c) => c.route === "mail")).toHaveLength(0);
+
+    // A write that reaches the guard is held, never made.
+    const write = await dispatch({ method: "POST", path: `/api/companies/${companyA}/issues`, body: { title: "Held" }, actor });
+    expect(write.status).toBe(202);
+    expect(targetCalls.filter((c) => c.route === "create_issue")).toHaveLength(0);
+
+    // An approved-change actor can only send exactly the approved request.
     const svc = boardChatService(db);
     const action = await svc.createAction({
       companyId: companyA,
@@ -451,25 +365,90 @@ describeDb("Board chat on a signed-in server", () => {
       summary: 'Create a new task "Exact"',
       details: [],
     });
-    const begun = await svc.beginConfirm(action.id, owner);
-    const tampered = await fetch(`${base}/api/companies/${companyA}/issues`, {
+    const confirmedActor = (await svc.buildActor({ companyId: companyA, userId: owner, actionId: action.id }))!;
+    const tampered = await dispatch({
       method: "POST",
-      headers: asRun(begun!.execToken),
-      body: JSON.stringify({ title: "Something else" }),
+      path: `/api/companies/${companyA}/issues`,
+      body: { title: "Something else" },
+      actor: confirmedActor,
+      action: { id: action.id, companyId: companyA, userId: owner, issueId: null, method: "POST", path: `/api/companies/${companyA}/issues`, bodyJson: JSON.stringify({ title: "Exact" }), summary: "x" },
     });
     expect(tampered.status).toBe(403);
-    expect(await tampered.json()).toMatchObject({ code: "BOARD_CHAT_REPLAY_MISMATCH" });
-    // Single use: the credential was spent on the refused attempt.
-    const retry = await fetch(`${base}/api/companies/${companyA}/issues`, {
-      method: "POST",
-      headers: asRun(begun!.execToken),
-      body: JSON.stringify({ title: "Exact" }),
-    });
-    expect(retry.status).toBe(401);
-    expect(targetCalls).toHaveLength(0);
+    expect(tampered.json).toMatchObject({ code: "BOARD_CHAT_REPLAY_MISMATCH" });
+    expect(targetCalls.filter((c) => c.route === "create_issue")).toHaveLength(0);
   });
 
-  it("never lets the chat decide deploy or merge cards, but can ask to approve a hire", async () => {
+  it("holds a write until the person approves it, then makes exactly that change once, in-process", async () => {
+    script = [
+      [{ tool: "create_task", input: { title: "Launch plan", priority: "high" } }],
+      [{ text: "I prepared a task for you to approve." }],
+    ];
+    const res = await chat(owner, "Make a launch plan task");
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('"type":"action"');
+    expect(targetCalls.filter((c) => c.route === "create_issue")).toHaveLength(0);
+    // The model was told it was held, not made.
+    const toolResult = JSON.stringify(modelCalls[1]!.messages);
+    expect(toolResult).toContain("NOT made");
+
+    const list = await fetch(`${base}/api/companies/${companyA}/board-chat/actions`, { headers: asUser(owner) });
+    const { actions } = (await list.json()) as { actions: Array<{ id: string; status: string; details: unknown[]; summary: string }> };
+    expect(actions).toHaveLength(1);
+    const held = actions[0]!;
+    expect(held).toMatchObject({ status: "pending", summary: 'Create a new task "Launch plan"' });
+    expect(held.details).toEqual([
+      { label: "Title", value: "Launch plan" },
+      { label: "Priority", value: "high" },
+    ]);
+
+    const byMember = await fetch(`${base}/api/board/chat/actions/${held.id}/confirm`, { method: "POST", headers: asUser(member) });
+    expect(byMember.status).toBe(403);
+    const byOtherOwner = await fetch(`${base}/api/board/chat/actions/${held.id}/confirm`, { method: "POST", headers: asUser(owner2) });
+    expect(byOtherOwner.status).toBe(403);
+    expect(await byOtherOwner.json()).toMatchObject({ code: "BOARD_CHAT_NOT_YOUR_CHANGE" });
+    expect(targetCalls.filter((c) => c.route === "create_issue")).toHaveLength(0);
+
+    const confirm = await fetch(`${base}/api/board/chat/actions/${held.id}/confirm`, { method: "POST", headers: asUser(owner) });
+    expect(confirm.status).toBe(200);
+    expect(await confirm.json()).toMatchObject({ action: { status: "done", resultMessage: "Done (ALP-9)." } });
+    const made = targetCalls.filter((c) => c.route === "create_issue");
+    expect(made).toHaveLength(1);
+    expect(made[0]).toMatchObject({
+      body: { title: "Launch plan", priority: "high" },
+      actor: { type: "board", userId: owner, companyIds: [companyA], isInstanceAdmin: false, source: "board_chat_confirmed" },
+    });
+    expect(spawnSpy).not.toHaveBeenCalled();
+
+    const again = await fetch(`${base}/api/board/chat/actions/${held.id}/confirm`, { method: "POST", headers: asUser(owner) });
+    expect(again.status).toBe(409);
+    expect(targetCalls.filter((c) => c.route === "create_issue")).toHaveLength(1);
+
+    const logged = (await db.select().from(activityLog).where(eq(activityLog.companyId, companyA))).map((row) => [row.action, row.actorId]);
+    expect(logged).toEqual(
+      expect.arrayContaining([
+        ["board_chat.message_sent", owner],
+        ["board_chat.action_requested", owner],
+        ["board_chat.action_confirmed", owner],
+        ["board_chat.reply_finished", owner],
+      ]),
+    );
+  });
+
+  it("drops a held change on Cancel and never makes it", async () => {
+    script = [[{ tool: "create_task", input: { title: "Never" } }], [{ text: "Prepared." }]];
+    await chat(owner);
+    const [held] = await db.select().from(boardChatActions).where(eq(boardChatActions.companyId, companyA));
+    const cancel = await fetch(`${base}/api/board/chat/actions/${held!.id}/cancel`, { method: "POST", headers: asUser(owner) });
+    expect(cancel.status).toBe(200);
+    expect(await cancel.json()).toMatchObject({ action: { status: "cancelled" } });
+    const confirm = await fetch(`${base}/api/board/chat/actions/${held!.id}/confirm`, { method: "POST", headers: asUser(owner) });
+    expect(confirm.status).toBe(409);
+    expect(targetCalls.filter((c) => c.route === "create_issue")).toHaveLength(0);
+    const logged = await db.select().from(activityLog).where(and(eq(activityLog.action, "board_chat.action_cancelled"), eq(activityLog.actorId, owner)));
+    expect(logged).toHaveLength(1);
+  });
+
+  it("never lets the chat decide deploy or merge cards, but can prepare approving a hire", async () => {
     const [deploy, merge, hire] = await db
       .insert(approvals)
       .values([
@@ -478,47 +457,84 @@ describeDb("Board chat on a signed-in server", () => {
         { companyId: companyA, type: "hire_agent", payload: { name: "Bob" } },
       ])
       .returning();
-    const chat = await startChat(owner);
-    const token = (await chat.exchange()).body.token!;
-    for (const card of [deploy!, merge!]) {
-      for (const verb of ["approve", "reject", "request-revision"]) {
-        const res = await fetch(`${base}/api/approvals/${card.id}/${verb}`, { method: "POST", headers: asRun(token), body: "{}" });
-        expect(res.status, `${verb} ${card.id}`).toBe(403);
-        expect(await res.json()).toMatchObject({ code: "BOARD_CHAT_APPROVAL_NOT_ALLOWED" });
-      }
-    }
-    const hireRes = await fetch(`${base}/api/approvals/${hire!.id}/approve`, { method: "POST", headers: asRun(token), body: "{}" });
-    expect(hireRes.status).toBe(202);
-    await chat.finish();
+    script = [
+      [
+        { tool: "decide_card", input: { cardId: deploy!.id, decision: "approve" } },
+        { tool: "decide_card", input: { cardId: merge!.id, decision: "reject" } },
+        { tool: "decide_card", input: { cardId: hire!.id, decision: "approve" } },
+      ],
+      [{ text: "Done preparing." }],
+    ];
+    await chat(owner);
+    const toolResults = JSON.stringify(modelCalls[1]!.messages);
+    expect(toolResults).toContain("Deploy and merge cards can't be decided in Board chat");
     const held = await db.select().from(boardChatActions).where(eq(boardChatActions.companyId, companyA));
     expect(held).toHaveLength(1);
     expect(held[0]!.summary).toBe('Approve the card "Bob"');
-    expect(targetCalls).toHaveLength(0);
+    expect(targetCalls.filter((c) => c.route === "approve")).toHaveLength(0);
   });
 
-  it("records each message's spend as a cost event for the company", async () => {
-    const chat = await startChat(owner);
-    await chat.finish([
-      { type: "stream_event", event: { type: "content_block_delta", delta: { text: "Here you go." } } },
-      {
-        type: "result",
-        result: "Here you go.",
-        total_cost_usd: 0.0234,
-        usage: { input_tokens: 1200, output_tokens: 80, cache_read_input_tokens: 300 },
-        modelUsage: { "claude-sonnet-5-5": {} },
-      },
+  it("refuses agent changes outside the allow-list, and unknown tools, without holding anything", async () => {
+    const agentId = randomUUID();
+    script = [
+      [
+        { tool: "update_agent", input: { agentId, runtimeConfig: { modelProfiles: { cheap: { adapterConfig: { command: "/bin/sh" } } } } } },
+        { tool: "hire_agent", input: { name: "Eve", permissions: { canCreateAgents: true }, laneABaseUrl: "https://attacker.example" } },
+        { tool: "api", input: { method: "GET", path: "/api/instance/settings" } },
+      ],
+      [{ text: "I couldn't do that." }],
+    ];
+    await chat(owner);
+    const toolResults = JSON.stringify(modelCalls[1]!.messages);
+    expect(toolResults).toContain("don't fit update_agent");
+    expect(toolResults).toContain("don't fit hire_agent");
+    expect(toolResults).toContain("There is no tool called api");
+    expect(await db.select().from(boardChatActions).where(eq(boardChatActions.companyId, companyA))).toHaveLength(0);
+  });
+
+  it("records each model call's spend as a cost event for the company", async () => {
+    script = [[{ tool: "get_overview", input: {} }], [{ text: "Here you go." }]];
+    await chat(owner);
+    const events = await db.select().from(costEvents).where(eq(costEvents.companyId, companyA));
+    expect(events.length).toBe(2);
+    for (const event of events) expect(event).toMatchObject({ billingCode: "board_chat", agentId: null, inputTokens: 1000, outputTokens: 50 });
+    const [run] = await db.select().from(boardChatRuns).where(eq(boardChatRuns.companyId, companyA));
+    expect(run).toMatchObject({ status: "done", inputTokens: 2000, outputTokens: 100 });
+  });
+
+  it("reads and, after Approve, writes through a real route in-process as the person", async () => {
+    script = [
+      [{ tool: "list_goals", input: {} }],
+      [{ tool: "create_goal", input: { title: "Reach 100 customers", description: "By year end" } }],
+      [{ text: "Prepared a goal for you." }],
+    ];
+    await chat(owner);
+    expect(JSON.stringify(modelCalls[1]!.messages)).toContain("[]");
+    expect(await db.select().from(goals).where(eq(goals.companyId, companyA))).toHaveLength(0);
+    const [held] = await db.select().from(boardChatActions).where(eq(boardChatActions.companyId, companyA));
+    expect(held!.details).toEqual([
+      { label: "Title", value: "Reach 100 customers" },
+      { label: "Description", value: "By year end" },
     ]);
-    const [event] = await db.select().from(costEvents).where(eq(costEvents.companyId, companyA));
-    expect(event).toMatchObject({
-      billingCode: "board_chat",
-      createdByUserId: owner,
-      agentId: null,
-      costCents: 2,
-      inputTokens: 1200,
-      outputTokens: 80,
-      model: "claude-sonnet-5-5",
+    const confirm = await fetch(`${base}/api/board/chat/actions/${held!.id}/confirm`, { method: "POST", headers: asUser(owner) });
+    expect(await confirm.json()).toMatchObject({ action: { status: "done" } });
+    const made = await db.select().from(goals).where(eq(goals.companyId, companyA));
+    expect(made).toHaveLength(1);
+    expect(made[0]).toMatchObject({ title: "Reach 100 customers", description: "By year end" });
+    const [logged] = await db.select().from(activityLog).where(eq(activityLog.action, "goal.created"));
+    expect(logged).toMatchObject({ actorType: "user", actorId: owner, companyId: companyA });
+  });
+
+  it("keeps the conversation on the Board Operations task only", async () => {
+    const [other] = await db
+      .insert(issues)
+      .values({ companyId: companyA, title: "Agent work", status: "todo", priority: "medium" })
+      .returning();
+    const res = await fetch(`${base}/api/board/chat/stream`, {
+      method: "POST",
+      headers: asUser(owner),
+      body: JSON.stringify({ companyId: companyA, message: "hi", taskId: other!.id }),
     });
-    const [run] = await db.select().from(boardChatRuns).where(eq(boardChatRuns.id, chat.runId!));
-    expect(run).toMatchObject({ costCents: 2, costEventId: event!.id });
+    expect(res.status).toBe(403);
   });
 });

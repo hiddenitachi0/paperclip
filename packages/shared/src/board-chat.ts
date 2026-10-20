@@ -65,7 +65,6 @@ export interface BoardChatAvailabilityResponse {
 
 export const BOARD_CHAT_ACTION_STATUSES = [
   "pending",
-  "confirmed",
   "executing",
   "done",
   "failed",

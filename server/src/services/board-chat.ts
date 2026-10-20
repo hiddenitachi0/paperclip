@@ -1,6 +1,5 @@
-import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { and, desc, eq, gt, gte, isNull, lt, sql } from "drizzle-orm";
+import { and, desc, eq, gt, gte, lt, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -20,47 +19,17 @@ import {
   type BoardChatSettings,
   type UpdateBoardChatSettingsInput,
 } from "@paperclipai/shared";
-import { hashBearerToken, boardAuthService } from "./board-auth.js";
-import { logger } from "../middleware/logger.js";
+import { boardAuthService } from "./board-auth.js";
 import type { BoardChatPolicyLookup } from "./board-chat-policy.js";
 
 /**
- * Board chat on signed-in Paperclip servers: settings, runs, the short-lived
- * per-run credential, and held changes ("actions").
+ * Board chat on signed-in Paperclip servers: settings, runs (the daily cap and
+ * cost), the person's one-company actor, and held changes ("actions").
  *
- * THE CREDENTIAL CHAIN (no long-lived or server-wide key is ever used)
- * --------------------------------------------------------------------
- *   1. When a person sends a message, `startRun` stores a run row and returns
- *      a ONE-TIME bootstrap code (only its hash is stored).
- *   2. The run's Paperclip connector (the only tool the model has) swaps the
- *      code for the run credential, once, within a minute. A second swap with
- *      the same code means someone else saw it: the credential is revoked and
- *      the run fails closed.
- *   3. The run credential authenticates as THAT person, with access to THAT
- *      company only, no instance-admin powers, and only while the run is
- *      running (it dies when the run ends, and after a few minutes at most).
- *      Every write it sends is held as an action, not made.
- *   4. Approve mints a third, single-use credential bound to that one held
- *      change; the server replays exactly the held request with it, and the
- *      request is checked against the stored copy before it reaches the route.
+ * The model runs inside the Paperclip server and its tools are in-process
+ * calls into this server's own routes (board-chat-dispatch.ts). There is no
+ * child process and no credential of any kind for the authenticated path.
  */
-
-export const BOARD_CHAT_TOKEN_PREFIX = {
-  bootstrap: "pcp_bcboot_",
-  run: "pcp_bcrun_",
-  exec: "pcp_bcexec_",
-} as const;
-
-/** How long a run credential can live at most (the CLI itself is stopped after two minutes). */
-export const BOARD_CHAT_RUN_TTL_MS = 4 * 60 * 1000;
-/** The connector must swap its bootstrap code this soon after the run starts. */
-export const BOARD_CHAT_BOOTSTRAP_TTL_MS = 60 * 1000;
-/** The single-use Approve credential lives this long. */
-export const BOARD_CHAT_EXEC_TTL_MS = 60 * 1000;
-
-function newToken(prefix: string) {
-  return `${prefix}${randomBytes(24).toString("hex")}`;
-}
 
 /** In-process notifications so an open chat stream can show a held change the moment it is held. */
 export const boardChatEvents = new EventEmitter();
@@ -96,10 +65,7 @@ export function toBoardChatAction(row: ActionRow, now = new Date()): BoardChatAc
   };
 }
 
-export type BoardChatActorResolution = Express.Request["actor"] & {
-  boardChatRunId?: string;
-  boardChatActionId?: string;
-};
+export type BoardChatActor = Express.Request["actor"];
 
 export function boardChatService(db: Db, deps: { now?: () => Date } = {}) {
   const now = deps.now ?? (() => new Date());
@@ -153,76 +119,36 @@ export function boardChatService(db: Db, deps: { now?: () => Date } = {}) {
     return Number(row?.count ?? 0);
   }
 
-  async function startRun(input: { companyId: string; userId: string; issueId: string | null; model?: string | null }) {
-    const bootstrapCode = newToken(BOARD_CHAT_TOKEN_PREFIX.bootstrap);
-    const at = now();
-    const [run] = await db
-      .insert(boardChatRuns)
-      .values({
-        companyId: input.companyId,
-        userId: input.userId,
-        issueId: input.issueId,
-        status: "running",
-        bootstrapCodeHash: hashBearerToken(bootstrapCode),
-        expiresAt: new Date(at.getTime() + BOARD_CHAT_RUN_TTL_MS),
-        model: input.model ?? null,
-        createdAt: at,
-      })
-      .returning();
-    return { run: run!, bootstrapCode };
-  }
-
   /**
-   * Swap the one-time bootstrap code for the run credential. Returns null on
-   * any failure. A second swap (by anyone) revokes the credential and fails
-   * the run, so a copied code can never quietly act alongside the real run.
+   * Count today's messages and record this one in one transaction, under a
+   * per-company lock, so two messages sent at once can never both squeeze
+   * under the cap. Returns null when the cap is already used up.
    */
-  async function exchangeBootstrapCode(runId: string, code: string): Promise<string | null> {
-    if (typeof code !== "string" || !code.startsWith(BOARD_CHAT_TOKEN_PREFIX.bootstrap)) return null;
-    const at = now();
-    const [run] = await db
-      .select()
-      .from(boardChatRuns)
-      .where(and(eq(boardChatRuns.id, runId), eq(boardChatRuns.bootstrapCodeHash, hashBearerToken(code))));
-    if (!run || run.status !== "running") return null;
-    if (run.createdAt.getTime() + BOARD_CHAT_BOOTSTRAP_TTL_MS < at.getTime()) return null;
-    if (run.tokenExchangeCount === 0) {
-      const token = newToken(BOARD_CHAT_TOKEN_PREFIX.run);
-      const [updated] = await db
-        .update(boardChatRuns)
-        .set({ tokenExchangeCount: 1, tokenHash: hashBearerToken(token) })
-        .where(and(eq(boardChatRuns.id, runId), eq(boardChatRuns.tokenExchangeCount, 0)))
-        .returning({ id: boardChatRuns.id });
-      if (updated) return token;
-    }
-    await db
-      .update(boardChatRuns)
-      .set({
-        tokenExchangeCount: sql`${boardChatRuns.tokenExchangeCount} + 1`,
-        tokenHash: null,
-        status: "failed",
-        endedAt: at,
-      })
-      .where(eq(boardChatRuns.id, runId));
-    logger.warn(
-      { event: "security.board_chat_bootstrap_reused", runId, companyId: run.companyId },
-      "A Board chat bootstrap code was used twice; the run credential was revoked",
-    );
-    return null;
-  }
-
-  async function findActiveRunByToken(token: string): Promise<RunRow | null> {
-    const [run] = await db
-      .select()
-      .from(boardChatRuns)
-      .where(
-        and(
-          eq(boardChatRuns.tokenHash, hashBearerToken(token)),
-          eq(boardChatRuns.status, "running"),
-          gt(boardChatRuns.expiresAt, now()),
-        ),
-      );
-    return run ?? null;
+  async function startRunWithinCap(input: {
+    companyId: string;
+    userId: string;
+    issueId: string | null;
+    dailyMessageCap: number;
+  }): Promise<RunRow | null> {
+    return db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`board_chat_cap:${input.companyId}`}))`);
+      const [row] = await tx
+        .select({ count: sql<number>`count(*)::int` })
+        .from(boardChatRuns)
+        .where(and(eq(boardChatRuns.companyId, input.companyId), gte(boardChatRuns.createdAt, startOfUtcDay(now()))));
+      if (Number(row?.count ?? 0) >= input.dailyMessageCap) return null;
+      const [run] = await tx
+        .insert(boardChatRuns)
+        .values({
+          companyId: input.companyId,
+          userId: input.userId,
+          issueId: input.issueId,
+          status: "running",
+          createdAt: now(),
+        })
+        .returning();
+      return run ?? null;
+    });
   }
 
   async function getRun(runId: string): Promise<RunRow | null> {
@@ -230,86 +156,60 @@ export function boardChatService(db: Db, deps: { now?: () => Date } = {}) {
     return run ?? null;
   }
 
-  async function finishRun(
+  /** Add one model call's usage to the run (called after every call, so a stopped run still has its cost). */
+  async function addRunUsage(
     runId: string,
-    input: {
-      status: "done" | "failed" | "timed_out";
-      model?: string | null;
-      inputTokens?: number;
-      cachedInputTokens?: number;
-      outputTokens?: number;
-      costCents?: number;
-      costMicroUsd?: number | null;
-      costEventId?: string | null;
-    },
+    usage: { provider: string; model: string; inputTokens: number; outputTokens: number; costCents: number },
   ) {
     await db
       .update(boardChatRuns)
       .set({
-        status: input.status,
-        tokenHash: null,
-        endedAt: now(),
-        ...(input.model !== undefined ? { model: input.model } : {}),
-        inputTokens: input.inputTokens ?? 0,
-        cachedInputTokens: input.cachedInputTokens ?? 0,
-        outputTokens: input.outputTokens ?? 0,
-        costCents: input.costCents ?? 0,
-        costMicroUsd: input.costMicroUsd ?? null,
-        costEventId: input.costEventId ?? null,
+        provider: usage.provider,
+        model: usage.model,
+        inputTokens: sql`${boardChatRuns.inputTokens} + ${usage.inputTokens}`,
+        outputTokens: sql`${boardChatRuns.outputTokens} + ${usage.outputTokens}`,
+        costCents: sql`${boardChatRuns.costCents} + ${usage.costCents}`,
       })
       .where(eq(boardChatRuns.id, runId));
   }
 
+  async function finishRun(runId: string, status: "done" | "failed" | "timed_out") {
+    await db.update(boardChatRuns).set({ status, endedAt: now() }).where(eq(boardChatRuns.id, runId));
+  }
+
   /**
-   * Who a run or Approve credential acts as: the person, in exactly one
-   * company, never as instance admin. Re-checked on every request from the
-   * person's CURRENT access, so losing the owner/admin role (or the company
-   * turning Board chat off) stops a run mid-way.
+   * Who a Board chat run (or an approved change) acts as: the person, in
+   * exactly one company, never as instance admin, with their REAL role there.
+   * Built from the person's current access every time, so losing the
+   * owner/admin role or the company switching Board chat off stops it.
+   * Instance admins pass only in companies they belong to (Paperclip's rule
+   * for everyone else too). Null = not allowed.
    */
-  async function resolveActorForToken(token: string): Promise<{
-    actor: BoardChatActorResolution;
-    action?: ActionRow;
-  } | null> {
-    let companyId: string;
-    let userId: string;
-    let runId: string | undefined;
-    let action: ActionRow | undefined;
-    if (token.startsWith(BOARD_CHAT_TOKEN_PREFIX.run)) {
-      const run = await findActiveRunByToken(token);
-      if (!run) return null;
-      companyId = run.companyId;
-      userId = run.userId;
-      runId = run.id;
-    } else if (token.startsWith(BOARD_CHAT_TOKEN_PREFIX.exec)) {
-      const consumed = await consumeExecToken(token);
-      if (!consumed) return null;
-      companyId = consumed.companyId;
-      userId = consumed.userId;
-      action = consumed;
-    } else {
-      return null;
-    }
-    const settings = await getSettings(companyId);
+  async function buildActor(input: {
+    companyId: string;
+    userId: string;
+    runId?: string | null;
+    actionId?: string | null;
+  }): Promise<BoardChatActor | null> {
+    const settings = await getSettings(input.companyId);
     if (!settings.enabled) return null;
-    const access = await boardAuthService(db).resolveBoardAccess(userId);
+    const access = await boardAuthService(db).resolveBoardAccess(input.userId);
     if (!access.user) return null;
-    const membership = access.memberships.find((row) => row.companyId === companyId && row.status === "active");
-    const role = membership?.membershipRole ?? null;
+    const membership = access.memberships.find((row) => row.companyId === input.companyId && row.status === "active");
+    if (!membership) return null;
+    const role = membership.membershipRole ?? null;
     if (!access.isInstanceAdmin && role !== "owner" && role !== "admin") return null;
     return {
-      actor: {
-        type: "board",
-        userId,
-        userName: access.user.name ?? null,
-        userEmail: access.user.email ?? null,
-        companyIds: [companyId],
-        memberships: [{ companyId, membershipRole: role ?? "admin", status: "active" }],
-        isInstanceAdmin: false,
-        source: action ? "board_chat_confirmed" : "board_chat",
-        boardChatRunId: runId,
-        boardChatActionId: action?.id,
-      },
-      action,
+      type: "board",
+      userId: input.userId,
+      userName: access.user.name ?? null,
+      userEmail: access.user.email ?? null,
+      companyIds: [input.companyId],
+      memberships: [{ companyId: input.companyId, membershipRole: role, status: "active" }],
+      isInstanceAdmin: false,
+      source: input.actionId ? "board_chat_confirmed" : "board_chat",
+      boardChatRunId: input.runId ?? undefined,
+      boardChatActionId: input.actionId ?? undefined,
     };
   }
 
@@ -357,43 +257,18 @@ export function boardChatService(db: Db, deps: { now?: () => Date } = {}) {
     return rows.reverse().map((row) => toBoardChatAction(row, at));
   }
 
-  /** pending -> confirmed, for the person who asked, and mint the single-use Approve credential. */
-  async function beginConfirm(actionId: string, userId: string): Promise<{ row: ActionRow; execToken: string } | null> {
-    const execToken = newToken(BOARD_CHAT_TOKEN_PREFIX.exec);
+  /** pending -> executing, for the person who asked, once. Null when it was already handled or has expired. */
+  async function beginExecute(actionId: string, userId: string): Promise<ActionRow | null> {
     const at = now();
     const [row] = await db
       .update(boardChatActions)
-      .set({
-        status: "confirmed",
-        execTokenHash: hashBearerToken(execToken),
-        execTokenExpiresAt: new Date(at.getTime() + BOARD_CHAT_EXEC_TTL_MS),
-        decidedByUserId: userId,
-        decidedAt: at,
-        updatedAt: at,
-      })
+      .set({ status: "executing", decidedByUserId: userId, decidedAt: at, updatedAt: at })
       .where(
         and(
           eq(boardChatActions.id, actionId),
           eq(boardChatActions.userId, userId),
           eq(boardChatActions.status, "pending"),
           gt(boardChatActions.expiresAt, at),
-        ),
-      )
-      .returning();
-    return row ? { row, execToken } : null;
-  }
-
-  /** confirmed -> executing. Single use: the credential is wiped as it is used. */
-  async function consumeExecToken(token: string): Promise<ActionRow | null> {
-    const at = now();
-    const [row] = await db
-      .update(boardChatActions)
-      .set({ status: "executing", execTokenHash: null, updatedAt: at })
-      .where(
-        and(
-          eq(boardChatActions.execTokenHash, hashBearerToken(token)),
-          eq(boardChatActions.status, "confirmed"),
-          gt(boardChatActions.execTokenExpiresAt, at),
         ),
       )
       .returning();
@@ -409,7 +284,6 @@ export function boardChatService(db: Db, deps: { now?: () => Date } = {}) {
       .update(boardChatActions)
       .set({
         status: input.status,
-        execTokenHash: null,
         resultStatus: input.resultStatus,
         resultMessage: input.resultMessage.slice(0, 2000),
         completedAt: at,
@@ -457,28 +331,23 @@ export function boardChatService(db: Db, deps: { now?: () => Date } = {}) {
       );
   }
 
-  /** Cancel what a run left pending when its run failed closed (e.g. a reused bootstrap code). */
-  async function cancelPendingForRun(runId: string, message: string) {
-    await db
-      .update(boardChatActions)
-      .set({ status: "cancelled", resultMessage: message, updatedAt: now() })
-      .where(and(eq(boardChatActions.runId, runId), eq(boardChatActions.status, "pending"), isNull(boardChatActions.decidedAt)));
-  }
-
   const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
   const policyLookup: BoardChatPolicyLookup = {
     async issue(id) {
-      const where = UUID_RE.test(id) ? eq(issues.id, id) : eq(issues.identifier, id.toUpperCase());
+      const where = UUID_RE.test(id) ? eq(issues.id, id.toLowerCase()) : eq(issues.identifier, id.toUpperCase());
       const [row] = await db
-        .select({ companyId: issues.companyId, identifier: issues.identifier, title: issues.title })
+        .select({ id: issues.id, companyId: issues.companyId, identifier: issues.identifier, title: issues.title })
         .from(issues)
         .where(where);
       return row ?? null;
     },
     async agent(id) {
       if (!UUID_RE.test(id)) return null;
-      const [row] = await db.select({ companyId: agents.companyId, name: agents.name }).from(agents).where(eq(agents.id, id));
+      const [row] = await db
+        .select({ companyId: agents.companyId, name: agents.name })
+        .from(agents)
+        .where(eq(agents.id, id.toLowerCase()));
       return row ?? null;
     },
     async approval(id) {
@@ -486,17 +355,20 @@ export function boardChatService(db: Db, deps: { now?: () => Date } = {}) {
       const [row] = await db
         .select({ companyId: approvals.companyId, type: approvals.type, payload: approvals.payload })
         .from(approvals)
-        .where(eq(approvals.id, id));
+        .where(eq(approvals.id, id.toLowerCase()));
       return row ?? null;
     },
     async goal(id) {
       if (!UUID_RE.test(id)) return null;
-      const [row] = await db.select({ companyId: goals.companyId, title: goals.title }).from(goals).where(eq(goals.id, id));
+      const [row] = await db.select({ companyId: goals.companyId, title: goals.title }).from(goals).where(eq(goals.id, id.toLowerCase()));
       return row ?? null;
     },
     async project(id) {
       if (!UUID_RE.test(id)) return null;
-      const [row] = await db.select({ companyId: projects.companyId, name: projects.name }).from(projects).where(eq(projects.id, id));
+      const [row] = await db
+        .select({ companyId: projects.companyId, name: projects.name })
+        .from(projects)
+        .where(eq(projects.id, id.toLowerCase()));
       return row ?? null;
     },
   };
@@ -505,27 +377,20 @@ export function boardChatService(db: Db, deps: { now?: () => Date } = {}) {
     getSettings,
     updateSettings,
     countMessagesToday,
-    startRun,
-    exchangeBootstrapCode,
-    findActiveRunByToken,
+    startRunWithinCap,
     getRun,
+    addRunUsage,
     finishRun,
-    resolveActorForToken,
+    buildActor,
     createAction,
     getActionRow,
     listActions,
-    beginConfirm,
-    consumeExecToken,
+    beginExecute,
     completeAction,
     cancelAction,
     expireStale,
-    cancelPendingForRun,
     policyLookup,
   };
 }
 
 export type BoardChatService = ReturnType<typeof boardChatService>;
-
-export function isBoardChatToken(token: string) {
-  return token.startsWith(BOARD_CHAT_TOKEN_PREFIX.run) || token.startsWith(BOARD_CHAT_TOKEN_PREFIX.exec);
-}
