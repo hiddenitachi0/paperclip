@@ -11,6 +11,7 @@ import type { StorageService } from "./storage/types.js";
 import { httpLogger, errorHandler } from "./middleware/index.js";
 import { actorMiddleware } from "./middleware/auth.js";
 import { boardMutationGuard } from "./middleware/board-mutation-guard.js";
+import { boardChatGuard } from "./middleware/board-chat-guard.js";
 import { privateHostnameGuard, resolvePrivateHostnameAllowSet } from "./middleware/private-hostname-guard.js";
 import { applyTrustProxy, parseTrustProxyEnv } from "./middleware/trust-proxy.js";
 import { healthRoutes } from "./routes/health.js";
@@ -66,6 +67,7 @@ import { executionWorkspaceRoutes } from "./routes/execution-workspaces.js";
 import { goalRoutes } from "./routes/goals.js";
 import { crmRoutes } from "./routes/crm.js";
 import { boardChatRoutes } from "./routes/board-chat.js";
+import { createInProcessDispatcher } from "./services/board-chat-dispatch.js";
 import { laneARoutes } from "./routes/lane-a.js";
 import { chatRouterRoutes } from "./routes/chat-router.js";
 import { issueAnswerRoutes } from "./routes/issue-answers.js";
@@ -301,6 +303,11 @@ export async function createApp(
       resolveSession: opts.resolveSession,
     }),
   );
+  // Board chat on signed-in servers: keeps its in-process requests inside one
+  // company, holds any change until the person approves it, and lets an
+  // approved change through only as exactly what was approved (see
+  // middleware/board-chat-guard.ts). A no-op for everyone else.
+  app.use(boardChatGuard(db));
   app.use("/api/auth", authRoutes(db));
   if (opts.betterAuthHandler) {
     app.all("/api/auth/{*authPath}", opts.betterAuthHandler);
@@ -394,7 +401,14 @@ export async function createApp(
   api.use(previewEnvironmentRoutes(db, { service: previewEnvironments }));
   api.use(goalRoutes(db));
   api.use(crmRoutes(db));
-  api.use(boardChatRoutes(db, { deploymentMode: opts.deploymentMode }));
+  // Board chat on signed-in servers runs its tools as in-process requests into
+  // this same app (no socket, no credential): see services/board-chat-dispatch.ts.
+  api.use(
+    boardChatRoutes(db, {
+      deploymentMode: opts.deploymentMode,
+      deps: { dispatch: createInProcessDispatcher(() => app as never) },
+    }),
+  );
   api.use(laneARoutes(db));
   api.use(privateAccessRoutes(db));
   api.use(chatRouterRoutes(db));

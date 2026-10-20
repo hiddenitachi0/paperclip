@@ -63,6 +63,9 @@ export function boardMutationGuard(): RequestHandler {
       req.actor.source === "local_implicit"
       || req.actor.source === "board_key"
       || req.actor.source === "cloud_tenant"
+      // Board chat bearer credentials (server-to-itself, never a browser).
+      || req.actor.source === "board_chat"
+      || req.actor.source === "board_chat_confirmed"
     ) {
       next();
       return;

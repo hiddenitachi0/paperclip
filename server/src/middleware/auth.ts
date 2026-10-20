@@ -17,6 +17,7 @@ import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "./logger.js";
 import { boardAuthService } from "../services/board-auth.js";
 import { companyServiceTokenService } from "../services/company-service-tokens.js";
+import { readInProcessBoardChatRequest } from "../services/board-chat-dispatch.js";
 import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compatibility.js";
 import { readServerSecret } from "../server-secrets.js";
 
@@ -89,6 +90,24 @@ interface ActorMiddlewareOptions {
 export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHandler {
   const boardAuth = boardAuthService(db);
   return async (req, _res, next) => {
+    // Board chat on a signed-in server hands its tool calls to this app as
+    // in-process requests (services/board-chat-dispatch.ts). They carry the
+    // person's one-company actor on a private Symbol, which no network
+    // request can carry, so nothing else is consulted for them.
+    const inProcess = readInProcessBoardChatRequest(req);
+    if (inProcess) {
+      const source = inProcess.actor.source;
+      if (inProcess.actor.type !== "board" || (source !== "board_chat" && source !== "board_chat_confirmed")) {
+        req.actor = { type: "none", source: "none" };
+        next();
+        return;
+      }
+      req.actor = inProcess.actor;
+      if (inProcess.action) req.boardChatAction = inProcess.action;
+      next();
+      return;
+    }
+
     req.actor =
       opts.deploymentMode === "local_trusted"
         ? {

@@ -28,6 +28,25 @@ const mockIssuesApi = vi.hoisted(() => ({
 }));
 const mockDialogState = vi.hoisted(() => ({ onboardingOpen: false }));
 
+const mockBoardChatMode = vi.hoisted(() => ({ mode: "local" as "local" | "signed_in" }));
+vi.mock("../hooks/useBoardChatAvailability", () => ({
+  useBoardChatAvailability: () => ({
+    available: true,
+    loaded: true,
+    reason: null,
+    mode: mockBoardChatMode.mode,
+    canChangeSettings: true,
+  }),
+}));
+const mockBoardChatApi = vi.hoisted(() => ({
+  listActions: vi.fn(async () => ({ actions: [] as unknown[] })),
+  confirm: vi.fn(async () => ({ action: {} })),
+  cancel: vi.fn(async () => ({ action: {} })),
+}));
+vi.mock("../api/boardChat", () => ({ boardChatApi: mockBoardChatApi }));
+vi.mock("../api/auth", () => ({
+  authApi: { getSession: vi.fn(async () => ({ session: { id: "s1", userId: "user-1" }, user: { id: "user-1" } })) },
+}));
 vi.mock("../api/agents", () => ({ agentsApi: mockAgentsApi }));
 vi.mock("../api/goals", () => ({ goalsApi: mockGoalsApi }));
 vi.mock("../api/issues", () => ({ issuesApi: mockIssuesApi }));
@@ -134,6 +153,8 @@ describe("BoardChat staged typing intro", () => {
     mockIssuesApi.list.mockResolvedValue([BOARD_ISSUE]);
     mockIssuesApi.listComments.mockResolvedValue([]);
     mockIssuesApi.listFeedbackVotes.mockResolvedValue([]);
+    mockBoardChatMode.mode = "local";
+    mockBoardChatApi.listActions.mockResolvedValue({ actions: [] });
   });
 
   afterEach(async () => {
@@ -320,6 +341,101 @@ describe("BoardChat staged typing intro", () => {
     // It is kept as the draft, like anything typed.
     expect(sessionStorage.getItem("paperclip.boardChat.draft.company-1")).toContain("Hire a marketing agent");
     initialEntry = "/PAP/board-chat";
+  });
+
+  function heldAction(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "action-1",
+      companyId: "company-1",
+      issueId: "issue-board",
+      runId: "run-1",
+      userId: "user-1",
+      summary: 'Create a new task "Launch plan"',
+      details: [{ label: "Priority", value: "high" }],
+      status: "pending",
+      resultMessage: null,
+      createdAt: "2026-06-10T00:00:01.000Z",
+      decidedAt: null,
+      completedAt: null,
+      expiresAt: "2026-06-11T00:00:01.000Z",
+      ...overrides,
+    };
+  }
+
+  it("does not ask for approval cards on a local single-user Paperclip", async () => {
+    await render();
+    expect(mockBoardChatApi.listActions).not.toHaveBeenCalled();
+    expect(container.querySelector("[data-testid=board-chat-action-card]")).toBeNull();
+  });
+
+  it("shows a held change inline with its exact details, and Approve sends only that change", async () => {
+    mockBoardChatMode.mode = "signed_in";
+    mockIssuesApi.listComments.mockResolvedValue([USER_COMMENT]);
+    mockBoardChatApi.listActions.mockResolvedValue({ actions: [heldAction()] });
+    await render();
+    const card = container.querySelector("[data-testid=board-chat-action-card]");
+    expect(card).not.toBeNull();
+    expect(card?.textContent).toContain('Create a new task "Launch plan"');
+    expect(card?.textContent).toContain("Priority");
+    expect(card?.textContent).toContain("Nothing changes until you click Approve.");
+    // The card sits after the message that asked for it.
+    const html = container.innerHTML;
+    expect(html.indexOf("Hi Alex!")).toBeLessThan(html.indexOf("Launch plan"));
+
+    await act(async () => {
+      (container.querySelector("[data-testid=board-chat-action-approve]") as HTMLButtonElement).click();
+    });
+    expect(mockBoardChatApi.confirm).toHaveBeenCalledWith("action-1");
+    expect(mockBoardChatApi.cancel).not.toHaveBeenCalled();
+  });
+
+  it("Cancel drops the change", async () => {
+    mockBoardChatMode.mode = "signed_in";
+    mockBoardChatApi.listActions.mockResolvedValue({ actions: [heldAction()] });
+    await render();
+    await act(async () => {
+      (container.querySelector("[data-testid=board-chat-action-cancel]") as HTMLButtonElement).click();
+    });
+    expect(mockBoardChatApi.cancel).toHaveBeenCalledWith("action-1");
+    expect(mockBoardChatApi.confirm).not.toHaveBeenCalled();
+  });
+
+  it("does not offer Approve on someone else's change, and shows what happened to finished ones", async () => {
+    mockBoardChatMode.mode = "signed_in";
+    mockBoardChatApi.listActions.mockResolvedValue({
+      actions: [
+        heldAction({ id: "a-other", userId: "someone-else" }),
+        heldAction({ id: "a-done", status: "done", resultMessage: "Done (PAP-9).", createdAt: "2026-06-10T00:00:02.000Z" }),
+      ],
+    });
+    await render();
+    const cards = Array.from(container.querySelectorAll("[data-testid=board-chat-action-card]"));
+    expect(cards).toHaveLength(2);
+    expect(cards[0]!.textContent).toContain("Waiting for the person who asked to approve it");
+    expect(cards[0]!.querySelector("[data-testid=board-chat-action-approve]")).toBeNull();
+    expect(cards[1]!.textContent).toContain("Approved and done");
+    expect(cards[1]!.textContent).toContain("Done (PAP-9).");
+  });
+
+  it("shows the server's plain reason when a message is refused", async () => {
+    mockBoardChatMode.mode = "signed_in";
+    const fetchSpy = vi.fn(async () =>
+      new Response(JSON.stringify({ error: "This company has used all 40 Board chat messages for today.", code: "BOARD_CHAT_DAILY_CAP" }), {
+        status: 429,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+    sessionStorage.setItem("paperclip.boardChat.draft.company-1", "Hire a marketing agent");
+    await render();
+    await act(async () => {
+      composerSpy.onSubmit();
+    });
+    for (let i = 0; i < 4; i++) await advance(0);
+    expect(fetchSpy).toHaveBeenCalled();
+    expect(container.querySelector("[role=alert]")?.textContent).toContain(
+      "This company has used all 40 Board chat messages for today.",
+    );
   });
 });
 
