@@ -382,7 +382,7 @@ const TOOLS: Record<string, ToolDef> = {
       name: "decide_card",
       description:
         "Prepare a decision on a card (held for the person's approval). Deploy and merge cards are never allowed; " +
-        "only hire, strategy and plain yes/no cards.",
+        "only hire and strategy cards.",
       inputSchema: {
         type: "object",
         properties: {

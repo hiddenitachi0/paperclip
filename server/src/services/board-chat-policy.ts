@@ -243,7 +243,8 @@ function longestString(value: unknown): number {
 /**
  * Why Board chat may not decide this card, or null when it may. Deploy and
  * merge cards are always refused; so is every card kind that moves money,
- * code, keys or tool access. Only plain hire, strategy and yes/no cards pass.
+ * code, keys or tool access. Only hire and strategy cards pass: plain yes/no
+ * cards are also used for spending and publishing, so they stay on the page.
  */
 export function boardChatApprovalRefusal(approval: { type: string; payload: Record<string, unknown> | null }): string | null {
   const kind = typeof approval.payload?.kind === "string" ? approval.payload.kind : "";
@@ -251,7 +252,6 @@ export function boardChatApprovalRefusal(approval: { type: string; payload: Reco
     return "Deploy and merge cards can't be decided in Board chat. Open the card in Paperclip and decide it yourself.";
   }
   if (approval.type === "hire_agent" || approval.type === "approve_ceo_strategy") return null;
-  if (approval.type === "request_board_approval" && !kind) return null;
   return "Board chat can't decide this kind of card. Open it in Paperclip and decide it yourself.";
 }
 

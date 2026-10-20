@@ -243,7 +243,9 @@ describe("describeBoardChatWrite", () => {
     expect(boardChatApprovalRefusal({ type: "request_board_approval", payload: { kind: "tool_grant" } })).toMatch(/can't decide/);
     expect(boardChatApprovalRefusal({ type: "budget_override_required", payload: {} })).toMatch(/can't decide/);
     expect(boardChatApprovalRefusal({ type: "credential_request", payload: {} })).toMatch(/can't decide/);
-    expect(boardChatApprovalRefusal({ type: "request_board_approval", payload: {} })).toBeNull();
+    // Plain yes/no cards also cover spending and publishing, so they are decided on the page.
+    expect(boardChatApprovalRefusal({ type: "request_board_approval", payload: {} })).toMatch(/can't decide/);
+    expect(boardChatApprovalRefusal({ type: "hire_agent", payload: {} })).toBeNull();
   });
 
   it("only allows the company's own name, description and budget", async () => {
