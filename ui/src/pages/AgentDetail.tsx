@@ -29,6 +29,7 @@ import { queryKeys } from "../lib/queryKeys";
 import { INSTANCE_SETTINGS_PATH_PREFIX } from "../lib/instance-settings";
 import { resolveSkillSummaryText } from "../lib/company-skill-summary";
 import { AgentJobSection } from "../components/jobs/AgentJobSection";
+import { AgentRequestRightsSection } from "../components/AgentRequestRightsSection";
 import { jobsApi } from "../api/jobs";
 import { AgentConfigForm } from "../components/AgentConfigForm";
 import { PageTabBar } from "../components/PageTabBar";
@@ -1944,6 +1945,7 @@ function ConfigurationTab({
                 disabled={updatePermissions.isPending || taskAssignLocked}
               />
             </div>
+            <AgentRequestRightsSection agentId={agent.id} />
           </div>
         </SettingsSubsection>
       </SettingsSection>

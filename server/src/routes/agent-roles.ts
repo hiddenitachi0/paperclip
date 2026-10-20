@@ -9,7 +9,7 @@ import { PERMISSION_KEYS } from "@paperclipai/shared";
 import { mcpServerConfigSchema } from "@paperclipai/shared/validators/agent";
 import { validate } from "../middleware/validate.js";
 import { forbidden, notFound } from "../errors.js";
-import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
+import { assertBoard, assertCompanyAccess, getActorInfo, isCompanyOwnerOrAdmin } from "./authz.js";
 import { companyScope, companyScopeFromParam } from "../middleware/company-scope.js";
 import type { RoleMutationActor } from "../services/agent-roles.js";
 import {
@@ -19,6 +19,7 @@ import {
 } from "../services/position-catalogue.js";
 import { companySkillService } from "../services/company-skills.js";
 import { logActivity } from "../services/activity-log.js";
+import { AGENT_REQUEST_RIGHT_KEYS } from "../services/agent-request-rights.js";
 import {
   createRole,
   listRoles,
@@ -346,12 +347,25 @@ export function agentRoleRoutes(rawDb: Db) {
     res.json(await removeAgentToolOverride(db, agentId, req.params.toolName as string, actorFor(req)));
   });
 
+  // The two "ask" rights (deploys:request / merges:request) are owner/admin
+  // only, the same rule as PUT /agents/:id/request-rights -- this generic
+  // override route must not be a side door around it.
+  async function assertMayChangeRight(req: Request, agentId: string, permissionKey: string) {
+    if (!AGENT_REQUEST_RIGHT_KEYS.includes(permissionKey as (typeof AGENT_REQUEST_RIGHT_KEYS)[number])) return;
+    const [agent] = await rawDb.select({ companyId: agents.companyId }).from(agents).where(eq(agents.id, agentId));
+    if (!agent) throw notFound("Agent not found");
+    if (!isCompanyOwnerOrAdmin(req, agent.companyId)) {
+      throw forbidden("Only the company's owner or an admin can change what an agent may ask for.");
+    }
+  }
+
   router.post(
     "/agents/:agentId/role/rights",
     scopeFromAgentIdParam(true),
     validate(grantSchema),
     async (req, res) => {
       const agentId = req.params.agentId as string;
+      await assertMayChangeRight(req, agentId, req.body.permissionKey);
       const grantedByUserId = (req as { actor?: { userId?: string | null } }).actor?.userId ?? null;
       const updated = await addAgentRightOverride(db, agentId, req.body, actorFor(req), grantedByUserId, rawDb);
       res.json(updated);
@@ -360,6 +374,7 @@ export function agentRoleRoutes(rawDb: Db) {
 
   router.delete("/agents/:agentId/role/rights/:permissionKey", scopeFromAgentIdParam(true), async (req, res) => {
     const agentId = req.params.agentId as string;
+    await assertMayChangeRight(req, agentId, req.params.permissionKey as string);
     res.json(await removeAgentRightOverride(db, agentId, req.params.permissionKey as string, actorFor(req), rawDb));
   });
 

@@ -20,6 +20,7 @@ import { companySkillRoutes } from "./routes/company-skills.js";
 import { teamsCatalogRoutes } from "./routes/teams-catalog.js";
 import { agentRoutes } from "./routes/agents.js";
 import { agentRoleRoutes } from "./routes/agent-roles.js";
+import { agentRequestRightsRoutes } from "./routes/agent-request-rights.js";
 import { personaRoutes } from "./routes/personas.js";
 import { personaAccountRoutes } from "./routes/persona-accounts.js";
 import { mcpToolLibraryRoutes } from "./routes/mcp-tool-library.js";
@@ -338,6 +339,7 @@ export async function createApp(
   api.use(llmRoutes(db));
   api.use(companySkillRoutes(db));
   api.use(teamsCatalogRoutes(db));
+  api.use(agentRequestRightsRoutes(db));
   api.use(agentRoutes(db, { pluginWorkerManager: workerManager, storageService: opts.storageService }));
   api.use(agentRoleRoutes(db));
   api.use(personaRoutes(db));
