@@ -249,6 +249,7 @@ function describeOrigin(note: AgentMemoryNote): string {
   const who = note.createdByName ?? null;
   const when = timeAgo(note.createdAt);
   const edited = note.updatedAt !== note.createdAt ? " (edited)" : "";
+  if (note.source === "reaction") return `Learned from your reactions, ${when}${edited}`;
   if (note.source === "agent") return `Saved in chat${who ? `, asked by ${who}` : ""}, ${when}${edited}`;
   return `Added here${who ? ` by ${who}` : ""}, ${when}${edited}`;
 }
