@@ -269,6 +269,44 @@ describe("approval-request permission gate (DUR-146)", () => {
     expect(mockApprovalService.create).not.toHaveBeenCalled();
   }, TEST_TIMEOUT);
 
+  it("lets a deploy request past the ask-right gate while the agent holds deploys:request, and refuses it again once revoked", async () => {
+    // Stand-in for the grant row that PUT /agents/:id/request-rights writes
+    // or deletes (agent-request-rights.test.ts proves the real access
+    // service answers deploys:request from that row).
+    let holdsDeployAskRight = true;
+    mockAccessService.decide.mockImplementation(async ({ action }: { action: string }) => {
+      const allowed = action === "deploys:request" ? holdsDeployAskRight : true;
+      return { allowed, action, reason: allowed ? "allow_test" : "deny_missing_grant", explanation: "test" };
+    });
+    const send = async () =>
+      request(await createApp(agentActor))
+        .post("/api/companies/22222222-2222-4222-8222-222222222222/approvals")
+        .send({
+          type: "request_board_approval",
+          dryRun: true,
+          payload: {
+            kind: "deploy",
+            projectId: "11111111-1111-4111-8111-111111111111",
+            workspaceId: "22222222-2222-4222-8222-222222222222",
+            title: "Deploy to prod",
+            note: "Deploying the latest build.",
+          },
+        });
+
+    const allowed = await send();
+    // Past the ask-right gate: the request reaches the deploy card's own
+    // checks (this minimal payload names no commit, so those refuse it).
+    expect(allowed.status).toBe(422);
+    expect(allowed.body.details?.reason).toBe("commit_missing");
+    expect(mockAccessService.decide).toHaveBeenCalledWith(expect.objectContaining({ action: "deploys:request" }));
+
+    holdsDeployAskRight = false;
+    const refused = await send();
+    expect(refused.status).toBe(403);
+    expect(refused.body.error).toContain("right to ask for a deploy");
+    expect(mockApprovalService.create).not.toHaveBeenCalled();
+  }, TEST_TIMEOUT);
+
   it("does not gate a hire_agent request on deploys:request/merges:request", async () => {
     mockAccessService.decide.mockImplementation(async ({ action }: { action: string }) => ({
       allowed: action === "company_scope:read",

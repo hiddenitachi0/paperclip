@@ -204,6 +204,15 @@ function assertBoardActorForRoleMutation(actor: RoleMutationActor | undefined, t
   }
 }
 
+function operatorAddedRightKeys(roleOverrides: unknown): Set<string> {
+  const add = (roleOverrides as RoleOverridesShape | null)?.rights?.add;
+  return new Set(
+    Array.isArray(add)
+      ? add.map((g) => g?.permissionKey).filter((k): k is string => typeof k === "string")
+      : []
+  );
+}
+
 interface AssignRoleOptions {
   // Board actor performing the assignment (for audit trail on grants)
   grantedByUserId?: string | null;
@@ -231,13 +240,23 @@ export async function assignRoleToAgent(
   // grants that were applied from the role (using the snapshot to know which ones).
   if (roleId === null) {
     const agent = await db
-      .select({ id: agents.id, companyId: agents.companyId, roleAppliedPermissionKeys: agents.roleAppliedPermissionKeys })
+      .select({
+        id: agents.id,
+        companyId: agents.companyId,
+        roleAppliedPermissionKeys: agents.roleAppliedPermissionKeys,
+        roleOverrides: agents.roleOverrides,
+      })
       .from(agents)
       .where(eq(agents.id, agentId))
       .then((rows) => rows[0] ?? null);
     if (!agent) throw notFound("Agent not found");
 
-    const appliedKeys = (agent.roleAppliedPermissionKeys as string[] | null) ?? [];
+    // A right also switched on for this agent directly (an operator add) is
+    // the agent's own, not the position's: clearing the position keeps it.
+    const operatorAddedKeys = operatorAddedRightKeys(agent.roleOverrides);
+    const appliedKeys = ((agent.roleAppliedPermissionKeys as string[] | null) ?? []).filter(
+      (k) => !operatorAddedKeys.has(k)
+    );
 
     await withCompanyScope(rawDb, agent.companyId, async (tx) => {
       await tx
@@ -297,7 +316,12 @@ export async function assignRoleToAgent(
   // part of a role snapshot is untouched and survives the switch.
   const previouslyAppliedKeys = (agent.roleAppliedPermissionKeys as string[] | null) ?? [];
   const previouslyAppliedMcpNames = (agent.roleAppliedMcpServerNames as string[] | null) ?? [];
-  const keysToRevoke = previouslyAppliedKeys.filter((k) => !permissionKeys.includes(k as PermissionKey));
+  // Rights also switched on for this agent directly (operator adds) survive a
+  // job switch even when the previous job carried them too.
+  const operatorAddedKeys = operatorAddedRightKeys(agent.roleOverrides);
+  const keysToRevoke = previouslyAppliedKeys.filter(
+    (k) => !permissionKeys.includes(k as PermissionKey) && !operatorAddedKeys.has(k)
+  );
   const mcpNamesToRemove = previouslyAppliedMcpNames.filter((n) => !mcpServerNames.includes(n));
 
   const now = new Date();
@@ -350,11 +374,19 @@ export async function assignRoleToAgent(
     // Apply permission grants (upsert by the unique index on companyId+type+id+key).
     // We use INSERT … ON CONFLICT DO NOTHING — the grant already exists, no need to
     // overwrite (the user may have customized scope on an existing grant).
-    if (grants.length > 0) {
+    // A right switched off for this agent directly (an operator remove) stays
+    // off: the new position does not quietly hand it back.
+    const operatorRemovedKeys = new Set(
+      ((agent.roleOverrides as RoleOverridesShape | null)?.rights?.remove ?? []).filter(
+        (k): k is string => typeof k === "string"
+      )
+    );
+    const grantsToInsert = grants.filter((g) => !operatorRemovedKeys.has(g.permissionKey));
+    if (grantsToInsert.length > 0) {
       await tx
         .insert(principalPermissionGrants)
         .values(
-          grants.map((g) => ({
+          grantsToInsert.map((g) => ({
             companyId: agent.companyId,
             principalType: "agent",
             principalId: agentId,

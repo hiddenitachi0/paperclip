@@ -6521,6 +6521,11 @@ export function issueRoutes(
       }
       await assertIssueEnvironmentSelection(sourceIssue.companyId, childBody.executionWorkspaceSettings?.environmentId);
     }
+    // A person may tick "brag video when done" on sub-tasks in a plan
+    // breakdown, the same as on a single new task. Agents were refused above.
+    // Check the company setting before any sub-task is made.
+    const bragOnDoneRequested = req.actor.type === "board" && requestedChildren.some((child) => child.bragOnDone === true);
+    if (bragOnDoneRequested) await bragOnDoneService(db).assertEnabled(sourceIssue.companyId);
 
     const actor = getActorInfo(req);
     const normalizedChildren = [];
@@ -6576,6 +6581,26 @@ export function issueRoutes(
       actorUserId: actor.actorType === "user" ? actor.actorId : null,
       actorRunId: actor.runId ?? null,
     });
+
+    // Record the person's brag-video choice on each ticked sub-task this
+    // request actually created. childIssueIds lines up with the requested
+    // children by position; a replay of an already-finished breakdown creates
+    // nothing new and so changes nothing here.
+    if (bragOnDoneRequested && req.actor.type === "board") {
+      const newlyCreatedIds = new Set(result.newlyCreatedIssues.map((issue) => issue.id));
+      for (let index = 0; index < requestedChildren.length; index += 1) {
+        if (requestedChildren[index]?.bragOnDone !== true) continue;
+        const childIssueId = result.childIssueIds[index];
+        if (!childIssueId || !newlyCreatedIds.has(childIssueId)) continue;
+        await bragOnDoneService(db).setPreapproval({
+          companyId: sourceIssue.companyId,
+          issueId: childIssueId,
+          userId: bragOnDoneUserId(req),
+          enabled: true,
+          allowDoneTask: true,
+        });
+      }
+    }
 
     await logActivity(db, {
       companyId: sourceIssue.companyId,

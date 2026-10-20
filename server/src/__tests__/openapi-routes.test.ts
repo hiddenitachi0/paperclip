@@ -80,6 +80,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "telegram-reactions.ts",
   // Agent role/job routes (DUR-114) are a new backend feature not yet in the public OpenAPI document.
   "agent-roles.ts",
+  // Owner/admin switches for an agent's "ask to deploy/merge" rights sit next to the agent-role routes and are not yet in the public OpenAPI document.
+  "agent-request-rights.ts",
   // MCP tool library routes (DUR-143) are a new backend feature not yet in the public OpenAPI document.
   "mcp-tool-library.ts",
   // "API with a key" tool routes (DUR-4004) sit next to the MCP tool library and are not yet in the public OpenAPI document.

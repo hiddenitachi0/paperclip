@@ -30,6 +30,7 @@ const mockIssueService = vi.hoisted(() => ({
   assertCheckoutOwner: vi.fn(),
   update: vi.fn(),
   createChild: vi.fn(),
+  decomposeAcceptedPlan: vi.fn(),
   addComment: vi.fn(),
   findMentionedAgents: vi.fn(),
   getRelationSummaries: vi.fn(),
@@ -292,6 +293,61 @@ describe("brag video when a task is done -- only people may set it", () => {
       .send({ acceptedPlanRevisionId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", children: [{ title: "Step", bragOnDone: true }] });
     expect(res.status).toBe(403);
     expect(res.body.error).toContain("Only a person");
+    expect(mockBragOnDone.setPreapproval).not.toHaveBeenCalled();
+  });
+
+  it("honours a person ticking it on plan-decomposition sub-tasks, only on the ticked ones", async () => {
+    mockIssueService.getById.mockResolvedValue(baseIssue({ status: "in_progress" }));
+    const childA = "aaaaaaaa-0000-4000-8000-00000000000a";
+    const childB = "aaaaaaaa-0000-4000-8000-00000000000b";
+    mockIssueService.decomposeAcceptedPlan.mockResolvedValue({
+      decomposition: { id: "decomp-1", status: "completed" },
+      childIssueIds: [childA, childB],
+      newlyCreatedIssues: [
+        { id: childA, companyId: COMPANY_ID, identifier: "PAP-1", title: "Step one", status: "todo", executionPolicy: null, assigneeAgentId: null },
+        { id: childB, companyId: COMPANY_ID, identifier: "PAP-2", title: "Step two", status: "todo", executionPolicy: null, assigneeAgentId: null },
+      ],
+    });
+    const res = await request(await createApp())
+      .post(`/api/issues/${ISSUE_ID}/accepted-plan-decompositions`)
+      .send({
+        acceptedPlanRevisionId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        children: [{ title: "Step one", bragOnDone: true }, { title: "Step two" }],
+      });
+    expect(res.status).toBe(200);
+    expect(mockBragOnDone.assertEnabled).toHaveBeenCalledWith(COMPANY_ID);
+    expect(mockBragOnDone.setPreapproval).toHaveBeenCalledTimes(1);
+    expect(mockBragOnDone.setPreapproval).toHaveBeenCalledWith(expect.objectContaining({
+      companyId: COMPANY_ID,
+      issueId: childA,
+      userId: "local-board",
+      enabled: true,
+    }));
+  });
+
+  it("does not re-record the choice when a finished plan breakdown is replayed", async () => {
+    mockIssueService.getById.mockResolvedValue(baseIssue({ status: "in_progress" }));
+    mockIssueService.decomposeAcceptedPlan.mockResolvedValue({
+      decomposition: { id: "decomp-1", status: "completed" },
+      childIssueIds: ["aaaaaaaa-0000-4000-8000-00000000000a"],
+      newlyCreatedIssues: [],
+    });
+    const res = await request(await createApp())
+      .post(`/api/issues/${ISSUE_ID}/accepted-plan-decompositions`)
+      .send({ acceptedPlanRevisionId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", children: [{ title: "Step one", bragOnDone: true }] });
+    expect(res.status).toBe(200);
+    expect(mockBragOnDone.setPreapproval).not.toHaveBeenCalled();
+  });
+
+  it("refuses a person's plan breakdown with a ticked sub-task when the setting is off, before any sub-task is made", async () => {
+    mockIssueService.getById.mockResolvedValue(baseIssue({ status: "in_progress" }));
+    const { HttpError } = await import("../errors.js");
+    mockBragOnDone.assertEnabled.mockRejectedValueOnce(new HttpError(422, "Brag videos for finished tasks are turned off for this company."));
+    const res = await request(await createApp())
+      .post(`/api/issues/${ISSUE_ID}/accepted-plan-decompositions`)
+      .send({ acceptedPlanRevisionId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", children: [{ title: "Step one", bragOnDone: true }] });
+    expect(res.status).toBe(422);
+    expect(mockIssueService.decomposeAcceptedPlan).not.toHaveBeenCalled();
     expect(mockBragOnDone.setPreapproval).not.toHaveBeenCalled();
   });
 
