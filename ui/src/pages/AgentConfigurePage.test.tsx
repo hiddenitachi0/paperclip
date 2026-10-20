@@ -69,6 +69,9 @@ vi.mock("../components/TrustPresetSection", () => ({
     <div data-testid="trust-preset" data-embedded={String(Boolean(embedded))}>Trust preset</div>
   ),
 }));
+vi.mock("../components/AgentRequestRightsSection", () => ({
+  AgentRequestRightsSection: () => <div data-testid="agent-request-rights">Ask rights</div>,
+}));
 vi.mock("../components/jobs/AgentJobSection", () => ({
   AgentJobSection: ({ embedded }: { embedded?: boolean }) => (
     <div data-testid="job-section" data-embedded={String(Boolean(embedded))}>Position</div>

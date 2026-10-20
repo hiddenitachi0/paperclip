@@ -5,10 +5,10 @@ import { PERMISSION_KEYS, type PermissionKey } from "@paperclipai/shared";
  * raw `namespace:action` string on screen (see PipelineLivenessBanner.tsx
  * for the existing violation of this rule — do not repeat it here).
  *
- * `deploys:request` / `merges:request` are not in PERMISSION_KEYS yet
- * (DUR-114 is expected to add them). Their labels are pre-seeded so the
- * rights picker in the Jobs editor is ready the moment the backend adds the
- * keys, without needing a follow-up UI change.
+ * `deploys:request` / `merges:request` are the two "ask" rights: they let an
+ * agent file an approval card, never approve one. They come from a position's
+ * default rights or from the per-agent switches on the agent's settings page
+ * (Permissions), which only a company owner or admin can change.
  */
 const KNOWN_PERMISSION_LABELS: Record<string, { label: string; description: string }> = {
   "agents:create": {
@@ -52,12 +52,14 @@ const KNOWN_PERMISSION_LABELS: Record<string, { label: string; description: stri
     description: "Approve people or agents asking to join the company.",
   },
   "deploys:request": {
-    label: "Ask to deploy",
-    description: "Ask an operator to deploy — cannot approve a deploy alone.",
+    label: "Can ask to put changes live",
+    description:
+      "Lets this agent send an approval card asking for its finished changes to be put live. A person still approves every one; the agent can never do it alone.",
   },
   "merges:request": {
-    label: "Ask to merge",
-    description: "Ask an operator to merge a pull request — cannot approve a merge alone.",
+    label: "Can ask to merge finished code",
+    description:
+      "Lets this agent send an approval card asking for its finished code to be merged. A person still approves every merge.",
   },
 };
 
