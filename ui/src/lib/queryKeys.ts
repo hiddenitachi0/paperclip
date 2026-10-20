@@ -321,6 +321,10 @@ export const queryKeys = {
   agentMemories: {
     list: (agentId: string) => ["agent-memories", agentId] as const,
   },
+  // Recent emoji reactions to a quick agent's messages.
+  agentReactions: {
+    list: (agentId: string, limit: number) => ["agent-reactions", agentId, limit] as const,
+  },
   // Quick-agent Conversations review (list + one transcript).
   laneAConversationLog: {
     list: (companyId: string, agentId: string, filters: Record<string, unknown>) =>
