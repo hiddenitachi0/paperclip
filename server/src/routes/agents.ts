@@ -2024,6 +2024,11 @@ export function agentRoutes(
   // config revisions elsewhere in this file). redactEventPayload builds a new
   // object rather than mutating in place, so this never touches the
   // underlying row -- a board/self read of the same agent is unaffected.
+  /** Board chat (signed-in servers): its reads are shown to a model, never live credentials. */
+  function isBoardChatActor(req: Request) {
+    return req.actor.source === "board_chat" || req.actor.source === "board_chat_confirmed";
+  }
+
   function redactForSecretMaskedAgentView(agent: Awaited<ReturnType<typeof svc.getById>>) {
     if (!agent) return null;
     return {
@@ -2470,6 +2475,12 @@ export function agentRoutes(
         );
         return;
       }
+      // Board chat reads go to a model (possibly a third party's), so they
+      // get the same masked view as a peer agent: no live credentials.
+      if (isBoardChatActor(req)) {
+        res.json(result.map((agent) => redactForSecretMaskedAgentView(agent)));
+        return;
+      }
       res.json(result);
       return;
     }
@@ -2708,7 +2719,7 @@ export function agentRoutes(
     // grant, but not itself the target agent) gets every field except live
     // credentials -- board callers and an agent reading its own record still
     // get the real, unmasked config.
-    if (!isSelf && req.actor.type === "agent") {
+    if ((!isSelf && req.actor.type === "agent") || isBoardChatActor(req)) {
       res.json(await buildAgentDetail(agent, { maskSecrets: true }));
       return;
     }

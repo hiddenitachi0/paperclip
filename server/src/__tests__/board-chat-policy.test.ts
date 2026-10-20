@@ -63,6 +63,8 @@ describe("checkBoardChatPath", () => {
       "/api/secrets/abc/usage",
       `/api/agents/${AGENT}/keys`,
       `/api/agents/${AGENT}/instructions-bundle/file`,
+      `/api/agents/${AGENT}/configuration`,
+      `/api/agents/${AGENT}/config-revisions`,
       "/api/crypto-wallets/x",
       "/api/deploy-runner/status",
       `/api/issues/${ISSUE}/interactions/abc/accept`,
@@ -234,9 +236,14 @@ describe("describeBoardChatWrite", () => {
     }
   });
 
-  it("lets the chat ask to approve a hire card", async () => {
-    const decision = await write("POST", `/api/approvals/${APPROVAL}/approve`, { decisionNote: "ok" }, { approval: { type: "hire_agent", payload: { name: "Bob" } } });
-    expect(decision).toMatchObject({ allowed: true, summary: 'Approve the card "Bob"', details: [{ label: "Note", value: "ok" }] });
+  it("lets the chat ask to approve a CEO strategy card, but never a hire card", async () => {
+    const decision = await write("POST", `/api/approvals/${APPROVAL}/approve`, { decisionNote: "ok" }, { approval: { type: "approve_ceo_strategy", payload: { title: "Q4 plan" } } });
+    expect(decision).toMatchObject({ allowed: true, summary: 'Approve the card "Q4 plan"', details: [{ label: "Note", value: "ok" }] });
+    // Approving a hire switches on whatever agent setup the card carries (kind, command, budget).
+    const hire = await write("POST", `/api/approvals/${APPROVAL}/approve`, {}, {
+      approval: { type: "hire_agent", payload: { name: "Bob", adapterType: "process", adapterConfig: { command: "/bin/sh" } } },
+    });
+    expect(hire).toMatchObject({ allowed: false, code: "BOARD_CHAT_APPROVAL_NOT_ALLOWED" });
   });
 
   it("refuses other risky card kinds (money, tools, host actions)", () => {
@@ -245,7 +252,8 @@ describe("describeBoardChatWrite", () => {
     expect(boardChatApprovalRefusal({ type: "credential_request", payload: {} })).toMatch(/can't decide/);
     // Plain yes/no cards also cover spending and publishing, so they are decided on the page.
     expect(boardChatApprovalRefusal({ type: "request_board_approval", payload: {} })).toMatch(/can't decide/);
-    expect(boardChatApprovalRefusal({ type: "hire_agent", payload: {} })).toBeNull();
+    expect(boardChatApprovalRefusal({ type: "hire_agent", payload: {} })).toMatch(/can't decide/);
+    expect(boardChatApprovalRefusal({ type: "approve_ceo_strategy", payload: {} })).toBeNull();
   });
 
   it("only allows the company's own name, description and budget", async () => {

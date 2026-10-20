@@ -16,6 +16,7 @@ import {
   costEvents,
   createDb,
   instanceUserRoles,
+  agents,
   goals,
   issueComments,
   issues,
@@ -66,6 +67,7 @@ describeDb("Board chat on a signed-in server", () => {
   const spawnSpy = vi.fn();
   const targetCalls: Array<{ route: string; body: unknown; actor: any }> = [];
   let script: ScriptStep[][] = [];
+  let onModelCall: (() => Promise<void>) | null = null;
   const modelCalls: Array<{ tools?: Array<{ name: string }>; messages: unknown[]; system: string }> = [];
 
   let companyA = "";
@@ -92,6 +94,7 @@ describeDb("Board chat on a signed-in server", () => {
     targetCalls.length = 0;
     modelCalls.length = 0;
     script = [];
+    onModelCall = null;
     companyA = randomUUID();
     companyB = randomUUID();
     await db.insert(companies).values([
@@ -143,6 +146,7 @@ describeDb("Board chat on a signed-in server", () => {
       { assertCompanyAccess },
       { createInProcessDispatcher },
       { goalRoutes },
+      { agentRoutes },
       { httpLogger },
       { createRequestLoadTracker },
     ] = await Promise.all([
@@ -155,6 +159,7 @@ describeDb("Board chat on a signed-in server", () => {
       import("../routes/authz.js"),
       import("../services/board-chat-dispatch.js"),
       import("../routes/goals.js"),
+      import("../routes/agents.js"),
       import("../middleware/logger.js"),
       import("../services/request-load.js"),
     ]);
@@ -164,6 +169,7 @@ describeDb("Board chat on a signed-in server", () => {
       messages: {
         create: vi.fn(async (params: any) => {
           modelCalls.push({ tools: params.tools, messages: params.messages, system: params.system });
+          if (onModelCall) await onModelCall();
           const next = script.shift() ?? [{ text: "All done." }];
           return anthropicMessage(next);
         }),
@@ -220,6 +226,7 @@ describeDb("Board chat on a signed-in server", () => {
     // One real route file, so a held change is proven against real route code
     // (company scope, validation, activity log), not only stand-ins.
     api.use(goalRoutes(db));
+    api.use(agentRoutes(db));
     app.use("/api", api);
     app.use(errorHandler);
     testApp = app;
@@ -233,7 +240,7 @@ describeDb("Board chat on a signed-in server", () => {
     server?.closeAllConnections();
     await new Promise<void>((resolve) => server?.close(() => resolve()));
     server = null;
-    for (const table of [boardChatActions, boardChatRuns, boardChatCompanySettings, costEvents, activityLog, approvals, issueComments, issues, goals]) {
+    for (const table of [boardChatActions, boardChatRuns, boardChatCompanySettings, costEvents, activityLog, approvals, issueComments, issues, goals, agents]) {
       await db.delete(table);
     }
   });
@@ -448,13 +455,14 @@ describeDb("Board chat on a signed-in server", () => {
     expect(logged).toHaveLength(1);
   });
 
-  it("never lets the chat decide deploy or merge cards, but can prepare approving a hire", async () => {
-    const [deploy, merge, hire] = await db
+  it("never lets the chat decide deploy, merge or hire cards, but can prepare approving a strategy card", async () => {
+    const [deploy, merge, hire, strategy] = await db
       .insert(approvals)
       .values([
         { companyId: companyA, type: "request_board_approval", payload: { kind: "deploy", title: "Deploy abc" } },
         { companyId: companyA, type: "request_board_approval", payload: { kind: "merge_pr", title: "Merge #1" } },
-        { companyId: companyA, type: "hire_agent", payload: { name: "Bob" } },
+        { companyId: companyA, type: "hire_agent", payload: { name: "Bob", adapterType: "process", adapterConfig: { command: "/bin/sh" } } },
+        { companyId: companyA, type: "approve_ceo_strategy", payload: { title: "Q4 plan" } },
       ])
       .returning();
     script = [
@@ -462,15 +470,17 @@ describeDb("Board chat on a signed-in server", () => {
         { tool: "decide_card", input: { cardId: deploy!.id, decision: "approve" } },
         { tool: "decide_card", input: { cardId: merge!.id, decision: "reject" } },
         { tool: "decide_card", input: { cardId: hire!.id, decision: "approve" } },
+        { tool: "decide_card", input: { cardId: strategy!.id, decision: "approve" } },
       ],
       [{ text: "Done preparing." }],
     ];
     await chat(owner);
     const toolResults = JSON.stringify(modelCalls[1]!.messages);
     expect(toolResults).toContain("Deploy and merge cards can't be decided in Board chat");
+    expect(toolResults).toContain("Board chat can't decide this kind of card");
     const held = await db.select().from(boardChatActions).where(eq(boardChatActions.companyId, companyA));
     expect(held).toHaveLength(1);
-    expect(held[0]!.summary).toBe('Approve the card "Bob"');
+    expect(held[0]!.summary).toBe('Approve the card "Q4 plan"');
     expect(targetCalls.filter((c) => c.route === "approve")).toHaveLength(0);
   });
 
@@ -523,6 +533,69 @@ describeDb("Board chat on a signed-in server", () => {
     expect(made[0]).toMatchObject({ title: "Reach 100 customers", description: "By year end" });
     const [logged] = await db.select().from(activityLog).where(eq(activityLog.action, "goal.created"));
     expect(logged).toMatchObject({ actorType: "user", actorId: owner, companyId: companyA });
+  });
+
+  it("never hands an agent's credentials to the model or the saved reply (real agent routes)", async () => {
+    const githubToken = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8";
+    const mcpSecret = "sk-live-" + "9Z8y7X6w5V4u3T2s1R0q";
+    const oddlyNamed = "ghp_" + "Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2";
+    const [agent] = await db
+      .insert(agents)
+      .values({
+        companyId: companyA,
+        name: "Coder",
+        role: "engineer",
+        adapterType: "claude_local",
+        adapterConfig: {
+          model: "claude-sonnet-5-5",
+          env: { GITHUB_TOKEN: { type: "plain", value: githubToken }, REPO_NOTE: oddlyNamed },
+          mcpServers: [{ name: "gh", url: "https://mcp.example", headers: { Authorization: `Bearer ${mcpSecret}` } }],
+        },
+      })
+      .returning();
+    script = [
+      [{ tool: "list_agents", input: {} }],
+      [{ tool: "get_agent", input: { agentId: agent!.id } }],
+      // Even if a model somehow repeated one, it is masked before it is shown or saved.
+      [{ text: `Coder is set up. (${githubToken})` }],
+    ];
+    const res = await chat(owner, "Tell me about my agents");
+    expect(res.status).toBe(200);
+    const seenByModel = JSON.stringify(modelCalls);
+    expect(seenByModel).toContain("Coder");
+    for (const secret of [githubToken, mcpSecret, oddlyNamed]) {
+      expect(seenByModel).not.toContain(secret);
+      expect(res.text).not.toContain(secret);
+    }
+    // The routes themselves give Board chat the masked view (no live credentials).
+    const { boardChatService } = await import("../services/board-chat.js");
+    const { createInProcessDispatcher } = await import("../services/board-chat-dispatch.js");
+    const actor = (await boardChatService(db).buildActor({ companyId: companyA, userId: owner }))!;
+    const dispatch = createInProcessDispatcher(() => testApp);
+    for (const path of [`/api/agents/${agent!.id}`, `/api/companies/${companyA}/agents`]) {
+      const raw = await dispatch({ method: "GET", path, actor });
+      expect(raw.status, path).toBe(200);
+      expect(raw.text, path).toContain("Coder");
+      expect(raw.text, path).not.toContain(githubToken);
+      expect(raw.text, path).not.toContain(mcpSecret);
+    }
+    const saved = await db.select().from(issueComments).where(eq(issueComments.authorUserId, "board-concierge"));
+    expect(saved).toHaveLength(1);
+    for (const secret of [githubToken, mcpSecret, oddlyNamed]) expect(saved[0]!.body).not.toContain(secret);
+    expect(saved[0]!.body).toContain("Coder is set up.");
+  });
+
+  it("stops between model calls when the company hits its spending limit mid-message", async () => {
+    script = [[{ tool: "get_overview", input: {} }], [{ text: "should never be asked" }]];
+    onModelCall = async () => {
+      await db.update(companies).set({ status: "paused", pauseReason: "budget" }).where(eq(companies.id, companyA));
+    };
+    const res = await chat(owner);
+    expect(res.status).toBe(200);
+    expect(modelCalls).toHaveLength(1);
+    expect(res.text).toContain("Board chat stopped: Company is paused because its budget hard-stop was reached.");
+    const [run] = await db.select().from(boardChatRuns).where(eq(boardChatRuns.companyId, companyA));
+    expect(run).toMatchObject({ status: "failed", inputTokens: 1000 });
   });
 
   it("keeps the conversation on the Board Operations task only", async () => {

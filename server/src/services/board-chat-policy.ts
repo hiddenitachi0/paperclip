@@ -15,8 +15,8 @@
  *   * WRITES are DEFAULT-DENY: only the changes in WRITE_RULES can be held,
  *     each with a strict list of the fields it may carry. Anything else is
  *     refused with a plain sentence pointing to the page in Paperclip.
- *   * Deploy and merge cards (and every card that moves money, code or keys)
- *     can never be decided from the chat.
+ *   * Only CEO strategy cards can be decided from the chat. Deploy, merge,
+ *     hire, yes/no and money cards are decided on the page.
  *   * The card shows EVERY field that will be sent, with its real name and
  *     its full value. A change too long to show in full is refused.
  *
@@ -64,7 +64,7 @@ const DENIED_PREFIXES: Array<{ prefix: RegExp; message: string }> = [
   { prefix: /^\/api\/(crypto-wallets|crypto|payment-cards|payment-notices|trading)(\/|$)/, message: "Board chat can't touch money, cards or wallets." },
   { prefix: /^\/api\/(deploy-runner|preview-environments|previews)(\/|$)/, message: "Board chat can't deploy or run previews." },
   { prefix: /^\/api\/(mail-accounts|mail|telegram-bots|data-connections)(\/|$)/, message: "Board chat can't read mail, chats or connected data." },
-  { prefix: new RegExp(`^/api/agents/${ANY_SEGMENT}/(keys|instructions-bundle)(/|$)`), message: "Board chat can't see an agent's keys or instruction files." },
+  { prefix: new RegExp(`^/api/agents/${ANY_SEGMENT}/(keys|instructions-bundle|configuration|config-revisions)(/|$)`), message: "Board chat can't see an agent's keys, setup or instruction files." },
   { prefix: new RegExp(`^/api/issues/${ANY_SEGMENT}/interactions(/|$)`), message: "Board chat can't answer cards on a task. Open the task and answer it yourself." },
 ];
 
@@ -243,15 +243,18 @@ function longestString(value: unknown): number {
 /**
  * Why Board chat may not decide this card, or null when it may. Deploy and
  * merge cards are always refused; so is every card kind that moves money,
- * code, keys or tool access. Only hire and strategy cards pass: plain yes/no
- * cards are also used for spending and publishing, so they stay on the page.
+ * code, keys or tool access. Only CEO strategy cards pass: plain yes/no
+ * cards are also used for spending and publishing, and approving a hire card
+ * switches on whatever agent setup its payload carries (kind, command,
+ * budget) -- which the card in the chat could not show -- so both stay on
+ * the page.
  */
 export function boardChatApprovalRefusal(approval: { type: string; payload: Record<string, unknown> | null }): string | null {
   const kind = typeof approval.payload?.kind === "string" ? approval.payload.kind : "";
   if (/deploy|merge|rollback|release/i.test(kind)) {
     return "Deploy and merge cards can't be decided in Board chat. Open the card in Paperclip and decide it yourself.";
   }
-  if (approval.type === "hire_agent" || approval.type === "approve_ceo_strategy") return null;
+  if (approval.type === "approve_ceo_strategy") return null;
   return "Board chat can't decide this kind of card. Open it in Paperclip and decide it yourself.";
 }
 
