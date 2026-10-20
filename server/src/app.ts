@@ -11,6 +11,7 @@ import type { StorageService } from "./storage/types.js";
 import { httpLogger, errorHandler } from "./middleware/index.js";
 import { actorMiddleware } from "./middleware/auth.js";
 import { boardMutationGuard } from "./middleware/board-mutation-guard.js";
+import { boardChatGuard } from "./middleware/board-chat-guard.js";
 import { privateHostnameGuard, resolvePrivateHostnameAllowSet } from "./middleware/private-hostname-guard.js";
 import { applyTrustProxy, parseTrustProxyEnv } from "./middleware/trust-proxy.js";
 import { healthRoutes } from "./routes/health.js";
@@ -300,6 +301,10 @@ export async function createApp(
       resolveSession: opts.resolveSession,
     }),
   );
+  // Board chat on signed-in servers: holds every change a Board chat run asks
+  // for until the person approves it, and keeps its credential inside one
+  // company (see middleware/board-chat-guard.ts). A no-op for everyone else.
+  app.use(boardChatGuard(db));
   app.use("/api/auth", authRoutes(db));
   if (opts.betterAuthHandler) {
     app.all("/api/auth/{*authPath}", opts.betterAuthHandler);

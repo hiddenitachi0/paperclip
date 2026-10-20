@@ -35,6 +35,15 @@ import { cn, formatDateTime } from "../lib/utils";
 import type { FeedbackVoteValue } from "@paperclipai/shared";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { BOARD_CHAT_SUBTITLE, readBoardChatPrefill } from "../lib/board-chat-handoff";
+import type { BoardChatAction } from "@paperclipai/shared";
+import { boardChatApi } from "../api/boardChat";
+import { authApi } from "../api/auth";
+import { ApiError } from "../api/client";
+import { BoardChatActionCard } from "../components/BoardChatActionCard";
+import { useBoardChatAvailability } from "../hooks/useBoardChatAvailability";
+
+/** A refusal from the chat route, carrying the server's plain sentence. */
+class BoardChatRequestError extends Error {}
 
 /**
  * Board chat (Board Concierge Chat; formerly shown as "Conference Room") — a
@@ -366,6 +375,52 @@ export function BoardChat() {
     enabled: !!boardIssueId,
   });
 
+  // Signed-in Paperclip: changes the chat prepared wait here as cards until
+  // the person who asked clicks Approve (or Cancel). Local mode has none.
+  const boardChatMode = useBoardChatAvailability(selectedCompanyId).mode;
+  const signedInChat = boardChatMode === "signed_in";
+  const { data: sessionData } = useQuery({
+    queryKey: queryKeys.auth.session,
+    queryFn: () => authApi.getSession(),
+    retry: false,
+    enabled: signedInChat,
+  });
+  const currentUserId = sessionData?.user?.id ?? null;
+  const actionsQueryKey = queryKeys.boardChat.actions(selectedCompanyId ?? "", boardIssueId);
+  const { data: actionsData } = useQuery({
+    queryKey: actionsQueryKey,
+    queryFn: () => boardChatApi.listActions(selectedCompanyId!, boardIssueId),
+    enabled: signedInChat && !!selectedCompanyId && !!boardIssueId,
+    refetchInterval: 5000,
+  });
+  const actions: BoardChatAction[] = actionsData?.actions ?? [];
+  const [actionBusyId, setActionBusyId] = useState<string | null>(null);
+  const [actionErrors, setActionErrors] = useState<Record<string, string>>({});
+  const decideAction = useCallback(
+    async (actionId: string, decision: "approve" | "cancel") => {
+      setActionBusyId(actionId);
+      setActionErrors((prev) => {
+        const next = { ...prev };
+        delete next[actionId];
+        return next;
+      });
+      try {
+        if (decision === "approve") await boardChatApi.confirm(actionId);
+        else await boardChatApi.cancel(actionId);
+      } catch (err) {
+        setActionErrors((prev) => ({
+          ...prev,
+          [actionId]: err instanceof ApiError ? err.message : "That didn't work. Please try again.",
+        }));
+      } finally {
+        setActionBusyId(null);
+        void queryClient.invalidateQueries({ queryKey: ["board-chat", "actions"] });
+        if (boardIssueId) void queryClient.invalidateQueries({ queryKey: queryKeys.issues.comments(boardIssueId) });
+      }
+    },
+    [queryClient, boardIssueId],
+  );
+
   const voteByComment = useMemo(() => {
     const map = new Map<string, FeedbackVoteValue>();
     for (const vote of feedbackVotes ?? []) {
@@ -598,6 +653,18 @@ export function BoardChat() {
         clearTimeout(fetchTimeout);
 
         if (!res.ok || !res.body) {
+          // A signed-in Paperclip says why in a plain sentence (not the
+          // company's owner or an admin, turned off, today's limit reached).
+          let refusal: string | null = null;
+          try {
+            const data = (await res.json()) as { error?: unknown };
+            if (res.status === 403 || res.status === 429 || res.status === 400) {
+              refusal = typeof data?.error === "string" ? data.error : null;
+            }
+          } catch {
+            refusal = null;
+          }
+          if (refusal) throw new BoardChatRequestError(refusal);
           throw new Error("Board chat stream not available");
         }
 
@@ -628,6 +695,9 @@ export function BoardChat() {
                 setStatusText(event.text);
               } else if (event.type === "start" && event.issueId) {
                 setBoardIssueId(event.issueId);
+              } else if (event.type === "action") {
+                // A change is waiting for Approve: show its card right away.
+                void queryClient.invalidateQueries({ queryKey: ["board-chat", "actions"] });
               } else if (event.type === "error") {
                 setErrorText(
                   event.message ||
@@ -659,7 +729,9 @@ export function BoardChat() {
         console.error("Board chat error:", err);
         setStatusText("");
         setErrorText(
-          "The board assistant is unavailable right now. Please try again in a moment.",
+          err instanceof BoardChatRequestError
+            ? err.message
+            : "The board assistant is unavailable right now. Please try again in a moment.",
         );
       } finally {
         setSending(false);
@@ -842,7 +914,28 @@ export function BoardChat() {
                 );
               })()}
 
-              {sortedComments.map((comment) => {
+              {[
+                ...sortedComments.map((comment) => ({ kind: "comment" as const, at: new Date(comment.createdAt).getTime(), comment })),
+                ...actions.map((action) => ({ kind: "action" as const, at: new Date(action.createdAt).getTime(), action })),
+              ]
+                .sort((a, b) => a.at - b.at)
+                .map((item) => {
+                if (item.kind === "action") {
+                  const action = item.action;
+                  return (
+                    <div key={`action-${action.id}`} className="flex justify-start">
+                      <BoardChatActionCard
+                        action={action}
+                        canDecide={currentUserId !== null && action.userId === currentUserId}
+                        busy={actionBusyId === action.id}
+                        error={actionErrors[action.id] ?? null}
+                        onApprove={() => void decideAction(action.id, "approve")}
+                        onCancel={() => void decideAction(action.id, "cancel")}
+                      />
+                    </div>
+                  );
+                }
+                const comment = item.comment;
                 const isUser = !comment.authorAgentId && comment.authorUserId !== "board-concierge";
                 if (isUser) {
                   return (

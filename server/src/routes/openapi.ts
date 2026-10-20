@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
-import { ASSIGNEE_UNAVAILABLE_REASONS } from "@paperclipai/shared";
+import { ASSIGNEE_UNAVAILABLE_REASONS, updateBoardChatSettingsSchema } from "@paperclipai/shared";
 import {
   // Agent
   createAgentSchema,
@@ -3571,6 +3571,72 @@ registry.registerPath({
     ),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
+});
+
+// Board chat on signed-in servers: who may use it, the company switch, and the
+// held changes that wait for the person's Approve (20 Oct 2026).
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/board-chat/availability",
+  tags: ["companies"],
+  summary: "Whether the signed-in person can use Board chat in this company, and why not",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/board-chat/settings",
+  tags: ["companies"],
+  summary: "Board chat on/off switch and daily message cap for this company",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "patch",
+  path: "/api/companies/{companyId}/board-chat/settings",
+  tags: ["companies"],
+  summary: "Turn Board chat on or off, or change its daily message cap (company owner or instance admin)",
+  request: { params: z.object({ companyId: z.string() }), body: jsonBody(updateBoardChatSettingsSchema) },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/board-chat/actions",
+  tags: ["companies"],
+  summary: "Changes Board chat has prepared in this company, waiting for or past approval",
+  request: { params: z.object({ companyId: z.string() }), query: z.object({ issueId: z.string().optional() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/board/chat/actions/{actionId}/confirm",
+  tags: ["instance"],
+  summary: "Approve one held Board chat change; the server then makes exactly that change as the person",
+  request: { params: z.object({ actionId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/board/chat/actions/{actionId}/cancel",
+  tags: ["instance"],
+  summary: "Cancel one held Board chat change; nothing is changed",
+  request: { params: z.object({ actionId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/board/chat/runs/{runId}/token",
+  tags: ["instance"],
+  security: [],
+  summary: "Internal: a Board chat run's Paperclip connector swaps its one-time code for the run credential (once)",
+  request: { params: z.object({ runId: z.string() }), body: jsonBody(z.object({ code: z.string() })) },
+  responses: { 200: r.ok(), 403: r.forbidden, 404: r.notFound },
 });
 
 // ─── Lane A (direct-model-call text primitive) ────────────────────────────────

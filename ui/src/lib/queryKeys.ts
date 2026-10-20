@@ -298,6 +298,11 @@ export const queryKeys = {
   },
   cloudUpstreams: (companyId: string) => ["cloud-upstreams", companyId] as const,
   health: ["health"] as const,
+  boardChat: {
+    availability: (companyId: string) => ["board-chat", "availability", companyId] as const,
+    settings: (companyId: string) => ["board-chat", "settings", companyId] as const,
+    actions: (companyId: string, issueId: string | null) => ["board-chat", "actions", companyId, issueId ?? "all"] as const,
+  },
   paymentCards: {
     list: (companyId: string) => ["payment-cards", companyId] as const,
   },

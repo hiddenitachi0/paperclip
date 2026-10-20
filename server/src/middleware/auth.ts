@@ -17,6 +17,7 @@ import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "./logger.js";
 import { boardAuthService } from "../services/board-auth.js";
 import { companyServiceTokenService } from "../services/company-service-tokens.js";
+import { boardChatService, isBoardChatToken } from "../services/board-chat.js";
 import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compatibility.js";
 import { readServerSecret } from "../server-secrets.js";
 
@@ -171,6 +172,21 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
 
     const token = authHeader.slice("bearer ".length).trim();
     if (!token) {
+      next();
+      return;
+    }
+
+    // Board chat on a signed-in server: a run's short-lived credential, or the
+    // single-use credential that replays one approved change. Both resolve to
+    // the person, in one company, never as instance admin (see
+    // services/board-chat.ts). An unknown or expired one authenticates as
+    // nobody -- it never falls through to the other token kinds below.
+    if (opts.deploymentMode === "authenticated" && isBoardChatToken(token)) {
+      const resolved = await boardChatService(db).resolveActorForToken(token);
+      if (resolved) {
+        req.actor = resolved.actor;
+        if (resolved.action) req.boardChatAction = resolved.action;
+      }
       next();
       return;
     }

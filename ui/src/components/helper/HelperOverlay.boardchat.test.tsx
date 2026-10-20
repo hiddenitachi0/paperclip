@@ -37,6 +37,18 @@ vi.mock("@/api/instanceSettings", () => ({
 vi.mock("@/api/health", () => ({
   healthApi: { get: vi.fn(async () => ({ status: "ok", deploymentMode: boardChatState.mode })) },
 }));
+const boardChatAvailability = vi.hoisted(() => ({
+  value: null as null | { available: boolean; reason: string | null; canChangeSettings: boolean },
+}));
+vi.mock("@/api/boardChat", () => ({
+  boardChatApi: {
+    getAvailability: vi.fn(async () =>
+      boardChatAvailability.value
+        ? { mode: "signed_in", message: null, dailyMessageCap: 40, messagesToday: 0, ...boardChatAvailability.value }
+        : null,
+    ),
+  },
+}));
 vi.mock("../../context/CompanyContext", () => ({
   useCompany: () => ({ selectedCompanyId: "c1", selectedCompany: { id: "c1", name: "Acme", issuePrefix: "ACM" } }),
 }));
@@ -100,6 +112,7 @@ let host: HTMLDivElement | null = null;
 beforeEach(() => {
   boardChatState.flag = true;
   boardChatState.mode = "local_trusted";
+  boardChatAvailability.value = null;
   mockHelperApi.getSettings.mockResolvedValue(settings());
   mockHelperApi.listInvestigations.mockResolvedValue({ investigations: [], availability: null });
   document.title = "Agents · Acme · Paperclip";
@@ -230,14 +243,36 @@ describe("HelperOverlay — Board chat hand-off", () => {
     expect(document.querySelector("[data-testid=helper-board-chat-unavailable]")?.textContent).toContain("is not turned on here");
   });
 
-  it("shows a plain note instead of the button where Board chat cannot run (a shared, signed-in server)", async () => {
+  it("hands over to Board chat on a signed-in server for the company's owner or admin", async () => {
     boardChatState.mode = "authenticated";
+    boardChatAvailability.value = { available: true, reason: null, canChangeSettings: true };
+    await renderOpen();
+    await ask("Hire a marketing agent", answer({ suggestBoardChat: true }));
+    await click("[data-testid=helper-board-chat-suggested]");
+    expect(location().pathname).toBe("/ACM/board-chat");
+    expect(String(location().state?.boardChatPrefill)).toContain("Hire a marketing agent");
+  });
+
+  it("explains plainly on a signed-in server when the company has Board chat off", async () => {
+    boardChatState.mode = "authenticated";
+    boardChatAvailability.value = { available: false, reason: "company_off", canChangeSettings: false };
+    await renderOpen();
+    await ask("Hire a marketing agent", answer({ suggestBoardChat: true }));
+    expect(document.querySelector("[data-testid=helper-board-chat-suggested]")).toBeNull();
+    expect(document.querySelector("[data-testid=helper-board-chat-unavailable]")?.textContent).toContain(
+      "turned off for this company",
+    );
+  });
+
+  it("shows a plain note instead of the button for someone who is not the company's owner or admin", async () => {
+    boardChatState.mode = "authenticated";
+    boardChatAvailability.value = { available: false, reason: "not_allowed", canChangeSettings: false };
     await renderOpen();
     await ask("Hire a marketing agent", answer({ suggestBoardChat: true }));
     expect(document.querySelector("[data-testid=helper-board-chat-suggested]")).toBeNull();
     expect(document.querySelector("[data-testid=helper-board-chat-answer]")).toBeNull();
     expect(document.querySelector("[data-testid=helper-board-chat-unavailable]")?.textContent).toContain(
-      "only works when Paperclip runs on your own computer",
+      "only for this company's owner and admins",
     );
   });
 });

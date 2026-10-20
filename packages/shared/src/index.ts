@@ -3165,3 +3165,20 @@ export {
   type PositionCatalogueJob,
   type PositionCatalogueJobVariable,
 } from "./position-catalogue.js";
+
+export {
+  BOARD_CHAT_DEFAULT_DAILY_MESSAGE_CAP,
+  BOARD_CHAT_MAX_DAILY_MESSAGE_CAP,
+  BOARD_CHAT_ACTION_EXPIRES_AFTER_HOURS,
+  BOARD_CHAT_UNAVAILABLE_REASONS,
+  BOARD_CHAT_ACTION_STATUSES,
+  updateBoardChatSettingsSchema,
+  type BoardChatSettings,
+  type UpdateBoardChatSettingsInput,
+  type BoardChatUnavailableReasonCode,
+  type BoardChatAvailabilityResponse,
+  type BoardChatActionStatus,
+  type BoardChatActionDetail,
+  type BoardChatAction,
+  type BoardChatActionEvent,
+} from "./board-chat.js";

@@ -101,7 +101,7 @@ export function Sidebar() {
   // sending actually works — the Board chat setting is on AND Paperclip runs in
   // single-operator local mode (its server route refuses everything else).
   // Hidden while either is still loading (same no-flash pattern as above).
-  const boardChatAvailable = useBoardChatAvailability().available;
+  const boardChatAvailable = useBoardChatAvailability(selectedCompanyId).available;
 
   const pluginContext = {
     companyId: selectedCompanyId,

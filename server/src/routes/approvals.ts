@@ -56,6 +56,7 @@ import {
   resolveProjectDeployWorkspaceId,
 } from "../services/deploy-workspace.js";
 import { evaluateDeployPolicyForProject } from "../services/deploy-policy-enforcement.js";
+import { boardChatApprovalRefusal } from "../services/board-chat-policy.js";
 import {
   GITHUB_COMPARE_FILE_LIMIT,
   describeDeployCardPartialCommitId,
@@ -1781,6 +1782,22 @@ export function approvalRoutes(
   }
 
   /**
+   * Board chat (signed-in servers) may decide only plain hire, strategy and
+   * yes/no cards, and never a deploy or merge card -- whether the request is
+   * a held change or the replay after the person clicked Approve. The Board
+   * chat guard already refuses these before they are held; this is the same
+   * rule again at the route, so no path around the guard can decide one.
+   */
+  async function refuseBoardChatDecision(req: Request, id: string) {
+    if (req.actor.source !== "board_chat" && req.actor.source !== "board_chat_confirmed") return;
+    const approval = await svc.getById(id);
+    const refusal = approval
+      ? boardChatApprovalRefusal({ type: approval.type, payload: (approval.payload ?? null) as Record<string, unknown> | null })
+      : "Board chat couldn't find that card.";
+    if (refusal) throw forbidden(refusal);
+  }
+
+  /**
    * DUR-4568 finding #2: the security-review request/verdict routes used to
    * sit behind plain `company_scope:read` -- any actor allowed to read
    * approvals (which includes ordinary company agents and read-only board
@@ -2576,6 +2593,7 @@ export function approvalRoutes(
     validate(resolveApprovalSchema),
     async (req, res) => {
     const id = req.params.id as string;
+    await refuseBoardChatDecision(req, id);
     const decidedByUserId = req.actor.userId ?? "board";
     // DUR-3923 item 1: a card filed before DUR-3926's filing-time check (e.g. kind
     // "deploy_pr") looks approvable but nothing ever acts on it. Refuse to approve it with
@@ -2793,6 +2811,7 @@ export function approvalRoutes(
     validate(resolveApprovalSchema),
     async (req, res) => {
     const id = req.params.id as string;
+    await refuseBoardChatDecision(req, id);
     const decidedByUserId = req.actor.userId ?? "board";
     const { approval, applied } = await svc.reject(id, decidedByUserId, req.body.decisionNote, {
       crossCompanyInstruction: crossCompanyDecisionHooks(decidedByUserId, req.body.decisionNote),
@@ -2842,6 +2861,7 @@ export function approvalRoutes(
     validate(requestApprovalRevisionSchema),
     async (req, res) => {
       const id = req.params.id as string;
+      await refuseBoardChatDecision(req, id);
       const decidedByUserId = req.actor.userId ?? "board";
       const approval = await svc.requestRevision(id, decidedByUserId, req.body.decisionNote);
 

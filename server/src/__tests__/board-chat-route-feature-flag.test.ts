@@ -22,15 +22,27 @@ vi.mock("node:child_process", async (importOriginal) => {
   return { ...actual, spawn: mockSpawn };
 });
 
+const mockIsCompanyOwnerOrAdmin = vi.hoisted(() => vi.fn(() => false));
+
 vi.mock("../routes/authz.js", () => ({
   getActorInfo: () => ({ actorId: "user-1", agentId: null, runId: null }),
   assertCompanyAccess: () => {},
+  assertBoard: () => {},
+  assertCompanyOwnerOrInstanceAdmin: () => {},
+  isCompanyOwnerOrAdmin: mockIsCompanyOwnerOrAdmin,
 }));
 
 async function createApp(deploymentMode: "local_trusted" | "authenticated" = "local_trusted") {
   const { boardChatRoutes } = await import("../routes/board-chat.js");
   const app = express();
   app.use(express.json());
+  app.use((req, _res, next) => {
+    (req as any).actor =
+      deploymentMode === "local_trusted"
+        ? { type: "board", userId: "local-board", source: "local_implicit", isInstanceAdmin: true }
+        : { type: "board", userId: "user-1", source: "session", companyIds: ["company-1"], memberships: [] };
+    next();
+  });
   app.use("/api", boardChatRoutes({} as any, { deploymentMode }));
   return app;
 }
@@ -58,8 +70,9 @@ describe("POST /api/board/chat/stream feature flag guard (PAP-137)", () => {
     expect(mockIssueService.create).not.toHaveBeenCalled();
   });
 
-  it("returns 403 DEPLOYMENT_MODE_UNSUPPORTED outside local_trusted even with the flag on", async () => {
+  it("on a signed-in server, refuses anyone who is not the company's owner or admin", async () => {
     mockGetExperimental.mockResolvedValue({ enableConferenceRoomChat: true });
+    mockIsCompanyOwnerOrAdmin.mockReturnValue(false);
     const app = await createApp("authenticated");
 
     const res = await request(app)
@@ -67,8 +80,12 @@ describe("POST /api/board/chat/stream feature flag guard (PAP-137)", () => {
       .send({ companyId: "company-1", message: "hello" });
 
     expect(res.status).toBe(403);
-    expect(res.body.code).toBe("DEPLOYMENT_MODE_UNSUPPORTED");
+    expect(res.body).toEqual({
+      error: "Board chat is only for this company's owner and admins.",
+      code: "BOARD_CHAT_ROLE_REQUIRED",
+    });
     expect(mockIssueService.addComment).not.toHaveBeenCalled();
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 
   it("lets requests past the guard when the flag is on (400 on missing body, not 403)", async () => {
@@ -120,6 +137,25 @@ describe("board-chat client disconnect", () => {
 
     await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled());
     expect(fakeProc.kill).not.toHaveBeenCalled();
+    // Local single-user mode keeps its original CLI invocation unchanged.
+    const [command, args, options] = mockSpawn.mock.calls[0]!;
+    expect(command).toBe("claude");
+    expect(args).toEqual([
+      "-p",
+      "-",
+      "--output-format",
+      "stream-json",
+      "--include-partial-messages",
+      "--verbose",
+      "--append-system-prompt",
+      expect.any(String),
+      "--model",
+      "sonnet",
+      "--dangerously-skip-permissions",
+    ]);
+    expect(options.cwd).toBe("/tmp");
+    expect(options.env.PAPERCLIP_COMPANY_ID).toBe("company-1");
+    expect(options.env.PAPERCLIP_API_URL).toMatch(/^http:\/\//);
 
     // Client walks away mid-stream.
     req.abort();

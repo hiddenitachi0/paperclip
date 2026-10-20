@@ -282,7 +282,7 @@ function CompanyHelper({ companyId, userId }: { companyId: string; userId: strin
   const { selectedCompany } = useCompany();
   const location = useLocation();
   const navigate = useNavigate();
-  const boardChat = useBoardChatAvailability();
+  const boardChat = useBoardChatAvailability(companyId);
   const initial = useMemo(() => loadHelperSession(userId, companyId), [userId, companyId]);
   const [open, setOpen] = useState(loadHelperOpen);
   const [width, setWidth] = useState(loadHelperWidth);

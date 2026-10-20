@@ -151,6 +151,11 @@ DECLARE
     'assets',
     'board_api_keys',
     'board_delegate_tokens',
+    -- Board chat on signed-in servers. Created, granted on and policed in
+    -- 0255_board_chat_authenticated.sql; company-scoped, so they are in both lists.
+    'board_chat_actions',
+    'board_chat_company_settings',
+    'board_chat_runs',
     -- DUR-4519 (Brag video phase 1). Created, granted on and policed in
     -- 0226_brag_jobs.sql; listed here so the login-role lists match the
     -- schema, as for the tables above.
@@ -536,6 +541,11 @@ DECLARE
     'approval_comments',
     'approvals',
     'assets',
+    -- Board chat on signed-in servers. Created, granted on and policed in
+    -- 0255_board_chat_authenticated.sql; company-scoped, so they are in both lists.
+    'board_chat_actions',
+    'board_chat_company_settings',
+    'board_chat_runs',
     -- DUR-4519 (Brag video phase 1). Created, granted on and policed in
     -- 0226_brag_jobs.sql; listed here so the login-role lists match the
     -- schema, as for the tables above.
