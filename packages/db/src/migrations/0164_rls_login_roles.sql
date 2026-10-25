@@ -214,6 +214,14 @@ DECLARE
     -- match the schema, as for the tables above.
     'company_speech_settings',
     'company_user_sidebar_preferences',
+    -- DUR-4852 (Legal Phase 1, contract register). Created, granted on and
+    -- policed in 0256_legal_contract_register.sql; company-scoped, so they are
+    -- in both lists.
+    'contract_deadline_reminders',
+    'contract_deadlines',
+    'contract_parties',
+    'contract_terms',
+    'contracts',
     'cost_events',
     -- DUR-4462/DUR-4458 daily Fal/Sogni reconciliation. Created, granted on
     -- and policed in 0219_cost_reconciliation.sql; listed here so the
@@ -596,6 +604,14 @@ DECLARE
     -- match the schema, as for the tables above.
     'company_speech_settings',
     'company_user_sidebar_preferences',
+    -- DUR-4852 (Legal Phase 1, contract register). Created, granted on and
+    -- policed in 0256_legal_contract_register.sql; company-scoped, so they are
+    -- in both lists.
+    'contract_deadline_reminders',
+    'contract_deadlines',
+    'contract_parties',
+    'contract_terms',
+    'contracts',
     'cost_events',
     -- DUR-4462/DUR-4458 daily Fal/Sogni reconciliation. Created, granted on
     -- and policed in 0219_cost_reconciliation.sql; listed here so the
