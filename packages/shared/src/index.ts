@@ -109,6 +109,7 @@ export {
   type LaneAKeywordRoute,
 } from "./lane-a-models.js";
 export * from "./prompt-cache.js";
+export * from "./report-data.js";
 export * from "./known-models.js";
 export * from "./openrouter-hosts.js";
 export * from "./model-readiness.js";
@@ -124,7 +125,10 @@ export {
   type CompanyWebSearchSettings,
 } from "./web-search.js";
 export { readLaneAConversationSearchSwitch } from "./lane-a-conversation-search.js";
+export { readLaneAPictureModelId } from "./lane-a-picture-model.js";
 export * from "./helper.js";
+export * from "./company-migration.js";
+export * from "./quality-loops.js";
 export {
   BROWSER_ACCESS_LEVELS,
   readLaneABrowserAccess,
@@ -205,6 +209,15 @@ export {
   supportsThinkingEffort,
   isThinkingEffortValid,
   validateAdapterModelEffort,
+  getThinkingEffortValue,
+  thinkingEffortLabel,
+  agentDefaultLabel,
+  validateModelAgainstList,
+  deriveChildModelEffortInheritance,
+  type ModelListValidationInput,
+  type InheritedFromMarker,
+  type ChildModelEffortInheritanceInput,
+  type ChildModelEffortInheritance,
   type ThinkingEffortKey,
   type ThinkingEffortVocabulary,
   type ThinkingEffortOption,
@@ -1438,6 +1451,43 @@ export {
   type RecordTelegramReactionInput,
   type UpdateReactionEmojiConfigInput,
 } from "./validators/telegram-reaction.js";
+export {
+  TELEGRAM_CHAT_DAILY_CAP_DEFAULT,
+  TELEGRAM_CHAT_DAILY_CAP_MAX,
+  TELEGRAM_CHAT_MESSAGE_MAX_CHARS,
+  TELEGRAM_LINK_CODE_ALPHABET,
+  TELEGRAM_LINK_CODE_LENGTH,
+  ackTelegramChatAnswerSchema,
+  telegramChatAskSchema,
+  telegramChatLinkSchema,
+  updateTelegramChatSettingsSchema,
+  type AckTelegramChatAnswerInput,
+  type TelegramChatAskInput,
+  type TelegramChatAskOutcome,
+  type TelegramChatAskResult,
+  type TelegramChatAskImage,
+  type TelegramChatLinkInput,
+  type TelegramChatLinkResult,
+  type TelegramChatOutboxItem,
+  type TelegramChatSettings,
+  type TelegramLinkCode,
+  type TelegramLinkStatus,
+  type UpdateTelegramChatSettingsInput,
+} from "./validators/telegram-chat.js";
+export {
+  CHAT_ATTACHMENTS_MAX,
+  CHAT_PHOTO_AGE_CHECK_MAX_OUTPUT_TOKENS,
+  CHAT_PHOTO_AGE_CHECK_PURPOSE,
+  CHAT_PHOTO_AGE_CHECK_SYSTEM_PROMPT,
+  CHAT_PHOTO_AGE_CHECK_USER_PROMPT,
+  CHAT_PHOTO_FILENAME_PREFIX,
+  CHAT_PHOTO_MAX_BASE64_CHARS,
+  CHAT_PHOTO_MAX_BYTES,
+  CHAT_PHOTO_TYPES,
+  chatPhotoFilename,
+  sniffChatPhotoType,
+  type ChatPhotoType,
+} from "./chat-attachments.js";
 export type { SpeechSettings, SpeechSpeakResult, SpeechTranscribeResult } from "./types/speech.js";
 export {
   SPEECH_DEFAULT_DAILY_SPEAK_CHARACTERS,
@@ -1762,9 +1812,11 @@ export {
   type AgentLimitsInput,
   PERSONA_FIELD_MAX_LENGTHS,
   BROWSER_ACCESS_FIELDS,
+  REACTION_LEARNING_FIELDS,
   AGENT_BROWSER_ACCESS_LEVELS,
   browserAccessSchema,
   type BrowserAccessField,
+  type ReactionLearningField,
   type AgentBrowserAccessLevel,
   jobVariableSchema,
   createJobSchema,
@@ -2093,6 +2145,11 @@ export {
   bookingRequestPayloadSchema,
   purchaseRequestPayloadSchema,
   videoRenderRequestPayloadSchema,
+  OPERATOR_ACTION_TYPES,
+  operatorActionTargetNameSchema,
+  operatorActionEnvKeySchema,
+  operatorActionRequestInputSchema,
+  operatorActionRequestPayloadSchema,
   type CreateApproval,
   type UpsertBudgetPolicy,
   type ResolveBudgetIncident,
@@ -2113,6 +2170,9 @@ export {
   type BookingRequestPayload,
   type PurchaseRequestPayload,
   type VideoRenderRequestPayload,
+  type OperatorActionType,
+  type OperatorActionRequestInput,
+  type OperatorActionRequestPayload,
   envBindingPlainSchema,
   envBindingSecretRefSchema,
   envBindingSchema,
@@ -2635,6 +2695,10 @@ export {
   VIDEO_TRANSITION_MAX_DURATION_MS,
   VIDEO_TRANSITION_MIN_DURATION_MS,
   VIDEO_QUALITY_ISSUE_CODES,
+  VIDEO_QUALITY_BLOCKING_ISSUE_CODES,
+  videoQualityIssueSeverity,
+  hasBlockingVideoQualityIssue,
+  type VideoQualityIssueSeverity,
   approveVideoDirectorRunSchema,
   createVideoSceneSchema,
   createVideoShotSchema,
@@ -2643,6 +2707,9 @@ export {
   estimateVideoStorylineCostCents,
   FAL_KLING_ALLOWED_DURATIONS_SECONDS,
   videoModelAllowedDurations,
+  videoShotVideoPrompt,
+  isFalKlingV3Model,
+  FAL_KLING_V3_ALLOWED_DURATIONS_SECONDS,
   videoRenderDurationSeconds,
   startVideoStorylineRenderSchema,
   updateVideoSceneSchema,
@@ -2826,6 +2893,15 @@ export {
 
 export {
   BRAG_BILLING_CODE,
+  BRAG_ON_DONE_COST_MARGIN,
+  BRAG_ON_DONE_DEFAULT_MAX_COST_CENTS,
+  BRAG_ON_DONE_LENGTH_SECONDS,
+  BRAG_ON_DONE_MAX_COST_CENTS_LIMIT,
+  BRAG_ON_DONE_OUTCOMES,
+  estimateBragOnDoneCostCents,
+  resolveBragOnDoneMaxCostCents,
+  type BragOnDoneOutcome,
+  type IssueBragPreapproval,
   BRAG_FORMATS,
   BRAG_JOB_STATUSES,
   BRAG_MAX_LENGTH_SECONDS,
@@ -3075,3 +3151,34 @@ export {
   type MailUrgencySummary,
   type SetMailUrgencyFeedbackInput,
 } from "./mail-urgency.js";
+export * from "./video-storyline-transitions.js";
+export * from "./video-storyline-clips.js";
+export * from "./video-storyline-directors.js";
+export * from "./crypto-wallets.js";
+export {
+  POSITION_CATALOGUE,
+  CATALOGUE_SKILL_KEYS,
+  LEGAL_ADVISOR_CATALOGUE_JOBS,
+  findPositionTemplate,
+  catalogueSkillIdForKey,
+  type PositionCatalogueEntry,
+  type PositionCatalogueJob,
+  type PositionCatalogueJobVariable,
+} from "./position-catalogue.js";
+
+export {
+  BOARD_CHAT_DEFAULT_DAILY_MESSAGE_CAP,
+  BOARD_CHAT_MAX_DAILY_MESSAGE_CAP,
+  BOARD_CHAT_ACTION_EXPIRES_AFTER_HOURS,
+  BOARD_CHAT_UNAVAILABLE_REASONS,
+  BOARD_CHAT_ACTION_STATUSES,
+  updateBoardChatSettingsSchema,
+  type BoardChatSettings,
+  type UpdateBoardChatSettingsInput,
+  type BoardChatUnavailableReasonCode,
+  type BoardChatAvailabilityResponse,
+  type BoardChatActionStatus,
+  type BoardChatActionDetail,
+  type BoardChatAction,
+  type BoardChatActionEvent,
+} from "./board-chat.js";

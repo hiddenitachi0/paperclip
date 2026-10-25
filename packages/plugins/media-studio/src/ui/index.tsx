@@ -5,6 +5,7 @@ import { MediaStudioEditTab } from "./edit-tab.js";
 import { CAST_IDENTITIES_ACTION, EMPTY_CAST, StorylineCastSection, castIdentityOptions, shotCastLabels, type CastIdentityOption, type StorylineCast } from "./storyline-cast.js";
 import { BulkProgressBar, StoryboardPanel, overApprovalLimit, useStoryboardActions, type StoryboardSummary } from "./storyboard-panel.js";
 import { AdvancedFeaturesToggle, AiDirectorSection } from "./director-panel.js";
+import { StoryWriterSection } from "./story-writer-panel.js";
 import { IdentitiesPanel } from "./identities-panel.js";
 import { RoomsPanel } from "./rooms-panel.js";
 import { MediaStudioSettingsTab } from "./settings-panel.js";
@@ -12,8 +13,10 @@ import { errorText, storylineFetchJson } from "./storyline-api.js";
 import { ScriptImportDialog, ScriptInstructionsDialog } from "./script-import.js";
 import {
   BUSY_STATUSES,
+  FILM_STATUSES,
   SKIP_PICTURES_EXPLANATION,
   computeSteps,
+  startBlockedReason,
   pictureCounts,
   refusalToItem,
   renderReadiness,
@@ -25,6 +28,8 @@ import {
   type ReadinessItem,
 } from "./storyline-flow.js";
 import { FilmPanel, ReadinessChecklist, StepBar, SuggestionsBanner } from "./storyline-steps.js";
+import { AspectPicker } from "./strip-panel.js";
+import { ExportSection, TimelineEditor } from "./timeline-editor.js";
 import { VideoModelPicker, type SogniVideoModelRow } from "./video-model-picker.js";
 
 // The plugin UI is served as a standalone ES module, so it must not import from
@@ -3274,6 +3279,8 @@ const VIDEO_STORYLINE_PROVIDER_OPTIONS: Array<{ value: "fal" | "sogni"; label: s
 interface VideoStorylineSummary {
   id: string;
   companyId: string;
+  /** The director whose AI story writer writes this storyline (step 1). */
+  directorId?: string | null;
   projectId: string | null;
   title: string;
   status: string;
@@ -3284,6 +3291,8 @@ interface VideoStorylineSummary {
   estimatedTotalCents: number | null;
   estimatedTotalSeconds: number | null;
   characterReferenceAssetIds: string[];
+  /** The picture shape (newer servers). */
+  aspect?: string;
   /** Storyboard picture service / model / look (newer servers). */
   pictureSettings?: StoryboardPictureSettingsValue;
   /** The script's characters and the saved people they are linked to (newer servers). */
@@ -3293,7 +3302,7 @@ interface VideoStorylineSummary {
   finalDurationSeconds: number | null;
   stitchBlockedReason: string | null;
   errorMessage: string | null;
-  qualityCheckIssues?: Array<{ code?: string; message: string }> | null;
+  qualityCheckIssues?: Array<{ code?: string; message: string; severity?: "warning" | "blocking" }> | null;
   qualityCheckedAt?: string | null;
   createdAt: string;
   updatedAt: string;
@@ -3667,6 +3676,8 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
   const [activeStep, setActiveStep] = useState<FlowStepKey | null>(null);
   /** The server refused "Start render": its reason, mapped to one-click fixes. */
   const [refusal, setRefusal] = useState<ReadinessItem | null>(null);
+  /** Bumped when the page changed something the timeline and export panels show (they load their own copy). */
+  const [timelineReload, setTimelineReload] = useState(0);
 
   const loadSettings = useCallback(async () => {
     if (!companyId) return;
@@ -3746,6 +3757,13 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
 
   useEffect(() => {
     void loadStorylines();
+  }, [loadStorylines]);
+
+  // Storylines made or deleted elsewhere (another tab, an agent) show up when the person comes back to the page.
+  useEffect(() => {
+    const onFocus = () => void loadStorylines();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
   }, [loadStorylines]);
 
   const selected = storylines?.find((s) => s.id === selectedId) ?? null;
@@ -3872,9 +3890,21 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
   }, [selectedId, selected?.status, loadProgress, loadStorylines]);
 
   /** Everything on the page for this storyline, after a change that may touch several parts. */
-  const refreshAll = useCallback(async () => {
+  /** The page's own copies (shots, status, pictures, progress), after the timeline changed something. */
+  const refreshPage = useCallback(async () => {
     await Promise.all([loadDetail(), loadStorylines(), loadStoryboard(), loadProgress()]);
   }, [loadDetail, loadStorylines, loadStoryboard, loadProgress]);
+
+  /** Everything, the timeline and export panels too. */
+  const refreshAll = useCallback(async () => {
+    await refreshPage();
+    setTimelineReload((n) => n + 1);
+  }, [refreshPage]);
+
+  // A render moving on (or finishing) changes what the timeline and export show.
+  useEffect(() => {
+    setTimelineReload((n) => n + 1);
+  }, [selected?.status]);
 
   const actions = useStoryboardActions({
     base,
@@ -3910,7 +3940,9 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
     setBusy(true);
     setError(null);
     try {
-      await storylineFetchJson(`/api/companies/${companyId}/video-storylines/${id}`, { method: "DELETE" });
+      await storylineFetchJson(`/api/companies/${companyId}/video-storylines/${id}`, { method: "DELETE" }, "deleting the storyline");
+      // Gone from the list at once, then the list is read again from the server.
+      setStorylines((prev) => (prev ? prev.filter((s) => s.id !== id) : prev));
       if (selectedId === id) setSelectedId(null);
       await loadStorylines();
     } catch (e) {
@@ -3979,6 +4011,21 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
     setError(null);
     try {
       await storylineFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}/stitch/retry`, { method: "POST" }, "combining the clips again");
+      await loadStorylines();
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** "Accept warnings and finish": the film is kept as it is and marked finished. */
+  const acceptWarnings = async () => {
+    if (!companyId || !selectedId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await storylineFetchJson(`/api/companies/${companyId}/video-storylines/${selectedId}/stitch/accept-warnings`, { method: "POST" }, "finishing the film");
       await loadStorylines();
     } catch (e) {
       setError(errorText(e));
@@ -4113,6 +4160,9 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
         storyboard,
         progress,
         approvalPending,
+        castCount: selected.cast?.members.length ?? 0,
+        lookChosen: Boolean(selected.pictureSettings?.lookId),
+        totalSeconds: detailFor === selectedId && shots.length > 0 ? shots.reduce((sum, sh) => sum + sh.durationSeconds, 0) : null,
       }
     : null;
 
@@ -4130,7 +4180,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
     const costLine =
       estimatedCents !== null ? `This will cost about ${formatMoney(estimatedCents)} for ${seconds} seconds of video.` : "The cost has not been worked out yet.";
     const capLine = selected.budgetCapCents !== null ? ` It stops before spending more than your budget of ${formatMoney(selected.budgetCapCents)}.` : "";
-    if (!window.confirm(`Start rendering this storyline now?\n\n${costLine}${capLine}\n\nIt renders clip by clip in the background; you can follow it in step 4.`)) return;
+    if (!window.confirm(`Start rendering this storyline now?\n\n${costLine}${capLine}\n\nIt renders clip by clip in the background; you can follow it on this page.`)) return;
     setBusy(true);
     setError(null);
     setRefusal(null);
@@ -4139,12 +4189,12 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
       setApprovalPending(false);
       await loadStorylines();
       await loadProgress();
-      setActiveStep("film");
+      setActiveStep("render");
     } catch (e) {
       const message = errorText(e);
       const item = refusalToItem(message, flowInput);
       if (!item) {
-        // Not a failure: the request for the owner's go-ahead was sent; step 3 explains the wait.
+        // Not a failure: the request for the owner's go-ahead was sent; step 5 explains the wait.
         setApprovalPending(true);
       } else {
         setRefusal(item);
@@ -4206,21 +4256,33 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
   const editable = !!selected && EDITABLE_STORYLINE_STATUSES.has(selected.status);
   const steps = flowInput ? computeSteps(flowInput) : [];
   const step: FlowStepKey = activeStep ?? (flowInput ? suggestedStep(flowInput) : "script");
+  // Where the next thing to do is, said once under the step bar.
+  const nextStep = flowInput ? steps.find((st) => st.key === suggestedStep(flowInput)) ?? null : null;
   const readiness = flowInput ? renderReadiness(flowInput) : { ready: false, items: [] as ReadinessItem[] };
   const checklistItems = refusal ? [refusal, ...readiness.items.filter((i) => !(refusal.id === "refusal-pictures" && i.id.startsWith("pictures-")))] : readiness.items;
   const renderEstimate = storyboard?.videoEstimatedTotalCents ?? selected?.estimatedTotalCents ?? null;
   const counts = pictureCounts(storyboard);
   const anyBusy = busy || actions.busyShotId !== null || actions.bulk !== null;
+  // Step 5 shows the progress panel once a render has run (or stopped with clips made).
+  const filmStarted =
+    !!selected &&
+    (FILM_STATUSES.has(selected.status) || ((selected.status === "failed" || selected.status === "cancelled") && (progress?.doneShots ?? 0) + (progress?.failedShots ?? 0) > 0));
+  const someMade = (progress?.doneShots ?? 0) > 0;
+  const startBlocked = !anyBusy && !readiness.ready ? startBlockedReason(checklistItems) : null;
+  // The picture shape is fixed once an AI picture or clip has been made in it.
+  const aspectLocked = (storyboard?.shots ?? []).some((s) => !!s.stillObjectKey) || shots.some((s) => s.status !== "draft");
   const sortedScenes = scenes.slice().sort((a, b) => a.orderIndex - b.orderIndex);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }} data-ms-storylines="">
+      {/* Disabled buttons look disabled (inline styles alone keep their colours). */}
+      <style>{"[data-ms-storylines] button:disabled { opacity: 0.5; cursor: not-allowed; }"}</style>
       <div style={card}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
           <div style={{ flex: "1 1 240px" }}>
             <strong style={{ fontSize: 13 }}>Video storylines</strong>
             <p style={{ fontSize: 12, color: "#868e96", margin: "2px 0 0" }}>
-              Turn a script into a film in four steps: write the script, check a picture of each shot, set a budget and render, then watch and download the film. Off by default.
+              Turn a script into a film in five steps: write the script, choose the cast and look, check a picture of each shot, arrange the timeline, then render and download the film. Off by default.
             </p>
           </div>
           <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
@@ -4323,6 +4385,14 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                     </button>
                   </div>
                   <StepBar steps={steps} active={step} onSelect={(key) => setActiveStep(key)} />
+                  {nextStep && nextStep.key !== step && (
+                    <p style={{ fontSize: 12, margin: 0 }} data-testid="next-step-hint">
+                      <strong>Next:</strong> step {nextStep.number}, {nextStep.title} ({nextStep.status.charAt(0).toLowerCase() + nextStep.status.slice(1)}).{" "}
+                      <button type="button" style={{ ...ghostBtn, padding: "2px 8px" }} onClick={() => setActiveStep(nextStep.key)}>
+                        Go there
+                      </button>
+                    </p>
+                  )}
                   <SuggestionsBanner count={pendingSuggestions} onReview={step === "script" ? undefined : () => setActiveStep("script")} />
                 </div>
 
@@ -4332,7 +4402,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                       <div>
                         <strong style={{ fontSize: 14 }}>Step 1: Script</strong>
                         <p style={{ fontSize: 12, color: "#868e96", margin: 0 }}>
-                          The script is the list of shots: what happens in each one, how long it lasts, and the camera. Import one, let the AI director improve it, or write shots by hand below.
+                          The script is the list of shots: what happens in each one, how long it lasts, and the camera. Let the AI story writer below write it from your ideas, import one, or write shots by hand.
                         </p>
                       </div>
                       <p style={{ fontSize: 13, fontWeight: 600, margin: 0 }} data-testid="script-status">
@@ -4347,8 +4417,8 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                             Import a script (JSON)
                           </button>
                         ) : (
-                          <button type="button" style={bigPrimaryBtn} data-testid="script-next" onClick={() => setActiveStep("pictures")}>
-                            Next: Pictures
+                          <button type="button" style={bigPrimaryBtn} data-testid="script-next" onClick={() => setActiveStep("cast")}>
+                            Next: Cast & look
                           </button>
                         )}
                       </div>
@@ -4385,6 +4455,19 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                       )}
                     </div>
 
+                    {companyId && (
+                      <StoryWriterSection
+                        companyId={companyId}
+                        storylineId={selected.id}
+                        directorId={selected.directorId ?? null}
+                        shotIds={shots.slice().sort((a, b) => a.orderIndex - b.orderIndex).map((sh) => sh.id)}
+                        editable={editable}
+                        fetchJson={storylineFetchJson}
+                        looks={looks.map((l) => ({ id: l.id, name: l.name }))}
+                        onChanged={refreshAll}
+                      />
+                    )}
+
                     {(advancedEnabled || pendingSuggestions > 0) && companyId && (
                       <AiDirectorSection
                         companyId={companyId}
@@ -4399,6 +4482,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
 
                     <div style={card}>
                       <strong style={{ fontSize: 13 }}>Scenes and shots</strong>
+                      <p style={{ fontSize: 11, color: "#868e96", margin: 0 }}>Write what happens in each shot here. Change the order and lengths on the Timeline (step 4).</p>
                       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                         <input style={{ ...input, flex: "1 1 180px" }} placeholder="Scene title (optional)" aria-label="New scene title" value={newSceneTitle} onChange={(e) => setNewSceneTitle(e.target.value)} />
                         <button type="button" style={secondaryBtn} disabled={busy || !editable} onClick={() => void addScene()}>
@@ -4433,26 +4517,6 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                                   </div>
                                 </div>
                                 <div style={{ display: "flex", gap: 4, alignItems: "flex-start" }}>
-                                  <button
-                                    type="button"
-                                    style={ghostBtn}
-                                    aria-label="Move shot up"
-                                    title="Move up"
-                                    disabled={busy || shotIdx === 0 || !editable}
-                                    onClick={() => void moveShot(shot.id, shot.orderIndex - 1)}
-                                  >
-                                    ↑
-                                  </button>
-                                  <button
-                                    type="button"
-                                    style={ghostBtn}
-                                    aria-label="Move shot down"
-                                    title="Move down"
-                                    disabled={busy || shotIdx === sceneShots.length - 1 || !editable}
-                                    onClick={() => void moveShot(shot.id, shot.orderIndex + 1)}
-                                  >
-                                    ↓
-                                  </button>
                                   <button type="button" style={ghostBtn} disabled={busy || !editable} onClick={() => void deleteShot(shot.id)}>
                                     Remove
                                   </button>
@@ -4501,6 +4565,42 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                       })}
                     </div>
 
+                  </>
+                )}
+
+                {step === "cast" && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }} data-testid="cast-step">
+                    <div style={card}>
+                      <div>
+                        <strong style={{ fontSize: 14 }}>Step 2: Cast & look</strong>
+                        <p style={{ fontSize: 12, color: "#868e96", margin: 0 }}>
+                          Optional, but worth a minute: who is in the film (so faces stay the same from shot to shot), the picture style, and the picture shape. Choose these before you make pictures in step 3.
+                        </p>
+                      </div>
+                      {base && (
+                        <AspectPicker
+                          apiBase={base}
+                          aspect={(selected.aspect as "16:9" | "9:16" | "1:1" | undefined) ?? "16:9"}
+                          locked={aspectLocked}
+                          disabled={anyBusy || !editable}
+                          run={async (fn) => {
+                            setError(null);
+                            try {
+                              await fn();
+                              await loadStorylines();
+                            } catch (e) {
+                              setError(errorText(e));
+                            }
+                          }}
+                        />
+                      )}
+                      <div>
+                        <button type="button" style={bigPrimaryBtn} data-testid="cast-next" onClick={() => setActiveStep("pictures")}>
+                          Next: Storyboard
+                        </button>
+                      </div>
+                    </div>
+
                     <StorylineCastSection
                       base={base}
                       cast={selected.cast ?? EMPTY_CAST}
@@ -4527,7 +4627,24 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                         max={20}
                       />
                     </div>
-                  </>
+
+                    <StoryboardPictureSettings
+                      value={selected.pictureSettings ?? {}}
+                      effective={storyboard?.picture ?? null}
+                      services={storyboard?.pictureServices ?? null}
+                      looks={looks}
+                      sogniModels={sogniPictureModels}
+                      sogniNote={sogniPictureNote}
+                      disabled={anyBusy || !editable}
+                      onNeedSogniModels={loadSogniPictureModels}
+                      onSave={(next) =>
+                        void (async () => {
+                          await updateStorylineFields({ pictureSettings: next }, "saving the picture settings");
+                          await loadStoryboard();
+                        })()
+                      }
+                    />
+                  </div>
                 )}
 
                 {step === "pictures" && (
@@ -4538,7 +4655,7 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                     shots={detailFor === selectedId ? shots : []}
                     editable={editable}
                     actions={actions}
-                    onNext={() => setActiveStep("render")}
+                    onNext={() => setActiveStep("timeline")}
                     looks={looks.map((l) => ({ id: l.id, name: l.name }))}
                     storylineLookName={looks.find((l) => l.id === selected.pictureSettings?.lookId)?.name ?? null}
                     shotCast={shotCastLabels(detailFor === selectedId ? shots : [], selected.cast ?? EMPTY_CAST, castIdentities)}
@@ -4554,106 +4671,147 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                       })()
                     }
                     settings={
-                      <StoryboardPictureSettings
-                        value={selected.pictureSettings ?? {}}
-                        effective={storyboard?.picture ?? null}
-                        services={storyboard?.pictureServices ?? null}
-                        looks={looks}
-                        sogniModels={sogniPictureModels}
-                        sogniNote={sogniPictureNote}
-                        disabled={anyBusy || !editable}
-                        onNeedSogniModels={loadSogniPictureModels}
-                        onSave={(next) =>
-                          void (async () => {
-                            await updateStorylineFields({ pictureSettings: next }, "saving the picture settings");
-                            await loadStoryboard();
-                          })()
-                        }
-                      />
+                      <p style={{ fontSize: 12, margin: 0 }} data-testid="storyboard-look-line">
+                        Picture style: <strong>{looks.find((l) => l.id === selected.pictureSettings?.lookId)?.name ?? "no look"}</strong>.{" "}
+                        <button type="button" style={{ ...ghostBtn, padding: "2px 8px" }} onClick={() => setActiveStep("cast")}>
+                          Change it in step 2
+                        </button>
+                      </p>
                     }
                   />
                 )}
 
-                {step === "render" && (
-                  <div style={card} data-testid="render-step">
+                {step === "timeline" && base && (
+                  <>
+                    <TimelineEditor
+                      key={`timeline-${selected.id}`}
+                      apiBase={base}
+                      editable={!["rendering", "stitching"].includes(selected.status)}
+                      shotsEditable={editable}
+                      reloadKey={timelineReload}
+                      onChanged={refreshPage}
+                      onGoStep={(next) => setActiveStep(next)}
+                    />
                     <div>
-                      <strong style={{ fontSize: 14 }}>Step 3: Budget & render</strong>
-                      <p style={{ fontSize: 12, color: "#868e96", margin: 0 }}>
-                        Set the most this film may spend, then start the render. Video is the expensive part, so nothing is made until every shot is approved and a budget is set.
-                      </p>
-                    </div>
-
-                    <div data-testid="render-costs" style={{ display: "flex", flexWrap: "wrap", gap: "2px 16px", fontSize: 12 }}>
-                      <span>
-                        Video: about <strong>{formatMoney(renderEstimate)}</strong>
-                        {selected.estimatedTotalSeconds ? ` for ${selected.estimatedTotalSeconds} seconds` : ""} (a ballpark, not a quote)
-                      </span>
-                      <span>Pictures so far: {formatMoney(storyboard?.stillTotalCents ?? 0)}</span>
-                      <span>Spent on video so far: {formatMoney(selected.spentCents)}</span>
-                    </div>
-
-                    <div style={{ ...field, maxWidth: 360 }}>
-                      <label style={{ fontSize: 12, color: "#868e96" }} htmlFor={`budget-${selected.id}`}>
-                        Budget (the render stops before it would spend more than this)
-                      </label>
-                      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                        <span style={{ fontSize: 13 }}>$</span>
-                        <input
-                          id={`budget-${selected.id}`}
-                          style={{ ...input, flex: 1, minWidth: 0 }}
-                          type="number"
-                          min={0}
-                          step="0.01"
-                          placeholder={suggestedBudgetCents(renderEstimate) !== null ? `Suggested: ${(suggestedBudgetCents(renderEstimate)! / 100).toFixed(2)}` : "e.g. 20.00"}
-                          key={`budget-${selected.id}-${selected.budgetCapCents ?? "none"}`}
-                          aria-label="Budget cap in dollars"
-                          defaultValue={selected.budgetCapCents !== null ? (selected.budgetCapCents / 100).toFixed(2) : ""}
-                          disabled={!editable || busy}
-                          onBlur={(e) => {
-                            const next = e.target.value.trim() === "" ? null : Math.round(Number(e.target.value) * 100);
-                            if (next !== selected.budgetCapCents) void updateBudgetCap(e.target.value);
-                          }}
-                        />
-                      </div>
-                    </div>
-
-                    {overApprovalLimit(storyboard) && storyboard && !approvalPending && (
-                      <div style={noticeBox} data-testid="storyboard-over-limit">
-                        This video is expected to cost more than your approval limit of {formatMoney(storyboard.approvalThresholdCents)}. When you press Start render, a request goes to the owner and the video waits until it is approved.
-                      </div>
-                    )}
-                    {approvalPending && (
-                      <div style={noticeBox} data-testid="storyboard-approval-pending">
-                        Waiting for the owner's go-ahead. This video costs more than your approval limit, so it starts once the owner approves the request. Press Start render again after that.
-                      </div>
-                    )}
-
-                    {refusal && <p style={{ fontSize: 12, margin: 0, fontWeight: 600, color: "#c92a2a" }} data-testid="render-refused">The render was not started. Fix this and try again:</p>}
-                    <ReadinessChecklist items={checklistItems} busy={anyBusy} onFix={(fix) => void applyFix(fix)} />
-                    {actions.bulk && <BulkProgressBar bulk={actions.bulk} onStop={actions.stop} />}
-                    {actions.error && <div style={errorBox}>{actions.error}</div>}
-                    {checklistItems.some((i) => i.fixes.some((f) => f.kind === "skip-pictures")) && (
-                      <p style={{ fontSize: 11, color: "#868e96", margin: 0 }} data-testid="skip-explanation">
-                        {SKIP_PICTURES_EXPLANATION}
-                      </p>
-                    )}
-
-                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                      <button
-                        type="button"
-                        style={bigPrimaryBtn}
-                        data-testid="start-render"
-                        disabled={anyBusy || !readiness.ready}
-                        title={readiness.ready ? undefined : "Sort out the items listed above first."}
-                        onClick={() => void startRender()}
-                      >
-                        Start render{renderEstimate !== null ? ` (about ${formatMoney(renderEstimate)})` : ""}
-                      </button>
-                      <button type="button" style={ghostBtn} disabled={anyBusy || shots.length === 0} onClick={() => void runEstimate()}>
-                        Work out the cost again
+                      <button type="button" style={bigPrimaryBtn} data-testid="timeline-next" onClick={() => setActiveStep("render")}>
+                        Next: Render & export
                       </button>
                     </div>
-                    {counts.dropped > 0 && <p style={{ fontSize: 11, color: "#868e96", margin: 0 }}>{counts.dropped} shot{counts.dropped === 1 ? " is" : "s are"} left out and will not be rendered or charged.</p>}
+                  </>
+                )}
+
+                {step === "render" && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }} data-testid="render-step">
+                    <div style={card}>
+                      <div>
+                        <strong style={{ fontSize: 14 }}>Step 5: Render & export</strong>
+                        <p style={{ fontSize: 12, color: "#868e96", margin: 0 }}>
+                          Video is the expensive part, so nothing is made until every shot's picture is approved (or skipped) and you set the most this film may spend. Then the clips are made one by one and put together
+                          into one film you can download.
+                        </p>
+                      </div>
+                    </div>
+
+                    {filmStarted && companyId && (
+                      <FilmPanel
+                        storyline={selected}
+                        progress={progress}
+                        videoUrl={`/api/companies/${companyId}/video-storylines/${selected.id}/final/content`}
+                        busy={busy}
+                        onRetryShot={(id) => void rerenderShot(id)}
+                        onCombineAgain={() => void retryStitch()}
+                        onAcceptWarnings={() => void acceptWarnings()}
+                        onCancel={() => void cancelRender()}
+                        onRefresh={() => void refreshAll()}
+                      />
+                    )}
+
+                    {editable && (
+                      <div style={card} data-testid="render-start">
+                        <strong style={{ fontSize: 13 }}>{someMade ? "Continue the render" : "Start the render"}</strong>
+                        {selected.errorMessage && !filmStarted && (
+                          <div style={{ ...errorBox, fontSize: 13 }} role="alert" data-testid="render-last-error">
+                            {selected.errorMessage}
+                          </div>
+                        )}
+
+                        <div data-testid="render-costs" style={{ display: "flex", flexWrap: "wrap", gap: "2px 16px", fontSize: 12 }}>
+                          <span>
+                            Video: about <strong>{formatMoney(renderEstimate)}</strong>
+                            {selected.estimatedTotalSeconds ? ` for ${selected.estimatedTotalSeconds} seconds` : ""} (a ballpark, not a quote)
+                          </span>
+                          <span>Pictures so far: {formatMoney(storyboard?.stillTotalCents ?? 0)}</span>
+                          <span>Spent on video so far: {formatMoney(selected.spentCents)}</span>
+                        </div>
+
+                        <div style={{ ...field, maxWidth: 360 }}>
+                          <label style={{ fontSize: 12, color: "#868e96" }} htmlFor={`budget-${selected.id}`}>
+                            Budget (the render stops before it would spend more than this)
+                          </label>
+                          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                            <span style={{ fontSize: 13 }}>$</span>
+                            <input
+                              id={`budget-${selected.id}`}
+                              style={{ ...input, flex: 1, minWidth: 0 }}
+                              type="number"
+                              min={0}
+                              step="0.01"
+                              placeholder={suggestedBudgetCents(renderEstimate) !== null ? `Suggested: ${(suggestedBudgetCents(renderEstimate)! / 100).toFixed(2)}` : "e.g. 20.00"}
+                              key={`budget-${selected.id}-${selected.budgetCapCents ?? "none"}`}
+                              aria-label="Budget cap in dollars"
+                              defaultValue={selected.budgetCapCents !== null ? (selected.budgetCapCents / 100).toFixed(2) : ""}
+                              disabled={!editable || busy}
+                              onBlur={(e) => {
+                                const next = e.target.value.trim() === "" ? null : Math.round(Number(e.target.value) * 100);
+                                if (next !== selected.budgetCapCents) void updateBudgetCap(e.target.value);
+                              }}
+                            />
+                          </div>
+                        </div>
+
+                        {overApprovalLimit(storyboard) && storyboard && !approvalPending && (
+                          <div style={noticeBox} data-testid="storyboard-over-limit">
+                            This video is expected to cost more than your approval limit of {formatMoney(storyboard.approvalThresholdCents)}. When you press Start render, a request goes to the owner and the video waits until it is approved.
+                          </div>
+                        )}
+                        {approvalPending && (
+                          <div style={noticeBox} data-testid="storyboard-approval-pending">
+                            Waiting for the owner's go-ahead. This video costs more than your approval limit, so it starts once the owner approves the request. Press Start render again after that.
+                          </div>
+                        )}
+
+                        {refusal && <p style={{ fontSize: 12, margin: 0, fontWeight: 600, color: "#c92a2a" }} data-testid="render-refused">The render was not started. Fix this and try again:</p>}
+                        <ReadinessChecklist items={checklistItems} busy={anyBusy} onFix={(fix) => void applyFix(fix)} />
+                        {actions.bulk && <BulkProgressBar bulk={actions.bulk} onStop={actions.stop} />}
+                        {actions.error && <div style={errorBox}>{actions.error}</div>}
+                        {checklistItems.some((i) => i.fixes.some((f) => f.kind === "skip-pictures")) && (
+                          <p style={{ fontSize: 11, color: "#868e96", margin: 0 }} data-testid="skip-explanation">
+                            {SKIP_PICTURES_EXPLANATION}
+                          </p>
+                        )}
+
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                          <button
+                            type="button"
+                            style={bigPrimaryBtn}
+                            data-testid="start-render"
+                            disabled={anyBusy || !readiness.ready}
+                            aria-describedby={startBlocked ? `start-blocked-${selected.id}` : undefined}
+                            onClick={() => void startRender()}
+                          >
+                            {someMade ? "Continue render" : "Start render"}
+                            {renderEstimate !== null ? ` (about ${formatMoney(renderEstimate)})` : ""}
+                          </button>
+                          <button type="button" style={ghostBtn} disabled={anyBusy || shots.length === 0} onClick={() => void runEstimate()}>
+                            Work out the cost again
+                          </button>
+                        </div>
+                        {startBlocked && (
+                          <p id={`start-blocked-${selected.id}`} style={{ fontSize: 12, margin: 0, color: "#c92a2a" }} data-testid="start-blocked">
+                            {startBlocked}
+                          </p>
+                        )}
+                        {counts.dropped > 0 && <p style={{ fontSize: 11, color: "#868e96", margin: 0 }}>{counts.dropped} shot{counts.dropped === 1 ? " is" : "s are"} left out and will not be rendered or charged.</p>}
 
                     <details style={{ fontSize: 12 }}>
                       <summary style={{ cursor: "pointer", fontWeight: 600 }}>Video settings (service and model)</summary>
@@ -4688,27 +4846,17 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                           />
                         </div>
                       </div>
-                      {selected.providerId === "fal" && (!selected.model || /kling/i.test(selected.model)) && (
+                      {selected.providerId === "fal" && (!selected.model || /kling/i.test(selected.model)) && !/kling-video\/(v3|o3)\//i.test(selected.model ?? "") && (
                         <p style={{ fontSize: 11, color: "#868e96", margin: "6px 0 0" }}>
-                          Fal.ai's Kling models only make 5- or 10-second clips. Shots with other lengths are rendered (and charged) at the next allowed length, up to 10 seconds.
+                          Fal.ai's Kling 1.6 and 2.1 models only make 5- or 10-second clips. Shots with other lengths are rendered (and charged) at the next allowed length, up to 10 seconds. Kling 3 makes any length from 3 to 15 seconds.
                         </p>
                       )}
                     </details>
-                  </div>
-                )}
+                      </div>
+                    )}
 
-                {step === "film" && companyId && (
-                  <FilmPanel
-                    storyline={selected}
-                    progress={progress}
-                    videoUrl={`/api/companies/${companyId}/video-storylines/${selected.id}/final/content`}
-                    busy={busy}
-                    onRetryShot={(id) => void rerenderShot(id)}
-                    onCombineAgain={() => void retryStitch()}
-                    onCancel={() => void cancelRender()}
-                    onGoRender={() => setActiveStep("render")}
-                    onRefresh={() => void refreshAll()}
-                  />
+                    {base && <ExportSection key={`export-${selected.id}`} apiBase={base} editable={selected.status !== "stitching"} storylineStatus={selected.status} reloadKey={timelineReload} onChanged={refreshPage} />}
+                  </div>
                 )}
               </>
             )}

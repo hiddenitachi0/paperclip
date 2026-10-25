@@ -1,6 +1,6 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { videoScenes, videoShotRenderJobs, videoShots, videoStorylines, withCompanyScope } from "@paperclipai/db";
+import { assets, issueAttachments, videoScenes, videoShotRenderJobs, videoShots, videoStorylines, videoTransitionTakes, withCompanyScope } from "@paperclipai/db";
 import {
   VIDEO_SCRIPT_SCENE_NOTES_MAX_LENGTH,
   VIDEO_STORYLINE_MAX_SCENES,
@@ -11,6 +11,8 @@ import {
   formatVideoScriptCharacters,
   mergeScriptCharactersIntoCast,
   readVideoStorylineCast,
+  readVideoExportSettings,
+  type VideoStorylineExportSettings,
   type UpdateVideoStorylineCastInput,
   type VideoStorylineCast,
   type ParsedVideoStorylineScript,
@@ -24,6 +26,7 @@ import {
   type UpdateVideoShotInput,
   type UpdateVideoStorylineInput,
   type VideoStorylineProgress,
+  videoQualityIssueSeverity,
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
@@ -70,18 +73,24 @@ export interface VideoStorylineSummary {
   pictureSettings: { providerId?: string | null; model?: string | null; lookId?: string | null };
   /** The script's characters and the saved people (Media Studio identities) they are linked to; see video-storyline-cast.ts. */
   cast: VideoStorylineCast;
+  /** The director whose AI story writer writes this storyline (step 1); null = none picked. */
+  directorId: string | null;
   finalObjectKey: string | null;
   finalByteSize: number | null;
   finalDurationSeconds: number | null;
   stitchBlockedReason: string | null;
   errorMessage: string | null;
-  qualityCheckIssues: Array<{ code: string; message: string; shotIndex: number | null; timeSeconds: number | null }>;
+  /** severity: "blocking" means the film is really broken; "warning" is worth a look but never stops Download. */
+  qualityCheckIssues: Array<{ code: string; message: string; shotIndex: number | null; timeSeconds: number | null; severity: "warning" | "blocking" }>;
   qualityCheckedAt: string | null;
   defaultTransition: string;
   defaultTransitionDurationMs: number;
   musicAssetId: string | null;
   musicSourceKey: string | null;
   musicVolumeDb: number;
+  /** Phase 2: the picture shape and how the film is put together. */
+  aspect: string;
+  exportSettings: VideoStorylineExportSettings;
   createdAt: string;
   updatedAt: string;
 }
@@ -168,18 +177,22 @@ function toStorylineSummary(row: StorylineRow): VideoStorylineSummary {
     characterReferenceAssetIds: row.characterReferenceAssetIds,
     pictureSettings: pictureFields(row.pictureSettings),
     cast: readVideoStorylineCast(row.pictureSettings),
+    directorId: row.directorId ?? null,
     finalObjectKey: row.finalObjectKey,
     finalByteSize: row.finalByteSize,
     finalDurationSeconds: row.finalDurationSeconds,
     stitchBlockedReason: row.stitchBlockedReason,
     errorMessage: row.errorMessage,
-    qualityCheckIssues: row.qualityCheckIssues,
+    // Always from the code, so rows checked before severities existed read the same way.
+    qualityCheckIssues: (row.qualityCheckIssues ?? []).map((issue) => ({ ...issue, severity: videoQualityIssueSeverity(issue) })),
     qualityCheckedAt: iso(row.qualityCheckedAt),
     defaultTransition: row.defaultTransition,
     defaultTransitionDurationMs: row.defaultTransitionDurationMs,
     musicAssetId: row.musicAssetId,
     musicSourceKey: row.musicSourceKey,
     musicVolumeDb: row.musicVolumeDb,
+    aspect: row.aspect,
+    exportSettings: readVideoExportSettings(row.exportSettings, row.aspect),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -323,7 +336,7 @@ async function computeShotOrder(
 }
 
 /** Writes 0..n-1 positions for `orderedIds`, parking every shot first so the unique (storyline, order) index never sees a clash mid-update. */
-async function applyShotOrder(tx: ScopedTx, storylineId: string, orderedIds: readonly string[]): Promise<void> {
+export async function applyShotOrder(tx: ScopedTx, storylineId: string, orderedIds: readonly string[]): Promise<void> {
   if (orderedIds.length === 0) return;
   await tx
     .update(videoShots)
@@ -398,6 +411,18 @@ async function assertNothingPaidToReplace(executor: Db | ScopedTx, storyline: St
 }
 
 export function videoStorylineService(db: Db) {
+  /** A file id (issue attachment) or an assets id of THIS company -> the assets id; refuses anything else. */
+  async function resolveMusicAssetId(companyId: string, id: string): Promise<string> {
+    const [asset] = await db.select({ id: assets.id }).from(assets).where(and(eq(assets.id, id), eq(assets.companyId, companyId)));
+    if (asset) return asset.id;
+    const [file] = await db
+      .select({ assetId: issueAttachments.assetId })
+      .from(issueAttachments)
+      .where(and(eq(issueAttachments.id, id), eq(issueAttachments.companyId, companyId)));
+    if (file) return file.assetId;
+    throw notFound("That music file is not in this company.");
+  }
+
   async function getStorylineRow(companyId: string, storylineId: string): Promise<StorylineRow> {
     const [row] = await db
       .select()
@@ -479,6 +504,7 @@ export function videoStorylineService(db: Db) {
         musicAssetId: input.musicAssetId,
         musicSourceKey: input.musicSourceKey,
         musicVolumeDb: input.musicVolumeDb,
+        ...(input.aspect ? { aspect: input.aspect } : {}),
         createdByAgentId: actor.agentId,
         createdByUserId: actor.actorType === "user" ? actor.actorId : null,
         createdAt: now,
@@ -511,6 +537,10 @@ export function videoStorylineService(db: Db) {
     // request that only touches musicAssetId could collide with a
     // musicSourceKey left over from an earlier update.
     const settingMusicAssetId = input.musicAssetId !== undefined && input.musicAssetId !== null;
+    // Phase 2: musicAssetId may also be a company FILE id (what Media Studio
+    // hands out, e.g. music made there) -- resolved to its asset, the same way
+    // loadReferenceImages resolves picture ids.
+    if (settingMusicAssetId) input = { ...input, musicAssetId: await resolveMusicAssetId(companyId, input.musicAssetId!) };
     const settingMusicSourceKey = input.musicSourceKey !== undefined && input.musicSourceKey !== null;
     const [row] = await db
       .update(videoStorylines)
@@ -557,10 +587,36 @@ export function videoStorylineService(db: Db) {
     return refreshed ?? toStorylineSummary(row);
   }
 
+  /**
+   * Deleting is a real delete (scenes, shots, transitions and render rows go
+   * with it by cascade); there is no archive flag. Allowed in any state
+   * except while something is actually being made or combined -- a finished
+   * film, a failed one, or one left "rendering" with nothing running can all
+   * be deleted (they used to be refused as "cannot be edited").
+   */
   async function deleteStoryline(companyId: string, storylineId: string, actor: VideoStorylineActor): Promise<void> {
     const existing = await getStorylineRow(companyId, storylineId);
-    assertStorylineEditable(existing);
-    await db.delete(videoStorylines).where(eq(videoStorylines.id, storylineId));
+    if (existing.status === "stitching") {
+      throw conflict("The film is being put together right now. Wait a minute for it to finish, then delete the storyline.");
+    }
+    const [running] = await db
+      .select({ id: videoShotRenderJobs.id })
+      .from(videoShotRenderJobs)
+      .where(and(eq(videoShotRenderJobs.storylineId, storylineId), eq(videoShotRenderJobs.companyId, companyId), eq(videoShotRenderJobs.status, "running")))
+      .limit(1);
+    const [making] = await db
+      .select({ id: videoTransitionTakes.id })
+      .from(videoTransitionTakes)
+      .where(and(eq(videoTransitionTakes.storylineId, storylineId), eq(videoTransitionTakes.companyId, companyId), eq(videoTransitionTakes.status, "generating")))
+      .limit(1);
+    if (running || making) {
+      throw conflict("Clips are being made for this storyline right now. Cancel the render first (in the Render & export step), then delete it.");
+    }
+    const deleted = await db
+      .delete(videoStorylines)
+      .where(and(eq(videoStorylines.id, storylineId), eq(videoStorylines.companyId, companyId)))
+      .returning({ id: videoStorylines.id });
+    if (deleted.length === 0) throw notFound("Video storyline not found");
     await logActivity(db, {
       companyId,
       ...activityActor(actor),
@@ -840,10 +896,11 @@ export function videoStorylineService(db: Db) {
   async function recomputeEstimate(companyId: string, storylineId: string): Promise<VideoStorylineSummary> {
     const storyline = await getStorylineRow(companyId, storylineId);
     const allShots = await db
-      .select({ durationSeconds: videoShots.durationSeconds, storyboardStatus: videoShots.storyboardStatus })
+      .select({ durationSeconds: videoShots.durationSeconds, storyboardStatus: videoShots.storyboardStatus, clipKind: videoShots.clipKind })
       .from(videoShots)
       .where(eq(videoShots.storylineId, storylineId));
-    const shots = allShots.filter((s) => s.storyboardStatus !== "dropped");
+    // Phase 2: the company's own videos and photos cost nothing to put in the film.
+    const shots = allShots.filter((s) => s.storyboardStatus !== "dropped" && s.clipKind === "generated");
     const estimate = estimateVideoStorylineCostCents(shots, storyline.providerId as VideoStorylineProvider, { model: storyline.model });
     const [row] = await db
       .update(videoStorylines)

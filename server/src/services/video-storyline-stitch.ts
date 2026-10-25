@@ -1,13 +1,27 @@
 import { buffer as streamToBuffer } from "node:stream/consumers";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, ne } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { assets, videoShots, videoStorylines } from "@paperclipai/db";
-import type { VideoShotTransition } from "@paperclipai/shared";
-import { conflict, notFound } from "../errors.js";
+import { hasBlockingVideoQualityIssue, readVideoExportSettings, videoExportPreset, videoQualityIssueSeverity, type VideoStorylineQualityIssue } from "@paperclipai/shared";
+import { conflict, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { getStorageService } from "../storage/index.js";
 import { logActivity } from "./activity-log.js";
-import { addMusicBed, checkFfmpegAvailable, normalizeClipsForStitch, stitchClips, stitchClipsWithTransitions, type ShotTransitionInput } from "./video-ffmpeg.js";
+import type { VideoStorylineActor } from "./video-storylines.js";
+import {
+  addMusicBed,
+  checkFfmpegAvailable,
+  normalizeClipsForStitch,
+  normalizeLoudness,
+  renderTitleCard,
+  stitchClips,
+  stitchClipsWithTransitions,
+  type MusicBedInput,
+  type NormalizeClipOptions,
+  type ShotTransitionInput,
+} from "./video-ffmpeg.js";
+import { runMediaJob } from "./media-job-queue.js";
+import { buildStitchPlan } from "./video-storyline-transitions.js";
 import { runVideoQualityCheck, type VideoQualityCheckShotPlan } from "./video-quality-check.js";
 
 /**
@@ -29,7 +43,37 @@ import { runVideoQualityCheck, type VideoQualityCheckShotPlan } from "./video-qu
  * failed check lands the storyline on "needs_attention" instead, with
  * qualityCheckIssues/errorMessage explaining what to look at and where --
  * the file itself is still stored so it can be inspected.
+ *
+ * Storyline export fix (Oct 2026): most findings are warnings, not
+ * blockers. A film whose check found only warnings (a loud peak, a quiet
+ * stretch) lands on "done" with the warnings attached, so it can be
+ * downloaded and shown with them; only a blocking finding (no picture, the
+ * wrong length) lands on "needs_attention". Every film with sound is also
+ * evened out (loudnorm to about -14 LUFS with a peak limiter, see
+ * video-ffmpeg.ts#normalizeLoudness), so a normal export never trips the
+ * clipping check in the first place. A stitch that fails twice in a row
+ * stops on "needs_attention" with a plain explanation instead of being
+ * retried on every tick forever.
  */
+
+/** Marks a failed attempt in errorMessage, so the next failure in a row stops instead of looping. */
+const STITCH_FAILED_PREFIX = "Putting the film together did not work";
+
+/** Plain words for a failed stitch: ffmpeg's own error repeats the whole command line, which helps nobody on the film page. */
+export function friendlyStitchError(err: unknown): string {
+  const text = (err instanceof Error ? err.message : String(err)).split("\n")[0]!.trim();
+  if (/^Command failed/i.test(text)) return "the video tool stopped with an error";
+  if (/timed? ?out|ETIMEDOUT|SIGTERM|SIGKILL/i.test(text)) return "it took too long and was stopped";
+  if (/ENOSPC|no space/i.test(text)) return "the server ran out of disk space";
+  return text.length > 160 ? `${text.slice(0, 157)}...` : text;
+}
+
+/** The storyline's message for a check result: blocking findings only (warnings are shown from qualityCheckIssues next to Download). */
+function qualityExplanation(issues: readonly VideoStorylineQualityIssue[]): string | null {
+  const blocking = issues.filter((i) => videoQualityIssueSeverity(i) === "blocking");
+  if (blocking.length === 0) return null;
+  return `The automatic check found ${blocking.length === 1 ? "a problem" : `${blocking.length} problems`} that stop this film from being finished:\n${blocking.map((i) => `- ${i.message}`).join("\n")}`;
+}
 
 const STITCH_TICK_BATCH = 5;
 
@@ -57,13 +101,23 @@ export function videoStorylineStitchService(db: Db, deps: VideoStorylineStitchDe
   async function loadMusicBed(
     companyId: string,
     storyline: typeof videoStorylines.$inferSelect,
-  ): Promise<{ buffer: Buffer; volumeDb: number } | "unsupported" | null> {
+  ): Promise<MusicBedInput | "unsupported" | null> {
     if (storyline.musicSourceKey) return "unsupported";
     if (!storyline.musicAssetId) return null;
     const [asset] = await db.select().from(assets).where(and(eq(assets.id, storyline.musicAssetId), eq(assets.companyId, companyId)));
     if (!asset) return "unsupported";
     const buffer = await downloadClip(companyId, asset.objectKey);
-    return { buffer, volumeDb: storyline.musicVolumeDb };
+    // Phase 2 music lane: trim, start offset, fades and mix/replace.
+    return {
+      buffer,
+      volumeDb: storyline.musicVolumeDb,
+      trimInMs: storyline.musicTrimInMs,
+      trimOutMs: storyline.musicTrimOutMs,
+      offsetMs: storyline.musicOffsetMs,
+      fadeInMs: storyline.musicFadeInMs,
+      fadeOutMs: storyline.musicFadeOutMs,
+      mode: storyline.musicAudioMode === "replace" ? "replace" : "mix",
+    };
   }
 
   async function stitchOne(storyline: typeof videoStorylines.$inferSelect): Promise<"stitched" | "needs_attention" | "blocked" | "failed"> {
@@ -93,6 +147,27 @@ export function videoStorylineStitchService(db: Db, deps: VideoStorylineStitchDe
       return "failed";
     }
 
+    // Phase 2: your own videos and photos are prepared by ffmpeg first; wait for them.
+    const [preparing] = await db
+      .select({ id: videoShots.id, orderIndex: videoShots.orderIndex, status: videoShots.status })
+      .from(videoShots)
+      .where(and(eq(videoShots.storylineId, storyline.id), ne(videoShots.status, "done"), ne(videoShots.storyboardStatus, "dropped"), ne(videoShots.clipKind, "generated")))
+      .limit(1);
+    if (preparing) {
+      await db
+        .update(videoStorylines)
+        .set({
+          status: "ready_to_stitch",
+          stitchBlockedReason:
+            preparing.status === "failed"
+              ? `Clip ${preparing.orderIndex + 1} could not be prepared. Change its trim (or remove it) on the strip, then combine again.`
+              : `Getting clip ${preparing.orderIndex + 1} ready (your own video or photo). The film is combined as soon as it is.`,
+          updatedAt: nowOf(),
+        })
+        .where(eq(videoStorylines.id, storyline.id));
+      return "blocked";
+    }
+
     const musicBed = await loadMusicBed(storyline.companyId, storyline);
     if (musicBed === "unsupported") {
       await db
@@ -106,44 +181,104 @@ export function videoStorylineStitchService(db: Db, deps: VideoStorylineStitchDe
       return "blocked";
     }
 
+    // Storyline strip: each gap's transition (cut, blend, or an inserted AI
+    // bridge). An AI bridge that is missing or out of date stops the film
+    // here, in plain words, until it is made again or switched to cut/blend.
+    const plan = await buildStitchPlan(db, storyline, shots);
+    if (plan.problems.length > 0) {
+      await db
+        .update(videoStorylines)
+        .set({ status: "ready_to_stitch", stitchBlockedReason: plan.problems.join(" "), updatedAt: nowOf() })
+        .where(eq(videoStorylines.id, storyline.id));
+      return "blocked";
+    }
+
     await db.update(videoStorylines).set({ status: "stitching", stitchBlockedReason: null, updatedAt: nowOf() }).where(eq(videoStorylines.id, storyline.id));
 
     try {
-      // DUR-4196: every shot's resolved transition-in (falling back to the
-      // storyline's default) -- shot 0 always renders "cut" regardless of
-      // what's stored, since there is no previous clip to transition from.
-      const allCut = shots.every((shot, index) => index === 0 || (shot.transitionIn ?? storyline.defaultTransition) === "cut");
-      const rawClips: Buffer[] = [];
-      for (const shot of shots) {
-        rawClips.push(await downloadClip(storyline.companyId, shot.resultObjectKey!));
-      }
-      // Same size/frame rate/codecs for every clip first -- see
-      // normalizeClipsForStitch -- and the real length of each one.
-      const normalized = await normalizeClipsForStitch(rawClips);
-      let stitched: Awaited<ReturnType<typeof stitchClips>>;
-      if (allCut) {
-        stitched = await stitchClips(normalized.buffers);
-      } else {
-        const shotInputs: ShotTransitionInput[] = shots.map((shot, index) => ({
-          buffer: normalized.buffers[index]!,
-          transitionIn: (index === 0 ? "cut" : (shot.transitionIn ?? storyline.defaultTransition)) as VideoShotTransition,
-          transitionDurationMs: storyline.defaultTransitionDurationMs,
-        }));
-        stitched = await stitchClipsWithTransitions(shotInputs);
-      }
-      if (musicBed) {
-        stitched = await addMusicBed(stitched, musicBed);
-      }
+      // At most a few heavy ffmpeg jobs at once on the shared box (media-job-queue.ts).
+      const built = await runMediaJob(`stitch ${storyline.id}`, async () => {
+        // The first item always joins with "cut" -- there is nothing before it.
+        // Phase 2 (design 2.7): the export's size, frame rate, fill/fit and quality.
+        const exportSettings = readVideoExportSettings(storyline.exportSettings, storyline.aspect);
+        const preset = videoExportPreset(exportSettings.preset);
+        const target = { width: preset.width, height: preset.height, fps: exportSettings.fps, fit: exportSettings.fit, quality: exportSettings.quality };
+        type BuiltItem = {
+          objectKey: string | null;
+          buffer?: Buffer;
+          transitionIn: ShotTransitionInput["transitionIn"];
+          transitionDurationMs: number;
+          normalize?: NormalizeClipOptions;
+          writtenSeconds: number;
+          allowStill?: boolean;
+          allowSilence?: boolean;
+        };
+        const shotById = new Map(shots.map((s) => [s.id, s]));
+        const items: BuiltItem[] = plan.items.map((item) => {
+          const shot = item.shotId ? shotById.get(item.shotId) : undefined;
+          return {
+            ...item,
+            // A held photo is meant to be still; your own clips and muted clips may be quiet.
+            allowStill: shot?.clipKind === "still",
+            allowSilence: Boolean(shot && (shot.clipKind !== "generated" || shot.clipMuted)),
+          };
+        });
+        // Title card and credits: drawn by ffmpeg from a text file, joined by cuts.
+        if (exportSettings.opening) {
+          const buffer = await renderTitleCard(exportSettings.opening.text, { seconds: exportSettings.opening.seconds, kind: "opening", target });
+          items.unshift({ objectKey: null, buffer, transitionIn: "cut", transitionDurationMs: 0, writtenSeconds: exportSettings.opening.seconds, allowStill: true, allowSilence: true });
+          if (items[1]) items[1] = { ...items[1], transitionIn: "cut" };
+        }
+        if (exportSettings.credits) {
+          const buffer = await renderTitleCard(exportSettings.credits.text, { seconds: exportSettings.credits.seconds, kind: "credits", target });
+          items.push({ objectKey: null, buffer, transitionIn: "cut", transitionDurationMs: 0, writtenSeconds: exportSettings.credits.seconds, allowStill: true, allowSilence: true });
+        }
+        const allCut = items.every((item, index) => index === 0 || item.transitionIn === "cut");
+        const rawClips: Buffer[] = [];
+        for (const item of items) {
+          rawClips.push(item.buffer ?? (await downloadClip(storyline.companyId, item.objectKey!)));
+        }
+        // Same size/frame rate/codecs for every clip first -- see
+        // normalizeClipsForStitch -- and the real length of each one.
+        const normalized = await normalizeClipsForStitch(rawClips, items.map((item) => item.normalize), target);
+        let result: Awaited<ReturnType<typeof stitchClips>>;
+        if (allCut) {
+          result = await stitchClips(normalized.buffers);
+        } else {
+          const inputs: ShotTransitionInput[] = items.map((item, index) => ({
+            buffer: normalized.buffers[index]!,
+            transitionIn: index === 0 ? "cut" : item.transitionIn,
+            transitionDurationMs: item.transitionDurationMs,
+          }));
+          result = await stitchClipsWithTransitions(inputs);
+        }
+        if (musicBed) {
+          result = await addMusicBed(result, musicBed);
+        }
+        // An even, never-clipping sound track. If this step fails the film
+        // is kept as it is (the check may then warn about loud peaks)
+        // rather than losing the whole export over the sound.
+        try {
+          const evened = await normalizeLoudness(result);
+          result = { buffer: evened.buffer, contentType: evened.contentType };
+        } catch (err) {
+          logger.warn({ err, storylineId: storyline.id }, "video-storyline-stitch: evening out the sound failed; keeping the film as stitched");
+        }
+        return { stitched: result, normalized, items };
+      });
+      const { stitched, normalized, items: builtItems } = built;
       const durationSeconds = Math.round(normalized.durationsSeconds.reduce((sum, seconds) => sum + seconds, 0));
 
       // DUR-4318: check the stitched file before it is ever shown as "done".
       // Planned against each clip's REAL length: providers snap or round
       // clip lengths (Kling only makes 5s/10s clips), so the written shot
       // durations are not what the film is made of.
-      const shotPlans: VideoQualityCheckShotPlan[] = shots.map((shot, index) => ({
-        durationSeconds: normalized.durationsSeconds[index] ?? shot.durationSeconds,
-        transitionIn: (index === 0 ? "cut" : (shot.transitionIn ?? storyline.defaultTransition)) as VideoShotTransition,
-        transitionDurationMs: storyline.defaultTransitionDurationMs,
+      const shotPlans: VideoQualityCheckShotPlan[] = builtItems.map((item, index) => ({
+        durationSeconds: normalized.durationsSeconds[index] ?? item.writtenSeconds,
+        transitionIn: index === 0 ? "cut" : item.transitionIn,
+        transitionDurationMs: item.transitionDurationMs,
+        allowStill: item.allowStill,
+        allowSilence: item.allowSilence,
       }));
       const qualityCheck = await runVideoQualityCheck(stitched.buffer, { shots: shotPlans, expectAudio: musicBed !== null });
 
@@ -154,20 +289,19 @@ export function videoStorylineStitchService(db: Db, deps: VideoStorylineStitchDe
         contentType: stitched.contentType,
         body: stitched.buffer,
       });
-      const explanation = qualityCheck.passed
-        ? null
-        : `Automatic quality check found ${qualityCheck.issues.length} issue(s):\n${qualityCheck.issues.map((i) => `- ${i.message}`).join("\n")}`;
+      // Warnings never block: only a truly broken film waits on "needs_attention".
+      const blocked = qualityCheck.blocking;
       await db
         .update(videoStorylines)
         .set({
-          status: qualityCheck.passed ? "done" : "needs_attention",
+          status: blocked ? "needs_attention" : "done",
           finalProvider: stored.provider,
           finalObjectKey: stored.objectKey,
           finalContentType: stored.contentType,
           finalByteSize: stored.byteSize,
           finalSha256: stored.sha256,
           finalDurationSeconds: durationSeconds,
-          errorMessage: explanation,
+          errorMessage: qualityExplanation(qualityCheck.issues),
           stitchBlockedReason: null,
           qualityCheckIssues: qualityCheck.issues,
           qualityCheckedAt: nowOf(),
@@ -179,19 +313,43 @@ export function videoStorylineStitchService(db: Db, deps: VideoStorylineStitchDe
         actorType: "agent",
         actorId: storyline.createdByAgentId ?? storyline.createdByUserId ?? "system",
         agentId: storyline.createdByAgentId,
-        action: qualityCheck.passed ? "video_storyline.stitched" : "video_storyline.needs_attention",
+        action: blocked ? "video_storyline.needs_attention" : "video_storyline.stitched",
         entityType: "video_storyline",
         entityId: storyline.id,
-        details: { shotCount: shots.length, durationSeconds, byteSize: stored.byteSize, qualityCheckIssues: qualityCheck.issues },
+        details: {
+          shotCount: shots.length,
+          durationSeconds,
+          byteSize: stored.byteSize,
+          qualityCheckIssues: qualityCheck.issues,
+          warningCount: qualityCheck.issues.filter((i) => i.severity !== "blocking").length,
+        },
       });
-      return qualityCheck.passed ? "stitched" : "needs_attention";
+      return blocked ? "needs_attention" : "stitched";
     } catch (err) {
       logger.error({ err, storylineId: storyline.id }, "video-storyline-stitch: stitch failed");
+      const reason = friendlyStitchError(err);
+      // One automatic retry; a second failure in a row stops and says so,
+      // instead of re-running a heavy ffmpeg job on every tick forever.
+      const failedBefore = (storyline.errorMessage ?? "").startsWith(STITCH_FAILED_PREFIX);
+      if (failedBefore) {
+        const message = `${STITCH_FAILED_PREFIX} twice in a row (${reason}). Your clips are kept. Press "Combine again" to try once more; if it keeps failing, change or remove the clip you changed last.`;
+        await db
+          .update(videoStorylines)
+          .set({
+            status: "needs_attention",
+            errorMessage: message,
+            qualityCheckIssues: [{ code: "stitch_failed", message, shotIndex: null, timeSeconds: null, severity: "blocking" }],
+            qualityCheckedAt: nowOf(),
+            updatedAt: nowOf(),
+          })
+          .where(eq(videoStorylines.id, storyline.id));
+        return "failed";
+      }
       await db
         .update(videoStorylines)
         .set({
           status: "ready_to_stitch",
-          errorMessage: `Stitching failed: ${err instanceof Error ? err.message : String(err)}`,
+          errorMessage: `${STITCH_FAILED_PREFIX} (${reason}). Trying once more automatically.`,
           updatedAt: nowOf(),
         })
         .where(eq(videoStorylines.id, storyline.id));
@@ -244,9 +402,18 @@ export function videoStorylineStitchService(db: Db, deps: VideoStorylineStitchDe
       .from(videoStorylines)
       .where(and(eq(videoStorylines.id, storylineId), eq(videoStorylines.companyId, companyId)));
     if (!storyline) throw notFound("Video storyline not found");
-    if (storyline.status !== "needs_attention") {
-      throw conflict(`This storyline is ${storyline.status.replace(/_/g, " ")}, not needing attention.`);
+    // Storyline strip: "Combine again" also works on a finished film (new
+    // transitions, no re-render), not only after a failed quality check.
+    if (storyline.status !== "needs_attention" && storyline.status !== "done") {
+      throw conflict(`This storyline is ${storyline.status.replace(/_/g, " ")}, so it cannot be combined again right now.`);
     }
+    const shots = await db
+      .select()
+      .from(videoShots)
+      .where(and(eq(videoShots.storylineId, storylineId), eq(videoShots.companyId, companyId), eq(videoShots.status, "done")))
+      .orderBy(asc(videoShots.orderIndex));
+    const plan = await buildStitchPlan(db, storyline, shots);
+    if (plan.problems.length > 0) throw unprocessable(plan.problems.join(" "));
     await db
       .update(videoStorylines)
       .set({
@@ -259,5 +426,46 @@ export function videoStorylineStitchService(db: Db, deps: VideoStorylineStitchDe
       .where(eq(videoStorylines.id, storylineId));
   }
 
-  return { tick, stitchOne, retryStitch };
+  /**
+   * "Accept warnings and finish": a film parked on "needs_attention" whose
+   * findings are all warnings (from before warnings stopped blocking, or a
+   * person who simply wants it as it is) becomes "done" without making it
+   * again. A film with a real problem cannot be accepted this way.
+   */
+  async function acceptWarnings(companyId: string, storylineId: string, actor: VideoStorylineActor): Promise<void> {
+    const [storyline] = await db
+      .select()
+      .from(videoStorylines)
+      .where(and(eq(videoStorylines.id, storylineId), eq(videoStorylines.companyId, companyId)));
+    if (!storyline) throw notFound("Video storyline not found");
+    if (storyline.status === "done") return;
+    if (storyline.status !== "needs_attention") {
+      throw conflict(`This storyline is ${storyline.status.replace(/_/g, " ")}, so there is nothing to accept right now.`);
+    }
+    if (!storyline.finalObjectKey) throw conflict("There is no finished film to accept yet. Combine the clips again first.");
+    if (hasBlockingVideoQualityIssue(storyline.qualityCheckIssues)) {
+      throw unprocessable("The automatic check found a real problem with this film, so it cannot be accepted as it is. Combine the clips again.");
+    }
+    await db
+      .update(videoStorylines)
+      .set({
+        status: "done",
+        errorMessage: null,
+        // The findings stay, so they are still shown next to Download as warnings.
+        updatedAt: nowOf(),
+      })
+      .where(and(eq(videoStorylines.id, storylineId), eq(videoStorylines.companyId, companyId), eq(videoStorylines.status, "needs_attention")));
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      action: "video_storyline.warnings_accepted",
+      entityType: "video_storyline",
+      entityId: storylineId,
+      details: { warningCount: (storyline.qualityCheckIssues ?? []).length },
+    });
+  }
+
+  return { tick, stitchOne, retryStitch, acceptWarnings };
 }

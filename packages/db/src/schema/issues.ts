@@ -18,7 +18,7 @@ import { companies } from "./companies.js";
 import { heartbeatRuns } from "./heartbeat_runs.js";
 import { projectWorkspaces } from "./project_workspaces.js";
 import { executionWorkspaces } from "./execution_workspaces.js";
-import type { SourceTrustMetadata } from "@paperclipai/shared";
+import type { IssueBragPreapproval, SourceTrustMetadata } from "@paperclipai/shared";
 
 export const issues = pgTable(
   "issues",
@@ -73,6 +73,11 @@ export const issues = pgTable(
     // Once true, evaluateFeatureLaunchDoneGate (server/src/services/feature-launch-gate.ts)
     // requires an approved feature_launch approval before the issue can move to done.
     featureLaunch: boolean("feature_launch").notNull().default(false),
+    // "Make a short brag video when this is done": a person's pre-approval
+    // (who, when, cost cap). Written ONLY by brag-on-done.ts's setter, never by
+    // the generic create/update paths (they strip it). triggeredAt is set once
+    // and never cleared, so a reopened-and-closed task never makes a second video.
+    bragPreapproval: jsonb("brag_preapproval").$type<IssueBragPreapproval | null>(),
     startedAt: timestamp("started_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
@@ -103,6 +108,9 @@ export const issues = pgTable(
     projectWorkspaceIdx: index("issues_company_project_workspace_idx").on(table.companyId, table.projectWorkspaceId),
     executionWorkspaceIdx: index("issues_company_execution_workspace_idx").on(table.companyId, table.executionWorkspaceId),
     dueMonitorIdx: index("issues_company_monitor_due_idx").on(table.companyId, table.monitorNextCheckAt),
+    bragPreapprovalPendingIdx: index("issues_brag_preapproval_pending_idx")
+      .on(table.companyId)
+      .where(sql`${table.bragPreapproval} is not null and ((${table.bragPreapproval} ->> 'triggeredAt') is null or (${table.bragPreapproval} ->> 'outcome') = 'accepted')`),
     identifierIdx: uniqueIndex("issues_identifier_idx").on(table.identifier),
     titleSearchIdx: index("issues_title_search_idx").using("gin", table.title.op("gin_trgm_ops")),
     identifierSearchIdx: index("issues_identifier_search_idx").using("gin", table.identifier.op("gin_trgm_ops")),

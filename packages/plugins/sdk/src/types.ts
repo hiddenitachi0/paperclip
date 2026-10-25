@@ -278,6 +278,14 @@ export interface ToolRunContext {
    * wrote into the tool input.
    */
   requesterMessage?: string;
+  /**
+   * The file ids of pictures the person attached in this quick-agent chat
+   * (a photo sent to a Telegram bot), set by the host only, like
+   * `requesterMessage`. A plugin that sends pictures to an outside service
+   * must treat each as a real photo of real people (Media Studio age-checks
+   * them first).
+   */
+  attachedFileIds?: string[];
 }
 
 /**

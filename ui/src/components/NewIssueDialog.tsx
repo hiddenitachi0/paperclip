@@ -2,8 +2,10 @@ import { memo, useState, useEffect, useRef, useCallback, useMemo, type ChangeEve
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   MODEL_PROFILE_KEYS,
-  getThinkingEffortKey,
+  agentDefaultLabel,
   getThinkingEffortOptions,
+  getThinkingEffortValue,
+  thinkingEffortLabel,
   type IssueWorkMode,
   type ModelProfileKey,
 } from "@paperclipai/shared";
@@ -46,6 +48,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { ToggleSwitch } from "@/components/ui/toggle-switch";
+import { BragOnDoneOption } from "./BragOnDoneOption";
 import {
   Popover,
   PopoverContent,
@@ -136,8 +139,16 @@ import {
 const STAGED_FILE_ACCEPT = "image/*,application/pdf,text/plain,text/markdown,application/json,text/csv,text/html,.md,.markdown";
 
 /** Per-task effort choices come from the one shared per-adapter list; "" = the agent's own setting. */
+/**
+ * Effort choices for the assignee's adapter (one shared per-adapter list). The
+ * first entry ("") means "no override" and is labelled with the agent's own
+ * level, e.g. "Agent default (High)".
+ */
 function issueThinkingEffortOptionsFor(adapterType: string | null | undefined, adapterConfig?: Record<string, unknown>) {
-  return getThinkingEffortOptions(adapterType, adapterConfig, { autoLabel: "Default" });
+  const agentEffort = getThinkingEffortValue(adapterType, adapterConfig ?? null);
+  return getThinkingEffortOptions(adapterType, adapterConfig, {
+    autoLabel: agentDefaultLabel(agentEffort ? thinkingEffortLabel(agentEffort) : null),
+  });
 }
 
 function loadDraft(): IssueDraft | null {
@@ -433,6 +444,7 @@ export function NewIssueDialog() {
   const [assigneeThinkingEffort, setAssigneeThinkingEffort] = useState("");
   const [assigneeChrome, setAssigneeChrome] = useState(false);
   const [planFirstOnOpus, setPlanFirstOnOpus] = useState(false);
+  const [bragOnDone, setBragOnDone] = useState(false);
   const [executionWorkspaceMode, setExecutionWorkspaceMode] = useState<string>("shared_workspace");
   const [selectedExecutionWorkspaceId, setSelectedExecutionWorkspaceId] = useState("");
   const [workMode, setWorkMode] = useState<IssueWorkMode>("standard");
@@ -815,6 +827,7 @@ export function NewIssueDialog() {
       setAssigneeThinkingEffort("");
       setAssigneeChrome(false);
       setPlanFirstOnOpus(false);
+      setBragOnDone(false);
       setExecutionWorkspaceMode(defaultExecutionWorkspaceMode);
       setWorkMode(nextWorkMode);
       setSelectedExecutionWorkspaceId(newIssueDefaults.executionWorkspaceId ?? "");
@@ -854,6 +867,7 @@ export function NewIssueDialog() {
       setAssigneeThinkingEffort("");
       setAssigneeChrome(false);
       setPlanFirstOnOpus(false);
+      setBragOnDone(false);
       setExecutionWorkspaceMode(defaultExecutionWorkspaceModeForIssueDefaults(newIssueDefaults, defaultProject));
       setWorkMode(nextWorkMode);
       setSelectedExecutionWorkspaceId(newIssueDefaults.executionWorkspaceId ?? "");
@@ -950,6 +964,7 @@ export function NewIssueDialog() {
       setAssigneeThinkingEffort("");
       setAssigneeChrome(false);
       setPlanFirstOnOpus(false);
+      setBragOnDone(false);
       setExecutionWorkspaceMode(defaultExecutionWorkspaceModeForIssueDefaults(newIssueDefaults, defaultProject));
       setSelectedExecutionWorkspaceId(newIssueDefaults.executionWorkspaceId ?? "");
       executionWorkspaceDefaultProjectId.current = hasExplicitProjectWorkspaceId || newIssueDefaults.executionWorkspaceId || defaultProject
@@ -983,6 +998,7 @@ export function NewIssueDialog() {
       setAssigneeThinkingEffort("");
       setAssigneeChrome(false);
       setPlanFirstOnOpus(false);
+      setBragOnDone(false);
       return;
     }
     // Read the operator's lane from the ref, never from the render snapshot: this pass may
@@ -994,14 +1010,13 @@ export function NewIssueDialog() {
 
     const config = (currentAssignee?.adapterConfig ?? {}) as Record<string, unknown>;
     const validThinkingValues = issueThinkingEffortOptionsFor(assigneeAdapterType, config);
-    const effortField = getThinkingEffortKey(assigneeAdapterType, config);
 
-    const seededModel = typeof config.model === "string" ? config.model : "";
-    const rawEffort = config[effortField];
-    const seededEffort =
-      typeof rawEffort === "string" && validThinkingValues.some((option) => option.id === rawEffort)
-        ? rawEffort
-        : "";
+    // Pre-fill = "Agent default (…)": the empty choice, labelled with the
+    // agent's own model/effort (see agentModelDefaultLabel and
+    // issueThinkingEffortOptionsFor). Nothing is pinned until the operator
+    // picks a different value.
+    const seededModel = "";
+    const seededEffort = "";
     const seededChrome = assigneeAdapterType === "claude_local" && config.chrome === true;
     seededAssigneeDefaultsRef.current = { model: seededModel, effort: seededEffort, chrome: seededChrome };
 
@@ -1068,6 +1083,7 @@ export function NewIssueDialog() {
     setAssigneeThinkingEffort("");
     setAssigneeChrome(false);
     setPlanFirstOnOpus(false);
+    setBragOnDone(false);
     setExecutionWorkspaceMode("shared_workspace");
     setSelectedExecutionWorkspaceId("");
     setWorkMode("standard");
@@ -1106,6 +1122,7 @@ export function NewIssueDialog() {
     setAssigneeThinkingEffort("");
     setAssigneeChrome(false);
     setPlanFirstOnOpus(false);
+    setBragOnDone(false);
     setExecutionWorkspaceMode("shared_workspace");
     setSelectedExecutionWorkspaceId("");
     setWorkMode("standard");
@@ -1186,6 +1203,7 @@ export function NewIssueDialog() {
       ...(taskWatchdogsEnabled && watchdogAgentId
         ? { watchdog: { agentId: watchdogAgentId, instructions: watchdogInstructions.trim() || null } }
         : {}),
+      ...(bragOnDone && dialogCompany?.bragOnDoneEnabled !== false ? { bragOnDone: true } : {}),
     });
   }
 
@@ -1299,6 +1317,8 @@ export function NewIssueDialog() {
     assigneeAdapterType,
     (currentAssignee?.adapterConfig ?? undefined) as Record<string, unknown> | undefined,
   );
+  const assigneeSavedModel = (currentAssignee?.adapterConfig as Record<string, unknown> | undefined)?.model;
+  const agentModelDefaultLabel = agentDefaultLabel(typeof assigneeSavedModel === "string" ? assigneeSavedModel : null);
   const recentAssigneeIds = useMemo(() => getRecentAssigneeIds(), [newIssueOpen]);
   const recentAssigneeOptionIds = useMemo(
     () => recentAssigneeIds.map((id) => assigneeValueFromSelection({ assigneeAgentId: id })),
@@ -2209,7 +2229,11 @@ export function NewIssueDialog() {
                     </p>
                   )}
                   {assigneeModelLane === "primary" && (
-                    <p className="text-[11px] text-muted-foreground">Runs on the agent's primary model.</p>
+                    <p className="text-[11px] text-muted-foreground">
+                      {isSubIssueMode && dialogCompany?.subtasksInheritModelEffort !== false
+                        ? `Uses ${parentIssueLabel || "the parent task"}'s model/effort if it has its own, otherwise the agent's.`
+                        : "Runs on the agent's primary model."}
+                    </p>
                   )}
                   {assigneeModelLane === "custom" && (
                     <p className="text-[11px] text-muted-foreground">Override the model and effort for this task only.</p>
@@ -2237,9 +2261,9 @@ export function NewIssueDialog() {
                     <InlineEntitySelector
                       value={assigneeModelOverride}
                       options={modelOverrideOptions}
-                      placeholder="Default model"
+                      placeholder={agentModelDefaultLabel}
                       disablePortal
-                      noneLabel="Default model"
+                      noneLabel={agentModelDefaultLabel}
                       searchPlaceholder="Search models..."
                       emptyMessage="No models found."
                       onChange={handleAssigneeModelOverrideChange}
@@ -2374,6 +2398,16 @@ export function NewIssueDialog() {
               </div>
             ) : null}
           </div>
+        </div>
+
+        {/* "Make a short brag video when this is done" (people only; the server refuses it from agents) */}
+        <div className="border-t border-border px-4 py-2 shrink-0">
+          <BragOnDoneOption
+            company={dialogCompany}
+            checked={bragOnDone && dialogCompany?.bragOnDoneEnabled !== false}
+            onCheckedChange={setBragOnDone}
+            disabled={createIssue.isPending}
+          />
         </div>
 
         {/* Property chips bar */}

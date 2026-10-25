@@ -24,16 +24,26 @@ const mockHelperApi = vi.hoisted(() => ({
   startInvestigation: vi.fn(),
 }));
 vi.mock("../../api/helper", () => ({ helperApi: mockHelperApi }));
+const authState = vi.hoisted(() => ({ userId: "u1" as string | null }));
+vi.mock("../../api/auth", () => ({
+  authApi: {
+    getSession: vi.fn(async () =>
+      authState.userId ? { session: { id: `s-${authState.userId}`, userId: authState.userId }, user: { id: authState.userId, email: null, name: null, image: null } } : null,
+    ),
+  },
+}));
+const captureState = vi.hoisted(() => ({ applyTargets: [] as string[] }));
 vi.mock("../../context/CompanyContext", () => ({
   useCompany: () => ({ selectedCompanyId: "c1", selectedCompany: { id: "c1", name: "Acme", issuePrefix: "ACM" } }),
 }));
 vi.mock("../MarkdownBody", () => ({ MarkdownBody: ({ children }: { children: string }) => <div data-markdown>{children}</div> }));
-vi.mock("../../lib/helper-capture", () => ({
+vi.mock("../../lib/helper-capture", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/helper-capture")>()),
   captureHelperContext: () => ({
     text: "Card: Deploy PR #612",
     truncated: false,
     entities: ["approval:a1"],
-    applyTargets: [],
+    applyTargets: captureState.applyTargets,
     itemCount: 1,
   }),
   viewportRect: () => ({ left: 0, top: 0, width: 100, height: 100 }),
@@ -41,6 +51,7 @@ vi.mock("../../lib/helper-capture", () => ({
 }));
 
 import { HelperOverlay } from "./HelperOverlay";
+import { HELPER_APPLY_EVENT, type HelperApplyEventDetail } from "../../lib/helper-apply";
 import { investigationEstimateText } from "./HelperInvestigations";
 
 function settings(): HelperSettingsView {
@@ -96,6 +107,7 @@ function investigation(overrides: Partial<HelperInvestigationView> = {}): Helper
     agentId: "agent-1",
     agentName: "Investigator",
     costCents: 0,
+    applyTargets: [],
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     ...overrides,
@@ -105,12 +117,16 @@ function investigation(overrides: Partial<HelperInvestigationView> = {}): Helper
 let root: Root | null = null;
 let host: HTMLDivElement | null = null;
 afterEach(() => {
+  window.sessionStorage.clear();
+  authState.userId = "u1";
   act(() => root?.unmount());
   host?.remove();
   root = null;
   host = null;
   vi.clearAllMocks();
   vi.useRealTimers();
+  captureState.applyTargets = [];
+  document.querySelectorAll("[data-helper-apply]").forEach((el) => el.remove());
 });
 
 async function flush() {
@@ -135,7 +151,11 @@ async function renderOpen() {
       </QueryClientProvider>,
     ),
   );
-  act(() => (document.querySelector("[data-testid=helper-open]") as HTMLButtonElement).click());
+  // The helper appears once it knows who is signed in.
+  await flush();
+  // After a "reload" the panel is still open (it is remembered for the browser tab).
+  const opener = document.querySelector("[data-testid=helper-open]") as HTMLButtonElement | null;
+  if (opener) act(() => opener.click());
   await flush();
 }
 
@@ -198,6 +218,9 @@ describe("HelperOverlay — Investigate deeper", () => {
     const confirm = document.querySelector("[data-testid=helper-investigate-confirm]")!;
     expect(confirm.textContent).toContain("“Investigator” will read what it needs");
     expect(confirm.textContent).toContain("advice only");
+    expect(document.querySelector("[data-testid=helper-investigate-run-note]")?.textContent).toBe(
+      "This starts a full agent run (uses its budget).",
+    );
     expect(document.querySelector("[data-testid=helper-investigate-estimate]")?.textContent).toContain(
       "It usually takes about 4 minutes and costs about $0.35, going by the middle of “Investigator”'s last 12 finished tasks.",
     );
@@ -369,6 +392,108 @@ describe("HelperOverlay — Investigate deeper", () => {
     expect(first.getAttribute("data-status")).toBe("done");
     expect(first.querySelector("[data-testid=helper-investigation-answer]")?.textContent).toContain("The sync key expired.");
     expect(mockHelperApi.listInvestigations).toHaveBeenCalledWith("c1");
+  });
+
+  it("sends the fields on screen, and offers Apply for the agent's answer (after a reload too) only while that field is still there", async () => {
+    const field = document.createElement("textarea");
+    field.setAttribute("data-helper-apply", "Description");
+    // A plain field takes the text through the helper's apply event (what useHelperApplyTarget-less fields do).
+    field.addEventListener(HELPER_APPLY_EVENT, (event) => {
+      const detail = (event as CustomEvent<HelperApplyEventDetail>).detail;
+      field.value = detail.value;
+      detail.handled = true;
+    });
+    document.body.appendChild(field);
+    captureState.applyTargets = ["Description"];
+    mockHelperApi.getSettings.mockResolvedValue(settings());
+    mockHelperApi.listInvestigations.mockResolvedValue({ investigations: [], availability: availability() });
+    mockHelperApi.startInvestigation.mockResolvedValue(investigation({ applyTargets: ["Description"] }));
+    await renderOpen();
+    typeQuestion("Write a better description");
+    await click("[data-testid=helper-investigate-composer]");
+    await click("[data-testid=helper-investigate-start]");
+    expect(mockHelperApi.startInvestigation).toHaveBeenCalledWith("c1", expect.objectContaining({ applyTargets: ["Description"] }));
+
+    // Later (a reload): the agent has answered with the text in a fenced block.
+    unmount();
+    const done = investigation({
+      status: "done",
+      statusLabel: "Done",
+      statusDetail: null,
+      answer: "Here is a clearer one:\n\n```\nReads cards and explains them.\n```",
+      applyTargets: ["Description", "Title"],
+    });
+    mockHelperApi.listInvestigations.mockResolvedValue({ investigations: [done], availability: availability() });
+    await renderOpen();
+    // The answer shows in the conversation it was started from (kept for the tab across the reload).
+    const answer = document.querySelector("[data-testid=helper-investigation-inline-answer]")!;
+    expect(answer.textContent).toContain("Reads cards and explains them.");
+    const applyButtons = () =>
+      [...document.querySelectorAll("[data-testid=helper-investigation-inline-answer] button")]
+        .map((b) => b.textContent)
+        .filter((t) => t?.startsWith("Apply"));
+    // "Title" is not on this screen, so it is not offered.
+    expect(applyButtons()).toEqual(["Apply to Description"]);
+    // In "My investigations" it stays one click away instead of showing the same answer twice.
+    expect(document.querySelector("[data-testid=helper-investigation] [data-testid=helper-investigation-answer]")).toBeNull();
+    field.value = "Old text";
+    await act(async () => {
+      [...answer.querySelectorAll("button")].find((b) => b.textContent === "Apply to Description")!.click();
+    });
+    expect(field.value).toBe("Reads cards and explains them.");
+    expect(document.querySelector("[data-testid=helper-note]")?.textContent).toContain("nothing is saved yet");
+
+    // Undo puts back what was there.
+    await click("[data-testid=helper-apply-undo]");
+    expect(field.value).toBe("Old text");
+    expect(document.querySelector("[data-testid=helper-note]")?.textContent).toContain("Put back what was in “Description” before.");
+
+    // The field is gone: no Apply button.
+    field.remove();
+    unmount();
+    await renderOpen();
+    expect(applyButtons()).toEqual([]);
+  });
+
+  it("shows a started investigation in the conversation, live, with its answer once the agent is done, and marks the Ask tab while closed", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    mockHelperApi.getSettings.mockResolvedValue(settings());
+    mockHelperApi.listInvestigations.mockResolvedValue({ investigations: [], availability: availability() });
+    mockHelperApi.startInvestigation.mockResolvedValue(investigation());
+    await renderOpen();
+    await askAndAnswer({ answer: "Probably fine." });
+    mockHelperApi.listInvestigations.mockResolvedValue({ investigations: [investigation()], availability: availability({ runningCount: 1 }) });
+    await click("[data-testid=helper-investigate-answer]");
+    await click("[data-testid=helper-investigate-start]");
+
+    const inline = () => document.querySelector("[data-testid=helper-investigation-inline]")!;
+    expect(inline().getAttribute("data-status")).toBe("queued");
+    expect(inline().textContent).toContain("the answer will appear right here");
+    expect(document.querySelector("[data-testid=helper-investigation-inline-link]")?.getAttribute("href")).toBe("/ACM/issues/ACM-12");
+
+    // Close the panel; the agent finishes meanwhile.
+    await click("button[aria-label='Close the helper']");
+    mockHelperApi.listInvestigations.mockResolvedValue({
+      investigations: [investigation({ status: "done", statusLabel: "Done", statusDetail: null, answer: "Yes. The tests pass." })],
+      availability: availability(),
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_500);
+    });
+    await flush();
+    expect(document.querySelector("[data-testid=helper-answer-ready]")).not.toBeNull();
+    expect(document.querySelector("[data-testid=helper-open]")?.getAttribute("aria-label")).toContain("an investigation answer is ready");
+
+    await click("[data-testid=helper-open]");
+    expect(inline().getAttribute("data-status")).toBe("done");
+    expect(document.querySelector("[data-testid=helper-investigation-inline-answer]")?.textContent).toContain("Yes. The tests pass.");
+
+    // A follow-up question carries the agent's answer in the history.
+    await askAndAnswer({ answer: "Then approve it." });
+    const history = mockHelperApi.ask.mock.calls.at(-1)![1].history as Array<{ role: string; content: string }>;
+    expect(history.at(-1)).toEqual({ role: "assistant", content: expect.stringContaining("Yes. The tests pass.") });
+    await click("button[aria-label='Close the helper']");
+    expect(document.querySelector("[data-testid=helper-answer-ready]")).toBeNull();
   });
 
   it("polls while one is running and stops once it is done", async () => {

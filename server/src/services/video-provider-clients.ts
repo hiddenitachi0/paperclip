@@ -39,9 +39,39 @@ export interface MediaJobInput {
    * person) uses this instead.
    */
   characters?: Array<{ name: string; images: string[] }>;
+  /**
+   * The END frame (data: URI): the clip must finish on exactly this picture.
+   * Used by AI transitions (start = shot A's real last frame, end = shot B's
+   * real first frame). Mapped per model: Fal Kling v3/O3 `end_image_url`,
+   * Kling 1.6/2.1 pro `tail_image_url`, Wan 2.2 `end_image_url`; Sogni
+   * animate_photo `endImageIndex` + `frameRole: "both"`. A model that cannot
+   * take one is refused, never silently ignored.
+   */
+  endImage?: string;
+  /**
+   * Whether the clip should carry the model's own sound. Kling v3 makes
+   * sound by default and charges 50% more for it, so Fal Kling gets
+   * `generate_audio: false` unless this is true.
+   */
+  generateAudio?: boolean;
+  /**
+   * false = send our prompt to Sogni as written (`skipPromptProcessing`, and
+   * `expandPrompt: false` for Wan 3) instead of letting Sogni rewrite it from
+   * the pictures. Storyline shots and transitions send false.
+   */
+  promptRewrite?: boolean;
   seed?: number;
   durationSeconds?: number;
   aspectRatio?: string;
+  /**
+   * false = the request carries the company's own footage (an uploaded photo
+   * or a frame of an uploaded video): Fal gets `X-Fal-Store-IO: 0`, so it
+   * does not keep the request/response payloads (design 2.5). Fal's docs say
+   * the CDN files it makes stay reachable; whether the queue's result
+   * endpoint still answers is checked by the poll path (a missing result is a
+   * plain failure, never a silent success). Sogni has no such switch.
+   */
+  storeIO?: false;
 }
 
 /** What the service told us right after asking it to start (never the finished file: that comes from poll()). */
@@ -87,16 +117,20 @@ function falAuthHeaders(apiKey: string): Record<string, string> {
   return { Authorization: `Key ${apiKey}`, "Content-Type": "application/json" };
 }
 
+/** Fal's header for "do not store this request's inputs and outputs". */
+export const FAL_STORE_IO_HEADER = "X-Fal-Store-IO";
+
 async function falQueueSubmit(
   fetchImpl: FetchImpl,
   apiKey: string,
   model: string,
   body: Record<string, unknown>,
+  opts: { storeIO?: false } = {},
 ): Promise<{ requestId: string }> {
   const checked = assertFalModelId(model);
   const res = await fetchImpl(`${FAL_QUEUE_BASE}/${checked}`, {
     method: "POST",
-    headers: falAuthHeaders(apiKey),
+    headers: { ...falAuthHeaders(apiKey), ...(opts.storeIO === false ? { [FAL_STORE_IO_HEADER]: "0" } : {}) },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`fal.ai ${checked} could not be started (${res.status}): ${await res.text()}`);
@@ -204,6 +238,29 @@ export function falVideoModelTakesElements(model: string | null | undefined): bo
   return !!model && /^fal-ai\/kling-video\/v3\/[a-z0-9._-]+\/image-to-video$/i.test(model.trim());
 }
 
+/** A pinned Fal Kling v3 / O3 model: they take `start_image_url` (never `image_url`). */
+function falKlingV3(model: string): boolean {
+  return /^fal-ai\/kling-video\/(v3|o3)\//i.test(model.trim());
+}
+
+/**
+ * The request field a Fal model takes its END frame in, or null when it has
+ * none (design 7.2): Kling v3/O3 `end_image_url`, Kling 1.6 / 2.1 pro
+ * image-to-video `tail_image_url`, Wan 2.2 A14B image-to-video `end_image_url`.
+ */
+export function falEndImageField(model: string): "end_image_url" | "tail_image_url" | null {
+  const id = model.trim().toLowerCase();
+  if (falKlingV3(id)) return "end_image_url";
+  if (/^fal-ai\/kling-video\/v(1\.6|2\.1)\/pro\/image-to-video$/.test(id)) return "tail_image_url";
+  if (/^fal-ai\/wan\/v2\.2-a14b\/image-to-video$/.test(id)) return "end_image_url";
+  return null;
+}
+
+/** Fal models that make their own sound unless told not to (and charge more for it). */
+export function falModelMakesSound(model: string): boolean {
+  return /^fal-ai\/kling-video\/(v3|o3|v2\.6)\//i.test(model.trim());
+}
+
 export class FalVideoProvider implements MediaJobProvider {
   readonly name = "fal";
   constructor(
@@ -231,12 +288,23 @@ export class FalVideoProvider implements MediaJobProvider {
       body.start_image_url = input.startImage ?? elements[0]!.frontal_image_url;
       body.elements = elements;
     } else if (input.startImage) {
-      body.image_url = input.startImage;
+      // Kling v3/O3 name the start picture start_image_url; older models image_url.
+      if (falKlingV3(model)) body.start_image_url = input.startImage;
+      else body.image_url = input.startImage;
     }
+    if (input.endImage) {
+      const field = falEndImageField(model);
+      if (!field) {
+        throw new Error(`The Fal model ${model} cannot finish on a chosen end picture. Use Kling 3.0 (fal-ai/kling-video/v3/standard/image-to-video).`);
+      }
+      body[field] = input.endImage;
+    }
+    // Kling v3 makes sound by default at +50% cost: off unless asked for (design 2.4).
+    if (falModelMakesSound(model)) body.generate_audio = input.generateAudio === true;
     if (input.aspectRatio) body.aspect_ratio = input.aspectRatio;
     if (typeof input.durationSeconds === "number") body.duration = String(input.durationSeconds);
     if (typeof input.seed === "number") body.seed = input.seed;
-    const { requestId } = await falQueueSubmit(this.fetchImpl, this.apiKey, model, body);
+    const { requestId } = await falQueueSubmit(this.fetchImpl, this.apiKey, model, body, input.storeIO === false ? { storeIO: false } : {});
     return { externalId: requestId, model, provider: this.name };
   }
 
@@ -275,30 +343,39 @@ export class FalVideoProvider implements MediaJobProvider {
 
 export type SogniVideoTool = "generate_video" | "animate_photo";
 
-/** Tool keys per published schema (videoModel enums). */
+/**
+ * Tool keys per Sogni's current published lists (videoModel enums of the
+ * hosted tools manifest in @sogni-ai/sogni-client 5.64.0 / sogni-protocol
+ * 1.0.0-alpha.51, 17 Oct 2026; Sogni's live answer that day listed the same
+ * animate_photo keys, the "-balanced" ones included).
+ */
 const GENERATE_VIDEO_KEYS = new Set([
-  "ltx25", "ltx23", "wan22", "seedance2", "seedance2-mini", "seedance2-5", "seedance2-5-uncensored",
+  "ltx25", "ltx23", "wan22", "seedance2", "seedance2-mini", "seedance2-mini-uncensored", "seedance2-5", "seedance2-5-uncensored",
   "minimax-h3-t2v", "minimax-h3-t2v-turbo", "minimax-h3-fasth3-t2v-turbo", "minimax-h3-fasth3-t2v-turbo-2stage",
   "happyhorse-1.1-t2v", "happyhorse-1.1-i2v", "happyhorse-1.1-r2v",
   "minimax-h3-r2v", "minimax-h3-r2v-turbo", "minimax-h3-r2v-2stage", "minimax-h3-r2v-balanced-2stage",
   "wan3.0-video", "wan3.0-spicy-video",
+  "minimax-h3-turbo", "minimax-h3-fasth3-turbo", "minimax-h3-fasth3-turbo-2stage",
+  "minimax-h3-balanced", "minimax-h3-t2v-balanced", "minimax-h3-r2v-balanced",
 ]);
 const ANIMATE_PHOTO_KEYS = new Set([
   "ltx25", "ltx23", "wan22", "happyhorse-1.1-i2v", "happyhorse-1.1-r2v",
   "minimax-h3-i2v", "minimax-h3-i2v-turbo", "minimax-h3-fasth3-i2v-turbo", "minimax-h3-fasth3-i2v-turbo-2stage",
   "minimax-h3-flf2v", "minimax-h3-flf2v-turbo", "minimax-h3-fasth3-flf2v-turbo", "minimax-h3-fasth3-flf2v-turbo-2stage",
   "wan3.0-video", "wan3.0-spicy-video",
+  "minimax-h3-i2v-balanced", "minimax-h3-flf2v-balanced",
 ]);
 /** Models whose generate_video takes loose reference pictures (referenceImageIndices). */
 const LOOSE_REFERENCE_KEYS = new Set([
-  "seedance2", "seedance2-mini", "seedance2-5", "seedance2-5-uncensored",
-  "minimax-h3-r2v", "minimax-h3-r2v-turbo", "minimax-h3-r2v-2stage", "minimax-h3-r2v-balanced-2stage",
+  "seedance2", "seedance2-mini", "seedance2-mini-uncensored", "seedance2-5", "seedance2-5-uncensored",
+  "minimax-h3-r2v", "minimax-h3-r2v-turbo", "minimax-h3-r2v-2stage", "minimax-h3-r2v-balanced", "minimax-h3-r2v-balanced-2stage",
   "happyhorse-1.1-r2v", "wan3.0-video", "wan3.0-spicy-video",
 ]);
 const SEEDANCE_KEYS: Record<string, string> = {
   "seedance-2-0": "seedance2",
   "seedance-2-0-fast": "seedance2-mini",
   "seedance-2-0-mini": "seedance2-mini",
+  "seedance-2-0-mini-uncensored": "seedance2-mini-uncensored",
   "seedance-2-5": "seedance2-5",
   "seedance-2-5-uncensored": "seedance2-5-uncensored",
 };
@@ -309,7 +386,7 @@ const SEEDANCE_KEYS: Record<string, string> = {
  * without one the text-to-video variant. null = Sogni's default; an unknown
  * name is returned unchanged.
  */
-export function sogniVideoModelKey(model: string | null | undefined, withStartImage: boolean): string | null {
+export function sogniVideoModelKey(model: string | null | undefined, withStartImage: boolean, withEndImage = false): string | null {
   const raw = model?.trim();
   if (!raw) return null;
   const id = raw.toLowerCase();
@@ -325,21 +402,26 @@ export function sogniVideoModelKey(model: string | null | undefined, withStartIm
   }
   if (id.startsWith("minimax-h3")) {
     const twoStage = id.includes("2stage");
+    const balanced = id.includes("balanced");
     if (id.includes("r2v")) {
-      if (twoStage) return id.includes("balanced") ? "minimax-h3-r2v-balanced-2stage" : "minimax-h3-r2v-2stage";
+      if (twoStage) return balanced ? "minimax-h3-r2v-balanced-2stage" : "minimax-h3-r2v-2stage";
+      if (balanced) return "minimax-h3-r2v-balanced";
       return id.includes("turbo") ? "minimax-h3-r2v-turbo" : "minimax-h3-r2v";
     }
-    const flf = id.includes("flf2v");
+    // A start AND an end picture (a transition) needs H3's first/last-frame variant, never plain i2v.
+    const flf = id.includes("flf2v") || (withStartImage && withEndImage);
     const workflow = withStartImage ? (flf ? "flf2v" : "i2v") : "t2v";
     if (id.includes("fastvideo") || id.includes("fasth3")) return `minimax-h3-fasth3-${workflow}-turbo${twoStage ? "-2stage" : ""}`;
+    // The LightX2V 8-step "Balanced" engine (t2v / i2v / flf2v).
+    if (balanced) return `minimax-h3-${workflow}-balanced`;
     return `minimax-h3-${workflow}${id.includes("turbo") ? "-turbo" : ""}`;
   }
   return raw;
 }
 
 /** Which tool a shot uses, and whether its pictures go along as a start frame or as loose references. */
-export function sogniVideoStep(model: string | null | undefined, hasStartImage: boolean): { tool: SogniVideoTool; videoModel: string | null; pictures: "start" | "references" | "none" } {
-  const startKey = sogniVideoModelKey(model, true);
+export function sogniVideoStep(model: string | null | undefined, hasStartImage: boolean, hasEndImage = false): { tool: SogniVideoTool; videoModel: string | null; pictures: "start" | "references" | "none" } {
+  const startKey = sogniVideoModelKey(model, true, hasEndImage);
   // Image-to-video when there is a start frame and the model can take one (Seedance and r2v models use loose references instead).
   if (hasStartImage && (startKey === null || ANIMATE_PHOTO_KEYS.has(startKey)) && !(startKey && startKey.endsWith("r2v"))) {
     return { tool: "animate_photo", videoModel: startKey, pictures: "start" };
@@ -352,6 +434,97 @@ export function sogniVideoStep(model: string | null | undefined, hasStartImage: 
     return { tool: "animate_photo", videoModel: startKey, pictures: "start" };
   }
   return { tool: "generate_video", videoModel: key, pictures: loose ? "references" : "none" };
+}
+
+const SOGNI_ERROR_DETAIL_MAX = 1500;
+const SOGNI_TOOL_WORDS: Record<SogniVideoTool, string> = {
+  animate_photo: "animating a picture",
+  generate_video: "making a video",
+};
+
+/**
+ * Sogni's own words, safe to log and show: no links (upload/download
+ * addresses), no data: URIs or long base64/token runs, no API key, at most
+ * ~1500 characters.
+ */
+export function sanitizeSogniErrorText(text: string, secrets: readonly string[] = []): string {
+  let out = String(text ?? "");
+  for (const secret of secrets) {
+    if (secret && secret.length >= 6) out = out.split(secret).join("[hidden]");
+  }
+  out = out
+    .replace(/data:[^\s"',;]*;base64,[A-Za-z0-9+/=_-]*/gi, "[picture]")
+    .replace(/\b(?:https?|wss?|s3|gs):\/\/[^\s"'<>]+/gi, "[link]")
+    .replace(/\bBearer\s+[^\s"',;]+/gi, "Bearer [hidden]")
+    .replace(/[A-Za-z0-9+/_=-]{40,}/g, "[…]")
+    .replace(/\s+/g, " ")
+    .trim();
+  return out.length > SOGNI_ERROR_DETAIL_MAX ? `${out.slice(0, SOGNI_ERROR_DETAIL_MAX - 1).trimEnd()}…` : out;
+}
+
+/** Sogni turned a video request down. Carries what we sent (tool, model) and what Sogni said, for the logs. */
+export class SogniVideoRequestError extends Error {
+  readonly status: number;
+  readonly sogniErrorCode: number | string | null;
+  readonly sogniMessage: string;
+  readonly tool: SogniVideoTool;
+  /** The videoModel we sent (Sogni's key), null = left out (Sogni's default). */
+  readonly videoModel: string | null;
+  constructor(
+    message: string,
+    details: { status: number; sogniErrorCode: number | string | null; sogniMessage: string; tool: SogniVideoTool; videoModel: string | null },
+  ) {
+    super(message);
+    this.name = "SogniVideoRequestError";
+    this.status = details.status;
+    this.sogniErrorCode = details.sogniErrorCode;
+    this.sogniMessage = details.sogniMessage;
+    this.tool = details.tool;
+    this.videoModel = details.videoModel;
+  }
+}
+
+/**
+ * The plain-English error for a refused workflow start. Sogni answers
+ * `{status:"error", errorCode, message}`; its message is kept whole (cleaned,
+ * up to ~1500 characters), and a refused video model is spelled out with the
+ * list Sogni accepts.
+ */
+export function sogniVideoRefusal(
+  status: number,
+  bodyText: string,
+  sent: { tool: SogniVideoTool; videoModel: string | null },
+  secrets: readonly string[] = [],
+): SogniVideoRequestError {
+  let parsed: Record<string, unknown> | null = null;
+  try {
+    const value: unknown = JSON.parse(bodyText);
+    parsed = value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+  } catch {
+    parsed = null;
+  }
+  const nested = parsed?.error && typeof parsed.error === "object" ? (parsed.error as Record<string, unknown>) : null;
+  const rawMessage = [parsed?.message, nested?.message].find((m): m is string => typeof m === "string" && m.trim() !== "") ?? bodyText;
+  const code = [parsed?.errorCode, nested?.code, parsed?.code].find((c): c is number | string => typeof c === "number" || typeof c === "string") ?? null;
+  const said = sanitizeSogniErrorText(rawMessage, secrets);
+  const doing = SOGNI_TOOL_WORDS[sent.tool];
+  const model = sent.videoModel ? `the video model "${sent.videoModel}"` : "Sogni's default video model";
+  let message: string;
+  const enumMatch = /Argument "videoModel" must be one of ((?:"[^"]*"(?:,\s*)?)+)/.exec(rawMessage);
+  if (enumMatch) {
+    const accepted = [...enumMatch[1]!.matchAll(/"([^"]*)"/g)].map((m) => m[1]!).filter((v) => v !== "");
+    const list = sanitizeSogniErrorText(accepted.join(", "), secrets);
+    if (sent.videoModel && accepted.includes(sent.videoModel)) {
+      // Sogni refused a model on its own list: seen on 17 Oct 2026, and the same request went through minutes later.
+      message = `Sogni refused the video request (${status}) for ${doing} with ${model}, even though that model is on its own list of accepted ones. This looks like a temporary problem on Sogni's side; trying again in a few minutes usually works.`;
+    } else {
+      message = `Sogni refused the video request (${status}): it didn't accept ${model} for ${doing}; it accepts: ${list}.`;
+    }
+    message += ` Sogni said: ${said}`;
+  } else {
+    message = `Sogni refused the video request (${status}) for ${doing} with ${model}: ${said || "no reason given"}`;
+  }
+  return new SogniVideoRequestError(message, { status, sogniErrorCode: code, sogniMessage: said, tool: sent.tool, videoModel: sent.videoModel });
 }
 
 const SOGNI_API_BASE = "https://api.sogni.ai";
@@ -379,7 +552,10 @@ export class SogniVideoProvider implements MediaJobProvider {
 
   async start(input: MediaJobInput): Promise<MediaJobHandle> {
     const requested = input.model ?? this.options.defaultModel ?? null;
-    const plan = sogniVideoStep(requested, Boolean(input.startImage));
+    const plan = sogniVideoStep(requested, Boolean(input.startImage), Boolean(input.endImage));
+    if (input.endImage && (plan.tool !== "animate_photo" || !input.startImage)) {
+      throw new Error("This Sogni video model cannot finish on a chosen end picture. Pick LTX-2.5, MiniMax H3 (first/last frame) or Wan 3.");
+    }
     const mediaReferences: Array<{ kind: "image"; url: string }> = [];
     const args: Json = {
       prompt: input.prompt,
@@ -390,6 +566,17 @@ export class SogniVideoProvider implements MediaJobProvider {
       mediaReferences.push({ kind: "image", url: await this.uploadReferenceImage(input.startImage, 0) });
       // -1 = the first uploaded picture, used as the START frame.
       args.sourceImageIndex = -1;
+      if (input.endImage) {
+        mediaReferences.push({ kind: "image", url: await this.uploadReferenceImage(input.endImage, 1) });
+        // -2 = the second upload, the END frame; "both" = the clip runs from one to the other.
+        args.endImageIndex = -2;
+        args.frameRole = "both";
+      }
+      if (input.promptRewrite === false) {
+        // Our prompt as written: Sogni otherwise rewrites it from the pictures alone.
+        args.skipPromptProcessing = true;
+        if (plan.videoModel?.startsWith("wan3")) args.expandPrompt = false;
+      }
     } else if (plan.pictures === "references") {
       const pictures = [...(input.startImage ? [input.startImage] : []), ...(input.referenceImages ?? [])].slice(0, 4);
       for (const [index, picture] of pictures.entries()) {
@@ -411,7 +598,9 @@ export class SogniVideoProvider implements MediaJobProvider {
       headers: this.headers({ "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() }),
       body: JSON.stringify(body),
     });
-    if (!res.ok) throw new Error(`Sogni refused the video request (${res.status}): ${(await res.text()).slice(0, 300)}`);
+    if (!res.ok) {
+      throw sogniVideoRefusal(res.status, await res.text(), { tool: plan.tool, videoModel: plan.videoModel }, [this.options.apiKey]);
+    }
     const parsed = asRecord(JSON.parse(await res.text()));
     const workflowId = asRecord(asRecord(parsed?.data)?.workflow)?.workflowId;
     if (typeof workflowId !== "string" || !workflowId) throw new Error("Sogni did not say which job it started.");

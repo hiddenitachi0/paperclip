@@ -6,8 +6,33 @@
 import sharp from "sharp";
 import type { CropBox } from "./identity.js";
 
-/** Cut one box (fractions of the picture) out of a picture. PNG keeps it lossless. */
-export async function cropPicture(bytes: Buffer, box: CropBox): Promise<{ bytes: Buffer; contentType: string; width: number; height: number }> {
+/** How a crop is encoded: longest edge in pixels and JPEG quality. */
+export interface CropEncoding {
+  maxEdge: number;
+  quality: number;
+}
+
+/** The first try, then smaller tries for when several crops together are too big for one response. */
+export const CROP_ENCODINGS: readonly CropEncoding[] = [
+  { maxEdge: 2048, quality: 90 },
+  { maxEdge: 1536, quality: 82 },
+  { maxEdge: 1024, quality: 74 },
+  { maxEdge: 768, quality: 68 },
+];
+
+/** All the crops of one call together may not pass this many bytes (before base64's +33%). */
+export const CROP_BUDGET_BYTES = 12 * 1024 * 1024;
+
+/**
+ * Cut one box (fractions of the picture) out of a picture. Encoded as JPEG
+ * (transparency flattened onto white, longest edge capped, never enlarged): a
+ * lossless PNG of a photo crop is several times the size of the photo.
+ */
+export async function cropPicture(
+  bytes: Buffer,
+  box: CropBox,
+  encoding: CropEncoding = CROP_ENCODINGS[0]!,
+): Promise<{ bytes: Buffer; contentType: string; width: number; height: number }> {
   const image = sharp(bytes).rotate(); // apply EXIF orientation first, so boxes match what people see
   const meta = await image.metadata();
   const oriented = meta.orientation && meta.orientation >= 5;
@@ -18,8 +43,31 @@ export async function cropPicture(bytes: Buffer, box: CropBox): Promise<{ bytes:
   const top = Math.max(0, Math.min(height - 1, Math.round(box.y * height)));
   const w = Math.max(1, Math.min(width - left, Math.round(box.w * width)));
   const h = Math.max(1, Math.min(height - top, Math.round(box.h * height)));
-  const out = await image.extract({ left, top, width: w, height: h }).png().toBuffer();
-  return { bytes: out, contentType: "image/png", width: w, height: h };
+  const { data, info } = await image
+    .extract({ left, top, width: w, height: h })
+    .flatten({ background: "#ffffff" })
+    .resize({ width: encoding.maxEdge, height: encoding.maxEdge, fit: "inside", withoutEnlargement: true })
+    .jpeg({ quality: encoding.quality, chromaSubsampling: "4:4:4" })
+    .toBuffer({ resolveWithObject: true });
+  return { bytes: data, contentType: "image/jpeg", width: info.width, height: info.height };
+}
+
+/**
+ * Cut every box. When the crops together pass the budget, all of them are cut
+ * again smaller; if even the smallest setting is too big, say so in plain words
+ * instead of dropping any crop.
+ */
+export async function cropPictures(
+  bytes: Buffer,
+  boxes: CropBox[],
+  budgetBytes: number = CROP_BUDGET_BYTES,
+): Promise<Array<{ bytes: Buffer; contentType: string; width: number; height: number }>> {
+  for (const encoding of CROP_ENCODINGS) {
+    const cuts = [];
+    for (const box of boxes) cuts.push(await cropPicture(bytes, box, encoding));
+    if (cuts.reduce((sum, cut) => sum + cut.bytes.length, 0) <= budgetBytes) return cuts;
+  }
+  throw new Error("These crops are too big to save together. Draw fewer or smaller boxes and try again.");
 }
 
 /** The box around the white part of a mask, as fractions; null when the mask is empty. */

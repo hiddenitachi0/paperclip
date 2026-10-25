@@ -65,6 +65,8 @@ export function friendlyStorylineError(status: number, bodyText: string, action?
   const doing = action ? ` while ${action}` : "";
 
   if (status === 413) {
+    // The server's own sentence (an upload over the company's limit, a full storage quota) when it sent one.
+    if (serverMessage) return new StorylineRequestError(serverMessage, status);
     return new StorylineRequestError("That is too much to send in one go (over 10 MB). Split the script into smaller parts.", status);
   }
   if (status === 401) {

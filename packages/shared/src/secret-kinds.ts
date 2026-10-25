@@ -84,6 +84,7 @@ export const SECRET_KIND_IDS = [
   "sftp_private_key",
   "payment_card_single_use",
   "site_login",
+  "crypto_wallet_key",
   "mail_imap_password",
   "other",
 ] as const;
@@ -281,6 +282,15 @@ export const SECRET_KINDS: readonly SecretKindDescriptor[] = [
     testable: false,
   },
   {
+    id: "crypto_wallet_key",
+    label: "Crypto wallet key",
+    description:
+      "The secret key of an agent's crypto wallet. Made or imported on the agent's Wallets section, never shown again, and only ever used by the server to sign a payment.",
+    provider: "other",
+    category: "payments",
+    testable: false,
+  },
+  {
     id: "mail_imap_password",
     label: "Email inbox password (IMAP)",
     description: "An account or app password for reading an email inbox read-only, used by the mail secretary duty.",
@@ -354,11 +364,12 @@ export function isTestableSecretKind(id: string | null | undefined): boolean {
  * Kinds whose raw value must never be bound into an agent's environment,
  * adapter config field, or MCP/tool config, and must never be resolved by
  * any generic runtime-resolution path -- only a dedicated, audited reader
- * (paymentCardService.resolveForFill for payment_card_single_use, and the
- * equivalent for site_login) may ever see the value. Checked by kind, not by
+ * (paymentCardService.resolveForFill for payment_card_single_use, the
+ * equivalent for site_login, and the crypto wallet signer for
+ * crypto_wallet_key) may ever see the value. Checked by kind, not by
  * binding row, so a differently-named row can never slip past the rule.
  */
-export const SECRET_KINDS_NEVER_BINDABLE: readonly SecretKind[] = ["payment_card_single_use", "site_login"];
+export const SECRET_KINDS_NEVER_BINDABLE: readonly SecretKind[] = ["payment_card_single_use", "site_login", "crypto_wallet_key"];
 
 export function isSecretKindBindable(id: string | null | undefined): boolean {
   if (!id) return true;

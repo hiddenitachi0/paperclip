@@ -37,6 +37,31 @@ export interface BragActor {
   agentId?: string | null;
 }
 
+/** A finished-task video reads only the task's own words (title + result summary), never a workspace or website. */
+export interface BragTaskMaterial {
+  title: string;
+  snippets: string[];
+}
+
+export interface CreateBragTaskJobInput {
+  issueId: string;
+  projectId: string | null;
+  lengthSeconds: number;
+  material: BragTaskMaterial;
+  /** Free-form origin marker stored on the job (e.g. "brag_on_done"). */
+  origin: string;
+}
+
+function readTaskMaterial(job: typeof bragJobs.$inferSelect): BragTaskMaterial | null {
+  const options = (job.options ?? {}) as { source?: unknown; taskMaterial?: unknown };
+  if (options.source !== "task") return null;
+  const raw = options.taskMaterial as { title?: unknown; snippets?: unknown } | undefined;
+  return {
+    title: typeof raw?.title === "string" ? raw.title : "",
+    snippets: Array.isArray(raw?.snippets) ? raw!.snippets.filter((v): v is string => typeof v === "string") : [],
+  };
+}
+
 export interface BragServiceDeps {
   capturer?: BragCapturer;
   loadSource?: (job: typeof bragJobs.$inferSelect, project: { name: string; workspaceCwd: string | null }) => Promise<BragSourceMaterial>;
@@ -68,10 +93,10 @@ export function bragService(db: Db, deps: BragServiceDeps = {}) {
   }
 
   /** Refuses when a hard-stop budget policy on the company or this project cannot cover the estimate. Fails closed. */
-  async function assertWithinBudget(companyId: string, projectId: string, estimatedCents: number): Promise<void> {
+  async function assertWithinBudget(companyId: string, projectId: string | null, estimatedCents: number): Promise<void> {
     const overview = await budgets.overview(companyId);
     for (const policy of overview.policies) {
-      const applies = policy.scopeType === "company" || (policy.scopeType === "project" && policy.scopeId === projectId);
+      const applies = policy.scopeType === "company" || (projectId !== null && policy.scopeType === "project" && policy.scopeId === projectId);
       if (!applies || !policy.isActive) continue;
       if (policy.paused) throw unprocessable(`The ${policy.scopeType} budget is paused. Resume it before making a video.`);
       if (policy.hardStopEnabled && policy.remainingAmount < estimatedCents) {
@@ -100,7 +125,7 @@ export function bragService(db: Db, deps: BragServiceDeps = {}) {
     } as never);
   }
 
-  async function defaultLoadSource(job: typeof bragJobs.$inferSelect, project: { name: string; workspaceCwd: string | null }) {
+  async function defaultLoadSource(job: typeof bragJobs.$inferSelect, project: { name: string; workspaceCwd: string | null }): Promise<BragSourceMaterial> {
     if (job.sourceUrl) return fetchWebsiteMaterial(job.sourceUrl);
     if (!project.workspaceCwd) throw unprocessable("This project has no workspace checkout to read. Give it a website address instead.");
     return readWorkspaceMaterial(project.workspaceCwd, project.name);
@@ -184,6 +209,47 @@ export function bragService(db: Db, deps: BragServiceDeps = {}) {
       return job;
     },
 
+    /**
+     * Server-only: a draft video about a finished task. Not reachable from any
+     * route; brag-on-done.ts calls it with the pre-approving person as actor.
+     */
+    async createTaskJob(companyId: string, actor: BragActor, input: CreateBragTaskJobInput) {
+      const estimate = estimateBragCostCents({ lengthSeconds: input.lengthSeconds, music: false });
+      const material: BragTaskMaterial = {
+        title: redactForScreen(input.material.title),
+        snippets: input.material.snippets.map((t) => redactForScreen(t)),
+      };
+      const job = await withCompanyScope(db, companyId, (tx) =>
+        tx
+          .insert(bragJobs)
+          .values({
+            companyId,
+            projectId: input.projectId,
+            status: "draft",
+            format: "landscape",
+            lengthSeconds: input.lengthSeconds,
+            music: false,
+            options: { issueId: input.issueId, source: "task", origin: input.origin, taskMaterial: material },
+            estimatedCostCents: estimate.estimatedCostCents,
+            createdByAgentId: null,
+            createdByUserId: actor.userId,
+          })
+          .returning()
+          .then((r) => r[0]!),
+      );
+      await logActivity(db, {
+        companyId,
+        actorType: "user",
+        actorId: actor.userId ?? "unknown",
+        agentId: null,
+        action: "brag_job.created",
+        entityType: "brag_job",
+        entityId: job.id,
+        details: { projectId: input.projectId, issueId: input.issueId, estimatedCostCents: estimate.estimatedCostCents, mode: "task", origin: input.origin },
+      });
+      return job;
+    },
+
     async getJob(companyId: string, jobId: string) {
       const job = await loadJob(companyId, jobId);
       return { job, scenes: await loadScenes(companyId, jobId) };
@@ -212,15 +278,21 @@ export function bragService(db: Db, deps: BragServiceDeps = {}) {
       }
       await assertWithinBudget(companyId, job.projectId, job.estimatedCostCents);
 
-      const project = await withCompanyScope(db, companyId, async (tx) => {
-        const p = await tx.select({ name: projects.name }).from(projects).where(eq(projects.id, job.projectId)).then((r) => r[0]);
-        const ws = await tx.select({ cwd: projectWorkspaces.cwd }).from(projectWorkspaces).where(eq(projectWorkspaces.projectId, job.projectId)).limit(1).then((r) => r[0]);
-        return { name: p?.name ?? "Project", workspaceCwd: ws?.cwd ?? null };
-      });
+      const projectId = job.projectId;
+      const project = projectId
+        ? await withCompanyScope(db, companyId, async (tx) => {
+          const p = await tx.select({ name: projects.name }).from(projects).where(eq(projects.id, projectId)).then((r) => r[0]);
+          const ws = await tx.select({ cwd: projectWorkspaces.cwd }).from(projectWorkspaces).where(eq(projectWorkspaces.projectId, projectId)).limit(1).then((r) => r[0]);
+          return { name: p?.name ?? "Project", workspaceCwd: ws?.cwd ?? null };
+        })
+        : { name: "Task", workspaceCwd: null };
+      const taskMaterial = readTaskMaterial(job);
 
       await withCompanyScope(db, companyId, (tx) => tx.update(bragJobs).set({ status: "planning", updatedAt: new Date() }).where(eq(bragJobs.id, jobId)));
       try {
-        const material = await (deps.loadSource ?? defaultLoadSource)(job, project);
+        const material: BragSourceMaterial = taskMaterial
+          ? { kind: "task", title: taskMaterial.title, snippets: taskMaterial.snippets, skipped: [] }
+          : await (deps.loadSource ?? defaultLoadSource)(job, project);
         const count = bragSceneCount(job.lengthSeconds);
         const texts = [material.title, ...material.snippets].filter(Boolean).slice(0, count).map((t) => redactForScreen(t));
         if (texts.length === 0) throw unprocessable("Found nothing on screen-worthy to make a video from.");

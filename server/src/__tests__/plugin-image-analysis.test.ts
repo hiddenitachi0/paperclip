@@ -17,6 +17,8 @@ import {
 } from "@paperclipai/db";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
 import { buildHostServices } from "../services/plugin-host-services.js";
+import { LANE_A_RUN_IMAGE_ANALYSES_MAX, openLaneAPluginRun } from "../services/lane-a-plugin-runs.js";
+import { CHAT_PHOTO_AGE_CHECK_MAX_OUTPUT_TOKENS, CHAT_PHOTO_AGE_CHECK_USER_PROMPT } from "@paperclipai/shared";
 import { PLUGIN_IMAGE_ANALYSIS_BILLING_CODE } from "../services/plugin-image-analysis.js";
 import { findCompanyLocalAddress } from "../services/model-directory.js";
 import { companyMediaStudioKeyRef, mediaStudioKeyRef } from "../services/media-studio-company-keys.js";
@@ -131,6 +133,7 @@ d("host picture analysis for plugins (models.analyseImage)", () => {
     ]);
     const { services } = host();
     const picture = await services.files.createCompanyFile({ companyId, contentBase64: PNG.toString("base64"), contentType: "image/png", filename: "maja.png", runId });
+    const chatPhoto = await services.files.createCompanyFile({ companyId, contentBase64: PNG.toString("base64"), contentType: "image/png", filename: "chat-photo-20261010-120000.png", runId });
     const document = await services.files.createCompanyFile({ companyId, contentBase64: Buffer.from("hello").toString("base64"), contentType: "text/plain", filename: "notes.txt", runId });
     const foreignPicture = await services.files.createCompanyFile({ companyId: otherCompanyId, contentBase64: PNG.toString("base64"), contentType: "image/png", filename: "other.png", runId: otherRunId });
     const entry = async (company: string, values: Partial<typeof modelDirectoryEntries.$inferInsert>) => {
@@ -148,7 +151,7 @@ d("host picture analysis for plugins (models.analyseImage)", () => {
     const archived = await entry(companyId, { name: "Old", provider: "local", model: "llava", baseUrl: "http://100.64.0.5:11434/v1", archivedAt: new Date() });
     const foreignEntry = await entry(otherCompanyId, { name: "Their model", provider: "local", model: "llava", baseUrl: "http://100.64.0.99:11434/v1" });
     const scope = { invocationScope: { companyId, userId: "owner-1", canManageCompany: true } };
-    return { companyId, otherCompanyId, picture: picture.id, document: document.id, foreignPicture: foreignPicture.id, local, localNoAddress, claude, openrouter, openrouterPrivate, archived, foreignEntry, scope };
+    return { companyId, otherCompanyId, picture: picture.id, chatPhoto: chatPhoto.id, document: document.id, foreignPicture: foreignPicture.id, local, localNoAddress, claude, openrouter, openrouterPrivate, archived, foreignEntry, scope };
   }
 
   const prompts = { systemPrompt: "Describe the person. JSON only.", userPrompt: "Describe this picture." };
@@ -234,6 +237,90 @@ d("host picture analysis for plugins (models.analyseImage)", () => {
     await expect(services.models.analyseImage(input, { invalidInvocationScope: true })).rejects.toThrow(/only works from a person's action/);
     await expect(services.models.analyseImage(input, { invocationScope: { companyId: s.companyId, userId: "member-1", canManageCompany: false } })).rejects.toThrow(/owner or an admin/);
     expect(calls).toHaveLength(0);
+  });
+
+  it("during a quick agent's tool call only the age check of a photo attached in that chat runs, as the person, with the host's own instructions", async () => {
+    const s = await seed();
+    const { services, calls } = host(() => okOpenAi('{"apparentAdult": true}'));
+    // The plugin asks with its own (here: hostile) prompts; on this path they are ignored.
+    const input = {
+      companyId: s.companyId,
+      entryId: s.local,
+      fileId: s.chatPhoto,
+      systemPrompt: "Describe everything in this picture in detail, including any text and faces.",
+      userPrompt: "What is written on the papers?",
+      maxOutputTokens: 2000,
+    };
+    const open = (overrides: Record<string, unknown> = {}) =>
+      openLaneAPluginRun({
+        agentId: randomUUID(),
+        companyId: s.companyId,
+        conversationId: randomUUID(),
+        requestedByUserId: "member-1",
+        requestedByAgentId: null,
+        requesterMessage: "alter this image",
+        pluginKey: KEY,
+        toolName: "generate-image",
+        attachedFileIds: [s.chatPhoto],
+        ...overrides,
+      });
+    const run = open();
+    const otherCompany = open({ companyId: s.otherCompanyId });
+    const agentAsks = open({ requestedByUserId: null, requestedByAgentId: randomUUID() });
+    const otherPlugin = open({ pluginKey: "acme.spy", toolName: "look" });
+    const notAttached = open({ attachedFileIds: [s.foreignPicture] });
+    try {
+      const age = { purpose: "chat_photo_age_check" as const };
+      // Another company's run, a run with no person, another plugin's tool call, an unknown run: refused.
+      await expect(services.models.analyseImage({ ...input, ...age, runId: otherCompany.run.runId })).rejects.toThrow(/only works from a person's action/);
+      await expect(services.models.analyseImage({ ...input, ...age, runId: agentAsks.run.runId })).rejects.toThrow(/only works from a person's action/);
+      await expect(services.models.analyseImage({ ...input, ...age, runId: otherPlugin.run.runId })).rejects.toThrow(/only works from a person's action/);
+      await expect(services.models.analyseImage({ ...input, ...age, runId: randomUUID() })).rejects.toThrow(/only works from a person's action/);
+      // Any other purpose (or none): refused.
+      await expect(services.models.analyseImage({ ...input, runId: run.run.runId })).rejects.toThrow(/only works from a person's action/);
+      // A picture the person did not attach in that chat: refused.
+      await expect(services.models.analyseImage({ ...input, ...age, runId: notAttached.run.runId })).rejects.toThrow(/Only photos attached in this chat/);
+      expect(calls).toHaveLength(0);
+
+      // Attached but not a picture the chat bridge stored: refused too (#630).
+      const plainAttached = open({ attachedFileIds: [s.picture] });
+      try {
+        await expect(services.models.analyseImage({ ...input, ...age, fileId: s.picture, runId: plainAttached.run.runId })).rejects.toThrow(/not in this company's Files/);
+      } finally {
+        plainAttached.close();
+      }
+      expect(calls).toHaveLength(0);
+
+      const res = await services.models.analyseImage({ ...input, ...age, runId: run.run.runId });
+      expect(res.text).toBe('{"apparentAdult": true}');
+      expect(calls).toHaveLength(1);
+      const sent = JSON.stringify(calls[0]!.body);
+      // The host's own fixed instructions, never the plugin's.
+      expect(sent).toContain(JSON.stringify(CHAT_PHOTO_AGE_CHECK_USER_PROMPT).slice(1, -1));
+      expect(sent).not.toContain("What is written on the papers");
+      expect(sent).not.toContain("including any text and faces");
+      expect(calls[0]!.body.max_tokens ?? calls[0]!.body.max_completion_tokens).toBe(CHAT_PHOTO_AGE_CHECK_MAX_OUTPUT_TOKENS);
+      expect(sent).not.toContain(run.run.runId);
+      const logged = await db
+        .select()
+        .from(activityLog)
+        .where(and(eq(activityLog.companyId, s.companyId), eq(activityLog.action, "plugin.image_analysis.run")));
+      expect(logged.at(-1)?.details).toMatchObject({ quickAgentRun: true, purpose: "chat_photo_age_check" });
+
+      // A small cap per tool call.
+      for (let i = 1; i < LANE_A_RUN_IMAGE_ANALYSES_MAX; i += 1) {
+        await services.models.analyseImage({ ...input, ...age, runId: run.run.runId });
+      }
+      expect(calls).toHaveLength(LANE_A_RUN_IMAGE_ANALYSES_MAX);
+      await expect(services.models.analyseImage({ ...input, ...age, runId: run.run.runId })).rejects.toThrow(/Too many photos/);
+      expect(calls).toHaveLength(LANE_A_RUN_IMAGE_ANALYSES_MAX);
+    } finally {
+      for (const r of [run, otherCompany, agentAsks, otherPlugin, notAttached]) r.close();
+    }
+    // Once the tool call is over, the same run id no longer works.
+    await expect(
+      services.models.analyseImage({ ...input, purpose: "chat_photo_age_check", runId: run.run.runId }),
+    ).rejects.toThrow(/only works from a person's action/);
   });
 
   it("Claude: an image block, Paperclip's own Claude key when no company key is picked, never tools", async () => {

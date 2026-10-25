@@ -1,3 +1,4 @@
+import { HuggingFaceModelPicker } from "./HuggingFaceModelPicker";
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -49,6 +50,7 @@ import {
   type ModelLastCheck,
   type ModelReadinessContext,
   type ModelSetupForReadiness,
+  readLaneAPictureModelId,
 } from "@paperclipai/shared";
 import { AlertCircle, CheckCircle2, Circle, Loader2 } from "lucide-react";
 import { Link } from "@/lib/router";
@@ -388,6 +390,19 @@ export function QuickAgentSection({
   });
   const saveWebSearch = (next: boolean) =>
     settingMutation.mutate({ adapterConfig: { laneA: { ...currentLaneA, webSearch: next } } });
+
+  // "Use this model for picture requests": a saved model that answers the
+  // messages with a photo, about a photo just sent, or asking for a picture.
+  const pictureModelId = readLaneAPictureModelId(agent.adapterConfig);
+  const pictureModel = pictureModelId ? (savedModels.find((entry) => entry.id === pictureModelId) ?? null) : null;
+  const pictureModelChoices = savedModels.filter((entry) => !entry.archivedAt || entry.id === pictureModelId);
+  const savePictureModel = (next: string | null) =>
+    settingMutation.mutate({ adapterConfig: { laneA: { ...currentLaneA, pictureModelId: next } } });
+  const pictureModelSummary = pictureModelId
+    ? pictureModel
+      ? pictureModel.name
+      : "A saved model that is no longer in the list"
+    : "Its own model";
 
   // "Browser access": off unless raised here. Board-only, same as webSearch.
   const browserAccess = readLaneABrowserAccess(agent.adapterConfig);
@@ -813,7 +828,14 @@ export function QuickAgentSection({
           />
         )}
 
-        {providerDescriptor.freeForm ? (
+        {provider === "huggingface" ? (
+          <HuggingFaceModelPicker
+            companyId={effectiveCompanyId}
+            value={agent.laneAModel ?? null}
+            disabled={settingMutation.isPending}
+            onSave={(next) => settingMutation.mutateAsync({ laneAModel: next })}
+          />
+        ) : providerDescriptor.freeForm ? (
           <>
             {!agent.laneAModel && (
               <p className="text-xs text-amber-600 dark:text-amber-400" data-testid="quick-agent-model-missing-notice">
@@ -958,6 +980,61 @@ export function QuickAgentSection({
           saving={settingMutation.isPending}
           onSave={(patch) => settingMutation.mutateAsync(patch)}
         />
+      </SettingsSubsection>
+
+      {/* 3b. A stronger model only for messages that involve pictures. */}
+      <SettingsSubsection
+        title="Use this model for picture requests"
+        summary={pictureModelSummary}
+        defaultOpen={Boolean(pictureModelId)}
+        storageKey="agent.quickAgent.pictureModel"
+        data-testid="quick-agent-picture-model-group"
+      >
+        <div className="space-y-2">
+          <p className="text-xs text-muted-foreground">
+            When someone sends this quick agent a photo, talks about a photo they just sent, or asks it for a picture,
+            that message is answered by the model you pick here instead of its own. Pick one that is good at using
+            tools (and can see pictures, if you want it to look at the photo). This helps when its own model is a
+            small model on your own computer that sometimes says it made a picture without making one. All other
+            messages stay on its own model. A model from another provider uses that provider's key, the same as a
+            backup model.
+          </p>
+          <label className="block space-y-1">
+            <span className="text-xs text-muted-foreground">Model for picture requests</span>
+            <select
+              className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
+              value={pictureModelId ?? ""}
+              disabled={settingMutation.isPending || !modelDirectoryQuery.isSuccess}
+              aria-label="Model for picture requests"
+              data-testid="quick-agent-picture-model"
+              onChange={(event) => savePictureModel(event.target.value || null)}
+            >
+              <option value="">Its own model (no change)</option>
+              {pictureModelId && !pictureModel && (
+                <option value={pictureModelId}>A saved model that is no longer in the list</option>
+              )}
+              {pictureModelChoices.map((entry) => (
+                <option key={entry.id} value={entry.id}>
+                  {entry.name} ({LANE_A_PROVIDER_CATALOGUE[normalizeLaneAProvider(entry.provider)].label}: {entry.model})
+                </option>
+              ))}
+            </select>
+          </label>
+          {modelDirectoryQuery.isSuccess && savedModels.length === 0 && (
+            <p className="text-xs text-muted-foreground">
+              There are no saved models yet.{" "}
+              <Link to="/company/settings/models" className="underline">
+                Save one under Settings → Models
+              </Link>{" "}
+              first.
+            </p>
+          )}
+          {pictureModelId && !pictureModel && modelDirectoryQuery.isSuccess && (
+            <p className="text-xs text-amber-600 dark:text-amber-400">
+              The saved model picked here was removed, so picture messages use its own model. Pick another one.
+            </p>
+          )}
+        </div>
       </SettingsSubsection>
 
       {/* 4. Who it is and what it does, in plain words. */}

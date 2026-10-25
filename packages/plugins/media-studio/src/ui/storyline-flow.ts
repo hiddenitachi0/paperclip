@@ -1,4 +1,5 @@
-// The guided Storylines flow: 1 Script -> 2 Pictures -> 3 Budget & render -> 4 Film.
+// The guided Storylines flow: 1 Script -> 2 Cast & look -> 3 Storyboard ->
+// 4 Timeline -> 5 Render & export.
 //
 // Pure helpers only (no React, no fetch) so the step bar's status lines, the
 // "what is missing before you can render" checklist and the mapping of the
@@ -11,13 +12,14 @@
 
 export const STILL_PICTURE_COST_CENTS = 2;
 
-export type FlowStepKey = "script" | "pictures" | "render" | "film";
+export type FlowStepKey = "script" | "cast" | "pictures" | "timeline" | "render";
 
 export const FLOW_STEPS: Array<{ key: FlowStepKey; number: number; title: string }> = [
   { key: "script", number: 1, title: "Script" },
-  { key: "pictures", number: 2, title: "Pictures" },
-  { key: "render", number: 3, title: "Budget & render" },
-  { key: "film", number: 4, title: "Film" },
+  { key: "cast", number: 2, title: "Cast & look" },
+  { key: "pictures", number: 3, title: "Storyboard" },
+  { key: "timeline", number: 4, title: "Timeline" },
+  { key: "render", number: 5, title: "Render & export" },
 ];
 
 /** The storyline fields the flow needs (a subset of the page's VideoStorylineSummary). */
@@ -68,14 +70,19 @@ export interface FlowInput {
   progress: FlowProgress | null;
   /** The owner's go-ahead was requested and has not come back yet. */
   approvalPending?: boolean;
+  /** Step 2: how many people are in the cast, and whether a picture look is chosen. */
+  castCount?: number;
+  lookChosen?: boolean;
+  /** Step 4: how long the film plays (seconds), when known. */
+  totalSeconds?: number | null;
 }
 
 /** Statuses where the shots can still be changed and a render can be started. */
 export const EDITABLE_STATUSES = new Set(["draft", "estimated", "paused", "failed", "cancelled"]);
 /** Statuses where something is happening in the background (the page polls). */
 export const BUSY_STATUSES = new Set(["rendering", "stitching", "ready_to_stitch"]);
-/** Statuses that belong to step 4: a render was started at some point. */
-const FILM_STATUSES = new Set(["rendering", "stitching", "ready_to_stitch", "done", "needs_attention", "paused"]);
+/** Statuses where a render was started at some point: step 5 shows its progress. */
+export const FILM_STATUSES = new Set(["rendering", "stitching", "ready_to_stitch", "done", "needs_attention", "paused"]);
 
 export interface PictureCounts {
   /** Shots that will be in the film (not left out). */
@@ -172,6 +179,11 @@ function filmStatus(input: FlowInput): { status: string; state: StepState } {
   }
 }
 
+function lengthText(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
 export function computeSteps(input: FlowInput): StepStatus[] {
   const counts = pictureCounts(input.storyboard);
   const started = FILM_STATUSES.has(input.storyline.status);
@@ -182,6 +194,9 @@ export function computeSteps(input: FlowInput): StepStatus[] {
       : input.pendingSuggestions > 0
         ? { status: `${plural(input.shotCount, "shot")}, ${plural(input.pendingSuggestions, "AI suggestion")} waiting`, state: "attention" }
         : { status: plural(input.shotCount, "shot"), state: "done" };
+
+  const castBits = [(input.castCount ?? 0) > 0 ? plural(input.castCount ?? 0, "person", "people") : "", input.lookChosen ? "look chosen" : ""].filter(Boolean);
+  const cast: Pick<StepStatus, "status" | "state"> = castBits.length > 0 ? { status: castBits.join(", "), state: "done" } : { status: "Optional", state: input.shotCount === 0 ? "todo" : "ready" };
 
   let pictures: Pick<StepStatus, "status" | "state">;
   if (input.shotCount === 0) pictures = { status: "Write the script first", state: "todo" };
@@ -195,8 +210,13 @@ export function computeSteps(input: FlowInput): StepStatus[] {
     };
   }
 
+  const timeline: Pick<StepStatus, "status" | "state"> =
+    input.shotCount === 0
+      ? { status: "Empty", state: "todo" }
+      : { status: input.totalSeconds ? `${lengthText(input.totalSeconds)} long, ${plural(input.shotCount, "clip")}` : plural(input.shotCount, "clip"), state: "ready" };
+
   let render: Pick<StepStatus, "status" | "state">;
-  if (started) render = { status: "Render started", state: "done" };
+  if (started || input.storyline.status === "failed" || (input.storyline.status === "cancelled" && (input.progress?.doneShots ?? 0) > 0)) render = filmStatus(input);
   else if (input.approvalPending) render = { status: "Waiting for the owner's go-ahead", state: "working" };
   else {
     const readiness = renderReadiness(input);
@@ -204,21 +224,28 @@ export function computeSteps(input: FlowInput): StepStatus[] {
     render = readiness.ready ? { status: "Ready to render", state: "ready" } : { status: `${plural(blocking, "thing")} to sort out first`, state: "todo" };
   }
 
-  const film = filmStatus(input);
-  const byKey: Record<FlowStepKey, Pick<StepStatus, "status" | "state">> = { script, pictures, render, film };
+  const byKey: Record<FlowStepKey, Pick<StepStatus, "status" | "state">> = { script, cast, pictures, timeline, render };
   return FLOW_STEPS.map((s) => ({ ...s, ...byKey[s.key] }));
 }
 
 /** The step to open when a storyline is picked: where the next thing to do is. */
 export function suggestedStep(input: FlowInput): FlowStepKey {
-  if (FILM_STATUSES.has(input.storyline.status)) return "film";
+  if (FILM_STATUSES.has(input.storyline.status)) return "render";
   if (input.shotCount === 0 || input.pendingSuggestions > 0) return "script";
   const counts = pictureCounts(input.storyboard);
   if (!input.storyboard || counts.total === 0 || counts.approved < counts.total) return "pictures";
   return "render";
 }
 
-// ─── Readiness checklist (step 3) ────────────────────────────────────────
+/** One sentence for a disabled Start button: what it is waiting for. */
+export function startBlockedReason(items: ReadinessItem[]): string | null {
+  const blocking = items.filter((i) => i.blocking);
+  if (blocking.length === 0) return null;
+  const first = blocking[0]!.text.replace(/\.$/, "");
+  return blocking.length === 1 ? `Start is waiting for this: ${first}.` : `Start is waiting for ${blocking.length} things, first: ${first}.`;
+}
+
+// ─── Readiness checklist (step 5) ────────────────────────────────────────
 
 export type ReadinessFix =
   | { kind: "go"; step: FlowStepKey; label: string }
@@ -274,7 +301,7 @@ export function renderReadiness(input: FlowInput): { ready: boolean; items: Read
   const { storyline } = input;
 
   if (!EDITABLE_STATUSES.has(storyline.status)) {
-    items.push({ id: "not-editable", blocking: true, text: "A render has already started for this storyline. Follow it in step 4.", fixes: [{ kind: "go", step: "film", label: "Go to Film" }] });
+    items.push({ id: "not-editable", blocking: true, text: "A render is already running for this storyline. Follow it below.", fixes: [{ kind: "refresh", label: "Refresh" }] });
     return { ready: false, items };
   }
   if (input.shotCount === 0) {
@@ -344,7 +371,7 @@ export function refusalToItem(message: string, input: FlowInput): ReadinessItem 
         const shot = /Shot (\d+)'s/i.exec(message);
         return shot ? `Shot ${shot[1]} has no approved picture yet, so the render was not started.` : "Some shots have no approved picture yet, so the render was not started.";
       })(),
-      fixes: items.length > 0 ? items.flatMap((i) => i.fixes) : [{ kind: "go", step: "pictures", label: "Go to Pictures" }],
+      fixes: items.length > 0 ? items.flatMap((i) => i.fixes) : [{ kind: "go", step: "pictures", label: "Go to the storyboard" }],
     };
   }
 
@@ -377,4 +404,32 @@ export function refusalToItem(message: string, input: FlowInput): ReadinessItem 
   }
 
   return { id: "refusal-other", blocking: true, text: message, fixes: [] };
+}
+
+// ─── The finished film's automatic check ───────────────────────────────────
+
+/** Must match VIDEO_QUALITY_BLOCKING_ISSUE_CODES in @paperclipai/shared (this bundle cannot import it). */
+const BLOCKING_QUALITY_CODES = new Set(["missing_video_stream", "duration_mismatch", "stitch_failed"]);
+
+export interface FilmQualityIssue {
+  code?: string;
+  message: string;
+  severity?: string;
+}
+
+/**
+ * Splits the check's findings: warnings (worth a look, never stop Download)
+ * and real problems (the film is broken). A film parked on "needs attention"
+ * with warnings only can be accepted as it is.
+ */
+export function filmQuality(storyline: { status: string; finalObjectKey: string | null; qualityCheckIssues?: FilmQualityIssue[] | null }): {
+  warnings: FilmQualityIssue[];
+  problems: FilmQualityIssue[];
+  canAcceptWarnings: boolean;
+} {
+  const issues = storyline.qualityCheckIssues ?? [];
+  const isProblem = (i: FilmQualityIssue) => i.severity === "blocking" || (!i.severity && BLOCKING_QUALITY_CODES.has(i.code ?? ""));
+  const problems = issues.filter(isProblem);
+  const warnings = issues.filter((i) => !isProblem(i));
+  return { warnings, problems, canAcceptWarnings: storyline.status === "needs_attention" && !!storyline.finalObjectKey && problems.length === 0 };
 }

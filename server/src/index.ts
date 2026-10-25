@@ -72,6 +72,7 @@ import {
   routineService,
   jobService,
   seedLegalAdvisorStarterPack,
+  convertBragPositionsToSkill,
   logScheduleChainBootstrapVerification,
   startSecretSurfaceScanner,
 } from "./services/index.js";
@@ -85,7 +86,10 @@ import { mailSecretaryService } from "./services/mail-secretary.js";
 import { mailAccountsService } from "./services/mail-accounts.js";
 import { videoStorylineRenderService } from "./services/video-storyline-render.js";
 import { tradingService } from "./services/trading.js";
+import { cryptoWalletService } from "./services/crypto-wallets.js";
 import { videoStorylineStitchService } from "./services/video-storyline-stitch.js";
+import { videoStorylineTransitionsService } from "./services/video-storyline-transitions.js";
+import { videoStorylineClipsService } from "./services/video-storyline-clips.js";
 import { describeTickPhases } from "./services/scheduler-tick-phases.js";
 import { runDailyCostReconciliation } from "./services/cost-reconciliation.js";
 import { pluginRegistryService } from "./services/plugin-registry.js";
@@ -116,6 +120,7 @@ import { initTelemetry, getTelemetryClient } from "./telemetry.js";
 import { waitForInFlightRunsToDrain } from "./shutdown-drain.js";
 import { startHeartbeatRunRetention } from "./services/heartbeat-run-retention.js";
 import { startWorktreeCleanup } from "./services/worktree-cleanup.js";
+import { bragOnDoneService } from "./services/brag-on-done.js";
 import { startCrossCompanyAccessLogRetention } from "./services/cross-company-access-log-retention.js";
 import { conflict } from "./errors.js";
 import {
@@ -703,6 +708,15 @@ export async function startServer(): Promise<StartedServer> {
   if (legalAdvisorStarterPackSeeded.createdJobs.length > 0 || legalAdvisorStarterPackSeeded.createdPosition) {
     logger.info(legalAdvisorStarterPackSeeded, "Seeded Legal Advisor Jobs starter pack");
   }
+  // Brag is a skill on the Content & Video Producer position, not a position
+  // of its own: convert any old Brag position (idempotent, no-op afterwards).
+  const bragConversions = await convertBragPositionsToSkill(db as any).catch((err) => {
+    logger.error({ err }, "Brag position conversion failed");
+    return [];
+  });
+  if (bragConversions.length > 0) {
+    logger.info({ bragConversions }, "Converted Brag positions to the Content & Video Producer position");
+  }
   if (config.deploymentMode === "authenticated") {
     const {
       createBetterAuthHandler,
@@ -1076,7 +1090,10 @@ export async function startServer(): Promise<StartedServer> {
     const mailAccounts = mailAccountsService(schedulerDb as any);
     const videoStorylineRender = videoStorylineRenderService(schedulerDb as any);
     const videoStorylineStitch = videoStorylineStitchService(schedulerDb as any);
+    const videoStorylineTransitions = videoStorylineTransitionsService(schedulerDb as any);
+    const videoStorylineClips = videoStorylineClipsService(schedulerDb as any);
     const tradingAgent = tradingService(schedulerDb as any);
+    const cryptoWallets = cryptoWalletService(schedulerDb as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(schedulerDb as any);
     const quietModeAlerts = quietModeAlertsService(schedulerDb as any);
     const personaPublisherSweep = config.personaPublishingSweepEnabled
@@ -1085,6 +1102,7 @@ export async function startServer(): Promise<StartedServer> {
     const organizationCheckups = organizationCheckupService(schedulerDb as any);
     const issueThreadInteractions = issueThreadInteractionService(schedulerDb as any);
     const escalationGrants = escalationGrantService(schedulerDb as any);
+    const bragOnDone = bragOnDoneService(schedulerDb as any);
 
     // Reap orphaned runs before timer ticks start so wakeups cannot coalesce
     // into a dead "running" row during startup recovery. Wrapped in
@@ -1633,6 +1651,30 @@ export async function startServer(): Promise<StartedServer> {
       // per-company videoStorylinesEnabled flag (default off) -- see
       // video-storyline-settings.ts -- but the ticks themselves always run;
       // an instance with the flag off everywhere just finds nothing to do.
+      // "Make a short brag video when this is done": done tasks with a
+      // person's unused pre-approval get their one video. Cross-company sweep,
+      // so bypass scope like the other sweeps; a company with the feature off
+      // gets a plain "turned off" comment instead.
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.bragOnDone, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: bragOnDone",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:bragOnDone",
+          },
+          () => bragOnDone.tick(),
+        )
+          .then((result) => {
+            if (result.checked > 0) {
+              logger.info({ ...result }, "brag-on-done tick");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "brag-on-done tick failed");
+          }),
+      );
+
       void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.videoStorylineRender, () =>
         runInCompanyScopeBypass(
           bypassDb,
@@ -1641,10 +1683,18 @@ export async function startServer(): Promise<StartedServer> {
             actorType: "scheduler",
             route: "heartbeat-scheduler:videoStorylineRender",
           },
-          () => videoStorylineRender.tick(),
+          // Storyline strip: AI transition takes are polled in the same chain.
+          async () => {
+            const result = await videoStorylineRender.tick();
+            const transitionResult = await videoStorylineTransitions.tick().catch((err: unknown) => {
+              logger.error({ err }, "video-storyline-transitions tick failed");
+              return { finished: 0, failed: 0 };
+            });
+            return { ...result, transitionsFinished: transitionResult.finished, transitionsFailed: transitionResult.failed };
+          },
         )
           .then((result) => {
-            if (result.advanced > 0 || result.failed > 0) {
+            if (result.advanced > 0 || result.failed > 0 || result.transitionsFinished > 0 || result.transitionsFailed > 0) {
               logger.info({ ...result }, "video-storyline-render tick");
             }
           })
@@ -1661,7 +1711,15 @@ export async function startServer(): Promise<StartedServer> {
             actorType: "scheduler",
             route: "heartbeat-scheduler:videoStorylineStitch",
           },
-          () => videoStorylineStitch.tick(),
+          // Phase 2: convert uploads, prepare your own clips (ffmpeg, free) and clean up first, then stitch.
+          async () => {
+            const clipResult = await videoStorylineClips.tick().catch((err: unknown) => {
+              logger.error({ err }, "video-storyline-clips tick failed");
+              return null;
+            });
+            if (clipResult && Object.values(clipResult).some((n) => n > 0)) logger.info({ ...clipResult }, "video-storyline-clips tick");
+            return videoStorylineStitch.tick();
+          },
         )
           .then((result) => {
             if (result.stitched > 0 || result.needsAttention > 0 || result.blocked > 0 || result.failed > 0) {
@@ -1695,6 +1753,30 @@ export async function startServer(): Promise<StartedServer> {
           })
           .catch((err) => {
             logger.error({ err }, "trading-agent tick failed");
+          }),
+      );
+
+      // Crypto wallets for agents: resolves wallet payment approval cards
+      // (approved -> signed and sent, turned down or expired -> not sent)
+      // and follows sent payments until the network confirms them. Never
+      // re-sends anything on its own.
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.cryptoWallets, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: cryptoWallets",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:cryptoWallets",
+          },
+          () => cryptoWallets.tick(new Date()),
+        )
+          .then((result) => {
+            if (result.changed > 0) {
+              logger.info({ ...result }, "crypto-wallets tick");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "crypto-wallets tick failed");
           }),
       );
 

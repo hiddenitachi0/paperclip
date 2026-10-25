@@ -26,6 +26,9 @@ const listQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(500).optional(),
 });
 
+/** What the bridge gets back when the agent's reaction learning is switched off. */
+const REACTION_LEARNING_OFF = { recorded: false, reason: "reaction_learning_disabled" } as const;
+
 export function telegramReactionRoutes(db: Db) {
   const router = Router();
   const svc = telegramReactionService(db);
@@ -48,6 +51,21 @@ export function telegramReactionRoutes(db: Db) {
     validate(recordTelegramReactionSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
+      // DUR-4829: with "learn from emoji reactions" off for this agent, nothing
+      // new is recorded (no row, no note, no follow-up question). A removal is
+      // still applied to a reaction recorded while it was on, so switching it
+      // back on never revives a reaction the person had already taken back.
+      if (!(await learning.isEnabled(companyId, req.body.agentId))) {
+        if (req.body.action === "removed") {
+          try {
+            await svc.record(companyId, req.body);
+          } catch {
+            // Nothing recorded to void: the answer is the same.
+          }
+        }
+        res.status(200).json(REACTION_LEARNING_OFF);
+        return;
+      }
       const { event, created } = await svc.record(companyId, req.body);
       await logActivity(db, {
         companyId,
@@ -90,6 +108,10 @@ export function telegramReactionRoutes(db: Db) {
     validate(recordReactionFollowUpAnswerSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
+      if (!(await learning.isEnabled(companyId, req.body.agentId))) {
+        res.status(200).json(REACTION_LEARNING_OFF);
+        return;
+      }
       const saved = await learning.recordFollowUpAnswer(companyId, req.body);
       if (!saved) throw notFound("No unanswered follow-up question for that picture");
       await logActivity(db, {

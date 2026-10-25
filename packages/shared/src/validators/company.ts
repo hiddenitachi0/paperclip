@@ -3,6 +3,7 @@ import {
   COMPANY_STATUSES,
   MAX_COMPANY_ATTACHMENT_MAX_BYTES,
 } from "../constants.js";
+import { BRAG_ON_DONE_MAX_COST_CENTS_LIMIT } from "../brag.js";
 
 const logoAssetIdSchema = z.string().uuid().nullable().optional();
 const brandColorSchema = z.string().regex(/^#[0-9a-fA-F]{6}$/).nullable().optional();
@@ -46,6 +47,12 @@ export const updateCompanySchema = createCompanySchema
     attachmentMaxBytes: attachmentMaxBytesSchema.optional(),
     // DUR-4497: null resets to the server default (7 days).
     worktreeCleanupRetentionDays: worktreeCleanupRetentionDaysSchema.optional(),
+    // Sub-tasks inherit their parent task's model/effort setting (default on).
+    subtasksInheritModelEffort: z.boolean().optional(),
+    // "Brag videos for finished tasks": the on/off switch and the most one
+    // video may cost (null = the default cap). Owner/admin only (route).
+    bragOnDoneEnabled: z.boolean().optional(),
+    bragOnDoneMaxCostCents: z.number().int().min(1).max(BRAG_ON_DONE_MAX_COST_CENTS_LIMIT).nullable().optional(),
   });
 
 export type UpdateCompany = z.infer<typeof updateCompanySchema>;

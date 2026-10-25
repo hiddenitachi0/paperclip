@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import { check, doublePrecision, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
+import { cryptoWallets, cryptoWalletTransactions } from "./crypto_wallets.js";
 
 /**
  * Trading agent (DUR-4153/DUR-4171, migration 0197): a fixed-rule,
@@ -175,8 +176,14 @@ export const tradingLedgerEntries = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
-    strategyId: uuid("strategy_id").notNull().references(() => tradingStrategies.id, { onDelete: "cascade" }),
+    // Null for crypto wallet events (migration 0251), which set wallet_id
+    // instead; the ledger_owner_check below requires one of the two.
+    strategyId: uuid("strategy_id").references(() => tradingStrategies.id, { onDelete: "cascade" }),
     orderId: uuid("order_id").references(() => tradingOrders.id, { onDelete: "set null" }),
+    walletId: uuid("wallet_id").references(() => cryptoWallets.id, { onDelete: "cascade" }),
+    walletTransactionId: uuid("wallet_transaction_id").references(() => cryptoWalletTransactions.id, { onDelete: "set null" }),
+    txHash: text("tx_hash"),
+    txStatus: text("tx_status"),
     eventType: text("event_type").notNull(),
     nokValue: doublePrecision("nok_value"),
     feeNok: doublePrecision("fee_nok"),
@@ -187,10 +194,12 @@ export const tradingLedgerEntries = pgTable(
   },
   (table) => ({
     strategyIdx: index("trading_ledger_entries_strategy_idx").on(table.strategyId, table.createdAt),
+    walletIdx: index("trading_ledger_entries_wallet_idx").on(table.walletId, table.createdAt),
     eventTypeCheck: check(
       "trading_ledger_entries_event_type_check",
-      sql`${table.eventType} IN ('signal', 'order_filled', 'order_rejected', 'risk_block', 'circuit_breaker', 'kill_switch', 'reconciliation')`,
+      sql`${table.eventType} IN ('signal', 'order_filled', 'order_rejected', 'risk_block', 'circuit_breaker', 'kill_switch', 'reconciliation', 'wallet_created', 'wallet_tx_requested', 'wallet_tx_blocked', 'wallet_tx_approval_requested', 'wallet_tx_submitted', 'wallet_tx_confirmed', 'wallet_tx_failed', 'wallet_tx_rejected', 'wallet_kill_switch', 'wallet_reconciliation', 'wallet_settings_changed')`,
     ),
+    ownerCheck: check("trading_ledger_entries_owner_check", sql`${table.strategyId} IS NOT NULL OR ${table.walletId} IS NOT NULL`),
   }),
 );
 

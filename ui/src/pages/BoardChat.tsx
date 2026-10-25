@@ -7,6 +7,7 @@ import {
   useMemo,
 } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useLocation, useNavigate } from "@/lib/router";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useDialogState } from "../context/DialogContext";
@@ -33,11 +34,27 @@ import { AgentIcon } from "../components/AgentIconPicker";
 import { cn, formatDateTime } from "../lib/utils";
 import type { FeedbackVoteValue } from "@paperclipai/shared";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
+import { BOARD_CHAT_SUBTITLE, readBoardChatPrefill } from "../lib/board-chat-handoff";
+import type { BoardChatAction } from "@paperclipai/shared";
+import { boardChatApi } from "../api/boardChat";
+import { authApi } from "../api/auth";
+import { ApiError } from "../api/client";
+import { BoardChatActionCard } from "../components/BoardChatActionCard";
+import { useBoardChatAvailability } from "../hooks/useBoardChatAvailability";
+
+/** A refusal from the chat route, carrying the server's plain sentence. */
+class BoardChatRequestError extends Error {}
 
 /**
- * Board Concierge Chat — a chat interface powered by the board-member skill.
- * Uses /board/chat/stream to invoke Claude with the board skill as system prompt.
- * The user manages their Paperclip company through natural conversation.
+ * Board chat (Board Concierge Chat; formerly shown as "Conference Room") — a
+ * chat interface powered by the board-member skill. Uses /board/chat/stream
+ * to invoke Claude with the board skill as system prompt. The user manages
+ * their Paperclip company through natural conversation; unlike "Ask
+ * Paperclip", it can make changes.
+ *
+ * "Do this in Board chat" in the Ask panel opens this page with a message
+ * already typed in (router state, see lib/board-chat-handoff.ts). It is only
+ * put in the box; the person sends it themselves.
  */
 /** Hit zone to the right of the 1px line (line sits on chat pane’s right edge). */
 const SPLIT_DIVIDER_PX = 12;
@@ -106,7 +123,7 @@ export function BoardChat() {
   const queryClient = useQueryClient();
 
   useEffect(() => {
-    setBreadcrumbs([{ label: "Conference Room" }]);
+    setBreadcrumbs([{ label: "Board chat" }]);
   }, [setBreadcrumbs]);
 
   const splitContainerRef = useRef<HTMLDivElement>(null);
@@ -273,6 +290,23 @@ export function BoardChat() {
     } catch { /* sessionStorage unavailable */ }
   }, [input, selectedCompanyId]);
 
+  // A message handed over from the Ask panel ("Do this in Board chat"): put it
+  // in the box for the person to check and send — never sent automatically.
+  // Declared after the draft load so it wins over a saved draft; the state is
+  // then cleared so a reload or Back does not type it in again.
+  const location = useLocation();
+  const navigate = useNavigate();
+  const handoffText = readBoardChatPrefill(location.state);
+  useEffect(() => {
+    if (!handoffText || !selectedCompanyId) return;
+    setInput(handoffText);
+    requestAnimationFrame(() => composerRef.current?.focus());
+    navigate(
+      { pathname: location.pathname, search: location.search, hash: location.hash },
+      { replace: true, state: null },
+    );
+  }, [handoffText, selectedCompanyId, navigate, location.pathname, location.search, location.hash]);
+
   const { data: agents } = useQuery({
     queryKey: queryKeys.agents.list(selectedCompanyId!),
     queryFn: () => agentsApi.list(selectedCompanyId!),
@@ -340,6 +374,52 @@ export function BoardChat() {
     queryFn: () => issuesApi.listFeedbackVotes(boardIssueId!),
     enabled: !!boardIssueId,
   });
+
+  // Signed-in Paperclip: changes the chat prepared wait here as cards until
+  // the person who asked clicks Approve (or Cancel). Local mode has none.
+  const boardChatMode = useBoardChatAvailability(selectedCompanyId).mode;
+  const signedInChat = boardChatMode === "signed_in";
+  const { data: sessionData } = useQuery({
+    queryKey: queryKeys.auth.session,
+    queryFn: () => authApi.getSession(),
+    retry: false,
+    enabled: signedInChat,
+  });
+  const currentUserId = sessionData?.user?.id ?? null;
+  const actionsQueryKey = queryKeys.boardChat.actions(selectedCompanyId ?? "", boardIssueId);
+  const { data: actionsData } = useQuery({
+    queryKey: actionsQueryKey,
+    queryFn: () => boardChatApi.listActions(selectedCompanyId!, boardIssueId),
+    enabled: signedInChat && !!selectedCompanyId && !!boardIssueId,
+    refetchInterval: 5000,
+  });
+  const actions: BoardChatAction[] = actionsData?.actions ?? [];
+  const [actionBusyId, setActionBusyId] = useState<string | null>(null);
+  const [actionErrors, setActionErrors] = useState<Record<string, string>>({});
+  const decideAction = useCallback(
+    async (actionId: string, decision: "approve" | "cancel") => {
+      setActionBusyId(actionId);
+      setActionErrors((prev) => {
+        const next = { ...prev };
+        delete next[actionId];
+        return next;
+      });
+      try {
+        if (decision === "approve") await boardChatApi.confirm(actionId);
+        else await boardChatApi.cancel(actionId);
+      } catch (err) {
+        setActionErrors((prev) => ({
+          ...prev,
+          [actionId]: err instanceof ApiError ? err.message : "That didn't work. Please try again.",
+        }));
+      } finally {
+        setActionBusyId(null);
+        void queryClient.invalidateQueries({ queryKey: ["board-chat", "actions"] });
+        if (boardIssueId) void queryClient.invalidateQueries({ queryKey: queryKeys.issues.comments(boardIssueId) });
+      }
+    },
+    [queryClient, boardIssueId],
+  );
 
   const voteByComment = useMemo(() => {
     const map = new Map<string, FeedbackVoteValue>();
@@ -573,6 +653,18 @@ export function BoardChat() {
         clearTimeout(fetchTimeout);
 
         if (!res.ok || !res.body) {
+          // A signed-in Paperclip says why in a plain sentence (not the
+          // company's owner or an admin, turned off, today's limit reached).
+          let refusal: string | null = null;
+          try {
+            const data = (await res.json()) as { error?: unknown };
+            if (res.status === 403 || res.status === 429 || res.status === 400) {
+              refusal = typeof data?.error === "string" ? data.error : null;
+            }
+          } catch {
+            refusal = null;
+          }
+          if (refusal) throw new BoardChatRequestError(refusal);
           throw new Error("Board chat stream not available");
         }
 
@@ -603,6 +695,9 @@ export function BoardChat() {
                 setStatusText(event.text);
               } else if (event.type === "start" && event.issueId) {
                 setBoardIssueId(event.issueId);
+              } else if (event.type === "action") {
+                // A change is waiting for Approve: show its card right away.
+                void queryClient.invalidateQueries({ queryKey: ["board-chat", "actions"] });
               } else if (event.type === "error") {
                 setErrorText(
                   event.message ||
@@ -634,7 +729,9 @@ export function BoardChat() {
         console.error("Board chat error:", err);
         setStatusText("");
         setErrorText(
-          "The board assistant is unavailable right now. Please try again in a moment.",
+          err instanceof BoardChatRequestError
+            ? err.message
+            : "The board assistant is unavailable right now. Please try again in a moment.",
         );
       } finally {
         setSending(false);
@@ -689,10 +786,13 @@ export function BoardChat() {
             />
             <div className="min-w-0 flex-1">
               <h3 className="text-sm font-semibold">
-                {ceoAgent?.name ?? "Conference Room"}
+                {ceoAgent?.name ?? "Board chat"}
               </h3>
               <p className="text-xs text-muted-foreground">
                 {selectedCompany?.name ?? "Your company"}
+              </p>
+              <p className="text-xs text-muted-foreground" data-testid="board-chat-subtitle">
+                {BOARD_CHAT_SUBTITLE}
               </p>
             </div>
             <div className="flex shrink-0 items-center gap-0.5">
@@ -738,6 +838,13 @@ export function BoardChat() {
               {/* Typing bubble — shown unconditionally until the reveal
                    timer fires, so the animation is guaranteed to be
                    visible even while agent/goal data is still loading. */}
+              {/* Cross-tip while the conversation is empty: Ask is for explanations. */}
+              {sortedComments.length === 0 && !optimisticMessage && (
+                <p className="text-xs text-muted-foreground" data-testid="board-chat-ask-tip">
+                  Just want an explanation of a page? Use the Ask tab on the right edge.
+                </p>
+              )}
+
               {!welcomeRevealed && <TypingBubble />}
 
               {welcomeRevealed && ceoAgent && selectedCompany && (() => {
@@ -807,7 +914,28 @@ export function BoardChat() {
                 );
               })()}
 
-              {sortedComments.map((comment) => {
+              {[
+                ...sortedComments.map((comment) => ({ kind: "comment" as const, at: new Date(comment.createdAt).getTime(), comment })),
+                ...actions.map((action) => ({ kind: "action" as const, at: new Date(action.createdAt).getTime(), action })),
+              ]
+                .sort((a, b) => a.at - b.at)
+                .map((item) => {
+                if (item.kind === "action") {
+                  const action = item.action;
+                  return (
+                    <div key={`action-${action.id}`} className="flex justify-start">
+                      <BoardChatActionCard
+                        action={action}
+                        canDecide={currentUserId !== null && action.userId === currentUserId}
+                        busy={actionBusyId === action.id}
+                        error={actionErrors[action.id] ?? null}
+                        onApprove={() => void decideAction(action.id, "approve")}
+                        onCancel={() => void decideAction(action.id, "cancel")}
+                      />
+                    </div>
+                  );
+                }
+                const comment = item.comment;
                 const isUser = !comment.authorAgentId && comment.authorUserId !== "board-concierge";
                 if (isUser) {
                   return (

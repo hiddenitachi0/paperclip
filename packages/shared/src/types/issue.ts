@@ -27,6 +27,7 @@ import type {
   IssueStatus,
   GoalConditionVerdict,
 } from "../constants.js";
+import type { IssueBragPreapproval } from "../brag.js";
 import type { Goal } from "./goal.js";
 import type { EscalationGrantWithSpend } from "./escalation-grant.js";
 import type { Project, ProjectWorkspace } from "./project.js";
@@ -88,6 +89,12 @@ export interface IssueAssigneeAdapterOverrides {
   useProjectWorkspace?: boolean;
   /** DUR-4144: "Plan first on Opus, then build on Sonnet" New Task switch. */
   planFirstOnOpus?: boolean;
+  /**
+   * Set when the model/effort in `adapterConfig` was copied from the parent
+   * task at creation (sub-task flow-down). Dropped as soon as someone edits the
+   * task's model/effort, because it is then the task's own setting.
+   */
+  inheritedFrom?: { issueId: string; identifier?: string | null };
 }
 
 export type DocumentFormat = "markdown";
@@ -509,6 +516,10 @@ export interface IssueExecutionPolicy {
   authorizationPolicy?: TrustAuthorizationPolicy;
   /** Opt-out for the automatic self-review pass gate (default on for code issues). */
   selfReview?: boolean;
+  /** Per-task override of the company's self-check passes (0-3). Unset = company setting. */
+  selfReviewPasses?: number;
+  /** Per-task override of the company's independent finish check. Unset = company setting. */
+  doneCheck?: boolean;
 }
 
 export interface IssueExecutionMonitorState {
@@ -643,6 +654,8 @@ export interface Issue {
   cancelledAt: Date | null;
   hiddenAt: Date | null;
   sourceTrust?: SourceTrustMetadata | null;
+  /** A person's pre-approval for one short brag video when this task is done. */
+  bragPreapproval?: IssueBragPreapproval | null;
   labelIds?: string[];
   labels?: IssueLabel[];
   blockedBy?: IssueRelationIssueSummary[];

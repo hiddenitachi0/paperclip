@@ -2599,6 +2599,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         companyId: runCtx.companyId ?? "company-test",
         projectId: runCtx.projectId ?? "project-test",
         ...(typeof runCtx.requesterMessage === "string" ? { requesterMessage: runCtx.requesterMessage } : {}),
+        ...(Array.isArray(runCtx.attachedFileIds) ? { attachedFileIds: runCtx.attachedFileIds } : {}),
       };
       return await handler(params, ctxToPass) as T;
     },

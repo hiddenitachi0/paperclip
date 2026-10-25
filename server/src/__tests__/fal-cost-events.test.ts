@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { companies, costEvents, createDb } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { reconcileFalDay, recordFalCostEvent } from "../services/fal-cost-events.js";
+import { reserveStorylineMediaSpend, storylineTransitionSpendCode } from "../services/storyline-media-ledger.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const d = support.supported ? describe : describe.skip;
@@ -54,6 +55,33 @@ d("Fal cost events (DUR-4455)", () => {
     });
     const rows = await db.select().from(costEvents).where(eq(costEvents.companyId, companyId));
     expect(rows.map((r) => r.costMicroUsd).sort()).toEqual([1_000_000, 2_000_000]);
+  });
+
+  it("settles a held storyline spend row to the real price instead of writing a second row (DUR-4807)", async () => {
+    const companyId = await seedCompany();
+    const other = await seedCompany();
+    const code = storylineTransitionSpendCode(randomUUID());
+    await reserveStorylineMediaSpend(db, { companyId, billingCode: code, provider: "fal", model: "fal-ai/video", cents: 100, agentId: null, createdByUserId: "u", occurredAt: new Date() });
+    // The same code in another company is never touched.
+    await reserveStorylineMediaSpend(db, { companyId: other, billingCode: code, provider: "fal", model: "fal-ai/video", cents: 100, agentId: null, createdByUserId: "u", occurredAt: new Date() });
+    const out = await recordFalCostEvent(db, priceFetch("seconds", 0.4, "fal-ai/video"), {
+      companyId, apiKey: "k", agentId: null, model: "fal-ai/video", usage: { seconds: 3 }, estimateCents: 100, billingCode: "video-storyline-transition", settleBillingCode: code,
+    });
+    expect(out).toEqual({ costCents: 120, costMicroUsd: 1_200_000 });
+    const rows = await db.select().from(costEvents).where(eq(costEvents.companyId, companyId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ billingCode: code, costCents: 120, costMicroUsd: 1_200_000 });
+    const [untouched] = await db.select().from(costEvents).where(eq(costEvents.companyId, other));
+    expect(untouched!.costCents).toBe(100);
+    const [company] = await db.select().from(companies).where(eq(companies.id, companyId));
+    expect(company!.spentMonthlyCents).toBe(120);
+
+    // No held row (a step started before holds were recorded): written the old way.
+    await recordFalCostEvent(db, priceFetch("seconds", 0.4, "fal-ai/video"), {
+      companyId, apiKey: "k", agentId: null, model: "fal-ai/video", usage: { seconds: 3 }, estimateCents: 100, billingCode: "video-storyline-transition", settleBillingCode: storylineTransitionSpendCode(randomUUID()),
+    });
+    const after = await db.select().from(costEvents).where(eq(costEvents.companyId, companyId));
+    expect(after.map((r) => r.billingCode).sort()).toEqual([code, "video-storyline-transition"].sort());
   });
 
   it("reconciles a day: confirms within tolerance, adjusts on drift, idempotent, skips without admin scope", async () => {

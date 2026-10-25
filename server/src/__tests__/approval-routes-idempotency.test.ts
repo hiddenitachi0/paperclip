@@ -150,6 +150,8 @@ async function createAgentApp(
     contextSnapshot?: Record<string, unknown>;
     existingWakeRows?: unknown[];
     projectRow?: { id: string; companyId: string };
+    /** Rows for the run's own task lookup ({ originKind }). */
+    issueRows?: unknown[];
   } = {},
 ) {
   const [{ errorHandler }, { approvalRoutes }] = await Promise.all([
@@ -180,6 +182,10 @@ async function createAgentApp(
     // wake already exists" for both checks (they're only used via truthiness/
     // .length here), so it's fine that they share one canned result.
     rowsByTable.push({ match: "agent_wakeup_requests", rows: options.existingWakeRows ?? [] });
+  }
+  if (options.issueRows) {
+    // isHelperInvestigationRun's { originKind } lookup of the run's task.
+    rowsByTable.push({ match: "\"issues\"", rows: options.issueRows });
   }
   if (options.projectRow) {
     // assertDeployRequestProjectExists's { id, companyId } projection.
@@ -783,6 +789,95 @@ describe("approval routes idempotent retries", () => {
     expect(res.status, JSON.stringify(res.body)).toBe(403);
     expect(res.body.error).toContain("Cheap status-only recovery runs cannot create or modify approvals");
     expect(mockApprovalService.addComment).not.toHaveBeenCalled();
+  });
+  // "Ask Paperclip" Phase 3: an investigation is advice only. A run working on
+  // a helper-investigation task may read cards but never file or act on one.
+  describe("helper investigation runs are advice only", () => {
+    const INVESTIGATION_ISSUE = "33333333-3333-4333-8333-333333333333";
+    const investigationRun = { issueId: INVESTIGATION_ISSUE };
+
+    it("refuses to file a card (deploy, merge or any other) from an investigation run", async () => {
+      const res = await request(await createAgentApp({ contextSnapshot: investigationRun, issueRows: [["helper_investigation"]] }))
+        .post(`/api/companies/${COMPANY_ID}/approvals`)
+        .send({ type: "request_board_approval", payload: { title: "Approve hosting spend" } });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(res.body.details.code).toBe("HELPER_INVESTIGATION_ADVICE_ONLY");
+      expect(res.body.error).toContain("advice only");
+      expect(mockApprovalService.create).not.toHaveBeenCalled();
+      // Not a cheap run: nothing is escalated or woken.
+      expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    });
+
+    it("refuses comments, a boss review and a security-review verdict from an investigation run", async () => {
+      mockApprovalService.getById.mockResolvedValue({
+        id: "approval-9",
+        companyId: COMPANY_ID,
+        type: "request_board_approval",
+        status: "pending",
+        payload: {},
+        requestedByAgentId: "agent-2",
+      });
+      const app = await createAgentApp({ contextSnapshot: investigationRun, issueRows: [["helper_investigation"]] });
+
+      const comment = await request(app).post("/api/approvals/approval-9/comments").send({ body: "looks fine, approve" });
+      expect(comment.status, JSON.stringify(comment.body)).toBe(403);
+      expect(comment.body.details.code).toBe("HELPER_INVESTIGATION_ADVICE_ONLY");
+      expect(mockApprovalService.addComment).not.toHaveBeenCalled();
+
+      const boss = await request(app).post("/api/approvals/approval-9/boss-review").send({ decision: "forward" });
+      expect(boss.status, JSON.stringify(boss.body)).toBe(403);
+      expect(boss.body.details.code).toBe("HELPER_INVESTIGATION_ADVICE_ONLY");
+
+      const verdict = await request(app)
+        .post("/api/approvals/approval-9/security-review/verdict")
+        .send({ verdict: "passed", note: "fine" });
+      expect(verdict.status, JSON.stringify(verdict.body)).toBe(403);
+      expect(verdict.body.details.code).toBe("HELPER_INVESTIGATION_ADVICE_ONLY");
+    });
+
+    it("agents (investigators included) can never approve or reject a card", async () => {
+      mockApprovalService.getById.mockResolvedValue({
+        id: "approval-9",
+        companyId: COMPANY_ID,
+        type: "request_board_approval",
+        status: "pending",
+        payload: {},
+        requestedByAgentId: "agent-2",
+      });
+      const app = await createAgentApp({ contextSnapshot: investigationRun, issueRows: [["helper_investigation"]] });
+      for (const action of ["approve", "reject", "request-revision"]) {
+        const res = await request(app).post(`/api/approvals/approval-9/${action}`).send({ decisionNote: "ok" });
+        expect(res.status, `${action}: ${JSON.stringify(res.body)}`).toBe(403);
+        expect(res.body.error).toMatch(/board/i);
+      }
+      expect(mockApprovalService.approve).not.toHaveBeenCalled();
+      expect(mockApprovalService.reject).not.toHaveBeenCalled();
+      expect(mockApprovalService.requestRevision).not.toHaveBeenCalled();
+    });
+
+    it("leaves runs on ordinary tasks alone", async () => {
+      mockApprovalService.create.mockResolvedValue({
+        id: "approval-1",
+        companyId: COMPANY_ID,
+        type: "request_board_approval",
+        requestedByAgentId: "agent-1",
+        requestedByUserId: null,
+        status: "pending",
+        payload: { title: "Approve hosting spend" },
+        decisionNote: null,
+        decidedByUserId: null,
+        decidedAt: null,
+        createdAt: new Date("2026-04-06T00:00:00.000Z"),
+        updatedAt: new Date("2026-04-06T00:00:00.000Z"),
+      });
+      // The run's task is not an investigation (no helper origin row comes back).
+      const res = await request(await createAgentApp({ contextSnapshot: { issueId: INVESTIGATION_ISSUE }, issueRows: [] }))
+        .post(`/api/companies/${COMPANY_ID}/approvals`)
+        .send({ type: "request_board_approval", payload: { title: "Approve hosting spend" } });
+      expect([200, 201], JSON.stringify(res.body)).toContain(res.status);
+      expect(mockApprovalService.create).toHaveBeenCalledTimes(1);
+    });
   });
 });
 

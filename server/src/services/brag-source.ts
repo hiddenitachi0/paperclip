@@ -13,7 +13,7 @@ import { isSecretBearingPath, maskFileForScreen, redactForScreen } from "./brag-
  */
 
 export interface BragSourceMaterial {
-  kind: "website" | "code";
+  kind: "website" | "code" | "task";
   title: string;
   /** Redacted text snippets, one per candidate scene, most prominent first. */
   snippets: string[];

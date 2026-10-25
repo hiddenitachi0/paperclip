@@ -55,6 +55,7 @@ const apiPrefixes: Record<string, string> = {
   // /api so this coverage check still sees every method the proxy answers.
   "preview-proxy.ts": "/api",
   "projects.ts": "/api",
+  "quality-loops.ts": "/api",
   "resource-memberships.ts": "/api",
   "routines.ts": "/api",
   "secrets.ts": "/api",
@@ -62,6 +63,7 @@ const apiPrefixes: Record<string, string> = {
   "sidebar-preferences.ts": "/api",
   "teams-catalog.ts": "/api",
   "telegram-bots.ts": "/api",
+  "telegram-chat.ts": "/api",
   "data-connections.ts": "/api",
   "report-scripts.ts": "/api",
   "report-templates.ts": "/api",
@@ -78,6 +80,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "telegram-reactions.ts",
   // Agent role/job routes (DUR-114) are a new backend feature not yet in the public OpenAPI document.
   "agent-roles.ts",
+  // Owner/admin switches for an agent's "ask to deploy/merge" rights sit next to the agent-role routes and are not yet in the public OpenAPI document.
+  "agent-request-rights.ts",
   // MCP tool library routes (DUR-143) are a new backend feature not yet in the public OpenAPI document.
   "mcp-tool-library.ts",
   // "API with a key" tool routes (DUR-4004) sit next to the MCP tool library and are not yet in the public OpenAPI document.
@@ -106,6 +110,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "morning-report.ts",
   // Trading agent routes (DUR-4171) are board-only paper-trading controls and not yet in the public OpenAPI document.
   "trading.ts",
+  // Crypto wallet routes are owner/admin and agent-only money controls, not yet in the public OpenAPI document.
+  "crypto-wallets.ts",
   // Product grabber routes (DUR-4187) are a new backend feature not yet in the public OpenAPI document.
   "product-grabber.ts",
   // Mail secretary routes (DUR-4093) are board-only inbox/filter configuration and not yet in the public OpenAPI document.
@@ -146,6 +152,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "brag.ts",
   // Ask Paperclip helper routes (helper overlay, Phase 1) are board-only and not yet in the public OpenAPI document.
   "helper.ts",
+  // Franchise migration cutover routes (verify destination, mark as migrated, undo) are board-only and not yet in the public OpenAPI document.
+  "company-migration.ts",
 ]);
 
 function createApp() {

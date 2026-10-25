@@ -246,9 +246,11 @@ export {
   type PersonaJobField,
   type AgentLimitsInput,
   BROWSER_ACCESS_FIELDS,
+  REACTION_LEARNING_FIELDS,
   AGENT_BROWSER_ACCESS_LEVELS,
   browserAccessSchema,
   type BrowserAccessField,
+  type ReactionLearningField,
   type AgentBrowserAccessLevel,
   agentRuntimeConfigSchema,
   agentInstructionsBundleModeSchema,
@@ -636,6 +638,11 @@ export {
   bookingRequestPayloadSchema,
   purchaseRequestPayloadSchema,
   videoRenderRequestPayloadSchema,
+  OPERATOR_ACTION_TYPES,
+  operatorActionTargetNameSchema,
+  operatorActionEnvKeySchema,
+  operatorActionRequestInputSchema,
+  operatorActionRequestPayloadSchema,
   type CreateApproval,
   type ResolveApproval,
   type RequestApprovalRevision,
@@ -654,6 +661,9 @@ export {
   type BookingRequestPayload,
   type PurchaseRequestPayload,
   type VideoRenderRequestPayload,
+  type OperatorActionType,
+  type OperatorActionRequestInput,
+  type OperatorActionRequestPayload,
 } from "./approval.js";
 
 export {

@@ -57,6 +57,8 @@ export type AuthorizationActor =
       | "cloud_tenant"
       | "board_delegate_key"
       | "company_service_token"
+      | "board_chat"
+      | "board_chat_confirmed"
       | "none";
   };
 
@@ -1187,6 +1189,18 @@ export function authorizationService(db: Db) {
     }
 
     if (input.actor.type === "board") {
+      // Board chat credentials carry exactly one company. Whatever the
+      // person's other memberships are, nothing outside it is allowed.
+      if (
+        (input.actor.source === "board_chat" || input.actor.source === "board_chat_confirmed") &&
+        !(input.actor.companyIds ?? []).includes(companyId)
+      ) {
+        return deny({
+          action: input.action,
+          reason: "deny_company_boundary",
+          explanation: "Board chat can only see and change this company.",
+        });
+      }
       let taskAssignmentPolicyEffect: AssignmentPolicyEffect | null = null;
       if (input.actor.source === "local_implicit") {
         return allow({
@@ -1200,6 +1214,10 @@ export function authorizationService(db: Db) {
       // deployments that ran the pre-hardening cloud_tenant path.
       if (
         input.actor.source !== "cloud_tenant" &&
+        // Board chat credentials are scoped to one company and are never
+        // elevated, even when the person is an instance admin.
+        input.actor.source !== "board_chat" &&
+        input.actor.source !== "board_chat_confirmed" &&
         (input.actor.isInstanceAdmin || await isInstanceAdmin(input.actor.userId))
       ) {
         return allow({

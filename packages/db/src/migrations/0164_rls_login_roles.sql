@@ -151,6 +151,11 @@ DECLARE
     'assets',
     'board_api_keys',
     'board_delegate_tokens',
+    -- Board chat on signed-in servers. Created, granted on and policed in
+    -- 0255_board_chat_authenticated.sql; company-scoped, so they are in both lists.
+    'board_chat_actions',
+    'board_chat_company_settings',
+    'board_chat_runs',
     -- DUR-4519 (Brag video phase 1). Created, granted on and policed in
     -- 0226_brag_jobs.sql; listed here so the login-role lists match the
     -- schema, as for the tables above.
@@ -224,6 +229,13 @@ DECLARE
     'crm_organizations',
     'cross_company_access_log',
     'cross_company_instructions',
+    -- Crypto wallets for agents. Created, granted on and policed in
+    -- 0251_crypto_wallets.sql; company-scoped, so they are in both lists.
+    'company_crypto_settings',
+    'crypto_agent_limits',
+    'crypto_wallet_destinations',
+    'crypto_wallet_transactions',
+    'crypto_wallets',
     'customer_inbox_conversations',
     'customer_inbox_deliveries',
     -- DUR-3972 slice S1. The real DDL, grant and policy for these tables live
@@ -324,6 +336,10 @@ DECLARE
     -- 0238_company_helper_settings.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'company_helper_settings',
+    -- Agent quality loops. Created, granted on and policed in
+    -- 0247_company_quality_loop_settings.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'company_quality_loop_settings',
     -- DUR-4392. Created, granted on and policed in
     -- 0229_model_directory_converters.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
@@ -361,6 +377,16 @@ DECLARE
     -- the schema.
     'report_runs',
     'report_templates',
+    -- Storyline strip (Simple editor, Phase 1). Created, granted on and
+    -- policed in 0244_storyline_transitions.sql; listed here so the
+    -- login-role lists match the schema.
+    'video_transition_takes',
+    'video_transitions',
+    -- Storyline Simple editor, Phase 2. Created, granted on and policed in
+    -- 0249_storyline_clips_music_export.sql; listed here so the login-role
+    -- lists match the schema.
+    'video_media_spend',
+    'video_uploads',
     -- DUR-4037. Created (and granted on) in 0187_payment_notices_and_settings.sql;
     -- listed here so the login-role lists match the schema, as for the tables above.
     'payment_notices',
@@ -424,6 +450,13 @@ DECLARE
     -- 0166_telegram_bots.sql; the name is listed here for the same reason
     -- company_service_tokens is, above.
     'telegram_bots',
+    -- Hermes parity slice 1 (two-way Telegram chat for linked people).
+    -- Created, granted on and policed in 0243_telegram_two_way_chat.sql;
+    -- telegram_person_links is per person (no company_id), so it is in this
+    -- list only, not in the company-scoped one below.
+    'telegram_chat_requests',
+    'telegram_chat_settings',
+    'telegram_person_links',
     -- DUR-4157 2FA. Created (and granted on) in 0206_totp_2fa.sql;
     -- user-scoped (no company_id), so it is in this list only, not in the
     -- company-scoped one below.
@@ -465,6 +498,11 @@ DECLARE
     -- on) in 0211_video_storyline_director_conversation.sql.
     'video_storyline_director_conversations',
     'video_storyline_director_messages',
+    -- Storyline directors and the AI story writer chat. Created, granted on
+    -- and policed in 0252_storyline_directors.sql; company-scoped, so they
+    -- are in both lists.
+    'video_storyline_directors',
+    'video_storyline_writer_messages',
     -- DUR-4182 Positions/Jobs. Created (and granted on) in 0201_jobs.sql;
     -- listed here so the login-role lists match the schema, as for the
     -- tables above.
@@ -503,6 +541,11 @@ DECLARE
     'approval_comments',
     'approvals',
     'assets',
+    -- Board chat on signed-in servers. Created, granted on and policed in
+    -- 0255_board_chat_authenticated.sql; company-scoped, so they are in both lists.
+    'board_chat_actions',
+    'board_chat_company_settings',
+    'board_chat_runs',
     -- DUR-4519 (Brag video phase 1). Created, granted on and policed in
     -- 0226_brag_jobs.sql; listed here so the login-role lists match the
     -- schema, as for the tables above.
@@ -568,6 +611,13 @@ DECLARE
     'crm_organizations',
     'customer_inbox_conversations',
     'customer_inbox_deliveries',
+    -- Crypto wallets for agents. Created, granted on and policed in
+    -- 0251_crypto_wallets.sql; company-scoped, so they are in both lists.
+    'company_crypto_settings',
+    'crypto_agent_limits',
+    'crypto_wallet_destinations',
+    'crypto_wallet_transactions',
+    'crypto_wallets',
     -- DUR-3972 slice S1, created in 0168_data_connections.sql; company-scoped,
     -- so they belong in this list too.
     'data_connections',
@@ -655,6 +705,10 @@ DECLARE
     -- 0238_company_helper_settings.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
     'company_helper_settings',
+    -- Agent quality loops. Created, granted on and policed in
+    -- 0247_company_quality_loop_settings.sql; listed here so the login-role
+    -- lists match the schema, as for the tables above.
+    'company_quality_loop_settings',
     -- DUR-4392. Created, granted on and policed in
     -- 0229_model_directory_converters.sql; listed here so the login-role
     -- lists match the schema, as for the tables above.
@@ -692,6 +746,16 @@ DECLARE
     -- the schema.
     'report_runs',
     'report_templates',
+    -- Storyline strip (Simple editor, Phase 1). Created, granted on and
+    -- policed in 0244_storyline_transitions.sql; listed here so the
+    -- login-role lists match the schema.
+    'video_transition_takes',
+    'video_transitions',
+    -- Storyline Simple editor, Phase 2. Created, granted on and policed in
+    -- 0249_storyline_clips_music_export.sql; listed here so the login-role
+    -- lists match the schema.
+    'video_media_spend',
+    'video_uploads',
     -- DUR-4037. Created (and granted on) in 0187_payment_notices_and_settings.sql;
     -- listed here so the login-role lists match the schema, as for the tables above.
     'payment_notices',
@@ -745,6 +809,10 @@ DECLARE
     -- DUR-3978 slice 2, created in 0166_telegram_bots.sql; company-scoped, so
     -- it belongs in this list too.
     'telegram_bots',
+    -- Hermes parity slice 1, created in 0243_telegram_two_way_chat.sql;
+    -- company-scoped, so they belong in this list too.
+    'telegram_chat_requests',
+    'telegram_chat_settings',
     -- DUR-4153/DUR-4171 trading agent (paper-trading only), created in
     -- 0197_trading_agent.sql; company-scoped, so it belongs in this list too.
     'trading_daily_stats',
@@ -774,6 +842,11 @@ DECLARE
     -- so it is in both lists.
     'video_storyline_director_conversations',
     'video_storyline_director_messages',
+    -- Storyline directors and the AI story writer chat. Created, granted on
+    -- and policed in 0252_storyline_directors.sql; company-scoped, so they
+    -- are in both lists.
+    'video_storyline_directors',
+    'video_storyline_writer_messages',
     -- DUR-4182 Positions/Jobs. Created (and granted on) in 0201_jobs.sql;
     -- listed here so the login-role lists match the schema, as for the
     -- tables above. Company-scoped, so it is in both lists.

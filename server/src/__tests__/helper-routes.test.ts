@@ -112,6 +112,39 @@ describe("helper routes", () => {
     expect(mockSvc.ask).not.toHaveBeenCalled();
   });
 
+  it("words refusals for the person, not as 'Validation error'", async () => {
+    const app = await buildApp(board("owner"));
+    const empty = await request(app).post(askUrl).send({ message: "" });
+    expect(empty.status).toBe(400);
+    expect(empty.body.error).toBe("Type a question first.");
+    expect(empty.body.code).toBe("HELPER_INVALID_REQUEST");
+    const long = await request(app).post(askUrl).send({ message: "x".repeat(4_001) });
+    expect(long.body.error).toBe("Your question is too long. Shorten it and try again.");
+    const context = await request(app).post(askUrl).send({ message: "hi", context: "x".repeat(12_001) });
+    expect(context.body.error).toBe("The page text is too long to send. Mark a smaller area and try again.");
+    const model = await request(app).post(askUrl).send({ message: "hi", directoryEntryId: "not-a-uuid" });
+    expect(model.body.error).toBe("The picked model could not be found. Pick another model and try again.");
+    const tools = await request(app).post(askUrl).send({ message: "hi", tools: [] });
+    expect(tools.body.error).toBe("Something in the request could not be read. Reload the page and try again.");
+    const pictures = await request(app).post(askUrl).send({ message: "hi", pictures: [{ kind: "screen" }] });
+    expect(pictures.body.error).toBe("One of the pictures could not be used. Remove it and attach it again.");
+    const investigation = await request(app).post(investigationsUrl).send({ question: "" });
+    expect(investigation.body.error).toBe("Type a question first.");
+    expect(mockSvc.ask).not.toHaveBeenCalled();
+  });
+
+  it("accepts a long conversation (the service keeps only the last turns) instead of refusing the next question", async () => {
+    const app = await buildApp(board("operator"));
+    const history = Array.from({ length: 40 }, (_, i) => ({ role: i % 2 === 0 ? "user" : "assistant", content: "y".repeat(7_000) }));
+    const res = await request(app).post(askUrl).send({ message: "And now?", history });
+    expect(res.status).toBe(200);
+    expect(mockSvc.ask).toHaveBeenCalledWith(expect.objectContaining({ history }));
+    const tooMuch = Array.from({ length: 101 }, () => ({ role: "user", content: "z" }));
+    const refused = await request(app).post(askUrl).send({ message: "hi", history: tooMuch });
+    expect(refused.status).toBe(400);
+    expect(refused.body.error).toBe("The conversation is too long to send. Press “New conversation” and ask again.");
+  });
+
   it("lets any member read settings but only an owner/admin change them", async () => {
     const operator = await buildApp(board("operator"));
     const read = await request(operator).get(settingsUrl);
@@ -195,6 +228,7 @@ describe("helper routes", () => {
           references: [`approval:${entryId}`],
           quickAnswer: "Maybe.",
           pictures: [{ kind: "file", fileId: entryId }],
+          applyTargets: ["Description"],
         });
       expect(res.status).toBe(201);
       expect(mockInvestigations.start).toHaveBeenCalledWith({
@@ -207,6 +241,7 @@ describe("helper routes", () => {
         references: [`approval:${entryId}`],
         quickAnswer: "Maybe.",
         pictures: [{ kind: "file", fileId: entryId }],
+        applyTargets: ["Description"],
         canConfigure: false,
       });
 
@@ -228,6 +263,8 @@ describe("helper routes", () => {
       expect((await request(app).post(investigationsUrl).send({ question: "hi", assigneeAgentId: entryId })).status).toBe(400);
       expect((await request(app).post(investigationsUrl).send({ question: "hi", companyId: otherCompanyId })).status).toBe(400);
       expect((await request(app).post(investigationsUrl).send({ question: "hi", status: "done" })).status).toBe(400);
+      expect((await request(app).post(investigationsUrl).send({ question: "hi", applyTargets: ["x".repeat(121)] })).status).toBe(400);
+      expect((await request(app).post(investigationsUrl).send({ question: "hi", applyTargets: Array.from({ length: 9 }, (_, i) => `F${i}`) })).status).toBe(400);
       expect((await request(app).post(investigationsUrl).send({ question: "hi", references: ["<script>"] })).status).toBe(400);
       expect((await request(app).post(investigationsUrl).send({ question: "hi", references: Array(21).fill(`agent:${entryId}`) })).status).toBe(400);
       const upload = { kind: "upload", dataBase64: "iVBORw0KGgo=" };

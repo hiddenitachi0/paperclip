@@ -29,6 +29,7 @@ import { queryKeys } from "../lib/queryKeys";
 import { INSTANCE_SETTINGS_PATH_PREFIX } from "../lib/instance-settings";
 import { resolveSkillSummaryText } from "../lib/company-skill-summary";
 import { AgentJobSection } from "../components/jobs/AgentJobSection";
+import { AgentRequestRightsSection } from "../components/AgentRequestRightsSection";
 import { jobsApi } from "../api/jobs";
 import { AgentConfigForm } from "../components/AgentConfigForm";
 import { PageTabBar } from "../components/PageTabBar";
@@ -52,11 +53,14 @@ import { BudgetPolicyCard } from "../components/BudgetPolicyCard";
 import { SorteringsreglerCard } from "../components/SorteringsreglerCard";
 import { QuickAgentSection } from "../components/QuickAgentSection";
 import { QuickAgentMemorySection } from "../components/QuickAgentMemorySection";
+import { ReactionLearningSection } from "../components/ReactionLearningSection";
 import { MorningReportSection } from "../components/MorningReportSection";
 import { QuickAgentChatPanel } from "../components/QuickAgentChatPanel";
 import { AgentAddOnToolsSection } from "../components/AgentAddOnToolsSection";
 import { TrustPresetSection } from "../components/TrustPresetSection";
 import { SettingsSection, SettingsSubsection } from "../components/SettingsSection";
+import { AgentCryptoWalletsSection } from "../components/AgentCryptoWalletsSection";
+import { useCompanyRole } from "../hooks/useCompanyRole";
 import { FileTree, buildFileTree } from "../components/FileTree";
 import { ScrollToBottom } from "../components/ScrollToBottom";
 import { SourceResolvedFoldCallout } from "../components/SourceResolvedFoldCallout";
@@ -130,6 +134,7 @@ import {
 } from "../lib/agent-skills-state";
 import { AgentSkillsTab } from "./AgentSkillsTab";
 import { AgentToolsTab } from "./AgentToolsTab";
+import { QuickAgentConversations } from "../components/QuickAgentConversations";
 
 const runStatusIcons: Record<string, { icon: typeof CheckCircle2; color: string }> = {
   succeeded: { icon: CheckCircle2, color: "text-green-600 dark:text-green-400" },
@@ -274,7 +279,7 @@ function scrollToContainerBottom(container: ScrollContainer, behavior: ScrollBeh
   container.scrollTo({ top: container.scrollHeight, behavior });
 }
 
-type AgentDetailView = "dashboard" | "instructions" | "configuration" | "skills" | "tools" | "runs" | "files" | "budget";
+type AgentDetailView = "dashboard" | "instructions" | "configuration" | "skills" | "tools" | "runs" | "files" | "budget" | "conversations";
 
 function parseAgentDetailView(value: string | null): AgentDetailView {
   if (value === "instructions" || value === "prompts") return "instructions";
@@ -283,6 +288,7 @@ function parseAgentDetailView(value: string | null): AgentDetailView {
   if (value === "tools") return "tools";
   if (value === "files") return "files";
   if (value === "budget") return "budget";
+  if (value === "conversations") return "conversations";
   if (value === "runs") return value;
   return "dashboard";
 }
@@ -838,6 +844,10 @@ export function AgentDetail() {
               ? "runs"
               : activeView === "budget"
                 ? "budget"
+              : activeView === "conversations"
+                ? "conversations"
+              : activeView === "files"
+                ? "files"
               : "dashboard";
     if (routeAgentRef !== canonicalAgentRef || urlTab !== canonicalTab) {
       navigate(`/agents/${canonicalAgentRef}/${canonicalTab}`, { replace: true });
@@ -1152,6 +1162,10 @@ export function AgentDetail() {
               { value: "runs", label: "Runs" },
               { value: "files", label: "Files" },
               { value: "budget", label: "Budget" },
+              // Quick agents: what the agent told people (owners/admins: everyone's; others: their own).
+              ...(agent.laneAEnabled || activeView === "conversations"
+                ? [{ value: "conversations", label: "Conversations" }]
+                : []),
             ]}
             value={activeView}
             onValueChange={(value) => navigate(`/agents/${canonicalAgentRef}/${value}`)}
@@ -1300,6 +1314,14 @@ export function AgentDetail() {
 
       {activeView === "files" && resolvedCompanyId && (
         <AgentFilesTab agent={agent} companyId={resolvedCompanyId} />
+      )}
+
+      {activeView === "conversations" && resolvedCompanyId && (
+        <QuickAgentConversations
+          companyId={resolvedCompanyId}
+          agentId={agent.id}
+          agentName={formatAgentDisplayName(agent, agent.persona)}
+        />
       )}
 
       {activeView === "budget" && resolvedCompanyId ? (
@@ -1619,10 +1641,12 @@ export function AgentConfigurePage({
     <>
       <QuickAgentSection agent={agent} companyId={companyId} />
       {quickAgentOn && <QuickAgentMemorySection agentId={agent.id} />}
+      {quickAgentOn && <ReactionLearningSection agentId={agent.id} agentName={agent.name} companyId={companyId} />}
       {quickAgentOn && <MorningReportSection agent={agent} companyId={companyId} />}
     </>
   );
   const revisionCount = configRevisions?.length ?? 0;
+  const companyRole = useCompanyRole(companyId);
 
   return (
     <div className="max-w-3xl space-y-6" data-helper-entity={`agent:${agent.id}`}>
@@ -1648,6 +1672,18 @@ export function AgentConfigurePage({
       >
         <KeysTab agentId={agentId} companyId={companyId} />
       </SettingsSection>
+
+      {companyId && companyRole.canManageConnections ? (
+        <SettingsSection
+          title="Crypto wallets"
+          description="Wallets this agent can pay or trade from. The server keeps the keys; you set the limits and allowed addresses."
+          defaultOpen={false}
+          storageKey="agent.configuration.cryptoWallets"
+          data-testid="agent-config-crypto-wallets"
+        >
+          <AgentCryptoWalletsSection companyId={companyId} agentId={agent.id} />
+        </SettingsSection>
+      ) : null}
 
       <SettingsSection
         title="Configuration history"
@@ -1911,6 +1947,7 @@ function ConfigurationTab({
                 disabled={updatePermissions.isPending || taskAssignLocked}
               />
             </div>
+            <AgentRequestRightsSection agentId={agent.id} />
           </div>
         </SettingsSubsection>
       </SettingsSection>

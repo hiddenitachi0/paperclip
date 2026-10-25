@@ -10,7 +10,8 @@ export const bragJobs = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
-    projectId: uuid("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+    // NULL only for a finished-task video whose task has no project.
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "cascade" }),
     // draft | planning | awaiting_approval | rendering | completed | failed | cancelled
     status: text("status").notNull().default("draft"),
     // Source: a repo URL / website URL (code is read from the project workspace when null)

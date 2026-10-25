@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
-import { ASSIGNEE_UNAVAILABLE_REASONS } from "@paperclipai/shared";
+import { ASSIGNEE_UNAVAILABLE_REASONS, updateBoardChatSettingsSchema } from "@paperclipai/shared";
 import {
   // Agent
   createAgentSchema,
@@ -62,12 +62,17 @@ import {
   createReportTemplateSchema,
   updateReportTemplateSchema,
   createReportRunSchema,
+  previewReportDataSchema,
   draftReportRunCommentarySchema,
   dataTrialCalculationSchema,
   setDatasetSourceSchema,
   updateDataConnectionSchema,
   // Telegram bots (DUR-3978)
   createTelegramBotSchema,
+  ackTelegramChatAnswerSchema,
+  telegramChatAskSchema,
+  telegramChatLinkSchema,
+  updateTelegramChatSettingsSchema,
   rotateTelegramBotTokenSchema,
   updateTelegramBotAllowedUsersSchema,
   updateTelegramBotCompanyNoticesSchema,
@@ -185,6 +190,7 @@ import {
   updateModelDirectorySettingsSchema,
   // Merge-card security review (DUR-4566)
   recordSecurityReviewVerdictSchema,
+  updateCompanyQualityLoopSettingsSchema,
 } from "@paperclipai/shared";
 
 type JsonSchema = Record<string, unknown>;
@@ -810,6 +816,8 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "GET /api/companies/{companyId}/model-directory",
   "POST /api/companies/{companyId}/model-directory",
   "GET /api/companies/{companyId}/model-directory/export",
+  "GET /api/companies/{companyId}/quality-loops/settings",
+  "PATCH /api/companies/{companyId}/quality-loops/settings",
   "GET /api/companies/{companyId}/model-directory/settings",
   "PUT /api/companies/{companyId}/model-directory/settings",
   "GET /api/companies/{companyId}/model-directory/openrouter-hosts",
@@ -839,6 +847,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
 
 const INSTANCE_ADMIN_OPERATIONS = new Set([
   "GET /api/companies/{companyId}/deploy-github-token",
+  "GET /api/approvals/{id}/operator-action-secret",
   "POST /api/companies",
   "POST /api/plugins/install",
   "POST /api/instance/database-backups",
@@ -868,9 +877,15 @@ const INSTANCE_ADMIN_OPERATIONS = new Set([
   // secret_access_events like every other credential read.
   "GET /api/instance/telegram-bridge-config",
   "GET /api/companies/{companyId}/telegram-bots/{botId}/bridge-token",
+  // Hermes parity slice 1: the bridge's calls for linked people.
+  "POST /api/companies/{companyId}/telegram-chat/link",
+  "POST /api/companies/{companyId}/telegram-chat/ask",
+  "GET /api/companies/{companyId}/telegram-chat/outbox",
+  "POST /api/companies/{companyId}/telegram-chat/outbox/{requestId}/ack",
 ]);
 
 const CREATED_OPERATIONS = new Set([
+  "POST /api/me/telegram-link/code",
   "POST /api/adapters/install",
   "POST /api/companies/{companyId}/agent-hires",
   "POST /api/companies/{companyId}/agents",
@@ -2775,6 +2790,24 @@ registry.registerPath({
 
 registry.registerPath({
   method: "get",
+  path: "/api/companies/{companyId}/operator-actions",
+  tags: ["approvals"],
+  summary: "List the host actions (restart/recreate/set setting) this company may ask the on-box runner for",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/approvals/{id}/operator-action-secret",
+  tags: ["approvals"],
+  summary: "Resolve the secret value for an approved set_env_var host action (instance admin only; on-box runner)",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 422: r.unprocessable },
+});
+
+registry.registerPath({
+  method: "get",
   path: "/api/approvals/{id}/issues",
   tags: ["approvals"],
   summary: "List issues linked to an approval",
@@ -3420,6 +3453,7 @@ for (const route of [
   ["get", "/api/companies/{companyId}/report-runs", "List report runs", undefined],
   ["post", "/api/companies/{companyId}/report-runs", "Start a report run: fetch data and run the approved calculation", createReportRunSchema],
   ["get", "/api/companies/{companyId}/report-runs/{runId}", "Get one report run", undefined],
+  ["post", "/api/companies/{companyId}/report-data/preview", "Preview a report template's data (owner/admin only; audited, first rows only)", previewReportDataSchema],
   ["post", "/api/companies/{companyId}/report-runs/{runId}/commentary", "Submit commentary; every number in it must come from the calculation's output", draftReportRunCommentarySchema],
 ] as const) {
   registerCurrentRoute({
@@ -3446,6 +3480,29 @@ for (const route of [
   ["delete", "/api/companies/{companyId}/telegram-bots/{botId}", "Disconnect a Telegram bot and delete its saved token", undefined],
   ["get", "/api/instance/telegram-bridge-config", "Every enabled Telegram bot on this instance, without tokens, for the host-side bridge", undefined],
   ["get", "/api/companies/{companyId}/telegram-bots/{botId}/bridge-token", "Resolve one bot's token for the host-side bridge (instance admin only)", undefined],
+] as const) {
+  registerCurrentRoute({
+    method: route[0],
+    path: route[1],
+    tags: ["telegram"],
+    summary: route[2],
+    ...(route[3] ? { body: route[3] } : {}),
+  });
+}
+
+// ─── Telegram questions from linked people (Hermes parity slice 1) ──────────
+// The person's own link (always the signed-in person's), the company setting
+// (owner/admin to change), and the bridge's calls (instance admin only).
+for (const route of [
+  ["get", "/api/me/telegram-link", "Whether your own Telegram account is linked", undefined],
+  ["post", "/api/me/telegram-link/code", "Make a one-time code (15 minutes) to link your own Telegram account", undefined],
+  ["delete", "/api/me/telegram-link", "Unlink your own Telegram account", undefined],
+  ["get", "/api/companies/{companyId}/telegram-chat/settings", "Which bot answers linked people, which agents answer, and the daily limit", undefined],
+  ["put", "/api/companies/{companyId}/telegram-chat/settings", "Change who answers linked people's questions on Telegram (owner or admin)", updateTelegramChatSettingsSchema],
+  ["post", "/api/companies/{companyId}/telegram-chat/link", "Link a Telegram sender to the person whose one-time code it is (bridge)", telegramChatLinkSchema],
+  ["post", "/api/companies/{companyId}/telegram-chat/ask", "A linked person's question to the company bot, answered as that person (bridge)", telegramChatAskSchema],
+  ["get", "/api/companies/{companyId}/telegram-chat/outbox", "Answers to linked people's questions ready to send (bridge)", undefined],
+  ["post", "/api/companies/{companyId}/telegram-chat/outbox/{requestId}/ack", "Mark one answer as sent or not sendable (bridge)", ackTelegramChatAnswerSchema],
 ] as const) {
   registerCurrentRoute({
     method: route[0],
@@ -3514,6 +3571,62 @@ registry.registerPath({
     ),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
+});
+
+// Board chat on signed-in servers: who may use it, the company switch, and the
+// held changes that wait for the person's Approve (20 Oct 2026).
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/board-chat/availability",
+  tags: ["companies"],
+  summary: "Whether the signed-in person can use Board chat in this company, and why not",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/board-chat/settings",
+  tags: ["companies"],
+  summary: "Board chat on/off switch and daily message cap for this company",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "patch",
+  path: "/api/companies/{companyId}/board-chat/settings",
+  tags: ["companies"],
+  summary: "Turn Board chat on or off, or change its daily message cap (company owner or instance admin)",
+  request: { params: z.object({ companyId: z.string() }), body: jsonBody(updateBoardChatSettingsSchema) },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/board-chat/actions",
+  tags: ["companies"],
+  summary: "Changes Board chat has prepared in this company, waiting for or past approval",
+  request: { params: z.object({ companyId: z.string() }), query: z.object({ issueId: z.string().optional() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/board/chat/actions/{actionId}/confirm",
+  tags: ["instance"],
+  summary: "Approve one held Board chat change; the server then makes exactly that change as the person",
+  request: { params: z.object({ actionId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/board/chat/actions/{actionId}/cancel",
+  tags: ["instance"],
+  summary: "Cancel one held Board chat change; nothing is changed",
+  request: { params: z.object({ actionId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
 });
 
 // ─── Lane A (direct-model-call text primitive) ────────────────────────────────
@@ -3767,6 +3880,89 @@ registerCurrentRoute({
       }),
     ),
     400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+  },
+});
+
+const ConversationLogPersonSchema = z.object({ kind: z.enum(["user", "agent"]), id: z.string(), name: z.string() });
+const ConversationLogRowSchema = z.object({
+  id: z.string(),
+  person: ConversationLogPersonSchema.nullable(),
+  channel: z.enum(["telegram"]).nullable(),
+  startedAt: z.string(),
+  lastMessageAt: z.string(),
+  messageCount: z.number(),
+  firstQuestion: z.string().nullable(),
+  toolUse: z.array(z.object({ label: z.string(), count: z.number() })),
+  handoffCount: z.number(),
+  private: z.boolean(),
+  mine: z.boolean(),
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/lane-a/agents/{agentId}/conversations",
+  tags: ["agents"],
+  summary:
+    "List a quick agent's conversations for review, newest activity first (board users only; owners/admins see all, " +
+    "others their own; an Employee (light) member's chat is listed without content)",
+  query: z.object({
+    userId: z.string().optional(),
+    from: z.string().optional(),
+    to: z.string().optional(),
+    hasHandoffs: z.enum(["true", "false"]).optional(),
+    q: z.string().max(200).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+    cursor: z.string().optional(),
+  }),
+  responses: {
+    200: r.ok(
+      z.object({
+        conversations: z.array(ConversationLogRowSchema),
+        nextCursor: z.string().nullable(),
+        people: z.array(ConversationLogPersonSchema),
+        canSeeAll: z.boolean(),
+      }),
+    ),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+  },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/lane-a/agents/{agentId}/conversations/{conversationId}",
+  tags: ["agents"],
+  summary: "Read one quick-agent conversation for review, with what the agent did in plain words (text masked)",
+  responses: {
+    200: r.ok(
+      z.object({
+        conversation: ConversationLogRowSchema,
+        continuedFrom: z.string().nullable(),
+        messages: z.array(
+          z.object({
+            id: z.string(),
+            role: z.enum(["user", "assistant"]),
+            content: z.string(),
+            createdAt: z.string(),
+            actions: z.array(
+              z.object({
+                tool: z.string(),
+                label: z.string(),
+                summary: z.string(),
+                ok: z.boolean(),
+                image: z.object({ contentPath: z.string(), contentType: z.string() }).nullable(),
+                task: z.object({ issueId: z.string(), identifier: z.string().nullable(), title: z.string() }).nullable(),
+              }),
+            ),
+          }),
+        ),
+      }),
+    ),
     401: r.unauthorized,
     403: r.forbidden,
     404: r.notFound,
@@ -6243,6 +6439,23 @@ registerCurrentRoute({
     409: r.conflict,
     422: r.unprocessable,
   },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/quality-loops/settings",
+  tags: ["quality-loops"],
+  summary: "Read the company's quality checks (Company settings > Quality checks): selfReviewPasses (0-3 self-check passes per task before review/done; 0 = off), doneCheckEnabled and doneCheckMaxRounds (the independent finish check by a cheap saved model, and how many 'not done' rounds before the person is asked), doneCheckDirectoryEntryId (the saved model it uses; null = the helper's default model), effectiveDoneCheckModel (what it will actually use, or null = no model, checks are skipped with a note), defaultReviewerAgentId (agent that reviews new code tasks). configured = false means the company never chose, and everything is off. Any active member; not agents.",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "patch",
+  path: "/api/companies/{companyId}/quality-loops/settings",
+  tags: ["quality-loops"],
+  summary: "Change the company's quality checks. Send any of selfReviewPasses (0-3), doneCheckEnabled, doneCheckMaxRounds (1-3), doneCheckDirectoryEntryId (a saved model of this company, not archived; null = the helper's default), defaultReviewerAgentId (an agent of this company; null = none). A field left out keeps its value. Owner/admin only; agents are refused.",
+  body: updateCompanyQualityLoopSettingsSchema,
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 422: r.unprocessable },
 });
 
 registerCurrentRoute({

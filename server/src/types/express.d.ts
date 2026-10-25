@@ -39,6 +39,12 @@ declare global {
           | "cloud_tenant"
           | "board_delegate_key"
           | "company_service_token"
+          // Board chat on a signed-in server: a run's short-lived credential
+          // ("board_chat", every write is held for the person's approval) and
+          // the single-use credential that replays one approved change
+          // ("board_chat_confirmed"). Both act as the person in one company.
+          | "board_chat"
+          | "board_chat_confirmed"
           | "none";
         // Present only when type === "service": which company service token
         // authenticated this request, so the route can record usage. The
@@ -58,6 +64,9 @@ declare global {
         delegateTokenId?: string;
         delegateName?: string;
         delegateScopes?: DelegateTokenScope[];
+        // Present only for the Board chat sources above.
+        boardChatRunId?: string;
+        boardChatActionId?: string;
       };
       /**
        * DUR-3977 default-deny marker. Set by `assertServiceOrBoard` (and only
@@ -86,6 +95,21 @@ declare global {
        * light employees with no route-by-route audit required.
        */
       lightRouteOptIn?: true;
+      /**
+       * Board chat: the held change a single-use Approve credential is bound
+       * to. Set by the actor middleware when it consumes that credential; the
+       * Board chat guard compares the request with it before any route runs.
+       */
+      boardChatAction?: {
+        id: string;
+        companyId: string;
+        userId: string;
+        issueId: string | null;
+        method: string;
+        path: string;
+        bodyJson: string | null;
+        summary: string;
+      };
     }
   }
 }

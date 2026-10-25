@@ -70,6 +70,12 @@ export type TelegramBridgeBot = {
   /** Voice messages: when the bot reads its answer aloud, and with which voice (null = default). */
   voiceReplyMode: "never" | "when_voice" | "always";
   voice: string | null;
+  /**
+   * Hermes parity slice 1: true for the one bot the company chose to answer
+   * linked people's questions (telegram_chat_settings, switched on). Only on
+   * that bot does the bridge answer people who are not on its allowlist.
+   */
+  answersLinkedPeople?: boolean;
   token: string;
 };
 

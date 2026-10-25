@@ -40,6 +40,15 @@ export const HELPER_CONTEXT_MAX_CHARS = 12_000;
 export const HELPER_MESSAGE_MAX_CHARS = 4_000;
 export const HELPER_HISTORY_MAX_TURNS = 12;
 export const HELPER_HISTORY_TURN_MAX_CHARS = 6_000;
+/**
+ * What the ask route ACCEPTS as history. It is more than the model gets: the
+ * server keeps only the last HELPER_HISTORY_MAX_TURNS questions and answers,
+ * each cut to HELPER_HISTORY_TURN_MAX_CHARS, so a long conversation (or an
+ * older browser tab that sends all of it) keeps working instead of being
+ * refused.
+ */
+export const HELPER_HISTORY_ACCEPT_MAX_ITEMS = 100;
+export const HELPER_HISTORY_ACCEPT_TURN_MAX_CHARS = 24_000;
 export const HELPER_PAGE_ROUTE_MAX_CHARS = 500;
 export const HELPER_MAX_OUTPUT_TOKENS = 1_500;
 
@@ -219,6 +228,9 @@ export const HELPER_INVESTIGATION_COMPANY_MAX_PER_DAY_CAP = 1000;
 export const HELPER_INVESTIGATIONS_LIST_LIMIT = 20;
 export const HELPER_INVESTIGATION_REFERENCES_MAX = 20;
 export const HELPER_INVESTIGATION_QUICK_ANSWER_MAX_CHARS = 6_000;
+/** Text fields on the person's screen the answer may be put into ("Apply to …"). */
+export const HELPER_INVESTIGATION_APPLY_TARGETS_MAX = 8;
+export const HELPER_APPLY_TARGET_MAX_CHARS = 120;
 
 /**
  * The line the quick model ends an answer with when it thinks an agent should
@@ -232,6 +244,108 @@ export function stripInvestigationSuggestion(answer: string): { text: string; su
   if (!new RegExp(SUGGEST_MARKER_SOURCE, "i").test(answer)) return { text: answer, suggested: false };
   const text = answer.replace(new RegExp(SUGGEST_MARKER_SOURCE, "gi"), "").replace(/\n{3,}/g, "\n\n").trim();
   return { text, suggested: true };
+}
+
+/**
+ * The line the quick model ends an answer with when the person is asking
+ * Paperclip to DO something (create, hire, change, assign, delete…) rather
+ * than to explain. The server removes it and sets `suggestBoardChat`.
+ */
+export const HELPER_WANTS_CHANGE_MARKER = "[[wants-change]]";
+const WANTS_CHANGE_MARKER_SOURCE = String.raw`\[\[\s*wants?[-_ ]change\s*\]\]`;
+
+/** Removes the "wants a change" marker from a quick answer and says whether it was there. */
+export function stripChangeRequestMarker(answer: string): { text: string; wantsChange: boolean } {
+  if (!new RegExp(WANTS_CHANGE_MARKER_SOURCE, "i").test(answer)) return { text: answer, wantsChange: false };
+  const text = answer.replace(new RegExp(WANTS_CHANGE_MARKER_SOURCE, "gi"), "").replace(/\n{3,}/g, "\n\n").trim();
+  return { text, wantsChange: true };
+}
+
+/**
+ * Openings that hand the rest of the sentence to someone else ("can you …",
+ * "please …", "I want to …"). They are removed before looking for the verb.
+ * English first; a few Norwegian ones because many Paperclip companies write
+ * Norwegian. Questions in other languages rely on the model's marker.
+ */
+const CHANGE_REQUEST_OPENERS: RegExp[] = [
+  /^(?:hey|hi|ok(?:ay)?|so|now|then|and|also)[,!]?\s+/,
+  /^(?:please|pls|plz|kindly)[,!]?\s+/,
+  /^(?:can|could|would|will)\s+(?:you|u|paperclip)(?:\s+please)?\s+/,
+  /^(?:i|we)\s+(?:want|need|would like|'d like|wanna)\s+(?:you\s+)?to\s+/,
+  /^(?:i|we)'?d\s+like\s+(?:you\s+)?to\s+/,
+  /^i\s+want\s+you\s+to\s+/,
+  /^(?:let'?s|lets)\s+/,
+  /^go\s+ahead\s+and\s+/,
+  /^help\s+me\s+(?:to\s+)?/,
+  /^(?:kan|kunne|vil)\s+du(?:\s+være\s+så\s+snill\s+(?:å\s+)?)?\s+/,
+  /^(?:vær\s+så\s+snill\s+(?:og|å)\s+|vennligst\s+)/,
+  /^(?:jeg|vi)\s+(?:vil|ønsker)\s+(?:at\s+du\s+skal\s+|å\s+)?/,
+];
+
+/**
+ * Verbs that, at the start of a request, ask for something to be changed.
+ * "write" and "draft" are left out on purpose: asking for text to put in a
+ * field is exactly what Ask is for ("Apply to field").
+ */
+const CHANGE_VERB_RE = new RegExp(
+  String.raw`^(?:` +
+    [
+      "create", "add", "hire", "fire", "employ", "recruit", "onboard", "terminate", "retire",
+      "delete", "remove", "drop", "archive", "unarchive", "restore",
+      "change", "set", "reset", "update", "edit", "modify", "rename", "replace", "switch",
+      "assign", "reassign", "unassign", "move", "transfer",
+      "enable", "disable", "activate", "deactivate", "turn\\s+(?:on|off)", "switch\\s+(?:on|off)",
+      "pause", "unpause", "resume", "restart", "start", "stop", "kill", "cancel", "close", "reopen",
+      "approve", "reject", "deny", "decline", "accept", "merge", "deploy", "publish",
+      "schedule", "reschedule", "configure", "install", "uninstall", "connect", "disconnect",
+      "invite", "promote", "demote", "raise", "lower", "increase", "decrease", "bump", "cap", "limit",
+      "set\\s*up", "make\\s+(?:a\\s+new|another|an?\\s+(?:agent|task|job|project|routine|goal|company|team))\\b",
+      "open\\s+(?:a|an)\\s+new", "spin\\s+up",
+      // Norwegian
+      "opprett", "lag\\s+(?:en|et)\\s+ny(?:tt)?", "legg\\s+til", "ansett", "si\\s+opp", "slett", "fjern", "arkiver", "endre", "bytt",
+      "sett(?:\\s+opp)?", "oppdater", "tildel", "flytt", "skru\\s+(?:på|av)", "aktiver", "deaktiver",
+      "start", "stopp", "pause", "godkjenn", "avvis", "inviter", "øk", "senk", "planlegg",
+      // ...and their infinitive forms ("kan du opprette …")
+      "opprette", "legge\\s+til", "ansette", "slette", "fjerne", "arkivere", "bytte", "sette(?:\\s+opp)?",
+      "oppdatere", "tildele", "flytte", "aktivere", "deaktivere", "starte", "stoppe", "godkjenne", "avvise",
+      "invitere", "øke", "senke", "planlegge",
+    ].join("|") +
+    String.raw`)(?=\s|$|[.,!?:;])`,
+);
+
+/** Openings that make a sentence a question about something, not a request ("how do I…", "should I…"). */
+const EXPLAIN_OPENER_RE =
+  /^(?:how|what|what's|whats|why|where|when|which|who|whose|is|are|was|were|does|do|did|should|shall|can\s+i|could\s+i|may\s+i|am\s+i|explain|tell\s+me|show\s+me|describe|hvordan|hva|hvorfor|hvor|når|hvilken|hvilke|hvem|er|kan\s+jeg|bør|skal\s+jeg|forklar)\b/;
+
+function sentenceAsksForChange(sentence: string): boolean {
+  let s = sentence.trim().toLowerCase().replace(/^[\s"'“”‘’(\[*-]+/, "");
+  if (!s) return false;
+  // Peel openers repeatedly ("ok, can you please …").
+  for (let i = 0; i < 4; i += 1) {
+    const before = s;
+    for (const re of CHANGE_REQUEST_OPENERS) s = s.replace(re, "");
+    if (s === before) break;
+  }
+  if (EXPLAIN_OPENER_RE.test(s)) return false;
+  return CHANGE_VERB_RE.test(s);
+}
+
+/**
+ * Cheap, predictable check: is this question asking Paperclip to DO
+ * something (hire, create, change a setting, assign, delete, set up a job…)
+ * rather than to explain? Looks at the start of each sentence for a request
+ * verb, after removing polite openings. "How do I hire an agent?" is a
+ * question (false); "Can you hire an agent?" is a request (true).
+ *
+ * The server combines this with the quick model's own marker, so requests
+ * this misses (other languages, unusual wording) are still caught.
+ */
+export function helperQuestionAsksForChange(message: string): boolean {
+  if (!message) return false;
+  return message
+    .split(/(?<=[.!?])\s+|\n+/)
+    .slice(0, 12)
+    .some(sentenceAsksForChange);
 }
 
 /** A record the person marked, e.g. "approval:<id>" or "agent:<id>". */
@@ -259,6 +373,11 @@ export interface HelperInvestigationView {
   agentName: string | null;
   /** What the task's runs have cost so far, in cents (Costs view). */
   costCents: number;
+  /**
+   * Text fields that were on screen when the question was asked. The panel
+   * offers "Apply to …" for the answer while such a field is still on screen.
+   */
+  applyTargets: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -339,7 +458,7 @@ export interface HelperInvestigationAgentSummary {
 
 export const helperAskTurnSchema = z.object({
   role: z.enum(["user", "assistant"]),
-  content: z.string().max(HELPER_HISTORY_TURN_MAX_CHARS),
+  content: z.string().max(HELPER_HISTORY_ACCEPT_TURN_MAX_CHARS),
 });
 
 export const helperPictureSchema = z.discriminatedUnion("kind", [
@@ -374,8 +493,8 @@ export const helperAskSchema = z
     pageRoute: z.string().max(HELPER_PAGE_ROUTE_MAX_CHARS).optional().nullable(),
     /** A saved model (model directory entry) of this company; absent = the company's helper default. */
     directoryEntryId: z.string().uuid().optional().nullable(),
-    /** Earlier turns of this panel conversation (kept in the browser only). */
-    history: z.array(helperAskTurnSchema).max(HELPER_HISTORY_MAX_TURNS * 2).optional(),
+    /** Earlier turns of this panel conversation (kept in the browser only; the server uses the last few). */
+    history: z.array(helperAskTurnSchema).max(HELPER_HISTORY_ACCEPT_MAX_ITEMS).optional(),
     /** Pictures attached to this question only (Phase 2). Needs a model that can see pictures. */
     pictures: z
       .array(helperPictureSchema)
@@ -404,6 +523,11 @@ export const startHelperInvestigationSchema = z
       .array(helperPictureSchema)
       .max(HELPER_PICTURES_MAX, `Attach at most ${HELPER_PICTURES_MAX} pictures to one question.`)
       .optional(),
+    /** Labels of the text fields on screen the answer may be put into later. */
+    applyTargets: z
+      .array(z.string().trim().min(1).max(HELPER_APPLY_TARGET_MAX_CHARS))
+      .max(HELPER_INVESTIGATION_APPLY_TARGETS_MAX)
+      .optional(),
   })
   .strict();
 export type StartHelperInvestigationRequest = z.infer<typeof startHelperInvestigationSchema>;
@@ -427,6 +551,14 @@ export interface HelperAskResponse {
    * deeper"; nothing starts until the person clicks.
    */
   suggestInvestigation: boolean;
+  /**
+   * The question asks Paperclip to DO something (create, hire, change a
+   * setting, assign, delete, set up a job…). Ask cannot; the panel then
+   * offers "Do this in Board chat" (if this person can use it). Set when the
+   * question reads like a request (helperQuestionAsksForChange) or the quick
+   * model marked it ([[wants-change]]).
+   */
+  suggestBoardChat: boolean;
 }
 
 export const updateHelperSettingsSchema = z

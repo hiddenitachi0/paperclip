@@ -58,6 +58,7 @@ const ACTIVITY_ROW_VERBS: Record<string, string> = {
   "issue.recovery_action_opened": "opened a recovery action on",
   "issue.recovery_action_resolved": "resolved the recovery action on",
   "issue.recovery_action_escalated": "escalated the recovery action on",
+  "issue.model_effort_inherited": "copied the parent task's model/effort to",
   "agent.created": "created",
   "agent.updated": "updated",
   "agent.paused": "paused",
@@ -130,6 +131,8 @@ const ACTIVITY_ROW_VERBS: Record<string, string> = {
   "company.created": "created company",
   "company.updated": "updated company",
   "company.archived": "archived",
+  "company.marked_migrated": "marked as moved to another Paperclip:",
+  "company.migration_undone": "undid the move and resumed",
   "company.reactivated": "reactivated",
   "company.budget_updated": "updated budget for",
   // DUR-3973: tasks waiting on an agent that cannot pick them up. The notice's

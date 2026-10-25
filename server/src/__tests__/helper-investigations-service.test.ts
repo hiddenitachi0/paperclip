@@ -27,6 +27,7 @@ import {
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import {
   buildHelperInvestigationDescription,
+  extractHelperInvestigationApplyTargets,
   extractHelperInvestigationQuestion,
   helperInvestigationService,
   helperInvestigationStatusOf,
@@ -379,6 +380,46 @@ describeDb("helper investigations (Ask Paperclip, Phase 3)", () => {
     expect((await svc.list(otherCompanyId, local("maria"), { canConfigure: false })).investigations.map((i) => i.question)).toEqual(["Other company"]);
   });
 
+  it("remembers which fields the answer may be put into, so the panel can offer Apply after a reload", async () => {
+    const companyId = await seedCompany();
+    const agentId = await seedAgent(companyId);
+    await setUp(companyId, agentId);
+    const { svc } = service();
+
+    const started = await svc.start({
+      companyId,
+      actor: local("maria"),
+      question: "Write a better description for this agent",
+      applyTargets: ["Description", "Description", "  Odd  --> <b>label</b> ", "Key sk-abcdefghijklmnopqrstuv"],
+    });
+    expect(started.applyTargets).toEqual(["Description", "Odd --> <b>label</b>", "Key [hidden]"]);
+    const [task] = await db.select().from(issues).where(eq(issues.id, started.id));
+    // The agent is told to put text for a field in one fenced block; the label can never close the hidden marker.
+    expect(task!.description).toContain("## Fields they can fill with your answer");
+    expect(task!.description).toContain("ONE fenced block");
+    const lastLine = task!.description!.trimEnd().split("\n").pop()!;
+    expect(lastLine.startsWith("<!-- helper-apply-targets:")).toBe(true);
+    expect(lastLine.indexOf("-->")).toBe(lastLine.length - 3);
+    expect(lastLine).not.toContain("<b>");
+    expect(task!.description).not.toContain("sk-abcdefghijklmnopqrstuv");
+
+    await db.update(issues).set({ status: "done", completedAt: new Date() }).where(eq(issues.id, started.id));
+    await db.insert(issueComments).values({
+      companyId,
+      issueId: started.id,
+      authorType: "agent",
+      authorAgentId: agentId,
+      body: "Here is a clearer one:\n\n```\nReads cards and explains them.\n```",
+    });
+    const [listed] = (await svc.list(companyId, local("maria"), { canConfigure: false })).investigations;
+    expect(listed).toMatchObject({ status: "done", applyTargets: ["Description", "Odd --> <b>label</b>", "Key [hidden]"] });
+    expect(listed!.answer).toContain("Reads cards and explains them.");
+
+    // Older investigations (no marker) simply offer no Apply.
+    const plain = await svc.start({ companyId, actor: local("maria"), question: "Why did the run fail?" });
+    expect(plain.applyTargets).toEqual([]);
+  });
+
   it("estimates time and cost from the agent's own recent finished tasks", async () => {
     const companyId = await seedCompany();
     const agentId = await seedAgent(companyId);
@@ -622,6 +663,31 @@ describeDb("helper investigations (Ask Paperclip, Phase 3)", () => {
     expect(system).toContain("Never say that you started anything yourself");
     expect(await db.select().from(issues)).toHaveLength(0);
   });
+
+  it("flags questions that ask Paperclip to make a change, so the panel can offer Board chat", async () => {
+    const companyId = await seedCompany();
+    const answerWith = (text: string) =>
+      vi.fn().mockResolvedValue({ content: [{ type: "text", text }], usage: { input_tokens: 5, output_tokens: 5 }, stop_reason: "end_turn" });
+    const ask = (create: ReturnType<typeof answerWith>, message: string) =>
+      helperService(db, { createModelClient: () => ({ messages: { create } }) as never }).ask({ companyId, userId: "maria", message });
+
+    // A request, by the plain check on the question (the model did not mark it).
+    const request = await ask(answerWith("I can't change things. Go to Agents → Hire."), "Can you hire a marketing agent for me?");
+    expect(request.suggestBoardChat).toBe(true);
+
+    // The model marked it (wording the plain check does not know); the marker never reaches the person.
+    const markedCreate = answerWith(`I can't do that myself. Open the agent and press Pause.\n\n[[wants-change]]`);
+    const marked = await ask(markedCreate, "Ola should take a break from tonight's runs");
+    expect(marked.suggestBoardChat).toBe(true);
+    expect(marked.answer).toBe("I can't do that myself. Open the agent and press Pause.");
+    expect(markedCreate.mock.calls[0]![0].system as string).toContain("[[wants-change]]");
+
+    // A question about how something works is not flagged.
+    const question = await ask(answerWith("It decides how often the agent wakes up."), "What does the heartbeat interval do?");
+    expect(question.suggestBoardChat).toBe(false);
+    expect(question.suggestInvestigation).toBe(false);
+    expect(await db.select().from(issues)).toHaveLength(0);
+  });
 });
 
 describe("helper investigation pieces", () => {
@@ -640,6 +706,14 @@ describe("helper investigation pieces", () => {
     const description = buildHelperInvestigationDescription({ question, context: "```code```" });
     expect(extractHelperInvestigationQuestion(description, "Ask Paperclip: Is")).toBe(question);
     expect(extractHelperInvestigationQuestion("edited by hand", "Ask Paperclip: Short title")).toBe("Short title");
+  });
+
+  it("reads the Apply fields back, and ignores a missing or broken marker", () => {
+    const description = buildHelperInvestigationDescription({ question: "q", applyTargets: ["Title", "A & B -->"] });
+    expect(extractHelperInvestigationApplyTargets(description)).toEqual(["Title", "A & B -->"]);
+    expect(extractHelperInvestigationApplyTargets(buildHelperInvestigationDescription({ question: "q" }))).toEqual([]);
+    expect(extractHelperInvestigationApplyTargets("<!-- helper-apply-targets: not json -->")).toEqual([]);
+    expect(extractHelperInvestigationApplyTargets(null)).toEqual([]);
   });
 
   it("strips the suggestion marker only when it is there", () => {

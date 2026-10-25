@@ -34,11 +34,13 @@ import {
   QUICK_AGENT_FIELDS,
   PERSONA_JOB_FIELDS,
   BROWSER_ACCESS_FIELDS,
+  REACTION_LEARNING_FIELDS,
   parseAgentLimits,
   laneAProviderModelIssue,
   laneABackupRoutingIssues,
   normalizeLaneAProvider,
   readLaneAWebSearchSwitch,
+  readLaneAPictureModelId,
   readLaneABrowserAccess,
   browserAccessLevelRank,
 } from "@paperclipai/shared";
@@ -1690,6 +1692,13 @@ export function agentRoutes(
     existingAdapterConfig: unknown,
   ) {
     if (req.actor.type !== "agent") return;
+    // "Use this model for picture requests" spends on another model (often a
+    // paid cloud one): board-only too, on the same write paths.
+    if (readLaneAPictureModelId(requestedAdapterConfig) !== readLaneAPictureModelId(existingAdapterConfig)) {
+      throw forbidden(
+        'Agent-authenticated callers cannot change a quick agent\'s "Use this model for picture requests" setting (adapterConfig.laneA.pictureModelId). Only board-authenticated callers can.',
+      );
+    }
     const requested = readLaneAProviderStash(requestedAdapterConfig);
     const existingStash = readLaneAProviderStash(existingAdapterConfig);
     if (
@@ -1733,6 +1742,20 @@ export function agentRoutes(
     if (req.actor.type !== "agent" || !patchTouchesBrowserAccessFields(patchData)) return;
     throw forbidden(
       `Agent-authenticated callers cannot set browser access on an agent (${BROWSER_ACCESS_FIELDS.join(", ")}). Only board-authenticated callers can.`,
+    );
+  }
+
+  // DUR-4829: the "learn from emoji reactions" switch is board-only on every
+  // write path, even on the agent's own record: an agent that could flip it
+  // could cut off its person's feedback, or undo the operator's "off".
+  function patchTouchesReactionLearningFields(patchData: Record<string, unknown>) {
+    return REACTION_LEARNING_FIELDS.some((key) => hasOwn(patchData, key));
+  }
+
+  function assertNoAgentReactionLearningFieldMutation(req: Request, patchData: Record<string, unknown>) {
+    if (req.actor.type !== "agent" || !patchTouchesReactionLearningFields(patchData)) return;
+    throw forbidden(
+      `Agent-authenticated callers cannot change reaction learning on an agent (${REACTION_LEARNING_FIELDS.join(", ")}). Only board-authenticated callers can.`,
     );
   }
 
@@ -2001,6 +2024,11 @@ export function agentRoutes(
   // config revisions elsewhere in this file). redactEventPayload builds a new
   // object rather than mutating in place, so this never touches the
   // underlying row -- a board/self read of the same agent is unaffected.
+  /** Board chat (signed-in servers): its reads are shown to a model, never live credentials. */
+  function isBoardChatActor(req: Request) {
+    return req.actor.source === "board_chat" || req.actor.source === "board_chat_confirmed";
+  }
+
   function redactForSecretMaskedAgentView(agent: Awaited<ReturnType<typeof svc.getById>>) {
     if (!agent) return null;
     return {
@@ -2447,6 +2475,12 @@ export function agentRoutes(
         );
         return;
       }
+      // Board chat reads go to a model (possibly a third party's), so they
+      // get the same masked view as a peer agent: no live credentials.
+      if (isBoardChatActor(req)) {
+        res.json(result.map((agent) => redactForSecretMaskedAgentView(agent)));
+        return;
+      }
       res.json(result);
       return;
     }
@@ -2685,7 +2719,7 @@ export function agentRoutes(
     // grant, but not itself the target agent) gets every field except live
     // credentials -- board callers and an agent reading its own record still
     // get the real, unmasked config.
-    if (!isSelf && req.actor.type === "agent") {
+    if ((!isSelf && req.actor.type === "agent") || isBoardChatActor(req)) {
       res.json(await buildAgentDetail(agent, { maskSecrets: true }));
       return;
     }
@@ -3692,6 +3726,7 @@ export function agentRoutes(
     assertNoAgentPersonaJobFieldMutation(req, patchData);
     // DUR-4013: same for the browser-access switch, even on its own record.
     assertNoAgentBrowserAccessFieldMutation(req, patchData);
+    assertNoAgentReactionLearningFieldMutation(req, patchData);
     if (patchTouchesLaneAFields(patchData)) {
       await assertCanManageLaneAFlag(req, existing);
       // DUR-3997: the model must fit the provider. A patch may carry one
@@ -3951,7 +3986,13 @@ export function agentRoutes(
       action: "agent.updated",
       entityType: "agent",
       entityId: agent.id,
-      details: appendAgentAuditDetails(summarizeAgentUpdateDetails(patchData), existing, agent),
+      details: {
+        ...appendAgentAuditDetails(summarizeAgentUpdateDetails(patchData), existing, agent),
+        // DUR-4829: who switched reaction learning, and which way.
+        ...(existing.reactionLearningEnabled !== agent.reactionLearningEnabled
+          ? { reactionLearningEnabled: { from: existing.reactionLearningEnabled, to: agent.reactionLearningEnabled } }
+          : {}),
+      },
     });
 
     // DUR-132 item 6: advisory-only -- the save already succeeded above. There

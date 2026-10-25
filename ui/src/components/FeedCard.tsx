@@ -130,6 +130,10 @@ function formatVerb(
       return "updated company";
     case "company.archived":
       return "archived company";
+    case "company.marked_migrated":
+      return "marked the company as moved to another Paperclip";
+    case "company.migration_undone":
+      return "undid the move and resumed the company here";
     case "company.budget_updated":
       return "updated company budget";
 

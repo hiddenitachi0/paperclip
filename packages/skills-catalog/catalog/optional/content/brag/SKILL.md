@@ -3,7 +3,8 @@ name: brag
 description: Turn the current project website into a short, polished, shareable launch video using Hyperframes. Use when someone says "/brag", "let's brag about this", "make a launch video", "turn this into a video", or wants to share what they built. Reads the project code directly — no live URL or screenshots needed.
 key: paperclipai/optional/content/brag
 recommendedForRoles:
-  - brag
+  - content-producer
+  - marketing
   - devrel
   - product
 tags:
@@ -24,6 +25,8 @@ Paperclip phase 1 does not run `npx hyperframes` at runtime; do not
 download Hyperframes — use the brag-slim path (slim.md) to build the video
 with tools already on the machine.
 -->
+
+> **PAPERCLIP RULE — ONLY WHEN A PERSON ASKS.** Run this skill only when a person asked for a video on the task (in the task they wrote or in their comment). Never start a brag video on your own initiative, for example after finishing a task. A person can instead tick "Make a short brag video when this is done" on a task; Paperclip then makes it automatically and you do nothing.
 
 # /brag
 

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { VIDEO_STORYLINE_ASPECTS } from "./video-storyline-clips.js";
 
 /**
  * DUR-4127 (backend half of DUR-4095, video storylines): types, limits and
@@ -34,14 +35,39 @@ export const VIDEO_QUALITY_ISSUE_CODES = [
   "silent_audio",
   "clipped_audio",
   "check_error",
+  // The film file has no picture at all (or cannot be read).
+  "missing_video_stream",
+  // Putting the film together failed more than once in a row.
+  "stitch_failed",
 ] as const;
 export type VideoQualityIssueCode = (typeof VIDEO_QUALITY_ISSUE_CODES)[number];
+
+/**
+ * Most findings are warnings: the film is still made and can be downloaded,
+ * the person just sees what the check noticed (a loud peak, a quiet
+ * stretch, a dark moment). Only a truly broken film blocks: no picture, the
+ * wrong length, or a film that could not be put together at all.
+ */
+export const VIDEO_QUALITY_BLOCKING_ISSUE_CODES: readonly VideoQualityIssueCode[] = ["missing_video_stream", "duration_mismatch", "stitch_failed"];
+
+export type VideoQualityIssueSeverity = "warning" | "blocking";
 
 export interface VideoStorylineQualityIssue {
   code: VideoQualityIssueCode;
   message: string;
   shotIndex: number | null;
   timeSeconds: number | null;
+  /** Derived from the code (see videoQualityIssueSeverity); stored rows from before this field existed have none. */
+  severity?: VideoQualityIssueSeverity;
+}
+
+export function videoQualityIssueSeverity(issue: { code: string }): VideoQualityIssueSeverity {
+  return (VIDEO_QUALITY_BLOCKING_ISSUE_CODES as readonly string[]).includes(issue.code) ? "blocking" : "warning";
+}
+
+/** True when any finding means the film is really broken (not just worth a look). */
+export function hasBlockingVideoQualityIssue(issues: ReadonlyArray<{ code: string }> | null | undefined): boolean {
+  return (issues ?? []).some((issue) => videoQualityIssueSeverity(issue) === "blocking");
 }
 
 export const VIDEO_SHOT_STATUSES = ["draft", "queued", "rendering", "done", "failed"] as const;
@@ -137,8 +163,15 @@ export const VIDEO_PROVIDER_COST_CENTS_PER_SECOND: Record<VideoStorylineProvider
 
 // ─── Clip lengths per provider/model ───────────────────────────────────────
 
-/** Kling (every Fal default video model in this codebase) only accepts these clip lengths; anything else makes Fal refuse the job. */
+/** Kling 1.6 / 2.1 (every Fal default video model in this codebase) only accepts these clip lengths; anything else makes Fal refuse the job. */
 export const FAL_KLING_ALLOWED_DURATIONS_SECONDS: readonly number[] = [5, 10];
+/** Kling 3.0 / O3 (Standard and Pro) take any whole number of seconds from 3 to 15. */
+export const FAL_KLING_V3_ALLOWED_DURATIONS_SECONDS: readonly number[] = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+
+/** A Fal Kling 3.0 / O3 model id. */
+export function isFalKlingV3Model(model: string | null | undefined): boolean {
+  return !!model && /kling-video\/(v3|o3)\//i.test(model);
+}
 
 /**
  * The clip lengths (seconds) a provider/model really accepts, when this
@@ -147,6 +180,7 @@ export const FAL_KLING_ALLOWED_DURATIONS_SECONDS: readonly number[] = [5, 10];
  * confirmed). `model` null = the provider's default model.
  */
 export function videoModelAllowedDurations(providerId: VideoStorylineProvider, model: string | null | undefined): readonly number[] | null {
+  if (providerId === "fal" && isFalKlingV3Model(model)) return FAL_KLING_V3_ALLOWED_DURATIONS_SECONDS;
   if (providerId === "fal" && (!model || /kling/i.test(model))) return FAL_KLING_ALLOWED_DURATIONS_SECONDS;
   return null;
 }
@@ -163,6 +197,16 @@ export function videoRenderDurationSeconds(providerId: VideoStorylineProvider, m
   if (!allowed || allowed.length === 0) return requestedSeconds;
   const sorted = [...allowed].sort((a, b) => a - b);
   return sorted.find((value) => value >= requestedSeconds) ?? sorted[sorted.length - 1]!;
+}
+
+/**
+ * The text a shot's video call gets: the shot description plus its camera
+ * notes. Camera notes used to be dropped on the way to the video model, so
+ * "slow push-in" never reached it.
+ */
+export function videoShotVideoPrompt(prompt: string, cameraNotes: string | null | undefined): string {
+  const camera = cameraNotes?.trim();
+  return camera ? `${prompt.trim()}\n\nCamera: ${camera}` : prompt;
 }
 
 export interface VideoCostEstimateShotInput {
@@ -261,6 +305,8 @@ export const createVideoStorylineSchema = z
     musicAssetId: storylineFields.musicAssetId.optional().default(null),
     musicSourceKey: storylineFields.musicSourceKey.optional().default(null),
     musicVolumeDb: storylineFields.musicVolumeDb.optional().default(VIDEO_MUSIC_DEFAULT_VOLUME_DB),
+    /** Phase 2: the picture shape, chosen before anything is rendered (16:9 when left out). */
+    aspect: z.enum(VIDEO_STORYLINE_ASPECTS).optional(),
   })
   .strict()
   .refine((value) => !(value.musicAssetId && value.musicSourceKey), {

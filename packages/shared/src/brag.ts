@@ -94,3 +94,50 @@ export const updateBragSceneSchema = z
   .strict()
   .refine((v) => v.action !== "edit" || !!v.description, { message: "Say what the scene should show.", path: ["description"] });
 export type UpdateBragSceneInput = z.infer<typeof updateBragSceneSchema>;
+
+/**
+ * "Brag video when this task is done": a person ticks a box on a task and that
+ * tick is stored on the task as a pre-approval. When the task reaches done the
+ * server makes one short video about it, under that person's authority and
+ * never above the cost cap recorded at tick time. Agents can never set it.
+ */
+export const BRAG_ON_DONE_LENGTH_SECONDS = 30;
+/** Headroom on top of the 30-second estimate for the default cap. */
+export const BRAG_ON_DONE_COST_MARGIN = 1.5;
+/** Default per-video cap when the company has not set its own. */
+export const BRAG_ON_DONE_DEFAULT_MAX_COST_CENTS = Math.ceil(
+  estimateBragCostCents({ lengthSeconds: BRAG_ON_DONE_LENGTH_SECONDS, music: false }).estimatedCostCents * BRAG_ON_DONE_COST_MARGIN,
+);
+/** Highest cap a company may set ($100), so a typo cannot pre-approve a fortune. */
+export const BRAG_ON_DONE_MAX_COST_CENTS_LIMIT = 10_000;
+
+export function resolveBragOnDoneMaxCostCents(companySettingCents: number | null | undefined): number {
+  return typeof companySettingCents === "number" && companySettingCents > 0
+    ? companySettingCents
+    : BRAG_ON_DONE_DEFAULT_MAX_COST_CENTS;
+}
+
+/** What one finished-task video is expected to cost (no music). */
+export function estimateBragOnDoneCostCents(): number {
+  return estimateBragCostCents({ lengthSeconds: BRAG_ON_DONE_LENGTH_SECONDS, music: false }).estimatedCostCents;
+}
+
+export const BRAG_ON_DONE_OUTCOMES = ["running", "accepted", "completed", "failed", "over_cap", "turned_off"] as const;
+export type BragOnDoneOutcome = (typeof BRAG_ON_DONE_OUTCOMES)[number];
+
+/** Stored on the task. Only a person can create it; it is used at most once. */
+export interface IssueBragPreapproval {
+  approvedByUserId: string;
+  approvedAt: string;
+  maxCostCents: number;
+  lengthSeconds: number;
+  /** Set once, when the task first reached done and the video was started. Never cleared. */
+  triggeredAt?: string | null;
+  bragJobId?: string | null;
+  outcome?: BragOnDoneOutcome | null;
+  outcomeMessage?: string | null;
+  videoFileId?: string | null;
+  /** Set when a person answered "make it anyway" on the over-cap question. */
+  acceptedByUserId?: string | null;
+  acceptedMaxCostCents?: number | null;
+}

@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { registerChatCommands } from "../commands/client/chat.js";
+import { Readable } from "node:stream";
+import { registerChatCommands, runChatAttach } from "../commands/client/chat.js";
 
 // DUR-3978: the Telegram bridge talks to agents through these two commands.
 
@@ -269,5 +270,44 @@ describe("chat commands", () => {
 
     await run(["chat", "reaction", "-C", COMPANY_ID, "--event", JSON.stringify(event), "--json"]);
     expect(JSON.parse(printed.pop()!)).toMatchObject({ ok: false, status: 409 });
+  });
+
+  it("sends the photos attached to a message as file ids", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ lane: "a", result: { response: "ok" }, taskRef: null }));
+    vi.stubGlobal("fetch", fetchMock);
+    await run(["chat", "send", AGENT_ID, "-C", COMPANY_ID, "--message", "alter this", "--attachment", ISSUE_A, "--attachment", ISSUE_B, "--json"]);
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      companyId: COMPANY_ID,
+      message: "alter this",
+      attachmentFileIds: [ISSUE_A, ISSUE_B],
+    });
+  });
+
+  it("chat attach stores a photo from standard input in the company's Files under a chat-photo name", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: ISSUE_A, contentType: "image/jpeg" }, 201));
+    vi.stubGlobal("fetch", fetchMock);
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]);
+    const outcome = await runChatAttach(
+      { companyId: COMPANY_ID, apiBase: "http://localhost:3100", apiKey: "board-token", stdin: true, json: true } as never,
+      { stdin: Readable.from([jpeg.toString("base64")]), now: new Date("2026-10-10T12:00:00Z") },
+    );
+    expect(outcome).toEqual({ ok: true, fileId: ISSUE_A, contentType: "image/jpeg", byteSize: jpeg.length });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`http://localhost:3100/api/companies/${COMPANY_ID}/files`);
+    const form = fetchMock.mock.calls[0]?.[1]?.body as FormData;
+    const file = form.get("file") as File;
+    expect(file.name).toBe("chat-photo-20261010-120000.jpg");
+    expect(file.type).toBe("image/jpeg");
+    expect(Buffer.from(await file.arrayBuffer())).toEqual(jpeg);
+  });
+
+  it("chat attach refuses anything that is not a JPEG, PNG or WebP picture without calling the server", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const outcome = await runChatAttach(
+      { companyId: COMPANY_ID, apiBase: "http://localhost:3100", apiKey: "board-token", stdin: true, json: true } as never,
+      { stdin: Readable.from([Buffer.from("%PDF-1.7").toString("base64")]) },
+    );
+    expect(outcome).toMatchObject({ ok: false, status: 415 });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

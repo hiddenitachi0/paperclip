@@ -23,6 +23,7 @@ import { isMergePrApprovalPayload, securityReviewService } from "./security-revi
 import { notifyHireApproved } from "./hire-hook.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { describeToolCapability, summarizeMcpServer } from "./agent-tool-audit.js";
+import { isUnsupportedDeployLikeKind } from "./deploy-workspace.js";
 
 const POSTGRES_UUID_TEXT_RE = /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i;
 
@@ -90,6 +91,22 @@ const REPORT_SCRIPT_CARD_FILED_ELSEWHERE =
   "Report calculation approval cards can only be filed by asking for approval on the calculation itself " +
   "(the card is built from the stored code). To change the code, draft a new version and ask for approval again";
 
+/**
+ * Crypto wallet payment cards (kind "crypto_wallet_tx") are filed only by
+ * cryptoWalletService from its own transaction row, never through create():
+ * a card someone else wrote could describe a different payment than the one
+ * that would be sent. Approving one is owner/admin-only on the card itself
+ * (routes/approvals.ts) -- see isApprovalCardOnlyKind.
+ */
+export const CRYPTO_WALLET_TX_APPROVAL_KIND = "crypto_wallet_tx";
+
+export function isCryptoWalletTxApproval(approval: Pick<typeof approvals.$inferSelect, "type" | "payload">): boolean {
+  return approval.type === "request_board_approval" && approval.payload?.kind === CRYPTO_WALLET_TX_APPROVAL_KIND;
+}
+
+const CRYPTO_WALLET_CARD_FILED_ELSEWHERE =
+  "Crypto wallet payment cards can only be filed by the wallet itself, when an agent asks to pay. Use the agent's wallet tools instead";
+
 const REPORT_SCRIPT_DECISION_ELSEWHERE =
   "A report calculation can only be approved by a company owner or admin from its approval card: approving runs its saved examples first and switches it on only if they all match";
 
@@ -121,7 +138,33 @@ export interface ApprovalSecurityReviewBypass {
 export interface ApprovalDecisionOptions {
   crossCompanyInstruction?: CrossCompanyInstructionDecisionHooks;
   securityReviewBypass?: ApprovalSecurityReviewBypass;
+  /**
+   * Set ONLY by POST /approvals/:id/approve, after its own per-kind checks
+   * (owner/admin for host actions, the unsupported deploy-kind refusal).
+   * Without it, approving a kind that must be decided on its own card is
+   * refused here -- see APPROVAL_CARD_ONLY below.
+   */
+  decidedOnApprovalCard?: boolean;
 }
+
+/**
+ * Kinds whose approval starts something on the host (a deploy, a host
+ * action) or whose approve route carries checks no other path repeats. Any
+ * approve() call that is not the approvals route itself -- a linked
+ * confirmation card being accepted, automation, a future caller -- is
+ * refused for these, whoever the actor is (security review of PR #625).
+ * merge_pr, report_script_version and cross_company_instruction are guarded
+ * here too, by their own checks further down (security review gate,
+ * approved-version digest, decision hooks).
+ */
+export function isApprovalCardOnlyKind(approval: Pick<typeof approvals.$inferSelect, "type" | "payload">): boolean {
+  if (approval.type !== "request_board_approval") return false;
+  const kind = approval.payload?.kind;
+  return kind === "operator_action" || kind === "deploy" || kind === CRYPTO_WALLET_TX_APPROVAL_KIND || isUnsupportedDeployLikeKind(kind);
+}
+
+const APPROVAL_CARD_ONLY_DECISION_ELSEWHERE =
+  "This card can only be approved on the approval card itself (deploys and host actions need the approval page's own checks)";
 
 const CROSS_COMPANY_DECISION_ELSEWHERE =
   "An instruction from another company can only be approved or declined from this company's approvals page";
@@ -197,6 +240,11 @@ export function approvalService(db: Db) {
     // before anything is written, and the card stays where it is.
     if (isCrossCompanyInstructionApproval(existing) && !options.crossCompanyInstruction) {
       throw unprocessable(CROSS_COMPANY_DECISION_ELSEWHERE, { kind: "cross_company_instruction" });
+    }
+    if (targetStatus === "approved" && isApprovalCardOnlyKind(existing) && !options.decidedOnApprovalCard) {
+      throw unprocessable(APPROVAL_CARD_ONLY_DECISION_ELSEWHERE, {
+        kind: (existing.payload as Record<string, unknown> | null)?.kind,
+      });
     }
     if (targetStatus === "approved") {
       await assertSecurityReviewClearedOrBypassed(existing, options);
@@ -522,6 +570,9 @@ export function approvalService(db: Db) {
       // that would run.
       if (isReportScriptVersionApproval({ type: data.type, payload: data.payload })) {
         throw unprocessable(REPORT_SCRIPT_CARD_FILED_ELSEWHERE, { kind: "report_script_version" });
+      }
+      if (isCryptoWalletTxApproval({ type: data.type, payload: data.payload })) {
+        throw unprocessable(CRYPTO_WALLET_CARD_FILED_ELSEWHERE, { kind: CRYPTO_WALLET_TX_APPROVAL_KIND });
       }
       return db
         .insert(approvals)
@@ -867,6 +918,9 @@ export function approvalService(db: Db) {
       }
       if (isReportScriptVersionApproval(existing) || (payload && isReportScriptVersionApproval({ type: existing.type, payload }))) {
         throw unprocessable(REPORT_SCRIPT_CARD_FILED_ELSEWHERE, { kind: "report_script_version" });
+      }
+      if (isCryptoWalletTxApproval(existing) || (payload && isCryptoWalletTxApproval({ type: existing.type, payload }))) {
+        throw unprocessable(CRYPTO_WALLET_CARD_FILED_ELSEWHERE, { kind: CRYPTO_WALLET_TX_APPROVAL_KIND });
       }
 
       const now = new Date();

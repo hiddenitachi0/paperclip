@@ -47,6 +47,7 @@ import { GoalAdoption } from "./pages/GoalAdoption";
 import { Activity } from "./pages/Activity";
 import { Inbox } from "./pages/Inbox";
 import { BoardChat } from "./pages/BoardChat";
+import { BoardChatAvailabilityGate } from "./components/BoardChatAvailabilityGate";
 import { CompanySettings } from "./pages/CompanySettings";
 import { CompanyConnections } from "./pages/CompanyConnections";
 import { CompanyModels } from "./pages/CompanyModels";
@@ -61,6 +62,7 @@ import { CompanySkills } from "./pages/CompanySkills";
 import { CompanyMcpTools } from "./pages/CompanyMcpTools";
 import { Personas } from "./pages/Personas";
 import { PersonaDetail } from "./pages/PersonaDetail";
+import { PersonaEdit } from "./pages/PersonaEdit";
 import { Positions } from "./pages/Positions";
 import { Secrets } from "./pages/Secrets";
 import { CompanyExport } from "./pages/CompanyExport";
@@ -80,6 +82,7 @@ import { PluginSettingsRoute } from "./pages/PluginSettingsRoute";
 import { AdapterManager } from "./pages/AdapterManager";
 import { PluginPage } from "./pages/PluginPage";
 import { OrgChart } from "./pages/OrgChart";
+import { Tower } from "./pages/Tower";
 import { WorkflowMap } from "./pages/WorkflowMap";
 import { NewAgent } from "./pages/NewAgent";
 import { AuthPage } from "./pages/Auth";
@@ -145,12 +148,15 @@ function boardRoutes() {
       <Route path="skills/*" element={<CompanySkills />} />
       <Route path="tools" element={<CompanyMcpTools />} />
       <Route path="personas" element={<Personas />} />
+      <Route path="personas/new" element={<PersonaEdit />} />
       <Route path="personas/:personaId" element={<PersonaDetail />} />
+      <Route path="personas/:personaId/edit" element={<PersonaEdit />} />
       <Route path="positions" element={<Positions />} />
       <Route path="settings" element={<LegacySettingsRedirect />} />
       <Route path="settings/*" element={<LegacySettingsRedirect />} />
       <Route path="plugins/:pluginId" element={<PluginPage />} />
       <Route path="org" element={<OrgChart />} />
+      <Route path="tower" element={<Tower />} />
       <Route path="agents" element={<Navigate to="/agents/all" replace />} />
       <Route path="agents/all" element={<Agents />} />
       <Route path="agents/active" element={<Agents />} />
@@ -257,7 +263,14 @@ function boardRoutes() {
           conference-room one; the master-level mount above it still serves
           `/artifacts` in both modes. */}
       <Route element={<ConferenceRoomChatGate />}>
-        <Route path="board-chat" element={<BoardChat />} />
+        <Route
+          path="board-chat"
+          element={
+            <BoardChatAvailabilityGate>
+              <BoardChat />
+            </BoardChatAvailabilityGate>
+          }
+        />
         <Route path="files" element={<Artifacts />} />
         <Route path="artifacts" element={<LegacyArtifactsRedirect />} />
       </Route>
@@ -504,6 +517,7 @@ export function App() {
           <Route path="routines" element={<UnprefixedBoardRedirect />} />
           <Route path="watchers" element={<UnprefixedBoardRedirect />} />
           <Route path="overlaps" element={<UnprefixedBoardRedirect />} />
+          <Route path="tower" element={<UnprefixedBoardRedirect />} />
           <Route path="routines/:routineId" element={<UnprefixedBoardRedirect />} />
           <Route path="review-queue" element={<UnprefixedBoardRedirect />} />
           <Route path="learnings" element={<UnprefixedBoardRedirect />} />

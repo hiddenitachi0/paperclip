@@ -9,9 +9,17 @@ import { PERMISSION_KEYS } from "@paperclipai/shared";
 import { mcpServerConfigSchema } from "@paperclipai/shared/validators/agent";
 import { validate } from "../middleware/validate.js";
 import { forbidden, notFound } from "../errors.js";
-import { assertBoard, assertCompanyAccess } from "./authz.js";
+import { assertBoard, assertCompanyAccess, getActorInfo, isCompanyOwnerOrAdmin } from "./authz.js";
 import { companyScope, companyScopeFromParam } from "../middleware/company-scope.js";
 import type { RoleMutationActor } from "../services/agent-roles.js";
+import {
+  addPositionFromCatalogue,
+  catalogueSkillIds,
+  listPositionCatalogue,
+} from "../services/position-catalogue.js";
+import { companySkillService } from "../services/company-skills.js";
+import { logActivity } from "../services/activity-log.js";
+import { AGENT_REQUEST_RIGHT_KEYS } from "../services/agent-request-rights.js";
 import {
   createRole,
   listRoles,
@@ -135,6 +143,81 @@ export function agentRoleRoutes(rawDb: Db) {
       const role = await createRole(db, companyId, req.body);
       res.status(201).json(role);
     }
+  );
+
+  // ── Ready-to-hire catalogue ("Add from catalogue") ─────────────────────
+  // Lists the built-in position templates, marking the ones this company
+  // already has, and adds one: the position, its one-click jobs, and the
+  // catalogue skills it needs. Board-only, like every route in this file.
+  router.get(
+    "/companies/:companyId/agent-roles/catalogue",
+    companyScopeFromParam(rawDb, (req, companyId) => {
+      assertBoard(req);
+      return assertCompanyAccess(req, companyId);
+    }),
+    async (req, res) => {
+      res.json(await listPositionCatalogue(db, req.params.companyId as string));
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/agent-roles/catalogue/:templateKey",
+    companyScopeFromParam(rawDb, (req, companyId) => {
+      assertBoard(req);
+      return assertCompanyAccess(req, companyId);
+    }),
+    validate(z.object({ installSkills: z.boolean().optional().default(true) })),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const result = await addPositionFromCatalogue(db, companyId, req.params.templateKey as string);
+
+      // Install the catalogue skills the position needs, best effort: a skill
+      // that cannot be installed (for example one that ships scripts and is
+      // blocked by the install audit) is reported back, never fatal.
+      const installedSkills: string[] = [];
+      const skillWarnings: string[] = [];
+      if (req.body.installSkills !== false) {
+        const skills = companySkillService(db, rawDb);
+        for (const { key, catalogSkillId } of catalogueSkillIds(result.missingSkillKeys)) {
+          try {
+            await skills.installFromCatalog(companyId, { catalogSkillId });
+            installedSkills.push(key);
+          } catch (err) {
+            const reason = err instanceof Error ? err.message : String(err);
+            skillWarnings.push(`Could not add the skill ${key}: ${reason}`);
+          }
+        }
+      }
+      const missingSkillKeys = result.missingSkillKeys.filter((key) => !installedSkills.includes(key));
+
+      const actor = getActorInfo(req);
+      await logActivity(db, {
+        companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "position.added_from_catalogue",
+        entityType: "agent_role",
+        entityId: result.position.id,
+        details: {
+          templateKey: req.params.templateKey,
+          name: result.position.name,
+          createdPosition: result.createdPosition,
+          createdJobs: result.createdJobs,
+          linkedJobs: result.linkedJobs,
+          installedSkills,
+          missingSkillKeys,
+        },
+      });
+
+      res.status(result.createdPosition ? 201 : 200).json({
+        ...result,
+        installedSkills,
+        missingSkillKeys,
+        warnings: skillWarnings,
+      });
+    },
   );
 
   // Get a single role (no company check — the role row itself carries companyId,
@@ -264,12 +347,25 @@ export function agentRoleRoutes(rawDb: Db) {
     res.json(await removeAgentToolOverride(db, agentId, req.params.toolName as string, actorFor(req)));
   });
 
+  // The two "ask" rights (deploys:request / merges:request) are owner/admin
+  // only, the same rule as PUT /agents/:id/request-rights -- this generic
+  // override route must not be a side door around it.
+  async function assertMayChangeRight(req: Request, agentId: string, permissionKey: string) {
+    if (!AGENT_REQUEST_RIGHT_KEYS.includes(permissionKey as (typeof AGENT_REQUEST_RIGHT_KEYS)[number])) return;
+    const [agent] = await rawDb.select({ companyId: agents.companyId }).from(agents).where(eq(agents.id, agentId));
+    if (!agent) throw notFound("Agent not found");
+    if (!isCompanyOwnerOrAdmin(req, agent.companyId)) {
+      throw forbidden("Only the company's owner or an admin can change what an agent may ask for.");
+    }
+  }
+
   router.post(
     "/agents/:agentId/role/rights",
     scopeFromAgentIdParam(true),
     validate(grantSchema),
     async (req, res) => {
       const agentId = req.params.agentId as string;
+      await assertMayChangeRight(req, agentId, req.body.permissionKey);
       const grantedByUserId = (req as { actor?: { userId?: string | null } }).actor?.userId ?? null;
       const updated = await addAgentRightOverride(db, agentId, req.body, actorFor(req), grantedByUserId, rawDb);
       res.json(updated);
@@ -278,6 +374,7 @@ export function agentRoleRoutes(rawDb: Db) {
 
   router.delete("/agents/:agentId/role/rights/:permissionKey", scopeFromAgentIdParam(true), async (req, res) => {
     const agentId = req.params.agentId as string;
+    await assertMayChangeRight(req, agentId, req.params.permissionKey as string);
     res.json(await removeAgentRightOverride(db, agentId, req.params.permissionKey as string, actorFor(req), rawDb));
   });
 

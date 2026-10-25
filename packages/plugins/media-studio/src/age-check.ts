@@ -188,6 +188,8 @@ export async function runAgeCheck(
   companyId: string,
   analysis: AnalysisModelSetting,
   picture: AgeCheckPicture,
+  /** A quick agent's tool-call run id, when the check runs inside one (see PluginImageAnalysisInput.runId). */
+  runId?: string | null,
 ): Promise<AgeCheckRecord> {
   // Checked again right before the call: a picture another call has judged
   // meanwhile (e.g. refused) is not sent to the model again.
@@ -200,6 +202,10 @@ export async function runAgeCheck(
     systemPrompt: AGE_CHECK_SYSTEM_PROMPT,
     userPrompt: AGE_CHECK_USER_PROMPT,
     maxOutputTokens: 60,
+    // Inside a quick agent's tool call the host only does this one check,
+    // with its own copy of these instructions (CHAT_PHOTO_AGE_CHECK_* in
+    // packages/shared; a server test pins that they match).
+    ...(runId ? { runId, purpose: "chat_photo_age_check" as const } : {}),
   });
   const verdict = parseAgeCheck(answer.text);
   if (verdict === "unreadable") throw new Error(AGE_CHECK_UNREADABLE_MESSAGE);

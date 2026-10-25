@@ -57,6 +57,7 @@ const sections: ShortcutSection[] = [
       { keys: ["["], label: "Toggle sidebar" },
       { keys: [META_KEY, "B"], label: "Collapse or expand sidebar", combo: true },
       { keys: ["]"], label: "Toggle panel" },
+      { keys: [META_KEY, "Shift", "H"], label: "Ask Paperclip about this page", combo: true },
       { keys: ["?"], label: "Show keyboard shortcuts" },
     ],
   },

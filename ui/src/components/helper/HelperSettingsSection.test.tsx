@@ -208,5 +208,22 @@ describe("HelperSettingsSection — investigations", () => {
     expect(document.querySelector("[data-testid=helper-investigator-unconfirmed]")?.textContent).toContain("investigations are off");
     expect(document.querySelector("[data-testid=helper-investigator-can-write-ack]")).toBeNull();
     expect(document.querySelector("[data-testid=helper-investigator-no-budget]")).toBeNull();
+    // Said up front, and the picked agent is named even though the agent list is not loaded for them.
+    const notice = document.querySelector("[data-testid=helper-settings-read-only]")!;
+    expect(notice.textContent).toBe("You can see these settings, but only a company owner or admin can change them.");
+    expect(notice.compareDocumentPosition(document.querySelector("[data-testid=helper-default-model]")!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const agentSelect = document.querySelector("[data-testid=helper-investigation-agent]") as HTMLSelectElement;
+    expect(agentSelect.selectedOptions[0]?.textContent).toBe("Builder");
+  });
+
+  it("says a refused save in plain words", async () => {
+    mockHelperApi.getSettings.mockResolvedValue(view());
+    mockHelperApi.updateSettings.mockRejectedValue(new ApiError("Internal server error", 500, {}));
+    await render();
+    await choose(document.querySelector("[data-testid=helper-investigation-max-running]") as HTMLSelectElement, "5");
+    expect(toast).toHaveBeenCalledWith({
+      title: "The settings could not be saved: something went wrong on Paperclip's side. Try again in a moment.",
+      tone: "error",
+    });
   });
 });

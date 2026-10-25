@@ -1695,6 +1695,97 @@
       "when": 1791583071889,
       "tag": "0242_helper_investigation_limits",
       "breakpoints": true
+    },
+    {
+      "idx": 243,
+      "version": "7",
+      "when": 1791655438727,
+      "tag": "0243_telegram_two_way_chat",
+      "breakpoints": true
+    },
+    {
+      "idx": 244,
+      "version": "7",
+      "when": 1791657999490,
+      "tag": "0244_storyline_transitions",
+      "breakpoints": true
+    },
+    {
+      "idx": 245,
+      "version": "7",
+      "when": 1791658809381,
+      "tag": "0245_subtasks_inherit_model_effort",
+      "breakpoints": true
+    },
+    {
+      "idx": 246,
+      "version": "7",
+      "when": 1791677123916,
+      "tag": "0246_report_data_fetch",
+      "breakpoints": true
+    },
+    {
+      "idx": 247,
+      "version": "7",
+      "when": 1791677879168,
+      "tag": "0247_company_quality_loop_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 248,
+      "version": "7",
+      "when": 1791678861143,
+      "tag": "0248_company_migrated_to",
+      "breakpoints": true
+    },
+    {
+      "idx": 249,
+      "version": "7",
+      "when": 1791685082915,
+      "tag": "0249_storyline_clips_music_export",
+      "breakpoints": true
+    },
+    {
+      "idx": 250,
+      "version": "7",
+      "when": 1791790000000,
+      "tag": "0250_totp_rate_limit_replay",
+      "breakpoints": true
+    },
+    {
+      "idx": 251,
+      "version": "7",
+      "when": 1791790100000,
+      "tag": "0251_crypto_wallets",
+      "breakpoints": true
+    },
+    {
+      "idx": 252,
+      "version": "7",
+      "when": 1791790200000,
+      "tag": "0252_storyline_directors",
+      "breakpoints": true
+    },
+    {
+      "idx": 253,
+      "version": "7",
+      "when": 1792306283201,
+      "tag": "0253_agent_reaction_learning_toggle",
+      "breakpoints": true
+    },
+    {
+      "idx": 254,
+      "version": "7",
+      "when": 1792306383201,
+      "tag": "0254_brag_on_done",
+      "breakpoints": true
+    },
+    {
+      "idx": 255,
+      "version": "7",
+      "when": 1792534219573,
+      "tag": "0255_board_chat_authenticated",
+      "breakpoints": true
     }
   ]
 }

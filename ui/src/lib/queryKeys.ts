@@ -4,12 +4,16 @@ export const queryKeys = {
     detail: (id: string) => ["companies", id] as const,
     stats: ["companies", "stats"] as const,
     instructions: (id: string) => ["companies", id, "instructions"] as const,
+    migrationVerify: (id: string) => ["companies", id, "migration-verify"] as const,
     cacheSettings: (id: string) => ["companies", id, "cache-settings"] as const,
     securityReviewSettings: (id: string) => ["companies", id, "security-review-settings"] as const,
+    qualityLoopSettings: (id: string) => ["companies", id, "quality-loop-settings"] as const,
     serviceTokens: (id: string) => ["companies", id, "service-tokens"] as const,
     telegramBots: (id: string) => ["companies", id, "telegram-bots"] as const,
+    telegramChatSettings: (id: string) => ["companies", id, "telegram-chat-settings"] as const,
     speechSettings: (id: string) => ["companies", id, "speech-settings"] as const,
     dataConnections: (id: string) => ["companies", id, "data-connections"] as const,
+    reportTemplates: (id: string) => ["companies", id, "report-templates"] as const,
     datasetSources: (id: string) => ["companies", id, "dataset-sources"] as const,
     modelDirectory: (id: string) => ["companies", id, "model-directory"] as const,
     modelReviews: (id: string, entryId: string) => ["companies", id, "model-directory", entryId, "reviews"] as const,
@@ -267,6 +271,7 @@ export const queryKeys = {
   },
   auth: {
     session: ["auth", "session"] as const,
+    telegramLink: ["auth", "telegram-link"] as const,
   },
   sidebarPreferences: {
     companyOrder: (userId: string) => ["sidebar-preferences", "company-order", userId] as const,
@@ -293,6 +298,11 @@ export const queryKeys = {
   },
   cloudUpstreams: (companyId: string) => ["cloud-upstreams", companyId] as const,
   health: ["health"] as const,
+  boardChat: {
+    availability: (companyId: string) => ["board-chat", "availability", companyId] as const,
+    settings: (companyId: string) => ["board-chat", "settings", companyId] as const,
+    actions: (companyId: string, issueId: string | null) => ["board-chat", "actions", companyId, issueId ?? "all"] as const,
+  },
   paymentCards: {
     list: (companyId: string) => ["payment-cards", companyId] as const,
   },
@@ -311,6 +321,17 @@ export const queryKeys = {
   agentMemories: {
     list: (agentId: string) => ["agent-memories", agentId] as const,
   },
+  // Recent emoji reactions to a quick agent's messages.
+  agentReactions: {
+    list: (agentId: string, limit: number) => ["agent-reactions", agentId, limit] as const,
+  },
+  // Quick-agent Conversations review (list + one transcript).
+  laneAConversationLog: {
+    list: (companyId: string, agentId: string, filters: Record<string, unknown>) =>
+      ["lane-a-conversation-log", companyId, agentId, filters] as const,
+    detail: (companyId: string, agentId: string, conversationId: string) =>
+      ["lane-a-conversation-log", companyId, agentId, "detail", conversationId] as const,
+  },
   // Overlapping work between open tasks.
   overlaps: {
     list: (companyId: string) => ["overlaps", companyId] as const,
@@ -324,6 +345,15 @@ export const queryKeys = {
     list: (companyId: string) => ["trading-strategies", companyId] as const,
     dashboard: (companyId: string, strategyId: string) => ["trading-dashboard", companyId, strategyId] as const,
     orders: (companyId: string, strategyId: string) => ["trading-orders", companyId, strategyId] as const,
+  },
+  // Crypto wallets for agents.
+  cryptoWallets: {
+    settings: (companyId: string) => ["crypto-settings", companyId] as const,
+    list: (companyId: string, agentId?: string) => ["crypto-wallets", companyId, agentId ?? "all"] as const,
+    balance: (companyId: string, walletId: string) => ["crypto-wallet-balance", companyId, walletId] as const,
+    destinations: (companyId: string, walletId: string) => ["crypto-wallet-destinations", companyId, walletId] as const,
+    transactions: (companyId: string, walletId: string) => ["crypto-wallet-transactions", companyId, walletId] as const,
+    agentLimits: (companyId: string, agentId: string) => ["crypto-agent-limits", companyId, agentId] as const,
   },
   // Product grabber: vendor site -> staging list -> human approval.
   productGrabber: {
@@ -397,6 +427,8 @@ export const queryKeys = {
   runDetail: (runId: string) => ["heartbeat-run", runId] as const,
   runWorkspaceOperations: (runId: string) => ["heartbeat-run", runId, "workspace-operations"] as const,
   liveRuns: (companyId: string) => ["live-runs", companyId] as const,
+  /** Paperclip Tower: per-agent spend since `from` (start of the UTC month). */
+  costsByAgent: (companyId: string, from: string) => ["costs-by-agent", companyId, from] as const,
   runIssues: (runId: string) => ["run-issues", runId] as const,
   org: (companyId: string) => ["org", companyId] as const,
   skills: {

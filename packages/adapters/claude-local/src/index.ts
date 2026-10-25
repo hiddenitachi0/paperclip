@@ -5,7 +5,14 @@ export const label = "Claude Code";
 
 export const SANDBOX_INSTALL_COMMAND = "npm install -g @anthropic-ai/claude-code";
 
+// Current generation first (Oct 2026): Opus 5.5 / Sonnet 5.5 / Haiku 5.5 /
+// Fable 5.1. Older ids stay listed so agents already saved on them keep a
+// readable label in the picker.
 export const models = [
+  { id: "claude-opus-5-5", label: "Claude Opus 5.5" },
+  { id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5" },
+  { id: "claude-haiku-5-5", label: "Claude Haiku 5.5" },
+  { id: "claude-fable-5-1", label: "Claude Fable 5.1" },
   { id: "claude-opus-5", label: "Claude Opus 5" },
   { id: "claude-sonnet-5", label: "Claude Sonnet 5" },
   { id: "claude-fable-5", label: "Claude Fable 5" },
@@ -25,7 +32,7 @@ export const modelProfiles: AdapterModelProfileDefinition[] = [
     label: "Cheap",
     description: "Use Claude Sonnet as the lower-cost Claude Code lane while preserving the agent's primary model.",
     adapterConfig: {
-      model: "claude-sonnet-5",
+      model: "claude-sonnet-5-5",
       effort: "low",
     },
     source: "adapter_default",
@@ -36,7 +43,7 @@ export const modelProfiles: AdapterModelProfileDefinition[] = [
     description:
       "Use Claude Opus for the plan-writing run of a \"plan first on Opus, then build on Sonnet\" job, while preserving the agent's primary model for the build runs that follow.",
     adapterConfig: {
-      model: "claude-opus-5",
+      model: "claude-opus-5-5",
       effort: "high",
     },
     source: "adapter_default",
@@ -50,7 +57,7 @@ Adapter: claude_local
 Core fields:
 - cwd (string, optional): default absolute working directory fallback for the agent process (created if missing when possible)
 - instructionsFilePath (string, optional): absolute path to a markdown instructions file injected at runtime
-- model (string, optional): Claude model id
+- model (string, optional): Claude model id (current: claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5, claude-fable-5-1). Leave empty only on purpose: empty means the Claude CLI picks its own default, which depends on the sign-in (on Max plans that is Opus, the costliest tier) and can change with CLI updates
 - effort (string, optional): reasoning effort passed via --effort (low|medium|high|xhigh|max)
 - chrome (boolean, optional): pass --chrome when running Claude
 - promptTemplate (string, optional): run prompt template

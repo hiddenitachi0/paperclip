@@ -180,6 +180,27 @@ function toRunSummary(row: typeof reportScriptRuns.$inferSelect): ReportScriptRu
   };
 }
 
+/**
+ * DUR-4727: a script run made for a REPORT stores the company's real data
+ * (the fetched ledger) as its `input`, and its `error` can echo that data
+ * from the script's stderr. Only a company owner/admin person may see
+ * those; for everyone else (agents, viewers, operators) they are withheld.
+ * Runs on saved examples (`fixture_test`, `approval_check`) are drafting
+ * data and stay visible. The digests, status and output (the numbers every
+ * member and agent already gets on the report run) are kept.
+ */
+export const REPORT_SCRIPT_RUN_ERROR_WITHHELD =
+  "The calculation did not finish. The details may contain the company's data, so only the company's owner or an admin can see them.";
+
+export function isDataBearingScriptRun(run: Pick<ReportScriptRun, "trigger">): boolean {
+  return run.trigger !== "fixture_test" && run.trigger !== "approval_check";
+}
+
+export function maskReportScriptRunForViewer(run: ReportScriptRun, canSeeCompanyData: boolean): ReportScriptRun {
+  if (canSeeCompanyData || !isDataBearingScriptRun(run)) return run;
+  return { ...run, input: null, error: run.error ? REPORT_SCRIPT_RUN_ERROR_WITHHELD : null };
+}
+
 function sha256Hex(data: string): string {
   return createHash("sha256").update(data, "utf8").digest("hex");
 }

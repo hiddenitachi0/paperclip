@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType }
 import { pickTextColorForPillBg } from "@/lib/color-contrast";
 import { issueStatusText } from "@/lib/status-colors";
 import { Link } from "@/lib/router";
-import { MODEL_PROFILE_KEYS, type Issue, type IssueExecutionMonitorKind, type IssueLabel, type ModelProfileKey } from "@paperclipai/shared";
+import { MODEL_PROFILE_KEYS, agentDefaultLabel, getThinkingEffortValue, thinkingEffortLabel, type Issue, type IssueExecutionMonitorKind, type IssueLabel, type ModelProfileKey } from "@paperclipai/shared";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { accessApi } from "../../api/access";
 import { agentsApi } from "../../api/agents";
@@ -26,7 +26,16 @@ import {
 import { getRecentProjectIds, trackRecentProject } from "../../lib/recent-projects";
 import { orderItemsBySelectedAndRecent } from "../../lib/recent-selections";
 import { formatAssigneeUserLabel } from "../../lib/assignees";
-import { buildExecutionPolicy, buildGoalConditionMonitor, stageParticipantValues } from "../../lib/issue-execution-policy";
+import {
+  TASK_QUALITY_CHECK_CHOICES,
+  applyTaskQualityCheckChoice,
+  buildExecutionPolicy,
+  buildGoalConditionMonitor,
+  pickQualityLoopFields,
+  readTaskQualityCheckChoice,
+  stageParticipantValues,
+  type TaskQualityCheckChoice,
+} from "../../lib/issue-execution-policy";
 import { formatMonitorOffset } from "../../lib/issue-monitor";
 import { extractProviderIdWithFallback } from "../../lib/model-utils";
 import { formatRetryReason } from "../../lib/runRetryState";
@@ -41,6 +50,7 @@ import type { IssueExternalObjectGroup } from "../../hooks/useIssueExternalObjec
 import { timeAgo } from "../../lib/timeAgo";
 import { Button } from "@/components/ui/button";
 import { ToggleSwitch } from "@/components/ui/toggle-switch";
+import { BragOnDoneOption } from "../BragOnDoneOption";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -144,9 +154,10 @@ export function IssueProperties({
   externalObjectsError,
   onRetryExternalObjects,
 }: IssuePropertiesProps) {
-  const { selectedCompanyId } = useCompany();
+  const { selectedCompanyId, companies: knownCompanies } = useCompany();
   const queryClient = useQueryClient();
   const companyId = issue.companyId ?? selectedCompanyId;
+  const issueCompany = (knownCompanies ?? []).find((company) => company.id === companyId) ?? null;
   const { data: experimentalSettings } = useQuery({
     queryKey: queryKeys.instance.experimentalSettings,
     queryFn: () => instanceSettingsApi.getExperimental(),
@@ -449,6 +460,18 @@ export function IssueProperties({
   );
   const assigneeOverrideChrome = assigneeAdapterType === "claude_local"
     && assigneeOverrideAdapterConfig.chrome === true;
+  // The agent's own model/effort, shown as "Agent default (…)" so the operator
+  // sees what the task runs on when it has no setting of its own.
+  const assigneeAgentAdapterConfig = asRecord(assignee?.adapterConfig);
+  const assigneeAgentModel =
+    typeof assigneeAgentAdapterConfig.model === "string" ? assigneeAgentAdapterConfig.model : "";
+  const assigneeAgentEffort = getThinkingEffortValue(assigneeAdapterType, assigneeAgentAdapterConfig);
+  const assigneeAgentDefaultSummary = [
+    assigneeAgentModel,
+    assigneeAgentEffort ? `${thinkingEffortLabel(assigneeAgentEffort)} effort` : "",
+  ].filter(Boolean).join(" · ");
+  const assigneeOverrideInheritedFrom = assigneeAdapterOverrides?.inheritedFrom ?? null;
+  const assigneeEffortOptions = thinkingEffortOptionsFor(assigneeAdapterType, assigneeAgentAdapterConfig);
   const { data: assigneeAdapterModels } = useQuery({
     queryKey:
       companyId && assigneeAdapterType
@@ -476,7 +499,10 @@ export function IssueProperties({
   );
   const assigneeSupportsPlanner = Boolean(assigneeSupportsCheapLane && assigneePlannerProfile);
   const assigneePlanFirstOnOpus = assigneeAdapterOverrides?.planFirstOnOpus === true;
-  const showAssigneeAdapterOptions = assigneeAdapterOverrides !== null || assigneeSupportsPlanner;
+  // Always shown for an agent that takes a per-task model/effort, so it can be
+  // changed after the task was created (applies from the next run).
+  const showAssigneeAdapterOptions =
+    supportsAssigneeOverrides || assigneeAdapterOverrides !== null || assigneeSupportsPlanner;
   const modelOverrideOptions = useMemo<InlineEntityOption[]>(() => {
     const models = sortAdapterModels(assigneeAdapterModels ?? []);
     const options = models.map((model) => ({
@@ -496,6 +522,8 @@ export function IssueProperties({
   const updateAssigneeAdapterOverrides = (next: Issue["assigneeAdapterOverrides"]) => {
     onUpdate({ assigneeAdapterOverrides: next });
   };
+  // Rebuilt from scratch, so an "inherited from" marker is dropped on purpose:
+  // once someone edits the model/effort it is this task's own setting.
   const buildAssigneeOverrideWithConfig = (adapterConfig: Record<string, unknown>) => {
     const nextConfig = compactRecord(adapterConfig);
     const next = compactRecord({
@@ -565,13 +593,14 @@ export function IssueProperties({
       ].filter(Boolean);
       return (
         <span className="min-w-0 truncate text-sm" title={details.length > 0 ? `Custom · ${details.join(" · ")}` : "Custom adapter options"}>
-          Custom{details.length > 0 ? ` · ${details.join(" · ")}` : " adapter options"}
+          {assigneeOverrideInheritedFrom ? "Inherited" : "Custom"}{details.length > 0 ? ` · ${details.join(" · ")}` : " adapter options"}
         </span>
       );
     }
     return (
-      <span className="text-sm text-muted-foreground">
-        Primary model{assigneePlanFirstOnOpus ? " · plan on Opus" : ""}
+      <span className="min-w-0 truncate text-sm text-muted-foreground">
+        {assigneeAgentDefaultSummary ? agentDefaultLabel(assigneeAgentDefaultSummary) : "Primary model"}
+        {assigneePlanFirstOnOpus ? " · plan on Opus" : ""}
       </span>
     );
   })();
@@ -596,6 +625,19 @@ export function IssueProperties({
             </button>
           ))}
         </div>
+        {assigneeOverrideInheritedFrom ? (
+          <p className="text-xs text-muted-foreground" data-testid="assignee-override-inherited-from">
+            Inherited from{" "}
+            <Link
+              to={`/issues/${assigneeOverrideInheritedFrom.identifier ?? assigneeOverrideInheritedFrom.issueId}`}
+              className="text-primary hover:underline"
+            >
+              {assigneeOverrideInheritedFrom.identifier ?? "the parent task"}
+            </Link>
+            . Change it here to give this task its own setting.
+          </p>
+        ) : null}
+        <p className="text-xs text-muted-foreground">Changes apply from the next run.</p>
         {assigneeOverrideLane === "cheap" ? (
           <p className="text-xs text-muted-foreground">
             Sends <code>modelProfile: "cheap"</code>{" "}
@@ -623,16 +665,18 @@ export function IssueProperties({
           ) : null}
         </div>
       ) : null}
-      {assigneeOverrideLane === "custom" ? (
+      {/* Model and effort are visible unless the cheap preset is chosen; picking a
+          value other than "Agent default (…)" gives the task its own setting. */}
+      {assigneeOverrideLane !== "cheap" ? (
         <>
           <div className="space-y-1.5">
             <div className="text-xs text-muted-foreground">Model</div>
             <InlineEntitySelector
               value={assigneeOverrideModel}
               options={modelOverrideOptions}
-              placeholder="Default model"
+              placeholder={agentDefaultLabel(assigneeAgentModel)}
               disablePortal
-              noneLabel="Default model"
+              noneLabel={agentDefaultLabel(assigneeAgentModel)}
               searchPlaceholder="Search models..."
               emptyMessage="No models found."
               onChange={(model) => updateAssigneeOverrideConfig({ model: model || undefined })}
@@ -641,9 +685,11 @@ export function IssueProperties({
           <div className="space-y-1.5">
             <div className="text-xs text-muted-foreground">Thinking effort</div>
             <div className="flex items-center gap-1.5 flex-wrap">
-              {thinkingEffortOptionsFor(assigneeAdapterType).map((option) => (
+              {assigneeEffortOptions.map((option) => (
                 <button
                   key={option.id || "default"}
+                  type="button"
+                  aria-pressed={assigneeOverrideThinkingEffort === option.id}
                   className={cn(
                     "px-2 py-1 rounded-md text-xs border border-border hover:bg-accent/50 transition-colors",
                     assigneeOverrideThinkingEffort === option.id && "bg-accent",
@@ -655,7 +701,7 @@ export function IssueProperties({
               ))}
             </div>
           </div>
-          {assigneeAdapterType === "claude_local" ? (
+          {assigneeAdapterType === "claude_local" && assigneeOverrideLane === "custom" ? (
             <div className="flex items-center justify-between rounded-md border border-border px-2 py-1.5">
               <div className="text-xs text-muted-foreground">Enable Chrome (--chrome)</div>
               <ToggleSwitch
@@ -1010,6 +1056,7 @@ export function IssueProperties({
         commentRequired: true,
         stages: basePolicy?.stages ?? [],
         ...(nextMonitor ? { monitor: nextMonitor } : {}),
+        ...pickQualityLoopFields(issue.executionPolicy ?? null),
       },
     });
   };
@@ -2393,6 +2440,29 @@ export function IssueProperties({
         </PropertyPicker>
         {nextRunnableExecutionStage === "approval" && approverValues.length > 0 ? runExecutionButton("approval") : null}
 
+        <PropertyRow label="Quality checks">
+          <select
+            className="min-w-0 max-w-full rounded-md border border-border bg-transparent px-1.5 py-0.5 text-sm outline-none focus:ring-2 focus:ring-ring"
+            value={readTaskQualityCheckChoice(issue.executionPolicy ?? null)}
+            onChange={(e) =>
+              onUpdate({
+                executionPolicy: applyTaskQualityCheckChoice(
+                  issue.executionPolicy ?? null,
+                  e.target.value as TaskQualityCheckChoice,
+                ),
+              })
+            }
+            title="Self-check: the agent re-checks its work against the task once before finishing. Finish check: a cheap model compares the task with the agent's final note and sends it back if something is missing."
+            data-testid="issue-quality-checks-select"
+          >
+            {TASK_QUALITY_CHECK_CHOICES.map((choice) => (
+              <option key={choice.value} value={choice.value}>
+                {choice.label}
+              </option>
+            ))}
+          </select>
+        </PropertyRow>
+
         {currentExecutionLabel && (
           <PropertyRow label="Execution">
             <span className="text-sm truncate min-w-0" title={currentExecutionLabel}>{currentExecutionLabel}</span>
@@ -2452,6 +2522,17 @@ export function IssueProperties({
           >
             {watchdogContent}
           </PropertyPicker>
+        ) : null}
+        {issue.bragPreapproval || issue.status !== "done" ? (
+          <div className="py-1.5">
+            <BragOnDoneOption
+              company={issueCompany}
+              checked={Boolean(issue.bragPreapproval)}
+              preapproval={issue.bragPreapproval ?? null}
+              taskDone={issue.status === "done"}
+              onCheckedChange={(next) => onUpdate({ bragOnDone: next })}
+            />
+          </div>
         ) : null}
       </PropertySection>
 

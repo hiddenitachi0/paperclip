@@ -399,3 +399,44 @@ describe("approvalService getById with an id that is not a uuid", () => {
     expect(dbStub.selectWhere).toHaveBeenCalledTimes(2);
   });
 });
+
+// Security review of PR #625 (DUR-4719): host actions and deploys can only be
+// approved by POST /approvals/:id/approve, which runs their own checks first
+// (owner/admin + card shape for host actions). Every other approve() caller
+// -- a linked confirmation accepted by any board member, automation -- is
+// refused here, whoever the actor is.
+describe("approve() refuses card-only kinds outside the approval route", () => {
+  function cardOnly(kind: string): ApprovalRecord {
+    return {
+      id: "approval-1",
+      companyId: "company-1",
+      type: "request_board_approval",
+      status: "pending",
+      payload: { kind, action: "restart_service", target: "telegram-bridge" },
+      requestedByAgentId: "requester-1",
+    };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockLogActivity.mockReset().mockResolvedValue(undefined);
+  });
+
+  for (const kind of ["operator_action", "deploy", "deploy_pr"]) {
+    it(`refuses a ${kind} card without decidedOnApprovalCard`, async () => {
+      const dbStub = createDbStub([[cardOnly(kind)]], []);
+      const svc = approvalService(dbStub.db as any);
+      await expect(svc.approve("approval-1", "board-member", null)).rejects.toThrow(/approval card itself/);
+      expect(dbStub.returning).not.toHaveBeenCalled();
+    });
+  }
+
+  it("approves an operator_action card when the approval route says it ran its checks", async () => {
+    const approved = { ...cardOnly("operator_action"), status: "approved" };
+    const dbStub = createDbStub([[cardOnly("operator_action")]], [approved]);
+    const svc = approvalService(dbStub.db as any);
+    const result = await svc.approve("approval-1", "owner", null, { decidedOnApprovalCard: true });
+    expect(result.applied).toBe(true);
+    expect(result.approval.status).toBe("approved");
+  });
+});

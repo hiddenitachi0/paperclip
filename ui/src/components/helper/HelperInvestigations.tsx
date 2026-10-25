@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Loader2, Search, ExternalLink } from "lucide-react";
 import type {
   HelperDroppedReference,
@@ -31,6 +31,8 @@ export interface InvestigationDraft {
   pictures: HelperPictureInput[];
   /** The quick helper's answer the person wants checked, if the draft came from one. */
   quickAnswer: string | null;
+  /** Text fields on screen the answer may be put into later ("Apply to …"). */
+  applyTargets: string[];
 }
 
 export const HELPER_INVESTIGATION_POLL_MS = 15_000;
@@ -134,6 +136,9 @@ export function InvestigateConfirm({
       ) : null}
       {availability?.ready ? (
         <div className="space-y-1.5" data-testid="helper-investigate-details">
+          <p className="font-medium" data-testid="helper-investigate-run-note">
+            This starts a full agent run (uses its budget).
+          </p>
           <p>
             “{availability.agentName}” will read what it needs (tasks, cards, comments, code, reviews, logs) and write one
             answer back here. It gives advice only: it does not approve, merge, deploy or change anything.
@@ -183,9 +188,66 @@ const BADGE: Record<HelperInvestigationView["status"], string> = {
   failed: "bg-amber-500/15 text-amber-700 dark:text-amber-400",
 };
 
-function InvestigationItem({ item, initiallyOpen }: { item: HelperInvestigationView; initiallyOpen: boolean }) {
+interface ApplyProps {
+  /** Whether a field with this label is on screen now. */
+  canApply?: (label: string) => boolean;
+  /** Puts the answer into that field (nothing is saved). */
+  onApply?: (label: string, answer: string) => void;
+  /** Called when the person follows the link to the task (the panel closes on small screens). */
+  onOpenTask?: () => void;
+  /** Extra buttons next to "Apply" for an answer (for example "Copy"). */
+  answerActions?: (answer: string) => ReactNode;
+}
+
+function taskPathOf(item: { id: string; identifier: string | null }): string {
+  return `/issues/${item.identifier ?? item.id}`;
+}
+
+function TaskLink({ item, onOpenTask, testId }: { item: { id: string; identifier: string | null }; onOpenTask?: () => void; testId: string }) {
+  return (
+    <Link
+      to={taskPathOf(item)}
+      disableIssueQuicklook
+      className="inline-flex items-center gap-1 text-[11px] underline"
+      data-testid={testId}
+      onClick={onOpenTask}
+    >
+      Open task{item.identifier ? ` ${item.identifier}` : ""} <ExternalLink className="h-3 w-3" />
+    </Link>
+  );
+}
+
+function AnswerButtons({
+  answer,
+  applyTargets,
+  canApply,
+  onApply,
+  answerActions,
+}: { answer: string; applyTargets: string[] } & ApplyProps) {
+  const labels = onApply && canApply ? applyTargets.filter((label) => canApply(label)) : [];
+  const extra = answerActions?.(answer);
+  if (labels.length === 0 && !extra) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {labels.map((label) => (
+        <Button key={label} size="xs" variant="outline" onClick={() => onApply!(label, answer)}>
+          Apply to {label}
+        </Button>
+      ))}
+      {extra}
+    </div>
+  );
+}
+
+function InvestigationItem({
+  item,
+  initiallyOpen,
+  canApply,
+  onApply,
+  onOpenTask,
+  answerActions,
+}: { item: HelperInvestigationView; initiallyOpen: boolean } & ApplyProps) {
   const [open, setOpen] = useState(initiallyOpen);
-  const taskPath = `/issues/${item.identifier ?? item.id}`;
   return (
     <li className="space-y-1.5 rounded-md border border-border px-2.5 py-2" data-testid="helper-investigation" data-status={item.status}>
       <div className="flex items-center justify-between gap-2">
@@ -193,21 +255,14 @@ function InvestigationItem({ item, initiallyOpen }: { item: HelperInvestigationV
           {isInvestigationActive(item) ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
           {item.statusLabel}
         </span>
-        <Link
-          to={taskPath}
-          disableIssueQuicklook
-          className="inline-flex items-center gap-1 text-[11px] underline"
-          data-testid="helper-investigation-link"
-        >
-          Open task{item.identifier ? ` ${item.identifier}` : ""} <ExternalLink className="h-3 w-3" />
-        </Link>
+        <TaskLink item={item} onOpenTask={onOpenTask} testId="helper-investigation-link" />
       </div>
       <button
         type="button"
         className="block w-full text-left text-sm"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        title={open ? "Hide the answer" : "Show the answer"}
+        title={item.answer ? (open ? "Hide the answer" : "Show the answer") : undefined}
       >
         <span className={open ? "" : "line-clamp-2"}>{item.question}</span>
       </button>
@@ -218,8 +273,15 @@ function InvestigationItem({ item, initiallyOpen }: { item: HelperInvestigationV
       {item.statusDetail ? <p className="text-xs text-muted-foreground">{item.statusDetail}</p> : null}
       {item.answer ? (
         open ? (
-          <div className="border-t border-border pt-1.5" data-testid="helper-investigation-answer">
+          <div className="space-y-1.5 border-t border-border pt-1.5" data-testid="helper-investigation-answer">
             <MarkdownBody className="text-sm">{item.answer}</MarkdownBody>
+            <AnswerButtons
+              answer={item.answer}
+              applyTargets={item.applyTargets ?? []}
+              canApply={canApply}
+              onApply={onApply}
+              answerActions={answerActions}
+            />
           </div>
         ) : (
           <Button size="xs" variant="ghost" onClick={() => setOpen(true)}>
@@ -231,15 +293,87 @@ function InvestigationItem({ item, initiallyOpen }: { item: HelperInvestigationV
   );
 }
 
+/**
+ * An investigation started from this conversation, shown in the conversation
+ * itself: who is looking, its live state, and the agent's answer once it is
+ * there. `item` is the latest from the server (null while it is not in the
+ * list, for example right after a reload before the list has loaded).
+ */
+export function InvestigationInline({
+  item,
+  fallback,
+  canApply,
+  onApply,
+  onOpenTask,
+  answerActions,
+}: {
+  item: HelperInvestigationView | null;
+  fallback: { id: string; identifier: string | null; question: string; agentName: string | null };
+  } & ApplyProps) {
+  const agent = item?.agentName ?? fallback.agentName ?? "The agent";
+  const status = item?.status ?? null;
+  return (
+    <div
+      className="space-y-1.5 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-sm"
+      data-testid="helper-investigation-inline"
+      data-status={status ?? "unknown"}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="inline-flex items-center gap-1.5 text-xs font-medium">
+          <Search className="h-3.5 w-3.5" /> Investigation
+          {item ? (
+            <span className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] ${BADGE[item.status]}`}>
+              {isInvestigationActive(item) ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+              {item.statusLabel}
+            </span>
+          ) : null}
+        </span>
+        <TaskLink item={item ?? fallback} onOpenTask={onOpenTask} testId="helper-investigation-inline-link" />
+      </div>
+      <p className="line-clamp-2 text-xs text-muted-foreground" title={item?.question ?? fallback.question}>
+        “{item?.question ?? fallback.question}”
+      </p>
+      {!item ? (
+        <p className="text-xs text-muted-foreground">Open the task to see where it stands.</p>
+      ) : item.answer ? (
+        <div className="space-y-1.5" data-testid="helper-investigation-inline-answer">
+          <p className="text-[11px] text-muted-foreground">
+            {agent} answered{item.costCents > 0 ? ` · ${formatCents(item.costCents)}` : ""}:
+          </p>
+          <MarkdownBody className="text-sm">{item.answer}</MarkdownBody>
+          <AnswerButtons
+            answer={item.answer}
+            applyTargets={item.applyTargets ?? []}
+            canApply={canApply}
+            onApply={onApply}
+            answerActions={answerActions}
+          />
+        </div>
+      ) : isInvestigationActive(item) ? (
+        <p className="text-xs text-muted-foreground">
+          {agent} is looking into it. This usually takes a few minutes; the answer will appear right here, and you can
+          keep using Paperclip (or close this panel) meanwhile.
+        </p>
+      ) : (
+        <p className="text-xs text-muted-foreground">{item.statusDetail ?? "It finished without an answer. Open the task to see what happened."}</p>
+      )}
+    </div>
+  );
+}
+
 /** "My investigations": the person's own, newest first, live while any is running. */
 export function MyInvestigations({
   investigations,
   openIds,
+  canApply,
+  onApply,
+  onOpenTask,
+  answerActions,
 }: {
   investigations: HelperInvestigationView[];
   /** Items whose answer shows without a click (the newest, and any started in this panel). */
   openIds: ReadonlySet<string>;
-}) {
+} & ApplyProps) {
   if (investigations.length === 0) return null;
   const active = investigations.filter(isInvestigationActive).length;
   return (
@@ -252,7 +386,15 @@ export function MyInvestigations({
       </div>
       <ul className="space-y-1.5">
         {investigations.map((item) => (
-          <InvestigationItem key={item.id} item={item} initiallyOpen={openIds.has(item.id)} />
+          <InvestigationItem
+            key={item.id}
+            item={item}
+            initiallyOpen={openIds.has(item.id)}
+            canApply={canApply}
+            onApply={onApply}
+            onOpenTask={onOpenTask}
+            answerActions={answerActions}
+          />
         ))}
       </ul>
     </section>

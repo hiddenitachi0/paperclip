@@ -6,7 +6,7 @@
 // called again and again by the background job (media-jobs.ts) — see
 // media-jobs-types.ts for why a video cannot be made inside one tool call.
 
-import { sogniVideoStep } from "./sogni-video-step.js";
+import { sogniVideoRefusal, sogniVideoStep } from "./sogni-video-step.js";
 import type { FetchImpl } from "./providers.js";
 import { falQueueCancel, falQueuePoll, falQueueSubmit } from "./fal-queue.js";
 import type { MediaJobHandle, MediaJobInput, MediaJobProvider, MediaPollOutcome } from "./media-jobs-types.js";
@@ -84,7 +84,10 @@ export class SogniVideoProvider implements MediaJobProvider {
 
   async start(input: MediaJobInput): Promise<MediaJobHandle> {
     const requested = input.model ?? this.options.defaultModel ?? null;
-    const plan = sogniVideoStep(requested, Boolean(input.startImage));
+    const plan = sogniVideoStep(requested, Boolean(input.startImage), Boolean(input.endImage));
+    if (input.endImage && (plan.tool !== "animate_photo" || !input.startImage)) {
+      throw new Error("This Sogni video model cannot finish on a chosen end picture. Pick LTX-2.5, MiniMax H3 (first/last frame) or Wan 3.");
+    }
     const mediaReferences: Array<{ kind: "image"; url: string }> = [];
     const args: Json = {
       prompt: input.prompt,
@@ -95,6 +98,17 @@ export class SogniVideoProvider implements MediaJobProvider {
       mediaReferences.push({ kind: "image", url: await this.uploadReferenceImage(input.startImage, 0) });
       // -1 = the first uploaded picture, used as the START frame.
       args.sourceImageIndex = -1;
+      if (input.endImage) {
+        mediaReferences.push({ kind: "image", url: await this.uploadReferenceImage(input.endImage, 1) });
+        // -2 = the second upload, the END frame; "both" = the clip runs from one to the other.
+        args.endImageIndex = -2;
+        args.frameRole = "both";
+      }
+      if (input.promptRewrite === false) {
+        // Our prompt as written: Sogni otherwise rewrites it from the pictures alone.
+        args.skipPromptProcessing = true;
+        if (plan.videoModel?.startsWith("wan3")) args.expandPrompt = false;
+      }
     } else if (plan.pictures === "references") {
       const pictures = [...(input.startImage ? [input.startImage] : []), ...(input.referenceImages ?? [])].slice(0, 4);
       for (const [index, picture] of pictures.entries()) {
@@ -116,7 +130,9 @@ export class SogniVideoProvider implements MediaJobProvider {
       headers: this.headers({ "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() }),
       body: JSON.stringify(body),
     });
-    if (!res.ok) throw new Error(`Sogni refused the video request (${res.status}): ${(await res.text()).slice(0, 300)}`);
+    if (!res.ok) {
+      throw sogniVideoRefusal(res.status, await res.text(), { tool: plan.tool, videoModel: plan.videoModel }, [this.options.apiKey]);
+    }
     const parsed = asRecord(JSON.parse(await res.text()));
     const workflowId = asRecord(asRecord(parsed?.data)?.workflow)?.workflowId;
     if (typeof workflowId !== "string" || !workflowId) throw new Error("Sogni did not say which job it started.");

@@ -74,8 +74,11 @@ describe("video model details (pure)", () => {
     expect(priceText({ ...FAL_VIDEO_MODELS[0]!, centsPerSecond: null, usdPerBaseRender: 0.194 })).toContain("Sogni list price about $0.194");
     expect(pictureSupportText(FAL_VIDEO_MODELS[1]!)).toContain("Needs a start picture");
     expect(pictureSupportText(FAL_VIDEO_MODELS[2]!)).toContain("Text only");
-    // Every Fal model the server can drive is a Kling model: 5- or 10-second clips.
-    expect(FAL_VIDEO_MODELS.every((m) => m.clipSeconds && "values" in m.clipSeconds && m.clipSeconds.values.join() === "5,10")).toBe(true);
+    // Kling 1.6/2.1 make 5- or 10-second clips; Kling 3 any length from 3 to 15 seconds.
+    for (const m of FAL_VIDEO_MODELS) {
+      if (m.id && /kling-video\/v3\//.test(m.id)) expect(m.clipSeconds).toEqual({ min: 3, max: 15 });
+      else expect(m.clipSeconds && "values" in m.clipSeconds && m.clipSeconds.values.join()).toBe("5,10");
+    }
   });
 });
 
@@ -238,7 +241,7 @@ describe("models and picture settings on the Storylines page", () => {
     vi.unstubAllGlobals();
   });
 
-  it("step 3: the video model is picked from Sogni's catalogue; switching service resets the model", async () => {
+  it("step 5: the video model is picked from Sogni's catalogue; switching service resets the model", async () => {
     await click(container.querySelector('[data-testid="step-render"]') as HTMLButtonElement);
     expect(actions["sogni.videoModels"]).toHaveBeenCalled();
     const picker = container.querySelector('[data-testid="video-model-picker"]')!;
@@ -249,7 +252,8 @@ describe("models and picture settings on the Storylines page", () => {
   });
 
   it("step 2: picture service (only those with a key), model and look are saved; a shot can have its own look", async () => {
-    // The guided flow opens on Pictures for this storyline.
+    // The picture settings (service, model, look) live in step 2, Cast & look.
+    await click(container.querySelector('[data-testid="step-cast"]') as HTMLButtonElement);
     const settings = container.querySelector('[data-testid="picture-settings"]')!;
     expect(settings.textContent).toContain("Picture settings: Sogni, default model, no look (about $0.01 a picture)");
     const serviceOptions = Array.from((settings.querySelector('select[aria-label="Picture service"]') as HTMLSelectElement).options).map((o) => o.value);
@@ -266,7 +270,7 @@ describe("models and picture settings on the Storylines page", () => {
     expect(JSON.parse(calls.filter((c) => c.path === `${BASE}/${SL}` && c.method === "PATCH").at(-1)!.body!)).toEqual({ pictureSettings: { lookId: "look-1", model: "z_image_turbo_bf16" } });
   });
 
-  it("step 2: per-shot look and the picture cost follow the chosen service", async () => {
+  it("step 3: per-shot look and the picture cost follow the chosen service", async () => {
     const tile = container.querySelector('[data-testid="storyboard-tile-sh-1"]')!;
     await choose(tile.querySelector("select") as HTMLSelectElement, "none");
     expect(JSON.parse(calls.find((c) => c.path === `${BASE}/${SL}/shots/sh-1` && c.method === "PATCH")!.body!)).toEqual({ pictureLookId: "none" });

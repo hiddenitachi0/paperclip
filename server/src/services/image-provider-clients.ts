@@ -34,6 +34,18 @@ export interface ImageGenerationInput {
   negativePrompt?: string;
   /** Sogni's Sensitive Content Filter; on unless a look saved by an owner/admin turned it off. */
   safeContentFilter?: boolean;
+  /** Storyline Phase 2: the picture shape the film is made in (16:9, 9:16 or 1:1). */
+  aspect?: "16:9" | "9:16" | "1:1";
+}
+
+/** Fal's image_size name for a storyline shape. */
+export function falImageSizeFor(aspect: ImageGenerationInput["aspect"]): string {
+  return aspect === "9:16" ? "portrait_16_9" : aspect === "1:1" ? "square_hd" : aspect === "16:9" ? "landscape_16_9" : "landscape_4_3";
+}
+
+/** Sogni picture size for a storyline shape (16:9 storyboard frame by default). */
+export function sogniStillSizeFor(aspect: ImageGenerationInput["aspect"]): { width: number; height: number } {
+  return aspect === "9:16" ? { width: 576, height: 1024 } : aspect === "1:1" ? { width: 1024, height: 1024 } : { width: 1024, height: 576 };
 }
 
 export interface ImageGenerationResult {
@@ -91,10 +103,11 @@ export class FalImageProvider implements ImageGenerationProvider {
             num_images: 1,
             output_format: "jpeg",
             safety_tolerance: "2",
+            ...(input.aspect ? { aspect_ratio: input.aspect } : {}),
           }
         : {
             prompt: input.prompt,
-            image_size: "landscape_4_3",
+            image_size: falImageSizeFor(input.aspect),
             num_images: 1,
             enable_safety_checker: true,
             // A cheap storyboard still -- few denoising steps, same
@@ -225,7 +238,7 @@ export class SogniImageProvider implements ImageGenerationProvider {
     for (const [index, reference] of references.entries()) {
       mediaReferences.push({ kind: "image", url: await this.uploadReference(reference, index) });
     }
-    const size = { width: 1024, height: 576 }; // A 16:9 storyboard frame.
+    const size = sogniStillSizeFor(input.aspect); // The storyline's shape (16:9 by default).
     const step: Json =
       references.length > 0
         ? {

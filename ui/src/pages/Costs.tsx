@@ -819,7 +819,7 @@ export function Costs() {
                                 ) : (
                                   <span className="h-3 w-3 shrink-0" />
                                 )}
-                                <Identity name={row.agentName ?? row.agentId} size="sm" />
+                                <Identity name={row.agentName ?? row.agentId ?? "No agent (started by a person)"} size="sm" />
                                 {row.agentStatus === "terminated" ? <StatusBadge status="terminated" /> : null}
                               </div>
                               <div className="text-right text-sm tabular-nums">
@@ -919,7 +919,7 @@ export function Costs() {
                 {savedContextRows.map((row) => (
                   <div key={row.agentId} className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
                     <div className="flex min-w-0 items-center gap-2">
-                      <Identity name={row.agentName} size="sm" />
+                      <Identity name={row.agentName ?? row.agentId ?? "Unknown agent"} size="sm" />
                       <span
                         className={cn(
                           "rounded-full px-2 py-0.5 text-xs font-medium",

@@ -11,6 +11,7 @@ import type { StorageService } from "./storage/types.js";
 import { httpLogger, errorHandler } from "./middleware/index.js";
 import { actorMiddleware } from "./middleware/auth.js";
 import { boardMutationGuard } from "./middleware/board-mutation-guard.js";
+import { boardChatGuard } from "./middleware/board-chat-guard.js";
 import { privateHostnameGuard, resolvePrivateHostnameAllowSet } from "./middleware/private-hostname-guard.js";
 import { applyTrustProxy, parseTrustProxyEnv } from "./middleware/trust-proxy.js";
 import { healthRoutes } from "./routes/health.js";
@@ -20,6 +21,7 @@ import { companySkillRoutes } from "./routes/company-skills.js";
 import { teamsCatalogRoutes } from "./routes/teams-catalog.js";
 import { agentRoutes } from "./routes/agents.js";
 import { agentRoleRoutes } from "./routes/agent-roles.js";
+import { agentRequestRightsRoutes } from "./routes/agent-request-rights.js";
 import { personaRoutes } from "./routes/personas.js";
 import { personaAccountRoutes } from "./routes/persona-accounts.js";
 import { mcpToolLibraryRoutes } from "./routes/mcp-tool-library.js";
@@ -28,6 +30,7 @@ import { webSearchRoutes } from "./routes/web-search.js";
 import { agentMemoryRoutes } from "./routes/agent-memories.js";
 import { agentWorkSummaryRoutes } from "./routes/agent-work-summaries.js";
 import { jobSettingsRoutes } from "./routes/job-settings.js";
+import { companyMigrationRoutes } from "./routes/company-migration.js";
 import { cacheSettingsRoutes } from "./routes/cache-settings.js";
 import { positionsJobsPathAliasMiddleware } from "./routes/positions-jobs-aliases.js";
 import { privateAccessRoutes } from "./routes/private-access.js";
@@ -43,10 +46,12 @@ import { modelDirectoryRoutes } from "./routes/model-directory.js";
 import { HELPER_ASK_API_PATH, HELPER_ASK_JSON_BODY_LIMIT, HELPER_INVESTIGATIONS_API_PATH, helperRoutes } from "./routes/helper.js";
 import { emailSettingsRoutes } from "./routes/email-settings.js";
 import { securityReviewSettingsRoutes } from "./routes/security-review-settings.js";
+import { qualityLoopRoutes } from "./routes/quality-loops.js";
 import { videoStorylineRoutes } from "./routes/video-storylines.js";
 import { mediaStudioDirectRoutes } from "./routes/media-studio-direct.js";
 import { bragRoutes } from "./routes/brag.js";
 import { tradingRoutes } from "./routes/trading.js";
+import { cryptoWalletRoutes } from "./routes/crypto-wallets.js";
 import { mcpOAuthRoutes } from "./routes/mcp-oauth.js";
 import { projectRoutes } from "./routes/projects.js";
 import { issueRoutes } from "./routes/issues.js";
@@ -62,6 +67,7 @@ import { executionWorkspaceRoutes } from "./routes/execution-workspaces.js";
 import { goalRoutes } from "./routes/goals.js";
 import { crmRoutes } from "./routes/crm.js";
 import { boardChatRoutes } from "./routes/board-chat.js";
+import { createInProcessDispatcher } from "./services/board-chat-dispatch.js";
 import { laneARoutes } from "./routes/lane-a.js";
 import { chatRouterRoutes } from "./routes/chat-router.js";
 import { issueAnswerRoutes } from "./routes/issue-answers.js";
@@ -85,6 +91,7 @@ import { crossCompanyInstructionRoutes } from "./routes/cross-company-instructio
 import { instanceSecurityRoutes } from "./routes/instance-security.js";
 import { crossCompanyAccessLogRoutes } from "./routes/cross-company-access-log.js";
 import { telegramBotRoutes } from "./routes/telegram-bots.js";
+import { TELEGRAM_CHAT_ASK_API_PATH, TELEGRAM_CHAT_ASK_JSON_BODY_LIMIT, telegramChatRoutes } from "./routes/telegram-chat.js";
 import { telegramReactionRoutes } from "./routes/telegram-reactions.js";
 import { SPEECH_TRANSCRIBE_API_PATH, SPEECH_TRANSCRIBE_JSON_BODY_LIMIT, speechRoutes } from "./routes/speech.js";
 import { dataConnectionRoutes } from "./routes/data-connections.js";
@@ -251,6 +258,11 @@ export async function createApp(
     limit: SPEECH_TRANSCRIBE_JSON_BODY_LIMIT,
     verify: captureRawBody,
   }));
+  // A linked person's Telegram question can carry one photo (up to 10 MB).
+  app.use(TELEGRAM_CHAT_ASK_API_PATH, express.json({
+    limit: TELEGRAM_CHAT_ASK_JSON_BODY_LIMIT,
+    verify: captureRawBody,
+  }));
   // "Ask Paperclip" with pictures: up to 4 pictures of 5 MB each as base64.
   app.use(HELPER_ASK_API_PATH, express.json({
     limit: HELPER_ASK_JSON_BODY_LIMIT,
@@ -291,6 +303,11 @@ export async function createApp(
       resolveSession: opts.resolveSession,
     }),
   );
+  // Board chat on signed-in servers: keeps its in-process requests inside one
+  // company, holds any change until the person approves it, and lets an
+  // approved change through only as exactly what was approved (see
+  // middleware/board-chat-guard.ts). A no-op for everyone else.
+  app.use(boardChatGuard(db));
   app.use("/api/auth", authRoutes(db));
   if (opts.betterAuthHandler) {
     app.all("/api/auth/{*authPath}", opts.betterAuthHandler);
@@ -329,6 +346,7 @@ export async function createApp(
   api.use(llmRoutes(db));
   api.use(companySkillRoutes(db));
   api.use(teamsCatalogRoutes(db));
+  api.use(agentRequestRightsRoutes(db));
   api.use(agentRoutes(db, { pluginWorkerManager: workerManager, storageService: opts.storageService }));
   api.use(agentRoleRoutes(db));
   api.use(personaRoutes(db));
@@ -339,6 +357,7 @@ export async function createApp(
   api.use(agentMemoryRoutes(db));
   api.use(agentWorkSummaryRoutes(db));
   api.use(jobSettingsRoutes(db));
+  api.use(companyMigrationRoutes(db));
   api.use(cacheSettingsRoutes(db));
   api.use(browserRoutes(db));
   api.use(paymentNoticesRoutes(db));
@@ -357,10 +376,12 @@ export async function createApp(
   }));
   api.use(emailSettingsRoutes(db));
   api.use(securityReviewSettingsRoutes(db));
+  api.use(qualityLoopRoutes(db));
   api.use(videoStorylineRoutes(db));
   api.use(mediaStudioDirectRoutes(db));
   api.use(bragRoutes(db));
   api.use(tradingRoutes(db));
+  api.use(cryptoWalletRoutes(db));
   api.use(mcpOAuthRoutes(db));
   api.use(assetRoutes(db, opts.storageService));
   api.use(projectRoutes(db));
@@ -380,7 +401,14 @@ export async function createApp(
   api.use(previewEnvironmentRoutes(db, { service: previewEnvironments }));
   api.use(goalRoutes(db));
   api.use(crmRoutes(db));
-  api.use(boardChatRoutes(db, { deploymentMode: opts.deploymentMode }));
+  // Board chat on signed-in servers runs its tools as in-process requests into
+  // this same app (no socket, no credential): see services/board-chat-dispatch.ts.
+  api.use(
+    boardChatRoutes(db, {
+      deploymentMode: opts.deploymentMode,
+      deps: { dispatch: createInProcessDispatcher(() => app as never) },
+    }),
+  );
   api.use(laneARoutes(db));
   api.use(privateAccessRoutes(db));
   api.use(chatRouterRoutes(db));
@@ -406,6 +434,8 @@ export async function createApp(
   api.use(instanceClaudeAuthRoutes(db));
   api.use(instanceServerAnthropicKeyRoutes(db));
   api.use(telegramBotRoutes(db));
+  // Hermes parity slice 1: linked people ask the company bot on Telegram.
+  api.use(telegramChatRoutes(db));
   api.use(telegramReactionRoutes(db));
   api.use(speechRoutes(db));
   // DUR-3972 S1: business-data sources. Off until enableBusinessData is on.

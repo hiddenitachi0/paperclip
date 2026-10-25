@@ -1,9 +1,10 @@
 import { sql } from "drizzle-orm";
-import { check, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { bigint, boolean, check, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid, type AnyPgColumn } from "drizzle-orm/pg-core";
 import { agents } from "./agents.js";
 import { assets } from "./assets.js";
 import { companies } from "./companies.js";
 import { projects } from "./projects.js";
+import { videoStorylineDirectors } from "./video_storyline_directors.js";
 
 /**
  * DUR-4127 (backend half of DUR-4095, video storylines): a storyline is a
@@ -69,6 +70,9 @@ export const videoStorylines = pgTable(
       }>()
       .notNull()
       .default({}),
+    // The director (video_storyline_directors) whose AI story writer writes
+    // this storyline in step 1; null = none picked yet.
+    directorId: uuid("director_id").references(() => videoStorylineDirectors.id, { onDelete: "set null" }),
     // Direct-storage pointer for the final stitched film -- deliberately NOT
     // an attachments-table row: a multi-hour concatenated film routinely
     // exceeds the 25MB company-attachment cap (attachment-types.ts), and
@@ -89,7 +93,7 @@ export const videoStorylines = pgTable(
     // shot timeline, not re-probed per shot), null when not localizable to a
     // single shot (e.g. a whole-file duration mismatch).
     qualityCheckIssues: jsonb("quality_check_issues")
-      .$type<Array<{ code: string; message: string; shotIndex: number | null; timeSeconds: number | null }>>()
+      .$type<Array<{ code: string; message: string; shotIndex: number | null; timeSeconds: number | null; severity?: "warning" | "blocking" }>>()
       .notNull()
       .default([]),
     qualityCheckedAt: timestamp("quality_checked_at", { withTimezone: true }),
@@ -104,6 +108,22 @@ export const videoStorylines = pgTable(
     musicAssetId: uuid("music_asset_id").references(() => assets.id, { onDelete: "set null" }),
     musicSourceKey: text("music_source_key"),
     musicVolumeDb: integer("music_volume_db").notNull().default(-18),
+    // Simple editor, Phase 2 (design 2.6/2.7): the music lane -- which part
+    // of the music file plays (trim), when it starts in the film (offset),
+    // fades, and whether it plays under the clips' own sound ("mix") or
+    // replaces it ("replace").
+    musicTrimInMs: integer("music_trim_in_ms").notNull().default(0),
+    musicTrimOutMs: integer("music_trim_out_ms"),
+    musicOffsetMs: integer("music_offset_ms").notNull().default(0),
+    musicFadeInMs: integer("music_fade_in_ms").notNull().default(0),
+    musicFadeOutMs: integer("music_fade_out_ms").notNull().default(0),
+    musicAudioMode: text("music_audio_mode").notNull().default("mix"),
+    // Phase 2: the picture shape, chosen once before anything is rendered
+    // and sent to the video models; and how the film is put together
+    // (preset, fps, fill/fit, end frame, quality, title cards) -- see
+    // VideoStorylineExportSettings in packages/shared.
+    aspect: text("aspect").notNull().default("16:9"),
+    exportSettings: jsonb("export_settings").$type<Record<string, unknown>>().notNull().default({}),
     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     createdByUserId: text("created_by_user_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -126,6 +146,12 @@ export const videoStorylines = pgTable(
       sql`${table.defaultTransitionDurationMs} >= 0 AND ${table.defaultTransitionDurationMs} <= 5000`,
     ),
     musicVolumeCheck: check("video_storylines_music_volume_check", sql`${table.musicVolumeDb} >= -60 AND ${table.musicVolumeDb} <= 0`),
+    musicLaneCheck: check(
+      "video_storylines_music_lane_check",
+      sql`${table.musicTrimInMs} >= 0 AND (${table.musicTrimOutMs} IS NULL OR ${table.musicTrimOutMs} > ${table.musicTrimInMs}) AND ${table.musicOffsetMs} >= 0 AND ${table.musicFadeInMs} >= 0 AND ${table.musicFadeInMs} <= 30000 AND ${table.musicFadeOutMs} >= 0 AND ${table.musicFadeOutMs} <= 30000`,
+    ),
+    musicAudioModeCheck: check("video_storylines_music_audio_mode_check", sql`${table.musicAudioMode} IN ('mix', 'replace')`),
+    aspectCheck: check("video_storylines_aspect_check", sql`${table.aspect} IN ('16:9', '9:16', '1:1')`),
     musicSourceExclusiveCheck: check(
       "video_storylines_music_source_exclusive_check",
       sql`${table.musicAssetId} IS NULL OR ${table.musicSourceKey} IS NULL`,
@@ -260,8 +286,29 @@ export const videoShots = pgTable(
     // Shown before (estimated) and after (actual) generating this shot's
     // still -- same before/after pairing resultByteSize's actualCostCents
     // sibling already uses for the real render.
+    // Storyline strip (Simple editor, Phase 1): what the company's
+    // picture-reading model saw in this clip's first / last second, cached
+    // by the clip's content hash so each join is read only once:
+    // { start?: {sourceHash, text, verdict, model, at}, end?: {...} }.
+    frameNotes: jsonb("frame_notes").$type<Record<string, unknown>>().notNull().default({}),
     stillEstimatedCostCents: integer("still_estimated_cost_cents"),
     stillActualCostCents: integer("still_actual_cost_cents"),
+    // Simple editor, Phase 2 (design 2.5): what kind of clip this is.
+    // "generated" = an AI shot (also a photo that was animated: it keeps
+    // sourceUploadId, so its frames still count as the company's own
+    // footage); "uploaded_video" = the company's own video, trimmed;
+    // "still" = a photo held or slowly zoomed by ffmpeg (free). Uploaded and
+    // still clips never reach a video provider: they are prepared on the
+    // server (video-storyline-clips.ts) and their result* columns hold the
+    // prepared clip.
+    clipKind: text("clip_kind").notNull().default("generated"),
+    sourceUploadId: uuid("source_upload_id").references((): AnyPgColumn => videoUploads.id, { onDelete: "set null" }),
+    sourceTrimInMs: integer("source_trim_in_ms"),
+    sourceTrimOutMs: integer("source_trim_out_ms"),
+    stillMotion: text("still_motion"),
+    // Per-clip sound in the film: muted, or a gain in dB.
+    clipMuted: boolean("clip_muted").notNull().default(false),
+    clipVolumeDb: integer("clip_volume_db").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -295,6 +342,14 @@ export const videoShots = pgTable(
       sql`${table.storyboardStatus} IN ('pending', 'approved', 'dropped')`,
     ),
     storylineStoryboardStatusIdx: index("video_shots_storyline_storyboard_status_idx").on(table.storylineId, table.storyboardStatus),
+    clipKindCheck: check("video_shots_clip_kind_check", sql`${table.clipKind} IN ('generated', 'uploaded_video', 'still')`),
+    stillMotionCheck: check("video_shots_still_motion_check", sql`${table.stillMotion} IS NULL OR ${table.stillMotion} IN ('hold', 'slow_zoom')`),
+    sourceTrimCheck: check(
+      "video_shots_source_trim_check",
+      sql`(${table.sourceTrimInMs} IS NULL OR ${table.sourceTrimInMs} >= 0) AND (${table.sourceTrimOutMs} IS NULL OR ${table.sourceTrimOutMs} > coalesce(${table.sourceTrimInMs}, 0))`,
+    ),
+    clipVolumeCheck: check("video_shots_clip_volume_check", sql`${table.clipVolumeDb} >= -60 AND ${table.clipVolumeDb} <= 12`),
+    sourceUploadIdx: index("video_shots_source_upload_idx").on(table.sourceUploadId),
   }),
 );
 
@@ -368,5 +423,210 @@ export const videoStorylineDirectorRuns = pgTable(
       "video_storyline_director_runs_status_check",
       sql`${table.status} IN ('drafting', 'ready_for_review', 'approved', 'rejected', 'failed')`,
     ),
+  }),
+);
+
+/**
+ * Storyline strip (Simple editor, Phase 1): how one gap between two shots is
+ * joined, keyed by the PAIR of shots (from -> to). No row = the old
+ * behaviour (the shot's transitionIn, else the storyline default). kind:
+ * cut | blend (smooth crossfade) | dissolve | fade | ai (an AI-made bridge
+ * clip inserted between the two shots). An "ai" gap is out of date when the
+ * chosen take's anchor hash no longer matches the two shots (a neighbour was
+ * re-rendered or edited) -- computed, never stored, so it can never drift --
+ * and stitching refuses it until it is made again or switched to cut/blend.
+ */
+export const videoTransitions = pgTable(
+  "video_transitions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    storylineId: uuid("storyline_id").notNull().references(() => videoStorylines.id, { onDelete: "cascade" }),
+    fromShotId: uuid("from_shot_id").notNull().references(() => videoShots.id, { onDelete: "cascade" }),
+    toShotId: uuid("to_shot_id").notNull().references(() => videoShots.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull().default("cut"),
+    aiStyle: text("ai_style"),
+    durationMs: integer("duration_ms").notNull().default(500),
+    placement: text("placement").notNull().default("insert"),
+    context: jsonb("context").$type<Record<string, unknown>>(),
+    contextHash: text("context_hash"),
+    plainLine: text("plain_line"),
+    prompt: text("prompt"),
+    userNote: text("user_note"),
+    suggestedKind: text("suggested_kind"),
+    suggestReason: text("suggest_reason"),
+    keepSame: jsonb("keep_same").$type<{ face: boolean; clothes: boolean; location: boolean }>().notNull().default({ face: true, clothes: true, location: true }),
+    audioMode: text("audio_mode").notNull().default("bed_only"),
+    provider: text("provider"),
+    model: text("model"),
+    chosenTakeId: uuid("chosen_take_id"),
+    locked: boolean("locked").notNull().default(false),
+    createdByUserId: text("created_by_user_id"),
+    createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pairUq: uniqueIndex("video_transitions_pair_uq").on(table.storylineId, table.fromShotId, table.toShotId),
+    companyIdx: index("video_transitions_company_idx").on(table.companyId),
+    // Phase 2 adds the extra free ffmpeg transitions under "More…" (keep in sync with VIDEO_TRANSITION_KINDS).
+    kindCheck: check(
+      "video_transitions_kind_check",
+      sql`${table.kind} IN ('cut', 'blend', 'dissolve', 'fade', 'ai', 'fade_black', 'fade_white', 'wipe_left', 'wipe_right', 'slide_left', 'slide_right', 'circle_open', 'zoom_in', 'pixelize', 'radial')`,
+    ),
+    placementCheck: check("video_transitions_placement_check", sql`${table.placement} IN ('insert', 'overlap')`),
+    audioModeCheck: check("video_transitions_audio_mode_check", sql`${table.audioMode} IN ('ambient', 'silent', 'bed_only')`),
+    durationCheck: check("video_transitions_duration_check", sql`${table.durationMs} >= 0 AND ${table.durationMs} <= 30000`),
+    suggestedKindCheck: check(
+      "video_transitions_suggested_kind_check",
+      sql`${table.suggestedKind} IS NULL OR ${table.suggestedKind} IN ('cut', 'blend', 'dissolve', 'fade', 'ai')`,
+    ),
+  }),
+);
+
+/**
+ * One generated version ("take") of an AI transition. reservedCents is held
+ * against the storyline budget and the company's monthly media cap from the
+ * moment the provider job starts; a failed take gives it back.
+ */
+export const videoTransitionTakes = pgTable(
+  "video_transition_takes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    storylineId: uuid("storyline_id").notNull().references(() => videoStorylines.id, { onDelete: "cascade" }),
+    transitionId: uuid("transition_id").notNull().references(() => videoTransitions.id, { onDelete: "cascade" }),
+    status: text("status").notNull().default("generating"),
+    provider: text("provider").notNull(),
+    model: text("model").notNull(),
+    externalId: text("external_id"),
+    anchorHash: text("anchor_hash").notNull(),
+    prompt: text("prompt").notNull(),
+    note: text("note"),
+    durationMs: integer("duration_ms").notNull(),
+    audioMode: text("audio_mode").notNull().default("bed_only"),
+    resultProvider: text("result_provider"),
+    resultObjectKey: text("result_object_key"),
+    resultContentType: text("result_content_type"),
+    resultByteSize: integer("result_byte_size"),
+    resultSha256: text("result_sha256"),
+    reservedCents: integer("reserved_cents").notNull().default(0),
+    costCents: integer("cost_cents"),
+    qc: jsonb("qc").$type<Record<string, unknown>>(),
+    error: text("error"),
+    createdByUserId: text("created_by_user_id"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    transitionIdx: index("video_transition_takes_transition_idx").on(table.transitionId, table.createdAt),
+    pollQueueIdx: index("video_transition_takes_poll_queue_idx").on(table.status, table.startedAt),
+    companyMonthIdx: index("video_transition_takes_company_created_idx").on(table.companyId, table.createdAt),
+    statusCheck: check("video_transition_takes_status_check", sql`${table.status} IN ('generating', 'ready', 'failed')`),
+    providerCheck: check("video_transition_takes_provider_check", sql`${table.provider} IN ('fal', 'sogni')`),
+    audioModeCheck: check("video_transition_takes_audio_mode_check", sql`${table.audioMode} IN ('ambient', 'silent', 'bed_only')`),
+    reservedCheck: check("video_transition_takes_reserved_check", sql`${table.reservedCents} >= 0`),
+  }),
+);
+
+/**
+ * Simple editor, Phase 2 (design 2.5): a photo or video the company uploaded
+ * for a storyline. The upload route stores the raw file (raw*); the clip
+ * tick (video-storyline-clips.ts, through the media job queue) turns it into
+ * a working copy -- HDR phone video tone-mapped to normal colour, variable
+ * frame rate made constant, photos turned upright -- plus a light preview
+ * copy, then deletes the raw file. byteSize is everything this upload keeps
+ * in storage right now and is what the company's storage quota counts.
+ *
+ * Privacy: nothing here is ever sent anywhere by being stitched. Before a
+ * photo or a frame of a video leaves the server (a video model, an AI
+ * bridge, the picture-reading model), it must pass the age check (ageChecks,
+ * per picture hash, never milder) and, when people are shown, both consent
+ * ticks -- see video-storyline-footage.ts.
+ */
+export const videoUploads = pgTable(
+  "video_uploads",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    storylineId: uuid("storyline_id").notNull().references(() => videoStorylines.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    status: text("status").notNull().default("processing"),
+    originalFilename: text("original_filename"),
+    sourceContentType: text("source_content_type").notNull(),
+    rawObjectKey: text("raw_object_key"),
+    rawByteSize: bigint("raw_byte_size", { mode: "number" }).notNull().default(0),
+    objectKey: text("object_key"),
+    contentType: text("content_type"),
+    workingByteSize: bigint("working_byte_size", { mode: "number" }).notNull().default(0),
+    sha256: text("sha256"),
+    previewObjectKey: text("preview_object_key"),
+    previewContentType: text("preview_content_type"),
+    previewByteSize: bigint("preview_byte_size", { mode: "number" }).notNull().default(0),
+    posterObjectKey: text("poster_object_key"),
+    posterByteSize: bigint("poster_byte_size", { mode: "number" }).notNull().default(0),
+    durationMs: integer("duration_ms"),
+    width: integer("width"),
+    height: integer("height"),
+    sourceFpsMilli: integer("source_fps_milli"),
+    wasHdr: boolean("was_hdr").notNull().default(false),
+    wasVariableFrameRate: boolean("was_variable_frame_rate").notNull().default(false),
+    hasAudio: boolean("has_audio").notNull().default(false),
+    showsPeople: boolean("shows_people").notNull().default(false),
+    consentLikeness: boolean("consent_likeness").notNull().default(false),
+    consentAdults: boolean("consent_adults").notNull().default(false),
+    consentByUserId: text("consent_by_user_id"),
+    consentAt: timestamp("consent_at", { withTimezone: true }),
+    ageChecks: jsonb("age_checks").$type<Record<string, { verdict: string; at: string; model: string | null }>>().notNull().default({}),
+    error: text("error"),
+    createdByUserId: text("created_by_user_id"),
+    createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    storylineIdx: index("video_uploads_storyline_idx").on(table.storylineId, table.createdAt),
+    companyIdx: index("video_uploads_company_idx").on(table.companyId, table.createdAt),
+    statusIdx: index("video_uploads_status_idx").on(table.status, table.updatedAt),
+    kindCheck: check("video_uploads_kind_check", sql`${table.kind} IN ('video', 'photo')`),
+    statusCheck: check("video_uploads_status_check", sql`${table.status} IN ('processing', 'ready', 'failed')`),
+    bytesCheck: check(
+      "video_uploads_bytes_check",
+      sql`${table.rawByteSize} >= 0 AND ${table.workingByteSize} >= 0 AND ${table.previewByteSize} >= 0 AND ${table.posterByteSize} >= 0`,
+    ),
+  }),
+);
+
+/**
+ * Phase 2: money held for a paid step that is not an AI transition take
+ * (today: "animate this photo"). Reserved against the storyline budget AND
+ * the company's monthly media cap before the provider is called (same lock
+ * as transitions), settled to the real cost when the clip arrives, released
+ * when it fails. The monthly cap is counted from the matching cost_events
+ * row (storyline-media-ledger.ts), because these rows go with their storyline.
+ */
+export const videoMediaSpend = pgTable(
+  "video_media_spend",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    storylineId: uuid("storyline_id").notNull().references(() => videoStorylines.id, { onDelete: "cascade" }),
+    shotId: uuid("shot_id").references(() => videoShots.id, { onDelete: "set null" }),
+    kind: text("kind").notNull(),
+    status: text("status").notNull().default("reserved"),
+    reservedCents: integer("reserved_cents").notNull().default(0),
+    costCents: integer("cost_cents"),
+    createdByUserId: text("created_by_user_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    companyMonthIdx: index("video_media_spend_company_created_idx").on(table.companyId, table.createdAt),
+    shotIdx: index("video_media_spend_shot_idx").on(table.shotId, table.status),
+    kindCheck: check("video_media_spend_kind_check", sql`${table.kind} IN ('animate_photo')`),
+    statusCheck: check("video_media_spend_status_check", sql`${table.status} IN ('reserved', 'settled', 'released')`),
+    reservedCheck: check("video_media_spend_reserved_check", sql`${table.reservedCents} >= 0`),
   }),
 );

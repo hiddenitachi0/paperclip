@@ -119,6 +119,10 @@ Same as changelog, plus:
 - Promised dates for unshipped work.
 - Pre-announcing something the team has not yet committed to ship.
 
+## Before anything goes public
+
+You write the draft; a person decides when it goes out. Never post to a public channel (social account, blog, newsletter, customer email) yourself unless the task explicitly says the post is approved. Attach the draft to the task and ask for approval with a plain-words card ("Post this release note on LinkedIn?").
+
 ## Post-publish checklist
 
 - Changelog is in source control alongside the release.

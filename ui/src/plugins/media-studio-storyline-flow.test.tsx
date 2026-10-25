@@ -16,8 +16,8 @@ import {
 } from "../../../packages/plugins/media-studio/src/ui/storyline-flow";
 
 /**
- * The guided Storylines flow (1 Script -> 2 Pictures -> 3 Budget & render ->
- * 4 Film): step status lines, the "what is missing" checklist and its
+ * The guided Storylines flow (1 Script -> 2 Cast & look -> 3 Storyboard ->
+ * 4 Timeline -> 5 Render & export): step status lines, the "what is missing" checklist and its
  * one-click fixes, the server-refusal mapping, AI suggestions vs picture
  * approval, and the bulk picture actions.
  */
@@ -47,7 +47,8 @@ describe("step status (pure)", () => {
   it("the owner's case: 9 shots with accepted AI suggestions but no pictures opens on Pictures, 0 of 9 approved", () => {
     const input = flow();
     const steps = computeSteps(input);
-    expect(steps.map((s) => s.status)).toEqual(["9 shots", "0 of 9 pictures approved", "2 things to sort out first", "Not started"]);
+    expect(steps.map((s) => s.title)).toEqual(["Script", "Cast & look", "Storyboard", "Timeline", "Render & export"]);
+    expect(steps.map((s) => s.status)).toEqual(["9 shots", "Optional", "0 of 9 pictures approved", "9 clips", "2 things to sort out first"]);
     expect(steps[0]!.state).toBe("done");
     expect(suggestedStep(input)).toBe("pictures");
   });
@@ -56,7 +57,7 @@ describe("step status (pure)", () => {
     const shots = [sbShot(0, "approved", true), sbShot(1, "approved", false), sbShot(2, "pending", true), sbShot(3, "pending", false), sbShot(4, "dropped", false)];
     const counts = pictureCounts({ shots, allApproved: false, videoEstimatedTotalCents: null, approvalThresholdCents: null });
     expect(counts).toMatchObject({ total: 4, approved: 2, approvedWithPicture: 1, approvedWithoutPicture: 1, waiting: 1, missing: 1, dropped: 1, waitingIds: ["sh-2"], missingIds: ["sh-3"] });
-    expect(computeSteps(flow({ shots }))[1]!.status).toBe("2 of 4 pictures approved (1 left out)");
+    expect(computeSteps(flow({ shots }))[2]!.status).toBe("2 of 4 pictures approved (1 left out)");
   });
 
   it("pending AI suggestions send the person to the script and show on the step", () => {
@@ -68,15 +69,16 @@ describe("step status (pure)", () => {
   it("ready, rendering, combining and done", () => {
     const approved = Array.from({ length: 9 }, (_, i) => sbShot(i, "approved", true));
     const ready = flow({ shots: approved, storyline: { id: "sl", status: "estimated", budgetCapCents: 2000, spentCents: 0, estimatedTotalCents: 1000, finalObjectKey: null } });
-    expect(computeSteps(ready)[2]).toMatchObject({ status: "Ready to render", state: "ready" });
+    expect(computeSteps(ready)[4]).toMatchObject({ status: "Ready to render", state: "ready" });
     expect(suggestedStep(ready)).toBe("render");
 
     const rendering = { ...ready, storyline: { ...ready.storyline, status: "rendering" }, progress: { totalShots: 9, doneShots: 2, failedShots: 0, renderingShots: 1 } };
-    expect(computeSteps(rendering)[3]!.status).toBe("Rendering 3 of 9");
-    expect(computeSteps(rendering)[2]!.status).toBe("Render started");
-    expect(suggestedStep(rendering)).toBe("film");
-    expect(computeSteps({ ...rendering, storyline: { ...rendering.storyline, status: "stitching" } })[3]!.status).toBe("Combining clips");
-    expect(computeSteps({ ...rendering, storyline: { ...rendering.storyline, status: "done" } })[3]).toMatchObject({ status: "Film ready", state: "done" });
+    expect(computeSteps(rendering)[4]!.status).toBe("Rendering 3 of 9");
+    expect(suggestedStep(rendering)).toBe("render");
+    expect(computeSteps({ ...rendering, storyline: { ...rendering.storyline, status: "stitching" } })[4]!.status).toBe("Combining clips");
+    expect(computeSteps({ ...rendering, storyline: { ...rendering.storyline, status: "done" } })[4]).toMatchObject({ status: "Film ready", state: "done" });
+    // A start that failed before anything was made reads as a failure on step 5, not as "ready".
+    expect(computeSteps({ ...ready, storyline: { ...ready.storyline, status: "failed" } })[4]).toMatchObject({ status: "Render failed", state: "attention" });
   });
 });
 
@@ -153,6 +155,8 @@ type ShotState = { status: "pending" | "approved" | "dropped"; still: boolean; p
 let state: Record<string, ShotState>;
 let budget: number | null;
 let startReply: { status: number; body: string };
+let slStatus: string;
+let slError: string | null;
 let calls: Array<{ path: string; method: string; body?: string }>;
 const lookAction = vi.fn(async () => ({ looks: [] }));
 
@@ -186,7 +190,7 @@ function installFetch() {
       if (path === `${BASE}/settings`) return json({ enabled: true });
       if (path === `${BASE}/settings/advanced`) return json({ enabled: true });
       if (path === BASE) {
-        return json([{ id: SL, companyId: COMPANY, projectId: null, title: "Nine shots", status: "estimated", providerId: "fal", model: null, budgetCapCents: budget, spentCents: 0, estimatedTotalCents: 1500, estimatedTotalSeconds: 15, characterReferenceAssetIds: [], finalObjectKey: null, finalByteSize: null, finalDurationSeconds: null, stitchBlockedReason: null, errorMessage: null, createdAt: "", updatedAt: "" }]);
+        return json([{ id: SL, companyId: COMPANY, projectId: null, title: "Nine shots", status: slStatus, providerId: "fal", model: null, budgetCapCents: budget, spentCents: 0, estimatedTotalCents: 1500, estimatedTotalSeconds: 15, characterReferenceAssetIds: [], finalObjectKey: null, finalByteSize: null, finalDurationSeconds: null, stitchBlockedReason: null, errorMessage: slError, createdAt: "", updatedAt: "" }]);
       }
       if (path === `${BASE}/${SL}` && method === "PATCH") {
         budget = JSON.parse(body!).budgetCapCents;
@@ -269,6 +273,8 @@ describe("guided flow on the page", () => {
     state = Object.fromEntries(IDS.map((id) => [id, { status: "pending", still: false, proposal: "accepted" }]));
     budget = 2000;
     startReply = { status: 200, body: "{}" };
+    slStatus = "estimated";
+    slError = null;
     calls = [];
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (globalThis as any).__paperclipPluginBridge__ = {
@@ -312,7 +318,7 @@ describe("guided flow on the page", () => {
     expect(approvePosts).toHaveLength(3);
     expect(approvePosts.every((c) => JSON.parse(c.body!).withoutStill === undefined)).toBe(true);
     expect(byTestId(container, "step-pictures-status").textContent).toBe("3 of 3 pictures approved");
-    expect(byTestId(container, "pictures-primary-next").textContent).toBe("Next: Budget & render");
+    expect(byTestId(container, "pictures-primary-next").textContent).toBe("Next: Timeline");
   });
 
   it("skips pictures for all remaining shots after explaining the trade-off", async () => {
@@ -359,6 +365,53 @@ describe("guided flow on the page", () => {
     const patch = calls.filter((c) => c.path === `${BASE}/${SL}` && c.method === "PATCH").at(-1);
     expect(JSON.parse(patch!.body!)).toEqual({ budgetCapCents: 1500 });
     expect(container.querySelector('[data-testid="render-refused"]')).toBeNull();
+  });
+
+  it("one stepper with five steps that says what is done and what is next", async () => {
+    await mount();
+    const titles = Array.from(byTestId(container, "step-bar").querySelectorAll("button")).map((b) => b.textContent);
+    expect(titles.map((t) => t?.replace(/^\S+?(?=[A-Z])/, ""))).toEqual([
+      "Script3 shots",
+      "Cast & lookOptional",
+      "Storyboard0 of 3 pictures approved",
+      "Timeline0:15 long, 3 clips",
+      "Render & export1 thing to sort out first",
+    ]);
+    await click(byTestId(container, "step-cast"));
+    expect(byTestId(container, "next-step-hint").textContent).toContain("Next: step 3, Storyboard (0 of 3 pictures approved)");
+    await click(button(byTestId(container, "next-step-hint"), "Go there"));
+    expect(byTestId(container, "storyboard-panel")).toBeTruthy();
+  });
+
+  it("Start is disabled with the reason spelled out next to it", async () => {
+    await mount();
+    await click(byTestId(container, "step-render"));
+    expect((byTestId(container, "start-render") as HTMLButtonElement).disabled).toBe(true);
+    expect(byTestId(container, "start-blocked").textContent).toBe("Start is waiting for this: 3 shots have no approved picture yet.");
+  });
+
+  it("a start that failed shows the plain reason and what to do, with Start ready again", async () => {
+    IDS.forEach((id) => (state[id] = { status: "approved", still: true, proposal: null }));
+    slError = "The render did not start. Something went wrong on our side while sending shot 1 to Sogni. If it keeps happening, tell your admin. Nothing was charged. Try again in a minute.";
+    await mount();
+    expect(byTestId(container, "render-last-error").textContent).toContain("Nothing was charged. Try again in a minute.");
+    expect((byTestId(container, "start-render") as HTMLButtonElement).disabled).toBe(false);
+
+    // A new refusal from the server is shown in the same plain words.
+    startReply = { status: 422, body: JSON.stringify({ error: "The render did not start. Sogni didn't accept shot 1: Sogni's storage did not take the starting frame (500). Nothing was charged. Try again in a minute." }) };
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    await click(byTestId(container, "start-render"));
+    expect(byTestId(container, "readiness-refusal-other").textContent).toContain("Sogni didn't accept shot 1");
+  });
+
+  it("the timeline is a step of its own, reached from the storyboard", async () => {
+    IDS.forEach((id) => (state[id] = { status: "approved", still: true, proposal: null }));
+    await mount();
+    await click(byTestId(container, "step-pictures"));
+    await click(byTestId(container, "pictures-primary-next"));
+    expect(byTestId(container, "timeline-editor")).toBeTruthy();
+    await click(byTestId(container, "timeline-next"));
+    expect(byTestId(container, "render-step")).toBeTruthy();
   });
 
   it("pending AI suggestions show a banner that leads to the script step, labelled apart from pictures", async () => {

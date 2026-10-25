@@ -41,7 +41,7 @@ export const dataReadEvents = pgTable(
     runIdx: index("data_read_events_run_idx").on(table.runId),
     channelCheck: check(
       "data_read_events_channel_check",
-      sql`${table.channel} IN ('quick_chat', 'telegram', 'settings_test')`,
+      sql`${table.channel} IN ('quick_chat', 'telegram', 'settings_test', 'report_run', 'report_preview')`,
     ),
     outcomeCheck: check(
       "data_read_events_outcome_check",

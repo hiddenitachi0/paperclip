@@ -14,7 +14,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  *   - Team-lead hire step (capsule wizard, PAP-125)
  *   - Onboarding front door (path picker)
  *   - "Add agents to your org" growth intake
- *   - Conference Room (BoardChat) shell + composer + activity feed
+ *   - Board chat (BoardChat, formerly "Conference Room") shell + composer + activity feed
  *   - Artifacts page
  *
  * These are structural/rendering checks — LLM-dependent streaming (CEO chat
@@ -129,7 +129,7 @@ test.describe("NUX Phase 4 visual QA", () => {
     ).toBeVisible({ timeout: 10_000 });
     await page.screenshot({ path: shot("05-growth-intake.png") });
 
-    // ── Section C: Conference Room (BoardChat) ────────────────────────────
+    // ── Section C: Board chat (BoardChat) ─────────────────────────────────
     // Visit the company dashboard first so CompanyContext selects the company
     // from the route before we land on the board-chat surface.
     await page.evaluate(() => window.localStorage.clear());
