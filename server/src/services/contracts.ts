@@ -34,7 +34,7 @@ import {
   type UpsertContractTerm,
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
-import { authorizationService } from "./authorization.js";
+import { authorizationService, type AuthorizationActor } from "./authorization.js";
 
 /**
  * Contract register (Legal Phase 1, DUR-4852).
@@ -204,13 +204,21 @@ export function aggregateTermRows(
  * holds the Legal Advisor position, or any agent holding an explicit
  * `contracts:access` grant. Everything else is refused (confidential by default).
  *
- * The explicit-grant path goes through the shared authorization service, so its
- * low-trust-boundary and task-bridge-key restrictions apply; the position path
- * only opens when the service said "no grant" and nothing stricter.
+ * `actor` must be the request's own actor (key scope, key id, run id) and not
+ * one rebuilt from the agent id: the shared authorization service applies its
+ * task-bridge-key and low-trust-boundary restrictions from those fields, and
+ * both paths below honour them. The position path only opens when the service
+ * said "no grant" and nothing stricter.
  */
-export async function agentMayUseContracts(db: Db, companyId: string, agentId: string): Promise<boolean> {
+export async function agentMayUseContracts(
+  db: Db,
+  companyId: string,
+  actor: AuthorizationActor,
+): Promise<boolean> {
+  const agentId = actor.agentId;
+  if (!agentId) return false;
   const decision = await authorizationService(db).decide({
-    actor: { type: "agent", agentId, companyId, source: "agent_key" },
+    actor,
     action: "contracts:access",
     resource: { type: "company", companyId },
   });

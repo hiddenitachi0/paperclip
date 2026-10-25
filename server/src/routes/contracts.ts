@@ -52,8 +52,7 @@ export function contractRoutes(rawDb: Db) {
       try {
         const companyId = req.params.companyId as string;
         if (req.actor.type === "agent") {
-          const agentId = req.actor.agentId;
-          if (!agentId || !(await agentMayUseContracts(db, companyId, agentId))) {
+          if (!(await agentMayUseContracts(db, companyId, req.actor))) {
             throw forbidden("This agent does not have access to contracts");
           }
         } else if (req.actor.type === "board") {

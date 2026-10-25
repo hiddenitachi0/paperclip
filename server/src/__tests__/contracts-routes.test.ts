@@ -82,7 +82,7 @@ describeEmbeddedPostgres("contract register routes (DUR-4852)", () => {
 
   type Who =
     | { board: string[]; role?: string }
-    | { agentId: string; companyId: string };
+    | { agentId: string; companyId: string; actorExtra?: Record<string, unknown> };
 
   function createApp(who: Who) {
     const app = express();
@@ -90,7 +90,7 @@ describeEmbeddedPostgres("contract register routes (DUR-4852)", () => {
     app.use((req, _res, next) => {
       (req as any).actor =
         "agentId" in who
-          ? { type: "agent", source: "agent_jwt", agentId: who.agentId, companyId: who.companyId }
+          ? { type: "agent", source: "agent_jwt", agentId: who.agentId, companyId: who.companyId, ...who.actorExtra }
           : {
               type: "board",
               source: "session",
@@ -120,7 +120,10 @@ describeEmbeddedPostgres("contract register routes (DUR-4852)", () => {
     return companyId;
   }
 
-  async function seedAgent(companyId: string, opts: { roleKey?: string; grant?: boolean; status?: string } = {}) {
+  async function seedAgent(
+    companyId: string,
+    opts: { roleKey?: string; grant?: boolean; status?: string; permissions?: Record<string, unknown> } = {},
+  ) {
     let roleId: string | null = null;
     if (opts.roleKey) {
       roleId = randomUUID();
@@ -136,7 +139,7 @@ describeEmbeddedPostgres("contract register routes (DUR-4852)", () => {
       adapterType: "codex_local",
       adapterConfig: {},
       runtimeConfig: {},
-      permissions: {},
+      permissions: opts.permissions ?? {},
       roleId,
     });
     await db.insert(companyMemberships).values({
@@ -311,6 +314,45 @@ describeEmbeddedPostgres("contract register routes (DUR-4852)", () => {
       const plain = await seedAgent(companyId);
       expect((await request(createApp({ agentId: granted, companyId })).get(`/api/companies/${companyId}/contracts`)).status).toBe(200);
       expect((await request(createApp({ agentId: plain, companyId })).get(`/api/companies/${companyId}/contracts`)).status).toBe(403);
+    });
+
+    it("refuses a task-bridge key even for the Legal Advisor or a granted agent", async () => {
+      const companyId = await seedCompany();
+      const legal = await seedAgent(companyId, { roleKey: "legal-advisor" });
+      const granted = await seedAgent(companyId, { grant: true });
+      const contract = await createContract(createApp({ board: [companyId] }), companyId);
+      for (const agentId of [legal, granted]) {
+        const app = createApp({
+          agentId,
+          companyId,
+          actorExtra: {
+            source: "agent_key",
+            keyId: randomUUID(),
+            keyScope: { kind: "task_bridge", parentIssueId: randomUUID() },
+          },
+        });
+        for (const res of [
+          await request(app).get(`/api/companies/${companyId}/contracts`),
+          await request(app).get(`/api/companies/${companyId}/contracts/${contract.id}?includeText=true`),
+          await request(app).patch(`/api/companies/${companyId}/contracts/${contract.id}`).send({ title: "x" }),
+        ]) {
+          expect(res.status).toBe(403);
+        }
+      }
+    });
+
+    it("refuses a Limited-trust agent even for the Legal Advisor or a granted agent", async () => {
+      const companyId = await seedCompany();
+      const permissions = {
+        trustPreset: "low_trust_review",
+        authorizationPolicy: { trustBoundary: { mode: "low_trust_review", projectIds: [randomUUID()] } },
+      };
+      const legal = await seedAgent(companyId, { roleKey: "legal-advisor", permissions });
+      const granted = await seedAgent(companyId, { grant: true, permissions });
+      for (const agentId of [legal, granted]) {
+        const res = await request(createApp({ agentId, companyId })).get(`/api/companies/${companyId}/contracts`);
+        expect(res.status).toBe(403);
+      }
     });
 
     it("refuses a terminated or pending Legal agent", async () => {
