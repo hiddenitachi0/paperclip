@@ -3615,31 +3615,45 @@ export function issueRoutes(
     return rawId;
   }
 
+  /**
+   * The issue's project and effective goal, plus the goal id to report.
+   *
+   * Cross-company isolation (docs/security/cross-company-isolation.md): an
+   * issue or project written before the reference guards existed may still
+   * store another company's project or goal id. Such a record is ignored
+   * (treated as absent), so neither its content nor its id is returned.
+   */
   async function resolveIssueProjectAndGoal(issue: {
     companyId: string;
     projectId: string | null;
     goalId: string | null;
   }) {
+    const inIssueCompany = <T extends { companyId: string }>(record: T | null): T | null =>
+      record && record.companyId === issue.companyId ? record : null;
     const projectPromise = issue.projectId ? projectsSvc.getById(issue.projectId) : Promise.resolve(null);
     const directGoalPromise = issue.goalId ? goalsSvc.getById(issue.goalId) : Promise.resolve(null);
-    const [project, directGoal] = await Promise.all([projectPromise, directGoalPromise]);
+    const [loadedProject, loadedDirectGoal] = await Promise.all([projectPromise, directGoalPromise]);
+    const project = inIssueCompany(loadedProject);
+    const directGoal = inIssueCompany(loadedDirectGoal);
+    // The issue's own goal id, unless it points into another company.
+    const ownGoalId = loadedDirectGoal && !directGoal ? null : issue.goalId;
 
     if (directGoal) {
-      return { project, goal: directGoal };
+      return { project, goal: directGoal, goalId: directGoal.id };
     }
 
     const projectGoalId = project?.goalId ?? project?.goalIds[0] ?? null;
     if (projectGoalId) {
-      const projectGoal = await goalsSvc.getById(projectGoalId);
-      return { project, goal: projectGoal };
+      const projectGoal = inIssueCompany(await goalsSvc.getById(projectGoalId));
+      return { project, goal: projectGoal, goalId: projectGoal?.id ?? ownGoalId };
     }
 
     if (!issue.projectId) {
       const defaultGoal = await goalsSvc.getDefaultCompanyGoal(issue.companyId);
-      return { project, goal: defaultGoal };
+      return { project, goal: defaultGoal, goalId: defaultGoal?.id ?? ownGoalId };
     }
 
-    return { project, goal: null };
+    return { project, goal: null, goalId: ownGoalId };
   }
 
   // Resolve issue identifiers (e.g. "PAP-39") to UUIDs for all /issues/:id routes
@@ -4139,7 +4153,7 @@ export function issueRoutes(
       ? executionWorkspacesSvc.getById(issue.executionWorkspaceId)
       : Promise.resolve(null);
     const [
-      { project, goal },
+      { project, goal, goalId: resolvedGoalId },
       ancestors,
       commentCursor,
       wakeComment,
@@ -4216,7 +4230,7 @@ export function issueRoutes(
         activeRecoveryAction: revalidatedActiveRecoveryAction,
         priority: issue.priority,
         projectId: issue.projectId,
-        goalId: goal?.id ?? issue.goalId,
+        goalId: resolvedGoalId,
         parentId: issue.parentId,
         blockedBy: relationsWithRecoveryActions.blockedBy,
         blocks: relationsWithRecoveryActions.blocks,
@@ -4307,7 +4321,7 @@ export function issueRoutes(
     assertCompanyAccess(req, issue.companyId);
     if (!(await assertIssueReadAllowed(req, res, issue))) return;
     const [
-      { project, goal },
+      { project, goal, goalId: resolvedGoalId },
       ancestors,
       mentionedProjectIds,
       documentPayload,
@@ -4359,7 +4373,7 @@ export function issueRoutes(
     const workProducts = await workProductsSvc.listForIssue(issue.id);
     res.json({
       ...issue,
-      goalId: goal?.id ?? issue.goalId,
+      goalId: resolvedGoalId,
       ancestors,
       ...(blockerAttention ? { blockerAttention } : {}),
       productivityReview,
