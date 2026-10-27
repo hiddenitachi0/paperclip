@@ -58,6 +58,7 @@ import { buildClipContactSheet, extractFirstFrameDataUri, extractFrameAtDataUri,
 import type { MediaJobHandle } from "./video-provider-clients.js";
 import { STORYLINE_TRANSITION_BILLING_CODE, STORYLINE_WRITER_NO_MODEL_MESSAGE, storylineCompanyModel } from "./video-storyline-company-model.js";
 import { buildProvider, estimateShotRenderCents, resolveShotRenderTarget, shotClipTiming, storylineSafeFetch, videoStorylineRenderService } from "./video-storyline-render.js";
+import { loadMadeClipTargets, resolveMadeClipTarget } from "./video-storyline-shot-target.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
 import { lockStorylineRow, videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
 import type { HelperServiceOptions } from "./helper.js";
@@ -282,6 +283,8 @@ export async function buildStitchPlan(
     .from(videoTransitions)
     .where(and(eq(videoTransitions.storylineId, storyline.id), eq(videoTransitions.companyId, storyline.companyId)));
   const byPair = new Map(rows.map((r) => [`${r.fromShotId}:${r.toShotId}`, r]));
+  // A made clip keeps the length (and so the trim reach) of the model that made it, whatever the film uses now.
+  const madeTargets = await loadMadeClipTargets(db, shots.filter((s) => s.clipKind === "generated" && s.status === "done").map((s) => s.id));
   const chosenIds = rows.filter((r) => r.kind === "ai" && r.chosenTakeId).map((r) => r.chosenTakeId!);
   const takes = chosenIds.length
     ? await db.select().from(videoTransitionTakes).where(and(inArray(videoTransitionTakes.id, chosenIds), eq(videoTransitionTakes.companyId, storyline.companyId)))
@@ -326,7 +329,7 @@ export async function buildStitchPlan(
     // Phase 2: per-clip sound (mute / volume).
     const audio: NormalizeClipOptions["audio"] = shot.clipMuted ? "strip" : shot.clipVolumeDb !== 0 ? { gainDb: shot.clipVolumeDb } : undefined;
     // Timeline editor: a made AI clip's trim is applied here (your own videos are cut when they are prepared).
-    const timing = shot.clipKind === "generated" ? shotClipTiming(storyline, shot) : null;
+    const timing = shot.clipKind === "generated" ? shotClipTiming(storyline, shot, null, madeTargets.get(shot.id) ?? null) : null;
     const trimMs = timing?.trimmed ? { startMs: Math.max(0, shot.sourceTrimInMs ?? 0), endMs: shot.sourceTrimOutMs ?? null } : undefined;
     const normalize: NormalizeClipOptions | undefined = audio || trimMs ? { ...(audio ? { audio } : {}), ...(trimMs ? { trimMs } : {}) } : undefined;
     items.push({
@@ -532,7 +535,9 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
     }
     // Same rule as setAspect: an AI picture or clip has been made in the current shape.
     const aspectLocked = shots.some((s) => s.clipKind === "generated" && !s.sourceUploadId && (s.status !== "draft" || s.resultObjectKey !== null || s.stillObjectKey !== null));
-    const timing = new Map(shots.map((s) => [s.id, shotClipTiming(storyline, s, s.sourceUploadId ? uploadById.get(s.sourceUploadId)?.durationMs ?? null : null)]));
+    // A made clip is read at the model that made it (its latest done render job); a shot not made yet at the one a render would use.
+    const madeTargets = await loadMadeClipTargets(db, shots.filter((s) => s.clipKind === "generated" && s.status === "done").map((s) => s.id));
+    const timing = new Map(shots.map((s) => [s.id, shotClipTiming(storyline, s, s.sourceUploadId ? uploadById.get(s.sourceUploadId)?.durationMs ?? null : null, madeTargets.get(s.id) ?? null)]));
     const totalSeconds = Math.round(
       shots.reduce((sum, s) => sum + (timing.get(s.id)?.playMs ?? s.durationSeconds * 1000) / 1000, 0) +
         gaps.filter((g) => g.kind === "ai").reduce((sum, g) => sum + g.durationMs / 1000, 0),
@@ -569,11 +574,14 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
         sourceLengthMs: timing.get(s.id)?.sourceLengthMs ?? null,
         ...(s.clipKind === "generated"
           ? {
-              providerId: resolveShotRenderTarget(storyline, s).providerId,
-              model: resolveShotRenderTarget(storyline, s).model,
+              // Made: what made it. Not made: what a render will use ("will use X"). estimatedCostCents is always a new render's.
+              providerId: resolveMadeClipTarget(storyline, s, madeTargets.get(s.id)).providerId,
+              model: resolveMadeClipTarget(storyline, s, madeTargets.get(s.id)).model,
+              pinned: s.providerId !== null,
+              willUse: resolveShotRenderTarget(storyline, s),
               estimatedCostCents: estimateShotRenderCents(storyline, [s]).estimatedTotalCents,
             }
-          : { providerId: null, model: null, estimatedCostCents: null }),
+          : { providerId: null, model: null, pinned: false, willUse: null, estimatedCostCents: null }),
       })),
       gaps,
       models: VIDEO_TRANSITION_MODELS.filter((m) => m.provider === providerId),
