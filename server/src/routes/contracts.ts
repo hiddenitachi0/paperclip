@@ -8,9 +8,12 @@ import {
   createContractDeadlineSchema,
   createContractPartySchema,
   createContractSchema,
+  findContractsQuerySchema,
   linkPreviousContractVersionSchema,
   listContractDeadlinesQuerySchema,
   listContractsQuerySchema,
+  registerContractSchema,
+  searchContractTextQuerySchema,
   updateContractDeadlineSchema,
   updateContractPartySchema,
   updateContractSchema,
@@ -143,7 +146,12 @@ export function contractRoutes(rawDb: Db, storage: StorageService, options: { ma
     if (!key.success) throw badRequest("Invalid term key");
     const query = aggregateContractTermQuerySchema.safeParse(req.query);
     if (!query.success) throw badRequest("Invalid query", query.error.flatten());
-    res.json(await svc.aggregateTerm(req.params.companyId as string, key.data, query.data));
+    const companyId = req.params.companyId as string;
+    res.json(
+      query.data.report === "true"
+        ? await svc.aggregateTermReport(companyId, key.data, query.data)
+        : await svc.aggregateTerm(companyId, key.data, query.data),
+    );
   });
 
   // --- Deadlines across the company ---
@@ -158,6 +166,41 @@ export function contractRoutes(rawDb: Db, storage: StorageService, options: { ma
     const query = listContractsQuerySchema.safeParse(req.query);
     if (!query.success) throw badRequest("Invalid query", query.error.flatten());
     res.json(await svc.listContracts(req.params.companyId as string, query.data));
+  });
+
+  // Fixed-path routes first so ":id" never swallows them.
+  router.get("/companies/:companyId/contracts/find", ...access(), async (req, res) => {
+    const query = findContractsQuerySchema.safeParse(req.query);
+    if (!query.success) throw badRequest("Invalid query", query.error.flatten());
+    res.json(await svc.findContracts(req.params.companyId as string, query.data));
+  });
+
+  router.get("/companies/:companyId/contracts/search-text", ...access(), async (req, res) => {
+    const query = searchContractTextQuerySchema.safeParse(req.query);
+    if (!query.success) throw badRequest("Invalid query", query.error.flatten());
+    const companyId = req.params.companyId as string;
+    const result = await svc.searchContractText(companyId, query.data);
+    // Who read contract text is on record; what they searched for and what matched is not.
+    await log(req, companyId, "contract.text_searched", "company", companyId, {
+      contractsInScope: result.contractsInScope,
+      withExtractedText: result.withExtractedText,
+      matchCount: result.matches.length,
+    });
+    res.json(result);
+  });
+
+  router.post("/companies/:companyId/contracts/register", ...access(), validate(registerContractSchema), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const registered = await svc.registerContract(companyId, req.body, actorRef(getActorInfo(req)));
+    await log(req, companyId, "contract.registered", "contract", registered.id, {
+      type: registered.type,
+      status: registered.status,
+      partyCount: registered.partyCount,
+      termCount: registered.termCount,
+      deadlineCount: registered.deadlineCount,
+      hasFile: Boolean(registered.assetId),
+    });
+    res.status(201).json(registered);
   });
 
   router.post("/companies/:companyId/contracts", ...access(), validate(createContractSchema), async (req, res) => {
@@ -320,6 +363,10 @@ export function contractRoutes(rawDb: Db, storage: StorageService, options: { ma
     res.json({ ok: true });
   });
 
+  router.get("/companies/:companyId/contracts/:id/related", ...access(), async (req, res) => {
+    res.json(await svc.findRelatedContracts(req.params.companyId as string, req.params.id as string));
+  });
+
   // --- Version chain ---
   router.get("/companies/:companyId/contracts/:id/versions", ...access(), async (req, res) => {
     res.json(await svc.getVersionLog(req.params.companyId as string, req.params.id as string));
@@ -332,8 +379,11 @@ export function contractRoutes(rawDb: Db, storage: StorageService, options: { ma
     async (req, res) => {
       const companyId = req.params.companyId as string;
       const id = req.params.id as string;
-      const result = await svc.linkPreviousVersion(companyId, id, req.body);
+      // An agent never approves its own link: it needs a board-accepted confirmation (checked in the service).
+      const viaAgent = req.actor.type === "agent";
+      const result = await svc.linkPreviousVersion(companyId, id, req.body, { requireBoardConfirmation: viaAgent });
       await log(req, companyId, "contract.version_linked", "contract", id, {
+        confirmationInteractionId: viaAgent ? req.body.confirmationInteractionId : null,
         previousContractId: result.previousContractId,
         versionNo: result.versionNo,
         carryDeadlines: result.carryDeadlines,

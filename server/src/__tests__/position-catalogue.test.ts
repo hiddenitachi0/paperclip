@@ -152,7 +152,12 @@ describeEmbeddedPostgres("position catalogue", () => {
     expect(result.position.id).toBe(own.id);
     expect(result.position.description).toBe("Our own wording");
     expect(result.linkedJobs).toEqual(["Revise contract"]);
-    expect(result.createdJobs.sort()).toEqual(["Compare two versions", "Draft new contract"]);
+    expect(result.createdJobs.sort()).toEqual([
+      "Ask across contracts",
+      "Compare two versions",
+      "Draft new contract",
+      "Register a contract",
+    ]);
 
     const [kept] = await db.select().from(jobs).where(eq(jobs.id, existingJob!.id));
     expect(kept!.instructions).toBe("ours");
