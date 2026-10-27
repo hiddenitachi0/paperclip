@@ -16,6 +16,7 @@
 
 import {
   SogniLoraCatalogCache,
+  evaluateLora,
   modelContentTags,
   parseSogniLoraCatalog,
   type SogniLoraCatalog,
@@ -563,6 +564,9 @@ export function checkSogniLoras(
   for (const pick of picks) {
     if (seen.has(pick.id)) return `The LoRA "${pick.id}" is in the list twice. Keep it once.`;
     seen.add(pick.id);
+    // A filter-bypass LoRA is never used, on any path and whatever the filter says (DUR-4898).
+    const bypass = evaluateLora({ id: pick.id, name: known.find((l) => l.id === pick.id)?.name }, "mature");
+    if (bypass.alwaysRefused && bypass.message) return bypass.message;
     const lora = known.find((l) => l.id === pick.id);
     if (!lora) return `Sogni has no LoRA called "${pick.id}" that this account can use. Pick LoRAs from the list.`;
     if (!options.allowOtherModels && !lora.modelIds.includes(sogniCanonicalModelId(model.id))) {

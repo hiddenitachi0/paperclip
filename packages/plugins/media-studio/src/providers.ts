@@ -9,6 +9,7 @@
 //                 poll GET /history/{prompt_id} ; GET /view?filename=&subfolder=&type=
 //   Sogni:        see sogni.ts (durable workflow: start, poll, download)
 
+import { FAL_FLAGGED_MESSAGE, falResultFlagged, falSafetyFields } from "@paperclipai/plugin-sdk/media";
 import {
   SogniProvider,
   isKnownSogniModel,
@@ -176,17 +177,19 @@ export class FalProvider implements GenerationProvider {
             prompt: input.prompt,
             image_size: falImageSize(input.imageSize),
             num_images: 1,
-            enable_safety_checker: true,
             ...(typeof input.steps === "number" ? { num_inference_steps: input.steps } : {}),
           };
     if (typeof input.seed === "number") body.seed = input.seed;
     const res = await this.fetchImpl(`${this.baseUrl}/${model}`, {
       method: "POST",
       headers: { Authorization: `Key ${this.apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      // Fal's safety checks go on every request, last, so nothing above can turn one off (DUR-4898).
+      body: JSON.stringify({ ...body, ...falSafetyFields(model) }),
     });
     if (!res.ok) throw new Error(`fal.ai ${model} failed (${res.status}): ${await res.text()}`);
     const data = (await res.json()) as { images?: Array<{ url: string; content_type?: string }>; seed?: number };
+    // Fal's own check flagged the picture (it comes back black): a failure, never used.
+    if (falResultFlagged(data)) throw new Error(FAL_FLAGGED_MESSAGE);
     const image = data.images?.[0];
     if (!image?.url) throw new Error("fal.ai returned no image");
     const seed = typeof data.seed === "number" ? data.seed : (input.seed ?? null);
@@ -218,10 +221,11 @@ export class FalProvider implements GenerationProvider {
     const res = await this.fetchImpl(`${this.baseUrl}/${model}`, {
       method: "POST",
       headers: { Authorization: `Key ${this.apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ ...body, ...falSafetyFields(model) }),
     });
     if (!res.ok) throw new Error(`fal.ai ${model} failed (${res.status}): ${await res.text()}`);
     const data = (await res.json()) as { images?: Array<{ url: string; content_type?: string }>; seed?: number };
+    if (falResultFlagged(data)) throw new Error(FAL_FLAGGED_MESSAGE);
     const image = data.images?.[0];
     if (!image?.url) throw new Error("fal.ai returned no image");
     const seed = typeof data.seed === "number" ? data.seed : (input.seed ?? null);

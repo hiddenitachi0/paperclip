@@ -13,6 +13,7 @@
 //           -> the model's own output, e.g. {video:{url,content_type}} or {audio:{url,content_type}}
 //   Cancel  PUT  https://queue.fal.run/{model}/requests/{id}/cancel
 
+import { FAL_FLAGGED_MESSAGE, falResultFlagged, falSafetyFields } from "@paperclipai/plugin-sdk/media";
 import type { FetchImpl } from "./providers.js";
 import { assertFalModelId } from "./providers.js";
 import type { MediaJobHandle, MediaPollOutcome } from "./media-jobs-types.js";
@@ -33,7 +34,8 @@ export async function falQueueSubmit(
   const res = await fetchImpl(`${FAL_QUEUE_BASE}/${checked}`, {
     method: "POST",
     headers: authHeaders(apiKey),
-    body: JSON.stringify(body),
+    // Fal's safety checks go on every request, last, so nothing above can turn one off (DUR-4898).
+    body: JSON.stringify({ ...body, ...falSafetyFields(checked) }),
   });
   if (!res.ok) throw new Error(`fal.ai ${checked} could not be started (${res.status}): ${await res.text()}`);
   const data = (await res.json()) as { request_id?: string };
@@ -70,6 +72,8 @@ export async function falQueuePoll(
   });
   if (!resultRes.ok) return { status: "failed", error: `fal.ai finished but the result could not be fetched (${resultRes.status}).` };
   const result = (await resultRes.json()) as Record<string, unknown>;
+  // Fal's own check flagged the result: a failure, never a finished clip.
+  if (falResultFlagged(result)) return { status: "failed", error: FAL_FLAGGED_MESSAGE };
   const media = result[resultKey] as { url?: string; content_type?: string } | undefined;
   if (!media?.url) return { status: "failed", error: "fal.ai finished but sent nothing back. Try again." };
   if (!/^https:\/\//i.test(media.url)) return { status: "failed", error: "fal.ai gave an address that is not https, so it was not used." };

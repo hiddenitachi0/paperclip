@@ -2,6 +2,8 @@ import { definePlugin, runWorker, type PluginContext, type ToolResult } from "@p
 import {
   SAFE_FOR_WORK_AVOID,
   classifyLoras,
+  evaluateLora,
+  personalLoraNeedsFilterOff,
   lorasForModel,
   madeForText,
   type LoraFitCheck,
@@ -984,6 +986,9 @@ async function prepareSogni(
           return { error: `The look "${look.name}" has more than ${SOGNI_MAX_LORAS} LoRAs. An owner or admin needs to remove some.` };
         }
         let picks = look.loras.map(({ id, strength }) => ({ id, strength }));
+        // A filter-bypass LoRA is never used, even when Sogni's list cannot be read to check the rest (DUR-4898).
+        const refusedPick = picks.map((p) => evaluateLora({ id: p.id }, "mature")).find((v) => v.alwaysRefused);
+        if (refusedPick) return { error: `The look "${look.name}" cannot be used: ${refusedPick.message}` };
         const loras = await knownLoras(ctx, cfg, catalog, picks.some((p) => p.id.startsWith("personal-")));
         if (loras.error) return { error: `The look "${look.name}" cannot be used: ${loras.error}` };
         // A look keeps its LoRAs when its model changes, so some may be made
@@ -1370,15 +1375,21 @@ export async function prepareGeneration(
     const prepared = await prepareSogni(ctx, cfg, input, look, lookModelUsed, referenceFileIds.length, notes, identityModel);
     if ("error" in prepared) return prepared;
     // The identity's LoRA (imported into Sogni and ready) for a model of its family.
-    // Sogni marks personal LoRAs as needing its content filter off, and only a
-    // look an owner/admin saved with the filter off turns it off, so the LoRA
-    // rides along only then (the same rule as a look's own personal LoRAs).
+    // DUR-4898: Sogni flags each LoRA on its own (ui.nsfw = "needs the filter
+    // off"). With the filter on, the person's LoRA rides along when Sogni's flag
+    // for it says it does not need the filter off; a LoRA flagged (or one whose
+    // flag cannot be read) is left out and the reference pictures keep the
+    // person. The filter itself is only ever off through a look an owner/admin
+    // saved that way.
     const trained = identity ? pickTrained(identity, "sogni", look?.identityTrained?.sogni) : null;
     const lora = trained ? { sogniLoraId: trained.ref, strength: trained.strength ?? 0.8, triggerWord: trained.triggerWord ?? "", baseModel: identity?.lora?.baseModel ?? "krea-2" } : null;
     if (lora) {
       const used = input.model ?? identityModel;
-      if (input.safeContentFilter !== false) {
-        notes.push(`The LoRA of "${identity!.name}" was not used: Sogni only runs your own LoRAs with its content filter off, which only a look an owner or admin saved that way can do. The reference pictures still keep the person the same.`);
+      const ownList = input.safeContentFilter !== false ? (await knownLoras(ctx, cfg, catalog, true)).known : null;
+      if (input.safeContentFilter !== false && personalLoraNeedsFilterOff(ownList?.find((l) => l.id === lora.sogniLoraId))) {
+        notes.push(`The LoRA of "${identity!.name}" was not used: Sogni says it only runs with its content filter off, and this picture keeps the filter on. The reference pictures still keep the person the same.`);
+      } else if (evaluateLora({ id: lora.sogniLoraId, personal: true }, "mature").alwaysRefused) {
+        notes.push(`The LoRA of "${identity!.name}" was not used: it switches off Sogni's safety filter and is never allowed.`);
       } else if (loraFitsModel(lora.baseModel, used) && prepared.usesOwnModel) {
         const picks = input.loras ?? [];
         if (!picks.some((p) => p.id === lora.sogniLoraId) && picks.length < SOGNI_MAX_LORAS) {
@@ -1511,6 +1522,11 @@ async function lookLorasToSave(
 ): Promise<LookLora[]> {
   if (picks.length === 0) return [];
   if (picks.length > SOGNI_MAX_LORAS) throw new Error(`A look can use at most ${SOGNI_MAX_LORAS} LoRAs; this has ${picks.length}. Remove some.`);
+  // A filter-bypass LoRA can never be saved on a look, even when Sogni's list cannot be read to check the rest (DUR-4898).
+  for (const pick of picks) {
+    const verdict = evaluateLora({ id: pick.id }, "mature");
+    if (verdict.alwaysRefused && verdict.message) throw new Error(verdict.message);
+  }
   const seen = new Set<string>();
   for (const pick of picks) {
     if (seen.has(pick.id)) throw new Error(`The LoRA "${pick.id}" is in the list twice. Keep it once.`);

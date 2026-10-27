@@ -22,6 +22,7 @@
 // same gate as the Edit tab. Every key comes from a company secret, resolved
 // here on the server; no key ever reaches the browser.
 
+import { FAL_FLAGGED_MESSAGE, falResultFlagged, falSafetyFields, isFilterBypassLora } from "@paperclipai/plugin-sdk/media";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 import { FAL_REFERENCE_MODEL, assertFalModelId, selectProvider, type FetchImpl } from "./providers.js";
 import { assemblePrompt } from "./look-prompt.js";
@@ -798,6 +799,9 @@ export async function makeIdentityPictures(
   if (service === "sogni") {
     const key = sogniWorkflowModel(model, "edit_image");
     if (!(key in SOGNI_EDIT_MODELS)) throw new Error(`Pictures of a person on Sogni need one of its picture-editing models (${Object.keys(SOGNI_EDIT_MODELS).join(", ")}).`);
+    // A filter-bypass LoRA is never used, whoever asks (DUR-4898).
+    const bypass = options.loras.find((l) => isFilterBypassLora({ id: l.id }));
+    if (bypass) throw new Error(`The LoRA "${bypass.id}" switches off Sogni's safety filter and is never allowed.`);
     if (options.loras.some((l) => l.id.startsWith("personal-"))) {
       throw new Error("Your own Sogni LoRAs only run with Sogni's content filter off, which only a look an owner or admin saved that way can do. Pick public LoRAs here.");
     }
@@ -841,10 +845,11 @@ export async function makeIdentityPictures(
       const res = await ctx.http.fetch(`https://fal.run/${checked}`, {
         method: "POST",
         headers: { Authorization: `Key ${key}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt, image_urls: pictures, num_images: count }),
+        body: JSON.stringify({ prompt, image_urls: pictures, num_images: count, ...falSafetyFields(checked) }),
       });
       if (!res.ok) throw new Error(`Fal.ai could not make the pictures (error ${res.status}).`);
       const body = (await res.json()) as { images?: Array<{ url?: string }>; seed?: number };
+      if (falResultFlagged(body)) throw new Error(FAL_FLAGGED_MESSAGE);
       const urls = (body.images ?? []).map((i) => i.url ?? "").filter((u) => /^https:\/\/|^data:image\//.test(u));
       if (urls.length === 0) throw new Error("Fal.ai sent no picture back. Try again.");
       const out: MadePicture[] = [];

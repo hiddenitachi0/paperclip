@@ -1035,6 +1035,44 @@ describe("LoRA training flow (stubbed Fal and Hugging Face)", () => {
     if ("error" in old) throw new Error(old.error);
     expect(old.input.loras).toEqual([{ id: "personal-old", strength: 0.5 }]);
   });
+
+  it("DUR-4898: with the filter on, the person's LoRA rides along only when Sogni's own flag for it says it does not need the filter off", async () => {
+    const { harness } = await setup();
+    const identity = await makeIdentity(harness);
+    await harness.performAction("lora.attach", { identityId: identity.id, sogniLoraId: "personal-abc", strength: 0.7, triggerWord: "majaberg" }, owner);
+    await harness.ctx.state.set({ scopeKind: "company", scopeId: COMPANY, stateKey: "looks" }, [
+      { id: "on", name: "Filtered", style: "", model: null, seed: null, referenceFileIds: [], identityId: identity.id, updatedAt: "x" },
+    ]);
+    const real = harness.ctx.http.fetch;
+    let flagged = true;
+    harness.ctx.http.fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      if (new URL(url).pathname === "/v1/loras/personal/catalog") {
+        return json(200, { data: { loras: [{ loraId: "personal-abc", name: "Maja LoRA", modelIds: [], ui: { min: 0, max: 1, default: 0.7, step: 0.05, nsfw: flagged, sexual: false } }], models: [], constraints: {} } });
+      }
+      return real(url, init);
+    }) as typeof harness.ctx.http.fetch;
+
+    const blocked = await prepareGeneration(harness.ctx, COMPANY, { prompt: "a walk", look: "Filtered" });
+    if ("error" in blocked) throw new Error(blocked.error);
+    expect(blocked.input.safeContentFilter).toBe(true);
+    expect(blocked.input.loras ?? []).toHaveLength(0);
+    expect(blocked.notes.join(" ")).toMatch(/only runs with its content filter off.*reference pictures still keep the person the same/);
+
+    flagged = false;
+    const allowed = await prepareGeneration(harness.ctx, COMPANY, { prompt: "a walk", look: "Filtered" });
+    if ("error" in allowed) throw new Error(allowed.error);
+    expect(allowed.input.safeContentFilter).toBe(true);
+    expect(allowed.input.loras).toEqual([{ id: "personal-abc", strength: 0.7 }]);
+  });
+
+  it("DUR-4898: a filter-bypass LoRA is refused for a person's pictures, whatever else is true", async () => {
+    const { harness, fake } = await setup();
+    const identity = await makeIdentity(harness);
+    await expect(
+      harness.performAction("trainingSet.generate", { identityId: identity.id, service: "sogni", loras: [{ id: "krea2-filter-bypass-3", strength: 1 }], prompt: "p" }, owner),
+    ).rejects.toThrow(/never allowed/);
+    expect(fake.calls.some((c) => c.url.includes("/v1/creative-agent/workflows"))).toBe(false);
+  });
 });
 
 // ─── Train with: Higgsfield Soul ID ───────────────────────────────────────────
