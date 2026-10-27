@@ -18,6 +18,7 @@ import {
   type StartVideoStorylineRenderInput,
   type VideoStorylineProvider,
 } from "@paperclipai/shared";
+import { assertFilmModelAllowed, filmContentMode, filmVideoPrompt } from "./film-content-rules.js";
 import type { MediaJobHandle, MediaJobInput, MediaJobProvider, MediaPollOutcome } from "./video-provider-clients.js";
 import { FalVideoProvider, SogniVideoProvider } from "./video-provider-clients.js";
 import { badRequest, conflict, HttpError, unprocessable } from "../errors.js";
@@ -441,6 +442,9 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       );
     }
     const { providerId, model } = resolveShotRenderTarget(storyline, shot);
+    // DUR-4898: a safe-for-work film never renders with a mature/uncensored model (before any key is read or anything is sent).
+    const mode = filmContentMode(storyline);
+    assertFilmModelAllowed(model, mode);
     // A shot animated from the company's own photo uses the company's own key only (decision 15).
     const apiKey = await resolveProviderApiKey(companyId, providerId, actorId, { companyKeyOnly: opts.companyKeyOnly || Boolean(shot.sourceUploadId) });
     const provider = (deps.buildProvider ?? buildProvider)(providerId, apiKey, model);
@@ -491,8 +495,8 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
 
     const input: MediaJobInput = {
       kind: "video",
-      // Camera notes go with the description (they used to be dropped).
-      prompt: videoShotVideoPrompt(shot.prompt, shot.cameraNotes),
+      // Camera notes go with the description (they used to be dropped). A safe-for-work film adds "Fully clothed." and what to keep out (no video request has a negative field yet).
+      prompt: filmVideoPrompt(mode, videoShotVideoPrompt(shot.prompt, shot.cameraNotes)),
       // Sogni: our prompt as written, not rewritten from the pictures (decision 7).
       promptRewrite: false,
       model: model ?? undefined,
@@ -850,6 +854,8 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     }
 
     const { providerId, model } = resolveShotRenderTarget(storyline, shot);
+    // DUR-4898: same rating rules as a real render, checked before anything is reserved.
+    assertFilmModelAllowed(model, filmContentMode(storyline));
     // The shortest clip this model will actually make (1s for a model that
     // takes any length, 5s for Fal's Kling models, which refuse 1s).
     const previewDurationSeconds = videoRenderDurationSeconds(providerId, model, PREVIEW_DURATION_SECONDS);
@@ -922,7 +928,7 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
 
     const handle = await provider.start({
       kind: "video",
-      prompt: videoShotVideoPrompt(shot.prompt, shot.cameraNotes),
+      prompt: filmVideoPrompt(filmContentMode(storyline), videoShotVideoPrompt(shot.prompt, shot.cameraNotes)),
       promptRewrite: false,
       model: model ?? undefined,
       startImage,

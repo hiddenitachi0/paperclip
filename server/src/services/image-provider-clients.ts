@@ -17,6 +17,7 @@
 // is what a storyboard picture with a Media Studio look needs. No retries on
 // 429/409 (the person just presses Make picture again).
 
+import { FAL_FLAGGED_MESSAGE, falResultFlagged, falSafetyFields } from "@paperclipai/plugin-sdk/media";
 import { readSogniWorkflowCredits } from "./sogni-cost.js";
 
 export type ImageFetchImpl = (url: string, init?: RequestInit) => Promise<Response>;
@@ -109,7 +110,6 @@ export class FalImageProvider implements ImageGenerationProvider {
             prompt: input.prompt,
             image_size: falImageSizeFor(input.aspect),
             num_images: 1,
-            enable_safety_checker: true,
             // A cheap storyboard still -- few denoising steps, same
             // "quick" posture media-studio's quick-picture.ts uses. Only for
             // the default quick model: a model picked on purpose keeps its
@@ -119,10 +119,13 @@ export class FalImageProvider implements ImageGenerationProvider {
     const res = await this.fetchImpl(`${this.baseUrl}/${model}`, {
       method: "POST",
       headers: { Authorization: `Key ${this.apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      // The safety fields go last: nothing above can turn a check off (DUR-4898).
+      body: JSON.stringify({ ...body, ...falSafetyFields(model) }),
     });
     if (!res.ok) throw new Error(`fal.ai ${model} failed (${res.status}): ${await res.text()}`);
     const data = (await res.json()) as { images?: Array<{ url: string; content_type?: string; width?: number; height?: number }> };
+    // Fal's own check flagged the picture (it comes back black): a failure, never stored, approved or chained.
+    if (falResultFlagged(data)) throw new Error(FAL_FLAGGED_MESSAGE);
     const image = data.images?.[0];
     if (!image?.url) throw new Error("fal.ai returned no image");
     const megapixels = typeof image.width === "number" && typeof image.height === "number" ? (image.width * image.height) / 1_000_000 : undefined;

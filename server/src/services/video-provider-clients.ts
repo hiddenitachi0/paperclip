@@ -19,6 +19,7 @@
 // Kept deliberately identical in behavior to the plugin's copy; see that
 // package for the fuller design commentary (Sogni's shape is an unconfirmed
 // upstream assumption -- see the DUR-4127 PR's "Questions for Filip").
+import { FAL_FLAGGED_MESSAGE, falResultFlagged, falSafetyFields } from "@paperclipai/plugin-sdk/media";
 import { readSogniWorkflowCredits } from "./sogni-cost.js";
 
 
@@ -131,7 +132,8 @@ async function falQueueSubmit(
   const res = await fetchImpl(`${FAL_QUEUE_BASE}/${checked}`, {
     method: "POST",
     headers: { ...falAuthHeaders(apiKey), ...(opts.storeIO === false ? { [FAL_STORE_IO_HEADER]: "0" } : {}) },
-    body: JSON.stringify(body),
+    // Fal's safety checks go on every request, last, so nothing above can turn one off (DUR-4898).
+    body: JSON.stringify({ ...body, ...falSafetyFields(checked) }),
   });
   if (!res.ok) throw new Error(`fal.ai ${checked} could not be started (${res.status}): ${await res.text()}`);
   const data = (await res.json()) as { request_id?: string };
@@ -162,6 +164,8 @@ async function falQueuePoll(fetchImpl: FetchImpl, apiKey: string, handle: MediaJ
   });
   if (!resultRes.ok) return { status: "failed", error: `fal.ai finished but the result could not be fetched (${resultRes.status}).` };
   const result = (await resultRes.json()) as Record<string, unknown>;
+  // Fal's own check flagged the clip: a failure. It never becomes a finished shot, so nothing is chained from it.
+  if (falResultFlagged(result)) return { status: "failed", error: FAL_FLAGGED_MESSAGE.replace("picture", "clip") };
   const media = result.video as { url?: string; content_type?: string } | undefined;
   if (!media?.url) return { status: "failed", error: "fal.ai finished but sent nothing back. Try again." };
   if (!/^https:\/\//i.test(media.url)) return { status: "failed", error: "fal.ai gave an address that is not https, so it was not used." };

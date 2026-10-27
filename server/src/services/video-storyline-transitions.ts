@@ -48,6 +48,7 @@ import {
 import { conflict, notFound, unprocessable, HttpError } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { getStorageService } from "../storage/index.js";
+import { assertFilmModelAllowed, filmContentMode, filmVideoPrompt } from "./film-content-rules.js";
 import { logActivity } from "./activity-log.js";
 import { recordFalCostEvent } from "./fal-cost-events.js";
 import { refreshStorylineMediaSpend, releaseStorylineMediaSpend, reserveStorylineMediaSpend, settleSogniStorylineSpend, storylineTransitionSpendCode } from "./storyline-media-ledger.js";
@@ -918,6 +919,9 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
     if (running) throw conflict("A version of this transition is already being made. Wait for it to finish.");
 
     const quote = takeQuote(storyline, row);
+    // DUR-4898: a safe-for-work film never makes a bridge with a mature/uncensored model (before anything is reserved).
+    const mode = filmContentMode(storyline);
+    assertFilmModelAllowed(quote.option.model, mode);
     if (input.confirmCostCents !== undefined && quote.cents > input.confirmCostCents) {
       throw conflict(`This now costs about ${dollars(quote.cents)}, more than the ${dollars(input.confirmCostCents)} you saw. Check it and press again.`);
     }
@@ -1034,7 +1038,7 @@ export function videoStorylineTransitionsService(db: Db, deps: VideoStorylineTra
       const provider = buildProvider(providerId, apiKey, quote.option.model);
       const handle = await provider.start({
         kind: "video",
-        prompt,
+        prompt: filmVideoPrompt(mode, prompt),
         model: quote.option.model,
         startImage,
         endImage,
