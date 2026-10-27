@@ -170,6 +170,8 @@ d(`migration ${MIGRATION_TAG}`, () => {
 
   it("rolls back by dropping the five tables in the documented order, leaving other tables alone", async () => {
     await db.transaction(async (tx) => {
+      // 0257 added contract_settings on top; its own rollback comes first.
+      await tx.execute(sql`DROP TABLE "contract_settings"`);
       await tx.execute(sql`DROP TABLE "contract_deadline_reminders", "contract_terms", "contract_parties", "contract_deadlines", "contracts"`);
       const left = (await tx.execute(
         sql`SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = 'public' AND table_name LIKE 'contract%'`,

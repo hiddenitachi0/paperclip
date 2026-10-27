@@ -16,6 +16,7 @@ import {
   searchContractTextQuerySchema,
   updateContractDeadlineSchema,
   updateContractPartySchema,
+  updateContractSettingsSchema,
   updateContractSchema,
   uploadContractFieldsSchema,
   upsertContractTermSchema,
@@ -24,8 +25,10 @@ import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { badRequest, forbidden, notFound, unprocessable } from "../errors.js";
+import { logger } from "../middleware/logger.js";
 import type { StorageService } from "../storage/types.js";
-import { assetService, logActivity } from "../services/index.js";
+import { assetService, heartbeatService, logActivity } from "../services/index.js";
+import { contractDeadlineReminderService } from "../services/contract-deadline-reminders.js";
 import { actorMayUseContracts, contractService } from "../services/contracts.js";
 import { contractFileService, validateContractUpload } from "../services/contract-files.js";
 import { CONTRACT_FILE_CONTENT_TYPES, resolveContractUploadMaxBytes } from "../services/contract-file-guard.js";
@@ -54,6 +57,21 @@ export function contractRoutes(rawDb: Db, storage: StorageService, options: { ma
   const router = Router();
   const db = createRequestScopedDb(rawDb);
   const svc = contractService(db, rawDb);
+  const reminders = contractDeadlineReminderService(db, { heartbeat: heartbeatService(db) });
+
+  /**
+   * Keep reminder issues in step with a deadline change. The write the caller
+   * asked for has already happened, so a failure here is logged (ids only) and
+   * left for the next daily sweep rather than turned into an error response.
+   */
+  async function syncReminders(companyId: string, run: () => Promise<unknown>) {
+    try {
+      await run();
+    } catch (error) {
+      logger.error({ err: error, companyId }, "contract deadline reminder sync failed after a deadline change");
+    }
+  }
+
   const maxUploadBytes = options.maxUploadBytes ?? resolveContractUploadMaxBytes();
   const files = contractFileService(db, storage, { maxBytes: maxUploadBytes });
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: maxUploadBytes, files: 1, fields: 20 } });
@@ -154,6 +172,25 @@ export function contractRoutes(rawDb: Db, storage: StorageService, options: { ma
     );
   });
 
+  // --- Reminder settings (default lead times per company; board only to change) ---
+  router.get("/companies/:companyId/contract-settings", ...access(), async (req, res) => {
+    res.json(await svc.getSettings(req.params.companyId as string));
+  });
+
+  router.patch(
+    "/companies/:companyId/contract-settings",
+    ...boardAccess(),
+    validate(updateContractSettingsSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const updated = await svc.updateSettings(companyId, req.body);
+      await log(req, companyId, "contract.settings_updated", "company", companyId, {
+        changed: Object.keys(req.body).sort(),
+      });
+      res.json(updated);
+    },
+  );
+
   // --- Deadlines across the company ---
   router.get("/companies/:companyId/contract-deadlines", ...access(), async (req, res) => {
     const query = listContractDeadlinesQuerySchema.safeParse(req.query);
@@ -192,6 +229,7 @@ export function contractRoutes(rawDb: Db, storage: StorageService, options: { ma
   router.post("/companies/:companyId/contracts/register", ...access(), validate(registerContractSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
     const registered = await svc.registerContract(companyId, req.body, actorRef(getActorInfo(req)));
+    if (registered.deadlineCount > 0) await syncReminders(companyId, () => reminders.syncContract(companyId, registered.id));
     await log(req, companyId, "contract.registered", "contract", registered.id, {
       type: registered.type,
       status: registered.status,
@@ -358,6 +396,7 @@ export function contractRoutes(rawDb: Db, storage: StorageService, options: { ma
   router.delete("/companies/:companyId/contracts/:id", ...boardAccess(), async (req, res) => {
     const companyId = req.params.companyId as string;
     const id = req.params.id as string;
+    await reminders.closeForContract(companyId, id);
     const removed = await svc.removeContract(companyId, id);
     await log(req, companyId, "contract.deleted", "contract", id, { type: removed.type });
     res.json({ ok: true });
@@ -382,6 +421,10 @@ export function contractRoutes(rawDb: Db, storage: StorageService, options: { ma
       // An agent never approves its own link: it needs a board-accepted confirmation (checked in the service).
       const viaAgent = req.actor.type === "agent";
       const result = await svc.linkPreviousVersion(companyId, id, req.body, { requireBoardConfirmation: viaAgent });
+      await syncReminders(companyId, async () => {
+        await reminders.syncContract(companyId, result.previousContractId);
+        await reminders.syncContract(companyId, id);
+      });
       await log(req, companyId, "contract.version_linked", "contract", id, {
         confirmationInteractionId: viaAgent ? req.body.confirmationInteractionId : null,
         previousContractId: result.previousContractId,
@@ -443,6 +486,7 @@ export function contractRoutes(rawDb: Db, storage: StorageService, options: { ma
     async (req, res) => {
       const companyId = req.params.companyId as string;
       const created = await svc.addDeadline(companyId, req.params.id as string, req.body);
+      await syncReminders(companyId, () => reminders.syncDeadline(companyId, created.id));
       await log(req, companyId, "contract.deadline_added", "contract", req.params.id as string, {
         deadlineId: created.id,
         kind: created.kind,
@@ -464,6 +508,7 @@ export function contractRoutes(rawDb: Db, storage: StorageService, options: { ma
         req.params.deadlineId as string,
         req.body,
       );
+      await syncReminders(companyId, () => reminders.syncDeadline(companyId, updated.id));
       await log(req, companyId, "contract.deadline_updated", "contract", req.params.id as string, {
         deadlineId: updated.id,
         changed: Object.keys(req.body).sort(),
@@ -475,6 +520,7 @@ export function contractRoutes(rawDb: Db, storage: StorageService, options: { ma
 
   router.delete("/companies/:companyId/contracts/:id/deadlines/:deadlineId", ...access(), async (req, res) => {
     const companyId = req.params.companyId as string;
+    await reminders.closeForDeadline(companyId, req.params.deadlineId as string);
     await svc.removeDeadline(companyId, req.params.id as string, req.params.deadlineId as string);
     await log(req, companyId, "contract.deadline_removed", "contract", req.params.id as string, {
       deadlineId: req.params.deadlineId,

@@ -622,6 +622,8 @@ export interface Issue {
   status: IssueStatus;
   workMode: IssueWorkMode;
   priority: IssuePriority;
+  /** Calendar date (YYYY-MM-DD) the work is due, if any. */
+  dueDate?: string | null;
   assigneeAgentId: string | null;
   assigneeUserId: string | null;
   checkoutRunId: string | null;

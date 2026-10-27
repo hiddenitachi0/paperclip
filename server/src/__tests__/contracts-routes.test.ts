@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { and, eq } from "drizzle-orm";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -19,6 +20,8 @@ import {
   contracts,
   createDb,
   crmOrganizations,
+  issueComments,
+  issues,
   principalPermissionGrants,
 } from "@paperclipai/db";
 import {
@@ -70,6 +73,8 @@ describeEmbeddedPostgres("contract register routes (DUR-4852)", () => {
 
   afterEach(async () => {
     await db.delete(contractDeadlineReminders);
+    await db.delete(issueComments);
+    await db.delete(issues);
     await db.delete(contractTerms);
     await db.delete(contractDeadlines);
     await db.delete(contractParties);
@@ -536,7 +541,10 @@ describeEmbeddedPostgres("contract register routes (DUR-4852)", () => {
       const companyId = await seedCompany();
       const app = createApp({ board: [companyId] });
       const { v1, v2 } = await twoVersions(app, companyId);
-      const deadline = await request(app).post(`/api/companies/${companyId}/contracts/${v1.id}/deadlines`).send({ kind: "notice_terminate", dueDate: "2027-03-01" });
+      // 55 days out: the 60-day step is in range, so the reminder sync keeps its row.
+      const dueDate = new Date(Date.now() + 55 * 86_400_000).toISOString().slice(0, 10);
+      const deadline = await request(app).post(`/api/companies/${companyId}/contracts/${v1.id}/deadlines`).send({ kind: "notice_terminate", dueDate });
+      await db.delete(contractDeadlineReminders);
       await db.insert(contractDeadlineReminders).values({ companyId, deadlineId: deadline.body.id, leadDays: 60 });
       await link(app, companyId, v2.id, { previousContractId: v1.id, changeSummary: "x", carryDeadlines: true });
       const reminders = await db.select().from(contractDeadlineReminders);
@@ -785,6 +793,136 @@ describeEmbeddedPostgres("contract register routes (DUR-4852)", () => {
       expect((await request(app).patch(`/api/companies/${companyId}/contracts/${id}/parties/${added.body.id}`).send({ name: null })).status).toBe(422);
       expect((await request(app).delete(`/api/companies/${companyId}/contracts/${id}/parties/${added.body.id}`)).status).toBe(200);
       expect((await request(app).delete(`/api/companies/${companyId}/contracts/${id}/parties/${added.body.id}`)).status).toBe(404);
+    });
+  });
+  // Legal Phase 3 (DUR-4855): the deadline routes keep reminder issues in step.
+  describe("deadline reminders", () => {
+    const inDays = (days: number) => new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
+    const issuesOf = (deadlineId: string) =>
+      db.select().from(issues).where(and(eq(issues.originKind, "contract_deadline"), eq(issues.originId, deadlineId)));
+
+    it("defaults needsOwner to true for decision kinds and false for the rest, and lets the caller override", async () => {
+      const companyId = await seedCompany();
+      const app = createApp({ board: [companyId] });
+      const { id } = await createContract(app, companyId);
+      const post = (body: Record<string, unknown>) =>
+        request(app).post(`/api/companies/${companyId}/contracts/${id}/deadlines`).send({ dueDate: inDays(400), ...body });
+      expect((await post({ kind: "notice_extend" })).body.needsOwner).toBe(true);
+      expect((await post({ kind: "notice_terminate" })).body.needsOwner).toBe(true);
+      expect((await post({ kind: "renewal" })).body.needsOwner).toBe(true);
+      expect((await post({ kind: "payment" })).body.needsOwner).toBe(false);
+      expect((await post({ kind: "payment", needsOwner: true })).body.needsOwner).toBe(true);
+      expect((await post({ kind: "notice_extend", needsOwner: false })).body.needsOwner).toBe(false);
+    });
+
+    it("opens the reminder as soon as a deadline inside its lead time is added, and closes it when done", async () => {
+      const companyId = await seedCompany();
+      const app = createApp({ board: [companyId] });
+      const { id } = await createContract(app, companyId);
+      const added = await request(app)
+        .post(`/api/companies/${companyId}/contracts/${id}/deadlines`)
+        .send({ kind: "payment", dueDate: inDays(20) });
+      const [reminder] = await issuesOf(added.body.id);
+      expect(reminder).toMatchObject({ companyId, status: "todo", dueDate: inDays(20) });
+
+      const done = await request(app)
+        .patch(`/api/companies/${companyId}/contracts/${id}/deadlines/${added.body.id}`)
+        .send({ state: "done" });
+      expect(done.status).toBe(200);
+      expect((await issuesOf(added.body.id))[0]!.status).toBe("cancelled");
+    });
+
+    it("moves the open reminder to the new date and closes it when the date moves out of range", async () => {
+      const companyId = await seedCompany();
+      const app = createApp({ board: [companyId] });
+      const { id } = await createContract(app, companyId);
+      const added = await request(app)
+        .post(`/api/companies/${companyId}/contracts/${id}/deadlines`)
+        .send({ kind: "payment", dueDate: inDays(20) });
+      const url = `/api/companies/${companyId}/contracts/${id}/deadlines/${added.body.id}`;
+      await request(app).patch(url).send({ dueDate: inDays(25) });
+      const [moved] = await issuesOf(added.body.id);
+      expect(moved).toMatchObject({ status: "todo", dueDate: inDays(25) });
+      await request(app).patch(url).send({ dueDate: inDays(300) });
+      expect((await issuesOf(added.body.id)).map((i) => i.status)).toEqual(["cancelled"]);
+    });
+
+    it("closes the reminders of a deadline that is removed, and of a contract that is deleted", async () => {
+      const companyId = await seedCompany();
+      const app = createApp({ board: [companyId] });
+      const { id } = await createContract(app, companyId);
+      const a = await request(app).post(`/api/companies/${companyId}/contracts/${id}/deadlines`).send({ kind: "payment", dueDate: inDays(20) });
+      const b = await request(app).post(`/api/companies/${companyId}/contracts/${id}/deadlines`).send({ kind: "reporting", dueDate: inDays(20) });
+      expect((await request(app).delete(`/api/companies/${companyId}/contracts/${id}/deadlines/${a.body.id}`)).status).toBe(200);
+      expect((await issuesOf(a.body.id)).map((i) => i.status)).toEqual(["cancelled"]);
+      expect((await request(app).delete(`/api/companies/${companyId}/contracts/${id}`)).status).toBe(200);
+      expect((await issuesOf(b.body.id)).map((i) => i.status)).toEqual(["cancelled"]);
+    });
+
+    it("closes the reminders of a deadline superseded by a new version, and keeps a carried one", async () => {
+      const companyId = await seedCompany();
+      const app = createApp({ board: [companyId] });
+      const v1 = await createContract(app, companyId);
+      const v2 = await createContract(app, companyId, { title: "Warehouse lease v2" });
+      const dropped = await request(app).post(`/api/companies/${companyId}/contracts/${v1.id}/deadlines`).send({ kind: "payment", dueDate: inDays(20) });
+      const res = await request(app)
+        .post(`/api/companies/${companyId}/contracts/${v2.id}/link-previous-version`)
+        .send({ previousContractId: v1.id, changeSummary: "x", carryDeadlines: false });
+      expect(res.status).toBe(200);
+      expect((await issuesOf(dropped.body.id)).map((i) => i.status)).toEqual(["cancelled"]);
+
+      const v3 = await createContract(app, companyId, { title: "Warehouse lease v3" });
+      const carried = await request(app).post(`/api/companies/${companyId}/contracts/${v2.id}/deadlines`).send({ kind: "payment", dueDate: inDays(20) });
+      await request(app)
+        .post(`/api/companies/${companyId}/contracts/${v3.id}/link-previous-version`)
+        .send({ previousContractId: v2.id, changeSummary: "y", carryDeadlines: true });
+      const [kept] = await issuesOf(carried.body.id);
+      expect(kept!.status).toBe("todo");
+      expect(kept!.description).toContain(v3.id);
+    });
+
+    it("reads and sets the company's default lead times, which new deadlines then use", async () => {
+      const companyId = await seedCompany();
+      const app = createApp({ board: [companyId] });
+      const { id } = await createContract(app, companyId);
+      const initial = await request(app).get(`/api/companies/${companyId}/contract-settings`);
+      expect(initial.body).toMatchObject({
+        noticeLeadTimesDays: null,
+        effectiveNoticeLeadTimesDays: [60, 30, 7],
+        effectiveOtherLeadTimesDays: [30, 7],
+      });
+      const set = await request(app)
+        .patch(`/api/companies/${companyId}/contract-settings`)
+        .send({ noticeLeadTimesDays: [90, 14], otherLeadTimesDays: [10] });
+      expect(set.status).toBe(200);
+      expect(set.body).toMatchObject({ effectiveNoticeLeadTimesDays: [90, 14], effectiveOtherLeadTimesDays: [10] });
+      const notice = await request(app).post(`/api/companies/${companyId}/contracts/${id}/deadlines`).send({ kind: "notice_extend", dueDate: inDays(400) });
+      const other = await request(app).post(`/api/companies/${companyId}/contracts/${id}/deadlines`).send({ kind: "payment", dueDate: inDays(400) });
+      const own = await request(app).post(`/api/companies/${companyId}/contracts/${id}/deadlines`).send({ kind: "payment", dueDate: inDays(400), leadTimesDays: [3] });
+      expect(notice.body.leadTimesDays).toEqual([90, 14]);
+      expect(other.body.leadTimesDays).toEqual([10]);
+      expect(own.body.leadTimesDays).toEqual([3]);
+      // Clearing goes back to the built-in defaults.
+      const cleared = await request(app).patch(`/api/companies/${companyId}/contract-settings`).send({ noticeLeadTimesDays: null });
+      expect(cleared.body.effectiveNoticeLeadTimesDays).toEqual([60, 30, 7]);
+      expect((await request(app).patch(`/api/companies/${companyId}/contract-settings`).send({ noticeLeadTimesDays: [] })).status).toBe(400);
+      expect((await request(app).patch(`/api/companies/${companyId}/contract-settings`).send({ bogus: 1 })).status).toBe(400);
+    });
+
+    it("keeps the settings per company and board-only to change", async () => {
+      const one = await seedCompany();
+      const two = await seedCompany();
+      const boardApp = createApp({ board: [one, two] });
+      await request(boardApp).patch(`/api/companies/${one}/contract-settings`).send({ otherLeadTimesDays: [5] });
+      expect((await request(boardApp).get(`/api/companies/${two}/contract-settings`)).body.otherLeadTimesDays).toBeNull();
+
+      const legal = await seedAgent(one, { roleKey: "legal-advisor" });
+      const agentApp = createApp({ agentId: legal, companyId: one });
+      expect((await request(agentApp).get(`/api/companies/${one}/contract-settings`)).status).toBe(200);
+      expect((await request(agentApp).patch(`/api/companies/${one}/contract-settings`).send({ otherLeadTimesDays: [1] })).status).toBe(403);
+      const outsider = await seedAgent(one);
+      expect((await request(createApp({ agentId: outsider, companyId: one })).get(`/api/companies/${one}/contract-settings`)).status).toBe(403);
+      expect((await request(agentApp).get(`/api/companies/${two}/contract-settings`)).status).toBe(403);
     });
   });
 });

@@ -176,7 +176,7 @@ export { videoStorylineDirectors } from "./video_storyline_directors.js";
 export { videoStorylineWriterMessages } from "./video_storyline_writer_messages.js";
 export { tradingStrategies, tradingOrders, tradingFifoLots, tradingLedgerEntries, tradingDailyStats } from "./trading.js";
 export { companyCryptoSettings, cryptoWallets, cryptoWalletDestinations, cryptoAgentLimits, cryptoWalletTransactions } from "./crypto_wallets.js";
-export { contracts, contractParties, contractDeadlines, contractDeadlineReminders, contractTerms } from "./contracts.js";
+export { contracts, contractParties, contractDeadlines, contractDeadlineReminders, contractTerms, contractSettings } from "./contracts.js";
 export { crmOrganizations } from "./crm_organizations.js";
 export { crmContacts } from "./crm_contacts.js";
 export { crmContactOrgRoles } from "./crm_contact_org_roles.js";
