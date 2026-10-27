@@ -89,6 +89,9 @@ export const ROUTINE_SCHEDULER_BYPASS_ROUTES = [
   // Claims finished tasks with a person's brag pre-approval and starts at most
   // one capped video each; every job and cost is recorded under that person.
   "heartbeat-scheduler:bragOnDone",
+  // Daily sweep that opens one reminder issue per contract deadline for the
+  // deadline's own company Legal agent; routine per-tick mechanics.
+  "heartbeat-scheduler:contractDeadlineReminders",
 ] as const;
 
 export type RoutineSchedulerBypassRoute = (typeof ROUTINE_SCHEDULER_BYPASS_ROUTES)[number];
