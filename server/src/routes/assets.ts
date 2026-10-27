@@ -12,6 +12,7 @@ import {
 } from "@paperclipai/shared";
 import type { StorageService } from "../storage/types.js";
 import { accessService, agentService, assetService, logActivity } from "../services/index.js";
+import { actorMayUseContracts, isContractFileAsset } from "../services/contracts.js";
 import { isAllowedContentType, MAX_ATTACHMENT_BYTES } from "../attachment-types.js";
 import { forbidden, notFound } from "../errors.js";
 import { assertCanUpdateAgent, assertCompanyAccess, getActorInfo } from "./authz.js";
@@ -518,6 +519,13 @@ export function assetRoutes(rawDb: Db, storage: StorageService) {
     const assetId = req.params.assetId as string;
     const asset = await svc.getById(assetId);
     if (!asset) {
+      res.status(404).json({ error: "Asset not found" });
+      return;
+    }
+    // Contract files are confidential: only callers allowed to use contracts
+    // may read them, here as on the contract routes. 404, not 403, so the
+    // route does not confirm that the id is a contract file.
+    if (isContractFileAsset(asset) && !(await actorMayUseContracts(db, asset.companyId, req.actor))) {
       res.status(404).json({ error: "Asset not found" });
       return;
     }

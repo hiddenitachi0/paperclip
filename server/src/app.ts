@@ -401,7 +401,7 @@ export async function createApp(
   api.use(executionWorkspaceRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(previewEnvironmentRoutes(db, { service: previewEnvironments }));
   api.use(goalRoutes(db));
-  api.use(contractRoutes(db));
+  api.use(contractRoutes(db, opts.storageService));
   api.use(crmRoutes(db));
   // Board chat on signed-in servers runs its tools as in-process requests into
   // this same app (no socket, no credential): see services/board-chat-dispatch.ts.

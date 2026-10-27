@@ -408,6 +408,39 @@ export async function agentMayUseContracts(
   return row.roleKey === LEGAL_POSITION_ROLE_KEY;
 }
 
+/** Storage namespace every contract file is written under (see contract-files.ts). */
+export const CONTRACT_FILE_NAMESPACE = "contracts";
+
+/**
+ * True for an asset that holds a contract file. Keyed on the stored object key,
+ * not on `contracts.asset_id`, so a file that was replaced (and is no longer
+ * the contract's current one) stays protected too.
+ */
+export function isContractFileAsset(asset: { companyId: string; objectKey: string }): boolean {
+  return asset.objectKey.startsWith(`${asset.companyId}/${CONTRACT_FILE_NAMESPACE}/`);
+}
+
+/**
+ * The whole "may this caller use contracts" decision for one request actor, so
+ * the contract routes and company search cannot drift apart: board members of
+ * the company except read-only viewers (instance admins and the local board
+ * are always in), and agents per `agentMayUseContracts`. Everything else
+ * (delegate tokens, service tokens, anonymous) is refused.
+ */
+export async function actorMayUseContracts(
+  db: Db,
+  companyId: string,
+  actor: AuthorizationActor,
+): Promise<boolean> {
+  if (actor.type === "agent") return agentMayUseContracts(db, companyId, actor);
+  if (actor.type === "board") {
+    if (actor.source === "local_implicit" || actor.isInstanceAdmin) return true;
+    const membership = actor.memberships?.find((item) => item.companyId === companyId);
+    return Boolean(membership && membership.status === "active" && membership.membershipRole !== "viewer");
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------- service
 
 /**
@@ -552,6 +585,17 @@ export function contractService(db: Db, rawDb: Db = db) {
         .where(and(...conditions))
         .orderBy(desc(contracts.createdAt))
         .limit(filters.limit ?? 200);
+    },
+
+    /** The file side of a contract (no text): 404 when it is not in this company. */
+    getFileState: async (companyId: string, id: string) => {
+      const row = await db
+        .select({ id: contracts.id, assetId: contracts.assetId, textStatus: contracts.textStatus })
+        .from(contracts)
+        .where(and(eq(contracts.id, id), eq(contracts.companyId, companyId)))
+        .then((rows) => rows[0] ?? null);
+      if (!row) throw notFound("Contract not found");
+      return row;
     },
 
     getContract: async (companyId: string, id: string, options: { includeText?: boolean } = {}) => {

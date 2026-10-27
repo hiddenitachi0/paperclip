@@ -169,7 +169,7 @@ describe("Search page", () => {
       scope: "all",
       limit: 20,
       offset: 0,
-      countsByType: { issue: 1, artifact: 0, agent: 0, project: 0 },
+      countsByType: { issue: 1, artifact: 0, agent: 0, project: 0, contract: 0 },
       hasMore: false,
       results: [
         {
@@ -239,7 +239,7 @@ describe("Search page", () => {
       scope: "artifacts",
       limit: 20,
       offset: 0,
-      countsByType: { issue: 0, artifact: 1, agent: 0, project: 0 },
+      countsByType: { issue: 0, artifact: 1, agent: 0, project: 0, contract: 0 },
       hasMore: false,
       results: [
         {
@@ -304,7 +304,7 @@ describe("Search page", () => {
       scope: "all",
       limit: 20,
       offset: 0,
-      countsByType: { issue: 0, artifact: 0, agent: 0, project: 0 },
+      countsByType: { issue: 0, artifact: 0, agent: 0, project: 0, contract: 0 },
       hasMore: false,
       results: [],
     });
@@ -348,7 +348,7 @@ describe("Search page", () => {
       scope: "all",
       limit: 20,
       offset: 0,
-      countsByType: { issue: 1, artifact: 0, agent: 0, project: 0 },
+      countsByType: { issue: 1, artifact: 0, agent: 0, project: 0, contract: 0 },
       hasMore: false,
       results: [
         {
@@ -402,7 +402,7 @@ describe("Search page", () => {
       scope: "comments",
       limit: 20,
       offset: 0,
-      countsByType: { issue: 0, artifact: 0, agent: 0, project: 0 },
+      countsByType: { issue: 0, artifact: 0, agent: 0, project: 0, contract: 0 },
       hasMore: false,
       results: [],
     });

@@ -821,6 +821,7 @@ export type {
   ProjectWorkspace,
   CompanySearchHighlight,
   CompanySearchArtifactSummary,
+  CompanySearchContractSummary,
   CompanySearchIssueSummary,
   CompanySearchResponse,
   CompanySearchResult,
@@ -1689,6 +1690,7 @@ export {
   updateContractDeadlineSchema,
   updateContractPartySchema,
   updateContractSchema,
+  uploadContractFieldsSchema,
   upsertContractTermSchema,
   type AggregateContractTermQuery,
   type ContractDeadlineKind,
@@ -1719,6 +1721,7 @@ export {
   type UpdateContract,
   type UpdateContractDeadline,
   type UpdateContractParty,
+  type UploadContractFields,
   type UpsertContractTerm,
 } from "./contracts.js";
 export {
