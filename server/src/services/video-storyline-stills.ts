@@ -15,8 +15,11 @@ import {
 import { conflict, unprocessable } from "../errors.js";
 import { getStorageService } from "../storage/index.js";
 import { logActivity } from "./activity-log.js";
+import { SogniLoraCatalogCache } from "@paperclipai/plugin-sdk/media";
 import {
   FalImageProvider,
+  SOGNI_STILL_DEFAULT_MODEL,
+  SOGNI_STILL_REFERENCE_MODEL,
   SogniImageProvider,
   sogniStorageFetch,
   type ImageFetchImpl,
@@ -25,8 +28,12 @@ import {
   type ImageGenerationResult,
 } from "./image-provider-clients.js";
 import {
+  editImageDropsNote,
+  fitLorasToModel,
   loadStoryboardLooks,
+  lookForShot,
   resolveStoryboardPictureTarget,
+  sheetWithoutCharacter,
   sogniEditModelOrDefault,
   sogniStepModel,
   storyboardPrompt,
@@ -42,7 +49,7 @@ import { recordFalCostEvent } from "./fal-cost-events.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
 import { lockStorylineRow, videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
 import { mediaStudioKeyRef } from "./media-studio-company-keys.js";
-import { assemblePrompt, SHEET_FIELDS, type CharacterSheet } from "./media-studio-look-prompt.js";
+import { assemblePrompt, type CharacterSheet } from "./media-studio-look-prompt.js";
 import {
   castIdentityNames,
   castPeople,
@@ -128,7 +135,16 @@ async function downloadImageBytes(result: ImageGenerationResult): Promise<{ buff
   throw new Error("Provider returned neither a url nor a dataUrl");
 }
 
-export function videoStorylineStillsService(db: Db) {
+/** Sogni's public LoRA list, read once per 10 minutes and shared by every storyboard picture in this process. */
+const sogniLoraCatalog = new SogniLoraCatalogCache({ fetch: safeImageFetch });
+
+export interface VideoStorylineStillsOptions {
+  /** Where the Sogni LoRA list comes from (tests stub it). */
+  loraCatalog?: Pick<SogniLoraCatalogCache, "get">;
+}
+
+export function videoStorylineStillsService(db: Db, options: VideoStorylineStillsOptions = {}) {
+  const loraCatalog = options.loraCatalog ?? sogniLoraCatalog;
   const storylines = videoStorylineService(db);
   const settings = videoStorylineSettingsService(db);
   const registry = pluginRegistryService(db);
@@ -190,6 +206,15 @@ export function videoStorylineStillsService(db: Db) {
     return { provider: new FalImageProvider(apiKey, safeImageFetch), apiKey };
   }
 
+  /** Sogni's public LoRAs, or null when they could not be read (then nobody can tell which LoRA fits which model). */
+  async function knownLoras() {
+    try {
+      return (await loraCatalog.get())?.loras ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   async function generateStill(companyId: string, storylineId: string, shotId: string, actor: VideoStorylineActor): Promise<VideoStoryboardShotSummary> {
     await settings.assertEnabled(companyId);
     const storyline = await storylines.getStorylineRow(companyId, storylineId);
@@ -208,6 +233,8 @@ export function videoStorylineStillsService(db: Db) {
         "The look picked for this shot's picture no longer exists (it was deleted on the Looks tab). Pick another look, or none, in step 2 (Cast & look).",
       );
     }
+    // A Higgsfield look is never quietly turned into a Fal or Sogni picture.
+    if (target.refusal) throw unprocessable(target.refusal);
     const estimate = estimateStoryboardCostCents([{ storyboardStatus: shot.storyboardStatus as VideoShotStoryboardStatus }], target.providerId);
     const { provider, apiKey } = await resolveImageProvider(companyId, actor.agentId ?? actor.actorId, target, cfg, pluginId);
     // Who is in this shot, and the saved people (identities) they are linked to.
@@ -248,10 +275,14 @@ export function videoStorylineStillsService(db: Db) {
     cfg: Record<string, unknown>,
     cast: ShotCastPeople,
   ): Promise<VideoStoryboardShotSummary> {
-    const look = target.look;
     if (cast.people.length > 0) {
       return finishCastStill(companyId, storyline, shot, actor, provider, apiKey, estimateCents, target, cfg, cast);
     }
+    // Nobody is linked in this shot: a look that shows a saved person keeps only its style and setting.
+    const scoped = lookForShot(target.look, new Set());
+    const look = scoped.look;
+    const notes = [...cast.notes];
+    if (scoped.note) notes.push(scoped.note);
     // The look's own pictures first (with their roles), then the shot's and the storyline's character pictures.
     const refs = storyboardReferences(look, shot.lookReferenceAssetIds, storyline.characterReferenceAssetIds, MAX_STILL_REFERENCES);
     const referenceImages = await loadReferenceImages(db, companyId, refs.ids);
@@ -264,18 +295,24 @@ export function videoStorylineStillsService(db: Db) {
     if (target.providerId === "sogni") {
       input.model = referenceImages.length > 0 ? sogniEditModelOrDefault(target.model) : target.model ? sogniStepModel(target.model, "generate_image") : undefined;
       if (look) {
-        if (look.loras.length > 0) input.loras = look.loras;
+        // The LoRAs must fit the model this picture is really made with (the editing model when it has reference pictures).
+        const modelUsed = input.model ?? (referenceImages.length > 0 ? SOGNI_STILL_REFERENCE_MODEL : SOGNI_STILL_DEFAULT_MODEL);
+        const fit = fitLorasToModel(look, modelUsed, look.loras.length > 0 ? await knownLoras() : null);
+        if (fit.note) notes.push(fit.note);
+        if (fit.loras.length > 0) input.loras = fit.loras;
         if (look.seed !== null) input.seed = look.seed;
         if (look.guidance !== null) input.guidance = look.guidance;
         if (look.negativePrompt) input.negativePrompt = look.negativePrompt;
         input.safeContentFilter = look.safeContentFilter;
+        const dropped = referenceImages.length > 0 ? editImageDropsNote(look) : null;
+        if (dropped) notes.push(dropped);
       }
     } else if (target.model && referenceImages.length === 0) {
       // With reference pictures Fal always uses FLUX Kontext (multi), which is what carries faces over.
       input.model = target.model;
     }
 
-    return makeAndStoreStill(companyId, storyline, shot, actor, provider, apiKey, estimateCents, target, cfg, input, { castIds: [], notes: cast.notes });
+    return makeAndStoreStill(companyId, storyline, shot, actor, provider, apiKey, estimateCents, target, cfg, input, { castIds: [], notes });
   }
 
   /** Makes the picture, records its cost, stores it and marks the shot's picture as waiting for review. */
@@ -412,7 +449,9 @@ export function videoStorylineStillsService(db: Db) {
     cfg: Record<string, unknown>,
     cast: ShotCastPeople,
   ): Promise<VideoStoryboardShotSummary> {
-    const look = target.look;
+    // A look that shows a saved person puts that person's character fields and face/body pictures only on shots they are in.
+    const scoped = lookForShot(target.look, new Set(cast.people.map((p) => p.identity.id)));
+    const look = scoped.look;
     const plan = planCastStill({
       people: cast.people,
       service: target.providerId,
@@ -424,6 +463,7 @@ export function videoStorylineStillsService(db: Db) {
       safeContentFilter: look ? look.safeContentFilter : true,
     });
     const notes = [...cast.notes, ...plan.notes];
+    if (scoped.note) notes.push(scoped.note);
     // One at a time so each picture keeps its place (and its person).
     const loaded: Array<{ id: string; dataUri: string | null; owner: string | null; role: (typeof plan.roles)[number] }> = [];
     for (const [i, id] of plan.ids.entries()) {
@@ -449,11 +489,7 @@ export function videoStorylineStillsService(db: Db) {
     const people = cast.people.filter((p) => sent.some((x) => x.owner === p.member.name));
     let sheet: CharacterSheet | undefined = look?.sheet;
     if (people.length === 1) sheet = sheetWithCastIdentity(look?.sheet, people[0]!.identity);
-    else if (people.length > 1 && look) {
-      sheet = Object.fromEntries(
-        SHEET_FIELDS.filter((f) => f.group !== "character" && look.sheet[f.key]).map((f) => [f.key, look.sheet[f.key]]),
-      ) as CharacterSheet;
-    }
+    else if (people.length > 1 && look) sheet = sheetWithoutCharacter(look.sheet);
     let prompt = assemblePrompt({
       request: castLine ? `${shot.prompt}\n\n${castLine}` : shot.prompt,
       style: look?.style,
@@ -464,7 +500,10 @@ export function videoStorylineStillsService(db: Db) {
 
     const input: ImageGenerationInput = { prompt, referenceImages: sent.map((p) => p.dataUri!), model: plan.model };
     if (target.providerId === "sogni") {
-      const loras = [...(look?.loras ?? [])];
+      // The look's LoRAs must fit the editing model this picture is made with; the person's own LoRA is added after.
+      const fit = look && look.loras.length > 0 ? fitLorasToModel(look, plan.model, await knownLoras()) : null;
+      if (fit?.note) notes.push(fit.note);
+      const loras = [...(fit?.loras ?? [])];
       if (plan.lora && !loras.some((l) => l.id === plan.lora!.id) && loras.length < 8) {
         loras.push({ id: plan.lora.id, strength: plan.lora.strength });
         if (plan.lora.triggerWord && !prompt.includes(plan.lora.triggerWord)) prompt = `${plan.lora.triggerWord}, ${prompt}`;
@@ -476,6 +515,8 @@ export function videoStorylineStillsService(db: Db) {
         if (look.guidance !== null) input.guidance = look.guidance;
         if (look.negativePrompt) input.negativePrompt = look.negativePrompt;
         input.safeContentFilter = look.safeContentFilter;
+        const dropped = editImageDropsNote(look);
+        if (dropped) notes.push(dropped);
       }
     }
     return makeAndStoreStill(companyId, storyline, shot, actor, provider, apiKey, estimateCents, target, cfg, input, { castIds: people.map((p) => p.member.id), notes });

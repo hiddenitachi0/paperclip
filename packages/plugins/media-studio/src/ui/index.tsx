@@ -418,7 +418,7 @@ type Look = {
   style: string;
   model: string | null;
   modelName?: string | null;
-  provider?: "fal" | "sogni" | null;
+  provider?: "fal" | "sogni" | "higgsfield" | null;
   seed: number | null;
   referenceFileIds: string[];
   referenceRoles?: string[];
@@ -2643,6 +2643,14 @@ type DirectKind = (typeof DIRECT_KINDS)[number];
 const DIRECT_KIND_LABELS: Record<DirectKind, string> = { picture: "Picture", video: "Video", audio: "Audio" };
 /** v1 ships Fal only; kept as a value (not a picker) so a second provider is a one-line change later. */
 const DIRECT_PROVIDER = "fal";
+
+/** A look's model when it is a Fal.ai model (Fal ids are paths such as fal-ai/flux/dev; Sogni's and Higgsfield's are not); else null. */
+export function falModelOfLook(look: Pick<Look, "model" | "provider"> | undefined): string | null {
+  const model = look?.model?.trim();
+  if (!model) return null;
+  if (look?.provider === "sogni" || look?.provider === "higgsfield") return null;
+  return model.includes("/") ? model : null;
+}
 const DIRECT_PROVIDER_LABEL = "Fal";
 const DIRECT_AUDIO_MODES = ["music", "speech"] as const;
 type DirectAudioMode = (typeof DIRECT_AUDIO_MODES)[number];
@@ -2842,11 +2850,13 @@ function DirectCreatePanel(props: {
 
   // Picking a look only pre-fills the model field here (client-side
   // convenience) -- the direct-create routes have no lookId/referenceFileIds
-  // field, so nothing about the look is sent to the server.
+  // field, so nothing about the look is sent to the server. Only a Fal model
+  // goes in the Fal box: a Sogni or Higgsfield model there would just fail.
   useEffect(() => {
     if (!lookId) return;
     const look = looks.find((l) => l.id === lookId);
-    if (look?.model) setModel(look.model);
+    const falModel = falModelOfLook(look);
+    if (falModel) setModel(falModel);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lookId]);
 
@@ -3480,8 +3490,9 @@ function StoryboardPictureSettings(props: {
             {value.lookId && !look && <option value={value.lookId}>A look that no longer exists</option>}
           </select>
           <span style={{ color: "#868e96" }}>
-            A look is a saved style from the Looks tab. Its style words, character description, reference pictures{provider === "sogni" ? " and LoRAs" : ""} are put on every
-            picture, the same way the Create tab uses it. You can pick a different look for one shot on its picture below.
+            A look is a saved style from the Looks tab. Its style words and setting go on every picture. Its character description and face or body pictures are used only
+            in shots where the look's saved person is in the cast.{provider === "sogni" ? " Its LoRAs are used only when they fit the model that makes the picture; a note says which were left out." : ""} A
+            look made for Higgsfield cannot be used here yet. The Create tab works differently: it only fills in the look's model. You can pick a different look for one shot on its picture below.
           </span>
           {value.lookId && !look && <span style={{ color: "#c92a2a" }}>That look was deleted. Pick another one, or No look, before making pictures.</span>}
         </div>
