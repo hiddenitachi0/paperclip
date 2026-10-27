@@ -352,6 +352,21 @@ d("storyline model change", () => {
   describe("spend cap on a single-shot re-render (DUR-4915)", () => {
     const shotStatuses = async (ids: string[]) => Promise.all(ids.map(async (id) => (await shotRow(id)).status));
 
+    it("a burst of re-renders with no tick between them counts the shots already in flight against the cap (DUR-4930)", async () => {
+      const { companyId, storylineId, shotIds } = await seed({ providerId: "fal", model: KLING_16, shots: 4 });
+      await db.update(videoStorylines).set({ budgetCapCents: 300 }).where(eq(videoStorylines.id, storylineId));
+      const rec = recordingService({ model: KLING_16, provider: "fal" });
+      const render = videoStorylineRenderService(db, { buildProvider: rec.buildProvider as never, resolveApiKey: async () => "fal-key" });
+      const outcomes = [];
+      for (const id of shotIds) outcomes.push(await render.reRenderShot(companyId, storylineId, id, ACTOR).then(() => "started", (err) => (err as { status: number }).status));
+      expect(outcomes).toEqual(["started", 422, 422, 422]);
+      await render.tick();
+      await render.tick();
+      expect(rec.started).toHaveLength(1);
+      expect(await shotStatuses(shotIds)).toEqual(["done", "draft", "draft", "draft"]);
+      expect((await storylineRow(storylineId)).spentCents).toBeLessThanOrEqual(300);
+    });
+
     it("refuses to re-render a shot of a film with no budget cap, and starts nothing", async () => {
       const { companyId, storylineId, shotIds } = await seed({ providerId: "fal", model: KLING_16, shots: 3 });
       await db.update(videoStorylines).set({ budgetCapCents: null }).where(eq(videoStorylines.id, storylineId));
@@ -492,6 +507,45 @@ d("storyline model change", () => {
       const after = await storylineRow(storylineId);
       expect(after.spentCents).toBeLessThanOrEqual(300);
       expect(await cards(companyId)).toHaveLength(1);
+    });
+
+    it("(e) a burst of re-renders with no tick between them counts the shots already in flight (DUR-4930)", async () => {
+      const { companyId, storylineId, shotIds } = await seed({ providerId: "fal", model: KLING_16, shots: 4 });
+      await videoStorylineSettingsService(db).setApprovalThresholdCents(companyId, 300);
+      const { rec, render } = renderer();
+      const outcomes = [];
+      for (const id of shotIds) outcomes.push(await render.reRenderShot(companyId, storylineId, id, ACTOR).then(() => "started", (err) => (err as { status: number }).status));
+      expect(outcomes).toEqual(["started", 422, 422, 422]);
+      await render.tick();
+      await render.tick();
+      expect(rec.started).toHaveLength(1);
+      expect(await shotStatuses(shotIds)).toEqual(["done", "draft", "draft", "draft"]);
+      expect((await storylineRow(storylineId)).spentCents).toBeLessThanOrEqual(300);
+      expect(await cards(companyId)).toHaveLength(1);
+    });
+
+    it("(e) the same burst, fired at once, still lets only what fits start", async () => {
+      const { companyId, storylineId, shotIds } = await seed({ providerId: "fal", model: KLING_16, shots: 4 });
+      await videoStorylineSettingsService(db).setApprovalThresholdCents(companyId, 300);
+      const { rec, render } = renderer();
+      const settled = await Promise.allSettled(shotIds.map((id) => render.reRenderShot(companyId, storylineId, id, ACTOR)));
+      expect(settled.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+      await render.tick();
+      await render.tick();
+      expect(rec.started).toHaveLength(1);
+      expect((await storylineRow(storylineId)).spentCents).toBeLessThanOrEqual(300);
+    });
+
+    it("(e) an approved card for the combined total lets the in-flight burst through", async () => {
+      const { companyId, storylineId, shotIds } = await seed({ providerId: "fal", model: KLING_16, shots: 2 });
+      await videoStorylineSettingsService(db).setApprovalThresholdCents(companyId, 300);
+      await approvedCard(companyId, storylineId, 500);
+      const { rec, render } = renderer();
+      await render.reRenderShot(companyId, storylineId, shotIds[0]!, ACTOR);
+      await render.reRenderShot(companyId, storylineId, shotIds[1]!, ACTOR);
+      await render.tick();
+      await render.tick();
+      expect(rec.started).toHaveLength(2);
     });
 
     it("a film that is already rendering (a run startRender cleared) is not gated again", async () => {

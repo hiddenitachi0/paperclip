@@ -33,7 +33,7 @@ import { extractLastFrameDataUri } from "./video-ffmpeg.js";
 import { sogniStorageFetch } from "./image-provider-clients.js";
 import { loadApprovedStillDataUri } from "./video-storyline-still-frame.js";
 import { videoStorylineSettingsService } from "./video-storyline-settings.js";
-import { lockStorylineRow, videoStorylineService, type VideoStorylineActor } from "./video-storylines.js";
+import { lockStorylineRow, videoStorylineService, type ScopedTx, type VideoStorylineActor } from "./video-storylines.js";
 import { executePinnedHttpRequest, validateAndResolveFetchUrl, pinnedToFetchResponse } from "./safe-outbound-fetch.js";
 import { companyMediaStudioKeyRef, mediaStudioKeyRef } from "./media-studio-company-keys.js";
 import {
@@ -713,6 +713,36 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     return hasAutomaticPin(shot) ? { ...shot, providerId: null, model: null } : shot;
   }
 
+  /**
+   * Money a shot that is `queued` or `rendering` will cost when it settles, which spentCents does not hold yet (it only
+   * rises when a shot settles). A single-shot re-render must count it, or a burst of re-renders each sees the same
+   * settled spend and walks past the cap and the approval threshold (DUR-4930). An animated photo is already counted
+   * in spentCents through its reserved ledger row, so it is left out here rather than counted twice. `exceptShotId` is
+   * the shot being re-rendered, never counted against itself.
+   */
+  async function inFlightShotEstimateCents(
+    runner: Db | ScopedTx,
+    storyline: Pick<typeof videoStorylines.$inferSelect, "id" | "providerId" | "model">,
+    companyId: string,
+    exceptShotId: string,
+  ): Promise<number> {
+    const inFlight = await runner
+      .select()
+      .from(videoShots)
+      .where(and(eq(videoShots.storylineId, storyline.id), inArray(videoShots.status, ["queued", "rendering"]), ne(videoShots.id, exceptShotId)));
+    const generated = inFlight.filter((s) => s.clipKind === "generated");
+    if (generated.length === 0) return 0;
+    const held = await runner
+      .select({ shotId: videoMediaSpend.shotId })
+      .from(videoMediaSpend)
+      .where(and(eq(videoMediaSpend.companyId, companyId), eq(videoMediaSpend.storylineId, storyline.id), eq(videoMediaSpend.status, "reserved")));
+    const heldShotIds = new Set(held.map((row) => row.shotId));
+    return estimateShotRenderCents(
+      storyline,
+      generated.filter((s) => !heldShotIds.has(s.id)).map(withoutAutomaticPin),
+    ).estimatedTotalCents;
+  }
+
   async function reRenderShot(companyId: string, storylineId: string, shotId: string, actor: VideoStorylineActor) {
     await settings.assertEnabled(companyId);
     const storyline = await storylines.getStorylineRow(companyId, storylineId);
@@ -738,7 +768,9 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       throw badRequest("Set a budget cap before re-rendering a shot, so spending stops at a limit you chose.");
     }
     const refundCents = shot.actualCostCents ?? 0;
-    const spentAfterRefund = Math.max(0, storyline.spentCents - refundCents);
+    // Shots already queued or rendering have not settled into spentCents yet: count what they will cost (DUR-4930).
+    const inFlightCents = await inFlightShotEstimateCents(db, storyline, companyId, shotId);
+    const spentAfterRefund = Math.max(0, storyline.spentCents - refundCents) + inFlightCents;
     // Price the shot the way it will actually render: with the legacy automatic pin cleared (see below), so the
     // estimate and the render use the same target.
     const shotEstimate = estimateShotRenderCents(storyline, [withoutAutomaticPin(shot)]);
@@ -785,7 +817,8 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
         throw badRequest("Set a budget cap before re-rendering a shot, so spending stops at a limit you chose.");
       }
       const lockedEstimate = estimateShotRenderCents(locked, [withoutAutomaticPin(current)]).estimatedTotalCents;
-      const lockedTotal = Math.max(0, locked.spentCents - lockedRefund) + lockedEstimate;
+      const lockedInFlight = await inFlightShotEstimateCents(tx, locked, companyId, shotId);
+      const lockedTotal = Math.max(0, locked.spentCents - lockedRefund) + lockedInFlight + lockedEstimate;
       if (lockedTotal > locked.budgetCapCents) {
         throw unprocessable(
           `Re-rendering this shot (estimated ${lockedEstimate} cents) would push spend to ${lockedTotal} cents, over the budget cap (${locked.budgetCapCents} cents). Raise the cap first.`,
