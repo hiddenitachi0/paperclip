@@ -207,6 +207,8 @@ export const TIMER_IDLE_GATE_WAKE_REASON_COVERAGE: Readonly<Record<string, reado
   "customer_inbox.unreadable_message": ["assigned_issue_created", "assigned_issue_updated", "wakeup_request"],
   "customer_inbox.conversation_continued": ["assigned_issue_updated", "comment_on_assigned_issue", "wakeup_request"],
   cross_company_instruction_approved: ["assigned_issue_created", "wakeup_request"],
+  // The daily deadline sweep opens a todo reminder issue for the contract owner / Legal agent.
+  contract_deadline_reminder: ["assigned_issue_created", "wakeup_request"],
   // Comments, mentions, interactions
   issue_commented: ["comment_on_assigned_issue", "interaction_changed", "wakeup_request"],
   issue_reopened_via_comment: ["comment_on_assigned_issue", "assigned_issue_updated", "wakeup_request"],
