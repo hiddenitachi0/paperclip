@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
 import express from "express";
 import request from "supertest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
   agents,
+  approvals,
   assets,
   companies,
   companyAgentRoles,
@@ -31,6 +33,7 @@ import {
   normalizePartyName,
   samePartiesForVersioning,
 } from "../services/contracts.js";
+import { issueThreadInteractionService } from "../services/issue-thread-interactions.js";
 
 let errorHandler: typeof import("../middleware/index.js").errorHandler;
 let contractRoutes: typeof import("../routes/contracts.js").contractRoutes;
@@ -149,6 +152,7 @@ describeEmbeddedPostgres("contract register agent tools (DUR-4856)", () => {
 
   afterEach(async () => {
     await db.delete(issueThreadInteractions);
+    await db.delete(approvals);
     await db.delete(issues);
     await db.delete(contractDeadlineReminders);
     await db.delete(contractTerms);
@@ -259,6 +263,7 @@ describeEmbeddedPostgres("contract register agent tools (DUR-4856)", () => {
       kind?: string;
       resolvedByUserId?: string | null;
       resolvedByAgentId?: string | null;
+      result?: Record<string, unknown> | null;
     },
   ) {
     const [row] = await db
@@ -273,6 +278,7 @@ describeEmbeddedPostgres("contract register agent tools (DUR-4856)", () => {
         resolvedByUserId: opts.resolvedByUserId === undefined ? "board-user-1" : opts.resolvedByUserId,
         resolvedByAgentId: opts.resolvedByAgentId ?? null,
         resolvedAt: new Date(),
+        result: (opts.result ?? undefined) as any,
         payload: {
           version: 1,
           prompt: "Is this a renegotiated version?",
@@ -599,6 +605,54 @@ describeEmbeddedPostgres("contract register agent tools (DUR-4856)", () => {
       expect((await link({ confirmationInteractionId: selfResolved })).status).toBe(403);
       const nobody = await seedConfirmation(companyId, issueId, agentId, { key, resolvedByUserId: null });
       expect((await link({ confirmationInteractionId: nobody })).status).toBe(403);
+      await expectNotLinked(oldC.id, newC.id);
+    });
+
+    it("refuses a card an agent linked to an ordinary approval, once the operator approves that other card", async () => {
+      const { companyId, agentId, oldC, newC, issueId, key, link } = await setup();
+      const [approval] = await db
+        .insert(approvals)
+        .values({ companyId, type: "approve_ceo_strategy", status: "pending", payload: { plan: "Q4 strategy" } })
+        .returning();
+      // The agent files the confirmation through the real service, linked to an unrelated waiting approval.
+      const interactionsSvc = issueThreadInteractionService(db);
+      const card = await interactionsSvc.create(
+        { id: issueId, companyId },
+        {
+          kind: "request_confirmation",
+          payload: { version: 1, prompt: "Is this a renegotiated version?", target: { type: "custom", key } },
+          linkedApprovalId: approval!.id,
+        } as Parameters<typeof interactionsSvc.create>[1],
+        { agentId, userId: null },
+      );
+      expect(card.linkedApprovalId).toBe(approval!.id);
+
+      // The operator approves the other card; the service closes the linked confirmation as accepted by them.
+      await db
+        .update(approvals)
+        .set({ status: "approved", decidedByUserId: "board-user-1", decidedAt: new Date() })
+        .where(eq(approvals.id, approval!.id));
+      const resolved = await interactionsSvc.resolveInteractionsLinkedToApproval(
+        { id: approval!.id, companyId, status: "approved" },
+        { userId: "board-user-1" },
+      );
+      expect(resolved.map((row) => row.id)).toEqual([card.id]);
+      const [stored] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, card.id));
+      expect(stored).toMatchObject({ status: "accepted", resolvedByUserId: "board-user-1", resolvedByAgentId: null });
+
+      expect((await link({ confirmationInteractionId: card.id })).status).toBe(403);
+      await expectNotLinked(oldC.id, newC.id);
+      const deadlines = await db.select().from(contractDeadlines).where(eq(contractDeadlines.contractId, oldC.id));
+      expect(deadlines.map((row) => row.state)).toEqual(["open"]);
+    });
+
+    it("refuses an accepted card that was closed automatically, which always carries a reason", async () => {
+      const { companyId, agentId, oldC, newC, issueId, key, link } = await setup();
+      const autoClosed = await seedConfirmation(companyId, issueId, agentId, {
+        key,
+        result: { version: 1, outcome: "accepted", reason: "Closed automatically: the linked board approval was approved." },
+      });
+      expect((await link({ confirmationInteractionId: autoClosed })).status).toBe(403);
       await expectNotLinked(oldC.id, newC.id);
     });
 

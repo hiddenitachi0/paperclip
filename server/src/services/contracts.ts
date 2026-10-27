@@ -508,7 +508,11 @@ export function contractService(db: Db, rawDb: Db = db) {
    * card must be a request_confirmation in this company, accepted (not
    * expired, rejected or pending) and resolved by a person, and its target must
    * name exactly this (new, old) pair. Accepting is a board-only route, so an
-   * agent cannot produce such a row. One generic message for every failure:
+   * agent cannot produce such a row. Two other routes also write "accepted"
+   * with a user id and are refused: a card linked to (or naming) an ordinary
+   * approval, which flips to accepted when the operator approves that other
+   * card, and any automatic close, which always writes result.reason. A direct
+   * accept writes neither. One generic message for every failure:
    * the caller learns what is needed, not which card exists.
    */
   async function assertBoardConfirmedVersionLink(
@@ -530,18 +534,23 @@ export function contractService(db: Db, rawDb: Db = db) {
         status: issueThreadInteractions.status,
         resolvedByUserId: issueThreadInteractions.resolvedByUserId,
         resolvedByAgentId: issueThreadInteractions.resolvedByAgentId,
+        linkedApprovalId: issueThreadInteractions.linkedApprovalId,
+        result: issueThreadInteractions.result,
         payload: issueThreadInteractions.payload,
       })
       .from(issueThreadInteractions)
       .where(and(eq(issueThreadInteractions.id, interactionId), eq(issueThreadInteractions.companyId, companyId)))
       .then((rows) => rows[0] ?? null);
     const target = (row?.payload as { target?: { type?: string; key?: string } | null } | undefined)?.target;
+    const autoResolvedReason = (row?.result as { reason?: string | null } | null | undefined)?.reason;
     const confirmed =
       row !== null &&
       row.kind === "request_confirmation" &&
       row.status === "accepted" &&
       Boolean(row.resolvedByUserId) &&
       !row.resolvedByAgentId &&
+      !row.linkedApprovalId &&
+      !autoResolvedReason &&
       target?.type === "custom" &&
       target.key === expectedKey;
     if (!confirmed) throw refusal();
