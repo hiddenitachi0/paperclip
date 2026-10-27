@@ -3,7 +3,8 @@ import { Readable } from "node:stream";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
 import type { SogniLoraInfo } from "@paperclipai/plugin-sdk/media";
-import { assets, createDb, companies, pluginConfig, pluginState, plugins } from "@paperclipai/db";
+import { and, eq } from "drizzle-orm";
+import { assets, createDb, companies, pluginConfig, pluginState, plugins, videoShots } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
 /**
@@ -66,6 +67,7 @@ const { videoStorylineService } = await import("../services/video-storylines.ts"
 const {
   HIGGSFIELD_LOOK_REFUSAL,
   editImageDropsNote,
+  falIgnoresNote,
   fitLorasToModel,
   lookForShot,
   normalizeStoryboardLook,
@@ -121,7 +123,8 @@ describe("1. LoRAs are checked against the model the picture really uses", () =>
     const own = look({ loras: [{ id: "personal-abc", strength: 0.8 }, { id: "gone", strength: 0.8 }] });
     const fit = fitLorasToModel(own, "z-turbo", KNOWN);
     expect(fit.loras.map((x) => x.id)).toEqual(["personal-abc"]);
-    expect(fit.note).toContain("does not list it for this account any more");
+    expect(fit.note).toContain("does not list it any more");
+    expect(unchecked.note).toContain('the LoRAs of the look "Hero"');
   });
 });
 
@@ -141,6 +144,24 @@ describe("2. the look's person only appears in shots they are in", () => {
     expect(shot.note).toContain("not in this shot");
   });
 
+  it("also leaves out pictures tagged outfit or other (the default tag), and says how to get the person back", () => {
+    const untagged = look({
+      identityId: "id-maja",
+      sheet: { hair: "long blonde" },
+      referenceFileIds: ["face-photo", "coat", "harbour", "palette"],
+      referenceRoles: ["other", "outfit", "style", "other"],
+    });
+    const shot = lookForShot(untagged, new Set(["id-bo"]), "Maja");
+    expect(shot.look!.referenceFileIds).toEqual(["harbour"]);
+    expect(shot.look!.sheet).toEqual({});
+    expect(shot.note).toContain("(Maja)");
+    expect(shot.note).toContain("add them to the cast in step 1");
+    // A look whose pictures are all untagged and which has no character fields still says so.
+    const onlyPhotos = look({ identityId: "id-maja", referenceFileIds: ["face-photo"] });
+    expect(lookForShot(onlyPhotos, new Set()).look!.referenceFileIds).toEqual([]);
+    expect(lookForShot(onlyPhotos, new Set()).note).not.toBeNull();
+  });
+
   it("changes nothing when the person is in the shot, or the look shows nobody", () => {
     expect(lookForShot(person, new Set(["id-maja"]))).toEqual({ look: person, note: null });
     const nobody = look({ sheet: { hair: "long blonde" } });
@@ -158,6 +179,14 @@ describe("3. a Higgsfield look is refused, never turned into Fal.ai", () => {
     expect(target.refusal).toBe(HIGGSFIELD_LOOK_REFUSAL);
     expect(target.model).toBeNull();
     expect(resolveStoryboardPictureTarget({ lookId: "look-1" }, null, [look({ provider: "sogni", model: "z-turbo" })]).refusal).toBeNull();
+  });
+});
+
+describe("Fal.ai ignores the look's LoRAs, seed, guidance and things to avoid, and the note says so", () => {
+  it("names what the look set and nothing else", () => {
+    expect(falIgnoresNote(look({ loras: [{ id: "a", strength: 1 }, { id: "b", strength: 1 }], seed: 3 }))).toMatch(/not its LoRAs and seed, so they were left out/);
+    expect(falIgnoresNote(look({ guidance: 2 }))).toMatch(/not guidance, so it was left out/);
+    expect(falIgnoresNote(look())).toBeNull();
   });
 });
 
@@ -327,13 +356,16 @@ d("storyboard stills apply the look rules (database)", () => {
     const sent = captured.pictures[0]!.input;
     expect(sent.model).toBe("qwen-lightning");
     expect(sent.loras).toEqual([{ id: "edit-ok", strength: 0.6 }]);
+    // The editor ignores them, so they are not even set (the note and the code cannot drift apart).
+    expect(sent.seed).toBeUndefined();
+    expect(sent.negativePrompt).toBeUndefined();
     const notes = result.notes!.join(" ");
     expect(notes).toContain('"LoRA z-only"');
     expect(notes).toContain("Qwen Image Edit 2511 Lightning");
     expect(notes).toMatch(/seed and "things to avoid" text/);
 
     // Text only, on the look's own model: both LoRAs fit, no note about them.
-    await db.delete(pluginState);
+    await db.delete(pluginState).where(and(eq(pluginState.pluginId, pluginId), eq(pluginState.scopeId, companyId)));
     await saveState(companyId, "looks", [{ id: "look-lora", name: "Harbour", style: "warm", provider: "sogni", model: "z_image_turbo_bf16", seed: 42, loras: [{ id: "z-only", strength: 0.8 }], referenceFileIds: [] }]);
     const plain = await stills().generateStill(companyId, storylineId, shotId, ACTOR);
     expect(captured.pictures[1]!.input).toMatchObject({ model: "z-turbo", seed: 42, loras: [{ id: "z-only", strength: 0.8 }] });
@@ -344,10 +376,58 @@ d("storyboard stills apply the look rules (database)", () => {
     const { companyId, storylineId, shotId } = await seed();
     await saveState(companyId, "looks", [{ id: "look-hf", name: "Soul", style: "film", provider: "higgsfield", model: "soul", referenceFileIds: [] }]);
     await videoStorylineService(db).updateStoryline(companyId, storylineId, { pictureSettings: { providerId: "fal", lookId: "look-hf" } }, ACTOR);
+    const costOf = async () => (await db.select({ cents: videoShots.stillEstimatedCostCents }).from(videoShots).where(eq(videoShots.id, shotId)))[0]!.cents;
+    const costBefore = await costOf();
     await expect(stills().generateStill(companyId, storylineId, shotId, ACTOR)).rejects.toMatchObject({
       status: 422,
       message: "Higgsfield can't make storyboard pictures yet; pick a Sogni or Fal look.",
     });
     expect(captured.pictures).toHaveLength(0);
+    expect(await costOf()).toBe(costBefore);
+  });
+
+  it("2. a shot that names the look's person keeps them even when the storyline has no cast; an untagged face picture stays out of other shots", async () => {
+    const { companyId, storylineId, shotId } = await seed();
+    const maja = await savedMaja(companyId);
+    await saveState(companyId, "identities", [maja]);
+    const facePhoto = await file(companyId, "look-face-photo");
+    await saveState(companyId, "looks", [
+      {
+        id: "look-maja",
+        name: "Maja look",
+        style: "warm film still",
+        provider: "sogni",
+        identityId: maja.id,
+        sheet: { hair: "long blonde" },
+        referenceFileIds: [facePhoto],
+        referenceRoles: ["other"],
+      },
+    ]);
+    const storylines = videoStorylineService(db);
+    await storylines.updateStoryline(companyId, storylineId, { pictureSettings: { providerId: "sogni", lookId: "look-maja" } }, ACTOR);
+
+    // Nobody named: the untagged ("other") face picture and the hair line stay out, and the note says how to bring her back.
+    const without = await stills().generateStill(companyId, storylineId, shotId, ACTOR);
+    expect(captured.pictures[0]!.input.referenceImages).toBeUndefined();
+    expect(String(captured.pictures[0]!.input.prompt)).not.toContain("long blonde");
+    expect(without.notes?.join(" ")).toContain("add them to the cast in step 1");
+
+    // The shot names her (no cast at all): the look applies as it always did.
+    await storylines.updateShot(companyId, storylineId, shotId, { prompt: "maja walks along the harbour" }, ACTOR);
+    const named = await stills().generateStill(companyId, storylineId, shotId, ACTOR);
+    const sent = captured.pictures[1]!.input;
+    expect((sent.referenceImages as string[]).map(keyOf)).toEqual(["look-face-photo"]);
+    expect(String(sent.prompt)).toContain("Hair:");
+    expect(named.notes?.join(" ") ?? "").not.toContain("not in this shot");
+  });
+
+  it("Fal.ai: a Sogni look's LoRAs are left out of a Fal.ai picture with a note", async () => {
+    const { companyId, storylineId, shotId } = await seed();
+    await saveState(companyId, "looks", [{ id: "look-l", name: "Harbour", style: "warm", provider: "sogni", loras: [{ id: "z-only", strength: 0.8 }], referenceFileIds: [] }]);
+    await videoStorylineService(db).updateStoryline(companyId, storylineId, { pictureSettings: { providerId: "fal", lookId: "look-l" } }, ACTOR);
+    const result = await stills().generateStill(companyId, storylineId, shotId, ACTOR);
+    expect(captured.pictures[0]).toMatchObject({ provider: "fal" });
+    expect(captured.pictures[0]!.input.loras).toBeUndefined();
+    expect(result.notes?.join(" ")).toMatch(/Fal\.ai pictures use only the style words.*not its LoRA, so it was left out/);
   });
 });

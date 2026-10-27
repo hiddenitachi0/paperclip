@@ -3490,8 +3490,8 @@ function StoryboardPictureSettings(props: {
             {value.lookId && !look && <option value={value.lookId}>A look that no longer exists</option>}
           </select>
           <span style={{ color: "#868e96" }}>
-            A look is a saved style from the Looks tab. Its style words and setting go on every picture. Its character description and face or body pictures are used only
-            in shots where the look's saved person is in the cast.{provider === "sogni" ? " Its LoRAs are used only when they fit the model that makes the picture; a note says which were left out." : ""} A
+            A look is a saved style from the Looks tab. Its style words and setting go on every picture. If the look shows a saved person, its character description and its face, body, outfit and untagged pictures are used only
+            in shots where that person is in the cast or named in the description; a look with no saved person uses them in every shot.{provider === "sogni" ? " Its LoRAs are used only when they fit the model that makes the picture; a note says which were left out." : ""} A
             look made for Higgsfield cannot be used here yet. The Create tab works differently: it only fills in the look's model. You can pick a different look for one shot on its picture below.
           </span>
           {value.lookId && !look && <span style={{ color: "#c92a2a" }}>That look was deleted. Pick another one, or No look, before making pictures.</span>}
