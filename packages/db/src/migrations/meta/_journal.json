@@ -1793,6 +1793,13 @@
       "when": 1792968525137,
       "tag": "0256_legal_contract_register",
       "breakpoints": true
+    },
+    {
+      "idx": 257,
+      "version": "7",
+      "when": 1793104149154,
+      "tag": "0257_legal_contract_reminders",
+      "breakpoints": true
     }
   ]
 }

@@ -2373,6 +2373,7 @@ const issueListSelect = {
   workMode: issues.workMode,
   priority: issues.priority,
   sizeLabel: issues.sizeLabel,
+  dueDate: issues.dueDate,
   assigneeAgentId: issues.assigneeAgentId,
   assigneeUserId: issues.assigneeUserId,
   checkoutRunId: issues.checkoutRunId,

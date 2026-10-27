@@ -18,6 +18,17 @@ import {
 import { createAgentSchema } from "./agent.js";
 
 describe("issue validators", () => {
+  it("accepts a plain calendar due date and refuses anything else (DUR-4855)", () => {
+    expect(createIssueSchema.parse({ title: "Pay", dueDate: "2027-01-31" }).dueDate).toBe("2027-01-31");
+    expect(createIssueSchema.parse({ title: "Pay", dueDate: null }).dueDate).toBeNull();
+    expect(createIssueSchema.parse({ title: "Pay" }).dueDate).toBeUndefined();
+    expect(updateIssueSchema.parse({ dueDate: "2027-02-28" }).dueDate).toBe("2027-02-28");
+    for (const bad of ["2027-02-30", "31/01/2027", "2027-01-31T10:00:00Z", "tomorrow", ""]) {
+      expect(createIssueSchema.safeParse({ title: "Pay", dueDate: bad }).success).toBe(false);
+      expect(updateIssueSchema.safeParse({ dueDate: bad }).success).toBe(false);
+    }
+  });
+
   it("passes real line breaks through unchanged", () => {
     const parsed = createIssueSchema.parse({
       title: "Follow up PR",

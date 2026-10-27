@@ -4,6 +4,7 @@ import {
   pgTable,
   uuid,
   text,
+  date,
   timestamp,
   integer,
   jsonb,
@@ -35,6 +36,10 @@ export const issues = pgTable(
     workMode: text("work_mode").notNull().default("standard"),
     priority: text("priority").notNull().default("medium"),
     sizeLabel: text("size_label", { enum: ["S", "M", "L"] }),
+    // Legal Phase 3 (DUR-4855): the day the work is due, as a plain calendar
+    // date (no time zone). Nullable; nothing is scheduled off it except the
+    // contract-deadline reminders, which set it to the deadline's date.
+    dueDate: date("due_date", { mode: "string" }),
     assigneeAgentId: uuid("assignee_agent_id").references(() => agents.id),
     assigneeUserId: text("assignee_user_id"),
     checkoutRunId: uuid("checkout_run_id").references(() => heartbeatRuns.id, { onDelete: "set null" }),
@@ -171,6 +176,20 @@ export const issues = pgTable(
       .on(table.companyId, table.originKind, table.originId)
       .where(
         sql`${table.originKind} = 'customer_inbox_unreadable'
+          and ${table.originId} is not null
+          and ${table.hiddenAt} is null
+          and ${table.status} not in ('done', 'cancelled')`,
+      ),
+    // Legal Phase 3 (DUR-4855): one open reminder issue per (deadline, lead
+    // step). originFingerprint is "<deadline id>:<lead days>" rather than the
+    // bare lead days: issueService.create's duplicate check matches on the
+    // fingerprint alone, so a bare "30" would refuse every second deadline.
+    // The permanent record is contract_deadline_reminders; this index is the
+    // DB-level guard against two sweeps racing.
+    activeContractDeadlineReminderIdx: uniqueIndex("issues_active_contract_deadline_reminder_uq")
+      .on(table.companyId, table.originKind, table.originId, table.originFingerprint)
+      .where(
+        sql`${table.originKind} = 'contract_deadline'
           and ${table.originId} is not null
           and ${table.hiddenAt} is null
           and ${table.status} not in ('done', 'cancelled')`,

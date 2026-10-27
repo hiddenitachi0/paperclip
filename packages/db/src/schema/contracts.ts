@@ -118,6 +118,10 @@ export const contractDeadlines = pgTable(
     // Days before due_date at which a reminder is due. Default per kind is set by the service.
     leadTimesDays: integer("lead_times_days").array().notNull(),
     clauseRef: text("clause_ref"),
+    // Legal Phase 3: true when the action is the owner's decision (notice,
+    // terminate, extend). A reminder for it shows up on the Now page as "Needs
+    // you" instead of landing in the Legal agent's queue. Default per kind is set by the service.
+    needsOwner: boolean("needs_owner").notNull().default(false),
     // open | done | dismissed | superseded
     state: text("state").notNull().default("open"),
     note: text("note"),
@@ -172,5 +176,26 @@ export const contractTerms = pgTable(
   (table) => ({
     contractKeyUq: uniqueIndex("contract_terms_contract_key_uq").on(table.contractId, table.key),
     companyKeyIdx: index("contract_terms_company_key_idx").on(table.companyId, table.key),
+  }),
+);
+
+/**
+ * Legal Phase 3 (DUR-4855, migration 0257): per-company reminder defaults.
+ * One row per company at most; a null array means "use the built-in default".
+ * Applies to deadlines created after the change; existing deadlines keep the
+ * lead times they were created with.
+ */
+export const contractSettings = pgTable(
+  "contract_settings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    noticeLeadTimesDays: integer("notice_lead_times_days").array(),
+    otherLeadTimesDays: integer("other_lead_times_days").array(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    companyUq: uniqueIndex("contract_settings_company_uq").on(table.companyId),
   }),
 );

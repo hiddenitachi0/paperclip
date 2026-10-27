@@ -438,6 +438,15 @@ function withCreateIssueStatusDefault<T extends z.ZodRawShape>(schema: z.ZodObje
   }, schema);
 }
 
+// Legal Phase 3 (DUR-4855): a plain calendar date, no time zone.
+export const issueDueDateSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, "Use a date in YYYY-MM-DD format")
+  .refine((value) => {
+    const parsed = new Date(`${value}T00:00:00Z`);
+    return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+  }, "Not a real calendar date");
+
 const createIssueBaseSchema = z.object({
   projectId: z.string().uuid().optional().nullable(),
   projectWorkspaceId: z.string().uuid().optional().nullable(),
@@ -455,6 +464,7 @@ const createIssueBaseSchema = z.object({
   requestDepth: issueRequestDepthInputSchema.optional().default(0),
   billingCode: z.string().optional().nullable(),
   sizeLabel: z.enum(ISSUE_SIZE_LABELS as [IssueSizeLabel, ...IssueSizeLabel[]]).optional().nullable(),
+  dueDate: issueDueDateSchema.optional().nullable(),
   changeLogVisible: z.boolean().optional(),
   changeLogSummary: multilineTextSchema.pipe(z.string().trim().min(1).max(500)).optional().nullable(),
   // DUR-313: marks an issue as a user-facing feature launch (DUR-299 point 2) --

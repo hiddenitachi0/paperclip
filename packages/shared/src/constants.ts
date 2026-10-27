@@ -304,6 +304,9 @@ export const ISSUE_ORIGIN_KINDS = [
   // the company's investigation agent (advice only). Created by that person
   // (created_by_user_id), so the panel lists each person's own.
   "helper_investigation",
+  // Legal Phase 3 (DUR-4855): a reminder the daily contract-deadline sweep
+  // opened. origin_id is the deadline id, origin_fingerprint "<deadline id>:<lead days>".
+  "contract_deadline",
 ] as const;
 export type BuiltInIssueOriginKind = (typeof ISSUE_ORIGIN_KINDS)[number];
 export type PluginIssueOriginKind = `plugin:${string}`;
