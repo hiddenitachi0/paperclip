@@ -51,7 +51,7 @@ describeEmbeddedPostgres("seedLegalAdvisorStarterPack", () => {
     expect(roles).toHaveLength(0);
   });
 
-  it("seeds the Legal Advisor position and its three jobs exactly once, as builtin", async () => {
+  it("seeds the Legal Advisor position and its five jobs exactly once, as builtin", async () => {
     await db.insert(companies).values({
       id: DUR_COMPANY_ID,
       name: "Durkan Agency",
@@ -62,7 +62,13 @@ describeEmbeddedPostgres("seedLegalAdvisorStarterPack", () => {
     const second = await seedLegalAdvisorStarterPack(db);
 
     expect(first.createdPosition).toBe(true);
-    expect(first.createdJobs.sort()).toEqual(["Compare two versions", "Draft new contract", "Revise contract"]);
+    expect(first.createdJobs.sort()).toEqual([
+      "Ask across contracts",
+      "Compare two versions",
+      "Draft new contract",
+      "Register a contract",
+      "Revise contract",
+    ]);
     expect(second.createdPosition).toBe(false);
     expect(second.createdJobs).toEqual([]);
 
@@ -75,7 +81,7 @@ describeEmbeddedPostgres("seedLegalAdvisorStarterPack", () => {
     expect(roles[0].isBuiltin).toBe(true);
 
     const createdJobs = await db.select().from(jobs).where(eq(jobs.companyId, DUR_COMPANY_ID));
-    expect(createdJobs).toHaveLength(3);
+    expect(createdJobs).toHaveLength(5);
     for (const job of createdJobs) {
       expect(job.isBuiltin).toBe(true);
       expect(job.runMode).toBe("full_agent");
@@ -85,8 +91,12 @@ describeEmbeddedPostgres("seedLegalAdvisorStarterPack", () => {
       expect(job.instructions?.toLowerCase()).toContain("risk");
     }
 
+    // The seeded jobs keep the variables their instructions use ({{contract}}, {{question}}).
+    const withVariables = createdJobs.filter((job) => job.variables.length > 0).map((job) => job.title).sort();
+    expect(withVariables).toEqual(["Ask across contracts", "Register a contract"]);
+
     const links = await db.select().from(jobPositions).where(eq(jobPositions.companyId, DUR_COMPANY_ID));
-    expect(links).toHaveLength(3);
+    expect(links).toHaveLength(5);
     expect(links.every((link) => link.positionId === roles[0].id)).toBe(true);
   });
 });

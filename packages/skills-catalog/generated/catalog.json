@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "packageName": "@paperclipai/skills-catalog",
   "packageVersion": "0.3.1",
-  "generatedAt": "2026-10-17T07:47:26.369Z",
+  "generatedAt": "2026-10-27T13:02:19.381Z",
   "skills": [
     {
       "id": "paperclipai:bundled:docs:doc-maintenance",
@@ -2382,6 +2382,41 @@
         }
       ],
       "contentHash": "sha256:9bdfb736ac07ff2b129bdac7ebd649e5f77963792356ee8a3e1265b55b97afcc"
+    },
+    {
+      "id": "paperclipai:optional:legal:contract-register",
+      "key": "paperclipai/optional/legal/contract-register",
+      "kind": "optional",
+      "category": "legal",
+      "slug": "contract-register",
+      "name": "contract-register",
+      "description": "Keep the company's contract register — register a new contract (parties, dates, deadlines and key terms with clause and page references), spot and link renegotiated versions only after a person confirms, fetch a contract on request, and answer questions across all contracts with honest coverage. Use when a task asks to add, find, compare or ask about contracts. Never gives a legal verdict.",
+      "path": "catalog/optional/legal/contract-register",
+      "entrypoint": "SKILL.md",
+      "trustLevel": "markdown_only",
+      "compatibility": "compatible",
+      "defaultInstall": false,
+      "recommendedForRoles": [
+        "legal-advisor",
+        "legal",
+        "operations"
+      ],
+      "requires": [],
+      "tags": [
+        "legal",
+        "contracts",
+        "register",
+        "deadlines"
+      ],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "kind": "skill",
+          "sizeBytes": 10069,
+          "sha256": "4a0b334c569a2965891e0ba798fa594e38a8814c700a873494b5e66aac253df7"
+        }
+      ],
+      "contentHash": "sha256:877579ca9c8a918450d867a590bb80135cfc02ecba15ea495f2205359eff0ff0"
     },
     {
       "id": "paperclipai:optional:media:media-studio-generation",

@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, exists, inArray, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, exists, ilike, inArray, lte, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -10,6 +10,7 @@ import {
   contractTerms,
   contracts,
   crmOrganizations,
+  issueThreadInteractions,
   issues,
   withCompanyScope,
 } from "@paperclipai/db";
@@ -22,23 +23,33 @@ import {
   DEFAULT_NOTICE_LEAD_TIMES_DAYS,
   defaultNeedsOwnerForKind,
   type UpdateContractSettings,
+  contractVersionLinkConfirmationKey,
+  defaultLeadTimesDaysForKind,
   type AggregateContractTermQuery,
+  type ContractFileRef,
+  type ContractRelatedReason,
   type ContractStatus,
   type ContractTermAggregate,
+  type ContractTermCoverageReport,
   type ContractTermNumericStats,
   type ContractTermRef,
   type CreateContract,
   type CreateContractDeadline,
   type CreateContractParty,
+  type FindContractsQuery,
   type LinkPreviousContractVersion,
   type ListContractDeadlinesQuery,
   type ListContractsQuery,
+  type RegisterContract,
+  type RelatedContractCandidate,
+  type RelatedContractsResult,
+  type SearchContractTextQuery,
   type UpdateContract,
   type UpdateContractDeadline,
   type UpdateContractParty,
   type UpsertContractTerm,
 } from "@paperclipai/shared";
-import { conflict, notFound, unprocessable } from "../errors.js";
+import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import { authorizationService, type AuthorizationActor } from "./authorization.js";
 
 /**
@@ -202,6 +213,165 @@ export function aggregateTermRows(
   };
 }
 
+// ---------------------------------------------------------------- pure helpers (Legal Phase 4)
+
+const LEGAL_FORM_WORDS = new Set([
+  "as", "asa", "ans", "da", "ltd", "limited", "inc", "llc", "gmbh", "ab", "oy", "sa", "bv", "plc", "co", "corp",
+]);
+
+/** "Landlord A.S." and "landlord as" are the same party; legal-form words never decide a match. */
+export function normalizePartyName(name: string): string {
+  const words = name
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\./g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .split(" ")
+    .filter(Boolean);
+  const core = words.filter((word) => !LEGAL_FORM_WORDS.has(word));
+  return (core.length > 0 ? core : words).join(" ");
+}
+
+
+type PartyIdentity = { organizationId: string | null; name: string | null };
+
+/**
+ * Two contracts have "the same parties" when they share at least
+ * min(2, size of the smaller party list) parties. Our own company is on every
+ * contract, so sharing one party is not enough once both list two or more.
+ */
+export function samePartiesForVersioning(a: PartyIdentity[], b: PartyIdentity[]): boolean {
+  if (a.length === 0 || b.length === 0) return false;
+  // A party with both an organisation and a name counts once: compare per party, not per key.
+  const matches = (x: PartyIdentity, y: PartyIdentity) => {
+    if (x.organizationId && x.organizationId === y.organizationId) return true;
+    if (x.name && y.name) {
+      const nx = normalizePartyName(x.name);
+      return nx !== "" && nx === normalizePartyName(y.name);
+    }
+    return false;
+  };
+  const shared = a.filter((x) => b.some((y) => matches(x, y))).length;
+  return shared >= Math.min(2, a.length, b.length);
+}
+
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, (char) => `\\${char}`);
+}
+
+/** Up to `max` windows of text around the case-insensitive matches of `needle`. */
+export function extractSnippets(text: string, needle: string, max = 3, radius = 160): string[] {
+  const haystack = text.toLowerCase();
+  const target = needle.toLowerCase();
+  if (!target) return [];
+  const snippets: string[] = [];
+  let from = 0;
+  while (snippets.length < max) {
+    const at = haystack.indexOf(target, from);
+    if (at === -1) break;
+    const start = Math.max(0, at - radius);
+    const end = Math.min(text.length, at + target.length + radius);
+    snippets.push(`${start > 0 ? "…" : ""}${text.slice(start, end).replace(/\s+/g, " ").trim()}${end < text.length ? "…" : ""}`);
+    from = end;
+  }
+  return snippets;
+}
+
+function formatNumber(value: number): string {
+  return Number.isInteger(value) ? String(value) : String(Math.round(value * 100) / 100);
+}
+
+/**
+ * The aggregate in plain words. It always says how many contracts the average
+ * is over and how many are missing from it, so an average is never quoted
+ * without its coverage.
+ */
+export function describeAggregateCoverage(
+  aggregate: ContractTermAggregate,
+  titles: Record<string, string>,
+): string {
+  const label = (ref: { contractId: string; clauseRef: string | null }) =>
+    `${titles[ref.contractId] ?? ref.contractId}${ref.clauseRef ? ` (${ref.clauseRef})` : ""}`;
+  // Alphabetical, so the same data always reads the same (ids are random).
+  const list = (refs: { contractId: string; clauseRef: string | null }[]) => refs.map(label).sort().join("; ");
+  const lines: string[] = [];
+  const scope = [
+    aggregate.filters.type ? `type ${aggregate.filters.type}` : "all types",
+    `status ${aggregate.filters.statuses.join(", ")}`,
+  ].join(", ");
+  lines.push(`Term "${aggregate.key}" across ${aggregate.totalContracts} contract(s) (${scope}).`);
+  if (aggregate.numeric.length === 0) {
+    lines.push("No contract states a number for this term, so there is no average.");
+  }
+  for (const stats of aggregate.numeric) {
+    const unit = stats.currency ? ` ${stats.currency}` : "";
+    lines.push(
+      `- ${stats.count} contract(s) with a number${stats.currency ? ` in ${stats.currency}` : ""}: average ${formatNumber(stats.avg)}${unit} ` +
+        `(min ${formatNumber(stats.min)}, max ${formatNumber(stats.max)}). Only these ${stats.count} are in the average: ${list(stats.contracts)}`,
+    );
+  }
+  const nonNumericWithValue = aggregate.withValue.count - aggregate.numeric.reduce((sum, stats) => sum + stats.count, 0);
+  if (nonNumericWithValue > 0) lines.push(`- ${nonNumericWithValue} contract(s) state a text or yes/no value (not averaged).`);
+  lines.push(`- ${aggregate.notMentioned.count} contract(s) read and do not mention it${aggregate.notMentioned.count ? `: ${list(aggregate.notMentioned.contracts)}` : ""}`);
+  lines.push(`- ${aggregate.explicitlyNone.count} contract(s) state explicitly that there is none${aggregate.explicitlyNone.count ? `: ${list(aggregate.explicitlyNone.contracts)}` : ""}`);
+  lines.push(`- ${aggregate.noTermRecorded.count} contract(s) not checked yet (nothing recorded, unknown rather than zero)${aggregate.noTermRecorded.count ? `: ${list(aggregate.noTermRecorded.contracts)}` : ""}`);
+  if (aggregate.malformed.count > 0) {
+    lines.push(`- ${aggregate.malformed.count} contract(s) have an unusable record, left out of every figure: ${list(aggregate.malformed.contracts)}`);
+  }
+  return lines.join("\n");
+}
+
+export type FoundContract = {
+  id: string;
+  title: string;
+  type: string;
+  status: string;
+  versionNo: number;
+  effectiveDate: string | null;
+  expiryDate: string | null;
+  summary: string | null;
+  parties: Array<{ role: string; name: string | null }>;
+  file: ContractFileRef | null;
+  score: number;
+  createdAt: Date;
+};
+
+function tokenize(value: string): string[] {
+  return (value.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).filter((word) => word.length >= 2);
+}
+
+/** One edit (insert, delete or replace) apart. */
+function withinOneEdit(a: string, b: string): boolean {
+  if (Math.abs(a.length - b.length) > 1) return false;
+  let i = 0;
+  let j = 0;
+  let edits = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      i += 1;
+      j += 1;
+      continue;
+    }
+    edits += 1;
+    if (edits > 1) return false;
+    if (a.length > b.length) i += 1;
+    else if (a.length < b.length) j += 1;
+    else {
+      i += 1;
+      j += 1;
+    }
+  }
+  return edits + (a.length - i) + (b.length - j) <= 1;
+}
+
+/** A word matches by prefix/containment, or (for words of 5+ letters) one typo away. */
+function wordMatches(token: string, words: string[]): boolean {
+  return words.some(
+    (word) => word.includes(token) || (token.length >= 5 && (token.includes(word) && word.length >= 5 || withinOneEdit(token, word))),
+  );
+}
+
 // ---------------------------------------------------------------- agent access
 
 /**
@@ -363,6 +533,71 @@ export function contractService(db: Db, rawDb: Db = db) {
     };
   }
 
+  /**
+   * The server-side half of "the agent must not approve its own link": the
+   * card must be a request_confirmation in this company, accepted (not
+   * expired, rejected or pending) and resolved by a person, and its target must
+   * name exactly this (new, old) pair. Accepting is a board-only route, so an
+   * agent cannot produce such a row. Two other routes also write "accepted"
+   * with a user id and are refused: a card linked to (or naming) an ordinary
+   * approval, which flips to accepted when the operator approves that other
+   * card, and any automatic close, which always writes result.reason. A direct
+   * accept writes neither. One generic message for every failure:
+   * the caller learns what is needed, not which card exists.
+   */
+  async function assertBoardConfirmedVersionLink(
+    companyId: string,
+    currentId: string,
+    previousId: string,
+    interactionId: string | undefined,
+  ) {
+    const expectedKey = contractVersionLinkConfirmationKey(currentId, previousId);
+    const refusal = () =>
+      forbidden(
+        "Linking a contract version needs a confirmation that a board member accepted. Ask with " +
+          `request_confirmation using target {"type":"custom","key":"${expectedKey}"}, then pass its id as confirmationInteractionId`,
+      );
+    if (!interactionId) throw refusal();
+    const row = await db
+      .select({
+        kind: issueThreadInteractions.kind,
+        status: issueThreadInteractions.status,
+        resolvedByUserId: issueThreadInteractions.resolvedByUserId,
+        resolvedByAgentId: issueThreadInteractions.resolvedByAgentId,
+        linkedApprovalId: issueThreadInteractions.linkedApprovalId,
+        result: issueThreadInteractions.result,
+        payload: issueThreadInteractions.payload,
+      })
+      .from(issueThreadInteractions)
+      .where(and(eq(issueThreadInteractions.id, interactionId), eq(issueThreadInteractions.companyId, companyId)))
+      .then((rows) => rows[0] ?? null);
+    const target = (row?.payload as { target?: { type?: string; key?: string } | null } | undefined)?.target;
+    const autoResolvedReason = (row?.result as { reason?: string | null } | null | undefined)?.reason;
+    const confirmed =
+      row !== null &&
+      row.kind === "request_confirmation" &&
+      row.status === "accepted" &&
+      Boolean(row.resolvedByUserId) &&
+      !row.resolvedByAgentId &&
+      !row.linkedApprovalId &&
+      !autoResolvedReason &&
+      target?.type === "custom" &&
+      target.key === expectedKey;
+    if (!confirmed) throw refusal();
+  }
+
+  function toTermColumns(input: UpsertContractTerm) {
+    return {
+      valueKind: input.valueKind,
+      numberValue: input.valueKind === "number" ? String(input.numberValue) : null,
+      currency: input.valueKind === "number" && input.currency ? input.currency.toUpperCase() : null,
+      textValue: input.valueKind === "text" ? input.textValue ?? null : null,
+      boolValue: input.valueKind === "bool" ? input.boolValue ?? null : null,
+      clauseRef: input.clauseRef ?? null,
+      pageRef: input.pageRef ?? null,
+    };
+  }
+
   async function insertParties(executor: Db, companyId: string, contractId: string, parties: CreateContractParty[]) {
     if (parties.length === 0) return;
     await executor.insert(contractParties).values(
@@ -376,7 +611,7 @@ export function contractService(db: Db, rawDb: Db = db) {
     );
   }
 
-  return {
+  const api = {
     // ------------------------------------------------------------ contracts
     listContracts: async (companyId: string, filters: ListContractsQuery = {}) => {
       const conditions = [eq(contracts.companyId, companyId)];
@@ -495,8 +730,17 @@ export function contractService(db: Db, rawDb: Db = db) {
      * superseded, and either moves (carryDeadlines) or closes the old one's
      * open deadlines. One transaction, so a half-linked chain cannot exist.
      */
-    linkPreviousVersion: async (companyId: string, currentId: string, input: LinkPreviousContractVersion) => {
+    linkPreviousVersion: async (
+      companyId: string,
+      currentId: string,
+      input: LinkPreviousContractVersion,
+      /** An agent may only link after a board member accepted a confirmation for exactly this pair. */
+      options: { requireBoardConfirmation: boolean },
+    ) => {
       if (currentId === input.previousContractId) throw unprocessable("A contract cannot supersede itself");
+      if (options.requireBoardConfirmation) {
+        await assertBoardConfirmedVersionLink(companyId, currentId, input.previousContractId, input.confirmationInteractionId);
+      }
       try {
         return await withCompanyScope(rawDb, companyId, async (tx) => {
           const t = tx as unknown as Db;
@@ -824,15 +1068,7 @@ export function contractService(db: Db, rawDb: Db = db) {
       const parsedKey = contractTermKeySchema.safeParse(key);
       if (!parsedKey.success) throw unprocessable("Invalid term key");
       await assertContractInCompany(companyId, contractId);
-      const values = {
-        valueKind: input.valueKind,
-        numberValue: input.valueKind === "number" ? String(input.numberValue) : null,
-        currency: input.valueKind === "number" && input.currency ? input.currency.toUpperCase() : null,
-        textValue: input.valueKind === "text" ? input.textValue ?? null : null,
-        boolValue: input.valueKind === "bool" ? input.boolValue ?? null : null,
-        clauseRef: input.clauseRef ?? null,
-        pageRef: input.pageRef ?? null,
-      };
+      const values = toTermColumns(input);
       return db
         .insert(contractTerms)
         .values({ companyId, contractId, key: parsedKey.data, ...values })
@@ -939,6 +1175,278 @@ export function contractService(db: Db, rawDb: Db = db) {
       );
     },
 
+    // ------------------------------------------------------------ agent intake (Legal Phase 4)
+    /** Contract, parties, terms and deadlines in one transaction: all of it or none of it. */
+    registerContract: async (companyId: string, input: RegisterContract, actor: ActorRef) => {
+      const { parties = [], terms = [], deadlines = [], ...fields } = input;
+      await assertReferencesInCompany(companyId, {
+        assetId: fields.assetId,
+        sourceIssueId: fields.sourceIssueId,
+        organizationIds: parties.map((party) => party.organizationId).filter((id): id is string => Boolean(id)),
+      });
+      return withCompanyScope(rawDb, companyId, async (tx) => {
+        const t = tx as unknown as Db;
+        const created = await t
+          .insert(contracts)
+          .values({
+            ...fields,
+            companyId,
+            createdByAgentId: actor.agentId ?? null,
+            createdByUserId: actor.userId ?? null,
+          })
+          .returning(contractListColumns)
+          .then((rows) => rows[0]);
+        await insertParties(t, companyId, created.id, parties);
+        if (terms.length > 0) {
+          await t
+            .insert(contractTerms)
+            .values(terms.map(({ key, ...term }) => ({ companyId, contractId: created.id, key, ...toTermColumns(term) })));
+        }
+        if (deadlines.length > 0) {
+          await t.insert(contractDeadlines).values(deadlines.map((deadline) => toDeadlineValues(companyId, created.id, deadline)));
+        }
+        return { ...created, partyCount: parties.length, termCount: terms.length, deadlineCount: deadlines.length };
+      });
+    },
+
+    /**
+     * Older contracts this one may be a newer version of: same type and the
+     * same parties, or named in this contract's own text. Candidates only; a
+     * link still needs a board member's confirmation. No contract text out.
+     */
+    findRelatedContracts: async (companyId: string, id: string): Promise<RelatedContractsResult> => {
+      const current = await db
+        .select({
+          id: contracts.id,
+          type: contracts.type,
+          status: contracts.status,
+          supersedesContractId: contracts.supersedesContractId,
+          extractedText: contracts.extractedText,
+          summary: contracts.summary,
+        })
+        .from(contracts)
+        .where(and(eq(contracts.id, id), eq(contracts.companyId, companyId)))
+        .then((rows) => rows[0] ?? null);
+      if (!current) throw notFound("Contract not found");
+      if (current.supersedesContractId || current.status === "superseded") {
+        return { contractId: id, alreadyHasPreviousVersion: Boolean(current.supersedesContractId), candidates: [] };
+      }
+
+      const all = await db
+        .select({
+          id: contracts.id,
+          title: contracts.title,
+          type: contracts.type,
+          status: contracts.status,
+          versionNo: contracts.versionNo,
+          effectiveDate: contracts.effectiveDate,
+          expiryDate: contracts.expiryDate,
+          supersedesContractId: contracts.supersedesContractId,
+        })
+        .from(contracts)
+        .where(eq(contracts.companyId, companyId))
+        .limit(5000);
+      const supersedesOf = new Map(all.map((row) => [row.id, row.supersedesContractId]));
+      const isDescendantOfCurrent = (candidateId: string) => {
+        const seen = new Set<string>();
+        let cursor: string | null | undefined = candidateId;
+        while (cursor && !seen.has(cursor)) {
+          if (cursor === id) return true;
+          seen.add(cursor);
+          cursor = supersedesOf.get(cursor);
+        }
+        return false;
+      };
+      const candidates = all.filter((row) => row.id !== id && row.status !== "superseded" && !isDescendantOfCurrent(row.id));
+      if (candidates.length === 0) return { contractId: id, alreadyHasPreviousVersion: false, candidates: [] };
+
+      const partyRows = await db
+        .select({ contractId: contractParties.contractId, organizationId: contractParties.organizationId, name: contractParties.name })
+        .from(contractParties)
+        .where(and(eq(contractParties.companyId, companyId), inArray(contractParties.contractId, [id, ...candidates.map((row) => row.id)])));
+      const partiesByContract = new Map<string, PartyIdentity[]>();
+      for (const row of partyRows) {
+        const list = partiesByContract.get(row.contractId) ?? [];
+        list.push({ organizationId: row.organizationId, name: row.name });
+        partiesByContract.set(row.contractId, list);
+      }
+      const currentParties = partiesByContract.get(id) ?? [];
+      const currentText = `${current.extractedText ?? ""}\n${current.summary ?? ""}`.toLowerCase();
+
+      const result: RelatedContractCandidate[] = [];
+      for (const candidate of candidates) {
+        const reasons: ContractRelatedReason[] = [];
+        if (candidate.type === current.type && samePartiesForVersioning(currentParties, partiesByContract.get(candidate.id) ?? [])) {
+          reasons.push("same_parties_and_type");
+        }
+        const title = candidate.title.trim().toLowerCase();
+        if (title.length >= 6 && currentText.includes(title)) reasons.push("named_in_contract_text");
+        if (reasons.length === 0) continue;
+        result.push({
+          id: candidate.id,
+          title: candidate.title,
+          type: candidate.type as RelatedContractCandidate["type"],
+          status: candidate.status as ContractStatus,
+          versionNo: candidate.versionNo,
+          effectiveDate: candidate.effectiveDate,
+          expiryDate: candidate.expiryDate,
+          reasons,
+        });
+      }
+      result.sort(
+        (a, b) =>
+          b.reasons.length - a.reasons.length || (b.effectiveDate ?? "").localeCompare(a.effectiveDate ?? "") || a.title.localeCompare(b.title),
+      );
+      return { contractId: id, alreadyHasPreviousVersion: false, candidates: result.slice(0, 10) };
+    },
+
+    /**
+     * Fuzzy find by title / party / type. Returns summary and a link to the
+     * stored file, never the extracted text.
+     */
+    findContracts: async (companyId: string, query: FindContractsQuery = {}) => {
+      const conditions = [eq(contracts.companyId, companyId)];
+      if (query.type) conditions.push(eq(contracts.type, query.type));
+      if (query.includeSuperseded !== "true") conditions.push(ne(contracts.status, "superseded"));
+      const rows = await db
+        .select({
+          id: contracts.id,
+          title: contracts.title,
+          type: contracts.type,
+          status: contracts.status,
+          versionNo: contracts.versionNo,
+          effectiveDate: contracts.effectiveDate,
+          expiryDate: contracts.expiryDate,
+          summary: contracts.summary,
+          createdAt: contracts.createdAt,
+          assetId: assets.id,
+          filename: assets.originalFilename,
+          contentType: assets.contentType,
+        })
+        .from(contracts)
+        .leftJoin(assets, and(eq(assets.id, contracts.assetId), eq(assets.companyId, contracts.companyId)))
+        .where(and(...conditions))
+        .orderBy(desc(contracts.createdAt))
+        .limit(2000);
+      if (rows.length === 0) return { contracts: [] as FoundContract[], totalMatches: 0 };
+
+      const partyRows = await db
+        .select({
+          contractId: contractParties.contractId,
+          role: contractParties.role,
+          name: sql<string | null>`coalesce(${contractParties.name}, ${crmOrganizations.name})`,
+        })
+        .from(contractParties)
+        .leftJoin(
+          crmOrganizations,
+          and(eq(crmOrganizations.id, contractParties.organizationId), eq(crmOrganizations.companyId, contractParties.companyId)),
+        )
+        .where(and(eq(contractParties.companyId, companyId), inArray(contractParties.contractId, rows.map((row) => row.id))));
+      const partiesByContract = new Map<string, Array<{ role: string; name: string | null }>>();
+      for (const row of partyRows) {
+        const list = partiesByContract.get(row.contractId) ?? [];
+        list.push({ role: row.role, name: row.name });
+        partiesByContract.set(row.contractId, list);
+      }
+
+      const tokens = tokenize(query.q ?? "");
+      const partyFilter = query.party ? normalizePartyName(query.party) : null;
+      const scored: FoundContract[] = [];
+      for (const row of rows) {
+        const parties = partiesByContract.get(row.id) ?? [];
+        if (partyFilter && !parties.some((party) => party.name && normalizePartyName(party.name).includes(partyFilter))) continue;
+        let score = 0;
+        if (tokens.length > 0) {
+          const titleWords = tokenize(row.title);
+          const partyWords = parties.flatMap((party) => tokenize(party.name ?? ""));
+          const summaryWords = tokenize(row.summary ?? "");
+          const typeWords = tokenize(row.type.replace(/_/g, " "));
+          for (const token of tokens) {
+            if (wordMatches(token, titleWords)) score += 4;
+            if (wordMatches(token, partyWords)) score += 3;
+            if (wordMatches(token, typeWords)) score += 2;
+            if (wordMatches(token, summaryWords)) score += 1;
+          }
+          if (score === 0) continue;
+        }
+        scored.push({
+          id: row.id,
+          title: row.title,
+          type: row.type,
+          status: row.status,
+          versionNo: row.versionNo,
+          effectiveDate: row.effectiveDate,
+          expiryDate: row.expiryDate,
+          summary: row.summary,
+          parties,
+          file: row.assetId
+            ? {
+                assetId: row.assetId,
+                contentPath: `/api/assets/${row.assetId}/content`,
+                filename: row.filename,
+                contentType: row.contentType,
+              }
+            : null,
+          score,
+          createdAt: row.createdAt,
+        });
+      }
+      scored.sort((a, b) => b.score - a.score || b.createdAt.getTime() - a.createdAt.getTime());
+      const limit = query.limit ?? 10;
+      return {
+        contracts: scored.slice(0, limit).map(({ createdAt: _createdAt, ...rest }) => rest),
+        totalMatches: scored.length,
+      };
+    },
+
+    /**
+     * Case-insensitive text search over the extracted text, as snippets. It
+     * always reports how many contracts in scope have no readable text, so
+     * "not found" is never mistaken for "not in the contract".
+     */
+    searchContractText: async (companyId: string, query: SearchContractTextQuery) => {
+      const statuses = query.statuses && query.statuses.length > 0 ? query.statuses : DEFAULT_AGGREGATE_STATUSES;
+      const scope = [eq(contracts.companyId, companyId), inArray(contracts.status, statuses)];
+      if (query.type) scope.push(eq(contracts.type, query.type));
+      const hasText = sql<boolean>`coalesce(length(${contracts.extractedText}), 0) > 0`;
+
+      const inScope = await db
+        .select({ id: contracts.id, title: contracts.title, textStatus: contracts.textStatus, hasText })
+        .from(contracts)
+        .where(and(...scope))
+        .limit(5000);
+
+      const limit = query.limit ?? 10;
+      const matched = await db
+        .select({
+          id: contracts.id,
+          title: contracts.title,
+          type: contracts.type,
+          status: contracts.status,
+          extractedText: contracts.extractedText,
+        })
+        .from(contracts)
+        .where(and(...scope, ilike(contracts.extractedText, `%${escapeLike(query.q)}%`)))
+        .orderBy(desc(contracts.createdAt))
+        .limit(limit + 1);
+
+      return {
+        contractsInScope: inScope.length,
+        withExtractedText: inScope.filter((row) => row.hasText).length,
+        withoutExtractedText: inScope
+          .filter((row) => !row.hasText)
+          .map((row) => ({ contractId: row.id, title: row.title, textStatus: row.textStatus })),
+        matches: matched.slice(0, limit).map((row) => ({
+          contractId: row.id,
+          title: row.title,
+          type: row.type,
+          status: row.status,
+          snippets: extractSnippets(row.extractedText ?? "", query.q),
+        })),
+        moreMatchesThanShown: matched.length > limit,
+      };
+    },
+
     /** Registry keys plus any free-form keys already in use in this company. */
     listTermKeys: async (companyId: string) => {
       const used = await db
@@ -946,6 +1454,32 @@ export function contractService(db: Db, rawDb: Db = db) {
         .from(contractTerms)
         .where(eq(contractTerms.companyId, companyId));
       return [...new Set([...CONTRACT_TERM_REGISTRY_KEYS, ...used.map((row) => row.key)])].sort();
+    },
+  };
+
+  return {
+    ...api,
+
+    /** The aggregate plus contract titles and the plain-words coverage an answer must quote. */
+    aggregateTermReport: async (
+      companyId: string,
+      key: string,
+      filters: Pick<AggregateContractTermQuery, "type" | "statuses" | "partyOrganizationId"> = {},
+    ): Promise<ContractTermCoverageReport> => {
+      const aggregate = await api.aggregateTerm(companyId, key, filters);
+      const ids = new Set<string>();
+      for (const bucket of [aggregate.withValue, aggregate.notMentioned, aggregate.explicitlyNone, aggregate.noTermRecorded, aggregate.malformed]) {
+        for (const ref of bucket.contracts) ids.add(ref.contractId);
+      }
+      const contractTitles: Record<string, string> = {};
+      if (ids.size > 0) {
+        const rows = await db
+          .select({ id: contracts.id, title: contracts.title })
+          .from(contracts)
+          .where(and(eq(contracts.companyId, companyId), inArray(contracts.id, [...ids])));
+        for (const row of rows) contractTitles[row.id] = row.title;
+      }
+      return { ...aggregate, contractTitles, coverageText: describeAggregateCoverage(aggregate, contractTitles) };
     },
   };
 }
