@@ -1,7 +1,7 @@
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, companies, issues, projects } from "@paperclipai/db";
+import { agents, companies, contractParties, contracts, issues, projects } from "@paperclipai/db";
 import {
   COMPANY_SEARCH_MAX_LIMIT,
   COMPANY_SEARCH_MAX_OFFSET,
@@ -10,6 +10,7 @@ import {
   COMPANY_ARTIFACTS_MAX_QUERY_LENGTH,
   type CompanyArtifact,
   type CompanySearchArtifactSummary,
+  type CompanySearchContractSummary,
   type CompanySearchIssueSummary,
   type CompanySearchQuery,
   type CompanySearchResponse,
@@ -193,7 +194,7 @@ function matchTerms(normalizedQuery: string, tokens: string[]) {
 }
 
 function makeCounts(results: CompanySearchResult[]) {
-  const counts: Record<CompanySearchResultType, number> = { issue: 0, artifact: 0, agent: 0, project: 0 };
+  const counts: Record<CompanySearchResultType, number> = { issue: 0, artifact: 0, agent: 0, project: 0, contract: 0 };
   for (const result of results) counts[result.type] += 1;
   return counts;
 }
@@ -208,6 +209,10 @@ function scopeIncludesAgents(scope: CompanySearchScope) {
 
 function scopeIncludesArtifacts(scope: CompanySearchScope) {
   return scope === "all" || scope === "artifacts";
+}
+
+function scopeIncludesContracts(scope: CompanySearchScope) {
+  return scope === "all" || scope === "contracts";
 }
 
 function scopeIncludesProjects(scope: CompanySearchScope) {
@@ -346,6 +351,71 @@ function simpleTextCondition(fields: SQL[], containsPattern: string, tokenArray:
   return sql<boolean>`(${sql.join([...phraseConditions, ...tokenConditions], sql` OR `)})`;
 }
 
+type ContractSearchRow = {
+  id: string;
+  title: string;
+  type: string;
+  status: string;
+  textStatus: string;
+  summary: string | null;
+  updatedAt: Date;
+  titleHit: boolean;
+  partiesHit: boolean;
+  summaryHit: boolean;
+  textHit: boolean;
+  textSnippet: string | null;
+};
+
+const CONTRACT_SNIPPET_BEFORE = 100;
+const CONTRACT_SNIPPET_LENGTH = 300;
+
+function contractResult(row: ContractSearchRow, prefix: string, normalizedQuery: string, tokens: string[]): CompanySearchResult {
+  const terms = matchTerms(normalizedQuery, tokens);
+  const matchedIn: CompanySearchContractSummary["matchedIn"] = [];
+  if (row.titleHit) matchedIn.push("title");
+  if (row.partiesHit) matchedIn.push("parties");
+  if (row.summaryHit) matchedIn.push("summary");
+  if (row.textHit) matchedIn.push("text");
+  const snippets: CompanySearchSnippet[] = [];
+  if (row.summaryHit) {
+    const snippet = createSnippet("summary", "Summary", row.summary, terms);
+    if (snippet) snippets.push(snippet);
+  }
+  if (row.textHit) {
+    const snippet = createSnippet("contract_text", "Contract text", row.textSnippet, terms);
+    if (snippet) snippets.push(snippet);
+  }
+  // Title and party matches outrank a hit buried in the text.
+  const score =
+    (row.titleHit ? 100 : 0) +
+    (row.partiesHit ? 60 : 0) +
+    (row.summaryHit ? 40 : 0) +
+    (row.textHit ? 20 : 0) +
+    (row.title.toLowerCase().startsWith(normalizedQuery) ? 80 : 0);
+  const summary: CompanySearchContractSummary = {
+    id: row.id,
+    type: row.type,
+    status: row.status,
+    textStatus: row.textStatus,
+    matchedIn,
+    updatedAt: row.updatedAt.toISOString(),
+  };
+  return {
+    id: row.id,
+    type: "contract",
+    score,
+    title: row.title,
+    href: `/${prefix}/contracts/${encodeURIComponent(row.id)}`,
+    matchedFields: matchedIn.map((field) => `contract_${field}`),
+    sourceLabel: snippets[0]?.label ?? "Contract",
+    snippet: snippets[0]?.text ?? null,
+    snippets,
+    contract: summary,
+    updatedAt: iso(row.updatedAt),
+    previewImageUrl: null,
+  };
+}
+
 export function companySearchBranchFetchLimit(limit: number, offset = 0) {
   const normalizedLimit = Number.isFinite(limit) ? Math.max(1, Math.floor(limit)) : COMPANY_SEARCH_MAX_LIMIT;
   const normalizedOffset = Number.isFinite(offset) ? Math.max(0, Math.floor(offset)) : 0;
@@ -354,13 +424,23 @@ export function companySearchBranchFetchLimit(limit: number, offset = 0) {
 
 export function companySearchService(db: Db) {
   return {
-    search: async (companyId: string, query: CompanySearchQuery): Promise<CompanySearchResponse> => {
+    /**
+     * `options.includeContracts` must be true only when the caller may use the
+     * contract register (see actorMayUseContracts): contracts are confidential,
+     * so the default is "never" and a caller who may not see them gets exactly
+     * the results they would have got before contracts existed.
+     */
+    search: async (
+      companyId: string,
+      query: CompanySearchQuery,
+      options: { includeContracts?: boolean } = {},
+    ): Promise<CompanySearchResponse> => {
       const normalizedQuery = normalizeQuery(query.q);
       const tokens = tokenizeQuery(normalizedQuery);
       const scope = query.scope;
       const limit = query.limit;
       const offset = query.offset;
-      const emptyCounts: Record<CompanySearchResultType, number> = { issue: 0, artifact: 0, agent: 0, project: 0 };
+      const emptyCounts: Record<CompanySearchResultType, number> = { issue: 0, artifact: 0, agent: 0, project: 0, contract: 0 };
       if (normalizedQuery.length === 0) {
         return {
           query: query.q,
@@ -704,7 +784,56 @@ export function companySearchService(db: Db) {
         }).then((result) => result.artifacts)
         : [];
 
+      let contractResults: CompanySearchResult[] = [];
+      if (options.includeContracts === true && scopeIncludesContracts(scope)) {
+        const matchTerm = sqlTextArray([normalizedQuery, ...tokens]);
+        const fieldHit = (column: SQL) =>
+          sql<boolean>`(lower(coalesce(${column}, '')) LIKE ${containsPattern} ESCAPE '\\' OR ${tokenMatchExpression(column, tokenArray)})`;
+        const titleHit = fieldHit(sql`${contracts.title}`);
+        const summaryHit = fieldHit(sql`${contracts.summary}`);
+        const textHit = fieldHit(sql`${contracts.extractedText}`);
+        // The contract id is spelled out: drizzle drops the table qualifier from
+        // columns used inside a select-list fragment, and a bare "id" would bind
+        // to the parties table inside the subquery.
+        const partiesHit = sql<boolean>`EXISTS (
+          SELECT 1 FROM ${contractParties} search_parties
+          WHERE search_parties.contract_id = ${sql.raw('"contracts"."id"')}
+            AND search_parties.company_id = ${companyId}
+            AND ${fieldHit(sql`search_parties.name`)}
+        )`;
+        // Position of the earliest matching word, so the snippet can be cut around it.
+        const firstTextPosition = sql<number>`(
+          SELECT min(found.position)
+          FROM (
+            SELECT strpos(lower(${contracts.extractedText}), search_term.value) AS position
+            FROM unnest(${matchTerm}) AS search_term(value)
+          ) found
+          WHERE found.position > 0
+        )`;
+        const contractRows = await db
+          .select({
+            id: contracts.id,
+            title: contracts.title,
+            type: contracts.type,
+            status: contracts.status,
+            textStatus: contracts.textStatus,
+            summary: contracts.summary,
+            updatedAt: contracts.updatedAt,
+            titleHit,
+            partiesHit,
+            summaryHit,
+            textHit,
+            textSnippet: sql<string | null>`CASE WHEN ${textHit} THEN substring(${contracts.extractedText} FROM greatest(coalesce(${firstTextPosition}, 1) - ${CONTRACT_SNIPPET_BEFORE}, 1) FOR ${CONTRACT_SNIPPET_LENGTH}) ELSE NULL END`,
+          })
+          .from(contracts)
+          .where(and(eq(contracts.companyId, companyId), sql<boolean>`(${titleHit} OR ${summaryHit} OR ${textHit} OR ${partiesHit})`))
+          .orderBy(desc(contracts.updatedAt), desc(contracts.id))
+          .limit(fetchLimit);
+        contractResults = (contractRows as ContractSearchRow[]).map((row) => contractResult(row, prefix, normalizedQuery, tokens));
+      }
+
       const results: CompanySearchResult[] = [
+        ...contractResults,
         ...(issueRows as IssueSearchRow[]).map((row) => issueResult(row, prefix, normalizedQuery, tokens)),
         ...artifactRows.map((artifact) => artifactResult(artifact, normalizedQuery, tokens)),
         ...(agentRows as SimpleSearchRow[]).map((row) => {

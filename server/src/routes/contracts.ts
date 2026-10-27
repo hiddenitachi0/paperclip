@@ -1,4 +1,5 @@
 import { Router, type NextFunction, type Request, type Response } from "express";
+import multer from "multer";
 import type { Db } from "@paperclipai/db";
 import { createRequestScopedDb } from "@paperclipai/db";
 import {
@@ -13,14 +14,18 @@ import {
   updateContractDeadlineSchema,
   updateContractPartySchema,
   updateContractSchema,
+  uploadContractFieldsSchema,
   upsertContractTermSchema,
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
-import { badRequest, forbidden } from "../errors.js";
-import { logActivity } from "../services/index.js";
-import { agentMayUseContracts, contractService } from "../services/contracts.js";
+import { badRequest, forbidden, notFound, unprocessable } from "../errors.js";
+import type { StorageService } from "../storage/types.js";
+import { assetService, logActivity } from "../services/index.js";
+import { actorMayUseContracts, contractService } from "../services/contracts.js";
+import { contractFileService, validateContractUpload } from "../services/contract-files.js";
+import { CONTRACT_FILE_CONTENT_TYPES, resolveContractUploadMaxBytes } from "../services/contract-file-guard.js";
 
 /**
  * Contract register routes (Legal Phase 1, DUR-4852 under DUR-4851).
@@ -35,12 +40,40 @@ import { agentMayUseContracts, contractService } from "../services/contracts.js"
  * company check), then `contractAccess()` decides inside that scope.
  *
  * Activity-log entries carry ids, enum values and the names of changed fields
- * only: never a title, summary, extracted text or term value.
+ * only: never a title, summary, extracted text, term value or file name.
+ *
+ * Files (Legal Phase 2a, DUR-4853): PDF and DOCX go through the contract's own
+ * upload routes, never the global attachment allowlist. Access is checked
+ * before the body is read, the type is decided by the file's first bytes, and
+ * the text is extracted in a capped worker (see services/contract-extraction.ts).
  */
-export function contractRoutes(rawDb: Db) {
+export function contractRoutes(rawDb: Db, storage: StorageService, options: { maxUploadBytes?: number } = {}) {
   const router = Router();
   const db = createRequestScopedDb(rawDb);
   const svc = contractService(db, rawDb);
+  const maxUploadBytes = options.maxUploadBytes ?? resolveContractUploadMaxBytes();
+  const files = contractFileService(db, storage, { maxBytes: maxUploadBytes });
+  const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: maxUploadBytes, files: 1, fields: 20 } });
+
+  async function readUpload(req: Request, res: Response) {
+    await new Promise<void>((resolve, reject) => {
+      upload.single("file")(req, res, (err: unknown) => (err ? reject(err) : resolve()));
+    });
+    const file = (req as Request & { file?: { buffer: Buffer; originalname?: string } }).file;
+    if (!file) throw badRequest("Missing file field 'file'");
+    return file;
+  }
+
+  /** Multer's own errors become fixed 4xx messages. */
+  function uploadErrors(error: unknown): never {
+    if (error instanceof multer.MulterError) {
+      if (error.code === "LIMIT_FILE_SIZE") {
+        throw unprocessable(`The file is larger than the ${Math.floor(maxUploadBytes / (1024 * 1024))} MB limit`);
+      }
+      throw badRequest("The upload could not be read");
+    }
+    throw error;
+  }
 
   function scope() {
     return companyScopeFromParam(rawDb, assertCompanyAccess);
@@ -51,19 +84,12 @@ export function contractRoutes(rawDb: Db) {
     return async (req: Request, _res: Response, next: NextFunction) => {
       try {
         const companyId = req.params.companyId as string;
-        if (req.actor.type === "agent") {
-          if (!(await agentMayUseContracts(db, companyId, req.actor))) {
-            throw forbidden("This agent does not have access to contracts");
-          }
-        } else if (req.actor.type === "board") {
-          if (req.actor.source !== "local_implicit" && !req.actor.isInstanceAdmin) {
-            const membership = req.actor.memberships?.find((item) => item.companyId === companyId);
-            if (!membership || membership.status !== "active" || membership.membershipRole === "viewer") {
-              throw forbidden("This member does not have access to contracts");
-            }
-          }
-        } else {
-          throw forbidden("This caller does not have access to contracts");
+        if (!(await actorMayUseContracts(db, companyId, req.actor))) {
+          throw forbidden(
+            req.actor.type === "agent"
+              ? "This agent does not have access to contracts"
+              : "This caller does not have access to contracts",
+          );
         }
         next();
       } catch (error) {
@@ -144,6 +170,131 @@ export function contractRoutes(rawDb: Db) {
       hasFile: Boolean(created.assetId),
     });
     res.status(201).json(created);
+  });
+
+  // --- Files: upload, attach, re-extract, download (Legal Phase 2a, DUR-4853) ---
+  /** What the operator and the agent are told about a file whose text could not be read. */
+  function extractionHint(textStatus: string) {
+    if (textStatus === "no_text_layer") {
+      return "This file has no text layer (it looks like a scan) and needs OCR. An agent with contract access can read the PDF itself.";
+    }
+    if (textStatus === "failed") {
+      return "The text could not be read from this file. The file is stored; you can try again with re-extract.";
+    }
+    return null;
+  }
+
+  /** Extracts and saves; a crash in storage or the database leaves `failed`, not a stuck `pending`. */
+  async function extractSafely(companyId: string, contractId: string) {
+    try {
+      return await files.extractFor(companyId, contractId);
+    } catch (error) {
+      if (error instanceof Error && "status" in error && typeof (error as { status: unknown }).status === "number") {
+        const status = (error as { status: number }).status;
+        if (status >= 400 && status < 500) throw error;
+      }
+      await svc.updateContract(companyId, contractId, { extractedText: null, textStatus: "failed" });
+      return { textStatus: "failed" as const, reason: "failed" as const, truncated: false, pageCount: null, textLength: 0 };
+    }
+  }
+
+  async function logExtraction(
+    req: Request,
+    companyId: string,
+    contractId: string,
+    outcome: Awaited<ReturnType<typeof extractSafely>>,
+  ) {
+    await log(req, companyId, "contract.text_extracted", "contract", contractId, {
+      textStatus: outcome.textStatus,
+      reason: outcome.reason,
+      truncated: outcome.truncated,
+      pageCount: outcome.pageCount,
+      textLength: outcome.textLength,
+    });
+  }
+
+  router.post("/companies/:companyId/contracts/upload", ...access(), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const file = await readUpload(req, res).catch(uploadErrors);
+    const fields = uploadContractFieldsSchema.safeParse(req.body ?? {});
+    if (!fields.success) throw badRequest("Invalid contract fields", fields.error.flatten());
+    const kind = validateContractUpload(file);
+    const actor = actorRef(getActorInfo(req));
+
+    const asset = await files.storeFile(companyId, file, kind, actor);
+    const fallbackTitle = (file.originalname ?? "").replace(/\.[^.]*$/, "").trim().slice(0, 300) || "Untitled contract";
+    const created = await svc.createContract(
+      companyId,
+      { ...fields.data, title: fields.data.title ?? fallbackTitle, assetId: asset.id, textStatus: "pending" },
+      actor,
+    );
+    await log(req, companyId, "contract.created", "contract", created.id, {
+      type: created.type,
+      status: created.status,
+      partyCount: 0,
+      hasFile: true,
+      fileKind: kind,
+      byteSize: asset.byteSize,
+    });
+    const extraction = await extractSafely(companyId, created.id);
+    await logExtraction(req, companyId, created.id, extraction);
+    res.status(201).json({
+      contract: await svc.getContract(companyId, created.id),
+      extraction: { ...extraction, hint: extractionHint(extraction.textStatus) },
+    });
+  });
+
+  router.post("/companies/:companyId/contracts/:id/file", ...access(), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const id = req.params.id as string;
+    await svc.getFileState(companyId, id);
+    const file = await readUpload(req, res).catch(uploadErrors);
+    const kind = validateContractUpload(file);
+    const asset = await files.storeFile(companyId, file, kind, actorRef(getActorInfo(req)));
+    await svc.updateContract(companyId, id, { assetId: asset.id, extractedText: null, textStatus: "pending" });
+    await log(req, companyId, "contract.file_attached", "contract", id, {
+      assetId: asset.id,
+      fileKind: kind,
+      byteSize: asset.byteSize,
+    });
+    const extraction = await extractSafely(companyId, id);
+    await logExtraction(req, companyId, id, extraction);
+    res.json({
+      contract: await svc.getContract(companyId, id),
+      extraction: { ...extraction, hint: extractionHint(extraction.textStatus) },
+    });
+  });
+
+  router.post("/companies/:companyId/contracts/:id/re-extract", ...access(), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const id = req.params.id as string;
+    await svc.getFileState(companyId, id);
+    const extraction = await extractSafely(companyId, id);
+    await logExtraction(req, companyId, id, extraction);
+    res.json({
+      contract: await svc.getContract(companyId, id),
+      extraction: { ...extraction, hint: extractionHint(extraction.textStatus) },
+    });
+  });
+
+  router.get("/companies/:companyId/contracts/:id/file", ...access(), async (req, res, next) => {
+    const companyId = req.params.companyId as string;
+    const id = req.params.id as string;
+    const state = await svc.getFileState(companyId, id);
+    if (!state.assetId) throw notFound("This contract has no file");
+    const asset = await assetService(db).getById(state.assetId);
+    if (!asset || asset.companyId !== companyId) throw notFound("This contract has no file");
+    const object = await storage.getObject(companyId, asset.objectKey);
+    const isDocx = asset.contentType === CONTRACT_FILE_CONTENT_TYPES.docx;
+    const contentType = isDocx ? CONTRACT_FILE_CONTENT_TYPES.docx : CONTRACT_FILE_CONTENT_TYPES.pdf;
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Content-Length", String(asset.byteSize || object.contentLength || 0));
+    res.setHeader("Content-Disposition", `attachment; filename="contract${isDocx ? ".docx" : ".pdf"}"`);
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Cache-Control", "private, no-store");
+    await log(req, companyId, "contract.file_downloaded", "contract", id, { assetId: asset.id });
+    object.stream.on("error", next);
+    object.stream.pipe(res);
   });
 
   router.get("/companies/:companyId/contracts/:id", ...access(), async (req, res) => {
