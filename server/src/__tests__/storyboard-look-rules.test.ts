@@ -3,7 +3,8 @@ import { Readable } from "node:stream";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
 import type { SogniLoraInfo } from "@paperclipai/plugin-sdk/media";
-import { assets, createDb, companies, pluginConfig, pluginState, plugins } from "@paperclipai/db";
+import { eq } from "drizzle-orm";
+import { assets, createDb, companies, pluginConfig, pluginState, plugins, videoShots, videoStorylines } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
 /**
@@ -14,7 +15,7 @@ import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } fro
  * the picture's notes. Every paid call is stubbed.
  */
 
-const captured = vi.hoisted(() => ({ pictures: [] as Array<{ provider: string; input: Record<string, unknown> }> }));
+const captured = vi.hoisted(() => ({ pictures: [] as Array<{ provider: string; input: Record<string, unknown> }>, failWith: null as string | null }));
 
 vi.mock("../storage/index.js", () => ({
   getStorageService: () => ({
@@ -42,6 +43,7 @@ vi.mock("../services/image-provider-clients.js", async (importOriginal) => {
     constructor(readonly name: string) {}
     async generate(input: Record<string, unknown>) {
       captured.pictures.push({ provider: this.name, input });
+      if (captured.failWith) throw new Error(captured.failWith);
       return { provider: this.name, model: String(input.model ?? "default"), contentType: "image/png", imageDataUrl: "data:image/png;base64,aGk=" };
     }
   }
@@ -101,20 +103,25 @@ function lora(id: string, modelIds: string[]): SogniLoraInfo {
 
 const Z_TURBO = "z_image_turbo_bf16";
 const QWEN_LIGHTNING_EDIT = "qwen_image_edit_2511_fp8_lightning";
-const KNOWN = [lora("z-only", [Z_TURBO]), lora("edit-ok", [QWEN_LIGHTNING_EDIT, Z_TURBO])];
+const KNOWN = [
+  lora("krea2-detail-enhancer", [Z_TURBO]),
+  lora("krea2-realism", [QWEN_LIGHTNING_EDIT, Z_TURBO]),
+  lora("krea2-breast", [Z_TURBO, QWEN_LIGHTNING_EDIT]),
+  lora("krea2-filter-bypass-3", [Z_TURBO, QWEN_LIGHTNING_EDIT]),
+];
 
 describe("1. LoRAs are checked against the model the picture really uses", () => {
   it("leaves out a LoRA made for another model, with a note naming it", () => {
-    const l = look({ loras: [{ id: "z-only", strength: 0.8 }, { id: "edit-ok", strength: 0.5 }] });
+    const l = look({ loras: [{ id: "krea2-detail-enhancer", strength: 0.8 }, { id: "krea2-realism", strength: 0.5 }] });
     const fit = fitLorasToModel(l, "qwen-lightning", KNOWN);
-    expect(fit.loras).toEqual([{ id: "edit-ok", strength: 0.5 }]);
-    expect(fit.note).toContain('"LoRA z-only"');
+    expect(fit.loras).toEqual([{ id: "krea2-realism", strength: 0.5 }]);
+    expect(fit.note).toContain('"LoRA krea2-detail-enhancer"');
     expect(fit.note).toContain("Qwen Image Edit 2511 Lightning");
     expect(fitLorasToModel(l, "z-turbo", KNOWN)).toEqual({ loras: l.loras, note: null });
   });
 
   it("sends them as saved, and says so, when Sogni's list cannot be read; keeps the account's own LoRAs", () => {
-    const l = look({ loras: [{ id: "z-only", strength: 0.8 }] });
+    const l = look({ loras: [{ id: "krea2-detail-enhancer", strength: 0.8 }] });
     const unchecked = fitLorasToModel(l, "qwen-lightning", null);
     expect(unchecked.loras).toHaveLength(1);
     expect(unchecked.note).toMatch(/not checked/);
@@ -217,6 +224,7 @@ d("storyboard stills apply the look rules (database)", () => {
 
   beforeEach(() => {
     captured.pictures.length = 0;
+    captured.failWith = null;
   });
 
   async function seed() {
@@ -316,7 +324,7 @@ d("storyboard stills apply the look rules (database)", () => {
         model: "z_image_turbo_bf16",
         seed: 42,
         negativePrompt: "blurry",
-        loras: [{ id: "z-only", strength: 0.8 }, { id: "edit-ok", strength: 0.6 }],
+        loras: [{ id: "krea2-detail-enhancer", strength: 0.8 }, { id: "krea2-realism", strength: 0.6 }],
         referenceFileIds: [background],
         referenceRoles: ["background"],
       },
@@ -326,17 +334,17 @@ d("storyboard stills apply the look rules (database)", () => {
     const result = await stills().generateStill(companyId, storylineId, shotId, ACTOR);
     const sent = captured.pictures[0]!.input;
     expect(sent.model).toBe("qwen-lightning");
-    expect(sent.loras).toEqual([{ id: "edit-ok", strength: 0.6 }]);
+    expect(sent.loras).toEqual([{ id: "krea2-realism", strength: 0.6 }]);
     const notes = result.notes!.join(" ");
-    expect(notes).toContain('"LoRA z-only"');
+    expect(notes).toContain('"LoRA krea2-detail-enhancer"');
     expect(notes).toContain("Qwen Image Edit 2511 Lightning");
     expect(notes).toMatch(/seed and "things to avoid" text/);
 
     // Text only, on the look's own model: both LoRAs fit, no note about them.
     await db.delete(pluginState);
-    await saveState(companyId, "looks", [{ id: "look-lora", name: "Harbour", style: "warm", provider: "sogni", model: "z_image_turbo_bf16", seed: 42, loras: [{ id: "z-only", strength: 0.8 }], referenceFileIds: [] }]);
+    await saveState(companyId, "looks", [{ id: "look-lora", name: "Harbour", style: "warm", provider: "sogni", model: "z_image_turbo_bf16", seed: 42, loras: [{ id: "krea2-detail-enhancer", strength: 0.8 }], referenceFileIds: [] }]);
     const plain = await stills().generateStill(companyId, storylineId, shotId, ACTOR);
-    expect(captured.pictures[1]!.input).toMatchObject({ model: "z-turbo", seed: 42, loras: [{ id: "z-only", strength: 0.8 }] });
+    expect(captured.pictures[1]!.input).toMatchObject({ model: "z-turbo", seed: 42, loras: [{ id: "krea2-detail-enhancer", strength: 0.8 }] });
     expect(plain.notes).toBeUndefined();
   });
 
@@ -350,4 +358,114 @@ d("storyboard stills apply the look rules (database)", () => {
     });
     expect(captured.pictures).toHaveLength(0);
   });
+
+  // ─── DUR-4898: safe for work unless the owner says otherwise ───────────
+
+  async function setRating(storylineId: string, contentRating: "sfw" | "mature") {
+    await db.update(videoStorylines).set({ contentRating }).where(eq(videoStorylines.id, storylineId));
+  }
+  const filterOffLook = (over: Record<string, unknown> = {}) => ({
+    id: "look-off",
+    name: "Unfiltered",
+    style: "warm film still",
+    provider: "sogni",
+    model: "z_image_turbo_bf16",
+    safeContentFilter: false,
+    contentFilterOffBy: "owner-1",
+    referenceFileIds: [],
+    ...over,
+  });
+  async function useLook(companyId: string, storylineId: string, saved: Record<string, unknown>) {
+    await saveState(companyId, "looks", [saved]);
+    await videoStorylineService(db).updateStoryline(companyId, storylineId, { pictureSettings: { providerId: "sogni", lookId: String(saved.id) } }, ACTOR);
+  }
+
+  it("4898. a filter-off look still sends the content filter ON in a safe-for-work film, and says so; a mature film follows the look", async () => {
+    const { companyId, storylineId, shotId } = await seed();
+    await useLook(companyId, storylineId, filterOffLook());
+    const sfw = await stills().generateStill(companyId, storylineId, shotId, ACTOR);
+    expect(captured.pictures[0]!.input.safeContentFilter).toBe(true);
+    expect(sfw.notes?.join(" ")).toContain("this film is safe for work, so the filter stayed on");
+
+    await setRating(storylineId, "mature");
+    await stills().generateStill(companyId, storylineId, shotId, ACTOR);
+    expect(captured.pictures[1]!.input.safeContentFilter).toBe(false);
+  });
+
+  it("4898. a film with no look sends the filter on too", async () => {
+    const { companyId, storylineId, shotId } = await seed();
+    await videoStorylineService(db).updateStoryline(companyId, storylineId, { pictureSettings: { providerId: "sogni" } }, ACTOR);
+    await stills().generateStill(companyId, storylineId, shotId, ACTOR);
+    expect(captured.pictures[0]!.input.safeContentFilter).toBe(true);
+  });
+
+  it("4898. a filter-bypass LoRA is refused in a safe-for-work film and in a mature film, and nothing is paid for", async () => {
+    const { companyId, storylineId, shotId } = await seed();
+    await useLook(companyId, storylineId, {
+      id: "look-bypass", name: "Bypass", style: "film", provider: "sogni", model: "z_image_turbo_bf16",
+      loras: [{ id: "krea2-filter-bypass-3", strength: 0.8 }], referenceFileIds: [],
+    });
+    for (const rating of ["sfw", "mature"] as const) {
+      await setRating(storylineId, rating);
+      await expect(stills().generateStill(companyId, storylineId, shotId, ACTOR)).rejects.toMatchObject({ status: 422, message: expect.stringContaining("never allowed") });
+    }
+    expect(captured.pictures).toHaveLength(0);
+  });
+
+  it("4898. an anatomy slider is dropped in a safe-for-work film with a note, and kept in a mature one", async () => {
+    const { companyId, storylineId, shotId } = await seed();
+    await useLook(companyId, storylineId, {
+      id: "look-slider", name: "Slider", style: "film", provider: "sogni", model: "z_image_turbo_bf16",
+      loras: [{ id: "krea2-detail-enhancer", strength: 0.8 }, { id: "krea2-breast", strength: 0.5 }], referenceFileIds: [],
+    });
+    const sfw = await stills().generateStill(companyId, storylineId, shotId, ACTOR);
+    expect(captured.pictures[0]!.input.loras).toEqual([{ id: "krea2-detail-enhancer", strength: 0.8 }]);
+    expect(sfw.notes?.join(" ")).toContain('The LoRA "LoRA krea2-breast" changes body anatomy');
+
+    await setRating(storylineId, "mature");
+    await stills().generateStill(companyId, storylineId, shotId, ACTOR);
+    expect(captured.pictures[1]!.input.loras).toEqual([{ id: "krea2-detail-enhancer", strength: 0.8 }, { id: "krea2-breast", strength: 0.5 }]);
+  });
+
+  it("4898. a spicy or uncensored model is refused in a safe-for-work film", async () => {
+    const { companyId, storylineId, shotId } = await seed();
+    await videoStorylineService(db).updateStoryline(companyId, storylineId, { pictureSettings: { providerId: "sogni", model: "dark-beast-krea2" } }, ACTOR);
+    await expect(stills().generateStill(companyId, storylineId, shotId, ACTOR)).rejects.toMatchObject({ status: 422, message: expect.stringContaining("made for mature pictures") });
+    expect(captured.pictures).toHaveLength(0);
+    await setRating(storylineId, "mature");
+    await stills().generateStill(companyId, storylineId, shotId, ACTOR);
+    expect(captured.pictures).toHaveLength(1);
+  });
+
+  it("4898. safe-for-work words: 'things to avoid' for a text picture, the prompt for a picture made from references", async () => {
+    const { companyId, storylineId, shotId } = await seed();
+    await videoStorylineService(db).updateStoryline(companyId, storylineId, { pictureSettings: { providerId: "sogni" } }, ACTOR);
+    await stills().generateStill(companyId, storylineId, shotId, ACTOR);
+    const text = captured.pictures[0]!.input;
+    expect(String(text.prompt)).toContain("Fully clothed.");
+    expect(String(text.prompt)).not.toContain("Keep out of the picture");
+    expect(String(text.negativePrompt)).toContain("nudity");
+
+    const reference = await file(companyId, "ref-1");
+    await db.update(videoShots).set({ lookReferenceAssetIds: [reference] }).where(eq(videoShots.id, shotId));
+    await stills().generateStill(companyId, storylineId, shotId, ACTOR);
+    const edit = captured.pictures[1]!.input;
+    expect(String(edit.prompt)).toContain("Fully clothed.");
+    expect(String(edit.prompt)).toContain("Keep out of the picture: nudity");
+    expect(edit.negativePrompt).toBeUndefined();
+
+    await setRating(storylineId, "mature");
+    await stills().generateStill(companyId, storylineId, shotId, ACTOR);
+    expect(String(captured.pictures[2]!.input.prompt)).not.toContain("Fully clothed");
+  });
+
+  it("4898. a picture the service refused or flagged is never stored, so it can't be approved", async () => {
+    const { companyId, storylineId, shotId } = await seed();
+    captured.failWith = "Fal's own safety check flagged this picture, so it was thrown away.";
+    await expect(stills().generateStill(companyId, storylineId, shotId, ACTOR)).rejects.toMatchObject({ status: 422 });
+    const [row] = await db.select().from(videoShots).where(eq(videoShots.id, shotId));
+    expect(row!.stillObjectKey).toBeNull();
+    await expect(stills().approveShot(companyId, storylineId, shotId, ACTOR)).rejects.toMatchObject({ status: 422 });
+  });
+
 });
