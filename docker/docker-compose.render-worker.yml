@@ -1,0 +1,145 @@
+# Media Studio code-rendered videos (D14, plan card "Code-rendered video
+# worker for infographics and explainers"): infra overlay adding the
+# locked-down render worker. Layer it on top of the base compose the same way
+# docker-compose.prod.yml is layered:
+#
+#   docker compose --env-file .env \
+#     -f docker/docker-compose.yml -f docker/docker-compose.prod.yml \
+#     -f docker/docker-compose.render-worker.yml up -d render-worker server
+#
+# The normal deploy only ships the app image, so this container is a one-time
+# box-side step (see docker/render-worker/README.md "Operator steps"). It must
+# pass the Security Reviewer gate before it goes live.
+#
+# Design (docker/render-worker/README.md has the full picture):
+#
+#  - `render-worker` runs agent-written HTML in a headless browser, so it gets
+#    NO network at all (`network_mode: none`): no route to the internet, the
+#    cloud metadata address, the tailnet, the database or Paperclip's own
+#    server. Everything a composition needs (pictures, fonts, music) is sent
+#    inside the job by Paperclip, which reads it from the company's own files.
+#  - Paperclip's server talks to it over a Unix socket on the shared
+#    `render-control` volume, never over a network path. The socket is
+#    owner+group only (0660): owner = the worker (uid 10001), group = the
+#    server's gid (PAPERCLIP_RENDER_SOCKET_GID, default 1000 = the server
+#    image's `node` group).
+#  - Non-root, read-only root filesystem, every capability dropped,
+#    no-new-privileges, Docker's default seccomp profile, no Docker socket,
+#    no host bind mounts: only its two named volumes.
+#  - `init: true` reaps the browser's orphaned helper processes (the
+#    September container-zombie incident).
+#  - CPU, memory, process-count and shared-memory limits below; the worker
+#    adds its own per-job wall-clock limit, video-length ceiling, output-size
+#    ceiling and queue length (environment below).
+#
+# Secrets: PAPERCLIP_SERVER_RENDER_WORKER_TOKEN goes in the host's .env (see
+# README). The PAPERCLIP_SERVER_ prefix keeps it out of every agent's own
+# environment (packages/adapter-utils/src/server-env-secrets.ts), and the
+# worker deletes it from its own environment at start-up, so neither
+# Hyperframes nor the browser ever sees it.
+x-render-worker-image: &render-worker-image
+  build:
+    context: ./render-worker
+  image: "${PAPERCLIP_RENDER_WORKER_IMAGE:-paperclip-render-worker:local}"
+
+services:
+  server:
+    environment:
+      PAPERCLIP_SERVER_RENDER_WORKER_TOKEN: "${PAPERCLIP_SERVER_RENDER_WORKER_TOKEN:?set in .env, see docker/render-worker/README.md}"
+      PAPERCLIP_SERVER_RENDER_WORKER_SOCKET: /run/render-control/render.sock
+    volumes:
+      - render-control:/run/render-control
+
+  render-worker:
+    <<: *render-worker-image
+    init: true
+    read_only: true
+    user: "10001:${PAPERCLIP_RENDER_SOCKET_GID:-1000}"
+    network_mode: none
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+      # Docker's default seccomp profile stays on. Hyperframes starts Chrome
+      # with --no-sandbox, so this container is the sandbox: never add
+      # `seccomp:unconfined`, a capability, or a host mount here.
+    tmpfs:
+      - /tmp:mode=1777,size=512m
+    shm_size: "1gb"
+    mem_limit: "3g"
+    memswap_limit: "3g"
+    cpus: 2.0
+    pids_limit: 512
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 4096
+    environment:
+      RENDER_WORKER_TOKEN: "${PAPERCLIP_SERVER_RENDER_WORKER_TOKEN:?set in .env, see docker/render-worker/README.md}"
+      RENDER_WORKER_SOCKET: /run/render-control/render.sock
+      RENDER_WORKER_JOBS_DIR: /work/jobs
+      # One job at a time, two browser processes per job: the box also runs
+      # the agents. Raise only after watching a long render's CPU use.
+      RENDER_WORKER_CONCURRENCY: "1"
+      RENDER_WORKER_BROWSERS_PER_JOB: "2"
+      RENDER_WORKER_MAX_QUEUE: "8"
+      # A job (check, snapshot or render) is stopped after this long.
+      RENDER_WORKER_JOB_TIMEOUT_SECONDS: "1800"
+      # Longest video the worker will hand back (30 min = the long-form cap).
+      RENDER_WORKER_MAX_DURATION_SECONDS: "1800"
+      # Largest finished file (2 GB, D18) and largest job upload.
+      RENDER_WORKER_MAX_OUTPUT_MB: "2048"
+      RENDER_WORKER_MAX_BODY_MB: "300"
+      # Unfetched results are deleted after an hour.
+      RENDER_WORKER_RESULT_TTL_SECONDS: "3600"
+    volumes:
+      - render-control:/run/render-control
+      # Per-job working folders. A named volume (on Docker's data-root, the
+      # 200 GB Hetzner volume), not tmpfs: a long render's frames would not
+      # fit in memory. Emptied on every start.
+      - render-jobs:/work/jobs
+    depends_on:
+      render-worker-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "src/healthcheck.mjs"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+
+  # One-shot: fresh named volumes are owned by root. Hand the socket folder
+  # to the worker (owner) and the server's group, and the jobs folder to the
+  # worker, before it starts. Only CHOWN/FOWNER, no network, exits at once.
+  render-worker-init:
+    <<: *render-worker-image
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        chown 10001:${PAPERCLIP_RENDER_SOCKET_GID:-1000} /run/render-control && chmod 0770 /run/render-control &&
+        chown 10001:10001 /work/jobs && chmod 0700 /work/jobs
+    user: "0:0"
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - FOWNER
+    security_opt:
+      - no-new-privileges:true
+    network_mode: none
+    volumes:
+      - render-control:/run/render-control
+      - render-jobs:/work/jobs
+    restart: "no"
+
+volumes:
+  render-control:
+  render-jobs:
