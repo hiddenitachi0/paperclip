@@ -23,10 +23,14 @@ How we checked it:
   word or the victim's secret value shows up in any answer, or if any victim
   record changes at all. It also fails if the intruder manages to tie one of
   its own records to one of the victim's.
+- The test cannot see two things, so they were checked by reading the code
+  instead: the live screen updates, and changes to instance-wide settings
+  (settings shared by all companies).
 - The test found **two real holes**, and both are now fixed. A project could be
   linked to another company's goal, after which that goal's title showed up in
   the intruder's project list. A goal could also be hung under another
-  company's goal, or given another company's agent as its owner.
+  company's goal, or given another company's agent as its owner. Any such
+  project link made before the fix is now ignored when projects are read.
 - It also found **one smaller audit problem**, now fixed. Refused requests to
   the admin pages were written to the "cross-company access" audit log as if an
   admin had used them.
@@ -48,7 +52,7 @@ been switched on yet.
 | Default deny for machine keys | A company service token reaches only routes that explicitly accept it (today: Lane A). | `server/src/routes/authz.ts:49`, `:146` |
 | Request company scope | `companyScope*` middleware resolves the company (from the URL, the body or the looked-up record), runs the access check first, then pins the DB connection to that company (`app.current_company_id`). | `server/src/middleware/company-scope.ts:45` |
 | Per-record checks | Routes like `/api/issues/:id` load the record, then call `assertCompanyAccess(record.companyId)`. Services filter every list by `companyId`. | e.g. `server/src/routes/goals.ts`, `server/src/services/*.ts` |
-| Reference checks | A write that names another record (secret, goal, agent, ...) must name one from the same company. | `services/secrets.ts:590`, `services/projects.ts:431` (new), `services/goals.ts:12` (new), `services/issues.ts:7308` (mentions) |
+| Reference checks | A write that names another record (secret, goal, agent, ...) must name one from the same company. | `services/secrets.ts:590`, `services/projects.ts:470` (new), `services/goals.ts:12` (new), `services/issues.ts:7308` (mentions) |
 | Database RLS | See the next section. | `packages/db/src/migrations/0149`, `0150`, `0164` |
 
 ## What the database (RLS) covers, and what relies on app code
@@ -72,7 +76,7 @@ been switched on yet.
   `FORCE ROW LEVEL SECURITY`. So unless the runbook's steps have been carried
   out on production (this audit had no production access and could not
   check), **isolation on production is enforced by the app code only**. The
-  sweep test is what proves that code.
+  sweep test and the per-surface tests below are what check that code.
 - **Not covered by RLS at all:** instance-wide tables without `company_id`
   (instance settings, plugins, `plugin_state`, `plugin_jobs`, environments,
   auth users and sessions, board keys, `cross_company_access_log`).
@@ -88,7 +92,8 @@ been switched on yet.
 
 ## Surface by surface
 
-Status: **OK** means verified, with nothing to fix. **FIXED** means a gap
+Status: **OK** means verified, with nothing to fix; **OK (code review)** means
+verified by reading the code only, with no test behind it. **FIXED** means a gap
 found and fixed on this branch. **GAP** means still open, with a recommended
 fix below.
 
@@ -103,8 +108,8 @@ Tests:
 | --- | --- | --- | --- |
 | Issues, comments, documents, labels, attachments | Company gate plus per-record lookup; identifiers resolved within the company | Sweep, Audit, `issues-routes-company-scope.test.ts`, `dur110-cross-company-issue-writes.test.ts` | OK |
 | Agents, agent keys, memories, personas | Company gate; `assertCanUpdateAgent` (`authz.ts`) | Sweep, `agents-routes-company-scope.test.ts`, `personas-routes-company-scope.test.ts` | OK |
-| Projects (goal links, lead agent) | `assertProjectReferencesInCompany` `services/projects.ts:431` | Sweep (found it), Refs | **FIXED**. A's project could link B's goal, and B's goal title then showed in A's project list |
-| Goals (parent goal, owner agent) | `assertGoalReferencesInCompany` `services/goals.ts:12` | Sweep (found it), Refs | **FIXED**. A's goal could sit under B's goal tree or name B's agent as owner |
+| Projects (goal links, lead agent) | `assertProjectReferencesInCompany` `services/projects.ts:470` | Sweep (found it), Refs | **FIXED**. A's project could link B's goal, and B's goal title then showed in A's project list. Links written before the fix are now filtered on read (`attachGoals` `services/projects.ts:96`): a project read returns no goal title, goal id or lead agent id from another company (Refs inserts such a link directly) |
+| Goals (parent goal, owner agent) | `assertGoalReferencesInCompany` `services/goals.ts:12` | Sweep (found it), Refs | **FIXED**. A's goal could sit under B's goal tree or name B's agent as owner. A link written before the fix still stores B's id in `parentId` / `ownerAgentId`, but no goal read joins it, so none of B's content is returned (code review) |
 | Secrets and secret bindings | `assertSecretInCompany` `services/secrets.ts:590`; value resolution re-checks the company (`:746`) | Sweep (B's secret value never appears), `secrets-routes-company-scope.test.ts` | OK |
 | Files and assets (object storage) | Asset rows per company; storage keys are prefixed with the company id | Sweep (storage stub flags any read of a B key) | OK |
 | Approvals and deploy cards | Company gate on `/approvals/:id/*`; deploy-runner status filtered per company `services/deploy-runner-status.ts:83` | Sweep, Audit | OK |
@@ -116,10 +121,10 @@ Tests:
 | Model catalogue | Per company (`routes/model-directory.ts:87`, entry routes behind the company scope) | Sweep (A-path plus B entry id) | OK |
 | Helper and investigations | Board member of the company; references filtered to what the person may see (`services/helper-investigations.ts:705`) | Sweep | OK |
 | Heartbeat wake payloads | Context is built from records filtered by the agent's own company (`services/heartbeat.ts:15169`); @mentions only resolve to agents in the same company (`services/issues.ts:7308`) | Code review; `heartbeat-tick-timers-agent-isolation.test.ts`, `agents-wakeup-company-scope.test.ts` | OK |
-| Live events (websocket) | The upgrade requires company membership (session) or an agent key of that company (`realtime/live-events-ws.ts:117`); a client subscribes to its own company channel only (`:230`); the global channel carries only plugin ids | Sweep (listens on A's channel and the global channel for B's tracer and ids), `live-events-ws.test.ts` | OK |
+| Live events (websocket) | The upgrade requires company membership (session) or an agent key of that company (`realtime/live-events-ws.ts:117`); a client subscribes to its own company channel only (`:230`); the global channel carries only plugin ids | Code review only. Not covered by the sweep (it opens no websocket), and `live-events-ws.test.ts` tests only upgrade-socket error handling, not company scoping | OK (code review) |
 | Plugins and Media Studio | Bridge calls require company access for the `companyId` they name (`routes/plugins.ts:742`); Media Studio keys all state by the host-verified company (`media-studio/src/worker.ts:361`, `company-settings.ts:52`); entities, logs and jobs carry `company_id` | Sweep, `plugin-tenant-isolation.test.ts` | OK (note 4) |
 | Environments | Instance resource (no `company_id`); any member sees the list with config, env and metadata redacted; only instance admins change it; changes are announced in every company's feed | Sweep (allow-listed, explained) | OK, shared by design |
-| Instance settings and admin routes | Instance admin only | Sweep (no instance-wide table changed by A's non-admin users or agents) | OK |
+| Instance settings and admin routes | Instance admin only | Code review only. Not covered by the sweep: its database check only sees rows that mention B, so it cannot see a change to an instance-wide table | OK (code review) |
 | Admin user routes (`/api/admin/users/*`) | Instance admin is now checked **before** the all-companies bypass scope opens (`routes/access.ts:5164`) | Sweep (no new bypass-log row) | **FIXED** (audit log noise, low) |
 | Company export | Builds only from the exporting company's own lists (`services/company-portability.ts:3244`) | Sweep (one call each; too slow to repeat for every field) and code review | OK |
 | Cross-company instructions | Intentional channel, see below | `cross-company-instructions-routes.test.ts`, Audit | OK (note 2) |
@@ -220,9 +225,7 @@ Postgres, runs in about 5 minutes):
 - **Assertions.** No answer contains B's tracer or secret value. Every
   database row that mentions B is unchanged, and no new row mentions B except
   refusal audit entries. No B-company URL answers 2xx except the two
-  instance-wide environment reads. No live event on A's channel or the global
-  channel carries B's data. No instance-wide table is changed by A's non-admin
-  credentials.
+  instance-wide environment reads.
 - If a probe logs A's credential out (for example
   `POST /api/cli-auth/revoke-current`), the test issues a new one and
   repeats the probe, so later routes are not silently skipped.
@@ -236,5 +239,10 @@ Known limits of the sweep:
 - Sweep 2 only reaches the roughly 70 write routes that accept a generic
   body. The others need route-specific bodies; the hand-written Audit test
   covers the important ones.
-- The websocket handshake and the Telegram bridge run outside Express. They
-  are covered by code review and their own tests, not by the sweep.
+- The database check only sees rows that mention B (by one of B's ids or its
+  tracer). A change to an instance-wide table (instance settings, plugins,
+  environments) does not mention B, so the sweep cannot detect it.
+- The websocket (handshake and live events) and the Telegram bridge run
+  outside Express, and the sweep does not listen for live events. They are
+  covered by code review, not by the sweep. `live-events-ws.test.ts` tests
+  only upgrade-socket error handling.

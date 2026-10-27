@@ -85,25 +85,36 @@ interface ResolveProjectNameOptions {
   excludeProjectId?: string | null;
 }
 
-/** Batch-load goal refs for a set of projects. */
+/**
+ * Batch-load goal refs for a set of projects.
+ *
+ * Cross-company isolation (docs/security/cross-company-isolation.md): links
+ * written before assertProjectReferencesInCompany existed may still point at
+ * another company's goal or agent. Reads drop every such reference, so a
+ * project never shows another company's goal title, goal id or agent id.
+ */
 async function attachGoals(db: Db, rows: ProjectRow[]): Promise<ProjectWithGoals[]> {
   if (rows.length === 0) return [];
 
   const projectIds = rows.map((r) => r.id);
+  const projectCompany = new Map(rows.map((r) => [r.id, r.companyId]));
 
-  // Fetch join rows + goal titles in one query
+  // Fetch join rows + goal titles in one query. project_goals.company_id is
+  // the project's company, so the goal must be in that company too.
   const links = await db
     .select({
       projectId: projectGoals.projectId,
+      linkCompanyId: projectGoals.companyId,
       goalId: projectGoals.goalId,
       goalTitle: goals.title,
     })
     .from(projectGoals)
-    .innerJoin(goals, eq(projectGoals.goalId, goals.id))
+    .innerJoin(goals, and(eq(projectGoals.goalId, goals.id), eq(goals.companyId, projectGoals.companyId)))
     .where(inArray(projectGoals.projectId, projectIds));
 
   const map = new Map<string, ProjectGoalRef[]>();
   for (const link of links) {
+    if (link.linkCompanyId !== projectCompany.get(link.projectId)) continue;
     let arr = map.get(link.projectId);
     if (!arr) {
       arr = [];
@@ -112,10 +123,38 @@ async function attachGoals(db: Db, rows: ProjectRow[]): Promise<ProjectWithGoals
     arr.push({ id: link.goalId, title: link.goalTitle });
   }
 
+  // Legacy single-value references (projects.goal_id, projects.lead_agent_id):
+  // keep each only if it points into the project's own company.
+  const legacyGoalIds = [
+    ...new Set(
+      rows
+        .filter((r) => r.goalId && !(map.get(r.id) ?? []).some((g) => g.id === r.goalId))
+        .map((r) => r.goalId as string),
+    ),
+  ];
+  const leadAgentIds = [...new Set(rows.map((r) => r.leadAgentId).filter((id): id is string => Boolean(id)))];
+  const [legacyGoalRows, leadAgentRows] = await Promise.all([
+    legacyGoalIds.length > 0
+      ? db.select({ id: goals.id, companyId: goals.companyId }).from(goals).where(inArray(goals.id, legacyGoalIds))
+      : Promise.resolve([] as Array<{ id: string; companyId: string }>),
+    leadAgentIds.length > 0
+      ? db.select({ id: agents.id, companyId: agents.companyId }).from(agents).where(inArray(agents.id, leadAgentIds))
+      : Promise.resolve([] as Array<{ id: string; companyId: string }>),
+  ]);
+  const legacyGoalCompany = new Map(legacyGoalRows.map((g) => [g.id, g.companyId]));
+  const leadAgentCompany = new Map(leadAgentRows.map((a) => [a.id, a.companyId]));
+
   return rows.map((r) => {
     const g = map.get(r.id) ?? [];
+    const goalId =
+      r.goalId && (g.some((x) => x.id === r.goalId) || legacyGoalCompany.get(r.goalId) === r.companyId)
+        ? r.goalId
+        : null;
+    const leadAgentId = r.leadAgentId && leadAgentCompany.get(r.leadAgentId) === r.companyId ? r.leadAgentId : null;
     return {
       ...r,
+      goalId,
+      leadAgentId,
       urlKey: deriveProjectUrlKey(r.name, r.id),
       goalIds: g.map((x) => x.id),
       goals: g,
