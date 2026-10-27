@@ -291,7 +291,21 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
     if (scoped.note) notes.push(scoped.note);
     // The look's own pictures first (with their roles), then the shot's and the storyline's character pictures.
     const refs = storyboardReferences(look, shot.lookReferenceAssetIds, storyline.characterReferenceAssetIds, MAX_STILL_REFERENCES);
-    const referenceImages = await loadReferenceImages(db, companyId, refs.ids);
+    let referenceImages: string[];
+    if (scoped.person) {
+      // The look's person is in this shot without a cast link (named in the text): their pictures face the same age check as a cast member's.
+      // One at a time so each file id is checked against its own bytes.
+      const loaded: Array<{ fileId: string; dataUri: string | null }> = [];
+      for (const id of refs.ids) loaded.push({ fileId: id, dataUri: (await loadReferenceImages(db, companyId, [id]))[0] ?? null });
+      const refusal = castPictureRefusal(
+        loaded.map((p) => ({ ...p, personName: scoped.person! })),
+        await loadCastAgeRefusals(db, cast.pluginId ?? null, companyId),
+      );
+      if (refusal) throw unprocessable(refusal);
+      referenceImages = loaded.flatMap((p) => (p.dataUri ? [p.dataUri] : []));
+    } else {
+      referenceImages = await loadReferenceImages(db, companyId, refs.ids);
+    }
     // A picture that could not be read is skipped; then the numbering would be off, so roles are only described when all arrived.
     const roles = referenceImages.length === refs.ids.length ? refs.roles : [];
     const input: ImageGenerationInput = {
@@ -434,22 +448,26 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
    * cast was picked by hand, when the shot's description names them (their
    * name or nickname), as the cast does: a storyline with no cast, or whose
    * cast lacks the person, still gets them in a shot that names them.
+   * `person` is their name when they are in the shot (else null).
    */
   async function lookOnShot(
     companyId: string,
     target: StoryboardPictureTarget,
     shot: Pick<ShotRow, "prompt" | "cameraNotes">,
     cast: ShotCastPeople,
-  ): Promise<{ look: StoryboardLook | null; note: string | null }> {
+  ): Promise<{ look: StoryboardLook | null; note: string | null; person: string | null }> {
     const present = new Set(cast.people.map((p) => p.identity.id));
     const identityId = target.look?.identityId ?? null;
-    if (!identityId || present.has(identityId)) return lookForShot(target.look, present);
+    if (!identityId) return { ...lookForShot(target.look, present), person: null };
+    const inCast = cast.people.find((p) => p.identity.id === identityId)?.identity ?? null;
+    if (inCast) return { ...lookForShot(target.look, present), person: inCast.name };
     const identity = (await loadCastIdentities(db, cast.pluginId ?? null, companyId)).find((i) => i.id === identityId) ?? null;
     if (identity && !cast.pickedByHand) {
       const text = [shot.prompt, shot.cameraNotes ?? ""].join("\n");
       if (videoCastNameMentioned(text, identity.name) || videoCastNameMentioned(text, identity.nickname)) present.add(identityId);
     }
-    return lookForShot(target.look, present, identity?.name ?? null);
+    // `person` is set whenever the look's person stays in this shot: their pictures go through the age check like a cast member's.
+    return { ...lookForShot(target.look, present, identity?.name ?? null), person: present.has(identityId) ? (identity?.name ?? null) : null };
   }
 
   /** The shot's cast and the saved people they are linked to (company-scoped). */
@@ -508,7 +526,8 @@ export function videoStorylineStillsService(db: Db, options: VideoStorylineStill
       loaded.push({ id, dataUri: dataUri ?? null, owner: plan.owners[i] ?? null, role: plan.roles[i]! });
     }
     const refusal = castPictureRefusal(
-      loaded.filter((p) => p.owner).map((p) => ({ fileId: p.id, dataUri: p.dataUri, personName: p.owner! })),
+      // The look's own pictures have no owner; when the look's person is in the shot they are checked as that person's.
+      loaded.filter((p) => p.owner || scoped.person).map((p) => ({ fileId: p.id, dataUri: p.dataUri, personName: p.owner ?? scoped.person! })),
       await loadCastAgeRefusals(db, cast.pluginId ?? null, companyId),
     );
     if (refusal) throw unprocessable(refusal);

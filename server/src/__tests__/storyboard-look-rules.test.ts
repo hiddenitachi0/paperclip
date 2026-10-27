@@ -421,6 +421,38 @@ d("storyboard stills apply the look rules (database)", () => {
     expect(named.notes?.join(" ") ?? "").not.toContain("not in this shot");
   });
 
+  it("naming the look's person in the shot does not get around the age check: their flagged picture is refused, nothing is paid", async () => {
+    const { companyId, storylineId, shotId } = await seed();
+    const maja = await savedMaja(companyId);
+    await saveState(companyId, "identities", [maja]);
+    const flagged = maja.crops[0]!.fileId;
+    const flaggedOther = await file(companyId, "look-photo-flagged");
+    await saveState(companyId, "looks", [
+      { id: "look-maja", name: "Maja look", style: "warm film still", provider: "sogni", identityId: maja.id, sheet: {}, referenceFileIds: [flagged, flaggedOther], referenceRoles: ["face", "other"] },
+    ]);
+    await db.insert(pluginState).values({ pluginId, scopeKind: "company", scopeId: companyId, namespace: "default", stateKey: "identityAgeBlocks", valueJson: [flagged, flaggedOther] });
+    const storylines = videoStorylineService(db);
+    await storylines.updateStoryline(companyId, storylineId, { pictureSettings: { providerId: "sogni", lookId: "look-maja" } }, ACTOR);
+    await storylines.updateShot(companyId, storylineId, shotId, { prompt: "maja walks along the harbour" }, ACTOR);
+
+    // No cast: the name in the shot text brings the look's pictures in, and the age check still applies.
+    await expect(stills().generateStill(companyId, storylineId, shotId, ACTOR)).rejects.toMatchObject({ status: 422, message: expect.stringContaining("age check") });
+    expect(captured.pictures).toHaveLength(0);
+
+    // A cast that holds somebody else (the look's face picture is dropped there, its flagged "other" picture is not): same refusal on the cast path.
+    const bo = {
+      ...maja,
+      id: `id-bo-${randomUUID().slice(0, 8)}`,
+      name: "bo",
+      crops: [{ role: "face", fileId: await file(companyId, "bo-face"), sourceFileId: null, box: null }],
+    };
+    await db.update(pluginState).set({ valueJson: [maja, bo] }).where(and(eq(pluginState.pluginId, pluginId), eq(pluginState.scopeId, companyId), eq(pluginState.stateKey, "identities")));
+    await storylines.setCast(companyId, storylineId, { members: [{ name: "Bo", identityId: bo.id }] }, ACTOR);
+    await storylines.updateShot(companyId, storylineId, shotId, { prompt: "maja and Bo walk along the harbour" }, ACTOR);
+    await expect(stills().generateStill(companyId, storylineId, shotId, ACTOR)).rejects.toMatchObject({ status: 422, message: expect.stringContaining("age check") });
+    expect(captured.pictures).toHaveLength(0);
+  });
+
   it("Fal.ai: a Sogni look's LoRAs are left out of a Fal.ai picture with a note", async () => {
     const { companyId, storylineId, shotId } = await seed();
     await saveState(companyId, "looks", [{ id: "look-l", name: "Harbour", style: "warm", provider: "sogni", loras: [{ id: "z-only", strength: 0.8 }], referenceFileIds: [] }]);
