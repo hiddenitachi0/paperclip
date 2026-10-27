@@ -390,6 +390,19 @@ function showNumber(value: number): string {
   return String(Math.round(value * 1000) / 1000);
 }
 
+/**
+ * The family of a Sogni catalog LoRA from its id ("h3-better-motion" -> h3),
+ * for LoRAs saved without one; null when the id does not say.
+ */
+export function inferMediaLoraFamily(lora: { provider: MediaLoraProvider; source: MediaLoraSource; ref: string }): string | null {
+  if (lora.provider !== "sogni" || lora.source !== "catalog") return null;
+  const ref = lora.ref.trim().toLowerCase();
+  if (ref.startsWith("h3-")) return "h3";
+  if (ref.startsWith("krea2-")) return "krea2";
+  if (ref.startsWith("moss-")) return "moss";
+  return null;
+}
+
 // ─── Checking a LoRA and a setup ─────────────────────────────────────────────
 
 /** The fields of a saved LoRA a setup check needs. */
@@ -541,10 +554,11 @@ export function checkMediaSetup(setup: MediaSetupForCheck, library: ReadonlyMap<
     }
     if (cap.takesLoras) {
       const canonical = setup.modelId.trim().toLowerCase();
+      const family = lora.family ?? inferMediaLoraFamily(lora);
       const fits =
         lora.compatibleModelIds.length > 0
           ? lora.compatibleModelIds.some((m) => m.trim().toLowerCase() === canonical)
-          : !lora.family || !cap.loraFamily || lora.family === cap.loraFamily;
+          : !family || !cap.loraFamily || family === cap.loraFamily;
       if (!fits) problems.push(`The LoRA "${label}" does not work with the model "${setup.modelId}". Pick a LoRA made for this model.`);
     }
     if (typeof pick.strength !== "number" || !Number.isFinite(pick.strength)) {

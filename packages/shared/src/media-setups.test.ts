@@ -120,6 +120,14 @@ describe("media setups: checking a setup", () => {
     expect(result.problems.join(" ")).toMatch(/does not work with the model "minimax-h3-fl2va-fp8_t2v"/);
   });
 
+  it("matches a catalog LoRA saved without a family by its Sogni id", () => {
+    const krea = lora({ ref: "krea2-detail-enhancer", name: "Detail", family: null, compatibleModelIds: [] });
+    expect(checkMediaSetup(setup({ loras: [{ loraId: krea.id, strength: 0.6 }] }), library(krea)).problems.join(" ")).toMatch(/does not work with the model/);
+    expect(
+      checkMediaSetup(setup({ kind: "image", modelId: "krea2_turbo_fp8_scaled", loras: [{ loraId: krea.id, strength: 0.6 }] }), library(krea)).problems,
+    ).toEqual([]);
+  });
+
   it("refuses a LoRA from another service, a missing or archived one, and duplicates", () => {
     const falLora = lora({ provider: "fal", source: "url", ref: "https://huggingface.co/x/y.safetensors", name: "Fal one" });
     expect(checkMediaSetup(setup({ loras: [{ loraId: falLora.id, strength: 0.6 }] }), library(falLora)).problems.join(" ")).toMatch(/Fal LoRA/);
