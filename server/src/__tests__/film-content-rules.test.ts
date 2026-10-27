@@ -11,6 +11,8 @@ import {
 import { FalImageProvider } from "../services/image-provider-clients.ts";
 import { FalDirectPictureProvider } from "../services/media-studio-direct-providers.ts";
 import { FalVideoProvider } from "../services/video-provider-clients.ts";
+import { FalProvider } from "../../../packages/plugins/media-studio/src/providers.js";
+import { falQueuePoll, falQueueSubmit } from "../../../packages/plugins/media-studio/src/fal-queue.js";
 
 /** DUR-4898: the rating rules each request obeys, and the provider-level safety fields. Stubbed HTTP only. */
 
@@ -130,5 +132,28 @@ describe("Fal requests carry the safety fields", () => {
     const direct = recorder(() => ({ images: [{ url: "https://v3.fal.media/black.jpg" }], has_nsfw_concepts: [true] }));
     await expect(new FalDirectPictureProvider("k", direct.fetchImpl).generate({ prompt: "p" })).rejects.toThrow(/safety check flagged/);
     expect(direct.calls[0]!.body).toMatchObject({ enable_safety_checker: true });
+  });
+});
+
+describe("the Media Studio plugin's Fal calls carry the same safety fields", () => {
+  it("pictures, with and without reference pictures, and a flagged picture is a failure", async () => {
+    for (const referenceImages of [undefined, ["data:image/png;base64,AA=="]]) {
+      const rec = recorder(() => ({ images: [{ url: "https://v3.fal.media/x.jpg" }], has_nsfw_concepts: [false] }));
+      await new FalProvider("k", rec.fetchImpl as never).generate({ prompt: "p", referenceImages } as never);
+      expect(rec.calls[0]!.body).toMatchObject({ enable_safety_checker: true });
+    }
+    const flagged = recorder(() => ({ images: [{ url: "https://v3.fal.media/black.jpg" }], has_nsfw_concepts: [true] }));
+    await expect(new FalProvider("k", flagged.fetchImpl as never).generate({ prompt: "p" } as never)).rejects.toThrow(/safety check flagged/);
+  });
+
+  it("queued video: Wan gets both checks, Veo the strictest tolerance, and a flagged result fails the job", async () => {
+    const wan = recorder(() => ({ request_id: "r1" }));
+    await falQueueSubmit(wan.fetchImpl as never, "k", "fal-ai/wan-flf2v", { prompt: "p" });
+    expect(wan.calls[0]!.body).toMatchObject({ enable_safety_checker: true, enable_output_safety_checker: true });
+    const veo = recorder(() => ({ request_id: "r1" }));
+    await falQueueSubmit(veo.fetchImpl as never, "k", "fal-ai/veo3.1", { prompt: "p" });
+    expect(veo.calls[0]!.body).toMatchObject({ safety_tolerance: "1" });
+    const flagged = recorder((url) => (url.endsWith("/status") ? { status: "COMPLETED" } : { video: { url: "https://v3.fal.media/x.mp4" }, has_nsfw_concepts: [true] }));
+    expect(await falQueuePoll(flagged.fetchImpl as never, "k", { externalId: "r1", model: "fal-ai/wan-flf2v", provider: "fal" } as never, "video")).toMatchObject({ status: "failed" });
   });
 });
