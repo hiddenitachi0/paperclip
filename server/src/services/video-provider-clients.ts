@@ -19,6 +19,7 @@
 // Kept deliberately identical in behavior to the plugin's copy; see that
 // package for the fuller design commentary (Sogni's shape is an unconfirmed
 // upstream assumption -- see the DUR-4127 PR's "Questions for Filip").
+import { PROMPT_EXPANSION_UNSUPPORTED, SEED_UNSUPPORTED, safetyFieldsOf, seedSent, type SentRequestFacts } from "./generation-facts.js";
 import { readSogniWorkflowCredits } from "./sogni-cost.js";
 
 
@@ -79,6 +80,8 @@ export interface MediaJobHandle {
   externalId: string;
   model: string;
   provider: string;
+  /** DUR-4902: what the start request really carried; only set by start(), not rebuilt when a job is polled later. */
+  sent?: SentRequestFacts;
 }
 
 export type MediaPollOutcome =
@@ -305,7 +308,15 @@ export class FalVideoProvider implements MediaJobProvider {
     if (typeof input.durationSeconds === "number") body.duration = String(input.durationSeconds);
     if (typeof input.seed === "number") body.seed = input.seed;
     const { requestId } = await falQueueSubmit(this.fetchImpl, this.apiKey, model, body, input.storeIO === false ? { storeIO: false } : {});
-    return { externalId: requestId, model, provider: this.name };
+    const sent: SentRequestFacts = {
+      tool: null,
+      safety: safetyFieldsOf(body),
+      contentFilterOn: null,
+      promptExpansion: PROMPT_EXPANSION_UNSUPPORTED,
+      seed: typeof body.seed === "number" ? body.seed : seedSent(undefined),
+      negativePrompt: null,
+    };
+    return { externalId: requestId, model, provider: this.name, sent };
   }
 
   poll(handle: MediaJobHandle): Promise<MediaPollOutcome> {
@@ -604,7 +615,15 @@ export class SogniVideoProvider implements MediaJobProvider {
     const parsed = asRecord(JSON.parse(await res.text()));
     const workflowId = asRecord(asRecord(parsed?.data)?.workflow)?.workflowId;
     if (typeof workflowId !== "string" || !workflowId) throw new Error("Sogni did not say which job it started.");
-    return { externalId: workflowId, model: plan.videoModel ?? "sogni-video", provider: this.name };
+    const sent: SentRequestFacts = {
+      tool: plan.tool,
+      safety: safetyFieldsOf(body),
+      contentFilterOn: body.safe_content_filter !== false,
+      promptExpansion: args.skipPromptProcessing === true ? "off" : "service default",
+      seed: SEED_UNSUPPORTED,
+      negativePrompt: null,
+    };
+    return { externalId: workflowId, model: plan.videoModel ?? "sogni-video", provider: this.name, sent };
   }
 
   async poll(handle: MediaJobHandle): Promise<MediaPollOutcome> {

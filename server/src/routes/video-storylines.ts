@@ -72,6 +72,7 @@ import { videoStorylineStitchService } from "../services/video-storyline-stitch.
 import { videoStorylineSettingsService } from "../services/video-storyline-settings.js";
 import { checkFfmpegAvailable } from "../services/video-ffmpeg.js";
 import { videoStorylineStillsService } from "../services/video-storyline-stills.js";
+import { readShotGenerationRecords } from "../services/generation-record.js";
 import { videoStorylineDirectorService } from "../services/video-storyline-director.js";
 import { videoStorylineDirectorConversationStore } from "../services/video-storyline-director-conversation.js";
 import { videoStorylineDirectorReviewService } from "../services/video-storyline-director-review.js";
@@ -979,6 +980,23 @@ export function videoStorylineRoutes(rawDb: Db) {
         next(err);
       });
       object.stream.pipe(res);
+    },
+  );
+
+  /**
+   * DUR-4902: the "How was this made?" records of a shot's newest picture and
+   * clip. The shot must belong to this company's storyline; records hold no
+   * keys or picture bytes (see generation-record.ts).
+   */
+  router.get(
+    "/companies/:companyId/video-storylines/:storylineId/shots/:shotId/generation",
+    ...gatedScope(),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const storylineId = req.params.storylineId as string;
+      const shotId = req.params.shotId as string;
+      await storylines.getShotRow(companyId, storylineId, shotId);
+      res.json(await readShotGenerationRecords(db, companyId, shotId));
     },
   );
 

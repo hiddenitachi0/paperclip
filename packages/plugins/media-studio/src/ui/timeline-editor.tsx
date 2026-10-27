@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { errorText, storylineFetchJson } from "./storyline-api.js";
+import { HowWasThisMade } from "./generation-details.js";
 import {
   AddFootage,
   ClipInspector,
@@ -1328,6 +1329,8 @@ function AiClipPanel(props: {
       )}
 
       {made && <ClipSound clip={clip} disabled={disabled} onPatch={(body, doing) => patchClip(body, doing)} />}
+
+      {made && <HowWasThisMade base={apiBase} shotId={clip.shotId} kind="clip" version={`${clip.status}:${clip.durationSeconds}`} />}
 
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
         {(made || clip.status === "failed") && (

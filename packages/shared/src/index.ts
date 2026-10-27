@@ -2882,6 +2882,8 @@ export {
 } from "./video-storyline-director-conversation.js";
 
 export {
+  GENERATION_SEED_SERVICE_CHOSE,
+  GENERATION_SEED_UNSUPPORTED,
   STILL_IMAGE_PROVIDER_COST_CENTS_PER_IMAGE,
   VIDEO_SHOT_STORYBOARD_STATUSES,
   approveStoryboardShotSchema,
@@ -2895,6 +2897,8 @@ export {
   type StoryboardCostEstimateResult,
   type StoryboardCostEstimateShotInput,
   type UpdateVideoStorylineApprovalThresholdInput,
+  type VideoShotGenerationRecord,
+  type VideoShotGenerationResponse,
   type VideoShotStoryboardStatus,
   type VideoStoryboardShotSummary,
   type VideoStoryboardSummary,

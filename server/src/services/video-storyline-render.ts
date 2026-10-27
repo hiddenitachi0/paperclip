@@ -27,6 +27,8 @@ import { releaseStorylineMediaSpend, settleSogniStorylineSpend, storylineAnimate
 import { recordSogniCost, SOGNI_CREDIT_PRICE_CONFIG_KEY } from "./sogni-cost.js";
 import { getStorageService } from "../storage/index.js";
 import { logActivity } from "./activity-log.js";
+import { buildGenerationRecord, CLIP_FINISHED_ACTION, CLIP_STARTED_ACTION, readClipStartRecord } from "./generation-record.js";
+import { readContentMode } from "@paperclipai/plugin-sdk/media";
 import { pluginRegistryService } from "./plugin-registry.js";
 import { approvalService } from "./approvals.js";
 import { secretService } from "./secrets.js";
@@ -375,8 +377,8 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     companyId: string,
     storyline: typeof videoStorylines.$inferSelect,
     shot: typeof videoShots.$inferSelect,
-  ): Promise<{ characters: Array<{ name: string; images: string[] }>; flat: string[]; startFallback: string | undefined }> {
-    const empty = { characters: [], flat: [], startFallback: undefined };
+  ): Promise<{ characters: Array<{ name: string; images: string[] }>; flat: string[]; flatFileIds: string[]; startFallback: string | undefined }> {
+    const empty = { characters: [], flat: [], flatFileIds: [], startFallback: undefined };
     const cast = readVideoStorylineCast(storyline.pictureSettings);
     if (!cast.members.some((m) => m.identityId)) return empty;
     const plugin = await registry.getByKey(MEDIA_STUDIO_PLUGIN_KEY);
@@ -400,18 +402,25 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       await loadCastAgeRefusals(db, pluginId, companyId),
     );
     if (refusal) throw unprocessable(refusal);
-    const characters = loaded
-      .map((p) => ({ name: p.name, images: p.pictures.map((x) => x.dataUri).filter((x): x is string => !!x) }))
-      .filter((c) => c.images.length > 0);
+    const readable = loaded.map((p) => ({ name: p.name, pictures: p.pictures.filter((x): x is { fileId: string; dataUri: string } => !!x.dataUri) })).filter((c) => c.pictures.length > 0);
+    const characters = readable.map((c) => ({ name: c.name, images: c.pictures.map((x) => x.dataUri) }));
     // Everyone's first picture (the face) first, then everyone's second, ...: a model that only takes a few still gets every face.
     const flat: string[] = [];
-    for (let k = 0; k < 3; k += 1) for (const c of characters) if (c.images[k]) flat.push(c.images[k]!);
+    const flatFileIds: string[] = [];
+    for (let k = 0; k < 3; k += 1) {
+      for (const c of readable) {
+        const picture = c.pictures[k];
+        if (!picture) continue;
+        flat.push(picture.dataUri);
+        flatFileIds.push(picture.fileId);
+      }
+    }
     // Without an approved picture or a previous clip, the first person's canonical render (else face) is a better first frame than a look picture.
     const first = people[0]!.identity;
     const startFallback = first.canonicalFileId
       ? loaded[0]?.pictures.find((x) => x.fileId === first.canonicalFileId)?.dataUri ?? characters[0]?.images[0]
       : characters[0]?.images[0];
-    return { characters, flat, startFallback: startFallback ?? undefined };
+    return { characters, flat, flatFileIds, startFallback: startFallback ?? undefined };
   }
 
   /**
@@ -488,6 +497,15 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
     // combining a continuity frame with separate character pictures in one call, so we pick ONE image
     // to actually drive continuity/likeness -- the approved still wins, then the continuity frame.
     const startImage = approvedStillImage ?? continuityImage ?? cast.startFallback ?? referenceImages[0];
+    const startSource = approvedStillImage
+      ? "start picture: the approved storyboard picture"
+      : continuityImage
+        ? "start picture: the last frame of the previous clip"
+        : cast.startFallback
+          ? "start picture: a saved person's picture"
+          : referenceImages[0]
+            ? "start picture: the first reference picture"
+            : null;
 
     const input: MediaJobInput = {
       kind: "video",
@@ -538,6 +556,34 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
         .update(videoShots)
         .set({ status: "rendering", providerId: handle.provider, model: handle.model, attempt, errorMessage: null, updatedAt: nowOf() })
         .where(eq(videoShots.id, shot.id));
+      // DUR-4902: what this clip was made with, kept so a clip that drifted can be explained later. Never stops a render that has started.
+      const chosenIds = [...cast.flatFileIds.map((fileId) => ({ fileId, role: "saved person" })), ...referenceAssetIds.map((fileId) => ({ fileId, role: "other" }))].slice(0, MAX_REFERENCE_IMAGES);
+      await logActivity(db, {
+        companyId,
+        actorType: systemActor.actorType,
+        actorId: systemActor.actorId,
+        action: CLIP_STARTED_ACTION,
+        entityType: "video_shot",
+        entityId: shot.id,
+        details: {
+          orderIndex: shot.orderIndex,
+          attempt,
+          generation: buildGenerationRecord({
+            kind: "clip",
+            prompt: input.prompt,
+            provider: handle.provider,
+            model: handle.model,
+            sent: handle.sent,
+            contentRating: readContentMode(storyline.contentRating),
+            references: [...(startSource ? [{ fileId: null, role: startSource }] : []), ...chosenIds],
+            referencesNotSent: Math.max(0, chosenIds.length - referenceImages.length),
+            estimatedCostCents: estimateShotRenderCents(storyline, [shot]).estimatedTotalCents,
+            notes: [],
+            knownSecrets: [apiKey],
+            now: nowOf(),
+          }),
+        },
+      }).catch((err) => logger.warn({ err, shotId: shot.id }, "video-storyline-render: could not write the clip's how-was-this-made record"));
     } catch (err) {
       // The job started but could not be written down: stop it rather than leave it unfollowed.
       logger.error({ err, shotId: shot.id, externalId: handle.externalId }, "video-storyline-render: started a shot but could not record it");
@@ -1230,6 +1276,25 @@ export function videoStorylineRenderService(db: Db, deps: VideoStorylineRenderDe
       })
       .where(eq(videoShots.id, shot.id));
     await db.update(videoShotRenderJobs).set({ status: "done", completedAt: nowOf(), updatedAt: nowOf() }).where(eq(videoShotRenderJobs.id, jobId));
+    // DUR-4902: finish the clip's how-was-this-made record with what it really cost. No start record (a clip started before records existed): none is made up.
+    await (async () => {
+      const started = await readClipStartRecord(db, companyId, shot.id);
+      if (!started) return;
+      const sogniCredits = typeof result.meta?.sogniCredits === "number" ? result.meta.sogniCredits : null;
+      await logActivity(db, {
+        companyId,
+        actorType: "system",
+        actorId: "video-storyline-render",
+        action: CLIP_FINISHED_ACTION,
+        entityType: "video_shot",
+        entityId: shot.id,
+        details: {
+          orderIndex: shot.orderIndex,
+          attempt: shot.attempt,
+          generation: { ...started, actualCostCents, providerCredits: sogniCredits },
+        },
+      });
+    })().catch((err) => logger.warn({ err, shotId: shot.id }, "video-storyline-render: could not finish the clip's how-was-this-made record"));
 
     // An animated photo had its estimate held (and counted) when it started: count only the difference now.
     const alreadyHeld = await settleShotReservation(companyId, shot.id, actualCostCents);

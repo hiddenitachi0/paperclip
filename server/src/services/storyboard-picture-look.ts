@@ -316,6 +316,29 @@ export function fitLorasToModel(
   return { loras, note: skipped.length > 0 ? skippedLorasNote(look.name, modelName, skipped) : null };
 }
 
+/**
+ * DUR-4902: the LoRAs fitLorasToModel leaves out of a request, each with the
+ * reason, for the "How was this made?" record (fitLorasToModel itself only
+ * returns one note for the whole look).
+ */
+export function loraFitDrops(loras: ReadonlyArray<{ id: string }>, model: string, known: SogniLoraInfo[] | null): Array<{ id: string; reason: string }> {
+  if (loras.length === 0 || known === null) {
+    return loras.slice(SOGNI_MAX_LORAS).map((l) => ({ id: l.id, reason: `More than ${SOGNI_MAX_LORAS} LoRAs; Sogni takes at most ${SOGNI_MAX_LORAS}.` }));
+  }
+  const modelId = sogniCatalogModelId(model);
+  const modelName = SOGNI_MODEL_NAMES[modelId] ?? modelId;
+  const checks = classifyLoras({ id: modelId, name: modelName }, [...loras], known, SOGNI_MODEL_NAMES);
+  const dropped: Array<{ id: string; reason: string }> = [];
+  const kept: string[] = [];
+  for (const check of checks) {
+    if (check.fit === "other-models") dropped.push({ id: check.id, reason: `Made for ${madeForText(check.madeFor)}, not for ${modelName}.` });
+    else if (check.fit === "unknown" && !check.id.startsWith("personal-")) dropped.push({ id: check.id, reason: "Sogni does not list this LoRA for this account any more." });
+    else kept.push(check.id);
+  }
+  for (const id of kept.slice(SOGNI_MAX_LORAS)) dropped.push({ id, reason: `More than ${SOGNI_MAX_LORAS} LoRAs; Sogni takes at most ${SOGNI_MAX_LORAS}.` });
+  return dropped;
+}
+
 /** What Sogni's edit_image (every picture made from reference pictures) ignores of the look; null when the look sets none of it. */
 export function editImageDropsNote(look: Pick<StoryboardLook, "name" | "seed" | "guidance" | "negativePrompt"> | null): string | null {
   if (!look) return null;
