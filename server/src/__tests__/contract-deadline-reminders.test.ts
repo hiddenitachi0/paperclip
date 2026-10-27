@@ -345,6 +345,14 @@ d("contract deadline reminder sweep (DUR-4855)", () => {
     expect(issue!.assigneeAgentId).toBe(legalId);
     expect(issue!.description).toMatch(/^Human action: .+$/m);
     expect(wakeups).toHaveLength(0);
+
+    // The Now page's feed: a blocked issue the owner must act on, attributed to the board.
+    const feed = await issueService(db).list(companyId, { status: "blocked", includeBlockedInboxAttention: true });
+    const listed = feed.find((row) => row.id === issue!.id) as
+      | { blockedInboxAttention?: { owner?: { type?: string }; reason?: string } }
+      | undefined;
+    expect(listed?.blockedInboxAttention?.owner?.type).toBe("board");
+    expect(listed?.blockedInboxAttention?.reason).toBe("human_action_required");
   });
 
   it("closes open reminders when the deadline is marked done, dismissed or superseded", async () => {
