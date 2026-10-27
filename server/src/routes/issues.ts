@@ -107,6 +107,7 @@ import {
   routineService,
   workProductService,
 } from "../services/index.js";
+import { actorMayUseContracts } from "../services/contracts.js";
 import { buildPlanReviewContext } from "../services/plan-review-context.js";
 import {
   TASK_WATCHDOG_ORIGIN_KIND,
@@ -299,7 +300,11 @@ type RecoveryRevalidationTrigger =
   | "work_product"
   | "read_projection";
 type CompanySearchService = {
-  search(companyId: string, query: CompanySearchQuery): Promise<CompanySearchResponse>;
+  search(
+    companyId: string,
+    query: CompanySearchQuery,
+    options?: { includeContracts?: boolean },
+  ): Promise<CompanySearchResponse>;
 };
 type ActivityIssueRelationSummary = {
   id: string;
@@ -3810,7 +3815,10 @@ export function issueRoutes(
       });
       return;
     }
-    const result = await getSearchService().search(companyId, query);
+    // DUR-4853: contracts are confidential, so they are searched only for a caller
+    // who may use the contract register (same rule as the contract routes).
+    const includeContracts = await actorMayUseContracts(db, companyId, req.actor);
+    const result = await getSearchService().search(companyId, query, { includeContracts });
     res.json(result);
   });
 

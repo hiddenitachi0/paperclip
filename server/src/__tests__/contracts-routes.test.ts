@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import express from "express";
 import request from "supertest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -23,6 +26,9 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 
+import { createLocalDiskStorageProvider } from "../storage/local-disk-provider.js";
+import { createStorageService } from "../storage/service.js";
+
 let errorHandler: typeof import("../middleware/index.js").errorHandler;
 let contractRoutes: typeof import("../routes/contracts.js").contractRoutes;
 
@@ -41,6 +47,8 @@ if (!embeddedPostgresSupport.supported) {
 describeEmbeddedPostgres("contract register routes (DUR-4852)", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+  const storageDir = mkdtempSync(path.join(tmpdir(), "paperclip-contract-files-"));
+  const storage = createStorageService(createLocalDiskStorageProvider(storageDir));
 
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-contracts-");
@@ -78,6 +86,7 @@ describeEmbeddedPostgres("contract register routes (DUR-4852)", () => {
 
   afterAll(async () => {
     await tempDb?.cleanup();
+    rmSync(storageDir, { recursive: true, force: true });
   });
 
   type Who =
@@ -105,7 +114,7 @@ describeEmbeddedPostgres("contract register routes (DUR-4852)", () => {
             };
       next();
     });
-    app.use("/api", contractRoutes(db));
+    app.use("/api", contractRoutes(db, storage));
     app.use(errorHandler);
     return app;
   }

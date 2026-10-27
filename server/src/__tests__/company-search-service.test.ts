@@ -241,7 +241,7 @@ describeEmbeddedPostgres("companySearchService", () => {
       }),
     });
     expect(result.results[0]?.snippet).toMatch(/comet tail/i);
-    expect(result.countsByType).toEqual({ issue: 0, artifact: 1, agent: 0, project: 0 });
+    expect(result.countsByType).toEqual({ issue: 0, artifact: 1, agent: 0, project: 0, contract: 0 });
   });
 
   it("does not pass high-offset search fetch windows through to artifact query validation", async () => {
@@ -443,7 +443,7 @@ describeEmbeddedPostgres("companySearchService", () => {
     const result = await svc.search(companyId, companySearchQuerySchema.parse({ q: "needle", limit: "2", offset: "2" }));
 
     expect(result.results.map((row) => row.id)).toEqual([agentIds[2], projectIds[0]]);
-    expect(result.countsByType).toEqual({ issue: 0, artifact: 0, agent: 3, project: 3 });
+    expect(result.countsByType).toEqual({ issue: 0, artifact: 0, agent: 3, project: 3, contract: 0 });
     expect(result.hasMore).toBe(true);
   });
 

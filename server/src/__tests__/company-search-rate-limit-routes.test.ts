@@ -16,7 +16,7 @@ function createSearchResponse(query: CompanySearchQuery): CompanySearchResponse 
     limit: query.limit,
     offset: query.offset,
     results: [],
-    countsByType: { issue: 0, artifact: 0, agent: 0, project: 0 },
+    countsByType: { issue: 0, artifact: 0, agent: 0, project: 0, contract: 0 },
     hasMore: false,
   };
 }
@@ -53,5 +53,29 @@ describe("company search route rate limiting", () => {
       retryAfterSeconds: 60,
     });
     expect(limited.headers["retry-after"]).toBe("60");
+  });
+
+  // DUR-4853: contracts are confidential, so search only includes them for a
+  // caller who may use the contract register (the viewer / agent / other-company
+  // cases of that rule are covered in contract-files-routes.test.ts).
+  it("asks for contract results on behalf of a board caller who may use contracts", async () => {
+    const search = vi.fn(async (_companyId: string, query: CompanySearchQuery, _options?: unknown) => createSearchResponse(query));
+    function appFor(actor: Express.Request["actor"]) {
+      const app = express();
+      app.use((req, _res, next) => {
+        req.actor = actor;
+        next();
+      });
+      app.use("/api", issueRoutes(withFakeCompanyScopeReserve({}) as never, {} as never, {
+        searchService: { search },
+        searchRateLimiter: createCompanySearchRateLimiter({ maxRequests: 100, windowMs: 60_000, now: () => 1_000 }),
+      }));
+      return app;
+    }
+
+    await request(appFor({ type: "board", userId: "user-1", companyIds: [companyId], source: "local_implicit", isInstanceAdmin: true }))
+      .get(`/api/companies/${companyId}/search?q=notice`)
+      .expect(200);
+    expect(search).toHaveBeenLastCalledWith(companyId, expect.anything(), { includeContracts: true });
   });
 });

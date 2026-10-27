@@ -225,6 +225,7 @@ export type {
 export type {
   CompanySearchHighlight,
   CompanySearchArtifactSummary,
+  CompanySearchContractSummary,
   CompanySearchIssueSummary,
   CompanySearchResponse,
   CompanySearchResult,
