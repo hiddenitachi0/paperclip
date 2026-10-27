@@ -1751,8 +1751,10 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
   const [imageSearch, setImageSearch] = useState("");
   // The search words the list on screen was made with (the box may hold newer, unsent words).
   const [imageQuery, setImageQuery] = useState("");
-  // Picked pictures whose file could not be loaded (deleted from Files).
+  // Picked pictures the server confirmed are gone from Files.
   const [missingRefs, setMissingRefs] = useState<ReadonlySet<string>>(() => new Set());
+  // Picked pictures whose preview did not load, though they may still be in Files.
+  const [unshownRefs, setUnshownRefs] = useState<ReadonlySet<string>>(() => new Set());
   const [saveNote, setSaveNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1891,6 +1893,8 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
           return [...prev, ...found.filter((img) => !have.has(img.fileId))];
         });
         setImagesCursor(res.nextCursor ?? null);
+        // The words and the list on screen move together, so "Load more" never mixes two searches.
+        setImageQuery(search);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
         setImages((prev) => prev ?? []);
@@ -1909,6 +1913,7 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
     setDraft(look ? lookToDraft(look) : { ...EMPTY_DRAFT });
     setSheetOpen(Boolean(look?.sheet && Object.keys(look.sheet).length > 0));
     setMissingRefs(new Set());
+    setUnshownRefs(new Set());
     if (images === null) void loadImages();
   };
 
@@ -1925,13 +1930,24 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
     });
   };
 
-  const markRefMissing = (fileId: string) => {
-    setMissingRefs((prev) => (prev.has(fileId) ? prev : new Set([...prev, fileId])));
+  // A preview that fails to load does not mean the picture was deleted (it may be
+  // too big to preview, or the session ended). Ask the server for the file itself
+  // and only call it gone when the server says so.
+  const checkRefPreview = async (fileId: string) => {
+    let gone = false;
+    try {
+      const res = await fetch(fileContentPath(fileId), { method: "HEAD", credentials: "include" });
+      gone = res.status === 404 || res.status === 403;
+    } catch {
+      gone = false;
+    }
+    const add = (prev: ReadonlySet<string>) => (prev.has(fileId) ? prev : new Set([...prev, fileId]));
+    if (gone) setMissingRefs(add);
+    else setUnshownRefs(add);
   };
 
   const onSearchImages = (e: React.FormEvent) => {
     e.preventDefault();
-    setImageQuery(imageSearch.trim());
     void loadImages({ search: imageSearch });
   };
 
@@ -2023,6 +2039,7 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
     if (typeof window !== "undefined" && !window.confirm(`Delete the look "${look.name}"? Pictures already made with it are kept.`)) return;
     setBusy(true);
     setError(null);
+    setSaveNote(null);
     try {
       const res = (await deleteLook({ id: look.id })) as LooksResponse;
       setLooks(res.looks ?? []);
@@ -2416,6 +2433,7 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
               <div aria-label="Picked reference pictures" style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                 {draft.referenceFileIds.map((id, i) => {
                   const missing = missingRefs.has(id);
+                  const unshown = !missing && unshownRefs.has(id);
                   return (
                     <div key={id} style={{ display: "flex", flexDirection: "column", gap: 4, width: 120 }}>
                       <span style={{ fontSize: 11, opacity: 0.7 }}>Picture {i + 1}</span>
@@ -2423,13 +2441,17 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
                         <div style={{ ...thumb, display: "flex", alignItems: "center", justifyContent: "center", textAlign: "center", fontSize: 11, color: "#a61e4d", background: "#fff0f6", width: 120 }}>
                           This picture is no longer in Files
                         </div>
+                      ) : unshown ? (
+                        <div style={{ ...thumb, display: "flex", alignItems: "center", justifyContent: "center", textAlign: "center", fontSize: 11, background: "#f1f3f5", width: 120 }}>
+                          This picture can't be shown right now
+                        </div>
                       ) : (
                         <img
                           src={thumbnailPathFor(fileContentPath(id))}
                           loading="lazy"
                           alt={`Reference picture ${i + 1}`}
                           style={thumb}
-                          onError={() => markRefMissing(id)}
+                          onError={() => void checkRefPreview(id)}
                         />
                       )}
                       <select
@@ -2442,7 +2464,7 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
                           <option key={o.value} value={o.value}>{o.label}</option>
                         ))}
                       </select>
-                      <button type="button" style={secondaryBtn} aria-label={`Remove picture ${i + 1}`} onClick={() => removeRef(i)}>
+                      <button type="button" style={secondaryBtn} aria-label={`Remove picture ${i + 1}`} disabled={busy} onClick={() => removeRef(i)}>
                         Remove
                       </button>
                     </div>
@@ -2460,6 +2482,7 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
                 aria-label="Search your pictures"
                 placeholder="Search your pictures by name"
                 value={imageSearch}
+                maxLength={160}
                 onChange={(e) => setImageSearch(e.target.value)}
                 style={{ ...input, flex: 1 }}
               />

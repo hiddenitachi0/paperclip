@@ -255,8 +255,24 @@ describe("Media Studio looks page: detailed looks", () => {
     );
   });
 
-  it("shows a deleted picture as no longer in Files, can remove it, and shows the note after saving", async () => {
-    actions["looks.save"] = vi.fn(async () => ({ looks: [], note: "1 picture was removed because it is no longer in Files." }));
+  // Stubs the page's fetches: the Files list, plus what the server says about one picture's file.
+  function stubFiles(fileStatus: number | "network-error", list: Record<string, unknown> = {}) {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (String(url).includes("/content")) {
+        expect(init?.method).toBe("HEAD");
+        if (fileStatus === "network-error") throw new TypeError("network down");
+        return new Response(null, { status: fileStatus });
+      }
+      return new Response(
+        JSON.stringify({ artifacts: [{ title: "Maja face", contentPath: `/api/attachments/${PIC_A}/content`, mediaKind: "image" }], ...list }),
+        { status: 200 },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  async function failFirstPreview() {
     root = createRoot(container);
     root.render(<MediaStudioLooksPage context={{ companyId: COMPANY } as never} />);
     await flush();
@@ -264,11 +280,42 @@ describe("Media Studio looks page: detailed looks", () => {
     await flush();
     container.querySelector<HTMLImageElement>('img[alt="Reference picture 1"]')!.dispatchEvent(new Event("error"));
     await flush();
+  }
+
+  it("shows a deleted picture as no longer in Files only when the server says it is gone, can remove it, and shows the note after saving", async () => {
+    stubFiles(404);
+    actions["looks.save"] = vi.fn(async () => ({ looks: [], note: "1 picture was removed because it is no longer in Files." }));
+    await failFirstPreview();
     expect(container.textContent).toContain("This picture is no longer in Files");
     expect(container.querySelector('button[aria-label="Remove picture 1"]')).not.toBeNull();
     buttonNamed(container, "Save look").click();
     await flush();
     expect(container.querySelector('[role="status"]')!.textContent).toBe("1 picture was removed because it is no longer in Files.");
+  });
+
+  it.each([413, 500, 401, "network-error" as const])(
+    "does not call a picture deleted when its preview fails and the server answers %s",
+    async (status) => {
+      stubFiles(status);
+      await failFirstPreview();
+      expect(container.textContent).not.toContain("no longer in Files");
+      expect(container.textContent).toContain("This picture can't be shown right now");
+      expect(container.querySelector('button[aria-label="Remove picture 1"]')).not.toBeNull();
+    },
+  );
+
+  it("clears the save note when a look is deleted", async () => {
+    stubFiles(404);
+    actions["looks.save"] = vi.fn(async () => ({ looks: [OLD_LOOK], note: "1 picture was removed because it is no longer in Files." }));
+    actions["looks.delete"] = vi.fn(async () => ({ looks: [] }));
+    vi.stubGlobal("confirm", () => true);
+    await failFirstPreview();
+    buttonNamed(container, "Save look").click();
+    await flush();
+    expect(container.querySelector('[role="status"]')).not.toBeNull();
+    buttonNamed(container, "Delete").click();
+    await flush();
+    expect(container.querySelector('[role="status"]')).toBeNull();
   });
 
   it("searches pictures by name and loads more pages", async () => {
@@ -296,6 +343,42 @@ describe("Media Studio looks page: detailed looks", () => {
     const lastUrl = String(fetchMock.mock.calls[fetchMock.mock.calls.length - 1]![0]);
     expect(lastUrl).toContain("q=dress");
     expect(lastUrl).toContain("qScope=filename");
+    expect(lastUrl).not.toContain("cursor=");
+    // Load more after a search asks for the same words together with the page it was given.
+    buttonNamed(container, "Load more pictures").click();
+    await flush();
+    const moreUrl = String(fetchMock.mock.calls[fetchMock.mock.calls.length - 1]![0]);
+    expect(moreUrl).toContain("q=dress");
+    expect(moreUrl).toContain("qScope=filename");
+    expect(moreUrl).toContain("cursor=next-page");
+  });
+
+  it("keeps the old words with the old list when a search fails", async () => {
+    let failNext = false;
+    const fetchMock = vi.fn(async (url: string) => {
+      if (failNext) return new Response("boom", { status: 500 });
+      const u = new URL(url, "http://x");
+      return new Response(
+        JSON.stringify({
+          artifacts: [{ title: u.searchParams.get("q") ? "Found" : "Maja face", contentPath: `/api/attachments/${PIC_A}/content`, mediaKind: "image" }],
+          nextCursor: "next-page",
+        }),
+        { status: 200 },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await openNewLook();
+    setValue(container.querySelector<HTMLInputElement>('input[aria-label="Search your pictures"]')!, "dress");
+    await flush();
+    failNext = true;
+    buttonNamed(container, "Search").click();
+    await flush();
+    failNext = false;
+    buttonNamed(container, "Load more pictures").click();
+    await flush();
+    const moreUrl = String(fetchMock.mock.calls[fetchMock.mock.calls.length - 1]![0]);
+    expect(moreUrl).not.toContain("q=dress");
+    expect(moreUrl).toContain("cursor=next-page");
   });
 });
 
