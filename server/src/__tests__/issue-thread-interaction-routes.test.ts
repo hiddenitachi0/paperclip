@@ -1,6 +1,6 @@
 import express from "express";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 const ASSIGNEE_AGENT_ID = "11111111-1111-4111-8111-111111111111";
@@ -183,6 +183,15 @@ async function createApp(actor: Record<string, unknown> = {
 }
 
 describe.sequential("issue thread interaction routes", () => {
+  // The first import of routes/issues.js pulls in the whole route/service graph and transforms it
+  // cold, which blew the default 5 s test timeout on CI (DUR-4886). Pay that cost once, here, with
+  // a generous hook timeout; the per-test vi.resetModules() below then only re-evaluates modules
+  // whose transforms are already cached.
+  beforeAll(async () => {
+    registerModuleMocks();
+    await createApp();
+  }, 60_000);
+
   beforeEach(() => {
     vi.resetModules();
     vi.doUnmock("../routes/issues.js");
