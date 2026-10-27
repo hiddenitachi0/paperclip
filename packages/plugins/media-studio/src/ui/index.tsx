@@ -28,6 +28,7 @@ import {
   type ReadinessItem,
 } from "./storyline-flow.js";
 import { FilmPanel, ReadinessChecklist, StepBar, SuggestionsBanner } from "./storyline-steps.js";
+import { RenderShotModels } from "./render-shot-models.js";
 import { AspectPicker } from "./strip-panel.js";
 import { ExportSection, TimelineEditor } from "./timeline-editor.js";
 import { VideoModelPicker, type SogniVideoModelRow } from "./video-model-picker.js";
@@ -4853,6 +4854,20 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                       )}
                     </details>
                       </div>
+                    )}
+
+                    {base && (
+                      <RenderShotModels
+                        key={`shot-models-${selected.id}`}
+                        apiBase={base}
+                        editable={editable}
+                        filmProviderId={selected.providerId}
+                        filmModel={selected.model}
+                        sogniModels={sogniVideoModels}
+                        sogniNote={sogniVideoNote}
+                        reloadKey={timelineReload}
+                        onChanged={refreshPage}
+                      />
                     )}
 
                     {base && <ExportSection key={`export-${selected.id}`} apiBase={base} editable={selected.status !== "stitching"} storylineStatus={selected.status} reloadKey={timelineReload} onChanged={refreshPage} />}
