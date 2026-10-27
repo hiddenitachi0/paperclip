@@ -290,3 +290,54 @@ describe("models.analyseImage", () => {
     await expect(handlers["models.analyseImage"]({ ...input, companyId: "company-b" }, scope)).rejects.toBeInstanceOf(InvocationScopeDeniedError);
   });
 });
+
+describe("mediaLibrary (read-only)", () => {
+  const methods = [
+    ["mediaLibrary.listSetups", { companyId: "company-a", kind: "video", approvedOnly: true }],
+    ["mediaLibrary.getSetup", { companyId: "company-a", setupId: "s1" }],
+    ["mediaLibrary.getProjectDefaults", { companyId: "company-a" }],
+    ["mediaLibrary.listLoras", { companyId: "company-a" }],
+    ["mediaLibrary.resolve", { companyId: "company-a", setupId: "s1", approvedOnly: true }],
+  ] as const;
+
+  function services() {
+    return {
+      mediaLibrary: {
+        listSetups: vi.fn(async () => []),
+        getSetup: vi.fn(async () => null),
+        getProjectDefaults: vi.fn(async () => ({
+          companyId: "company-a",
+          defaultImageSetupId: null,
+          defaultVideoSetupId: null,
+          defaultContentRating: "sfw",
+          defaultContinuityMode: "stills",
+        })),
+        listLoras: vi.fn(async () => []),
+        resolve: vi.fn(async () => null),
+      },
+    };
+  }
+
+  it("needs media.library.read for every method", async () => {
+    const svc = services();
+    const handlers = createHostClientHandlers({ pluginId: "paperclip.test", capabilities: ["http.outbound"], services: svc as unknown as HostServices });
+    for (const [method, params] of methods) {
+      await expect((handlers[method] as (p: unknown) => Promise<unknown>)(params)).rejects.toBeInstanceOf(CapabilityDeniedError);
+    }
+    for (const fn of Object.values(svc.mediaLibrary)) expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("passes the call through with the capability, and holds a UI action to its company", async () => {
+    const svc = services();
+    const handlers = createHostClientHandlers({ pluginId: "paperclip.test", capabilities: ["media.library.read"], services: svc as unknown as HostServices });
+    for (const [method, params] of methods) {
+      await (handlers[method] as (p: unknown) => Promise<unknown>)(params);
+    }
+    expect(svc.mediaLibrary.listSetups).toHaveBeenCalledWith({ companyId: "company-a", kind: "video", approvedOnly: true });
+    expect(svc.mediaLibrary.resolve).toHaveBeenCalledWith({ companyId: "company-a", setupId: "s1", approvedOnly: true });
+    await expect(
+      handlers["mediaLibrary.listSetups"]({ companyId: "company-b" }, { invocationScope: { companyId: "company-a" } }),
+    ).rejects.toBeInstanceOf(InvocationScopeDeniedError);
+    expect(svc.mediaLibrary.listSetups).toHaveBeenCalledTimes(1);
+  });
+});

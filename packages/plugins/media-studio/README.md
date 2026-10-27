@@ -272,6 +272,19 @@ The approval it files is a normal `request_board_approval`, so it also shows up 
   background removal). "Place product" sends the room as picture 1 and products as 2.., then puts the result back
   only inside the area (`mask-composite.ts`), so the rest of the room is pixel-identical.
 
+## Model setups and the LoRA library (film studio, Phase 1)
+
+- A **model setup** is a named recipe kept in core tables, not plugin state: service + exact model id + LoRAs
+  from the company's **LoRA library**, each with an explicit strength, plus params (prompt expansion always set).
+  Every company starts with editable drafts: Natural (MiniMax H3 + Better Motion 0.6), Natural face & speech
+  (H3 + Natural Face & Speech 0.6), Action (H3 + Better Motion 0.8), Romantic / calm (Wan 3 start + end, no
+  LoRA) and Stills (Krea 2). Owners and admins edit them under `/api/companies/:id/media/...`; agents only see
+  approved ones. Wan 3 takes no LoRA anywhere, and filter-bypass LoRAs can never be saved.
+- The worker reads them through `ctx.mediaLibrary` (capability `media.library.read`, read-only): `listSetups`,
+  `getSetup`, `getProjectDefaults`, `listLoras` and `resolve` (checked on the server against the company's own
+  LoRAs). Pass `approvedOnly: true` on every path an agent drives. The Create tab, tools and Identities are moved
+  onto it by the later Phase 1 cards; today's look and render paths are unchanged.
+
 ## How it fits together (zero core edits)
 
 The plugin uses only existing Paperclip REST routes from its UI (running under the user

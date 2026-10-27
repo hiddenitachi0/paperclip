@@ -60,6 +60,10 @@ import type {
   PluginAgentMediaSpendCheck,
   PluginImageAnalysisInput,
   PluginImageAnalysisResult,
+  PluginMediaLora,
+  PluginMediaProjectDefaults,
+  PluginMediaResolvedSetup,
+  PluginMediaSetup,
 } from "./protocol.js";
 
 // ---------------------------------------------------------------------------
@@ -1869,6 +1873,29 @@ export interface PluginModelsClient {
 }
 
 /**
+ * `ctx.mediaLibrary` — read the company's saved Media Studio model setups
+ * ("Action" = MiniMax H3 + Better Motion at 0.8), its LoRA library and its
+ * new-project defaults. Requires `media.library.read`. Read-only: setups and
+ * LoRAs are changed on Paperclip's own pages, never by a plugin.
+ *
+ * Rows are only ever the given company's. Pass `approvedOnly: true` on every
+ * path an agent drives (tools, jobs): agents only use approved setups.
+ * `resolve` checks the setup on the host against the company's own LoRA rows
+ * and returns exactly what a run sends (provider refs, explicit strengths,
+ * params), with `usable: false` and plain-language `problems` when it cannot
+ * be used.
+ */
+export interface PluginMediaLibraryClient {
+  listSetups(companyId: string, options?: { kind?: "image" | "video"; approvedOnly?: boolean }): Promise<PluginMediaSetup[]>;
+  /** null when there is no such setup in this company (or it is not approved and `approvedOnly` is set). */
+  getSetup(companyId: string, setupId: string, options?: { approvedOnly?: boolean }): Promise<PluginMediaSetup | null>;
+  getProjectDefaults(companyId: string): Promise<PluginMediaProjectDefaults>;
+  /** The library's live LoRAs (archived and refused ones are left out). */
+  listLoras(companyId: string): Promise<PluginMediaLora[]>;
+  resolve(companyId: string, setupId: string, options?: { approvedOnly?: boolean }): Promise<PluginMediaResolvedSetup | null>;
+}
+
+/**
  * `ctx.billing` — reserve spend against the same company budget and shared
  * Media Studio cap the Create tab uses (DUR-4441). Requires
  * `billing.media_studio_direct.reserve`.
@@ -2134,6 +2161,9 @@ export interface PluginContext {
 
   /** Picture analysis with the company's saved models, run by the host. Requires `models.image_analysis.run`. */
   models: PluginModelsClient;
+
+  /** Media Studio's saved model setups, LoRA library and project defaults (read-only). Requires `media.library.read`. */
+  mediaLibrary: PluginMediaLibraryClient;
 
   /** Company files not tied to a task. Requires `company.files.create` / `company.files.read`. */
   files: PluginFilesClient;
