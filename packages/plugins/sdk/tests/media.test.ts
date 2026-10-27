@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ANATOMY_SLIDER_LORA_IDS,
   FILTER_BYPASS_LORA_IDS,
+  FLAGGED_LORA_IDS,
   REVIEWED_LORA_IDS,
   SAFE_FOR_WORK_AVOID,
   SOGNI_LORA_CATALOG_URL,
@@ -70,6 +71,22 @@ describe("media: LoRA deny rules", () => {
     expect(evaluateLora({ id: "krea2-aberrant", nsfw: true, sexual: true }, "mature").allowed).toBe(true);
   });
 
+  it("refuses the three LoRAs Sogni flagged at review by id alone, with no flags passed", () => {
+    expect(FLAGGED_LORA_IDS).toEqual(["krea2-aberrant", "krea2-realism-engine", "h3-vbvr-video-reasoning"]);
+    for (const id of FLAGGED_LORA_IDS) {
+      expect(REVIEWED_LORA_IDS.has(id)).toBe(true);
+      expect(evaluateLora({ id }, "sfw")).toMatchObject({ allowed: false, reason: "nsfw-flag", alwaysRefused: false });
+      expect(evaluateLora({ id, nsfw: false, sexual: false, personal: true }, "sfw").allowed).toBe(false);
+      expect(evaluateLora({ id }, "mature").allowed).toBe(true);
+    }
+  });
+
+  it("refuses filter-bypass names with other separators or dash characters in every mode", () => {
+    for (const name of ["filter.bypass 4", "Filter\u2013Bypass", "filter\u2014bypass", "FILTER_BYPASS"]) {
+      expect(evaluateLora({ id: "something-new", name }, "mature")).toMatchObject({ allowed: false, reason: "filter-bypass" });
+    }
+  });
+
   it("refuses the whole Mystic X family in SFW, by id or name", () => {
     for (const id of ["krea2-mystic-x", "h3-mystic-xxx-v4", "h3-mystic-xxx-v5", "moss-mystic-x"]) {
       // Even if Sogni dropped its flags.
@@ -119,6 +136,8 @@ describe("media: model content tags", () => {
     "seedream-5-0-pro-uncensored",
     "ltx23-22b-10eros-v1.4-fp8mixed_i2v",
     "ltx23-eros",
+    "sogni/dark_beast_x",
+    "flux1-darkbeast",
   ];
   it.each(refused)("refuses %s in SFW and allows it in mature", (id) => {
     expect(modelContentTags({ id }).length).toBeGreaterThan(0);

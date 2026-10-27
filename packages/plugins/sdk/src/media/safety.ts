@@ -52,8 +52,16 @@ export const FILTER_BYPASS_LORA_IDS: readonly string[] = ["krea2-filter-bypass-2
 /** Anatomy sliders that Sogni leaves unflagged. Refused in SFW. */
 export const ANATOMY_SLIDER_LORA_IDS: readonly string[] = ["krea2-breast", "krea2-chest-firmness", "krea2-nipple-projection"];
 
+/**
+ * LoRAs that were SFW-refused in the 24 Oct 2026 snapshot only because Sogni
+ * flagged them (ui.nsfw / ui.sexual). Recorded by id so the refusal still holds
+ * when a caller has only the pick (no catalog row) or Sogni drops the flag.
+ */
+export const FLAGGED_LORA_IDS: readonly string[] = ["krea2-aberrant", "krea2-realism-engine", "h3-vbvr-video-reasoning"];
+
 // A future "filter-bypass-4" is refused too: id or name says filter bypass.
-const FILTER_BYPASS = /filter[\s_-]*bypass/i;
+// Any run of whitespace, punctuation or dash-like characters may separate the words.
+const FILTER_BYPASS = /filter[\s._\-\u2010-\u2015\u2212]*bypass/i;
 // Mystic X, any host family (krea2-mystic-x, h3-mystic-xxx-v5, moss-mystic-x).
 const MYSTIC_X = /mystic[\s_-]*x/i;
 
@@ -159,6 +167,9 @@ export function evaluateLora(lora: LoraPolicyInput, mode: ContentMode): PolicyVe
   if (mode !== "sfw") return ALLOWED;
   if (lora.nsfw === true) return deny("nsfw-flag", `The LoRA "${label}" is marked not safe for work by Sogni, so it cannot be used in a safe-for-work film.`);
   if (lora.sexual === true) return deny("sexual-flag", `The LoRA "${label}" is marked sexual by Sogni, so it cannot be used in a safe-for-work film.`);
+  if (FLAGGED_LORA_IDS.includes(lc(lora.id))) {
+    return deny("nsfw-flag", `The LoRA "${label}" was marked not safe for work when it was reviewed, so it cannot be used in a safe-for-work film.`);
+  }
   if (ANATOMY_SLIDER_LORA_IDS.includes(lc(lora.id))) {
     return deny("anatomy-slider", `The LoRA "${label}" changes body anatomy and cannot be used in a safe-for-work film.`);
   }
@@ -189,7 +200,7 @@ export interface ModelPolicyInput {
 // By id because Sogni leaves some of these untagged (wan3.0-spicy-video,
 // seedream-5-0-pro-uncensored). Sogni's own "uncensored" tag is NOT used on its
 // own: it sits on most models, including the default Z-Image Turbo.
-const DARK_BEAST = /^dark[_-]?beast/i;
+const DARK_BEAST = /dark[_-]?beast/i;
 const ID_UNCENSORED = /(^|[^a-z0-9])uncensored($|[^a-z0-9])/i;
 const ID_SPICY = /(^|[^a-z0-9])spicy($|[^a-z0-9])/i;
 // 10Eros (ltx23-22b-10eros-...) and its alias ltx23-eros.
