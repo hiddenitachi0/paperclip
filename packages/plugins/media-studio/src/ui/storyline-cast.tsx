@@ -188,7 +188,7 @@ function IdentityPicker(props: {
         data-testid={`cast-picker-${member.id}`}
       >
         {current?.thumbFileId ? <img src={thumbPath(current.thumbFileId)} alt="" style={thumb} /> : <span style={thumb} />}
-        <span>{current ? current.name : missing ? "Saved person no longer exists" : "Not linked"}</span>
+        <span>{current ? current.name : missing ? "Saved person no longer exists" : "Link to a person"}</span>
       </button>
       {open && (
         <div role="listbox" aria-label={`Pick a saved person for ${member.name}`} style={{ ...card, position: "absolute", top: "100%", left: 0, zIndex: 5, background: "var(--background, #fff)", minWidth: 240, maxHeight: 280, overflowY: "auto", padding: 6, gap: 4 }}>
@@ -273,31 +273,9 @@ export function StorylineCastSection(props: {
     [base, props.onSaved],
   );
 
-  const saveShot = useCallback(
-    async (shotId: string, castIds: string[] | null) => {
-      setBusy(true);
-      setError(null);
-      try {
-        const saved = await storylineFetchJson(`${base}/shots/${shotId}/cast`, { method: "PUT", body: JSON.stringify({ castIds }) }, "saving who is in the shot");
-        await props.onSaved(saved);
-      } catch (e) {
-        setError(errorText(e));
-      } finally {
-        setBusy(false);
-      }
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [base, props.onSaved],
-  );
-
   const disabled = busy || !editable;
-  const sortedShots = shots.slice().sort((a, b) => a.orderIndex - b.orderIndex);
   const linked = cast.members.filter((m) => m.identityId && identities.some((i) => i.id === m.identityId));
   const example = linked[0]?.name ?? cast.members[0]?.name ?? "Maja";
-  const crowded = sortedShots.filter((shot) => {
-    const { castIds } = shotCastFor(shot, cast, identities);
-    return castIds.filter((id) => linked.some((m) => m.id === id)).length > 1;
-  });
 
   return (
     <div style={card} data-testid="cast-section">
@@ -380,52 +358,162 @@ export function StorylineCastSection(props: {
         </div>
       )}
 
-      {cast.members.length > 0 && sortedShots.length > 0 && (
-        <details data-testid="shot-cast">
-          <summary style={{ cursor: "pointer", fontSize: 12, fontWeight: 600 }}>Who is in each shot</summary>
-          <p style={muted}>
-            Found from the names in each shot's description. Tick or untick to change it; "Use the description" goes back to finding them by name.
-          </p>
-          {crowded.length > 0 && (
-            <div style={noticeBox}>
-              {crowded.length === 1 ? "One shot has" : `${crowded.length} shots have`} more than one saved person. Picture models find that harder: both faces are sent
-              first, but check those pictures closely, and pick a picture model with more slots if a face is left out.
-            </div>
-          )}
-          {sortedShots.map((shot) => {
-            const { castIds, picked } = shotCastFor(shot, cast, identities);
-            return (
-              <div key={shot.id} data-testid={`shot-cast-row-${shot.id}`} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 12, borderTop: "1px solid rgba(128,128,128,0.15)", paddingTop: 4 }}>
-                <span style={{ flex: "1 1 200px", minWidth: 0 }}>
-                  <strong>Shot {shot.orderIndex + 1}.</strong> {shot.prompt.length > 90 ? `${shot.prompt.slice(0, 90)}...` : shot.prompt}
-                </span>
-                {cast.members.map((m) => (
-                  <label key={m.id} style={{ display: "flex", alignItems: "center", gap: 3 }}>
-                    <input
-                      type="checkbox"
-                      checked={castIds.includes(m.id)}
-                      disabled={disabled}
-                      aria-label={`${m.name} is in shot ${shot.orderIndex + 1}`}
-                      onChange={(e) => {
-                        const next = e.target.checked ? [...castIds, m.id] : castIds.filter((id) => id !== m.id);
-                        void saveShot(shot.id, next);
-                      }}
-                    />
-                    {m.name}
-                  </label>
-                ))}
-                {picked ? (
-                  <button type="button" style={ghostBtn} disabled={disabled} onClick={() => void saveShot(shot.id, null)}>
-                    Use the description
-                  </button>
-                ) : (
-                  <span style={{ color: "#868e96" }}>{castIds.length > 0 ? "found by name" : "nobody named"}</span>
-                )}
-              </div>
-            );
-          })}
-        </details>
+      <ShotCastConfirm base={base} cast={cast} shots={shots} identities={identities} editable={editable} onSaved={props.onSaved} />
+    </div>
+  );
+}
+
+// ─── Who is in each shot (chips + confirm) ───────────────────────────────────
+
+const chipBase: React.CSSProperties = { padding: "2px 10px", borderRadius: 12, fontSize: 12, cursor: "pointer", border: "1px solid transparent" };
+const chipOn: React.CSSProperties = { ...chipBase, background: "#e7f5ff", color: "#1971c2", borderColor: "#a5d8ff", fontWeight: 600 };
+const chipOff: React.CSSProperties = { ...chipBase, background: "transparent", color: "#868e96", borderColor: "#ced4da" };
+
+/**
+ * Each shot's cast as chips: the people named in the shot's description are
+ * suggested; nothing is final until someone confirms it (one shot, or all at
+ * once). A confirmed shot keeps its cast even if the description changes.
+ * Shows the server's own words when it refuses a change.
+ */
+export function ShotCastConfirm(props: {
+  /** /api/companies/:companyId/video-storylines/:storylineId */
+  base: string;
+  cast: StorylineCast;
+  shots: CastShot[];
+  identities: CastIdentityOption[];
+  editable: boolean;
+  onSaved: (storyline: unknown) => void | Promise<void>;
+  /** Shown beside a character who is not linked to a saved person (the storyboard step sends people to step 2). */
+  onLinkPerson?: () => void;
+}) {
+  const { base, cast, shots, identities } = props;
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState<string | null>(null);
+
+  const sortedShots = useMemo(() => shots.slice().sort((a, b) => a.orderIndex - b.orderIndex), [shots]);
+  const rows = sortedShots.map((shot) => ({ shot, ...shotCastFor(shot, cast, identities) }));
+  const unconfirmed = rows.filter((r) => !r.picked);
+  const disabled = busy || !props.editable;
+  const linkedIds = new Set(cast.members.filter((m) => m.identityId && identities.some((i) => i.id === m.identityId)).map((m) => m.id));
+  const crowded = rows.filter((r) => r.castIds.filter((id) => linkedIds.has(id)).length > 1);
+  const unlinkedInShots = cast.members.filter((m) => !linkedIds.has(m.id) && rows.some((r) => r.castIds.includes(m.id)));
+
+  const save = useCallback(
+    async (changes: Array<{ shotId: string; castIds: string[] | null }>, doneText: string) => {
+      setBusy(true);
+      setError(null);
+      setDone(null);
+      let saved = 0;
+      try {
+        // One after another: each change rewrites the same stored settings.
+        for (const change of changes) {
+          const storyline = await storylineFetchJson(`${base}/shots/${change.shotId}/cast`, { method: "PUT", body: JSON.stringify({ castIds: change.castIds }) }, "saving who is in the shot");
+          await props.onSaved(storyline);
+          saved += 1;
+        }
+        setDone(doneText);
+      } catch (e) {
+        setError(changes.length > 1 && saved > 0 ? `${errorText(e)}\n${saved} of ${changes.length} shots were confirmed before this stopped.` : errorText(e));
+      } finally {
+        setBusy(false);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [base, props.onSaved],
+  );
+
+  if (cast.members.length === 0 || sortedShots.length === 0) return null;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }} data-testid="shot-cast">
+      <div>
+        <strong style={{ fontSize: 13 }}>Who is in each shot</strong>
+        <p style={muted}>
+          We suggest people by the names in each shot's description. Click a name to add or remove it. Pictures and clips use the people you confirm, so check each shot.
+        </p>
+      </div>
+      {error && <div style={errorBox} role="alert" data-testid="shot-cast-error">{error}</div>}
+      {done && !error && <div style={noticeBox} role="status">{done}</div>}
+      {!props.editable && <p style={muted}>The cast cannot be changed while the video is rendering.</p>}
+      {unconfirmed.length > 0 ? (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <button
+            type="button"
+            style={secondaryBtn}
+            disabled={disabled}
+            data-testid="confirm-all-cast"
+            onClick={() => void save(unconfirmed.map((r) => ({ shotId: r.shot.id, castIds: r.castIds })), `Confirmed the cast for ${unconfirmed.length === 1 ? "1 shot" : `${unconfirmed.length} shots`}.`)}
+          >
+            Confirm suggested cast for all shots
+          </button>
+          <span style={muted}>{unconfirmed.length === 1 ? "1 shot is" : `${unconfirmed.length} shots are`} still waiting for you to confirm.</span>
+        </div>
+      ) : (
+        <p style={{ ...muted, color: "#2b8a3e" }} data-testid="all-cast-confirmed">The cast is confirmed for every shot.</p>
       )}
+      {unlinkedInShots.length > 0 && (
+        <div style={noticeBox} data-testid="cast-unlinked-note">
+          {unlinkedInShots.map((m) => m.name).join(", ")} {unlinkedInShots.length === 1 ? "is" : "are"} not linked to a person, so they are drawn from the
+          description only and may look different from shot to shot.{" "}
+          {props.onLinkPerson && (
+            <button type="button" style={secondaryBtn} onClick={props.onLinkPerson}>
+              Link to a person
+            </button>
+          )}
+        </div>
+      )}
+      {crowded.length > 0 && (
+        <div style={noticeBox}>
+          {crowded.length === 1 ? "One shot has" : `${crowded.length} shots have`} more than one saved person. Picture models find that harder: both faces are sent first, but
+          check those pictures closely, and pick a picture model with more slots if a face is left out.
+        </div>
+      )}
+      {rows.map(({ shot, castIds, picked }) => (
+        <div
+          key={shot.id}
+          data-testid={`shot-cast-row-${shot.id}`}
+          style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 12, borderTop: "1px solid rgba(128,128,128,0.15)", paddingTop: 4 }}
+        >
+          <span style={{ flex: "1 1 200px", minWidth: 0 }}>
+            <strong>Shot {shot.orderIndex + 1}.</strong> {shot.prompt.length > 90 ? `${shot.prompt.slice(0, 90)}...` : shot.prompt}
+          </span>
+          <span style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+            {cast.members.map((m) => {
+              const on = castIds.includes(m.id);
+              return (
+                <button
+                  key={m.id}
+                  type="button"
+                  style={on ? chipOn : chipOff}
+                  aria-pressed={on}
+                  disabled={disabled}
+                  aria-label={`${m.name} is in shot ${shot.orderIndex + 1}`}
+                  data-testid={`shot-cast-chip-${shot.id}-${m.id}`}
+                  onClick={() => void save([{ shotId: shot.id, castIds: on ? castIds.filter((id) => id !== m.id) : [...castIds, m.id] }], "Saved.")}
+                >
+                  {on ? m.name : `+ ${m.name}`}
+                </button>
+              );
+            })}
+          </span>
+          {picked ? (
+            <>
+              <span style={{ color: "#2b8a3e" }}>Confirmed</span>
+              <button type="button" style={ghostBtn} disabled={disabled} onClick={() => void save([{ shotId: shot.id, castIds: null }], "Back to the suggestion from the description.")}>
+                Use the description
+              </button>
+            </>
+          ) : (
+            <>
+              <span style={{ color: "#868e96" }}>{castIds.length > 0 ? "Suggested" : "Nobody named"}</span>
+              <button type="button" style={ghostBtn} disabled={disabled} data-testid={`confirm-cast-${shot.id}`} onClick={() => void save([{ shotId: shot.id, castIds }], `Confirmed the cast for shot ${shot.orderIndex + 1}.`)}>
+                {castIds.length > 0 ? "Confirm" : "Confirm nobody"}
+              </button>
+            </>
+          )}
+        </div>
+      ))}
     </div>
   );
 }

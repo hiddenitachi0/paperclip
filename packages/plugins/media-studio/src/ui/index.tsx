@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { PluginCompanySettingsPageProps, PluginDetailTabProps, PluginHostContext, PluginPageProps, PluginSidebarProps } from "@paperclipai/plugin-sdk/ui";
 import { usePluginAction, useHostNavigation, PluginConfigForm } from "@paperclipai/plugin-sdk/ui";
 import { MediaStudioEditTab } from "./edit-tab.js";
-import { CAST_IDENTITIES_ACTION, EMPTY_CAST, StorylineCastSection, castIdentityOptions, shotCastLabels, type CastIdentityOption, type StorylineCast } from "./storyline-cast.js";
+import { CAST_IDENTITIES_ACTION, EMPTY_CAST, ShotCastConfirm, StorylineCastSection, castIdentityOptions, shotCastLabels, type CastIdentityOption, type StorylineCast } from "./storyline-cast.js";
 import { BulkProgressBar, StoryboardPanel, overApprovalLimit, useStoryboardActions, type StoryboardSummary } from "./storyboard-panel.js";
 import { AdvancedFeaturesToggle, AiDirectorSection } from "./director-panel.js";
 import { StoryWriterSection } from "./story-writer-panel.js";
@@ -4659,6 +4659,19 @@ export function MediaStudioStorylinesPage({ context }: PluginPageProps) {
                     looks={looks.map((l) => ({ id: l.id, name: l.name }))}
                     storylineLookName={looks.find((l) => l.id === selected.pictureSettings?.lookId)?.name ?? null}
                     shotCast={shotCastLabels(detailFor === selectedId ? shots : [], selected.cast ?? EMPTY_CAST, castIdentities)}
+                    castConfirm={
+                      <ShotCastConfirm
+                        base={base}
+                        cast={selected.cast ?? EMPTY_CAST}
+                        shots={detailFor === selectedId ? shots : []}
+                        identities={castIdentities}
+                        editable={editable}
+                        onSaved={async () => {
+                          await loadStorylines();
+                        }}
+                        onLinkPerson={() => setActiveStep("cast")}
+                      />
+                    }
                     onShotLook={(shotId, pictureLookId) =>
                       void (async () => {
                         setError(null);
