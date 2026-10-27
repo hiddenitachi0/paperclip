@@ -1101,6 +1101,14 @@ async function listUnresolvedBlockerIssueIds(
     )
     .then((rows) => rows.map((row) => row.id));
 }
+/**
+ * The project's default goal, which a new or moved issue inherits.
+ *
+ * Cross-company isolation (docs/security/cross-company-isolation.md): a
+ * project link written before assertProjectReferencesInCompany existed may
+ * point at another company's goal. The goal must be in the issue's company,
+ * otherwise there is no default goal, so an issue never inherits it.
+ */
 async function getProjectDefaultGoalId(
   db: ProjectGoalReader,
   companyId: string,
@@ -1108,11 +1116,31 @@ async function getProjectDefaultGoalId(
 ) {
   if (!projectId) return null;
   const row = await db
-    .select({ goalId: projects.goalId })
+    .select({ goalId: goals.id })
     .from(projects)
+    .innerJoin(goals, and(eq(goals.id, projects.goalId), eq(goals.companyId, companyId)))
     .where(and(eq(projects.id, projectId), eq(projects.companyId, companyId)))
     .then((rows) => rows[0] ?? null);
   return row?.goalId ?? null;
+}
+
+/**
+ * `goalId` if that goal is in `companyId`, otherwise null. Used to ignore an
+ * issue's stored goal that points into another company (written before the
+ * reference guards existed).
+ */
+async function goalIdInCompany(
+  db: ProjectGoalReader,
+  companyId: string,
+  goalId: string | null | undefined,
+) {
+  if (!goalId) return null;
+  const row = await db
+    .select({ id: goals.id })
+    .from(goals)
+    .where(and(eq(goals.id, goalId), eq(goals.companyId, companyId)))
+    .then((rows) => rows[0] ?? null);
+  return row?.id ?? null;
 }
 
 async function getWorkspaceInheritanceIssue(
@@ -6195,18 +6223,22 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
 
       const runUpdate = async (tx: any) => {
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, existing.companyId);
-        const [currentProjectGoalId, nextProjectGoalId] = await Promise.all([
+        const [currentProjectGoalId, nextProjectGoalId, currentGoalId] = await Promise.all([
           getProjectDefaultGoalId(tx, existing.companyId, existing.projectId),
           getProjectDefaultGoalId(
             tx,
             existing.companyId,
             issueData.projectId !== undefined ? issueData.projectId : existing.projectId,
           ),
+          // A stored goal in another company (inherited before the reference
+          // guards existed) is treated as no goal, so this update replaces it
+          // with the usual fallback instead of keeping it.
+          goalIdInCompany(tx, existing.companyId, existing.goalId),
         ]);
 
         patch.goalId = resolveNextIssueGoalId({
           currentProjectId: existing.projectId,
-          currentGoalId: existing.goalId,
+          currentGoalId,
           currentProjectGoalId,
           projectId: issueData.projectId,
           goalId: issueData.goalId,
@@ -7462,15 +7494,20 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
       }> = [];
       const visited = new Set<string>([issueId]);
       const start = await db.select().from(issues).where(eq(issues.id, issueId)).then(r => r[0] ?? null);
+      // Cross-company isolation (docs/security/cross-company-isolation.md):
+      // every lookup below is limited to the issue's own company, so a parent,
+      // project or goal id written before the reference guards existed can
+      // never pull another company's record into the answer.
+      const companyId = start?.companyId ?? null;
       let currentId = start?.parentId ?? null;
-      while (currentId && !visited.has(currentId) && raw.length < 50) {
+      while (companyId && currentId && !visited.has(currentId) && raw.length < 50) {
         visited.add(currentId);
         const parent = await db.select({
           id: issues.id, identifier: issues.identifier, title: issues.title, description: issues.description,
           status: issues.status, priority: issues.priority,
           assigneeAgentId: issues.assigneeAgentId, projectId: issues.projectId,
           goalId: issues.goalId, parentId: issues.parentId,
-        }).from(issues).where(eq(issues.id, currentId)).then(r => r[0] ?? null);
+        }).from(issues).where(and(eq(issues.id, currentId), eq(issues.companyId, companyId))).then(r => r[0] ?? null);
         if (!parent) break;
         raw.push({
           id: parent.id, identifier: parent.identifier ?? null, title: parent.title, description: parent.description ?? null,
@@ -7520,11 +7557,11 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
       }>();
       const goalMap = new Map<string, { id: string; title: string; description: string | null; level: string; status: string }>();
 
-      if (projectIds.length > 0) {
+      if (companyId && projectIds.length > 0) {
         const workspaceRows = await db
           .select()
           .from(projectWorkspaces)
-          .where(inArray(projectWorkspaces.projectId, projectIds))
+          .where(and(inArray(projectWorkspaces.projectId, projectIds), eq(projectWorkspaces.companyId, companyId)))
           .orderBy(desc(projectWorkspaces.isPrimary), asc(projectWorkspaces.createdAt), asc(projectWorkspaces.id));
         const workspaceMap = new Map<string, Array<(typeof workspaceRows)[number]>>();
         for (const workspace of workspaceRows) {
@@ -7536,7 +7573,7 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
         const rows = await db.select({
           id: projects.id, name: projects.name, description: projects.description,
           status: projects.status, goalId: projects.goalId,
-        }).from(projects).where(inArray(projects.id, projectIds));
+        }).from(projects).where(and(inArray(projects.id, projectIds), eq(projects.companyId, companyId)));
         for (const r of rows) {
           const projectWorkspaceRows = workspaceMap.get(r.id) ?? [];
           const workspaces = projectWorkspaceRows.map((workspace) => ({
@@ -7563,16 +7600,23 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
         }
       }
 
-      if (goalIds.length > 0) {
+      if (companyId && goalIds.length > 0) {
         const rows = await db.select({
           id: goals.id, title: goals.title, description: goals.description,
           level: goals.level, status: goals.status,
-        }).from(goals).where(inArray(goals.id, goalIds));
+        }).from(goals).where(and(inArray(goals.id, goalIds), eq(goals.companyId, companyId)));
         for (const r of rows) goalMap.set(r.id, r);
+      }
+      // goal_id and project_id are foreign keys, so an id missing from its map
+      // belongs to another company: drop the id as well as the record.
+      for (const project of projectMap.values()) {
+        if (project.goalId && !goalMap.has(project.goalId)) project.goalId = null;
       }
 
       return raw.map(a => ({
         ...a,
+        projectId: a.projectId && projectMap.has(a.projectId) ? a.projectId : null,
+        goalId: a.goalId && goalMap.has(a.goalId) ? a.goalId : null,
         project: a.projectId ? projectMap.get(a.projectId) ?? null : null,
         goal: a.goalId ? goalMap.get(a.goalId) ?? null : null,
       }));

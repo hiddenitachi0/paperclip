@@ -1,9 +1,9 @@
 import type { IssuePriority, IssueStatus } from "../constants.js";
 
-export const COMPANY_SEARCH_SCOPES = ["all", "issues", "comments", "documents", "artifacts", "agents", "projects"] as const;
+export const COMPANY_SEARCH_SCOPES = ["all", "issues", "comments", "documents", "artifacts", "agents", "projects", "contracts"] as const;
 export type CompanySearchScope = (typeof COMPANY_SEARCH_SCOPES)[number];
 
-export type CompanySearchResultType = "issue" | "artifact" | "agent" | "project";
+export type CompanySearchResultType = "issue" | "artifact" | "agent" | "project" | "contract";
 
 export interface CompanySearchHighlight {
   start: number;
@@ -43,6 +43,19 @@ export interface CompanySearchArtifactSummary {
   updatedAt: string;
 }
 
+/**
+ * A contract hit (Legal Phase 2a, DUR-4853). Only ever returned to a caller who
+ * may use the contract register. `matchedIn` says where the words were found.
+ */
+export interface CompanySearchContractSummary {
+  id: string;
+  type: string;
+  status: string;
+  textStatus: string;
+  matchedIn: Array<"title" | "parties" | "summary" | "text">;
+  updatedAt: string;
+}
+
 export interface CompanySearchResult {
   id: string;
   type: CompanySearchResultType;
@@ -55,6 +68,7 @@ export interface CompanySearchResult {
   snippets: CompanySearchSnippet[];
   issue?: CompanySearchIssueSummary;
   artifact?: CompanySearchArtifactSummary;
+  contract?: CompanySearchContractSummary;
   updatedAt: string | null;
   previewImageUrl: string | null;
 }

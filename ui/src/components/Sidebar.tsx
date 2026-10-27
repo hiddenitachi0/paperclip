@@ -31,6 +31,7 @@ import {
   TrendingUp,
   CandlestickChart,
   Mail,
+  Scale,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { NavLink } from "@/lib/router";
@@ -56,6 +57,7 @@ import { PluginLauncherOutlet } from "@/plugins/launchers";
 import { SidebarCompanyMenu } from "./SidebarCompanyMenu";
 import { BOARD_CHAT_SUBTITLE } from "../lib/board-chat-handoff";
 import { useBoardChatAvailability } from "../hooks/useBoardChatAvailability";
+import { useCanUseContracts } from "../hooks/useCanUseContracts";
 
 export function Sidebar() {
   const { openNewIssue } = useDialogActions();
@@ -88,6 +90,8 @@ export function Sidebar() {
     enabled: Boolean(selectedCompanyId),
   });
   const companyRole = useCompanyRole(selectedCompanyId);
+  // Contracts are confidential: the Legal link is drawn only for board members who can use it.
+  const showLegal = useCanUseContracts(selectedCompanyId);
   // Owners and admins always see Email, even while it is off, so they can find
   // the "Turn on email" button. Everyone else sees it only once it is on.
   const showEmail = emailSettings?.enabled === true || companyRole.canManageConnections;
@@ -230,6 +234,7 @@ export function Sidebar() {
           ) : null}
           <SidebarNavItem to="/goals" label="Goals" icon={Target} />
           <SidebarNavItem to="/files" label="Files" icon={Package} />
+          {showLegal ? <SidebarNavItem to="/legal" label="Legal" icon={Scale} title="Contracts and the dates you must not miss" /> : null}
           <SidebarNavItem to="/skills" label="Skills" icon={Boxes} />
           <SidebarNavItem to="/tools" label="Tools" icon={Plug} />
           {showWorkspacesLink ? (

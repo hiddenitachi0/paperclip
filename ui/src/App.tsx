@@ -38,6 +38,8 @@ import { UserProfile } from "./pages/UserProfile";
 import { ExecutionWorkspaceDetail } from "./pages/ExecutionWorkspaceDetail";
 import { Goals } from "./pages/Goals";
 import { Artifacts } from "./pages/Artifacts";
+import { Legal } from "./pages/Legal";
+import { ContractPage } from "./pages/ContractPage";
 import { GoalDetail } from "./pages/GoalDetail";
 import { Approvals } from "./pages/Approvals";
 import { ApprovalDetail } from "./pages/ApprovalDetail";
@@ -196,6 +198,8 @@ function boardRoutes() {
       <Route path="routines/:routineId/:section" element={<LegacyRoutinesRedirect />} />
       <Route path="workflow-map" element={<WorkflowMap />} />
       <Route path="watchers" element={<Watchers />} />
+      <Route path="legal" element={<Legal />} />
+      <Route path="legal/:contractId" element={<ContractPage />} />
       <Route path="overlaps" element={<Overlaps />} />
       <Route path="trading" element={<Trading />} />
       <Route path="trading/:strategyId" element={<TradingStrategyDetail />} />
@@ -516,6 +520,8 @@ export function App() {
           <Route path="issues/:issueId" element={<UnprefixedBoardRedirect />} />
           <Route path="routines" element={<UnprefixedBoardRedirect />} />
           <Route path="watchers" element={<UnprefixedBoardRedirect />} />
+          <Route path="legal" element={<UnprefixedBoardRedirect />} />
+          <Route path="legal/:contractId" element={<UnprefixedBoardRedirect />} />
           <Route path="overlaps" element={<UnprefixedBoardRedirect />} />
           <Route path="tower" element={<UnprefixedBoardRedirect />} />
           <Route path="routines/:routineId" element={<UnprefixedBoardRedirect />} />

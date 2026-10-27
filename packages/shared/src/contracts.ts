@@ -176,6 +176,36 @@ export const updateContractSchema = z
   .strict();
 export type UpdateContract = z.infer<typeof updateContractSchema>;
 
+const formText = (max: number) =>
+  z.preprocess((value) => (value === "" ? undefined : value), z.string().trim().min(1).max(max).optional());
+
+/**
+ * The text fields that travel with a contract file upload (multipart form).
+ * Form values are strings, so booleans and numbers are parsed here and an
+ * empty field means "not given". Parties are added afterwards through the
+ * parties routes; the file, its asset and the extracted text are set by the
+ * server and are not accepted from the form.
+ */
+export const uploadContractFieldsSchema = z
+  .object({
+    title: formText(300),
+    type: contractTypeSchema,
+    status: z.preprocess((v) => (v === "" ? undefined : v), contractStatusSchema.exclude(["superseded"]).optional()),
+    language: formText(40),
+    governingLaw: formText(200),
+    effectiveDate: z.preprocess((v) => (v === "" ? undefined : v), isoDate.optional()),
+    expiryDate: z.preprocess((v) => (v === "" ? undefined : v), isoDate.optional()),
+    autoRenewal: z.preprocess((v) => (v === "true" ? true : v === "false" ? false : v === "" ? undefined : v), z.boolean().optional()),
+    noticePeriodDays: z.preprocess(
+      (v) => (v === "" || v === undefined ? undefined : typeof v === "string" ? Number(v) : v),
+      z.number().int().min(0).max(36_500).optional(),
+    ),
+    summary: z.preprocess((v) => (v === "" ? undefined : v), z.string().max(20_000).optional()),
+    sourceIssueId: z.preprocess((v) => (v === "" ? undefined : v), z.string().uuid().optional()),
+  })
+  .strict();
+export type UploadContractFields = z.infer<typeof uploadContractFieldsSchema>;
+
 export const listContractsQuerySchema = z.object({
   status: contractStatusSchema.optional(),
   type: contractTypeSchema.optional(),

@@ -5155,13 +5155,23 @@ export function accessRoutes(
     }
   );
 
+  // Cross-company isolation audit (docs/security/cross-company-isolation.md):
+  // refuse a non-admin BEFORE the bypass scope is opened. The handlers below
+  // still call assertInstanceAdmin themselves; this only stops a refused
+  // request (a company member, an agent, or nobody at all) from first
+  // entering the all-companies scope and writing a cross_company_access_log
+  // row as if an admin had crossed the wall.
+  const instanceAdminBeforeBypass = (req: Request, _res: unknown, next: (err?: unknown) => void) => {
+    assertInstanceAdmin(req).then(() => next(), next);
+  };
+
   // DUR-381 (DUR-277 Wave 5b) category (c): instance-admin routes manage
   // state (instance-admin role grants, cross-company user access) that by
   // definition spans every company on the instance, so there is no single
   // companyId to scope to.
   router.post(
     "/admin/users/:userId/promote-instance-admin",
-    companyScopeBypassForRoute(rawDb, "instance-admin role grant spans all companies"),
+    instanceAdminBeforeBypass, companyScopeBypassForRoute(rawDb, "instance-admin role grant spans all companies"),
     async (req, res) => {
       await assertInstanceAdmin(req);
       const userId = req.params.userId as string;
@@ -5187,7 +5197,7 @@ export function accessRoutes(
     }
   );
 
-  router.get("/admin/users", companyScopeBypassForRoute(rawDb, "instance-admin user search spans all companies"), async (req, res) => {
+  router.get("/admin/users", instanceAdminBeforeBypass, companyScopeBypassForRoute(rawDb, "instance-admin user search spans all companies"), async (req, res) => {
     await assertInstanceAdmin(req);
     const query = searchAdminUsersQuerySchema.parse(req.query);
     const needle = query.query.trim().toLowerCase();
@@ -5249,7 +5259,7 @@ export function accessRoutes(
 
   router.post(
     "/admin/users/:userId/demote-instance-admin",
-    companyScopeBypassForRoute(rawDb, "instance-admin role revocation spans all companies"),
+    instanceAdminBeforeBypass, companyScopeBypassForRoute(rawDb, "instance-admin role revocation spans all companies"),
     async (req, res) => {
       await assertInstanceAdmin(req);
       const userId = req.params.userId as string;
@@ -5273,7 +5283,7 @@ export function accessRoutes(
 
   router.get(
     "/admin/users/:userId/company-access",
-    companyScopeBypassForRoute(rawDb, "a user's cross-company access summary spans all companies"),
+    instanceAdminBeforeBypass, companyScopeBypassForRoute(rawDb, "a user's cross-company access summary spans all companies"),
     async (req, res) => {
     await assertInstanceAdmin(req);
     const userId = req.params.userId as string;
@@ -5282,7 +5292,7 @@ export function accessRoutes(
 
   router.put(
     "/admin/users/:userId/company-access",
-    companyScopeBypassForRoute(rawDb, "granting/revoking a user's access across companies spans all companies"),
+    instanceAdminBeforeBypass, companyScopeBypassForRoute(rawDb, "granting/revoking a user's access across companies spans all companies"),
     validate(updateUserCompanyAccessSchema),
     async (req, res) => {
       await assertInstanceAdmin(req);

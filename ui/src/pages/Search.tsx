@@ -38,11 +38,12 @@ const SCOPE_LABELS: Record<CompanySearchScope, string> = {
   artifacts: "Files",
   agents: "Agents",
   projects: "Projects",
+  contracts: "Contracts",
 };
 
-type SubGroupKey = "issues" | "comments" | "documents" | "artifacts" | "agents" | "projects";
+type SubGroupKey = "issues" | "comments" | "documents" | "artifacts" | "agents" | "projects" | "contracts";
 
-const SUBGROUP_ORDER: SubGroupKey[] = ["issues", "comments", "documents", "artifacts", "agents", "projects"];
+const SUBGROUP_ORDER: SubGroupKey[] = ["issues", "comments", "documents", "artifacts", "agents", "projects", "contracts"];
 
 const SUBGROUP_LABELS: Record<SubGroupKey, string> = {
   issues: "Tasks",
@@ -51,12 +52,14 @@ const SUBGROUP_LABELS: Record<SubGroupKey, string> = {
   artifacts: "Files",
   agents: "Agents",
   projects: "Projects",
+  contracts: "Contracts",
 };
 
 function classifyResult(result: CompanySearchResult): SubGroupKey {
   if (result.type === "artifact") return "artifacts";
   if (result.type === "agent") return "agents";
   if (result.type === "project") return "projects";
+  if (result.type === "contract") return "contracts";
   const matched = new Set(result.matchedFields);
   if (matched.has("title") || matched.has("identifier") || matched.has("description")) return "issues";
   if (matched.has("comment")) return "comments";
@@ -264,7 +267,7 @@ export function Search() {
     return () => window.removeEventListener("keydown", handler);
   }, [focusInput]);
 
-  const counts = data?.countsByType ?? { issue: 0, artifact: 0, agent: 0, project: 0 };
+  const counts = data?.countsByType ?? { issue: 0, artifact: 0, agent: 0, project: 0, contract: 0 };
   const totalResults = data?.results.length ?? 0;
 
   const tabItems = useMemo<PageTabItem[]>(() => {
@@ -279,11 +282,12 @@ export function Search() {
     const issuesTotal = counts.issue ?? 0;
     return COMPANY_SEARCH_SCOPES.map((value) => {
       let count: number | null = null;
-      if (value === "all") count = (counts.issue ?? 0) + (counts.artifact ?? 0) + (counts.agent ?? 0) + (counts.project ?? 0);
+      if (value === "all") count = (counts.issue ?? 0) + (counts.artifact ?? 0) + (counts.agent ?? 0) + (counts.project ?? 0) + (counts.contract ?? 0);
       else if (value === "issues") count = issuesTotal;
       else if (value === "artifacts") count = counts.artifact ?? 0;
       else if (value === "agents") count = counts.agent ?? 0;
       else if (value === "projects") count = counts.project ?? 0;
+      else if (value === "contracts") count = counts.contract ?? 0;
       return {
         value,
         label: (
