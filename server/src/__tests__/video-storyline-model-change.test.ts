@@ -348,4 +348,64 @@ d("storyline model change", () => {
     expect(rec.built.at(-1)).toEqual(targets[1]);
     expect(rec.started.at(-1)?.durationSeconds).toBe(10);
   });
+
+  describe("spend cap on a single-shot re-render (DUR-4915)", () => {
+    const shotStatuses = async (ids: string[]) => Promise.all(ids.map(async (id) => (await shotRow(id)).status));
+
+    it("refuses to re-render a shot of a film with no budget cap, and starts nothing", async () => {
+      const { companyId, storylineId, shotIds } = await seed({ providerId: "fal", model: KLING_16, shots: 3 });
+      await db.update(videoStorylines).set({ budgetCapCents: null }).where(eq(videoStorylines.id, storylineId));
+      const statusBefore = (await storylineRow(storylineId)).status;
+      const rec = recordingService({ model: KLING_16, provider: "fal" });
+      const render = videoStorylineRenderService(db, { buildProvider: rec.buildProvider as never, resolveApiKey: async () => "fal-key" });
+      await expect(render.reRenderShot(companyId, storylineId, shotIds[0]!, ACTOR)).rejects.toMatchObject({ status: 400 });
+      expect(rec.started).toHaveLength(0);
+      expect((await storylineRow(storylineId)).status).toBe(statusBefore);
+      expect(await shotStatuses(shotIds)).toEqual(["draft", "draft", "draft"]);
+    });
+
+    it("re-rendering a shot of a film that was never started renders exactly that shot and leaves the film as it was", async () => {
+      const { companyId, storylineId, shotIds } = await seed({ providerId: "fal", model: KLING_16, shots: 3 });
+      const statusBefore = (await storylineRow(storylineId)).status;
+      expect(["draft", "estimated"]).toContain(statusBefore);
+      const rec = recordingService({ model: KLING_16, provider: "fal" });
+      const render = videoStorylineRenderService(db, { buildProvider: rec.buildProvider as never, resolveApiKey: async () => "fal-key" });
+      await render.reRenderShot(companyId, storylineId, shotIds[0]!, ACTOR);
+      expect((await storylineRow(storylineId)).status).toBe(statusBefore);
+      await render.tick();
+      await render.tick();
+      expect(rec.started).toHaveLength(1);
+      expect(await shotStatuses(shotIds)).toEqual(["done", "draft", "draft"]);
+      const after = await storylineRow(storylineId);
+      expect(after.status).toBe(statusBefore);
+      expect(after.spentCents).toBe(250);
+    });
+
+    it("re-rendering a shot of a paused film does not resume the film either", async () => {
+      const { companyId, storylineId, shotIds } = await seed({ providerId: "fal", model: KLING_16, shots: 2 });
+      await db.update(videoStorylines).set({ status: "paused" }).where(eq(videoStorylines.id, storylineId));
+      const rec = recordingService({ model: KLING_16, provider: "fal" });
+      const render = videoStorylineRenderService(db, { buildProvider: rec.buildProvider as never, resolveApiKey: async () => "fal-key" });
+      await render.reRenderShot(companyId, storylineId, shotIds[0]!, ACTOR);
+      await render.tick();
+      await render.tick();
+      expect(rec.started).toHaveLength(1);
+      expect(await shotStatuses(shotIds)).toEqual(["done", "draft"]);
+      expect((await storylineRow(storylineId)).status).toBe("paused");
+    });
+
+    it("a rendering film whose cap has gone does not start the next shot", async () => {
+      const { companyId, storylineId, shotIds } = await seed({ providerId: "fal", model: KLING_16, shots: 3 });
+      const rec = recordingService({ model: KLING_16, provider: "fal" });
+      const render = videoStorylineRenderService(db, { buildProvider: rec.buildProvider as never, resolveApiKey: async () => "fal-key" });
+      await render.startRender(companyId, storylineId, ACTOR, {});
+      await db.update(videoStorylines).set({ budgetCapCents: null }).where(eq(videoStorylines.id, storylineId));
+      await render.tick();
+      expect(rec.started).toHaveLength(1);
+      expect(await shotStatuses(shotIds)).toEqual(["done", "draft", "draft"]);
+      const after = await storylineRow(storylineId);
+      expect(after.status).toBe("paused");
+      expect(after.errorMessage).toMatch(/No budget cap/);
+    });
+  });
 });
