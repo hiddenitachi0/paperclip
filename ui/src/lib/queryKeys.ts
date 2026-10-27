@@ -232,6 +232,16 @@ export const queryKeys = {
       ] as const,
     agents: (companyId: string) => ["artifacts", "agents", companyId] as const,
   },
+  contracts: {
+    list: (companyId: string, filters?: { type?: string; status?: string }) =>
+      ["contracts", companyId, "list", filters?.type ?? "", filters?.status ?? ""] as const,
+    detail: (companyId: string, contractId: string) => ["contracts", companyId, "detail", contractId] as const,
+    text: (companyId: string, contractId: string) => ["contracts", companyId, "text", contractId] as const,
+    versions: (companyId: string, contractId: string) => ["contracts", companyId, "versions", contractId] as const,
+    openDeadlines: (companyId: string) => ["contracts", companyId, "open-deadlines"] as const,
+    organisations: (companyId: string) => ["contracts", companyId, "organisations"] as const,
+    all: (companyId: string) => ["contracts", companyId] as const,
+  },
   budgets: {
     overview: (companyId: string) => ["budgets", "overview", companyId] as const,
   },
